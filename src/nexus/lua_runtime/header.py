@@ -213,7 +213,7 @@ class RepoProbe:
     name: str
 
 
-def probe_repo(cwd: Path) -> RepoProbe | None:
+def probe_repo(cwd: Path | None) -> RepoProbe | None:
     """The repo containing *cwd*, or ``None`` when *cwd* is in no work tree.
 
     This is the is-a-repo probe (RDR-240 gate r2 Significant 1): a directory that is not in a
@@ -226,6 +226,11 @@ def probe_repo(cwd: Path) -> RepoProbe | None:
     """
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 - deferred: CLI startup cost
 
+    # No directory, or one that no longer exists, is in no repo. Measured 2026-11-08: under
+    # Claude Desktop chat the MCP server's cwd is Desktop's copy of the plugin, which Desktop
+    # deletes when it replaces the plugin, so the process can outlive its own cwd.
+    if cwd is None or not Path(cwd).is_dir():
+        return None
     try:
         r = run_bounded(["git", "rev-parse", "--show-toplevel", "--git-common-dir"],
                         cwd=cwd, env=_git_env(), timeout=GIT_TIMEOUT)
@@ -250,13 +255,13 @@ def probe_repo(cwd: Path) -> RepoProbe | None:
     return RepoProbe(top, name)
 
 
-def repo_root(cwd: Path) -> Path | None:
+def repo_root(cwd: Path | None) -> Path | None:
     """The git work-tree top containing *cwd*, or ``None`` outside a repo."""
     probe = probe_repo(cwd)
     return probe.root if probe else None
 
 
-def repo_name(cwd: Path) -> str | None:
+def repo_name(cwd: Path | None) -> str | None:
     """The worktree-stable repo name for *cwd* (the main checkout's base name), or ``None``
     outside a repo."""
     probe = probe_repo(cwd)
@@ -296,9 +301,9 @@ def prepare_args(
     header: Header,
     args: Mapping[str, JSONValue],
     *,
-    cwd: Path,
+    cwd: Path | None,
     clock: Callable[[], datetime] = utc_now,
-    repo_probe: Callable[[Path], RepoProbe | None] = probe_repo,
+    repo_probe: Callable[[Path | None], RepoProbe | None] = probe_repo,
 ) -> dict[str, JSONValue]:
     """Check *args* against *header*, fill the reserved values, and return the arguments the
     script receives, in header order; an absent optional argument is omitted (a JSON null
@@ -314,9 +319,13 @@ def prepare_args(
     4. every missing required argument is refused, the first in header order named;
     5. each value's type is checked.
 
-    *cwd* is the directory the run belongs to: the calling process's working directory
-    (``run_script`` runs in the MCP server or the ``nx`` process; the worker's own cwd is a
-    temporary directory). *repo_probe* lets ``run_script`` probe once and reuse the root for
+    *cwd* is the directory the run belongs to: the calling process's working directory, or
+    ``None`` when it has none (``os.getcwd()`` raised); either way a directory in no repo gives
+    no ``repo``. ``run_script`` runs in the MCP server or the ``nx`` process (the worker's own
+    cwd is a temporary directory). Measured 2026-11-08 (nexus-mdbds.9): the plugin's launcher
+    moves the MCP server to ``CLAUDE_PROJECT_DIR``, the directory the Claude Code session
+    started in (the Desktop Code tab too); under Claude Desktop chat and Cowork the server stays
+    in Desktop's copy of the plugin, which is no repo and can be deleted under it. *repo_probe* lets ``run_script`` probe once and reuse the root for
     ``VerbContext.repo_root``. Raises ``ScriptError("args", ...)`` naming the argument.
     """
     if not isinstance(args, Mapping):
