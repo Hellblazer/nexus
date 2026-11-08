@@ -1935,3 +1935,499 @@ def test_project_repo_with_an_empty_window_never_asks_the_resolver(
     with pytest.raises(VerbError) as err:  # still the repository check first
         _sessions("2026-11-04", "2026-11-04", "repo", ctx=VerbContext(repo_root=None))
     assert str(err.value) == REPO_NEEDED
+
+
+# ---- the pre-parse skip (nexus-qo7ie.37) -------------------------------------
+#
+# A line no selected field needs is not decoded; its top-level timestamp,
+# sessionId, agentId and isSidechain are read from the raw text, and only when
+# the text proves they are top-level. The skip must change nothing: every test
+# below runs the verb with the skip on and off and compares the results.
+
+SID_B = "bbbbbbbb-2222-3333-4444-555555555555"
+SID_C = "cccccccc-2222-3333-4444-555555555555"
+SID_D = "dddddddd-2222-3333-4444-555555555555"
+DECOY = "2026-11-03T22:00:00.000Z"
+
+
+def _c(*pairs) -> str:
+    """One compact line with its keys in the order given (as Claude Code writes it)."""
+    return json.dumps(dict(pairs), separators=(",", ":"), ensure_ascii=False)
+
+
+def _t(sec: int, day: str = "2026-11-03", hour: int = 10) -> str:
+    return f"{day}T{hour:02d}:00:{sec:02d}.000Z"
+
+
+def _line(kind: str, ts, sid: str, body: dict, *, side=False, tail=()) -> str:
+    """A user, assistant or attachment line in the harness's key order."""
+    if kind == "attachment":
+        mid = [("attachment", body), ("type", "attachment")]
+    else:
+        mid = [("type", kind), ("message", body)]
+    return _c(
+        ("parentUuid", None),
+        ("isSidechain", side),
+        *mid,
+        ("uuid", f"u-{ts}"),
+        ("timestamp", ts),
+        *tail,
+        ("userType", "external"),
+        ("sessionId", sid),
+        ("version", "2.1.0"),
+        ("gitBranch", "main"),
+    )
+
+
+def _tr_block(tid, content, **extra) -> dict:
+    return {"tool_use_id": tid, "type": "tool_result", "content": content, **extra}
+
+
+def _asst_msg(mid, content, model="claude-test-1") -> dict:
+    return {
+        "id": mid,
+        "model": model,
+        "role": "assistant",
+        "content": content,
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+
+def _equivalence_files() -> dict[str, list[str]]:
+    """Every line type, in the shapes that decide whether the skip may fire."""
+    esc = 'say "hi"\n\tpath C:\\x \u00e9 \\u0041'
+    a = [
+        _c(("type", "last-prompt"), ("leafUuid", "l"), ("sessionId", "PRE-START")),
+        # the first stamped record is not a user, assistant or attachment line
+        _c(
+            ("type", "queue-operation"),
+            ("operation", "enqueue"),
+            ("timestamp", _t(0)),
+            ("sessionId", SID),
+            ("content", "q" * 40),
+        ),
+        _line("user", _t(1), SID, {"role": "user", "content": PROMPT}),
+        _line(
+            "user",
+            _t(2),
+            SID,
+            {"role": "user", "content": "<command-name>/conexus:x</command-name>"},
+        ),
+        _line(
+            "user",
+            _t(3),
+            SID,
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "<command-name>/conexus:y</command-name>"}
+                ],
+            },
+        ),
+        _line("user", _t(4), SID, {"role": "user", "content": esc}),
+        _line(
+            "attachment",
+            _t(5),
+            SID,
+            {
+                "type": "deferred_tools_record",
+                "entries": [
+                    {"name": "WebFetch", "defer_loading": True},
+                    {"name": "Read", "defer_loading": False},
+                ],
+            },
+        ),
+        _line(
+            "attachment",
+            _t(6),
+            SID,
+            {"type": "deferred_tools_delta", "addedNames": ["mcp__x__y"]},
+        ),
+        _line(
+            "attachment",
+            _t(7),
+            SID,
+            {
+                "type": "instructions",
+                "files": [{"path": "/r/CLAUDE.md", "type": "Project", "content": esc}],
+            },
+        ),
+        _line(
+            "attachment",
+            _t(8),
+            SID,
+            {
+                "type": "nested_memory",
+                "path": "/r/sub/CLAUDE.md",
+                "content": {"type": "Local", "content": "abc"},
+            },
+        ),
+        _line("attachment", _t(9), SID, {"type": "hook_success", "x": "y"}),
+        # a nested object between the stamp and the end: not provable from the tail
+        _line(
+            "attachment",
+            _t(10),
+            SID,
+            {"type": "hook_success"},
+            tail=(("rendered", {"a": [1, {"b": "c"}]}), ("renderedRole", "user")),
+        ),
+        _line(
+            "assistant",
+            _t(11),
+            SID,
+            _asst_msg(
+                "m1",
+                [
+                    {"type": "thinking", "thinking": THINK},
+                    {"type": "text", "text": BODY},
+                ],
+            ),
+        ),
+        _line(
+            "assistant",
+            _t(12),
+            SID,
+            _asst_msg("m1", [_tool_use("t1", "Bash", {"command": "go status"})]),
+        ),
+        # tool results: list-of-text content, string content with is_error,
+        # two blocks; each with a toolUseResult object after the stamp
+        _line(
+            "user",
+            _t(13),
+            SID,
+            {
+                "role": "user",
+                "content": [_tr_block("t1", [{"type": "text", "text": RESULT}])],
+            },
+            tail=(("toolUseResult", {"stdout": RESULT, "nested": {"k": [1, 2]}}),),
+        ),
+        _line(
+            "assistant",
+            _t(14),
+            SID,
+            _asst_msg(
+                "m2",
+                [
+                    _tool_use("t2", "mcp__nexus__memory_get", {"title": "a"}),
+                    _tool_use("t3", "Read", {"file_path": "/x"}),
+                ],
+                model="claude-test-2",
+            ),
+        ),
+        _line(
+            "user",
+            _t(15),
+            SID,
+            {
+                "role": "user",
+                "content": [
+                    _tr_block("t2", esc, is_error=True),
+                    _tr_block("t3", "fine"),
+                ],
+            },
+            tail=(("toolUseResult", "Error: boom"),),
+        ),
+        # a decoy: a user line with no top-level stamp, one inside an object
+        _c(
+            ("parentUuid", None),
+            ("isSidechain", False),
+            ("type", "user"),
+            ("message", {"role": "user", "content": [_tr_block("zz", "r")]}),
+            ("uuid", "u-decoy"),
+            ("toolUseResult", {"timestamp": DECOY, "sessionId": "DECOY"}),
+            ("sessionId", SID),
+        ),
+        # decoys inside api-request: nested objects and strings that look like
+        # a stamp, a session and a user line
+        _c(
+            ("type", "api-request"),
+            ("sessionId", SID),
+            ("id", "r1"),
+            ("timestamp", _t(16)),
+            ("version", "2.1.0"),
+            (
+                "params",
+                {
+                    "messages": [
+                        {"type": "user", "timestamp": DECOY, "sessionId": "DECOY"}
+                    ],
+                    "note": '{"type":"user","timestamp":"2026-11-03T23:00:00Z"}',
+                },
+            ),
+            ("shapeHash", "h"),
+        ),
+        # the type value of a nested string only
+        _c(
+            ("type", "api-request"),
+            ("sessionId", SID),
+            ("timestamp", _t(17)),
+            ("params", {"note": '"type":"user"'}),
+        ),
+        # no top-level timestamp, a nested one
+        _c(
+            ("type", "api-request-blob"),
+            ("sessionId", SID),
+            ("hash", "h"),
+            ("message", {"timestamp": DECOY, "role": "user"}),
+        ),
+        _c(
+            ("type", "queue-operation"),
+            ("content", {"timestamp": DECOY}),
+            ("sessionId", SID),
+        ),
+        # keys in unusual order: the type is not first
+        _c(
+            ("timestamp", _t(18)),
+            ("sessionId", SID),
+            ("type", "pr-link"),
+            ("prNumber", 3),
+        ),
+        _c(
+            ("sessionId", SID),
+            ("subtype", "x"),
+            ("timestamp", _t(19)),
+            ("type", "system"),
+        ),
+        # a stamp after a nested value, a session before it
+        _c(
+            ("type", "file-history-snapshot"),
+            ("sessionId", SID),
+            ("snapshot", {"a": {"b": ["}", "{"]}}),
+            ("timestamp", _t(20)),
+        ),
+        # a sidechain line replayed into a main file: ignored whatever its type
+        _c(
+            ("type", "api-request"),
+            ("isSidechain", True),
+            ("sessionId", SID),
+            ("timestamp", _t(21)),
+            ("params", {}),
+        ),
+        # a stamp that is not a string; a sessionId that is not a string
+        _c(("type", "pr-link"), ("timestamp", 12345), ("sessionId", 7)),
+        # duplicate keys: the last one wins
+        f'{{"type":"pr-link","sessionId":"{SID}","timestamp":"{_t(22)}","timestamp":"{_t(23)}"}}',
+        # an escaped key and escaped values
+        f'{{"type":"pr-link","sessionId":"{SID}","time\\u0073tamp":"{_t(25)}"}}',
+        _c(("type", "pr-link"), ("sessionId", "s\\id"), ("timestamp", _t(26))),
+        # whitespace inside the line, and a stamp then a carriage return
+        '{"type": "pr-link", "sessionId": "'
+        + SID
+        + '", "timestamp": "'
+        + _t(27)
+        + '"}',
+        '{"type":"pr-link","timestamp":"' + _t(29) + '","sessionId":"' + SID + '"}\r',
+        # the last stamped record is an inert one: it sets the end
+        _c(
+            ("type", "pr-link"),
+            ("sessionId", SID),
+            ("timestamp", _t(30)),
+            ("prNumber", 9),
+        ),
+        # a truncated line and a line that is not JSON, after the last stamp
+        f'{{"type":"pr-link","sessionId":"{SID}","timestamp":"{_t(28)}","prUrl":"htt',
+        '{"type":"pr-link","sessionId":"' + SID + '","timestamp":"' + _t(28) + '"',
+        "not json at all",
+        # an unstamped line after the start, carrying a sessionId
+        _c(("type", "mode"), ("mode", "x"), ("sessionId", "LATE")),
+    ]
+    # a transcript whose first stamped record, an inert one, is before the window
+    b = [
+        _c(
+            ("type", "queue-operation"),
+            ("timestamp", _t(59, "2026-11-02", 23)),
+            ("sessionId", SID_B),
+        ),
+        _line("user", _t(1), SID_B, {"role": "user", "content": PROMPT}),
+    ]
+    # a sidechain inert line first (ignored), then an inert line that starts it
+    c = [
+        _c(
+            ("type", "api-request"),
+            ("isSidechain", True),
+            ("timestamp", _t(59, "2026-11-02", 23)),
+            ("sessionId", SID_C),
+        ),
+        _c(("type", "pr-link"), ("sessionId", SID_C), ("timestamp", _t(1, hour=11))),
+        _line(
+            "assistant",
+            _t(2, hour=11),
+            SID_C,
+            _asst_msg("c1", [_tool_use("c1", "Grep", {"pattern": "x"})]),
+        ),
+    ]
+    # a subagent: its agentId comes from an inert line
+    d = [
+        _c(
+            ("type", "queue-operation"),
+            ("agentId", "AG1"),
+            ("timestamp", _t(1, hour=12)),
+            ("sessionId", SID_D),
+        ),
+        _line(
+            "assistant",
+            _t(2, hour=12),
+            SID_D,
+            _asst_msg("d1", [_tool_use("d1", "Bash", {"command": "ls"})]),
+        ),
+        _line("user", _t(3, hour=12), SID_D, {"role": "user", "content": PROMPT}),
+    ]
+    return {"a": a, "b": b, "c": c, "d": d}
+
+
+def _equivalence_root(root: Path) -> None:
+    files = _equivalence_files()
+    _write(root / PROJECT / f"{SID}.jsonl", [], raw=files["a"])
+    _write(root / PROJECT / f"{SID_B}.jsonl", [], raw=files["b"])
+    _write(root / PROJECT / f"{SID_C}.jsonl", [], raw=files["c"])
+    _write(root / PROJECT / SID_D / "subagents" / "agent-AG1.jsonl", [], raw=files["d"])
+
+
+def _ask(monkeypatch: pytest.MonkeyPatch, skip: bool, fields, bodies=None):
+    monkeypatch.setattr(vt, "_PREPARSE", skip)
+    monkeypatch.setattr(vt, "_PREPARSE_MIN", 0)
+    return _sessions(project=None, fields=fields, bodies=bodies)
+
+
+def _field_sets() -> list[tuple[str | None, bool | None]]:
+    sets: list[tuple[str | None, bool | None]] = [(None, None), (None, True)]
+    for name in (*vt._SCALARS, *vt._SUBS):
+        sets.append((name, True if name == "assistant_text" else None))
+    for lst, subs in vt._SUBS.items():
+        for sub in subs:
+            if sub != "input":  # "input" needs "name": set below
+                sets.append((f"{lst}.{sub}", True if lst == "assistant_text" else None))
+    sets += [
+        ("tool_calls.name,tool_calls.input", None),
+        ("tool_calls.result_time", None),
+        ("tool_calls.name,tool_calls.is_error", None),
+        ("tool_calls.name,slash_commands", None),
+        ("instruction_loads,deferred_tools", None),
+        ("deferred_tools_dropped", None),
+        ("start,end,records,bytes", None),
+        ("start,end", None),
+    ]
+    sets += [(",".join(fields), bodies) for fields, bodies, _ in QUERIES.values()]
+    return sets
+
+
+def test_the_skip_is_equivalent_for_every_field_set(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _equivalence_root(root)
+    for fields, bodies in _field_sets():
+        want = _ask(monkeypatch, False, fields, bodies)
+        got = _ask(monkeypatch, True, fields, bodies)
+        assert got == want, (fields, bodies)
+    # not vacuous: the main session, its subagent and the others came back
+    full = _ask(monkeypatch, False, None)
+    assert [r["session_id"] for r in full] == [SID, SID_C, SID_D]
+    assert full[0]["end"] == _t(30)  # an inert line set the end
+    assert full[2]["agent_id"] == "AG1"
+    assert [c["name"] for c in full[0]["slash_commands"]] == ["conexus:x", "conexus:y"]
+
+
+@pytest.fixture
+def decoded(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The lines the verb handed to json.loads."""
+    seen: list[str] = []
+    real = json.loads
+
+    def loads(s, *a, **k):
+        if isinstance(s, bytes):
+            seen.append(s.decode("utf-8", "replace"))
+        return real(s, *a, **k)
+
+    monkeypatch.setattr(json, "loads", loads)
+    return seen
+
+
+def _stamped(text: list[str], ts: str) -> bool:
+    return any(f'"timestamp":"{ts}"' in t for t in text)
+
+
+def test_an_inert_line_is_not_decoded(
+    root: Path, monkeypatch: pytest.MonkeyPatch, decoded: list[str]
+) -> None:
+    _equivalence_root(root)
+    _ask(monkeypatch, True, ",".join(QUERIES["tools"][0]))
+    # api-request, queue-operation, pr-link, an unusual key order, a stamp behind
+    # a nested value that is not in the run: none is decoded
+    for sec in (0, 16, 17, 18, 19, 30):
+        assert not _stamped(decoded, _t(sec)), sec
+    # a line whose stamp the text cannot vouch for is decoded: a repeated key, an
+    # escaped key, a stamp behind a nested value, the decoys
+    assert _stamped(decoded, _t(23)) and any("time\\u0073tamp" in t for t in decoded)
+    assert _stamped(decoded, _t(20))
+    assert any("u-decoy" in t for t in decoded)
+    assert any(DECOY in t and "api-request-blob" in t for t in decoded)
+    # assistant, user and attachment lines are always decoded
+    for sec in (1, 5, 9, 12, 13, 14, 15):
+        assert _stamped(decoded, _t(sec)), sec
+
+
+def test_an_inert_line_is_decoded_when_the_text_does_not_vouch_for_a_wanted_key(
+    root: Path, monkeypatch: pytest.MonkeyPatch, decoded: list[str]
+) -> None:
+    """A wanted key named in the line but not in the run may be top-level."""
+    lines = [
+        _c(("type", "pr-link"), ("sessionId", SID), ("timestamp", _t(0))),
+        # isSidechain named inside the nested value: could be, so it is read
+        _c(
+            ("type", "api-request"),
+            ("sessionId", SID),
+            ("timestamp", _t(1)),
+            ("p", {"isSidechain": True}),
+        ),
+        # no isSidechain anywhere: skipped
+        _c(
+            ("type", "api-request"),
+            ("sessionId", SID),
+            ("timestamp", _t(2)),
+            ("p", {"a": 1}),
+        ),
+    ]
+    _write(root / PROJECT / f"{SID}.jsonl", [], raw=lines)
+    _ask(monkeypatch, True, "tool_call_count")
+    assert [_stamped(decoded, _t(i)) for i in (0, 1, 2)] == [False, True, False]
+
+
+def test_a_skip_that_loses_the_stamp_is_caught_by_the_comparison(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation check: drop the timestamp a skipped line yields and the results differ."""
+    _equivalence_root(root)
+    fields = ",".join(QUERIES["tools"][0])
+    want = _ask(monkeypatch, False, fields)
+    real = vt._inert
+
+    def lossy(raw, s):
+        rec = real(raw, s)
+        if (
+            rec is not None and rec["type"] != "user"
+        ):  # a skipped line without its stamp
+            rec.pop("timestamp", None)
+        return rec
+
+    monkeypatch.setattr(vt, "_inert", lossy)
+    assert _ask(monkeypatch, True, fields) != want
+    monkeypatch.setattr(vt, "_inert", real)
+    assert _ask(monkeypatch, True, fields) == want
+
+
+def test_only_a_line_over_the_size_floor_is_peeked(
+    root: Path, monkeypatch: pytest.MonkeyPatch, decoded: list[str]
+) -> None:
+    big = _c(
+        ("type", "api-request-blob"),
+        ("sessionId", SID),
+        ("timestamp", _t(0)),
+        ("message", {"pad": "x" * vt._PREPARSE_MIN}),
+    )
+    small = _c(("type", "pr-link"), ("sessionId", SID), ("timestamp", _t(1)))
+    _write(root / PROJECT / f"{SID}.jsonl", [], raw=[big, small])
+    [rec] = _sessions(fields="tool_call_count")
+    assert rec["session_id"] == SID
+    assert [d for d in decoded if '"pr-link"' in d] and not [
+        d for d in decoded if '"api-request-blob"' in d
+    ]
