@@ -208,3 +208,14 @@ def test_list_survives_a_repo_probe_that_fails(monkeypatch: pytest.MonkeyPatch, 
     assert result.exit_code == 0
     assert "research_add" in result.stdout
     assert "repo procedures not listed" in result.stderr and "git did not run" in result.stderr
+
+
+def test_a_number_too_large_to_be_finite_is_a_usage_error(tmp_path) -> None:
+    from click.testing import CliRunner
+
+    from nexus.cli import main
+
+    f = tmp_path / "a.json"
+    f.write_text('{"n": {"m": [1e999]}}', encoding="utf-8")
+    result = CliRunner().invoke(main, ["run", "x", "--args-file", str(f)])
+    assert result.exit_code == 2 and "finite" in result.output
