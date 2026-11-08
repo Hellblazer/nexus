@@ -1,0 +1,40 @@
+# RDR-240 Technical Design 7 (nexus-qo7ie.33): the vocabulary of an RDR research record.
+# A record's classification says how far the finding is established, and its
+# verification method says how it was checked. `nx rdr preamble rdr-research -- add`
+# and the research_add procedure (src/nexus/procedures/research_add.lua, through
+# tables.get) both read this one table; it replaced two Python constants in
+# src/nexus/commands/rdr.py. Python reads it through nexus.tables.rdr_research_vocab.
+#
+#   verified       checked against the source itself
+#   documented     stated by documentation, not checked against the source
+#   assumed        believed, not yet checked
+#
+#   source_search  read in the code or the record it describes
+#   spike          shown by running an experiment
+#   docs_only      taken from documentation alone
+
+[table]
+id = "rdr-research-vocab"
+kind = "decision-table"
+version = 1
+
+[dimensions.classification]
+domain = ["verified", "documented", "assumed"]
+
+[dimensions.method]
+domain = ["source_search", "spike", "docs_only"]
+
+[[row]]
+id = "verified"
+guard = { classification = "verified", method = ["source_search", "spike", "docs_only"] }
+emit = { meaning = "checked against the source itself" }
+
+[[row]]
+id = "documented"
+guard = { classification = "documented", method = ["source_search", "spike", "docs_only"] }
+emit = { meaning = "stated by documentation, not checked against the source" }
+
+[[row]]
+id = "assumed"
+guard = { classification = "assumed", method = ["source_search", "spike", "docs_only"] }
+emit = { meaning = "believed, not yet checked" }
