@@ -11,7 +11,8 @@ tests/test_procedure_research_add.py. A verb failure reaches the script as a
 Lua error, as through the dispatcher. The verbs are the real ones over a temp
 git repository. The header is read by ``header.parse`` and the static check
 passes the file with those grants, as run_script will. The run_script-level
-test waits for the runtime (recorded on the bead).
+tests are the last section of this file, ``through the real run path``: the
+real ``run_procedure``, worker and library lookup over the same temp repo.
 
 The emitted commands are also run: in bash, in the temp repository, with the
 tools they name replaced by stubs that print their arguments, so quoting,
@@ -23,6 +24,7 @@ drift-ledger workflow's watched paths.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -33,11 +35,18 @@ from pathlib import Path
 import lupa.lua54 as lua54
 import pytest
 import yaml
+from click.testing import CliRunner
 
+from nexus.cli import main
 from nexus.lua_runtime import header as hd
+from nexus.lua_runtime import library
+from nexus.lua_runtime import run as run_mod
 from nexus.lua_runtime import static_check as sc
 from nexus.lua_runtime import verbs_git
+from nexus.lua_runtime.errors import ScriptError
+from nexus.lua_runtime.runner import run_procedure
 from nexus.lua_runtime.verb_types import VerbContext
+from nexus.mcp import core
 
 REPO_ROOT = Path(hd.__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / ".nexus" / "procedures" / "preflight.lua"
@@ -655,3 +664,140 @@ def test_ruff_is_the_version_ci_pins() -> None:
     m = re.search(r"uvx (ruff@[0-9.]+) check src/", CI.read_text(encoding="utf-8"))
     assert m is not None, "ci.yml's ruff lint job moved"
     assert f'local RUFF = "{m.group(1)}"' in SOURCE.decode("ascii")
+
+
+# ---- through the real run path (run_script, the worker, the library root) -----------
+#
+# How the run finds its repo: run_script probes ``os.getcwd()`` (``header.probe_repo``), so
+# the tests chdir into the temp repo; the probe's top is the verbs' ``repo_root`` and the
+# top's ``.nexus/procedures`` is the repo root of the library, which runs only when
+# NX_PROCEDURES_REPO_ROOT is exactly "1". The copy of preflight.lua in the temp repo is
+# untracked, so it is never part of the diff the run reads.
+
+OFF_TEXT = (
+    "preflight is in .nexus/procedures/, which is off; "
+    f"set {library.REPO_ROOT_ENV}=1 to run repo procedures (RDR-242 S5)"
+)
+
+CASES: dict[str, dict[str, str | None]] = {
+    "code": {"src/nexus/x.py": "x = 1\n", "tests/sub/test_x.py": "def test(): pass\n"},
+    "docs-only": {"docs/a.md": "# a\n", "README.md": "changed\n"},
+    "empty": {},
+}
+
+
+CLASSES: dict[str, list[str]] = {"code": ["python"], "docs-only": ["docs"], "empty": []}
+
+RUFF_ON_SRC = (
+    "git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
+    "':(glob)src/**/*.py' | xargs -0 -r uvx ruff@0.15.18 check --force-exclude --"
+)
+
+
+@pytest.fixture
+def procedure_repo(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The temp repo holding the real script under .nexus/procedures, as the cwd, root OFF."""
+    dest = repo / ".nexus" / "procedures"
+    dest.mkdir(parents=True)
+    shutil.copy(SCRIPT, dest / "preflight.lua")
+    monkeypatch.delenv(library.REPO_ROOT_ENV, raising=False)
+    monkeypatch.chdir(repo)
+    return repo
+
+
+@pytest.fixture
+def root_on(procedure_repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv(library.REPO_ROOT_ENV, "1")
+    return procedure_repo
+
+
+@pytest.fixture
+def workers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The names of the workers run_script started (a spy on the supervisor)."""
+    started: list[str] = []
+    real = run_mod.supervisor.supervise
+
+    def spy(request, **kw):  # type: ignore[no-untyped-def]
+        started.append(request["name"])
+        return real(request, **kw)
+
+    monkeypatch.setattr(run_mod.supervisor, "supervise", spy)
+    return started
+
+
+def _norm(value: object) -> object:
+    """JSON and the harness differ only in how an empty Lua table reads: [] or {}."""
+    if isinstance(value, dict):
+        return {k: _norm(v) for k, v in value.items()} or []
+    if isinstance(value, list):
+        return [_norm(v) for v in value]
+    return value
+
+
+def _apply(repo: Path, case: str) -> None:
+    if CASES[case]:
+        _change(repo, CASES[case])
+
+
+@pytest.mark.parametrize("case", sorted(CASES))
+def test_the_real_run_equals_the_harness_field_for_field(
+    root_on: Path, workers: list[str], case: str
+) -> None:
+    _apply(root_on, case)
+    real = run_procedure("preflight", {"base": "base"})
+    assert workers == ["preflight"], "the worker did not run"
+    assert _norm(real) == _norm(_Run(root_on)())
+    assert isinstance(real, dict)
+    assert real["empty"] is (case == "empty")
+    # The harness and the real run read the same script, so equality cannot catch a broken
+    # script by itself; these pin the real result to what the class table must say.
+    assert bool(real["checks"]) is (case != "empty")  # not an empty-equals-empty pass
+    assert real["code"] is (case == "code")
+    assert _class_names(real) == CLASSES[case]
+    if case == "code":
+        assert _commands(real)["python"][0] == RUFF_ON_SRC
+
+
+def test_both_front_doors_return_identical_json(root_on: Path) -> None:
+    _apply(root_on, "code")
+    args = {"base": "base"}
+    via_mcp = core.procedure_run(name="preflight", args=args)
+    cli = CliRunner().invoke(main, ["run", "preflight", "--args-file", "-"], input=json.dumps(args))
+    assert cli.exit_code == 0, cli.output
+    assert json.loads(str(via_mcp)) == json.loads(cli.stdout)
+    assert _norm(json.loads(cli.stdout)) == _norm(_Run(root_on)())
+    assert json.loads(cli.stdout)["checks"]
+
+
+@pytest.mark.parametrize("value", [None, "true"])
+def test_with_the_root_off_the_run_is_refused_through_every_door(
+    procedure_repo: Path,
+    workers: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+) -> None:
+    if value is not None:
+        monkeypatch.setenv(library.REPO_ROOT_ENV, value)
+    _apply(procedure_repo, "code")
+    expected = f"name: repo_root_off: {OFF_TEXT}"
+
+    with pytest.raises(ScriptError) as refused:
+        run_procedure("preflight", {"base": "base"})
+    assert refused.value.kind == "name"
+    assert refused.value.detail == f"repo_root_off: {OFF_TEXT}"
+
+    assert str(core.procedure_run(name="preflight", args={"base": "base"})) == expected
+
+    cli = CliRunner().invoke(main, ["run", "preflight", "--args-file", "-"], input='{"base": "base"}')
+    assert cli.exit_code == 1
+    assert cli.stderr.strip() == expected
+    assert cli.stdout == ""
+    assert workers == [], "a refused run started a worker"
+
+
+def test_the_runtime_this_file_depends_on_is_present() -> None:
+    """Non-vacuity: no test here skips, so a missing runtime fails this file rather than
+    emptying it (lupa is a declared dependency, pyproject.toml)."""
+    assert lua54.LuaRuntime is not None
+    assert callable(run_mod.run_script)
+    assert library.REPO_ROOT_ENV == "NX_PROCEDURES_REPO_ROOT"
