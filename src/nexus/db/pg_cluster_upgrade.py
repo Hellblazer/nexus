@@ -34,8 +34,12 @@ import tempfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from nexus.daemon.service_registry import SpawnLockHold
 
 from nexus.db.pg_provision import (
     _INITDB_TIMEOUT_S,
@@ -74,10 +78,18 @@ _RUNBOOK = (
 #: The limit of what is known about this command. Shown in the help, the docs, the dry run and before the move.
 #: Remove it once the command has run against a real pre-17 cluster.
 UNTESTED_NOTE = "not yet run against a real pre-17 cluster; copy the data directory first"
-#: Nothing locks the service while the upgrade runs (the runbook has the same exposure): another nx session or a
-#: login item can start it on the half-built cluster. Said wherever the untested note is.
-NO_LOCK_NOTE = ("nothing locks the service during the upgrade: close other terminals running nx, and Claude Code "
-                "sessions with the conexus plugin, and disable an autostart unit (launchd, systemd) first")
+#: What the service lock guarantees and what it does not. ``--apply`` and ``--check-only`` hold the storage
+#: service's spawn lock (the one a supervisor's ``start()`` takes) for the whole run, so a concurrent
+#: ``nx daemon service start`` or an autostart unit waits on it instead of starting a supervisor on the
+#: half-built cluster. It is freed just before this command starts the service again: a supervisor that child
+#: ``start`` spawns would otherwise wait on its own parent. Said wherever the untested note is.
+LOCK_NOTE = ("the storage service's spawn lock is held for the whole run (freed just before the service is started "
+             "again), so a concurrent `nx daemon service start` or an autostart unit waits instead of starting on the "
+             "half-built cluster; it does not stop a service that is already running (--apply stops it) or a "
+             "PostgreSQL server that another manager (brew services, systemd) restarts")
+
+#: The registry tier whose supervisor takes the spawn lock (``storage_service_daemon._REGISTRY_TIER``; a test pins them equal).
+_SERVICE_TIER = "storage_service"
 
 #: What a failure before the data directory moves leaves behind (the service and the old server are stopped first).
 _NOT_MOVED = (
@@ -93,6 +105,24 @@ _WORKDIR_HASH_NOTE = (
 
 #: ``verb`` is ``"stop"`` or ``"start"``; the callable runs ``nx daemon service <verb>`` and returns its exit code.
 ServiceControl = Callable[[str, Path], int]
+
+
+def _hold_service_lock(plan: "UpgradePlan") -> "SpawnLockHold":
+    """Take the storage service's spawn lock for *plan*'s config directory, or raise :class:`PgUpgradeRefused`.
+
+    The lock itself lives in the shared lifecycle primitive (:meth:`ServiceRegistry.try_hold_spawn_lock`); this is
+    only the translation of its refusal into this command's.
+    """
+    from nexus.daemon.service_registry import ServiceRegistry, SpawnLockBusyError  # noqa: PLC0415 — deferred, heavy; this command only
+
+    try:
+        return ServiceRegistry(dir=plan.config_dir, tier=_SERVICE_TIER).try_hold_spawn_lock()
+    except SpawnLockBusyError as exc:
+        raise PgUpgradeRefused(f"{exc}. Wait for it to finish and run this again. Nothing was changed.") from None
+    except OSError as exc:
+        raise PgUpgradeRefused(
+            f"could not take the storage service's spawn lock in {plan.config_dir} ({exc.strerror}). Nothing was changed."
+        ) from None
 
 
 class PgUpgradeRefused(Exception):
@@ -323,7 +353,7 @@ def plan_lines(plan: UpgradePlan) -> list[str]:
     old_ctl, new = plan.old_bin / "pg_ctl", plan.new_bins.bin_dir
     return [
         f"NOTE: this command is {UNTESTED_NOTE} ({plan.pgdata}).",
-        f"NOTE: {NO_LOCK_NOTE}.",
+        f"NOTE: {LOCK_NOTE}.",
         "",
         f"cluster      {plan.pgdata} (PostgreSQL {plan.cluster_major}, superuser {plan.os_user})",
         f"old bin      {plan.old_bin}",
@@ -331,6 +361,7 @@ def plan_lines(plan: UpgradePlan) -> list[str]:
         f"kept copy    {plan.pgdata_old}",
         "",
         "--apply would:",
+        "  0. take the storage service's spawn lock (refuse if another process holds it); freed before step 6",
         "  1. nx daemon service stop",
         f"  2. {old_ctl} -D {plan.pgdata} -m fast stop, then check with status that no server runs",
         f"  3. refuse if {plan.pgdata_old} exists; else mv {plan.pgdata} {plan.pgdata_old}",
@@ -366,10 +397,19 @@ def _short_tempdir() -> Path:
 class ClusterUpgrade:
     """Runs one plan. *say* prints a line; *service* stops and starts the storage service."""
 
-    def __init__(self, plan: UpgradePlan, *, say: Callable[[str], None], service: ServiceControl) -> None:
+    def __init__(
+        self,
+        plan: UpgradePlan,
+        *,
+        say: Callable[[str], None],
+        service: ServiceControl,
+        hold_lock: Callable[[UpgradePlan], "SpawnLockHold"] = _hold_service_lock,
+    ) -> None:
         self.plan = plan
         self.say = say
         self.service = service
+        self._hold_lock = hold_lock
+        self._lock: "SpawnLockHold | None" = None
         self._moved = False
 
     # ── helpers ────────────────────────────────────────────────────────────
@@ -450,6 +490,18 @@ class ClusterUpgrade:
 
     def check_only(self) -> None:
         """initdb into a temporary directory and ``pg_upgrade --check`` against it; the temporary directory goes."""
+        self._lock = self._hold_lock(self.plan)
+        try:
+            self._check_only_locked()
+        finally:
+            self._release_lock()
+
+    def _release_lock(self) -> None:
+        lock, self._lock = self._lock, None
+        if lock is not None:
+            lock.release()
+
+    def _check_only_locked(self) -> None:
         p = self.plan
         old_ctl = p.old_bin / "pg_ctl"
         try:
@@ -518,18 +570,22 @@ class ClusterUpgrade:
         if p.port is None:
             raise PgUpgradeRefused(f"{CREDENTIALS_FILENAME} has no PG_PORT: the follow-up steps could not reach the new cluster")
         with _interrupts_raise():
+            self._lock = self._hold_lock(p)
             try:
-                workdir = _short_tempdir()
-            except OSError as exc:
-                raise PgUpgradeRefused(
-                    f"could not make a work directory under {SHORT_TMP_ROOT} ({exc.strerror}): nothing was changed"
-                ) from None
-            self._apply(workdir)
+                try:
+                    workdir = _short_tempdir()
+                except OSError as exc:
+                    raise PgUpgradeRefused(
+                        f"could not make a work directory under {SHORT_TMP_ROOT} ({exc.strerror}): nothing was changed"
+                    ) from None
+                self._apply(workdir)
+            finally:
+                self._release_lock()
 
     def _apply(self, workdir: Path) -> None:
         p = self.plan
         self.say(f"NOTE: this command is {UNTESTED_NOTE} ({p.pgdata}).")
-        self.say(f"NOTE: {NO_LOCK_NOTE}.")
+        self.say(f"NOTE: {LOCK_NOTE}.")
         try:
             self._stop_and_move()
             self._upgrade(workdir)
@@ -693,6 +749,11 @@ class ClusterUpgrade:
     def _finish(self, workdir: Path) -> list[str]:
         """Start the service and run pg_upgrade's follow-ups; return the problems (empty on success)."""
         p = self.plan
+        # The cluster is whole now. Free the lock before the service starts: `nx daemon service start` spawns a
+        # supervisor that takes it, and would wait on this process (60 s, then fail) if we still held it.
+        # The cluster is whole now. Free the lock before the service starts: `nx daemon service start` spawns a
+        # supervisor that takes it, and would wait on this process (60 s, then fail) if we still held it.
+        self._release_lock()
         problems: list[str] = []
         host = ["-h", "127.0.0.1", "-p", str(p.port), "-U", p.os_user]
         update = self._find_update_extensions(workdir)

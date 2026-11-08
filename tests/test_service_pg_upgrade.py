@@ -153,6 +153,8 @@ class Rig:
         """Every file under cfg with its content: the 'nothing changed' witness."""
         out: dict[str, str] = {}
         for p in sorted(self.cfg.rglob("*")):
+            if p.name == "storage_service_spawn.lock":  # the empty lock file the command (like a start) leaves behind
+                continue
             out[str(p.relative_to(self.cfg))] = p.read_text(encoding="utf-8") if p.is_file() else "<dir>"
         return out
 
@@ -771,16 +773,147 @@ def test_the_rollback_guard_holds_the_fatal_signals(rig: Rig) -> None:
         signal.signal(signal.SIGINT, previous)
 
 
-def test_the_no_lock_warning_is_shown_where_a_user_sees_it(rig: Rig) -> None:
-    """Review r2: nothing locks the service during the upgrade, so the user is told to close other sessions."""
-    note = upgrade_mod.NO_LOCK_NOTE
+# -- the service lock (nexus-j738q limitation 4)
+
+
+def _lock_is_held(cfg: Path) -> bool:
+    """Whether someone holds the storage service's spawn lock in *cfg* (taken and given back when free)."""
+    from nexus.daemon.service_registry import ServiceRegistry, SpawnLockBusyError  # noqa: PLC0415
+
+    try:
+        ServiceRegistry(dir=cfg, tier="storage_service").try_hold_spawn_lock().release()
+    except SpawnLockBusyError:
+        return True
+    return False
+
+
+def _hold_it(cfg: Path):
+    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415
+
+    return ServiceRegistry(dir=cfg, tier="storage_service").try_hold_spawn_lock()
+
+
+def test_the_lock_names_the_services_tier() -> None:
+    from nexus.daemon import storage_service_daemon as ssd  # noqa: PLC0415
+
+    assert upgrade_mod._SERVICE_TIER == ssd._REGISTRY_TIER
+
+
+def test_apply_holds_the_service_lock_through_the_stop_and_the_upgrade_and_frees_it_before_the_start(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Held across ``service stop`` (which never takes it) and the upgrade; free at ``service start`` (a supervisor
+    started while we held it would wait on us: the deadlock the release avoids)."""
+    seen: list[tuple[str, bool]] = []
+    rig.on_service = lambda verb: seen.append((verb, _lock_is_held(rig.cfg)))
+    real_upgrade = upgrade_mod.ClusterUpgrade._upgrade
+
+    def probing(self, workdir):
+        seen.append(("upgrade", _lock_is_held(rig.cfg)))
+        return real_upgrade(self, workdir)
+
+    monkeypatch.setattr(upgrade_mod.ClusterUpgrade, "_upgrade", probing)
+    assert not _lock_is_held(rig.cfg)
+    result = rig.run("--apply")
+    assert result.exit_code == 0, result.output
+    assert seen == [("stop", True), ("upgrade", True), ("start", False)]
+    assert not _lock_is_held(rig.cfg), "the lock outlived the command"
+
+
+def test_apply_is_refused_while_another_process_holds_the_lock(rig: Rig) -> None:
+    before = rig.snapshot()
+    with _hold_it(rig.cfg):
+        result = rig.run("--apply")
+    assert result.exit_code == 1, result.output
+    assert "spawn lock" in result.output and "Nothing was changed" in result.output
+    assert rig.service_calls == [], "the service must not be stopped when the lock is not ours"
+    assert all("--version" in ln for ln in rig.log_lines()), rig.log_lines()
+    assert (rig.state / "old_running").exists()
+    assert rig.snapshot() == before
+    rig.assert_original_restored()
+
+
+def test_check_only_holds_the_lock_while_it_runs_and_is_refused_when_it_is_held(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    (rig.state / "old_running").unlink()
+    seen: list[bool] = []
+    real_initdb = upgrade_mod.ClusterUpgrade._initdb
+
+    def probing(self, new_data, workdir):
+        seen.append(_lock_is_held(rig.cfg))
+        return real_initdb(self, new_data, workdir)
+
+    monkeypatch.setattr(upgrade_mod.ClusterUpgrade, "_initdb", probing)
+    assert rig.run("--check-only").exit_code == 0
+    assert seen == [True] and not _lock_is_held(rig.cfg)
+    with _hold_it(rig.cfg):
+        refused = rig.run("--check-only")
+    assert refused.exit_code == 1 and "spawn lock" in refused.output
+    assert len(rig.calls("initdb")) == 1, "the refused run must not have started initdb"
+
+
+def test_the_dry_run_neither_takes_nor_minds_the_lock(rig: Rig) -> None:
+    with _hold_it(rig.cfg):
+        result = rig.run()
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize(
+    "how",
+    ["failed_pg_upgrade", "interrupt_before_move", "interrupt_after_upgrade", "service_stop_fails", "failed_follow_up"],
+)
+def test_the_lock_is_free_after_every_way_apply_can_end(rig: Rig, how: str) -> None:
+    def interrupt_on(verb_wanted: str):
+        def hook(verb: str) -> None:
+            if verb == verb_wanted:
+                raise KeyboardInterrupt
+        return hook
+
+    kwargs: dict[str, object] = {}
+    if how == "failed_pg_upgrade":
+        kwargs["fail"] = "pg_upgrade"
+    elif how == "interrupt_before_move":
+        rig.on_service = interrupt_on("stop")
+    elif how == "interrupt_after_upgrade":
+        rig.on_service = interrupt_on("start")
+    elif how == "service_stop_fails":
+        rig.service_rc["stop"] = 1
+    elif how == "failed_follow_up":
+        kwargs["fail"] = "vacuumdb"
+    rig.run("--apply", **kwargs)
+    assert not _lock_is_held(rig.cfg), how
+
+
+def test_the_lock_is_free_after_a_failed_check_only(rig: Rig) -> None:
+    (rig.state / "old_running").unlink()
+    rig.run("--check-only", fail="pg_upgrade_check")
+    assert not _lock_is_held(rig.cfg)
+
+
+def test_the_lock_is_held_through_the_rollback(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[bool] = []
+    real = upgrade_mod.ClusterUpgrade._rollback_held
+
+    def probing(self, workdir):
+        seen.append(_lock_is_held(rig.cfg))
+        return real(self, workdir)
+
+    monkeypatch.setattr(upgrade_mod.ClusterUpgrade, "_rollback_held", probing)
+    assert rig.run("--apply", fail="pg_upgrade").exit_code == 1
+    assert seen == [True]
+
+
+def test_the_lock_text_says_what_the_lock_guarantees_and_what_it_does_not(rig: Rig) -> None:
+    """Replaces the 'nothing locks the service' warning, in every place a user reads it."""
+    assert not hasattr(upgrade_mod, "NO_LOCK_NOTE")
+    note = upgrade_mod.LOCK_NOTE
+    assert "spawn lock" in note and "does not stop a service that is already running" in note
     assert note in rig.run().output
     applied = rig.run("--apply")
     assert applied.exit_code == 0 and applied.output.index(note) < applied.output.index("stopping the storage service")
     helped = " ".join(CliRunner().invoke(main, ["daemon", "service", "pg-upgrade", "--help"]).output.split()).lower()
-    assert "nothing locks the service during the upgrade" in helped
-    doc = " ".join((Path(__file__).resolve().parents[1] / "docs/cli-reference.md").read_text(encoding="utf-8").split())
-    assert "Nothing locks the service while the upgrade runs" in doc
+    assert "holds the storage service's spawn lock" in helped and "nothing locks" not in helped
+    repo = Path(__file__).resolve().parents[1]
+    for doc in ("docs/cli-reference.md", "docs/migration-runbook.md"):
+        text = " ".join((repo / doc).read_text(encoding="utf-8").split())
+        assert "spawn lock" in text and "Nothing locks the service" not in text, doc
 
 
 # -- bundle discovery follows --config-dir (nexus-j738q limitation 3)
