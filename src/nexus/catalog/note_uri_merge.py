@@ -14,8 +14,11 @@ holds the content. The rule, as a total order over a group of rows:
 4. a tie among stale rows goes to the lowest tumbler.
 
 For one stale row and its twin that is: the twin wins unless the stale row holds chunks and the twin holds none,
-or both hold chunks and the stale row is newer. The rule never folds a chunk holder into a chunkless winner, so
-``nx catalog merge``'s chunk refusal (nexus-bivz3.27) never applies to a pair it decides.
+or both hold chunks and the stale row is newer. "Holds chunks" is ``catalog_documents.chunk_count``, the column
+``nx catalog merge`` reads for its refusal (nexus-bivz3.27), not a manifest recount. The rule, run on the census, never
+picks a chunkless winner over a chunk holder, but the census can be a round old: the verb reads both rows' count
+again just before each merge and refuses a pair that would fold a chunk holder into a chunkless winner.
+When both rows hold chunks, the loser's chunks and meta (tags, ttl) stay behind the alias.
 
 A group is the twin plus every stale row that points at it, so two stale rows sharing one twin do not chain-merge.
 The functions here are pure: they read the census's merge entries and decide; the verb does the calling.
@@ -53,6 +56,15 @@ class Decision:
     def rewrite_needed(self) -> bool:
         """A stale winner keeps its stale URI through the merge, so it is rewritten after."""
         return not self.winner.is_twin
+
+    @property
+    def merge_order(self) -> tuple[Candidate, ...]:
+        """The order the losers are merged in. Under a stale winner the twin holds the target URI, so it goes LAST
+        (and the winner is rewritten at once): the window in which nothing holds the URI is then one request, and a
+        refused or failed earlier merge leaves the twin in place. Otherwise tumbler order."""
+        if not self.rewrite_needed:
+            return self.losers
+        return tuple(sorted(self.losers, key=lambda c: c.is_twin))
 
 
 @dataclass(frozen=True)
@@ -119,7 +131,13 @@ def decide_group(members: list[Candidate]) -> Decision:
             else:
                 rule = "both hold chunks and the twin is newer"
         elif twin.chunk_count == 0:
-            rule = "the stale row holds the only chunks"
+            if len([c for c in holders if not c.is_twin]) == 1:
+                rule = "the stale row holds the only chunks"
+            else:
+                rule = (
+                    "several stale rows hold chunks and the twin none: the newest wins "
+                    "(the lowest tumbler on a tie)"
+                )
         else:
             rule = "both hold chunks and the stale row is newer"
     elif not holders:

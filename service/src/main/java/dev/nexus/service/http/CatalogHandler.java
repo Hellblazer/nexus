@@ -702,8 +702,8 @@ public final class CatalogHandler implements HttpHandler {
      *
      * <p>Body (all optional): {@code {"apply": false, "limit": 1000, "sample": 20, "tumblers": [...]}}. {@code apply} must be a JSON
      * boolean; {@code limit} (1..{@value #MAX_NOTE_URI_REPAIR_LIMIT}) bounds the rows ONE call rewrites; {@code sample}
-     * (0..{@value #MAX_NOTE_URI_REPAIR_SAMPLE}) bounds the example rows listed per class. The response is
-     * {@code tumblers} (a list of at most {@value #MAX_BATCH_DOC_IDS}) restricts what {@code apply} rewrites to those rewrite
+     * (0..{@value #MAX_NOTE_URI_REPAIR_SAMPLE}) bounds the example rows listed per class. {@code tumblers} (a list of
+     * at most {@value #MAX_BATCH_DOC_IDS}) restricts what {@code apply} rewrites to those rewrite
      * candidates (the census is the tenant's either way); an empty list rewrites none. The response is
      * {@link CatalogRepository#repairStaleNoteUris}'s map. A rewrite onto a URI a live document holds, or holds by the
      * time the UPDATE runs, is the shared {@link CatalogRepository.SourceUriCollision} (409) with nothing written.

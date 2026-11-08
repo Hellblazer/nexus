@@ -43,7 +43,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
-from typing import Any
+from typing import Any, NoReturn
 
 import click
 import httpx
@@ -220,9 +220,11 @@ _MERGE_REPORT_ENTRIES: int = 500
 #: tenant with more than this many groups; the census after says what is left.
 _MAX_MERGE_ROUNDS: int = 200
 _WINDOW_NOTE = (
-    "When a stale row wins, the twin is merged into it and the stale row is rewritten in a second request. "
-    "The window between the two is real: the row still holds its old URI and nothing holds the new one, so a "
-    "re-put under the new collection inside it mints a third row. It is one request long."
+    "When a stale row wins, its stale losers are merged first, the twin is merged last, and the stale row is "
+    "rewritten in the next request. The window is that one request: between the twin's merge and the rewrite the row still "
+    "holds its old URI and nothing holds the new one, so a re-put under the new collection inside it mints a "
+    "third row. A run that stops inside it is finished by `nx catalog repair-note-uris --apply`, which rewrites "
+    "the stale row."
 )
 
 
@@ -233,7 +235,7 @@ class _RunStopped(Exception):
 def _decision_dict(d: Decision) -> dict:
     return {
         "winner": d.winner.tumbler,
-        "losers": [c.tumbler for c in d.losers],
+        "losers": [c.tumbler for c in d.merge_order],
         "rule": d.rule,
         "target_uri": d.target_uri,
         "rewrite_needed": d.rewrite_needed,
@@ -261,7 +263,7 @@ def _print_plan(p: Plan, report: dict) -> None:
         echo(
             f"    {d.winner.tumbler} wins: {d.rule}  [{', '.join(_describe(c) for c in d.members)}]"
         )
-        for i, loser in enumerate(d.losers):
+        for i, loser in enumerate(d.merge_order):
             tail = (
                 f", then rewrite {d.winner.tumbler}"
                 if d.rewrite_needed and i == len(d.losers) - 1
@@ -278,15 +280,29 @@ def _print_plan(p: Plan, report: dict) -> None:
         )
 
 
-def _execute_decision(writer: Any, d: Decision, *, round_no: int, record: Any) -> dict:
-    """Merge every loser of ``d`` into its winner, one request each, then rewrite a stale winner. A 409 refusal
-    (self, not found, already aliased, cycle) is reported for that pair and the group goes on; any other engine
-    error is recorded and raises :class:`_RunStopped`. ``record`` writes one ledger line, durably, before the
-    next request is made. There is no ``--force``: the rule never folds a chunk holder into a chunkless winner,
-    and a pair whose data says otherwise (a stale census) is refused here without a call."""
+def _chunks_now(reader: Any, tumbler: str) -> int | None:
+    """The row's own ``catalog_documents.chunk_count`` now (what ``nx catalog merge`` reads for its bivz3.27
+    refusal), or None when the row is gone."""
+    entry = reader.resolve(tumbler, follow_alias=False)
+    if entry is None:
+        return None
+    return int(getattr(entry, "chunk_count", 0) or 0)
+
+
+def _execute_decision(
+    writer: Any, d: Decision, *, round_no: int, record: Any, reader: Any
+) -> dict:
+    """Merge every loser of ``d`` into its winner, one request each (the twin last under a stale winner), then
+    rewrite a stale winner. A 409 refusal (self, not found, already aliased, cycle) is reported for that pair and
+    the group goes on; any other engine error, or a connection that failed or dropped (the request may have been
+    applied), is recorded and raises :class:`_RunStopped`. ``record`` writes one ledger line, durably, before the
+    next request is made; a ``merge-intent`` line goes down before each merge, because the loser's URI before is
+    the only copy a lost response would take with it. Before each merge both rows' ``chunk_count`` is read again
+    through ``reader``: a pair that would fold a chunk holder into a chunkless winner (the census can be a round
+    old) is refused without a call. There is no ``--force``."""
     pairs: list[dict] = []
     all_merged = True
-    for loser in d.losers:
+    for loser in d.merge_order:
         line = {
             "type": "merge",
             "round": round_no,
@@ -297,13 +313,52 @@ def _execute_decision(writer: Any, d: Decision, *, round_no: int, record: Any) -
             "rule": d.rule,
             "rewrite_needed": d.rewrite_needed,
         }
-        if loser.chunk_count > 0 and d.winner.chunk_count == 0:
+        if loser.is_twin and d.rewrite_needed and not all_merged:
             line.update(
                 outcome="refused",
-                detail=f"chunk guard: {loser.tumbler} holds {loser.chunk_count} chunk(s) and the winner "
-                f"{d.winner.tumbler} holds none; a merge moves no chunks, so none is made",
+                detail="not attempted: an earlier merge into the winner was refused, so the twin keeps the URI "
+                "the winner will need",
+            )
+            record(line)
+            pairs.append(line)
+            continue
+        try:
+            loser_chunks = _chunks_now(reader, loser.tumbler)
+            winner_chunks = _chunks_now(reader, d.winner.tumbler)
+        except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+            line.update(
+                outcome="error",
+                loser_uri_after=None,
+                detail=f"could not read the chunk counts before the merge ({type(exc).__name__}); nothing was sent",
+            )
+            record(line)
+            raise _RunStopped(
+                f"merge {loser.tumbler} into {d.winner.tumbler} not attempted: the chunk counts could not be "
+                f"read ({type(exc).__name__}). Nothing was sent."
+            ) from exc
+        if loser_chunks is None or winner_chunks is None:
+            gone = loser.tumbler if loser_chunks is None else d.winner.tumbler
+            line.update(
+                outcome="refused",
+                detail=f"{gone} was not found when re-read (tombstoned or gone since the census); no call was made",
+            )
+        elif loser_chunks > 0 and winner_chunks == 0:
+            line.update(
+                outcome="refused",
+                detail=f"chunk guard: {loser.tumbler} holds {loser_chunks} chunk(s) and the winner "
+                f"{d.winner.tumbler} holds none (read again just now); a merge moves no chunks, so none is made",
             )
         else:
+            record(
+                {
+                    "type": "merge-intent",
+                    "round": round_no,
+                    "winner": d.winner.tumbler,
+                    "loser": loser.tumbler,
+                    "loser_uri_before": loser.uri,
+                    "rule": d.rule,
+                }
+            )
             try:
                 result = writer.merge_documents(loser.tumbler, d.winner.tumbler)
                 line.update(
@@ -327,16 +382,16 @@ def _execute_decision(writer: Any, d: Decision, *, round_no: int, record: Any) -
                     raise _RunStopped(
                         f"merge {loser.tumbler} into {d.winner.tumbler} failed: {exc}"
                     ) from exc
-            except httpx.TimeoutException as exc:
+            except httpx.TransportError as exc:  # a timeout, a refused or dropped connection, a broken response
                 line.update(
                     outcome="error",
                     loser_uri_after=None,
-                    detail=f"timeout: the merge may have happened ({type(exc).__name__})",
+                    detail=f"{type(exc).__name__}: the merge may have happened",
                 )
                 record(line)
                 raise _RunStopped(
-                    f"merge {loser.tumbler} into {d.winner.tumbler} timed out; it may have happened. "
-                    "Run the census again."
+                    f"merge {loser.tumbler} into {d.winner.tumbler} got no answer ({type(exc).__name__}); it "
+                    "may have happened. Run the census again."
                 ) from exc
         record(line)
         pairs.append(line)
@@ -351,16 +406,31 @@ def _execute_decision(writer: Any, d: Decision, *, round_no: int, record: Any) -
             "followed": False,
             "detail": "",
         }
+
+        def bad_response(raw: Any, why: str) -> NoReturn:
+            # The request was made and may have committed: keep whatever the engine said, then stop.
+            rewrite.update(detail=f"{why} The rewrite may have happened.", raw=raw)
+            record(rewrite)
+            raise _RunStopped(
+                f"rewrite of {d.winner.tumbler}: {why} The raw report is in the ledger; run the census again."
+            )
+
         if not all_merged:
             rewrite["detail"] = (
                 "not rewritten: a merge into it was refused, so it still has a sibling"
             )
         else:
+            record(
+                {
+                    "type": "rewrite-intent",
+                    "round": round_no,
+                    "winner": d.winner.tumbler,
+                    "winner_uri_before": d.winner.uri,
+                }
+            )
             try:
-                step = _check_report(
-                    writer.repair_stale_note_uris(
-                        apply=True, limit=1, sample=0, tumblers=[d.winner.tumbler]
-                    )
+                raw = writer.repair_stale_note_uris(
+                    apply=True, limit=1, sample=0, tumblers=[d.winner.tumbler]
                 )
             except httpx.HTTPStatusError as exc:
                 if exc.response is not None and exc.response.status_code == 409:
@@ -371,17 +441,36 @@ def _execute_decision(writer: Any, d: Decision, *, round_no: int, record: Any) -
                     raise _RunStopped(
                         f"rewrite of {d.winner.tumbler} failed: {exc}"
                     ) from exc
-            except httpx.TimeoutException as exc:
+            except httpx.TransportError as exc:
                 rewrite["detail"] = (
-                    f"timeout: the rewrite may have happened ({type(exc).__name__})"
+                    f"{type(exc).__name__}: the rewrite may have happened"
                 )
                 record(rewrite)
                 raise _RunStopped(
-                    f"rewrite of {d.winner.tumbler} timed out; it may have happened. Run the census again."
+                    f"rewrite of {d.winner.tumbler} got no answer ({type(exc).__name__}); it may have happened. "
+                    "Run the census again."
                 ) from exc
             else:
-                if step.get("rewritten") == 1:
-                    for entry in _check_ledger(step):
+                try:
+                    step = _check_report(raw)
+                except click.ClickException as exc:
+                    bad_response(raw, exc.format_message())
+                done = step.get("rewritten")
+                if isinstance(done, bool) or not isinstance(done, int):
+                    bad_response(
+                        raw, f"unexpected report from the engine: rewritten is {done!r}."
+                    )
+                if done == 0:
+                    rewrite["detail"] = (
+                        "not a rewrite candidate now (a sibling or twin still holds its target, or it changed): "
+                        "left for the next census"
+                    )
+                else:
+                    try:
+                        entries = _check_ledger(step)
+                    except click.ClickException as exc:
+                        bad_response(raw, exc.format_message())
+                    for entry in entries:
                         record(
                             {
                                 "type": "rewrite",
@@ -390,12 +479,22 @@ def _execute_decision(writer: Any, d: Decision, *, round_no: int, record: Any) -
                                 **entry,
                             }
                         )
-                    rewrite["followed"] = True
-                else:
-                    rewrite["detail"] = (
-                        "not a rewrite candidate now (a sibling or twin still holds its target, or it changed): "
-                        "left for the next census"
-                    )
+                    if any(
+                        e["table"] == "catalog_documents" and e["key"] == d.winner.tumbler
+                        for e in entries
+                    ):
+                        rewrite["followed"] = True
+                    else:
+                        rewrite["detail"] = (
+                            "engine rewrote a different row (no tumblers support?): the ledger names "
+                            f"{sorted({e['key'] for e in entries if e['table'] == 'catalog_documents'})}, "
+                            f"not {d.winner.tumbler}"
+                        )
+                        record(rewrite)
+                        raise _RunStopped(
+                            f"rewrite of {d.winner.tumbler}: engine rewrote a different row (no tumblers "
+                            "support?). What it changed is in the ledger."
+                        )
         record(rewrite)
     return {"pairs": pairs, "rewrite": rewrite}
 
@@ -457,6 +556,11 @@ def _run_merge(
             click.echo("Nothing to merge.")
         return 0
 
+    # The pass reads both rows' chunk_count again before each merge; the reader is the catalog reader `nx catalog
+    # merge` uses for its own check.
+    from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+
+    reader = _cat_cmd._get_catalog()
     path = ledger_path or _default_ledger_path()
     try:
         # Owner-only, on Windows too: the ledger names every merged note's titles.
@@ -499,7 +603,9 @@ def _run_merge(
             rounds += 1
             for d in todo:
                 attempted.add(frozenset(c.tumbler for c in d.members))
-                outcome = _execute_decision(writer, d, round_no=rounds, record=record)
+                outcome = _execute_decision(
+                    writer, d, round_no=rounds, record=record, reader=reader
+                )
                 for p in outcome["pairs"]:
                     pairs.append(p)
                     if not as_json:
@@ -648,9 +754,12 @@ def repair_note_uris_cmd(
     more than one pass; --apply repeats until none are left or a batch makes no progress.
 
     \b
-    --merge is the merge pass, chunks decide: the twin wins unless the stale row holds chunks and the twin holds
-    none (or both hold chunks and the stale row is newer); a stale winner is rewritten after the merge, with a
-    one-request window between the two. Dry run by default (each group's winner and why); --merge --apply
+    --merge is the merge pass, chunks decide (catalog_documents.chunk_count): the twin wins unless the stale row
+    holds chunks and the twin holds none (or both hold chunks and the stale row is newer). Under a stale winner the
+    twin is merged last and the stale row rewritten at once, so the window is one request; a run that stops
+    inside it is finished by `nx catalog repair-note-uris --apply`. Both rows' chunk_count is read again before
+    each merge, and a pair that would fold a chunk holder into a chunkless winner is refused. A loser's chunks and
+    meta (tags, ttl) stay behind its alias. Dry run by default (each group's winner and why); --merge --apply
     performs it, a refused pair is reported and the run goes on, and the ledger records every pair.
 
     \b

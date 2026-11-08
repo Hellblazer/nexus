@@ -174,3 +174,25 @@ class TestPlan:
         assert p.decisions == []
         assert [s["tumbler"] for s in p.skipped] == ["1.1.1"]
         assert p.skipped[0]["why"]
+
+
+class TestOrderAndLabels:
+    """Review round 1 (nexus-bivz3.24): the twin is merged last under a stale winner; labels say what happened."""
+
+    def test_a_stale_winner_merges_its_stale_losers_first_and_the_twin_last(self):
+        # The twin 1.1.2 sorts before the stale loser 1.1.3: tumbler order alone would merge it first.
+        d = decide_group([_s("1.1.1", 5, "2026-10-01T00:00Z"), _w("1.1.2", 0, None), _s("1.1.3", 0, None)])
+        assert d.winner.tumbler == "1.1.1" and d.rewrite_needed
+        assert [c.tumbler for c in d.merge_order] == ["1.1.3", "1.1.2"]
+
+    def test_a_twin_winner_keeps_tumbler_order(self):
+        d = decide_group([_s("1.1.3", 0, None), _w("1.1.2", 0, None), _s("1.1.1", 0, None)])
+        assert [c.tumbler for c in d.merge_order] == ["1.1.1", "1.1.3"]
+
+    def test_several_stale_rows_holding_chunks_against_a_chunkless_twin_is_not_called_the_only_chunks(self):
+        d = decide_group([
+            _s("1.1.1", 2, "2026-10-01T00:00Z"), _s("1.1.3", 4, "2026-11-01T00:00Z"), _w("1.1.2", 0, None),
+        ])
+        assert d.winner.tumbler == "1.1.3", "the newest stale holder"
+        assert d.rule != "the stale row holds the only chunks"
+        assert "several stale rows hold chunks" in d.rule and "newest" in d.rule
