@@ -181,6 +181,15 @@ def trash_cmd(limit: int) -> None:
         return d["sensitive"] is True if "sensitive" in d else lines.withholding()
 
     flagged = {str(d.get("tumbler", "")) for d in docs if _is_flagged(d)}
+    # A merged duplicate's own flag is unset while its canonical holds the content: follow alias_of to the canonical's
+    # flag (a canonical the live catalog does not return, or an unreadable catalog, counts flagged).
+    aliased = {str(d.get("tumbler", "")): str(d["alias_of"]) for d in docs
+               if d.get("alias_of") and str(d.get("tumbler", "")) not in flagged}
+    if aliased:
+        from nexus.sensitive_output import flagged_tumblers  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+        canon_flagged = flagged_tumblers(set(aliased.values()), cat=cat)
+        flagged |= {t for t, canon in aliased.items() if canon in canon_flagged}
     click.echo(f"{len(docs)} tombstoned document(s):")
     click.echo(f"  {'TUMBLER':<16} {'DELETED_AT':<26} TITLE")
     for d in docs:

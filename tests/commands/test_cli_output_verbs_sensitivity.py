@@ -150,6 +150,16 @@ def test_trash_withholds_a_tombstoned_flagged_title(cli, monkeypatch) -> None:
     assert f"[{withheld_note(1)}]" in out
 
 
+def test_trash_follows_a_tombstoned_alias_to_its_flagged_canonical(cli, monkeypatch) -> None:
+    """A merged duplicate's own flag is unset; a canonical flagged after the merge still withholds the alias."""
+    cli.fake.trash.append({"tumbler": "1.9.3", "title": f"{CANARY} alias copy", "deleted_at": "2026-11-01T00:00:00Z",
+                           "sensitive": False, "alias_of": SECRET})
+    _claude_code(monkeypatch)
+    out = cli("trash")
+    assert CANARY not in out and stub_line("1.9.3") in out
+    assert f"[{withheld_note(2)}]" in out
+
+
 def test_trash_from_an_engine_without_the_flag_withholds_every_row_under_claude_code(cli, monkeypatch) -> None:
     for row in cli.fake.trash:
         del row["sensitive"]
@@ -171,6 +181,7 @@ def test_delete_names_a_flagged_document_by_its_stub_in_the_prompt_and_the_resul
     out = cli("delete", SECRET, input="y\n")
     assert CANARY not in out
     assert out.count(stub_line(SECRET)) == 2, out
+    assert f"[{withheld_note(1)}]" in out, "one document, counted once"
     clean = cli("delete", CLEAN, input="y\n")
     assert "Gardening" in clean
 
