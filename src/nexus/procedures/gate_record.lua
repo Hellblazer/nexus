@@ -1,6 +1,6 @@
 -- procedure: gate_record
 -- summary: Build a review agent's T2 gate record; the caller writes it with memory_put.
--- args: kind:string, bead:string, rdr:integer?, sha:string, outcome:string, body:string, now:string, repo:string
+-- args: kind:string, bead:string, rdr:integer?, sha:string, outcome:string, body:string, round:integer?, now:string, repo:string
 -- grants: none
 
 -- RDR-240 Technical Design 6 (nexus-qo7ie.34). The review agents' gate records in T2
@@ -11,9 +11,12 @@
 -- not stopped; the lint over the agents' write-back lines and the rollup's own tag check
 -- catch it.
 --
--- The title is <kind>-<sha>-<bead>-<date>: the slug Technical Design 6 leaves open is the
--- bead id (RDR-240 gate r2 Significant 6), so two records about one commit for two beads
--- never share a title. Every kind leads the title, where the audit-tag table matches it.
+-- The title is <kind>-<sha>-<bead>-<date>[-r<round>]: the slug Technical Design 6 leaves
+-- open is the bead id (RDR-240 gate r2 Significant 6), so two records about one commit for
+-- two beads never share a title, and the optional round separates a re-dispatched pass.
+-- Two passes of one kind with the same sha, bead, day and round share a title, and the
+-- second memory_put replaces the first. Every kind leads the title, where the audit-tag
+-- table matches it.
 
 local args = ...
 
@@ -39,12 +42,17 @@ if not string.match(sha, "^[0-9a-f]+$") or #sha < 7 or #sha > 64 then
 end
 
 local bead = args.bead
-if not string.match(bead, "^[a-z][a-z0-9]*%-[a-z0-9][a-z0-9.]*$") then
-  error("bead must be a bead id such as nexus-qo7ie.34; got " .. bead, 0)
+-- Any repo's bead id (nexus-qo7ie.34, ART-12, my-proj-abc12): one token with no space or
+-- comma, since the id goes into a comma-separated tag list and the title.
+if not string.match(bead, "^[%w][%w._-]*$") then
+  error("bead must be a bead id such as nexus-qo7ie.34, with no space or comma; got " .. bead, 0)
 end
 
-if args.rdr ~= nil and args.rdr < 1 then
-  error("rdr must be a positive integer; got " .. args.rdr, 0)
+if args.rdr ~= nil and (args.rdr < 1 or args.rdr > 9999) then
+  error("rdr must be a positive integer up to 9999; got " .. args.rdr, 0)
+end
+if args.round ~= nil and (args.round < 1 or args.round > 99) then
+  error("round must be an integer from 1 to 99; got " .. args.round, 0)
 end
 
 local date = string.match(args.now, "^(%d%d%d%d%-%d%d%-%d%d)T")
@@ -57,7 +65,13 @@ if string.match(body, "^%s*$") then
   error("body must not be empty", 0)
 end
 -- A body that carries the agent's verdict block must agree with the outcome it records.
-local stated = string.match(body, "%- %*%*outcome%*%*: *([%w-]+)")
+-- The block comes last, so an earlier quoted verdict (an example, a prior round) is not it:
+-- the last "- **outcome**:" or "* **outcome**:" line is compared, its value bare, in
+-- backticks or in bold.
+local stated = nil
+for value in string.gmatch("\n" .. body, "\n%s*[-*] +%*%*outcome%*%*: *[`*]*([%w-]+)") do
+  stated = value
+end
 if stated ~= nil and stated ~= args.outcome then
   error("the body's verdict '" .. stated .. "' disagrees with outcome '" .. args.outcome .. "'", 0)
 end
@@ -73,7 +87,8 @@ fields = fields .. "sha: " .. sha .. "\n" .. "outcome: " .. args.outcome .. "\n"
 
 return {
   project = args.repo,
-  title = args.kind .. "-" .. sha .. "-" .. bead .. "-" .. date,
+  title = args.kind .. "-" .. sha .. "-" .. bead .. "-" .. date
+    .. (args.round ~= nil and ("-r" .. string.format("%d", args.round)) or ""),
   tags = tags,
   -- The record's own fields first: the reader takes the first match, so a line in the
   -- body never stands in for one of them.
