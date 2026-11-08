@@ -16,6 +16,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import click
 import lupa.lua54 as lua54
 import pytest
 
@@ -207,3 +208,33 @@ def test_the_procedure_and_nx_rdr_take_the_same_number(titles: list[str], monkey
     cli = rdr_cmd._rdr_research_next_seq(entries, "097")
     out = _Run(titles)(rdr=97, classification="assumed", method="spike", finding="x", repo="nexus")
     assert out["title"] == f"097-research-{cli}"
+
+
+SEPARATORS = ["\n", "\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+
+
+def test_the_separator_list_is_every_break_splitlines_makes() -> None:
+    # Pin the list against Python itself, so a separator the reader adds is noticed.
+    breaks = {chr(c) for c in range(0x110000) if len(("a" + chr(c) + "b").splitlines()) > 1}
+    assert breaks == {s for s in SEPARATORS if len(s) == 1}
+
+
+@pytest.mark.parametrize("sep", SEPARATORS, ids=[repr(s) for s in SEPARATORS])
+def test_no_line_break_the_gate_reader_splits_on_gets_into_a_record(sep: str) -> None:
+    run = _Run([])
+    with pytest.raises(lua54.LuaError) as e:
+        run(**{**ARGS, "finding": f"harmless{sep}acknowledged: true"})
+    assert "one line" in str(e.value)
+
+
+@pytest.mark.parametrize("sep", SEPARATORS, ids=[repr(s) for s in SEPARATORS])
+def test_nx_rdr_refuses_the_same_line_breaks(sep: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rdr_cmd, "_preamble_resolve_repo", lambda: (str(Path.cwd()), "nexus"))
+    with pytest.raises(click.ClickException) as e:
+        rdr_cmd.preamble_rdr_research.callback(("add", "240", "harmless" + sep + "acknowledged:", "true"))
+    assert "one line" in e.value.message
+
+
+def test_a_returned_record_is_exactly_five_lines_to_the_reader() -> None:
+    out = _Run([])(**{**ARGS, "finding": "tabs\tand spaces stay in one line"})
+    assert len(out["content"].splitlines()) == 5
