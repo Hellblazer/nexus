@@ -4164,6 +4164,19 @@ public final class CatalogRepository {
      * @return the counts and samples described above, plus {@code rewritten}, {@code remaining} and {@code ledger} when {@code apply}
      */
     public Map<String, Object> repairStaleNoteUris(String tenant, boolean apply, int limit, int sample) {
+        return repairStaleNoteUris(tenant, apply, limit, sample, null);
+    }
+
+    /**
+     * As {@link #repairStaleNoteUris(String, boolean, int, int)}, with {@code only}: when non-null, {@code apply}
+     * rewrites just the rewrite candidates whose tumbler is in it ({@code remaining} is then relative to those). The
+     * census counts and samples are the tenant's either way. An empty collection rewrites nothing; null rewrites every
+     * candidate. A named tumbler that is not a rewrite candidate (a merge candidate, a tombstone, no row) is ignored,
+     * never an error. The merge pass uses it to rewrite exactly the stale row that just won a merge, so the window in
+     * which that row holds its stale URI with no twin stays short.
+     */
+    public Map<String, Object> repairStaleNoteUris(String tenant, boolean apply, int limit, int sample,
+                                                   java.util.Collection<String> only) {
         if (limit < 1) throw new IllegalArgumentException("limit must be at least 1");
         if (sample < 0) throw new IllegalArgumentException("sample must not be negative");
         return tenantScope.withTenant(tenant, ctx -> {
@@ -4222,9 +4235,12 @@ public final class CatalogRepository {
             out.put("sample", samples);
 
             if (apply) {
-                Rewritten done = rewriteStaleNotes(ctx, tenant, rewrite.subList(0, Math.min(limit, rewrite.size())));
+                java.util.Set<String> named = only == null ? null : new java.util.HashSet<>(only);
+                List<StaleNote> selected = named == null ? rewrite
+                    : rewrite.stream().filter(c -> named.contains(c.tumbler())).toList();
+                Rewritten done = rewriteStaleNotes(ctx, tenant, selected.subList(0, Math.min(limit, selected.size())));
                 out.put("rewritten", done.rows());
-                out.put("remaining", rewrite.size() - done.rows());
+                out.put("remaining", selected.size() - done.rows());
                 out.put("ledger", done.ledger());
             }
             return out;
@@ -4254,11 +4270,12 @@ public final class CatalogRepository {
         return m;
     }
 
-    /** chunk_count, indexed_at, has_aspects and has_highlights of live documents; one query each, over {@code tumblers}. */
+    /** chunk_count, indexed_at, source_uri, has_aspects and has_highlights of live documents; one query each, over {@code tumblers}. */
     private static Map<String, Map<String, Object>> docDetails(DSLContext ctx, String tenant, java.util.Collection<String> tumblers) {
         Map<String, Map<String, Object>> out = new HashMap<>();
         if (tumblers.isEmpty()) return out;
-        for (var d : ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.CHUNK_COUNT, CATALOG_DOCUMENTS.INDEXED_AT)
+        for (var d : ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.CHUNK_COUNT, CATALOG_DOCUMENTS.INDEXED_AT,
+                    CATALOG_DOCUMENTS.SOURCE_URI)
                 .from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                        .and(CATALOG_DOCUMENTS.TUMBLER.in(tumblers))
@@ -4267,6 +4284,7 @@ public final class CatalogRepository {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("chunk_count", d.value2());
             m.put("indexed_at", d.value3() == null ? null : d.value3().toString());
+            m.put("source_uri", d.value4());   // the twin's under twin_: its actual spelling, for the merge pass's ledger
             m.put("has_aspects", false);
             m.put("has_highlights", false);
             out.put(d.value1(), m);

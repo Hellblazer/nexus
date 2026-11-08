@@ -600,6 +600,94 @@ class NoteUriRepairTest {
             "has_aspects", "twin_has_aspects", "has_highlights", "twin_has_highlights");
     }
 
+    // ── the merge pass's two engine inputs (nexus-bivz3.24, merge half) ───────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void apply_onlyTheNamedTumblersAreRewritten_andTheCensusCountsAreStillTheTenants() throws Exception {
+        Fx f = plant("only");
+
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5, java.util.Set.of("a2", "m1", "no-such"));
+
+        assertThat(r.get("rewrite")).as("the census counts the tenant, not the filter").isEqualTo(4);
+        assertThat(r.get("rewritten")).as("a2 only: m1 is a merge candidate and no-such is not a row").isEqualTo(1);
+        assertThat(r.get("remaining")).as("relative to the named candidates").isEqualTo(0);
+        assertThat(docUri(f.tenant, "a2")).isEqualTo(f.nx(f.y, "beta"));
+        for (String untouched : List.of("a1", "c1", "m1")) {
+            assertThat(docUri(f.tenant, untouched)).as(untouched).isNotEqualTo(f.nx(f.y, "alpha"));
+        }
+        assertThat(docUri(f.tenant, "a1")).isEqualTo(f.nx(f.x1, "alpha"));
+        assertThat(docUri(f.tenant, "c1")).isEqualTo(f.nx(f.x1, "eps"));
+        assertThat(docUri(f.tenant, "m1")).isEqualTo(f.nx(f.x1, "gamma"));
+        List<Map<String, Object>> ledger = (List<Map<String, Object>>) r.get("ledger");
+        assertThat(ledgerRows(ledger, "catalog_documents")).extracting(m -> (String) m.get("key")).containsExactly("a2");
+    }
+
+    @Test
+    void apply_anEmptyTumblerListRewritesNothing_andAnAbsentOneRewritesAll() throws Exception {
+        Fx f = plant("only-empty");
+
+        Map<String, Object> none = repo.repairStaleNoteUris(f.tenant, true, 1000, 0, java.util.Set.of());
+        assertThat(none.get("rewritten")).isEqualTo(0);
+        assertThat(none.get("remaining")).isEqualTo(0);
+        assertThat(docUri(f.tenant, "a1")).isEqualTo(f.nx(f.x1, "alpha"));
+
+        assertThat(repo.repairStaleNoteUris(f.tenant, true, 1000, 0, null).get("rewritten")).isEqualTo(4);
+    }
+
+    @Test
+    void apply_theTumblerFilterStillHonoursLimitAndTheHolderRecheck() throws Exception {
+        Fx f = plant("only-limit");
+        Map<String, Object> one = repo.repairStaleNoteUris(f.tenant, true, 1, 0, java.util.Set.of("a1", "a2"));
+        assertThat(one.get("rewritten")).isEqualTo(1);
+        assertThat(one.get("remaining")).isEqualTo(1);
+
+        CatalogRepository.setNoteUriRepairHookForTests(stage -> {
+            if (stage.equals("locked")) seedNote(f.tenant, "race-twin", f.y, f.nx(f.y, "beta"));
+        });
+        assertThatThrownBy(() -> repo.repairStaleNoteUris(f.tenant, true, 1000, 0, java.util.Set.of("a2")))
+            .isInstanceOf(CatalogRepository.SourceUriCollision.class);
+    }
+
+    @Test
+    void census_aMergeEntryNamesTheTwinsActualUri_chromaSpellingIncluded() throws Exception {
+        Fx f = new Fx("twinuri");
+        String t = f.tenant;
+        seedNote(t, "ch-twin", f.y, "chroma://" + f.y + "/legacy-twin");
+        seedNote(t, "ch-stale", f.y, f.nx(f.x1, "legacy-twin"));
+        seedNote(t, "nx-twin", f.y, f.nx(f.y, "plain"));
+        seedNote(t, "nx-stale", f.y, f.nx(f.x1, "plain"));
+
+        Map<String, Object> r = repo.repairStaleNoteUris(t, false, 1000, 5);
+
+        Map<String, Object> ch = byTumbler(sampleOf(r).get("merge"), "ch-stale");
+        assertThat(ch.get("source_uri")).isEqualTo(f.nx(f.x1, "legacy-twin"));
+        assertThat(ch.get("twin_source_uri")).as("the loser's URI before a merge, for the ledger")
+            .isEqualTo("chroma://" + f.y + "/legacy-twin");
+        assertThat(byTumbler(sampleOf(r).get("merge"), "nx-stale").get("twin_source_uri")).isEqualTo(f.nx(f.y, "plain"));
+    }
+
+    @Test
+    void http_tumblersRestrictApply_andBadOnesAre400() throws Exception {
+        Fx f = plant("http-only");
+
+        var some = post(f, "{\"apply\":true,\"tumblers\":[\"a1\"]}");
+        assertThat(some.statusCode()).as(some.body()).isEqualTo(200);
+        Map<String, Object> done = mapper.readValue(some.body(), MAP_T);
+        assertThat(done.get("rewritten")).isEqualTo(1);
+        assertThat(docUri(f.tenant, "a1")).isEqualTo(f.nx(f.y, "alpha"));
+        assertThat(docUri(f.tenant, "a2")).isEqualTo(f.nx(f.x2, "beta"));
+
+        for (String bad : List.of("{\"tumblers\":\"a1\"}", "{\"tumblers\":[1]}", "{\"tumblers\":[\"\"]}",
+                "{\"tumblers\":[null]}")) {
+            assertThat(post(f, bad).statusCode()).as(bad).isEqualTo(400);
+        }
+        StringBuilder many = new StringBuilder("{\"apply\":true,\"tumblers\":[");
+        for (int i = 0; i < 1001; i++) many.append(i == 0 ? "" : ",").append("\"t").append(i).append('"');
+        many.append("]}");
+        assertThat(post(f, many.toString()).statusCode()).as("more than 1000 tumblers").isEqualTo(400);
+    }
+
     // ── HTTP ──────────────────────────────────────────────────────────────────
 
     @Test

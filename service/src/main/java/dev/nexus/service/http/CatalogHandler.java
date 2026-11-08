@@ -700,9 +700,11 @@ public final class CatalogHandler implements HttpHandler {
      * {@code source_uri} names a collection other than the one the note lives in (nexus-bivz3.24, the repair half of
      * RDR-231 critique Issue 7).
      *
-     * <p>Body (all optional): {@code {"apply": false, "limit": 1000, "sample": 20}}. {@code apply} must be a JSON
+     * <p>Body (all optional): {@code {"apply": false, "limit": 1000, "sample": 20, "tumblers": [...]}}. {@code apply} must be a JSON
      * boolean; {@code limit} (1..{@value #MAX_NOTE_URI_REPAIR_LIMIT}) bounds the rows ONE call rewrites; {@code sample}
      * (0..{@value #MAX_NOTE_URI_REPAIR_SAMPLE}) bounds the example rows listed per class. The response is
+     * {@code tumblers} (a list of at most {@value #MAX_BATCH_DOC_IDS}) restricts what {@code apply} rewrites to those rewrite
+     * candidates (the census is the tenant's either way); an empty list rewrites none. The response is
      * {@link CatalogRepository#repairStaleNoteUris}'s map. A rewrite onto a URI a live document holds, or holds by the
      * time the UPDATE runs, is the shared {@link CatalogRepository.SourceUriCollision} (409) with nothing written.
      */
@@ -715,7 +717,18 @@ public final class CatalogHandler implements HttpHandler {
         }
         int limit = boundedInt(body.get("limit"), "limit", 1, MAX_NOTE_URI_REPAIR_LIMIT, DEFAULT_NOTE_URI_REPAIR_LIMIT);
         int sample = boundedInt(body.get("sample"), "sample", 0, MAX_NOTE_URI_REPAIR_SAMPLE, DEFAULT_NOTE_URI_REPAIR_SAMPLE);
-        var result = repo.repairStaleNoteUris(tenant, Boolean.TRUE.equals(rawApply), limit, sample);
+        java.util.List<String> only = null;
+        Object rawTumblers = body.get("tumblers");
+        if (rawTumblers != null) {
+            if (!(rawTumblers instanceof List<?> l) || l.stream().anyMatch(o -> !(o instanceof String s) || s.isBlank())) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"'tumblers' must be a list of non-blank strings\"}"); return;
+            }
+            if (l.size() > MAX_BATCH_DOC_IDS) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"too many tumblers (max " + MAX_BATCH_DOC_IDS + ")\"}"); return;
+            }
+            only = l.stream().map(o -> (String) o).toList();
+        }
+        var result = repo.repairStaleNoteUris(tenant, Boolean.TRUE.equals(rawApply), limit, sample, only);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
