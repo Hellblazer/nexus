@@ -617,7 +617,8 @@ def _write_body(resp: http.client.HTTPResponse, dest: Path) -> None:
     # no error; a body shorter than its Content-Length is a transport failure
     # to retry, not bytes for the verifier to reject.
     declared = resp.headers.get("Content-Length")
-    if declared is not None and declared.isdigit() and written < int(declared):
+    chunked = resp.headers.get("Transfer-Encoding") is not None  # length is the chunks'
+    if not chunked and declared is not None and declared.isdigit() and written < int(declared):
         raise http.client.IncompleteRead(b"", int(declared) - written)
 
 
@@ -663,6 +664,7 @@ def _api_open(url: str, accept: str, timeout: float) -> http.client.HTTPResponse
         token = _api_token()
         if exc.code != 401 or token is None:
             raise
+        exc.close()
         _rejected_api_tokens.add(token)
         _log.warning("github_api_token_rejected_retrying_anonymously", url=url)
         return urllib.request.urlopen(_api_request(url, accept), timeout=timeout)
@@ -680,8 +682,14 @@ def _split_release_url(url: str) -> tuple[str, str] | None:
 
 
 def _rest_asset_url(tag: str, name: str, url: str, timeout: float) -> str:
-    """The REST asset URL for *name* in release *tag*, from one cached lookup."""
+    """The REST asset URL for *name* in release *tag*, from one cached lookup.
+
+    A cached listing that lacks *name* is fetched again once: it may have been
+    taken while the release was still publishing.
+    """
     assets = _release_assets_cache.get(tag)
+    if assets is not None and name not in assets:
+        assets = None
     if assets is None:
         lookup = f"{_RELEASE_API_BASE}/releases/tags/{tag}"
         with _api_open(lookup, "application/vnd.github+json", timeout) as resp:
@@ -761,6 +769,7 @@ def _download(url: str, dest: Path, *, timeout: float = _DOWNLOAD_TIMEOUT_S) -> 
                 raise BinaryDownloadError(
                     f"failed to download {url}: {exc}. {_DOWNLOAD_HINT}"
                 ) from exc
+            exc.close()
             last = exc
         except (OSError, http.client.HTTPException) as exc:  # network, timeout, short body
             if _is_cert_failure(exc):
@@ -768,6 +777,10 @@ def _download(url: str, dest: Path, *, timeout: float = _DOWNLOAD_TIMEOUT_S) -> 
                     f"failed to download {url}: {exc}. The TLS certificate did not verify."
                 ) from exc
             last = exc
+        except Exception as exc:  # anything else is not transient: fail as before
+            raise BinaryDownloadError(
+                f"failed to download {url}: {exc}. {_DOWNLOAD_HINT}"
+            ) from exc
         _log.warning(
             "binary_download_attempt_failed", url=url, attempt=attempt, error=str(last)
         )
@@ -791,7 +804,10 @@ def _download(url: str, dest: Path, *, timeout: float = _DOWNLOAD_TIMEOUT_S) -> 
             f"failed to write {dest} while downloading {url}: {exc}"
         ) from exc
     except Exception as exc:
+        _release_assets_cache.pop(parsed[0], None)  # a stale asset id must not stick
         refused = isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403, 429)
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
         raise BinaryDownloadError(
             f"failed to download {url}: {last}; the REST asset fallback failed too: "
             f"{exc}. {_API_REFUSED_HINT if refused else _DOWNLOAD_HINT}"

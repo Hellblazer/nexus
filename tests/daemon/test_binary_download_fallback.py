@@ -42,6 +42,8 @@ class _Plan:
     primary: list[int] = field(default_factory=list)  # per-attempt status; 0 = short body
     after: int = 504  # status once ``primary`` is used up
     primary_sleep_s: float = 0.0
+    sleep_on_attempt: dict[int, float] = field(default_factory=dict)
+    listing_grows: bool = False  # the first listing lacks NAME, later ones carry it
     api_status: int = 200
     tags_status: int = 200
     reject_token: bool = False  # 401 for any request carrying Authorization
@@ -90,7 +92,16 @@ def _github_handler(plan: _Plan, storage: list[str]) -> type[BaseHTTPRequestHand
                 n = _record(plan, "primary", self)
                 if plan.primary_sleep_s and n == 1:
                     time.sleep(plan.primary_sleep_s)
+                if n in plan.sleep_on_attempt:
+                    time.sleep(plan.sleep_on_attempt[n])
                 status = plan.primary[n - 1] if n <= len(plan.primary) else plan.after
+                if status == 1:  # RFC-noncompliant: Content-Length and chunked both
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(BODY) * 4))
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    self.wfile.write(f"{len(BODY):x}\r\n".encode() + BODY + b"\r\n0\r\n\r\n")
+                    return
                 if status == 0:  # headers promise more than the body carries
                     self.send_response(200)
                     self.send_header("Content-Length", str(len(BODY) * 4))
@@ -106,7 +117,7 @@ def _github_handler(plan: _Plan, storage: list[str]) -> type[BaseHTTPRequestHand
                 self._send(504, b"gateway timeout")
                 return
             if path == f"/repos/o/r/releases/tags/{TAG}":
-                _record(plan, "tags", self)
+                n_tags = _record(plan, "tags", self)
                 if plan.reject_token and self.headers.get("Authorization"):
                     self._send(401, b'{"message": "Bad credentials"}', "application/json")
                     return
@@ -119,6 +130,8 @@ def _github_handler(plan: _Plan, storage: list[str]) -> type[BaseHTTPRequestHand
                     else f"{host}/repos/o/r/releases/assets/{ASSET_ID}"
                 )
                 names = [NAME, "model.onnx"] if plan.asset_listed else []
+                if plan.listing_grows and n_tags == 1:
+                    names = ["model.onnx"]
                 assets = [{"name": nm, "id": ASSET_ID, "url": url} for nm in names]
                 self._send(200, json.dumps({"tag_name": TAG, "assets": assets}).encode(), "application/json")
                 return
@@ -371,3 +384,53 @@ def test_bge_download_raises_the_original_failure_when_the_fallback_fails(
         sbm._httpx_stream(f"{base}/dl/{TAG}/model.onnx", tmp_path / "model.onnx")
     assert ei.value.response.status_code == 504
     assert plan.hits["asset"] == 1
+
+
+# -- review r2 pins ------------------------------------------------------------
+
+
+def test_retries_use_the_short_per_operation_timeout(
+    github, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan, _ = github
+    monkeypatch.setattr(b, "_RETRY_TIMEOUT_S", 0.3)
+    plan.primary = [504]
+    plan.after = 200
+    plan.sleep_on_attempt = {2: 1.0}  # within the first attempt's timeout, past the retries'
+    dest = tmp_path / NAME
+    b._download(_url(), dest, timeout=5.0)
+    assert dest.read_bytes() == BODY
+    assert plan.hits["primary"] == 3
+
+
+def test_content_length_with_chunked_encoding_is_accepted(github, tmp_path: Path) -> None:
+    plan, _ = github
+    plan.primary = [1]
+    dest = tmp_path / NAME
+    b._download(_url(), dest)
+    assert dest.read_bytes() == BODY
+    assert plan.hits["primary"] == 1
+
+
+def test_a_listing_without_the_asset_is_fetched_again(github, tmp_path: Path) -> None:
+    plan, _ = github
+    plan.listing_grows = True
+    b._download(f"{b._RELEASE_DOWNLOAD_BASE}/{TAG}/model.onnx", tmp_path / "m")  # caches the short listing
+    b._download(_url(), tmp_path / NAME)
+    assert (tmp_path / NAME).read_bytes() == BODY
+    assert plan.hits["tags"] == 2
+
+
+def test_bge_failed_fallback_leaves_no_part_and_no_dest(
+    github, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan, base = github
+    plan.api_status = 502
+    monkeypatch.setattr(sbm, "_ASSET_DOWNLOAD_BASE", f"{base}/dl")
+    monkeypatch.setattr(sbm, "_RETRY_ATTEMPTS", 2)
+    monkeypatch.setattr(sbm, "_retry_sleep", lambda _s: None)
+    dest = tmp_path / "model.onnx"
+    with pytest.raises(httpx.HTTPStatusError):
+        sbm._httpx_stream(f"{base}/dl/{TAG}/model.onnx", dest)
+    assert not dest.exists()
+    assert not dest.with_suffix(".onnx.part").exists()
