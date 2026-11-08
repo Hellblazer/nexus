@@ -25,35 +25,55 @@ SKILL_PATH = REPO_ROOT / "conexus" / "skills" / "writing-nx-skills" / "SKILL.md"
 
 SECTION_HEADING = "## Promoting a Memory File"
 
-#: part name -> (subsection heading, patterns its body must match).
+#: part name -> (subsection heading, patterns its body must match). The dict
+#: order is the order the section's intro promises ("in this order").
 PARTS: dict[str, tuple[str, tuple[str, ...]]] = {
     "criterion": (
         "### The criterion",
         (
             r"How to apply",
             r"ordered steps",
-            r"8 KB",
+            r"8\s*KB",
             r"bright line",
         ),
     ),
     "target": (
         "### The target",
         (
-            r"procedure library",
+            r"A procedure library is",
             r"\.nexus/procedures/",
             # The shipped library is named by what it ships with, not by its
             # repo path: a plugin file may not name a repo-only path
             # (test_plugin_markdown_paths_lint), and src/nexus/procedures/ is
             # a package path in any case.
             r"ships with `nx`",
+            # The script target is not available until the runner ships
+            # (critic B1, 2026-11-08): the skill must say so itself.
+            r"`procedure_run`",
+            r"released package",
+            r"source stays whole",
+            # A file holding both a fixed and a judgment part (critic B2).
+            r"split by part",
+            r"its own target",
+            # The worked example baton's qo7ie.36 follows: fixed part to a
+            # script, judgment part to a skill, and what to do until the
+            # runner ships.
+            r"`preflight`",
+            r"judgment part becomes a skill",
+            r"stays in the source or goes into the skill",
+            r"hook-development",
+            r"test first",
         ),
     ),
     "citation": (
         "### Citing the sources",
         (
             r"cites? its source files",
+            r"file path or T2 title",
             r"pointer",
+            r"call that runs it",
             r"rule and its why",
+            r"Bidirectional Memory",
         ),
     ),
     "loss check": (
@@ -63,19 +83,37 @@ PARTS: dict[str, tuple[str, tuple[str, ...]]] = {
             r"every rule",
             r"lacks",
             r"before the source shrinks",
+            r"Ship when the list is empty",
+            r"one source file at a time",
+            r"union of the targets",
+            r"whole source file",
+            r"enumerates",
+            r"0 ship-blockers",
+            r"on the bead",
         ),
     ),
     "empty-list rule": (
         "### The empty-list rule",
         (
             r"only with an empty list",
+            r"does not shrink",
+            # When the source shrinks (baton, 2026-11-08): with the target,
+            # after the list is empty and recorded, never in a later change.
+            r"same change that lands the target",
+            r"empty and recorded on the bead",
+            r"not shrink in a later change",
             r"script or (?:a )?hook",
         ),
     ),
 }
 
-#: The target table must name all three targets in its Target column.
-TARGET_ROWS: tuple[str, ...] = ("Skill", "Lua script", "Hook")
+#: (cell of the "The memory holds" column, prefix of its Target cell). The
+#: pairing is the point of the table: swapping two targets must fail.
+TARGET_PAIRS: tuple[tuple[str, str], ...] = (
+    ("judgment", "Skill"),
+    ("fixed sequence", "Lua script"),
+    ("bright line", "Hook"),
+)
 
 
 def _section(text: str) -> str | None:
@@ -93,19 +131,34 @@ def _subsections(section: str) -> dict[str, str]:
     return {pieces[i].strip(): pieces[i + 1] for i in range(1, len(pieces) - 1, 2)}
 
 
-def _target_column(body: str) -> list[str]:
-    cells: list[str] = []
+def _table_rows(body: str) -> list[list[str]]:
+    """Cells of each table row (separator rows dropped). A row with fewer than
+    two cells is kept short: callers must not index past what is there."""
+    rows: list[list[str]] = []
     for line in body.splitlines():
         if not line.startswith("|"):
             continue
-        row = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(row) >= 2 and not set(row[1]) <= set("-: "):
-            cells.append(row[1])
-    return cells
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells and all(set(c) <= set("-: ") for c in cells):
+            continue
+        rows.append(cells)
+    return rows
+
+
+def _pairs_ok(body: str) -> bool:
+    rows = _table_rows(body)
+    for holds, target in TARGET_PAIRS:
+        if not any(
+            len(r) >= 2 and holds in r[0].lower() and r[1].startswith(target)
+            for r in rows
+        ):
+            return False
+    return True
 
 
 def missing_parts(text: str) -> list[str]:
-    """Names of the required parts that *text* lacks, in PARTS order."""
+    """Names of the required parts that *text* lacks, in PARTS order, plus
+    ``order`` when every part is present but out of the promised order."""
     section = _section(text)
     if section is None:
         return list(PARTS)
@@ -115,11 +168,12 @@ def missing_parts(text: str) -> list[str]:
         body = subs.get(heading)
         if body is None or not all(re.search(p, body, re.I) for p in patterns):
             missing.append(name)
-            continue
-        if name == "target":
-            column = _target_column(body)
-            if not all(any(c.startswith(row) for c in column) for row in TARGET_ROWS):
-                missing.append(name)
+        elif name == "target" and not _pairs_ok(body):
+            missing.append(name)
+    if not missing:
+        at = [section.index(h) for h, _ in PARTS.values()]
+        if at != sorted(at):
+            missing.append("order")
     return missing
 
 
@@ -160,11 +214,84 @@ def test_checker_flags_a_target_table_without_the_hook_row() -> None:
     text = SKILL_PATH.read_text(encoding="utf-8")
     draft = "\n".join(
         line for line in text.splitlines()
-        if not (line.startswith("|") and line.split("|")[2].strip().startswith("Hook"))
+        if not (line.startswith("|") and "bright line" in line.lower())
     )
     assert missing_parts(draft) == ["target"]
+
+
+def test_checker_flags_swapped_targets_in_the_table() -> None:
+    """Skill and Hook trade places: every name is still in the column."""
+    text = SKILL_PATH.read_text(encoding="utf-8")
+    draft = (
+        text.replace("| Skill |", "| @@ |")
+        .replace("| Hook |", "| Skill |")
+        .replace("| @@ |", "| Hook |")
+    )
+    assert draft != text
+    assert missing_parts(draft) == ["target"]
+
+
+def test_checker_survives_a_short_table_row() -> None:
+    text = SKILL_PATH.read_text(encoding="utf-8")
+    draft = text.replace("| --- | --- | --- | --- |", "| --- | --- | --- | --- |\n| x |", 1)
+    assert draft != text
+    assert missing_parts(draft) == []
+
+
+def test_checker_flags_parts_out_of_order() -> None:
+    text = SKILL_PATH.read_text(encoding="utf-8")
+    section = _section(text)
+    assert section is not None
+    subs = _subsections(section)
+    first, second = PARTS["criterion"][0], PARTS["target"][0]
+    # A body starts with its own newline, so heading + body is the exact slice.
+    swapped = section.replace(f"{first}{subs[first]}", "@@1@@").replace(
+        f"{second}{subs[second]}", "@@2@@"
+    )
+    swapped = swapped.replace("@@1@@", f"{second}{subs[second]}").replace(
+        "@@2@@", f"{first}{subs[first]}"
+    )
+    draft = text.replace(section, swapped)
+    assert draft != text
+    assert missing_parts(draft) == ["order"]
+
+
+def _pattern_cases() -> list[tuple[str, str]]:
+    return [(part, pat) for part, (_, pats) in PARTS.items() for pat in pats]
+
+
+@pytest.mark.parametrize(("part", "pattern"), _pattern_cases())
+def test_every_pinned_phrase_is_load_bearing(part: str, pattern: str) -> None:
+    """Delete one pinned phrase from its part: the checker names that part.
+    A phrase the checker would not miss is not pinned."""
+    text = SKILL_PATH.read_text(encoding="utf-8")
+    section = _section(text)
+    assert section is not None
+    heading = PARTS[part][0]
+    body = _subsections(section)[heading]
+    cut = re.sub(pattern, "", body, flags=re.I)
+    assert cut != body, f"{pattern!r} matched nothing in {part!r}"
+    draft = text.replace(body, cut)
+    assert part in missing_parts(draft)
 
 
 def test_checker_flags_a_skill_without_the_section() -> None:
     text = SKILL_PATH.read_text(encoding="utf-8")
     assert missing_parts(text.replace(SECTION_HEADING, "## Something Else")) == list(PARTS)
+
+
+def _frontmatter_description(text: str) -> str:
+    m = re.search(r"^description:\s*(.*)$", text, re.M)
+    assert m, "no description line"
+    return m.group(1)
+
+
+def test_description_and_activation_name_promotion() -> None:
+    """An agent promoting a memory file must be able to find this skill: the
+    description is what the Skill tool lists, the activation section is what
+    the skill says of itself (critic N4)."""
+    text = SKILL_PATH.read_text(encoding="utf-8")
+    assert re.search(r"memory file", _frontmatter_description(text), re.I)
+    m = re.search(r"(?ms)^## When This Skill Activates\n(.*?)(?=^## )", text)
+    assert m, "no 'When This Skill Activates' section"
+    assert re.search(r"memory file", m.group(1), re.I)

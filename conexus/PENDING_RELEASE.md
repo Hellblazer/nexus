@@ -47,7 +47,9 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/skills/writing-nx-skills/SKILL.md`
-  nexus-qo7ie.35: a "Promoting a Memory File" section: the criterion, the target choice (skill, Lua script in a procedure library, hook), citing the sources, the `substantive-critic` loss check and the empty-list rule (RDR-240 Technical Design 9). It names the procedure library, which exists only once the package release that ships `procedure_run` is out; release the plugin after that package release.
-
 ## Deferred to the next client release
+
+- `conexus/skills/writing-nx-skills/SKILL.md`
+  nexus-qo7ie.35: a "Promoting a Memory File" section (RDR-240 Technical Design 9) and a "When This Skill Activates" section; the description now names promoting a memory file. DEFERRED on purpose: the section's script target needs `procedure_run` and a procedure library, which exist only in a package release. The next normal client release ships package and plugin together, so the skill goes live with the runner. The skill states the same condition itself, so a plugin-only release that carried it early would not mislead, but do not cherry-pick it.
+- `conexus/skills/orchestration/reference.md`
+  nexus-qo7ie.35: the Skill Routing line for `/conexus:writing-nx-skills` says it also covers promoting a memory file. Deferred with the skill it describes.
