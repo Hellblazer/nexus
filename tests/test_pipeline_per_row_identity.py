@@ -84,15 +84,6 @@ def _seed_completed_leftover(engine: FakePipelineEngine, pdf_path: str, collecti
     return db.pipeline_id_for(_HASH)
 
 
-@pytest.fixture(autouse=True)
-def _document_manifest(monkeypatch) -> None:
-    """nexus-ahm18: the writer double sends no manifest rows; the post-pass reads the document's own."""
-    monkeypatch.setattr(
-        "nexus.pipeline_stages._own_manifest_rows",
-        lambda doc_id, collection: [ManifestRow(position=0, chash="c0")],
-    )
-
-
 def _run(
     engine: FakePipelineEngine, pdf_path: str, collection: str, doc_id: str, *, force: bool = False,
     patch_here: bool = True,

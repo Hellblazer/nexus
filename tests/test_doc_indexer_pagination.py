@@ -106,6 +106,7 @@ def _make_chunk_fn(num_chunks: int):
                     "chunk_index": i,
                     "chunk_count": num_chunks,
                 },
+                {"chunk_index": i},
             )
             for i in range(num_chunks)
         ]

@@ -182,12 +182,6 @@ class TestPipelineIndexPdfForce:
             "nexus.pipeline_stages.chunker_loop", return_value=None,
         ), patch(
             "nexus.pipeline_stages.uploader_loop", return_value=0,
-        ), patch(
-            "nexus.pipeline_stages._enrich_metadata_from_extraction",
-            return_value=True,
-        ), patch(
-            "nexus.pipeline_stages._update_chunk_metadata",
-            return_value=None,
         ):
             pipeline_index_pdf(
                 fake_pdf, h, "knowledge__reproducer", fake_t3, db=db, embed_fn=fake_embed,
@@ -226,12 +220,6 @@ class TestPipelineIndexPdfForce:
             "nexus.pipeline_stages.chunker_loop", return_value=None,
         ), patch(
             "nexus.pipeline_stages.uploader_loop", return_value=0,
-        ), patch(
-            "nexus.pipeline_stages._enrich_metadata_from_extraction",
-            return_value=True,
-        ), patch(
-            "nexus.pipeline_stages._update_chunk_metadata",
-            return_value=None,
         ):
             pipeline_index_pdf(
                 fake_pdf, h, "knowledge__reproducer", fake_t3,
@@ -295,12 +283,6 @@ class TestPipelineIndexPdfForce:
             "nexus.pipeline_stages.chunker_loop", return_value=None,
         ), patch(
             "nexus.pipeline_stages.uploader_loop", return_value=0,
-        ), patch(
-            "nexus.pipeline_stages._enrich_metadata_from_extraction",
-            return_value=True,
-        ), patch(
-            "nexus.pipeline_stages._update_chunk_metadata",
-            return_value=None,
         ):
             pipeline_index_pdf(
                 fake_pdf, h, "knowledge__reproducer", fake_t3,
@@ -342,12 +324,6 @@ class TestPipelineIndexPdfForce:
             "nexus.pipeline_stages.chunker_loop", return_value=None,
         ), patch(
             "nexus.pipeline_stages.uploader_loop", return_value=0,
-        ), patch(
-            "nexus.pipeline_stages._enrich_metadata_from_extraction",
-            return_value=True,
-        ), patch(
-            "nexus.pipeline_stages._update_chunk_metadata",
-            return_value=None,
         ):
             # Must not raise.
             pipeline_index_pdf(

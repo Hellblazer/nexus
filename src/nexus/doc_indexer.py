@@ -249,55 +249,34 @@ def _identity_where(file_path: str, corpus: str, *, content_hash: str = "") -> d
     return {"source_path": file_path}
 
 
-def _metadata_for_doc_id(col: Any, doc_id: str) -> list[dict]:
-    """nexus-w6wp0: fetch *doc_id*'s own chunk metadatas via the catalog
-    manifest (doc_id -> document_chunks -> chash), not a content-derived
-    where-filter.
+def _catalog_summary_for_doc_id(doc_id: str) -> dict:
+    """The run-summary facts of *doc_id*, read from the catalog: ``{"chunks", "pages", "title", "author"}``.
 
-    The manifest is the per-document chunk binding post RDR-108/180: it
-    scopes the read to exactly the chash rows THIS document's manifest
-    currently claims, unlike a collection-wide content_hash-keyed query
-    which can also pick up a disjoint or partially-overlapping decoy --
-    e.g. a stale/orphaned leftover batch from an earlier superseded write
-    that happens to share this content_hash but isn't part of this
-    document's live manifest. Self-contained (opens/closes its own
-    catalog reader), mirroring ``_check_document_fork``'s manifest fetch.
+    RDR-236 Phase 4 Step 1: a chunk row carries no page, title or author, so the summary the streaming
+    upload hands the CLI (``index_pdf(return_metadata=True)``) is read where they live: the page of each
+    of the document's own manifest rows (nexus-w6wp0: the manifest scopes the read to this document's
+    chunks, never to a content-derived collection scan) and the catalog entry's title and author. Page 0
+    (the manifest's null) is "not paged", as the chunkers' default was.
 
-    NOT a fix for TRUE byte-identical duplicate documents (round-2 review
-    correction, substantive-critic, 2026-08-05): identical content_hash
-    implies identical per-chunk text, hence identical chash SETS, so two
-    documents' manifests resolve to the SAME shared, content-deduplicated
-    T3 rows either way (RDR-108's chunk-level dedup -- see t3.py's
-    store_put docstring and test_within_collection_identical_chunks_
-    collapse). Those shared rows carry whichever registration's title/
-    source_author was written last (last-write-wins), regardless of which
-    document's manifest scopes the read. Acceptable for a summary display
-    (chunk content is correct either way; only title/author attribution
-    on a genuine duplicate reflects the most recent indexer), not
-    something this function disambiguates further.
-
-    Deliberately NOT best-effort (unlike ``_check_document_fork``, whose
-    fork signal is optional): this result feeds the ``return_metadata``
-    dict callers depend on, so a genuine catalog-read failure propagates
-    as-is rather than being swallowed to an empty list -- FAIL LOUD, never
-    a silent empty standing in for a real error. An empty MANIFEST
-    (doc_id resolves but has zero chash rows) is not itself an error and
-    returns ``[]`` normally; the caller's own count>0-but-empty guard is
-    what turns a genuinely inconsistent zero-metadata result into a loud
-    failure.
+    Deliberately NOT best-effort: this feeds the ``return_metadata`` dict callers depend on, so a genuine
+    catalog-read failure propagates as-is rather than being swallowed to an empty summary. A document
+    whose manifest has no rows returns ``chunks == 0``; the caller's own count>0-but-empty guard turns
+    that inconsistency into a loud failure.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
 
     reader = make_catalog_reader()
     try:
-        manifest = reader.get_manifest(doc_id)
-        chashes = sorted({row.chash for row in manifest if getattr(row, "chash", "")})
+        manifest = [row for row in reader.get_manifest(doc_id) if getattr(row, "chash", "")]
+        entry = reader.resolve(doc_id) if manifest else None
     finally:
         reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe
-    if not chashes:
-        return []
-    batch = _vector_with_retry(col.get, ids=chashes, include=["metadatas"], sensitivity="include")
-    return batch.get("metadatas", [])
+    return {
+        "chunks": len(manifest),
+        "pages": sorted({int(getattr(row, "page_number", 0) or 0) for row in manifest}),
+        "title": str(getattr(entry, "title", "") or ""),
+        "author": str(getattr(entry, "author", "") or ""),
+    }
 
 
 def _catalog_absolute_identity(doc_id: str) -> str:
@@ -1968,8 +1947,9 @@ def _index_document(
     service mode.  This supports local dry-run mode (ONNX /
     DefaultEmbeddingFunction) without requiring any API keys.
 
-    When *return_metadata* is True, returns the prepared chunk metadatas list
-    instead of a bare int.  Callers (index_pdf, index_markdown) use it to
+    When *return_metadata* is True, returns the prepared chunks' position dicts
+    (spans, page, section labels; a chunk row carries none since RDR-236 Phase 4
+    Step 1) instead of a bare int.  Callers (index_pdf, index_markdown) use it to
     build format-specific summary dicts.  Default False preserves the existing
     int return type with zero overhead.
 
@@ -2169,10 +2149,9 @@ def _index_document(
     # Mirrors pipeline_stages.pipeline_index_pdf's `if not doc_id:` guard.
     _catalog_doc_id_for_batch = doc_id
     if not _catalog_doc_id_for_batch:
-        _ct_for_register = (metadatas[0].get("content_type") if metadatas else "") or "prose"
         _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
             file_path, corpus,
-            content_type=_ct_for_register,
+            content_type="prose",
             physical_collection=collection_name,
             source_uri=source_uri,
         )
@@ -2314,7 +2293,7 @@ def _index_document(
     # _identity_where's docstring above.
 
     if return_metadata:
-        return metadatas
+        return positions  # the chunks' position dicts: a chunk row carries no label (RDR-236 Phase 4 Step 1)
     return len(prepared)
 
 
@@ -2431,7 +2410,7 @@ def _index_pdf_incremental(
     # guard.
     _catalog_doc_id_for_batch = doc_id
     if not _catalog_doc_id_for_batch and not dry_run:
-        _ct_for_register = (metadatas_all[0].get("content_type") if metadatas_all else "") or "pdf"
+        _ct_for_register = "pdf"
         # nexus-uxg4u round 2: with_created=True + on_doc_registered so a
         # mint made HERE (the caller's own doc_id arrived empty) is not
         # invisible to the caller's rollback tracking — see this
@@ -2600,8 +2579,9 @@ def _pdf_chunks(
     """Chunk a PDF and return (id, text, metadata, positions) tuples.
 
     *positions* (RDR-236 Phase 4 Step 0, nexus-6pfgb.65) is the chunk's position fields (spans, page,
-    section labels) as a dict of their own; the manifest rows are built from it. Until Step 1 the
-    metadata still carries the same keys.
+    section labels) as a dict of their own; the manifest rows are built from it. The metadata is the
+    chunk row: the CHUNK keys only (Step 1). The document's title and author, which a row once carried,
+    go to *extraction_stats* (``title``, ``author``) for the catalog registration and the run summary.
 
     *sensitive* (RDR-243 row 21, nexus-rfvyy.6.10): the extractor never resolves or contacts a
     MinerU server; see :class:`~nexus.pdf_extractor.PDFExtractor`.
@@ -2612,7 +2592,8 @@ def _pdf_chunks(
     bge-768. Empty falls back to *target_model* (nexus-25wlq).
 
     *extraction_stats* (nexus-i0cwh), when given, receives ``page_count``
-    and ``pages_with_text`` from the extraction result.
+    and ``pages_with_text`` from the extraction result, and the document's resolved ``title`` and
+    ``author`` (RDR-236 Phase 4 Step 1: no chunk row carries them).
 
     *title_override* (nexus-1uov1), when non-empty, wins over
     :func:`~nexus.indexer_utils.resolve_pdf_title`'s own
@@ -2698,9 +2679,11 @@ def _pdf_chunks(
     if bib_enrich_enabled and not sensitive:  # RDR-243 rows 7 and 8: a sensitive document's title is never sent
         from nexus.bib_enricher import enrich as bib_enrich  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         bib = bib_enrich(source_title)
+    if extraction_stats is not None:
+        extraction_stats["title"] = source_title
+        extraction_stats["author"] = str(result.metadata.get("pdf_author", "") or "")
     if extraction_stats is not None and bib:
-        # nexus-6pfgb.28: index_pdf writes the lookup to the catalog document's bib_* columns
-        # (the chunk rows' bib_* keys below are retired by nexus-6pfgb.27).
+        # nexus-6pfgb.28: index_pdf writes the lookup to the catalog document's bib_* columns.
         extraction_stats["bib"] = bib
 
     from nexus.metadata_schema import make_chunk_metadata, position_fields  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
@@ -2718,26 +2701,12 @@ def _pdf_chunks(
             section_title=chunk.metadata.get("section_title", ""),
             section_type=chunk.metadata.get("section_type", ""),
         )
-        # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
-        # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id;
-        # catalog manifest is authoritative.
+        # The chunk row is the CHUNK keys only (RDR-236 Phase 4 Step 1). The document's title, author,
+        # bibliography and extraction provenance are the catalog document's.
         meta = make_chunk_metadata(
             content_type="pdf",
             chunk_text_hash=chunk_text_hash_full,
-            content_hash=content_hash,
-            indexed_at=now_iso,
             embedding_model=target_model,
-            title=source_title,
-            source_author=result.metadata.get("pdf_author", ""),
-            tags="pdf",
-            category="paper",
-            bib_year=bib.get("year", 0),
-            bib_authors=bib.get("authors", ""),
-            bib_venue=bib.get("venue", ""),
-            bib_citation_count=bib.get("citation_count", 0),
-            extraction_method=result.metadata.get("extraction_method", ""),
-            quality_gate_overridden=bool(result.metadata.get("quality_gate_overridden", False)),
-            **positions,  # Step 0: the row still carries them; Step 1 stops passing this
         )
         prepared.append((chunk_id, chunk.text, meta, positions))
     return prepared
@@ -2757,7 +2726,9 @@ def _markdown_chunks(
 ) -> list[tuple[str, str, dict, dict]]:
     """Chunk a Markdown file and return (id, text, metadata, positions) tuples.
 
-    *positions* is the chunk's position fields as a dict of their own; see :func:`_pdf_chunks`.
+    *positions* is the chunk's position fields as a dict of their own; see :func:`_pdf_chunks`. The metadata
+    is the chunk row, the CHUNK keys only (RDR-236 Phase 4 Step 1): *extraction_source* and the title and
+    author of the frontmatter are the catalog document's (``_catalog_markdown_hook``), not written here.
     *collection_name* decides the token window; see :func:`_pdf_chunks`.
 
     Chunks carry no git provenance (RDR-101 Phase 5c), so no subprocess runs (nexus-ru672).
@@ -2786,15 +2757,6 @@ def _markdown_chunks(
     if not chunks:
         return []
 
-    # nexus-8l6: source_title fallback chain. Frontmatter ``title:`` wins;
-    # otherwise derive from the first H1 or the normalised filename so
-    # ``nx store list`` never displays ``untitled``.
-    from nexus.indexer_utils import derive_title  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    source_title = (
-        str(frontmatter.get("title") or "").strip()
-        or derive_title(md_path, body)
-    )
-
     from nexus.metadata_schema import make_chunk_metadata, position_fields  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
     prepared: list[tuple[str, str, dict, dict]] = []
@@ -2810,21 +2772,10 @@ def _markdown_chunks(
             section_title=chunk.metadata.get("header_path", ""),
             section_type=chunk.metadata.get("section_type", ""),
         )
-        # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
-        # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id;
-        # catalog manifest is authoritative.
         meta = make_chunk_metadata(
             content_type="markdown",
             chunk_text_hash=chunk_text_hash_full,
-            content_hash=content_hash,
-            indexed_at=now_iso,
             embedding_model=target_model,
-            title=source_title,
-            source_author=_frontmatter_author(frontmatter),
-            tags="markdown",
-            category="prose",
-            extraction_source=extraction_source,
-            **positions,  # Step 0: the row still carries them; Step 1 stops passing this
         )
         prepared.append((chunk_id, chunk.text, meta, positions))
     return prepared
@@ -3422,37 +3373,30 @@ def index_pdf(
                 # pipeline-side locking, out of scope for a read-path bug
                 # fix); documented honestly rather than silently accepted.
                 if doc_id:
-                    all_meta = _metadata_for_doc_id(col, doc_id)
+                    _summary = _catalog_summary_for_doc_id(doc_id)
                 else:
-                    # nexus-w6wp0 round 2: doc_id=="" here means catalog
-                    # REGISTRATION FAILED for this run (nexus-i711w: the
-                    # service owns the catalog in every mode; there is no
-                    # "no catalog configured" mode to fall back from) --
-                    # log it as the anomaly it is rather than silently
-                    # treating it as an ordinary, supported path.
-                    _log.warning(
-                        "index_pdf_metadata_read_no_doc_id",
-                        pdf=str(pdf_path),
-                        content_hash=content_hash,
-                        reason="catalog registration failed or returned no doc_id; "
-                               "falling back to a content_hash-scoped metadata read",
-                    )
-                    meta_where = _identity_where(str(pdf_path), corpus, content_hash=content_hash)
-                    all_meta = []
-                    offset = 0
-                    while True:
-                        batch = _vector_with_retry(
-                            col.get,
-                            where=meta_where,
-                            include=["metadatas"],
-                            limit=300,
-                            offset=offset, sensitivity="include",
+                    # nexus-w6wp0 round 2: doc_id=="" here means catalog REGISTRATION FAILED for this
+                    # run (nexus-i711w: the service owns the catalog in every mode; there is no "no
+                    # catalog configured" mode to fall back from), or this is a dry run, which
+                    # registers nothing. Log the anomaly as such, and summarise from the extraction
+                    # (a chunk row carries no page, title or author since RDR-236 Phase 4 Step 1, so
+                    # there is no row to read either): the pages that hold text, the title and author
+                    # the pipeline resolved.
+                    if not dry_run:
+                        _log.warning(
+                            "index_pdf_metadata_read_no_doc_id",
+                            pdf=str(pdf_path),
+                            content_hash=content_hash,
+                            reason="catalog registration failed or returned no doc_id; "
+                                   "summarising from the extraction",
                         )
-                        all_meta.extend(batch.get("metadatas", []))
-                        if len(batch.get("ids", [])) < 300:
-                            break
-                        offset += 300
-                if count and not all_meta:
+                    _summary = {
+                        "chunks": count,
+                        "pages": sorted(_extraction_stats.get("pages_with_text") or []),
+                        "title": str(_extraction_stats.get("title", "")),
+                        "author": str(_extraction_stats.get("author", "")),
+                    }
+                if count and not _summary["chunks"]:
                     # FAIL LOUD (nexus-w6wp0, reworded round 2): indexing
                     # itself SUCCEEDED -- the pipeline already reports
                     # *count* chunks committed to T3 -- this is a failure
@@ -3484,16 +3428,16 @@ def index_pdf(
                     )
                 return {
                     "chunks": count,
-                    "pages": sorted({m.get("page_number", 0) for m in all_meta}),
-                    "title": all_meta[0].get("title", "") if all_meta else "",
-                    "author": all_meta[0].get("source_author", "") if all_meta else "",
-                                    "page_count": _extraction_stats.get("page_count", 0),
+                    "pages": _summary["pages"],
+                    "title": _summary["title"],
+                    "author": _summary["author"],
+                    "page_count": _extraction_stats.get("page_count", 0),
                     "pages_with_text": _extraction_stats.get("pages_with_text"),
                 }
             return count
 
     # Catalog registration helper for batch paths (streaming has its own hook)
-    def _register_in_catalog(meta_list: list[dict], chunk_count: int) -> None:
+    def _register_in_catalog(chunk_count: int) -> None:
         if dry_run:
             # nexus-uxg4u: never touch the catalog on a dry run.
             return
@@ -3501,9 +3445,11 @@ def index_pdf(
             from nexus.pipeline_stages import _catalog_pdf_hook, extraction_record  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             _catalog_pdf_hook(
                 pdf_path, col_name,
-                title=meta_list[0].get("title", "") if meta_list else "",
-                author=meta_list[0].get("source_author", "") if meta_list else "",
-                year=int(meta_list[0].get("year", 0)) if meta_list else 0,
+                # The title and author are the extraction's (``_pdf_chunks`` fills them into the stats):
+                # a chunk row carries neither since RDR-236 Phase 4 Step 1. A chunk never carried a year.
+                title=str(_extraction_stats.get("title", "")),
+                author=str(_extraction_stats.get("author", "")),
+                year=0,
                 corpus=corpus,
                 chunk_count=chunk_count,
                 source_uri=source_uri,
@@ -3569,9 +3515,8 @@ def index_pdf(
             except Exception as exc:
                 _rollback_if_freshly_minted(exc)
                 raise
-            metadatas = [p[2] for p in prepared]
             try:
-                _register_in_catalog(metadatas, len(metadatas))
+                _register_in_catalog(len(prepared))
                 # RDR-089 document-grain chain — fires once per PDF boundary at the
                 # incremental-branch tail. content="" (chunks already paginated
                 # through T3); the hook reads source_path itself per the P0.1
@@ -3621,11 +3566,11 @@ def index_pdf(
         _report_extraction()
         if return_metadata:
             return {
-                "chunks": len(metadatas),
-                "pages": sorted({m.get("page_number", 0) for m in metadatas}),
-                "title": metadatas[0].get("title", "") if metadatas else "",
-                "author": metadatas[0].get("source_author", "") if metadatas else "",
-                            "page_count": _extraction_stats.get("page_count", 0),
+                "chunks": len(prepared),
+                "pages": sorted({p.get("page_number", 0) for p in prepared_positions(prepared)}),
+                "title": str(_extraction_stats.get("title", "")),
+                "author": str(_extraction_stats.get("author", "")),
+                "page_count": _extraction_stats.get("page_count", 0),
                 "pages_with_text": _extraction_stats.get("pages_with_text"),
             }
         return count
@@ -3644,7 +3589,7 @@ def index_pdf(
         hooks = HookRegistry()
         install_default_hooks(hooks)
     # nexus-zq79 F2: register-or-lookup (fresh indexes returned "" pre-fix).
-    _ct_for_register = (metadatas_list[0].get("content_type") if metadatas_list else "") or "pdf"
+    _ct_for_register = "pdf"
     if dry_run:
         # nexus-uxg4u: never touch the catalog on a dry run — this call
         # would otherwise be idempotent onto the top-level pre-flight
@@ -3749,7 +3694,7 @@ def index_pdf(
         # The catalog enrichment (title, author, year, chunk count) is part of the work the stamp
         # vouches for (nexus-z0o2p.34): a kill in it must leave the fence 'indexing' so the next
         # run redoes it. It swallows its own exceptions, so only a kill reaches the stamp late.
-        _register_in_catalog(metadatas_list, len(metadatas_list))
+        _register_in_catalog(len(metadatas_list))
         # The stamp, LAST (D2): a kill in a hook above leaves the fence 'indexing', so the next
         # run redoes the document and fires the hooks again.
         if pending is not None:
@@ -3800,11 +3745,11 @@ def index_pdf(
 
     if return_metadata:
         return {
-            "chunks": len(metadatas_list),
-            "pages": sorted({m.get("page_number", 0) for m in metadatas_list}),
-            "title": metadatas_list[0].get("source_title", "") if metadatas_list else "",
-            "author": metadatas_list[0].get("source_author", "") if metadatas_list else "",
-                    "page_count": _extraction_stats.get("page_count", 0),
+            "chunks": len(prepared),
+            "pages": sorted({p.get("page_number", 0) for p in positions_list}),
+            "title": str(_extraction_stats.get("title", "")),
+            "author": str(_extraction_stats.get("author", "")),
+            "page_count": _extraction_stats.get("page_count", 0),
             "pages_with_text": _extraction_stats.get("pages_with_text"),
         }
     return len(prepared)
@@ -4384,18 +4329,18 @@ def index_markdown(
             return count
         if not isinstance(raw, list):
             return {"chunks": 0, "sections": 0}
-        metadatas: list[dict] = raw
-        sections = sum(1 for m in metadatas if m.get("section_title", ""))
-        if metadatas:
+        chunk_positions: list[dict] = raw  # the position dicts (a chunk row carries no label since Step 1)
+        sections = sum(1 for p in chunk_positions if p.get("section_title", ""))
+        if chunk_positions:
             _catalog_markdown_hook(
-                md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri,
+                md_path, col_name, content_type, corpus, len(chunk_positions), base_path=base_path, source_uri=source_uri,
                 extraction_source=extraction_source,
             )
             _stamp_last()
             _forks = _check_document_fork(doc_id, col_name)
             if on_fork_detected is not None:
                 on_fork_detected(_forks)
-        return {"chunks": len(metadatas), "sections": sections}
+        return {"chunks": len(chunk_positions), "sections": sections}
     finally:
         for _pending in _stamps:
             _pending.close()

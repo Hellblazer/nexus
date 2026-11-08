@@ -15,14 +15,29 @@ import pytest
 from nexus.aspect_readers import uri_for
 from nexus.catalog import store_hook
 from nexus.catalog.factory import make_catalog_reader
-from nexus.catalog.note_write import STORED, put_note
+from nexus.catalog.note_write import STORED, put_note as _put_note
 from nexus.catalog.store_hook import NOTE_META_KEYS
 from nexus.catalog.recovery_bundle import export_bundle, import_bundle, read_bundle
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._legacy_note_rows import stamp_legacy_note_rows
 from nexus.mcp.core import store_put
 
 pytestmark = pytest.mark.integration
+
+
+def put_note(**kw):
+    """``put_note`` as a client before RDR-236 Phase 4 Step 1 wrote it: it also stamped the note's own facts
+    (writer tumbler, title, tags, category, TTL, agent) on its chunk rows. This file covers the recovery
+    bundle's rules for those legacy rows, so the rows are given them; a current client writes the CHUNK keys
+    only."""
+    result = _put_note(**kw)
+    if result.status == STORED:
+        stamp_legacy_note_rows(
+            HttpVectorClient(), kw["collection"], result.chunk_ids, catalog_doc_id=result.catalog_doc_id,
+            title=kw["title"], tags=kw.get("tags", ""), category=kw.get("category", ""),
+            ttl_days=kw.get("ttl_days"), source_agent=kw.get("source_agent", ""))
+    return result
 
 
 def test_two_notes_sharing_a_chunk_export_and_import_their_own_keys(t2_service_env, tmp_path):

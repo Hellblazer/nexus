@@ -621,14 +621,14 @@ class TestLocalCollectionLifecycle:
         col.upsert(
             ids=["temp-id"],
             documents=["temporary data"],
-            metadatas=[make_chunk_metadata(
+            # A legacy row: a client of before RDR-236 Phase 4 Step 1 stamped the TTL on the row; the
+            # current clients write no ttl_days or indexed_at, so only a row like this expires through
+            # ``expire()`` (a note's TTL is the catalog's, retired by the catalog pass).
+            metadatas=[{**make_chunk_metadata(
                 content_type="prose",
-                chunk_text_hash=h_temp, content_hash=h_temp,
-                chunk_end_char=14,
-                indexed_at=old, ttl_days=1,
+                chunk_text_hash=h_temp,
                 embedding_model="local-onnx-minilm-l6-v2",
-                title="temp",
-            )],
+            ), "indexed_at": old, "ttl_days": 1, "title": "temp"}],
         )
         # Permanent entry — still alive after expire(). ttl_days omitted
         # (defaults to None); an explicit 0 is now rejected (nexus-24rof).

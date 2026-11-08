@@ -9742,7 +9742,15 @@ def collection_info(name: str) -> str:
                     if posture.withheld(i):
                         lines.append(f"  - {posture.stub(i)}")
                         continue
-                    title = (e.get("title") or "untitled")[:60]
+                    # The title is the OWNING document's own, from the catalog (RDR-236 Phase 4 Step 1: a
+                    # chunk row carries none); the row's is the fallback only for a chunk with no live
+                    # owner, as in store_list.
+                    _shown = _store_hook.note_display(
+                        None if owner_map is None else owner_map.get(e.get("id", ""), []),
+                        row=e, row_title=e.get("title") or "", row_tags="", row_ttl_days=None,
+                        row_indexed_at="",
+                    )
+                    title = (_shown.title or "untitled")[:60]
                     lines.append(f"  - {title}" + (f"  {_SENSITIVE_BADGE}" if posture.flagged(i) else ""))
                 if note := posture.note_line():
                     lines.append(note)

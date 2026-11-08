@@ -1944,22 +1944,7 @@ def pdf_extract_patches_ctx():
     return _Ctx()
 
 
-_BASE_REQUIRED_FIELDS = {
-    # Identity / position / spans — RDR-102 D2 dropped source_path; the
-    # catalog tumbler in doc_id is the canonical reference. RDR-108
-    # Phase 3 (nexus-bdag) retired chunk_index, chunk_count, doc_id —
-    # the catalog ``document_chunks`` manifest is now authoritative.
-    "content_hash", "chunk_text_hash",
-    "chunk_start_char", "chunk_end_char", "page_number",
-    # Display / routing — RDR-101 Phase 5c (nexus-o6aa.13) dropped
-    # ``corpus``, ``store_type``, ``git_meta``. ``title`` kept (audit
-    # finding: find_ids_by_title is load-bearing for nx store).
-    "title", "source_author", "section_title", "section_type",
-    "tags", "category", "content_type", "embedding_model",
-    # Lifecycle
-    # (session_id is still accepted on an old row but no writer stamps it: nexus-6pfgb.4)
-    "indexed_at", "ttl_days", "frecency_score", "source_agent",
-}
+_BASE_REQUIRED_FIELDS = {"chunk_text_hash", "embedding_model"}  # RDR-236 Phase 4 Step 1: the CHUNK keys
 # pdf_subject / pdf_keywords / is_image_pdf / has_formulas / format /
 # page_count / source_date are intentionally NOT in ALLOWED_TOP_LEVEL —
 # normalize() drops them. They were never stored in T3 even before the
@@ -1997,8 +1982,7 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch, mock_t3, voyage_c
             chk_cls.return_value.chunk.return_value = [mock_chunk]
             index_markdown(sample_md, corpus="docs", t3=mock_t3)
     assert captured
-    missing = _BASE_REQUIRED_FIELDS - captured[0].keys()
-    assert not missing, f"Missing metadata fields: {missing}"
+    assert set(captured[0]) == _BASE_REQUIRED_FIELDS, sorted(captured[0])
 
 
 @pytest.mark.t2_tenant
@@ -2032,10 +2016,7 @@ def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch, owner_write
     # than stamping "" placeholders a late duplicate could re-merge.
     # nexus-vhyar: it also omits frecency_score, which the frecency-only
     # reindex owns.
-    stub_omits = {"title", "source_author", "frecency_score"}
-    missing = ((_BASE_REQUIRED_FIELDS | _PDF_EXTRA_FIELDS) - stub_omits) - captured[0].keys()
-    assert not missing, f"Missing PDF metadata fields: {missing}"
-    assert not stub_omits & captured[0].keys()
+    assert set(captured[0]) == _BASE_REQUIRED_FIELDS | _PDF_EXTRA_FIELDS, sorted(captured[0])
 
 
 def test_sha256_does_not_call_read_bytes(tmp_path: Path):
@@ -2089,16 +2070,9 @@ def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, 
                 chk_cls.return_value.chunk.return_value = [mock_chunk]
                 index_markdown(sample_md, corpus="docs", t3=mock_t3)
     assert captured
-    # RDR-101 Phase 5c: ``store_type`` dropped from chunk schema;
-    # ``content_type`` is the canonical routing field.
-    assert captured[0]["content_type"] == expected_type
-    # nexus-1oguj: the extractor identity from ExtractionResult.metadata
-    # is threaded through to the written chunk for PDFs; markdown never
-    # sets it (no extractor involved), so normalize() drops the key.
-    if indexer == "pdf":
-        assert captured[0]["extraction_method"] == "x"
-    else:
-        assert "extraction_method" not in captured[0]
+    # RDR-236 Phase 4 Step 1: the content type and the extractor identity are the catalog document's; the
+    # chunk row carries the CHUNK keys only.
+    assert set(captured[0]) == {"chunk_text_hash", "embedding_model"}
 
 
 @pytest.mark.t2_tenant
@@ -2130,8 +2104,10 @@ def test_index_markdown_offsets(has_fm, fm_text, body, expected_start, expected_
             chk_cls.return_value.chunk.return_value = [mock_chunk]
             index_markdown(md_path, corpus="docs", t3=mock_t3)
     assert captured
-    assert captured[0]["chunk_start_char"] == expected_start
-    assert captured[0]["chunk_end_char"] == expected_end
+    # The span is the chunker's position dict's (the manifest row's), handed to the owner write beside the row.
+    positions = owner_write.calls[0]["positions"][0]
+    assert positions["chunk_start_char"] == expected_start
+    assert positions["chunk_end_char"] == expected_end
 
 
 # nexus-sghyo (2026-08-06): the whole client-side Voyage CCE embed
@@ -3100,70 +3076,36 @@ class TestStreamingRouting:
 
 
 class TestStreamingReturnMetadata:
-    """nexus-w6wp0: index_pdf's streaming return_metadata=True read used to
-    query T3 via _identity_where's dead source_path fallback (RDR-102 D2
-    removed source_path from make_chunk_metadata), so it silently always
-    returned pages=[]/title=""/author="" -- even when the pipeline had just
-    written real chunks.
+    """nexus-w6wp0: index_pdf's streaming ``return_metadata=True`` summary (pages, title, author).
 
-    The fix has two paths (review round, code-review-expert +
-    substantive-critic, 2026-08-05):
-    - doc_id known (the catalog-registered common case): scope the read to
-      THIS document's own catalog manifest (doc_id -> chash list) via
-      ``_metadata_for_doc_id`` -- collision-safe even when another document
-      in the same collection shares this one's content_hash.
-    - doc_id empty (no-catalog ingest contract): fall back to the
-      content_hash-keyed where-clause (the identity the staleness check
-      and pipeline_stages._enrich_metadata_from_extraction's post-pass
-      already use).
+    RDR-236 Phase 4 Step 1: no chunk row carries a page, title or author, so the summary is read where they
+    live. With a catalog ``doc_id`` it is the document's own manifest (the page of each of its manifest
+    rows, nexus-w6wp0's collision safety: only this document's chunks) and its catalog entry's title and
+    author (``_catalog_summary_for_doc_id``). With no ``doc_id`` (a dry run, which registers nothing, or a
+    failed registration) it is the extraction's: the pages that hold text, and the title and author the
+    pipeline resolved into the run's extraction stats.
 
-    Both paths share a fail-loud guard for the genuinely-anomalous case of
-    chunks>0 but no metadata found. ``doc_id`` resolution is explicitly
-    controlled per test (patching ``_register_or_lookup_doc_id``) rather
-    than left to whatever catalog/service happens to be ambiently
-    reachable -- letting it resolve implicitly is exactly what made an
-    earlier draft of these tests nondeterministic across environments.
+    Both paths share a fail-loud guard for the genuinely-anomalous case of chunks>0 but nothing found.
+    ``doc_id`` resolution is explicitly controlled per test (patching ``_register_or_lookup_doc_id``).
     """
 
-    @staticmethod
-    def _vector_with_retry_side_effect(populated_metadatas):
-        """Distinguish the staleness-check query (limit=1, must miss so the
-        run proceeds) from the no-catalog-fallback metadata-read query
-        (limit=300), and within the metadata-read query, distinguish a
-        content_hash-keyed where (the fix) from a source_path-keyed where
-        (the dead nexus-tbkk1 branch this bug used) -- so the test fails
-        loud if a future edit reverts to the dead identity instead of
-        merely happening to pass.
-        """
-        def _side_effect(_fn, *, where, include=None, limit=None, offset=None, **_kw):
-            if limit == 1:
-                # staleness pre-check: report "not found" so indexing proceeds
-                return {"metadatas": []}
-            if "content_hash" in where:
-                return {"ids": [m["_id"] for m in populated_metadatas], "metadatas": populated_metadatas}
-            # dead source_path branch (nexus-tbkk1): matches nothing in
-            # production since RDR-102 D2 -- this is the bug being fixed.
-            return {"ids": [], "metadatas": []}
-        return _side_effect
-
-    def _run(self, tmp_path, *, pipeline_count, populated_metadatas, doc_id="",
-              extra_patches=()):
+    def _run(self, tmp_path, *, pipeline_count, doc_id="", extra_patches=(), stats=None):
         pdf = tmp_path / "doc.pdf"
         pdf.write_bytes(b"dummy")
-        vwr_side_effect = self._vector_with_retry_side_effect(populated_metadatas)
+
+        def _pipeline(*a, extraction_stats=None, **kw):
+            if extraction_stats is not None and stats:
+                extraction_stats.update(stats)
+            return pipeline_count
+
         with ExitStack() as stack:
-            # nexus-sghyo (2026-08-06): _has_credentials is deleted — the
-            # service-mode guard (ambient test default) already prevents
-            # the retired non-service credential-fallback branch.
             stack.enter_context(patch("nexus.doc_indexer._sha256", return_value="abc123"))
             stack.enter_context(patch("nexus.doc_indexer.make_t3"))
             stack.enter_context(patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value=doc_id))
             stack.enter_context(patch("nexus.doc_indexer._check_document_fork", return_value=[]))
-            mock_vwr = stack.enter_context(
-                patch("nexus.doc_indexer._vector_with_retry", side_effect=vwr_side_effect)
-            )
+            stack.enter_context(patch("nexus.doc_indexer._vector_with_retry", return_value={"metadatas": []}))
             mock_pymupdf_open = stack.enter_context(patch("pymupdf.open"))
-            stack.enter_context(patch("nexus.pipeline_stages.pipeline_index_pdf", return_value=pipeline_count))
+            stack.enter_context(patch("nexus.pipeline_stages.pipeline_index_pdf", side_effect=_pipeline))
             for p in extra_patches:
                 stack.enter_context(p)
             mock_doc = MagicMock()
@@ -3171,202 +3113,60 @@ class TestStreamingReturnMetadata:
             mock_doc.__exit__ = MagicMock(return_value=False)
             mock_doc.__len__ = MagicMock(return_value=3)
             mock_pymupdf_open.return_value = mock_doc
-            result = index_pdf(pdf, "test", streaming="always", return_metadata=True)
-        return result, mock_vwr
+            return index_pdf(pdf, "test", streaming="always", return_metadata=True)
 
     @pytest.mark.t2_tenant
-    def test_streaming_return_metadata_reflects_pipeline_chunks_no_catalog(self, tmp_path):
-        """RED against pre-fix code (source_path where-clause always
-        matches zero rows -> pages/title/author silently empty despite
-        chunks == 5); GREEN once the metadata query keys on content_hash.
-        doc_id="" (no-catalog fallback branch) so this exercises the
-        content_hash-keyed query path directly."""
-        populated = [
-            {"_id": "c1", "page_number": 1, "title": "My Paper", "source_author": "A. Thor"},
-            {"_id": "c2", "page_number": 2, "title": "My Paper", "source_author": "A. Thor"},
-        ]
-        result, mock_vwr = self._run(tmp_path, pipeline_count=5, populated_metadatas=populated, doc_id="")
+    def test_streaming_return_metadata_reflects_the_extraction_when_there_is_no_catalog_document(self, tmp_path):
+        """doc_id="" (a dry run, or a failed registration): the summary is the run's extraction stats."""
+        result = self._run(
+            tmp_path, pipeline_count=5, doc_id="",
+            stats={"title": "My Paper", "author": "A. Thor", "pages_with_text": [1, 2], "page_count": 2},
+        )
         assert result == {
-            "chunks": 5,
-            "pages": [1, 2],
-            "title": "My Paper",
-            "author": "A. Thor",
+            "chunks": 5, "pages": [1, 2], "title": "My Paper", "author": "A. Thor",
+            "page_count": 2, "pages_with_text": [1, 2],
+        }
+
+    @pytest.mark.t2_tenant
+    def test_streaming_return_metadata_uses_the_catalog_when_doc_id_known(self, tmp_path):
+        """doc_id present (the catalog-registered common case): the summary is the catalog's, read for THIS
+        document's id (its manifest scopes the read to its own chunks, so a byte-identical sibling in the
+        collection cannot leak in)."""
+        summary = {"chunks": 2, "pages": [1, 4], "title": "My Paper", "author": "A. Thor"}
+        mock_summary = MagicMock(return_value=summary)
+        result = self._run(
+            tmp_path, pipeline_count=5, doc_id="1.1.1",
+            extra_patches=(patch("nexus.doc_indexer._catalog_summary_for_doc_id", mock_summary),),
+        )
+        assert result == {
+            "chunks": 5, "pages": [1, 4], "title": "My Paper", "author": "A. Thor",
             "page_count": 0,
             # None: the fake pipeline reports no extraction stats, which reads
             # as "unverified", never as "no pages" (nexus-i0cwh).
             "pages_with_text": None,
         }
-        # Kill control: assert the metadata-read call actually used the
-        # content_hash identity, not merely that the mock happened to return
-        # something. A regression back to the dead source_path where-clause
-        # must fail this even if some other mock quirk made the dict match.
-        meta_read_calls = [
-            c for c in mock_vwr.call_args_list
-            if c.kwargs.get("limit") == 300
-        ]
-        assert meta_read_calls, "expected a limit=300 metadata-read call"
-        assert meta_read_calls[0].kwargs["where"] == {"content_hash": "abc123"}
-
-    @pytest.mark.t2_tenant
-    def test_streaming_return_metadata_uses_manifest_when_doc_id_known(self, tmp_path):
-        """doc_id present (the catalog-registered common case): the
-        metadata read must go through _metadata_for_doc_id (manifest-
-        scoped), not the content_hash where-clause -- proven by mocking
-        _metadata_for_doc_id directly and asserting it was called with
-        this run's doc_id, and that the where-clause path was NOT
-        consulted for the returned metadata."""
-        manifest_meta = [
-            {"page_number": 1, "title": "My Paper", "source_author": "A. Thor"},
-            {"page_number": 4, "title": "My Paper", "source_author": "A. Thor"},
-        ]
-        mock_meta_for_doc_id = MagicMock(return_value=manifest_meta)
-        result, mock_vwr = self._run(
-            tmp_path, pipeline_count=5, populated_metadatas=[], doc_id="1.1.1",
-            extra_patches=(patch("nexus.doc_indexer._metadata_for_doc_id", mock_meta_for_doc_id),),
-        )
-        assert result == {
-            "chunks": 5,
-            "pages": [1, 4],
-            "title": "My Paper",
-            "author": "A. Thor",
-            "page_count": 0,
-            # None: the fake pipeline reports no extraction stats, which reads
-            # as "unverified", never as "no pages" (nexus-i0cwh).
-            "pages_with_text": None,
-        }
-        mock_meta_for_doc_id.assert_called_once()
-        call_args = mock_meta_for_doc_id.call_args
-        assert call_args.args[1] == "1.1.1" or call_args.kwargs.get("doc_id") == "1.1.1"
-        # The content_hash where-branch must not have been consulted at
-        # all for the metadata read (only the staleness pre-check, if
-        # anything, may have hit _vector_with_retry).
-        meta_read_calls = [c for c in mock_vwr.call_args_list if c.kwargs.get("limit") == 300]
-        assert not meta_read_calls, "manifest-scoped path must not fall through to the where-clause query"
-
-    @pytest.mark.t2_tenant
-    def test_streaming_return_metadata_manifest_scoping_avoids_content_hash_collision(self, tmp_path):
-        """CRITICAL-2 regression (substantive-critic, 2026-08-05): two
-        catalog documents in the same collection share this run's
-        content_hash (byte-identical content -- e.g. duplicate PDFs). A
-        bare content_hash-keyed query would return the WRONG document's
-        title/author (or a mix); the manifest-scoped path (doc_id known)
-        must return ONLY this document's own metadata, ignoring whatever
-        the content_hash-keyed query would have produced."""
-        sibling_content_hash_rows = [
-            {"_id": "sibling-1", "page_number": 9, "title": "Sibling Paper", "source_author": "B. Other"},
-        ]
-        this_doc_manifest_meta = [
-            {"page_number": 1, "title": "My Paper", "source_author": "A. Thor"},
-        ]
-        mock_meta_for_doc_id = MagicMock(return_value=this_doc_manifest_meta)
-        result, mock_vwr = self._run(
-            tmp_path, pipeline_count=1, populated_metadatas=sibling_content_hash_rows, doc_id="1.1.1",
-            extra_patches=(patch("nexus.doc_indexer._metadata_for_doc_id", mock_meta_for_doc_id),),
-        )
-        assert result["title"] == "My Paper"
-        assert result["author"] == "A. Thor"
-        assert result["pages"] == [1]
-        # The sibling's decoy row must never have leaked into the result --
-        # if it had, title would be "Sibling Paper" / pages would include 9.
-        assert "Sibling Paper" not in str(result)
+        mock_summary.assert_called_once_with("1.1.1")
 
     @pytest.mark.t2_tenant
     def test_streaming_return_metadata_empty_when_pipeline_wrote_nothing(self, tmp_path):
         """Kill control: a legitimate zero-chunk run (e.g. skipped as
         already-complete) must still return the all-empty dict, not raise --
         the fail-loud guard is for chunks>0-but-no-metadata only."""
-        result, _ = self._run(tmp_path, pipeline_count=0, populated_metadatas=[], doc_id="")
-        # The streaming path builds its dict from the run's extraction stats;
-        # a fake pipeline reports none, so pages_with_text is None (unverified).
+        result = self._run(tmp_path, pipeline_count=0, doc_id="")
         assert result == {"chunks": 0, "pages": [], "title": "", "author": "", "page_count": 0, "pages_with_text": None}
 
     @pytest.mark.t2_tenant
-    def test_streaming_return_metadata_fail_loud_on_inconsistent_empty_read_no_catalog(self, tmp_path):
-        """FAIL LOUD (no-catalog branch): the pipeline reports chunks
-        written (count > 0) but the (correctly content_hash-keyed)
-        metadata query finds none -- a genuine inconsistency, not a
-        legitimate empty result. Must raise, never silently return an
-        empty dict."""
-        from nexus.errors import IndexingError
-
-        with pytest.raises(IndexingError):
-            self._run(tmp_path, pipeline_count=5, populated_metadatas=[], doc_id="")
-
-    @pytest.mark.t2_tenant
     def test_streaming_return_metadata_fail_loud_on_inconsistent_empty_read_with_doc_id(self, tmp_path):
-        """FAIL LOUD (manifest branch): doc_id known, but
-        _metadata_for_doc_id finds nothing despite count > 0 -- same
-        guard, same message contract, exercised on the collision-safe
-        path this time."""
+        """FAIL LOUD: doc_id known, the pipeline reports chunks written (count > 0), but the document's
+        manifest holds none -- a genuine inconsistency. Must raise, never silently return an empty dict."""
         from nexus.errors import IndexingError
 
-        mock_meta_for_doc_id = MagicMock(return_value=[])
+        empty = MagicMock(return_value={"chunks": 0, "pages": [], "title": "", "author": ""})
         with pytest.raises(IndexingError):
             self._run(
-                tmp_path, pipeline_count=5, populated_metadatas=[], doc_id="1.1.1",
-                extra_patches=(patch("nexus.doc_indexer._metadata_for_doc_id", mock_meta_for_doc_id),),
+                tmp_path, pipeline_count=5, doc_id="1.1.1",
+                extra_patches=(patch("nexus.doc_indexer._catalog_summary_for_doc_id", empty),),
             )
-
-    def test_metadata_for_doc_id_queries_col_by_manifest_chashes(self):
-        """Round-2 critic note: the tests above mock _metadata_for_doc_id
-        wholesale to pin index_pdf's branch preference (doc_id present ->
-        manifest path) -- this test pins the HELPER's own behavior instead,
-        exercising its real col.get(ids=...) call against a fake col (no
-        mocking of _metadata_for_doc_id itself, and _vector_with_retry runs
-        for real too -- only the catalog reader and the T3 collection are
-        doubles). Verifies: manifest rows -> deduped, sorted chash list ->
-        col.get(ids=<those chashes>, include=["metadatas"]) -> the
-        metadatas T3 returned, reader closed."""
-        from types import SimpleNamespace
-
-        from nexus.doc_indexer import _metadata_for_doc_id
-
-        manifest_rows = [
-            SimpleNamespace(chash="chash-b"),
-            SimpleNamespace(chash="chash-a"),
-            SimpleNamespace(chash="chash-a"),  # duplicate row, same chash
-            SimpleNamespace(chash=""),  # no-chash row must be filtered out
-        ]
-        fake_reader = MagicMock()
-        fake_reader.get_manifest.return_value = manifest_rows
-
-        fake_col = MagicMock()
-        fake_col.get.return_value = {
-            "ids": ["chash-a", "chash-b"],
-            "metadatas": [
-                {"page_number": 1, "title": "My Paper", "source_author": "A. Thor"},
-                {"page_number": 2, "title": "My Paper", "source_author": "A. Thor"},
-            ],
-        }
-
-        with patch("nexus.catalog.factory.make_catalog_reader", return_value=fake_reader):
-            result = _metadata_for_doc_id(fake_col, "1.1.1")
-
-        fake_reader.get_manifest.assert_called_once_with("1.1.1")
-        fake_reader.close.assert_called_once()
-        fake_col.get.assert_called_once_with(ids=["chash-a", "chash-b"], include=["metadatas"], sensitivity="include")
-        assert result == [
-            {"page_number": 1, "title": "My Paper", "source_author": "A. Thor"},
-            {"page_number": 2, "title": "My Paper", "source_author": "A. Thor"},
-        ]
-
-    def test_metadata_for_doc_id_empty_manifest_short_circuits_without_querying_col(self):
-        """An empty manifest (zero live chash rows) returns [] without
-        even calling col.get -- distinct from a genuine "queried and found
-        nothing" case, and cheaper (no round-trip for a document with no
-        chunks recorded)."""
-        from nexus.doc_indexer import _metadata_for_doc_id
-
-        fake_reader = MagicMock()
-        fake_reader.get_manifest.return_value = []
-        fake_col = MagicMock()
-
-        with patch("nexus.catalog.factory.make_catalog_reader", return_value=fake_reader):
-            result = _metadata_for_doc_id(fake_col, "1.1.1")
-
-        assert result == []
-        fake_col.get.assert_not_called()
-        fake_reader.close.assert_called_once()
 
 
 class TestSectionTypeInPipeline:
@@ -3379,8 +3179,9 @@ class TestSectionTypeInPipeline:
         tuples = _markdown_chunks(md, "abc123", "model-ctx", "2026-01-01", "docs__test")
         assert len(tuples) >= 2
         for _id, _text, meta, positions in tuples:
-            assert "section_type" in meta
-            # RDR-236 Phase 4 Step 0: the chunker's own position dict carries it too.
+            # RDR-236 Phase 4 Step 1: the label is the chunker's position dict's (the manifest row's), and the
+            # chunk row carries the CHUNK keys only.
+            assert "section_type" not in meta
             assert "section_type" in positions
 
     @pytest.mark.parametrize("heading,content,expected_type", [
@@ -3394,7 +3195,7 @@ class TestSectionTypeInPipeline:
         # Need abstract + another section so there are >= 2 chunks for CCE
         md.write_text(f"# Abstract\n\nContent.\n\n# {heading}\n\n{content}\n")
         tuples = _markdown_chunks(md, "abc123", "model-ctx", "2026-01-01", "docs__test")
-        typed = [m for _, _, m, _p in tuples if m["section_type"] == expected_type]
+        typed = [p for _, _, _m, p in tuples if p["section_type"] == expected_type]
         assert typed, f"Expected at least one chunk classified as '{expected_type}'"
 
 

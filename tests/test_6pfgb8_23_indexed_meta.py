@@ -168,26 +168,14 @@ def test_nx_index_pdf_on_a_repo_registered_pdf_keeps_the_repo_paths_category() -
     assert pdf_register_meta("/r/p.pdf", "")["category"] == "paper"
 
 
-def _kwargs(path: str, near: str) -> tuple[str, str]:
-    """The ``tags=`` and ``category=`` expressions of the ``make_chunk_metadata`` / dict call that follows *near*."""
+@pytest.mark.parametrize("path", ["code_indexer.py", "prose_indexer.py", "doc_indexer.py"])
+def test_the_row_writers_no_longer_stamp_what_this_module_states(path) -> None:
+    """RDR-236 Phase 4 Step 1: the tags, category and source format are the catalog document's alone (this module
+    is their one home); a chunk row writer passes the factory no ``tags=`` or ``category=``."""
     text = (SRC / path).read_text()
-    block = text[text.index(near):][:1800]
-    tags = re.search(r'tags(?:=|"\s*:\s*)([^,\n]+),', block)
-    category = re.search(r'category(?:=|"\s*:\s*)([^,\n]+),', block)
-    assert tags and category, (path, near)
-    return tags.group(1).strip(), category.group(1).strip()
-
-
-@pytest.mark.parametrize("path,near,tags,category", [
-    ("code_indexer.py", 'content_type="code"', 'ext.lstrip(".")', '"code"'),
-    ("prose_indexer.py", 'content_type="markdown"', '"markdown"', '"prose"'),
-    ("prose_indexer.py", 'content_type="prose"', 'ext.lstrip(".")', '"prose"'),
-    ("doc_indexer.py", 'content_type="markdown"', '"markdown"', '"prose"'),
-    ("doc_indexer.py", 'content_type="pdf"', '"pdf"', '"paper"'),
-    ("indexer.py", '"tags": "pdf"', '"pdf"', '"prose"'),
-])
-def test_the_row_writers_still_stamp_the_constants_this_module_mirrors(path, near, tags, category) -> None:
-    assert _kwargs(path, near) == (tags, category)
+    assert "make_chunk_metadata(" in text
+    for block in re.findall(r"make_chunk_metadata\((.*?)\n\s*\)", text, flags=re.S):
+        assert "tags=" not in block and "category=" not in block, (path, block)
 
 
 @pytest.mark.parametrize("path", ["code_indexer.py", "prose_indexer.py"])

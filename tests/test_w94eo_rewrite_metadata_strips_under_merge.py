@@ -26,11 +26,8 @@ _LEGACY = "store_type"
 def _seed(t3) -> str:
     chash = hashlib.sha256(_TEXT.encode()).hexdigest()
     meta = make_chunk_metadata(
-        content_type="markdown", chunk_text_hash=chash, content_hash="c" * 64,
-        chunk_start_char=0, chunk_end_char=len(_TEXT), page_number=0,
-        indexed_at="2026-09-26T00:00:00Z", embedding_model="bge-base-en-v15-768",
-        title="Doc", source_author="", section_title="", section_type="",
-        tags="", category="",
+        content_type="markdown", chunk_text_hash=chash,
+        embedding_model="bge-base-en-v15-768",
     )
     # Substrate SQL with the engine's real embedding: the engine refuses an
     # ownerless upsert-chunks write from RDR-223 Phase 3 on.
@@ -58,16 +55,15 @@ def test_rewrite_metadata_strips_a_legacy_key_and_converges(t2_service_env) -> N
     assert (updated, total) == (1, 1)
     meta = _stored(t3, chash)
     assert _LEGACY not in meta, meta
-    assert meta.get("title") == "Doc", meta
+    assert set(meta) <= {"chunk_text_hash", "embedding_model"}, meta  # RDR-236 Phase 4 Step 1: CHUNK keys only
 
     # Converged: a second run finds nothing to change.
     assert _rewrite_collection_metadata(t3, _COLLECTION) == (0, 1, 1)
 
 
-def test_rewrite_metadata_never_deletes_bib_fields(t2_service_env) -> None:
-    """nx enrich bib owns bib_* and writes them after indexing; a rewrite that
-    deleted them could erase a concurrent enrichment. A placeholder bib key
-    that normalize() drops is left alone, and the row still converges."""
+def test_rewrite_metadata_exempts_no_key_not_even_bib_fields(t2_service_env) -> None:
+    """RDR-236 Phase 4 Step 1: a chunk row is the CHUNK keys, so the rewrite verb strips every other key,
+    ``bib_*`` included (the bibliography is the catalog document's, written by ``nx enrich bib``)."""
     t3 = make_t3()
     chash = _seed(t3)
     t3.update_chunks(_COLLECTION, [chash], [{"bib_year": 0}])
@@ -75,7 +71,6 @@ def test_rewrite_metadata_never_deletes_bib_fields(t2_service_env) -> None:
 
     assert _rewrite_collection_metadata(t3, _COLLECTION)[0] == 1
     meta = _stored(t3, chash)
-    assert _LEGACY not in meta, meta
-    assert meta.get("bib_year") == 0, meta
+    assert "bib_year" not in meta and _LEGACY not in meta, meta
 
     assert _rewrite_collection_metadata(t3, _COLLECTION) == (0, 1, 1)

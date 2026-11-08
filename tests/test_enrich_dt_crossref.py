@@ -177,18 +177,16 @@ def test_source_dt_gapfills_when_primary_misses(
 
     runner = CliRunner()
     with held({"c1": "Paper A", "c2": "Paper A"}), \
-            patch("nexus.commands.enrich._catalog_enrich_hook", return_value=True):
+            patch("nexus.commands.enrich._catalog_enrich_hook", return_value=True) as hook:
         result = runner.invoke(
             enrich, ["bib", "knowledge__t", "--delay", "0", "--source", "dt"]
         )
     assert result.exit_code == 0, result.output
-    assert "enriched 2 chunks across 1 documents" in result.output
+    assert "enriched 1 documents" in result.output
     mock_dt_resolve.assert_called_once()
-    # the update payload carried DT's year
-    update_call = [c for c in mock_retry.call_args_list
-                   if "metadatas" in c.kwargs]
-    assert update_call, "expected a col.update with metadatas"
-    assert update_call[-1].kwargs["metadatas"][0]["bib_year"] == 2013
+    # RDR-236 Phase 4 Step 1: DT's year goes to the catalog document, and no chunk row is updated
+    assert hook.call_args.kwargs["bib_meta"]["year"] == 2013
+    assert not [c for c in mock_retry.call_args_list if "metadatas" in c.kwargs]
 
 
 @patch("nexus.mcp_client.devonthink.available", return_value=False)

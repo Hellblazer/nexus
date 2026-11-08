@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-236 nexus-6pfgb.18: an ``.nxexp`` import sends a chunk row's own keys, not the export row's
-document keys.
+document keys (and, since Phase 4 Step 1, not its position keys either: those go on the manifest row, see
+``test_6pfgb65_chunk_keys_only``).
 
 The engine-backed proof (a target holding document X, a file for document Y sharing a chunk with it;
 Y's import leaves X's title, tags and line span alone) is in
@@ -22,26 +23,21 @@ def _every_key_row() -> dict:
     return {r.key: f"v-{r.key}" for r in ckm.rows() if r.kind == "metadata-key"} | {"made_up_cargo": 1}
 
 
-def test_an_unshared_row_keeps_chunk_and_position_keys_only():
-    got = _import_chunk_metadata(_every_key_row(), shared=False)
-    assert set(got) == ckm.keys_of("CHUNK") | ckm.keys_of("POSITION")
-    assert len(got) >= 9, "the key table examined too little to mean anything"
-
-
-def test_a_shared_row_keeps_chunk_keys_only():
-    got = _import_chunk_metadata(_every_key_row(), shared=True)
+def test_a_row_keeps_chunk_keys_only():
+    got = _import_chunk_metadata(_every_key_row())
     assert set(got) == ckm.keys_of("CHUNK") == {"chunk_text_hash", "embedding_model"}
+    assert len(_every_key_row()) >= 9, "the key table examined too little to mean anything"
 
 
-def test_no_document_legacy_or_row_key_ever_goes_out():
-    for shared in (False, True):
-        got = _import_chunk_metadata(_every_key_row(), shared=shared)
-        assert not set(got) & (ckm.keys_of("DOCUMENT") | ckm.keys_of("LEGACY") | ckm.keys_of("ROW")), got
-        assert "made_up_cargo" not in got
+def test_no_document_position_legacy_or_row_key_ever_goes_out():
+    got = _import_chunk_metadata(_every_key_row())
+    assert not set(got) & (
+        ckm.keys_of("DOCUMENT") | ckm.keys_of("POSITION") | ckm.keys_of("LEGACY") | ckm.keys_of("ROW")), got
+    assert "made_up_cargo" not in got
 
 
 def test_a_none_row_is_an_empty_payload():
-    assert _import_chunk_metadata(None, shared=False) == {}  # type: ignore[arg-type]
+    assert _import_chunk_metadata(None) == {}  # type: ignore[arg-type]
 
 
 class _Reader:

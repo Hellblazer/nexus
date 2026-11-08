@@ -582,7 +582,6 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     from nexus.metadata_schema import make_chunk_metadata, position_fields  # noqa: PLC0415  — circular-dep avoidance (nexus.metadata_schema)
 
     for i, chunk in enumerate(chunks):
-        title = f"{rel_path}:{chunk['line_start']}-{chunk['line_end']}"
         # ``chunk_chroma_id`` is the per-chunk natural id — the FULL
         # ``chunk_text_hash`` via the chunk_identity boundary (RDR-180;
         # the RDR-108 [:32] truncation is retired). Identical chunk text
@@ -622,11 +621,8 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             source_bytes, language, chunk["line_start"] - 1, chunk["line_end"] - 1
         ):
             section_type = "imports"
-        # RDR-101 Phase 5c (nexus-o6aa.13) dropped corpus, store_type,
-        # git_meta from the chunk schema. Title kept (find_ids_by_title
-        # is load-bearing for nx store / MCP store_get). RDR-108 Phase 3
-        # (nexus-bdag) dropped chunk_index, chunk_count, doc_id —
-        # catalog manifest is authoritative.
+        # The chunk row carries the CHUNK keys only (RDR-236 Phase 4 Step 1): the document's own facts are the
+        # catalog document's, and the span and section labels go to the manifest row from ``chunk_positions``.
         chunk_positions = position_fields(
             chunk_start_char=chunk_start_char,
             chunk_end_char=chunk_end_char,
@@ -638,14 +634,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         metadata = make_chunk_metadata(
             content_type="code",
             chunk_text_hash=chunk_text_hash_full,
-            content_hash=content_hash,
-            indexed_at=ctx.now_iso,
             embedding_model=ctx.embedding_model,
-            title=title,
-            tags=ext.lstrip("."),
-            category="code",
-            frecency_score=float(ctx.score),
-            **chunk_positions,  # Step 0: the row still carries them; Step 1 stops passing this
         )
         ids.append(chunk_chroma_id)
         documents.append(chunk["text"])
@@ -707,6 +696,9 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             "metadatas": metadatas,
             "positions": positions,
             "catalog_doc_id": catalog_doc_id,
+            # The file's content hash: the flush's fence and completion stamp read it from here, no
+            # longer from a chunk row (a row carries no content_hash since RDR-236 Phase 4 Step 1).
+            "content_hash": content_hash,
             "collection": ctx.corpus,
             "hooks": ctx.hooks,
         },

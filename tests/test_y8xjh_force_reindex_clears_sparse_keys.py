@@ -32,20 +32,7 @@ def _fake_pdf_chunks(overridden: bool):
         meta = make_chunk_metadata(
             content_type="pdf",
             chunk_text_hash=chash,
-            content_hash=content_hash,
-            chunk_start_char=0,
-            chunk_end_char=len(_TEXT),
-            page_number=1,
-            indexed_at=now_iso,
             embedding_model=target_model,
-            title="Paper",
-            source_author="",
-            section_title="",
-            section_type="",
-            tags="pdf",
-            category="paper",
-            extraction_method="mineru+degraded" if overridden else "mineru",
-            quality_gate_overridden=overridden,
         )
         # Two chunks, so the one-chunk batcher in _index refuses the file (oversize path).
         text2 = _TEXT + " (second page)"
@@ -111,48 +98,25 @@ def _stored(t3) -> dict:
     return got["metadatas"][0]
 
 
-def test_clean_force_reindex_clears_stale_quality_gate_override(
-    t2_service_env, tmp_path, monkeypatch,
-) -> None:
-    t3 = make_t3()
-    _index(tmp_path, t3, monkeypatch, overridden=True)
-    assert _stored(t3).get("quality_gate_overridden") is True  # non-vacuity
-
-    _index(tmp_path, t3, monkeypatch, overridden=False)
-
-    meta = _stored(t3)
-    assert "quality_gate_overridden" not in meta, meta
-    assert meta.get("extraction_method") == "mineru", meta
 
 
-def test_without_delete_keys_the_stale_override_survives(
-    t2_service_env, tmp_path, monkeypatch,
-) -> None:
-    """Control: with ``rewrite_delete_keys`` stubbed to name nothing, the same
-    round trip leaves the stale True in place. This is the pre-fix client
-    against the merging engine; if it ever cleared, the test above would prove
-    nothing about delete_keys."""
-    monkeypatch.setattr("nexus.metadata_schema.rewrite_delete_keys", lambda metadatas: [])
-    t3 = make_t3()
-    _index(tmp_path, t3, monkeypatch, overridden=True)
-    _index(tmp_path, t3, monkeypatch, overridden=False)
-
-    assert _stored(t3).get("quality_gate_overridden") is True
 
 
 @pytest.mark.parametrize("metadatas,expected", [
-    ([{"title": "t"}], None),
-    ([{"quality_gate_overridden": True}, {}], "quality_gate_overridden"),
+    ([{"chunk_text_hash": "a", "embedding_model": "m"}], None),
+    ([{"chunk_text_hash": "a", "embedding_model": "m"}, {"chunk_text_hash": "b"}], "embedding_model"),
 ])
 def test_rewrite_delete_keys_names_keys_absent_from_any_row(metadatas, expected) -> None:
+    """RDR-236 Phase 4 Step 1: the keys a full-rewrite writer owns are the CHUNK keys, so a clean batch names
+    none and the retired document keys a stored row still holds are the Step 3 sweep's."""
     from nexus.metadata_schema import REWRITE_OWNED_KEYS, rewrite_delete_keys
 
     keys = rewrite_delete_keys(metadatas)
     assert keys == sorted(keys)
-    assert not any(k.startswith("bib_") for k in keys), "bib_* belongs to nx enrich bib"
-    assert "content_type" not in keys
-    assert set(keys) <= REWRITE_OWNED_KEYS
-    if expected is not None:
+    assert set(keys) <= REWRITE_OWNED_KEYS == {"chunk_text_hash", "embedding_model"}
+    if expected is None:
+        assert keys == []
+    else:
         assert expected in keys
 
 

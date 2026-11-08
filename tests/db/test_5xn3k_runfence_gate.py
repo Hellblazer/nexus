@@ -432,17 +432,18 @@ def _fresh_pdf(tmp_path: Path, name: str = "doc.pdf", *, marker: str = "") -> Pa
     return p.resolve()
 
 
-def _count_chunks(col, content_hash: str) -> int:
-    """Paginated T3 chunk count for *content_hash* (QUOTAS: limit<=300)."""
+def _count_chunks(col, content_hash: str, doc_id: str) -> int:
+    """The document's chunks present in T3: those its own manifest names (QUOTAS: limit<=300).
+
+    RDR-236 Phase 4 Step 1: a chunk row carries no ``content_hash``, so the document's chunks are the ones its
+    catalog manifest references, counted live (a manifest row whose chunk is not in T3 does not count)."""
+    from nexus.catalog.factory import make_catalog_reader
+
+    chashes = [r.chash for r in make_catalog_reader().get_manifest(doc_id) if r.chash]
     total = 0
-    offset = 0
-    while True:
-        batch = col.get(where={"content_hash": content_hash}, include=[], limit=300, offset=offset, sensitivity="include")
-        ids = batch.get("ids", [])
-        total += len(ids)
-        if len(ids) < 300:
-            break
-        offset += 300
+    for start in range(0, len(chashes), 300):
+        batch = col.get(ids=chashes[start:start + 300], include=[], limit=300, sensitivity="include")
+        total += len(batch.get("ids", []))
     return total
 
 
@@ -605,7 +606,7 @@ def _consistent_truncation_recovery_scenario(
 
     # ── Consistent-truncation shape ──────────────────────────────────────
     col = t3.get_or_create_collection(_COLLECTION)
-    t3_count = _count_chunks(col, content_hash)
+    t3_count = _count_chunks(col, content_hash, doc_id)
     manifest = make_catalog_reader().get_manifest(doc_id)
 
     assert 0 < t3_count < _TOTAL_CHUNKS, (
@@ -643,7 +644,7 @@ def _consistent_truncation_recovery_scenario(
         )
 
     assert recovered > 0, "recovery run must report indexed chunks, not a no-op"
-    t3_count_final = _count_chunks(col, content_hash)
+    t3_count_final = _count_chunks(col, content_hash, doc_id)
     manifest_final = make_catalog_reader().get_manifest(doc_id)
     assert t3_count_final == _TOTAL_CHUNKS, t3_count_final
     assert len(manifest_final) == _TOTAL_CHUNKS, len(manifest_final)
@@ -715,7 +716,7 @@ def test_kill_control_fence_pinned_complete_blocks_recovery(
     )
 
     col = t3.get_or_create_collection(_COLLECTION)
-    truncated_count = _count_chunks(col, content_hash)
+    truncated_count = _count_chunks(col, content_hash, doc_id)
     assert 0 < truncated_count < _TOTAL_CHUNKS
 
     # Blind the fence read to a constant "complete" + matching hash.
@@ -745,7 +746,7 @@ def test_kill_control_fence_pinned_complete_blocks_recovery(
         "the REAL fence state must still read 'indexing' — only OUR patched "
         "read was blinded, never the engine's actual row"
     )
-    assert _count_chunks(col, content_hash) == truncated_count, (
+    assert _count_chunks(col, content_hash, doc_id) == truncated_count, (
         "chunk count must stay at the truncated level — a real re-index "
         "must NOT have happened while the fence read was blinded"
     )
@@ -838,7 +839,7 @@ _INCR_COLLECTION = "docs__runfence-gate-incr__bge-base-en-v15-768__v1"
 _INCR_TOTAL = 150  # > _INCREMENTAL_BATCH_SIZE (128) -> forces >=2 batches
 
 
-def _incr_prepared(n: int, content_hash: str, nonce: str) -> list[tuple[str, str, dict]]:
+def _incr_prepared(n: int, content_hash: str, nonce: str) -> list[tuple[str, str, dict, dict]]:
     """*nonce* MUST be unique per test run (code-review-expert MINOR,
     2026-08-02): chash is content-addressed off the chunk TEXT, so a
     fixed text set collides with a prior same-process run of this test —
@@ -850,19 +851,15 @@ def _incr_prepared(n: int, content_hash: str, nonce: str) -> list[tuple[str, str
     assertion failure. Matches the marker discipline already applied to
     every PDF fixture in this file (``_fresh_pdf``'s ``marker`` param).
     """
-    out: list[tuple[str, str, dict]] = []
+    out: list[tuple[str, str, dict, dict]] = []
     for i in range(n):
         text = f"incremental chunk {i} unique_runfence_gate_multi_batch_{nonce}_{i}"
         chash = hashlib.sha256(text.encode()).hexdigest()
         out.append((
             chash,
             text,
-            {
-                "content_hash": content_hash,
-                "embedding_model": "bge-base-en-v15-768",
-                "chunk_text_hash": chash,
-                "content_type": "pdf",
-            },
+            {"embedding_model": "bge-base-en-v15-768", "chunk_text_hash": chash},
+            {"page_number": 1},
         ))
     return out
 
@@ -955,7 +952,7 @@ def test_multi_batch_incremental_explicit_complete_round_trip(
     assert result_holder.get("total") == _INCR_TOTAL
 
     col = t3.get_or_create_collection(_INCR_COLLECTION)
-    assert _count_chunks(col, content_hash) == _INCR_TOTAL
+    assert _count_chunks(col, content_hash, doc_id) == _INCR_TOTAL
     manifest = make_catalog_reader().get_manifest(doc_id)
     assert len(manifest) == _INCR_TOTAL
 

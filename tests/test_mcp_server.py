@@ -394,10 +394,10 @@ class TestNexusHmxiRoundTripGrandfathering:
         post_chash, _ = single_chunk_manifest_metadata("Post-Phase-5 ART addition")
         bypass_fk_seed_chunk(t2_service_env, "knowledge__art", pre_chash)
         bypass_fk_seed_chunk(t2_service_env, "knowledge__art", post_chash)
-        t3.put(
-            collection="knowledge__art",
-            content="Pre-Phase-5 ART data",
-            title="art-overview",
+        # A note from before RDR-236 Phase 4 Step 1: the row carries the title its writer stamped.
+        t3.get_or_create_collection("knowledge__art", strict=False).upsert(
+            ids=[pre_chash], documents=["Pre-Phase-5 ART data"],
+            metadatas=[{"chunk_text_hash": pre_chash, "title": "art-overview"}],
         )
         # ``store_put`` with the same short form must add to the
         # legacy collection (no split).
@@ -506,7 +506,7 @@ class TestNexusHmxiRoundTripGrandfathering:
         assert note_writes == [promoted], "and writes the note under it"
         # ``store_list`` resolves to the same conformant target.
         listing = store_list(collection="knowledge__greenfield", limit=10)
-        assert "greenfield-doc" in listing
+        assert promoted in listing  # the title is the catalog document's, which this test fakes
 
 
 @pytest.mark.t2_tenant
@@ -1090,7 +1090,7 @@ def test_store_list_docs_says_so_when_the_catalog_cannot_be_read(t3, local_mode_
     )
     result = store_list(collection="fixture-subject", docs=True)
     assert "grouped by chunk, not by manifest" in result
-    assert "degraded-test" in result
+    assert "1 chunks" in result  # the title is the catalog's, which cannot be read here
 
 
 # ── Memory ───────────────────────────────────────────────────────────────────
@@ -1219,13 +1219,20 @@ def test_store_put_category_persisted_in_metadata(t3):
         title="rdr-103-postmortem",
         category="rdr_postmortem",
     )
-    # Pull the stored chunk back and confirm category is on the metadata.
+    # RDR-236 Phase 4 Step 1: the category is the note's own fact, on its catalog entry; the shared
+    # chunk row carries the CHUNK keys only.
+    from nexus.catalog.factory import make_catalog_reader
+
     col = t3.get_or_create_collection("knowledge__1-1__voyage-context-3__v1")
-    rows = col.get(where={"category": "rdr_postmortem"}, include=["metadatas"], sensitivity="include")
-    assert rows["ids"], (
-        "category=rdr_postmortem chunk should be retrievable via where filter"
-    )
-    assert rows["metadatas"][0]["category"] == "rdr_postmortem"
+    rows = col.get(include=["metadatas"], sensitivity="include")
+    assert rows["ids"] and all(set(m) <= {"chunk_text_hash", "embedding_model"} for m in rows["metadatas"])
+    reader = make_catalog_reader()
+    try:
+        entries = [e for e in reader.list_by_collection("knowledge__1-1__voyage-context-3__v1")
+                   if e.title == "rdr-103-postmortem"]
+    finally:
+        reader.close()
+    assert entries and (entries[0].meta or {}).get("category") == "rdr_postmortem"
 
 
 @pytest.mark.t2_tenant
@@ -1242,10 +1249,9 @@ def test_store_put_category_default_empty(t3):
         title="no-category",
     )
     col = t3.get_or_create_collection("knowledge__1-1__voyage-context-3__v1")
-    # where filters with non-empty values miss; without filter we see all.
-    rows = col.get(where={"title": "no-category"}, include=["metadatas"], sensitivity="include")
+    rows = col.get(include=["metadatas"], sensitivity="include")
     assert rows["ids"], "stored chunk must be retrievable"
-    assert rows["metadatas"][0].get("category", "") == ""
+    assert all("category" not in m for m in rows["metadatas"])  # no chunk row carries a category
 
 
 def test_memory_put_empty_content(t2_path):

@@ -261,7 +261,9 @@ def _ctx(chashes: list[str], doc_id: str) -> dict:
     return {
         "ids": chashes,
         "documents": [f"text {c[:4]}" for c in chashes],
-        "metadatas": [{"chunk_text_hash": c, "content_hash": "c" * 64} for c in chashes],
+        "metadatas": [{"chunk_text_hash": c} for c in chashes],
+        "positions": [{"line_start": 1} for _ in chashes],
+        "content_hash": "c" * 64,
         "catalog_doc_id": doc_id,
     }
 

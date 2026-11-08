@@ -70,7 +70,7 @@ def test_a_fence_less_document_is_stale_then_indexed_then_skipped(t2_service_env
     assert prepared
     seed_chunks_direct(
         _COLLECTION, [p[0] for p in prepared], [p[1] for p in prepared],
-        [p[2] for p in prepared], embed=True)
+        [{**p[2], "content_hash": content_hash} for p in prepared], embed=True)  # the legacy shape: a pre-Step-1 row
     cat = make_catalog_writer()
     try:
         cat.write_manifest(

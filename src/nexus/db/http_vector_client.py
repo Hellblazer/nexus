@@ -6773,7 +6773,14 @@ class HttpVectorClient:
         )
 
     def find_ids_by_title(self, collection: str, title: str) -> list[str]:
-        """Return all chunk IDs whose title metadata exactly matches *title*.
+        """Return all chunk IDs whose title matches *title*: the catalog's answer, in effect.
+
+        RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): a chunk row carries no ``title`` any more (the title is
+        the catalog document's), so the ``where={"title": ...}`` read below is answered by the engine
+        from the catalog document title (``/v1/vectors/get`` route (c), nexus-u9dc5, engine 0.1.171, at or
+        below ``REQUIRED_ENGINE_VERSION``), not from the row; a row written before Step 1 that still holds
+        a title answers the same query until the Step 3 sweep. The catalog lookup after a miss
+        (:meth:`_catalog_chashes_for_title`) covers a title the engine cannot place.
 
         nexus-umvh2: was missing entirely, crashing ``nx store delete
         --title`` and the MCP ``store_get`` title-fallback with

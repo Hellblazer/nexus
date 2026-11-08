@@ -80,7 +80,6 @@ Only ``write_manifest_many`` and ``complete_index_run`` are used on *cat*, so it
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Any, Sequence
 
 import httpx
@@ -264,15 +263,15 @@ def note_manifest_rows(manifest_metadatas: Sequence[dict], pieces: Sequence[str]
 
 
 def _chunk_payload(
-    collection: str, pieces: Sequence[str], rows: Sequence[dict], *,
-    title: str, tags: str, category: str, source_agent: str,
-    ttl_days: int | None, catalog_doc_id: str, content_type: str,
+    collection: str, pieces: Sequence[str], rows: Sequence[dict], *, content_type: str,
 ) -> list[dict]:
     """The ``chunks`` array: one ``{chash, text, metadata}`` per DISTINCT piece.
 
-    The metadata is what the retired ``HttpVectorClient.put`` stamped on the single piece it wrote (the same
-    ``make_chunk_metadata`` factory, ``catalog_doc_id`` included), so a note reads back exactly as
-    one written the old way. Identical pieces collapse to one chunk, as identical text always did.
+    The metadata is the chunk row's CHUNK keys and nothing else (RDR-236 Phase 4 Step 1,
+    nexus-6pfgb.65): ``chunk_text_hash`` and ``embedding_model``. The note's title, tags, category,
+    agent and TTL are its catalog entry's (``note_catalog_meta``, written by the same put), and a
+    piece's span is its manifest row's (:func:`note_manifest_rows`); neither rides on the shared row.
+    Identical pieces collapse to one chunk, as identical text always did.
     """
     from nexus.corpus import embedding_model_row_preferred  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — deferred: circular-dep avoidance
@@ -280,7 +279,6 @@ def _chunk_payload(
     # The row's model, as the engine embeds by it (nexus-ldh33); the same cached read
     # note_pieces chose the window from.
     model = embedding_model_row_preferred(collection)
-    now_iso = datetime.now(UTC).isoformat()
     out: list[dict] = []
     seen: set[str] = set()
     for piece, row in zip(pieces, rows, strict=True):
@@ -288,22 +286,7 @@ def _chunk_payload(
         if chash in seen:
             continue
         seen.add(chash)
-        meta = make_chunk_metadata(
-            content_type=content_type,
-            chunk_text_hash=chash,
-            content_hash=chash,
-            chunk_start_char=0,
-            chunk_end_char=len(piece),
-            indexed_at=now_iso,
-            embedding_model=model,
-            title=title,
-            tags=tags,
-            category=category,
-            ttl_days=ttl_days,
-            source_agent=source_agent,
-        )
-        if catalog_doc_id:
-            meta["catalog_doc_id"] = catalog_doc_id
+        meta = make_chunk_metadata(content_type=content_type, chunk_text_hash=chash, embedding_model=model)
         out.append({"chash": chash, "text": piece, "metadata": meta})
     return out
 
@@ -375,9 +358,7 @@ def write_note(
     _first, manifest_metadatas = note_manifest_metadata(pieces)
     rows = note_manifest_rows(manifest_metadatas, pieces)
     chunks = _chunk_payload(
-        collection, pieces, rows, title=title, tags=tags, category=category,
-        source_agent=source_agent, ttl_days=ttl_days,
-        catalog_doc_id=catalog_doc_id, content_type=content_type or chunk_content_type_for_collection(collection),
+        collection, pieces, rows, content_type=content_type or chunk_content_type_for_collection(collection),
     )
     result = NoteWriteResult(
         catalog_doc_id=catalog_doc_id, collection=collection, chunk_ids=[r["chash"] for r in rows])

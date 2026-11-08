@@ -69,9 +69,10 @@ def test_manifest_chunk_rows_always_send_the_label_keys_an_empty_label_is_sent_a
     ])
     assert (row["section_title"], row["section_type"], row["page_number"]) == ("", "", None)
 
+    # RDR-236 Phase 4 Step 1: a stored row that carries no position key (one written since Step 1) is never sent
+    # as an authoritative empty label: no label key at all, so the engine leaves the manifest row legacy.
     (bare,) = _manifest_chunk_rows([(0, {"chunk_text_hash": X})])
-    assert {"section_title", "section_type", "page_number"} <= bare.keys()
-    assert (bare["section_title"], bare["section_type"], bare["page_number"]) == ("", "", None)
+    assert not {"section_title", "section_type", "page_number"} & bare.keys()
 
 
 # ── a manifest re-write must not drop the labels ─────────────────────────────

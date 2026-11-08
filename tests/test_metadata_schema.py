@@ -31,28 +31,12 @@ def test_allowed_top_level_is_bounded() -> None:
 
 
 def test_load_bearing_keys_are_allowed() -> None:
-    """Every key read by ``where=`` filters or scoring must be top-level.
-
-    RDR-108 Phase 3 retired three chunk-identity keys (``doc_id``,
-    ``chunk_index``, ``chunk_count``): the ``document_chunks`` manifest
-    table is authoritative and the chunk-level fields became cargo.
-    """
+    """The write allowlist is the CHUNK keys of the key table (RDR-236 Phase 4 Step 1): the chunk's identity
+    and the model that embedded it. Every other key a chunk row once carried lives on the catalog document
+    (title, tags, bibliography, ttl, provenance) or the manifest row (spans, page, sections)."""
     from nexus.metadata_schema import ALLOWED_TOP_LEVEL
 
-    for key in (
-        "content_hash",
-        "chunk_text_hash",
-        "chunk_start_char",
-        "chunk_end_char",
-        "page_number",
-        "bib_year",
-        "ttl_days",
-        "indexed_at",  # replaces expires_at; expiry derived via is_expired()
-        "section_type",
-        "frecency_score",
-        "source_agent",
-    ):
-        assert key in ALLOWED_TOP_LEVEL, f"load-bearing key {key!r} missing"
+    assert ALLOWED_TOP_LEVEL == {"chunk_text_hash", "embedding_model"}
 
 
 def test_content_type_is_canonical() -> None:
@@ -96,28 +80,6 @@ def test_cargo_keys_not_allowed() -> None:
 # ── normalize() ─────────────────────────────────────────────────────────────
 
 
-def test_normalize_drops_unknown_keys() -> None:
-    """RDR-102 D2: ``source_path`` is no longer in ALLOWED_TOP_LEVEL.
-    RDR-108 Phase 3: ``chunk_index`` / ``chunk_count`` / ``doc_id`` are
-    also dropped. The ``content_hash`` check stands in for "load-bearing
-    keys survive"."""
-    from nexus.metadata_schema import normalize
-
-    raw = {
-        "source_path": "/a.pdf",
-        "content_hash": "abc",
-        "chunk_text_hash": "def",
-        "pdf_subject": "should drop",
-        "ast_chunked": True,
-    }
-    out = normalize(raw, content_type="pdf")
-    assert "pdf_subject" not in out
-    assert "ast_chunked" not in out
-    assert "source_path" not in out, (
-        "RDR-102 D2: source_path is no longer in ALLOWED_TOP_LEVEL; "
-        "normalize() must drop it"
-    )
-    assert out["content_hash"] == "abc"
 
 
 def test_normalize_drops_flat_git_keys() -> None:
@@ -141,16 +103,6 @@ def test_normalize_drops_flat_git_keys() -> None:
         assert k not in out
 
 
-def test_normalize_injects_content_type() -> None:
-    from nexus.metadata_schema import normalize
-
-    raw = {
-        "source_path": "f.py",
-        "content_hash": "x",
-        "chunk_text_hash": "y",
-    }
-    out = normalize(raw, content_type="code")
-    assert out["content_type"] == "code"
 
 
 def test_normalize_rejects_invalid_content_type() -> None:
@@ -162,25 +114,6 @@ def test_normalize_rejects_invalid_content_type() -> None:
                   content_type="binary")
 
 
-def test_normalize_preserves_bib_fields() -> None:
-    from nexus.metadata_schema import normalize
-
-    raw = {
-        "source_path": "p.pdf",
-        "content_hash": "x",
-        "chunk_text_hash": "y",
-        "bib_year": 2024,
-        "bib_authors": "Smith, Jones",
-        "bib_venue": "ICML",
-        "bib_citation_count": 42,
-        "bib_semantic_scholar_id": "ss-12345",
-    }
-    out = normalize(raw, content_type="pdf")
-    assert out["bib_year"] == 2024
-    assert out["bib_authors"] == "Smith, Jones"
-    assert out["bib_venue"] == "ICML"
-    assert out["bib_citation_count"] == 42
-    assert out["bib_semantic_scholar_id"] == "ss-12345"
 
 
 def test_normalize_is_idempotent() -> None:
@@ -205,43 +138,8 @@ def test_normalize_is_idempotent() -> None:
     assert first == second
 
 
-def test_normalize_idempotent_on_reprocess() -> None:
-    """Re-normalising a previously-normalised dict is idempotent.
-    RDR-101 Phase 5c: the git_meta unpack/repack round-trip is gone
-    (git_meta is no longer in the schema), so this verifies the
-    simpler post-5c invariant — round-trip preserves load-bearing
-    fields."""
-    from nexus.metadata_schema import normalize
-
-    raw = {
-        "content_hash": "x",
-        "chunk_text_hash": "y",
-    }
-    first = normalize(raw, content_type="code")
-    merged = {**first, "bib_year": 2024, "bib_authors": "Doe"}
-    second = normalize(merged, content_type="code")
-    assert second["bib_year"] == 2024
-    assert second["content_hash"] == "x"
-    assert second["content_type"] == "code"
 
 
-def test_normalize_keeps_ttl_and_indexed_at() -> None:
-    """``ttl_days=0`` is the permanent sentinel and is kept; ``expires_at``
-    no longer exists in the schema (computed from indexed_at + ttl_days
-    via :func:`is_expired` Python-side)."""
-    from nexus.metadata_schema import ALLOWED_TOP_LEVEL, normalize
-
-    raw = {
-        "source_path": "a",
-        "content_hash": "x",
-        "chunk_text_hash": "y",
-        "ttl_days": 0,
-        "indexed_at": "2026-04-26T00:00:00+00:00",
-    }
-    out = normalize(raw, content_type="code")
-    assert out["ttl_days"] == 0
-    assert out["indexed_at"] == "2026-04-26T00:00:00+00:00"
-    assert "expires_at" not in ALLOWED_TOP_LEVEL
 
 
 def test_is_expired_uses_indexed_at_plus_ttl() -> None:
@@ -325,47 +223,8 @@ def test_normalize_drops_empty_bib_placeholders() -> None:
         assert key not in out, f"empty {key} should be dropped"
 
 
-def test_normalize_keeps_partial_bib_when_year_populated() -> None:
-    """If even one bib_* slot has a real value, keep all four for a
-    consistent search/display contract."""
-    from nexus.metadata_schema import normalize
-
-    raw = {
-        "source_path": "p.pdf",
-        "content_hash": "x",
-        "chunk_text_hash": "y",
-        "bib_year": 2024,
-        "bib_authors": "",
-        "bib_venue": "",
-        "bib_citation_count": 0,
-    }
-    out = normalize(raw, content_type="pdf")
-    assert out["bib_year"] == 2024
-    assert out["bib_authors"] == ""
-    assert out["bib_venue"] == ""
-    assert out["bib_citation_count"] == 0
 
 
-def test_normalize_keeps_fully_populated_bib() -> None:
-    from nexus.metadata_schema import normalize
-
-    raw = {
-        "source_path": "p.pdf",
-        "content_hash": "x",
-        "chunk_text_hash": "y",
-        "bib_year": 2024,
-        "bib_authors": "Smith",
-        "bib_venue": "ICML",
-        "bib_citation_count": 42,
-    }
-    out = normalize(raw, content_type="pdf")
-    assert out["bib_year"] == 2024
-    assert out["bib_authors"] == "Smith"
-    assert out["bib_venue"] == "ICML"
-    assert out["bib_citation_count"] == 42
-
-
-# ── validate() ──────────────────────────────────────────────────────────────
 
 
 def test_validate_passes_well_formed() -> None:
@@ -394,18 +253,6 @@ def test_validate_rejects_unknown_key() -> None:
         validate({"content_hash": "x", "bogus_key": "x"})
 
 
-def test_validate_rejects_non_primitive_values() -> None:
-    """Chroma metadata only accepts str/int/float/bool/None — enforce upstream.
-    Use a key in :data:`ALLOWED_TOP_LEVEL` (so the key-set check passes)
-    with a non-primitive value to exercise the type check specifically.
-    """
-    from nexus.metadata_schema import MetadataSchemaError, validate
-
-    with pytest.raises(MetadataSchemaError, match="non-primitive"):
-        validate({"content_hash": "x", "tags": ["list", "instead", "of", "string"]})
-
-
-# ── Write path protection ───────────────────────────────────────────────────
 
 
 def test_normalize_output_fits_under_chroma_cap() -> None:
@@ -598,29 +445,6 @@ def test_make_chunk_metadata_rejects_source_path_kwarg() -> None:
         )
 
 
-def test_make_chunk_metadata_does_not_emit_source_path() -> None:
-    """RDR-102 D2: a ``make_chunk_metadata`` call with no source_path
-    kwarg (the post-Phase-B signature) MUST NOT emit a ``source_path``
-    key in the returned metadata. The schema-level removal from
-    ALLOWED_TOP_LEVEL is what enforces this — ``normalize()`` drops
-    any key not in the set, and source_path no longer is.
-    """
-    from nexus.metadata_schema import make_chunk_metadata
-
-    meta = make_chunk_metadata(
-        content_type="code",
-        chunk_text_hash="abc",
-        content_hash="def",
-        indexed_at="2026-05-02T00:00:00Z",
-        embedding_model="model-code",
-    )
-    assert "source_path" not in meta, (
-        f"source_path must not appear in chunk metadata after Phase B; "
-        f"got keys: {sorted(meta.keys())}"
-    )
-
-
-# ── RDR-101 Phase 5c: final schema removal (nexus-o6aa.13) ───────────────────
 
 
 class TestPhase5cSchemaRemoval:
@@ -644,86 +468,9 @@ class TestPhase5cSchemaRemoval:
     needed.
     """
 
-    def test_dropped_keys_not_in_allowed_top_level(self) -> None:
-        """The 3 Phase 5c keys are gone from the schema. ``title``
-        is kept (audit / find_ids_by_title)."""
-        from nexus.metadata_schema import ALLOWED_TOP_LEVEL
-        for k in ("corpus", "store_type", "git_meta"):
-            assert k not in ALLOWED_TOP_LEVEL, (
-                f"{k!r} must be removed from ALLOWED_TOP_LEVEL "
-                f"(Phase 5c). Current: {sorted(ALLOWED_TOP_LEVEL)}"
-            )
-        # Title MUST stay — find_ids_by_title is load-bearing.
-        assert "title" in ALLOWED_TOP_LEVEL, (
-            "title must remain in ALLOWED_TOP_LEVEL — "
-            "find_ids_by_title (nx store, MCP store_get) reads it."
-        )
 
-    def test_normalize_drops_phase_5c_keys(self) -> None:
-        """``normalize()`` drops the 3 keys via the Step 4 cargo
-        filter (anything outside ALLOWED_TOP_LEVEL gets dropped)."""
-        from nexus.metadata_schema import normalize
-        out = normalize(
-            {
-                "content_type": "code",
-                "chunk_text_hash": "abc", "content_hash": "def",
-                "indexed_at": "2026-05-03T00:00:00Z",
-                "embedding_model": "model-code",
-                "title": "src/foo.py:1-10",
-                "corpus": "nexus",
-                "store_type": "code",
-                "git_project_name": "nexus",
-            },
-            content_type="code",
-        )
-        for k in ("corpus", "store_type", "git_meta"):
-            assert k not in out, (
-                f"{k!r} survived normalize() — Phase 5c should drop it. "
-                f"Got keys: {sorted(out.keys())}"
-            )
-        # Title kept.
-        assert out.get("title") == "src/foo.py:1-10"
 
-    def test_make_chunk_metadata_rejects_dropped_kwargs(self) -> None:
-        """``corpus``, ``store_type``, ``git_meta`` kwargs are removed
-        from the factory signature. Passing any of them raises
-        ``TypeError`` — re-introduction is a build break.
 
-        ``title`` kwarg remains accepted.
-        """
-        from nexus.metadata_schema import make_chunk_metadata
-        common_kwargs = dict(
-            content_type="code",
-            chunk_text_hash="abc", content_hash="def",
-            indexed_at="2026-05-03T00:00:00Z",
-            embedding_model="model-code",
-        )
-        for kwarg, value in [
-            ("corpus", "nexus"),
-            ("store_type", "code"),
-            ("git_meta", {"git_project_name": "nexus"}),
-        ]:
-            with pytest.raises(TypeError):
-                make_chunk_metadata(**common_kwargs, **{kwarg: value})
-        # title kwarg still works.
-        meta = make_chunk_metadata(**common_kwargs, title="src/foo.py")
-        assert meta.get("title") == "src/foo.py"
-
-    def test_validate_rejects_dropped_keys(self) -> None:
-        """``validate()`` enforces ALLOWED_TOP_LEVEL membership; the
-        3 dropped keys trigger MetadataSchemaError. ``title`` does not."""
-        from nexus.metadata_schema import validate, MetadataSchemaError
-        good_base = {
-            "content_type": "code",
-            "chunk_text_hash": "abc", "content_hash": "def",
-            "indexed_at": "2026-05-03T00:00:00Z",
-            "embedding_model": "model-code",
-        }
-        for dropped in ("corpus", "store_type", "git_meta"):
-            with pytest.raises(MetadataSchemaError):
-                validate({**good_base, dropped: "value"})
-        # title stays — must NOT raise.
-        validate({**good_base, "title": "src/foo.py"})
 
     def test_event_sourced_machinery_removed(self) -> None:
         """Phase 5c removes the Phase 5a/5b flag wiring entirely:
@@ -830,24 +577,6 @@ class TestPhase3SchemaRemoval:
             with pytest.raises(MetadataSchemaError):
                 validate({**good_base, dropped: "value" if isinstance(dropped, str) and dropped == "doc_id" else 1})
 
-    def test_make_chunk_metadata_does_not_emit_phase_3_keys(self) -> None:
-        """A bare ``make_chunk_metadata`` call with the post-Phase-3
-        signature must NOT emit any of the 3 dropped keys.
-        """
-        from nexus.metadata_schema import make_chunk_metadata
-
-        meta = make_chunk_metadata(
-            content_type="code",
-            chunk_text_hash="abc",
-            content_hash="def",
-            indexed_at="2026-05-09T00:00:00Z",
-            embedding_model="model-code",
-        )
-        for k in self.PHASE_3_DROPPED:
-            assert k not in meta, (
-                f"{k!r} appeared in factory output post-Phase-3; "
-                f"got keys: {sorted(meta.keys())}"
-            )
 
     def test_legacy_chunk_dict_reads_unaffected(self) -> None:
         """Pre-Phase-3 chunks stored in T3 still carry doc_id /

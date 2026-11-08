@@ -23,8 +23,6 @@ from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineConflictRunnin
 from tests._owner_write_double import install_streaming_writer, throwaway_t3 as _make_throwaway_t3
 from tests.pipeline_fake_engine import make_fake_engine_db
 from nexus.pipeline_stages import (
-    _enrich_metadata_from_extraction,
-    _update_chunk_metadata,
     chunker_loop,
     extractor_loop,
     pipeline_index_pdf,
@@ -187,24 +185,10 @@ def _pop_chunks(db: HttpPipelineDB, h: str, n: int) -> None:
 
 @contextmanager
 def _document_owns(*chashes: str):
-    """nexus-ahm18: the manifest the metadata post-pass reads. The streaming writer double sends no
-    manifest rows, and the post-pass selects the document's own chunks from the manifest, so a test
-    that drives a post-pass over a fake T3 names the chunks the document owns here. The selection
-    against the real engine is ``tests/test_ahm18_pdf_postpass_by_manifest.py`` and the PDF journey.
-
-    The patch is a spy, and leaving the block asserts it was called with a real ``doc_id`` and this
-    test's collection, so a drive that fell back to the ``content_hash`` selection (``doc_id`` not
-    passed through, or a dry run) fails here instead of passing for the wrong reason."""
-    calls: list[tuple[str, str]] = []
-
-    def _rows(doc_id: str, collection: str):
-        calls.append((doc_id, collection))
-        return [ManifestRow(position=i, chash=c) for i, c in enumerate(chashes)]
-
-    with patch("nexus.pipeline_stages._own_manifest_rows", side_effect=_rows):
-        yield calls
-    assert calls, "the post-pass never read the document's manifest: it selected by content_hash"
-    assert all(doc_id and collection == "docs__test" for doc_id, collection in calls), calls
+    """Kept for the callers that wrap a drive in it. RDR-236 Phase 4 Step 1 retired the post-pass that read
+    the document's own manifest (the extraction facts are the catalog document's), so nothing reads it and
+    this is a no-op."""
+    yield []
 
 
 def _run_with_col(db, col_get_return, fake_result, fake_chunks,
@@ -395,14 +379,11 @@ class TestChunkerLoop:
         # dropped store_type, corpus, git_meta. content_type / content_hash
         # / embedding_model / page_number remain as the canonical chunk-
         # time identity / routing fields.
-        for k, v in [("content_type", "pdf"),
-                     ("content_hash", "h1"),
-                     ("embedding_model", "model-ctx"),
-                     ("page_number", 1)]:
-            assert meta[k] == v
-        for dropped in ("source_path", "store_type", "corpus", "git_meta"):
-            assert dropped not in meta
-        assert "indexed_at" in meta
+        # RDR-236 Phase 4 Step 1: the buffered row is the CHUNK keys, with the chunker's position
+        # fields riding beside it under ``_positions`` (the uploader takes them out).
+        assert meta["embedding_model"] == "model-ctx"
+        assert meta["_positions"]["page_number"] == 1
+        assert set(meta) == {"chunk_text_hash", "embedding_model", "_positions"}
         # RDR-180 (nexus-jxizy.3): chunk_id is the FULL chunk_text_hash.
         import hashlib as _hl
         expected_0 = _hl.sha256(b"chunk 0 text").hexdigest()
@@ -882,87 +863,7 @@ class TestPipelineIndexPdf:
         assert writer.events[-2:] == [("finish",), ("complete",)]
         assert db.get_pipeline_state("abc123") is None
 
-    @pytest.mark.t2_tenant
-    def test_a_post_pass_that_selects_no_chunk_after_an_upload_keeps_the_buffer_and_stamps_nothing(
-        self, db, mock_t3, writer, monkeypatch,
-    ) -> None:
-        """nexus-ahm18: the document's manifest names no chunk of this collection although two were
-        uploaded. The post-pass has examined nothing; it must fail, not finish the PDF without a
-        title, so the buffer is kept for a retry and nothing is stamped."""
-        monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id",
-                            lambda *a, with_created=False, **kw: ("1.1.1", False) if with_created else "1.1.1")
-        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}),
-                 ("chunk 1", 1, {"page_number": 2, "chunk_type": "text"}))
-        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
-                patch("nexus.pipeline_stages._own_manifest_rows", return_value=[]), \
-                capture_logs() as logs:
-            ME.return_value.extract.side_effect = _fx(3, _er(3))
-            MC.return_value.chunk.return_value = fc
-            pipeline_index_pdf(Path("/test/doc.pdf"), "abc123", "docs__test",
-                               mock_t3, db=db, embed_fn=_embed, corpus="test")
-        (warn,) = [e for e in logs if e["event"] == "post_pass_selected_no_chunks"
-                   and e["post_pass"] == "enrich"]
-        assert warn["doc_id"] == "1.1.1" and warn["chunks_uploaded"] == 2
-        assert ("complete",) not in writer.events, "a failed post-pass stamps nothing"
-        state = db.get_pipeline_state("abc123")
-        assert state is not None and state["status"] == "failed", "the buffer is kept and resumable"
 
-    @pytest.mark.t2_tenant
-    def test_post_pass_failure_can_be_retried_not_skipped(self, db) -> None:
-        """nexus-6m9zy.5 (#10, no probe -- READ finding, test written from
-        the bead description). uploader_loop already calls
-        db.mark_completed() -- BEFORE any post-pass runs -- the moment
-        chunks_uploaded catches up with chunks_created. When a post-pass
-        (metadata enrichment here) then fails, delete_pipeline_data is
-        skipped so the checkpoint data is 'kept for retry', but the row's
-        status stayed 'completed' -- the ONLY status create_pipeline()
-        treats as skip -- so the very next `nx index pdf` of that file
-        returned 0 chunks immediately, on every subsequent run, until
-        --force. Drives a real pipeline row to that exact state via a
-        failing t3.update_chunks call, then asserts a second real
-        pipeline_index_pdf call re-enters (and this time succeeds)
-        instead of skipping.
-        """
-        mock_col = MagicMock()
-        mock_col.get.return_value = {"ids": ["abc123_0"], "metadatas": [
-            {"page_number": 1, "chunk_type": "text", "content_hash": "abc123"}]}
-        t3 = create_autospec(T3Database, instance=True)
-        t3.get_or_create_collection.return_value = mock_col
-        t3.update_chunks.side_effect = [Exception("quota exceeded"), None]
-
-        fr = _er(1)
-        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
-
-        # Run 1: extraction/chunking/upload all succeed (the row is
-        # marked 'completed' by uploader_loop mid-run), then the
-        # enrichment post-pass fails.
-        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns("abc123_0"):
-            ME.return_value.extract.side_effect = _fx(1, fr)
-            MC.return_value.chunk.return_value = fc
-            first_total = pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test",
-                                             t3, db=db, embed_fn=_embed, corpus="test")
-        assert first_total > 0  # chunks WERE uploaded -- only the post-pass failed
-
-        state = db.get_pipeline_state("abc123")
-        assert state is not None, "pipeline data must be kept for retry, not deleted"
-        assert state["status"] != "completed", (
-            f"row wrongly left 'completed' after a failed post-pass: {state['status']!r} "
-            f"-- the next create_pipeline() call would skip instead of retrying"
-        )
-
-        # Run 2: update_chunks now succeeds. Everything else is already
-        # uploaded, so all three stages short-circuit near-instantly on
-        # resume and execution reaches the post-pass again for a genuine
-        # retry -- this must NOT be a silent 0-chunk skip.
-        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns("abc123_0"):
-            ME.return_value.extract.side_effect = _fx(1, fr)
-            MC.return_value.chunk.return_value = fc
-            second_total = pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test",
-                                              t3, db=db, embed_fn=_embed, corpus="test")
-        assert second_total > 0, "the retry silently skipped instead of re-entering the pipeline"
-        assert t3.update_chunks.call_count == 2, (
-            "the retry must actually re-attempt the failed post-pass, not just re-report the old total"
-        )
 
     @pytest.mark.t2_tenant
     def test_force_re_embed_true_forwards_true(self, db, mock_t3, writer) -> None:
@@ -1093,66 +994,7 @@ class TestPipelineIndexPdf:
         s = db.get_pipeline_state("h1")
         assert s["status"] == "failed" and "boom" in s["error"]
 
-    @pytest.mark.t2_tenant
-    def test_the_stamp_waits_for_the_post_pass_and_a_failed_post_pass_never_stamps(
-        self, db, writer, monkeypatch,
-    ) -> None:
-        """The writer sends every request and leaves the run 'indexing'; the orchestrator stamps it
-        after the post-passes. A post-pass that fails leaves it unstamped, so a process killed
-        between the last chunk and the enrichment never leaves a complete-looking document that is
-        missing its title and author (RDR-223, nexus-z0o2p.11)."""
-        mock_col = MagicMock()
-        mock_col.get.return_value = {"ids": ["abc123_0"], "metadatas": [
-            {"page_number": 1, "chunk_type": "text", "content_hash": "abc123"}]}
-        t3 = create_autospec(T3Database, instance=True)
-        t3.get_or_create_collection.return_value = mock_col
-        t3.update_chunks.side_effect = Exception("quota exceeded")
-        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns("abc123_0"):
-            ME.return_value.extract.side_effect = _fx(1, _er(1))
-            MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {"page_number": 1}))
-            pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test", t3,
-                               db=db, embed_fn=_embed, corpus="test")
-        (w,) = writer.instances
-        assert w.finished, "every request was sent"
-        assert not w.completed and ("complete",) not in writer.events
 
-    @pytest.mark.t2_tenant
-    def test_a_post_pass_retry_with_nothing_left_to_upload_stamps_without_a_writer(
-        self, db, writer, monkeypatch,
-    ) -> None:
-        """The retry of a run whose post-pass failed finds every chunk already flagged uploaded: no
-        writer runs, and the orchestrator stamps the run through the fail-closed helper (see
-        ``tests/test_rdr223_pdf_resume_tail.py`` for what that helper does on a missing route or a
-        transport failure)."""
-        mock_col = MagicMock()
-        mock_col.get.return_value = {"ids": ["abc123_0"], "metadatas": [
-            {"page_number": 1, "chunk_type": "text", "content_hash": "abc123"}]}
-        t3 = create_autospec(T3Database, instance=True)
-        t3.get_or_create_collection.return_value = mock_col
-        t3.update_chunks.side_effect = [Exception("quota exceeded"), None]
-        calls: list[tuple] = []
-        # The buffer must still exist WHEN the stamp is sent: it goes after the stamp, never before
-        # (a stamp that fails, or a kill before it, needs the buffer to send only the stamp).
-        monkeypatch.setattr(
-            "nexus.doc_indexer._stamp_finished_upload",
-            lambda *a: calls.append((*a, db.get_pipeline_state("abc123") is not None)))
-        # The document's fence as the earlier run left it: begun for this content, never stamped.
-        # (The writer here is a recorder, so the real engine's fence was never begun.)
-        monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("indexing", "abc123"))
-
-        def _run() -> int:
-            with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns("abc123_0"):
-                ME.return_value.extract.side_effect = _fx(1, _er(1))
-                MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {"page_number": 1}))
-                return pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test", t3,
-                                          db=db, embed_fn=_embed, corpus="test")
-
-        _run()
-        assert calls == [], "the failed post-pass stamped nothing"
-        assert _run() == 1
-        assert len(writer.instances) == 1, "the retry had nothing to send and made no writer"
-        assert len(calls) == 1 and calls[0][1:] == ("abc123", 1, True)
-        assert db.get_pipeline_state("abc123") is None, "the buffer goes once the stamp landed"
 
     @pytest.mark.t2_tenant
     @pytest.mark.parametrize("refused", [False, True], ids=["transport-failure", "refusal"])
@@ -1363,109 +1205,9 @@ class TestPipelineIndexPdf:
                                db=db, embed_fn=_embed)
         assert 0 not in written and 2 in written
 
-    @pytest.mark.t2_tenant
-    def test_table_regions_postpass(self, db) -> None:
-        t3, col = _run_with_col(
-            db,
-            col_get_return={"ids": ["abc_0", "abc_1"], "metadatas": [
-                {"page_number": 1, "chunk_type": "text", "content_hash": "abc123"},
-                {"page_number": 2, "chunk_type": "text", "content_hash": "abc123"}]},
-            fake_result=_er(3),
-            fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"}),
-                            ("c1", 1, {"page_number": 2, "chunk_type": "text"})))
-        assert t3.update_chunks.call_count >= 1
-        for call in t3.update_chunks.call_args_list:
-            a = call[0]
-            if a[0] == "docs__test" and any(m.get("chunk_type") == "table_page" for m in a[2]):
-                assert "abc_1" in a[1]
-                break
-        else:
-            pytest.fail("table_regions post-pass did not update chunks to table_page")
 
-    @pytest.mark.t2_tenant
-    def test_metadata_enrichment_postpass(self, db) -> None:
-        """Post-pass writes the resolved title and author into the chunk
-        metadata. ``source_title`` was collapsed into ``title``; the
-        post-pass now writes ``title`` only."""
-        fr = _er(1)
-        fr.metadata["pdf_title"] = "My Paper Title"
-        fr.metadata["pdf_author"] = "Jane Doe"
-        t3, _ = _run_with_col(
-            db,
-            col_get_return={"ids": ["abc_0"], "metadatas": [
-                {"title": "", "content_hash": "abc123", "page_number": 1}]},
-            fake_result=fr,
-            fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
-            pdf_path="/paper.pdf")
-        for call in t3.update_chunks.call_args_list:
-            a = call[0]
-            if a[0] == "docs__test":
-                m = a[2][0]
-                assert m["title"] == "My Paper Title"
-                assert m["source_author"] == "Jane Doe"
-                # nexus-1oguj: the post-pass also backfills the extractor
-                # identity from ExtractionResult.metadata once extraction
-                # completes — ``_er()`` defaults to "mineru".
-                assert m["extraction_method"] == "mineru"
-                break
-        else:
-            pytest.fail("metadata enrichment post-pass not called")
 
-    @pytest.mark.t2_tenant
-    def test_metadata_enrichment_postpass_clears_stale_quality_gate_override(self, db) -> None:
-        """nexus-w94eo: the engine now MERGES metadata rather than replacing
-        it, so a healthy re-index (this run's extraction did NOT trip the
-        quality gate) must actively request removal of a stale
-        ``quality_gate_overridden`` from an earlier degraded run — omitting
-        the key from this write's dict is no longer enough to clear it."""
-        fr = _er(1)
-        fr.metadata["pdf_title"] = "My Paper Title"
-        t3, _ = _run_with_col(
-            db,
-            col_get_return={"ids": ["abc_0"], "metadatas": [{"content_hash": "abc123"}]},
-            fake_result=fr,
-            fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
-            pdf_path="/paper.pdf")
-        for call in t3.update_chunks.call_args_list:
-            args, kwargs = call
-            if args and args[0] == "docs__test" and any(
-                m.get("title") == "My Paper Title" for m in args[2]
-            ):
-                assert kwargs.get("delete_keys") == ["quality_gate_overridden"], (
-                    f"a healthy re-index must clear a stale override; got kwargs={kwargs!r}"
-                )
-                assert "quality_gate_overridden" not in args[2][0], (
-                    "a healthy run must not itself stamp quality_gate_overridden"
-                )
-                break
-        else:
-            pytest.fail("metadata enrichment post-pass not called")
 
-    @pytest.mark.t2_tenant
-    def test_metadata_enrichment_postpass_sets_quality_gate_override_no_delete(self, db) -> None:
-        """The inverse of the test above: when THIS run's extraction DID trip
-        the quality gate, the post-pass sets the key (not delete_keys)."""
-        fr = _er(1)
-        fr.metadata["pdf_title"] = "My Paper Title"
-        fr.metadata["quality_gate_overridden"] = True
-        t3, _ = _run_with_col(
-            db,
-            col_get_return={"ids": ["abc_0"], "metadatas": [{"content_hash": "abc123"}]},
-            fake_result=fr,
-            fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
-            pdf_path="/paper.pdf")
-        for call in t3.update_chunks.call_args_list:
-            args, kwargs = call
-            if args and args[0] == "docs__test" and any(
-                m.get("title") == "My Paper Title" for m in args[2]
-            ):
-                assert args[2][0]["quality_gate_overridden"] is True
-                assert kwargs.get("delete_keys") == [], (
-                    f"a degraded run must not request its own key's deletion; got kwargs={kwargs!r}"
-                )
-                break
-        else:
-            pytest.fail("metadata enrichment post-pass not called")
 
     @pytest.mark.t2_tenant
     def test_stale_chunk_pruning_post_pass_removed_as_dead_code(self, db) -> None:
@@ -1750,27 +1492,28 @@ class TestPipelineIndexPdfDryRun:
         mock_fail.assert_not_called()
         mock_hook.assert_not_called()
 
-    def test_a_dry_run_handed_a_doc_id_still_reads_no_manifest(self, db, throwaway_t3) -> None:
-        """nexus-ahm18: the post-passes' content_hash carve-out keys on ``dry_run``, not on an empty
-        ``doc_id``. A direct caller handing a dry run a doc_id must not read the real catalog from a
-        preview, and the preview's post-pass must still do its work in the throwaway store."""
+    def test_a_dry_run_handed_a_doc_id_still_touches_no_catalog(self, db, throwaway_t3) -> None:
+        """nexus-ahm18: a direct caller handing a dry run a doc_id must not read or write the real catalog
+        from a preview. (RDR-236 Phase 4 Step 1: the preview's post-pass that also ran in the throwaway
+        store is gone; the title it resolves is the run's extraction stats', checked here.)"""
         fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
         fr = _er(1)
         fr.metadata["pdf_title"] = "Preview Title"
+        stats: dict = {}
         with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
-                patch("nexus.pipeline_stages._own_manifest_rows") as manifest, \
-                patch("nexus.pipeline_stages._catalog_pdf_hook"):
+                patch("nexus.catalog.factory.make_catalog_reader") as reader, \
+                patch("nexus.pipeline_stages._catalog_pdf_hook") as hook:
             ME.return_value.extract.side_effect = _fx(1, fr)
             MC.return_value.chunk.return_value = fc
             total = pipeline_index_pdf(
                 Path("/dry-run.pdf"), "dryrun456", "docs__test",
                 throwaway_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True, doc_id="x",
+                extraction_stats=stats,
             )
         assert total == 1
-        manifest.assert_not_called()
-        col = throwaway_t3.get_or_create_collection("docs__test")
-        (meta,) = col.get(where={"content_hash": "dryrun456"}, include=["metadatas"], sensitivity="include")["metadatas"]
-        assert meta["title"] == "Preview Title", "the preview's post-pass ran, selecting by content_hash"
+        reader.assert_not_called()
+        hook.assert_not_called()
+        assert stats["title"] == "Preview Title"
 
     def test_dry_run_with_default_hooks_uploader_loop_fires_zero_hooks(
         self, db, throwaway_t3,
@@ -1819,27 +1562,9 @@ class TestBufferEdgeCases:
         db.mark_uploaded("h1", [])
 
 
-_REQUIRED_META = {
-    # Identity / spans / position — RDR-102 D2 dropped source_path.
-    # RDR-108 Phase 3 (nexus-bdag) dropped chunk_index, chunk_count, doc_id
-    # in favour of the catalog ``document_chunks`` manifest.
-    "content_hash", "chunk_text_hash",
-    "chunk_start_char", "chunk_end_char", "line_start", "line_end", "page_number",
-    # Display / routing — RDR-101 Phase 5c (nexus-o6aa.13) dropped
-    # ``store_type``, ``corpus``, ``git_meta``. ``title``/``source_author``
-    # are NOT required here (nexus-w94eo): both are unknown at streaming
-    # chunk-time and are omitted rather than stamped as "" placeholders —
-    # see test_streaming_metadata_omits_title_and_source_author below.
-    "section_title", "section_type", "tags", "category",
-    "content_type", "embedding_model",
-    # Lifecycle. ``frecency_score`` is NOT required (nexus-vhyar): the stub
-    # omits its 0.0 default so a late duplicate cannot reset a score the
-    # frecency-only reindex bumped; readers default a missing score to 0.0.
-    # ``session_id`` is no longer written by any factory (nexus-6pfgb.4, RDR-236 Phase 2):
-    # the key stays accepted by the schema for old rows echoed back, never required.
-    "indexed_at", "ttl_days", "source_agent",
-    # bib_* intentionally omitted (drop-when-empty by normalize)
-}
+# RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): a buffered chunk's row metadata is the CHUNK keys; the
+# position fields ride beside it under ``_positions`` and the uploader takes them out.
+_REQUIRED_META = {"chunk_text_hash", "embedding_model"}
 
 
 def test_streaming_metadata_has_all_batch_fields(db, done_event) -> None:
@@ -1854,12 +1579,8 @@ def test_streaming_metadata_has_all_batch_fields(db, done_event) -> None:
                      extraction_done=done_event, pdf_path="/doc.pdf",
                      corpus="mycorpus", target_model="model-ctx")
     meta = json.loads(db.read_ready_chunks("h1")[0]["metadata_json"])
-    assert _REQUIRED_META - set(meta.keys()) == set()
-    # nexus-w94eo: title/source_author must be ABSENT, not present as "".
-    # See test_streaming_metadata_omits_title_and_source_author for the
-    # dedicated regression test and the full rationale.
-    assert "title" not in meta
-    assert "source_author" not in meta
+    assert set(meta) == _REQUIRED_META | {"_positions"}
+    assert meta["_positions"]["chunk_end_char"] == 10 and meta["_positions"]["page_number"] == 1
 
 
 def test_streaming_metadata_omits_title_and_source_author(db, done_event) -> None:
@@ -1896,87 +1617,10 @@ def test_streaming_metadata_omits_title_and_source_author(db, done_event) -> Non
     )
 
 
-@pytest.mark.parametrize("get_exc,upd_exc,expected", [
-    pytest.param(Exception("connection reset"), None, False, id="query_failure"),
-    pytest.param(None, Exception("quota exceeded"), False, id="update_failure"),
-    pytest.param(None, None, True, id="success"),
-])
-def test_update_chunk_metadata(get_exc, upd_exc, expected) -> None:
-    t3, col = MagicMock(), MagicMock()
-    if get_exc:
-        col.get.side_effect = get_exc
-    else:
-        col.get.return_value = {"ids": ["id1"], "metadatas": [{"chunk_type": "text"}]}
-    if upd_exc:
-        t3.update_chunks.side_effect = upd_exc
-
-    def _tag(m: dict) -> bool:
-        m["chunk_type"] = "table_page"
-        return True
-
-    assert _update_chunk_metadata(t3, col, "docs__test", "abc123", _tag, doc_id="") is expected
 
 
-def test_update_chunk_metadata_writes_only_the_changed_keys() -> None:
-    """nexus-vhyar: the post-pass sends the keys update_fn changed, not the row
-    it read. Echoing the read-back row re-asserted stale values over any write
-    that committed between the read and this write (the engine merges)."""
-    t3, col = MagicMock(), MagicMock()
-    col.get.return_value = {
-        "ids": ["id1", "id2"],
-        "metadatas": [
-            {"chunk_type": "text", "title": "stale", "page_number": 3},
-            {"chunk_type": "table_page", "title": "stale", "page_number": 3},
-        ],
-    }
-
-    def _tag(m: dict) -> bool:
-        if m["chunk_type"] == "table_page":
-            return False
-        m["chunk_type"] = "table_page"
-        return True
-
-    assert _update_chunk_metadata(t3, col, "docs__test", "abc123", _tag, doc_id="") is True
-    t3.update_chunks.assert_called_once_with("docs__test", ["id1"], [{"chunk_type": "table_page"}])
 
 
-# nexus-tbkk1: test_prune_stale_chunks (a parametrized unit test of the
-# query/delete pagination mechanics of nexus.pipeline_stages.
-# _prune_stale_chunks) DELETED along with the function it tested — see
-# test_stale_chunk_pruning_post_pass_removed_as_dead_code above for the
-# full rationale and the tests that still cover the surviving, unrelated
-# machinery (indexer_utils.orphaned_chashes union guard, its now-deleted
-# prune_orphan_candidates wrapper's fate; mcp_infra._sweep_superseded_
-# vectors real protection).
-
-
-def test_pipeline_data_kept_on_enrichment_failure(db) -> None:
-    t3, col = MagicMock(), MagicMock()
-    col.get.return_value = {"ids": ["id1"], "metadatas": [{"content_hash": "h1"}]}
-    t3.update_chunks.side_effect = Exception("quota exceeded")
-    ro = MagicMock(spec=ExtractionResult)
-    ro.text, ro.metadata, ro.title = "some text", {"page_count": 1, "pdf_title": "Test"}, "Test"
-    assert _enrich_metadata_from_extraction("h1", ro, Path("/test.pdf"), t3, col, "docs__test", doc_id="") is False
-
-
-def test_enrich_metadata_title_override_wins_over_resolve_pdf_title() -> None:
-    """nexus-1uov1: the streaming path's post-pass is the OTHER site that
-    stamps every chunk's title (per-chunk metadata is discarded during
-    flush, so title is corrected here after upload) — title_override
-    must win here exactly as it does in doc_indexer._pdf_chunks's
-    small-document path."""
-    t3, col = MagicMock(), MagicMock()
-    col.get.return_value = {"ids": ["id1"], "metadatas": [{"content_hash": "h1"}]}
-    ro = MagicMock(spec=ExtractionResult)
-    ro.text, ro.metadata = "some text", {"page_count": 1, "pdf_title": "Fragment Only"}
-    override = "Self-Aware Vector Embeddings for Retrieval-Augmented Generation"
-
-    assert _enrich_metadata_from_extraction(
-        "h1", ro, Path("/test.pdf"), t3, col, "docs__test", title_override=override, doc_id="",
-    ) is True
-
-    written_metas = t3.update_chunks.call_args[0][2]
-    assert all(m["title"] == override for m in written_metas)
 
 
 @pytest.mark.t2_tenant

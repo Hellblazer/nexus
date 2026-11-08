@@ -63,18 +63,18 @@ def _line_chunks(file_path: Path, content_hash: str, target_model: str, now_iso:
     """One chunk per non-blank line, shaped like ``_markdown_chunks``' output."""
     from nexus.metadata_schema import make_chunk_metadata
 
-    prepared: list[tuple[str, str, dict]] = []
+    prepared: list[tuple[str, str, dict, dict]] = []
     pos = 0
     for line in file_path.read_text().splitlines():
         if not line.strip():
             continue
         h = _sha(line)
         meta = make_chunk_metadata(
-            content_type="markdown", chunk_text_hash=h, content_hash=content_hash,
-            chunk_start_char=pos, chunk_end_char=pos + len(line), indexed_at=now_iso,
-            embedding_model=target_model, title="z0o2p13", tags="markdown", category="prose")
+            content_type="markdown", chunk_text_hash=h,
+            embedding_model=target_model, )
+        # The span rides beside the row (RDR-236 Phase 4 Step 1): the chunk row holds the CHUNK keys only.
+        prepared.append((h, line, meta, {"chunk_start_char": pos, "chunk_end_char": pos + len(line)}))
         pos += len(line) + 1
-        prepared.append((h, line, meta))
     return prepared
 
 
@@ -472,15 +472,15 @@ def _stored_metadata(collection: str, chashes: list[str], *, non_live: bool = Fa
 
 
 @pytest.mark.parametrize("re_embed", [False, True], ids=["force", "force-re-embed"])
-def test_forced_reindex_keeps_enrichment_and_clears_the_owned_keys_the_document_dropped(
+def test_forced_reindex_keeps_other_writers_keys_and_names_no_delete_key(
     tmp_path, re_embed,
 ) -> None:
-    """The combined routes REPLACE stored chunk metadata; the old upsert MERGED and preserved the
-    ``bib_*`` enrichment (``nx enrich`` sets it), clearing only the keys the writer owns and
-    dropped (``rewrite_delete_keys``). ``_index_document`` sends the merge mode, so a forced
-    re-index keeps ``bib_year`` and clears a stale owned key. With ``--re-embed`` the same holds
-    through the engine's insert branch, and every chunk is really re-embedded through the real
-    writer (``force_re_embed`` reaches the engine)."""
+    """The combined routes REPLACE stored chunk metadata; the old upsert MERGED. ``_index_document`` sends
+    the merge mode, so a forced re-index keeps a key another writer set (``bib_year``, which a pre-Step-1
+    ``nx enrich`` left on the row). RDR-236 Phase 4 Step 1: the rows are the CHUNK keys, both always sent, so
+    the write names no key to delete (the retired keys a stored row still holds are the Step 3 sweep's). With
+    ``--re-embed`` the same holds through the engine's insert branch, and every chunk is really re-embedded
+    through the real writer (``force_re_embed`` reaches the engine)."""
     from nexus.db.http_vector_client import per_collection_chunk_cap
 
     cap = per_collection_chunk_cap(_COLLECTION)
@@ -490,25 +490,20 @@ def test_forced_reindex_keeps_enrichment_and_clears_the_owned_keys_the_document_
     every = [_sha(x) for x in lines]
     _index(path, marker)
 
-    # Another writer's enrichment, plus a stale value of a key the indexer owns and no longer sends.
-    hvc.HttpVectorClient().update_chunks(
-        _COLLECTION, every, [{"bib_year": 2020, "quality_gate_overridden": True} for _ in every])
+    # Another writer's key on every row.
+    hvc.HttpVectorClient().update_chunks(_COLLECTION, every, [{"bib_year": 2020} for _ in every])
     before = _stored_metadata(_COLLECTION, every)
-    assert all(m["bib_year"] == 2020 and m["quality_gate_overridden"] is True for m in before.values())
+    assert all(m["bib_year"] == 2020 for m in before.values())
 
     with _traffic() as t:
         _index(path, marker, force=True, force_re_embed=re_embed)
 
     after = _stored_metadata(_COLLECTION, every)
     assert all(m.get("bib_year") == 2020 for m in after.values()), "enrichment survived"
-    assert all("quality_gate_overridden" not in m for m in after.values()), \
-        "an owned key the write dropped is cleared"
-    assert all(m["content_hash"] == before[c]["content_hash"] for c, m in after.items())
     sent = [b for p, b, _ in t.data() if "chunks" in b]
     assert sent, "non-vacuity: chunk-carrying requests were made"
     assert all(b["metadata_merge"] is True for b in sent)
-    assert all("quality_gate_overridden" in b["metadata_delete_keys"] for b in sent)
-    assert all("bib_year" not in b["metadata_delete_keys"] for b in sent)
+    assert all(not b.get("metadata_delete_keys") for b in sent)
     if re_embed:
         assert t.total("embed_embedded") == len(every), "--force --re-embed re-embeds every chunk"
         assert all(b["force_re_embed"] is True for b in sent)
@@ -539,11 +534,11 @@ def test_per_chunk_metadata_is_what_the_old_write_path_stored(tmp_path) -> None:
     # metadata dict the client sent, merged into nothing), into a control collection. They carry
     # no owner row, which the write routes refuse from RDR-223 Phase 3, so they go in with
     # substrate SQL.
-    metas = [dict(m) for _, _, m in prepared]
-    # Non-vacuity, kept from the old path: the writer drops owned keys from its dict, so the
-    # delete_keys the old route call named were non-empty. With a first write into an empty
-    # collection they stripped nothing, which is why plain SQL is equivalent.
-    assert rewrite_delete_keys(metas)
+    metas = [dict(m) for _, _, m, _p in prepared]
+    # RDR-236 Phase 4 Step 1: every row carries both CHUNK keys, so the old route call named no key
+    # to delete (with a first write into an empty collection they stripped nothing anyway, which is why
+    # plain SQL is equivalent).
+    assert rewrite_delete_keys(metas) == []
     seed_chunks_direct(
         _CONTROL_COLLECTION, [p[0] for p in prepared], [p[1] for p in prepared],
         metas, embed=True)
@@ -551,9 +546,7 @@ def test_per_chunk_metadata_is_what_the_old_write_path_stored(tmp_path) -> None:
     new = _stored_metadata(_COLLECTION, every)
     # The old path stored the chunks with no owner row, which live(c) hides.
     old = _stored_metadata(_CONTROL_COLLECTION, every, non_live=True)
-    volatile = {"indexed_at", "content_hash"}
     for chash in every:
-        assert {k: v for k, v in new[chash].items() if k not in volatile} == \
-            {k: v for k, v in old[chash].items() if k not in volatile}, chash
-        assert new[chash]["indexed_at"], "the write time is stored"
+        assert new[chash] == old[chash], chash
+        assert set(new[chash]) == {"chunk_text_hash", "embedding_model"}
         assert new[chash]["chunk_text_hash"] == chash

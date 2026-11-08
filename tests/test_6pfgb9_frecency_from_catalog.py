@@ -407,6 +407,6 @@ def test_frecency_only_survives_a_catalog_that_cannot_write(tmp_path: Path) -> N
         def update(self, *a, **k):
             raise RuntimeError("catalog down")
 
-    db = _frecency_only(tmp_path, _Down())
+    db = _frecency_only(tmp_path, _Down())  # does not raise
 
-    db.update_chunks.assert_called()  # the row write is unaffected
+    db.update_chunks.assert_not_called()  # no chunk row is written since RDR-236 Phase 4 Step 1

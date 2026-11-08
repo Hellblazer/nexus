@@ -2990,186 +2990,31 @@ def _write_frecency_meta(
 
 
 def _run_index_frecency_only(repo: Path, registry: "object") -> None:
-    """Update frecency_score metadata on all indexed chunks without re-embedding.
+    """Refresh each indexed document's frecency without re-indexing or re-embedding.
 
-    Handles the code__, docs__, and rdr__ collections (rdr added by
-    nexus-e0w01 — it was previously a total omission from this mode).
-
-    Routing (nexus-enehl, RDR-152):
-    - Service mode (NX_STORAGE_BACKEND_VECTORS=service): obtains an
-      :class:`HttpVectorClient` and routes the metadata update through
-      the Java service's ``/v1/vectors/update-metadata`` endpoint so the
-      frecency_score lands in the service's Chroma — the one that
-      service-mode search reads.  No credential check is needed; the
-      service handles its own Chroma/Voyage.  This replaces the
-      nexus-67ljl early-return skip-guard that previously prevented
-      split-brain writes to daemon-Chroma.
-    - Local mode: obtains a :class:`T3Database` via ``make_t3()`` and
-      updates directly (the Chroma-era writability probe that used to
-      precede this was deleted at nexus-7a8rn).
-      Non-service cloud mode is retired (nexus-sghyo) and raises loud.
+    A document's frecency is a fact about the document, so it lives on its catalog entry
+    (``meta["frecency_score"]``, RDR-236 Phase 1, nexus-6pfgb.9): one write per document, not per
+    collection or per chunk. Since RDR-236 Phase 4 Step 1 (nexus-6pfgb.65) the chunk rows carry no
+    ``frecency_score``, so this mode no longer touches T3: it reads the repo's registration, computes the
+    scores, and writes them to the catalog. A file with no catalog document has nowhere to put a score
+    and is skipped; the next full run registers it.
     """
     from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     info = registry.get(repo)
     if info is None:
         return
 
-    # RDR-103 Phase 3a: registry value preserves the legacy name when the
-    # repo was added before the migration; fallback queries the catalog
-    # for a conformant name (Phase 5 drops the legacy branch entirely).
-    code_collection = info.get("code_collection", info["collection"])
-    docs_collection = info.get("docs_collection") or _repo_collection_or_legacy(repo, "docs")
-    # nexus-e0w01: rdr__ was a total omission here — RDR chunks' frecency_score
-    # was never refreshed by --frecency-only, only by a full index pass. Same
-    # resolution chain the full pass uses; the not-yet-written case is handled
-    # below by the existing NotFound skip (no zombie mint).
-    rdr_collection = info.get("rdr_collection") or _repo_collection_or_legacy(repo, "rdr")
-
-    from nexus.db.http_vector_client import is_vector_service_mode as _is_svc  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
-    if _is_svc():
-        # nexus-enehl: service mode — route frecency metadata updates through
-        # the Java service's /v1/vectors/update-metadata endpoint.
-        # No credential check needed: the service handles its own Chroma/Voyage.
-        from nexus.db.http_vector_client import get_http_vector_client as _get_svc  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
-        db = _get_svc()
-        _log.info(
-            "frecency_service_mode",
-            repo=str(repo),
-            reason="NX_STORAGE_BACKEND_VECTORS=service; routing frecency updates "
-                   "through Java service /v1/vectors/update-metadata endpoint.",
-        )
-    else:
-        from nexus.config import is_local_mode  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        if not is_local_mode():
-            # nexus-sghyo: non-service cloud-mode ingestion was retired —
-            # the client no longer embeds via Voyage.
-            raise CredentialsMissingError(
-                "non-service cloud-mode ingestion was retired: the client "
-                "no longer embeds via Voyage. Set NX_STORAGE_BACKEND_"
-                "VECTORS=service (the default) or unset it."
-            )
-        db = make_t3()
-
     frecency_map = batch_frecency(repo)
 
-    # nexus-f4z9: pre-resolve doc_ids once for all files so the chunk
-    # lookup can key on ``doc_id`` when the catalog has the entry.
-    # Files predating the catalog backfill (no doc_id) are skipped by
-    # the per-file loop below — nexus-afudo (2026-08-05) deleted the
-    # legacy source_path-keyed filter they used to fall through to.
+    # Pre-resolve the catalog doc_id of every file once; a file predating the catalog backfill has none
+    # (nexus-afudo deleted the source_path-keyed lookup it used to fall back to).
     file_to_doc_id = _build_frecency_doc_id_map(repo, list(frecency_map.keys()))
 
-    # RDR-236 Phase 1 (nexus-6pfgb.9): the catalog is where a document's frecency lives; one
-    # write per document, not per collection or chunk. The per-chunk row write below stays until
-    # nexus-6pfgb.27 retires it: clients on an older release still read the score from the row.
     _write_frecency_meta(
         {file_to_doc_id[f]: s for f, s in frecency_map.items() if f in file_to_doc_id},
         _frecency_computed_at(),
     )
-
-    # Update frecency in all three content-type collections (nexus-e0w01).
-    collection_names = [code_collection]
-    if docs_collection:
-        collection_names.append(docs_collection)
-    if rdr_collection:
-        collection_names.append(rdr_collection)
-
-    # nexus-ks40: frecency_only is a read-update flow; if the
-    # collection has not yet been written, skip rather than mint an
-    # empty zombie via get_or_create_collection.
-    from nexus.errors import collection_not_found_errors  # noqa: PLC0415 — deferred import (RDR-155 P4b P0c: substrate-neutral missing-collection contract)
-
-    # nexus-7zcv (RDR-108 Phase 4 review D-H4): the legacy
-    # ``where={"doc_id": <id>}`` lookup matches nothing for Phase-3
-    # chunks (the doc_id metadata field is gone). Use the catalog
-    # document_chunks manifest to map doc_id -> chashes, then fetch
-    # by ``chash[:32]`` IDs. Falls back to the legacy where-filter
-    # when the catalog is unavailable (correct only for pre-Phase-3
-    # chunks).
-    _cat = None
-    try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        _cat = make_catalog_reader()
-    except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-        _log.debug("frecency_only_catalog_lookup_failed", exc_info=True)
-
-    for collection_name in collection_names:
-        try:
-            col = db.get_collection(collection_name)
-            if col is None:
-                continue
-        except collection_not_found_errors():
-            continue
-        for file, score in frecency_map.items():
-            doc_id = file_to_doc_id.get(file, "")
-
-            existing: dict | None = None
-            if _cat is not None and doc_id:
-                # Manifest-based path: resolve chashes for this doc.
-                try:
-                    manifest = _cat.get_manifest(doc_id)
-                except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
-                    manifest = []
-                natural_ids = [r.chash for r in manifest if r.chash]  # RDR-180: full digest
-                if natural_ids:
-                    try:
-                        present = col.get(ids=natural_ids, include=[], sensitivity="include")
-                    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
-                        present = None
-                    if present and present.get("ids"):
-                        existing = present
-
-            if existing is None:
-                if not doc_id:
-                    # nexus-afudo (2026-08-05): the legacy source_path
-                    # where-filter this used to fall back to is DELETED
-                    # dead code. RDR-102 D2 (2026-05-02) removed
-                    # source_path from make_chunk_metadata for every
-                    # writer; a live-store probe (field>=! existence
-                    # test) found zero source_path rows across 13
-                    # representative collections (~115k chunks,
-                    # including this run's own code__/docs__/rdr__
-                    # collections). A file with no catalog doc_id has no
-                    # frecency-refresh path left — skip it; the next run
-                    # retries once the catalog hook backfills a doc_id.
-                    continue
-                # doc_id-keyed where-filter. Returns nothing for
-                # post-Phase-3 chunks whose manifest resolution above
-                # failed or found no chashes; still worth trying — a
-                # transient manifest-read failure with an otherwise
-                # healthy doc_id should not skip the file outright.
-                where = {"doc_id": doc_id}
-                try:
-                    existing = _paginated_get(
-                        col, include=[], where=where,
-                    )
-                except Exception:  # noqa: BLE001 — nexus-ou4tb: isolate this FILE, not the run
-                    # The client fails loud now (a degraded service no longer
-                    # reads as an empty collection), but one file's failed
-                    # staleness lookup must not abort the whole repo's
-                    # frecency pass. Skip this file; the next run retries it.
-                    _log.warning(
-                        "frecency_staleness_lookup_failed_skipping_file",
-                        file=str(file), collection=getattr(col, "name", "?"),
-                        exc_info=True,
-                    )
-                    continue
-
-            if not existing["ids"]:
-                continue  # not yet indexed — needs full nx index repo
-
-            # nexus-vhyar: send only the key this pass owns. The engine
-            # merges, so the rest of the row is untouched; echoing back the
-            # metadata read above ({**m, ...}) re-asserted every key as it
-            # stood at read time over any write that committed in between
-            # (the read-modify-write race nexus-w94eo removed from the PDF
-            # post-pass).
-            updated_metadatas = [
-                {"frecency_score": float(score)} for _ in existing["ids"]
-            ]
-            db.update_chunks(collection=collection_name, ids=existing["ids"], metadatas=updated_metadatas)
 
 
 # ── Backward-compatible per-file wrappers ────────────────────────────────────
@@ -3812,12 +3657,12 @@ def _index_pdf_file(
     metadatas_raw = [p[2] for p in prepared]
     positions_raw = prepared_positions(prepared)
 
-    # Build embed_texts with context prefix BEFORE augmentation overwrites 'title'.
-    # PDF title is now stored under `title` (the source_title→title
-    # collapse). Read from metadatas_raw and use it in the embed prefix.
+    # Embed-only context prefix: the document's title (``_pdf_chunks`` resolves it into the extraction
+    # stats: a chunk row carries none since RDR-236 Phase 4 Step 1) and each chunk's page, from its own
+    # position dict. The text is what it was when the title rode on every row.
+    title = str(_extraction_stats.get("title", ""))
     embed_texts_pdf: list[str] = []
-    for doc, m, raw_pos in zip(documents, metadatas_raw, positions_raw):
-        title = m.get("title", "")
+    for doc, raw_pos in zip(documents, positions_raw):
         page_number = raw_pos.get("page_number", 0)
         prefix_parts: list[str] = []
         if title:
@@ -3838,50 +3683,22 @@ def _index_pdf_file(
         catalog_doc_id, file, collection_name, extraction_record(_extraction_stats),
     )
 
-    # Augment metadata with repo-indexer fields.
-    # Filter empty/zero values from _pdf_chunks to stay under ChromaDB's
-    # 32-key metadata limit. PDF chunks produce ~31 raw keys; augmentation
-    # adds ~12 more. Without filtering, the _write_batch trimmer silently
-    # drops keys by insertion order, losing git metadata.
+    # The chunk rows are the CHUNK keys only (RDR-236 Phase 4 Step 1): the document's title, tags,
+    # category, agent, ttl and frecency are the catalog document's, and no legacy ``doc_id`` rides on a
+    # row (its census reader, nexus-6pfgb.39, is closed). The manifest rows were built from the position
+    # dicts, and a chunk's zero ``chunk_start_char`` reached them as "not recorded" (null) because the
+    # position dict is filtered by the same empty-value rule the row used to be: RDR-236 Phase 4 Step 0
+    # keeps the manifest rows byte-identical, so the filter stays. That null is a latent defect of this
+    # path (manifest_span would take the 0 as a real start beside a recorded end); fixing it is a
+    # separate, visible change (nexus-6pfgb.65 note).
     _EMPTY_VALUES = ("", 0, False, None)
-    # Keys where empty/zero IS meaningful (TTL guard, required fields)
+    # Keys where empty/zero IS meaningful.
     _KEEP_ALWAYS = {"ttl_days", "chunk_index", "page_number"}
-    metadatas: list[dict] = []
-    positions: list[dict] = []
-    for m, raw_pos in zip(metadatas_raw, positions_raw):
-        # Drop empty raw metadata values
-        cleaned = {
-            k: v for k, v in m.items()
-            if v not in _EMPTY_VALUES or k in _KEEP_ALWAYS
-        }
-        # The manifest rows were built from this filtered row, so a chunk's zero ``chunk_start_char``
-        # reached them as "not recorded" (null) and its manifest ``char_start`` was null, not 0. RDR-236
-        # Phase 4 Step 0 keeps the manifest rows byte-identical, so the position dict is filtered by the
-        # same rule. That null is a latent defect of this path (manifest_span would take the 0 as a real
-        # start beside a recorded end); fixing it is a separate, visible change (nexus-6pfgb.65 note).
-        positions.append({
-            k: v for k, v in raw_pos.items()
-            if v not in _EMPTY_VALUES or k in _KEEP_ALWAYS
-        })
-        augmented = {
-            **cleaned,
-            "title": f"{file.relative_to(repo)}:page-{raw_pos.get('page_number', 0)}",
-            "tags": "pdf",
-            # RECORDED, not fixed (nexus-6pfgb.8): the repo PDF path says category "prose" where
-            # ``nx index pdf`` (doc_indexer, tags="pdf") says "paper". The catalog meta stamp
-            # (``nexus.catalog.indexed_meta.document_register_meta``) mirrors each path as written, so the
-            # two stay as they are on the document too; a change here changes that mirror and its pin.
-            "category": "prose",
-            "source_agent": "nexus-indexer",
-            "ttl_days": 0,
-            "frecency_score": float(score),
-            "doc_id": catalog_doc_id,
-            # RDR-236 Phase 0 (nexus-qyx35): no flat ``git_*`` keys here. They are LEGACY
-            # (RDR-101 Phase 5c), nothing reads them from a chunk row, and this dict never
-            # passed ``normalize``, so they reached the engine. ``doc_id`` stays until
-            # nexus-6pfgb.39: the engine's manifest-less census forward join reads it.
-        }
-        metadatas.append(augmented)
+    metadatas: list[dict] = [dict(m) for m in metadatas_raw]
+    positions: list[dict] = [
+        {k: v for k, v in raw_pos.items() if v not in _EMPTY_VALUES or k in _KEEP_ALWAYS}
+        for raw_pos in positions_raw
+    ]
 
     with _stage("embed"):
         if embed_fn is not None:
@@ -3917,6 +3734,9 @@ def _index_pdf_file(
             "metadatas": metadatas,
             "positions": positions,
             "catalog_doc_id": catalog_doc_id,
+            # The file's content hash, read by the flush's fence and completion stamp (a chunk row
+            # carries none since RDR-236 Phase 4 Step 1).
+            "content_hash": content_hash_hex,
             "collection": collection_name,
             "hooks": hooks,
         },
@@ -5283,16 +5103,16 @@ def _aggregate_flush_positions(file_contexts: list) -> list[dict]:
     """The position dicts of a flush's chunks, parallel to :func:`_aggregate_flush_metas`, each with its
     file-local ``chunk_index`` (RDR-236 Phase 4 Step 0, nexus-6pfgb.65).
 
-    A staged file's context carries the chunker's ``positions``; a context without them (a test double,
-    a producer that predates the split) has them read off its metadata rows (STEP1-DELETE).
+    A staged file's context carries the chunker's ``positions``, index-aligned with its ``metadatas``
+    (a row carries none since RDR-236 Phase 4 Step 1, so there is nowhere else to read them).
     """
-    from nexus.metadata_schema import aligned_positions  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
-
     agg: list[dict] = []
     for _path, _c in file_contexts:
         if not isinstance(_c, dict):
             continue
-        for _j, _p in enumerate(aligned_positions(_c["metadatas"], _c.get("positions"))):
+        if len(_c["positions"]) != len(_c["metadatas"]):
+            raise ValueError(f"{len(_c['positions'])} position dicts for {len(_c['metadatas'])} chunk rows")
+        for _j, _p in enumerate(_c["positions"]):
             agg.append({**_p, "chunk_index": _j})
     return agg
 
@@ -5487,11 +5307,11 @@ def _build_combined_write_payload(
 
     full_ids = {d for d, _ in full_docs}
     complete_map = {
-        _c["catalog_doc_id"]: _c["metadatas"][0].get("content_hash", "")
+        _c["catalog_doc_id"]: _c["content_hash"]
         for _path, _c in file_contexts
         if isinstance(_c, dict) and _c.get("catalog_doc_id") in full_ids
         and _c.get("metadatas")
-        and _c["metadatas"][0].get("content_hash")
+        and _c.get("content_hash")
     }
     return chunks_payload, full_docs, complete_map, orphan_ids
 
@@ -6515,7 +6335,7 @@ def _run_index(
         )
 
     # RDR-236 Phase 1 (nexus-6pfgb.9): each document's frecency goes on its catalog meta beside
-    # the run's computed_at (the chunk rows below keep it until nexus-6pfgb.27). Paged batches,
+    # the run's computed_at (no chunk row carries it since RDR-236 Phase 4 Step 1). Paged batches,
     # not a round trip per file; best effort, so a catalog that cannot take it never stops indexing.
     if file_to_doc_id:
         _write_frecency_meta(
@@ -7082,8 +6902,7 @@ def _run_index(
                 _cdid = _c.get("catalog_doc_id")
                 if not _cdid:
                     continue
-                _metas_c = _c.get("metadatas")
-                _chash = _metas_c[0].get("content_hash", "") if _metas_c else ""
+                _chash = _c.get("content_hash", "") if _c.get("metadatas") else ""
                 if _chash:
                     pairs.append((_cdid, _chash))
             if not pairs:
@@ -7151,7 +6970,7 @@ def _run_index(
                 _cdid = _c["catalog_doc_id"]
                 if not _cdid:
                     continue
-                _chash = _c["metadatas"][0].get("content_hash", "") if _c["metadatas"] else ""
+                _chash = _c.get("content_hash", "") if _c["metadatas"] else ""
                 if _chash:
                     _manifest_complete[_cdid] = _chash
             _t0 = time.monotonic()

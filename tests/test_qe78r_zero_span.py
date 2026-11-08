@@ -37,11 +37,12 @@ def _span(row: dict) -> tuple:
 
 
 def _factory_meta(**kw) -> dict:
-    """A chunk's metadata exactly as an indexer writes it (the factory's defaults and all)."""
-    return make_chunk_metadata(
-        content_type="markdown", chunk_text_hash=X, content_hash=X,
-        indexed_at="2026-11-02T00:00:00+00:00", embedding_model="m", **kw,
-    )
+    """A chunk's metadata as a stored legacy row carries it: the chash and the position fields the chunker's
+    ``position_fields`` produces (with its defaults and all). A chunk row written since RDR-236 Phase 4 Step 1
+    carries no position key; the manifest builder reads the chunker's own dict."""
+    from nexus.metadata_schema import position_fields
+
+    return {"chunk_text_hash": X, **position_fields(**kw)}
 
 
 # ── the two row producers ────────────────────────────────────────────────────

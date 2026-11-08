@@ -159,15 +159,7 @@ def test_index_pdf_file_passes_chunk_chars(tmp_path) -> None:
     from nexus.indexer import _index_pdf_file
     pdf = tmp_path / "sample.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")
-    fake_chunk = ("chunk-id-001", "Some text", {
-        "source_path": str(pdf), "source_title": "Test PDF", "source_author": "",
-        "source_date": "", "corpus": "docs__test", "store_type": "pdf",
-        "page_count": 1, "page_number": 1, "section_title": "", "format": "",
-        "extraction_method": "", "chunk_index": 0, "chunk_count": 1,
-        "chunk_start_char": 0, "chunk_end_char": 10, "embedding_model": "model-ctx",
-        "indexed_at": "2026-01-01", "content_hash": "abc123", "pdf_subject": "",
-        "pdf_keywords": "", "is_image_pdf": False,
-    })
+    fake_chunk = ("chunk-id-001", "Some text", {"chunk_text_hash": "chunk-id-001", "embedding_model": "model-ctx"}, {"page_number": 1})
     # nexus-sghyo (2026-08-06): _index_pdf_file's embed_fn=None branch is
     # unreachable ONLY via the _run_index orchestrator — called directly
     # here, it needs an explicit embed_fn (the deleted _embed_with_fallback

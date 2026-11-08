@@ -1,30 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Single source of truth for T3 record metadata (nexus-40t).
+"""Single source of truth for T3 chunk-row metadata (nexus-40t).
 
-Every write into ChromaDB funnels through :func:`normalize` so the key
-set stays bounded and Chroma Cloud's 32-key ``MAX_RECORD_METADATA_KEYS``
-quota is never breached. Every ``upsert``/``update`` then calls
-:func:`validate` as a last-line guard that refuses to silently lose
-fields.
+A chunk row carries the CHUNK keys of ``tables/chunk-metadata-keys.toml`` (``chunk_text_hash``,
+``embedding_model``) and nothing else (RDR-236 Phase 4 Step 1, nexus-6pfgb.65). Every write the client
+builds funnels through :func:`make_chunk_metadata` / :func:`normalize`, which drop any other key, and
+:func:`validate` is the strict check that refuses one.
 
-Design:
-  * :data:`ALLOWED_TOP_LEVEL` — the canonical schema. Keys are either
-    read by a ``where=`` filter, consumed by scoring, or displayed to
-    the user.
-  * **Cargo keys** (``pdf_subject``, ``ast_chunked``, ``session_id``,
-    etc.) are dropped by :func:`normalize` — they were written but
-    never read.
-  * **Consolidated keys**: the four ``git_*`` fields are packed into a
-    single ``git_meta`` JSON string so that provenance is preserved at
-    the cost of one metadata slot instead of four.
+A document's own facts (title, tags, bibliography, provenance, lifecycle) live on its catalog entry; a
+chunk's position in a document (spans, page, section labels) lives on the catalog manifest row. A chunker
+returns those position fields beside the chunk row (:func:`position_fields`), and the manifest builder
+reads them from there.
 
 The function is **idempotent**: re-running it on output is a no-op.
-Post-pass enrichers rely on this so they can merge additions with an
-existing row without accreting keys.
 
-Also see ``src/nexus/db/limits.py`` for the upstream
-quota that this module keeps us under.
+Also see ``src/nexus/db/limits.py`` for the upstream quota that this module keeps us under.
 """
 from __future__ import annotations
 
@@ -33,6 +23,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import structlog
+
+from nexus.tables import chunk_metadata_keys as _key_table
 
 _log = structlog.get_logger(__name__)
 
@@ -56,122 +48,14 @@ __all__ = [
 
 # ── Schema ──────────────────────────────────────────────────────────────────
 
-#: Top-level keys allowed on any T3 record. Populated by auditing every
-#: ``where=`` filter, every ``meta.get(...)`` / ``metadata[...]`` read,
-#: and every display formatter in the codebase.
-ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
-    # Identity (2) — RDR-102 D2 dropped ``source_path`` (catalog tumbler
-    # is the canonical reference). RDR-108 Phase 3 (nexus-bdag) dropped
-    # ``doc_id``, ``chunk_index``, ``chunk_count``: the catalog
-    # ``document_chunks`` manifest table is the authoritative
-    # document-to-chunk map and chunk-level mirrors of those fields
-    # consume metadata budget for no payload. Pre-Phase-3 chunks keep
-    # the fields in their stored metadata for legacy reads; Phase 4
-    # rewrites read paths to consult the manifest directly.
-    "content_hash",
-    "chunk_text_hash",
-    # Spans (5)
-    "chunk_start_char",
-    "chunk_end_char",
-    "line_start",
-    "line_end",
-    # ``page_number``, ``section_title`` and ``section_type`` below are labels of a chunk's
-    # POSITION in one document, so since nexus-tko2w (RDR-108) they also ride the catalog
-    # manifest row (``catalog_document_chunks``, per (doc_id, position)). The copy on the
-    # shared T3 chunk row is the last writer's; it is still written as the fallback for a
-    # manifest row that predates the columns, and a reader that needs the label of a chunk in
-    # a given document reads the manifest.
-    "page_number",
-    # Display / user-facing (6) — ``title`` is intentionally KEPT
-    # per the rdr-101-phase4-reader-audit + 2026-05-03 re-verification:
-    # ``find_ids_by_title`` (db/t3.py:1256) is load-bearing for
-    # ``nx store delete --title`` and the MCP ``store_get`` title-
-    # fallback path. Dropping it would silently break title-keyed
-    # retrieval for MCP-promoted notes in ``knowledge__knowledge``.
-    "title",
-    "source_author",
-    "section_title",
-    "section_type",
-    "tags",
-    "category",
-    # Routing (2) — RDR-101 Phase 5c (nexus-o6aa.13) dropped
-    # ``store_type`` (legacy duplicate of ``content_type``; only
-    # fallback reader at db/t3.py:122 remains for legacy chunks)
-    # and ``corpus`` (zero non-write readers; catalog Document
-    # carries the corpus binding at the document level).
-    "content_type",
-    "embedding_model",
-    # Bibliographic (filtered via where=bib_year; displayed in results) (5).
-    # ``bib_semantic_scholar_id`` is the load-bearing "this title was
-    # enriched" marker (commands/enrich.py uses presence to skip
-    # already-enriched titles; catalog/link_generator.py uses it for
-    # citation links). Dropped together with the rest when all-empty.
-    "bib_year",
-    "bib_authors",
-    "bib_venue",
-    "bib_citation_count",
-    "bib_semantic_scholar_id",
-    # Lifecycle / scoring (5) — ``expires_at`` removed; expiry is
-    # derived from ``indexed_at + ttl_days`` Python-side. ``ttl_days=0``
-    # is the "permanent" sentinel THIS FIELD's OWN write default still
-    # uses (T3Database.put / make_chunk_metadata,
-    # unchanged — RDR-194 D5 / nexus-tk070.p6b scopes the None-sentinel
-    # flip to the SQL nexus.frecency table and this field's own READ path
-    # (T3Database.expire / HttpVectorClient.expire), not to this write
-    # default; see those methods' docstrings). is_expired() below already
-    # treats 0/None/absent identically, so 0 here is not a bug, just an
-    # unconverted local convention for this specific unstructured-JSON
-    # field, distinct from the SQL column family's canonical NULL
-    # spelling.
-    "indexed_at",
-    "ttl_days",
-    "frecency_score",
-    "source_agent",
-    # Retired writer (nexus-6pfgb.4): no factory call stamps it. It stays accepted so an
-    # old row echoed back by a read-modify-write (commands/enrich.py) still validates;
-    # the key-table retirement (6pfgb.27) removes it.
-    "session_id",
-    # RDR-101 Phase 5c dropped ``git_meta`` (consolidated git
-    # provenance JSON blob): zero non-self-referential readers in
-    # src/. Catalog Document carries source git provenance at the
-    # document level.
-    # Provenance (2) — RDR-139 Layer D. How the chunk's text was sourced:
-    # ``file`` (on-disk file, the default) | ``dt_content`` | ``dt_ocr`` |
-    # ``dt_transcribe`` (DEVONthink-extracted, for non-file-backed records).
-    # ``normalize`` drops the ``file`` default (absent == file) so only
-    # DT-sourced chunks spend the extra key — file chunks stay under the cap.
-    "extraction_source",
-    # nexus-1oguj: which PDF-extraction BACKEND actually produced this
-    # chunk's text (``mineru`` | ``pymupdf``, or the honest degraded-aggregate
-    # ``mineru+degraded`` when any page settled below the first rung of RDR-237's
-    # per-page ladder, rung 3 included; documents indexed before RDR-237 can carry
-    # the values of the extractor it removed and the legacy ``pymupdf_normalized``,
-    # which stay readable and which nothing writes now). Load-bearing for retroactively scoping extractor
-    # regressions (e.g. nexus-gtltb's mineru-corruption blast radius) —
-    # previously produced at extraction time and asserted in tests but
-    # discarded before storage. Empty for non-PDF content_types
-    # (markdown/code/prose never pass this kwarg); ``normalize`` drops
-    # the empty default so those chunks stay under the cap.
-    "extraction_method",
-    # nexus-wi1uv round-2 (code-review-expert + substantive-critic
-    # Critical, both independently, 2026-08-06): whether this chunk was
-    # indexed under ``--allow-degraded-extraction`` after failing the
-    # post-extraction quality gate. Without this the override was
-    # transient-only (CLI echo + structlog WARNING at index time,
-    # discarded once the process exits) — a deliberately-degraded
-    # document became indistinguishable from a silent failure one
-    # shakedown cycle later, reproducing this bead's own complaint
-    # shape. The document's own record is its catalog ``meta``
-    # (nexus-6pfgb.6) and the audit is ``nx catalog list --meta
-    # quality_gate_overridden=true`` (nexus-6pfgb.16): this chunk-row copy
-    # is the LAST WRITER's, so ``where=quality_gate_overridden=true`` loses
-    # a document whose chunk another document indexed later. A
-    # shakedown/audit has a durable handle on which documents were
-    # accepted with known-degraded text. ``False`` default is dropped by
-    # ``normalize`` (see Step 2e) so the common healthy-extraction chunk
-    # spends no metadata budget on it.
-    "quality_gate_overridden",
-})
+#: Top-level keys a client sends on a T3 chunk row: the CHUNK rows of ``tables/chunk-metadata-keys.toml``
+#: (``chunk_text_hash`` and ``embedding_model``), the two keys the chunk's text and its embedding determine, so
+#: every document that holds the chunk agrees on them. Everything else a chunk row once carried is a fact about
+#: a document or a position in one: it lives on the catalog document (title, tags, bib, ttl, provenance) or on
+#: the manifest row (spans, labels), and a shared row's copy was only its last writer's (RDR-236, Phase 4
+#: Step 1, nexus-6pfgb.65). The engine's own ROW keys (quarantine, origin collection) are stamped there, never
+#: sent. The table is the key list; none is kept here.
+ALLOWED_TOP_LEVEL: frozenset[str] = _key_table.keys_of("CHUNK")
 
 #: Allowed content_type values. Replaces the old overlapping pair
 #: ``(store_type, category)``.
@@ -179,46 +63,16 @@ CONTENT_TYPES: frozenset[str] = frozenset({"code", "pdf", "markdown", "prose"})
 
 #: Safety margin below the historical 32-key cap (:data:`~nexus.db.limits.
 #: QUOTAS.MAX_RECORD_METADATA_KEYS`). Any write producing more than this
-#: many keys raises :class:`MetadataSchemaError`. RDR-101 Phase 3 PR δ
-#: bumped this to 32 to admit the new ``doc_id`` field; RDR-102 D2 then
-#: dropped ``source_path``, and RDR-101 Phase 5c / RDR-108 Phase 3 dropped
-#: ``corpus``, ``store_type``, ``git_meta``, ``doc_id``, ``chunk_index``,
-#: ``chunk_count`` — nexus-1oguj then ADDED ``extraction_method`` back in
-#: as canonical (not cargo), and nexus-wi1uv then added
-#: ``quality_gate_overridden``. ``ALLOWED_TOP_LEVEL`` sits at 28 of 32
-#: today (verify via ``len(ALLOWED_TOP_LEVEL)`` — this comment drifts,
-#: the code doesn't). The ``bib_*`` placeholder-drop and
-#: ``extraction_source`` / ``extraction_method`` / ``quality_gate_
-#: overridden`` omitted-when-empty/False filters in :func:`normalize`
-#: keep typical chunks well under the cap (no-bib + no-git + no-DT-source
-#: + non-PDF + non-degraded ≈ 20 keys).
+#: many keys raises :class:`MetadataSchemaError`. A chunk row carries the CHUNK keys of the key table
+#: (two today), so the cap is a bound no client write approaches.
 MAX_SAFE_TOP_LEVEL_KEYS: int = 32
 
-#: Git provenance sub-keys — packed into ``git_meta`` as a JSON string.
-_GIT_FIELD_MAP: dict[str, str] = {
-    "git_project_name": "project",
-    "git_branch": "branch",
-    "git_commit_hash": "commit",
-    "git_remote_url": "remote",
-}
-
-#: Bibliographic slots. All four are dropped together when every value
-#: is the placeholder (``0`` or ``""``) — without ``--enrich`` they are
-#: pure cargo eating metadata budget (nexus-2my fix #2). When at least
-#: one slot is populated the full set rides along so the search/display
-#: contract stays uniform.
-_BIB_FIELDS: tuple[str, ...] = (
-    "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
-    "bib_semantic_scholar_id",
-)
-
-#: Keys a FULL-REWRITE writer owns (nexus-y8xjh): every schema key except the
-#: ``bib_*`` set, which ``nx enrich bib`` writes after indexing and a re-index
-#: cannot recompute, and ``content_type``, which every write stamps. The engine
-#: merges chunk metadata instead of replacing it (nexus-w94eo), so a key a
-#: rewrite drops as empty (normalize's Steps 2c-2e, or the ``nx index repo`` PDF
-#: path's own empty-value filter) would otherwise keep its stale stored value.
-REWRITE_OWNED_KEYS: frozenset[str] = ALLOWED_TOP_LEVEL - frozenset(_BIB_FIELDS) - {"content_type"}
+#: Keys a FULL-REWRITE writer owns (nexus-y8xjh): every key it sends. The engine merges chunk metadata instead
+#: of replacing it (nexus-w94eo), so a key a rewrite dropped would otherwise keep its stale stored value. With
+#: the CHUNK-only schema both keys are always sent, so :func:`rewrite_delete_keys` names none for a client
+#: batch; the retired document and position keys a pre-Step-1 row still holds are removed by the Step 3 sweep,
+#: not by one document's re-index (the row is shared).
+REWRITE_OWNED_KEYS: frozenset[str] = ALLOWED_TOP_LEVEL
 
 
 def rewrite_delete_keys(metadatas: list[dict[str, Any]]) -> list[str]:
@@ -255,82 +109,24 @@ class MetadataSchemaError(ValueError):
 # ── Normalise ───────────────────────────────────────────────────────────────
 
 
-def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
-    """Return a canonical metadata dict for a T3 record.
+def normalize(raw: dict[str, Any], *, content_type: str | None = None) -> dict[str, Any]:
+    """Return a canonical metadata dict for a T3 chunk row: the CHUNK keys of *raw* and nothing else.
 
-    Operations (in order):
+    1. When *content_type* is given, validate it against :data:`CONTENT_TYPES`. It is a writer's routing
+       argument, not a key: a chunk row no longer carries it (RDR-236 Phase 4 Step 1; the content type is
+       a fact about the document and lives on the catalog document).
+    2. Keep only the keys in :data:`ALLOWED_TOP_LEVEL`. Every other key a caller sent (a document key, a
+       position key, a legacy key, anything outside the key table) is dropped silently.
 
-    1. Validate ``content_type`` against :data:`CONTENT_TYPES`.
-    2. Drop cargo keys — anything outside :data:`ALLOWED_TOP_LEVEL`.
-       Then drop the four ``bib_*`` slots together when every value is
-       the placeholder (``0`` / ``""``).
-    3. Inject ``content_type`` so routing code has a single canonical
-       field to read.
-
-    RDR-101 Phase 5c (``nexus-o6aa.13``) removed ``corpus``,
-    ``store_type``, ``git_meta`` from :data:`ALLOWED_TOP_LEVEL`.
-    RDR-108 Phase 3 (``nexus-bdag``) further removed ``doc_id``,
-    ``chunk_index``, ``chunk_count``. The Step 2 cargo filter drops
-    each of them silently.
-
-    The function never raises on unknown keys (cargo is silently dropped).
-    The companion :func:`validate` performs the strict post-write check.
+    The function never raises on unknown keys. The companion :func:`validate` performs the strict
+    post-write check, and the function is idempotent.
     """
-    if content_type not in CONTENT_TYPES:
+    if content_type is not None and content_type not in CONTENT_TYPES:
         raise ValueError(
             f"invalid content_type {content_type!r}; "
             f"expected one of {sorted(CONTENT_TYPES)}"
         )
-
-    working = dict(raw)
-
-    # Drop the legacy flat ``git_*`` keys before the cargo filter so
-    # they don't consume metadata budget. Pre-Phase-5c they were
-    # consolidated into a ``git_meta`` JSON blob; post-5c they're
-    # discarded entirely (catalog Document carries git provenance at
-    # the document level).
-    for raw_key in _GIT_FIELD_MAP:
-        working.pop(raw_key, None)
-
-    # Step 2: drop cargo.
-    normalised = {k: v for k, v in working.items() if k in ALLOWED_TOP_LEVEL}
-
-    # Step 2b: drop the bib_* placeholder set when every slot is empty.
-    # When ``--enrich`` is off the indexer writes the four bib_* keys
-    # with ``0`` / ``""`` defaults; without this filter they consume four
-    # metadata slots for no payload (nexus-2my fix #2).
-    if not any(normalised.get(field) for field in _BIB_FIELDS):
-        for field in _BIB_FIELDS:
-            normalised.pop(field, None)
-
-    # Step 2c: drop the RDR-139 Layer D provenance key when it carries the
-    # ``file`` default (or is empty). Absent == file. Only DT-sourced chunks
-    # (``dt_content`` / ``dt_ocr`` / ``dt_transcribe``) keep the key, so the
-    # common file-backed chunk stays one key under the cap.
-    if normalised.get("extraction_source", "file") in ("", "file"):
-        normalised.pop("extraction_source", None)
-
-    # Step 2d: drop the nexus-1oguj extraction_method key when empty.
-    # Only PDF chunks pass a real value (mineru / pymupdf / mineru+degraded,
-    # or a legacy value from before RDR-237, pymupdf_normalized among them);
-    # markdown/code/prose chunks never set it and must not spend a metadata
-    # slot on "".
-    if not normalised.get("extraction_method", ""):
-        normalised.pop("extraction_method", None)
-
-    # Step 2e: drop the nexus-wi1uv quality_gate_overridden key when
-    # False (the common case — a chunk indexed under a healthy
-    # extraction, or a non-PDF content_type that never sets it). Only
-    # chunks written under ``--allow-degraded-extraction`` after an
-    # actual gate failure keep the key, so it never costs the common
-    # chunk a metadata slot.
-    if not normalised.get("quality_gate_overridden", False):
-        normalised.pop("quality_gate_overridden", None)
-
-    # Step 3: stamp content_type.
-    normalised["content_type"] = content_type
-
-    return normalised
+    return {k: v for k, v in raw.items() if k in ALLOWED_TOP_LEVEL}
 
 
 # ── Validate ────────────────────────────────────────────────────────────────
@@ -438,13 +234,13 @@ def position_fields(
 
 
 def positions_of_row(meta: dict[str, Any]) -> dict[str, Any]:
-    """The position fields a row-shaped dict carries, plus its ``chunk_index`` when it has one.
+    """The position fields a STORED row carries, plus its ``chunk_index`` when it has one.
 
-    For a caller whose chunk metadata is a stored row (the manifest heal reads T3 rows; a legacy caller
-    hands metadatas and no positions). A producer that has its own position dict passes that instead.
-
-    STEP1-DELETE: after Step 1 a new row carries none of these keys, so a producer that relied on this
-    reading would send empty labels; Step 1 removes every call that is not reading a stored legacy row.
+    For a caller whose chunk metadata is a stored legacy row (the manifest heal and the backfill read T3
+    rows; a re-embed hands the stored metadatas on). A row written since RDR-236 Phase 4 Step 1 carries
+    none of these keys, and the result is then empty: :func:`nexus.mcp_infra._manifest_chunk_rows` sends no
+    label keys for such a position, so the row's manifest entry stays unlabelled (legacy) rather than
+    becoming an authoritative empty label. A producer that has its own position dict passes that instead.
     """
     out = {k: meta[k] for k in POSITION_FIELDS if k in meta}
     if "chunk_index" in meta:
@@ -453,12 +249,8 @@ def positions_of_row(meta: dict[str, Any]) -> dict[str, Any]:
 
 
 def prepared_positions(prepared: "list[tuple]") -> "list[dict[str, Any]]":
-    """The position dict of each ``(id, text, meta[, positions])`` tuple a document chunker returned.
-
-    The chunkers (``doc_indexer._pdf_chunks`` / ``_markdown_chunks``) return four-tuples; a tuple of
-    three (a test double, an older producer) has its positions read off its row (STEP1-DELETE).
-    """
-    return [p[3] if len(p) > 3 else positions_of_row(p[2]) for p in prepared]
+    """The position dict of each ``(id, text, meta, positions)`` tuple a document chunker returned."""
+    return [p[3] for p in prepared]
 
 
 def aligned_positions(
@@ -466,7 +258,9 @@ def aligned_positions(
 ) -> "list[dict[str, Any]]":
     """*positions* checked against *metadatas* (same length), or read off the rows when a caller handed none.
 
-    The one place the "no positions given" leg lives, so Step 1 removes it in one edit (STEP1-DELETE).
+    The "none given" leg is for a caller whose metadatas are stored rows (a re-embed's store chains, the
+    legacy hooks): :func:`positions_of_row` reads what the row carries, which for a row written since
+    RDR-236 Phase 4 Step 1 is nothing.
     """
     if positions is None:
         return [positions_of_row(m) for m in metadatas]
@@ -478,101 +272,23 @@ def aligned_positions(
 def make_chunk_metadata(
     *,
     content_type: str,
-    # Identity (always required) — RDR-102 D2 hard-removed
-    # ``source_path``; RDR-101 Phase 5c (nexus-o6aa.13) hard-removed
-    # ``corpus``, ``store_type``, and ``git_meta``. RDR-108 Phase 3
-    # (nexus-bdag) hard-removed ``chunk_index``, ``chunk_count``, and
-    # ``doc_id`` — the catalog ``document_chunks`` manifest carries
-    # those fields at document scope. Callers that still pass any of
-    # the removed kwargs raise ``TypeError`` so the regression is caught
-    # at the call site rather than silently dropped downstream.
     chunk_text_hash: str,
-    content_hash: str,
-    indexed_at: str,
     embedding_model: str,
-    # Position (required where meaningful, default 0 elsewhere)
-    chunk_start_char: int = 0,
-    chunk_end_char: int = 0,
-    line_start: int = 0,
-    line_end: int = 0,
-    page_number: int = 0,
-    # Display — ``title`` kept (find_ids_by_title is load-bearing for
-    # nx store / MCP store_get title-fallback per the .10.2 audit).
-    title: str = "",
-    source_author: str = "",
-    section_title: str = "",
-    section_type: str = "",
-    tags: str = "",
-    category: str = "",
-    # Bibliographic (defaults dropped together by normalize when all-empty)
-    bib_year: int = 0,
-    bib_authors: str = "",
-    bib_venue: str = "",
-    bib_citation_count: int = 0,
-    bib_semantic_scholar_id: str = "",
-    # Lifecycle. Type widened to accept None (nexus-tk070.p6b fix-pass,
-    # nexus-24rof, RDR-194 D5): T3Database.put now
-    # validates and passes None through for "permanent" rather than 0 — see
-    # those methods' own docstrings. The DEFAULT stays 0 deliberately,
-    # unchanged: non-put() callers (code/prose/pdf indexers via
-    # upsert_chunks*) have no --ttl concept at all and rely on this
-    # factory default for ordinary permanent content; widening ONLY the
-    # put() write path's own default (not this shared factory's) keeps
-    # the indexer pipeline's blast radius at zero for this fix.
-    ttl_days: int | None = 0,
-    frecency_score: float = 0.0,
-    source_agent: str = "nexus-indexer",
-    # Provenance — RDR-139 Layer D. ``file`` default is dropped by normalize.
-    extraction_source: str = "file",
-    # Provenance — nexus-1oguj. Which PDF extractor produced the chunk's
-    # text. Empty default is dropped by normalize; only PDF callers pass
-    # a real value.
-    extraction_method: str = "",
-    # nexus-wi1uv round-2. True only for a chunk indexed under
-    # --allow-degraded-extraction after failing the post-extraction
-    # quality gate. False default is dropped by normalize.
-    quality_gate_overridden: bool = False,
 ) -> dict[str, Any]:
-    """Build a complete chunk metadata dict and route through
-    :func:`normalize` so it's safe to write directly to T3.
+    """Build a chunk row's metadata: the CHUNK keys, routed through :func:`normalize`.
 
-    Every :data:`ALLOWED_TOP_LEVEL` key gets a value (either explicit
-    or a documented default). Bib placeholders are dropped together
-    when all-empty (see :func:`normalize`).
+    A chunk row carries ``chunk_text_hash`` and ``embedding_model`` and nothing else (RDR-236 Phase 4
+    Step 1, nexus-6pfgb.65). The document's title, tags, category, bibliographic fields, provenance and
+    lifecycle live on its catalog entry; a chunk's spans, page and section labels live on its manifest row
+    (the chunkers return them beside the row, :func:`position_fields`). The factory takes no argument for
+    them, so a caller cannot write one by accident. *content_type* is validated and not written.
 
-    Indexers should never build chunk metadata dicts by hand — route
-    through this factory so adding a new ``ALLOWED_TOP_LEVEL`` key
-    is a single edit, not seven separate indexer changes.
+    Indexers never build chunk metadata dicts by hand: route through this factory.
     """
-    raw: dict[str, Any] = {
-        "content_hash": content_hash,
-        "chunk_text_hash": chunk_text_hash,
-        "chunk_start_char": chunk_start_char,
-        "chunk_end_char": chunk_end_char,
-        "line_start": line_start,
-        "line_end": line_end,
-        "page_number": page_number,
-        "title": title,
-        "source_author": source_author,
-        "section_title": section_title,
-        "section_type": section_type,
-        "tags": tags,
-        "category": category,
-        "embedding_model": embedding_model,
-        "bib_year": bib_year,
-        "bib_authors": bib_authors,
-        "bib_venue": bib_venue,
-        "bib_citation_count": bib_citation_count,
-        "bib_semantic_scholar_id": bib_semantic_scholar_id,
-        "ttl_days": ttl_days,
-        "indexed_at": indexed_at,
-        "frecency_score": frecency_score,
-        "source_agent": source_agent,
-        "extraction_source": extraction_source,
-        "extraction_method": extraction_method,
-        "quality_gate_overridden": quality_gate_overridden,
-    }
-    return normalize(raw, content_type=content_type)
+    return normalize(
+        {"chunk_text_hash": chunk_text_hash, "embedding_model": embedding_model},
+        content_type=content_type,
+    )
 
 
 # ── Expiry helper (replaces the dropped ``expires_at`` field) ────────────────
