@@ -271,6 +271,25 @@ class CatalogRestoreTrashTest {
         assertThat(entry.get("file_path")).isEqualTo("docs/rdr/trash-path.md");
     }
 
+    @Test
+    @Order(81)
+    void trash_carriesEachTombstonesSensitiveFlag() {
+        // nexus-rfvyy.9 item 2: no live-only read returns a tombstone, so the trash listing is where a client
+        // learns a tombstone's flag (nx catalog trash withholds a flagged one's title under Claude Code).
+        var flagged = new java.util.HashMap<String, Object>(regDoc("Trash flagged", "docs/flagged.md"));
+        flagged.put("sensitive", true);
+        String flaggedT = catalogRepo.registerDocument(TENANT_A, "trash-flagged", flagged);
+        String plainT = catalogRepo.registerDocument(TENANT_A, "trash-plain", regDoc("Trash plain", "docs/plain.md"));
+        assertThat(catalogRepo.deleteDocument(TENANT_A, flaggedT)).isEqualTo(1);
+        assertThat(catalogRepo.deleteDocument(TENANT_A, plainT)).isEqualTo(1);
+
+        var trash = catalogRepo.listTrash(TENANT_A, 200, 0);
+        assertThat(trash.stream().filter(d -> flaggedT.equals(d.get("tumbler"))).findFirst().orElseThrow()
+            .get("sensitive")).isEqualTo(true);
+        assertThat(trash.stream().filter(d -> plainT.equals(d.get("tumbler"))).findFirst().orElseThrow()
+            .get("sensitive")).isEqualTo(false);
+    }
+
     /**
      * nexus-wbfpw.35 fix round 3: a batch delete stamps every row with the one
      * transaction timestamp, so the listing's {@code ORDER BY deleted_at DESC}

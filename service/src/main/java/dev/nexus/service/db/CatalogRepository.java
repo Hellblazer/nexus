@@ -3184,7 +3184,7 @@ public final class CatalogRepository {
             ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CORPUS,
                        CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH,
-                       CATALOG_DOCUMENTS.DELETED_AT)
+                       CATALOG_DOCUMENTS.DELETED_AT, CATALOG_DOCUMENTS.SENSITIVE)
                .from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
                // TUMBLER breaks ties: a batch delete stamps every row with one
@@ -3205,6 +3205,10 @@ public final class CatalogRepository {
                    m.put("content_type", r.get(CATALOG_DOCUMENTS.CONTENT_TYPE));
                    m.put("file_path", r.get(CATALOG_DOCUMENTS.FILE_PATH));
                    m.put("deleted_at", r.get(CATALOG_DOCUMENTS.DELETED_AT));
+                   // nexus-rfvyy.9 item 2: a tombstone keeps its flag, and no live-only read (/show, /resolve_many)
+                   // returns a tombstone, so the trash listing is where a client learns it (nx catalog trash
+                   // withholds a flagged one's title).
+                   m.put("sensitive", Boolean.TRUE.equals(r.get(CATALOG_DOCUMENTS.SENSITIVE)));
                    return m;
                })
         );
