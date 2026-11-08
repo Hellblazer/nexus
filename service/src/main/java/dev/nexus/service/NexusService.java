@@ -332,6 +332,13 @@ public final class NexusService {
      * {@code ChunkKeysSweepJobs} is the evictor the tenant reset route runs). Built before the route is registered.
      */
     private final dev.nexus.service.http.ChunkKeysSweepJobs chunkKeysJobs = new dev.nexus.service.http.ChunkKeysSweepJobs();
+    /**
+     * RDR-193 Step 1 (nexus-u5m5g.2): the catalog reconcile jobs, scoped to tenant plus owner (tenant-keyed: a job
+     * holds its tenant's staged rows; {@code EngineJobs.reconcile} is the evictor the tenant reset route runs). Built
+     * before the routes; the catalog handler takes it in Step 2.
+     */
+    private final dev.nexus.service.http.EngineJobs<Void> reconcileJobs =
+        dev.nexus.service.http.EngineJobs.reconcile(System::currentTimeMillis);
     /** Test seam: when set, the chunk-keys routes use this sweep instead of the one built over the vector repository. */
     private volatile dev.nexus.service.vectors.ChunkKeySweep chunkKeysSweepForTests;
     /** Test seam (nexus-v75nw): when set, replaces the credential lookup an apply job makes at each boundary. */
@@ -1073,7 +1080,8 @@ public final class NexusService {
                 t -> chunkReaper == null ? 0 : chunkReaper.evictTenant(t)),
             dev.nexus.service.db.TenantKeyedState.of("NexusService.dataSweepFailuresByTenant",
                 t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0),
-            dev.nexus.service.db.TenantKeyedState.of("ChunkKeysSweepJobs", chunkKeysJobs::evictTenant));
+            dev.nexus.service.db.TenantKeyedState.of("ChunkKeysSweepJobs", chunkKeysJobs::evictTenant),
+            dev.nexus.service.db.TenantKeyedState.of("EngineJobs.reconcile", reconcileJobs::evictTenant));
     }
 
     /** The evictors the tenant reset route runs, in order; empty-safe, built whether or not the route is enabled. */
@@ -1303,6 +1311,10 @@ public final class NexusService {
     /** Test seam (nexus-v75nw): the registry the asynchronous dry runs live in, to run the tenant reset's evictor. */
     dev.nexus.service.http.ChunkKeysSweepJobs chunkKeysJobsForTests() {
         return chunkKeysJobs;
+    }
+
+    dev.nexus.service.http.EngineJobs<Void> reconcileJobsForTests() {
+        return reconcileJobs;
     }
 
     /** The sink bound now (see {@link #chunkKeysAudit(dev.nexus.service.http.ChunkKeysAdminHandler.Audit)}). */
@@ -2130,6 +2142,7 @@ public final class NexusService {
     public void stop() {
         sweepScheduler.shutdownNow();
         chunkKeysJobs.shutdown();
+        reconcileJobs.shutdown();
         // The runner's executor too; an in-flight batch is interrupted, and a job left running resumes from its
         // cursor on the next boot.
         if (reembedExecutor != null) {
