@@ -936,7 +936,7 @@ def uploader_loop(
     def _flag(batch: _Held) -> None:
         """The batch's request was sent: post-store hooks (RDR-095), then flag it uploaded."""
         nonlocal total_uploaded
-        batch_rows, ids, documents, embeddings, metadatas, batch_positions = batch
+        batch_rows, ids, documents, embeddings, metadatas, _positions = batch
         # Both single-doc and batch chains fire from every storage event; the per-doc loop
         # covers single-shape consumers on CLI ingest.
         if not dry_run:

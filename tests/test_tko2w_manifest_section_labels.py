@@ -19,7 +19,7 @@ from nexus.catalog.store_hook import _retract_manifest_rows_for_chash
 from nexus.catalog.types import ManifestRow, manifest_row_wire
 from nexus.mcp.core import resolve_owner_section_types
 from nexus.mcp_infra import _manifest_chunk_rows as _rows_from_positions
-from nexus.mcp_infra import rows_as_positioned
+from tests._positioned_rows import rows_as_positioned
 
 X = "a" * 64
 Y = "b" * 64

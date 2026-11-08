@@ -18,7 +18,7 @@ import pytest
 from nexus.catalog.manifest_backfill import _fetch_chunk_by_id, _fetch_chunks_by_key
 from nexus.catalog.note_write import note_manifest_rows
 from nexus.mcp_infra import _manifest_chunk_rows as _rows_from_positions
-from nexus.mcp_infra import rows_as_positioned
+from tests._positioned_rows import rows_as_positioned
 from nexus.metadata_schema import make_chunk_metadata
 
 X = "a" * 64
