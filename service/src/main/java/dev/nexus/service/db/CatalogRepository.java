@@ -3184,7 +3184,7 @@ public final class CatalogRepository {
             ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CORPUS,
                        CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH,
-                       CATALOG_DOCUMENTS.DELETED_AT, CATALOG_DOCUMENTS.SENSITIVE)
+                       CATALOG_DOCUMENTS.DELETED_AT, CATALOG_DOCUMENTS.SENSITIVE, CATALOG_DOCUMENTS.ALIAS_OF)
                .from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
                // TUMBLER breaks ties: a batch delete stamps every row with one
@@ -3209,6 +3209,10 @@ public final class CatalogRepository {
                    // returns a tombstone, so the trash listing is where a client learns it (nx catalog trash
                    // withholds a flagged one's title).
                    m.put("sensitive", Boolean.TRUE.equals(r.get(CATALOG_DOCUMENTS.SENSITIVE)));
+                   // A merged duplicate's own flag is unset while its canonical holds the content; the client follows
+                   // alias_of to the canonical's flag (its canonical is usually live, so a live read answers).
+                   String aliasOf = r.get(CATALOG_DOCUMENTS.ALIAS_OF);
+                   m.put("alias_of", aliasOf == null || aliasOf.isEmpty() ? null : aliasOf);
                    return m;
                })
         );

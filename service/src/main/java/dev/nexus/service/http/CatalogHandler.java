@@ -892,7 +892,9 @@ public final class CatalogHandler implements HttpHandler {
      * calling {@code nx catalog restore}. Response shape mirrors {@link
      * #handleList}: {@code {"documents": [...], "count": N}}, each entry
      * carrying {@code tumbler}, {@code title}, {@code physical_collection},
-     * {@code corpus}, {@code content_type}, {@code file_path}, and {@code deleted_at}.
+     * {@code corpus}, {@code content_type}, {@code file_path}, {@code deleted_at}, {@code sensitive} (the
+     * tombstone's own flag) and {@code alias_of} (its canonical's tumbler, or null), so a client can withhold a
+     * flagged tombstone's title, following a merged duplicate to its canonical (nexus-rfvyy.9 item 2).
      */
     private void handleTrash(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }

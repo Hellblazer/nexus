@@ -288,6 +288,8 @@ class CatalogRestoreTrashTest {
             .get("sensitive")).isEqualTo(true);
         assertThat(trash.stream().filter(d -> plainT.equals(d.get("tumbler"))).findFirst().orElseThrow()
             .get("sensitive")).isEqualTo(false);
+        assertThat(trash.stream().filter(d -> plainT.equals(d.get("tumbler"))).findFirst().orElseThrow())
+            .as("alias_of is present, null for a document that is no merged duplicate").containsEntry("alias_of", null);
     }
 
     /**
