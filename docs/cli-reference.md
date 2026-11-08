@@ -6946,6 +6946,8 @@ An error prints as `<kind>: <detail>` on standard error and the exit status is 1
 
 ---
 
+**The `transcripts` procedure.** `nx run transcripts` (arguments `{"query", "since", "until", "project"}`) reads Claude Code transcripts. Its `project` is ONE Claude Code project directory name under `~/.claude/projects`, or `all`. A repository's linked-worktree sessions sit in their own directories (`-Users-me-git-nexus-wt-<name>` beside `-Users-me-git-nexus`), so a per-repository count runs the procedure for each directory and sums them: measured 2026-11-08, 98 of the nexus repository's 178 main sessions in a two-week window were in the primary checkout's directory. Counts are floors where a record was cut to 1 MB (`truncated_records`). A result is paged: run again with `since` set to `next_since` and the returned `until` until `next_since` is absent.
+
 ## nx command-context
 
 Generates the agent-relay preamble context that the conexus skills consume (RDR-130 P2). Each subcommand mirrors a skill (`analyze-code`, `architecture`, `create-plan`, `implement`, `debug`, `deep-analysis`, `enrich-plan`, `knowledge-tidy`, `pdf-process`, `plan-audit`, and more) and prints the working-directory, project-type, git-branch, and ready-bead context blocks the agent needs. Run `nx command-context --help` for the full subcommand list. Primarily invoked by tooling, not by hand.
