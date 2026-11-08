@@ -2573,11 +2573,13 @@ def _layer2_census_lines(rows: list[dict], t2_key: str) -> list[str]:
     (nexus-5r0ho item 8)."""
     research = _research_rows_for(rows, t2_key)
     if not research:
+        from nexus.tables.rdr_research_vocab import CLASSIFICATIONS, METHODS  # noqa: PLC0415 - deferred: only this branch needs it
+
         return [
             "**Layer 2 VACUOUS**: no research records exist for this RDR, so the assumption "
             "audit has nothing to examine and cannot pass. Record findings first "
-            f"(`nx rdr preamble rdr-research -- add {t2_key} --classification <verified|documented|assumed> "
-            "--method <source_search|spike|docs_only> <finding>`), or write "
+            f"(`nx rdr preamble rdr-research -- add {t2_key} --classification <{'|'.join(CLASSIFICATIONS)}> "
+            f"--method <{'|'.join(METHODS)}> <finding>`), or write "
             "`research: none (<why>)` in the gate record so the vacuity is a decision on record.",
             "",
         ]
@@ -3271,7 +3273,9 @@ def _rdr_research_next_seq(entries: list[dict], t2_key: str) -> int:
         int(m.group(2))
         for entry in entries
         if (m := _RDR_RESEARCH_TITLE_RE.match(entry.get("title", "") if isinstance(entry, dict) else ""))
-        and m.group(1) == t2_key
+        # Any zero padding of the id is the same RDR, as the gate reads it
+        # (_research_rows_for) and the research_add procedure counts it.
+        and int(m.group(1)) == int(t2_key)
     ]
     return max(seqs) + 1 if seqs else 1
 
