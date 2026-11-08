@@ -31,12 +31,23 @@ RESTATING = (
     ROOT / "conexus" / "skills" / "orchestration" / "reference.md",
     ROOT / "conexus" / "skills" / "substantive-critique" / "SKILL.md",
 )
-PROCEDURE = 'procedure_run("gate_record", '
+#: The procedure, by its full MCP name and table name; the call form is nexus-qo7ie.31's.
+PROCEDURE = re.compile(r'mcp__plugin_conexus_nexus__procedure_run\(name="gate_record"')
 UNCHANGED = "passing the returned `project`, `title`, `tags` and `content` unchanged"
 NO_COMPOSE = "never compose the tag string yourself"
 DROP_CLAUSE = "leave out `rdr` when the bead serves no RDR"
-#: A writer composing its own gate tags, the form gate_record replaced.
-COMPOSED_TAGS = re.compile(r'tags="kind:gate')
+#: A writer composing its own gate tags, the form gate_record replaced, in any spelling:
+#: a tags assignment or field whose value names kind:gate, or the kind:gate,bead: list.
+#: The RDR gate flow's own records in <repo>_rdr (tags="rdr,gate,...") are outside
+#: gate_record (RDR-240 TD6) and are not matched.
+COMPOSED_TAGS = re.compile(
+    r"""tags\s*[=:]\s*\\?["'`]?\s*[^"'`\s]*?kind:gate\b|kind:gate\s*,\s*bead:|bead:[^\s,]*\s*,\s*kind:gate""",
+    re.IGNORECASE,
+)
+#: Every plugin file that can instruct a writer, less the two release ledgers.
+SCANNED = sorted(
+    p for d in ("agents", "skills", "commands") for p in (ROOT / "conexus" / d).rglob("*.md")
+)
 SENTENCE = re.compile(
     r"A gate record \(a review, critique, confirmation or fix round\) is built by [^\n]*?\(RDR-240 TD6, RDR-209 Amendment A1\)\."
 )
@@ -66,7 +77,8 @@ def test_the_tag_sentence_is_identical_in_every_writer() -> None:
         f"the tag sentence differs between writers: {found}"
     )
     sentence = next(iter(found.values()))
-    for clause in (PROCEDURE, UNCHANGED, NO_COMPOSE, DROP_CLAUSE):
+    assert PROCEDURE.search(sentence), "the writers' sentence does not name procedure_run(name=\"gate_record\" ...)"
+    for clause in (UNCHANGED, NO_COMPOSE, DROP_CLAUSE):
         assert clause in sentence, f"the writers' sentence lacks {clause!r}"
 
 
@@ -75,24 +87,49 @@ def composed_tag_lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if COMPOSED_TAGS.search(line)]
 
 
-@pytest.mark.parametrize("path", [*(AGENTS_DIR / n for n in WRITERS), *RESTATING], ids=lambda p: p.name)
-def test_no_writer_composes_its_own_gate_tags(path: Path) -> None:
+def test_the_scan_covers_the_plugins_instruction_files() -> None:
+    names = {p.relative_to(ROOT / "conexus").as_posix() for p in SCANNED}
+    assert {f"agents/{n}" for n in WRITERS} <= names
+    assert {p.relative_to(ROOT / "conexus").as_posix() for p in RESTATING} <= names
+    assert len(names) > 50, "the scan examined almost nothing"
+
+
+@pytest.mark.parametrize("path", SCANNED, ids=lambda p: p.relative_to(ROOT / "conexus").as_posix())
+def test_no_plugin_file_composes_its_own_gate_tags(path: Path) -> None:
     lines = composed_tag_lines(path.read_text(encoding="utf-8"))
     assert not lines, f"{path.relative_to(ROOT)} composes gate tags instead of using gate_record: {lines}"
 
 
-def test_the_composed_tag_check_sees_the_old_write_back_line() -> None:
-    old = (
-        'A gate record (a review, critique, confirmation or fix round) also passes '
-        '`tags="kind:gate,bead:<id>,rdr:<NNN>"` (drop `rdr:` when the bead serves no RDR).'
-    )
-    assert composed_tag_lines(old) == [old]
+@pytest.mark.parametrize("line", [
+    'also passes `tags="kind:gate,bead:<id>,rdr:<NNN>"` (drop `rdr:` when the bead serves no RDR).',
+    "memory_put(..., tags='kind:gate,bead:nexus-1')",
+    'memory_put(..., tags = "kind:gate,bead:nexus-1")',
+    "memory_put(..., tags=`kind:gate,bead:nexus-1`)",
+    'memory_put(..., tags="bead:x,kind:gate")',
+    "tags: kind:gate,bead:<id>",
+    'tags=\\"kind:gate,bead:x\\"',
+    "with the tags kind:gate, bead:<id>, rdr:<NNN>",
+])
+def test_the_composed_tag_check_sees_every_spelling(line: str) -> None:
+    assert composed_tag_lines(line) == [line]
+
+
+@pytest.mark.parametrize("line", [
+    "the rollup reads its `kind:gate`, `bead:` and `rdr:` tags",
+    "the phase-close rollup finds the record by its `kind:gate`, `bead:` and `rdr:` tags (RDR-240 TD6)",
+    'tags="critique,review"',
+    'tags="rdr,gate,fix-check"',
+    'memory_put(project="{repo}_rdr", title="{id}-gate-latest", tags="rdr,gate")',
+    "a gatekeeper checks it",
+])
+def test_the_composed_tag_check_leaves_prose_and_other_tags_alone(line: str) -> None:
+    assert composed_tag_lines(line) == []
 
 
 @pytest.mark.parametrize("path", RESTATING, ids=lambda p: p.name)
 def test_restating_files_name_the_procedure_and_the_unchanged_write(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
-    assert PROCEDURE in text, f"{path.relative_to(ROOT)} does not name procedure_run(\"gate_record\", ...)"
+    assert PROCEDURE.search(text), f"{path.relative_to(ROOT)} does not name procedure_run(name=\"gate_record\" ...)"
     assert UNCHANGED in text, f"{path.relative_to(ROOT)} does not say the four fields are written unchanged"
     assert NO_COMPOSE in text, f"{path.relative_to(ROOT)} does not forbid composing the tag string"
 
