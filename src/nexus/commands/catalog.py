@@ -304,6 +304,7 @@ def catalog() -> None:
 # acyclic. Keep import order and register order aligned as families accumulate.
 from nexus.commands.catalog_cmds import owners as _owners_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import backfill as _backfill_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import note_uri_repair as _note_uri_repair_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import links as _links_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import collections as _collections_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import migration as _migration_cmds  # noqa: E402 — must follow the `catalog` group definition above
@@ -325,6 +326,7 @@ from nexus.commands.catalog_cmds import sensitivity as _sensitivity_cmds  # noqa
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
+_note_uri_repair_cmds.register(catalog)
 _links_cmds.register(catalog)
 _collections_cmds.register(catalog)
 _migration_cmds.register(catalog)
