@@ -7,23 +7,47 @@ Standard library only: the worker imports this module too.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
+# ScriptError kinds. The worker's error frame carries the first three;
+# run_script raises "header" and "args" before any worker starts (RDR-240
+# Technical Design 1, nexus-mdbds.9).
+KINDS: tuple[str, ...] = ("static_check", "lua", "result", "header", "args")
+
+# ScriptLimitError limits: the inner limits (a limit frame), the parent's
+# kill timer (wall_time) and the OS limits (cpu_time, memory).
+LIMITS: tuple[str, ...] = (
+    "instructions",
+    "memory",
+    "stack",
+    "result",
+    "wall_time",
+    "cpu_time",
+)
+
+# Worker counters, when known: peak_lua_bytes, instructions.
+Stats = Mapping[str, int]
+
 
 class ScriptRunError(Exception):
     """Base of every error ``run_script`` raises."""
 
 
 class ScriptError(ScriptRunError):
-    """The script was refused or raised.
+    """The script was refused or raised; ``kind`` is one of ``KINDS``.
 
-    ``kind`` is ``"static_check"`` (a static-check refusal naming its rule and
-    line), ``"lua"`` (a Lua error with its message) or ``"result"`` (a result
-    the host's walk rejects).
+    ``static_check`` (a refusal naming its rule and line), ``lua`` (a Lua
+    error with its message), ``result`` (a result the host's walk rejects),
+    ``header`` and ``args`` (refused by run_script before a worker starts).
     """
 
-    def __init__(self, kind: str, detail: str) -> None:
+    def __init__(self, kind: str, detail: str, *, stats: Stats | None = None) -> None:
+        if kind not in KINDS:
+            raise ValueError(f"unknown ScriptError kind {kind!r}")
         super().__init__(f"{kind}: {detail}")
         self.kind = kind
         self.detail = detail
+        self.stats = stats
 
 
 class ScriptLimitError(ScriptRunError):
@@ -33,10 +57,15 @@ class ScriptLimitError(ScriptRunError):
     ``wall_time`` or ``cpu_time``; ``value`` is the limit that was in force.
     """
 
-    def __init__(self, limit: str, value: object) -> None:
+    def __init__(
+        self, limit: str, value: object, *, stats: Stats | None = None
+    ) -> None:
+        if limit not in LIMITS:
+            raise ValueError(f"unknown ScriptLimitError limit {limit!r}")
         super().__init__(f"script limit {limit} ({value}) reached")
         self.limit = limit
         self.value = value
+        self.stats = stats
 
 
 class ScriptWorkerError(ScriptRunError):
