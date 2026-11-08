@@ -504,8 +504,9 @@ def _indexed_dynamically(code: list[int], pc: int, a: int) -> bool:
     """Whether the namespace loaded into R[*a*] at *pc* is next used as ``ns[expr]``.
 
     Only the rule name depends on this: the namespace is refused either way. The key's own
-    instructions can come between (``memory["g" .. "et"]``), so read forward to the first
-    instruction that indexes R[a], stopping where R[a] is overwritten or control leaves.
+    instructions can come between (``memory["g" .. "et"]``, ``memory[tostring(1)]``, a
+    branch for ``x and "a" or "b"``), so read forward to the first instruction that indexes
+    R[a], stopping where an instruction names R[a] as its target or the function returns.
     """
     for ins in code[pc + 1:]:
         op, ra, kf, b, _ = _decode(ins)
@@ -513,6 +514,6 @@ def _indexed_dynamically(code: list[int], pc: int, a: int) -> bool:
             return True
         if b == a and op in ("GETFIELD", "SELF"):
             return False
-        if ra == a or op in ("JMP", "CALL", "TAILCALL", "RETURN", "RETURN0", "RETURN1", "CLOSURE"):
+        if ra == a or op in ("RETURN", "RETURN0", "RETURN1", "TAILCALL"):
             return False
     return False
