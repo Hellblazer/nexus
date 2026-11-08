@@ -1668,3 +1668,36 @@ def test_a_start_the_script_cannot_place_is_never_divided_in_hand_and_each_sessi
     assert fakes[0].calls[1][:2] == (_day(0), f"{_day(0)}T01:00:00Z")  # the old hour reads, not the records in hand
     whole, _ = run(records, "skills", since=_day(0), until=_day(1))
     assert tj.join_pages("skills", pages)["rows"] == tj.join_pages("skills", [whole])["rows"]
+
+
+def test_agents_keeps_whole_days_so_a_subagent_is_matched_to_its_parent_on_every_page() -> None:
+    # A parent at 14:50 dispatching a reviewer, its subagent at 15:05, on a day the page has no
+    # room for after a 25-call day: divided by hour, the two would be reduced apart and the run
+    # would read as unattributed (critic r1, nexus-qo7ie.38).
+    d0, d1 = "2026-11-03", "2026-11-04"
+    fill = [rec(f"f{i}", f"{d0}T10:0{i}:00Z", calls=[call("Read", {}, "10:00:00", day=d0) for _ in range(5)])
+            for i in range(5)]
+    parent = rec("m", f"{d1}T14:50:00Z", calls=[call("Agent", {"subagent_type": "reviewer"}, "14:55:00", day=d1)]
+                 + [call("Read", {}, "14:56:00", day=d1) for _ in range(4)])
+    child = rec("m", f"{d1}T15:05:00Z", main=False, agent="a1",
+                calls=[call("Read", {}, "15:06:00", day=d1) for _ in range(2)])
+    records = [*fill, parent, child]
+    pages, _ = pages_of(records, "agents", since=d0, until="2026-11-05", patch=calls_cap(30))
+    assert [p.get("next_since") for p in pages] == [d1, None]
+    whole, _ = run(records, "agents", since=d0, until="2026-11-05")
+    joined = tj.join_pages("agents", pages)["rows"]
+    assert joined == tj.join_pages("agents", [whole])["rows"]
+    assert any(r.get("agent_type") == "reviewer" for r in joined)
+
+
+def test_a_long_fraction_at_the_end_of_an_hour_stays_in_that_hour() -> None:
+    # 05:59:59.9999999 as a float rounds to 06:00; the verb puts it in hour 5, so must the script,
+    # or a page ending at 06:00 drops it.
+    day = "2026-11-03"
+    records = [rec("b", f"{day}T05:10:00Z", calls=[call("Skill", {"skill": "k"}, "05:11:00", day=day)]),
+               rec("a", f"{day}T05:59:59.9999999Z", calls=[call("Skill", {"skill": "k"}, "05:59:59", day=day)]),
+               rec("c", f"{day}T06:10:00Z", calls=[call("Skill", {"skill": "k"}, "06:11:00", day=day) for _ in range(10)])]
+    for query in ("skills", "tools"):
+        pages, _ = pages_of(records, query, since=day, until="2026-11-04", patch=calls_cap(2))
+        whole, _ = run(records, query, since=day, until="2026-11-04")
+        assert tj.join_pages(query, pages)["rows"] == tj.join_pages(query, [whole])["rows"], query
