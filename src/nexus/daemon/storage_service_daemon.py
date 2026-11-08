@@ -126,6 +126,7 @@ from nexus.daemon.service_registry import (
     write_stop_marker,
 )
 from nexus.daemon.service_registry import _WINDOWS_SHARING_RETRY_BUDGET_S
+from nexus.daemon.service_registry import spawn_lock_filename
 
 _log = structlog.get_logger(__name__)
 
@@ -175,8 +176,10 @@ class HealthProbe(Enum):
     UNKNOWN = "unknown"
 
 
-#: Path suffix of the spawn lock file inside config_dir.
-_SPAWN_LOCK_FILE: str = "storage_service_spawn.lock"
+#: Name of the spawn lock file inside config_dir. Defined by the primitive, so a holder
+#: (``ServiceRegistry.try_hold_spawn_lock``, used by ``nx daemon service pg-upgrade``) and this
+#: supervisor's ``start()`` take the same file.
+_SPAWN_LOCK_FILE: str = spawn_lock_filename(_REGISTRY_TIER)
 
 #: How long to wait for the service /health to return 200 before failing,
 #: OUTSIDE a migration (PRE_MIGRATION / POST_MIGRATION phases — see
