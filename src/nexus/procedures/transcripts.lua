@@ -6,77 +6,79 @@
 -- RDR-240 Technical Design 5 (nexus-qo7ie.31). Seven queries over transcripts.sessions, one
 -- UTC day per verb call, paged under the run's 1 MB result cap.
 --
--- Arguments. query is one of the seven names. since is required. until is optional and
--- defaults to the reserved now; it is a Lua keyword, so the script reads it as
--- args["until"]. project is a Claude Code project directory name, default all.
+-- Arguments. query is one of the seven names. since is required and must be before until.
+-- until defaults to the reserved now (a Lua keyword, so read as args["until"]). project is a
+-- Claude Code project directory name, default all. Window: [since, until) in UTC. A bare date
+-- is that day at 00:00 UTC; a timestamp is YYYY-MM-DDTHH:MM:SS with an optional Z; nothing
+-- else is read. A session belongs to the window that holds its first record, so one spanning
+-- midnight is counted once, on its start day.
 --
--- Window. Half-open, [since, until), in UTC. A bare date is that day at 00:00 UTC; a
--- timestamp is YYYY-MM-DDTHH:MM:SS with an optional Z, always UTC; nothing else is read
--- (no offsets, no fractions). A session belongs to the window that holds its first record
--- (transcripts.sessions decides that), so a session spanning midnight is counted once, on
--- its start day. A session that starts exactly at since is in; one that starts exactly at
--- until is out.
+-- Result: {rows, truncated_records, since, until, next_since}. since and until are the values
+-- the run used. next_since is absent when the window is done; otherwise the next page starts
+-- there (a date, or a timestamp when the page ended inside a day split into hours). Run again
+-- with since = next_since and the returned until, and join the pages with
+-- nexus.lua_runtime.transcripts_join.join_pages (it refuses a page whose since is not the
+-- previous next_since). A page adds whole units (days, hours after a split) while its rows
+-- stay under PAGE_BYTES, its verb calls under MAX_UNITS_PER_RUN (every query: a year-long
+-- sparse window pages) and, for keyed queries, its sessions under MAX_SESSIONS_PER_RUN. A day
+-- whose verb result is too large, or whose rows alone pass PAGE_BYTES, is split into hours;
+-- an hour that still does not fit fails with result-window: naming the hour. A transcript
+-- over 1 MB after the verb's cuts fails with the verb's record-too-large: error, unchanged.
 --
--- Result: {rows, truncated_records, until, next_since}. until is the value the run used
--- (the until argument, else now). next_since is absent when the window is done; otherwise it is where the
--- next page starts: a date, or a timestamp when the page ended inside a day that was split
--- into hours. The caller runs again with since = next_since and the returned until, and joins the
--- pages with nexus.lua_runtime.transcripts_join.join_pages. A page adds whole days (hours
--- after a split) while its rows stay under PAGE_BYTES and, for the keyed queries, while its
--- sessions stay under MAX_SESSIONS_PER_RUN. A day whose verb result is too large, or whose
--- rows alone pass PAGE_BYTES, is split into hours; an hour that still does not fit fails
--- with an error starting result-window: that names the hour. A transcript over 1 MB after
--- the verb's cuts fails with the verb's record-too-large: error, unchanged.
---
--- Rows. A row's size is estimated as twice the byte length of its strings plus 16 bytes a
--- field (the sandbox has no JSON encoder). Per-session queries (memory, tools, loads)
--- return rows that pages concatenate. Keyed queries return rows summed by key; each field
--- of a keyed row is tagged for the join: sum adds, max takes the larger, mean is carried as
--- <field>_total and <field>_count (the join adds both and derives <field>_mean).
---   memory (per session): session_id, main, agent_id, kind, name, count, last_use, size.
---     kind is file_read or file_write (a Read, Write or Edit of a memory file), t2_get (a
---     memory_get call; name is project/title), t2_search (a memory_search call, which
---     carries no title; name is the project) or loaded (what loaded into a subagent's
---     instructions; size in bytes).
---   tools (per session): session_id, main, agent_id, kind, name, server, sub, deferred,
---     count, last_use, size. kind is tool (name is the tool; server is the MCP server of
---     an mcp__ tool; deferred is true when the session had the tool deferred; size is the
---     bytes of the call's string inputs), nx (a verb read from Bash command text: name is
---     "nx <verb>", sub the next word when it looks like a subcommand) or deferred_summary
---     (count is the tools deferred to the session, called how many of them were called).
---   loads (per session): session_id, main, agent_id, kind (the attachment), name (the
---     path), type, count, last_use, size (the largest size seen). main and agent_id tell a
---     main session from a dispatch.
---   agents (keyed kind, agent_type, model): dispatches sum, runs sum, turns sum, errors
---     sum, context mean, max_context max, cost_estimate_usd sum, unpriced sum. A dispatch
---     row is an Agent or Task call in a main session (the type and model it asked for; errors
---     is the call's own error flag); a run row is a subagent transcript (the model it ran,
---     its turns, its first-turn context, its tool errors). A subagent transcript names no
---     dispatch, so a run row's agent_type is (unattributed).
+-- Rows. Size is estimated as twice the UTF-8 bytes of the strings plus 16 bytes a field (the
+-- sandbox has no JSON encoder). Per-session queries return rows that pages concatenate; a
+-- size no row measured is absent, not 0. Keyed queries return rows summed by key; each field
+-- is tagged for the join: sum adds, max takes the larger, mean is carried as <field>_total
+-- and <field>_count (the join derives <field>_mean).
+--   memory (per session): session_id, main, agent_id, kind, name, count, last_use, size. kind
+--     is file_read, file_write (a Read, Write or Edit of a memory file), t2_get (name is
+--     project/title), t2_search (name is the project) or loaded (what loaded into a
+--     subagent's instructions; size in bytes). last_use compares parsed times.
+--   tools (per session): session_id, main, agent_id, kind, name, server, sub, deferred, count,
+--     last_use, size. kind is tool (server of an mcp__ tool; deferred when the session had it
+--     deferred; size the bytes of the call's string inputs), nx (name "nx <verb>"; see below)
+--     or deferred_summary (count tools deferred to the session, called how many were called).
+--   loads (per session): session_id, main, agent_id, kind (the attachment), name (the path),
+--     type, count, last_use, size (the largest seen).
+--   agents (keyed kind, agent_type, model): dispatches, runs, turns, errors, cost_estimate_usd,
+--     unpriced sum; context mean; max_context max. A dispatch row is an Agent or Task call in
+--     a main session (type and model it asked for). A run row is a subagent transcript (its
+--     turns, first-turn context, tool errors). A subagent record shares its parent's
+--     session_id: within a unit, each session's subagents in start order take that session's
+--     Agent and Task calls in time order, each the first call not yet taken at or before its
+--     start, and the run row gets that call's agent_type and, if it named one, its model (cost
+--     is always priced by the model the run used). Unmatched runs are (unattributed); a
+--     parent and child in different units do not match.
 --   skills (keyed scope, kind, name): count, runs_with_skill, long_runs,
---     long_runs_without_skill, all sum. kind is skill, dispatch, slash or runs (one row per
---     scope with the run counts of scripts/skill_routing_census.py).
---   violations (keyed rule): count sum (main sessions with at least one hit), main_sessions
---     sum. Every page carries a row for every rule, zeros included, so no page drops its
---     denominator; the join derives per_100.
---   procedures (keyed procedure): runs sum, hand_written sum.
--- Cost. cost_estimate_usd is an ESTIMATE from the one price table below, USD per million
--- tokens, read from src/nexus/operators/llm_models.py PRICES (the published price list,
--- read through Context7 on 2026-10-23). A model not in the table adds to unpriced and
--- costs nothing here. The long-prompt tier of some models is not applied.
+--     long_runs_without_skill sum. kind is skill, dispatch, slash or runs (one row per scope
+--     with the run counts of scripts/skill_routing_census.py). LONG_RUN_TURNS counts distinct
+--     API messages (assistant_turns), about 1.6 times fewer than the census's assistant
+--     records, so the census's 50 records is scaled to 31 messages.
+--   violations (keyed rule): count (main sessions with a hit), main_sessions sum. Every page
+--     carries every rule, zeros included, so no page drops its denominator.
+--   procedures (keyed procedure): runs, hand_written sum.
+-- A Bash command is read by segment (split at ; & | ( ) newlines): quotes pair as the shell
+-- pairs them, comments and heredoc bodies are never a command. nx verbs: nx is a segment's
+-- command word, the verb the bare lowercase word after it, sub the next such word (so for
+-- nx search foo, sub is foo; a quoted word, a path or a flag never is).
+-- Cost. cost_estimate_usd is an ESTIMATE from the price table below, USD per million tokens,
+-- from src/nexus/operators/llm_models.py PRICES (read through Context7 on 2026-10-23; a test
+-- compares them). A model not in it adds to unpriced and costs nothing. Long-prompt tiers
+-- are not applied.
 --
--- Violation rules (RDR-238 Phase 2; the five rules of its research 4, counted as main
--- sessions with at least one hit): em-dash in assistant prose (code spans and fences
--- left out); git-stash, a git stash command outside quotes and heredocs; full-disk-find,
--- a find whose start path is /, ~, $HOME, /Users, /home or one directory below the last
--- two; claude-session-trailer, a Claude-Session: line in a git commit command;
--- backtick-in-quoted-arg, a backtick inside a quoted argument of a command that runs nx or bd.
+-- Violation rules (RDR-238 Phase 2): em-dash in assistant prose (code left out); git-stash,
+-- a git command whose subcommand, past the global options (-C dir, --no-pager), is stash;
+-- full-disk-find, a find whose start path (quoted or not) is /, ~, $HOME, /Users, /home or
+-- one directory below the last two; claude-session-trailer, a Claude-Session: line in a git
+-- commit segment (its arguments or its heredoc); backtick-in-quoted-arg, a backtick inside
+-- double quotes in a segment whose command is nx or bd (inside single quotes it is literal).
 
 local args = ...
 
 local PAGE_BYTES = 768 * 1024
 local MAX_SESSIONS_PER_RUN = 1000
-local LONG_RUN_TURNS = 50
+local LONG_RUN_TURNS = 31
+local MAX_UNITS_PER_RUN = 100
 local DAY = 86400
 local HOUR = 3600
 local FIELD_BYTES = 16
@@ -167,18 +169,44 @@ local function stamp(t)
   return string.format("%04d-%02d-%02dT%02d:%02d:%02dZ", y, m, d, s // HOUR, s % HOUR // 60, s % 60)
 end
 
+-- A transcript timestamp (a fraction allowed) as seconds, or nil when it is not UTC ISO.
+local function ts_value(text)
+  local y, m, d, hh, mi, ss, frac =
+    tostring(text):match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)(%.?%d*)Z?$")
+  if y == nil then
+    return nil
+  end
+  return days_from_civil(tonumber(y), tonumber(m), tonumber(d)) * DAY + tonumber(hh) * HOUR
+    + tonumber(mi) * 60 + tonumber(ss) + (tonumber("0" .. frac) or 0)
+end
+
+-- Is time a after time b: by parsed time, else (a form that is not UTC ISO) by text.
+local function later(a, b)
+  local x, y = ts_value(a), ts_value(b)
+  if x ~= nil and y ~= nil then
+    return x > y
+  end
+  return a > b
+end
+
 -- ---- rows ----
 
 -- Twice the byte length of every string, plus 16 bytes a field.
+local function row_bytes(row)
+  local n = 0
+  for _, v in pairs(row) do
+    n = n + FIELD_BYTES
+    if type(v) == "string" then
+      n = n + 2 * #v
+    end
+  end
+  return n
+end
+
 local function estimate(rows)
   local n = 0
   for _, row in ipairs(rows) do
-    for _, v in pairs(row) do
-      n = n + FIELD_BYTES
-      if type(v) == "string" then
-        n = n + 2 * #v
-      end
-    end
+    n = n + row_bytes(row)
   end
   return n
 end
@@ -199,12 +227,18 @@ end
 -- Rows summed by key; keys are the row fields that identify it, tags how the others combine.
 local function keyed(keys, tags)
   local acc = {index = {}, rows = {}}
-  function acc.add(row)
+  local function id_of(row)
     local parts = {}
     for i, k in ipairs(keys) do
       parts[i] = tostring(row[k])
     end
-    local id = table.concat(parts, "\31")
+    return table.concat(parts, "\31")
+  end
+  function acc.has(row)
+    return acc.index[id_of(row)] ~= nil
+  end
+  function acc.add(row)
+    local id = id_of(row)
     local into = acc.index[id]
     if into == nil then
       into = {}
@@ -245,7 +279,7 @@ local function tally(mode, rec)
     local r = t.by[id]
     if r == nil then
       r = {session_id = rec.session_id, main = rec.main == true, agent_id = rec.agent_id,
-           kind = kind, name = name, count = 0, size = 0}
+           kind = kind, name = name, count = 0}
       if extra ~= nil then
         for k, v in pairs(extra) do
           r[k] = v
@@ -255,11 +289,13 @@ local function tally(mode, rec)
       t.order[#t.order + 1] = id
     end
     r.count = r.count + 1
-    if type(time) == "string" and (r.last_use == nil or time > r.last_use) then
+    if type(time) == "string" and (r.last_use == nil or later(time, r.last_use)) then
       r.last_use = time
     end
     if type(size) == "number" then
-      if mode == "sum" then
+      if r.size == nil then
+        r.size = size
+      elseif mode == "sum" then
         r.size = r.size + size
       elseif size > r.size then
         r.size = size
@@ -277,33 +313,194 @@ end
 
 -- ---- reading a command ----
 
-local function words_of(cmd)
-  local words = {}
-  if type(cmd) == "string" then
-    for w in cmd:gmatch("[^%s;&|()]+") do
-      words[#words + 1] = w
+-- A Bash command split into segments at ; & | ( ) newlines and backticks. A segment is
+-- {w = words with their quotes removed, b = whether each word was wholly unquoted, bt = a
+-- backtick inside double quotes, docs = the heredoc bodies it opened}. Quotes pair as the
+-- shell pairs them, a comment (# at a word start) is dropped, a heredoc body belongs to its
+-- segment's docs and nowhere else. Jumps over runs with find, so a long command stays cheap.
+local function scan(cmd)
+  local segs, seg, pending = {}, nil, {}
+  local buf, started, bare = {}, false, true
+  local n, i = #cmd, 1
+  local function newseg()
+    seg = {w = {}, b = {}, bt = false, docs = {}}
+    segs[#segs + 1] = seg
+  end
+  local function endword()
+    if started then
+      seg.w[#seg.w + 1] = table.concat(buf)
+      seg.b[#seg.b + 1] = bare
+    end
+    buf, started, bare = {}, false, true
+  end
+  local function add(text)
+    buf[#buf + 1] = text
+    started = true
+  end
+  local function bodies(from)
+    for _, h in ipairs(pending) do
+      local p, stop, after = from, nil, nil
+      while p <= n do
+        local e = cmd:find("\n", p, true) or n + 1
+        if (cmd:sub(p, e - 1):gsub("^\t+", "")) == h.delim then
+          stop, after = p - 1, e + 1
+          break
+        end
+        p = e + 1
+      end
+      h.seg.docs[#h.seg.docs + 1] = cmd:sub(from, stop or n)
+      from = after or n + 1
+    end
+    pending = {}
+    return from
+  end
+  newseg()
+  while i <= n do
+    local j = cmd:find("[%s;&|()`'\"\\#<]", i)
+    if j == nil then
+      add(cmd:sub(i))
+      break
+    end
+    if j > i then
+      add(cmd:sub(i, j - 1))
+    end
+    local c = cmd:sub(j, j)
+    i = j + 1
+    if c == "\n" then
+      endword()
+      newseg()
+      i = bodies(i)
+    elseif c:match("%s") then
+      endword()
+    elseif c == "#" then
+      if started then
+        add("#")
+      else
+        i = cmd:find("\n", i, true) or n + 1
+      end
+    elseif c == ";" or c == "&" or c == "|" or c == "(" or c == ")" or c == "`" then
+      endword()
+      newseg()
+    elseif c == "\\" then
+      local nxt = cmd:sub(i, i)
+      i = i + 1
+      if nxt ~= "\n" and nxt ~= "" then
+        add(nxt)
+        bare = false
+      end
+    elseif c == "'" then
+      local e = cmd:find("'", i, true) or n + 1
+      add(cmd:sub(i, e - 1))
+      bare = false
+      i = e + 1
+    elseif c == '"' then
+      add("")
+      bare = false
+      while i <= n do
+        local k = cmd:find('["\\`]', i)
+        if k == nil then
+          add(cmd:sub(i))
+          i = n + 1
+          break
+        end
+        add(cmd:sub(i, k - 1))
+        local d = cmd:sub(k, k)
+        i = k + 1
+        if d == '"' then
+          break
+        elseif d == "\\" then
+          local x = cmd:sub(i, i)
+          if x == '"' or x == "\\" or x == "$" or x == "`" then
+            add(x)
+          elseif x ~= "\n" then
+            add("\\" .. x)
+          end
+          i = i + 1
+        else
+          seg.bt = true
+          add("`")
+        end
+      end
+    elseif cmd:sub(i, i + 1) == "<<" then
+      add("<<<")
+      i = i + 2
+    elseif cmd:sub(i, i) == "<" then
+      local k = i + 1
+      if cmd:sub(k, k) == "-" then
+        k = k + 1
+      end
+      local _, sp = cmd:find("^[ \t]*", k)
+      k = sp + 1
+      local s, e, q, delim = cmd:find("^(['\"])(.-)%1", k)
+      if s == nil then
+        s, e, delim = cmd:find("^\\?([%w_.%-]+)", k)
+      end
+      if s ~= nil then
+        endword()
+        pending[#pending + 1] = {delim = delim, seg = seg}
+        i = e + 1
+      else
+        add("<<")
+        i = i + 1
+      end
+    else
+      add("<")
     end
   end
-  return words
+  endword()
+  return segs
 end
 
-local function is_word(w)
-  return w ~= nil and w:match("^%a[%w%-]*$") ~= nil
+-- Words a segment may start with that are not its command.
+local SKIP = {env = true, time = true, sudo = true, command = true, exec = true, nohup = true,
+              uv = true, run = true, ["{"] = true, ["!"] = true, ["then"] = true, ["do"] = true,
+              ["else"] = true}
+
+-- The index of a segment's command word, or nil.
+local function head(seg)
+  for k, w in ipairs(seg.w) do
+    if not (SKIP[w] or w:match("^[%a_][%w_]*=")) then
+      return k
+    end
+  end
+  return nil
 end
 
--- Each nx call in a command as {verb, next word that looks like a subcommand or nil}.
-local function nx_verbs(cmd)
+local function is_cmd(w, name)
+  return w == name or w:sub(-#name - 1) == "/" .. name
+end
+
+local GIT_ARG = {["-C"] = true, ["-c"] = true, ["--git-dir"] = true, ["--work-tree"] = true,
+                 ["--namespace"] = true, ["--super-prefix"] = true, ["--config-env"] = true}
+
+-- The git subcommand of a segment whose command word is at k, past the global options.
+local function git_sub(seg, k)
+  local j = k + 1
+  while seg.w[j] ~= nil do
+    local w = seg.w[j]
+    if GIT_ARG[w] then
+      j = j + 2
+    elseif w:sub(1, 1) == "-" then
+      j = j + 1
+    else
+      return w
+    end
+  end
+  return nil
+end
+
+local VERB = "^[a-z][a-z0-9_%-]*$"
+
+-- Each nx call as {verb, sub}: nx is the command word of a segment, the verb the bare
+-- lowercase word after it, and sub the next word when that is one too (so for
+-- nx search foo, sub is foo; a quoted word, a path or a flag never is).
+local function nx_verbs(segs)
   local found = {}
-  local words = words_of(cmd)
-  for i, w in ipairs(words) do
-    if w == "nx" or w:match("/nx$") then
-      local a, b = words[i + 1], words[i + 2]
-      if is_word(a) then
-        if not is_word(b) then
-          b = nil
-        end
-        found[#found + 1] = {a, b}
-      end
+  for _, seg in ipairs(segs) do
+    local k = head(seg)
+    if k ~= nil and is_cmd(seg.w[k], "nx") and seg.b[k + 1] and seg.w[k + 1]:match(VERB) then
+      local b = seg.w[k + 2]
+      found[#found + 1] = {seg.w[k + 1], (seg.b[k + 2] and b:match(VERB)) and b or nil}
     end
   end
   return found
@@ -354,8 +551,8 @@ local function build_tools()
           called[name] = true
           ncalled = ncalled + 1
         end
-        if name == "Bash" then
-          for _, v in ipairs(nx_verbs(inp.command)) do
+        if name == "Bash" and type(inp.command) == "string" then
+          for _, v in ipairs(nx_verbs(scan(inp.command))) do
             local sub = v[2]
             t.hit("n\31" .. v[1] .. "\31" .. tostring(sub), "nx", "nx " .. v[1], c.time, 0,
                   sub ~= nil and {sub = sub} or nil)
@@ -464,12 +661,59 @@ local function cost_of(model, tokens)
 end
 
 local function build_agents()
+  local attributed = {}
   return {
     keyed = true,
     bodies = false,
     keys = {"kind", "agent_type", "model"},
     tags = {dispatches = "sum", runs = "sum", turns = "sum", errors = "sum", context = "mean",
             max_context = "max", cost_estimate_usd = "sum", unpriced = "sum"},
+    -- A subagent record shares its parent's session_id. Within a unit, each session's
+    -- subagents in start order take that session's Agent and Task calls in time order, each
+    -- the first call not yet taken that is at or before its start; the rest stay unattributed.
+    begin = function(recs)
+      attributed = {}
+      local calls, subs = {}, {}
+      for _, rec in ipairs(recs) do
+        local sid = tostring(rec.session_id)
+        if rec.main == true then
+          for _, c in ipairs(list(rec.tool_calls)) do
+            local at = is_dispatch(c.name) and ts_value(c.time) or nil
+            if at ~= nil then
+              local inp = input_of(c)
+              local l = calls[sid] or {}
+              calls[sid] = l
+              l[#l + 1] = {at = at, n = #l, type = str(inp.subagent_type, "(default)"), model = str(inp.model, nil)}
+            end
+          end
+        else
+          local at = ts_value(rec.start)
+          if at ~= nil then
+            local l = subs[sid] or {}
+            subs[sid] = l
+            l[#l + 1] = {at = at, id = tostring(rec.agent_id), rec = rec}
+          end
+        end
+      end
+      for sid, l in pairs(subs) do
+        local d = calls[sid]
+        if d ~= nil then
+          table.sort(d, function(a, b)
+            return a.at < b.at or (a.at == b.at and a.n < b.n)
+          end)
+          table.sort(l, function(a, b)
+            return a.at < b.at or (a.at == b.at and a.id < b.id)
+          end)
+          local p = 1
+          for _, s in ipairs(l) do
+            if d[p] ~= nil and d[p].at <= s.at then
+              attributed[s.rec] = d[p]
+              p = p + 1
+            end
+          end
+        end
+      end
+    end,
     each = function(rec, add)
       if rec.main == true then
         for _, c in ipairs(list(rec.tool_calls)) do
@@ -490,7 +734,9 @@ local function build_agents()
       local model = str(list(rec.models)[1], "(unknown)")
       local ctx = rec.first_context_tokens
       local usd, priced = cost_of(model, rec.tokens)
-      add({kind = "run", agent_type = "(unattributed)", model = model, runs = 1,
+      local from = attributed[rec]
+      add({kind = "run", agent_type = from and from.type or "(unattributed)",
+           model = from and from.model or model, runs = 1,
            turns = rec.assistant_turns or 0, errors = errors,
            context_total = ctx or 0, context_count = ctx and 1 or 0, max_context = ctx or 0,
            cost_estimate_usd = usd, unpriced = priced and 0 or 1})
@@ -537,57 +783,55 @@ local function prose_has_em_dash(text)
   return prose:find(dash, 1, true) ~= nil
 end
 
--- The command up to its first heredoc, with quoted strings emptied.
-local function outside_quotes(cmd)
-  local head = cmd:match("^(.-)<<") or cmd
-  return head:gsub('"[^"]*"', '""'):gsub("'[^']*'", "''")
+local ROOTS = {["/"] = true, ["~"] = true, ["~/"] = true, ["$HOME"] = true, ["$HOME/"] = true,
+               ["${HOME}"] = true, ["${HOME}/"] = true, ["/Users"] = true, ["/Users/"] = true,
+               ["/home"] = true, ["/home/"] = true}
+
+-- Is the start path of the find at k a whole-disk root (quoted or not).
+local function disk_root(seg, k)
+  local j = k + 1
+  while seg.w[j] ~= nil and seg.w[j]:sub(1, 1) == "-" do
+    j = j + 1
+  end
+  local p = seg.w[j]
+  return p ~= nil and (ROOTS[p] == true or p:match("^/Users/[^/]+/?$") ~= nil
+    or p:match("^/home/[^/]+/?$") ~= nil)
 end
 
-local function whole_disk_find(cmd)
-  local words = {}
-  for w in cmd:gmatch("%S+") do
-    words[#words + 1] = w
+local function names_trailer(seg)
+  for _, w in ipairs(seg.w) do
+    if w:find("Claude-Session:", 1, true) then
+      return true
+    end
   end
-  local roots = {["/"] = true, ["~"] = true, ["~/"] = true, ["$HOME"] = true, ["$HOME/"] = true,
-                 ["${HOME}"] = true, ["/Users"] = true, ["/home"] = true}
-  for i, w in ipairs(words) do
-    if w == "find" then
-      local j = i + 1
-      while words[j] ~= nil and words[j]:sub(1, 1) == "-" do
-        j = j + 1
-      end
-      local p = words[j]
-      if p ~= nil and (roots[p] or p:match("^/Users/[^/]+/?$") or p:match("^/home/[^/]+/?$")) then
-        return true
-      end
+  for _, d in ipairs(seg.docs) do
+    if d:find("Claude-Session:", 1, true) then
+      return true
     end
   end
   return false
 end
 
-local function quoted_backtick(cmd)
-  local runs_cli = false
-  for _, w in ipairs(words_of(cmd)) do
-    if w == "nx" or w == "bd" then
-      runs_cli = true
-    end
-  end
-  return runs_cli and (cmd:find('"[^"]*`[^"]*"') ~= nil or cmd:find("'[^']*`[^']*'") ~= nil)
-end
-
+-- The command word of each segment decides: git (its subcommand past the global options),
+-- find, nx or bd. Quoted text, comments and heredoc bodies are never a command.
 local function bash_hits(cmd, hit)
-  local bare = outside_quotes(cmd)
-  if bare:find("%f[%w]git%s+stash%f[%W]") then
-    hit["git-stash"] = true
-  end
-  if whole_disk_find(bare) then
-    hit["full-disk-find"] = true
-  end
-  if cmd:find("Claude%-Session:") and cmd:find("commit", 1, true) then
-    hit["claude-session-trailer"] = true
-  end
-  if quoted_backtick(cmd) then
-    hit["backtick-in-quoted-arg"] = true
+  for _, seg in ipairs(scan(cmd)) do
+    local k = head(seg)
+    local c = k and seg.w[k] or ""
+    if is_cmd(c, "git") then
+      local sub = git_sub(seg, k)
+      if sub == "stash" then
+        hit["git-stash"] = true
+      elseif sub == "commit" and names_trailer(seg) then
+        hit["claude-session-trailer"] = true
+      end
+    elseif is_cmd(c, "find") then
+      if disk_root(seg, k) then
+        hit["full-disk-find"] = true
+      end
+    elseif (is_cmd(c, "nx") or is_cmd(c, "bd")) and seg.bt then
+      hit["backtick-in-quoted-arg"] = true
+    end
   end
 end
 
@@ -650,12 +894,9 @@ local function build_procedures()
           end
         elseif name == "Bash" then
           local cmd = str(inp.command, "")
-          local words = words_of(cmd)
-          for i, w in ipairs(words) do
-            local procedure = words[i + 2]
-            if (w == "nx" or w:match("/nx$")) and words[i + 1] == "run" and procedure ~= nil
-              and procedure:match("^[a-z][a-z0-9_]*$") then
-              bump(runs, procedure)
+          for _, v in ipairs(nx_verbs(scan(cmd))) do
+            if v[1] == "run" and v[2] ~= nil and v[2]:match("^[a-z][a-z0-9_]*$") then
+              bump(runs, v[2])
             end
           end
           if cmd:find("nx memory put", 1, true) and cmd:find("kind:gate", 1, true) then
@@ -701,6 +942,9 @@ local BUILDERS = {
 -- ---- one unit of the window ----
 
 local function reduce(q, recs)
+  if q.begin ~= nil then
+    q.begin(recs)
+  end
   if q.keyed then
     local acc = keyed(q.keys, q.tags)
     for _, rec in ipairs(recs) do
@@ -721,27 +965,6 @@ local function reduce(q, recs)
   return rows
 end
 
-local function merge(q, held, more)
-  if q.keyed then
-    local acc = keyed(q.keys, q.tags)
-    for _, row in ipairs(held) do
-      acc.add(row)
-    end
-    for _, row in ipairs(more) do
-      acc.add(row)
-    end
-    return acc.result()
-  end
-  local rows = {}
-  for _, row in ipairs(held) do
-    rows[#rows + 1] = row
-  end
-  for _, row in ipairs(more) do
-    rows[#rows + 1] = row
-  end
-  return rows
-end
-
 -- The records of [a, b), or nil when the verb says the result is too large.
 local function fetch(q, a, b)
   local ok, res = pcall(transcripts.sessions, stamp(a), stamp(b), args.project, q.bodies)
@@ -756,38 +979,61 @@ end
 
 -- Add the unit's rows to the page: ok, full (the page stops before this unit), or split (the
 -- unit cannot be read, or its rows alone pass the page bound, and must be narrowed, wherever
--- the page stands).
+-- the page stands). The page keeps a running byte estimate: a per-session query appends the
+-- unit's rows, a keyed one sums them into the page's accumulator, and a row that is not yet
+-- there is the only growth, so no unit rescans the page.
 local function admit(q, page, recs)
   if q.keyed and page.units > 0 and page.sessions + #recs > MAX_SESSIONS_PER_RUN then
     return "full"
   end
   local rows = reduce(q, recs)
-  if estimate(rows) > PAGE_BYTES then
+  local size = estimate(rows)
+  if size > PAGE_BYTES then
     return "split"
   end
-  local merged = merge(q, page.rows, rows)
-  if estimate(merged) > PAGE_BYTES then
-    return "full"
-  end
-  local cut = 0
-  for _, rec in ipairs(recs) do
-    if rec.truncated == true then
-      cut = cut + 1
+  local grown = size
+  if q.keyed then
+    grown = 0
+    for _, row in ipairs(rows) do
+      if not page.acc.has(row) then
+        grown = grown + row_bytes(row)
+      end
     end
   end
-  page.rows = merged
+  if page.bytes + grown > PAGE_BYTES then
+    return "full"
+  end
+  for _, row in ipairs(rows) do
+    if q.keyed then
+      page.acc.add(row)
+    else
+      page.rows[#page.rows + 1] = row
+    end
+  end
+  for _, rec in ipairs(recs) do
+    if rec.truncated == true then
+      page.truncated = page.truncated + 1
+    end
+  end
+  page.bytes = page.bytes + grown
   page.units = page.units + 1
   page.sessions = page.sessions + #recs
-  page.truncated = page.truncated + cut
   return "ok"
 end
 
 local function window(q, lo, hi)
-  local page = {rows = {}, units = 0, sessions = 0, truncated = 0}
+  local page = {rows = {}, bytes = 0, units = 0, calls = 0, sessions = 0, truncated = 0}
+  if q.keyed then
+    page.acc = keyed(q.keys, q.tags)
+  end
   local pos = lo
   local split_end = nil
   local next_since = nil
   while pos < hi do
+    if page.units > 0 and page.calls >= MAX_UNITS_PER_RUN then
+      next_since = stamp(pos)
+      break
+    end
     local stop
     if split_end ~= nil and pos < split_end then
       stop = math.min(split_end, (pos // HOUR + 1) * HOUR)
@@ -795,6 +1041,7 @@ local function window(q, lo, hi)
       split_end = nil
       stop = math.min(hi, (pos // DAY + 1) * DAY)
     end
+    page.calls = page.calls + 1
     local recs = fetch(q, pos, stop)
     local verdict = "split"
     if recs ~= nil then
@@ -812,6 +1059,9 @@ local function window(q, lo, hi)
       split_end = stop
     end
   end
+  if q.keyed then
+    page.rows = page.acc.result()
+  end
   return page, next_since
 end
 
@@ -824,6 +1074,10 @@ end
 local until_text = args["until"] or args.now
 local lo = parse_time(args.since, "since")
 local hi = parse_time(until_text, "until")
+if lo >= hi then
+  fail("since must be before until; got " .. args.since .. " and " .. until_text)
+end
 local page, next_since = window(build(), lo, hi)
 
-return {rows = page.rows, truncated_records = page.truncated, ["until"] = until_text, next_since = next_since}
+return {rows = page.rows, truncated_records = page.truncated, since = args.since,
+        ["until"] = until_text, next_since = next_since}

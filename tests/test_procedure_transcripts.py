@@ -18,6 +18,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Callable
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from nexus.lua_runtime import static_check as sc
 from nexus.lua_runtime import transcripts_join as tj
 from nexus.lua_runtime import verbs_transcripts as vt
 from nexus.lua_runtime.verb_types import VerbContext, VerbError
+from nexus.operators.llm_models import PRICES
 
 SCRIPT = Path(hd.__file__).parent.parent / "procedures" / "transcripts.lua"
 SOURCE = SCRIPT.read_bytes()
@@ -96,8 +98,11 @@ class Sessions:
 class Run:
     """One script run in a sandbox-shaped environment with a fake (or real) verb."""
 
-    def __init__(self, verb: Callable[..., Any], *, patch: dict[str, str] | None = None) -> None:
+    def __init__(self, verb: Callable[..., Any], *, patch: dict[str, str] | None = None,
+                 count: bool = False) -> None:
         self.verb = verb
+        self.count = count
+        self.instructions = 0  # Lua VM instructions of the last call, when count is set
         self.source = TEXT
         for name, value in (patch or {}).items():  # a bound constant, patched in the text
             new, n = re.subn(rf"^local {name} = .*$", f"local {name} = {value}", self.source, flags=re.M)
@@ -143,7 +148,16 @@ class Run:
         fn, err = loaded if isinstance(loaded, tuple) else (loaded, None)
         assert fn is not None, err
         given = {"since": "2026-11-03", "now": NOW, **args}
-        return _py(fn(rt.table_from({k: v for k, v in given.items() if v is not None})))
+        table = rt.table_from({k: v for k, v in given.items() if v is not None})
+        if self.count:  # the hook lives here, never in the script (which has no debug library)
+            rt.execute("COUNT = 0; debug.sethook(function() COUNT = COUNT + 1 end, '', 1000)")
+        try:
+            result = fn(table)
+        finally:
+            if self.count:
+                rt.execute("debug.sethook()")
+                self.instructions = int(rt.globals().COUNT) * 1000
+        return _py(result)
 
 
 def _py(x: Any) -> Any:
@@ -161,6 +175,13 @@ def run(records: list[dict], query: str, **kw: Any) -> tuple[dict, Sessions]:
     fake = Sessions(records, max_records=kw.pop("max_records", None))
     out = Run(fake, patch=kw.pop("patch", None))(query=query, **kw)
     return out, fake
+
+
+def measure(records: list[dict], query: str, **kw: Any) -> tuple[dict, int]:
+    """One run and the Lua VM instructions it took (to the nearest thousand)."""
+    runner = Run(Sessions(records), patch=kw.pop("patch", None), count=True)
+    out = runner(query=query, **kw)
+    return out, runner.instructions
 
 
 def by(rows: list[dict], *keys: str) -> dict[tuple, dict]:
@@ -182,7 +203,7 @@ def test_the_header_parses_and_the_static_check_passes_with_its_grants() -> None
 def test_the_source_is_printable_ascii_and_never_names_the_environment() -> None:
     assert all(c in (9, 10, 13) or 32 <= c <= 126 for c in SOURCE)
     assert "_ENV" not in TEXT
-    assert len(SOURCE) < sc.MAX_SOURCE // 2
+    assert len(SOURCE) < sc.MAX_SOURCE * 3 // 4  # headroom under the static check's 64 KiB (was half)
 
 
 def test_the_cost_is_an_estimate_from_one_dated_price_table() -> None:
@@ -202,9 +223,9 @@ def test_an_unknown_query_and_bad_times_are_refused() -> None:
         run([], "tools", until="tomorrow")
 
 
-def test_to_defaults_to_now_and_until_is_the_value_used() -> None:
+def test_to_defaults_to_now_and_until_and_since_are_the_values_used() -> None:
     out, fake = run([], "tools", since="2026-11-07")
-    assert out["until"] == NOW
+    assert (out["until"], out["since"]) == (NOW, "2026-11-07")
     assert fake.calls == [("2026-11-07", "2026-11-08", None, False),
                           ("2026-11-08", "2026-11-08T12:00:00Z", None, False)]
     out, _ = run([], "tools", since="2026-11-07", until="2026-11-07T06:00:00Z")
@@ -212,10 +233,14 @@ def test_to_defaults_to_now_and_until_is_the_value_used() -> None:
     assert "next_since" not in out
 
 
-def test_an_empty_or_reversed_window_returns_no_rows_and_no_calls() -> None:
-    out, fake = run([], "tools", since="2026-11-05", until="2026-11-05")
-    assert out == {"rows": [], "truncated_records": 0, "until": "2026-11-05"}
-    assert fake.calls == []
+def test_a_window_that_does_not_start_before_it_ends_is_an_error_and_makes_no_call() -> None:
+    for since, until in (("2026-11-05", "2026-11-05"), ("2026-11-06", "2026-11-05"),
+                         ("2026-11-05T10:00:00Z", "2026-11-05T10:00:00Z"), ("2026-11-09", None)):
+        fake = Sessions([])
+        with pytest.raises(lua54.LuaError, match="since must be before until"):
+            Run(fake)(query="tools", since=since, until=until)
+        assert fake.calls == []
+    run([], "tools", since="2026-11-05", until="2026-11-05T00:00:01Z")  # one second is a window
 
 
 # ---- the queries, against one fixture with known counts -------------------------------------
@@ -283,9 +308,24 @@ def test_agents_counts_dispatches_and_runs_and_labels_the_cost_an_estimate() -> 
     assert (r1["runs"], r1["turns"], r1["errors"]) == (1, 4, 1)
     assert (r1["context_total"], r1["context_count"], r1["max_context"]) == (5000, 1, 5000)
     assert r1["cost_estimate_usd"] == pytest.approx(5.0 + 25.0)  # 1M input at 5, 1M output at 25
-    r2 = rows[("run", "(unattributed)", "claude-unknown-9")]
+    # s1 starts before any dispatch of its session; s2 (12:00) takes the first one, the developer on opus
+    r2 = rows[("run", "developer", "opus")]
     assert (r2["unpriced"], r2["cost_estimate_usd"], r2["context_total"]) == (1, 0, 3000)
     assert set(r1) == tj.SHAPES["agents"].fields
+
+
+def test_the_lua_price_table_equals_the_python_one_for_every_model_it_lists() -> None:
+    listed = set(re.findall(r'\["(claude-[a-z0-9\-]+)"\] = \{', TEXT))
+    assert listed == set(PRICES)
+    for i, field in enumerate(("input", "output", "cache_creation", "cache_read")):
+        records = [rec(f"s{m}", f"{DAY}T10:00:00Z", main=False, agent=f"a{m}", models=[model],
+                       tokens={"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0, field: 1_000_000})
+                   for m, model in enumerate(sorted(PRICES))]
+        out, _ = run(records, "agents", until="2026-11-04")
+        got = {r["model"]: r["cost_estimate_usd"] for r in out["rows"]}
+        want = {m: (p.input, p.output, p.cache_write, p.cache_read)[i] for m, p in PRICES.items()}
+        assert got == pytest.approx(want), field
+        assert all(r["unpriced"] == 0 for r in out["rows"])
 
 
 def test_a_dated_model_id_prices_as_its_base_model() -> None:
@@ -294,6 +334,56 @@ def test_a_dated_model_id_prices_as_its_base_model() -> None:
     out, _ = run([s], "agents", until="2026-11-04")
     (row,) = out["rows"]
     assert row["cost_estimate_usd"] == pytest.approx(2.0) and row["unpriced"] == 0
+
+
+def _sub(sid: str, start: str, agent: str, model: str = "claude-opus-4-8", **kw: Any) -> dict:
+    return rec(sid, f"{DAY}T{start}Z", main=False, agent=agent, models=[model], **kw)
+
+
+def test_a_subagent_run_takes_the_first_unmatched_dispatch_at_or_before_its_start() -> None:
+    parent = rec("P", f"{DAY}T10:00:00Z", calls=[
+        call("Agent", {"subagent_type": "reviewer", "model": "opus"}, "10:01:00"),
+        call("Task", {"subagent_type": "developer"}, "10:02:00"),
+        call("Agent", {"subagent_type": "never-ran"}, "10:30:00"),
+        call("Read", {"file_path": "/x"}, "10:01:30")])
+    def one_m() -> dict:  # a fresh dict each: lupa does not convert one shared dict twice
+        return {"input": 1_000_000, "output": 0, "cache_read": 0, "cache_creation": 0}
+
+    subs = [
+        _sub("P", "10:00:30", "a0"),  # before any dispatch: nothing at or before its start
+        _sub("P", "10:01:05", "a1", tokens=one_m()),  # reviewer, asked for opus, ran opus-4-8
+        _sub("P", "10:02:07", "a2", "claude-sonnet-4-6", tokens=one_m()),  # developer, no model asked
+        _sub("P", "10:02:09", "a3"),  # the next dispatch (10:30) is after its start
+        _sub("Q", "10:05:00", "q1"),  # a session with no main record in the unit
+    ]
+    out, _ = run([parent, *subs], "agents", until="2026-11-04")
+    rows = by(out["rows"], "kind", "agent_type", "model")
+    a1 = rows[("run", "reviewer", "opus")]
+    assert a1["runs"] == 1 and a1["cost_estimate_usd"] == pytest.approx(5.0)  # priced by the model it ran
+    a2 = rows[("run", "developer", "claude-sonnet-4-6")]
+    assert a2["runs"] == 1 and a2["cost_estimate_usd"] == pytest.approx(3.0)
+    assert rows[("run", "(unattributed)", "claude-opus-4-8")]["runs"] == 3  # a0, a3, q1
+    assert rows[("dispatch", "never-ran", "(default)")]["dispatches"] == 1
+    assert sum(r["runs"] for r in out["rows"]) == 5
+
+
+def test_attribution_orders_by_parsed_time_so_a_fraction_is_not_misread() -> None:
+    parent = rec("P", f"{DAY}T10:00:00Z", calls=[call("Agent", {"subagent_type": "t"}, "10:01:00.500")])
+    early = _sub("P", "10:01:00.250", "a1")  # before the dispatch by parsed time
+    late = _sub("P", "10:01:00.900", "a2")
+    out, _ = run([parent, early, late], "agents", until="2026-11-04")
+    rows = by(out["rows"], "kind", "agent_type")
+    assert rows[("run", "(unattributed)")]["runs"] == 1 and rows[("run", "t")]["runs"] == 1
+    whole = _sub("P", "10:01:01", "a3")  # no fraction, half a second after the dispatch
+    out, _ = run([parent, whole], "agents", until="2026-11-04")
+    assert by(out["rows"], "kind", "agent_type")[("run", "t")]["runs"] == 1
+
+
+def test_a_subagent_in_another_unit_than_its_parent_stays_unattributed() -> None:
+    parent = rec("P", f"{DAY}T10:00:00Z", calls=[call("Agent", {"subagent_type": "t"}, "10:01:00")])
+    child = rec("P", "2026-11-04T00:05:00Z", main=False, agent="a1")
+    out, _ = run([parent, child], "agents", until="2026-11-05")
+    assert by(out["rows"], "kind", "agent_type")[("run", "(unattributed)")]["runs"] == 1
 
 
 def test_tools_counts_per_tool_server_and_nx_verb_with_deferred_against_called() -> None:
@@ -329,6 +419,14 @@ def test_skills_ports_the_census() -> None:
     assert {k for r in out["rows"] for k in r} == tj.SHAPES["skills"].fields
 
 
+def test_a_long_run_is_31_api_messages_which_is_about_the_censuss_50_records() -> None:
+    assert re.search(r"^local LONG_RUN_TURNS = 31$", TEXT, re.M)
+    records = [rec("a", f"{DAY}T10:00:00Z", turns=30), rec("b", f"{DAY}T11:00:00Z", turns=31)]
+    out, _ = run(records, "skills", until="2026-11-04")
+    main = by(out["rows"], "scope", "kind", "name")[("main", "runs", "(all)")]
+    assert (main["count"], main["long_runs"]) == (2, 1)
+
+
 def test_memory_counts_file_t2_and_subagent_loads() -> None:
     out, _ = run(fixture_day(), "memory", until="2026-11-04")
     rows = by(out["rows"], "session_id", "main", "kind", "name")
@@ -342,6 +440,23 @@ def test_memory_counts_file_t2_and_subagent_loads() -> None:
     assert (loaded["size"], loaded["agent_id"], loaded["type"]) == (1000, "a1", "Project")
     assert not any(r["kind"] == "loaded" and r["main"] for r in out["rows"])
     assert not any("not_memory" in r["name"] for r in out["rows"])
+
+
+def test_memory_read_and_get_rows_carry_no_size_and_last_use_compares_parsed_times() -> None:
+    s = rec("s", f"{DAY}T10:00:00Z", calls=[
+        call(GET, {"project": "n", "title": "t"}, "10:00:00"),
+        call(GET, {"project": "n", "title": "t"}, "10:00:00.500"),
+        call(GET, {"project": "n", "title": "t"}, "10:00:00.250"),
+        call("Read", {"file_path": f"{MEM}/a.md"}, "10:00:01.500"),
+        call("Read", {"file_path": f"{MEM}/a.md"}, "10:00:01")])
+    out, _ = run([s], "memory", until="2026-11-04")
+    rows = by(out["rows"], "kind")
+    assert rows[("t2_get",)]["last_use"] == f"{DAY}T10:00:00.500Z"  # string order puts "...00Z" last
+    assert rows[("file_read",)]["last_use"] == f"{DAY}T10:00:01.500Z"
+    assert all("size" not in r for r in out["rows"])  # unknown is absent, never 0
+    loaded = rec("m", f"{DAY}T10:00:00Z", main=False, agent="a", loads=[load("/r/x.md", 40)])
+    out, _ = run([loaded], "memory", until="2026-11-04")
+    assert out["rows"][0]["size"] == 40  # a measured size stays
 
 
 def test_loads_counts_instruction_files_per_main_session_and_per_dispatch() -> None:
@@ -377,34 +492,117 @@ def test_violations_counts_main_sessions_with_a_hit_and_carries_every_denominato
     assert {r["rule"]: (r["count"], r["main_sessions"]) for r in empty["rows"]}["em-dash"] == (0, 0)
 
 
+BT = "backtick-in-quoted-arg"
+STASH, FIND, TRAILER = "git-stash", "full-disk-find", "claude-session-trailer"
+
+
 @pytest.mark.parametrize("command,rule", [
-    ("git stash", "git-stash"),
-    ("cd x && git stash pop", "git-stash"),
+    ("git stash", STASH),
+    ("cd x && git stash pop", STASH),
     ("git stashed", None),
+    ("git log stash", None),
+    ("git -C stash status", None),
     ("echo 'git stash' > notes", None),
+    ('echo "git stash"', None),
     ('git commit -m "do not git stash"', None),
     ("git commit -F - <<'EOF'\nuse git stash here\nEOF", None),
-    ("find / -name x", "full-disk-find"),
-    ("find ~ -type f", "full-disk-find"),
-    ("find $HOME -name x", "full-disk-find"),
-    ("find -L / -name x", "full-disk-find"),
-    ("find /Users/hal -name x", "full-disk-find"),
-    ("find /home -name x", "full-disk-find"),
+    # global options before the subcommand, a stash after a heredoc, a comment
+    ("git -C /tmp/x stash", STASH),
+    ("git --no-pager stash list", STASH),
+    ("git -c core.pager=cat stash pop", STASH),
+    ("git --git-dir=.git stash", STASH),
+    ("git --git-dir .git --work-tree . stash", STASH),
+    ("cat <<EOF\nnotes\nEOF\ngit stash", STASH),
+    ("git commit -F - <<'EOF'\nuse git stash\nEOF\ngit stash", STASH),
+    ("# git stash", None),
+    ("ls # git stash", None),
+    ("ls;\n# git stash\nls", None),
+    ("echo a#b; git stash", STASH),
+    ("find / -name x", FIND),
+    ("find ~ -type f", FIND),
+    ("find $HOME -name x", FIND),
+    ("find -L / -name x", FIND),
+    ("find /Users/hal -name x", FIND),
+    ("find /home -name x", FIND),
+    ('find "$HOME" -name x', FIND),
+    ('find "/" -name x', FIND),
+    ("find '/Users' -name x", FIND),
+    ("sudo find / -name x", FIND),
+    ("ls && find ~/ -name x", FIND),
     ("find . -name x", None),
     ("find /Users/hal/git/nexus -name x", None),
     ("find src -name '/'", None),
-    ('git commit -m "x\n\nClaude-Session: abc"', "claude-session-trailer"),
+    ('find . -name "/"', None),
+    ("find src -path ~", None),
+    ('echo "find / -name x"', None),
+    ("grep -r find /", None),
+    ('git commit -m "x\n\nClaude-Session: abc"', TRAILER),
+    ("git -C /x commit -m 'Claude-Session: a'", TRAILER),
+    ("git --no-pager commit --amend -m 'Claude-Session: a'", TRAILER),
+    ("git commit -F - <<'EOF'\nsubject\n\nClaude-Session: abc\nEOF", TRAILER),
     ("git log --grep 'Claude-Session:'", None),
-    ('bd create "fix `x` thing"', "backtick-in-quoted-arg"),
-    ("nx store put 'a `b`'", "backtick-in-quoted-arg"),
+    ("grep 'Claude-Session:' notes.txt", None),
+    ("git commit -m ok\ngrep Claude-Session: notes.txt", None),
+    ("git status # git commit Claude-Session:", None),
+    ("git commit -m ok # Claude-Session: x", None),
+    ("git log -1 --format=Claude-Session:", None),
+    ('bd create "fix `x` thing"', BT),
+    ('uv run nx store put "a `b`"', BT),
+    ('echo $(bd create "a `b`")', BT),
+    ('nx store put "it\'s `x`"', BT),
+    ("nx store put 'it'\"'\"'s' \"`x`\"", BT),
+    ("nx store put 'a `b`'", None),  # single quotes: the backtick is literal
+    ("nx store put 'a \"b `c`\"'", None),
+    ("bd create \"a\" 'b `c`'", None),
+    ('nx store put "a \\`b\\`"', None),  # an escaped backtick is literal too
     ('echo "a `b`"', None),
+    ('echo "`x`" && nx memory put ok', None),  # the backtick is in another segment
+    ('nx x <<EOF\n`y` "`z`"\nEOF', None),  # a heredoc body is not an argument
+    ('nx x # "a `b`"', None),
     ('nx memory put "a $(date)"', None),
     ("nx memory put plain", None),
+    ("nx store put `date`", None),
 ])
 def test_the_bash_rules(command: str, rule: str | None) -> None:
     s = rec("s", f"{DAY}T10:00:00Z", calls=[call("Bash", {"command": command})])
     out, _ = run([s], "violations", until="2026-11-04")
     assert {r["rule"] for r in out["rows"] if r["count"]} == ({rule} if rule else set())
+
+
+@pytest.mark.parametrize("command,verbs", [
+    ("echo 'use nx store here'", []),
+    ("rg nx src", []),
+    ("grep -rn nx README", []),
+    ("cat <<EOF\nnx store put\nEOF", []),
+    ("nx --version", []),
+    ("nx Store put", []),
+    # sub is the next word when it is a bare lowercase word: so for a verb that takes a free
+    # argument (nx search foo) it is that argument; a quoted word, a path or a flag never is
+    ("nx search foo", [("search", "foo")]),
+    ('nx search "foo bar"', [("search", None)]),
+    ("nx scratch ./file", [("scratch", None)]),
+    ("nx store 'put'", [("store", None)]),
+    ("nx store put x", [("store", "put")]),
+    ("nx index repo .", [("index", "repo")]),
+    ("/opt/bin/nx doctor --fix", [("doctor", None)]),
+    ("nx memory curate --cold && uv run nx store put x", [("memory", "curate"), ("store", "put")]),
+    ("cd x; FOO=1 nx run gate_record -", [("run", "gate_record")]),
+    ("echo hi | nx search q", [("search", "q")]),
+])
+def test_nx_verbs_are_read_from_the_command_word_of_a_segment(command: str, verbs: list) -> None:
+    s = rec("s", f"{DAY}T10:00:00Z", calls=[call("Bash", {"command": command})])
+    out, _ = run([s], "tools", until="2026-11-04")
+    got = sorted((r["name"][3:], r.get("sub")) for r in out["rows"] if r["kind"] == "nx")
+    assert got == sorted(verbs), command
+
+
+def test_a_procedure_run_is_read_the_same_way() -> None:
+    s = rec("s", f"{DAY}T10:00:00Z", calls=[
+        call("Bash", {"command": "echo 'nx run decoy'"}),
+        call("Bash", {"command": "rg nx run src"}),
+        call("Bash", {"command": "nx run real_one --args-file -"})])
+    out, _ = run([s], "procedures", until="2026-11-04")
+    assert by(out["rows"], "procedure") == {("real_one",): {"procedure": "real_one", "runs": 1, "hand_written": 0}}
 
 
 @pytest.mark.parametrize("text,hit", [
@@ -418,10 +616,11 @@ def test_the_em_dash_rule_reads_prose_not_code(text: str, hit: bool) -> None:
 
 
 def test_only_violations_asks_for_bodies() -> None:
+    assert "plain" in json.dumps(fixture_day()) and "clean" in json.dumps(fixture_day())  # the fixture has bodies
     for query in ("agents", "tools", "skills", "memory", "loads", "procedures"):
         out, fake = run(fixture_day(), query, until="2026-11-04")
         assert [c[3] for c in fake.calls] == [False], query
-        assert "PLAIN" not in json.dumps(out) and "dash" not in json.dumps(out), query
+        assert "plain" not in json.dumps(out) and "clean" not in json.dumps(out), query  # no body text
     _, fake = run(fixture_day(), "violations", until="2026-11-04")
     assert [c[3] for c in fake.calls] == [True]
 
@@ -610,7 +809,8 @@ def test_rows_passing_768_kb_return_next_since_and_the_joined_pages_equal_one_pa
 
 
 def _estimate(rows: list[dict]) -> int:
-    return sum(16 + (2 * len(v) if isinstance(v, str) else 0) for r in rows for v in r.values())
+    """The script's row estimate: 16 bytes a field, and twice the UTF-8 bytes of every string."""
+    return sum(16 + (2 * len(v.encode("utf-8")) if isinstance(v, str) else 0) for r in rows for v in r.values())
 
 
 def test_a_page_ending_mid_day_returns_a_timestamp_and_the_pages_still_equal_one_pass() -> None:
@@ -717,12 +917,119 @@ def test_keyed_pages_at_the_real_work_bound() -> None:
     assert out["next_since"] == "2026-11-02"
 
 
+def _day(n: int) -> str:
+    return (date(2025, 11, 1) + timedelta(days=n)).isoformat()
+
+
+def test_the_estimate_helper_counts_utf8_bytes_and_a_field_is_16_bytes() -> None:
+    assert _estimate([{"a": "é", "b": 1, "c": True}]) == 16 * 3 + 2 * 2
+    r = rec("s", f"{DAY}T10:00:00Z", calls=[call(GET, {"project": "n", "title": "t"})])
+    out, _ = run([r], "memory", until="2026-11-04")
+    # session_id, main, kind, name, count, last_use: six fields; strings "s", "t2_get", "n/t", 20 chars
+    assert _estimate(out["rows"]) == 6 * 16 + 2 * (1 + 6 + 3 + 20) == 156
+
+
+def test_a_page_holds_exactly_page_bytes_and_one_byte_less_does_not() -> None:
+    def one(day: str) -> dict:
+        return rec("s", f"{day}T10:00:00Z", calls=[call(GET, {"project": "n", "title": "t"}, day=day)])
+
+    # a unit's own rows: exactly PAGE_BYTES is accepted, one byte less is split down to the hour and refused
+    out, fake = run([one(DAY)], "memory", until="2026-11-04", patch={"PAGE_BYTES": "156"})
+    assert len(out["rows"]) == 1 and len(fake.calls) == 1 and "next_since" not in out
+    with pytest.raises(lua54.LuaError, match="^result-window"):
+        run([one(DAY)], "memory", until="2026-11-04", patch={"PAGE_BYTES": "155"})
+    # the page: two units of 156 fit in 312 and not in 311
+    two = [one(DAY), one("2026-11-04")]
+    out, _ = run(two, "memory", until="2026-11-05", patch={"PAGE_BYTES": "312"})
+    assert len(out["rows"]) == 2 and "next_since" not in out
+    out, _ = run(two, "memory", until="2026-11-05", patch={"PAGE_BYTES": "311"})
+    assert len(out["rows"]) == 1 and out["next_since"] == "2026-11-04"
+
+
+def test_hour_pieces_align_to_the_hour_from_a_mid_hour_since() -> None:
+    records = [rec(f"s{i}", f"2026-11-03T{6 + i // 20:02d}:{i % 20:02d}:00Z", calls=[call("Read", {})])
+               for i in range(60)]
+    out, fake = run(records, "tools", since="2026-11-03T05:30:00Z", until="2026-11-04", max_records=40)
+    pieces = [c[:2] for c in fake.calls]
+    assert pieces[0] == ("2026-11-03T05:30:00Z", "2026-11-04")
+    assert pieces[1:5] == [("2026-11-03T05:30:00Z", "2026-11-03T06:00:00Z"),
+                           ("2026-11-03T06:00:00Z", "2026-11-03T07:00:00Z"),
+                           ("2026-11-03T07:00:00Z", "2026-11-03T08:00:00Z"),
+                           ("2026-11-03T08:00:00Z", "2026-11-03T09:00:00Z")]
+    assert len(out["rows"]) == 60
+
+
+def sparse(days: int, every: int) -> list[dict]:
+    """One small session every ``every`` days: a sparse year of the kind the units cap exists for."""
+    return [rec(f"s{d}", f"{_day(d)}T10:00:00Z", calls=[
+        call("Skill", {"skill": f"k{d % 3}"}, day=_day(d)),
+        call(GET, {"project": "n", "title": f"t{d % 5}"}, day=_day(d)),
+        call("Agent", {"subagent_type": "developer"}, "10:05:00", day=_day(d))])
+        for d in range(0, days, every)]
+
+
+def test_a_year_long_sparse_window_pages_by_units_and_the_joined_pages_equal_one_pass() -> None:
+    records = sparse(400, 17)
+    units = int(re.search(r"^local MAX_UNITS_PER_RUN = (\d+)$", TEXT, re.M).group(1))
+    assert 30 <= units <= 400
+    for query in ("memory", "tools", "skills", "agents", "violations"):
+        pages, _ = pages_of(records, query, since=_day(0), until=_day(400))
+        assert len(pages) >= 400 // units, query  # per-session queries are paged by units too
+        one, _ = run(records, query, since=_day(0), until=_day(400), patch={"MAX_UNITS_PER_RUN": "100000"})
+        assert "next_since" not in one, query
+        joined = tj.join_pages(query, pages)["rows"]
+        assert len(joined) == len(one["rows"]), query
+        for x, y in zip(joined, tj.join_pages(query, [one])["rows"], strict=True):
+            assert x == pytest.approx(y), query
+
+
+def test_a_page_stops_at_the_units_cap_and_always_takes_at_least_one_unit() -> None:
+    out, fake = run(sparse(30, 1), "tools", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "7"})
+    assert out["next_since"] == _day(7) and len(fake.calls) == 7
+    out, fake = run(sparse(30, 1), "tools", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "0"})
+    assert out["next_since"] == _day(1) and len(fake.calls) == 1
+
+
+def test_a_365_day_sparse_window_costs_well_under_the_instruction_cap() -> None:
+    records = sparse(365, 9)
+    for query in ("agents", "tools", "skills", "memory", "violations", "loads", "procedures"):
+        out, n = measure(records, query, since=_day(0), until=_day(365))
+        assert 0 < n < 10_000_000, (query, n)  # the runtime stops a run at 50 million
+        assert "next_since" in out, query  # a year does not fit one run: it pages
+    big = fixture_day()
+    dense = [json.loads(json.dumps(r).replace(DAY, _day(d)).replace("m1", f"m1-{d}"))
+             for d in range(0, 365, 30) for r in big]
+    for query in ("agents", "tools", "skills", "memory", "violations"):
+        _, n = measure(dense, query, since=_day(0), until=_day(365))
+        assert n < 10_000_000, (query, n)
+
+
+def test_a_year_of_per_session_rows_in_one_run_costs_millions_not_tens_of_millions() -> None:
+    # 365 units, ~4.4K rows held by the end: the copy-and-rescan merge took 50 million instructions
+    # (the runtime's whole cap) for this; appending to a running estimate takes about one
+    recs = [rec(f"s{d}-{i}", f"{_day(d)}T10:{i:02d}:00Z", calls=[call(GET, {"title": f"t{i}"}, day=_day(d))])
+            for d in range(365) for i in range(12)]
+    out, n = measure(recs, "memory", since=_day(0), until=_day(365), patch={"MAX_UNITS_PER_RUN": "100000"})
+    assert len(out["rows"]) == 365 * 12 and "next_since" not in out
+    assert n < 5_000_000, n
+
+
+def test_a_page_costs_the_same_however_many_rows_it_already_holds() -> None:
+    def instructions(days: int) -> int:
+        recs = [rec(f"s{d}-{i}", f"{_day(d)}T10:{i:02d}:00Z", calls=[call(GET, {"title": f"t{i}"}, day=_day(d))])
+                for d in range(days) for i in range(40)]
+        return measure(recs, "memory", since=_day(0), until=_day(days), patch={"MAX_UNITS_PER_RUN": "1000"})[1]
+
+    few, many = instructions(10), instructions(80)
+    assert many < few * 8 * 1.5  # linear in the units: appending, never copying the held rows
+
+
 # ---- the join ---------------------------------------------------------------------------------
 
 
 def _agents(**rows: Any) -> dict:
     return {"rows": rows["rows"], "truncated_records": rows.get("t", 0), "until": NOW,
-            **({"next_since": rows["next"]} if rows.get("next") else {})}
+            "since": rows.get("since", "2026-11-01"), **({"next_since": rows["next"]} if rows.get("next") else {})}
 
 
 def test_join_sums_means_and_maxes_by_key_and_derives_the_mean() -> None:
@@ -733,7 +1040,7 @@ def test_join_sums_means_and_maxes_by_key_and_derives_the_mean() -> None:
                 "context_count": ctx_count, "max_context": mx, "cost_estimate_usd": cost, "unpriced": 0, **extra}
 
     p1 = _agents(rows=[row(2, 3000, 2, 2500, 1.5), {**row(1, 0, 0, 0, 0), "model": "other"}], t=1, next="2026-11-02")
-    p2 = _agents(rows=[row(1, 500, 1, 9000, 0.25)], t=2)
+    p2 = _agents(rows=[row(1, 500, 1, 9000, 0.25)], t=2, since="2026-11-02")
     joined = tj.join_pages("agents", [p1, p2])
     rows = by(joined["rows"], "model")
     r = rows[("m",)]
@@ -748,9 +1055,9 @@ def test_join_sums_means_and_maxes_by_key_and_derives_the_mean() -> None:
 
 def test_join_concatenates_per_session_rows_in_page_order() -> None:
     a = {"rows": [{"session_id": "a", "name": "x", "count": 1}], "truncated_records": 0, "until": NOW,
-         "next_since": "2026-11-02"}
+         "since": "2026-11-01", "next_since": "2026-11-02"}
     b = {"rows": [{"session_id": "b", "name": "x", "count": 1}, {"session_id": "a", "name": "x", "count": 1}],
-         "truncated_records": 0, "until": NOW}
+         "truncated_records": 0, "until": NOW, "since": "2026-11-02"}
     for q in ("memory", "tools", "loads"):
         assert [r["session_id"] for r in tj.join_pages(q, [a, b])["rows"]] == ["a", "b", "a"]
 
@@ -759,9 +1066,9 @@ def test_join_violations_keeps_every_pages_denominator_and_derives_a_rate() -> N
     def page(count: int, n: int, **kw: Any) -> dict:
         return {"rows": [{"rule": "em-dash", "count": count, "main_sessions": n},
                          {"rule": "git-stash", "count": 0, "main_sessions": n}],
-                "truncated_records": 0, "until": NOW, **kw}
+                "truncated_records": 0, "until": NOW, "since": "2026-11-01", **kw}
 
-    joined = tj.join_pages("violations", [page(2, 10, next_since="2026-11-02"), page(0, 30)])
+    joined = tj.join_pages("violations", [page(2, 10, next_since="2026-11-02"), page(0, 30, since="2026-11-02")])
     rows = by(joined["rows"], "rule")
     assert (rows[("em-dash",)]["count"], rows[("em-dash",)]["main_sessions"]) == (2, 40)
     assert rows[("em-dash",)]["per_100"] == pytest.approx(5.0)
@@ -769,13 +1076,13 @@ def test_join_violations_keeps_every_pages_denominator_and_derives_a_rate() -> N
 
 
 def test_join_refuses_pages_that_do_not_make_one_window() -> None:
-    ok = {"rows": [], "truncated_records": 0, "until": NOW}
+    ok = {"rows": [], "truncated_records": 0, "until": NOW, "since": "2026-11-01"}
     with pytest.raises(tj.JoinError, match="unknown query"):
         tj.join_pages("nope", [ok])
     with pytest.raises(tj.JoinError, match="no pages"):
         tj.join_pages("tools", [])
     with pytest.raises(tj.JoinError, match="different windows"):
-        tj.join_pages("tools", [{**ok, "next_since": "2026-11-02"}, {**ok, "until": "2026-11-09"}])
+        tj.join_pages("tools", [{**ok, "next_since": "2026-11-02"}, {**ok, "since": "2026-11-02", "until": "2026-11-09"}])
     with pytest.raises(tj.JoinError, match="before the last"):
         tj.join_pages("tools", [ok, ok])
     with pytest.raises(tj.JoinError, match="not done"):
@@ -783,11 +1090,34 @@ def test_join_refuses_pages_that_do_not_make_one_window() -> None:
     assert tj.join_pages("tools", [{**ok, "next_since": "2026-11-02"}], allow_partial=True)["pages"] == 1
 
 
+def test_join_refuses_pages_that_do_not_continue_each_other() -> None:
+    first = {"rows": [], "truncated_records": 0, "until": NOW, "since": "2026-11-01", "next_since": "2026-11-03"}
+    last = {"rows": [], "truncated_records": 0, "until": NOW, "since": "2026-11-03"}
+    assert tj.join_pages("tools", [first, last])["pages"] == 2
+    with pytest.raises(tj.JoinError, match="starts at '2026-11-02'.*ended at '2026-11-03'"):
+        tj.join_pages("tools", [first, {**last, "since": "2026-11-02"}])  # a gap
+    with pytest.raises(tj.JoinError, match="starts at"):
+        tj.join_pages("tools", [first, {k: v for k, v in last.items() if k != "since"}])  # no since at all
+    third = {**last, "since": "2026-11-03", "next_since": "2026-11-05"}
+    final = {**last, "since": "2026-11-04"}
+    with pytest.raises(tj.JoinError, match="starts at '2026-11-04'.*ended at '2026-11-05'"):
+        tj.join_pages("tools", [first, third, final])  # the second join is checked too
+
+
+def test_real_pages_carry_the_since_the_next_page_continues_from() -> None:
+    records = [r for d in ("2026-11-01", "2026-11-02", "2026-11-03") for r in hourly(500, d, 9)]
+    pages, _ = pages_of(records, "memory", since="2026-11-01", until="2026-11-04")
+    assert [p["since"] for p in pages] == ["2026-11-01", "2026-11-02", "2026-11-03"]
+    with pytest.raises(tj.JoinError, match="starts at"):
+        tj.join_pages("memory", [pages[0], pages[2]])
+
+
 def test_the_join_tags_name_exactly_the_fields_the_script_returns() -> None:
     for query in ("agents", "skills", "violations", "procedures"):
         out, _ = run(fixture_day(), query, until="2026-11-04")
         assert {k for r in out["rows"] for k in r} <= tj.SHAPES[query].fields, query
-        assert tj.SHAPES[query].fields <= {k for r in out["rows"] for k in r} | {"unpriced"}, query
+        # every keyed row carries every field (a tag starts at 0), so the sets are equal, none optional
+        assert tj.SHAPES[query].fields == {k for r in out["rows"] for k in r}, query
     for query in ("memory", "tools", "loads"):
         out, _ = run(fixture_day(), query, until="2026-11-04")
         assert {k for r in out["rows"] for k in r} <= tj.SESSION_FIELDS[query], query
