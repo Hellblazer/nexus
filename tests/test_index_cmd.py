@@ -924,11 +924,14 @@ def test_index_pdf_dry_run_threads_flag_to_index_pdf(runner, fake_pdf):
     explicit dry_run=True kwarg, not be inferred from the dry-run
     branch's ephemeral T3 client or no-op embedder -- the phantom-
     registration bug this flag closes is gated on the flag itself."""
-    with patch("nexus.doc_indexer.index_pdf", return_value=3) as m:
+    summary = {"chunks": 3, "pages": [1, 2], "title": "T", "author": "A"}
+    with patch("nexus.doc_indexer.index_pdf", return_value=summary) as m:
         result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--dry-run"])
     assert result.exit_code == 0, result.output
     _, kw = m.call_args
     assert kw.get("dry_run") is True
+    # The dry run prints the summary the run itself returned (a chunk row carries no page or title).
+    assert "Chunks: 3" in result.output and "Pages: 1–2" in result.output and 'Title: "T"' in result.output
 
 
 def test_index_pdf_allow_degraded_extraction_flag_defaults_false(runner, fake_pdf):

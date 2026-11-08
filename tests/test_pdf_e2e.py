@@ -123,8 +123,8 @@ class TestIndexPdfE2E:
         results = local_t3.search("hello world test document", ["docs__pdf-e2e-simple__voyage-context-3__v1"], sensitivity="include")
         assert results, "Expected search results after indexing"
         assert results[0]["distance"] < 1.0, f"distance={results[0]['distance']} too large"
-        # RDR-101 Phase 5c: store_type dropped; content_type is canonical.
-        assert results[0]["content_type"] == "pdf"
+        # RDR-236 Phase 4 Step 1: the content type is the catalog document's, not a chunk row's.
+        assert "content_type" not in results[0]
 
     def test_e2e_multipage_page_attribution(self, multipage_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E2: multipage.pdf → query for 'database transactions' returns page 2 chunk."""
@@ -140,9 +140,11 @@ class TestIndexPdfE2E:
             n_results=3, sensitivity="include",
         )
         assert results, "Expected search results for database transactions query"
-        page_numbers = [r.get("page_number") for r in results]
-        assert 2 in page_numbers, (
-            f"Expected at least one page 2 chunk in top-3 results, got: {page_numbers}"
+        # RDR-236 Phase 4 Step 1: the page is the manifest row's, not a chunk row's, so the proof that the
+        # right chunk comes back is its text (the page-2 text of the fixture) and the absent row label.
+        assert all("page_number" not in r for r in results)
+        assert any("transaction" in r["content"].lower() for r in results), (
+            "Expected the page 2 (database transactions) chunk in the top-3 results"
         )
 
     def test_e2e_staleness_guard(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
@@ -236,8 +238,8 @@ class TestIndexPdfFileE2E:
 
         results = local_t3.search("hello world test document", [collection_name], sensitivity="include")
         assert results, "Expected search results after indexing"
-        assert results[0].get("source_agent") == "nexus-indexer"
-        assert results[0].get("tags") == "pdf"
+        # RDR-236 Phase 4 Step 1: the agent and tags are the catalog document's, not a chunk row's.
+        assert "source_agent" not in results[0] and "tags" not in results[0]
         # git_meta is dropped post-Phase-5c — chunk metadata carries
         # only schema-canonical fields now.
         assert "git_meta" not in results[0]

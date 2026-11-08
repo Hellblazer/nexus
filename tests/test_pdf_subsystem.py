@@ -132,35 +132,24 @@ class TestPdfChunksMetadata:
         PDF's XMP title, the first heading, or the filename stem.
         """
         content_hash = _sha256(simple_pdf)
+        stats: dict = {}
         result = _pdf_chunks(
             simple_pdf, content_hash, "model-ctx", "2026-01-01T00:00:00", "mybook",
-            extractor="pymupdf",
+            extractor="pymupdf", extraction_stats=stats,
         )
         assert result, "Expected at least one chunk from simple.pdf"
         for chunk_id, text, meta, _p in result:
-            # RDR-101 Phase 5c (nexus-o6aa.13) dropped store_type, corpus,
-            # git_meta. content_type is the canonical routing field.
-            assert meta["content_type"] == "pdf"
-            assert "store_type" not in meta
-            assert "corpus" not in meta
-            assert "git_meta" not in meta
-            assert meta["content_hash"] == content_hash
-            # page_count is dropped by normalize() — not in ALLOWED_TOP_LEVEL.
-            assert "page_count" not in meta
-            # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL and is
-            # threaded from ExtractionResult.metadata.
-            assert meta["extraction_method"] == "pymupdf"
-            # RDR-108 Phase 3 (nexus-bdag): chunk_count / chunk_index /
-            # doc_id retired from chunk metadata. Catalog manifest carries
-            # the document-to-chunk binding instead.
-            assert "chunk_count" not in meta
-            assert "chunk_index" not in meta
-            assert "doc_id" not in meta
-            # title (was source_title): XMP title, first heading or filename fallback
-            assert isinstance(meta["title"], str)
-            # source_author: from the PDF's author field; may be empty
-            assert isinstance(meta["source_author"], str)
+            # RDR-236 Phase 4 Step 1: the chunk row is the CHUNK keys only.
+            assert set(meta) == {"chunk_text_hash", "embedding_model"}
             assert meta["embedding_model"] == "model-ctx"
+            assert isinstance(chunk_id, str) and chunk_id
+            assert isinstance(text, str) and text.strip()
+        # The document's facts are the extraction's, for the catalog: the method, the XMP title / first
+        # heading / filename fallback, and the author (may be empty).
+        assert stats["extraction_method"] == "pymupdf"
+        assert isinstance(stats["title"], str) and stats["title"]
+        assert isinstance(stats["author"], str)
+        for chunk_id, text, meta, _p in result:
             assert isinstance(chunk_id, str) and chunk_id
             assert isinstance(text, str) and text.strip()
 
@@ -171,13 +160,15 @@ class TestPdfChunksMetadata:
         (nx dt index knows the record's real name)."""
         content_hash = _sha256(simple_pdf)
         override = "Self-Aware Vector Embeddings for Retrieval-Augmented Generation"
+        stats: dict = {}
         result = _pdf_chunks(
             simple_pdf, content_hash, "model-ctx", "2026-01-01T00:00:00", "mybook",
-            title_override=override, extractor="pymupdf",
+            title_override=override, extractor="pymupdf", extraction_stats=stats,
         )
         assert result, "Expected at least one chunk from simple.pdf"
-        for _chunk_id, _text, meta, _p in result:
-            assert meta["title"] == override
+        # RDR-236 Phase 4 Step 1: the title is the document's (the catalog hook's input), not a chunk row's.
+        assert stats["title"] == override
+        assert all("title" not in meta for _id, _t, meta, _p in result)
 
     def test_multipage_pdf_page_numbers(self, multipage_pdf: Path) -> None:
         """AC-S2: page_number values are drawn from {1, 2, 3}; no zeros present."""
@@ -187,7 +178,7 @@ class TestPdfChunksMetadata:
             extractor="pymupdf",
         )
         assert result
-        page_numbers = {meta["page_number"] for _, _, meta, _p in result}
+        page_numbers = {p["page_number"] for _, _, _meta, p in result}
         assert page_numbers <= {1, 2, 3}, f"Unexpected page numbers: {page_numbers}"
         assert 0 not in page_numbers, "Page 0 should not appear when boundaries are present"
         assert len(page_numbers) > 1, (
@@ -212,17 +203,17 @@ class TestPdfChunksMetadata:
         doc.close()
 
         content_hash = _sha256(bare)
+        stats: dict = {}
         result = _pdf_chunks(
             bare, content_hash, "test-model", "2026-01-01T00:00:00", "test", extractor="pymupdf",
+            extraction_stats=stats,
         )
         assert result
+        # title: no XMP title; first heading or filename fallback. author: the PDF has none.
+        assert isinstance(stats["title"], str) and stats["title"]
+        assert stats["author"] == "", f"Expected '', got {stats['author']!r}"
         for _, _, meta, _p in result:
-            # title (was source_title): no XMP title; first heading or filename fallback
-            assert isinstance(meta["title"], str)
-            # source_author: the PDF has no author field
-            assert meta["source_author"] == "", f"Expected '', got {meta['source_author']!r}"
-            # source_date: not in ALLOWED_TOP_LEVEL — dropped by normalize().
-            assert "source_date" not in meta
+            assert set(meta) == {"chunk_text_hash", "embedding_model"}
 
 
 # ── AC-S3 / AC-S4 — index_pdf pipeline ───────────────────────────────────────
@@ -442,9 +433,9 @@ class TestIndexPdfFileGitMetadata:
         assert metadatas, "Expected at least one chunk to be upserted"
         for meta in metadatas:
             assert not [k for k in meta if k.startswith("git_")], sorted(meta)
-            assert meta["tags"] == "pdf"
-            assert meta["category"] == "prose"
-            assert isinstance(meta["frecency_score"], float)
+            # RDR-236 Phase 4 Step 1: the repo PDF dict carries the CHUNK keys only (no tags, category,
+            # frecency or legacy doc_id: those are the catalog document's, or retired).
+            assert set(meta) == {"chunk_text_hash", "embedding_model"}
 
 
 # ── RDR-237: one extractor per request, no conditional routing ──────────────

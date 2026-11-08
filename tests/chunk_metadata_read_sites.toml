@@ -143,10 +143,6 @@ bib_year = 1
 indexed_at = 1
 ttl_days = 1
 
-[sites."src/nexus/db/t3.py::_infer_content_type"]
-content_type = 1
-store_type = 1
-
 [sites."src/nexus/doc_indexer.py::_markdown_chunks"]
 chunk_end_char = 1
 chunk_start_char = 1
@@ -156,9 +152,8 @@ section_type = 1
 [sites."src/nexus/doc_indexer.py::_pdf_chunks"]
 chunk_end_char = 1
 chunk_start_char = 1
-extraction_method = 2
+extraction_method = 1
 page_number = 1
-quality_gate_overridden = 1
 section_title = 1
 section_type = 1
 
@@ -245,10 +240,6 @@ chunk_start_char = 1
 page_number = 1
 section_title = 1
 section_type = 1
-
-[sites."src/nexus/pipeline_stages.py::_enrich_metadata_from_extraction"]
-extraction_method = 1
-quality_gate_overridden = 1
 
 [sites."src/nexus/pipeline_stages.py::_merge_buffered_provenance"]
 extraction_method = 1

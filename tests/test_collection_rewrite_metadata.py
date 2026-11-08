@@ -133,12 +133,10 @@ def test_rewrite_drops_cargo_and_legacy_git_keys() -> None:
     # Phase 5c — source_path / store_type dropped.
     assert "source_path" not in written
     assert "store_type" not in written
-    # indexed_at is canonical (paired with ttl_days for derived expiry).
-    assert written["indexed_at"] == "2026-01-01T00:00:00+00:00"
-    assert "format" not in written
-    # nexus-1oguj: extraction_method is canonical (not cargo) — preserved.
-    assert written["extraction_method"] == "mineru"
-    assert written["content_type"]
+    # RDR-236 Phase 4 Step 1: the canonical row is the CHUNK keys; every document key goes too.
+    assert set(written) <= {"chunk_text_hash", "embedding_model"}, written
+    for k in ("indexed_at", "format", "extraction_method", "content_type"):
+        assert k not in written
 
 
 def test_rewrite_skips_already_canonical_chunks() -> None:

@@ -167,7 +167,9 @@ class TestCallerLoopsIsolatePerItem:
 
     SITES = [
         # (file, marker that must be inside a guarded region)
-        ("src/nexus/indexer.py", "frecency_staleness_lookup_failed_skipping_file"),
+        # (RDR-236 Phase 4 Step 1, nexus-6pfgb.65: the frecency-only reindex's per-file chunk-row lookup,
+        # "frecency_staleness_lookup_failed_skipping_file", is DELETED with the row write it served; the
+        # reindex now writes the catalog only.)
         # (nexus-afudo: indexer.py's "legacy_prune_failed_skipping_
         # source_path" guarded region — _prune_misclassified_in_
         # collection's per-path source_path fallback loop — was DELETED
@@ -301,8 +303,7 @@ class TestCallerLoopsIsolatePerItem:
         nexus-z0o2p.34 (RDR-223, Sam 2026-09-30): the registration moved INTO the
         small-doc branch's own ``try``, ahead of the completion stamp (a kill in
         the enrichment must leave the fence ``indexing``). The invariant is the
-        same, restated structurally: the ``_register_in_catalog(metadatas_list,
-        ...)`` call precedes the stamp, and every ``try`` that encloses it has
+        same, restated structurally: the ``_register_in_catalog(len(metadatas_list))`` call precedes the stamp, and every ``try`` that encloses it has
         handlers that always re-raise, so no swallowing handler can strand it.
         """
         from pathlib import Path
@@ -316,7 +317,8 @@ class TestCallerLoopsIsolatePerItem:
             c for c in ast.walk(index_pdf)
             if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
             and c.func.id == "_register_in_catalog"
-            and c.args and isinstance(c.args[0], ast.Name) and c.args[0].id == "metadatas_list"]
+            and c.args and isinstance(c.args[0], ast.Call) and c.args[0].args
+            and isinstance(c.args[0].args[0], ast.Name) and c.args[0].args[0].id == "metadatas_list"]
         (stamp,) = [
             c for c in ast.walk(index_pdf)
             if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)

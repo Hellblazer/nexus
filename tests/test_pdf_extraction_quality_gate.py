@@ -249,14 +249,18 @@ class TestQualityGateOverriddenPropagation:
             chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 15, "page_number": 1}
             chk_cls.return_value.chunk.return_value = [chunk]
 
+            stats: dict = {}
             prepared = _pdf_chunks(
                 pdf, content_hash="deadbeef" * 8, target_model="voyage-context-3",
                 now_iso="2026-08-06T00:00:00+00:00", corpus="default",
-                allow_degraded_extraction=True,
+                allow_degraded_extraction=True, extraction_stats=stats,
             )
         assert len(prepared) == 1
         _id, _text, meta, _positions = prepared[0]
-        assert meta["quality_gate_overridden"] is True
+        # RDR-236 Phase 4 Step 1: the override is the catalog document's fact (the record the catalog
+        # hook is handed), and no chunk row carries it.
+        assert "quality_gate_overridden" not in meta
+        assert stats["quality_gate_overridden"] is True
 
     def test_pdf_chunks_omits_key_on_healthy_extraction(self, tmp_path: Path):
         """The common case (gate passed, no override) must NOT carry the
@@ -293,59 +297,7 @@ class TestQualityGateOverriddenPropagation:
         _id, _text, meta, _positions = prepared[0]
         assert "quality_gate_overridden" not in meta
 
-    def test_streaming_enrichment_includes_override_when_true(self):
-        """Streaming path post-pass: _enrich_metadata_from_extraction must
-        merge quality_gate_overridden=True into the update_chunks payload
-        when the ExtractionResult carries it."""
-        from nexus.pipeline_stages import _enrich_metadata_from_extraction
 
-        result = ExtractionResult(
-            text=_GARBAGE_TEXT,
-            metadata={
-                "extraction_method": "mineru", "page_count": 1,
-                "quality_gate_overridden": True,
-            },
-        )
-        col = MagicMock()
-        col.get.return_value = {"ids": ["c1"], "metadatas": [{"title": "old"}]}
-        t3 = MagicMock()
-
-        ok = _enrich_metadata_from_extraction(
-            "hash123", result, Path("/repo/x.pdf"), t3, col, "docs__test", doc_id="",
-        )
-        assert ok is True
-        t3.update_chunks.assert_called_once()
-        _, call_args, _ = t3.update_chunks.mock_calls[0]
-        updated_metas = call_args[2]
-        assert updated_metas[0]["quality_gate_overridden"] is True
-
-    def test_streaming_enrichment_omits_key_when_false(self):
-        """The common case must not merge the key in at all (verified
-        fix: the enrichment dict does NOT rely on a downstream normalize()
-        that the HttpVectorClient.update_chunks production path does not
-        actually run)."""
-        from nexus.pipeline_stages import _enrich_metadata_from_extraction
-
-        result = ExtractionResult(
-            text=_HEALTHY_TEXT,
-            metadata={"extraction_method": "mineru", "page_count": 1},
-        )
-        col = MagicMock()
-        col.get.return_value = {"ids": ["c1"], "metadatas": [{"title": "old"}]}
-        t3 = MagicMock()
-
-        ok = _enrich_metadata_from_extraction(
-            "hash123", result, Path("/repo/x.pdf"), t3, col, "docs__test", doc_id="",
-        )
-        assert ok is True
-        t3.update_chunks.assert_called_once()
-        _, call_args, _ = t3.update_chunks.mock_calls[0]
-        updated_metas = call_args[2]
-        assert "quality_gate_overridden" not in updated_metas[0]
-
-
-# ── Round-2 findings (code-review-expert + substantive-critic, both
-# independently, 2026-08-06) ─────────────────────────────────────────────
 
 
 class TestBoundaryBehaviorShortDocuments:

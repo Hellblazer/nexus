@@ -280,7 +280,7 @@ def test_force_bypasses_staleness_pdf_file(tmp_path: Path) -> None:
     }
     db = _make_db()
 
-    # Mock _pdf_chunks to return one fake chunk tuple: (id, doc, metadata)
+    # Mock _pdf_chunks to return one fake chunk tuple: (id, doc, metadata, positions)
     fake_chunk = (
         "abc123",
         "Some PDF text content",
@@ -290,6 +290,7 @@ def test_force_bypasses_staleness_pdf_file(tmp_path: Path) -> None:
             "content_hash": content_hash_hex,
             "embedding_model": "model-ctx",
         },
+        {"page_number": 1},
     )
     # nexus-sghyo (2026-08-06): embed_fn is the supported injection point
     # now — the deleted doc_indexer._embed_with_fallback used to back the

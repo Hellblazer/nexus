@@ -209,8 +209,6 @@ class TestLayerDFallback:
         meta = make_chunk_metadata(
             content_type="markdown",
             chunk_text_hash="a" * 64,
-            content_hash="b" * 64,
-            indexed_at="2026-05-30T00:00:00Z",
             embedding_model="model-ctx",
         )
         assert "extraction_source" not in meta  # absent == file

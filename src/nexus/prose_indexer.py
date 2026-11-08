@@ -181,7 +181,6 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         from nexus.metadata_schema import make_chunk_metadata, position_fields  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
         for chunk in chunks:
-            title = f"{file_path.relative_to(ctx.repo_path)}:chunk-{chunk.chunk_index}"
             # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
             # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
             chunk_text_hash_full = _hl.sha256(chunk.text.encode()).hexdigest()
@@ -192,20 +191,12 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 section_title=chunk.metadata.get("header_path", ""),
                 section_type=chunk.metadata.get("section_type", ""),
             )
-            # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
-            # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id;
-            # catalog manifest is authoritative.
+            # The chunk row carries the CHUNK keys only (RDR-236 Phase 4 Step 1); the positions go to the
+            # manifest row.
             metadata = make_chunk_metadata(
                 content_type="markdown",
                 chunk_text_hash=chunk_text_hash_full,
-                content_hash=content_hash,
-                indexed_at=ctx.now_iso,
                 embedding_model=ctx.embedding_model,
-                title=title,
-                tags="markdown",
-                category="prose",
-                frecency_score=float(ctx.score),
-                **chunk_positions,  # Step 0: the row still carries them; Step 1 stops passing this
             )
             ids.append(chunk_chroma_id)
             documents.append(chunk.text)
@@ -245,7 +236,6 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         from nexus.metadata_schema import make_chunk_metadata, position_fields  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
         for ls, le, text in raw_chunks:
-            title = f"{file_path.relative_to(ctx.repo_path)}:{ls}-{le}"
             # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
             # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
             chunk_text_hash_full = _hl.sha256(text.encode()).hexdigest()
@@ -261,9 +251,6 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 if _h_idx >= 0:
                     section_title = _headings[_h_idx][1]
                     section_type = classify_section_type([section_title])
-            # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
-            # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id —
-            # catalog manifest is authoritative.
             chunk_positions = position_fields(
                 chunk_start_char=chunk_start_char,
                 chunk_end_char=chunk_end_char,
@@ -275,14 +262,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             metadata = make_chunk_metadata(
                 content_type="prose",
                 chunk_text_hash=chunk_text_hash_full,
-                content_hash=content_hash,
-                indexed_at=ctx.now_iso,
                 embedding_model=ctx.embedding_model,
-                title=title,
-                tags=ext.lstrip("."),
-                category="prose",
-                frecency_score=float(ctx.score),
-                **chunk_positions,  # Step 0: the row still carries them; Step 1 stops passing this
             )
             ids.append(chunk_chroma_id)
             documents.append(text)
@@ -352,6 +332,9 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             "metadatas": metadatas,
             "positions": positions,
             "catalog_doc_id": catalog_doc_id,
+            # The file's content hash, read by the flush's fence and completion stamp (a chunk row
+            # carries none since RDR-236 Phase 4 Step 1).
+            "content_hash": content_hash,
             "collection": ctx.corpus,
             "hooks": ctx.hooks,
         },

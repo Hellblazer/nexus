@@ -847,7 +847,6 @@ def run_bib_enrichment(
     )
 
     enriched_docs = 0
-    enriched_chunks = 0
     skipped_docs = 0
     by_id_count = 0  # how many documents resolved via DOI / arXiv (nexus-sbzr)
 
@@ -927,60 +926,21 @@ def run_bib_enrichment(
             _log.debug("enrich_no_result", title=title)
             continue
 
-        # Chunk rows carry the bib only where this document is the sole live
-        # holder: a chunk another document also holds would show this
-        # document's values to that one (and the other's, last, to this one).
-        # The catalog row below is the document's own, whatever its chunks.
-        own_ids = [c for c in chunk_ids if len(owners.get(c, ())) == 1]
-        # Build per-chunk metadata updates: the stub's update takes full
-        # metadata dicts, so we fetch and merge. Batch at 200 to stay under
-        # the 300-record get/write limit.
-        _BATCH = 200
-        updated_ids: list[str] = []
-        updated_meta: list[dict] = []
-        for batch_start in range(0, len(own_ids), _BATCH):
-            batch_ids = own_ids[batch_start:batch_start + _BATCH]
-            fetch = _vector_with_retry(col.get, ids=batch_ids, include=["metadatas"], sensitivity="include")
-            for cid, meta in zip(fetch.get("ids", []), fetch.get("metadatas", [])):
-                merged = dict(meta)
-                merged["bib_year"] = bib.get("year", 0)
-                merged["bib_venue"] = bib.get("venue", "")
-                merged["bib_authors"] = bib.get("authors", "")
-                merged["bib_citation_count"] = bib.get("citation_count", 0)
-                # nexus-57mk: write the backend's native ID so re-runs
-                # against the same backend dedupe correctly. The
-                # citation-link generator matches against either field.
-                if backend == "openalex":
-                    merged["bib_openalex_id"] = bib.get("openalex_id", "")
-                    if bib.get("doi"):
-                        merged["bib_doi"] = bib.get("doi", "")
-                else:
-                    merged["bib_semantic_scholar_id"] = bib.get(
-                        "semantic_scholar_id", "",
-                    )
-                updated_ids.append(cid)
-                updated_meta.append(merged)
-
-        for batch_start in range(0, len(updated_ids), _BATCH):
-            batch_end = min(batch_start + _BATCH, len(updated_ids))
-            _vector_with_retry(
-                col.update,
-                ids=updated_ids[batch_start:batch_end],
-                metadatas=updated_meta[batch_start:batch_end],
-            )
-        enriched_chunks += len(updated_ids)
+        # The bibliography is the document's own fact and lives on its catalog entry (the hook below):
+        # no chunk row carries it since RDR-236 Phase 4 Step 1. The row a document shares with another
+        # would show one document's values to the other, and the old read-modify-write echo of the whole
+        # row re-added every retired key a row had been swept of.
         catalog_updated = _catalog_enrich_hook(
             title=title, bib_meta=bib,
             collection_name=collection, backend=backend,
             tumblers=[tumbler],
         )
-        if updated_ids or catalog_updated:
+        if catalog_updated:
             enriched_docs += 1
             _log.debug(
                 "enrich_updated",
                 title=title,
                 tumbler=tumbler,
-                chunks=len(updated_ids),
                 year=bib.get("year"),
                 venue=bib.get("venue"),
             )
@@ -990,8 +950,7 @@ def run_bib_enrichment(
     )
     sensitive_note = f" {sensitive_docs} sensitive skipped." if sensitive_docs else ""
     click.echo(
-        f"Done: enriched {enriched_chunks} chunks across "
-        f"{enriched_docs} documents{via_id_note}; "
+        f"Done: enriched {enriched_docs} documents{via_id_note}; "
         f"{skipped_docs} documents had no {backend_label} match.{sensitive_note}"
     )
 

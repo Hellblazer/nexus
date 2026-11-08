@@ -20,6 +20,7 @@ from nexus.catalog.recovery_bundle import export_bundle, import_bundle, read_bun
 from nexus.catalog.store_hook import NOTE_META_KEYS
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._legacy_note_rows import stamp_legacy_note_rows
 
 pytestmark = pytest.mark.integration
 
@@ -42,7 +43,14 @@ def _put_keyless(**kw):
                                "source_agent": "", "put_at": ""})
 
     with patch.object(store_hook, "catalog_store_hook_tracked", _hook):
-        return put_note(**kw)
+        result = put_note(**kw)
+    # A pre-Step-1 client also stamped the note's own facts on its chunk rows (RDR-236 Phase 4 Step 1: a
+    # current client writes the CHUNK keys only), which is where the keyless export recovers them from.
+    stamp_legacy_note_rows(
+        HttpVectorClient(), kw["collection"], result.chunk_ids, catalog_doc_id=result.catalog_doc_id,
+        title=kw["title"], tags=kw.get("tags", ""), category=kw.get("category", ""),
+        ttl_days=kw.get("ttl_days"), source_agent=kw.get("source_agent", ""))
+    return result
 
 
 def _stored_text(reader, client, collection: str, title: str) -> tuple[str, int]:

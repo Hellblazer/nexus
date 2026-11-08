@@ -452,7 +452,7 @@ def test_store_put_get_roundtrip_ij9hg(
         f"store_get did not return the stored content (round-trip broken):\n{got}"
     )
 
-    # 3) Metadata keys content_type + embedding_model must be present on the
+    # 3) Metadata keys chunk_text_hash + embedding_model must be present on the
     #    stored chunk (denormalised identity the read/search path relies on).
     client = get_http_vector_client()
     entry = client.get_by_id(collection, doc_id, sensitivity="include")
@@ -465,7 +465,8 @@ def test_store_put_get_roundtrip_ij9hg(
         f"get_by_id returned the old nested shape (bug): keys={sorted(entry)}"
     )
     assert "content" in entry, f"get_by_id missing flat 'content': keys={sorted(entry)}"
-    assert "content_type" in entry, f"content_type missing from flat entry: {sorted(entry)}"
+    # RDR-236 Phase 4 Step 1: the row's identity is the chash and the model; the content type is the catalog's.
+    assert "chunk_text_hash" in entry, f"chunk_text_hash missing from flat entry: {sorted(entry)}"
     assert "embedding_model" in entry, f"embedding_model missing from flat entry: {sorted(entry)}"
 
     # 4) The content must be findable via semantic search (collection_names

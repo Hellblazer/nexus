@@ -295,7 +295,7 @@ class TestIndexDocumentSourceKey:
         )
 
         def dummy_chunk_fn(file_path, content_hash, target_model, now_iso, corpus):
-            return [("id1", "text", {})]
+            return [("id1", "text", {}, {})]
 
         with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
             result = _index_document(md, "corp", dummy_chunk_fn, t3=mock_t3, source_key="relative/doc.md")

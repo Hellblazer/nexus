@@ -30,6 +30,7 @@ from nexus.db.http_vector_client import HttpVectorClient, _post
 from nexus.mcp.core import store_put
 from tests._catalog_fixture_ops import ActiveCatalog, documents_by_title
 from tests._chunk_seed import seed_chunks_direct
+from tests._legacy_note_rows import stamp_legacy_note_rows
 
 pytestmark = pytest.mark.integration
 
@@ -55,6 +56,13 @@ class _World:
         with patch("nexus.mcp.core._get_t3", return_value=self.client):
             store_put(content=body, collection=self.subject, title=title, **kwargs)
         self.collection = t3_collection_name(self.subject, t3=self.client)
+        # This file covers the legacy TTL rules, which read the facts a pre-Step-1 client stamped on the
+        # note's chunk row (RDR-236 Phase 4 Step 1: a current client writes the CHUNK keys only).
+        entry = self._entry(title)
+        assert entry is not None
+        stamp_legacy_note_rows(
+            self.client, self.collection, [_chash(body)], catalog_doc_id=str(entry.tumbler), title=title,
+            ttl_days=int(ttl[:-1]) if ttl else None)
 
     def _entry(self, title: str):
         reader = make_catalog_reader()

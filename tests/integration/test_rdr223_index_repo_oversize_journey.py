@@ -206,7 +206,7 @@ class _Env:
         #: ``armed`` makes the spy batch hook die (RDR-223 decision D2: stamp last on every path).
         self.kill = {"armed": False}
         self.variant = 0
-        self._pdf_chunks: list[tuple[str, str, dict]] = []
+        self._pdf_chunks: list[tuple[str, str, dict, dict]] = []
 
     # sources ----------------------------------------------------------------
 
@@ -237,7 +237,7 @@ class _Env:
             self._pdf_chunks = self._make_pdf_chunks(n or 30, t, fixed)
         return self.path
 
-    def _make_pdf_chunks(self, count: int, t: str, fixed: str) -> list[tuple[str, str, dict]]:
+    def _make_pdf_chunks(self, count: int, t: str, fixed: str) -> list[tuple[str, str, dict, dict]]:
         from nexus.metadata_schema import make_chunk_metadata
 
         content_hash = hashlib.sha256(self.path.read_bytes()).hexdigest()
@@ -246,11 +246,10 @@ class _Env:
             text = f"Page {i} {(t if i < 3 else fixed)} unique pdf text."
             h = _chash(text)
             meta = make_chunk_metadata(
-                content_type="pdf", chunk_text_hash=h, content_hash=content_hash,
-                chunk_start_char=i * 100, chunk_end_char=i * 100 + len(text), page_number=i + 1,
-                indexed_at=_NOW, embedding_model=_MODEL, title="Big PDF", tags="pdf",
-                category="paper")
-            out.append((h, text, meta))
+                content_type="pdf", chunk_text_hash=h,
+                embedding_model=_MODEL,
+                )
+            out.append((h, text, meta, {"page_number": i + 1}))
         return out
 
     def register(self) -> str:
@@ -317,7 +316,7 @@ class _Env:
 
         prepared = self._pdf_chunks
         self.monkeypatch.setattr(di, "_pdf_chunks", lambda *a, **k: [
-            (i, t, dict(m)) for i, t, m in prepared])
+            (i, t, dict(m), dict(p)) for i, t, m, p in prepared])
         _index_pdf_file(
             self.path, self.repo, self.collection, _MODEL, None, _ForbiddenDb(), "", _NOW, 0.0,
             force=True, embed_fn=lambda texts: [[] for _ in texts],
@@ -401,19 +400,14 @@ def test_full_run_equals_one_combined_write_of_the_file(env: _Env) -> None:
     every = [r["chash"] for r in rows]
     assert _present(env.collection, every) == set(every) == _present(env.control_collection, every)
     assert _index_state(env.doc_id) == "complete" == _index_state(ctl)
-    # The rows carry the position fields the old manifest hook derived from each chunk's own
-    # metadata (line and character spans, an absent span stored as null). A 0 line or 0 end char is the
-    # factory's "not recorded" and is stored as null; a 0 start char is real when the end is recorded,
-    # as for the first chunk of a file (nexus-qe78r).
-    meta = {c["chash"]: c["metadata"] for c in chunks}
-
-    def _start(m: dict) -> int | None:
-        return m.get("chunk_start_char") if m.get("chunk_end_char") else (m.get("chunk_start_char") or None)
-
+    # The rows carry the position fields the chunker's own position dict holds (line and character spans,
+    # an absent span stored as null; a chunk row carries none since RDR-236 Phase 4 Step 1). A 0 line or
+    # 0 end char is "not recorded" and is stored as null; a 0 start char is real when the end is recorded,
+    # as for the first chunk of a file (nexus-qe78r). What was stored is what was sent, row for row.
+    assert all(set(c["metadata"]) <= {"chunk_text_hash", "embedding_model"} for c in chunks)
     expected = [
-        (i, h, meta[h].get("line_start") or None, meta[h].get("line_end") or None,
-         _start(meta[h]), meta[h].get("chunk_end_char") or None, i)
-        for i, h in enumerate(every)
+        (i, r["chash"], r.get("line_start"), r.get("line_end"), r.get("char_start"), r.get("char_end"), i)
+        for i, r in enumerate(rows)
     ]
     assert _manifest(env.doc_id) == expected
     if env.kind == "code":
@@ -562,42 +556,6 @@ def _stored_metadata(collection: str, chashes: list[str]) -> dict[str, dict]:
     return dict(zip(got["ids"], got["metadatas"]))
 
 
-@pytest.mark.parametrize("re_embed", [False, True], ids=["force", "force-re-embed"])
-def test_forced_reindex_keeps_enrichment_and_clears_an_owned_key_the_write_dropped(
-    env: _Env, re_embed: bool,
-) -> None:
-    """The combined write REPLACES stored chunk metadata unless asked to merge; the upsert-chunks
-    call the oversize fallbacks replaced MERGED it. So a ``bib_year`` that ``nx enrich bib`` set on
-    an oversize file's chunks (a PDF's, in practice) must survive a forced re-index, and a stale
-    value of a key the indexer owns and no longer sends must be cleared. With ``--re-embed`` the
-    same holds through the engine's insert branch."""
-    env.write_file()
-    env.register()
-    first = env.run()
-    every = _chashes_sent(first)
-
-    HttpVectorClient().update_chunks(
-        env.collection, every, [{"bib_year": 2020, "quality_gate_overridden": True} for _ in every])
-    before = _stored_metadata(env.collection, every)
-    assert all(m["bib_year"] == 2020 and m["quality_gate_overridden"] is True for m in before.values())
-
-    again = env.run(force_re_embed=re_embed)
-
-    after = _stored_metadata(env.collection, every)
-    assert all(m.get("bib_year") == 2020 for m in after.values()), "enrichment survived"
-    assert all("quality_gate_overridden" not in m for m in after.values()), \
-        "an owned key the write dropped is cleared"
-    sent = [b for _, b, _ in _data(again) if b.get("chunks")]
-    assert sent and all(b["metadata_merge"] is True for b in sent)
-    assert all("quality_gate_overridden" in b["metadata_delete_keys"] for b in sent)
-    assert all("bib_year" not in b["metadata_delete_keys"] for b in sent)
-    if re_embed:
-        assert _embedded(again) == len(every), "--re-embed really re-embeds"
-    else:
-        assert _embedded(again) == 0
-
-
-# ── the ChunkBatcher flush merges per chunk, for a flush of several files ─────
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -669,81 +627,3 @@ def asymmetric_rows(monkeypatch):
     monkeypatch.setattr(ms, "make_chunk_metadata", wrapped)
 
 
-@pytest.mark.parametrize("re_embed", [False, True], ids=["force", "force-re-embed"])
-def test_a_forced_index_repo_flush_merges_each_chunks_metadata(
-    flush_repo, asymmetric_rows, re_embed: bool,
-) -> None:
-    """``_batch_flush`` writes every file of a flush in ONE combined write and names one request-level
-    ``metadata_delete_keys`` list for all of them: the keys the writer owns that SOME row lacks.
-    The engine applies that list chunk by chunk, stripping each named key from the chunk's stored
-    row before it merges the chunk's own metadata on top. So a chunk that carries a named key
-    writes it back, a chunk that lacks it loses a stale value, and a key another writer owns
-    (``bib_year``) is never named. Only a kwargs pin on a mock covered this. Here ``_run_index``
-    (``_batch_flush`` is a closure) runs against the real engine on two markdown files that land in
-    ONE ``docs__`` flush and carry different owned keys, plus a python file for ``code__``."""
-    from nexus.indexer import _run_index
-
-    repo, reg = flush_repo
-    _run_index(repo, reg, force=False)            # registers the repo's owner
-    with _traffic() as base:                      # from here on the owner names the collections
-        _run_index(repo, reg, force=True)
-    written = {b["collection"] for p, b, _ in base if p == "/manifest/write_many"}
-    (docs_col,) = [c for c in written if c.startswith("docs__")]
-    (code_col,) = [c for c in written if c.startswith("code__")]
-    docs = _docs_by_file(docs_col)
-    code = _docs_by_file(code_col)
-    assert set(docs) == {"a.md", "b.md"} and set(code) == {"m.py"}
-    a_hashes, b_hashes = docs["a.md"][1], docs["b.md"][1]
-    m_hashes = code["m.py"][1]
-    assert a_hashes and b_hashes and m_hashes and not set(a_hashes) & set(b_hashes)
-
-    a_before = _stored_metadata(docs_col, a_hashes)
-    b_before = _stored_metadata(docs_col, b_hashes)
-    assert all(m.get("extraction_method") == "probe-method" and "extraction_source" not in m
-               for m in a_before.values())
-    assert all(m.get("extraction_source") == "probe-source" and "extraction_method" not in m
-               for m in b_before.values())
-
-    # Another writer's enrichment and a stale owned key on every chunk, and on each file the key
-    # that only the OTHER file's rows carry.
-    both = a_hashes + b_hashes
-    stale = {"bib_year": 2020, "quality_gate_overridden": True}
-    client = HttpVectorClient()
-    client.update_chunks(docs_col, both, [dict(stale) for _ in both])
-    client.update_chunks(docs_col, a_hashes, [{"extraction_source": "STALE-S"} for _ in a_hashes])
-    client.update_chunks(docs_col, b_hashes, [{"extraction_method": "STALE-M"} for _ in b_hashes])
-    client.update_chunks(code_col, m_hashes, [dict(stale) for _ in m_hashes])
-    seeded = _stored_metadata(docs_col, both)
-    assert all(m["bib_year"] == 2020 and m["quality_gate_overridden"] is True for m in seeded.values())
-    assert all(seeded[h]["extraction_source"] == "STALE-S" for h in a_hashes)
-    assert all(seeded[h]["extraction_method"] == "STALE-M" for h in b_hashes)
-
-    with _traffic() as log:
-        _run_index(repo, reg, force=True, force_re_embed=re_embed)
-
-    # Non-vacuity: the two markdown files went out in ONE write_many of TWO documents, and that
-    # write named the union of what each file's rows lack.
-    flushes = [(b, r) for p, b, r in log if p == "/manifest/write_many" and b["collection"] == docs_col]
-    assert len(flushes) == 1
-    body, resp = flushes[0]
-    assert len(body["docs"]) == 2
-    assert body["metadata_merge"] is True and resp.get("metadata_merge") is True
-    for key in ("extraction_method", "extraction_source", "quality_gate_overridden"):
-        assert key in body["metadata_delete_keys"], key
-    assert "bib_year" not in body["metadata_delete_keys"]
-    code_writes = [b for p, b, _ in log if p == "/manifest/write_many" and b["collection"] == code_col]
-    assert len(code_writes) == 1 and len(code_writes[0]["docs"]) == 1
-    assert int(resp.get("embed_embedded") or 0) == (len(set(both)) if re_embed else 0)
-
-    a_after = _stored_metadata(docs_col, a_hashes)
-    b_after = _stored_metadata(docs_col, b_hashes)
-    for after in (a_after, b_after, _stored_metadata(code_col, m_hashes)):
-        assert all(m.get("bib_year") == 2020 for m in after.values()), "enrichment survived"
-        assert all("quality_gate_overridden" not in m for m in after.values()), \
-            "a stale owned key is cleared"
-    # Each file keeps the key its own rows carry (stripped by the union list, then written back)
-    # and loses the stale value of the key only the other file's rows carry.
-    assert all(m.get("extraction_method") == "probe-method" and "extraction_source" not in m
-               for m in a_after.values())
-    assert all(m.get("extraction_source") == "probe-source" and "extraction_method" not in m
-               for m in b_after.values())

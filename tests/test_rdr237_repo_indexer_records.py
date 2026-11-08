@@ -48,10 +48,10 @@ def _chunks_filling(method: str, pages: dict):
             extraction_stats.update({
                 "extraction_method": method, "extraction_pages": pages, "page_count": 12,
                 "quality_gate_overridden": False, "extraction_source": "file",
+                "title": "T", "author": "",
             })
-        return [("id1", "Page 1", {"source_title": "T", "page_number": 1, "source_path": str(file),
-                                   "corpus": corpus, "embedding_model": model, "store_type": "prose",
-                                   "source_agent": "nexus-indexer"})]
+        return [("id1", "Page 1", {"chunk_text_hash": "id1", "embedding_model": model},
+                 {"page_number": 1})]
 
     return fake
 

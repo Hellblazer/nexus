@@ -11963,9 +11963,9 @@ _PDF_STUB_NO_URI = "content_hash "
 
 
 def _is_pdf_stub_metadata(meta: dict, *, document_has_method: bool) -> bool:
-    """True when a PDF chunk row still carries the streaming uploader's placeholder title (the empty
-    string) AND the document that owns it records no ``extraction_method`` in its catalog ``meta`` -- the
-    post-pass that fills both in never landed for that document.
+    """True when a PDF chunk row is the streaming uploader's placeholder of before RDR-236 Phase 4 Step 1
+    (no title) AND the document that owns it records no ``extraction_method`` in its catalog ``meta`` --
+    the post-pass that filled both in never landed for that document.
 
     Both halves are needed. A PDF whose extractor returned no title has an empty title but a recorded
     method, and is healthy. *document_has_method* is the OWNING document's own catalog fact
@@ -11974,8 +11974,16 @@ def _is_pdf_stub_metadata(meta: dict, *, document_has_method: bool) -> bool:
     landed. A document indexed before nexus-6pfgb.6 has no method in its meta until
     ``nx catalog backfill-meta`` (nexus-6pfgb.10) or its next index run, and is named here until then
     when its row title is empty.
+
+    The placeholder is a LEGACY row shape. Since Step 1 no chunk row carries a title (or any document
+    key), the streaming upload writes no placeholder and there is no post-pass to fail, so a row with no
+    ``title`` says nothing about the document: only a row that still carries some document, position or
+    legacy key (the old stub carried several) and lacks a title is the placeholder. Without that condition
+    every method-less PDF indexed after Step 1 would read as an unfinished upload.
     """
-    return not meta.get("title") and not document_has_method
+    from nexus.tables.chunk_metadata_keys import non_chunk_row_keys  # noqa: PLC0415 — deferred: health imports at CLI start
+
+    return bool(meta.keys() & non_chunk_row_keys()) and not meta.get("title") and not document_has_method
 
 
 def _spread_sample(items: list[str], k: int) -> list[str]:

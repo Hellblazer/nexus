@@ -449,6 +449,22 @@ def test_index_code_file_force_re_embed_explicit_opt_in(tmp_path, make_ctx):
     assert call_kwargs["force_re_embed"] is True
 
 
+def _position_capture():
+    """A batch hook that records the chunkers' position dicts: a chunk row carries no span or label since
+    RDR-236 Phase 4 Step 1, so a test that asks what an indexer decided about a chunk's section or lines reads
+    what the manifest hook is handed."""
+    from nexus.hook_registry import HookRegistry
+
+    seen: list[list[dict]] = []
+
+    def capture(ids, collection, contents, embeddings, metadatas, positions=None, **kw):
+        seen.append(list(positions or []))
+
+    hooks = HookRegistry()
+    hooks.register_batch(capture)
+    return hooks, seen
+
+
 def test_index_code_file_stamps_import_only_chunk_section_type(tmp_path, make_ctx):
     """RDR-200 Phase 1c evidence hygiene (nexus-4jj40 Sam's decision 3):
     a chunk consisting only of an import statement gets
@@ -464,13 +480,13 @@ def test_index_code_file_stamps_import_only_chunk_section_type(tmp_path, make_ct
     def fake_embed_fn(texts):
         return [[0.1] * 128 for _ in texts]
 
-    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn)
+    hooks, seen = _position_capture()
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn, hooks=hooks)
 
     result = index_code_file(ctx, py_file)
 
     assert result == 1
-    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
-    assert call_kwargs["metadatas"][0]["section_type"] == "imports"
+    assert seen and seen[0][0]["section_type"] == "imports"
 
 
 def test_index_code_file_mixed_chunk_not_stamped_imports(tmp_path, make_ctx):
@@ -487,13 +503,13 @@ def test_index_code_file_mixed_chunk_not_stamped_imports(tmp_path, make_ctx):
     def fake_embed_fn(texts):
         return [[0.1] * 128 for _ in texts]
 
-    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn)
+    hooks, seen = _position_capture()
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn, hooks=hooks)
 
     result = index_code_file(ctx, py_file)
 
     assert result == 1
-    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
-    assert call_kwargs["metadatas"][0]["section_type"] != "imports"
+    assert seen and seen[0][0]["section_type"] != "imports"
 
 
 # ── index_prose_file ─────────────────────────────────────────────────────────
@@ -533,9 +549,10 @@ def test_index_prose_file_non_markdown_uses_line_chunk(tmp_path, make_ctx):
 
     # nexus-8g79.28: real empty collection → check_staleness returns
     # False → indexer proceeds.
+    hooks, seen = _position_capture()
     ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
                    db=mock_db, embed_fn=fake_embed_fn,
-                   corpus="docs__test", embedding_model="model-ctx")
+                   corpus="docs__test", embedding_model="model-ctx", hooks=hooks)
 
     result = index_prose_file(ctx, txt_file)
 
@@ -546,8 +563,8 @@ def test_index_prose_file_non_markdown_uses_line_chunk(tmp_path, make_ctx):
     embed_texts = embed_calls[0]
     upsert_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
     assert embed_texts == upsert_kwargs["documents"]
-    meta = upsert_kwargs["metadatas"][0]
-    assert "line_start" in meta and meta["line_start"] >= 1
+    assert set(upsert_kwargs["metadatas"][0]) == {"chunk_text_hash", "embedding_model"}
+    assert seen and seen[0][0]["line_start"] >= 1  # the line span is the position dict's (the manifest row's)
 
 
 # ── nexus-hg2dw: zero-content outcomes distinguished from a fresh skip ──────

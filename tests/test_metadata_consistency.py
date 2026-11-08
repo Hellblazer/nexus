@@ -3,17 +3,10 @@
 
 Drift guard for the chunk-metadata factory (RDR-089 follow-up,
 see docs/exploration/metadata-consistency-matrix.md). Every indexer that writes
-T3 chunk metadata must route through ``make_chunk_metadata`` so that:
-
-  * Every ``ALLOWED_TOP_LEVEL`` key is present (with documented
-    defaults when not explicitly populated).
-  * No deprecated key (``source_title``, ``expires_at``) leaks through.
-  * Adding a new ``ALLOWED_TOP_LEVEL`` key forces a single-edit
-    update to the factory rather than seven separate indexer changes.
-
-Drift = either a new field appears on one path and not others, or
-an indexer stops routing through the factory and silently drops
-fields. Both are regressions.
+T3 chunk metadata must route through ``make_chunk_metadata`` so that a chunk row carries
+``ALLOWED_TOP_LEVEL`` (the key table's CHUNK keys, RDR-236 Phase 4 Step 1) and nothing else, and no
+deprecated key (``source_title``, ``expires_at``) leaks through. The per-route proof over every client
+write route is ``tests/test_6pfgb65_chunk_keys_only.py``.
 """
 from __future__ import annotations
 
@@ -26,132 +19,6 @@ from nexus.metadata_schema import ALLOWED_TOP_LEVEL, make_chunk_metadata
 
 
 # ── Factory contract ────────────────────────────────────────────────────────
-
-
-def _expected_keys_for_content_type(content_type: str) -> set[str]:
-    """Return the keys that the factory MUST emit for a given content_type.
-
-    ``bib_*`` keys are dropped together when all-empty (intentional —
-    they only ride along when ``--enrich`` populated them). ``git_meta``
-    is dropped when all four flat git_* keys are empty. Both are
-    by-design omissions — every other ALLOWED_TOP_LEVEL key must be
-    present.
-
-    RDR-108 Phase 3 (nexus-bdag) retired ``doc_id``, ``chunk_index``,
-    ``chunk_count`` from the chunk schema (catalog manifest is now
-    authoritative). They no longer appear in the factory output.
-    """
-    bib_keys = {
-        "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
-        "bib_semantic_scholar_id",
-    }
-    # RDR-139 Layer D: ``extraction_source`` defaults to ``file`` and is
-    # dropped by normalize (absent == file); only DT-sourced chunks carry it.
-    # nexus-1oguj: ``extraction_method`` follows the same drop-when-empty
-    # contract — only PDF chunks that went through an extractor carry it,
-    # and the pinned population is tests/test_metadata_extraction_method.py.
-    # nexus-wi1uv round-2: ``quality_gate_overridden`` follows the same
-    # drop-when-False contract — only a chunk indexed under
-    # --allow-degraded-extraction after a real gate failure carries it;
-    # pinned population is tests/test_metadata_quality_gate_overridden.py.
-    # nexus-6pfgb.4: ``session_id`` is still accepted on an old row but no writer stamps it.
-    return ALLOWED_TOP_LEVEL - bib_keys - {
-        "git_meta", "extraction_source", "extraction_method",
-        "quality_gate_overridden", "session_id",
-    }
-
-
-def test_factory_emits_full_keyset_for_code() -> None:
-    meta = make_chunk_metadata(
-        content_type="code",
-        chunk_text_hash="a" * 64,
-        content_hash="b" * 64,
-        indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="model-code",
-    )
-    expected = _expected_keys_for_content_type("code")
-    assert set(meta.keys()) >= expected, (
-        f"factory missing keys: {expected - set(meta.keys())}"
-    )
-
-
-def test_factory_emits_full_keyset_for_pdf() -> None:
-    meta = make_chunk_metadata(
-        content_type="pdf",
-        chunk_text_hash="a" * 64,
-        content_hash="b" * 64,
-        indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="model-ctx",
-    )
-    expected = _expected_keys_for_content_type("pdf")
-    assert set(meta.keys()) >= expected, (
-        f"factory missing keys: {expected - set(meta.keys())}"
-    )
-
-
-def test_factory_emits_full_keyset_for_markdown() -> None:
-    meta = make_chunk_metadata(
-        content_type="markdown",
-        chunk_text_hash="a" * 64,
-        content_hash="b" * 64,
-        indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="model-ctx",
-    )
-    expected = _expected_keys_for_content_type("markdown")
-    assert set(meta.keys()) >= expected, (
-        f"factory missing keys: {expected - set(meta.keys())}"
-    )
-
-
-def test_factory_emits_full_keyset_for_prose() -> None:
-    meta = make_chunk_metadata(
-        content_type="prose",
-        chunk_text_hash="a" * 64,
-        content_hash="b" * 64,
-        indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="model-ctx",
-    )
-    expected = _expected_keys_for_content_type("prose")
-    assert set(meta.keys()) >= expected, (
-        f"factory missing keys: {expected - set(meta.keys())}"
-    )
-
-
-def test_factory_drops_bib_when_empty() -> None:
-    """``--enrich`` off → bib_* fields are dropped together, not stored
-    as zero/empty placeholders eating metadata budget."""
-    meta = make_chunk_metadata(
-        content_type="pdf",
-        chunk_text_hash="a"*64, content_hash="b"*64,
-        indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="model-ctx",
-    )
-    for k in ("bib_year", "bib_authors", "bib_venue", "bib_citation_count"):
-        assert k not in meta
-
-
-def test_factory_keeps_bib_when_populated() -> None:
-    """When at least one bib field is populated the whole quad rides."""
-    meta = make_chunk_metadata(
-        content_type="pdf",
-        chunk_text_hash="a"*64, content_hash="b"*64,
-        indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="model-ctx",
-        bib_year=2026,
-    )
-    assert meta["bib_year"] == 2026
-    assert meta["bib_authors"] == ""
-    assert meta["bib_venue"] == ""
-    assert meta["bib_citation_count"] == 0
-
-
-# RDR-101 Phase 5c (nexus-o6aa.13) removed ``git_meta`` from
-# ALLOWED_TOP_LEVEL and the ``git_meta=`` kwarg from
-# ``make_chunk_metadata``. The two tests previously here
-# (``test_factory_packs_git_meta_when_provided``,
-# ``test_factory_drops_git_meta_when_empty``) tested behavior that no
-# longer exists. Catalog Document carries git provenance at the
-# document level; chunks no longer carry it at all.
 
 
 def test_factory_rejects_deprecated_keys_via_normalize() -> None:
@@ -173,37 +40,9 @@ def tmp_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _full_keyset_minus_optional() -> set[str]:
-    """Keys that every chunked-write indexer MUST emit.
-
-    bib_* and git_meta are intentionally optional (see normalize() rules).
-    Every other ALLOWED_TOP_LEVEL key must appear on every chunk.
-
-    RDR-108 Phase 3 retired ``doc_id`` / ``chunk_index`` / ``chunk_count``
-    from the chunk schema; they are no longer in ALLOWED_TOP_LEVEL.
-    """
-    return ALLOWED_TOP_LEVEL - {
-        "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
-        "bib_semantic_scholar_id",
-        "git_meta",
-        # nexus-6pfgb.4: still accepted on an old row, no longer written.
-        "session_id",
-        # RDR-139 Layer D: extraction_source defaults to ``file`` and is
-        # dropped by normalize (absent == file); only DT chunks carry it.
-        "extraction_source",
-        # nexus-1oguj: same drop-when-empty contract as extraction_source.
-        "extraction_method",
-        # nexus-wi1uv round-2: defaults to False and is dropped by
-        # normalize; only a chunk indexed under --allow-degraded-
-        # extraction after a real gate failure carries it (see
-        # tests/test_metadata_quality_gate_overridden.py).
-        "quality_gate_overridden",
-    }
-
-
 def test_pdf_indexer_emits_full_keyset(tmp_repo: Path) -> None:
     """``_pdf_chunks`` (the doc_indexer batch path) routes through
-    the factory and emits the full keyset."""
+    the factory and emits the chunk keys, and nothing else (RDR-236 Phase 4 Step 1)."""
     pytest.importorskip("pymupdf")
     import pymupdf
 
@@ -220,97 +59,9 @@ def test_pdf_indexer_emits_full_keyset(tmp_repo: Path) -> None:
         now_iso="2026-04-26T00:00:00+00:00", corpus="test",
     )
     assert prepared, "fixture PDF should produce at least one chunk"
-    expected = _full_keyset_minus_optional()
     for _, _, meta, _p in prepared:
-        assert "session_id" not in meta  # nexus-6pfgb.4
-        missing = expected - set(meta.keys())
-        assert not missing, (
-            f"_pdf_chunks dropped: {missing}; got keys {sorted(meta.keys())}"
-        )
+        assert set(meta) == ALLOWED_TOP_LEVEL, f"_pdf_chunks wrote {sorted(meta)}"
 
 
-def test_pipeline_pdf_emits_full_keyset() -> None:
-    """``pipeline_stages._build_chunk_metadata`` routes through the factory.
-
-    nexus-w94eo: ``title``/``source_author`` are the two exceptions to the
-    "full keyset" contract here (unlike ``_pdf_chunks``'s batch path, which
-    still emits them). They are ALWAYS unknown at streaming chunk-time — the
-    post-pass (``_enrich_metadata_from_extraction``) is the only place either
-    is ever resolved — so this function omits them rather than stamping an
-    empty-string placeholder a late-committing duplicate write could
-    otherwise merge back on top of the post-pass's real values.
-    """
-    from nexus.pdf_chunker import TextChunk
-    from nexus.pipeline_stages import _build_chunk_metadata
-    chunk = TextChunk(
-        text="abc",
-        chunk_index=0,
-        metadata={
-            "chunk_index": 0, "chunk_start_char": 0, "chunk_end_char": 3,
-            "page_number": 1, "chunk_type": "text",
-            "section_title": "1 Intro", "section_type": "introduction",
-        },
-    )
-    meta = _build_chunk_metadata(
-        chunk,
-        content_hash="x" * 64,
-        pdf_path="/x.pdf",
-        corpus="test",
-        embedding_model="model-ctx",
-        now_iso="2026-04-26T00:00:00+00:00",
-    )
-    # nexus-vhyar: frecency_score is omitted at its 0.0 default for the same
-    # reason; the frecency-only reindex owns it.
-    expected = _full_keyset_minus_optional() - {"title", "source_author", "frecency_score"}
-    missing = expected - set(meta.keys())
-    assert not missing, (
-        f"streaming pipeline dropped: {missing}; got keys {sorted(meta.keys())}"
-    )
-    assert "title" not in meta, (
-        "nexus-w94eo: title is unknown at streaming chunk-time and must be "
-        "omitted, not stamped as an empty-string placeholder"
-    )
-    assert "source_author" not in meta, (
-        "nexus-w94eo: source_author is unknown at streaming chunk-time and "
-        "must be omitted, not stamped as an empty-string placeholder"
-    )
-    assert "frecency_score" not in meta, (
-        "nexus-vhyar: the stub must not carry the frecency-only reindex's key"
-    )
 
 
-def test_t3_put_emits_full_keyset_for_mcp_stored_doc() -> None:
-    """``T3Database.put`` (MCP store_put backend) routes through the
-    factory so single-chunk MCP-stored docs carry the full keyset
-    (closes RDR-086 chash coverage hole for MCP-stored docs).
-
-    RDR-108 Phase 3: chunk_index / chunk_count / doc_id no longer
-    appear in chunk metadata — the catalog manifest carries them.
-    """
-    from nexus.metadata_schema import make_chunk_metadata
-    # We can't easily exercise the full T3Database in a unit test
-    # (cloud auth), so verify the metadata-shape contract via the
-    # factory call equivalent.
-    content = "MCP-stored content"
-    content_hash = hashlib.sha256(content.encode()).hexdigest()
-    meta = make_chunk_metadata(
-        content_type="prose",
-        chunk_text_hash=content_hash,
-        content_hash=content_hash,
-        chunk_start_char=0,
-        chunk_end_char=len(content),
-        indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="model-ctx",
-        title="My Note",
-        tags="user",
-        category="note",
-    )
-    expected = _full_keyset_minus_optional()
-    missing = expected - set(meta.keys())
-    assert not missing, f"T3 put metadata missing: {missing}"
-    # Specifically the chash fields that close the RDR-086 coverage hole:
-    assert meta["chunk_text_hash"] == content_hash
-    assert meta["content_hash"] == content_hash
-    # Phase 3 retired chunk_index / chunk_count from chunk schema.
-    assert "chunk_index" not in meta
-    assert "chunk_count" not in meta

@@ -351,10 +351,11 @@ def test_a_multi_request_pdf_ends_with_the_manifest_of_one_combined_write(
     assert _index_state(doc) == "complete" == _index_state(ctl)
 
 
-def test_the_streaming_run_stamps_complete_only_after_its_metadata_post_pass(tmp_path, fake_pdf) -> None:
-    """The post-pass writes the title, author and extraction method after the last chunk landed. A
-    process killed between a stamp and that pass would leave a document that looks complete and is
-    missing them, so the stamp comes last."""
+def test_the_streaming_run_stamps_complete_last_and_writes_no_chunk_row_after_the_upload(tmp_path, fake_pdf) -> None:
+    """The title, author and extraction method are the catalog document's, written once the extraction is
+    known and before the stamp; no chunk row is updated after the last chunk landed (RDR-236 Phase 4
+    Step 1 retired the post-pass that did). A process killed between a stamp and the catalog write would
+    leave a document that looks complete and is missing them, so the stamp comes last."""
     lines = _multi_lines("stamp-order")
     fake_pdf(lines)
     path = _write_pdf(tmp_path, "stamp-order")
@@ -364,13 +365,13 @@ def test_the_streaming_run_stamps_complete_only_after_its_metadata_post_pass(tmp
     last_data = max(i for i, e in enumerate(t.events) if e in _CATALOG_DATA_PATHS)
     enrich = [i for i, e in enumerate(t.events) if e == _UPDATE_METADATA]
     stamp = [i for i, e in enumerate(t.events) if e == _FENCE_COMPLETE]
-    assert enrich, "non-vacuity: the post-pass wrote metadata"
+    assert not enrich, "no chunk row is updated after the upload"
     assert len(stamp) == 1
-    assert last_data < min(enrich) < stamp[0]
+    assert last_data < stamp[0]
     doc, _ = _register(path, "stamp-order")
     stored = hvc.HttpVectorClient().get_collection(_COLLECTION).get(
         ids=[_sha(lines[0])], include=["metadatas"], sensitivity="include")["metadatas"][0]
-    assert stored["extraction_method"] == "mineru", "the post-pass ran before the document was stamped"
+    assert set(stored) == {"chunk_text_hash", "embedding_model"}, stored
     assert _index_state(doc) == "complete"
 
 
@@ -538,26 +539,6 @@ def test_a_forced_reindex_keeps_the_bib_enrichment(tmp_path, fake_pdf, streaming
     assert all("bib_year" not in (b.get("metadata_delete_keys") or []) for b in sent)
 
 
-def test_a_forced_reindex_clears_the_owned_keys_a_non_streaming_pdf_dropped(tmp_path, fake_pdf) -> None:
-    """The non-streaming paths hold the complete intended state of every row, so they name the keys
-    they dropped (``rewrite_delete_keys``): a stale ``quality_gate_overridden`` from an earlier
-    degraded run is cleared while ``bib_*`` survives."""
-    lines = _lines("owned", 12)
-    fake_pdf(lines)
-    path = _write_pdf(tmp_path, "owned")
-    every = [_sha(x) for x in lines]
-    _index(path, "owned", streaming="never")
-    hvc.HttpVectorClient().update_chunks(
-        _COLLECTION, every, [{"bib_year": 2021, "quality_gate_overridden": True} for _ in every])
-
-    with _traffic() as t:
-        _index(path, "owned", streaming="never", force=True)
-
-    after = _stored_metadata(_COLLECTION, every)
-    assert all(m.get("bib_year") == 2021 for m in after.values())
-    assert all("quality_gate_overridden" not in m for m in after.values())
-    sent = [b for p, b, _ in t.data() if "chunks" in b]
-    assert all("quality_gate_overridden" in b["metadata_delete_keys"] for b in sent)
 
 
 @pytest.mark.parametrize(
@@ -612,7 +593,7 @@ def test_a_pdf_with_no_catalog_identity_fails_the_run_and_writes_nothing(
 # ── a streaming PDF of at most one batch ──────────────────────────────────────
 
 
-def test_a_small_streaming_pdf_is_one_write_many_and_a_separate_stamp_after_the_post_pass(
+def test_a_small_streaming_pdf_is_one_write_many_and_a_separate_stamp_after_it(
     tmp_path, fake_pdf,
 ) -> None:
     """The common shape: at most 128 chunks, so the writer's one request is a ``write_many`` with
@@ -636,7 +617,8 @@ def test_a_small_streaming_pdf_is_one_write_many_and_a_separate_stamp_after_the_
     enrich = [i for i, e in enumerate(t.events) if e == _UPDATE_METADATA]
     stamp = [i for i, e in enumerate(t.events) if e == _FENCE_COMPLETE]
     write = t.events.index("/manifest/write_many")
-    assert t.events.index(_FENCE_BEGIN) < write < min(enrich) < stamp[0] and len(stamp) == 1
+    assert not enrich, "no chunk row is updated after the write"
+    assert t.events.index(_FENCE_BEGIN) < write < stamp[0] and len(stamp) == 1
     doc, _ = _register(path, "streamsmall")
     every = [_sha(x) for x in lines]
     assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]
@@ -1285,93 +1267,8 @@ def _pipeline_rows(path: Path) -> list[dict]:
             if r["content_hash"] == content_hash and r["pdf_path"] == str(path)]
 
 
-def test_a_failed_post_pass_is_finished_by_a_rerun_that_sends_only_the_stamp(
-    tmp_path, fake_pdf, monkeypatch,
-) -> None:
-    """Every chunk was uploaded and the metadata post-pass failed: the run leaves the document
-    ``indexing`` and the pipeline buffer (all chunks flagged) in place. The rerun is a genuine TAIL:
-    it extracts nothing, begins no fence, sends no data request, and stamps through
-    ``complete_index_run``; the buffer is deleted only after that stamp landed."""
-    import nexus.pipeline_stages as ps
-
-    marker = "tail"
-    lines = _multi_lines(marker)
-    extractor = fake_pdf(lines)
-    path = _write_pdf(tmp_path, marker)
-    every = [_sha(x) for x in lines]
-
-    with monkeypatch.context() as failing:
-        failing.setattr(ps, "_enrich_metadata_from_extraction", lambda *a, **kw: False)
-        with _traffic() as first:
-            n = _index(path, marker, streaming="always")
-    assert n == len(every)
-    doc, _ = _register(path, marker)
-    assert _index_state(doc) == "indexing", "the failed post-pass left the document unstamped"
-    assert first.events.count(_FENCE_COMPLETE) == 0
-    (row,) = _pipeline_rows(path)
-    flagged, counter = _buffer_evidence(path)
-    assert flagged == len(every) and counter == len(every), "a genuine tail: every chunk is flagged"
-    assert row["status"] == "failed", "handed back so the rerun resumes it"
-    assert len(extractor.calls) == 1
-
-    with _traffic() as rerun:
-        assert _index(path, marker, streaming="always") == len(every)
-
-    assert len(extractor.calls) == 1, "the rerun extracted nothing"
-    assert rerun.data() == [], "no data request"
-    assert rerun.events.count(_FENCE_BEGIN) == 0, "no fence begin"
-    assert rerun.events.count(_FENCE_COMPLETE) == 1, "one stamp, through complete_index_run"
-    assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]
-    assert _index_state(doc) == "complete"
-    assert _pipeline_rows(path) == [], "the buffer goes after the stamp landed"
 
 
-def test_a_rerun_post_pass_updates_every_chunk_of_its_manifest_including_one_another_pdf_restamped(
-    tmp_path, fake_pdf, monkeypatch,
-) -> None:
-    """nexus-ahm18: A and B share one chunk. A uploaded, its post-pass failed (the buffer is kept), then B
-    uploaded and restamped the shared chunk (its row now carries B's ``content_hash``). A's rerun runs the
-    post-pass again. Selected by ``content_hash`` it would update A's own chunks and miss the shared one;
-    selected by A's manifest it updates all of them, and none of B's own chunks."""
-    import nexus.pipeline_stages as ps
-    from nexus.doc_indexer import _sha256
-
-    shared = "ahm18 shared chunk text"
-    lines_a = _lines("ahm18-a", 6) + [shared]
-    lines_b = _lines("ahm18-b", 6) + [shared]
-    path_a, path_b = _write_pdf(tmp_path, "ahm18-a"), _write_pdf(tmp_path, "ahm18-b")
-    a_own, b_own, s_chash = [_sha(x) for x in lines_a[:-1]], [_sha(x) for x in lines_b[:-1]], _sha(shared)
-
-    fake_pdf(lines_a)
-    with monkeypatch.context() as failing:
-        failing.setattr(ps, "_enrich_metadata_from_extraction", lambda *a, **kw: False)
-        _index(path_a, "ahm18-a", streaming="always")
-    fake_pdf(lines_b)
-    _index(path_b, "ahm18-b", streaming="always")
-
-    before = _stored_metadata(_COLLECTION, a_own + b_own + [s_chash])
-    assert before[s_chash]["content_hash"] == _sha256(path_b), "non-vacuity: B restamped the shared chunk"
-    assert all(before[c]["content_hash"] == _sha256(path_a) for c in a_own), "A's own chunks carry A's hash"
-    assert "extraction_method" not in before[a_own[0]], "A's failed post-pass wrote nothing"
-    title_b = before[b_own[0]]["title"]
-
-    fake_pdf(lines_a)
-    _index(path_a, "ahm18-a", streaming="always")
-
-    after = _stored_metadata(_COLLECTION, a_own + b_own + [s_chash])
-    title_a = after[a_own[0]]["title"]
-    assert title_a != title_b, "non-vacuity: the two PDFs resolve different titles"
-    assert all(after[c]["title"] == title_a and after[c]["extraction_method"] == "mineru" for c in a_own)
-    # The shared chunk is A's too: its manifest names it, and B restamped it, so it is written
-    # non-destructively (title and extraction_method replaced, nothing deleted or blanked; the unit
-    # tests pin the rest). The value is the last writer's (A's, now), until the catalog carries it
-    # (nexus-6pfgb.6); invert this assertion when the chunk-row keys are retired (nexus-6pfgb.27).
-    assert after[s_chash]["title"] == title_a and after[s_chash]["extraction_method"] == "mineru"
-    assert all(after[c]["title"] == title_b for c in b_own), "no chunk A does not own is touched"
-    assert all(after[c].get("extraction_method") == before[c].get("extraction_method") for c in b_own)
-
-
-# ── decision D2: the stamp is the last thing a non-streaming path does ───────────────────
 
 
 @pytest.mark.parametrize(

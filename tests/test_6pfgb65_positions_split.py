@@ -9,10 +9,11 @@ chunk-row metadata dicts. The goldens were captured from the code before the spl
 it (the ``row-has-positions`` half of every case passes on the pre-split tree), so equality means
 "unchanged".
 
-Each case runs twice. ``row-has-positions`` is the plain run (the factory still emits the position keys
-in this commit). ``row-has-no-positions`` makes ``make_chunk_metadata`` drop the POSITION keys from its
-output, which is what Step 1 will do; the manifest rows must still equal the goldens, and the only way
-they can is by reading the chunker's own position dict. That half fails with the split reverted.
+Since Step 1 (nexus-6pfgb.65) the chunk row carries the CHUNK keys only, so the manifest rows can only
+come from the chunker's own position dict, and the chunk-row half of the goldens holds those two keys. The
+manifest-row half is the pre-split capture and has not been regenerated: it is the pin. (The earlier form of
+this file ran every case twice, once with the factory made to drop the POSITION keys, to prove the manifest
+did not read them off the row; the real factory now does that.)
 
 Routes: ``oversize`` (the file goes through the multi-batch combined writer), ``flush`` (the ChunkBatcher
 stages it and the flush builds the owner rows), ``legacy`` (the old per-file upsert, where the batch
@@ -59,6 +60,7 @@ class _RecordingCat:
         self.rows: list[dict] = []
         self.chunks: list[dict] = []
         self.requests = 0
+        self.summary: dict = {}
 
     def begin_index_run(self, doc_id, content_hash, run_id, collection, **kw):
         return {"prior_chashes": [], "prior_count": 0}
@@ -114,18 +116,6 @@ def _install(monkeypatch) -> _RecordingCat:
     monkeypatch.setattr(di, "_fence_fail", lambda *a, **k: None)
     module_time(monkeypatch, "nexus.retry").sleep = lambda *_a, **_k: None
     return rec
-
-
-def _strip_positions(monkeypatch) -> None:
-    """Step 1 in miniature: the factory's output carries no POSITION key."""
-    import nexus.metadata_schema as ms
-
-    orig = ms.make_chunk_metadata
-
-    def stripped(**kw):
-        return {k: v for k, v in orig(**kw).items() if k not in POSITION_FIELDS}
-
-    monkeypatch.setattr(ms, "make_chunk_metadata", stripped)
 
 
 def _ctx(repo: Path, *, corpus: str, batcher, db, hooks) -> IndexContext:
@@ -365,10 +355,10 @@ def _drive_index_pdf_route(route: str, tmp_path: Path, monkeypatch, rec: _Record
             patch("nexus.doc_indexer.PDFExtractor") as ext_cls, \
             patch("nexus.catalog.factory.make_catalog_writer", return_value=rec):
         ext_cls.return_value.extract.return_value = _pdf_extraction_result()
-        di.index_pdf(
+        rec.summary = di.index_pdf(
             f, "pin65", _T3(), collection_name=_CCE,
             embed_fn=lambda texts, model: ([[] for _ in texts], model),
-            hooks=HookRegistry(), force=True, streaming="never")
+            hooks=HookRegistry(), force=True, streaming="never", return_metadata=True)
     # Non-vacuity of the route: one request for the single-request path, several for the batched one.
     assert (rec.requests > 1) == (route == "incremental"), rec.requests
     return [c["metadata"] for c in rec.chunks]
@@ -420,13 +410,11 @@ _CASES = (
 
 
 def _observe(
-    path: str, route: str, tmp_path: Path, monkeypatch, *, strip: bool,
+    path: str, route: str, tmp_path: Path, monkeypatch,
     rewrite_buffer: Callable[[dict], None] | None = None,
 ) -> dict:
     """What the owner-row writer is handed for *path* indexed by *route*."""
     rec = _install(monkeypatch)
-    if strip:
-        _strip_positions(monkeypatch)
     if route == "doc":
         metas = _drive_doc_route(path, tmp_path, monkeypatch, rec)
     elif route == "stream":
@@ -435,8 +423,7 @@ def _observe(
         metas = _drive_index_pdf_route(route, tmp_path, monkeypatch, rec)
     else:
         metas = _drive_repo_route(path, route, tmp_path, monkeypatch, rec)
-    # Two routes stamp indexed_at from the wall clock; it is no part of what is pinned.
-    return {"rows": rec.rows, "chunks": [{**m, "indexed_at": "T"} for m in metas]}
+    return {"rows": rec.rows, "chunks": list(metas)}
 
 
 def _goldens() -> dict:
@@ -446,24 +433,18 @@ def _goldens() -> dict:
 @pytest.mark.skipif(not os.environ.get("NX_PIN_CAPTURE"), reason="golden capture only")
 @pytest.mark.parametrize("path,route", _CASES)
 def test_capture(path, route, tmp_path, monkeypatch) -> None:
-    obs = _observe(path, route, tmp_path, monkeypatch, strip=False)
+    obs = _observe(path, route, tmp_path, monkeypatch)
     sys.stdout.write("\nGOLDEN " + f"{path}/{route} " + json.dumps(obs, sort_keys=True) + "\n")
 
 
-@pytest.mark.parametrize("strip", [False, True], ids=["row-has-positions", "row-has-no-positions"])
 @pytest.mark.parametrize("path,route", _CASES)
-def test_manifest_rows_equal_their_pre_split_values(path, route, strip, tmp_path, monkeypatch) -> None:
+def test_manifest_rows_equal_their_pre_split_values(path, route, tmp_path, monkeypatch) -> None:
     gold = _goldens()[f"{path}/{route}"]
-    got = _observe(path, route, tmp_path, monkeypatch, strip=strip)
+    got = _observe(path, route, tmp_path, monkeypatch)
 
     assert len(gold["rows"]) > 1, "non-vacuity: the fixture must yield several chunks"
     assert got["rows"] == gold["rows"]
-    # The chunk rows are unchanged too (Step 0 changes the data flow, not what is written); in the
-    # stripped run they are the goldens less the POSITION keys.
-    expected_chunks = [
-        {k: v for k, v in m.items() if not (strip and k in POSITION_FIELDS)} for m in gold["chunks"]
-    ]
-    assert got["chunks"] == expected_chunks
+    assert got["chunks"] == gold["chunks"]
 
 
 def test_every_path_and_route_has_a_golden() -> None:
@@ -478,19 +459,19 @@ def test_position_fields_are_the_tables_position_keys() -> None:
     assert set(POSITION_FIELDS) == keys_of("POSITION")
 
 
-def test_the_position_dicts_the_chunkers_return_equal_what_the_row_carries(tmp_path) -> None:
-    """Until Step 1 the row still carries the position keys, and the chunker's own dict agrees with
-    them for every key it sets (this is what lets Step 1 drop the keys from the row without moving a
-    manifest value)."""
+def test_the_chunkers_hand_the_positions_beside_a_row_that_carries_none(tmp_path) -> None:
+    """The chunker's own position dict is the only place a chunk's span and section labels are (the row
+    holds the CHUNK keys), and it is a full dict over the table's POSITION keys."""
     from nexus.doc_indexer import _markdown_chunks
-    from nexus.metadata_schema import positions_of_row
 
     f = tmp_path / "notes.md"
     f.write_text(_MD_SRC, encoding="utf-8")
     prepared = _markdown_chunks(f, "h" * 64, _MODEL, _NOW, "pin65", collection_name=_CCE)
     assert len(prepared) > 1 and all(len(p) == 4 for p in prepared)
     for _cid, _text, meta, positions in prepared:
-        assert positions_of_row(meta) == positions
+        assert set(meta) == {"chunk_text_hash", "embedding_model"}
+        assert set(positions) == set(POSITION_FIELDS)
+    assert any(p[3]["section_title"] for p in prepared), "non-vacuity: the fixture has headings"
 
 
 def _carries_positions(golden: dict) -> bool:
@@ -528,8 +509,8 @@ def _drop_buffered_positions(every: int) -> Callable[[dict], None]:
             if idx % every:
                 continue
             meta = json.loads(row["metadata_json"])
-            assert "_positions" in meta and "chunk_end_char" in meta, "non-vacuity: the buffer row is new-shaped"
-            del meta["_positions"]
+            assert "_positions" in meta and "chunk_end_char" not in meta, "non-vacuity: the buffer row is new-shaped"
+            meta.update(meta.pop("_positions"))  # the old shape: the positions inside the row metadata
             row["metadata_json"] = json.dumps(meta)
             dropped += 1
         assert dropped, "non-vacuity: no buffered row was rewritten"
@@ -543,8 +524,7 @@ def test_a_buffer_written_before_the_split_resumes_to_the_same_manifest_rows(eve
     so the manifest rows are the stream golden's (RDR-236 Phase 4 Step 0). Without that fallback the rows
     would carry empty labels and null spans."""
     gold = _goldens()["pdf/stream"]
-    got = _observe("pdf", "stream", tmp_path, monkeypatch, strip=False,
-                   rewrite_buffer=_drop_buffered_positions(every))
+    got = _observe("pdf", "stream", tmp_path, monkeypatch, rewrite_buffer=_drop_buffered_positions(every))
     assert len(gold["rows"]) > 1
     assert got["rows"] == gold["rows"]
     assert got["chunks"] == gold["chunks"]
