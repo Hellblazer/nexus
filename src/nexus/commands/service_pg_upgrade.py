@@ -49,22 +49,22 @@ def _nx_service(verb: str, config_dir: Path) -> int:
     default=False,
     help="Run initdb into a temporary directory and pg_upgrade --check against it, then remove it. "
     "Never creates or moves the real data directory. The old server must not be running. Holds the same lock "
-    "as --apply; an interrupt stops the old server pg_upgrade --check started.",
+    "as --apply; on failure or interrupt it stops the old server only if pg_upgrade --check started it.",
 )
 @click.option(
     "--apply",
     "do_apply",
     is_flag=True,
     default=False,
-    help="Do the upgrade: stop the service and the old server, move the data directory to <data>.old, "
+    help="Do the upgrade: move the data directory to <data>.old, "
     "initdb, pg_upgrade --check, pg_upgrade, start the service, then update_extensions.sql and "
     "vacuumdb --all --analyze-in-stages. Any failure after the move removes the new directory and "
-    "moves the original back. <data>.old is kept. "
+    "moves the original back. <data>.old is kept. Refuses while the storage service or the old PostgreSQL "
+    "server is running and stops neither: run `nx daemon service stop` first (the message names the commands). "
     "This command is not yet run against a real pre-17 cluster; copy the data directory first. "
     "Holds the storage service's spawn lock for the whole run (freed just before the service is started "
-    "again), so a concurrent `nx daemon service start` or an autostart unit waits instead of starting on the "
-    "half-built cluster; it does not stop a service that is already running (--apply stops it) or a "
-    "PostgreSQL server that brew services or systemd restarts.",
+    "again), so a concurrent `nx daemon service start` waits instead of starting on the half-built cluster; "
+    "it does not keep a PostgreSQL server that brew services or systemd restarts from coming back.",
 )
 @click.option("--config-dir", "config_dir_str", default=None, help="Config directory override.")
 def pg_upgrade_cmd(old_bin: Path, check_only: bool, do_apply: bool, config_dir_str: str | None) -> None:

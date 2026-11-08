@@ -4564,12 +4564,20 @@ It is the scripted form of "A local cluster older than PostgreSQL 17" in
 **Not yet run against a real pre-17 cluster; copy the data directory first.** `--apply` and `--check-only`
 hold the storage service's spawn lock (`<config dir>/storage_service_spawn.lock`, the lock a supervisor takes
 in its start) for the whole run, and are refused up front when another process holds it. A concurrent
-`nx daemon service start`, or an autostart unit, then waits on the lock instead of starting a supervisor on
-the half-built cluster (the verb times out waiting for the service; a supervisor it spawned proceeds once the
-lock is freed). The lock is freed just before the command starts the service again. It does not stop a
-service that is already running (`--apply` stops it first), and it does not keep a PostgreSQL server that
-another manager (brew services, systemd) restarts from coming back: `--apply` refuses if a server still runs
-after its stop, so disable that manager first.
+`nx daemon service start` then waits on the lock instead of starting a supervisor on the half-built cluster:
+the verb times out waiting for the service, and the supervisor it spawned stays blocked on the lock and
+proceeds (or exits, if another one has started meanwhile) once the lock is freed. Each concurrent start leaves
+one such blocked supervisor. That the verb waits is tested; how an autostart unit (launchd, systemd) behaves
+while the lock is held, including its own start timeout and restart limits, is not, so stop the unit before
+`--apply`. The lock is freed just before the command starts the service again.
+
+`--apply` refuses while the storage service or the old PostgreSQL server is running, and stops neither: it
+finds the service the way `nx daemon service stop` does (a live lease, then the process table) and the
+server with the old `pg_ctl status`. The message names `nx daemon service stop --config-dir <dir>` and, for
+a server, `<old pg_ctl> -D <data> -m fast stop`; run them, stop the server's service manager (brew services,
+systemd) so it does not restart, and run the command again. Nothing is changed by a refusal. `nx daemon
+service stop` leaves a PostgreSQL server that nx started running by default, so a running server is the
+usual second refusal. The lock does not keep a server that another manager restarts from coming back.
 The command is tested against fake PostgreSQL binaries only. Until a real run
 exists, take a copy of the data directory (`cp -a <data> <copy>`) before
 `--apply`; the dry run and `--apply` both print this reminder.
@@ -4585,8 +4593,10 @@ Without a mode flag the command changes nothing: it validates the cluster and
 `initdb` into a temporary directory (never the real data directory) with the
 options nx creates its own clusters with, runs `pg_upgrade --check` against the
 real cluster (it starts and stops the old server on it and does not modify it),
-and removes the temporary directory; the old server must not be running. `--apply` stops the service, stops the old server with the old
-`pg_ctl` and checks it is down, moves the data directory to `<data>.old`, runs
+and removes the temporary directory; the old server must not be running. If the check fails or is interrupted,
+`--check-only` stops the old server only when `pg_upgrade --check` started it (no server's pid file was there
+when it began); a server someone else started meanwhile is left running and the output says so. `--apply`
+checks with the old `pg_ctl` that no server runs, moves the data directory to `<data>.old`, runs
 `initdb` (`--auth=trust` for the upgrade; the next service start converts it to
 `scram-sha-256`), `pg_upgrade --check` and `pg_upgrade`, starts the service, then
 runs `update_extensions.sql` (it looks in its work directory and under

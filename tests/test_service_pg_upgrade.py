@@ -36,6 +36,9 @@ from tests._module_seam import setattr_in
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the command is Linux and macOS only")
 
+#: The command's own service finder, kept before the rig replaces it with a recorder.
+_REAL_FIND_SERVICE = upgrade_mod._find_running_service
+
 PASSWORD = "S3cr3t-pw-VALUE-9f2c"
 USER = "nxtester"
 PORT = "54329"
@@ -64,6 +67,12 @@ exit 0
 _INITDB = _PRELUDE + r"""
 while [ $# -gt 0 ]; do case "$1" in -D) shift; D="$1";; esac; shift; done
 mkdir -p "$D"
+if fail initdb_foreign; then  # someone else (brew services, systemd) brings the old server up while the check is still setting up
+  touch "$FAKE_STATE/old_running"; echo "initdb: could not create $D/x" >&2; exit 1
+fi
+if fail initdb_foreign_pid; then  # ... and it is already up, with its pid file, when pg_upgrade --check is about to begin
+  touch "$FAKE_STATE/old_running"; echo 4242 > "$FAKE_OLD_PGDATA/postmaster.pid"
+fi
 if fail initdb; then echo "initdb: could not create $D/x" >&2; exit 1; fi
 echo 17 > "$D/PG_VERSION"; echo trust > "$D/pg_hba.conf"
 """
@@ -136,8 +145,12 @@ class Rig:
     state: Path
     service_calls: list[tuple[str, bool, bool]] = field(default_factory=list)  # verb, pw in env, pgdata present
     service_rc: dict[str, int] = field(default_factory=dict)
-    #: Called with the verb before the recorder answers; may raise or change the world (a peer making a .old).
+    #: Called with the verb before the recorder answers (or with "running?" when the command looks for a running
+    #: service); may raise or change the world (a peer making a .old).
     on_service: Callable[[str], None] | None = None
+    #: What the command finds when it looks for a running storage service (empty: none).
+    service_found: list[str] = field(default_factory=list)
+    find_calls: int = 0
 
     @property
     def pgdata_old(self) -> Path:
@@ -192,7 +205,7 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Rig:
     root = tmp_path / "fake"
     state = root / "state"
     state.mkdir(parents=True)
-    (state / "old_running").touch()  # the old server is up until the command stops it
+    # The old server is down by default: --apply and --check-only refuse a running one and stop nothing of the user's.
     old_bin, new_bin = root / "old-bin", root / "new-bin"
     _write_bin(old_bin, {"pg_ctl": _PG_CTL}, which="old", major=16)
     _write_bin(new_bin, {"pg_ctl": _PG_CTL, "initdb": _INITDB, "psql": _PSQL, "createdb": _NOOP,
@@ -217,7 +230,16 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Rig:
             r.on_service(verb)
         return r.service_rc.get(verb, 0)
 
+    def fake_find(plan) -> list[str]:
+        assert plan.config_dir == cfg, "the service must be looked for in the test's config dir, never the real one"
+        r.find_calls += 1
+        if r.on_service is not None:
+            r.on_service("running?")
+        return list(r.service_found)
+
     monkeypatch.setattr(cmd_mod, "_nx_service", fake_service)
+    monkeypatch.setattr(upgrade_mod, "_find_running_service", fake_find)
+    monkeypatch.setenv("FAKE_OLD_PGDATA", str(pgdata))
     return r
 
 
@@ -241,8 +263,7 @@ def test_dry_run_changes_nothing_and_prints_the_plan(rig: Rig) -> None:
     result = rig.run()
     assert result.exit_code == 0, result.output
     assert rig.snapshot() == before
-    assert (rig.state / "old_running").exists(), "the dry run must not stop the old server"
-    assert rig.service_calls == []
+    assert rig.service_calls == [] and rig.find_calls == 0, "the dry run must not look for, stop or start anything"
     for step in ("nx daemon service stop", "-m fast stop", "mv ", "initdb", "pg_upgrade --check",
                  "nx daemon service start", "update_extensions.sql", "vacuumdb", "postgres.old"):
         assert step in result.output, step
@@ -289,14 +310,12 @@ def test_an_existing_old_directory_is_refused_with_the_back_out_text(rig: Rig) -
     assert "pre-upgrade cluster" in result.output and "back out" in result.output
     assert f"mv {rig.pgdata_old} {rig.pgdata}" in result.output
     assert rig.snapshot() == before
-    assert rig.service_calls == [], "the service must not be stopped when the run would be refused anyway"
-    assert (rig.state / "old_running").exists()
+    assert rig.service_calls == []
     assert not any("stop" in ln.split("||")[0] for ln in rig.calls("pg_ctl"))
 
 
 def test_check_only_does_not_mind_an_old_directory(rig: Rig) -> None:
     rig.pgdata_old.mkdir()
-    (rig.state / "old_running").unlink()
     assert rig.run("--check-only").exit_code == 0
 
 
@@ -322,7 +341,6 @@ def _initdb_target(rig: Rig) -> Path:
 
 
 def test_check_only_runs_initdb_in_a_temp_dir_and_leaves_the_real_cluster_alone(rig: Rig) -> None:
-    (rig.state / "old_running").unlink()  # the old server is already down
     before = rig.snapshot()
     result = rig.run("--check-only")
     assert result.exit_code == 0, result.output
@@ -338,7 +356,6 @@ def test_check_only_runs_initdb_in_a_temp_dir_and_leaves_the_real_cluster_alone(
 
 
 def test_check_only_failure_leaves_the_original_and_removes_the_temp_dir(rig: Rig) -> None:
-    (rig.state / "old_running").unlink()
     before = rig.snapshot()
     result = rig.run("--check-only", fail="pg_upgrade_check")
     assert result.exit_code == 1
@@ -349,6 +366,7 @@ def test_check_only_failure_leaves_the_original_and_removes_the_temp_dir(rig: Ri
 
 
 def test_check_only_refuses_while_the_old_server_runs(rig: Rig) -> None:
+    (rig.state / "old_running").touch()
     before = rig.snapshot()
     result = rig.run("--check-only")
     assert result.exit_code == 1 and "a server is running" in result.output
@@ -362,7 +380,6 @@ def test_an_interrupted_check_only_stops_the_old_server_pg_upgrade_started(
 ) -> None:
     """nexus-j738q limitation 2: ``pg_upgrade --check`` starts the old server; an interrupt can leave it running."""
     monkeypatch.setattr(upgrade_mod, "_PG_UPGRADE_TIMEOUT_S", 25.0)  # a failing run times out instead of hanging
-    (rig.state / "old_running").unlink()  # down when the command starts, as --check-only requires
     before = rig.snapshot()
     previous = signal.signal(sig, lambda *_: None)
     pid = None
@@ -384,7 +401,6 @@ def test_an_interrupted_check_only_stops_the_old_server_pg_upgrade_started(
 
 
 def test_a_failed_check_only_also_stops_a_server_it_left_running(rig: Rig) -> None:
-    (rig.state / "old_running").unlink()
     result = rig.run("--check-only", fail="check_leak")
     assert result.exit_code == 1 and "pg_upgrade --check failed" in result.output
     assert not (rig.state / "old_running").exists()
@@ -392,7 +408,6 @@ def test_a_failed_check_only_also_stops_a_server_it_left_running(rig: Rig) -> No
 
 
 def test_a_check_only_that_cannot_stop_the_server_says_which_command_to_run(rig: Rig) -> None:
-    (rig.state / "old_running").unlink()
     (rig.state / "old_stuck").touch()  # the old pg_ctl's stop leaves the server up
     result = rig.run("--check-only", fail="check_leak")
     assert result.exit_code == 1
@@ -402,9 +417,97 @@ def test_a_check_only_that_cannot_stop_the_server_says_which_command_to_run(rig:
 
 
 def test_a_clean_check_only_never_asks_pg_ctl_to_stop(rig: Rig) -> None:
-    (rig.state / "old_running").unlink()
     assert rig.run("--check-only").exit_code == 0
     assert not any(" stop" in ln for ln in rig.log_lines())
+
+
+def test_a_failed_check_only_leaves_a_server_someone_else_started_during_setup(rig: Rig) -> None:
+    """initdb fails after a service manager brought the old server up: the check never began, so the server is not ours."""
+    result = rig.run("--check-only", fail="initdb_foreign")
+    assert result.exit_code == 1 and "initdb failed" in result.output
+    assert (rig.state / "old_running").exists(), "stopped a server the check did not start"
+    assert not any(" stop" in ln.split("||")[0] for ln in rig.calls("pg_ctl"))
+    assert "did not start" in result.output and "left running" in result.output
+    assert not _initdb_target(rig).parent.exists(), "the temporary directory goes even so"
+
+
+def test_a_failed_check_only_leaves_a_server_that_was_up_before_pg_upgrade_check_began(rig: Rig) -> None:
+    """A pid file is there when pg_upgrade --check is about to begin: whatever runs afterwards was not started by it."""
+    result = rig.run("--check-only", fail="initdb_foreign_pid,pg_upgrade_check")
+    assert result.exit_code == 1 and "pg_upgrade --check failed" in result.output
+    assert (rig.state / "old_running").exists(), "stopped a server the check did not start"
+    assert not any(" stop" in ln.split("||")[0] for ln in rig.calls("pg_ctl"))
+    assert "did not start" in result.output
+
+
+def test_apply_makes_its_work_directory_and_removes_an_unmoved_one_with_signals_ignored(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+    real_mkdtemp, real_rmtree = upgrade_mod.tempfile.mkdtemp, upgrade_mod.shutil.rmtree
+
+    def mkdtemp(*a, **kw):
+        seen["tempdir"] = signal.getsignal(signal.SIGINT)
+        return real_mkdtemp(*a, **kw)
+
+    def rmtree(path, *a, **kw):
+        if "pgup." in str(path):
+            seen["rmtree"] = signal.getsignal(signal.SIGINT)
+        return real_rmtree(path, *a, **kw)
+
+    setattr_in(monkeypatch, upgrade_mod, "tempfile.mkdtemp", mkdtemp)
+    setattr_in(monkeypatch, upgrade_mod, "shutil.rmtree", rmtree)
+    rig.service_found = ["a live service lease (supervisor pid 1)"]  # refused before the move: the unmoved path removes the work dir
+    assert rig.run("--apply").exit_code == 1
+    assert seen == {"tempdir": signal.SIG_IGN, "rmtree": signal.SIG_IGN}, seen
+
+
+def test_a_failed_check_only_that_finds_no_server_says_nothing_about_one(rig: Rig) -> None:
+    result = rig.run("--check-only", fail="initdb")
+    assert result.exit_code == 1 and "did not start" not in result.output
+
+
+@pytest.mark.parametrize("where", ["tempdir", "step_failed", "interrupted", "rmtree"])
+def test_check_only_ignores_a_second_signal_while_it_cleans_up(rig: Rig, monkeypatch: pytest.MonkeyPatch, where: str) -> None:
+    """The handler body, the temp-dir removal and the window after mkdtemp run with the fatal signals ignored, so a
+    second ^C cannot leave the temporary directory (or its mkdtemp-to-assignment gap) behind."""
+    disposition: dict[str, object] = {}
+
+    def record(name: str) -> None:
+        disposition[name] = signal.getsignal(signal.SIGINT)
+
+    real_mkdtemp, real_rmtree = upgrade_mod.tempfile.mkdtemp, upgrade_mod.shutil.rmtree
+
+    def mkdtemp(*a, **kw):
+        record("tempdir")
+        return real_mkdtemp(*a, **kw)
+
+    def rmtree(path, *a, **kw):
+        if "pgup." in str(path):
+            record("rmtree")
+        return real_rmtree(path, *a, **kw)
+
+    setattr_in(monkeypatch, upgrade_mod, "tempfile.mkdtemp", mkdtemp)
+    setattr_in(monkeypatch, upgrade_mod, "shutil.rmtree", rmtree)
+    real_stop = upgrade_mod.ClusterUpgrade._stop_check_server
+
+    def stop(self, check_began):
+        record("step_failed" if not disposition.get("interrupted_seen") else "interrupted")
+        return real_stop(self, check_began)
+
+    monkeypatch.setattr(upgrade_mod.ClusterUpgrade, "_stop_check_server", stop)
+    if where == "interrupted":
+        real_step = upgrade_mod.ClusterUpgrade._step
+
+        def step(self, what, argv, **kw):
+            if what == "pg_upgrade --check":
+                disposition["interrupted_seen"] = True
+                raise KeyboardInterrupt
+            return real_step(self, what, argv, **kw)
+
+        monkeypatch.setattr(upgrade_mod.ClusterUpgrade, "_step", step)
+        rig.run("--check-only")
+    else:
+        rig.run("--check-only", fail="pg_upgrade_check")
+    assert disposition[where] == signal.SIG_IGN, f"{where}: a signal arriving here would raise ({disposition[where]!r})"
 
 
 # ── --apply ─────────────────────────────────────────────────────────────────────
@@ -413,8 +516,8 @@ def test_a_clean_check_only_never_asks_pg_ctl_to_stop(rig: Rig) -> None:
 def test_apply_success_runs_in_the_runbooks_order(rig: Rig) -> None:
     result = rig.run("--apply")
     assert result.exit_code == 0, result.output
-    # Service stop precedes every pg command; the new cluster is the old one's data, upgraded.
-    assert rig.service_calls == [("stop", False, True), ("start", False, True)]
+    # Nothing is stopped; the service is started once, after pg_upgrade. The new cluster is the old one's data, upgraded.
+    assert rig.service_calls == [("start", False, True)]
     assert (rig.pgdata_old / "orig-marker").read_text(encoding="utf-8") == "original\n"
     assert (rig.pgdata / "migrated").exists() and not (rig.pgdata / "orig-marker").exists()
     steps = [ln.split(" ||")[0] for ln in rig.log_lines()]
@@ -426,8 +529,7 @@ def test_apply_success_runs_in_the_runbooks_order(rig: Rig) -> None:
         if tool == "pg_upgrade":
             tool += " --check" if "--check" in s else ""
         kinds.append(tool + (":" + s.split()[-1] if tool == "pg_ctl" else ""))
-    assert kinds == ["pg_ctl:status", "pg_ctl:stop", "pg_ctl:status", "initdb", "pg_upgrade --check",
-                     "pg_upgrade", "psql", "vacuumdb"], kinds
+    assert kinds == ["pg_ctl:status", "initdb", "pg_upgrade --check", "pg_upgrade", "psql", "vacuumdb"], kinds
     assert "Upgraded" in result.output and f"rm -rf {rig.pgdata_old}" in result.output
     assert "nx doctor" in result.output and "scram-sha-256" in result.output
     # Every pg_ctl call is the OLD pg_ctl: the fake logs which bin dir it ran from.
@@ -435,11 +537,54 @@ def test_apply_success_runs_in_the_runbooks_order(rig: Rig) -> None:
     assert pg_ctl_lines and all(ln.endswith("bin=old-bin") for ln in pg_ctl_lines), pg_ctl_lines
 
 
-def test_apply_uses_the_old_pg_ctl_to_stop_the_old_server_and_checks_it_is_down(rig: Rig) -> None:
+def test_apply_checks_with_the_old_pg_ctl_that_no_server_runs_and_stops_nothing(rig: Rig) -> None:
     rig.run("--apply")
-    assert not (rig.state / "old_running").exists()
     statuses = [ln for ln in rig.calls("pg_ctl") if " status " in ln]
-    assert len(statuses) == 2, statuses  # before the stop, and the verification after it
+    assert len(statuses) == 1 and "bin=old-bin" in statuses[0], statuses
+    assert not any(" stop" in ln.split("||")[0] for ln in rig.calls("pg_ctl")), "apply stops no server"
+
+
+def test_apply_is_refused_while_the_storage_service_runs_and_changes_nothing(rig: Rig) -> None:
+    rig.service_found = ["a live service lease (supervisor pid 4242)"]
+    before = rig.snapshot()
+    result = rig.run("--apply")
+    assert result.exit_code == 1, result.output
+    assert "storage service is running" in result.output and "4242" in result.output
+    assert f"nx daemon service stop --config-dir {rig.cfg}" in result.output and "Nothing was changed" in result.output
+    assert rig.snapshot() == before and not rig.pgdata_old.exists()
+    assert rig.service_calls == [], "apply must not stop (or start) the service itself"
+    assert not any(ln.split()[0] in _MUTATING for ln in rig.log_lines())
+    assert not any(" stop" in ln.split("||")[0] for ln in rig.calls("pg_ctl"))
+    rig.assert_original_restored()
+
+
+def test_apply_finds_a_real_service_lease_in_the_config_dir_with_the_real_finder(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No fake finder: a live lease published in the plan's config dir is what makes the command refuse."""
+    from nexus.daemon import storage_service_daemon as ssd  # noqa: PLC0415
+    from nexus.daemon.service_registry import ServiceRegistry, service_identity, ttl_for_tier  # noqa: PLC0415
+
+    monkeypatch.setattr(upgrade_mod, "_find_running_service", _REAL_FIND_SERVICE)
+    ServiceRegistry(dir=rig.cfg, tier=ssd._REGISTRY_TIER, ttl=ttl_for_tier(ssd._REGISTRY_TIER)).publish(
+        service_identity(), endpoint={"pid": os.getpid(), "port": 1}, version="t", owner_token="tok",
+        payload={"supervisor_pid": os.getpid()},
+    )
+    result = rig.run("--apply")
+    assert result.exit_code == 1 and "storage service is running" in result.output and "lease" in result.output, result.output
+    assert rig.service_calls == [] and rig.calls("initdb") == []
+    rig.assert_original_restored()
+
+
+def test_apply_is_refused_while_the_old_server_runs_and_stops_nothing(rig: Rig) -> None:
+    (rig.state / "old_running").touch()
+    before = rig.snapshot()
+    result = rig.run("--apply")
+    assert result.exit_code == 1, result.output
+    assert "a server is running" in result.output and f"{rig.old_bin / 'pg_ctl'} -D {rig.pgdata} -m fast stop" in result.output
+    assert "Nothing was changed" in result.output
+    assert (rig.state / "old_running").exists(), "apply must not stop the old server"
+    assert rig.snapshot() == before and not rig.pgdata_old.exists()
+    assert rig.service_calls == [] and rig.calls("initdb") == []
+    assert not any(" stop" in ln.split("||")[0] for ln in rig.calls("pg_ctl"))
 
 
 def test_apply_makes_the_new_cluster_with_nxs_own_options_and_trust_auth(rig: Rig) -> None:
@@ -500,7 +645,7 @@ def test_a_failed_check_after_the_move_rolls_back(rig: Rig) -> None:
     rig.assert_original_restored()
     assert not any(" --check" not in ln and ln.startswith("pg_upgrade") for ln in rig.log_lines()), \
         "the real pg_upgrade must not run after a failed --check"
-    assert rig.service_calls == [("stop", False, True)], "the service is not started after a rollback"
+    assert rig.service_calls == [], "the service is not started after a rollback"
 
 
 def test_a_failed_pg_upgrade_rolls_back_stops_the_leaked_server_and_keeps_the_logs(rig: Rig) -> None:
@@ -540,23 +685,6 @@ def test_the_rollback_test_fails_without_the_rollback(rig: Rig, monkeypatch: pyt
     with pytest.raises(AssertionError):
         rig.assert_original_restored()
     assert not rig.pgdata.joinpath("orig-marker").exists() and rig.pgdata_old.exists()
-
-
-def test_a_service_that_will_not_stop_changes_nothing(rig: Rig) -> None:
-    rig.service_rc["stop"] = 1
-    before = rig.snapshot()
-    result = rig.run("--apply")
-    assert result.exit_code == 1 and "nx daemon service stop" in result.output
-    assert rig.snapshot() == before
-    assert not any(ln.split()[0] in _MUTATING for ln in rig.log_lines())
-
-
-def test_an_old_server_that_will_not_stop_changes_nothing(rig: Rig) -> None:
-    before = rig.snapshot()
-    result = rig.run("--apply", fail="old_stop_noop")
-    assert result.exit_code == 1 and "still runs" in result.output
-    assert rig.snapshot() == before and not rig.pgdata_old.exists()
-    assert rig.calls("initdb") == []
 
 
 def test_a_failed_follow_up_keeps_the_upgrade_and_the_old_directory(rig: Rig) -> None:
@@ -628,7 +756,6 @@ def test_a_work_directory_that_cannot_be_made_leaves_the_original_in_place(rig: 
 
 
 def test_check_only_refuses_cleanly_when_the_temp_directory_cannot_be_made(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
-    (rig.state / "old_running").unlink()
 
     def no_space(*_a, **_kw):
         raise OSError(errno.ENOSPC, "No space left on device")
@@ -703,15 +830,15 @@ def test_a_keyboard_interrupt_in_a_step_rolls_back_and_propagates(rig: Rig, monk
     assert isinstance(result.exception, SystemExit) and result.exit_code == 1  # click's Abort
     assert "Aborted" in result.output and "Rolled back" in result.output
     rig.assert_original_restored()
-    assert rig.service_calls == [("stop", False, True)]
+    assert rig.service_calls == []
 
 
 def test_an_interrupt_before_the_move_moves_nothing_and_removes_the_work_directory(rig: Rig) -> None:
-    def interrupt_on_stop(verb: str) -> None:
-        if verb == "stop":
+    def interrupt_on_look(verb: str) -> None:
+        if verb == "running?":
             raise KeyboardInterrupt
 
-    rig.on_service = interrupt_on_stop
+    rig.on_service = interrupt_on_look
     result = rig.run("--apply")
     assert isinstance(result.exception, SystemExit)
     assert "interrupted" in result.output and "was not moved" in result.output
@@ -799,9 +926,10 @@ def test_the_lock_names_the_services_tier() -> None:
     assert upgrade_mod._SERVICE_TIER == ssd._REGISTRY_TIER
 
 
-def test_apply_holds_the_service_lock_through_the_stop_and_the_upgrade_and_frees_it_before_the_start(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Held across ``service stop`` (which never takes it) and the upgrade; free at ``service start`` (a supervisor
-    started while we held it would wait on us: the deadlock the release avoids)."""
+def test_apply_holds_the_service_lock_through_the_look_and_the_upgrade_and_frees_it_before_the_start(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Held when the command looks for a running service (so no start slips in between the look and the move) and
+    across the upgrade; free at ``service start`` (a supervisor started while we held it would wait on us: the
+    deadlock the release avoids)."""
     seen: list[tuple[str, bool]] = []
     rig.on_service = lambda verb: seen.append((verb, _lock_is_held(rig.cfg)))
     real_upgrade = upgrade_mod.ClusterUpgrade._upgrade
@@ -814,7 +942,7 @@ def test_apply_holds_the_service_lock_through_the_stop_and_the_upgrade_and_frees
     assert not _lock_is_held(rig.cfg)
     result = rig.run("--apply")
     assert result.exit_code == 0, result.output
-    assert seen == [("stop", True), ("upgrade", True), ("start", False)]
+    assert seen == [("running?", True), ("upgrade", True), ("start", False)]
     assert not _lock_is_held(rig.cfg), "the lock outlived the command"
 
 
@@ -824,15 +952,13 @@ def test_apply_is_refused_while_another_process_holds_the_lock(rig: Rig) -> None
         result = rig.run("--apply")
     assert result.exit_code == 1, result.output
     assert "spawn lock" in result.output and "Nothing was changed" in result.output
-    assert rig.service_calls == [], "the service must not be stopped when the lock is not ours"
+    assert rig.service_calls == [] and rig.find_calls == 0, "nothing is looked at, stopped or started when the lock is not ours"
     assert all("--version" in ln for ln in rig.log_lines()), rig.log_lines()
-    assert (rig.state / "old_running").exists()
     assert rig.snapshot() == before
     rig.assert_original_restored()
 
 
 def test_check_only_holds_the_lock_while_it_runs_and_is_refused_when_it_is_held(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
-    (rig.state / "old_running").unlink()
     seen: list[bool] = []
     real_initdb = upgrade_mod.ClusterUpgrade._initdb
 
@@ -882,7 +1008,6 @@ def test_the_lock_is_free_after_every_way_apply_can_end(rig: Rig, how: str) -> N
 
 
 def test_the_lock_is_free_after_a_failed_check_only(rig: Rig) -> None:
-    (rig.state / "old_running").unlink()
     rig.run("--check-only", fail="pg_upgrade_check")
     assert not _lock_is_held(rig.cfg)
 
@@ -904,16 +1029,21 @@ def test_the_lock_text_says_what_the_lock_guarantees_and_what_it_does_not(rig: R
     """Replaces the 'nothing locks the service' warning, in every place a user reads it."""
     assert not hasattr(upgrade_mod, "NO_LOCK_NOTE")
     note = upgrade_mod.LOCK_NOTE
-    assert "spawn lock" in note and "does not stop a service that is already running" in note
+    assert "spawn lock" in note and "--apply refuses while the service or the old PostgreSQL server is running" in note
+    assert "stops neither" in note and "nx daemon service stop" in note
+    assert "autostart" not in note, "the autostart unit's own timeout is not tested, so the note does not speak for it"
     assert note in rig.run().output
     applied = rig.run("--apply")
-    assert applied.exit_code == 0 and applied.output.index(note) < applied.output.index("stopping the storage service")
+    assert applied.exit_code == 0 and applied.output.index(note) < applied.output.index("moved ")
     helped = " ".join(CliRunner().invoke(main, ["daemon", "service", "pg-upgrade", "--help"]).output.split()).lower()
     assert "holds the storage service's spawn lock" in helped and "nothing locks" not in helped
+    assert "refuses while the storage service or the old postgresql server is running and stops neither" in helped
+    assert "stop the service and the old server" not in helped
     repo = Path(__file__).resolve().parents[1]
     for doc in ("docs/cli-reference.md", "docs/migration-runbook.md"):
         text = " ".join((repo / doc).read_text(encoding="utf-8").split())
         assert "spawn lock" in text and "Nothing locks the service" not in text, doc
+        assert "refuses while the storage service" in text and "(`--apply` stops it" not in text, doc
 
 
 # -- bundle discovery follows --config-dir (nexus-j738q limitation 3)
@@ -985,15 +1115,17 @@ def test_discover_pg_binaries_takes_the_config_dir(rig: Rig, monkeypatch: pytest
 # -- errors (finding 4)
 
 
-def test_a_service_stop_that_raises_ends_with_a_message_and_moves_nothing(rig: Rig) -> None:
+def test_a_service_look_that_raises_ends_with_a_message_and_moves_nothing(rig: Rig) -> None:
     def boom(verb: str) -> None:
-        raise subprocess.TimeoutExpired("nx daemon service", 600)
+        if verb == "running?":
+            raise RuntimeError("process table exploded")
 
     rig.on_service = boom
     result = rig.run("--apply")
     _assert_clean_exit(result)
-    assert "nx daemon service stop" in result.output and "not touched" in result.output
+    assert "stopped on RuntimeError" in result.output and "was not moved" in result.output
     rig.assert_original_restored()
+    assert not any(ln.split()[0] in _MUTATING for ln in rig.log_lines())
 
 
 def test_a_service_start_that_raises_keeps_the_upgrade_and_says_what_to_run(rig: Rig) -> None:
@@ -1023,7 +1155,6 @@ def test_a_pg_ctl_status_that_cannot_run_ends_with_a_message(rig: Rig, monkeypat
         return real_run(argv, **kw)
 
     monkeypatch.setattr(upgrade_mod, "_run", run)
-    (rig.state / "old_running").unlink()
     result = rig.run(*mode)
     _assert_clean_exit(result)
     assert "status" in result.output and "could not run" in result.output
@@ -1091,10 +1222,10 @@ def test_a_rollback_that_cannot_move_the_original_back_says_so(rig: Rig, monkeyp
 # -- surviving mutants (finding 7)
 
 
-def test_a_old_directory_made_while_the_service_stopped_is_refused_before_the_move(rig: Rig) -> None:
+def test_a_old_directory_made_after_the_plan_is_refused_before_the_move(rig: Rig) -> None:
     """Kills the mutant that deletes the second .old check: build_plan's earlier check does not see this one."""
     def peer_makes_the_old_directory(verb: str) -> None:
-        if verb == "stop":
+        if verb == "running?":
             rig.pgdata_old.mkdir()  # empty: a rename onto it would succeed, so only the check stops it
 
     rig.on_service = peer_makes_the_old_directory
@@ -1126,7 +1257,7 @@ def test_credentials_without_a_port_are_refused_before_anything_stops(rig: Rig) 
     result = rig.run("--apply")
     _assert_clean_exit(result)
     assert "PG_PORT" in result.output
-    assert rig.service_calls == [] and (rig.state / "old_running").exists()
+    assert rig.service_calls == [] and rig.find_calls == 0
     assert not any(ln.split()[0] in _MUTATING for ln in rig.log_lines())
 
 
@@ -1159,7 +1290,7 @@ def test_apply_prints_the_limit_before_it_moves_the_data_directory(rig: Rig) -> 
     assert result.exit_code == 0, result.output
     text = result.output
     assert upgrade_mod.UNTESTED_NOTE in text
-    assert text.index(upgrade_mod.UNTESTED_NOTE) < text.index("moved ") and text.index("NOTE:") < text.index("stopping the storage service")
+    assert text.index(upgrade_mod.UNTESTED_NOTE) < text.index("moved ") and text.index("NOTE:") < text.index("moved ")
 
 
 def test_the_wording_does_not_claim_more_than_it_does(rig: Rig) -> None:

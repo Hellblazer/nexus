@@ -265,6 +265,12 @@ class SpawnLockBusyError(ServiceRegistryError):
     (a supervisor mid-start, or another holder such as ``nx daemon service pg-upgrade``)."""
 
 
+#: The tiers whose supervisor takes ``<tier>_spawn.lock`` in its ``start()``. Holding another tier's lock would
+#: exclude nothing, so :meth:`ServiceRegistry.try_hold_spawn_lock` refuses it. A tier that gains a spawn lock is
+#: added here in the same change.
+SPAWN_LOCK_TIERS: frozenset[str] = frozenset({"storage_service"})
+
+
 def spawn_lock_filename(tier: str) -> str:
     """The spawn-lock file's name inside the registry directory: ``<tier>_spawn.lock``.
 
@@ -754,8 +760,13 @@ class ServiceRegistry:
         so a holder may call ``nx daemon service stop`` as a child, but must release before a child ``start``
         (a supervisor started while the holder still holds it would wait on the holder).
 
-        Raises :class:`SpawnLockBusyError` when someone else holds it.
+        Raises :class:`SpawnLockBusyError` when someone else holds it, and :class:`ServiceRegistryError` for a tier
+        outside :data:`SPAWN_LOCK_TIERS` (its supervisor takes no spawn lock, so a hold would exclude nothing).
         """
+        if self._tier not in SPAWN_LOCK_TIERS:
+            raise ServiceRegistryError(
+                f"the {self._tier} tier has no spawn lock to hold (only {', '.join(sorted(SPAWN_LOCK_TIERS))} do)"
+            )
         self._ensure_dir()
         path = self.spawn_lock_path()
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
