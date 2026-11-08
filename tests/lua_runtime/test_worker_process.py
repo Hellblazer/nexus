@@ -650,8 +650,11 @@ def test_the_kill_timer_ends_a_runaway_worker_at_the_wall_limit() -> None:
     [
         'return ("a"):rep(200):find(("a*"):rep(6) .. "b")',
         'return ("a"):rep(30):find(("a?"):rep(30) .. ("a"):rep(30) .. "c")',
+        # single C calls that allocate nothing and that the count hook never sees (nexus-mdbds.5 review r1)
+        'return string.rep("", 2^40)',
+        "return table.move({}, 1, 2^40, 1)",
     ],
-    ids=["star-chain", "optional-chain"],
+    ids=["star-chain", "optional-chain", "empty-rep", "table-move"],
 )
 def test_a_pathological_pattern_is_killed_at_the_wall_limit_and_the_caller_keeps_serving(
     source: str,

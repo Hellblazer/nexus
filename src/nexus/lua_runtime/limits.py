@@ -17,6 +17,13 @@ from typing import Any
 
 _MIB = 1024 * 1024
 
+# The lowest memory limit a run may have. Below about 130 KB lupa aborts the
+# worker (exit 134, "PANIC: unprotected error in call to Lua API (not enough
+# memory)") while it pushes the source and builds the runtime outside any
+# protected call, so no limit there can be a clean ScriptLimitError (nexus-mdbds.5
+# review r1). 1 MiB keeps every run well above it.
+MIN_MEMORY: int = 1 * _MIB
+
 
 @dataclass(frozen=True)
 class Limits:
@@ -41,6 +48,10 @@ class Limits:
                 raise ValueError(
                     f"limit {key} must be a finite number above zero, got {value!r}"
                 )
+        if self.memory < MIN_MEMORY:
+            raise ValueError(
+                f"limit memory must be at least {MIN_MEMORY} bytes, got {self.memory!r}"
+            )
 
     def lowered(self, **changes: float) -> Limits:
         values = dict(self.__dict__)
