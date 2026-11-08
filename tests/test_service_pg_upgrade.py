@@ -75,6 +75,12 @@ while [ $# -gt 0 ]; do case "$1" in -d) shift; OLD="$1";; -D) shift; NEW="$1";; 
 [ -f "$NEW/PG_VERSION" ] || { echo "pg_upgrade: new cluster $NEW missing" >&2; exit 2; }
 leak() { [ -n "${FAKE_LEAK:-}" ] && echo "pg_upgrade: connection failed, password was $PGPASSWORD" >&2; true; }
 if [ "$check" = 1 ]; then
+  if fail check_hang; then  # pg_upgrade --check started the old server and then waits, ignoring every catchable signal
+    touch "$FAKE_STATE/old_running"; trap '' INT TERM HUP
+    echo $$ > "$FAKE_STATE/pu.pid"
+    while :; do sleep 0.05; done
+  fi
+  if fail check_leak; then touch "$FAKE_STATE/old_running"; echo "check died with the old server up" >&2; exit 1; fi
   if fail pg_upgrade_check; then leak; echo "check found a problem" >&2; exit 1; fi
   exit 0
 fi
@@ -346,6 +352,57 @@ def test_check_only_refuses_while_the_old_server_runs(rig: Rig) -> None:
     assert result.exit_code == 1 and "a server is running" in result.output
     assert rig.snapshot() == before and rig.calls("initdb") == []
     assert (rig.state / "old_running").exists(), "check-only must not stop anything itself"
+
+
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP], ids=["SIGINT", "SIGTERM", "SIGHUP"])
+def test_an_interrupted_check_only_stops_the_old_server_pg_upgrade_started(
+    rig: Rig, sig: signal.Signals, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-j738q limitation 2: ``pg_upgrade --check`` starts the old server; an interrupt can leave it running."""
+    monkeypatch.setattr(upgrade_mod, "_PG_UPGRADE_TIMEOUT_S", 25.0)  # a failing run times out instead of hanging
+    (rig.state / "old_running").unlink()  # down when the command starts, as --check-only requires
+    before = rig.snapshot()
+    previous = signal.signal(sig, lambda *_: None)
+    pid = None
+    try:
+        thread = _fire_when_the_child_hangs(rig, sig)
+        result = rig.run("--check-only", fail="check_hang")
+        thread.join(timeout=5)
+        pid = int((rig.state / "pu.pid").read_text(encoding="utf-8"))
+    finally:
+        signal.signal(sig, previous)
+        if pid is not None:
+            safe_killpg_group(pid)
+    assert isinstance(result.exception, SystemExit) and result.exit_code == 1, result.output  # click's Abort
+    assert not (rig.state / "old_running").exists(), "the old server pg_upgrade --check started is still running"
+    assert any("-m fast stop" in ln and ln.startswith("pg_ctl") and "bin=old-bin" in ln for ln in rig.log_lines())
+    assert not _initdb_target(rig).parent.exists(), "the temporary directory must go"
+    assert rig.snapshot() == before
+    rig.assert_original_restored()
+
+
+def test_a_failed_check_only_also_stops_a_server_it_left_running(rig: Rig) -> None:
+    (rig.state / "old_running").unlink()
+    result = rig.run("--check-only", fail="check_leak")
+    assert result.exit_code == 1 and "pg_upgrade --check failed" in result.output
+    assert not (rig.state / "old_running").exists()
+    assert not _initdb_target(rig).parent.exists()
+
+
+def test_a_check_only_that_cannot_stop_the_server_says_which_command_to_run(rig: Rig) -> None:
+    (rig.state / "old_running").unlink()
+    (rig.state / "old_stuck").touch()  # the old pg_ctl's stop leaves the server up
+    result = rig.run("--check-only", fail="check_leak")
+    assert result.exit_code == 1
+    assert (rig.state / "old_running").exists()
+    assert f"-D {rig.pgdata} -m fast stop" in result.output and "still running" in result.output
+    assert not _initdb_target(rig).parent.exists(), "the temporary directory goes even so"
+
+
+def test_a_clean_check_only_never_asks_pg_ctl_to_stop(rig: Rig) -> None:
+    (rig.state / "old_running").unlink()
+    assert rig.run("--check-only").exit_code == 0
+    assert not any(" stop" in ln for ln in rig.log_lines())
 
 
 # ── --apply ─────────────────────────────────────────────────────────────────────
