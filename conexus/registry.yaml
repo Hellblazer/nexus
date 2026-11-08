@@ -458,11 +458,12 @@ standalone_skills:
     tools: [Read, Glob, Grep, Bash]
 
   writing-nx-skills:
-    description: "Guide for authoring conexus plugin skills"
+    description: "Guide for authoring conexus plugin skills, and for promoting a memory file into a skill, script or hook"
     triggers:
       - "creating new skill"
       - "editing skill"
       - "plugin authorship"
+      - "promoting a memory file to a skill, script or hook"
     tools: [Read, Write, Edit, Bash]
 
   orchestration:
