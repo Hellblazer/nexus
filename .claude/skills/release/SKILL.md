@@ -325,6 +325,7 @@ Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 
 ### 4. Update both changelogs
 
+- Changelog fragments first: `python3 scripts/changelog_fold.py fold` moves every `changelog/unreleased/*.md` and `conexus/changelog/unreleased/*.md` fragment under its changelog's `## [Unreleased]` (grouped by section, oldest first) and deletes the fragments; stage the deletions with `git add -- changelog/unreleased conexus/changelog/unreleased` (nexus-3ceda.2). On a release branch that cherry-picks rather than merges develop, fold only the fragments it carries.
 - `CHANGELOG.md` (root): move `## [Unreleased]` content into a new `## [X.Y.Z] - YYYY-MM-DD` section. Leave a fresh empty `## [Unreleased]` at the top.
 - `conexus/CHANGELOG.md` (plugin changelog): always update, even if no plugin changes (note: "Plugin version aligned with conexus X.Y.Z. No plugin-side changes." is acceptable).
 

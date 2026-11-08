@@ -233,6 +233,7 @@ Do not bump these without testing the full chunking pipeline.
 ## Git Workflow
 
 - Branch naming: `feature/<bead-id>-<short-description>`
+- **Changelog entries are fragments**, never edits under `## [Unreleased]`: add `changelog/unreleased/<bead-id>.md` (plugin changes: `conexus/changelog/unreleased/`), one `### <Section>` line and one or more `- ` bullets; the format is in that directory's README.md. `scripts/changelog_fold.py check` (lint bucket) refuses a bullet under `## [Unreleased]`, and the release folds the fragments (nexus-3ceda.2).
 - **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via merge (or merge-then-tag).
 - **A PR body closes an issue only with a closing keyword:** `Closes #N`, `Fixes #N` or `Resolves #N`, one per line. A plain reference ("see #N") leaves the issue open (PR #254).
 - `main` takes changes through PRs only, release version-bumps included (nexus-mkj6u replaced the prior direct-to-main carve-out). That is policy, held by the push guard and the release skill, not by the branch protection (below). See Release Process below.
@@ -338,6 +339,7 @@ This is exactly the v7.7.0 sequence (2026-08-14, commit `62da4273b`): the first 
 | `mcpb/pyproject.toml` | `version` field |
 | `mcpb/manifest.json` | `version` field |
 | `uv.lock` | auto-updated by `uv sync` — **must be committed** |
+| `changelog/unreleased/`, `conexus/changelog/unreleased/` | `python3 scripts/changelog_fold.py fold` empties them into each changelog's Unreleased (README.md stays) |
 | `CHANGELOG.md` | move Unreleased → `[X.Y.Z]`, add empty Unreleased |
 | `conexus/CHANGELOG.md` | add `[X.Y.Z]` entry |
 | `.claude-plugin/marketplace.json` | bump `plugins[].version` for every plugin listed (conexus, sn, conexus-tool-spill, conexus-prose-edit) **and every `plugins[].source.ref` to `vX.Y.Z`** (parity-tested) |

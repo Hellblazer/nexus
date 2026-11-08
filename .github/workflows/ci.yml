@@ -338,6 +338,10 @@ jobs:
               web/install.*) docs_only=false ;;
               web/*) ;;
               conexus/CHANGELOG.md) ;;
+              # Changelog fragments (nexus-3ceda.2): prose like CHANGELOG.md, one
+              # level deep only, so a nested path still reads as code.
+              changelog/unreleased/*/*) docs_only=false ;;
+              changelog/unreleased/*.md) ;;
               */*) docs_only=false ;;
               README.md) ;;
               CHANGELOG*) ;;
@@ -1324,6 +1328,11 @@ jobs:
 
       - name: Install project + dev deps
         run: uv sync --group dev
+
+      - name: Changelog fragments are well formed (nexus-3ceda.2)
+        # A fragment-only or CHANGELOG-only push takes this lane, not the lint
+        # bucket, so the fragment check runs here too.
+        run: python3 scripts/changelog_fold.py check
 
       - name: Run the docs-reading tests
         # The selector exits 1 below its own floor, which fails this step
