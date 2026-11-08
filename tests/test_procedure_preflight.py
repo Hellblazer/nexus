@@ -44,16 +44,18 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
+from nexus import bounded_subprocess
 from nexus.cli import main
 from nexus.lua_runtime import header as hd
 from nexus.lua_runtime import library
 from nexus.lua_runtime import run as run_mod
 from nexus.lua_runtime import static_check as sc
-from nexus.lua_runtime import verbs_git
+from nexus.lua_runtime import supervisor, verbs_git
 from nexus.lua_runtime.errors import ScriptError
 from nexus.lua_runtime.runner import run_procedure
 from nexus.lua_runtime.verb_types import VerbContext
 from nexus.mcp import core
+from tests._module_seam import setattr_in
 
 REPO_ROOT = Path(hd.__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / ".nexus" / "procedures" / "preflight.lua"
@@ -743,9 +745,10 @@ def workers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 @pytest.fixture
 def spawns(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
-    """The argv of every process started through ``subprocess.Popen`` while it is installed:
-    the worker, and the git calls of the repo probe and the verbs (they run in this process
-    through ``run_bounded``)."""
+    """The argv of every process the run starts: the worker (``supervisor.start_worker``) and
+    the git calls of the repo probe and the verbs (``bounded_subprocess.run_bounded``). The spy
+    is installed as those two modules' own ``subprocess``, never on the stdlib module
+    (tests/test_module_seam.py)."""
     seen: list[list[str]] = []
 
     class Spy(subprocess.Popen):  # type: ignore[type-arg]
@@ -753,7 +756,7 @@ def spawns(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
             seen.append([str(x) for x in args])
             super().__init__(args, *a, **kw)
 
-    monkeypatch.setattr(subprocess, "Popen", Spy)
+    setattr_in(monkeypatch, [bounded_subprocess, supervisor], "subprocess.Popen", Spy)
     return seen
 
 
