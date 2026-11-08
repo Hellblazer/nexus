@@ -1673,6 +1673,31 @@ For each candidate, parses the path component out of the stored `chroma://<colle
 | `--apply` | Perform the rewrite (default: dry-run report only) |
 | `--json` | Emit JSON instead of the human-readable report |
 
+### nx catalog repair-note-uris
+
+```
+nx catalog repair-note-uris [--apply] [--json] [--sample N] [--batch-size N]
+```
+
+Repairs note `source_uri` values that name a collection the note no longer lives in (nexus-bivz3.24, RDR-231 critique Issue 7). A note moved by a re-home, a collection update or a rename before RDR-231 step 4 keeps `nx-note://X/t` on a row living in `Y`; the `chroma://` to `nx-note://` backfill changed only the scheme, so the row is still stale and a re-put under `Y` mints a duplicate. The census and the rewrite run in the engine (`POST /v1/catalog/note_uri_repair`, one tenant, one SQL census), and the verb needs an engine that has the route (an older one answers with a named refusal). Dry run by default; the census is always printed.
+
+Classes of live note row whose URI collection differs from `physical_collection`:
+
+- **rewrite candidates**: no other live row holds `nx-note://<physical collection>/<title>`, and no other stale row rewrites onto it. `--apply` rewrites the catalog row, its `document_aspects` row and its `document_highlights` row in ONE transaction, each by its own value (a legacy `chroma://` spelling comes out as `nx-note://`). A twin that appears while it runs is a 409 naming the holder, with nothing written for that batch.
+- **merge candidates**: a live twin holds the target (`twin`), or two stale rows would rewrite onto one URI (`sibling`). Listed, never merged: `POST /v1/catalog/merge` moves neither chunks, aspects nor highlights, and which row wins is a design decision.
+- **refused**: a row whose physical collection is file-routed (`rdr__`, `docs__`, `code__`), or whose URI has no title part. Reported, never rewritten.
+- **tombstoned**: stale rows with `deleted_at` set. Counted, never rewritten: only live rows can mint a duplicate.
+- **`nxexp://` export copies**: census only. The inner collection of `nxexp://<target>/<note uri>` names the export's source by design, so it is not stale; the census counts the copies whose `<target>` is no longer the collection they live in. No move path rewrites an `nxexp://` value, so there is no rule to repair against.
+
+`--apply` runs the census, rewrites in batches of `--batch-size` until no rewrite candidate is left, then prints the census again. It stops with exit 1 if a batch rewrites nothing while candidates remain, and on a 409.
+
+| Flag | Description |
+|------|-------------|
+| `--apply` | Perform the rewrite (default: dry-run census only) |
+| `--json` | Emit JSON: the engine's report, or with `--apply` `{before, rewritten, batches, after}` |
+| `--sample N` | Example rows listed per class (0 to 500, default 20). The counts are never capped |
+| `--batch-size N` | Rewrite candidates one engine transaction rewrites (1 to 5000, default 1000) |
+
 ### nx catalog backfill-etags
 
 ```
