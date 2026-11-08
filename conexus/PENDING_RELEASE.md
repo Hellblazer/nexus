@@ -47,6 +47,9 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/skills/writing-nx-skills/SKILL.md`
+  nexus-qo7ie.35: a "Promoting a Memory File" section: the criterion, the target choice (skill, Lua script in a procedure library, hook), citing the sources, the `substantive-critic` loss check and the empty-list rule (RDR-240 Technical Design 9). It names the procedure library, which exists only once the package release that ships `procedure_run` is out; release the plugin after that package release.
+
 ## Deferred to the next client release
 
 - `conexus/skills/peer-messaging/SKILL.md`

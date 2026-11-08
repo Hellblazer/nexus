@@ -94,6 +94,42 @@ After creating a skill, update [conexus/registry.yaml](https://github.com/Hellbl
 
 Add it to [conexus/skills/orchestration/reference.md](https://github.com/Hellblazer/nexus/blob/main/conexus/skills/orchestration/reference.md) § Skill Routing so it is discoverable. The SessionStart text (`GUIDANCE_IMPERATIVE` in [src/nexus/session_start_guidance.py](https://github.com/Hellblazer/nexus/blob/main/src/nexus/session_start_guidance.py), PyPI wheel) names only the situations and the handful of skills and agents that answer them; it is not a menu. Add a skill there only when it answers a situation the imperative already lists, and mind its byte budget ([tests/test_session_start_guidance.py](https://github.com/Hellblazer/nexus/blob/main/tests/test_session_start_guidance.py), [tests/hooks/test_session_start_combined_budget.py](https://github.com/Hellblazer/nexus/blob/main/tests/hooks/test_session_start_combined_budget.py)). Wrapper skills that only dispatch an agent the model already dispatches directly do not earn a place: the six that did (code-review, debugging, development, test-validation, query, using-nx-skills) were retired with zero model loads in 30 days (nexus-dg7i6.6).
 
+## Promoting a Memory File
+
+A memory file is read when someone remembers to read it, and its index line has to summarise the whole procedure. Moving a procedure into a skill, a script or a hook fixes that. A move that shrinks the source can also drop a rule, so a promotion follows five parts, in this order (RDR-240).
+
+### The criterion
+
+A memory file is a candidate when its "How to apply" is any of:
+
+- a procedure, written as ordered steps;
+- longer than about 8 KB;
+- a bright line, a rule that must hold every time.
+
+### The target
+
+What the memory holds decides where it goes:
+
+| The memory holds | Target | Why | Example |
+| --- | --- | --- | --- |
+| A procedure that needs judgment | Skill | Loads on demand; the model applies it | release checklist, review gate |
+| A fixed sequence with one right answer | Lua script in a procedure library | Runs the same way every time; nothing to misremember | what to check before a push |
+| A bright line that must always hold | Hook | Memory is context, a hook is enforcement | no `git stash`, no full-disk `find` |
+
+A procedure only one repo needs goes in that repo's library (`.nexus/procedures/`). A practice every conexus user should follow goes in the library that ships with `nx`. Personal rules stay as memory.
+
+### Citing the sources
+
+The target cites its source files, each by name. The source shrinks to the rule and its why, plus a pointer to the skill, script or hook. It is not deleted: in the one paper that tests promotion, the sources and the promoted skill together did better than the skill alone.
+
+### The loss check
+
+Before the source shrinks, dispatch `substantive-critic` with the target and its source files. It compares the two and lists every rule the target lacks. Brief it with "Ship when the list is empty". Promote one source file at a time, each with its own check. Unchecked compaction can score below having no context at all, so a short target is not evidence that nothing was lost.
+
+### The empty-list rule
+
+A promotion lands only with an empty list. A rule on the list goes into the target, and the check runs again; the source does not shrink in between. The same check applies when the target is a script or a hook.
+
 ## Known Pitfalls
 
 ### bd update --description silently corrupts multi-line content
