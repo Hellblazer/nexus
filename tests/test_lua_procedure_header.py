@@ -417,3 +417,15 @@ def test_a_repo_whose_path_holds_a_line_separator_is_found(ceiling: Path) -> Non
 def test_an_unknown_name_that_is_not_utf8_still_gives_a_utf8_error() -> None:
     msg = _args_refusal("a:integer", {"a": 1, "\ud800": 2})
     msg.encode("utf-8")
+
+
+def test_a_missing_or_deleted_directory_is_in_no_repo(tmp_path: Path) -> None:
+    # Claude Desktop chat leaves the MCP server in a plugin copy it later deletes.
+    gone = tmp_path / "plugin.old"
+    assert hd.probe_repo(gone) is None
+    assert hd.probe_repo(None) is None
+    assert hd.prepare_args(_hdr("repo:string?"), {}, cwd=gone, clock=lambda: FIXED) == {}
+    assert hd.prepare_args(_hdr("repo:string?"), {}, cwd=None, clock=lambda: FIXED) == {}
+    with pytest.raises(ScriptError) as e:
+        hd.prepare_args(_hdr("repo:string"), {}, cwd=None, clock=lambda: FIXED)
+    assert "no repo here" in str(e.value)
