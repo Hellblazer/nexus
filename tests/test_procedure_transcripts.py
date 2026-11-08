@@ -1,0 +1,813 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""The transcripts procedure (RDR-240 Technical Design 5, nexus-qo7ie.31): its seven queries,
+day stepping, the hour split, paging, and the Python page join.
+
+Until the runtime of nexus-mdbds.5 lands, the script runs in a test-local harness (as
+tests/test_procedure_research_add.py's): the environment is built from the static check's own
+allowlists, the script is loaded in mode "t", and its arguments arrive as the main chunk's
+vararg. ``transcripts.sessions`` is a fake that serves fixture records built here, per
+window, and counts its calls; a few tests use the real verb over fixture JSONL files instead.
+The paging tests patch a bound constant in the source text so a page fills with a small
+fixture; one test per bound runs at the real value.
+"""
+from __future__ import annotations
+
+import json
+import re
+import time
+from collections import Counter
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import lupa.lua54 as lua54
+import pytest
+
+from nexus.lua_runtime import header as hd
+from nexus.lua_runtime import static_check as sc
+from nexus.lua_runtime import transcripts_join as tj
+from nexus.lua_runtime import verbs_transcripts as vt
+from nexus.lua_runtime.verb_types import VerbContext, VerbError
+
+SCRIPT = Path(hd.__file__).parent.parent / "procedures" / "transcripts.lua"
+SOURCE = SCRIPT.read_bytes()
+TEXT = SOURCE.decode("ascii")
+NOW = "2026-11-08T12:00:00Z"
+EM = "—"
+MEM = "/h/.claude/projects/x/memory"
+GET = "mcp__plugin_conexus_nexus__memory_get"
+SEARCH = "mcp__plugin_conexus_nexus__memory_search"
+PUT = "mcp__plugin_conexus_nexus__memory_put"
+RUN = "mcp__plugin_conexus_nexus__procedure_run"
+
+
+# ---- fixtures: records in the shape transcripts.sessions returns --------------------------
+
+
+def call(name: str, inp: dict | None = None, t: str = "10:01:00", *, err: bool | None = None,
+         day: str = "2026-11-03") -> dict:
+    return {"name": name, "input": inp or {}, "time": f"{day}T{t}Z",
+            "result_time": f"{day}T{t}Z", "is_error": err}
+
+
+def rec(sid: str, start: str, *, main: bool = True, calls: list | None = None, agent: str | None = None,
+        models: list | None = None, turns: int = 3, ctx: int | None = 1000, tokens: dict | None = None,
+        loads: list | None = None, slash: list | None = None, deferred: list | None = None,
+        text: list | None = None, truncated: bool = False, project: str = "p") -> dict:
+    r: dict[str, Any] = {
+        "session_id": sid, "main": main, "agent_id": agent, "project": project,
+        "start": start, "end": start, "models": models or ["claude-opus-4-8"],
+        "assistant_turns": turns,
+        "tokens": tokens or {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0},
+        "first_context_tokens": ctx, "tool_calls": calls or [], "instruction_loads": loads or [],
+        "slash_commands": slash or [], "deferred_tools": deferred or [], "deferred_tools_dropped": 0,
+        "bytes": 10, "records": 3, "truncated": truncated,
+    }
+    if text is not None:
+        r["assistant_text"] = text
+    return r
+
+
+def load(path: str, size: int, *, ftype: str = "Project", kind: str = "instructions") -> dict:
+    return {"path": path, "kind": kind, "type": ftype, "size": size, "time": "2026-11-03T10:00:03Z"}
+
+
+class Sessions:
+    """A fake transcripts.sessions: window by start, bodies only when asked, calls counted."""
+
+    def __init__(self, records: list[dict], *, max_records: int | None = None) -> None:
+        self.records = records
+        self.max_records = max_records
+        self.calls: list[tuple] = []
+
+    def __call__(self, since: str, until: str, project: str | None, bodies: bool | None) -> Any:
+        self.calls.append((since, until, project, bodies))
+        lo, hi = vt._bound(since, "since"), vt._bound(until, "until")
+        got = sorted((r for r in self.records if lo <= vt._bound(r["start"], "start") < hi),
+                     key=lambda r: r["start"])
+        if self.max_records is not None and len(got) > self.max_records:
+            return f"result-too-large: transcripts.sessions: {len(got)} records; narrow the window"
+        if not bodies:
+            got = [{k: v for k, v in r.items() if k != "assistant_text"} for r in got]
+        return got
+
+
+class Run:
+    """One script run in a sandbox-shaped environment with a fake (or real) verb."""
+
+    def __init__(self, verb: Callable[..., Any], *, patch: dict[str, str] | None = None) -> None:
+        self.verb = verb
+        self.source = TEXT
+        for name, value in (patch or {}).items():  # a bound constant, patched in the text
+            new, n = re.subn(rf"^local {name} = .*$", f"local {name} = {value}", self.source, flags=re.M)
+            assert n == 1, name
+            self.source = new
+        self.rt = lua54.LuaRuntime(register_eval=False, register_builtins=False, unpack_returned_tuples=False)
+
+    def _sessions(self, since: str, until: str, project: Any, bodies: Any) -> Any:
+        try:
+            out = self.verb(since, until, project, bodies)
+        except VerbError as exc:
+            return str(exc)
+        return out if isinstance(out, str) else self.rt.table_from(out, recursive=True)
+
+    def __call__(self, **args: object) -> dict:
+        rt = self.rt
+        build = rt.execute(
+            """
+            return function(base, libs, sessions)
+            local env = {}
+            for _, name in ipairs(base) do env[name] = _G[name] end
+            for lib, members in pairs(libs) do
+              local t = {}
+              for _, m in ipairs(members) do t[m] = _G[lib][m] end
+              env[lib] = t
+            end
+            getmetatable("").__index = env.string
+            env.transcripts = {sessions = function(a, b, p, bo)
+              local r = sessions(a, b, p, bo)
+              if type(r) == "string" then error(r, 0) end
+              return r
+            end}
+            return env
+            end
+            """
+        )
+        env = build(
+            rt.table_from(sorted(sc.BASE_FUNCTIONS)),
+            rt.table_from({lib: rt.table_from(sorted(m)) for lib, m in sc.LIB_MEMBERS.items()}),
+            self._sessions,
+        )
+        loaded = rt.eval("load")(self.source, "=transcripts", "t", env)
+        fn, err = loaded if isinstance(loaded, tuple) else (loaded, None)
+        assert fn is not None, err
+        given = {"since": "2026-11-03", "now": NOW, **args}
+        return _py(fn(rt.table_from({k: v for k, v in given.items() if v is not None})))
+
+
+def _py(x: Any) -> Any:
+    if lua54.lua_type(x) != "table":
+        return x
+    keys = list(x.keys())
+    if keys and all(isinstance(k, int) for k in keys) and sorted(keys) == list(range(1, len(keys) + 1)):
+        return [_py(x[k]) for k in sorted(keys)]
+    if not keys:
+        return []
+    return {k: _py(v) for k, v in x.items()}
+
+
+def run(records: list[dict], query: str, **kw: Any) -> tuple[dict, Sessions]:
+    fake = Sessions(records, max_records=kw.pop("max_records", None))
+    out = Run(fake, patch=kw.pop("patch", None))(query=query, **kw)
+    return out, fake
+
+
+def by(rows: list[dict], *keys: str) -> dict[tuple, dict]:
+    return {tuple(r.get(k) for k in keys): r for r in rows}
+
+
+# ---- the script itself ----------------------------------------------------------------------
+
+
+def test_the_header_parses_and_the_static_check_passes_with_its_grants() -> None:
+    h = hd.parse(SOURCE, name="transcripts")
+    assert [(a.name, a.type, a.optional) for a in h.args] == [
+        ("query", "string", False), ("since", "string", False), ("until", "string", True),
+        ("project", "string", True), ("now", "string", False)]
+    assert h.grants == frozenset({"transcripts.sessions"})
+    assert sc.check(SOURCE, h.grants) == h.grants
+
+
+def test_the_source_is_printable_ascii_and_never_names_the_environment() -> None:
+    assert all(c in (9, 10, 13) or 32 <= c <= 126 for c in SOURCE)
+    assert "_ENV" not in TEXT
+    assert len(SOURCE) < sc.MAX_SOURCE // 2
+
+
+def test_the_cost_is_an_estimate_from_one_dated_price_table() -> None:
+    assert TEXT.count("2026-10-23") == 2  # the header comment and the table's own
+    assert "cost_estimate_usd" in TEXT and "ESTIMATE" in TEXT
+    assert TEXT.count('["claude-opus-4-8"]') == 1
+
+
+def test_an_unknown_query_and_bad_times_are_refused() -> None:
+    with pytest.raises(lua54.LuaError, match="query must be one of"):
+        run([], "nope")
+    for bad in ("2026-13-01", "2026-02-30", "yesterday", "2026-11-03T10:00:00+01:00",
+                "2026-11-03T10:00:00.5Z", "2026-11-03T24:00:00Z"):
+        with pytest.raises(lua54.LuaError, match="since"):
+            run([], "tools", since=bad)
+    with pytest.raises(lua54.LuaError, match="until must"):
+        run([], "tools", until="tomorrow")
+
+
+def test_to_defaults_to_now_and_until_is_the_value_used() -> None:
+    out, fake = run([], "tools", since="2026-11-07")
+    assert out["until"] == NOW
+    assert fake.calls == [("2026-11-07", "2026-11-08", None, False),
+                          ("2026-11-08", "2026-11-08T12:00:00Z", None, False)]
+    out, _ = run([], "tools", since="2026-11-07", until="2026-11-07T06:00:00Z")
+    assert out["until"] == "2026-11-07T06:00:00Z"
+    assert "next_since" not in out
+
+
+def test_an_empty_or_reversed_window_returns_no_rows_and_no_calls() -> None:
+    out, fake = run([], "tools", since="2026-11-05", until="2026-11-05")
+    assert out == {"rows": [], "truncated_records": 0, "until": "2026-11-05"}
+    assert fake.calls == []
+
+
+# ---- the queries, against one fixture with known counts -------------------------------------
+
+DAY = "2026-11-03"
+
+
+def fixture_day() -> list[dict]:
+    m1 = rec(
+        "m1", f"{DAY}T10:00:00Z", turns=60,
+        calls=[
+            call("Read", {"file_path": f"{MEM}/feedback_a.md"}, "10:01:00"),
+            call("Read", {"file_path": f"{MEM}/feedback_a.md"}, "10:02:00"),
+            call("Read", {"file_path": "/h/src/not_memory.py"}),
+            call("Edit", {"file_path": "/h/.claude/projects/x/MEMORY.md"}, "10:03:00"),
+            call(GET, {"project": "nexus", "title": "t1"}, "10:04:00"),
+            call(GET, {"project": "nexus", "title": "t1"}, "10:05:00"),
+            call(SEARCH, {"project": "nexus", "query": "q"}, "10:06:00"),
+            call(SEARCH, {"query": "no project"}, "10:06:30"),
+            call("mcp__plugin_conexus_nexus__search", {"query": "a"}, "10:07:00"),
+            call("mcp__plugin_conexus_nexus__search", {"query": "b"}, "10:08:00"),
+            call("mcp__plugin_conexus_nexus__search", {"query": "c"}, "10:09:00"),
+            call("WebFetch", {"url": "u"}, "10:10:00"),
+            call("Bash", {"command": "nx memory curate --cold && uv run nx store put x"}, "10:11:00"),
+            call("Bash", {"command": "nx run transcripts --args-file -"}, "10:12:00"),
+            call("Bash", {"command": "git stash"}, "10:13:00"),
+            call("Bash", {"command": "cat ~/.claude/projects/x/y.jsonl | jq ."}, "10:14:00"),
+            call("Skill", {"skill": "conexus:orchestration"}, "10:15:00"),
+            call("Skill", {"skill": "conexus:orchestration"}, "10:16:00"),
+            call("Agent", {"subagent_type": "developer", "model": "opus"}, "10:17:00"),
+            call("Agent", {"subagent_type": "developer"}, "10:18:00"),
+            call("Task", {}, "10:19:00", err=True),
+            call(RUN, {"name": "gate_record"}, "10:20:00"),
+            call(PUT, {"title": "review-abc-b-2026", "tags": "kind:gate,bead:b"}, "10:21:00"),
+            call(PUT, {"title": "review-abd-b-2026", "tags": "kind:gate,bead:b"}, "10:22:00"),
+            call(PUT, {"title": "240-research-9", "content": "x"}, "10:23:00"),
+        ],
+        deferred=["WebFetch", "mcp__x__y", "Unused"],
+        loads=[load("/r/CLAUDE.md", 900), load("/r/CLAUDE.md", 1000), load("/r/rules/a.md", 200, ftype="Local")],
+        slash=[{"name": "commit", "time": f"{DAY}T10:30:00Z"}],
+        text=[{"time": f"{DAY}T10:40:00Z", "text": f"plain {EM} dash"},
+              {"time": f"{DAY}T10:41:00Z", "text": f"```\n{EM}\n``` and `{EM}` only"}],
+    )
+    m2 = rec("m2", f"{DAY}T11:00:00Z", turns=60, text=[{"time": f"{DAY}T11:01:00Z", "text": "clean"}])
+    s1 = rec(
+        "m1", f"{DAY}T10:05:00Z", main=False, agent="a1", turns=4, ctx=5000,
+        tokens={"input": 1_000_000, "output": 1_000_000, "cache_read": 0, "cache_creation": 0},
+        calls=[call("Read", {"file_path": "/x"}, err=False), call("Bash", {"command": "false"}, err=True)],
+        loads=[load("/r/CLAUDE.md", 1000)],
+    )
+    s2 = rec("m1", f"{DAY}T12:00:00Z", main=False, agent="a2", turns=2, ctx=3000, models=["claude-unknown-9"],
+             tokens={"input": 10, "output": 10, "cache_read": 0, "cache_creation": 0})
+    return [m1, m2, s1, s2]
+
+
+def test_agents_counts_dispatches_and_runs_and_labels_the_cost_an_estimate() -> None:
+    out, _ = run(fixture_day(), "agents", until="2026-11-04")
+    rows = by(out["rows"], "kind", "agent_type", "model")
+    d = rows[("dispatch", "developer", "opus")]
+    assert (d["dispatches"], d["errors"], d["runs"]) == (1, 0, 0)
+    assert rows[("dispatch", "developer", "(default)")]["dispatches"] == 1
+    t = rows[("dispatch", "(default)", "(default)")]
+    assert (t["dispatches"], t["errors"]) == (1, 1)
+    r1 = rows[("run", "(unattributed)", "claude-opus-4-8")]
+    assert (r1["runs"], r1["turns"], r1["errors"]) == (1, 4, 1)
+    assert (r1["context_total"], r1["context_count"], r1["max_context"]) == (5000, 1, 5000)
+    assert r1["cost_estimate_usd"] == pytest.approx(5.0 + 25.0)  # 1M input at 5, 1M output at 25
+    r2 = rows[("run", "(unattributed)", "claude-unknown-9")]
+    assert (r2["unpriced"], r2["cost_estimate_usd"], r2["context_total"]) == (1, 0, 3000)
+    assert set(r1) == tj.SHAPES["agents"].fields
+
+
+def test_a_dated_model_id_prices_as_its_base_model() -> None:
+    s = rec("s", f"{DAY}T10:00:00Z", main=False, agent="a", models=["claude-haiku-4-5-20251001"],
+            tokens={"input": 2_000_000, "output": 0, "cache_read": 0, "cache_creation": 0})
+    out, _ = run([s], "agents", until="2026-11-04")
+    (row,) = out["rows"]
+    assert row["cost_estimate_usd"] == pytest.approx(2.0) and row["unpriced"] == 0
+
+
+def test_tools_counts_per_tool_server_and_nx_verb_with_deferred_against_called() -> None:
+    out, _ = run(fixture_day(), "tools", until="2026-11-04")
+    m1 = [r for r in out["rows"] if r["session_id"] == "m1" and r["main"]]
+    rows = by(m1, "kind", "name", "sub")
+    s = rows[("tool", "mcp__plugin_conexus_nexus__search", None)]
+    assert (s["count"], s["server"], s["last_use"]) == (3, "plugin_conexus_nexus", f"{DAY}T10:09:00Z")
+    assert s["size"] == 3  # the bytes of the string inputs
+    w = rows[("tool", "WebFetch", None)]
+    assert (w["count"], w["deferred"]) == (1, True)
+    assert "deferred" not in rows[("tool", "Skill", None)]
+    assert rows[("nx", "nx memory", "curate")]["count"] == 1
+    assert rows[("nx", "nx store", "put")]["count"] == 1
+    assert rows[("nx", "nx run", "transcripts")]["count"] == 1
+    summary = rows[("deferred_summary", "(deferred)", None)]
+    assert (summary["count"], summary["called"]) == (3, 1)
+    assert all(r["session_id"] == "m1" and r["main"] is True for r in m1)
+    assert tj.SESSION_FIELDS["tools"] >= {k for r in out["rows"] for k in r}
+
+
+def test_skills_ports_the_census() -> None:
+    out, _ = run(fixture_day(), "skills", until="2026-11-04")
+    rows = by(out["rows"], "scope", "kind", "name")
+    assert rows[("main", "skill", "conexus:orchestration")]["count"] == 2
+    assert rows[("main", "dispatch", "developer")]["count"] == 2
+    assert rows[("main", "dispatch", "(default)")]["count"] == 1
+    assert rows[("main", "slash", "commit")]["count"] == 1
+    main = rows[("main", "runs", "(all)")]
+    assert (main["count"], main["runs_with_skill"], main["long_runs"], main["long_runs_without_skill"]) == (2, 1, 2, 1)
+    sub = rows[("subagent", "runs", "(all)")]
+    assert (sub["count"], sub["runs_with_skill"], sub["long_runs"]) == (2, 0, 0)
+    assert {k for r in out["rows"] for k in r} == tj.SHAPES["skills"].fields
+
+
+def test_memory_counts_file_t2_and_subagent_loads() -> None:
+    out, _ = run(fixture_day(), "memory", until="2026-11-04")
+    rows = by(out["rows"], "session_id", "main", "kind", "name")
+    assert rows[("m1", True, "file_read", f"{MEM}/feedback_a.md")]["count"] == 2
+    assert rows[("m1", True, "file_write", "/h/.claude/projects/x/MEMORY.md")]["count"] == 1
+    g = rows[("m1", True, "t2_get", "nexus/t1")]
+    assert (g["count"], g["last_use"]) == (2, f"{DAY}T10:05:00Z")
+    assert rows[("m1", True, "t2_search", "nexus")]["count"] == 1
+    assert rows[("m1", True, "t2_search", "(all)")]["count"] == 1
+    loaded = rows[("m1", False, "loaded", "/r/CLAUDE.md")]
+    assert (loaded["size"], loaded["agent_id"], loaded["type"]) == (1000, "a1", "Project")
+    assert not any(r["kind"] == "loaded" and r["main"] for r in out["rows"])
+    assert not any("not_memory" in r["name"] for r in out["rows"])
+
+
+def test_loads_counts_instruction_files_per_main_session_and_per_dispatch() -> None:
+    out, _ = run(fixture_day(), "loads", until="2026-11-04")
+    rows = by(out["rows"], "session_id", "agent_id", "name")
+    c = rows[("m1", None, "/r/CLAUDE.md")]
+    assert (c["count"], c["size"], c["type"], c["kind"], c["main"]) == (2, 1000, "Project", "instructions", True)
+    assert rows[("m1", None, "/r/rules/a.md")]["type"] == "Local"
+    d = rows[("m1", "a1", "/r/CLAUDE.md")]
+    assert (d["main"], d["count"], d["size"]) == (False, 1, 1000)
+
+
+def test_procedures_counts_runs_against_hand_written_equivalents() -> None:
+    out, _ = run(fixture_day(), "procedures", until="2026-11-04")
+    rows = by(out["rows"], "procedure")
+    # one gate_record run, two kind:gate puts: the first carries the run's record
+    assert (rows[("gate_record",)]["runs"], rows[("gate_record",)]["hand_written"]) == (1, 1)
+    assert (rows[("transcripts",)]["runs"], rows[("transcripts",)]["hand_written"]) == (1, 1)
+    assert (rows[("research_add",)]["runs"], rows[("research_add",)]["hand_written"]) == (0, 1)
+    assert {k for r in out["rows"] for k in r} == tj.SHAPES["procedures"].fields
+
+
+def test_violations_counts_main_sessions_with_a_hit_and_carries_every_denominator() -> None:
+    out, fake = run(fixture_day(), "violations", until="2026-11-04")
+    rows = by(out["rows"], "rule")
+    assert set(k[0] for k in rows) == {"em-dash", "git-stash", "full-disk-find", "claude-session-trailer",
+                                       "backtick-in-quoted-arg"}
+    assert {k: (v["count"], v["main_sessions"]) for (k,), v in rows.items()} == {
+        "em-dash": (1, 2), "git-stash": (1, 2), "full-disk-find": (0, 2),
+        "claude-session-trailer": (0, 2), "backtick-in-quoted-arg": (0, 2)}
+    assert fake.calls[0][3] is True
+    empty, _ = run([], "violations", until="2026-11-04")
+    assert {r["rule"]: (r["count"], r["main_sessions"]) for r in empty["rows"]}["em-dash"] == (0, 0)
+
+
+@pytest.mark.parametrize("command,rule", [
+    ("git stash", "git-stash"),
+    ("cd x && git stash pop", "git-stash"),
+    ("git stashed", None),
+    ("echo 'git stash' > notes", None),
+    ('git commit -m "do not git stash"', None),
+    ("git commit -F - <<'EOF'\nuse git stash here\nEOF", None),
+    ("find / -name x", "full-disk-find"),
+    ("find ~ -type f", "full-disk-find"),
+    ("find $HOME -name x", "full-disk-find"),
+    ("find -L / -name x", "full-disk-find"),
+    ("find /Users/hal -name x", "full-disk-find"),
+    ("find /home -name x", "full-disk-find"),
+    ("find . -name x", None),
+    ("find /Users/hal/git/nexus -name x", None),
+    ("find src -name '/'", None),
+    ('git commit -m "x\n\nClaude-Session: abc"', "claude-session-trailer"),
+    ("git log --grep 'Claude-Session:'", None),
+    ('bd create "fix `x` thing"', "backtick-in-quoted-arg"),
+    ("nx store put 'a `b`'", "backtick-in-quoted-arg"),
+    ('echo "a `b`"', None),
+    ('nx memory put "a $(date)"', None),
+    ("nx memory put plain", None),
+])
+def test_the_bash_rules(command: str, rule: str | None) -> None:
+    s = rec("s", f"{DAY}T10:00:00Z", calls=[call("Bash", {"command": command})])
+    out, _ = run([s], "violations", until="2026-11-04")
+    assert {r["rule"] for r in out["rows"] if r["count"]} == ({rule} if rule else set())
+
+
+@pytest.mark.parametrize("text,hit", [
+    (f"a {EM} b", True), ("no dash", False), (f"```\n{EM}\n```", False), (f"see `{EM}` here", False),
+    (f"```\ncode\n``` then {EM}", True), (f"a - b", False),
+])
+def test_the_em_dash_rule_reads_prose_not_code(text: str, hit: bool) -> None:
+    s = rec("s", f"{DAY}T10:00:00Z", text=[{"time": f"{DAY}T10:00:01Z", "text": text}])
+    out, _ = run([s], "violations", until="2026-11-04")
+    assert by(out["rows"], "rule")[("em-dash",)]["count"] == int(hit)
+
+
+def test_only_violations_asks_for_bodies() -> None:
+    for query in ("agents", "tools", "skills", "memory", "loads", "procedures"):
+        out, fake = run(fixture_day(), query, until="2026-11-04")
+        assert [c[3] for c in fake.calls] == [False], query
+        assert "PLAIN" not in json.dumps(out) and "dash" not in json.dumps(out), query
+    _, fake = run(fixture_day(), "violations", until="2026-11-04")
+    assert [c[3] for c in fake.calls] == [True]
+
+
+def test_a_truncated_record_is_counted() -> None:
+    records = [rec("a", f"{DAY}T10:00:00Z", truncated=True), rec("b", f"{DAY}T11:00:00Z"),
+               rec("c", "2026-11-04T10:00:00Z", truncated=True)]
+    out, _ = run(records, "tools", until="2026-11-05")
+    assert out["truncated_records"] == 2
+
+
+# ---- the real verb over fixture transcripts -------------------------------------------------
+
+
+def _jsonl(path: Path, lines: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+
+
+def _assistant(ts: str, sid: str, blocks: list, mid: str = "m1") -> dict:
+    return {"type": "assistant", "timestamp": ts, "sessionId": sid, "isSidechain": False,
+            "message": {"id": mid, "model": "claude-opus-4-8", "role": "assistant", "content": blocks,
+                        "usage": {"input_tokens": 1, "output_tokens": 1}}}
+
+
+def _result(ts: str, sid: str, tid: str, text: str) -> dict:
+    return {"type": "user", "timestamp": ts, "sessionId": sid, "isSidechain": False,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid, "content": [{"type": "text", "text": text}]}]}}
+
+
+class RealVerb:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+        self.calls: list[tuple] = []
+
+    def __call__(self, since: str, until: str, project: Any, bodies: Any) -> Any:
+        self.calls.append((since, until, project, bodies))
+        return vt.sessions(since, until, project, bodies, deadline=time.monotonic() + 60,
+                           ctx=VerbContext(repo_root=None))
+
+
+def test_bodies_true_carries_assistant_text_and_never_a_tool_result_or_a_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    p = root / "projects" / "proj"
+    _jsonl(p / "s1.jsonl", [
+        {"type": "user", "timestamp": f"{DAY}T10:00:00Z", "sessionId": "s1",
+         "message": {"role": "user", "content": f"prompt {EM} with a dash and git stash"}},
+        _assistant(f"{DAY}T10:00:01Z", "s1", [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]),
+        _result(f"{DAY}T10:00:02Z", "s1", "t1", f"result {EM} git stash"),
+        _assistant(f"{DAY}T10:00:03Z", "s1", [{"type": "text", "text": f"said {EM} this"}], mid="m2"),
+    ])
+    _jsonl(p / "s2.jsonl", [
+        {"type": "user", "timestamp": f"{DAY}T11:00:00Z", "sessionId": "s2",
+         "message": {"role": "user", "content": f"prompt {EM}"}},
+        _assistant(f"{DAY}T11:00:01Z", "s2", [{"type": "tool_use", "id": "t9", "name": "Bash",
+                                                "input": {"command": "ls"}}]),
+        _result(f"{DAY}T11:00:02Z", "s2", "t9", f"result {EM} git stash"),
+    ])
+    verb = RealVerb(monkeypatch, root)
+    out = Run(verb)(query="violations", until="2026-11-04")
+    rows = by(out["rows"], "rule")
+    assert (rows[("em-dash",)]["count"], rows[("em-dash",)]["main_sessions"]) == (1, 2)
+    assert rows[("git-stash",)]["count"] == 0
+    assert [c[3] for c in verb.calls] == [True]
+    tools = Run(verb)(query="tools", until="2026-11-04")
+    assert verb.calls[-1][3] is False
+    assert EM not in json.dumps(tools, ensure_ascii=False)
+
+
+def test_a_record_over_1_mb_arrives_cut_marked_and_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    big = "x" * (3 * 1024 * 1024)
+    _jsonl(root / "projects" / "proj" / "big.jsonl", [
+        _assistant(f"{DAY}T10:00:00Z", "big", [
+            {"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {"command": big[:300_000]}}
+            for i in range(10)])])
+    verb = RealVerb(monkeypatch, root)
+    out = Run(verb)(query="tools", until="2026-11-04")
+    assert out["truncated_records"] == 1
+    assert out["rows"] and all(r["session_id"] == "big" for r in out["rows"])
+
+
+def test_a_session_spanning_midnight_is_counted_once_on_its_start_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    _jsonl(root / "projects" / "proj" / "late.jsonl", [
+        _assistant("2026-11-03T23:50:00Z", "late", [
+            {"type": "tool_use", "id": "a", "name": "Skill", "input": {"skill": "s"}}]),
+        _assistant("2026-11-04T00:10:00Z", "late", [
+            {"type": "tool_use", "id": "b", "name": "Skill", "input": {"skill": "s"}}], mid="m2"),
+    ])
+    verb = RealVerb(monkeypatch, root)
+    out = Run(verb)(query="skills", since="2026-11-02", until="2026-11-06")
+    rows = by(out["rows"], "scope", "kind", "name")
+    assert rows[("main", "runs", "(all)")]["count"] == 1
+    assert rows[("main", "skill", "s")]["count"] == 2  # both calls, one session, the start day's
+    assert [c[:2] for c in verb.calls] == [("2026-11-02", "2026-11-03"), ("2026-11-03", "2026-11-04"),
+                                           ("2026-11-04", "2026-11-05"), ("2026-11-05", "2026-11-06")]
+
+
+# ---- day stepping, the hour split, paging ----------------------------------------------------
+
+
+def test_a_three_day_window_makes_three_verb_calls_one_utc_day_each() -> None:
+    records = [rec(f"s{i}", f"2026-11-0{i}T10:00:00Z") for i in (1, 2, 3)]
+    out, fake = run(records, "tools", since="2026-11-01", until="2026-11-04")
+    assert fake.calls == [("2026-11-01", "2026-11-02", None, False), ("2026-11-02", "2026-11-03", None, False),
+                          ("2026-11-03", "2026-11-04", None, False)]
+    assert out["truncated_records"] == 0 and "next_since" not in out
+
+
+def test_the_project_is_passed_through() -> None:
+    _, fake = run([], "tools", until="2026-11-04", project="-Users-me-proj")
+    assert fake.calls[0][2] == "-Users-me-proj"
+
+
+def test_a_timestamp_window_steps_to_the_next_midnight_and_ends_at_to() -> None:
+    _, fake = run([], "tools", since="2026-11-03T22:30:00Z", until="2026-11-05T06:00:00Z")
+    assert fake.calls == [("2026-11-03T22:30:00Z", "2026-11-04", None, False),
+                          ("2026-11-04", "2026-11-05", None, False),
+                          ("2026-11-05", "2026-11-05T06:00:00Z", None, False)]
+
+
+def test_the_month_and_year_and_leap_day_step_correctly() -> None:
+    _, fake = run([], "tools", since="2027-12-31", until="2028-01-02")
+    assert [c[:2] for c in fake.calls] == [("2027-12-31", "2028-01-01"), ("2028-01-01", "2028-01-02")]
+    _, fake = run([], "tools", since="2028-02-28", until="2028-03-01")
+    assert [c[:2] for c in fake.calls] == [("2028-02-28", "2028-02-29"), ("2028-02-29", "2028-03-01")]
+
+
+def test_a_boundary_session_is_in_the_later_window_only() -> None:
+    records = [rec("mid", "2026-11-04T00:00:00Z"), rec("end", "2026-11-04T10:00:00Z")]
+    out, _ = run(records, "tools", since="2026-11-03", until="2026-11-04")
+    assert out["rows"] == []
+    out, _ = run([rec("mid", "2026-11-04T00:00:00Z", calls=[call("Read", {})])], "tools", since="2026-11-04",
+                 until="2026-11-05")
+    assert [r["session_id"] for r in out["rows"]] == ["mid"]
+
+
+def hourly(n: int, day: str, hour: int, title: str = "t" * 600) -> list[dict]:
+    """n main sessions starting in one hour, each with a long memory_get title (a ~1.4 KB row)."""
+    return [rec(f"{day}-{hour:02d}-{i:04d}", f"{day}T{hour:02d}:{i % 60:02d}:{i // 60:02d}Z",
+                calls=[call(GET, {"project": "nexus", "title": f"{title}{i:04d}"})])
+            for i in range(n)]
+
+
+def oracle_memory(records: list[dict]) -> Counter:
+    return Counter(r["session_id"] for r in records)
+
+
+def pages_of(records: list[dict], query: str, *, since: str, until: str, patch: dict | None = None,
+             max_records: int | None = None) -> tuple[list[dict], list[Sessions]]:
+    """Every page of a window, run the way a caller loops on next_since."""
+    pages: list[dict] = []
+    fakes: list[Sessions] = []
+    cursor = since
+    while True:
+        out, fake = run(records, query, since=cursor, until=until, patch=patch, max_records=max_records)
+        pages.append(out)
+        fakes.append(fake)
+        assert len(pages) < 200
+        if "next_since" not in out:
+            return pages, fakes
+        assert out["next_since"] > cursor
+        cursor = out["next_since"]
+
+
+def test_rows_passing_768_kb_return_next_since_and_the_joined_pages_equal_one_pass() -> None:
+    # three days of ~500 rows of ~1.4 KB: one day fits a page, two do not
+    records = [r for d in ("2026-11-01", "2026-11-02", "2026-11-03") for r in hourly(500, d, 9)]
+    pages, _ = pages_of(records, "memory", since="2026-11-01", until="2026-11-04")
+    assert [p.get("next_since") for p in pages] == ["2026-11-02", "2026-11-03", None]
+    assert all(400 * 1024 < _estimate(p["rows"]) <= 768 * 1024 for p in pages)
+    joined = tj.join_pages("memory", pages)
+    assert oracle_memory(records) == Counter(r["session_id"] for r in joined["rows"])
+    assert len(joined["rows"]) == 1500
+    one, _ = run(records, "memory", since="2026-11-01", until="2026-11-04", patch={"PAGE_BYTES": "10 * 1024 * 1024"})
+    assert one["rows"] == joined["rows"] and "next_since" not in one
+
+
+def _estimate(rows: list[dict]) -> int:
+    return sum(16 + (2 * len(v) if isinstance(v, str) else 0) for r in rows for v in r.values())
+
+
+def test_a_page_ending_mid_day_returns_a_timestamp_and_the_pages_still_equal_one_pass() -> None:
+    # one day of three hours of ~500 rows each: the day is over a page, each hour fits
+    records = [r for h in (0, 1, 2) for r in hourly(500, "2026-11-03", h)]
+    pages, fakes = pages_of(records, "memory", since="2026-11-03", until="2026-11-04")
+    nexts = [p.get("next_since") for p in pages]
+    assert nexts[0] == "2026-11-03T01:00:00Z" and nexts[-1] is None
+    assert all(n is None or re.fullmatch(r"2026-11-03T\d\d:00:00Z", n) for n in nexts)
+    joined = tj.join_pages("memory", pages)
+    assert oracle_memory(records) == Counter(r["session_id"] for r in joined["rows"])
+    assert len(joined["rows"]) == 1500
+    # the first call read the day, then the hours it split into
+    assert fakes[0].calls[0][:2] == ("2026-11-03", "2026-11-04")
+    assert fakes[0].calls[1][:2] == ("2026-11-03", "2026-11-03T01:00:00Z")
+
+
+def test_a_single_hour_over_the_page_bound_fails_with_result_window() -> None:
+    records = hourly(1200, "2026-11-03", 5)
+    with pytest.raises(lua54.LuaError, match=r"^result-window: 2026-11-03T05:00:00Z to 2026-11-03T06:00:00Z"):
+        run(records, "memory", since="2026-11-03", until="2026-11-04")
+
+
+def test_a_day_the_verb_refuses_is_split_into_hours_and_every_session_is_counted_once() -> None:
+    records = [rec(f"s{i}", f"2026-11-03T{i % 24:02d}:{i // 24:02d}:00Z", calls=[call("Read", {})])
+               for i in range(60)]
+    out, fake = run(records, "tools", since="2026-11-03", until="2026-11-04", max_records=40)
+    assert fake.calls[0][:2] == ("2026-11-03", "2026-11-04")
+    assert [c[:2] for c in fake.calls[1:3]] == [("2026-11-03", "2026-11-03T01:00:00Z"),
+                                                ("2026-11-03T01:00:00Z", "2026-11-03T02:00:00Z")]
+    assert len(fake.calls) == 1 + 24
+    assert Counter(r["session_id"] for r in out["rows"]) == Counter(r["session_id"] for r in records)
+    unsplit, _ = run(records, "tools", since="2026-11-03", until="2026-11-04")
+    assert unsplit["rows"] == out["rows"]
+
+
+def test_an_hour_the_verb_refuses_fails_with_result_window_and_a_record_error_passes_through() -> None:
+    records = [rec(f"s{i}", f"2026-11-03T05:{i:02d}:00Z") for i in range(50)]
+    with pytest.raises(lua54.LuaError, match=r"^result-window: 2026-11-03T05:00:00Z to 2026-11-03T06:00:00Z"):
+        run(records, "tools", since="2026-11-03", until="2026-11-04", max_records=30)
+
+    def refuses(*_: Any) -> Any:
+        raise VerbError("record-too-large: transcripts.sessions: one transcript's record does not fit in 1 MB")
+
+    with pytest.raises(lua54.LuaError, match=r"^record-too-large:"):
+        Run(refuses)(query="tools", until="2026-11-04")
+    calls: list = []
+
+    def refuses_once_counted(*a: Any) -> Any:
+        calls.append(a)
+        raise VerbError("transcripts.sessions: the run's time budget ran out reading transcripts")
+
+    with pytest.raises(lua54.LuaError, match="time budget"):
+        Run(refuses_once_counted)(query="tools", until="2026-11-04")
+    assert len(calls) == 1
+
+
+def test_sessions_on_a_page_boundary_and_on_an_hour_boundary_are_counted_once() -> None:
+    # day 2 starts exactly at midnight (a page boundary); in day 3 a session starts exactly on
+    # each hour boundary of a split day
+    records = (hourly(500, "2026-11-01", 9)
+               + [rec("on-midnight", "2026-11-02T00:00:00Z", calls=[call(GET, {"title": "m"})])]
+               + hourly(500, "2026-11-02", 9)
+               + [rec(f"on-hour-{h}", f"2026-11-03T{h:02d}:00:00Z", calls=[call(GET, {"title": "h"})])
+                  for h in range(24)]
+               + [r for h in (3, 4, 5) for r in hourly(500, "2026-11-03", h)])
+    pages, _ = pages_of(records, "memory", since="2026-11-01", until="2026-11-04")
+    assert len(pages) > 3
+    joined = tj.join_pages("memory", pages)
+    got = Counter(r["session_id"] for r in joined["rows"])
+    assert got == oracle_memory(records)
+    assert all(n == 1 for n in got.values())
+    stops = [p["next_since"] for p in pages if "next_since" in p]
+    assert "2026-11-02" in stops and any(s.endswith(":00:00Z") for s in stops)
+
+
+def test_the_work_trigger_pages_the_keyed_queries_by_sessions_and_the_joined_pages_equal_one_pass() -> None:
+    records = [rec(f"s{d}-{i}", f"2026-11-{d:02d}T10:0{i}:00Z",
+                   calls=[call("Skill", {"skill": f"k{i % 2}"})]) for d in range(1, 13) for i in range(2)]
+    pages, _ = pages_of(records, "skills", since="2026-11-01", until="2026-11-13", patch={"MAX_SESSIONS_PER_RUN": "5"})
+    assert len(pages) == 6  # two sessions a day, five a page: two days a page
+    assert [p.get("next_since") for p in pages[:2]] == ["2026-11-03", "2026-11-05"]
+    one, _ = run(records, "skills", since="2026-11-01", until="2026-11-13")
+    assert "next_since" not in one
+    assert tj.join_pages("skills", pages)["rows"] == tj.join_pages("skills", [one])["rows"]
+    # per-session queries are bounded by bytes, not by the work trigger
+    solo, _ = run(records, "tools", since="2026-11-01", until="2026-11-13", patch={"MAX_SESSIONS_PER_RUN": "5"})
+    assert "next_since" not in solo
+
+
+def test_a_busy_first_unit_is_taken_whole_so_a_run_always_makes_progress() -> None:
+    records = [rec(f"s{i}", f"2026-11-01T10:{i:02d}:00Z", calls=[call("Skill", {"skill": "k"})]) for i in range(20)]
+    out, _ = run(records, "skills", since="2026-11-01", until="2026-11-03", patch={"MAX_SESSIONS_PER_RUN": "5"})
+    assert out["next_since"] == "2026-11-02"
+    assert by(out["rows"], "scope", "kind", "name")[("main", "runs", "(all)")]["count"] == 20
+
+
+def test_keyed_pages_at_the_real_work_bound() -> None:
+    n = int(re.search(r"^local MAX_SESSIONS_PER_RUN = (\d+)$", TEXT, re.M).group(1))
+    assert 100 <= n <= 5000
+    records = [rec(f"s{d}-{i}", f"2026-11-0{d}T10:{i % 60:02d}:{i // 60:02d}Z", calls=[call("Skill", {"skill": "k"})])
+               for d in (1, 2) for i in range(n // 2 + 1)]
+    out, _ = run(records, "skills", since="2026-11-01", until="2026-11-03")
+    assert out["next_since"] == "2026-11-02"
+
+
+# ---- the join ---------------------------------------------------------------------------------
+
+
+def _agents(**rows: Any) -> dict:
+    return {"rows": rows["rows"], "truncated_records": rows.get("t", 0), "until": NOW,
+            **({"next_since": rows["next"]} if rows.get("next") else {})}
+
+
+def test_join_sums_means_and_maxes_by_key_and_derives_the_mean() -> None:
+    key = {"kind": "run", "agent_type": "(unattributed)", "model": "m"}
+
+    def row(runs: int, ctx_total: int, ctx_count: int, mx: int, cost: float, **extra: Any) -> dict:
+        return {**key, "dispatches": 0, "runs": runs, "turns": runs * 2, "errors": 1, "context_total": ctx_total,
+                "context_count": ctx_count, "max_context": mx, "cost_estimate_usd": cost, "unpriced": 0, **extra}
+
+    p1 = _agents(rows=[row(2, 3000, 2, 2500, 1.5), {**row(1, 0, 0, 0, 0), "model": "other"}], t=1, next="2026-11-02")
+    p2 = _agents(rows=[row(1, 500, 1, 9000, 0.25)], t=2)
+    joined = tj.join_pages("agents", [p1, p2])
+    rows = by(joined["rows"], "model")
+    r = rows[("m",)]
+    assert (r["runs"], r["turns"], r["errors"]) == (3, 6, 2)  # sum
+    assert r["max_context"] == 9000  # max
+    assert (r["context_total"], r["context_count"]) == (3500, 3)
+    assert r["context_mean"] == pytest.approx(3500 / 3)  # mean of the total over the count, not of means
+    assert r["cost_estimate_usd"] == pytest.approx(1.75)
+    assert rows[("other",)]["context_mean"] is None
+    assert joined["truncated_records"] == 3 and joined["pages"] == 2 and joined["until"] == NOW
+
+
+def test_join_concatenates_per_session_rows_in_page_order() -> None:
+    a = {"rows": [{"session_id": "a", "name": "x", "count": 1}], "truncated_records": 0, "until": NOW,
+         "next_since": "2026-11-02"}
+    b = {"rows": [{"session_id": "b", "name": "x", "count": 1}, {"session_id": "a", "name": "x", "count": 1}],
+         "truncated_records": 0, "until": NOW}
+    for q in ("memory", "tools", "loads"):
+        assert [r["session_id"] for r in tj.join_pages(q, [a, b])["rows"]] == ["a", "b", "a"]
+
+
+def test_join_violations_keeps_every_pages_denominator_and_derives_a_rate() -> None:
+    def page(count: int, n: int, **kw: Any) -> dict:
+        return {"rows": [{"rule": "em-dash", "count": count, "main_sessions": n},
+                         {"rule": "git-stash", "count": 0, "main_sessions": n}],
+                "truncated_records": 0, "until": NOW, **kw}
+
+    joined = tj.join_pages("violations", [page(2, 10, next_since="2026-11-02"), page(0, 30)])
+    rows = by(joined["rows"], "rule")
+    assert (rows[("em-dash",)]["count"], rows[("em-dash",)]["main_sessions"]) == (2, 40)
+    assert rows[("em-dash",)]["per_100"] == pytest.approx(5.0)
+    assert tj.join_pages("violations", [{"rows": [], "until": NOW}])["rows"] == []
+
+
+def test_join_refuses_pages_that_do_not_make_one_window() -> None:
+    ok = {"rows": [], "truncated_records": 0, "until": NOW}
+    with pytest.raises(tj.JoinError, match="unknown query"):
+        tj.join_pages("nope", [ok])
+    with pytest.raises(tj.JoinError, match="no pages"):
+        tj.join_pages("tools", [])
+    with pytest.raises(tj.JoinError, match="different windows"):
+        tj.join_pages("tools", [{**ok, "next_since": "2026-11-02"}, {**ok, "until": "2026-11-09"}])
+    with pytest.raises(tj.JoinError, match="before the last"):
+        tj.join_pages("tools", [ok, ok])
+    with pytest.raises(tj.JoinError, match="not done"):
+        tj.join_pages("tools", [{**ok, "next_since": "2026-11-02"}])
+    assert tj.join_pages("tools", [{**ok, "next_since": "2026-11-02"}], allow_partial=True)["pages"] == 1
+
+
+def test_the_join_tags_name_exactly_the_fields_the_script_returns() -> None:
+    for query in ("agents", "skills", "violations", "procedures"):
+        out, _ = run(fixture_day(), query, until="2026-11-04")
+        assert {k for r in out["rows"] for k in r} <= tj.SHAPES[query].fields, query
+        assert tj.SHAPES[query].fields <= {k for r in out["rows"] for k in r} | {"unpriced"}, query
+    for query in ("memory", "tools", "loads"):
+        out, _ = run(fixture_day(), query, until="2026-11-04")
+        assert {k for r in out["rows"] for k in r} <= tj.SESSION_FIELDS[query], query
+    assert set(tj.SHAPES) == {"agents", "tools", "skills", "memory", "violations", "loads", "procedures"}
+    for q in tj.SHAPES:
+        assert re.search(rf"^local function build_{q}\(\)$", TEXT, re.M)
+
+
+def test_joined_pages_of_a_keyed_query_equal_one_pass_for_every_keyed_query() -> None:
+    records = []
+    for d in range(1, 7):
+        for r in fixture_day():
+            r = json.loads(json.dumps(r).replace(DAY, f"2026-11-0{d}"))
+            r["session_id"] = f"{r['session_id']}-{d}"
+            records.append(r)
+    for query in ("agents", "skills", "violations", "procedures"):
+        pages, _ = pages_of(records, query, since="2026-11-01", until="2026-11-07", patch={"MAX_SESSIONS_PER_RUN": "5"})
+        one, _ = run(records, query, since="2026-11-01", until="2026-11-07")
+        assert len(pages) > 1 and "next_since" not in one
+        a, b = tj.join_pages(query, pages)["rows"], tj.join_pages(query, [one])["rows"]
+        assert len(a) == len(b)
+        for x, y in zip(a, b, strict=True):
+            assert x == pytest.approx(y), query
