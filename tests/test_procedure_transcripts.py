@@ -1173,9 +1173,12 @@ def test_a_page_ending_mid_day_returns_a_timestamp_and_the_pages_still_equal_one
     joined = tj.join_pages("memory", pages)
     assert oracle_memory(records) == Counter(r["session_id"] for r in joined["rows"])
     assert len(joined["rows"]) == 1500
-    # the first call read the day, then the hours it split into
-    assert fakes[0].calls[0][:2] == ("2026-11-03", "2026-11-04")
-    assert fakes[0].calls[1][:2] == ("2026-11-03", "2026-11-03T01:00:00Z")
+    # the day is read once and divided by the hours in hand; each later page reads the rest of the day once
+    assert [[c[:2] for c in f.calls] for f in fakes] == [
+        [("2026-11-03", "2026-11-04")],
+        [("2026-11-03T01:00:00Z", "2026-11-04")],
+        [("2026-11-03T02:00:00Z", "2026-11-04")],
+    ]
 
 
 def test_a_single_hour_over_the_page_bound_fails_with_result_window() -> None:
@@ -1219,11 +1222,11 @@ def test_an_hour_the_verb_refuses_fails_with_result_window_and_a_record_error_pa
 
 
 def test_sessions_on_a_page_boundary_and_on_an_hour_boundary_are_counted_once() -> None:
-    # day 2 starts exactly at midnight (a page boundary); in day 3 a session starts exactly on
-    # each hour boundary of a split day
+    # day 2's first session starts exactly at midnight and no hour of day 2 fits after day 1, so
+    # the page ends there (a page boundary); in day 3 a session starts exactly on each hour
+    # boundary of a divided day
     records = (hourly(500, "2026-11-01", 9)
-               + [rec("on-midnight", "2026-11-02T00:00:00Z", calls=[call(GET, {"title": "m"})])]
-               + hourly(500, "2026-11-02", 9)
+               + hourly(500, "2026-11-02", 0)
                + [rec(f"on-hour-{h}", f"2026-11-03T{h:02d}:00:00Z", calls=[call(GET, {"title": "h"})])
                   for h in range(24)]
                + [r for h in (3, 4, 5) for r in hourly(500, "2026-11-03", h)])
@@ -1447,7 +1450,7 @@ def test_the_tool_call_bound_acts_on_per_session_queries_and_a_page_always_advan
     out, _ = run(records, "tools", since=_day(0), until=_day(4), patch={"MAX_TOOL_CALLS_PER_RUN": "47"})
     assert out["next_since"] == _day(1)
     out, _ = run(records, "tools", since=_day(0), until=_day(4), patch={"MAX_TOOL_CALLS_PER_RUN": "0"})
-    assert out["next_since"].startswith(_day(0) + "T")  # progress: the first hour with calls is whole
+    assert out["next_since"] == _day(1)  # progress: the day's one hour with calls is taken whole
     out, _ = run(records, "tools", since=_day(0), until=_day(4))
     assert "next_since" not in out  # the real bound does not split a small window
     pages, _ = pages_of(records, "tools", since=_day(0), until=_day(4), patch={"MAX_TOOL_CALLS_PER_RUN": "30"})
@@ -1456,7 +1459,7 @@ def test_the_tool_call_bound_acts_on_per_session_queries_and_a_page_always_advan
     assert tj.join_pages("tools", pages)["rows"] == whole["rows"]
 
 
-def test_a_first_day_over_the_bound_is_narrowed_to_hours_and_the_pages_equal_one_pass() -> None:
+def test_a_first_day_over_the_bound_is_divided_by_its_hours_and_the_pages_equal_one_pass() -> None:
     # 30 sessions a day, one an hour from 08:00, 2 calls each (60 a day) against a bound of 25
     records = [rec(f"h{d}-{i}", f"{_day(d)}T{8 + i:02d}:00:00Z",
                    calls=[call("Skill", {"skill": "k"}, day=_day(d)), call("Skill", {"skill": "j"}, day=_day(d))])
@@ -1465,16 +1468,16 @@ def test_a_first_day_over_the_bound_is_narrowed_to_hours_and_the_pages_equal_one
     for query in ("skills", "tools"):
         pages, fakes = pages_of(records, query, since=_day(0), until=_day(2), patch=patch)
         assert pages[0]["next_since"] == f"{_day(0)}T20:00:00Z", query  # 12 hours of 2 calls, 24 <= 25
-        assert fakes[0].calls[0][:2] == (_day(0), _day(1))  # the day is read, found over, and read by the hour
-        assert fakes[0].calls[1][:2] == (_day(0), f"{_day(0)}T01:00:00Z")
+        assert [c[:2] for c in fakes[0].calls] == [(_day(0), _day(1))]  # the day is read once, divided in hand
+        assert fakes[1].calls[0][:2] == (f"{_day(0)}T20:00:00Z", _day(1))  # the rest of the day, once
         assert all(re.fullmatch(r"\d{4}-\d\d-\d\d(T\d\d:00:00Z)?", p["next_since"]) for p in pages[:-1])
         whole, _ = run(records, query, since=_day(0), until=_day(2))
         assert tj.join_pages(query, pages)["rows"] == tj.join_pages(query, [whole])["rows"], query
     # an hour over the bound is taken whole: the page always makes progress
     heavy = [rec("big", f"{_day(0)}T09:00:00Z", calls=[call("Skill", {"skill": "k"}, day=_day(0)) for _ in range(40)])]
     pages, _ = pages_of(heavy, "skills", since=_day(0), until=_day(1), patch=patch)
-    assert [p.get("next_since") for p in pages] == [f"{_day(0)}T09:00:00Z", None]  # the empty hours, then the hour
-    assert by(pages[1]["rows"], "kind", "name")[("skill", "k")]["count"] == 40  # and the empty hours after it
+    assert [p.get("next_since") for p in pages] == [None]  # the day's one hour, whole, on one page
+    assert by(pages[0]["rows"], "kind", "name")[("skill", "k")]["count"] == 40
 
 
 def test_a_row_with_a_key_the_page_already_holds_adds_no_bytes_to_the_running_estimate() -> None:
@@ -1610,3 +1613,58 @@ def test_joined_pages_of_a_keyed_query_equal_one_pass_for_every_keyed_query() ->
         assert len(a) == len(b)
         for x, y in zip(a, b, strict=True):
             assert x == pytest.approx(y), query
+
+
+# ---- a day that does not fit is divided by the hours of the records already read ----------
+
+
+def calls_cap(n: int) -> dict[str, str]:
+    """A patch that sets the page's tool-call bound to *n*."""
+    return {"MAX_TOOL_CALLS_PER_RUN": str(n)}
+
+
+def _hourly(days: int, hours: tuple[int, ...] = (9, 10, 11, 12), per: int = 10) -> list[dict]:
+    """A session at each of ``hours`` every day, each with ``per`` Skill calls."""
+    return [rec(f"h{d}-{h}", f"{_day(d)}T{h:02d}:00:00Z",
+                calls=[call("Skill", {"skill": "k"}, f"{h:02d}:01:00", day=_day(d)) for _ in range(per)])
+            for d in range(days) for h in hours]
+
+
+def test_a_page_that_fills_inside_a_day_ends_at_an_hour_of_the_records_it_read_with_no_hour_reads() -> None:
+    records = _hourly(3)  # 40 calls a day, 10 an hour from 09:00 to 12:00
+    out, fake = run(records, "skills", since=_day(0), until=_day(3), patch=calls_cap(60))
+    assert out["next_since"] == f"{_day(1)}T11:00:00Z"  # day 0 and two hours of day 1 are 60 calls
+    assert [c[:2] for c in fake.calls] == [(_day(0), _day(1)), (_day(1), _day(2))]  # no hour reads
+    out, fake = run(records, "skills", since=out["next_since"], until=_day(3), patch=calls_cap(60))
+    assert [c[:2] for c in fake.calls][0] == (f"{_day(1)}T11:00:00Z", _day(2))  # the rest of the day, once
+    pages, _ = pages_of(records, "skills", since=_day(0), until=_day(3), patch=calls_cap(60))
+    whole, _ = run(records, "skills", since=_day(0), until=_day(3))
+    assert tj.join_pages("skills", pages)["rows"] == tj.join_pages("skills", [whole])["rows"]
+
+
+def test_a_day_whose_calls_alone_pass_the_bound_is_divided_by_the_hours_in_hand() -> None:
+    records = _hourly(1, per=20)  # 80 calls in one day, 20 an hour
+    for query in ("skills", "tools", "violations"):
+        pages, fakes = pages_of(records, query, since=_day(0), until=_day(1), patch=calls_cap(50))
+        assert [p.get("next_since") for p in pages] == [f"{_day(0)}T11:00:00Z", None], query
+        assert [len(f.calls) for f in fakes] == [1, 1], query  # each page reads its window once
+        whole, _ = run(records, query, since=_day(0), until=_day(1))
+        assert tj.join_pages(query, pages)["rows"] == tj.join_pages(query, [whole])["rows"], query
+
+
+def test_an_hour_over_the_bound_on_its_own_is_taken_whole_so_a_page_advances() -> None:
+    records = _hourly(1, hours=(9, 10), per=30)
+    pages, fakes = pages_of(records, "skills", since=_day(0), until=_day(1), patch=calls_cap(20))
+    assert [p.get("next_since") for p in pages] == [f"{_day(0)}T10:00:00Z", None]
+    assert [len(f.calls) for f in fakes] == [1, 1]
+
+
+def test_a_start_the_script_cannot_place_is_never_divided_in_hand_and_each_session_counts_once() -> None:
+    # The verb takes any ISO offset; the script reads only UTC. Put in the wrong hour, the 12:00
+    # session would be admitted with 09:00 and read again by the page that starts at 10:00.
+    records = _hourly(1, per=20)
+    records[-1]["start"] = records[-1]["start"].replace("Z", "+00:00")
+    pages, fakes = pages_of(records, "skills", since=_day(0), until=_day(1), patch=calls_cap(50))
+    assert fakes[0].calls[1][:2] == (_day(0), f"{_day(0)}T01:00:00Z")  # the old hour reads, not the records in hand
+    whole, _ = run(records, "skills", since=_day(0), until=_day(1))
+    assert tj.join_pages("skills", pages)["rows"] == tj.join_pages("skills", [whole])["rows"]
