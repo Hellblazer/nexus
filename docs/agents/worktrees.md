@@ -127,6 +127,26 @@ things to avoid carefully; they are impossible.
    into a verdict any more, so read the `conclusion` of the check runs, not
    the board.
 
+   Treat the develop run as part of the push. Before stacking more work on a
+   develop sha, or cutting a release branch on it, read that sha's check-run
+   conclusions. A red there is a finding to diagnose before the next push, not
+   background: on 2026-09-14 (7.46.0) develop went red on a real bug (procps
+   truncates a piped `ps -o command=` to COLUMNS, so `watcher_alive` missed a
+   live watcher), two more pushes stacked on it for about three hours, and the
+   release PR failed on the same test, costing a fix, a rebase, a force-push
+   and a second PR CI cycle. Local suites run on macOS, whose `ps` does not
+   truncate, so only Linux CI could see it. When a red reproduces only on
+   Linux, reproduce the mechanism in a container (a `python:3.12` image has
+   procps) rather than guess. When the red looks environmental, read the
+   failed log; do not grep it. A grep tuned to the failure keeps the failure
+   and throws away the environment: on 2026-09-19 two fixture tests passed
+   locally and failed on the runner, and the runner's `git --version` (2.55.0
+   against 2.53.0 here) sat in the same log above the failure. Page the
+   section around the failure and look for version, config and runner lines
+   before forming a hypothesis. A cancelled or superseded run is never read as
+   red; read the run that replaced it. (Source: memory
+   `feedback_release_and_develop_ci` § check_develop_ci_after_push.)
+
 8. **Push unchanged**, in two steps, from INSIDE the worktree.
    Step 1: `scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range <sha>...`
    pushes nothing: it prints the files your commits touch, a 12-hex digest of that
@@ -154,10 +174,18 @@ things to avoid carefully; they are impossible.
    tuple space is unreachable.
 
    **Batch develop pushes** (Sam, 2026-10-21, nexus-cvtxu): develop CI runs
-   one run at a time, so each push waits for the one before it. Hold green
-   commits and push them together, alone only for a develop red or a peer
-   who is waiting. A push within 30 minutes of the worktree's last one
-   prints `PUSH_BATCH_HINT` on stderr.
+   two runs at a time, by run-number parity, each slot keeping only its
+   newest push waiting (`.github/workflows/ci.yml` concurrency, 2026-10-23),
+   so a third push waits. Hold green commits and push them together, alone
+   only for a develop red or a peer who is waiting. A push within 30 minutes
+   of the worktree's last one prints `PUSH_BATCH_HINT` on stderr. Push rate,
+   not run length, sets push-to-verdict: on 2026-10-21 runs were down to p50
+   15 minutes, yet the per-push measure was p50 25 / p90 41 over 62 pushes
+   because pushes queued behind each other, about 12 of them one session's.
+   A peer's "push freely, I rebase" clears file overlap only, never CI: on
+   2026-10-09, under the old cancel-in-progress rule, two sessions agreed that
+   and cancelled three of each other's develop runs in one evening. (Source:
+   memory `feedback_release_and_develop_ci` § batch_develop_pushes.)
 
 9. **Whoever pushes to `develop` fast-forwards the primary in the same
    breath.** `cd` to the primary and `git merge --ff-only origin/develop`.

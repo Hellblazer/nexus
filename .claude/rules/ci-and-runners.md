@@ -17,6 +17,20 @@ Project policy, cited by name from the workflows. Full text and origin: [ci-cost
 - **Full matrix breadth only at merge boundaries.** PRs run the full matrix; interior pushes run the minimal representative.
 - **Tag cadence is a cost decision.** Batch related work into one cut.
 
+## GitHub Actions traps
+
+Each was earned by one burn. Source: memory `feedback_release_and_develop_ci` § release_and_ci_mechanics.
+
+- **`waiting` is a deployment-environment approval, a person's click, never runner backlog** (v0.1.59 sat for hours, 2026-07-31). A watch that emits only on job conclusions is silent on it, so a watch also emits on `waiting`, `queued` and `action_required`; a gate whose cost is a click carries a notification or is not built.
+- **An environment does three things:** secret scoping, a ref policy, required reviewers. To drop the approval, remove the reviewers rule alone and keep the branch policy.
+- **Approve a pending deployment without the UI:** write `{"environment_ids":[<id>],"state":"approved","comment":"<why>"}` to a file and run `gh api --method POST repos/Hellblazer/nexus/actions/runs/<run-id>/pending_deployments --input <file>`. This is an environment approval, not a fork-PR run approval (that click stays Sam's, below).
+- **A required check must run and report `skipped`.** Never put a workflow-level `paths:` filter on a workflow that carries a required check: it never reports and wedges every PR. Gate the expensive job with a job-level `if:` on a SHA-pinned detector, and make the detector a required check too; a failed detector that skips the job is fail-open. Admin direct pushes bypass required checks, so the gate has to hold without them.
+- **Never rename a required job.** The release preflight's `ci-evidence-contexts` leg fails on drift from branch protection.
+- **`on.schedule` fires only from the default branch.** A scheduled workflow authored on develop never runs, and one retired on develop keeps firing from main (2026-07-31: the watchdog written to catch silent red gates was itself inert). After any schedule change, diff the workflow file against `origin/main`.
+- **Read a red gate's own header before patching its symptom.**
+- **`gh pr merge --auto` is never used.** It fires when the required checks pass, including while a non-required check is red, and squashes only the tip at that moment, orphaning later pushes (three times, 2026-05 to 2026-06). Release PRs merge by hand with `--merge` after CI is green.
+- **Read completion from the run's or the commit's check-run conclusion.** The jobs API and `statusCheckRollup` can show a job in progress forever on a completed run, and a wait on them never fires (7.6.0, 2026-08-11). One read, not a loop (`docs/agents/worktrees.md` rule 7).
+
 ## Self-hosted runners and fork PRs
 
 Full text (runner inventory, lab pool, hellmini, win-release): [self-hosted-runners](../../docs/agents/self-hosted-runners.md).

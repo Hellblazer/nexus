@@ -134,6 +134,17 @@ the preflight; Step 0 above runs it by hand.
 Do not let this file grow into a second battery. Admission requires: genuinely
 release-blocking and deterministic (no service, no sandbox HOME).
 
+**When this release changes the cut or release machinery itself** (`release.yml`,
+the cut and floor scripts, the battery), rehearse the whole flow end to end in
+isolation before the real run: a fake target (bare origin, fork, container) with
+the real scripts and CI's real checkout shape (depth-1, explicit tag fetches,
+event payloads, `GITHUB_ACTIONS` set), with the source's uncommitted work
+committed into the sandbox so fixes are rehearsed before they land. A rehearsal
+that passed on a full clone has not rehearsed CI. When you find the gap, build
+the rehearsal now; do not file it (Sam, 2026-08-30, after the RDR-197 cut
+refused three times). Source: memory `feedback_release_and_develop_ci`
+§ release_and_ci_mechanics.
+
 ### 1. Run unit + integration suite
 
 ```bash
@@ -303,6 +314,14 @@ Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 - `CHANGELOG.md` (root): move `## [Unreleased]` content into a new `## [X.Y.Z] - YYYY-MM-DD` section. Leave a fresh empty `## [Unreleased]` at the top.
 - `conexus/CHANGELOG.md` (plugin changelog): always update, even if no plugin changes (note: "Plugin version aligned with conexus X.Y.Z. No plugin-side changes." is acceptable).
 
+**Resolving a `CHANGELOG.md` or `docs/wire-contract-pending.md` conflict (Step 7's merge of main, Step 11b, a landing's rebase): never keep both sides.** When one side EDITED an existing bullet, the conflict block holds the old and the new version of it, and concatenation ships both. On 2026-10-01 three landings resolved this way left develop with one nexus-z0o2p.24 bullet three times in two variants; on 2026-10-30 a scripted keep-both resolver across four rebases left six superseded bullets on develop's Unreleased section, once three generations of one bullet. Print each side's lines with a same-as marker (the leading `- **title**` or the cited sha), keep ONE copy of an entry present on both sides (the edited one), then check the result by bullet OPENING, because a line-level `uniq -d` passes on a rewritten bullet:
+
+```bash
+awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f && /^- \*\*/{k=substr($0,1,70); if (seen[k]++) {print "DUPLICATE OPENING: " k; bad=1}; n++} END{print n+0 " bullets examined"; exit bad}' CHANGELOG.md
+```
+
+When a pair shares an opening, keep the newest version (the one carrying the latest round's wording). `0 bullets examined` is a pass over nothing, not a clean Unreleased. Source: memory `feedback_release_and_develop_ci` § changelog_keep_both_duplicates.
+
 ### 4b. Move this release's wire-ledger entries to Shipped (IN the release commit)
 
 Every `docs/wire-contract-pending.md` `## Unshipped` entry whose commit this
@@ -402,6 +421,36 @@ engine-service-v0.1.154 was still building. The suite's session-start
 preflight now refuses such a run in seconds, but a refused CI run is still a
 wasted round: check first.
 
+**A paired release whose engine range carries a data-effecting changeset needs
+its relay attestation in THIS branch's tree.** Run
+`uv run python scripts/list_data_effects.py <prev-engine-tag> <engine-tag> --record-relay-attestation`
+(it writes `docs/data-effect-relay/<engine-tag>.json`) and commit the file on
+the release branch, in the release commit, before the client tag. `release.yml`
+and its `workflow_dispatch` retry both check out the tagged tree, a tag is
+immutable, so a file landed on develop or after the tag can never satisfy the
+check for that tag. On 2026-10-21 v7.83.0 was tagged with the attestation only
+on develop: `--paired-deploy-auto` refused ("no relay attestation"), PyPI got
+nothing, the fix was a whole new release (7.83.1, PR #1618), and main's
+marketplace pinned an unpublished v7.83.0 in between. v7.97.0 (2026-11-07)
+refused the same way. The battery does not run this check; only the release
+workflow does. So before handing over the PR, in the release worktree, re-run
+Step 0's `--paired-deploy engine-service-vX.Y.Z` form (it runs the same relay
+check; so does the workflow's `--paired-deploy-auto` whenever the cloud is
+still below the floor).
+
+**The release tree carries no engine source past the pinned tag.** The floor
+gate's source-ancestry arm refuses a tree whose `service/src/main` differs from
+the pinned engine tag. A release branch based on develop can carry such source,
+so before stacking beads on it run
+`git diff --stat engine-service-vX.Y.Z HEAD -- service/src/main`: anything
+non-empty waits until after the client tag. (7.45.0, 2026-09-14: two beads
+stacked on the release tree were refused by the early preflight and pulled.) A
+patch release with no new code is based on main, not develop. The same arm runs
+in the post-tag bare verify (Steps 0 and 12), and a develop checkout after the
+release has engine source past the pin: run the post-tag verifies from a
+worktree at the client tag. A client that ships with engine source its pinned
+engine lacks has features its engine does not (the 7.1.0/v0.1.62 inversion).
+
 Per the marketplace-pinned-source playbook (also used by `Hellblazer/palinex`), release commits go through a PR. CI gates the bump before it lands on main. No more direct-to-main exception.
 
 ```bash
@@ -450,9 +499,11 @@ gh pr create --base main --title "release: conexus X.Y.Z" --body "<release notes
 Wait for CI green, then merge:
 
 ```bash
-gh pr merge <N> --merge   # NOT --squash — preserves the chore(release) commit verbatim
+gh pr merge <N> --merge   # NOT --squash — preserves the chore(release) commit verbatim; NEVER --auto (see below)
 git checkout main && git pull
 ```
+
+Never `gh pr merge --auto` on a release PR: it fires when the required checks pass, including while a non-required check is red, and squashes only the tip at that moment, orphaning later pushes (three times, 2026-05 to 2026-06). Merge by hand, after CI is green.
 
 Why merge-not-squash: tag-push (Step 9) must reference the release commit by SHA. Squash rewrites the SHA; merge preserves it. The optional `source.sha` field in marketplace.json (if you added it pre-tag) would point at the original branch SHA, not the squashed one.
 
@@ -537,12 +588,28 @@ Do NOT run `uv publish` or `twine upload` manually: the Release workflow handles
 gh api repos/Hellblazer/nexus/commits/<merge-sha>/check-runs --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'   # read once; re-read later, never `gh run watch` or a polling loop (AGENTS.md worktree rule 7)
 ```
 
+Read completion from the check-run `conclusion` (or the run's own status). The jobs API and `statusCheckRollup` can show a job in progress forever on a completed run, and a wait on them never fires (7.6.0, 2026-08-11).
+
 One job must complete: `Build and publish to PyPI`. (2026-07-06 CI-cost
 pass, PR #1375: the tag-time pytest matrix was removed — the tag points at a
 main merge commit whose identical tree just passed the release PR's required
 checks, so the re-run was the same tree's fourth test pass and made publish
 hostage to the nexus-9eaz GHA-flake family. The publish job still verifies
 tag == pyproject version before building.)
+
+**A burned tag means the local battery has a shape gap.** Do not move the tag
+yourself (`docs/contributing.md` § Break-glass: a failure in the pipeline retries
+through `workflow_dispatch`; a failure in the tagged tree is fixed by the next
+version, as 7.83.1 was; re-pointing a tag is an admin decision, as the
+re-point of v7.97.0 on 2026-11-06 was, after its run refused for the missing
+attestation and published nothing). Before cutting that next version, reproduce
+the failed job's exact commands locally, fix everything that shape surfaces, not
+only the visible line, then cut once. Each cut that fixes only the visible line hits the next
+step of the same job: v0.1.101, v0.1.102 and v0.1.103 burned in one afternoon on
+three build-only defects of one class ("It's ALWAYS just one more thing", Sam,
+2026-09-05). Then build the shape into a rehearsal leg (nexus-xihsm) rather than
+filing it. Source: memory `feedback_release_and_develop_ci`
+§ release_and_ci_mechanics.
 
 ### 11. Verify release landed
 
@@ -554,12 +621,34 @@ curl -s "https://pypi.org/pypi/conexus/json" | \
 
 Both must report `vX.Y.Z` / `X.Y.Z`. **Do not declare done before this check passes.** PyPI publish can be skipped if the Release workflow's pytest fails; the tag alone does not guarantee publication.
 
+The aggregate JSON above lags the simple index (7.48.0 and 7.49.0 both): a still-old `info.version` is not a pass, and not yet a failure. Re-read after a few minutes; once `https://pypi.org/simple/conexus/` serves the wheel, rerun any check that read the aggregate (`tests/e2e/fresh-install-mvv.sh --published X.Y.Z` is the usual candidate) rather than treating the first red as a publish failure.
+
 ### 11b. Back-merge main into develop (MANDATORY — ends the stale-develop class)
 
 ```bash
 git checkout develop && git pull
-git merge origin/main --no-edit    # trivially clean right after a release:
-                                   # the release branch just CONTAINED develop
+git merge origin/main --no-edit    # conflict-free right after a release (the release
+                                   # branch just CONTAINED develop), but clean is
+                                   # NOT correct: check CHANGELOG.md below first
+```
+
+**Check the CHANGELOG section before the push** (7.87.0, 2026-10-26: git
+auto-merged `CHANGELOG.md` with no conflict, but the release commit had inserted
+`## [X.Y.Z]` right under `## [Unreleased]`, so every entry develop added after
+the cut landed under the release heading; the release section then claimed code
+the tag does not carry; fixed in ed04993f2 after a peer caught it). Diff develop's
+`## [X.Y.Z]` section against the tag's:
+
+```bash
+diff <(git show vX.Y.Z:CHANGELOG.md | sed -n '/^## \[X.Y.Z\]/,/^## \[[0-9]/p') \
+     <(sed -n '/^## \[X.Y.Z\]/,/^## \[[0-9]/p' CHANGELOG.md)   # must be empty
+```
+
+Move every extra entry (with its `###` heading) back under `## [Unreleased]`
+in this same merge commit. The fast lane below hand-resolves this merge, but its
+CHANGELOG order carries the same risk: run this check there too.
+
+```bash
 scripts/git-push-develop.sh --allowed-paths-from-range HEAD
 # step 1 prints the files and a digest and pushes nothing; read the list
 # (it should be the release's bump files and main's release commits), then:
@@ -704,6 +793,49 @@ stream-json events and `gate.log`).
 
 ### 12. Reinstall local tool and verify
 
+**After a release the sessions hold, then move together** (Sam, 2026-10-22: he
+wants every session on one version). While other sessions are live, nobody runs
+`nx upgrade`, `scripts/reinstall-tool.sh` or `claude plugin update`, and no
+session restarts itself, this one included: mixed nx and plugin versions across
+sessions hit hook and verb skew, and a floor-bumped client spawned before the
+cloud engine is deployed gets the managed service refused (GH #1402). One run
+does all of it, so hand Sam that command instead of reinstalling only this
+session's nx:
+
+```bash
+~/.local/bin/claude-restart-sessions --ask-ready      # asks every idle session whether it can restart; read the replies with --status
+~/.local/bin/claude-restart-sessions --nx X.Y.Z --dry-run   # read it, then the same line without --dry-run
+```
+
+`~/.local/bin/claude-restart-sessions` is a symlink to `scripts/claude-restart-sessions`;
+its docstring is the reference for every mode (`--nx`, `--fresh`, `--ask-ready`,
+`--status`, `--revive`). With `--nx` it runs the engine gate (re-reading `/version`
+every 30 s up to `--engine-wait`, default 1800 s, so a paired release's redeploy
+can land; `--skip-engine-gate` on a local-mode box), then `uv cache clean conexus`
+plus `reinstall-tool.sh conexus==X.Y.Z`, then the marketplace and plugin update,
+and restarts nothing unless every step holds. The pin and the cache clean exist
+because a bare `conexus` spec resolved from uv's cached index and built two
+generations of 7.69.0 minutes after 7.70.0 published (2026-10-04): read
+`nx --version`, never the "built generation" line. Before handing Sam the
+command:
+
+- Read the dry run's `-n` values against ListAgents. A restart keeps each
+  session's CURRENT name (Sam, 2026-10-31); before the script dropped the launch
+  `-n`, every `/rename`d session would have come back as `nexus_7ff`.
+- A session pinned at status `shell` is not restarted (the script waits for idle
+  and skips it after `--wait`, 600 s). Live background shells keep that status
+  even when the prompt is idle, finished background agents' shells included
+  (footer "N shells"): stop stale agents' shells (TaskStop) and check every
+  pane footer for "shells". `--force` restarts such a session anyway.
+- Afterwards read `~/.claude/restart-sessions.log` for `N of N resumed`, and
+  `nx --version` must print X.Y.Z. After a reboot the restart mode finds nothing
+  (it needs live pids); `claude-restart-sessions --revive [--dry-run]` resumes
+  the sessions whose transcripts were written in the 30 minutes before boot.
+
+Source: memory `feedback_release_and_develop_ci` § coordinated_upgrade_restart.
+The rest of this step is what that run does to this box, and the manual form
+for a box with no live sessions.
+
 **CLOUD-MODE BOX GATE (nexus-1emxn (c)):** on a cloud-mode box, run the
 post-tag floor verify FIRST (the bare form):
 
@@ -712,7 +844,7 @@ uv run python scripts/check_engine_release_floor.py
 ```
 
 Exit codes, precisely:
-- **0** — cloud current; reinstall now.
+- **0** — cloud current; go ahead with the run above (or the reinstall below, with no other session live).
 - **1** — cloud still BEHIND the new floor: new spawns after this
   reinstall would REFUSE the managed service (the GH #1402 class, on your
   own box). Wait for the deploy to land, re-verify, then reinstall.
@@ -721,6 +853,13 @@ Exit codes, precisely:
 
 Local-mode boxes skip this gate — their engine converges from
 `PINNED_SERVICE_TAG` at reinstall.
+
+Run this verify from a worktree at the client tag, not a develop checkout: the
+source-ancestry arm compares `service/src/main` with the pinned engine tag, and
+develop has engine source past it.
+
+The manual form, for a box with no other live session (the coordinated run does
+exactly this install):
 
 ```bash
 scripts/reinstall-tool.sh    # preserves [local] and other extras; the PDF stack (mineru, torch) is the on-demand [pdf] extra: NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh keeps it
@@ -867,8 +1006,9 @@ deploy paragraph does not apply, because the engine pin is unchanged), Step 10
 (release.yml publishes the identical nx code under the new version), Step 11, and
 Step 11b's back-merge of `main` into `develop`.
 
-The back-merge is not trivially clean in this lane (Step 11b's remark assumes the
-release branch contained develop; this one did not). Expect conflicts in both
+The back-merge is not conflict-free in this lane (Step 11b's remark assumes the
+release branch contained develop; this one did not), and Step 11b's CHANGELOG
+section diff against the tag applies here too. Expect conflicts in both
 changelogs and the ledger, and resolve them by hand; there is no helper script.
 On 7.87.1 only `CHANGELOG.md` conflicted: the ledger merged cleanly to develop's
 side, because each cherry-pick's ledger conflict was resolved to the tag's side, so
@@ -917,12 +1057,13 @@ push its tags once their gates are green (engine-release skill Step 4 states the
 
 ## Common Mistakes
 
+- **Freehanding a version surface or a tag from memory of AGENTS.md instead of invoking this skill.** It skips the pre-push and post-publish verification that catches a failed publish (v4.32.13: the tag's workflow failed, PyPI was skipped, and the release was declared done anyway). Invoke `release` (or `engine-release`) before touching either.
 - **Bumping only `pyproject.toml` and missing the four plugin manifests.** CI parity check catches this late. Run the Step 8 pre-push check.
 - **Skipping the integration suite.** Unit-only is what CI runs; integration is your last gate against keyed-API regressions before tag-push.
 - **Running the full unit suite CONCURRENTLY with the E2E gates.** (2026-08-17, 7.9.0 battery.) The E2E gates parallelize safely among THEMSELVES, but their teardown phases (`nx daemon service stop --with-pg`, gate cleanup, the engine-substrate orphan sweep) share a machine-wide blast radius with the unit suite's self-provisioned engine substrates — the suite ran clean to ~75% then block-failed the moment a sandbox teardown fired. Sequence: E2E gates in parallel, the unit suite SERIAL (before or after). A block-shaped mass failure under concurrency is contention-shaped, but the quiet re-run of the failed set is mandatory evidence either way.
 - **Using `gh release create` after `git push origin vX.Y.Z`.** Duplicate release. The Release workflow already creates one.
 - **Forgetting `uv sync`.** `uv.lock` not updated; CI fails or local install resolves differently.
-- **Forgetting `scripts/reinstall-tool.sh` after tag-push.** Local `nx` stays on old version; the post-merge "verify locally" step lies.
+- **Forgetting the coordinated install after tag-push (Step 12).** Local `nx` stays on the old version; the post-merge "verify locally" step lies. The opposite slip is also a mistake: running `scripts/reinstall-tool.sh` or `nx upgrade` in one session while others are live.
 - **Pushing the tag before the version-bump commit.** Tag points at the wrong commit; the Release workflow's version-match step fails (`tag != pyproject.toml version`).
 - **Running `uv publish` or `twine upload` manually.** The Release workflow handles PyPI via OIDC; manual publish either duplicates or fights the workflow.
 - **Declaring "release done" after `git push origin vX.Y.Z`.** Step 11 (PyPI + GitHub release verification) is what closes the loop. The tag-push only TRIGGERS the workflow; if Py3.13 flakes, publish is skipped.
@@ -932,7 +1073,5 @@ push its tags once their gates are green (engine-release skill Step 4 states the
 
 - `.claude/rules/releases-and-engine.md` § Cutting a release (a pointer to this file; this file is canonical for the procedure)
 - `docs/contributing.md#release-process` (long form: the Break-glass subsection for retry / yank / revert / tag-retraction procedures, and the Schema/data-migration releases subsection Step 6d above draws its rationale from)
-- `feedback_invoke_release_skill.md` (memory entry: invoke this skill, do not freehand)
-- `feedback_post_release_reinstall.md` (memory entry: reinstall after tag)
-- `feedback_release_discipline.md` (memory entry: full suite before tag, not after)
-- `feedback_version_bump_manifests.md` (memory entry: all four manifests, CI enforces parity)
+- `feedback_release_and_develop_ci` (memory entry, merged 2026-10-29: the release and CI mechanics, engine-cut, develop-CI and restart rules cited above, plus the parts that stay Sam's; it replaces the four older `feedback_*` entries this list once named, none of which exist any more)
+- `.claude/rules/ci-and-runners.md` § GitHub Actions traps and `docs/agents/worktrees.md` rules 7 and 8 (develop CI reads and push batching)
