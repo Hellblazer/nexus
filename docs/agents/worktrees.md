@@ -193,6 +193,13 @@ things to avoid carefully; they are impossible.
    unproven while other remotes' refs exist: check each cited sha with
    `git branch -r --contains <sha>`, limited to `origin/` lines.
 
+   **A rebase that conflicts in `CHANGELOG.md` or
+   `docs/wire-contract-pending.md` never keeps both sides**: an edited bullet
+   appears in both, and concatenation ships both (three landings on
+   2026-10-01, four rebases on 2026-10-30). Keep one copy, then check by
+   bullet opening and ledger entry with the commands in the release skill's
+   Step 4 (`.claude/skills/release/SKILL.md`).
+
    **Never cite another repository's commit sha in a doc.** The same test
    requires every sha-shaped token in `docs/` to resolve on develop, so a
    foreign sha (RDR-236, 2026-10-26: the conexus head in an RDR finding) turns
