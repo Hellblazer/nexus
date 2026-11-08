@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`nx run` and the MCP tool `procedure_run` run a library procedure** (RDR-240 Technical Design 2 and 3, nexus-qo7ie.31). Both call one function, `nexus.lua_runtime.runner.run_procedure(name, args)`, which calls RDR-242's `run_script` and passes its result and its errors through unchanged; until the runtime that provides `run_script` ships in the same build, a call answers `unavailable: ...` and runs nothing. `nx run NAME [--args-file F | -]` prints the JSON result; an error prints `<kind>: <detail>` and exits 1; `nx run --list` lists the library's procedures with their header summary. `procedure_run(name, args)` returns the result as JSON text, or the error as `<kind>: <detail>` with `isError` set; its description lists the procedures that ship with `nx`. The library has two roots (`nexus.lua_runtime.library`): the packaged `nexus/procedures/`, and `<repo>/.nexus/procedures/`. The repo root is OFF unless the environment variable `NX_PROCEDURES_REPO_ROOT` is exactly `1` (RDR-242 Open Question S5, answered on its safe side); a name found only there is refused with the reason `repo_root_off`. A name matches `[a-z][a-z0-9_]{0,63}`, a file's resolved path must lie inside its resolved root, and a repo procedure named like a shipped one is refused. `procedure_run` prompts for approval until Sam decides whether to auto-approve it. The MCP server registers 47 tools, 45 for agents. Two lints pin the shape: the front doors call the runner and nothing else, and every shipped procedure parses, grants only version 1 verbs and passes the static check; a wheel test pins the procedures and the vocabulary table as package data.
+
 ## [7.98.0] - 2026-11-07
 
 Pairs with engine-service-v0.1.182 (REQUIRED_ENGINE_VERSION 0.1.181 -> 0.1.182). The engine carries vectors-055 (the vector sensitivity exclude filter) and the rerank exclusion of sensitive text; every wire-ledger entry this release ships is additive, so the cloud deploy of v0.1.182 is safe for older clients and may go ahead of this release.
