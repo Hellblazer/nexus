@@ -21,9 +21,10 @@
 -- with since = next_since and the returned until, and join the pages with
 -- nexus.lua_runtime.transcripts_join.join_pages (it refuses a page whose since is not the
 -- previous next_since). A page adds whole units (days, hours after a split) while its rows
--- stay under PAGE_BYTES, its verb reads under MAX_UNITS_PER_RUN (every query: a year-long
--- sparse window pages; each read decodes every transcript of its window again, so a tools unit,
--- which makes two reads, counts two), the tool calls it reads under MAX_TOOL_CALLS_PER_RUN
+-- stay under PAGE_BYTES, starts no unit once its verb reads reach MAX_UNITS_PER_RUN (every
+-- query: a year-long sparse window pages; each read decodes every transcript of its window
+-- again, so a tools unit, which makes two reads, counts two, and a page can end one read over),
+-- the tool calls it reads under MAX_TOOL_CALLS_PER_RUN
 -- (every query: the Lua instructions a page takes follow the commands it scans, about 1,300 a
 -- call at worst, so 15,000 calls stay under 20 million of the runtime's 50 million) and, for
 -- keyed queries, its sessions under MAX_SESSIONS_PER_RUN. A day whose verb result is too
