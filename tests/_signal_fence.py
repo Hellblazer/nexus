@@ -19,7 +19,8 @@ its target is classified:
   stale-daemon reaper and stale-run drain, the stale-substrate sweep): they signal an earlier, dead session's
   leftovers on purpose, after their own identity checks;
 * **foreign**: anything else, including ``kill(-1, ...)`` and a group no member of which is ours;
-* a probe (signal 0) and a target whose ``/proc/<pid>/stat`` is gone (it exited) are not classified; a target whose
+* a probe (signal 0), a target whose ``/proc/<pid>/stat`` is gone (it exited) and a zombie (state ``Z``: exited
+  and not yet reaped, so a signal delivers nothing) are not classified; a target whose
   environment cannot be read (another user's process) is judged by its ancestry and argv alone. Under
   ``hidepid=2`` another user's process has no readable ``stat`` and reads as unclassified.
 
@@ -28,8 +29,8 @@ changes nothing here. Each foreign event names the test (or the session phase), 
 target and its program name (argv[0]'s basename up to its first space: never the separate arguments, though a
 process that rewrote its title can show a title word); the summary groups repeats.
 
-``fail`` mode (Sam's choice 2026-11-07, halcyon/xzorj-alerting; the default once develop CI with the two rules reads
-zero foreign across every shard, ``report`` until then): a session that saw any foreign signal exits failed (a status already nonzero is kept) and its summary says why (grep ``signal fence (``). The first CI
+``fail`` mode (the default; Sam's choice 2026-11-07, halcyon/xzorj-alerting, made the default once develop CI at
+ebc9d82f0 (6092 signals across the six shards, 0 foreign, 6 sanctioned) read zero): a session that saw any foreign signal exits failed (a status already nonzero is kept) and its summary says why (grep ``signal fence (``). The first CI
 measurement before the rules saw 18 foreign signals of 6162, all false positives: detached test runs and their
 children that left the process tree with a scrubbed environment, every one naming the test's box in its argv or
 environment (rule A claims all 18 on the diagnostic run; rule B covers a reparented member of a group we lead, which
@@ -60,9 +61,9 @@ import pytest
 TOKEN_ENV = "NX_TEST_SIGNAL_FENCE_TOKEN"
 ROOT_ENV = "NX_TEST_SIGNAL_FENCE_ROOT"
 MODE_ENV = "NX_TEST_SIGNAL_FENCE"
-#: Sam chose fail (2026-11-07, halcyon/xzorj-alerting); it becomes the default once develop CI, with rules A and B,
-#: shows zero foreign signals across every shard (nexus-xzorj). Until then fail is opt-in.
-DEFAULT_MODE = "report"
+#: Sam chose fail (2026-11-07, halcyon/xzorj-alerting). Develop CI with rules A and B read zero foreign on every
+#: shard at ebc9d82f0 (6092 signals across the six shards, 0 foreign, 6 sanctioned), so fail is the default (nexus-xzorj).
+DEFAULT_MODE = "fail"
 _WORKEROUTPUT_KEY = "nx_signal_fence"
 _MAX_LISTED = 20
 
@@ -94,9 +95,8 @@ _counts = {"signals": 0, "own": 0, "foreign": 0, "unclassified": 0}
 
 
 def _env_mode() -> str:
-    """``NX_TEST_SIGNAL_FENCE``: ``report`` (the default until the suite-wide CI measurement with rules A and B reads
-    zero foreign; then :data:`DEFAULT_MODE` flips to ``fail``), ``fail`` or ``off``, case-insensitive; any other value
-    means the default. The signal itself is sent unchanged in every mode."""
+    """``NX_TEST_SIGNAL_FENCE``: ``fail`` (the default, :data:`DEFAULT_MODE`), ``report`` or ``off``,
+    case-insensitive; any other value means the default. The signal itself is sent unchanged in every mode."""
     value = os.environ.get(MODE_ENV, DEFAULT_MODE).strip().lower()
     return value if value in ("fail", "report", "off") else DEFAULT_MODE
 
@@ -161,6 +161,23 @@ def _stat(pid: int) -> tuple[int, int] | None:
         return int(fields[1]), int(fields[2])
     except (IndexError, ValueError):
         return None
+
+
+def _state(pid: int) -> str | None:
+    """The one-letter process state from ``/proc/<pid>/stat`` (``R``, ``S``, ``Z`` and so on), or ``None`` when gone."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes().decode("utf-8", "replace")
+    except OSError:
+        return None
+    fields = raw[raw.rfind(")") + 2:].split()
+    return fields[0] if fields else None
+
+
+#: States that cannot receive a signal: a zombie (exited, not yet reaped) and a dead task. A signal to one delivers
+#: nothing, so it is never counted (nexus-xzorj red fix: an orphaned zombie of a non-reaping namespace init read
+#: foreign on develop CI at 745ea0128). Judged by the state field, never by an empty command line, which a live
+#: process can have too.
+_UNSIGNALLABLE = frozenset({"Z", "X"})
 
 
 def _has_token(pid: int, token: str) -> bool:
@@ -251,6 +268,8 @@ def classify(kind: str, target: int, sig: int, *, root: int, token: str, basetem
     if kind == "kill" and target == -1:
         return "foreign", 0
     if kind == "kill" and target > 0:
+        if _state(target) in _UNSIGNALLABLE:
+            return "unclassified", target
         verdict = owned(target, root=root, token=token, basetemp=basetemp)
         if verdict is None:
             return "unclassified", target
@@ -260,10 +279,10 @@ def classify(kind: str, target: int, sig: int, *, root: int, token: str, basetem
                 verdict = True
         return ("own" if verdict else "foreign"), target
     pgid = os.getpgrp() if target == 0 else abs(target)
-    leader = owned(pgid, root=root, token=token, basetemp=basetemp)
+    leader = None if _state(pgid) in _UNSIGNALLABLE else owned(pgid, root=root, token=token, basetemp=basetemp)
     if leader is not None:
         return ("own" if leader else "foreign"), pgid
-    members = _group_members(pgid)
+    members = [m for m in _group_members(pgid) if _state(m) not in _UNSIGNALLABLE]
     if not members:
         return "unclassified", 0
     for m in members:

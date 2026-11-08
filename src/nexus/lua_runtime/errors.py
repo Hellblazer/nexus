@@ -10,9 +10,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 # ScriptError kinds. The worker's error frame carries the first three;
-# run_script raises "header" and "args" before any worker starts (RDR-240
-# Technical Design 1, nexus-mdbds.9).
-KINDS: tuple[str, ...] = ("static_check", "lua", "result", "header", "args")
+# run_script raises "header", "args" and "name" before any worker starts
+# (RDR-240 Technical Design 1; RDR-242 Technical Design 4, nexus-mdbds.9).
+# "name": the name breaks the name rule, resolves outside its root, is in
+# neither library root, a repo name shadows a shipped one, or names a
+# repo-root procedure while the repo root is off.
+KINDS: tuple[str, ...] = ("static_check", "lua", "result", "header", "args", "name")
 
 # ScriptLimitError limits: the inner limits (a limit frame), the parent's
 # kill timer (wall_time) and the OS limits (cpu_time, memory).
@@ -38,7 +41,8 @@ class ScriptError(ScriptRunError):
 
     ``static_check`` (a refusal naming its rule and line), ``lua`` (a Lua
     error with its message), ``result`` (a result the host's walk rejects),
-    ``header`` and ``args`` (refused by run_script before a worker starts).
+    ``header``, ``args`` and ``name`` (refused by run_script before a worker
+    starts).
     """
 
     def __init__(self, kind: str, detail: str, *, stats: Stats | None = None) -> None:

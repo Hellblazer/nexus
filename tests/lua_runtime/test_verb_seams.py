@@ -361,5 +361,29 @@ def test_errors_refuse_unknown_kinds_and_limits_and_carry_stats() -> None:
         errors.ScriptLimitError("weird", 1)
     e = errors.ScriptLimitError("memory", 64, stats={"peak_lua_bytes": 9})
     assert e.stats == {"peak_lua_bytes": 9}
-    assert set(errors.KINDS) == {"static_check", "lua", "result", "header", "args"}
+    assert set(errors.KINDS) == {
+        "static_check",
+        "lua",
+        "result",
+        "header",
+        "args",
+        "name",
+    }
+    assert errors.ScriptError("name", "no procedure x").kind == "name"
     assert "cpu_time" in errors.LIMITS
+
+
+@pytest.mark.parametrize("value", [2**63, -(2**63) - 1, 2**70])
+def test_number_refuses_an_int_lua_cannot_hold(value: int) -> None:
+    # json.loads yields such ints from valid JSON; lupa raises OverflowError on
+    # them, so they are refused here as bad_args (found in nexus-mdbds.9 review).
+    spec = VerbSpec("x.n", (ParamSpec("n", "number"),), _fn)
+    assert check_args(spec, [2**63 - 1]) == (2**63 - 1,)
+    with pytest.raises(VerbArgError, match="n is outside the 64-bit range"):
+        check_args(spec, [value])
+
+
+def test_string_refuses_what_utf8_cannot_encode() -> None:
+    # json.loads accepts a lone surrogate escape ("\ud800").
+    with pytest.raises(VerbArgError, match="title is not valid UTF-8"):
+        check_args(_GET, ["p", "\ud800"])
