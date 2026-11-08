@@ -229,6 +229,31 @@ def _harness(tmp_path, monkeypatch, *, pg_ports, engine_ports, engine_script, pg
     return h
 
 
+class _FakeTime:
+    """A clock that moves only when the wait sleeps, wired into ``_boot``'s wait so a test
+    of window arithmetic does not depend on how fast a loaded host schedules it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _fake_wait_time(monkeypatch: pytest.MonkeyPatch) -> _FakeTime:
+    fake = _FakeTime()
+    real = sub._wait_engine_ready
+
+    def _wait(*args, **kwargs):
+        return real(*args, **kwargs, clock=fake, sleep=fake.sleep)
+
+    monkeypatch.setattr(sub, "_wait_engine_ready", _wait)
+    return fake
+
+
 class _AliveProc:
     """A process that never exits."""
 
@@ -256,7 +281,8 @@ class TestEngineListenerIdentity:
     def test_a_foreign_listener_timeout_names_the_stall_and_keeps_the_log_tail(
         self, tmp_path, monkeypatch, foreign_listener,
     ) -> None:
-        monkeypatch.setattr(sub, "_ENGINE_STALL_S", 0.3)
+        fake = _fake_wait_time(monkeypatch)
+        monkeypatch.setattr(sub, "_ENGINE_STALL_S", 5.0)
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
         _harness(
             tmp_path, monkeypatch,
@@ -268,14 +294,18 @@ class TestEngineListenerIdentity:
             sub._boot()
         assert "stalled before any migration output" in str(err.value)
         assert "Tail of engine log" in str(err.value)
+        assert 5.0 <= fake.now < 6.0
 
     def test_a_migration_that_outlives_the_stall_window_in_total_still_binds(
         self, tmp_path, monkeypatch,
     ) -> None:
-        """Run 42436306115 through ``_boot``: the engine logs a changeset every poll for
-        longer than the stall window (0.5 s here, 60 s there), then binds. A fixed
-        deadline of that length gave up on it."""
+        """Run 42436306115 through ``_boot``: the engine logs a changeset on every poll
+        for 0.8 s of wait time, longer than the 0.5 s window (60 s / 180 s there), then
+        binds. A fixed deadline of that length gave up on it. The clock is the wait's own,
+        so a scheduler pause on a loaded host cannot lapse the window."""
+        fake = _fake_wait_time(monkeypatch)
         monkeypatch.setattr(sub, "_ENGINE_STALL_S", 0.5)
+        monkeypatch.setattr(sub, "_ENGINE_MIGRATING_STALL_S", 0.5)
         monkeypatch.setattr(sub, "_ENGINE_CEILING_S", 30.0)
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
         port = _reserve_port()
@@ -285,16 +315,17 @@ class TestEngineListenerIdentity:
             engine_ports=[port],
             engine_script=["advancing"],
         )
-        started = time.monotonic()
         state = sub._boot()
-        assert time.monotonic() - started > 0.5, "the boot ended inside the stall window, so it proved nothing"
+        assert fake.now > 0.5, "the boot ended inside the stall window, so it proved nothing"
         assert state["base_url"] == f"http://127.0.0.1:{port}"
         assert h.spawned_ports == [port]
 
     def test_a_migration_that_stops_advancing_fails_naming_the_changeset_and_the_tail(
         self, tmp_path, monkeypatch,
     ) -> None:
+        fake = _fake_wait_time(monkeypatch)
         monkeypatch.setattr(sub, "_ENGINE_STALL_S", 0.3)
+        monkeypatch.setattr(sub, "_ENGINE_MIGRATING_STALL_S", 0.3)
         monkeypatch.setattr(sub, "_ENGINE_CEILING_S", 30.0)
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
         _harness(
@@ -310,6 +341,7 @@ class TestEngineListenerIdentity:
         assert "stalled at db/changelog/cs-9.xml::cs-9::nexus-test" in text
         assert "Tail of engine log" in text
         assert "Running Changeset: db/changelog/cs-9.xml" in text
+        assert fake.now < 1.0
 
     def test_an_engine_that_lost_the_bind_race_is_retried_on_a_new_port(
         self, tmp_path, monkeypatch, foreign_listener,

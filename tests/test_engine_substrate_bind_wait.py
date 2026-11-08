@@ -29,6 +29,7 @@ import pytest
 from tests import _engine_substrate as sub
 
 _STALL_S = 60.0
+_MIGRATING_STALL_S = 180.0
 _CEILING_S = 300.0
 _RUNAWAY_S = 10_000.0
 
@@ -120,6 +121,7 @@ def _wait(clock: _Clock, proc: _Proc, port: int, log: _EngineLog, **kw) -> None:
     sub._wait_engine_ready(
         proc, port, str(log.path),
         stall_s=kw.get("stall_s", _STALL_S), ceiling_s=kw.get("ceiling_s", _CEILING_S),
+        migrating_stall_s=kw.get("migrating_stall_s", _MIGRATING_STALL_S),
         clock=clock, sleep=clock.sleep,
     )
 
@@ -178,6 +180,59 @@ class TestMigrationStillAdvancing:
         assert clock.now > 100.0
 
 
+class TestStallWindows:
+    def test_one_changeset_silent_past_the_short_window_is_not_a_stall_while_migrating(
+        self, clock, log, listener,
+    ) -> None:
+        """A single slow changeset under load: 120 s with no line, inside the migrating
+        window (180 s) though past the 60 s one."""
+        port = listener.getsockname()[1]
+        log.migration_start()
+        _schedule(clock, {
+            5.0: lambda: log.changeset("slow-1"),
+            125.0: lambda: log.changeset("slow-2"),
+            130.0: lambda: (log.migration_complete(), log.ready(port)),
+        })
+        _wait(clock, _Proc(clock), port, log)
+        assert clock.now > 120.0
+
+    def test_the_short_window_still_applies_after_complete(self, clock, log) -> None:
+        log.migration_start()
+        _schedule(clock, {5.0: lambda: log.changeset("cs-1"), 6.0: log.migration_complete})
+        with pytest.raises(TimeoutError, match=r"stalled after schema_migration_complete for 60s"):
+            _wait(clock, _Proc(clock), 1, log)
+        assert clock.now <= 70.0
+
+    def test_the_short_window_applies_before_any_migration_has_started(self, clock, log) -> None:
+        with pytest.raises(TimeoutError, match=r"stalled before any migration output for 60s"):
+            _wait(clock, _Proc(clock), 1, log)
+        assert clock.now <= 62.0
+
+
+class TestPartialLines:
+    def test_a_half_written_changeset_line_is_counted_once_when_it_completes(
+        self, clock, log,
+    ) -> None:
+        """Engine stdout flushes in small buffers: a read can end mid-line. The half must
+        not be fed to the scanner (it would name a truncated changeset, and the rest of
+        the line, fed alone, would match nothing)."""
+        log.migration_start()
+
+        def write_half() -> None:
+            with log.path.open("a", encoding="utf-8") as fh:
+                fh.write("Running Changeset: db/changelog/vectors-0")
+
+        def write_rest() -> None:
+            with log.path.open("a", encoding="utf-8") as fh:
+                fh.write("47.xml::vectors-047-1::nexus-test\n")
+
+        _schedule(clock, {3.0: write_half, 5.0: write_rest})
+        with pytest.raises(TimeoutError) as err:
+            _wait(clock, _Proc(clock), 1, log)
+        assert "stalled at db/changelog/vectors-047.xml::vectors-047-1::nexus-test for 180s" in str(err.value)
+        assert 184.0 <= clock.now <= 187.0, "progress is the completed line (t=5), not the half (t=3)"
+
+
 class TestStall:
     def test_no_progress_for_the_stall_window_fails_naming_the_last_changeset(
         self, clock, log,
@@ -187,9 +242,9 @@ class TestStall:
         with pytest.raises(TimeoutError) as err:
             _wait(clock, _Proc(clock), 1, log)
         text = str(err.value)
-        assert "stalled at db/changelog/vectors-047-4.xml::vectors-047-4::nexus-test for 60s" in text
+        assert "stalled at db/changelog/vectors-047-4.xml::vectors-047-4::nexus-test for 180s" in text
         assert "ceiling" not in text
-        assert 79.0 <= clock.now <= 82.0, f"gave up at t={clock.now}, not one stall window after the last progress"
+        assert 199.0 <= clock.now <= 202.0, f"gave up at t={clock.now}, not one stall window after the last progress"
 
     def test_log_growth_that_is_not_migration_progress_does_not_reset_the_stall(
         self, clock, log,
@@ -204,9 +259,9 @@ class TestStall:
             log.line("2026-11-08 INFO  HikariPool-1 - Pool stats")
 
         clock.on_tick(noise)
-        with pytest.raises(TimeoutError, match=r"stalled at \S*cs-1\S* for 60s"):
+        with pytest.raises(TimeoutError, match=r"stalled at \S*cs-1\S* for 180s"):
             _wait(clock, _Proc(clock), 1, log)
-        assert clock.now <= 70.0
+        assert clock.now <= 190.0
 
     def test_a_silent_engine_stalls_before_any_migration_output(self, clock, log) -> None:
         with pytest.raises(TimeoutError, match=r"stalled before any migration output for 60s"):
@@ -249,6 +304,43 @@ class TestCeiling:
         assert "after schema_migration_complete" in text
 
 
+class TestReadyLineThenNoAnswer:
+    @pytest.fixture
+    def silent_port(self) -> Iterator[int]:
+        """A port that is bound but not listening: a connect is refused at once."""
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        try:
+            yield sock.getsockname()[1]
+        finally:
+            sock.close()
+
+    def test_an_engine_that_logs_ready_and_then_dies_fails_at_once_with_its_log(
+        self, clock, log, silent_port,
+    ) -> None:
+        """OOM kill or crash right after the ready line: nothing listens, the process is
+        gone. The connect phase must not wait out the ceiling."""
+        log.migration_start()
+        log.migration_complete()
+        log.ready(silent_port)
+        log.line("java.lang.OutOfMemoryError: Java heap space")
+        with pytest.raises(RuntimeError) as err:
+            _wait(clock, _Proc(clock, die_at=2.0, rc=137), silent_port, log)
+        assert not isinstance(err.value, TimeoutError)
+        assert "exited with rc=137" in str(err.value)
+        assert "OutOfMemoryError" in str(err.value)
+        assert clock.now <= 3.0, f"a dead engine was waited on until t={clock.now}"
+
+    def test_a_live_process_whose_port_never_answers_fails_within_the_connect_phase(
+        self, clock, log, silent_port,
+    ) -> None:
+        log.ready(silent_port)
+        with pytest.raises(TimeoutError) as err:
+            _wait(clock, _Proc(clock), silent_port, log)
+        assert f"port {silent_port} did not answer for 5s" in str(err.value)
+        assert clock.now <= 7.0, "the connect phase borrowed the ceiling"
+
+
 class TestDeadProcess:
     def test_a_process_that_exits_mid_migration_fails_at_once_with_its_log(self, clock, log) -> None:
         log.migration_start()
@@ -269,8 +361,9 @@ class TestDeadProcess:
             _wait(clock, _Proc(clock, die_at=0.0, rc=1), 22980, log)
 
 
-def test_the_constants_leave_the_stall_window_inside_the_ceiling() -> None:
-    assert 0 < sub._ENGINE_STALL_S < sub._ENGINE_CEILING_S
+def test_the_constants_leave_the_stall_windows_inside_the_ceiling() -> None:
+    assert 0 < sub._ENGINE_STALL_S <= sub._ENGINE_MIGRATING_STALL_S < sub._ENGINE_CEILING_S
+    assert 0 < sub._ENGINE_CONNECT_S <= 10.0
     # The old fixed deadline was 60 s from the spawn; a stall window shorter than that
     # would make this wait stricter than the one it replaces.
     assert sub._ENGINE_STALL_S >= 60.0
