@@ -177,9 +177,7 @@ class Link(NamedTuple):
 
 
 def _pyproject_bumped(to: str = "7.86.4") -> str:
-    return PYPROJECT.replace(
-        'name = "conexus"\nversion = "7.86.3"', f'name = "conexus"\nversion = "{to}"'
-    )
+    return PYPROJECT.replace('name = "conexus"\nversion = "7.86.3"', f'name = "conexus"\nversion = "{to}"')
 
 
 def _commit(
@@ -552,10 +550,7 @@ def test_plugin_diff_without_a_version_bump_fails(repo: Path) -> None:
 def test_only_a_patch_plus_one_bump_is_eligible(repo: Path, to: str) -> None:
     """Mutation (accept any version change, or any increase): a minor bump, a
     skipped patch, a downgrade and a jump all read ELIGIBLE."""
-    _commit(
-        repo,
-        {"conexus/skills/a.md": "skill v2\n", "pyproject.toml": _pyproject_bumped(to)},
-    )
+    _commit(repo, {"conexus/skills/a.md": "skill v2\n", "pyproject.toml": _pyproject_bumped(to)})
     r = _check(repo)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "not a patch bump" in r.stdout and "7.86.4 exactly" in r.stdout
@@ -566,10 +561,7 @@ def test_a_non_numeric_version_is_ineligible(repo: Path, to: str) -> None:
     """The surface normaliser accepts any version-looking value; the bump check
     must still refuse one that is not X.Y.Z. Mutation (skip the semver parse):
     the surface check alone passes it."""
-    _commit(
-        repo,
-        {"conexus/skills/a.md": "skill v2\n", "pyproject.toml": _pyproject_bumped(to)},
-    )
+    _commit(repo, {"conexus/skills/a.md": "skill v2\n", "pyproject.toml": _pyproject_bumped(to)})
     r = _check(repo)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "is not X.Y.Z on both sides" in r.stdout
@@ -600,10 +592,7 @@ def test_head_that_does_not_descend_from_base_is_ineligible(repo: Path) -> None:
     assert PASS_LINE not in r.stdout
 
 
-@pytest.mark.parametrize(
-    "base",
-    ["main", "HEAD", "7.86.3", "v7.86", "v7.86.3-rc1", "v7.86.3^", "plugin-v7.86.3-1"],
-)
+@pytest.mark.parametrize("base", ["main", "HEAD", "7.86.3", "v7.86", "v7.86.3-rc1", "v7.86.3^", "plugin-v7.86.3-1"])
 def test_base_must_be_a_client_tag(repo: Path, base: str) -> None:
     """Mutation (drop the vX.Y.Z regex): any commit-ish is accepted as the base,
     including one that resolves."""
@@ -697,12 +686,8 @@ def test_a_manifest_that_does_not_parse_is_ineligible(repo: Path, text: str) -> 
     assert "mcpb/manifest.json [M] unparsable" in r.stdout
 
 
-@pytest.mark.parametrize(
-    "pin", ["evil>=7.86.4", "conexus-foo>=7.86.4", "conexus==7.86.4"]
-)
-def test_the_mcpb_pin_cannot_be_rewritten_to_another_package(
-    repo: Path, pin: str
-) -> None:
+@pytest.mark.parametrize("pin", ["evil>=7.86.4", "conexus-foo>=7.86.4", "conexus==7.86.4"])
+def test_the_mcpb_pin_cannot_be_rewritten_to_another_package(repo: Path, pin: str) -> None:
     """Mutation (normalise any quoted ``<name>>=<version>`` dependency)."""
     text = _bump(MCPB_PYPROJECT).replace("conexus>=7.86.4", pin)
     assert pin in text
@@ -712,10 +697,7 @@ def test_the_mcpb_pin_cannot_be_rewritten_to_another_package(
     assert "mcpb/pyproject.toml [M] changes more than the version" in r.stdout
 
 
-@pytest.mark.parametrize(
-    "path",
-    sorted(["pyproject.toml", "mcpb/pyproject.toml", "mcpb/manifest.json", "uv.lock"]),
-)
+@pytest.mark.parametrize("path", sorted(["pyproject.toml", "mcpb/pyproject.toml", "mcpb/manifest.json", "uv.lock"]))
 def test_deleting_a_version_surface_is_ineligible(repo: Path, path: str) -> None:
     """Mutation (content-check only when both sides exist, pass a delete)."""
     _commit(repo, {path: None}, bump=False)
@@ -854,9 +836,7 @@ def _shape_repo(tmp_path: Path, files: list[str]) -> tuple[Path, str, dict[str, 
     return r, version, base
 
 
-def test_working_tree_release_files_bumped_as_a_release_does_are_eligible(
-    tmp_path: Path,
-) -> None:
+def test_working_tree_release_files_bumped_as_a_release_does_are_eligible(tmp_path: Path) -> None:
     """The measured case: the real files, bumped the way the fake 7.86.4 was
     (sed on the version strings; uv.lock only the conexus stanza).
 
@@ -889,9 +869,7 @@ def test_working_tree_release_files_bumped_as_a_release_does_are_eligible(
     assert f"{len(_SHAPE_FILES)} changed paths" in out.stdout
 
 
-def test_working_tree_hook_source_edit_is_ineligible_beside_a_plugin_change(
-    tmp_path: Path,
-) -> None:
+def test_working_tree_hook_source_edit_is_ineligible_beside_a_plugin_change(tmp_path: Path) -> None:
     """develop's self-gc commit touched src/nexus/hooks/self_gc.py: the real file,
     edited, with a plugin change and a second src/ file in the same diff.
 
@@ -907,10 +885,8 @@ def test_working_tree_hook_source_edit_is_ineligible_beside_a_plugin_change(
     _commit(
         r,
         {
-            "src/nexus/hooks/self_gc.py": base["src/nexus/hooks/self_gc.py"]
-            + "# edited\n",
-            "src/nexus/engine_version.py": base["src/nexus/engine_version.py"]
-            + "# edited\n",
+            "src/nexus/hooks/self_gc.py": base["src/nexus/hooks/self_gc.py"] + "# edited\n",
+            "src/nexus/engine_version.py": base["src/nexus/engine_version.py"] + "# edited\n",
             "conexus/hooks/hooks.json": base["conexus/hooks/hooks.json"] + "\n",
             "pyproject.toml": _bump_pyproject(base["pyproject.toml"], version),
         },
@@ -951,10 +927,7 @@ def _pick(repo: Path, sha: str) -> None:
 
 
 STRADDLE_ENGINE = ("feat: engine half (nexus-aaaaa)", {"src/nexus/a.py": "a = 2\n"})
-STRADDLE_PLUGIN = (
-    "feat: plugin half (nexus-aaaaa)",
-    {"conexus/skills/a.md": "skill v2\n"},
-)
+STRADDLE_PLUGIN = ("feat: plugin half (nexus-aaaaa)", {"conexus/skills/a.md": "skill v2\n"})
 
 
 def test_a_bead_with_a_src_half_on_develop_is_ineligible(repo: Path) -> None:
@@ -973,12 +946,7 @@ def test_a_bead_with_a_src_half_on_develop_is_ineligible(repo: Path) -> None:
 
 @pytest.mark.parametrize(
     "path",
-    [
-        "scripts/s.py",
-        "service/pom.xml",
-        "tests/e2e/release-battery.sh",
-        "conexus/daemon/d.py",
-    ],
+    ["scripts/s.py", "service/pom.xml", "tests/e2e/release-battery.sh", "conexus/daemon/d.py"],
 )
 def test_a_bead_half_in_any_refused_area_straddles(repo: Path, path: str) -> None:
     """The gate's own classification decides, not a src/-only list. Mutation:
@@ -993,9 +961,7 @@ def test_a_bead_half_in_any_refused_area_straddles(repo: Path, path: str) -> Non
     assert f"touches {path}" in r.stdout
 
 
-def test_a_bead_wholly_in_the_plugin_passes_and_says_what_it_examined(
-    repo: Path,
-) -> None:
+def test_a_bead_wholly_in_the_plugin_passes_and_says_what_it_examined(repo: Path) -> None:
     """Mutation: refuse any bead named in the commits (a check that cannot pass)."""
     first, second = _develop(
         repo,
@@ -1013,9 +979,7 @@ def test_a_bead_wholly_in_the_plugin_passes_and_says_what_it_examined(
     assert r.stdout.rstrip().splitlines()[-1] == PASS_LINE
 
 
-def test_a_bead_commit_that_only_moves_the_version_does_not_straddle(
-    repo: Path,
-) -> None:
+def test_a_bead_commit_that_only_moves_the_version_does_not_straddle(repo: Path) -> None:
     """The check reuses classify(): a version-only edit of a version surface is
     eligible. Mutation: treat every non-channel path as a straddle."""
     bump, plugin = _develop(
@@ -1050,12 +1014,7 @@ def test_bead_ids_match_as_whole_tokens(repo: Path, other: str) -> None:
 def test_commits_already_in_the_base_tag_are_not_a_straddle(repo: Path) -> None:
     """A bead whose src/ half shipped in an earlier release is whole by now.
     Mutation: scan develop's whole history instead of base..develop."""
-    _commit(
-        repo,
-        {"src/nexus/a.py": "a = 2\n"},
-        bump=False,
-        message="feat: engine (nexus-aaaaa)",
-    )
+    _commit(repo, {"src/nexus/a.py": "a = 2\n"}, bump=False, message="feat: engine (nexus-aaaaa)")
     _git(repo, "tag", "-f", "v7.86.3")
     _git(repo, "update-ref", "refs/remotes/origin/develop", "HEAD")
     (plugin,) = _develop(repo, [STRADDLE_PLUGIN])
@@ -1075,9 +1034,7 @@ def test_a_merge_commit_naming_the_bead_is_not_scanned(repo: Path) -> None:
     _git(repo, "merge", "-q", "--no-ff", "-m", "Merge side (nexus-aaaaa)", "side")
     _git(repo, "update-ref", "refs/remotes/origin/develop", "HEAD")
     _git(repo, "checkout", "-q", "main")
-    (plugin,) = _git(
-        repo, "log", "--format=%H", "-1", "--grep=plugin half", "origin/develop"
-    ).split()
+    (plugin,) = _git(repo, "log", "--format=%H", "-1", "--grep=plugin half", "origin/develop").split()
     _pick(repo, plugin)
     _commit(repo, {}, message="chore(release): conexus 7.86.4")
     r = _check(repo)
@@ -1109,9 +1066,7 @@ def test_develop_ref_option_selects_the_reference(repo: Path) -> None:
     _git(repo, "update-ref", "refs/remotes/origin/develop", "v7.86.3")
     _pick(repo, plugin)
     _commit(repo, {}, message="chore(release): conexus 7.86.4")
-    assert (
-        _check(repo).returncode == 0
-    )  # origin/develop is the tag: nothing else to find
+    assert _check(repo).returncode == 0  # origin/develop is the tag: nothing else to find
     r = _run(repo, "--base", "v7.86.3", "--develop-ref", "elsewhere")
     assert r.returncode == 1, r.stdout + r.stderr
     assert engine[:10] in r.stdout

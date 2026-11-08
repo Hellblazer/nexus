@@ -12,12 +12,14 @@ from click.testing import CliRunner
 from nexus.catalog import note_uri_merge
 from nexus.cli import main
 from nexus.commands.catalog_cmds import note_uri_repair as cmd
+from tests._changelog import changelog_text
 
 _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _text(rel: str) -> str:
-    return re.sub(r"\s+", " ", (_ROOT / rel).read_text(encoding="utf-8"))
+    raw = changelog_text(_ROOT) if rel == "CHANGELOG.md" else (_ROOT / rel).read_text(encoding="utf-8")
+    return re.sub(r"\s+", " ", raw)
 
 
 _PAGES = ("CHANGELOG.md", "docs/cli-reference.md", "docs/rdr/rdr-231-note-source-uri-scheme.md")

@@ -164,7 +164,7 @@ def test_fold_groups_by_section_orders_by_first_commit_and_deletes(repo: Path) -
     )  # sorts before zzz by name
     _git(repo, "add", "--", str(newer))
     _git(repo, "commit", "-q", "-m", "b", when="2026-02-01T00:00:00Z")
-    # zzz is deleted and re-added later: it still sorts by its FIRST add, so stays ahead of mmm.
+    # zzz is folded away and a new zzz added later (a second round): it sorts by its latest add.
     _git(repo, "rm", "-q", "--", str(old))
     _git(repo, "commit", "-q", "-m", "c", when="2026-03-01T00:00:00Z")
     _frag(repo, "nexus-zzz.md", "### Added\n\n- added first\n")
@@ -182,7 +182,7 @@ def test_fold_groups_by_section_orders_by_first_commit_and_deletes(repo: Path) -
     text = (repo / "CHANGELOG.md").read_text()
     s, e = cf.unreleased_body(text)
     assert text[s:e] == (
-        "\nPairs with x.\n\n### Added\n\n- added first\n- added second\n- untracked\n\n"
+        "\nPairs with x.\n\n### Added\n\n- added second\n- added first\n- untracked\n\n"
         "### Fixed\n\n- a fix\n  wrapped\n\n"
     )
     assert text[e:].startswith("## [1.0.0]")
@@ -192,6 +192,17 @@ def test_fold_groups_by_section_orders_by_first_commit_and_deletes(repo: Path) -
     # Folded bullets sit under [Unreleased] until the release step moves them to [X.Y.Z] in the
     # same commit, so check reads them as hand entries in between.
     assert any("hand-written" in x for x in cf.check(repo))
+
+
+def test_a_second_fold_and_a_fold_without_readme_work(repo: Path) -> None:
+    _frag(repo, "nexus-one.md", "### Added\n\n- one\n")
+    assert cf.fold(repo) == []
+    _frag(repo, "nexus-two.md", "### Fixed\n\n- two\n")  # a late fragment after the first fold
+    (repo / "changelog/unreleased" / cf.DIR_README).unlink()  # a branch off a tag without it
+    assert cf.fold(repo) == []
+    text = (repo / "CHANGELOG.md").read_text()
+    s, e = cf.unreleased_body(text)
+    assert "- one\n" in text[s:e] and "### Fixed\n\n- two\n" in text[s:e]
 
 
 def test_fold_refuses_and_writes_nothing_on_a_bad_fragment(repo: Path) -> None:

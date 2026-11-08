@@ -16,8 +16,8 @@ from ``conexus/PENDING_RELEASE.md`` and are written by the release itself, so it
 A fragment is one ``### <Section>`` line (Added, Changed, Deprecated, Removed, Fixed, Security,
 Performance or Docs) followed by one or more ``- `` bullets; a bullet may wrap onto lines indented
 by two spaces. ``fold`` groups the bullets by section in that order and, inside a section, by the
-commit that first added each fragment (oldest first; a fragment git has no history for sorts last,
-by name). The directory keeps a ``README.md``, which is not a fragment; dotfiles (``.DS_Store``,
+commit that added each fragment (its latest add, oldest first; a fragment git has no history for
+sorts last, by name). The directory keeps a ``README.md``, which is not a fragment; dotfiles (``.DS_Store``,
 editor swap files) are ignored and a subdirectory is refused.
 """
 
@@ -152,7 +152,8 @@ def check(root: Path) -> list[str]:
         if hand:
             errors.append(
                 f"{changelog}: [Unreleased] holds {len(hand)} hand-written line(s); "
-                f"put the entry in {frag_dir}/<bead-id>.md instead (first: {hand[0][:60]!r})"
+                f"put the entry in {frag_dir}/<bead-id>.md instead, as '### Added' (or Changed, "
+                f"Fixed, ...), a blank line, then '- **...**' (first: {hand[0][:60]!r})"
             )
     return errors
 
@@ -172,7 +173,9 @@ def _first_added(root: Path, path: Path) -> int | None:
         capture_output=True,
         text=True,
     ).stdout.split()
-    return int(out[-1]) if out else None
+    # git log lists newest first: the latest add is this fragment's own; an older add of the same
+    # name belongs to an earlier round that was folded and deleted.
+    return int(out[0]) if out else None
 
 
 def render(fragments: list[tuple[int | None, Fragment]]) -> str:
@@ -193,7 +196,21 @@ def render(fragments: list[tuple[int | None, Fragment]]) -> str:
 
 def fold(root: Path) -> list[str]:
     """Fold every target's fragments; return errors (nothing written if any)."""
-    errors = check(root)
+    # Only what fold needs: well-formed fragments and a top [Unreleased]. Not check's hand-bullet
+    # rule (a second fold after a late fragment would read the first fold's bullets as hand
+    # entries) and not the README (a release branch off an older tag may not carry it).
+    errors: list[str] = []
+    for frag_dir, changelog in TARGETS:
+        for p in fragment_paths(root, frag_dir):
+            errors.extend(parse_fragment(p)[1])
+        cl = root / changelog
+        if not cl.is_file():
+            errors.append(f"{changelog}: missing")
+            continue
+        try:
+            unreleased_body(cl.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            errors.append(f"{changelog}: {exc}")
     if errors:
         return errors
     for frag_dir, changelog in TARGETS:

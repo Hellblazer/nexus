@@ -13,3 +13,6 @@ The first line is one section: Added, Changed, Deprecated, Removed, Fixed, Secur
 Docs. Then one or more `- ` bullets; a bullet may wrap onto lines indented by two spaces. At release
 `scripts/changelog_fold.py fold` moves every fragment under `## [Unreleased]`, grouped by section and
 ordered by the commit that added it, and deletes the fragments.
+
+Two entries for one bead need distinct names (`nexus-abc-cli.md`, `nexus-abc-docs.md`); two sessions
+writing the same name for one bead still collide, as they would on any shared file.

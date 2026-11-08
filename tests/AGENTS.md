@@ -131,6 +131,8 @@ The run prints one line at setup, token-free: `external engine: host=... tenant=
 
 Distilled from the 2026-08 compression arc (design records in T2: `nexus/test-suite-compression-analysis-2026-08-05` and the closure/critique entries linked from it):
 
+- **A test that pins a changelog entry's wording reads `tests._changelog.changelog_text()`**, which is `CHANGELOG.md` plus every `changelog/unreleased/` fragment: an entry lives in a fragment until the release folds it (nexus-3ceda.2), so reading `CHANGELOG.md` alone goes red the day the entry is written.
+
 - **Scenario-merge vs parametrize:** checks that share one journey/state
   progression belong in one scenario test (multi-assert, with messages).
   Independent inputs/signals get a parametrize table so each keeps its own

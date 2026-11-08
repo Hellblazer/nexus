@@ -966,6 +966,14 @@ git add CHANGELOG.md conexus/PENDING_RELEASE.md
 git cherry-pick --continue
 ```
 
+A picked commit may carry a root changelog fragment (`changelog/unreleased/`,
+nexus-3ceda.2). When the base tag predates fragments (`git cat-file -e
+vX.Y.Z:scripts/changelog_fold.py` fails), its eligibility script does not free that
+path: pick with `git cherry-pick -n -x <sha>`, `git rm` the fragment, commit, and
+write its bullet into the vX.Y.N section by hand at Step 4. When the tag has the
+script, Step 4's `changelog_fold.py fold` runs on the branch as written. Either
+way the back-merge into develop deletes the shipped fragments (below).
+
 A conflict in a plugin file means the pick depends on a commit you skipped:
 `git cherry-pick --abort`, and defer that entry and every entry that builds on
 it to the next normal release. A commit that also touches `src/` or `service/`

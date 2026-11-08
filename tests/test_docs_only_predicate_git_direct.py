@@ -29,7 +29,6 @@ Two test families:
   and the unusable-base/before-SHA fallback (empty, all-zero, unreachable)
   on both PR and push events.
 """
-
 from __future__ import annotations
 
 import os
@@ -48,9 +47,7 @@ JOB_NAME = "changes"
 STEP_NAME_PREFIX = "Compute the doc-only predicate directly from git"
 
 ZERO_SHA = "0000000000000000000000000000000000000000"
-GARBAGE_SHA = (
-    "abc123abc123abc123abc123abc123abc123ab"  # well-formed hex, absent from any repo
-)
+GARBAGE_SHA = "abc123abc123abc123abc123abc123abc123ab"  # well-formed hex, absent from any repo
 
 
 def _doc() -> dict:
@@ -114,12 +111,7 @@ def test_checkout_still_fetch_depth_zero() -> None:
 
 @pytest.mark.parametrize(
     "job_name",
-    [
-        "ca3-pgvector-bundle",
-        "ca3-pgvector-bundle-macos",
-        "engine-service-build",
-        "write-seam-gate",
-    ],
+    ["ca3-pgvector-bundle", "ca3-pgvector-bundle-macos", "engine-service-build", "write-seam-gate"],
 )
 def test_conservative_family_still_uses_dorny(job_name: str) -> None:
     """The 'always true on a develop push' safety-net family is a DIFFERENT
@@ -137,19 +129,14 @@ def test_conservative_family_still_uses_dorny(job_name: str) -> None:
     ("consumer_job", "expected_condition"),
     [
         # nexus-q99w4: service-jar also feeds the docs-reader leg on a doc-only diff.
-        (
-            "service-jar",
-            "success() && (needs.changes.outputs.code == 'true' || needs.changes.outputs.code == 'false')",
-        ),
+        ("service-jar", "success() && (needs.changes.outputs.code == 'true' || needs.changes.outputs.code == 'false')"),
         ("test-docs-readers", "success() && needs.changes.outputs.code == 'false'"),
         ("test", "success() && needs.changes.outputs.code == 'true'"),
         ("test-lint", "success() && needs.changes.outputs.code == 'true'"),
         ("test-mode-census", "success() && needs.changes.outputs.code == 'true'"),
     ],
 )
-def test_downstream_consumers_condition_unchanged(
-    consumer_job: str, expected_condition: str
-) -> None:
+def test_downstream_consumers_condition_unchanged(consumer_job: str, expected_condition: str) -> None:
     job = _doc()["jobs"][consumer_job]
     needs = job["needs"]
     needs_list = needs if isinstance(needs, list) else [needs]
@@ -161,8 +148,8 @@ def test_pytest_gate_still_requires_changes_success() -> None:
     job = _doc()["jobs"]["pytest-gate"]
     assert "changes" in job["needs"]
     run_text = "\n".join(step.get("run", "") for step in job["steps"] if "run" in step)
-    assert "needs.changes.result" in run_text
-    assert "needs.changes.outputs.code" in run_text
+    assert 'needs.changes.result' in run_text
+    assert 'needs.changes.outputs.code' in run_text
 
 
 # ── behavioural: extract + execute the real gate script ───────────────────
@@ -206,19 +193,13 @@ def _render(run_text: str, values: dict[str, str]) -> str:
     return _GH_EXPR_RE.sub(repl, run_text)
 
 
-def _run_in(
-    repo: Path, script: str
-) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+def _run_in(repo: Path, script: str) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
     with tempfile.TemporaryDirectory() as d:
         out = Path(d) / "gh_output"
         env = dict(os.environ)
         env["GITHUB_OUTPUT"] = str(out)
         proc = subprocess.run(
-            ["bash", "-c", script],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            env=env,
+            ["bash", "-c", script], cwd=repo, capture_output=True, text=True, env=env,
         )
         outputs: dict[str, str] = {}
         if out.exists():
@@ -231,10 +212,7 @@ def _run_in(
 
 def _git(repo: Path, *args: str) -> str:
     proc = subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        capture_output=True,
-        text=True,
+        ["git", *args], cwd=repo, capture_output=True, text=True,
     )
     assert proc.returncode == 0, (args, proc.stdout, proc.stderr)
     return proc.stdout.strip()
@@ -263,9 +241,7 @@ def _commit(repo: Path, files: dict[str, str], message: str) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
-def _values(
-    event_name: str, base_sha: str = "unused", before_sha: str = "unused"
-) -> dict[str, str]:
+def _values(event_name: str, base_sha: str = "unused", before_sha: str = "unused") -> dict[str, str]:
     return {
         "github.event_name": event_name,
         "github.event.pull_request.base.sha": base_sha,
@@ -310,9 +286,7 @@ def test_pr_mixed_diff_resolves_false(tmp_path: Path) -> None:
     assert outputs.get("code") == "true"
 
 
-def test_pr_empty_diff_against_valid_commits_is_malformed_and_fails_loud(
-    tmp_path: Path,
-) -> None:
+def test_pr_empty_diff_against_valid_commits_is_malformed_and_fails_loud(tmp_path: Path) -> None:
     """THE ACTUAL PR #1464 BUG CLASS: an empty changed-file set must never
     silently resolve to docs_only true or false -- it must fail the job."""
     repo = _init_repo(tmp_path)
@@ -325,9 +299,7 @@ def test_pr_empty_diff_against_valid_commits_is_malformed_and_fails_loud(
 
 
 @pytest.mark.parametrize("bad_base", ["", ZERO_SHA])
-def test_pr_unusable_base_sha_falls_back_to_true_not_silently(
-    tmp_path: Path, bad_base: str
-) -> None:
+def test_pr_unusable_base_sha_falls_back_to_true_not_silently(tmp_path: Path, bad_base: str) -> None:
     repo = _init_repo(tmp_path)
     _commit(repo, {"seed.txt": "x"}, "seed")
     script = _render(_gate_script(), _values("pull_request", base_sha=bad_base))
@@ -337,9 +309,7 @@ def test_pr_unusable_base_sha_falls_back_to_true_not_silently(
     assert "::warning::" in proc.stdout or "::warning::" in proc.stderr
 
 
-def test_pr_unreachable_base_sha_falls_back_to_true_not_silently(
-    tmp_path: Path,
-) -> None:
+def test_pr_unreachable_base_sha_falls_back_to_true_not_silently(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _commit(repo, {"seed.txt": "x"}, "seed")
     script = _render(_gate_script(), _values("pull_request", base_sha=GARBAGE_SHA))
@@ -364,9 +334,7 @@ def test_pr_three_dot_uses_merge_base_not_raw_base_tip(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     fork = _commit(repo, {"seed.txt": "x"}, "seed")
     # Base advances past the fork with a commit the PR never asked for.
-    base_advanced = _commit(
-        repo, {"src/nexus/other.py": "code"}, "base advances independently"
-    )
+    base_advanced = _commit(repo, {"src/nexus/other.py": "code"}, "base advances independently")
     # Head branches off the FORK POINT, not the advanced base.
     _checkout(repo, fork)
     head = _commit(repo, {"docs/rdr/999-thing.md": "hi"}, "docs-only PR change")
@@ -398,20 +366,14 @@ def test_push_docs_only_diff_resolves_true(tmp_path: Path) -> None:
 def test_push_mixed_diff_resolves_false(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     before = _commit(repo, {"seed.txt": "x"}, "seed")
-    _commit(
-        repo,
-        {"docs/rdr/117-thing.md": "hi", "src/nexus/foo.py": "code"},
-        "mixed update",
-    )
+    _commit(repo, {"docs/rdr/117-thing.md": "hi", "src/nexus/foo.py": "code"}, "mixed update")
     script = _render(_gate_script(), _values("push", before_sha=before))
     proc, outputs = _run_in(repo, script)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert outputs.get("code") == "true"
 
 
-def test_push_empty_diff_against_valid_commits_is_malformed_and_fails_loud(
-    tmp_path: Path,
-) -> None:
+def test_push_empty_diff_against_valid_commits_is_malformed_and_fails_loud(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     head = _commit(repo, {"seed.txt": "x"}, "seed")
     script = _render(_gate_script(), _values("push", before_sha=head))
@@ -422,9 +384,7 @@ def test_push_empty_diff_against_valid_commits_is_malformed_and_fails_loud(
 
 
 @pytest.mark.parametrize("bad_before", ["", ZERO_SHA])
-def test_push_unusable_before_sha_falls_back_to_true_not_silently(
-    tmp_path: Path, bad_before: str
-) -> None:
+def test_push_unusable_before_sha_falls_back_to_true_not_silently(tmp_path: Path, bad_before: str) -> None:
     """Covers the first-push-of-a-new-branch edge case named in the bead."""
     repo = _init_repo(tmp_path)
     _commit(repo, {"seed.txt": "x"}, "seed")
@@ -435,9 +395,7 @@ def test_push_unusable_before_sha_falls_back_to_true_not_silently(
     assert "::warning::" in proc.stdout or "::warning::" in proc.stderr
 
 
-def test_push_unreachable_before_sha_falls_back_to_true_not_silently(
-    tmp_path: Path,
-) -> None:
+def test_push_unreachable_before_sha_falls_back_to_true_not_silently(tmp_path: Path) -> None:
     """Covers the force-push-rewrote-history edge case named in the bead."""
     repo = _init_repo(tmp_path)
     _commit(repo, {"seed.txt": "x"}, "seed")
@@ -570,8 +528,7 @@ def test_nested_web_lookalike_is_code(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("script_name", ["install.sh", "install.ps1"])
 def test_the_published_installer_scripts_are_code_not_site_pages(
-    tmp_path: Path,
-    script_name: str,
+    tmp_path: Path, script_name: str,
 ) -> None:
     """nexus-sv2wx.28: web/install.sh and web/install.ps1 are what `curl | sh`
     and `irm | iex` run, and tests/test_install_sh.py and tests/test_install_ps1.py
@@ -601,11 +558,7 @@ def test_a_site_page_beside_the_installers_stays_docs_only(tmp_path: Path) -> No
 def test_a_mixed_push_of_a_page_and_an_installer_is_code(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     before = _commit(repo, {"seed.txt": "x"}, "seed")
-    _commit(
-        repo,
-        {"web/index.html": "<h1>hi</h1>", "web/install.sh": "echo changed"},
-        "both",
-    )
+    _commit(repo, {"web/index.html": "<h1>hi</h1>", "web/install.sh": "echo changed"}, "both")
     script = _render(_gate_script(), _values("push", before_sha=before))
     proc, outputs = _run_in(repo, script)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
