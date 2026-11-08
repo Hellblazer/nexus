@@ -211,17 +211,21 @@ def withhold_flagged_rows(obj: Any, lines: CliDocumentLines, *, keep: Sequence[s
 
 
 def flagged_tumblers(tumblers: Iterable[str], *, cat: Any = None) -> set[str]:
-    """The subset of *tumblers* to treat as flagged for output: :func:`nexus.doc_sensitivity.flagged`, or every one
-    of them when the catalog cannot say (fail closed, as :func:`present_entries` does for an alias)."""
+    """The subset of *tumblers* to treat as flagged for output, failing closed: the ones
+    :func:`nexus.doc_sensitivity.flagged` names, every one the live catalog does not return (a tombstone or a
+    purged document keeps no flag a live read can see), and all of them when the catalog cannot be read."""
     from nexus import doc_sensitivity  # noqa: PLC0415 - deferred: the module reaches the catalog factory
 
     wanted = {str(t) for t in tumblers if t}
     if not wanted:
         return set()
     try:
-        return doc_sensitivity.flagged(wanted, cat=cat)
-    except doc_sensitivity.SensitivityUnknown:
+        cat = cat if cat is not None else doc_sensitivity._catalog_reader()
+        flagged = doc_sensitivity.flagged(wanted, cat=cat)
+        live = {str(k) for k in (cat.resolve_many(sorted(wanted)) or {})}
+    except Exception:  # noqa: BLE001 — any failure to read the flag is "unknown", and unknown withholds
         return wanted
+    return flagged | (wanted - live)
 
 
 def entries_flagged(entries: Iterable[Any], *, cat: Any = None) -> set[str]:
