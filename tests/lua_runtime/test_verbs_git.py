@@ -206,3 +206,29 @@ def test_both_verbs_are_registered_with_one_string_parameter() -> None:
 
 def test_the_verb_table_loads_both_verbs() -> None:
     assert {"git.diff_names", "git.diff_stat"} <= set(VERB_TABLE)
+
+
+def test_an_inherited_git_dir_does_not_redirect_the_verb(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init", "-q", "-b", "main")
+    _git(other, "config", "user.email", "t@example.invalid")
+    _git(other, "config", "user.name", "t")
+    (other / "theirs.txt").write_text("t\n", encoding="utf-8")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-q", "-m", "x")
+    _git(other, "tag", "base")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    names = verbs_git.diff_names("base", deadline=_deadline(), ctx=_ctx(repo))
+    assert "a.txt" in names
+    assert "theirs.txt" not in names
+
+
+def test_a_repo_root_that_is_not_a_repository_says_so(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(VerbError, match="not a git repository"):
+        verbs_git.diff_names("HEAD", deadline=_deadline(), ctx=_ctx(plain))

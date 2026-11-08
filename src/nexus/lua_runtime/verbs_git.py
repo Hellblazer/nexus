@@ -9,7 +9,10 @@ never a process's current directory) and describe what its branch adds since
 not counted. Committed work only: uncommitted changes are not in it. Renames
 are off, so a moved file shows as its old path and its new one. Paths are
 always repository-relative, whatever the user's ``diff.relative``. Each git
-subprocess gets the run's remaining budget as its ``timeout``.
+subprocess gets the run's remaining budget as its ``timeout``, and an
+environment without the caller's ``GIT_*`` variables, so a ``GIT_DIR`` set by a
+hook cannot point it at another repository. Needs git 2.28 or later
+(``--no-relative``).
 """
 
 from __future__ import annotations
@@ -35,6 +38,16 @@ from nexus.lua_runtime.verb_types import (
 _GIT = ("git", "-c", "core.quotepath=false")
 
 
+def _env() -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["LC_ALL"] = "C"
+    return env
+
+
+class _NoCommit(VerbError):
+    """rev-parse --verify --quiet found no such commit (exit 1, nothing said)."""
+
+
 def _git(args: list[str], *, cwd: Path, deadline: float) -> str:
     left = deadline - time.monotonic()
     if left <= 0:
@@ -46,12 +59,14 @@ def _git(args: list[str], *, cwd: Path, deadline: float) -> str:
             capture_output=True,
             timeout=left,
             check=False,
-            env={**os.environ, "LC_ALL": "C"},
+            env=_env(),
         )
     except subprocess.TimeoutExpired:
         raise VerbTimeout("git: the run's time budget ran out during git") from None
     except OSError as exc:
         raise VerbError(f"git: cannot run git: {exc.strerror}") from None
+    if proc.returncode == 1 and not proc.stderr.strip() and args[0] == "rev-parse":
+        raise _NoCommit("no such commit")
     if proc.returncode != 0:
         err = proc.stderr.decode("utf-8", "replace").strip().splitlines()
         raise VerbError(f"git: {err[0][:300] if err else f'exit {proc.returncode}'}")
@@ -85,9 +100,7 @@ def _commit(base: str, *, cwd: Path, deadline: float) -> str:
             cwd=cwd,
             deadline=deadline,
         )
-    except VerbTimeout:
-        raise
-    except VerbError:
+    except _NoCommit:
         out = ""
     sha = out.strip()
     if not sha:

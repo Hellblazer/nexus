@@ -23,6 +23,27 @@ counted once. A file last written before ``since`` cannot start inside the
 window and is not opened (a restored copy with an older mtime would be
 missed).
 
+The record:
+- ``session_id``, ``main``, ``agent_id`` (a subagent's ``agentId``),
+  ``project``, ``start`` and ``end`` (timestamps as written);
+- ``models``; ``assistant_turns``, the number of distinct API messages (one
+  message can be several transcript records, about 1.6 per message on real
+  data, so this is not ``skill_routing_census.py``'s assistant-record
+  count); ``tokens`` summed once per message; ``first_context_tokens``, the
+  first message's input, cache-read and cache-creation tokens;
+- ``tool_calls``: ``name``, ``input``, ``time``, ``result_time`` and
+  ``is_error`` (from the result's marker, never its content; null when no
+  result came);
+- ``instruction_loads``: ``path``, ``kind`` (the attachment), ``type`` (User,
+  Project and the like) and ``size`` (UTF-8 bytes of the file's content,
+  never the content);
+- ``slash_commands``: the name of each command a user ran, read only from a
+  prompt the harness wrote (it starts with its ``<command-name>`` or
+  ``<command-message>`` tag), one per prompt, main sessions only;
+- ``deferred_tools`` and ``deferred_tools_dropped`` (names past 4,096);
+- ``bytes`` and ``records`` (lines) of the file; ``truncated``; and with
+  ``bodies``, ``assistant_text``.
+
 Every field is read defensively: a value of the wrong type is ignored, and a
 line that is not JSON is skipped, so one malformed record never fails a
 call. Strings are made valid UTF-8 (a lone surrogate becomes U+FFFD) and
@@ -66,6 +87,7 @@ from nexus.lua_runtime.verb_types import (
 
 VERB = "transcripts.sessions"
 TOO_LARGE = "result-too-large"
+RECORD_TOO_LARGE = "record-too-large"
 RECORD_CAP_BYTES = 1024 * 1024
 LINES_PER_DEADLINE_CHECK = 2000
 BYTES_PER_DEADLINE_CHECK = 8 * 1024 * 1024
@@ -84,7 +106,14 @@ _MAX_MODELS = 64
 _MAX_DEFERRED = 4096
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _SURROGATE = re.compile("[\ud800-\udfff]")
-_COMMAND = re.compile(r"<command-name>/?([^<\s]{1,128})</command-name>")
+# A slash command is a user prompt the harness wrote: it starts with one of
+# these tags, and its name is a command name, never free text.
+_COMMAND_STARTS = ("<command-name>", "<command-message>")
+_COMMAND = re.compile(r"<command-name>/?([A-Za-z0-9_:.\-/]{1,64})</command-name>")
+_COMMAND_HEAD = 512
+MAX_LINE_BYTES = 64 * 1024 * 1024  # a longer line is skipped, never held
+LINE_CHUNK = 1024 * 1024
+_LUA_INT_MAX = 2**63 - 1
 
 _now = time.monotonic
 
@@ -105,7 +134,11 @@ def _text(value: Any, limit: int) -> str | None:
 
 
 def _count(value: Any) -> int:
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= _LUA_INT_MAX
+    ):
         return value
     return 0
 
@@ -119,8 +152,10 @@ def _clean(value: Any, cut: list[bool], depth: int = 0) -> JSONValue:
         if len(value) > INPUT_STRING_CAP:
             cut[0] = True
         return _text(value, INPUT_STRING_CAP)
-    if isinstance(value, bool) or value is None or isinstance(value, int):
+    if isinstance(value, bool) or value is None:
         return value
+    if isinstance(value, int):
+        return value if -_LUA_INT_MAX - 1 <= value <= _LUA_INT_MAX else None
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
@@ -197,8 +232,21 @@ def _plain_dir(p: Path) -> bool:
         return False
 
 
-def _files(root: Path, project: str | None) -> Iterator[tuple[str, Path, bool]]:
-    if not _plain_dir(root):
+def _linked(path: Path, top: Path) -> bool:
+    """Whether ``path`` or a directory between it and ``top`` is a link."""
+    p = path
+    while p != top and p != p.parent:
+        if p.is_symlink():
+            return True
+        p = p.parent
+    return False
+
+
+def _files(
+    root: Path, project: str | None, deadline: float
+) -> Iterator[tuple[str, Path, bool]]:
+    """Transcript files under ``root`` (which may itself be a link), links below it excluded."""
+    if not root.is_dir():
         raise VerbError(f"{VERB}: no Claude Code projects directory at {root}")
     if project is None or project == "all":
         dirs = sorted(p for p in root.iterdir() if _plain_dir(p))
@@ -216,10 +264,14 @@ def _files(root: Path, project: str | None) -> Iterator[tuple[str, Path, bool]]:
             raise VerbError(f"{VERB}: no project {project!r} under {root}")
         dirs = [d]
     for d in dirs:
+        _check(deadline)
+        name = _text(d.name, 255) or ""
         for main in sorted(d.glob("*.jsonl")):
-            yield d.name, main, True
+            if not _linked(main, d):
+                yield name, main, True
         for sub in sorted(d.glob("*/subagents/**/*.jsonl")):
-            yield d.name, sub, False
+            if not _linked(sub, d):
+                yield name, sub, False
 
 
 # ---- one transcript ----------------------------------------------------------
@@ -243,6 +295,7 @@ class _Session:
         self.call_ids: set[str] = set()
         self.loads: list[dict[str, Any]] = []
         self.deferred: set[str] = set()
+        self.deferred_dropped = 0
         self.text: list[dict[str, Any]] = []
         self.commands: list[dict[str, Any]] = []
         self.cut = [False]
@@ -315,8 +368,10 @@ class _Session:
         if isinstance(content, str):
             self._commands(content, stamp)
             return
+        first = True
         for block in content if isinstance(content, list) else []:
             if not isinstance(block, dict):
+                first = False
                 continue
             if block.get("type") == "tool_result":
                 tid = block.get("tool_use_id")
@@ -324,15 +379,24 @@ class _Session:
                 if call is not None:
                     call["is_error"] = block.get("is_error") is True
                     call["result_time"] = stamp
-            elif block.get("type") == "text" and isinstance(block.get("text"), str):
+            elif (
+                first
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            ):
                 self._commands(block["text"], stamp)
+            first = False
 
     def _commands(self, text: str, stamp: str | None) -> None:
-        if not self.main or "<command-name>" not in text:
+        """One command name from a prompt the harness wrote, never prompt text."""
+        if not self.main:
             return
-        for m in _COMMAND.finditer(text):
-            name = _text(m.group(1), 128)
-            self.commands.append({"name": name, "time": stamp})
+        head = text[:_COMMAND_HEAD].lstrip()
+        if not head.startswith(_COMMAND_STARTS):
+            return
+        m = _COMMAND.search(head)
+        if m is not None:
+            self.commands.append({"name": m.group(1), "time": stamp})
 
     def _attachment(self, att: dict[str, Any], stamp: str | None) -> None:
         akind = att.get("type")
@@ -361,8 +425,12 @@ class _Session:
 
     def _defer(self, name: Any) -> None:
         n = _text(name, 256)
-        if n and len(self.deferred) < _MAX_DEFERRED:
+        if not n or n in self.deferred:
+            return
+        if len(self.deferred) < _MAX_DEFERRED:
             self.deferred.add(n)
+        else:
+            self.deferred_dropped += 1
 
     def _load(
         self, path: Any, ftype: Any, content: Any, kind: str, stamp: str | None
@@ -409,13 +477,30 @@ def _scan(
             size = os.fstat(fh.fileno()).st_size
         except OSError:
             return None
-        for raw in fh:
+        while True:
+            raw = fh.readline(LINE_CHUNK)
+            if not raw:
+                break
+            whole = raw.endswith(b"\n") or len(raw) < LINE_CHUNK
             lines += 1
             read += len(raw)
+            long_line = False
+            while not whole:  # a line longer than one chunk
+                if read >= next_bytes:
+                    _check(deadline)
+                    next_bytes = read + BYTES_PER_DEADLINE_CHECK
+                more = fh.readline(LINE_CHUNK)
+                read += len(more)
+                if len(raw) + len(more) > MAX_LINE_BYTES:
+                    long_line = True
+                    raw = b""
+                if not long_line:
+                    raw += more
+                whole = not more or more.endswith(b"\n") or len(more) < LINE_CHUNK
             if lines % LINES_PER_DEADLINE_CHECK == 0 or read >= next_bytes:
                 _check(deadline)
                 next_bytes = read + BYTES_PER_DEADLINE_CHECK
-            if not raw.strip():
+            if long_line or not raw.strip():
                 continue
             try:
                 rec = json.loads(raw, parse_constant=lambda _c: None)
@@ -441,10 +526,10 @@ def _scan(
         return None
     agent_id = None
     if not main:
-        agent_id = s.agent_id or path.stem.removeprefix("agent-")
+        agent_id = s.agent_id or _text(path.stem.removeprefix("agent-"), 128)
     record: dict[str, Any] = {
         "session_id": s.session_id
-        or (path.stem if main else path.parent.parent.name)[:128],
+        or _text(path.stem if main else _session_dir(path).name, 128),
         "main": main,
         "agent_id": agent_id,
         "project": project,
@@ -458,6 +543,7 @@ def _scan(
         "instruction_loads": s.loads,
         "slash_commands": s.commands,
         "deferred_tools": sorted(s.deferred),
+        "deferred_tools_dropped": s.deferred_dropped,
         "bytes": size,
         "records": lines,
         "truncated": s.cut[0],
@@ -465,6 +551,14 @@ def _scan(
     if bodies:
         record["assistant_text"] = s.text
     return _fit(record)
+
+
+def _session_dir(path: Path) -> Path:
+    """``<project>/<session>`` for a file under ``<session>/subagents/``."""
+    for p in path.parents:
+        if p.name == "subagents":
+            return p.parent
+    return path.parent
 
 
 def _fit(record: dict[str, Any]) -> dict[str, Any]:
@@ -511,7 +605,7 @@ def _fit(record: dict[str, Any]) -> dict[str, Any]:
         if _size(record) <= RECORD_CAP_BYTES:
             return record
     raise VerbError(
-        f"{TOO_LARGE}: {VERB}: one transcript's record does not fit in 1 MB"
+        f"{RECORD_TOO_LARGE}: {VERB}: one transcript's record does not fit in 1 MB"
     )
 
 
@@ -538,7 +632,7 @@ def sessions(
     lo = _bound(since, "since")
     hi = _bound(until, "until")
     root = _projects_root()
-    files = list(_files(root, project))
+    files = list(_files(root, project, deadline))
     if lo >= hi:
         return []
     cap = verb_types.VERB_RESULT_CAP_BYTES
@@ -552,7 +646,7 @@ def sessions(
         except OSError:
             continue
         if not stat.S_ISREG(st.st_mode) or st.st_mtime < floor:
-            continue  # a link, or last written before the window opened
+            continue  # not a plain file, or last written before the window opened
         rec = _scan(path, proj, main, lo, hi, bool(bodies), deadline)
         if rec is None:
             continue
