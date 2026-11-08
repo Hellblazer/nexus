@@ -2283,9 +2283,11 @@ def _equivalence_root(root: Path) -> None:
     _write(root / PROJECT / SID_D / "subagents" / "agent-AG1.jsonl", [], raw=files["d"])
 
 
-def _ask(monkeypatch: pytest.MonkeyPatch, skip: bool, fields, bodies=None):
+def _ask(monkeypatch: pytest.MonkeyPatch, skip: bool, fields, bodies=None, floor=0):
+    """The verb with the skip on or off; ``floor=None`` keeps the real size floor."""
     monkeypatch.setattr(vt, "_PREPARSE", skip)
-    monkeypatch.setattr(vt, "_PREPARSE_MIN", 0)
+    if floor is not None:
+        monkeypatch.setattr(vt, "_PREPARSE_MIN", floor)
     return _sessions(project=None, fields=fields, bodies=bodies)
 
 
@@ -2355,6 +2357,8 @@ def test_an_inert_line_is_not_decoded(
     # a nested value that is not in the run: none is decoded
     for sec in (0, 16, 17, 18, 19, 30):
         assert not _stamped(decoded, _t(sec)), sec
+    # a stamp or id that is not a string reads as absent: skipped, not decoded
+    assert not any('"timestamp":12345' in t for t in decoded)
     # a line whose stamp the text cannot vouch for is decoded: a repeated key, an
     # escaped key, a stamp behind a nested value, the decoys
     assert _stamped(decoded, _t(23)) and any("time\\u0073tamp" in t for t in decoded)
@@ -2431,3 +2435,197 @@ def test_only_a_line_over_the_size_floor_is_peeked(
     assert [d for d in decoded if '"pr-link"' in d] and not [
         d for d in decoded if '"api-request-blob"' in d
     ]
+
+
+# ---- round 2: what a stand-in must carry, and what a tear must not stamp ------
+
+SID_E, SID_F, SID_G, SID_H, SID_J, SID_K = (
+    f"{c * 8}-2222-3333-4444-555555555555" for c in "efghjk"
+)
+BIG = 5000  # pads an inert line past the real 4096-byte floor
+
+
+def _h(hour: int, sec: int) -> str:
+    return _t(sec, hour=hour)
+
+
+def _write_bytes(path: Path, lines: list[bytes], *, final_newline: bool = True) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = b"\n".join(lines) + (b"\n" if final_newline else b"")
+    path.write_bytes(body)
+
+
+def _round2_root(root: Path, pad: int) -> None:
+    """Files whose ids, stamps and tears only a stand-in that carries them can match.
+
+    Every later line disagrees with the first inert line (another sessionId,
+    no agentId, a later stamp), so a stand-in that loses an id, or a skip that
+    keeps a bad line's stamp, changes a record. ``pad`` makes the inert lines
+    reach the real size floor.
+    """
+    x = "x" * pad
+
+    def flat(*pairs) -> str:  # a flat inert line, padded with a last member
+        return _c(*pairs, *((("pad", x),) if pad else ()))
+
+    user = {"role": "user", "content": PROMPT}
+    # the first inert line's sessionId is not the file stem; acting lines with
+    # type, stamp and session before the message; one with no stamp; an inert line
+    # with a non-ASCII character
+    e = [
+        flat(
+            ("type", "queue-operation"),
+            ("timestamp", _h(13, 0)),
+            ("sessionId", "FOREIGN-E"),
+        ),
+        _line("user", _h(13, 1), "OTHER-E", user),
+        _c(
+            ("type", "assistant"),
+            ("timestamp", _h(13, 2)),
+            ("sessionId", "OTHER-E"),
+            (
+                "message",
+                _asst_msg(
+                    "e1",
+                    [
+                        _tool_use("e1", "Bash", {"command": "ls"}),
+                        {"type": "text", "text": BODY + x},
+                    ],
+                ),
+            ),
+        ),
+        _c(
+            ("type", "user"),
+            ("timestamp", _h(13, 3)),
+            ("sessionId", "OTHER-E"),
+            (
+                "message",
+                {
+                    "role": "user",
+                    "content": "<command-name>/flat:cmd</command-name> " + x,
+                },
+            ),
+        ),
+        _c(
+            ("type", "user"),
+            ("sessionId", "OTHER-E"),
+            (
+                "message",
+                {
+                    "role": "user",
+                    "content": "<command-name>/nots:cmd</command-name> " + x,
+                },
+            ),
+            ("uuid", "u-nots"),
+        ),
+        flat(
+            ("type", "pr-link"),
+            ("sessionId", "OTHER-E"),
+            ("timestamp", _h(13, 9)),
+            ("note", "\u00e9"),
+        ),
+    ]
+    # a subagent whose agentId is not its file name, a later line with another
+    f = [
+        flat(
+            ("type", "queue-operation"),
+            ("agentId", "AGX"),
+            ("timestamp", _h(14, 0)),
+            ("sessionId", SID_F),
+        ),
+        _line("user", _h(14, 1), SID_F, user, tail=(("agentId", "AGY"),)),
+    ]
+    # an agentId, and a sessionId, that come only after a nested member
+    g = [
+        _c(
+            ("type", "api-request"),
+            ("timestamp", _h(15, 0)),
+            ("sessionId", SID_G),
+            ("p", {"a": 1, "pad": x}),
+            ("agentId", "AGZ"),
+        ),
+        _line("user", _h(15, 1), SID_G, user),
+    ]
+    h = [
+        _c(
+            ("type", "api-request"),
+            ("timestamp", _h(16, 0)),
+            ("p", {"a": 1, "pad": x}),
+            ("sessionId", "FOREIGN-H"),
+        ),
+        _line("user", _h(16, 1), "OTHER-H", user),
+    ]
+    q = ("q", x) if pad else ("q", "")
+    head = lambda sec: (
+        f'{{"type":"api-request","timestamp":"{_h(17, sec)}","sessionId":"{SID_J}"'
+    )  # noqa: E731
+    j = [
+        flat(
+            ("type", "queue-operation"), ("timestamp", _h(17, 0)), ("sessionId", SID_J)
+        ),
+        _line("user", _h(17, 1), SID_J, user).encode(),
+        # a lone 0xff inside a nested string: json.loads drops the line
+        head(5).encode() + b',"q":"' + x.encode() + b'","p":{"a":"\xff"}}',
+        # a torn last write: a nested-brace tear, no newline
+        head(8).encode() + b',"q":"' + x.encode() + b'","p":{"a":{}',
+    ]
+    k = [
+        flat(
+            ("type", "queue-operation"), ("timestamp", _h(18, 0)), ("sessionId", SID_K)
+        ),
+        _line("user", _h(18, 1), SID_K, user),
+        flat(("type", "pr-link"), ("timestamp", _h(18, 9)), ("sessionId", SID_K)),
+    ]
+    del q
+    enc = lambda lines: [ln if isinstance(ln, bytes) else ln.encode() for ln in lines]  # noqa: E731
+    pj = root / PROJECT
+    _write_bytes(pj / f"{SID_E}.jsonl", enc(e))
+    _write_bytes(pj / SID_F / "subagents" / "agent-FN.jsonl", enc(f))
+    _write_bytes(pj / SID_G / "subagents" / "agent-GN.jsonl", enc(g))
+    _write_bytes(pj / f"{SID_H}.jsonl", enc(h))
+    _write_bytes(pj / f"{SID_J}.jsonl", enc(j), final_newline=False)
+    _write_bytes(
+        pj / f"{SID_K}.jsonl", enc(k), final_newline=False
+    )  # a whole last line, unterminated
+
+
+@pytest.mark.parametrize(("pad", "floor"), [(0, 0), (BIG, None)])
+def test_a_stand_in_carries_what_the_decode_would_and_a_tear_stamps_nothing(
+    root: Path, monkeypatch: pytest.MonkeyPatch, pad: int, floor
+) -> None:
+    _round2_root(root, pad)
+    for fields, bodies in _field_sets():
+        want = _ask(monkeypatch, False, fields, bodies, floor)
+        got = _ask(monkeypatch, True, fields, bodies, floor)
+        assert got == want, (fields, bodies)
+    full = {
+        (r["session_id"], r["agent_id"]): r
+        for r in _ask(monkeypatch, False, None, None, floor)
+    }
+    # the ids come from the inert line, not from a later line or the file name
+    assert ("FOREIGN-E", None) in full
+    assert ("FOREIGN-H", None) in full
+    assert (SID_F, "AGX") in full and (SID_G, "AGZ") in full
+    # the acting lines with a flat head are read
+    e = full[("FOREIGN-E", None)]
+    assert [c["name"] for c in e["slash_commands"]] == ["flat:cmd", "nots:cmd"]
+    assert e["tool_call_count"] == 1
+    # a bad line and a torn line stamp nothing: the end is the last good stamp
+    assert full[(SID_J, None)]["end"] == _h(17, 1)
+    assert full[(SID_K, None)]["end"] == _h(18, 9)
+
+
+def test_at_the_real_floor_the_padded_lines_are_the_ones_not_decoded(
+    root: Path, monkeypatch: pytest.MonkeyPatch, decoded: list[str]
+) -> None:
+    _round2_root(root, BIG)
+    _ask(monkeypatch, True, "tool_call_count", None, None)
+    assert not _stamped(decoded, _h(13, 0)) and not _stamped(
+        decoded, _h(13, 9)
+    )  # inert, and \u00e9
+    assert not _stamped(decoded, _h(14, 0))
+    # an id after a nested member, a bad line and a torn line are decoded, and so
+    # is a whole last line with no newline
+    assert _stamped(decoded, _h(15, 0)) and _stamped(decoded, _h(16, 0))
+    assert _stamped(decoded, _h(17, 5)) and _stamped(decoded, _h(17, 8))
+    assert _stamped(decoded, _h(18, 9))
