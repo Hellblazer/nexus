@@ -33,10 +33,11 @@ and unwrapped (env assignments, sudo/nohup/xargs, ssh/wsl/lab-remote/lab-run,
 NOT CARRIED, by design (not machine-checkable from the command text): which
 branches are "yours" (ownership), whether a deletion target is alive, whether
 a cloud-touching walk sits inside an announced window, and the brief clauses
-for dispatched agents. Those live in prose. Also left out on purpose: a FOREGROUND pipe whose first
-stage is nx, pytest, lab-run, lab-remote or mvnw (``pytest ... | tail`` and
-``lab-remote ... | tail`` are everyday and were judged quiet; the incident was the background
-form, and "filter at read time" lives in the nexus skill).
+for dispatched agents. Those live in prose. Also left out on purpose: a
+FOREGROUND pipe whose first stage is nx, pytest, lab-run, lab-remote or mvnw
+(``pytest ... | tail`` and ``lab-remote ... | tail`` are everyday and were
+judged quiet; the incident was the background form, and "filter at read time"
+lives in the nexus skill).
 
 Stdlib only. Fail-open: a predicate that raises counts as no match.
 """
@@ -147,6 +148,8 @@ _PREFIX = frozenset(
      "setsid", "stdbuf", "caffeinate"}
 )
 _XARGS_VALUED = frozenset({"-n", "-I", "-P", "-L", "-s", "-d", "-E", "-a"})
+#: Shell reserved words that open a command on the same line (``for ...; do CMD``, ``if ...; then CMD``).
+_RESERVED = frozenset({"do", "then", "else", "elif", "if", "while", "until", "!"})
 
 
 def _unwrap(toks: list[str]) -> tuple[tuple[str, ...], frozenset[str]]:
@@ -161,7 +164,7 @@ def _unwrap(toks: list[str]) -> tuple[tuple[str, ...], frozenset[str]]:
         if not t:
             i += 1
             continue
-        if _ASSIGN.match(t):
+        if _ASSIGN.match(t) or t in _RESERVED:
             i += 1
             continue
         base = os.path.basename(t)
@@ -223,38 +226,103 @@ def _inner_commands(eff: tuple[str, ...]) -> list[str]:
     return []
 
 
-_HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_]\w*)\2")
+_HEREDOC_TAIL = re.compile(r"(-?)\s*(['\"]?)([A-Za-z_]\w*)\2")
 
 
-def _strip_heredocs(text: str) -> tuple[str, list[str]]:
-    """``(text without heredoc bodies, the bodies)``. A body is data fed to a command, not a command: the
-    operator line stays (its redirect targets matter), the lines up to the closing tag go. An unclosed
-    heredoc runs to the end, as in the shell."""
+def _heredoc_ops(raw: str) -> list[tuple[str, bool]]:
+    """``(tag, dash)`` of each UNQUOTED heredoc operator in one segment (``echo "a << b"`` opens none)."""
+    ops: list[tuple[str, bool]] = []
+    quote = ""
+    i, n = 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 1
+            elif c == quote:
+                quote = ""
+        elif c == "\\":
+            i += 1
+        elif c in "'\"":
+            quote = c
+        elif raw.startswith("<<", i) and raw[i - 1 : i] != "<" and raw[i + 2 : i + 3] != "<":
+            m = _HEREDOC_TAIL.match(raw, i + 2)
+            if m:
+                ops.append((m.group(3), bool(m.group(1))))
+                i = m.end() - 1
+        i += 1
+    return ops
+
+
+def _feeds_a_shell(eff: tuple[str, ...]) -> bool:
+    """Does this command read a script from stdin? A shell without ``-c``, or ssh/wsl/lab-run/lab-remote
+    with no remote command or a shell as the remote command."""
+    if not eff:
+        return False
+    c = os.path.basename(eff[0])
+    if c in _SHELLS:
+        return not any(re.fullmatch(r"-[a-z]*c[a-z]*", t) for t in eff[1:])
+    if c in {"ssh", "wsl", "wsl.exe", "lab-remote", "lab-run"}:
+        inner = _inner_commands(eff)
+        if not inner or not inner[0].strip():
+            return True
+        words = inner[0].split()
+        return os.path.basename(words[0]) in _SHELLS and not any(
+            re.fullmatch(r"-[a-z]*c[a-z]*", t) for t in words[1:]
+        )
+    return False
+
+
+def _body_is_script(segs: list[tuple[str, str]], k: int) -> bool:
+    """The heredoc opened in segment *k* feeds a shell: its own command, or the next stage of its pipeline."""
+    def feeds(raw: str) -> bool:  # redirects (``<<EOF``, ``2>&1``) are not arguments of the command
+        return _feeds_a_shell(_unwrap([t for t in _tokens(raw) if not re.match(r"\d*[<>]", t)])[0])
+
+    return feeds(segs[k][0]) or (segs[k][1] == "|" and k + 1 < len(segs) and feeds(segs[k + 1][0]))
+
+
+def _strip_heredocs(text: str) -> tuple[str, list[str], list[str]]:
+    """``(text without heredoc bodies, all bodies, the bodies that are scripts)``. A body is data fed to a
+    command, not a command: the operator line stays (its redirect targets matter), the lines up to the
+    closing tag go. A body fed to a shell (``bash <<EOF``, ``cat <<EOF | bash``, ``ssh host <<EOF``) is a
+    script, and the caller analyses its lines as commands. An unclosed heredoc runs to the end, as in the
+    shell."""
     if "<<" not in text:
-        return text, []
+        return text, [], []
     kept: list[str] = []
     bodies: list[str] = []
-    pending: list[tuple[str, bool, list[str]]] = []
+    scripts: list[str] = []
+    pending: list[tuple[str, bool, bool, list[str]]] = []
+
+    def close(script: bool, body: list[str]) -> None:
+        bodies.append("\n".join(body))
+        if script:
+            scripts.append(bodies[-1])
+
     for line in text.split("\n"):
         if pending:
-            tag, dash, body = pending[0]
+            tag, dash, script, body = pending[0]
             if (line.lstrip("\t") if dash else line).rstrip() == tag:
-                bodies.append("\n".join(body))
+                close(script, body)
                 pending.pop(0)
             else:
                 body.append(line)
             continue
         kept.append(line)
-        for m in _HEREDOC.finditer(line):
-            pending.append((m.group(3), bool(m.group(1)), []))
-    bodies.extend("\n".join(body) for _tag, _dash, body in pending)
-    return "\n".join(kept), bodies
+        if "<<" in line:
+            segs = _split(line)
+            for k, (raw, _sep) in enumerate(segs):
+                for tag, dash in _heredoc_ops(raw):
+                    pending.append((tag, dash, _body_is_script(segs, k), []))
+    for _tag, _dash, script, body in pending:
+        close(script, body)
+    return "\n".join(kept), bodies, scripts
 
 
 def _analyze(text: str, depth: int = 0, bodies: list[str] | None = None) -> tuple[list[Pipe], list[Pipe]]:
     """``(top-level pipelines, pipelines found inside wrappers)``. Heredoc bodies are cut first and
     appended to *bodies* when given."""
-    text, found = _strip_heredocs(text)
+    text, found, scripts = _strip_heredocs(text)
     if bodies is not None:
         bodies.extend(found)
     top: list[Pipe] = []
@@ -274,6 +342,10 @@ def _analyze(text: str, depth: int = 0, bodies: list[str] | None = None) -> tupl
             cur = []
     if cur:
         top.append(Pipe(tuple(cur), ""))
+    if depth < 3:
+        for script in scripts:
+            t2, i2 = _analyze(script, depth + 1)
+            inner.extend(t2 + i2)
     return top, inner
 
 
@@ -294,7 +366,7 @@ class Ctx:
         self.note = ""  # a predicate may set text that leads the advice (reset per row)
         self.deadline = time.monotonic() + DEADLINE_S  # shared by every spawn of this call
         self.worktrees: dict[str, int] = {}  # cwd -> worktree count, one lookup per cwd
-        self.bodies: list[str] = []  # heredoc bodies of the command (data, never analysed as commands)
+        self.bodies: list[str] = []  # heredoc bodies of the command (data; only a body fed to a shell is analysed as commands)
         self._analysis: tuple[list[Pipe], list[Pipe]] | None = None
 
     @property
@@ -760,7 +832,8 @@ ROWS: tuple[Row, ...] = (
         "host: a laptop `pkill -f` has been used to end an agent's own queued run, and it cannot tell that run "
         "from a peer's. A single SIGTERM to a pid picked out of `ps` by its command line has ended another "
         "session's lab-remote run. Signal only a pid you started yourself (`$!` or your own background task "
-        "id), found by its parent pid, and check it with `ps -p <pid> -o pid,ppid,args` before `kill <pid>`. "
+        "id), found by its parent pid, and check its parent and its working directory "
+        "(`ps -p <pid> -o pid,ppid,args`, `lsof -a -p <pid> -d cwd`) before `kill <pid>`. "
         "Never take a pid from ps or pgrep by its command line.",
         hints=("kill",),
     ),

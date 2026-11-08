@@ -105,6 +105,33 @@ MATCHES: list[tuple[str, str, str, dict]] = [
     ("hook_verb_by_hand", "heredoc-python-body",
      "uv run python - <<'EOF'\nfrom nexus.hooks import session_start\nsession_start('trace')\nEOF", {}),
     ("hook_verb_by_hand", "after-and-and", "cd /tmp && uv run nx-hook session-start", {}),
+    # Reserved words are not commands: the word after one is (H4; the 2026-10-14 trace was a loop).
+    ("hook_verb_by_hand", "for-do-loop", "for v in a b; do uv run nx-hook session-start; done", {}),
+    ("hook_verb_by_hand", "for-do-loop-entry-main",
+     """for v in a b; do uv run python -c "from nexus._hook_runtime import entry; entry.main()"; done""", {}),
+    ("pattern_kill", "for-do", "for p in 1 2; do pkill -f x; done", {}),
+    ("pattern_kill", "if-then", "if true; then pkill -f x; fi", {}),
+    ("pattern_kill", "if-condition", "if pkill -f x; then echo gone; fi", {}),
+    ("pattern_kill", "bang", "! pkill -f x", {}),
+    ("pattern_kill", "else-branch", "if false; then true; else killall python; fi", {}),
+    ("shared_glob_delete", "while-do", "while true; do rm -rf /tmp/nx-*; done", {}),
+    # A heredoc fed to a shell is a script: its lines are commands (N1).
+    ("pattern_kill", "bash-heredoc", "bash <<'EOF'\npkill -f pytest\nEOF", {}),
+    ("pattern_kill", "bash-s-heredoc", "bash -s <<EOF\npkill -f pytest\nEOF", {}),
+    ("pattern_kill", "sh-heredoc", "sh <<EOF\nkillall python\nEOF", {}),
+    ("pattern_kill", "zsh-heredoc", "zsh <<EOF\npkill -f x\nEOF", {}),
+    ("pattern_kill", "cat-pipe-bash", "cat <<'EOF' | bash\npkill -f x\nEOF", {}),
+    ("pattern_kill", "ssh-bash-heredoc", "ssh chas bash <<'EOF'\npkill -f pytest\nEOF", {}),
+    ("pattern_kill", "wsl-bash-heredoc", "wsl -d Ubuntu bash <<'EOF'\npkill -f pytest\nEOF", {}),
+    ("pattern_kill", "sudo-bash-heredoc", "sudo bash <<EOF\npkill -f pytest\nEOF", {}),
+    ("pattern_kill", "lab-run-heredoc", "lab-run -c lab-m -- bash <<EOF\npkill -f pytest\nEOF", {}),
+    ("shared_glob_delete", "ssh-host-heredoc", "ssh chas <<'EOF'\nrm -rf ~/tmp/nx129-*\nEOF", {}),
+    ("shared_glob_delete", "bash-s-heredoc", "bash -s <<EOF\nrm -rf /tmp/nexus_*\nEOF", {}),
+    ("whole_disk_scan", "sh-heredoc", "sh <<EOF\nfind / -name x\nEOF", {}),
+    ("shared_glob_delete", "wsl-heredoc", "wsl -d Ubuntu bash <<'EOF'\nrm -rf /tmp/*\nEOF", {}),
+    # A quoted << opens no heredoc, so the later line is still a command (N2).
+    ("pattern_kill", "quoted-shift-then-command", 'echo "fix << handling"\npkill -f y', {}),
+    ("pattern_kill", "quoted-heredoc-word", "echo 'use << EOF'\npkill -f y", {}),
 ]
 
 NEAR_MISSES: list[tuple[str, str, str, dict]] = [
@@ -158,6 +185,13 @@ NEAR_MISSES: list[tuple[str, str, str, dict]] = [
     ("hook_verb_by_hand", "import-with-no-call", "python3 -c 'import nexus._hook_runtime'", {}),
     ("hook_verb_by_hand", "import-session-start-module-no-call", "python3 -c 'import nexus.hooks.session_start'", {}),
     ("hook_verb_by_hand", "echo-the-word", "echo nx-hook", {}),
+    ("pattern_kill", "reserved-word-then-read", "for f in a b; do cat $f; done", {}),
+    ("pattern_kill", "cat-heredoc-is-data", "cat <<EOF\npkill -f x\nEOF", {}),
+    ("pattern_kill", "tee-heredoc-is-data", "tee notes.txt <<EOF\npkill -f x\nEOF", {}),
+    ("pattern_kill", "commit-message-from-stdin", "git commit -F - <<'EOF'\nfix: do not pkill\nEOF", {}),
+    ("pattern_kill", "shell-with-c-gets-the-body-as-stdin-data", "bash -c 'cat' <<EOF\npkill -f x\nEOF", {}),
+    ("pattern_kill", "cat-pipe-grep-is-data", "cat <<EOF | grep x\npkill -f x\nEOF", {}),
+    ("pattern_kill", "ssh-python-heredoc-is-code-not-commands", "ssh chas python3 <<EOF\nprint('pkill -f x')\nEOF", {}),
     ("hook_verb_by_hand", "heredoc-prose-not-a-runner", "cat > notes.md <<'EOF'\nrun nx-hook session-start\nsession_start('x')\nEOF", {}),
 ]
 
@@ -312,6 +346,11 @@ def test_the_command_after_a_heredoc_is_still_analysed() -> None:
     assert _ids("cat > n.txt <<'EOF'\npkill -f x\nEOF\nrm -rf /tmp/*") == ["shared_glob_delete"]
     assert _ids("echo $((1 <<2)) ; pkill -f y") == ["pattern_kill"], "a shift is not a heredoc"
     assert _ids("cat <<<'pkill -f x'") == [], "a here-string stays one quoted word"
+    assert _ids('echo "fix << handling"\npkill -f y') == ["pattern_kill"], "a quoted << opens no heredoc"
+    assert _ids("echo 'a << b' && cat <<EOF\nhello\nEOF\npkill -f y") == ["pattern_kill"]
+    assert _ids("cat <<EOF\npkill -f x\nEOF\nbash <<EOF\nrm -rf /tmp/*\nEOF") == ["shared_glob_delete"], (
+        "the cat body is data, the bash body is a script, whatever order they come in"
+    )
 
 
 def test_nothing_in_a_heredoc_body_spawns(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -383,6 +422,7 @@ def test_the_advice_names_the_rule_and_the_safe_alternative() -> None:
     for row, needle in {
         "pattern_kill": "`kill <pid>`",
         "pattern_kill ": "parent pid",
+        "pattern_kill  ": "-d cwd",
         "branch_bulk_delete": "one `git branch -D <name>` at a time",
         "stash_with_worktrees": "git show HEAD:f > f",
         "bg_pipe_masks_exit": "ec=$?",
@@ -404,6 +444,7 @@ def test_the_pattern_kill_advice_tells_the_two_incidents_as_they_happened() -> N
     assert "lab-remote" in advice
     assert "a pattern kill has ended a peer" not in advice, "the wrong attribution (round 1, W1)"
     assert "found by its parent pid" in advice
+    assert "lsof -a -p <pid> -d cwd" in advice, "the pid's working directory is confirmed too, not only its parent"
 
 
 def test_advise_is_the_mode_and_no_row_denies_today() -> None:
