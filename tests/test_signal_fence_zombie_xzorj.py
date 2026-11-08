@@ -82,7 +82,7 @@ def test_a_live_process_with_an_empty_argv_is_still_judged_by_the_rules(tmp_path
     pid = int(pidfile.read_text())
     try:
         deadline = time.monotonic() + 10
-        while Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0", 1)[0] != b"":
+        while Path(f"/proc/{pid}/cmdline").read_bytes() != b"\x0060\x00":  # the finished exec, not mid-exec
             assert time.monotonic() < deadline, "the process never showed an empty argv[0]"
             time.sleep(0.02)
         assert fence._state(pid) not in ("Z", "X")
@@ -101,7 +101,9 @@ def test_a_live_child_with_an_empty_argv_is_still_the_sessions() -> None:
     p = subprocess.Popen(["bash", "-c", 'exec -a "" sleep 60'])
     try:
         deadline = time.monotonic() + 10
-        while Path(f"/proc/{p.pid}/cmdline").read_bytes().split(b"\0", 1)[0] != b"":
+        # The exact argv of the exec'd sleep (["", "60"]), not just an empty first field: mid-exec the whole area
+        # reads empty for a moment, which an argv[0] test would take for the finished exec.
+        while Path(f"/proc/{p.pid}/cmdline").read_bytes() != b"\x0060\x00":
             assert time.monotonic() < deadline
             time.sleep(0.02)
         root, token = _ids()

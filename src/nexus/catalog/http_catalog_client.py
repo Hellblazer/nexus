@@ -2139,6 +2139,30 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             idempotent=False,
         ) or {}
 
+    def repair_stale_note_uris(self, *, apply: bool = False, limit: int = 1000, sample: int = 20) -> dict:
+        """POST /v1/catalog/note_uri_repair — census, and with ``apply`` the rewrite, of NOTE rows whose
+        ``source_uri`` names a collection the note no longer lives in (nexus-bivz3.24, RDR-231 critique Issue 7).
+
+        ``apply=False`` (the default) is a pure read: the engine returns the class counts (``stale_live``,
+        ``rewrite``, ``merge`` with ``merge_twin`` and ``merge_sibling``, ``refused``, ``tombstoned``,
+        ``export_copies``, ``export_copies_target_moved``) and up to ``sample`` example rows per class under ``sample`` (merge entries
+        carry ``chunk_count``, ``indexed_at``, ``has_aspects``, ``has_highlights`` and the twin's under ``twin_``).
+        ``apply=True`` also rewrites up to ``limit`` rewrite candidates in ONE engine transaction (catalog row, aspect
+        row and highlight row together) and adds ``rewritten``, ``remaining`` and ``ledger``: one
+        ``{table, key, [doc_id], old_uri, new_uri}`` per row changed, the caller's only undo record. A rewrite
+        onto a URI a live document holds, or takes while the call runs, is a 409 (``SourceUriCollision``) with
+        nothing written. Merge candidates are never touched: which row wins a merge is a design decision.
+
+        An engine without the route answers 404; this method does not swallow it, so the CLI verb can tell "engine
+        too old" from "engine answered" (the ``ghost_sweep`` shape).
+        """
+        # idempotent=not apply: a dry run is a pure read and keeps the retry. A live call makes one attempt: a
+        # blind resend after a read timeout would report the post-rewrite census as the outcome of this call.
+        return self._post(
+            "/note_uri_repair", {"apply": apply, "limit": limit, "sample": sample},
+            idempotent=not apply, mutates=apply, timeout=300.0,
+        ) or {}
+
     def ghost_sweep(self, *, dry_run: bool = True) -> dict:
         """POST /v1/catalog/ghost-sweep — the operator-facing caller for the
         engine's RDR-204 ghost sweep (nexus-29drn, Sam's ruling 2026-09-23:

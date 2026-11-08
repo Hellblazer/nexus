@@ -4,7 +4,7 @@
 The design of record is the runbook section "A local cluster older than PostgreSQL 17"
 (``docs/migration-runbook.md``); this module is that script with its failure paths made code:
 
-* the old server is stopped with the OLD ``pg_ctl`` and checked to be down;
+* the old server must already be down (checked with the OLD ``pg_ctl``) and so must the service: both are refused, not stopped;
 * the new cluster is made with :func:`nexus.db.pg_provision._initdb_argv`, the options ``nx`` creates its own
   clusters with, plus ``--auth=trust`` for the upgrade (the next service start converts it to scram-sha-256);
 * the superuser password reaches ``pg_upgrade``, ``psql`` and ``vacuumdb`` as ``PGPASSWORD`` in the CHILD's
@@ -17,8 +17,9 @@ Three modes, in increasing reach: :meth:`ClusterUpgrade.dry_run` changes nothing
 :meth:`ClusterUpgrade.check_only` runs ``initdb`` into a temporary directory (never the real data directory)
 and ``pg_upgrade --check`` against it; :meth:`ClusterUpgrade.apply` does the upgrade.
 
-The service is stopped and started through an injected callable (``nx daemon service stop|start``), so the
-module never reaches a real service from a test.
+``--apply`` refuses while the storage service or the old server is running (it stops neither; the message names
+the command to run) and starts the service again through an injected callable (``nx daemon service start``), so
+the module never reaches a real service from a test.
 """
 from __future__ import annotations
 
@@ -34,8 +35,12 @@ import tempfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from nexus.daemon.service_registry import SpawnLockHold
 
 from nexus.db.pg_provision import (
     _INITDB_TIMEOUT_S,
@@ -73,17 +78,23 @@ _RUNBOOK = (
 
 #: The limit of what is known about this command. Shown in the help, the docs, the dry run and before the move.
 #: Remove it once the command has run against a real pre-17 cluster.
-UNTESTED_NOTE = "not yet run against a real pre-17 cluster; copy the data directory first"
-#: Nothing locks the service while the upgrade runs (the runbook has the same exposure): another nx session or a
-#: login item can start it on the half-built cluster. Said wherever the untested note is.
-NO_LOCK_NOTE = ("nothing locks the service during the upgrade: close other terminals running nx, and Claude Code "
-                "sessions with the conexus plugin, and disable an autostart unit (launchd, systemd) first")
+UNTESTED_NOTE = "run once against a real pre-17 cluster on Linux, not yet with the service start; copy the data directory first"
+#: What the service lock guarantees and what it does not. ``--apply`` and ``--check-only`` hold the storage
+#: service's spawn lock (the one a supervisor's ``start()`` takes) for the whole run, so a concurrent
+#: ``nx daemon service start`` waits on it instead of starting a supervisor on the half-built cluster. It is
+#: freed just before this command starts the service again: a supervisor that child ``start`` spawns would
+#: otherwise wait on its own parent. Said wherever the untested note is.
+LOCK_NOTE = ("the storage service's spawn lock is held for the whole run (freed just before the service is started "
+             "again), so a concurrent `nx daemon service start` waits instead of starting on the half-built cluster. "
+             "--apply refuses while the service or the old PostgreSQL server is running (it stops neither: run "
+             "`nx daemon service stop` first); the lock does not keep a server that another manager (brew services, "
+             "systemd) restarts from coming back")
 
-#: What a failure before the data directory moves leaves behind (the service and the old server are stopped first).
-_NOT_MOVED = (
-    "The data directory was not moved. The storage service and the old server may be stopped: "
-    "`nx daemon service start` starts the service again."
-)
+#: The registry tier whose supervisor takes the spawn lock (``storage_service_daemon._REGISTRY_TIER``; a test pins them equal).
+_SERVICE_TIER = "storage_service"
+
+#: What a failure before the data directory moves leaves behind: nothing was stopped, so nothing needs starting.
+_NOT_MOVED = "The data directory was not moved, and nothing was stopped."
 
 #: The work directory keeps pg_upgrade's logs, which include the globals dump with the roles' password hashes.
 _WORKDIR_HASH_NOTE = (
@@ -93,6 +104,31 @@ _WORKDIR_HASH_NOTE = (
 
 #: ``verb`` is ``"stop"`` or ``"start"``; the callable runs ``nx daemon service <verb>`` and returns its exit code.
 ServiceControl = Callable[[str, Path], int]
+
+
+def _hold_service_lock(plan: "UpgradePlan") -> "SpawnLockHold":
+    """Take the storage service's spawn lock for *plan*'s config directory, or raise :class:`PgUpgradeRefused`.
+
+    The lock itself lives in the shared lifecycle primitive (:meth:`ServiceRegistry.try_hold_spawn_lock`); this is
+    only the translation of its refusal into this command's.
+    """
+    from nexus.daemon.service_registry import ServiceRegistry, SpawnLockBusyError  # noqa: PLC0415 — deferred, heavy; this command only
+
+    try:
+        return ServiceRegistry(dir=plan.config_dir, tier=_SERVICE_TIER).try_hold_spawn_lock()
+    except SpawnLockBusyError as exc:
+        raise PgUpgradeRefused(f"{exc}. Wait for it to finish and run this again. Nothing was changed.") from None
+    except OSError as exc:
+        raise PgUpgradeRefused(
+            f"could not take the storage service's spawn lock in {plan.config_dir} ({exc.strerror}). Nothing was changed."
+        ) from None
+
+
+def _find_running_service(plan: "UpgradePlan") -> list[str]:
+    """What ``nx daemon service stop`` would find running for *plan*'s config directory (empty: none). Read-only."""
+    from nexus.daemon.storage_service_daemon import storage_service_running  # noqa: PLC0415 — deferred, heavy; this command only
+
+    return storage_service_running(plan.config_dir)
 
 
 class PgUpgradeRefused(Exception):
@@ -283,7 +319,7 @@ def build_plan(config_dir: Path, old_bin: Path, *, require_no_old_dir: bool = Tr
         )
 
     try:
-        new_bins = discover_pg_binaries()
+        new_bins = discover_pg_binaries(config_dir)  # the bundle beside the cluster, not the process's default dir
         if not new_bins.bin_dir.is_absolute():  # review r2: a relative NEXUS_PG_BIN would break once cwd moves
             new_bins = type(new_bins).from_dir(_absolute(new_bins.bin_dir))
     except PgBinaryNotFoundError as exc:
@@ -323,7 +359,7 @@ def plan_lines(plan: UpgradePlan) -> list[str]:
     old_ctl, new = plan.old_bin / "pg_ctl", plan.new_bins.bin_dir
     return [
         f"NOTE: this command is {UNTESTED_NOTE} ({plan.pgdata}).",
-        f"NOTE: {NO_LOCK_NOTE}.",
+        f"NOTE: {LOCK_NOTE}.",
         "",
         f"cluster      {plan.pgdata} (PostgreSQL {plan.cluster_major}, superuser {plan.os_user})",
         f"old bin      {plan.old_bin}",
@@ -331,15 +367,17 @@ def plan_lines(plan: UpgradePlan) -> list[str]:
         f"kept copy    {plan.pgdata_old}",
         "",
         "--apply would:",
-        "  1. nx daemon service stop",
-        f"  2. {old_ctl} -D {plan.pgdata} -m fast stop, then check with status that no server runs",
+        "  0. take the storage service's spawn lock (refuse if another process holds it); freed before step 6",
+        f"  1. refuse if the storage service is running (it is not stopped: run `nx daemon service stop --config-dir {plan.config_dir}` first)",
+        f"  2. refuse if a server runs on {plan.pgdata} (checked with {old_ctl} -D {plan.pgdata} status; it is not stopped: "
+        f"`{old_ctl} -D {plan.pgdata} -m fast stop`, and stop its service manager)",
         f"  3. refuse if {plan.pgdata_old} exists; else mv {plan.pgdata} {plan.pgdata_old}",
         "  4. from a short temporary directory: initdb into a new data directory with the options nx creates "
         "its own clusters with, --auth=trust",
         "  5. pg_upgrade --check, then the real pg_upgrade (the password, "
         + ("from pg_credentials, " if plan.password else "none recorded, ")
         + "goes in the child's environment only)",
-        f"     any failure from step 3 on: stop the child and any server, remove the new {plan.pgdata}, "
+        f"     any failure from step 3 on: stop the child and any server it started, remove the new {plan.pgdata}, "
         f"mv {plan.pgdata_old} back",
         "  6. nx daemon service start",
         "  7. psql -f update_extensions.sql (when pg_upgrade wrote one; it says whether it found one), then "
@@ -348,7 +386,7 @@ def plan_lines(plan: UpgradePlan) -> list[str]:
         "",
         "--check-only runs pg_upgrade --check against the real cluster, with a temporary initdb as the new one. pg_upgrade --check "
         "starts and stops the old server on the real data directory and does not modify it, so the old server "
-        "must not be running.",
+        "must not be running. If the check fails or is interrupted it stops the old server only when it started it.",
         "Nothing was changed. Re-run with --check-only to test it, or --apply to upgrade.",
     ]
 
@@ -364,12 +402,24 @@ def _short_tempdir() -> Path:
 
 
 class ClusterUpgrade:
-    """Runs one plan. *say* prints a line; *service* stops and starts the storage service."""
+    """Runs one plan. *say* prints a line; *service* starts the storage service again."""
 
-    def __init__(self, plan: UpgradePlan, *, say: Callable[[str], None], service: ServiceControl) -> None:
+    def __init__(
+        self,
+        plan: UpgradePlan,
+        *,
+        say: Callable[[str], None],
+        service: ServiceControl,
+        hold_lock: Callable[[UpgradePlan], "SpawnLockHold"] = _hold_service_lock,
+        find_service: Callable[[UpgradePlan], list[str]] | None = None,
+    ) -> None:
         self.plan = plan
         self.say = say
         self.service = service
+        self._hold_lock = hold_lock
+        # Looked up at call time, so a test (or a caller) can replace the module's finder.
+        self._find_service = find_service or (lambda plan: _find_running_service(plan))
+        self._lock: "SpawnLockHold | None" = None
         self._moved = False
 
     # ── helpers ────────────────────────────────────────────────────────────
@@ -450,6 +500,19 @@ class ClusterUpgrade:
 
     def check_only(self) -> None:
         """initdb into a temporary directory and ``pg_upgrade --check`` against it; the temporary directory goes."""
+        self._lock = self._hold_lock(self.plan)
+        try:
+            self._check_only_locked()
+        finally:
+            self._release_lock()
+
+    def _release_lock(self) -> None:
+        lock, self._lock = self._lock, None
+        if lock is not None:
+            lock.release()
+
+    def _require_no_server(self) -> None:
+        """Refuse (:class:`PgUpgradeRefused`) unless ``pg_ctl status`` says no server runs on the data directory."""
         p = self.plan
         old_ctl = p.old_bin / "pg_ctl"
         try:
@@ -459,57 +522,122 @@ class ClusterUpgrade:
         if state == _PG_CTL_RUNNING:
             raise PgUpgradeRefused(
                 f"a server is running on {p.pgdata}: stop it with `{old_ctl} -D {p.pgdata} -m fast stop` "
-                "(and its service manager, such as brew services or systemd, so it does not restart), then run again"
+                "(and its service manager, such as brew services or systemd, so it does not restart), then run again. "
+                "Nothing was changed."
             )
         if state != _PG_CTL_NOT_RUNNING:
-            raise PgUpgradeRefused(f"`{old_ctl} -D {p.pgdata} status` exited {state}: cannot tell whether a server runs there")
-        try:
-            workdir = _short_tempdir()
-        except OSError as exc:
-            raise PgUpgradeRefused(f"could not make a temporary directory under {SHORT_TMP_ROOT} ({exc.strerror})") from None
-        try:
-            new_data = workdir / "data"
+            raise PgUpgradeRefused(
+                f"`{old_ctl} -D {p.pgdata} status` exited {state}: cannot tell whether a server runs there. Nothing was changed."
+            )
+
+    def _check_only_locked(self) -> None:
+        p = self.plan
+        self._require_no_server()
+        with _interrupts_raise():
+            with _interrupts_held():  # no window between the directory existing and workdir naming it
+                try:
+                    workdir = _short_tempdir()
+                except OSError as exc:
+                    raise PgUpgradeRefused(f"could not make a temporary directory under {SHORT_TMP_ROOT} ({exc.strerror})") from None
+            # True from just before pg_upgrade --check runs, when pg_ctl status says no server runs there: only then
+            # does that step start the old server, so only then is a server running afterwards ours to stop. Judged by
+            # status, not by postmaster.pid: an unclean shutdown leaves a stale pid file that postgres replaces.
+            check_began = False
             try:
-                self._initdb(new_data, workdir)
-                self.say("initdb: a temporary cluster was made; running pg_upgrade --check against it")
-                self._step("pg_upgrade --check", self._upgrade_argv(p.pgdata, new_data, check=True),
-                           timeout=_PG_UPGRADE_TIMEOUT_S, cwd=workdir, secret=True)
-            except _StepFailed as exc:
-                raise PgUpgradeFailed(
-                    f"{exc}\n{p.pgdata} was not modified (pg_upgrade --check starts and stops the old server on it, "
-                    f"and changes nothing). If it reports an encoding or locale mismatch, the old "
-                    f"cluster was made with other options; see {_RUNBOOK}."
-                ) from None
-        finally:
-            shutil.rmtree(workdir, ignore_errors=True)
+                new_data = workdir / "data"
+                try:
+                    self._initdb(new_data, workdir)
+                    self.say("initdb: a temporary cluster was made; running pg_upgrade --check against it")
+                    try:
+                        check_began = self._server_state(p.old_bin / "pg_ctl", p.pgdata) != _PG_CTL_RUNNING
+                    except _StepFailed:
+                        check_began = False  # status unreadable: leave whatever runs there alone
+                    self._step("pg_upgrade --check", self._upgrade_argv(p.pgdata, new_data, check=True),
+                               timeout=_PG_UPGRADE_TIMEOUT_S, cwd=workdir, secret=True)
+                except _StepFailed as exc:
+                    with _interrupts_held():
+                        left = self._stop_check_server(check_began)
+                        raise PgUpgradeFailed(
+                            f"{exc}\n{p.pgdata} was not modified (pg_upgrade --check starts and stops the old server on it, "
+                            f"and changes nothing). If it reports an encoding or locale mismatch, the old "
+                            f"cluster was made with other options; see {_RUNBOOK}." + (f"\n{left}" if left else "")
+                        ) from None
+                except BaseException as exc:  # an interrupt, or a bug: pg_upgrade --check may have left the old server up
+                    with _interrupts_held():
+                        left = self._stop_check_server(check_began)
+                        if left:
+                            self.say(left)
+                        if isinstance(exc, Exception):
+                            raise
+                        self.say(f"interrupted ({exc}). {p.pgdata} was not modified; the temporary directory is removed.")
+                        raise
+            finally:
+                with _interrupts_held():
+                    shutil.rmtree(workdir, ignore_errors=True)
         self.say(f"pg_upgrade --check passed. The temporary cluster is removed and {p.pgdata} was not modified.")
+
+    def _stop_check_server(self, check_began: bool) -> str | None:
+        """After a ``--check-only`` that did not finish cleanly: stop the old server ``pg_upgrade --check`` started.
+
+        *check_began* says that ``pg_ctl status`` found no server running when ``pg_upgrade --check`` began (a stale
+        pid file from an unclean shutdown does not count), so a server up now is the one it started. When it is False (the check never began, or a server was already there), a
+        server that runs now belongs to someone else (brew services, systemd, a person): it is left alone and the
+        returned note says so. Stopped with the OLD ``pg_ctl``, ``fast`` and bounded; signals are ignored
+        meanwhile. Returns a warning naming the command to run when a server of ours cannot be confirmed down.
+        """
+        p = self.plan
+        old_ctl = p.old_bin / "pg_ctl"
+        with _interrupts_held():
+            if not check_began:
+                try:
+                    running = self._server_state(old_ctl, p.pgdata) == _PG_CTL_RUNNING
+                except _StepFailed:
+                    return None
+                if running:
+                    return (f"NOTE: a server is running on {p.pgdata} that this check did not start (a service manager "
+                            f"such as brew services or systemd, or a person, started it): it was left running.")
+                return None
+            with contextlib.suppress(Exception):
+                self._stop_server(old_ctl, p.pgdata, mode="fast")
+            if self._is_down(old_ctl, p.pgdata):
+                return None
+        return (f"WARNING: a server may still be running on {p.pgdata} (pg_upgrade --check started it and it could "
+                f"not be confirmed stopped): stop it with `{old_ctl} -D {p.pgdata} -m fast stop`. "
+                f"It is still running, or `pg_ctl status` could not say.")
 
     def apply(self) -> None:
         p = self.plan
         if p.port is None:
             raise PgUpgradeRefused(f"{CREDENTIALS_FILENAME} has no PG_PORT: the follow-up steps could not reach the new cluster")
         with _interrupts_raise():
+            self._lock = self._hold_lock(p)
             try:
-                workdir = _short_tempdir()
-            except OSError as exc:
-                raise PgUpgradeRefused(
-                    f"could not make a work directory under {SHORT_TMP_ROOT} ({exc.strerror}): nothing was changed"
-                ) from None
-            self._apply(workdir)
+                # The notes go before the work directory exists, so a signal while they print leaks nothing.
+                self.say(f"NOTE: this command is {UNTESTED_NOTE} ({p.pgdata}).")
+                self.say(f"NOTE: {LOCK_NOTE}.")
+                with _interrupts_held():  # no window between the directory existing and workdir naming it
+                    try:
+                        workdir = _short_tempdir()
+                    except OSError as exc:
+                        raise PgUpgradeRefused(
+                            f"could not make a work directory under {SHORT_TMP_ROOT} ({exc.strerror}): nothing was changed"
+                        ) from None
+                self._apply(workdir)
+            finally:
+                self._release_lock()
 
     def _apply(self, workdir: Path) -> None:
         p = self.plan
-        self.say(f"NOTE: this command is {UNTESTED_NOTE} ({p.pgdata}).")
-        self.say(f"NOTE: {NO_LOCK_NOTE}.")
         try:
-            self._stop_and_move()
+            self._check_idle_and_move()
             self._upgrade(workdir)
         except BaseException as exc:
             # The rename may have landed with the flag not yet set (an interrupt in between): the directory
             # layout says so too. A refusal has the original in place and a pre-existing .old, so it cannot match.
             moved = self._moved or (not os.path.lexists(p.pgdata) and os.path.lexists(p.pgdata_old))
             if not moved:
-                shutil.rmtree(workdir, ignore_errors=True)
+                with _interrupts_held():
+                    shutil.rmtree(workdir, ignore_errors=True)
                 if isinstance(exc, (PgUpgradeRefused, PgUpgradeFailed)):
                     raise
                 if isinstance(exc, _StepFailed):
@@ -561,20 +689,19 @@ class ClusterUpgrade:
             f"The pre-upgrade cluster is kept at {p.pgdata_old}. Work directory kept: {workdir}\n{_WORKDIR_HASH_NOTE}"
         )
 
-    def _stop_and_move(self) -> None:
-        """Stop the service and the old server, then move the data directory aside. Raises before the move on any problem."""
+    def _check_idle_and_move(self) -> None:
+        """Refuse while the service or the old server runs, then move the data directory aside. Stops nothing.
+
+        Raises before the move on any problem. The service is looked for the way ``nx daemon service stop`` finds it.
+        """
         p = self.plan
-        old_ctl = p.old_bin / "pg_ctl"
-        self.say("stopping the storage service")
-        if self._service("stop") != 0:
-            raise PgUpgradeRefused("`nx daemon service stop` failed: the data directory was not touched")
-        self.say(f"stopping the old server with {old_ctl}")
-        self._stop_server(old_ctl, p.pgdata, mode="fast")
-        if self._server_state(old_ctl, p.pgdata) != _PG_CTL_NOT_RUNNING:
+        running = self._find_service(p)
+        if running:
             raise PgUpgradeRefused(
-                f"a server still runs on {p.pgdata} (a service manager such as brew services or systemd may restart "
-                f"it: stop it there). {_NOT_MOVED}"
+                f"the storage service is running ({'; '.join(running)}): stop it with "
+                f"`nx daemon service stop --config-dir {p.config_dir}`, then run this again. Nothing was changed."
             )
+        self._require_no_server()
         if os.path.lexists(p.pgdata_old):
             raise PgUpgradeRefused(f"{_old_dir_text(p.pgdata, p.pgdata_old)}\n{_NOT_MOVED}")
         try:
@@ -664,6 +791,9 @@ class ClusterUpgrade:
     def _finish(self, workdir: Path) -> list[str]:
         """Start the service and run pg_upgrade's follow-ups; return the problems (empty on success)."""
         p = self.plan
+        # The cluster is whole now. Free the lock before the service starts: `nx daemon service start` spawns a
+        # supervisor that takes it, and would wait on this process (60 s, then fail) if we still held it.
+        self._release_lock()
         problems: list[str] = []
         host = ["-h", "127.0.0.1", "-p", str(p.port), "-U", p.os_user]
         update = self._find_update_extensions(workdir)

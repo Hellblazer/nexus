@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 import threading
 from pathlib import Path
 
@@ -248,6 +249,24 @@ def test_the_below_floor_wait_ticks_so_a_windows_stop_is_seen(tmp_path: Path, mo
     assert all(w is not None and w <= ssd.DEFAULT_HEARTBEAT_INTERVAL for w in stop.timeouts), stop.timeouts
 
 
+def _after_the_refusal_snapshot(monkeypatch: pytest.MonkeyPatch, action: Callable[[], None]) -> None:
+    """Run *action* right after the wait reads the credentials it compares against, never before.
+
+    A timer raced that read: on a loaded runner it fired first, the snapshot then held the new credentials, the
+    wait saw no change and the bounding stop returned 0 (develop shard 6 at 0e1c5d831)."""
+    real = ssd._creds_file_bytes
+    done: list[bool] = []
+
+    def snapshot_then_act(config_dir: Path) -> bytes | None:
+        data = real(config_dir)
+        if not done:
+            done.append(True)
+            action()
+        return data
+
+    monkeypatch.setattr(ssd, "_creds_file_bytes", snapshot_then_act)
+
+
 def test_a_reinit_while_waiting_exits_3_for_a_fresh_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The waiting process holds the old port and password; the OS unit's restart reads the new ones.
     monkeypatch.setattr(ssd, "_BELOW_FLOOR_RECHECK_S", 0.01)
@@ -259,7 +278,7 @@ def test_a_reinit_while_waiting_exits_3_for_a_fresh_process(tmp_path: Path, monk
         (tmp_path / pp.CREDENTIALS_FILENAME).write_text("PG_PORT=6543\n")
         (pgdata / "PG_VERSION").write_text(f"{PG_VERSION_FLOOR}\n")
 
-    threading.Timer(0.2, reinit).start()
+    _after_the_refusal_snapshot(monkeypatch, reinit)
     assert ssd._supervise_until_stopped(sup, threading.Event(), lambda: None) == 3  # type: ignore[arg-type]
     assert sup.starts == 1
     assert sup.stops == 1
@@ -270,8 +289,8 @@ def test_a_reinit_to_another_data_path_wakes_the_waiter(tmp_path: Path, monkeypa
     monkeypatch.setattr(ssd, "_BELOW_FLOOR_RECHECK_S", 0.01)
     (tmp_path / pp.CREDENTIALS_FILENAME).write_text("PG_PORT=5433\n")
     sup = _BelowFloorSup(_pgdata(tmp_path, "16"))
-    threading.Timer(0.2, lambda: (tmp_path / pp.CREDENTIALS_FILENAME).write_text(
-        f"PG_DATA={tmp_path / 'postgres-new'}\nPG_PORT=6543\n")).start()
+    _after_the_refusal_snapshot(monkeypatch, lambda: (tmp_path / pp.CREDENTIALS_FILENAME).write_text(
+        f"PG_DATA={tmp_path / 'postgres-new'}\nPG_PORT=6543\n"))
     stop = threading.Event()
     threading.Timer(3.0, stop.set).start()  # bounds the wrong behaviour, which would wait for the old path
     assert ssd._supervise_until_stopped(sup, stop, lambda: None) == 3  # type: ignore[arg-type]

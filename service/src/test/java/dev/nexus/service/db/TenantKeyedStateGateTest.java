@@ -564,6 +564,9 @@ public class TenantKeyedStateGateTest {
                 notKeyed.put(f, "a component of one sweep call's result record, built for that request and dropped "
                     + "with its response; nothing keeps it between requests");
             }
+            notKeyed.put("CatalogRepository.Rewritten.ledger", "a component of one stale-note repair batch's result, "
+                + "the ledger of the rows that call changed, built for that request and returned in its response "
+                + "(nexus-bivz3.24); nothing keeps it between requests");
             notKeyed.put("ChunkConstraintAdmin.TenantProbe.tenant", "a component of one table-wide probe row (the "
                 + "tenant name beside its counts), built for that request and dropped with its response");
             for (String f : List.of("ChunkKeyPlan.allowed", "ChunkKeyPlan.rowKeys", "ChunkKeyPlan.bypassPrefixes",
@@ -749,12 +752,13 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, COUNTER);
             }
-            // TEST_HOOK (22)
+            // TEST_HOOK (23)
             for (String f : List.of(
                 "CatalogRepository.afterChunkUpsertHookForTests",
                 "CatalogRepository.afterMoveCompletedHookForTests",
                 "CatalogRepository.afterMovePreconditionHookForTests",
                 "CatalogRepository.beforeReadHookForTests",
+                "CatalogRepository.noteUriRepairHookForTests",
                 "ReembedJobRepository.lockRetryHookForTests",
                 "ReembedRunner.phaseHookForTests",
                 "NexusService.reembedServedModelsForTests",

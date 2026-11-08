@@ -1673,6 +1673,34 @@ For each candidate, parses the path component out of the stored `chroma://<colle
 | `--apply` | Perform the rewrite (default: dry-run report only) |
 | `--json` | Emit JSON instead of the human-readable report |
 
+### nx catalog repair-note-uris
+
+```
+nx catalog repair-note-uris [--apply] [--json] [--sample N] [--batch-size N] [--ledger PATH]
+```
+
+Repairs note `source_uri` values that name a collection the note no longer lives in (nexus-bivz3.24, RDR-231 critique Issue 7). A note moved by a re-home, a collection update or a rename before RDR-231 step 4 keeps `nx-note://X/t` on a row living in `Y`; the `chroma://` to `nx-note://` backfill changed only the scheme, so the row is still stale and a re-put under `Y` mints a duplicate. The census and the rewrite run in the engine (`POST /v1/catalog/note_uri_repair`, one tenant, one SQL census), and the verb needs an engine that has the route (an older one answers with a named refusal). Dry run by default; the census is always printed.
+
+Classes of live note row whose URI collection differs from `physical_collection`:
+
+- **rewrite candidates**: no other live row holds `nx-note://<physical collection>/<title>`, and no other stale row rewrites onto it. `--apply` rewrites the catalog row, its `document_aspects` row and its `document_highlights` row in ONE transaction, each by its own value (a legacy `chroma://` spelling comes out as `nx-note://`). A twin that appears while it runs is a 409 naming the holder, with nothing written for that batch.
+- **merge candidates**: a live twin holds the target in either spelling (`twin`), or two stale rows would rewrite onto one URI (`sibling`). Listed, never merged: `POST /v1/catalog/merge` moves neither chunks, aspects nor highlights, and which row wins is a design decision. Each entry carries what a choosing rule reads: `chunk_count`, `indexed_at`, `has_aspects`, `has_highlights`, and the twin's under a `twin_` prefix.
+- **refused**: a row whose physical collection is blank or file-routed (`rdr__`, `docs__`, `code__`), or whose URI has no title part. Reported, never rewritten.
+- **tombstoned**: stale rows with `deleted_at` set. Counted, never rewritten: only live rows can mint a duplicate. A restore makes one live again, so a restored stale tombstone appears in the next census as a rewrite or merge candidate.
+- **`nxexp://` export copies**: census only, by scope. The inner collection of `nxexp://<target>/<note uri>` names the export's source by design, so it is not stale; the census counts the copies whose `<target>` is no longer the collection they live in. That count grows with every rename and re-home, because the move paths skip `nxexp://` values (`NoteUri.moveTo`); a re-import into the new collection then misses the copy and mints another. Repairing it needs its own rule and is a follow-on.
+
+`--apply` runs the census, rewrites in batches of `--batch-size` until no rewrite candidate is left, then prints the census again. A chain (a stale row whose target is held by another stale row) needs a second pass once the first has moved, so it re-censuses and goes round again while candidates remain, up to `ceil(rewrite candidates / batch size) + 10` batches (the slack covers chains up to ten deep). It stops with exit 1 if a batch rewrites nothing while candidates remain, at that cap, and on a 409.
+
+**The ledger is the only undo record.** `--apply` writes one JSON line per row changed, in all three tables (`catalog_documents` keyed by tumbler, `document_aspects` and `document_highlights` by row id, with `doc_id`), each with `old_uri` and `new_uri` and its `batch`, flushed to disk after every batch before the next is asked for. Default file: `nx-note-uri-repair-<UTC timestamp>.jsonl` in the working directory; an existing file is appended to, and a new one is created owner-only (it names every rewritten note's title). A response lost to a timeout can leave one batch rewritten with no ledger lines: the engine keeps no other record of the old URIs, so that batch cannot be undone from the ledger; the timeout message says so. A later census shows its rows as already in their own collection, so re-running is safe. If the engine returns a batch whose ledger is unusable, the batch has still committed: the raw report is saved beside the ledger as `<ledger>.rejected` and the run stops.
+
+| Flag | Description |
+|------|-------------|
+| `--apply` | Perform the rewrite (default: dry-run census only) |
+| `--json` | Emit JSON: the engine's report, or with `--apply` `{before, rewritten, batches, ledger, after}` |
+| `--sample N` | Example rows listed per class (0 to 500, default 20). The counts are never capped |
+| `--batch-size N` | Rewrite candidates one engine transaction rewrites (1 to 5000, default 1000) |
+| `--ledger PATH` | With `--apply`: the undo ledger file (default a timestamped `.jsonl` in the working directory) |
+
 ### nx catalog backfill-etags
 
 ```
@@ -4561,9 +4589,23 @@ with the bundle's `pg_upgrade`. The engine refuses a cluster below 17 and
 It is the scripted form of "A local cluster older than PostgreSQL 17" in
 [the migration runbook](migration-runbook.md). Linux and macOS only.
 
-**Not yet run against a real pre-17 cluster; copy the data directory first.** Nothing locks the service while
-the upgrade runs: close other `nx` sessions and Claude Code sessions with the conexus plugin, and disable an
-autostart unit (launchd, systemd), before `--apply`.
+**Run once against a real pre-17 cluster on Linux, not yet with the service start; copy the data directory first.** `--apply` and `--check-only`
+hold the storage service's spawn lock (`<config dir>/storage_service_spawn.lock`, the lock a supervisor takes
+in its start) for the whole run, and are refused up front when another process holds it. A concurrent
+`nx daemon service start` then waits on the lock instead of starting a supervisor on the half-built cluster:
+the verb times out waiting for the service, and the supervisor it spawned stays blocked on the lock and
+proceeds (or exits, if another one has started meanwhile) once the lock is freed. Each concurrent start leaves
+one such blocked supervisor. That the verb waits is tested; how an autostart unit (launchd, systemd) behaves
+while the lock is held, including its own start timeout and restart limits, is not, so stop the unit before
+`--apply`. The lock is freed just before the command starts the service again.
+
+`--apply` refuses while the storage service or the old PostgreSQL server is running, and stops neither: it
+finds the service the way `nx daemon service stop` does (a live lease, then the process table) and the
+server with the old `pg_ctl status`. The message names `nx daemon service stop --config-dir <dir>` and, for
+a server, `<old pg_ctl> -D <data> -m fast stop`; run them, stop the server's service manager (brew services,
+systemd) so it does not restart, and run the command again. Nothing is changed by a refusal. `nx daemon
+service stop` leaves a PostgreSQL server that nx started running by default, so a running server is the
+usual second refusal. The lock does not keep a server that another manager restarts from coming back.
 The command is tested against fake PostgreSQL binaries only. Until a real run
 exists, take a copy of the data directory (`cp -a <data> <copy>`) before
 `--apply`; the dry run and `--apply` both print this reminder.
@@ -4579,8 +4621,10 @@ Without a mode flag the command changes nothing: it validates the cluster and
 `initdb` into a temporary directory (never the real data directory) with the
 options nx creates its own clusters with, runs `pg_upgrade --check` against the
 real cluster (it starts and stops the old server on it and does not modify it),
-and removes the temporary directory; the old server must not be running. `--apply` stops the service, stops the old server with the old
-`pg_ctl` and checks it is down, moves the data directory to `<data>.old`, runs
+and removes the temporary directory; the old server must not be running. If the check fails or is interrupted,
+`--check-only` stops the old server only when `pg_upgrade --check` started it (`pg_ctl status` found no server
+running when it began; a stale pid file from a crash does not count); a server someone else started meanwhile is left running and the output says so. `--apply`
+checks with the old `pg_ctl` that no server runs, moves the data directory to `<data>.old`, runs
 `initdb` (`--auth=trust` for the upgrade; the next service start converts it to
 `scram-sha-256`), `pg_upgrade --check` and `pg_upgrade`, starts the service, then
 runs `update_extensions.sql` (it looks in its work directory and under

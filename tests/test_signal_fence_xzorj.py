@@ -32,6 +32,15 @@ def _ids() -> tuple[int, str]:
 @pytest.fixture
 def child():
     p = subprocess.Popen(_SLEEP)
+    # Popen returns once the child's close-on-exec error pipe closes, which the kernel does inside exec before it
+    # writes the new image's argument area, so /proc/<pid>/cmdline can still read empty for a moment (develop shard 1
+    # at 9098d1de0 read '' as the program name). Wait, bounded, until the child's argv is the one it was started with.
+    if sys.platform.startswith("linux"):
+        want = b"\0".join(a.encode() for a in _SLEEP) + b"\0"
+        deadline = time.monotonic() + 10
+        while Path(f"/proc/{p.pid}/cmdline").read_bytes() != want:
+            assert time.monotonic() < deadline, "the child never finished its exec"
+            time.sleep(0.01)
     yield p
     p.kill()
     p.wait()
@@ -50,7 +59,12 @@ def _orphan(tmp_path: Path, *, env: dict[str, str] | None) -> int:
     while not pidfile.exists() or not pidfile.read_text():
         assert time.monotonic() < deadline, "the orphan never wrote its pid"
         time.sleep(0.05)
-    return int(pidfile.read_text())
+    pid = int(pidfile.read_text())
+    want = b"\0".join(a.encode() for a in _SLEEP) + b"\0"
+    while Path(f"/proc/{pid}/cmdline").read_bytes() != want:  # the exec finished (see the child fixture)
+        assert time.monotonic() < deadline, "the orphan never finished its exec"
+        time.sleep(0.01)
+    return pid
 
 
 def _reap(pid: int) -> None:

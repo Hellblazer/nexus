@@ -298,6 +298,7 @@ def test_download_maps_404_to_asset_absent(tmp_path, monkeypatch):
 @pytest.mark.parametrize("code", [403, 500, 503])
 def test_download_other_http_errors_are_not_asset_absent(tmp_path, monkeypatch, code):
     setattr_in(monkeypatch, b, "urllib.request.urlopen", _raise_http(code))
+    monkeypatch.setattr(b, "_RETRY_DELAYS_S", (0.0, 0.0))  # 5xx is retried (nexus-h29w1)
     with pytest.raises(b.BinaryDownloadError) as exc_info:
         b._download("https://example/x", tmp_path / "x")
     assert not isinstance(exc_info.value, b.BinaryAssetAbsentError)

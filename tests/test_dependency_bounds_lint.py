@@ -349,6 +349,7 @@ def test_live_pyproject_dependencies_all_parse() -> None:
 # together, on a green ``-m slow`` MinerU run and shakedown.
 _SHAPE_SENSITIVE: dict[str, str] = {
     "mineru": "MinerU markdown shape locks tests/test_pdf_subsystem.py's slow fixtures and the visual-marker regexes",
+    "lupa": "RDR-242 A4: the bundled Lua 5.4 patch release, the count hook and max_memory behaviour, and the static check's bytecode layout hold for lupa 2.8 only",
 }
 
 _LOCK = _REPO_ROOT / "uv.lock"

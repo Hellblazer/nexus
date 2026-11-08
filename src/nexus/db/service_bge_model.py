@@ -190,7 +190,7 @@ _RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0)
 _retry_sleep: Callable[[float], None] = time.sleep
 
 
-def _stream_once(url: str, dest: Path) -> None:
+def _stream_once(url: str, dest: Path, headers: dict[str, str] | None = None) -> None:
     """Stream ``url`` to ``dest`` atomically (``.part`` then rename), one attempt.
 
     On any failure the ``.part`` file is removed, so a stalled/aborted download
@@ -205,7 +205,9 @@ def _stream_once(url: str, dest: Path) -> None:
     # install forever — the retry loop above exists precisely to absorb it.
     timeout = httpx.Timeout(timeout=None, connect=30.0, read=300.0)
     try:
-        with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as resp:
+        with httpx.stream(
+            "GET", url, headers=headers, follow_redirects=True, timeout=timeout
+        ) as resp:
             resp.raise_for_status()
             with open(tmp, "wb") as fh:
                 for chunk in resp.iter_bytes(chunk_size=1 << 20):
@@ -243,7 +245,31 @@ def _httpx_stream(url: str, dest: Path) -> None:
             )
             _retry_sleep(delay)
     assert last is not None  # loop ran at least once without returning
+    if _rest_fallback(url, dest):
+        return
     raise last
+
+
+def _rest_fallback(url: str, dest: Path) -> bool:
+    """One fetch of the same asset from the REST asset endpoint, after every
+    retry on the release download URL failed (nexus-h29w1: that redirect
+    returned 504 for assets the endpoint served). True when it landed; the
+    caller verifies the pinned sha256 as before. httpx drops Authorization on
+    the cross-origin redirect to the storage host.
+    """
+    from nexus.daemon.binary_install import release_asset_api_fallback  # noqa: PLC0415
+
+    try:
+        target = release_asset_api_fallback(url)
+        if target is None:
+            return False
+        api_url, headers = target
+        _stream_once(api_url, dest, headers=headers)
+    except Exception as exc:  # noqa: BLE001 — the caller re-raises the original failure
+        _log.warning("bge_download_rest_fallback_failed", url=url, error=str(exc))
+        return False
+    _log.info("bge_download_rest_fallback_used", url=url)
+    return True
 
 
 def _verify_sha256(path: Path, expected: str, label: str) -> None:
