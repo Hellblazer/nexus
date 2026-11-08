@@ -368,7 +368,9 @@ class NoteUriRepairTest {
     void apply_aTwinFoundWhenTheRowsAreLocked_is409AndNothingIsWritten() throws Exception {
         Fx f = plant("race1");
         Map<String, Map<String, String>> before = snapshot(f.tenant);
+        List<String> stages = new java.util.concurrent.CopyOnWriteArrayList<>();
         CatalogRepository.setNoteUriRepairHookForTests(stage -> {
+            stages.add(stage);
             if (stage.equals("locked")) seedNote(f.tenant, "race-twin", f.y, f.nx(f.y, "alpha"));
         });
 
@@ -378,6 +380,10 @@ class NoteUriRepairTest {
                 assertThat(e.getMessage()).contains(f.nx(f.y, "alpha"));
             });
 
+        // The index would refuse the same twin at the UPDATE with the same holder and message, so the 409 alone
+        // cannot tell the re-check from the index. Only the re-check stops the run BEFORE the "checked" stage.
+        assertThat(stages).as("the run stopped at the holder re-check").containsExactly("locked");
+
         assertThat(withoutRaceTwin(snapshot(f.tenant), "race-twin")).as("all or nothing").isEqualTo(before);
     }
 
@@ -385,7 +391,9 @@ class NoteUriRepairTest {
     void apply_aTwinCommittedAfterTheCheck_isCaughtByTheIndex_as409AndNothingIsWritten() throws Exception {
         Fx f = plant("race2");
         Map<String, Map<String, String>> before = snapshot(f.tenant);
+        List<String> stages = new java.util.concurrent.CopyOnWriteArrayList<>();
         CatalogRepository.setNoteUriRepairHookForTests(stage -> {
+            stages.add(stage);
             if (stage.equals("checked")) seedNote(f.tenant, "race-twin", f.y, f.nx(f.y, "beta"));
         });
 
@@ -395,7 +403,201 @@ class NoteUriRepairTest {
                 assertThat(e.getMessage()).contains(f.nx(f.y, "beta"));
             });
 
+        assertThat(stages).as("the re-check passed; the index caught the twin").containsExactly("locked", "checked");
+
         assertThat(withoutRaceTwin(snapshot(f.tenant), "race-twin")).as("all or nothing").isEqualTo(before);
+    }
+
+    // ── the ledger (the undo record of --apply) ───────────────────────────────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void apply_returnsALedgerOfEveryRewrittenRow_inAllThreeTables() throws Exception {
+        Fx f = plant("ledger");
+        long aspectId = aspectRowId(f.tenant, "a1");
+        long highlightId = highlightRowId(f.tenant, "a1");
+
+        Map<String, Object> dry = repo.repairStaleNoteUris(f.tenant, false, 1000, 0);
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 0);
+
+        assertThat(dry).as("a dry run rewrites nothing, so it has no ledger").doesNotContainKey("ledger");
+        List<Map<String, Object>> ledger = (List<Map<String, Object>>) r.get("ledger");
+        assertThat(ledger).hasSize(6);
+        assertThat(ledgerRows(ledger, "catalog_documents")).extracting(m -> (String) m.get("key"))
+            .containsExactlyInAnyOrder("a1", "a2", "c1", "l1");
+        Map<String, Object> cat = ledgerRows(ledger, "catalog_documents").stream()
+            .filter(m -> "a1".equals(m.get("key"))).findFirst().orElseThrow();
+        assertThat(cat.get("old_uri")).isEqualTo(f.nx(f.x1, "alpha"));
+        assertThat(cat.get("new_uri")).isEqualTo(f.nx(f.y, "alpha"));
+        assertThat(ledgerRows(ledger, "catalog_documents").stream().filter(m -> "l1".equals(m.get("key"))).findFirst()
+            .orElseThrow().get("old_uri")).as("the old URI is recorded as it was, legacy spelling and all")
+            .isEqualTo("chroma://" + f.x1 + "/legacy");
+        Map<String, Object> asp = ledgerRows(ledger, "document_aspects").get(0);
+        assertThat(asp.get("key")).isEqualTo(Long.toString(aspectId));
+        assertThat(asp.get("doc_id")).isEqualTo("a1");
+        assertThat(asp.get("old_uri")).isEqualTo(f.nx(f.x1, "notes/alpha.md"));
+        assertThat(asp.get("new_uri")).isEqualTo(f.nx(f.y, "notes/alpha.md"));
+        Map<String, Object> hl = ledgerRows(ledger, "document_highlights").get(0);
+        assertThat(hl.get("key")).isEqualTo(Long.toString(highlightId));
+        assertThat(hl.get("old_uri")).isEqualTo(f.nx(f.x1, "alpha"));
+        assertThat(hl.get("new_uri")).isEqualTo(f.nx(f.y, "alpha"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void apply_theLedgerIsBoundedByTheBatch() throws Exception {
+        Fx f = plant("ledger-limit");
+
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 2, 0);
+
+        List<Map<String, Object>> ledger = (List<Map<String, Object>>) r.get("ledger");
+        assertThat(ledgerRows(ledger, "catalog_documents")).as("one entry per rewritten catalog row").hasSize(2);
+        assertThat(ledger.size()).isLessThanOrEqualTo(2 * 3);
+        assertThat(r.get("rewritten")).isEqualTo(2);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> ledgerRows(List<Map<String, Object>> ledger, String table) {
+        return ledger.stream().filter(m -> table.equals(m.get("table"))).toList();
+    }
+
+    private long aspectRowId(String tenant, String docId) {
+        return tenantScope.withTenant(tenant, ctx -> ctx.select(DOCUMENT_ASPECTS.ID)
+            .from(DOCUMENT_ASPECTS).where(DOCUMENT_ASPECTS.DOC_ID.eq(docId)).fetchOne(0, Long.class));
+    }
+
+    private long highlightRowId(String tenant, String docId) {
+        return tenantScope.withTenant(tenant, ctx -> ctx.select(DOCUMENT_HIGHLIGHTS.ID)
+            .from(DOCUMENT_HIGHLIGHTS).where(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId)).fetchOne(0, Long.class));
+    }
+
+    // ── satellites without a document ─────────────────────────────────────────
+
+    @Test
+    void aSatelliteWithABlankDocIdCannotExist_soTheRepairNeedsNoFallbackForIt() throws Exception {
+        // Gate review r1 asked for a fallback for the legacy knowledge-note aspect rows whose doc_id is blank
+        // (aspects-004). hygiene-001-1 deleted every row with a NULL doc_id and set NOT NULL, and fk-001 puts a
+        // composite foreign key on (tenant_id, doc_id): '' names no catalog row (23503), NULL is refused (23502).
+        // If this ever stops failing, the repair must claim such rows (by the old catalog URI) and count them.
+        Fx f = new Fx("blankdoc");
+        seedNote(f.tenant, "b1", f.y, f.nx(f.x1, "bt"));
+        seedAspect(f.tenant, "b1", f.y, "p-b1", f.nx(f.x1, "bt"));
+        seedHighlight(f.tenant, "b1", f.y, f.nx(f.x1, "bt"));
+
+        assertThatThrownBy(() -> blankDocId(f.tenant, "b1")).hasMessageContaining("violates foreign key constraint");
+    }
+
+    // ── a blank physical collection ───────────────────────────────────────────
+
+    @Test
+    void census_aNoteRowWithABlankPhysicalCollectionIsRefusedAsMalformed_andNeverRewritten() throws Exception {
+        Fx f = new Fx("blankcoll");
+        seedNote(f.tenant, "nc", f.y, f.nx(f.x1, "nc"));
+        setPhysicalCollection(f.tenant, "nc", "");
+
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+
+        assertThat(r.get("refused_malformed")).isEqualTo(1);
+        assertThat(r.get("rewrite")).isEqualTo(0);
+        assertThat(r.get("rewritten")).isEqualTo(0);
+        assertThat(docUri(f.tenant, "nc")).isEqualTo(f.nx(f.x1, "nc"));
+        assertThat(tumblers(sampleOf(r).get("refused"))).containsExactly("nc");
+    }
+
+    // ── chains and the chroma:// twin ─────────────────────────────────────────
+
+    @Test
+    void apply_aChainResolvesOnTheNextCall() throws Exception {
+        Fx f = new Fx("chain");
+        String t = f.tenant;
+        seedNote(t, "cb", f.x2, f.nx(f.y, "ct"));   // stale B: lives in x2, names y; its target nx(x2, ct) is free
+        seedNote(t, "ca", f.y, f.nx(f.x1, "ct"));   // stale A: its target nx(y, ct) is held by B
+
+        Map<String, Object> first = repo.repairStaleNoteUris(t, false, 1000, 5);
+        assertThat(first.get("rewrite")).isEqualTo(1);
+        assertThat(tumblers(sampleOf(first).get("rewrite"))).containsExactly("cb");
+        assertThat(tumblers(sampleOf(first).get("merge"))).containsExactly("ca");
+
+        assertThat(repo.repairStaleNoteUris(t, true, 1000, 0).get("rewritten")).isEqualTo(1);
+        assertThat(docUri(t, "cb")).isEqualTo(f.nx(f.x2, "ct"));
+        assertThat(docUri(t, "ca")).isEqualTo(f.nx(f.x1, "ct"));
+
+        Map<String, Object> second = repo.repairStaleNoteUris(t, false, 1000, 5);
+        assertThat(second.get("rewrite")).as("B's move freed A's target").isEqualTo(1);
+        assertThat(second.get("merge")).isEqualTo(0);
+        assertThat(repo.repairStaleNoteUris(t, true, 1000, 0).get("rewritten")).isEqualTo(1);
+        assertThat(docUri(t, "ca")).isEqualTo(f.nx(f.y, "ct"));
+    }
+
+    @Test
+    void census_aLiveChromaSpelledTwinIsATwin_andApplyDoesNotMintTheDuplicate() throws Exception {
+        Fx f = new Fx("chromatwin");
+        String t = f.tenant;
+        seedNote(t, "ch-twin", f.y, "chroma://" + f.y + "/legacy-twin");
+        seedNote(t, "ch-stale", f.y, f.nx(f.x1, "legacy-twin"));
+
+        Map<String, Object> r = repo.repairStaleNoteUris(t, true, 1000, 5);
+
+        assertThat(r.get("merge_twin")).isEqualTo(1);
+        assertThat(r.get("rewrite")).isEqualTo(0);
+        assertThat(r.get("rewritten")).isEqualTo(0);
+        assertThat(byTumbler(sampleOf(r).get("merge"), "ch-stale").get("twin")).isEqualTo("ch-twin");
+        assertThat(docUri(t, "ch-stale")).isEqualTo(f.nx(f.x1, "legacy-twin"));
+    }
+
+    // ── one transaction across the three tables ───────────────────────────────
+
+    @Test
+    void apply_aFailureAfterTheCatalogUpdate_leavesAllThreeTablesUnchanged() throws Exception {
+        for (String stage : List.of("catalog_updated", "written")) {
+            Fx f = plant("rollback-" + stage);
+            Map<String, Map<String, String>> before = snapshot(f.tenant);
+            List<String> stages = new java.util.concurrent.CopyOnWriteArrayList<>();
+            CatalogRepository.setNoteUriRepairHookForTests(s -> {
+                stages.add(s);
+                if (s.equals(stage)) throw new IllegalStateException("injected failure after " + stage);
+            });
+
+            assertThatThrownBy(() -> repo.repairStaleNoteUris(f.tenant, true, 1000, 0))
+                .as(stage).hasStackTraceContaining("injected failure after " + stage);
+
+            assertThat(stages).as(stage).endsWith(stage);
+            assertThat(snapshot(f.tenant)).as(stage + ": catalog, aspects and highlights all roll back").isEqualTo(before);
+            assertThat(before.get("aspects")).isNotEmpty();
+            assertThat(before.get("highlights")).isNotEmpty();
+        }
+    }
+
+    // ── the merge entries carry what the recommended rule needs ───────────────
+
+    @Test
+    void census_mergeEntriesCarryChunkCountIndexedAtAndSatellitePresence_forTheRowAndItsTwin() throws Exception {
+        Fx f = plant("mergefields");
+        String t = f.tenant;
+        setChunkCount(t, "m1", 3);
+        setIndexedAt(t, "m1", "2026-10-01T00:00:00Z");
+        setIndexedAt(t, "t1", "2026-11-01T00:00:00Z");
+        seedAspect(t, "m1", f.y, "notes/m1.md", f.nx(f.x1, "notes/m1.md"));
+        seedHighlight(t, "t1", f.y, f.nx(f.y, "gamma"));
+
+        Map<String, Object> r = repo.repairStaleNoteUris(t, false, 1000, 10);
+
+        Map<String, Object> m1 = byTumbler(sampleOf(r).get("merge"), "m1");
+        assertThat(m1.get("twin")).isEqualTo("t1");
+        assertThat(m1.get("chunk_count")).isEqualTo(3);
+        assertThat(m1.get("twin_chunk_count")).isEqualTo(0);
+        assertThat(m1.get("has_aspects")).isEqualTo(true);
+        assertThat(m1.get("twin_has_aspects")).isEqualTo(false);
+        assertThat(m1.get("has_highlights")).isEqualTo(false);
+        assertThat(m1.get("twin_has_highlights")).isEqualTo(true);
+        assertThat(java.time.OffsetDateTime.parse((String) m1.get("indexed_at")).toInstant())
+            .isEqualTo(java.time.Instant.parse("2026-10-01T00:00:00Z"));
+        assertThat(java.time.OffsetDateTime.parse((String) m1.get("twin_indexed_at")).toInstant())
+            .isEqualTo(java.time.Instant.parse("2026-11-01T00:00:00Z"));
+        Map<String, Object> s1 = byTumbler(sampleOf(r).get("merge"), "s1");
+        assertThat(s1.get("twin")).isEqualTo("s2");
+        assertThat(s1).containsKeys("chunk_count", "twin_chunk_count", "indexed_at", "twin_indexed_at",
+            "has_aspects", "twin_has_aspects", "has_highlights", "twin_has_highlights");
     }
 
     // ── HTTP ──────────────────────────────────────────────────────────────────
@@ -527,6 +729,45 @@ class NoteUriRepairTest {
         try (Connection su = pg.createConnection("")) {
             DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, uri)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+                .execute();
+        }
+    }
+
+    private void blankDocId(String tenant, String... docIds) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            for (String d : docIds) {
+                dsl.update(DOCUMENT_ASPECTS).set(DOCUMENT_ASPECTS.DOC_ID, "")
+                    .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.eq(d))).execute();
+                dsl.update(DOCUMENT_HIGHLIGHTS).set(DOCUMENT_HIGHLIGHTS.DOC_ID, "")
+                    .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(d))).execute();
+            }
+        }
+    }
+
+    private void setPhysicalCollection(String tenant, String tumbler, String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+                .execute();
+        }
+    }
+
+    private void setIndexedAt(String tenant, String tumbler, String iso) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.INDEXED_AT, java.time.OffsetDateTime.parse(iso))
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+                .execute();
+        }
+    }
+
+    private void setChunkCount(String tenant, String tumbler, int n) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.CHUNK_COUNT, n)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
                 .execute();
         }
