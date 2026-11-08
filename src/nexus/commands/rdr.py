@@ -3388,6 +3388,10 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
         finding_text = " ".join(rest).strip()
         if not finding_text:
             raise click.ClickException("rdr-research add: the finding text is empty.")
+        if len(finding_text.splitlines()) > 1:
+            # The record is read line by line (splitlines): a token holding a line break
+            # would plant its own fields, such as "acknowledged: true" (nexus-qo7ie.33).
+            raise click.ClickException("rdr-research add: the finding must be one line; it holds a line break.")
         title = _rdr_research_add(t2_key, finding_text, repo_name, classification=classification, method=method)
         print(f"Recorded T2 research finding: `{repo_name}_rdr/{title}`")
         return
