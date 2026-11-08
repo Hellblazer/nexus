@@ -12,8 +12,8 @@ on chas named exactly:
 * a reparented, scrubbed member of a process group whose live leader is the session's (the macOS guest driver's
   fake ``sleep``): rule B.
 
-Then ``fail`` turns any foreign signal into a failed session, with the signal still sent unchanged; ``report`` (the
-default until develop CI with the two rules reads zero foreign) lists only, and ``off`` removes the fence. The negative control plants a foreign signal and must go red.
+Then ``fail`` (the default since develop CI with the two rules read zero foreign on every shard) turns any foreign
+signal into a failed session, with the signal still sent unchanged; ``report`` lists only, and ``off`` removes it. The negative control plants a foreign signal and must go red.
 """
 from __future__ import annotations
 
@@ -327,13 +327,14 @@ def test_a_nested_session_reports_and_leaves_its_parents_verdict_alone(pytester)
 
 
 @_linux_fence
-def test_the_default_is_report_until_the_ci_measurement_reads_zero(pytester) -> None:
-    """The flip to fail is one line (DEFAULT_MODE) and this test, after develop CI with rules A and B shows zero
-    foreign signals across every shard (nexus-xzorj)."""
-    assert fence.DEFAULT_MODE == "report"
+def test_the_default_fails_a_session_on_a_foreign_signal(pytester) -> None:
+    """Fail became the default after develop CI with rules A and B read zero foreign on every shard at
+    ebc9d82f0 (6092 signals across the six shards, 0 foreign, 6 sanctioned). The negative control, with no mode set."""
+    assert fence.DEFAULT_MODE == "fail"
     result = _inner(pytester, _PLANTED, None)
-    assert result.ret == pytest.ExitCode.OK
-    result.stdout.fnmatch_lines(["signal fence (report mode, nexus-xzorj): signals=1 own=0 foreign=1 *"])
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stdout.fnmatch_lines(["signal fence (fail mode, nexus-xzorj): signals=1 own=0 foreign=1 *",
+                                 "signal fence FAILED: 1 foreign signal(s)*"])
 
 
 def test_every_session_start_reaper_opens_the_sanctioned_scope() -> None:

@@ -243,8 +243,8 @@ By default `t2_service_env` / `t2_tenant` lease one lazily minted tenant per xdi
 the session's or foreign; it always sends the signal unchanged. The session's: a descendant of the root pytest
 process, a carrier of `NX_TEST_SIGNAL_FENCE_TOKEN`, a process whose argv or environment names a path inside the
 session's basetemp (rule A), or a member of a group whose live leader is the session's (rule B). **A foreign signal
-fails the run** in `fail` mode (Sam 2026-11-07; the default once develop CI with the two rules reads zero
-foreign across every shard, `report` until then): the summary line `signal fence (fail mode, nexus-xzorj):
+fails the run** (`fail` mode, the default since develop CI with the two rules read zero foreign on every shard,
+Sam 2026-11-07): the summary line `signal fence (fail mode, nexus-xzorj):
 signals=N own=N foreign=N unclassified=N sanctioned=N errors=N`, a `signal fence FAILED` line, then `foreign:` lines
 naming the test, call site, signal and target program. Fix the kill (identity-check the pid:
 `tests/_child_process.kill_if_identity`), or make the target name its own tmp_path (rule A). A deliberate signal to

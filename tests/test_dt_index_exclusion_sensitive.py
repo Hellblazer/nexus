@@ -13,6 +13,8 @@ a collection-name label at module level; each test names its mode.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 from click.testing import CliRunner
 from structlog.testing import capture_logs
@@ -327,7 +329,8 @@ def test_cloud_mode_with_the_ack_indexes_an_excluded_record_sensitive(
     _records(monkeypatch, DtRecord("U-EX", "/ex.md", excluded=True))
     out = _run("--ack-external-embedder")
     assert out.exit_code == 0, out.output  # the ack means something here: the record itself is sensitive
-    assert "https://cloud.invalid" in out.output, "the cloud disclosure (census row 22) rides the ack"
+    # A line-anchored match, not a substring test (CodeQL py/incomplete-url-substring-sanitization).
+    assert re.search(r"(?m)^.*\bhttps://cloud\.invalid\b", out.output), "the cloud disclosure (census row 22) rides the ack"
     assert [(c["uuid"], c.get("sensitive"), c.get("ack_external_embedder")) for c in indexed] == [("U-EX", True, True)]
 
 

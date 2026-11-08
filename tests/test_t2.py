@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.db.t2 import T2Database, _sanitize_fts5
+from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import (
     backdate_memory,
     canonical_chunk_id as _cid,
@@ -366,18 +366,7 @@ def test_get_all_returns_full_content(db: T2Database) -> None:
     assert all("content" in e["content"] for e in entries)
 
 
-# ── _sanitize_fts5 ──────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("input_q,expected", [
-    ("hello world", "hello world"),
-    ("verification-probe", '"verification-probe"'),
-    ("phase:1", '"phase:1"'),
-    ("foo bar-baz", 'foo "bar-baz"'),
-    ('say"hello', '"say""hello"'),
-])
-def test_sanitize_fts5(input_q: str, expected: str) -> None:
-    assert _sanitize_fts5(input_q) == expected
-
+# ── _sanitize_fts5 (its pure cases: tests/test_t2_sanitize_fts5.py) ─────────
 
 @pytest.mark.parametrize("search_fn,query,setup_kwargs", [
     ("search", "verification-probe", {}),

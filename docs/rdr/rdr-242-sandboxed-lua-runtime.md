@@ -647,7 +647,12 @@ grant rule.
     the memory verbs call the T2 store layer (`db.resolve_title`,
     `db.list_entries`, `db.search`); the other four are new client functions
     (Key Discoveries, A3). `transcripts.sessions` never returns message
-    bodies unless `bodies` is true. A write verb, when one ships, is a
+    bodies unless `bodies` is true. Read-only means no verb writes a record
+    or its content. `memory.get` still counts one access (`access_count`,
+    `last_accessed`) on an exact or unique-prefix hit, as MCP `memory_get`
+    does, because the engine's resolve endpoint has no silent read;
+    `memory.search` reads with `access="silent"` and `memory.list` counts
+    nothing (nexus-mdbds.7 review r1). A write verb, when one ships, is a
     separate entry in the verb table, granted only when declared and covered
     by an approval (item 1); none ships before that document.
 11. Limits. Defaults, each lowered by the caller and never raised:
@@ -1259,3 +1264,4 @@ scope change and the round 2 findings named.
   check in the worker. Technical Design renumbered 1 to 13.
 - 2026-11-07: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `55954c930`; critique `nexus_rdr/242-gate-critique-2026-11-07-r3`.
 - 2026-11-07: Accepted (Sam, "Accept, fold residuals"). Residual dispositions: S1, S2, S3, S4 and S5 carried by bead nexus-mdbds (stage 3 implementation), each with its Implementation Plan phase.
+- 2026-11-07: Technical Design 10 amended to match reviewed code (nexus-mdbds.7 review r1; standing grant 3): `memory.get` counts one access through `db.resolve_title`, the other memory verbs count none.
