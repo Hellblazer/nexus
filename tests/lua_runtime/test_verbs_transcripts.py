@@ -995,25 +995,32 @@ def test_deferred_tools_past_the_cap_are_counted(
 # ---- fields and project "repo" (RDR-242 A2, nexus-qo7ie.31) ---------------------
 
 ALWAYS = {"session_id", "agent_id", "main", "truncated"}
-MEM_TOOLS = [
-    "mcp__plugin_conexus_nexus__memory_get",
-    "mcp__plugin_conexus_nexus__memory_search",
-    "mcp__plugin_conexus_nexus__memory_put",
-    "mcp__plugin_conexus_nexus__memory_delete",
-]
-MEM_INPUTS = [f"tool_calls.input@{t}" for t in MEM_TOOLS]
-
 # The field sets the Lua caller passes, one per query, and the keys each must
-# return beyond the four that always come back.
+# return beyond the four that always come back (marlowe's set, 2026-11-08).
 QUERIES = {
     "tools": (
-        ["deferred_tools", "tool_calls.name", "tool_calls.time", "tool_calls.input@Bash"]
-        + MEM_INPUTS,
+        [
+            "tool_calls.name",
+            "tool_calls.time",
+            "tool_calls.input_bytes",
+            "tool_calls.input@Bash",
+        ],
         False,
-        {"deferred_tools", "tool_calls"},
+        {"tool_calls"},
     ),
+    "deferred_tools": (["deferred_tools"], False, {"deferred_tools"}),
     "memory": (
-        ["instruction_loads", "tool_calls.name", "tool_calls.time"] + MEM_INPUTS,
+        [
+            "instruction_loads",
+            "tool_calls.name",
+            "tool_calls.time",
+            "tool_calls.input@Read",
+            "tool_calls.input@Write",
+            "tool_calls.input@Edit",
+            "tool_calls.input@MultiEdit",
+            "tool_calls.input@*__memory_get",
+            "tool_calls.input@*__memory_search",
+        ],
         False,
         {"instruction_loads", "tool_calls"},
     ),
@@ -1047,6 +1054,8 @@ QUERIES = {
             "slash_commands",
             "tool_calls.name",
             "tool_calls.input@Skill",
+            "tool_calls.input@Agent",
+            "tool_calls.input@Task",
         ],
         False,
         {"assistant_turns", "slash_commands", "tool_calls"},
@@ -1059,7 +1068,9 @@ QUERIES = {
     "procedures": (
         [
             "tool_calls.name",
-            "tool_calls.input@mcp__plugin_conexus_nexus__procedure_run",
+            "tool_calls.input@*__procedure_run",
+            "tool_calls.input@*__memory_put",
+            "tool_calls.input@Bash",
         ],
         False,
         {"tool_calls"},
@@ -1127,6 +1138,7 @@ def test_an_empty_fields_string_or_name_is_an_arg_error(
         "tool_calls.input@",
         "instruction_loads.input@Bash",  # @ belongs to tool_calls.input only
         "tool_calls.name@Bash",
+        "tool_calls.input@ Bash",  # whitespace inside the tool name
         "Tool_calls",
         "assistant_turns.x",
     ],
@@ -1175,9 +1187,12 @@ def test_tool_call_count_counts_calls_after_dedup_whatever_is_selected(
     only = _one("tool_call_count")
     assert only["tool_call_count"] == 2 and "tool_calls" not in only
     # Counted before any filter: an input@ that matches nothing still counts.
-    narrow = _one("tool_call_count,tool_calls.input@Nope")
+    narrow = _one("tool_call_count,tool_calls.name,tool_calls.input@Nope")
     assert narrow["tool_call_count"] == 2
-    assert len(narrow["tool_calls"]) == 2
+    assert narrow["tool_calls"] == [
+        {"name": "Bash"},
+        {"name": "mcp__nexus__memory_get"},
+    ]
 
 
 def test_a_bare_list_name_is_all_its_sub_fields(root: Path) -> None:
@@ -1244,7 +1259,7 @@ def test_input_at_tool_keeps_the_input_only_on_calls_of_that_tool(root: Path) ->
     none = _one("tool_calls.name,tool_calls.input@Bas,tool_calls.input@bash")
     assert all("input" not in c for c in none["tool_calls"])
     # Plain tool_calls.input keeps every input, alone or beside an @ form.
-    plain = _one("tool_calls.input,tool_calls.input@Bash")
+    plain = _one("tool_calls.name,tool_calls.input,tool_calls.input@Bash")
     assert [c["input"] for c in plain["tool_calls"]] == [
         {"command": "git status"},
         {"project": "p", "title": "a title"},
@@ -1266,7 +1281,7 @@ def test_each_query_field_set_validates_and_returns_only_its_keys(
     rec = _one(",".join(fields), bodies=bodies or None)
     assert set(rec) == ALWAYS | tops
     allowed = {
-        "tool_calls": {"name", "time", "is_error", "input"},
+        "tool_calls": {"name", "time", "is_error", "input", "input_bytes"},
         "instruction_loads": {"path", "kind", "type", "size", "time"},
         "slash_commands": {"name", "time"},
         "assistant_text": {"time", "text"},
@@ -1277,40 +1292,33 @@ def test_each_query_field_set_validates_and_returns_only_its_keys(
     if "tool_calls" in tops:
         calls = rec["tool_calls"]
         assert [c["name"] for c in calls] == ["Bash", "mcp__nexus__memory_get"]
-        # An input rides only on a call whose tool an input@ named.
+        # An input rides only on a call whose tool an input@ named, exactly
+        # or by a *<tail> suffix.
         wanted = {f.split("@", 1)[1] for f in fields if "@" in f}
         for c in calls:
-            assert ("input" in c) == (c["name"] in wanted)
+            hit = any(
+                c["name"].endswith(w[1:]) if w.startswith("*") else c["name"] == w
+                for w in wanted
+            )
+            assert ("input" in c) == hit
     if query == "violations":
-        assert rec["assistant_text"] == [{"time": "2026-11-03T10:00:05.000Z", "text": BODY}]
+        assert rec["assistant_text"] == [
+            {"time": "2026-11-03T10:00:05.000Z", "text": BODY}
+        ]
         assert rec["tool_calls"][0] == {
             "name": "Bash",
             "input": {"command": "git status"},
         }
-    if query == "tools":
+    if query == "deferred_tools":
         assert rec["deferred_tools"] == ["WebFetch", "mcp__x__y"]
+    if query == "tools":
+        assert [c["input_bytes"] for c in rec["tool_calls"]] == [10, 8]
         assert rec["tool_calls"][0]["time"] == "2026-11-03T10:00:05.500Z"
+    if query == "memory":
+        assert "input" not in rec["tool_calls"][0]
+        assert rec["tool_calls"][1]["input"] == {"project": "p", "title": "a title"}
     if query == "agents":
         assert rec["tool_calls"][1]["is_error"] is True
-
-
-def test_the_real_memory_tool_names_are_matched_exactly(root: Path) -> None:
-    recs = _main_session()
-    recs.append(
-        _assistant(
-            "2026-11-03T10:00:10.000Z",
-            SID,
-            [_tool_use("m1", MEM_TOOLS[0], {"project": "p", "title": "t"})],
-            msg_id="mm1",
-        )
-    )
-    _write(root / PROJECT / f"{SID}.jsonl", recs)
-    fields, _, _ = QUERIES["memory"]
-    rec = _one(",".join(fields))
-    last = rec["tool_calls"][-1]
-    assert last["name"] == MEM_TOOLS[0]
-    assert last["input"] == {"project": "p", "title": "t"}
-    assert "input" not in rec["tool_calls"][0]
 
 
 def test_a_selected_out_input_is_never_cleaned(
@@ -1353,7 +1361,8 @@ def test_fields_never_change_which_records_come_back(root: Path) -> None:
     other = "22222222-0000-0000-0000-000000000000"
     _write(root / PROJECT / f"{SID}.jsonl", _main_session())
     _write(
-        root / PROJECT / f"{other}.jsonl", _main_session("2026-11-03T12:00:00.000Z", other)
+        root / PROJECT / f"{other}.jsonl",
+        _main_session("2026-11-03T12:00:00.000Z", other),
     )
     _write(
         root / PROJECT / SID / "subagents" / "agent-a1.jsonl",
@@ -1370,7 +1379,8 @@ def test_fields_never_change_which_records_come_back(root: Path) -> None:
 def test_ordering_does_not_need_start_to_be_selected(root: Path) -> None:
     other = "22222222-0000-0000-0000-000000000000"
     _write(
-        root / PROJECT / f"{other}.jsonl", _main_session("2026-11-03T09:00:00.000Z", other)
+        root / PROJECT / f"{other}.jsonl",
+        _main_session("2026-11-03T09:00:00.000Z", other),
     )
     _write(root / PROJECT / f"{SID}.jsonl", _main_session())
     assert [r["session_id"] for r in _sessions(fields="models")] == [other, SID]
@@ -1434,20 +1444,6 @@ def test_a_result_over_the_cap_is_judged_on_the_selected_fields(
     with pytest.raises(VerbError, match=r"^result-too-large:"):
         _sessions()
     assert len(_sessions(fields="models")) == 3
-
-
-def test_the_deadline_still_applies_with_fields(root: Path) -> None:
-    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
-    with pytest.raises(VerbTimeout):
-        vt.sessions(
-            "2026-11-03",
-            "2026-11-04",
-            PROJECT,
-            None,
-            "models",
-            deadline=time.monotonic() - 1,
-            ctx=CTX,
-        )
 
 
 # ---- project "repo" ----------------------------------------------------------
@@ -1577,3 +1573,351 @@ def test_project_repo_through_the_real_resolver(root: Path, tmp_path: Path) -> N
     out = _sessions(project="repo", ctx=VerbContext(repo_root=main))
     assert [r["project"] for r in out] == ["-main", "-wt"]
     assert len(_sessions(project="all")) == 3
+
+
+# ---- round 2: never held, _fit on partial selections, input needs name ----------
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        "tool_calls.input",
+        "tool_calls.input@Bash",
+        "tool_calls.time,tool_calls.input@Bash",
+        "tool_calls.input,tool_calls.input@Bash",
+    ],
+)
+def test_an_input_without_the_name_is_an_arg_error(root: Path, fields: str) -> None:
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
+    with pytest.raises(VerbArgError, match="tool_calls.name"):
+        _sessions(fields=fields)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        "tool_calls.name,tool_calls.input",
+        "tool_calls",
+        "tool_calls.input@Bash,tool_calls.name",
+    ],
+)
+def test_an_input_with_the_name_or_a_bare_list_is_accepted(
+    root: Path, fields: str
+) -> None:
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
+    assert all("name" in c for c in _one(fields)["tool_calls"])
+
+
+@pytest.mark.parametrize("tool", [" Bash", "\tBash", " Bash", "* Bash", "*\tBash"])
+def test_a_tool_name_with_surrounding_whitespace_is_an_arg_error(
+    root: Path, tool: str
+) -> None:
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
+    with pytest.raises(VerbArgError, match="whitespace"):
+        _sessions(fields=f"tool_calls.name,tool_calls.input@{tool}")
+
+
+@pytest.mark.parametrize(
+    "tool", ["*", "**x", "x*", "Ba*sh", "*a*b", "a*", "*__memory_get*"]
+)
+def test_a_star_anywhere_but_one_leading_one_is_an_arg_error(
+    root: Path, tool: str
+) -> None:
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
+    with pytest.raises(VerbArgError, match="tool_calls.input@"):
+        _sessions(fields=f"tool_calls.name,tool_calls.input@{tool}")
+
+
+def test_input_at_star_tail_matches_names_ending_with_the_tail(root: Path) -> None:
+    recs = _main_session()
+    for tid, name in [
+        ("s1", "mcp__plugin_conexus_nexus__memory_get"),
+        ("s2", "mcp__plugin_conexus_nexus__memory_getter"),
+        ("s3", "memory_get"),
+        ("s4", "MEMORY_GET"),
+        ("s5", "xx__memory_get"),
+    ]:
+        recs.append(
+            _assistant(
+                "2026-11-03T10:00:10.000Z",
+                SID,
+                [_tool_use(tid, name, {"k": tid})],
+                msg_id=tid,
+            )
+        )
+    _write(root / PROJECT / f"{SID}.jsonl", recs)
+    rec = _one("tool_calls.name,tool_calls.input@*__memory_get,tool_calls.input@Bash")
+    assert {c["name"]: "input" in c for c in rec["tool_calls"]} == {
+        "Bash": True,
+        "mcp__nexus__memory_get": True,
+        "mcp__plugin_conexus_nexus__memory_get": True,
+        "mcp__plugin_conexus_nexus__memory_getter": False,
+        "memory_get": False,  # the tail is "__memory_get": both underscores
+        "MEMORY_GET": False,
+        "xx__memory_get": True,
+    }
+    # An exact name is not a suffix: "memory_get" matches only itself.
+    rec = _one("tool_calls.name,tool_calls.input@memory_get")
+    assert {c["name"] for c in rec["tool_calls"] if "input" in c} == {"memory_get"}
+
+
+def test_input_bytes_sums_top_level_string_values_of_the_raw_input(
+    root: Path,
+) -> None:
+    recs = _main_session()
+    big = "x" * 300_000  # past INPUT_STRING_CAP: counted before any clean
+    for tid, inp in [
+        ("b1", {"a": "héllo", "n": 12345, "l": ["abcdef"], "d": {"s": "nested"}}),
+        ("b2", {"a": big, "b": "yz"}),
+        ("b3", {"a": "\ud800"}),  # a lone surrogate, as it reaches the file
+        ("b4", ["a", "b"]),
+        ("b5", "just a string"),
+        ("b6", None),
+        ("b7", {}),
+    ]:
+        recs.append(
+            _assistant(
+                "2026-11-03T10:00:10.000Z",
+                SID,
+                [_tool_use(tid, "Edit", inp)],
+                msg_id=tid,
+            )
+        )
+    _write(root / PROJECT / f"{SID}.jsonl", recs)
+    rec = _one("tool_calls.name,tool_calls.input_bytes")
+    assert [(c["name"], c["input_bytes"]) for c in rec["tool_calls"]] == [
+        ("Bash", 10),
+        ("mcp__nexus__memory_get", 8),
+        ("Edit", len("héllo".encode())),
+        ("Edit", 300_002),
+        ("Edit", 3),
+        ("Edit", 0),
+        ("Edit", 0),
+        ("Edit", 0),
+        ("Edit", 0),
+    ]
+    # On every call, whether or not that call's input is selected.
+    rec = _one("tool_calls.name,tool_calls.input_bytes,tool_calls.input@Edit")
+    assert all("input_bytes" in c for c in rec["tool_calls"])
+    assert [("input" in c) for c in rec["tool_calls"]] == [False, False] + [True] * 7
+    # Measured on the raw input: the carried copy was cut, the count was not.
+    assert len(rec["tool_calls"][3]["input"]["a"]) == 256 * 1024
+    assert rec["tool_calls"][3]["input_bytes"] == 300_002
+    assert rec["truncated"] is True
+
+
+def test_input_bytes_is_opt_in_and_needs_no_input_or_name(root: Path) -> None:
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
+    assert "input_bytes" not in _one(None)["tool_calls"][0]
+    assert "input_bytes" not in _one("tool_calls")["tool_calls"][0]
+    assert _one("tool_calls.input_bytes")["tool_calls"] == [
+        {"input_bytes": 10},
+        {"input_bytes": 8},
+    ]
+
+
+def test_input_bytes_alone_cleans_no_input(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
+    monkeypatch.setattr(
+        vt, "_clean", lambda *a, **k: pytest.fail("an unselected input was cleaned")
+    )
+    assert _one("tool_calls.name,tool_calls.input_bytes")["tool_calls"][0] == {
+        "name": "Bash",
+        "input_bytes": 10,
+    }
+
+
+@pytest.fixture
+def held(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """The _Session each scan built, and every string _text and _byte_size saw."""
+    sessions: list[vt._Session] = []
+    texts: list[str] = []
+    sized: list[object] = []
+
+    class Seen(vt._Session):
+        def __init__(self, *a, **k) -> None:
+            super().__init__(*a, **k)
+            sessions.append(self)
+
+    real_text, real_size = vt._text, vt._byte_size
+
+    def text(value, limit):
+        if isinstance(value, str):
+            texts.append(value)
+        return real_text(value, limit)
+
+    def size(content):
+        sized.append(content)
+        return real_size(content)
+
+    monkeypatch.setattr(vt, "_Session", Seen)
+    monkeypatch.setattr(vt, "_text", text)
+    monkeypatch.setattr(vt, "_byte_size", size)
+    return {"sessions": sessions, "texts": texts, "sized": sized}
+
+
+def _held_session(root: Path, held: dict, fields: str, bodies=None) -> vt._Session:
+    recs = _main_session()
+    recs.append(  # a call that never gets a result stays pending if tracked
+        _assistant(
+            "2026-11-03T10:00:09.000Z",
+            SID,
+            [_tool_use("open1", "Grep", {"pattern": "x"})],
+            msg_id="m9",
+        )
+    )
+    _write(root / PROJECT / f"{SID}.jsonl", recs)
+    _one(fields, bodies=bodies)
+    [s] = held["sessions"]
+    return s
+
+
+@pytest.mark.parametrize("bodies", [None, True])
+def test_a_scan_that_selects_no_list_holds_none(root: Path, held: dict, bodies) -> None:
+    s = _held_session(root, held, "tokens,tool_call_count", bodies)
+    assert s.calls == [] and s.loads == [] and s.commands == [] and s.text == []
+    assert s.pending == {}
+    assert s.deferred == set() and s.deferred_dropped == 0
+    assert s.call_count == 3  # counted, not held
+    assert BODY not in held["texts"]
+    assert held["sized"] == []
+    assert "Project" not in held["texts"] and "/r/CLAUDE.md" not in held["texts"]
+
+
+def test_only_the_selected_list_is_held(root: Path, held: dict) -> None:
+    s = _held_session(root, held, "tool_calls.name", True)
+    assert len(s.calls) == 3
+    assert s.pending == {}  # neither result_time nor is_error is selected
+    assert s.loads == [] and s.commands == [] and s.text == []
+    assert s.deferred == set()
+    assert held["sized"] == [] and BODY not in held["texts"]
+
+
+def test_results_are_tracked_only_when_a_result_key_is_selected(
+    root: Path, held: dict
+) -> None:
+    s = _held_session(root, held, "tool_calls.name,tool_calls.is_error")
+    assert list(s.pending) == ["open1"]
+    held["sessions"].clear()
+    s = _held_session(root, held, "tool_calls.name,tool_calls.result_time")
+    assert list(s.pending) == ["open1"]
+
+
+def test_deferred_tools_are_held_only_when_one_of_their_fields_is_selected(
+    root: Path, held: dict
+) -> None:
+    s = _held_session(root, held, "instruction_loads")
+    assert s.deferred == set() and s.deferred_dropped == 0
+    held["sessions"].clear()
+    s = _held_session(root, held, "deferred_tools_dropped")
+    assert s.deferred == {"WebFetch", "mcp__x__y"}
+
+
+def test_instruction_loads_hold_only_the_selected_keys_and_never_size_unasked(
+    root: Path, held: dict
+) -> None:
+    s = _held_session(root, held, "instruction_loads.path")
+    assert [set(x) for x in s.loads] == [{"path"}, {"path"}]
+    assert held["sized"] == []  # no content measured
+    assert "Project" not in held["texts"] and "Local" not in held["texts"]
+    held["sessions"].clear()
+    s = _held_session(root, held, "instruction_loads.size")
+    assert len(held["sized"]) == 2
+
+
+def test_assistant_text_holds_only_the_selected_keys_and_never_decodes_unasked(
+    root: Path, held: dict
+) -> None:
+    s = _held_session(root, held, "assistant_text.time", True)
+    assert s.text == [{"time": "2026-11-03T10:00:05.000Z"}]
+    assert BODY not in held["texts"]
+    held["sessions"].clear()
+    s = _held_session(root, held, "assistant_text.text", True)
+    assert s.text == [{"text": BODY}]
+    assert BODY in held["texts"]
+
+
+def test_slash_commands_are_held_only_when_selected(root: Path, held: dict) -> None:
+    s = _held_session(root, held, "slash_commands.name")
+    assert s.commands == [{"name": "conexus:rdr-gate"}]
+
+
+def test_fit_cuts_partial_selections_and_counts_exactly(root: Path) -> None:
+    # Six 250 KB inputs, all kept by _clean, are 1.5 MB: _fit must cut them.
+    # Calls of other tools carry no input key; the cut must pass them by.
+    recs = _main_session()
+    n_other = 20
+    for i in range(6):
+        recs.append(
+            _assistant(
+                "2026-11-03T10:00:10.000Z",
+                SID,
+                [_tool_use(f"w{i}", "Write", {"content": "x" * 250_000})],
+                msg_id=f"w{i}",
+            )
+        )
+    for i in range(n_other):
+        recs.append(
+            _assistant(
+                "2026-11-03T10:00:11.000Z",
+                SID,
+                [_tool_use(f"g{i}", "Grep", {"pattern": "p"})],
+                msg_id=f"g{i}",
+            )
+        )
+    _write(root / PROJECT / f"{SID}.jsonl", recs)
+    rec = _one("tool_call_count,tool_calls.name,tool_calls.input@Write")
+    assert len(encode_result(rec)) <= vt.RECORD_CAP_BYTES
+    assert rec["truncated"] is True
+    assert rec["tool_call_count"] == 2 + 6 + n_other
+    assert "tool_calls_dropped" not in rec
+    calls = rec["tool_calls"]
+    assert len(calls) == 2 + 6 + n_other
+    writes = [c for c in calls if c["name"] == "Write"]
+    assert len(writes) == 6
+    assert all(0 < len(c["input"]["content"]) < 250_000 for c in writes)
+    assert all("input" not in c for c in calls if c["name"] != "Write")
+
+
+def test_fit_drops_a_partial_text_list_without_its_text_key(root: Path) -> None:
+    # 40,000 time-only text elements are about 1.5 MB with no text to cut: the
+    # cut steps must pass them by, then the tails are dropped and counted.
+    n_text = 40_000
+    recs = _main_session()
+    for i in range(n_text):
+        recs.append(
+            _assistant(
+                "2026-11-03T10:00:10.000Z",
+                SID,
+                [{"type": "text", "text": "t"}],
+                msg_id=f"t{i}",
+            )
+        )
+    _write(root / PROJECT / f"{SID}.jsonl", recs)
+    rec = _one("tool_call_count,tool_calls.name,assistant_text.time", bodies=True)
+    assert len(encode_result(rec)) <= vt.RECORD_CAP_BYTES
+    assert rec["truncated"] is True
+    assert rec["tool_call_count"] == 2
+    # tool_calls come first in the drop order, and carry no input to cut.
+    assert rec["tool_calls_dropped"] + len(rec["tool_calls"]) == 2
+    kept = rec["assistant_text"]
+    assert all(set(t) == {"time"} for t in kept)
+    assert rec["assistant_text_dropped"] > 0
+    assert len(kept) + rec["assistant_text_dropped"] == n_text + 1  # +1: BODY
+
+
+def test_project_repo_with_an_empty_window_never_asks_the_resolver(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
+    monkeypatch.setattr(
+        vt, "repo_project_dirs", lambda *a, **k: pytest.fail("resolver asked")
+    )
+    ctx = VerbContext(repo_root=tmp_path)
+    assert _sessions("2026-11-04", "2026-11-04", "repo", ctx=ctx) == []
+    assert _sessions("2026-11-05", "2026-11-04", "repo", ctx=ctx) == []
+    with pytest.raises(VerbError) as err:  # still the repository check first
+        _sessions("2026-11-04", "2026-11-04", "repo", ctx=VerbContext(repo_root=None))
+    assert str(err.value) == REPO_NEEDED

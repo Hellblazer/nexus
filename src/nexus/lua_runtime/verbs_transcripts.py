@@ -46,9 +46,12 @@ The record:
 - ``bytes`` and ``records`` (lines) of the file; ``truncated``; and with
   ``bodies``, ``assistant_text``.
 
-``fields`` (nexus-qo7ie.31) narrows the record to the named fields, while the
+``fields`` (nexus-qo7ie.31) narrows the record to the named fields while the
 file is parsed: an unselected field, above all a tool call's input, is never
-cleaned or held. See ``_parse_fields`` for the grammar. ``project`` may also be
+cleaned or kept, and ``bodies`` true without ``assistant_text`` collects no
+text. That cuts the result's size and the memory a scan retains; it does not
+cut the read: every line is still read and decoded. See ``_parse_fields`` for
+the grammar. ``project`` may also be
 the reserved value ``repo``: every project directory holding the sessions of
 the repository the run started in (``transcripts_projects``); a project
 directory literally named ``repo`` cannot be asked for by name.
@@ -99,8 +102,7 @@ from nexus.lua_runtime.verb_types import (
 VERB = "transcripts.sessions"
 REPO_PROJECT = "repo"
 REPO_NEEDED = (
-    f'{VERB}: project "{REPO_PROJECT}" needs a repository '
-    "(the run started outside one)"
+    f'{VERB}: project "{REPO_PROJECT}" needs a repository (the run started outside one)'
 )
 TOO_LARGE = "result-too-large"
 RECORD_TOO_LARGE = "record-too-large"
@@ -241,10 +243,15 @@ _SCALARS = (
     "deferred_tools", "deferred_tools_dropped", "bytes", "records", "truncated",
 )  # fmt: skip
 _SUBS: dict[str, tuple[str, ...]] = {
-    "tool_calls": ("name", "input", "time", "result_time", "is_error"),
+    "tool_calls": ("name", "input", "time", "result_time", "is_error", "input_bytes"),
     "instruction_loads": ("path", "kind", "type", "size", "time"),
     "slash_commands": ("name", "time"),
     "assistant_text": ("time", "text"),
+}
+# A bare list name, and a nil ``fields``, keep today's keys: ``input_bytes`` is
+# a derived measure that must be asked for by name.
+_BARE: dict[str, tuple[str, ...]] = {
+    k: tuple(x for x in v if x != "input_bytes") for k, v in _SUBS.items()
 }
 _ALWAYS = ("session_id", "agent_id", "main", "truncated")
 _INPUT_AT = "input@"
@@ -252,28 +259,50 @@ _INPUT_AT = "input@"
 
 class _Fields:
     """What a call selects. ``top`` is the record's keys; ``keys`` the sub-keys
-    each selected list keeps per element; ``input_tools`` the tools whose calls
-    keep an ``input`` when it is not kept on every call (None: every call)."""
+    each selected list keeps per element. A call keeps its ``input`` when
+    ``input_all``, or its tool name is in ``input_exact`` or ends with one of
+    ``input_suffix``."""
 
     def __init__(
         self,
         top: frozenset[str],
         keys: dict[str, frozenset[str]],
-        input_tools: frozenset[str] | None,
+        input_all: bool = True,
+        input_exact: frozenset[str] = frozenset(),
+        input_suffix: tuple[str, ...] = (),
     ) -> None:
         self.top = top
         self.keys = keys
-        self.input_tools = input_tools
+        self.input_all = input_all
+        self.input_exact = input_exact
+        self.input_suffix = input_suffix
 
     def wants_input(self, tool: str | None) -> bool:
         if "input" not in self.keys.get("tool_calls", ()):
             return False
-        return self.input_tools is None or tool in self.input_tools
+        if self.input_all:
+            return True
+        return tool is not None and (
+            tool in self.input_exact or tool.endswith(self.input_suffix)
+        )
 
 
 def _all_fields(bodies: bool) -> _Fields:
-    lists = {k: frozenset(v) for k, v in _SUBS.items() if bodies or k != "assistant_text"}
-    return _Fields(frozenset(_SCALARS) | frozenset(lists), lists, None)
+    lists = {
+        k: frozenset(v) for k, v in _BARE.items() if bodies or k != "assistant_text"
+    }
+    return _Fields(frozenset(_SCALARS) | frozenset(lists), lists)
+
+
+def _input_bytes(value: Any) -> int:
+    """UTF-8 bytes of an input's top-level string values, as parsed (before any clean)."""
+    if not isinstance(value, dict):
+        return 0
+    return sum(
+        len(v.encode("utf-8", "surrogatepass"))
+        for v in value.values()
+        if isinstance(v, str)
+    )
 
 
 def _parse_fields(fields: str | None, bodies: bool) -> _Fields:
@@ -282,18 +311,25 @@ def _parse_fields(fields: str | None, bodies: bool) -> _Fields:
     ``fields`` is comma-separated names, whitespace around a name ignored. A
     name is a record key, ``<list>.<sub>`` for a list's per-element key, or
     ``tool_calls.input@<Tool>``: the input only on calls named exactly
-    ``<Tool>`` (repeatable). A bare list name keeps every sub-key, and so
-    wins over sub-keys named beside it; a plain ``tool_calls.input`` wins over
-    ``input@`` forms. ``session_id``, ``agent_id``, ``main`` and ``truncated``
-    always come back. An empty string or name, an unknown name, or
-    ``assistant_text`` without ``bodies`` is a ``VerbArgError``.
+    ``<Tool>``, or with ``*<tail>``, on calls whose name ends with ``<tail>``
+    (repeatable; one leading ``*`` and a non-empty tail, no ``*`` elsewhere, no
+    whitespace inside the name). ``tool_calls.input``, plain or ``@``, needs
+    ``tool_calls.name`` too, so no row is an anonymous ``{}``.
+    ``tool_calls.input_bytes`` is the UTF-8 size of the input's top-level
+    string values, on every call. A bare list name keeps every sub-key but
+    ``input_bytes``, and so wins over sub-keys named beside it; a plain
+    ``tool_calls.input`` wins over ``input@`` forms. ``session_id``,
+    ``agent_id``, ``main`` and ``truncated`` always come back. An empty string
+    or name, an unknown name, or ``assistant_text`` without ``bodies`` is a
+    ``VerbArgError``.
     """
     if fields is None:
         return _all_fields(bodies)
     top: set[str] = set()
     bare: set[str] = set()
     subs: dict[str, set[str]] = {}
-    tools: set[str] = set()
+    exact: set[str] = set()
+    suffix: set[str] = set()
     for raw in fields.split(","):
         name = raw.strip()
         if not name:
@@ -311,9 +347,13 @@ def _parse_fields(fields: str | None, bodies: bool) -> _Fields:
                 raise VerbArgError(f"{VERB}: unknown field {shown!r}")
             if head == "tool_calls" and tail.startswith(_INPUT_AT):
                 tool = tail[len(_INPUT_AT) :]
-                if not tool:
-                    raise VerbArgError(f"{VERB}: field {shown!r} names no tool")
-                tools.add(tool)
+                match = tool[1:] if tool.startswith("*") else tool
+                if not match or "*" in match or match != match.strip():
+                    raise VerbArgError(
+                        f"{VERB}: field {shown!r} must name a tool (or *<tail>) "
+                        "with no other * and no surrounding whitespace"
+                    )
+                (suffix if tool.startswith("*") else exact).add(match)
             elif tail in _SUBS[head]:
                 subs.setdefault(head, set()).add(tail)
             else:
@@ -323,16 +363,26 @@ def _parse_fields(fields: str | None, bodies: bool) -> _Fields:
         raise VerbArgError(f"{VERB}: assistant_text needs bodies to be true")
     keys: dict[str, frozenset[str]] = {}
     for lst in _SUBS:
-        if lst not in top:
-            continue
-        keys[lst] = frozenset(_SUBS[lst] if lst in bare else subs.get(lst, ()))
-    input_tools: frozenset[str] | None = None
+        if lst in top:
+            keys[lst] = frozenset(_BARE[lst] if lst in bare else subs.get(lst, ()))
     calls = keys.get("tool_calls")
-    if calls is not None and "tool_calls" not in bare:
-        if "input" not in calls and tools:
+    input_all = False
+    if calls is not None:
+        input_all = "input" in calls
+        if (input_all or exact or suffix) and "name" not in calls:
+            raise VerbArgError(
+                f"{VERB}: tool_calls.input needs tool_calls.name, so a call is "
+                "never an anonymous row"
+            )
+        if exact or suffix:
             keys["tool_calls"] = calls | {"input"}
-            input_tools = frozenset(tools)
-    return _Fields(frozenset(top) | frozenset(_ALWAYS), keys, input_tools)
+    return _Fields(
+        frozenset(top) | frozenset(_ALWAYS),
+        keys,
+        input_all,
+        frozenset(exact),
+        tuple(sorted(suffix)),
+    )
 
 
 # ---- files -----------------------------------------------------------------
@@ -401,6 +451,13 @@ def _files(
 
 
 # ---- one transcript ----------------------------------------------------------
+
+
+def _byte_size(content: Any) -> int | None:
+    """UTF-8 bytes of an instruction file's content (never the content), or None."""
+    if not isinstance(content, str):
+        return None
+    return len(content.encode("utf-8", "surrogatepass"))
 
 
 _OMIT: Any = object()
@@ -535,6 +592,7 @@ class _Session:
             time=stamp,
             result_time=None,
             is_error=None,
+            input_bytes=lambda: _input_bytes(block.get("input")),
         )
 
     def _user(self, message: dict[str, Any], stamp: str | None) -> None:
@@ -627,11 +685,7 @@ class _Session:
                 path=p,
                 kind=kind,
                 type=lambda: _text(ftype, 64),
-                size=lambda: (
-                    len(content.encode("utf-8", "surrogatepass"))
-                    if isinstance(content, str)
-                    else None
-                ),
+                size=lambda: _byte_size(content),
                 time=stamp,
             )
         )
@@ -825,6 +879,10 @@ def sessions(
     lo = _bound(since, "since")
     hi = _bound(until, "until")
     f = _parse_fields(fields, bool(bodies))
+    if project == REPO_PROJECT and lo >= hi:
+        if ctx.repo_root is None:
+            raise VerbError(REPO_NEEDED)
+        return []  # an empty window asks the resolver nothing
     root = _projects_root()
     files = list(_files(root, project, deadline, ctx.repo_root))
     if lo >= hi:
