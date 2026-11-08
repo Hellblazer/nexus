@@ -170,12 +170,17 @@ def trash_cmd(limit: int) -> None:
         click.echo("Trash is empty.")
         return
 
-    from nexus.sensitive_output import CliDocumentLines, flagged_tumblers  # noqa: PLC0415 — deferred to avoid CLI startup cost
+    from nexus.sensitive_output import CliDocumentLines  # noqa: PLC0415 — deferred to avoid CLI startup cost
 
-    # nexus-rfvyy.9 item 2: a flagged document's title is content (the stub under Claude Code). The trash row carries
-    # no flag, so it is read for the page (a tombstone is read on its own); an unreadable catalog withholds every row.
-    flagged = flagged_tumblers((str(d.get("tumbler", "")) for d in docs), cat=cat)
+    # nexus-rfvyy.9 item 2: a flagged document's title is content (the stub under Claude Code, a badge in a terminal).
+    # No live-only read returns a tombstone, so the flag comes from the trash row itself; an engine that predates the
+    # row's "sensitive" key leaves it unknown, and unknown withholds under Claude Code (and prints plainly in a terminal).
     lines = CliDocumentLines()
+
+    def _is_flagged(d: dict) -> bool:
+        return d["sensitive"] is True if "sensitive" in d else lines.withholding()
+
+    flagged = {str(d.get("tumbler", "")) for d in docs if _is_flagged(d)}
     click.echo(f"{len(docs)} tombstoned document(s):")
     click.echo(f"  {'TUMBLER':<16} {'DELETED_AT':<26} TITLE")
     for d in docs:

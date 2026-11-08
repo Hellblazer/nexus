@@ -1099,9 +1099,10 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     # nexus-rfvyy.9 item 2: a flagged document's title is content (the stub under Claude Code, a badge in a terminal).
     lines = CliDocumentLines()
     flagged = str(entry.tumbler) in entries_flagged([entry], cat=cat)
+    quoted = f"'{entry.title}' ({t})"
     if not yes:
         click.confirm(
-            f"Delete {lines.label(t, flagged, repr(entry.title) + f' ({t})')}? Links will be preserved.",
+            f"Delete {lines.label(t, flagged, quoted)}? Links will be preserved.",
             abort=True,
         )
 

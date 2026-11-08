@@ -50,9 +50,11 @@ class _FakeCatalog:
             _entry(CLEAN, "Gardening", path="/pub/garden.md", miss=2),
             _entry(SECRET, SECRET_TITLE, sensitive=True, path=SECRET_PATH, miss=2),
         ]
+        # The trash rows carry their flag (nexus-rfvyy.9); the tombstones themselves are invisible to every live read
+        # below, as they are to the engine's /show and /resolve_many.
         self.trash = [
-            {"tumbler": CLEAN, "title": "Gardening", "deleted_at": "2026-11-01T00:00:00Z"},
-            {"tumbler": SECRET, "title": SECRET_TITLE, "deleted_at": "2026-11-01T00:00:00Z"},
+            {"tumbler": "1.9.1", "title": "Gardening", "deleted_at": "2026-11-01T00:00:00Z", "sensitive": False},
+            {"tumbler": "1.9.2", "title": SECRET_TITLE, "deleted_at": "2026-11-01T00:00:00Z", "sensitive": True},
         ]
 
     def _by(self, t):
@@ -137,9 +139,25 @@ def test_orphans_withholds_under_claude_code_and_badges_in_a_terminal(cli, monke
 
 
 def test_trash_withholds_a_tombstoned_flagged_title(cli, monkeypatch) -> None:
-    _assert_badged(cli("trash"))
+    """The flag comes from the trash row: no live read returns a tombstone (the fake's resolve_many and by_doc_id
+    do not know these tumblers, as the engine's do not)."""
+    assert cli.fake.resolve_many(["1.9.1", "1.9.2"]) == {}
+    out = cli("trash")
+    assert SECRET_TITLE in out and BADGE in out and SECRET_READER in out
     _claude_code(monkeypatch)
-    _assert_withheld(cli("trash"))
+    out = cli("trash")
+    assert CANARY not in out and stub_line("1.9.2") in out and "Gardening" in out
+    assert f"[{withheld_note(1)}]" in out
+
+
+def test_trash_from_an_engine_without_the_flag_withholds_every_row_under_claude_code(cli, monkeypatch) -> None:
+    for row in cli.fake.trash:
+        del row["sensitive"]
+    assert "Gardening" in cli("trash"), "in a terminal an unknown flag prints plainly"
+    _claude_code(monkeypatch)
+    out = cli("trash")
+    assert CANARY not in out and "Gardening" not in out
+    assert f"[{withheld_note(2)}]" in out
 
 
 def test_gc_withholds_a_flagged_orphan(cli, monkeypatch) -> None:
@@ -192,6 +210,29 @@ def test_flagged_tumblers_fails_closed(monkeypatch) -> None:
 
     assert flagged_tumblers(["1.1", "1.2", ""], cat=_Down()) == {"1.1", "1.2"}
     assert flagged_tumblers([], cat=_Down()) == set()
+
+
+def test_flagged_tumblers_counts_a_tumbler_the_live_catalog_does_not_return_as_flagged() -> None:
+    """A tombstoned or purged document keeps no flag a live read can see, so its rows are withheld."""
+    fake = _FakeCatalog()
+    assert flagged_tumblers([CLEAN, SECRET, "1.9.9"], cat=fake) == {SECRET, "1.9.9"}
+
+
+def test_the_integrity_report_follows_a_merged_alias_to_its_flagged_canonical(monkeypatch) -> None:
+    """A merged duplicate's own flag is unset; the report row of an alias of a flagged note is flagged."""
+    fake = _FakeCatalog()
+    canonical = _entry(SECRET, SECRET_TITLE, sensitive=True)
+    canonical.meta["doc_id"] = "c" * 64
+    alias = _entry(ALIAS, SECRET_TITLE, alias_of=SECRET)
+    alias.meta["doc_id"] = "d" * 64
+    fake.entries = [canonical, alias]
+    fake.get_manifest = lambda t: []  # chunk_count 3 against 0 manifest rows: both drift
+    monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: fake)
+    monkeypatch.setattr("nexus.db.make_t3", lambda: (_ for _ in ()).throw(RuntimeError("no T3 here")))
+    report = doctor._run_store_put_integrity()
+    rows = {r["tumbler"]: r for r in report["drift"]}
+    assert rows[SECRET].get("sensitive") is True
+    assert rows[ALIAS].get("sensitive") is True, "the alias follows its flagged canonical"
 
 
 def test_entries_flagged_follows_an_alias_to_its_flagged_canonical() -> None:

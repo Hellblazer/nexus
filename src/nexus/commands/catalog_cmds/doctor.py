@@ -1230,12 +1230,6 @@ def _print_name_vs_embed_dim_text(report: dict) -> None:
             click.echo(f"    {u['collection']}  {u['error']}")
 
 
-def _flag(entry: Any) -> dict:
-    """``{"sensitive": True}`` for a flagged document's report row, nothing for any other, so an unflagged row's shape
-    is unchanged (nexus-rfvyy.9 item 2)."""
-    return {"sensitive": True} if getattr(entry, "sensitive", False) is True else {}
-
-
 def _run_store_put_integrity() -> dict:
     """store_put-origin integrity check (nexus-b6enc / GH #1419 Issue 8).
 
@@ -1297,6 +1291,16 @@ def _run_store_put_integrity() -> dict:
         t3_db = make_t3()
     except Exception as exc:  # noqa: BLE001 — T3 unavailable: ghost detection degrades loudly, never a silent all-clean
         t3_error = str(exc)
+
+    from nexus.sensitive_output import entries_flagged  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    # nexus-rfvyy.9 item 2: the flag of each row, a merged duplicate (alias_of) following its canonical, read once;
+    # an alias whose canonical cannot be read counts flagged (fail closed).
+    flagged = entries_flagged(docs, cat=cat)
+
+    def _flag(entry: Any) -> dict:
+        # Only on a flagged row, so an unflagged row's shape is unchanged.
+        return {"sensitive": True} if str(entry.tumbler) in flagged else {}
 
     drift: list[dict] = []
     ghosts: list[dict] = []
@@ -1372,13 +1376,10 @@ def _run_store_put_integrity() -> dict:
     return report
 
 
-def _print_store_put_integrity_text(report: dict, lines: Any = None) -> None:
+def _print_store_put_integrity_text(report: dict, lines: Any) -> None:
     def _named(row: dict) -> str:
         # nexus-rfvyy.9 item 2: a flagged document's title is the stub (Claude Code) or carries a badge (terminal).
-        title = repr(row.get("title"))
-        if lines is None or row.get("sensitive") is not True:
-            return title
-        return lines.label(str(row.get("tumbler", "")), True, title)
+        return lines.label(str(row.get("tumbler", "")), row.get("sensitive") is True, repr(row.get("title")))
 
     if report.get("error"):
         click.echo(f"store-put-integrity: ERROR - {report['error']}")

@@ -444,7 +444,10 @@ def test_memory_rollup_is_stated_as_not_enforced() -> None:
         ("repo runs bound for a Voyage collection", ("--sensitive-glob", "--ack-external-embedder", "not indexed")),
         # nexus-rfvyy.9 item 2 (Sam 2026-11-08, option b) brought delete, trash, gc, enrich and the rest under the
         # posture; what stays outside is the taxonomy views, the reapable label on an older engine and legacy rows.
-        ("CLI verbs outside the output posture", ("nx taxonomy", "nx store list --reapable", "nx t3 gc", "legacy row")),
+        ("CLI verbs outside the output posture", (
+            "Only the verbs named", "nx catalog verify", "nx catalog heal", "aspects-show", "nx enrich info",
+            "nx taxonomy", "nx store list --reapable", "nx t3 gc", "legacy row",
+        )),
         ("title, author and path are discoverable", ("catalog_show(title=)", "store_get", "author", "discoverable")),
         ("the audit table readers", ("nexus_diag", "managed-cloud tenant", "service database role")),
         ("the edge allowlist bead", ("nexus-rfvyy.7.5", "2026-11-07")),
