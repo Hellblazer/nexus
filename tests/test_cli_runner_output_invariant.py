@@ -38,6 +38,13 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
+# An O(repo) AST scan, so it belongs in the lint bucket every batch runs
+# before queueing. Outside it, this invariant let develop go red twice on
+# 2026-11-08 (windows 23 and 28): a changed-tests run never selects it.
+pytestmark = pytest.mark.lint
+
 _AMBIGUOUS = object()  # sentinel: name assigned more than once in its scope
 
 
