@@ -15,9 +15,11 @@ runs, the target URI.
 
 What it does NOT do, by design:
 
-* **No merge.** A row whose target URI a live document already holds (a twin), or that would rewrite onto the
-  same URI as another stale row, is listed and left alone. ``POST /v1/catalog/merge`` moves neither chunks nor
-  aspects nor highlights, so which row wins is a design choice that waits for Sam.
+* **No merge without ``--merge``.** A row whose target URI a live document already holds (a twin), or that
+  would rewrite onto the same URI as another stale row, is listed and left alone by the plain verb.
+  ``--merge`` is the merge pass (Sam's ruling "Chunks decide", RDR-231 Decision 6): the survivor is the row that
+  holds the chunks, because ``POST /v1/catalog/merge`` moves neither chunks nor aspects nor highlights. The rule
+  is :mod:`nexus.catalog.note_uri_merge`; the loop and its ledger are below.
 * **No tombstoned rows.** Counted, not rewritten: only live rows can mint a duplicate. A restore makes a stale
   tombstone live again, so it appears in the next census as a rewrite or merge candidate.
 * **No ``nxexp://`` rows (scope, and a risk that grows).** An export copy's inner collection names the SOURCE of
@@ -47,6 +49,7 @@ import click
 import httpx
 
 from nexus._winsec import open_private
+from nexus.catalog.note_uri_merge import Decision, Plan, plan as _plan_merges
 
 #: The counts a report must carry, as integers, before anything is written on its strength.
 _COUNT_KEYS: tuple[str, ...] = (
@@ -176,8 +179,8 @@ def _print_census(report: dict) -> None:
         echo(f"  ... {listed - shown} more (raise --sample, or read --json)")
     if report["merge"]:
         echo(
-            "Merge candidates are listed and not merged: which row wins (the stale-URI row or its twin) is a "
-            "design decision, and POST /v1/catalog/merge moves neither chunks, aspects nor highlights."
+            "Merge candidates are listed and not merged here: --merge merges them (the row that holds the chunks "
+            "survives; POST /v1/catalog/merge moves neither chunks, aspects nor highlights)."
         )
 
 
@@ -207,6 +210,379 @@ def _default_ledger_path() -> str:
     return f"nx-note-uri-repair-{stamp}.jsonl"
 
 
+# --------------------------------------------------------------------------------------------------------------
+# --merge: the merge pass (Sam's ruling "Chunks decide", ask bivz324-merge-winner)
+# --------------------------------------------------------------------------------------------------------------
+
+#: The most merge entries the engine will list in one report (its ``sample`` cap): one round's worth.
+_MERGE_REPORT_ENTRIES: int = 500
+#: A hard bound on rounds. Each round must try at least one group never tried before, so this only matters for a
+#: tenant with more than this many groups; the census after says what is left.
+_MAX_MERGE_ROUNDS: int = 200
+_WINDOW_NOTE = (
+    "When a stale row wins, the twin is merged into it and the stale row is rewritten in a second request. "
+    "The window between the two is real: the row still holds its old URI and nothing holds the new one, so a "
+    "re-put under the new collection inside it mints a third row. It is one request long."
+)
+
+
+class _RunStopped(Exception):
+    """An engine error that is not a refusal: the pass stops, with the ledger written."""
+
+
+def _decision_dict(d: Decision) -> dict:
+    return {
+        "winner": d.winner.tumbler,
+        "losers": [c.tumbler for c in d.losers],
+        "rule": d.rule,
+        "target_uri": d.target_uri,
+        "rewrite_needed": d.rewrite_needed,
+        "members": [
+            {
+                "tumbler": c.tumbler,
+                "chunk_count": c.chunk_count,
+                "indexed_at": c.indexed_at,
+                "twin": c.is_twin,
+                "source_uri": c.uri,
+            }
+            for c in d.members
+        ],
+    }
+
+
+def _describe(c: Any) -> str:
+    return f"{c.tumbler} ({'twin' if c.is_twin else 'stale'}, {c.chunk_count} chunk(s))"
+
+
+def _print_plan(p: Plan, report: dict) -> None:
+    echo = click.echo
+    for d in p.decisions:
+        echo(f"  {d.target_uri or 'group'}")
+        echo(
+            f"    {d.winner.tumbler} wins: {d.rule}  [{', '.join(_describe(c) for c in d.members)}]"
+        )
+        for i, loser in enumerate(d.losers):
+            tail = (
+                f", then rewrite {d.winner.tumbler}"
+                if d.rewrite_needed and i == len(d.losers) - 1
+                else ""
+            )
+            echo(f"    merge {loser.tumbler} into {d.winner.tumbler}{tail}")
+    for sk in p.skipped:
+        echo(f"  skipped {sk.get('tumbler')}: {sk.get('why')}")
+    listed = len(report["sample"]["merge"])
+    if report["merge"] > listed:
+        echo(
+            f"  {report['merge'] - listed} more merge candidate(s) are not in this report: --apply works in rounds, "
+            "and the pairs it merges make room for the rest."
+        )
+
+
+def _execute_decision(writer: Any, d: Decision, *, round_no: int, record: Any) -> dict:
+    """Merge every loser of ``d`` into its winner, one request each, then rewrite a stale winner. A 409 refusal
+    (self, not found, already aliased, cycle) is reported for that pair and the group goes on; any other engine
+    error is recorded and raises :class:`_RunStopped`. ``record`` writes one ledger line, durably, before the
+    next request is made. There is no ``--force``: the rule never folds a chunk holder into a chunkless winner,
+    and a pair whose data says otherwise (a stale census) is refused here without a call."""
+    pairs: list[dict] = []
+    all_merged = True
+    for loser in d.losers:
+        line = {
+            "type": "merge",
+            "round": round_no,
+            "winner": d.winner.tumbler,
+            "loser": loser.tumbler,
+            "loser_uri_before": loser.uri,
+            "loser_uri_after": loser.uri,
+            "rule": d.rule,
+            "rewrite_needed": d.rewrite_needed,
+        }
+        if loser.chunk_count > 0 and d.winner.chunk_count == 0:
+            line.update(
+                outcome="refused",
+                detail=f"chunk guard: {loser.tumbler} holds {loser.chunk_count} chunk(s) and the winner "
+                f"{d.winner.tumbler} holds none; a merge moves no chunks, so none is made",
+            )
+        else:
+            try:
+                result = writer.merge_documents(loser.tumbler, d.winner.tumbler)
+                line.update(
+                    outcome="merged",
+                    loser_uri_after="",
+                    detail="",
+                    links_remapped=int((result or {}).get("links_remapped", 0) or 0),
+                    links_collapsed=int((result or {}).get("links_collapsed", 0) or 0),
+                    links_dropped=int((result or {}).get("links_dropped", 0) or 0),
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code == 409:
+                    line.update(outcome="refused", detail=_refusal_text(exc))
+                else:
+                    line.update(
+                        outcome="error",
+                        loser_uri_after=None,
+                        detail=f"engine error: {exc}",
+                    )
+                    record(line)
+                    raise _RunStopped(
+                        f"merge {loser.tumbler} into {d.winner.tumbler} failed: {exc}"
+                    ) from exc
+            except httpx.TimeoutException as exc:
+                line.update(
+                    outcome="error",
+                    loser_uri_after=None,
+                    detail=f"timeout: the merge may have happened ({type(exc).__name__})",
+                )
+                record(line)
+                raise _RunStopped(
+                    f"merge {loser.tumbler} into {d.winner.tumbler} timed out; it may have happened. "
+                    "Run the census again."
+                ) from exc
+        record(line)
+        pairs.append(line)
+        all_merged = all_merged and line["outcome"] == "merged"
+
+    rewrite: dict | None = None
+    if d.rewrite_needed:
+        rewrite = {
+            "type": "rewrite-result",
+            "round": round_no,
+            "winner": d.winner.tumbler,
+            "followed": False,
+            "detail": "",
+        }
+        if not all_merged:
+            rewrite["detail"] = (
+                "not rewritten: a merge into it was refused, so it still has a sibling"
+            )
+        else:
+            try:
+                step = _check_report(
+                    writer.repair_stale_note_uris(
+                        apply=True, limit=1, sample=0, tumblers=[d.winner.tumbler]
+                    )
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code == 409:
+                    rewrite["detail"] = f"rewrite refused: {_refusal_text(exc)}"
+                else:
+                    rewrite["detail"] = f"engine error: {exc}"
+                    record(rewrite)
+                    raise _RunStopped(
+                        f"rewrite of {d.winner.tumbler} failed: {exc}"
+                    ) from exc
+            except httpx.TimeoutException as exc:
+                rewrite["detail"] = (
+                    f"timeout: the rewrite may have happened ({type(exc).__name__})"
+                )
+                record(rewrite)
+                raise _RunStopped(
+                    f"rewrite of {d.winner.tumbler} timed out; it may have happened. Run the census again."
+                ) from exc
+            else:
+                if step.get("rewritten") == 1:
+                    for entry in _check_ledger(step):
+                        record(
+                            {
+                                "type": "rewrite",
+                                "round": round_no,
+                                "winner": d.winner.tumbler,
+                                **entry,
+                            }
+                        )
+                    rewrite["followed"] = True
+                else:
+                    rewrite["detail"] = (
+                        "not a rewrite candidate now (a sibling or twin still holds its target, or it changed): "
+                        "left for the next census"
+                    )
+        record(rewrite)
+    return {"pairs": pairs, "rewrite": rewrite}
+
+
+def _run_merge(
+    writer: Any, *, apply: bool, as_json: bool, ledger_path: str | None
+) -> int:
+    """The ``--merge`` verb body. Returns the exit status."""
+    before = _call(
+        writer, {"apply": False, "limit": 1, "sample": _MERGE_REPORT_ENTRIES}
+    )
+    first = _plan_merges(before["sample"]["merge"])
+    if not apply:
+        if as_json:
+            click.echo(
+                json.dumps(
+                    {
+                        "census": before,
+                        "plan": [_decision_dict(d) for d in first.decisions],
+                        "skipped": first.skipped,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            _print_census(before)
+            click.echo("Merge plan (the rule: chunks decide; ties go to the twin):")
+            _print_plan(first, before)
+            if not first.decisions:
+                click.echo("Nothing to merge.")
+            click.echo(
+                "Dry run: nothing written. Re-run with --merge --apply to perform it."
+            )
+        return 0
+
+    if not as_json:
+        _print_census(before)
+    if not first.decisions:
+        if as_json:
+            click.echo(
+                json.dumps(
+                    {
+                        "before": before,
+                        "after": before,
+                        "pairs": [],
+                        "merged": 0,
+                        "refused": 0,
+                        "errors": 0,
+                        "rewrites_followed": 0,
+                        "rounds": 0,
+                        "ledger": None,
+                        "skipped": first.skipped,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            _print_plan(first, before)
+            click.echo("Nothing to merge.")
+        return 0
+
+    path = ledger_path or _default_ledger_path()
+    try:
+        # Owner-only, on Windows too: the ledger names every merged note's titles.
+        fd = open_private(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        fh = os.fdopen(fd, "a", encoding="utf-8", newline="")  # noqa: SIM115 — closed in the finally below
+    except OSError as exc:
+        raise click.ClickException(
+            f"cannot open the ledger {path!r} ({exc}). Nothing was written."
+        ) from exc
+
+    def record(line: dict) -> None:
+        fh.write(json.dumps(line) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+
+    if not as_json:
+        click.echo(f"Ledger: {path}")
+    pairs: list[dict] = []
+    rewrites: list[dict] = []
+    attempted: set[frozenset[str]] = set()
+    report, current_plan, rounds, stopped, skipped = (
+        before,
+        first,
+        0,
+        None,
+        list(first.skipped),
+    )
+    try:
+        while rounds < _MAX_MERGE_ROUNDS:
+            touched: set[str] = set()
+            todo: list[Decision] = []
+            for d in current_plan.decisions:
+                key = frozenset(c.tumbler for c in d.members)
+                if key in attempted or touched & key:
+                    continue
+                todo.append(d)
+                touched |= key
+            if not todo:
+                break
+            rounds += 1
+            for d in todo:
+                attempted.add(frozenset(c.tumbler for c in d.members))
+                outcome = _execute_decision(writer, d, round_no=rounds, record=record)
+                for p in outcome["pairs"]:
+                    pairs.append(p)
+                    if not as_json:
+                        if p["outcome"] == "merged":
+                            click.echo(
+                                f"  merged   {p['loser']} into {p['winner']}  [{p['rule']}]"
+                            )
+                        elif p["outcome"] == "refused":
+                            click.echo(
+                                f"  REFUSED  {p['loser']} into {p['winner']}: {p['detail']}"
+                            )
+                if outcome["rewrite"] is not None:
+                    rewrites.append(outcome["rewrite"])
+                    if not as_json:
+                        r = outcome["rewrite"]
+                        click.echo(
+                            f"  rewrote  {r['winner']}"
+                            if r["followed"]
+                            else f"  not rewritten  {r['winner']}: {r['detail']}"
+                        )
+            report = _call(
+                writer, {"apply": False, "limit": 1, "sample": _MERGE_REPORT_ENTRIES}
+            )
+            current_plan = _plan_merges(report["sample"]["merge"])
+            skipped = current_plan.skipped
+    except _RunStopped as exc:
+        stopped = str(exc)
+    finally:
+        fh.close()
+
+    merged = sum(1 for p in pairs if p["outcome"] == "merged")
+    refused = sum(1 for p in pairs if p["outcome"] == "refused")
+    errors = sum(1 for p in pairs if p["outcome"] == "error") + (
+        1 if stopped and not any(p["outcome"] == "error" for p in pairs) else 0
+    )
+    followed = sum(1 for r in rewrites if r["followed"])
+    if stopped is None:
+        after = report
+    else:
+        try:
+            after = _call(
+                writer, {"apply": False, "limit": 1, "sample": _MERGE_REPORT_ENTRIES}
+            )
+        except click.ClickException:
+            after = report
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "before": before,
+                    "after": after,
+                    "pairs": pairs,
+                    "rewrites": rewrites,
+                    "merged": merged,
+                    "refused": refused,
+                    "errors": errors,
+                    "rewrites_followed": followed,
+                    "rounds": rounds,
+                    "ledger": path,
+                    "skipped": skipped,
+                    "stopped": stopped,
+                },
+                indent=2,
+            )
+        )
+    else:
+        click.echo(
+            f"{merged} merged, {refused} refused, {errors} error(s); {followed} rewrite(s) followed. Ledger: {path}"
+        )
+        if any(r["followed"] or r["detail"] for r in rewrites):
+            click.echo(_WINDOW_NOTE)
+        if refused:
+            click.echo(
+                "Refused pairs stay in the census; read the reasons above (the ledger has them too)."
+            )
+        click.echo("Census after:")
+        _print_census(after)
+    if stopped:
+        click.echo(f"Stopped: {stopped}", err=True)
+        return 1
+    return 0
+
+
 @click.command(name="repair-note-uris")
 @click.option(
     "--apply", is_flag=True, help="Perform the rewrite (default: dry-run census only)."
@@ -233,6 +609,14 @@ def _default_ledger_path() -> str:
     help="Rewrite candidates ONE engine transaction rewrites; --apply repeats until none are left.",
 )
 @click.option(
+    "--merge",
+    "merge_pass",
+    is_flag=True,
+    help="The merge pass for the merge candidates (a live twin, or siblings): chunks decide who survives. "
+    "Dry run by default (each group's winner and why); with --apply it merges the losers into the winner "
+    "and rewrites a stale winner, writing the ledger. Plain rewrite candidates are left to --apply alone.",
+)
+@click.option(
     "--ledger",
     "ledger_path",
     type=click.Path(dir_okay=False, writable=True),
@@ -241,7 +625,12 @@ def _default_ledger_path() -> str:
     "nx-note-uri-repair-<UTC timestamp>.jsonl in the working directory. An existing file is appended to.",
 )
 def repair_note_uris_cmd(
-    apply: bool, as_json: bool, sample: int, batch_size: int, ledger_path: str | None
+    apply: bool,
+    as_json: bool,
+    sample: int,
+    batch_size: int,
+    merge_pass: bool,
+    ledger_path: str | None,
 ) -> None:
     """Repair note URIs that name a collection the note no longer lives in (nexus-bivz3.24).
 
@@ -249,7 +638,7 @@ def repair_note_uris_cmd(
     Always prints the census first; writes only with --apply.
       rewrite candidates  no live note holds nx-note://<its collection>/<title>: the URI is rewritten, in the
                           catalog row, its aspect row and its highlight row, in one transaction
-      merge candidates    a live twin holds the target (or two stale rows share it): listed, NOT merged
+      merge candidates    a live twin holds the target (or two stale rows share it): listed; merged only by --merge
       refused             blank or file-routed collection, or no title part: listed, never rewritten
       tombstoned          counted, never rewritten (a restored one shows up in the next census)
       nxexp:// copies     census only: their target segment goes stale with every rename or re-home, and a
@@ -257,6 +646,12 @@ def repair_note_uris_cmd(
     A twin that appears while --apply runs is a 409 that names it: nothing is written for that batch, and the
     row is a merge candidate on the next census. A chain (a stale row's target held by another stale row) takes
     more than one pass; --apply repeats until none are left or a batch makes no progress.
+
+    \b
+    --merge is the merge pass, chunks decide: the twin wins unless the stale row holds chunks and the twin holds
+    none (or both hold chunks and the stale row is newer); a stale winner is rewritten after the merge, with a
+    one-request window between the two. Dry run by default (each group's winner and why); --merge --apply
+    performs it, a refused pair is reported and the run goes on, and the ledger records every pair.
 
     \b
     --apply writes a LEDGER (--ledger PATH): every row changed, in all three tables, with its old and new URI.
@@ -274,6 +669,16 @@ def repair_note_uris_cmd(
     if ledger_path is not None and not apply:
         raise click.UsageError("--ledger only applies with --apply.")
     writer = _cat_cmd._get_catalog_writer()
+    if merge_pass:
+        try:
+            status = _run_merge(
+                writer, apply=apply, as_json=as_json, ledger_path=ledger_path
+            )
+        finally:
+            writer.close()
+        if status:
+            raise click.exceptions.Exit(status)
+        return
     ledger_fh = None
     try:
         before = _call(writer, {"apply": False, "limit": batch_size, "sample": sample})

@@ -1676,7 +1676,7 @@ For each candidate, parses the path component out of the stored `chroma://<colle
 ### nx catalog repair-note-uris
 
 ```
-nx catalog repair-note-uris [--apply] [--json] [--sample N] [--batch-size N] [--ledger PATH]
+nx catalog repair-note-uris [--apply] [--merge] [--json] [--sample N] [--batch-size N] [--ledger PATH]
 ```
 
 Repairs note `source_uri` values that name a collection the note no longer lives in (nexus-bivz3.24, RDR-231 critique Issue 7). A note moved by a re-home, a collection update or a rename before RDR-231 step 4 keeps `nx-note://X/t` on a row living in `Y`; the `chroma://` to `nx-note://` backfill changed only the scheme, so the row is still stale and a re-put under `Y` mints a duplicate. The census and the rewrite run in the engine (`POST /v1/catalog/note_uri_repair`, one tenant, one SQL census), and the verb needs an engine that has the route (an older one answers with a named refusal). Dry run by default; the census is always printed.
@@ -1684,7 +1684,7 @@ Repairs note `source_uri` values that name a collection the note no longer lives
 Classes of live note row whose URI collection differs from `physical_collection`:
 
 - **rewrite candidates**: no other live row holds `nx-note://<physical collection>/<title>`, and no other stale row rewrites onto it. `--apply` rewrites the catalog row, its `document_aspects` row and its `document_highlights` row in ONE transaction, each by its own value (a legacy `chroma://` spelling comes out as `nx-note://`). A twin that appears while it runs is a 409 naming the holder, with nothing written for that batch.
-- **merge candidates**: a live twin holds the target in either spelling (`twin`), or two stale rows would rewrite onto one URI (`sibling`). Listed, never merged: `POST /v1/catalog/merge` moves neither chunks, aspects nor highlights, and which row wins is a design decision. Each entry carries what a choosing rule reads: `chunk_count`, `indexed_at`, `has_aspects`, `has_highlights`, and the twin's under a `twin_` prefix.
+- **merge candidates**: a live twin holds the target in either spelling (`twin`), or two stale rows would rewrite onto one URI (`sibling`). Listed by the plain verb and merged only by `--merge` (below): `POST /v1/catalog/merge` moves neither chunks, aspects nor highlights, so the row that holds the chunks survives. Each entry carries what a choosing rule reads: `chunk_count`, `indexed_at`, `has_aspects`, `has_highlights`, and the twin's under a `twin_` prefix.
 - **refused**: a row whose physical collection is blank or file-routed (`rdr__`, `docs__`, `code__`), or whose URI has no title part. Reported, never rewritten.
 - **tombstoned**: stale rows with `deleted_at` set. Counted, never rewritten: only live rows can mint a duplicate. A restore makes one live again, so a restored stale tombstone appears in the next census as a rewrite or merge candidate.
 - **`nxexp://` export copies**: census only, by scope. The inner collection of `nxexp://<target>/<note uri>` names the export's source by design, so it is not stale; the census counts the copies whose `<target>` is no longer the collection they live in. That count grows with every rename and re-home, because the move paths skip `nxexp://` values (`NoteUri.moveTo`); a re-import into the new collection then misses the copy and mints another. Repairing it needs its own rule and is a follow-on.
@@ -1693,12 +1693,22 @@ Classes of live note row whose URI collection differs from `physical_collection`
 
 **The ledger is the only undo record.** `--apply` writes one JSON line per row changed, in all three tables (`catalog_documents` keyed by tumbler, `document_aspects` and `document_highlights` by row id, with `doc_id`), each with `old_uri` and `new_uri` and its `batch`, flushed to disk after every batch before the next is asked for. Default file: `nx-note-uri-repair-<UTC timestamp>.jsonl` in the working directory; an existing file is appended to, and a new one is created owner-only (it names every rewritten note's title). A response lost to a timeout can leave one batch rewritten with no ledger lines: the engine keeps no other record of the old URIs, so that batch cannot be undone from the ledger; the timeout message says so. A later census shows its rows as already in their own collection, so re-running is safe. If the engine returns a batch whose ledger is unusable, the batch has still committed: the raw report is saved beside the ledger as `<ledger>.rejected` and the run stops.
 
+**The merge pass (`--merge`).** Sam's ruling (RDR-231 Decision 6): chunks decide, because `POST /v1/catalog/merge` moves no chunks, aspects or highlights. For a stale row S and the live twin W holding its target, W wins by default; S wins only if S holds chunks and W holds none, or both hold chunks and S's `indexed_at` is strictly newer (a missing one is the oldest); ties go to W. Stale rows that would rewrite onto one URI are ranked by the same key, a tie going to the lowest tumbler; the others merge into the winner. A twin shared by two stale rows is one group.
+
+- W wins: `merge(S -> W)`, one request. W keeps its URI; S's becomes `''` and S leaves the census for good.
+- S wins: `merge(W -> S)`, then S alone is rewritten. The window between the two requests is real: S holds its old URI and nothing holds the new one, so a re-put under the new collection inside it mints a third row. It is one request long.
+- The loser's aspects and highlights stay behind the alias; nothing moves them, and no aspect read follows `alias_of`.
+- A refused merge (self, not found, already aliased, cycle) is reported for that pair and the run goes on; a pair is tried once. Any other engine error, or a timeout, stops the run with the ledger written. There is no `--force`: the rule never folds a chunk holder into a chunkless winner, and a pair whose data says otherwise is refused without a call.
+- `--merge` is a dry run (each group's winner and why). `--merge --apply` merges in rounds of up to 500 listed pairs, prints the census first and after, and writes the ledger. Plain rewrite candidates are left to `--apply` alone.
+- The ledger (`--ledger PATH`, owner-only) has, per pair, a `merge` line (`winner`, `loser`, `loser_uri_before`, `loser_uri_after`, `rule`, `outcome`, `detail`, `links_remapped`, `rewrite_needed`), then for a stale winner `rewrite` lines (the rows changed, as for `--apply`) and a `rewrite-result` line saying whether the rewrite followed. A merge is undone by restoring the loser's URI and clearing its `alias_of`; the ledger records the links remapped as counts only.
+
 | Flag | Description |
 |------|-------------|
 | `--apply` | Perform the rewrite (default: dry-run census only) |
 | `--json` | Emit JSON: the engine's report, or with `--apply` `{before, rewritten, batches, ledger, after}` |
 | `--sample N` | Example rows listed per class (0 to 500, default 20). The counts are never capped |
 | `--batch-size N` | Rewrite candidates one engine transaction rewrites (1 to 5000, default 1000) |
+| `--merge` | The merge pass above (dry run by default; `--merge --apply` performs it) |
 | `--ledger PATH` | With `--apply`: the undo ledger file (default a timestamped `.jsonl` in the working directory) |
 
 ### nx catalog backfill-etags
