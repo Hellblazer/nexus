@@ -73,6 +73,9 @@ fi
 if fail initdb_foreign_pid; then  # ... and it is already up, with its pid file, when pg_upgrade --check is about to begin
   touch "$FAKE_STATE/old_running"; echo 4242 > "$FAKE_OLD_PGDATA/postmaster.pid"
 fi
+if fail initdb_stale_pid; then  # an unclean shutdown left a stale pid file; no server runs (pg_ctl status says so)
+  echo 999999 > "$FAKE_OLD_PGDATA/postmaster.pid"
+fi
 if fail initdb; then echo "initdb: could not create $D/x" >&2; exit 1; fi
 echo 17 > "$D/PG_VERSION"; echo trust > "$D/pg_hba.conf"
 """
@@ -438,6 +441,15 @@ def test_a_failed_check_only_leaves_a_server_that_was_up_before_pg_upgrade_check
     assert (rig.state / "old_running").exists(), "stopped a server the check did not start"
     assert not any(" stop" in ln.split("||")[0] for ln in rig.calls("pg_ctl"))
     assert "did not start" in result.output
+
+
+def test_a_failed_check_only_stops_its_server_even_after_a_stale_pid_file(rig: Rig) -> None:
+    """A crash left postmaster.pid behind with no server running: pg_upgrade --check still starts the old server (postgres
+    replaces a stale pid file), so the check started it and stops it. Judged by pg_ctl status, not the file."""
+    result = rig.run("--check-only", fail="initdb_stale_pid,check_leak")
+    assert result.exit_code == 1 and "pg_upgrade --check failed" in result.output
+    assert not (rig.state / "old_running").exists(), "left running a server the check started"
+    assert any(" stop" in ln.split("||")[0] for ln in rig.calls("pg_ctl"))
 
 
 def test_apply_makes_its_work_directory_and_removes_an_unmoved_one_with_signals_ignored(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1275,14 +1287,14 @@ def test_windows_is_refused(rig: Rig, monkeypatch: pytest.MonkeyPatch, mode: lis
 
 def test_the_untested_limit_is_shown_where_a_user_sees_it(rig: Rig) -> None:
     note = upgrade_mod.UNTESTED_NOTE
-    assert note == "not yet run against a real pre-17 cluster; copy the data directory first"
+    assert note == "run once against a real pre-17 cluster on Linux, not yet with the service start; copy the data directory first"
     dry = rig.run()
     assert note in dry.output
     helped = CliRunner().invoke(main, ["daemon", "service", "pg-upgrade", "--help"]).output
-    assert note in " ".join(helped.split()).lower()
+    assert note.lower() in " ".join(helped.split()).lower()
     repo = Path(__file__).resolve().parents[1]
     for doc in ("docs/cli-reference.md", "docs/migration-runbook.md"):
-        assert note in " ".join((repo / doc).read_text(encoding="utf-8").split()).lower().replace("**", ""), doc
+        assert note.lower() in " ".join((repo / doc).read_text(encoding="utf-8").split()).lower().replace("**", ""), doc
 
 
 def test_apply_prints_the_limit_before_it_moves_the_data_directory(rig: Rig) -> None:
