@@ -54,8 +54,8 @@ class EngineJobsTest {
         }
     }
 
-    private Started<Void> hold(String tenant, String scope, String fp, CountDownLatch release) {
-        return jobs.start(tenant, scope, fp, (job, stage) -> {
+    private Started<Void> hold(String tenant, String owner, String fp, CountDownLatch release) {
+        return jobs.start(tenant, owner, fp, (job, stage) -> {
             release.await(20, TimeUnit.SECONDS);
             return ok(tenant);
         });
@@ -65,7 +65,7 @@ class EngineJobsTest {
     void aJobRunsThenEndsDone_andThePollReadsItsStageAndOutcome() throws Exception {
         CountDownLatch inside = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        Started<Void> s = jobs.start("t", "t", "fp", (job, stage) -> {
+        Started<Void> s = jobs.start("t", null, "fp", (job, stage) -> {
             stage.accept("staging");
             inside.countDown();
             release.await(20, TimeUnit.SECONDS);
@@ -89,7 +89,7 @@ class EngineJobsTest {
 
     @Test
     void aWorkThatThrowsEndsFailedWith500_namingTheClassNeverTheMessage() throws Exception {
-        Started<Void> s = jobs.start("t", "t", "fp", (job, stage) -> {
+        Started<Void> s = jobs.start("t", null, "fp", (job, stage) -> {
             throw new IllegalStateException("secret detail");
         });
         await(() -> jobs.find(s.job().id(), "t").state() != State.RUNNING);
@@ -104,7 +104,7 @@ class EngineJobsTest {
 
     @Test
     void aWorkThatAnswersNon200EndsFailedWithItsOwnOutcome() throws Exception {
-        Started<Void> s = jobs.start("t", "t", "fp", (job, stage) -> new Outcome(409, Map.of("reason", "stale")));
+        Started<Void> s = jobs.start("t", null, "fp", (job, stage) -> new Outcome(409, Map.of("reason", "stale")));
         await(() -> jobs.find(s.job().id(), "t").state() != State.RUNNING);
 
         assertThat(jobs.find(s.job().id(), "t").state()).isEqualTo(State.FAILED);
@@ -114,19 +114,19 @@ class EngineJobsTest {
     @Test
     void theSameRequestIsHandedTheRunningJob_aDifferentOneIsAConflictNamingIt() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
-        Started<Void> first = hold("t", "t", "fp-a", release);
+        Started<Void> first = hold("t", null, "fp-a", release);
 
-        Started<Void> again = jobs.start("t", "t", "fp-a", (job, stage) -> ok("never"));
+        Started<Void> again = jobs.start("t", null, "fp-a", (job, stage) -> ok("never"));
         assertThat(again.created()).isFalse();
         assertThat(again.job().id()).isEqualTo(first.job().id());
 
-        assertThatThrownBy(() -> jobs.start("t", "t", "fp-b", (job, stage) -> ok("never")))
+        assertThatThrownBy(() -> jobs.start("t", null, "fp-b", (job, stage) -> ok("never")))
             .isInstanceOfSatisfying(Conflict.class, c -> assertThat(c.jobId()).isEqualTo(first.job().id()))
             .hasMessageContaining(first.job().id());
 
         release.countDown();
         await(() -> jobs.find(first.job().id(), "t").state() == State.DONE);
-        Started<Void> after = jobs.start("t", "t", "fp-a", (job, stage) -> ok("t"));
+        Started<Void> after = jobs.start("t", null, "fp-a", (job, stage) -> ok("t"));
         assertThat(after.created()).as("a finished job is never handed to a new start").isTrue();
         assertThat(after.job().id()).isNotEqualTo(first.job().id());
     }
@@ -136,9 +136,9 @@ class EngineJobsTest {
         CountDownLatch release = new CountDownLatch(1);
         try {
             for (int i = 0; i < 4; i++) {   // 2 running + 2 queued
-                hold("t" + i, "t" + i, "fp", release);
+                hold("t" + i, null, "fp", release);
             }
-            assertThatThrownBy(() -> hold("t9", "t9", "fp", release)).isInstanceOf(Busy.class);
+            assertThatThrownBy(() -> hold("t9", null, "fp", release)).isInstanceOf(Busy.class);
             assertThat(jobs.size()).as("a refused start holds nothing").isEqualTo(4);
         } finally {
             release.countDown();
@@ -146,13 +146,32 @@ class EngineJobsTest {
     }
 
     @Test
-    void anUnknownIdFindsNothing() {
+    void anUnknownIdFindsNothing_whileAnotherJobIsHeld() throws Exception {
+        Started<Void> s = jobs.start("t", null, "fp", (job, stage) -> ok("t"));
+        await(() -> s.job().state() == State.DONE);
+        assertThat(jobs.find(s.job().id(), "t")).isNotNull();
         assertThat(jobs.find("no-such-job", "t")).isNull();
     }
 
     @Test
+    void aFailureHookThatThrowsStillEndsTheJob_withTheDefaultOutcome() throws Exception {
+        jobs.shutdown();
+        jobs = new EngineJobs<>("engine-jobs-test-", now::get,
+            new Bounds(2, 2, 64, Duration.ofMinutes(30), Duration.ofMinutes(15)),
+            (job, thrown) -> { throw new IllegalStateException("the hook itself failed"); });
+        Started<Void> s = jobs.start("t", null, "fp", (job, stage) -> {
+            throw new IllegalArgumentException("work failed");
+        });
+        await(() -> s.job().state() != State.RUNNING);
+        assertThat(s.job().state()).isEqualTo(State.FAILED);
+        assertThat(s.job().outcome().body()).containsEntry("reason", "job_failed");
+        assertThat(jobs.start("t", null, "fp-next", (job, stage) -> ok("t")).created())
+            .as("the scope is free again").isTrue();
+    }
+
+    @Test
     void aFinishedJobIsGoneAfterTheRetentionPeriod() throws Exception {
-        Started<Void> s = jobs.start("t", "t", "fp", (job, stage) -> ok("t"));
+        Started<Void> s = jobs.start("t", null, "fp", (job, stage) -> ok("t"));
         await(() -> jobs.find(s.job().id(), "t").state() == State.DONE);
 
         now.addAndGet(Duration.ofMinutes(29).toMillis());
@@ -166,7 +185,7 @@ class EngineJobsTest {
     void aJobStopsByItselfAtTheMaximumRuntime() throws Exception {
         CountDownLatch inside = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        Started<Void> s = jobs.start("t", "t", "fp", (job, stage) -> {
+        Started<Void> s = jobs.start("t", null, "fp", (job, stage) -> {
             inside.countDown();
             release.await(20, TimeUnit.SECONDS);
             return new Outcome(job.stopReason() == null ? 200 : 500, Map.of("stopped", String.valueOf(job.stopReason())));
@@ -183,10 +202,10 @@ class EngineJobsTest {
     @Test
     void evictTenantHidesItsRunningJobsAndRemovesItsFinishedOnes_otherTenantsKeepTheirs() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
-        Started<Void> done = jobs.start("t", "t", "fp-done", (job, stage) -> ok("t"));
+        Started<Void> done = jobs.start("t", null, "fp-done", (job, stage) -> ok("t"));
         await(() -> jobs.find(done.job().id(), "t").state() == State.DONE);
-        Started<Void> running = hold("t", "t", "fp-run", release);
-        Started<Void> other = jobs.start("u", "u", "fp", (job, stage) -> ok("u"));
+        Started<Void> running = hold("t", null, "fp-run", release);
+        Started<Void> other = jobs.start("u", null, "fp", (job, stage) -> ok("u"));
         await(() -> jobs.find(other.job().id(), "u").state() == State.DONE);
 
         assertThat(jobs.evictTenant("t")).isEqualTo(2);
@@ -196,12 +215,12 @@ class EngineJobsTest {
         assertThat(running.job().stopReason()).isEqualTo("evicted");
         assertThat(jobs.find(other.job().id(), "u")).isNotNull();
 
-        assertThatThrownBy(() -> jobs.start("t", "t", "fp-run", (job, stage) -> ok("never")))
+        assertThatThrownBy(() -> jobs.start("t", null, "fp-run", (job, stage) -> ok("never")))
             .as("an evicted running job still holds its scope until it ends, and is never joined")
             .isInstanceOf(Conflict.class);
         release.countDown();
         await(() -> running.job().state() != State.RUNNING);
-        assertThat(jobs.start("t", "t", "fp-run", (job, stage) -> ok("t")).created()).isTrue();
+        assertThat(jobs.start("t", null, "fp-run", (job, stage) -> ok("t")).created()).isTrue();
     }
 
     @Test
@@ -216,12 +235,12 @@ class EngineJobsTest {
             return ok("t");
         };
         try {
-            Started<Void> a = jobs.start("t", EngineJobs.scopeKey("t", "1.1"), "fp-a", work);
-            Started<Void> b = jobs.start("t", EngineJobs.scopeKey("t", "1.2"), "fp-b", work);
+            Started<Void> a = jobs.start("t", "1.1", "fp-a", work);
+            Started<Void> b = jobs.start("t", "1.2", "fp-b", work);
             assertThat(a.created()).isTrue();
             assertThat(b.created()).as("another owner of the same tenant is not a conflict").isTrue();
             assertThat(bothInside.await(20, TimeUnit.SECONDS)).as("both run at once").isTrue();
-            assertThatThrownBy(() -> jobs.start("t", EngineJobs.scopeKey("t", "1.1"), "fp-c", work))
+            assertThatThrownBy(() -> jobs.start("t", "1.1", "fp-c", work))
                 .as("the same owner with a different request is a conflict")
                 .isInstanceOf(Conflict.class);
         } finally {
@@ -236,8 +255,59 @@ class EngineJobsTest {
     }
 
     @Test
+    void theReconcileInstanceRunsFourAtOnce_queuesThirtyTwo_refusesTheNext_andCapsAJobAtFifteenMinutes()
+            throws Exception {
+        jobs.shutdown();
+        jobs = EngineJobs.reconcile(now::get);
+        CountDownLatch release = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger inside = new java.util.concurrent.atomic.AtomicInteger();
+        EngineJobs.Work<Void> work = (job, stage) -> {
+            inside.incrementAndGet();
+            release.await(20, TimeUnit.SECONDS);
+            return ok("t");
+        };
+        try {
+            Started<Void> first = jobs.start("t", "owner-0", "fp", work);
+            for (int i = 1; i < 36; i++) {
+                jobs.start("t", "owner-" + i, "fp", work);
+            }
+            await(() -> inside.get() == 4);
+            assertThatThrownBy(() -> jobs.start("t", "owner-36", "fp", work))
+                .as("4 running and 32 queued: the 37th start is refused")
+                .isInstanceOf(Busy.class);
+            assertThat(inside.get()).as("no fifth worker").isEqualTo(4);
+
+            assertThat(first.job().stopReason()).isNull();
+            now.addAndGet(Duration.ofMinutes(15).toMillis() - 1);
+            assertThat(first.job().stopReason()).isNull();
+            now.addAndGet(1);
+            assertThat(first.job().stopReason()).isEqualTo("wall_clock_cap");
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void twoTenantsWithTheSameOwnerNameNeverShareAScope() throws Exception {
+        jobs.shutdown();
+        jobs = EngineJobs.reconcile(now::get);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            Started<Void> a = hold("t", "1.1", "fp", release);
+            Started<Void> b = hold("u", "1.1", "fp", release);
+            assertThat(b.created()).as("tenant u is never handed tenant t's job").isTrue();
+            assertThat(b.job().id()).isNotEqualTo(a.job().id());
+            assertThatThrownBy(() -> jobs.start("u", "1.1", "fp-other", (job, stage) -> ok("never")))
+                .as("a different request in u's scope names u's job, never t's")
+                .isInstanceOfSatisfying(Conflict.class, c -> assertThat(c.jobId()).isEqualTo(b.job().id()));
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
     void residual3_anotherTenantsPollFindsNothing() throws Exception {
-        Started<Void> s = jobs.start("t", EngineJobs.scopeKey("t", "1.1"), "fp", (job, stage) -> ok("t"));
+        Started<Void> s = jobs.start("t", "1.1", "fp", (job, stage) -> ok("t"));
         await(() -> s.job().state() == State.DONE);
 
         assertThat(jobs.find(s.job().id(), "t")).isNotNull();
@@ -247,9 +317,9 @@ class EngineJobsTest {
     @Test
     void residual3_evictTenantDropsAJobKeyedByTenantPlusOwner() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
-        Started<Void> done = jobs.start("t", EngineJobs.scopeKey("t", "1.1"), "fp", (job, stage) -> ok("t"));
+        Started<Void> done = jobs.start("t", "1.1", "fp", (job, stage) -> ok("t"));
         await(() -> done.job().state() == State.DONE);
-        Started<Void> running = hold("t", EngineJobs.scopeKey("t", "1.2"), "fp", release);
+        Started<Void> running = hold("t", "1.2", "fp", release);
         try {
             assertThat(jobs.evictTenant("t")).isEqualTo(2);
             assertThat(jobs.find(done.job().id(), "t")).isNull();

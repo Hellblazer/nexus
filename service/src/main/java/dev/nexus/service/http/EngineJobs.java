@@ -24,11 +24,12 @@ import java.util.function.Predicate;
  * so each job kind (the chunk-keys sweep, the catalog reconcile, later the taxonomy discover) gets its own instance
  * with its own bounds, and a running job of one kind never blocks another kind for the same tenant.
  *
- * <p><b>Scope.</b> Every job has a scope key and a request fingerprint. Within one scope at most one job runs: a start
+ * <p><b>Scope.</b> Every job has a scope and a request fingerprint. Within one scope at most one job runs: a start
  * with the same fingerprint as the running job is handed that job ({@link Started#created} false, the route's 202 with
- * its id), and one with a different fingerprint is a {@link Conflict} naming it (409). The scope key is the tenant for
- * the chunk-keys sweep and the tenant plus the owner for reconcile ({@link #scopeKey}), so two repositories of one
- * tenant indexed at once do not wait on each other. A finished job is only ever read: a start never reuses one.
+ * its id), and one with a different fingerprint is a {@link Conflict} naming it (409). The scope is built here from the
+ * start's tenant and, for a kind scoped finer than the tenant, the thing within it (reconcile: the owner), so two
+ * repositories of one tenant indexed at once do not wait on each other, and no start can name a scope of another
+ * tenant. A finished job is only ever read: a start never reuses one.
  *
  * <p><b>Tenant.</b> Every job also stores its tenant, apart from its scope key. {@link #find(String, String)} answers a
  * poll only for the job's own tenant (another tenant's poll finds nothing, the route's 404), and {@link #evictTenant}
@@ -154,10 +155,6 @@ public final class EngineJobs<A> {
             return tenant;
         }
 
-        public String scopeKey() {
-            return scopeKey;
-        }
-
         /** What the job kind keeps on this job, or null for a kind that keeps nothing. */
         public A data() {
             return data;
@@ -256,9 +253,9 @@ public final class EngineJobs<A> {
         };
     }
 
-    /** The scope key of a job scoped to a tenant and one thing within it (reconcile: the owner). */
-    public static String scopeKey(String tenant, String within) {
-        return tenant + '\u0000' + within;
+    /** The scope of a job of {@code tenant}: the tenant itself, or the tenant and one thing within it. */
+    private static String scopeKey(String tenant, String within) {
+        return within == null ? tenant : tenant + '\u0000' + within;
     }
 
     /** Test seam: the runtime cap of the jobs started from now on and of those held now, running or queued. */
@@ -275,29 +272,31 @@ public final class EngineJobs<A> {
     }
 
     /** As {@link #start(String, String, String, Function, Work)} for a kind that keeps nothing on its jobs. */
-    public Started<A> start(String tenant, String scopeKey, String fingerprint, Work<A> work) {
-        return start(tenant, scopeKey, fingerprint, job -> null, work);
+    public Started<A> start(String tenant, String within, String fingerprint, Work<A> work) {
+        return start(tenant, within, fingerprint, job -> null, work);
     }
 
     /**
-     * Starts {@code work} for {@code tenant} in {@code scopeKey}, or returns the job running in that scope when its
-     * {@code fingerprint} is the same. A running job the tenant reset evicted still holds its scope and is never
+     * Starts {@code work} for {@code tenant}, or returns the job running in its scope when its {@code fingerprint} is
+     * the same. The scope is the tenant when {@code within} is null, else the tenant and {@code within} (reconcile
+     * passes the owner). A running job the tenant reset evicted still holds its scope and is never
      * handed to a start. {@code attach} makes what the kind keeps on the new job; it is not called for a joined job.
      *
      * @throws Conflict a job with a different fingerprint runs in this scope
      * @throws Busy     every thread and queue place is taken
      */
-    public Started<A> start(String tenant, String scopeKey, String fingerprint, Function<Job<A>, A> attach,
+    public Started<A> start(String tenant, String within, String fingerprint, Function<Job<A>, A> attach,
                             Work<A> work) {
-        return start(tenant, scopeKey, fingerprint, job -> true, attach, work);
+        return start(tenant, within, fingerprint, job -> true, attach, work);
     }
 
     /**
      * As above, the running job handed to the start only when {@code joins} also accepts it (the chunk-keys sweep:
      * only the caller that started it, under its starter check); a running job it rejects is a {@link Conflict}.
      */
-    synchronized Started<A> start(String tenant, String scopeKey, String fingerprint, Predicate<Job<A>> joins,
+    synchronized Started<A> start(String tenant, String within, String fingerprint, Predicate<Job<A>> joins,
                                   Function<Job<A>, A> attach, Work<A> work) {
+        String scopeKey = scopeKey(tenant, within);
         evictExpired();
         for (Job<A> j : jobs.values()) {
             if (!j.scopeKey.equals(scopeKey) || j.state != State.RUNNING) {
@@ -329,7 +328,7 @@ public final class EngineJobs<A> {
             outcome = work.run(job, s -> job.stage = s);
             end = outcome.httpStatus() == 200 ? State.DONE : State.FAILED;
         } catch (Throwable t) {
-            outcome = failure.apply(job, t);
+            outcome = failureOutcome(job, t);
             end = State.FAILED;
         }
         job.outcome = outcome;
@@ -339,26 +338,38 @@ public final class EngineJobs<A> {
     }
 
     /**
+     * The kind's failure outcome, or the default one when the kind's own throws: a job always reaches a terminal state,
+     * or it would hold its scope for good (nothing expires a running job).
+     */
+    private Outcome failureOutcome(Job<A> job, Throwable thrown) {
+        try {
+            return failure.apply(job, thrown);
+        } catch (Throwable hookFailed) {
+            return EngineJobs.<A>defaultFailure().apply(job, thrown);
+        }
+    }
+
+    /**
      * The job with this id when it belongs to {@code tenant}, or null: never started, expired, evicted, another
      * process, or another tenant's job (the poll answers 404 either way, so it says nothing of another tenant).
      */
     public synchronized Job<A> find(String id, String tenant) {
-        Job<A> j = find(id);
+        Job<A> j = findAnyTenant(id);
         return j == null || !j.tenant.equals(tenant) ? null : j;
     }
 
     /**
      * The job with this id whoever it belongs to, or null. For a kind whose wrapper makes its own ownership check
-     * (the chunk-keys sweep's starter check); a route answering a poll uses {@link #find(String, String)}.
+     * (the chunk-keys sweep's starter check); a route answering a poll uses {@link #find(String, String)}, never this.
      */
-    synchronized Job<A> find(String id) {
+    synchronized Job<A> findAnyTenant(String id) {
         evictExpired();
         Job<A> j = jobs.get(id);
         return j == null || j.evicted ? null : j;
     }
 
-    /** Whether the tenant reset hid {@code id} while it ran. */
-    public synchronized boolean evicted(String id) {
+    /** Whether the tenant reset hid {@code id} while it ran (no tenant check: for a kind's own wrapper). */
+    synchronized boolean evicted(String id) {
         Job<A> j = jobs.get(id);
         return j != null && j.evicted;
     }
