@@ -556,3 +556,26 @@ def test_a_huge_finite_wall_time_keeps_the_timer_alive(
     finally:
         proc.kill()
         proc.wait()
+
+
+@pytest.mark.parametrize("memory", [1, 4096, 130_000, (1 << 20) - 1])
+def test_a_memory_limit_below_the_floor_is_refused(memory: int) -> None:
+    # Below about 130 KB, lupa aborts the worker (exit 134, "PANIC: unprotected
+    # error in call to Lua API (not enough memory)") while it pushes the source
+    # and builds the runtime outside any protected call; a floor of 1 MiB keeps
+    # every run above that (nexus-mdbds.5 review r1).
+    with pytest.raises(ValueError, match="memory"):
+        Limits(memory=memory)
+    with pytest.raises(ValueError, match="memory"):
+        Limits().lowered(memory=memory)
+
+
+def test_the_memory_floor_itself_runs_a_script() -> None:
+    assert Limits().lowered(memory=1 << 20).memory == 1 << 20
+    out = supervise(
+        start("return 1 + 1"),
+        limits=Limits().lowered(memory=1 << 20, wall_time=20),
+        verbs=_TABLE,
+        config=WorkerConfig(),
+    )
+    assert out.value == 2
