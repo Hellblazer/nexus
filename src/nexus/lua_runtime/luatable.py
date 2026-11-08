@@ -18,12 +18,21 @@ each child recursing the same way, so an overrun raises ``LuaMemoryError``.
 Near the limit the walk degrades to one protected call per node; far from it
 the whole result is one ``table_from``.
 
-``WORST_BYTES_PER_JSON_BYTE`` is a measured bound
-(``tests/lua_runtime/test_cost_measurement.py``): the worst shape found is a
-list of empty tables or objects at 27.2 Lua bytes per JSON byte (peak equals
-final use), so 32 leaves headroom for allocator rounding. A session-like
-record list is about 4. A test builds the worst shape at the cap and must see
-``LuaMemoryError``, not an abort.
+``WORST_BYTES_PER_JSON_BYTE`` is a measured bound, and a bound is only as
+good as the worst shape tried. What was measured, in Lua bytes per JSON byte
+(``tests/lua_runtime/test_luatable.py`` re-measures every shape on each run
+and fails when one exceeds the constant): session records 2.1 to 2.3, memory
+entries 1.5, ``git.diff_stat`` rows 4.1, a list of empty tables or objects
+25.7 (27.2 on the first series), and chains of single-element arrays
+(``[[[...]]]``) 33 at depth 3, 35.5 at depth 32 and 36.0 from depth 300 on:
+a level costs a 56-byte table and a 16-byte array slot for two JSON bytes,
+and that does not change with depth, so a depth cap would not lower it. 48
+is that worst 36.0 with a third of headroom for allocator rounding and a
+shape not yet found. A shape that costs more than the constant breaks the
+guarantee: ``table_from`` of a subtree judged to fit would overrun and abort
+the process, so the constant must stay above every measured shape. A test
+builds the worst shapes at the cap and must see ``LuaMemoryError``, not an
+abort.
 
 Needs ``lupa`` only through the runtime handed in.
 """
@@ -33,9 +42,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-#: Lua bytes per JSON byte that no shape was measured to exceed (27.2 on a
-#: list of empty tables), with headroom.
-WORST_BYTES_PER_JSON_BYTE: int = 32
+#: Lua bytes per JSON byte that no shape was measured to exceed (36.0, deep
+#: chains of single-element arrays), with a third of headroom; see the module
+#: docstring for the shapes.
+WORST_BYTES_PER_JSON_BYTE: int = 48
 
 #: Memory left free for the call frames and strings the surrounding run needs.
 RESERVE_BYTES: int = 256 * 1024

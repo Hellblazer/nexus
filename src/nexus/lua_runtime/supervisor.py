@@ -23,6 +23,7 @@ workers; a fifth ``supervise`` raises ``ScriptBusyError`` at once.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -43,10 +44,11 @@ from nexus.lua_runtime.errors import (
     ScriptBusyError,
     ScriptError,
     ScriptLimitError,
+    ScriptRunError,
     ScriptWorkerError,
     Stats,
 )
-from nexus.lua_runtime.runtime import DEFAULT_LIMITS, Limits
+from nexus.lua_runtime.limits import DEFAULT_LIMITS, Limits
 from nexus.util.nx_argv import argv_off_cwd
 from nexus.lua_runtime import verb_types
 from nexus.lua_runtime.verb_types import (
@@ -75,8 +77,14 @@ MAX_WORKERS: int = frames.MAX_WORKERS
 STDERR_KEEP_BYTES: int = 64 * 1024
 #: Seconds the worker gets to exit after its final frame before it is killed.
 EXIT_GRACE_S: float = 5.0
-#: How the worker reports the OS memory limit (a caught ``MemoryError``).
+#: How the worker reports the OS memory limit (a caught ``MemoryError``). On Windows the same status is what the
+#: Microsoft C runtime's ``abort()`` returns, so a Lua PANIC abort there is filed as the memory limit too, which is
+#: what it is (an allocation the allocator refused); on POSIX it is SIGABRT and a ``ScriptWorkerError``.
 EXIT_MEMORY: int = 3
+
+#: How often a run loop waiting on a verb looks at the worker itself (seconds): a worker that died inside a verb
+#: that never returns is noticed within this, not at the wall limit.
+VERB_POLL_S: float = 0.2
 
 #: Error kinds and limits a worker's final frame may name (the rest are the caller's).
 _WORKER_KINDS = frozenset({"static_check", "lua", "result"})
@@ -154,6 +162,16 @@ class _Job:
         self._lock = threading.Lock()
 
     def assign(self, pid: int) -> bool:
+        """Put process *pid* in the job. *pid* is what ``Popen`` returned.
+
+        Whether that is the interpreter or a venv launcher that starts the
+        interpreter as a child does not change the limits: a child of a job
+        member joins the job on creation, and the Windows tests of the worker
+        (time limit, memory limit, kill on parent death) pass through the
+        job on a uv venv. A launcher that exits at once would leave a worker
+        that began outside the job; ``sys.executable`` of a venv is the real
+        interpreter on the Windows hosts measured.
+        """
         from nexus.util import win_job  # noqa: PLC0415
 
         with self._lock:
@@ -214,10 +232,10 @@ class _KillTimer(threading.Thread):
     def force(self) -> None:
         """End the worker now as the wall-time limit (the deadline, or a verb's ``VerbTimeout``)."""
         with self._lock:
-            if self._cancelled.is_set() or self._proc.poll() is not None:
-                return
-            self.fired = True
-            _kill(self._proc, self._job)
+            if not self._cancelled.is_set() and self._proc.poll() is None:
+                self.fired = True
+                _kill(self._proc, self._job)
+        # also when the worker is already dead: a run loop waiting on a verb must wake and look at the worker
         self._wake.set()
 
     def cancel(self) -> bool:
@@ -254,6 +272,19 @@ class _VerbCall(threading.Thread):
         self.error: str | None = None
 
     def run(self) -> None:
+        # Whatever happens in the verb, the run loop is told: a thread that dies silently leaves the loop waiting
+        # for a result that never comes, and the run ends as a false wall_time.
+        try:
+            self._call()
+        except BaseException as exc:  # noqa: BLE001 -- a verb never takes the run loop down, nor leaves it waiting
+            self.error = (
+                _text(exc) or f"{self._spec.name} failed ({type(exc).__name__})"
+            )
+        finally:
+            self.finished = True
+            self._wake.set()
+
+    def _call(self) -> None:
         try:
             value = self._spec.fn(*self._args, deadline=self._deadline, ctx=self._ctx)
             data = encode_result(value)
@@ -269,17 +300,33 @@ class _VerbCall(threading.Thread):
         except VerbTimeout:
             self.timed_out = True
         except VerbError as exc:  # includes VerbArgError a verb raises itself
-            self.error = str(exc)
+            self.error = _text(exc)
         except Exception as exc:  # noqa: BLE001 -- a verb never takes the run loop down
-            _log.warning(
-                "lua_verb_failed",
-                verb=self._spec.name,
-                exc_class=type(exc).__name__,
-                exc_info=True,
+            try:
+                _log.warning(
+                    "lua_verb_failed",
+                    verb=self._spec.name,
+                    exc_class=type(exc).__name__,
+                    exc_info=True,
+                )
+            except Exception:  # noqa: BLE001 -- a log line that cannot be written (a lone surrogate) is not the verb's failure
+                pass
+            self.error = (
+                _text(exc) or f"{self._spec.name} failed ({type(exc).__name__})"
             )
-            self.error = str(exc) or f"{self._spec.name} failed ({type(exc).__name__})"
-        self.finished = True
-        self._wake.set()
+
+
+def _text(value: object) -> str:
+    """``str(value)`` that is always valid UTF-8 text: a lone surrogate becomes a backslash escape.
+
+    A verb's message reaches the script as a Lua string; one that cannot be
+    encoded would raise inside the reply builder or inside ``lupa``.
+    """
+    try:
+        text = str(value)
+    except Exception:  # noqa: BLE001 -- a __str__ that raises
+        text = type(value).__name__
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def _worker_env() -> dict[str, str]:
@@ -382,34 +429,33 @@ def _supervise(
         else worker_argv(os_limits, frames.reply_frame_cap(cap))
     )
     job: _Job | None = None
-    if sys.platform == "win32":
-        from nexus.util import win_job  # noqa: PLC0415
+    proc: subprocess.Popen[bytes] | None = None
+    keeper: _StderrKeeper | None = None
+    timer: _KillTimer | None = None
+    try:
+        if sys.platform == "win32":
+            from nexus.util import win_job  # noqa: PLC0415
 
-        handle = win_job.create_job(
-            per_process_user_time_100ns=os_limits.cpu_soft_s * 10_000_000,
-            process_memory_limit=os_limits.as_bytes,
-        )
-        if handle is None:
-            raise ScriptWorkerError("cannot create the worker's job object")
-        job = _Job(handle)
-    try:
-        proc = start_worker(argv)
-    except OSError as exc:
-        if job is not None:
-            job.close()
-        raise ScriptWorkerError(f"cannot start the worker: {exc}") from exc
-    if job is not None and not job.assign(proc.pid):
-        _kill(proc, job)
-        proc.wait()
-        raise ScriptWorkerError("cannot put the worker in its job object")
-    keeper = _StderrKeeper(proc.stderr)
-    keeper.start()
-    wake = threading.Event()
-    timer = _KillTimer(proc, job, limits.wall_time, wake)
-    timer.start()
-    if config.on_spawn is not None:
-        config.on_spawn(proc)
-    try:
+            handle = win_job.create_job(
+                per_process_user_time_100ns=os_limits.cpu_soft_s * 10_000_000,
+                process_memory_limit=os_limits.as_bytes,
+            )
+            if handle is None:
+                raise ScriptWorkerError("cannot create the worker's job object")
+            job = _Job(handle)
+        try:
+            proc = start_worker(argv)
+        except OSError as exc:
+            raise ScriptWorkerError(f"cannot start the worker: {exc}") from exc
+        if job is not None and not job.assign(proc.pid):
+            raise ScriptWorkerError("cannot put the worker in its job object")
+        keeper = _StderrKeeper(proc.stderr)
+        keeper.start()
+        wake = threading.Event()
+        timer = _KillTimer(proc, job, limits.wall_time, wake)
+        timer.start()
+        if config.on_spawn is not None:
+            config.on_spawn(proc)
         return _converse(
             proc,
             job,
@@ -426,15 +472,25 @@ def _supervise(
             os_limits,
         )
     finally:
-        timer.cancel()
-        _kill(proc, job)
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            try:
-                if stream is not None:
-                    stream.close()
-            except OSError:
-                pass
-        proc.wait()
+        # One cleanup from the first resource on: whatever failed, and wherever, the process is ended, the pipes and
+        # the job handle are closed, and the child is reaped.
+        if timer is not None:
+            timer.cancel()
+        if proc is not None:
+            _kill(proc, job)
+            if keeper is not None:
+                keeper.join(
+                    timeout=2.0
+                )  # the drain ends when the killed worker's stderr reaches end of file
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except OSError:
+                    pass
+            proc.wait()
+        elif job is not None:
+            job.close()
 
 
 def _converse(
@@ -484,6 +540,49 @@ def _converse(
         )
 
     try:
+        return _protocol(
+            proc,
+            job,
+            keeper,
+            timer,
+            wake,
+            start,
+            limits,
+            verbs,
+            grants,
+            deadline,
+            cap,
+            config,
+            worker_error,
+            ended,
+        )
+    except ScriptRunError:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- a surprise in the run loop is the worker's problem, not an escaping exception
+        _log.warning("lua_run_loop_failed", exc_class=type(exc).__name__, exc_info=True)
+        raise worker_error(
+            f"internal error in the run loop ({type(exc).__name__})"
+        ) from None
+
+
+def _protocol(
+    proc: subprocess.Popen[bytes],
+    job: _Job | None,
+    keeper: _StderrKeeper,
+    timer: _KillTimer,
+    wake: threading.Event,
+    start: Mapping[str, JSONValue],
+    limits: Limits,
+    verbs: Mapping[str, VerbSpec],
+    grants: frozenset[str],
+    deadline: float,
+    cap: int,
+    config: WorkerConfig,
+    worker_error: Callable[[str], ScriptWorkerError],
+    ended: Callable[[], Exception],
+) -> RunOutcome:
+    assert proc.stdin is not None and proc.stdout is not None
+    try:
         ready = frames.read_frame(proc.stdout, frames.READY_FRAME_CAP)
     except frames.FrameError as exc:
         if exc.kind == "eof":
@@ -525,12 +624,22 @@ def _converse(
                 raise worker_error(
                     f"a verb-call frame is over the {frames.CALL_FRAME_CAP}-byte cap"
                 )
+            call_id = frame.get("id")
+            if (
+                not isinstance(call_id, int)
+                or isinstance(call_id, bool)
+                or not isinstance(frame.get("verb"), str)
+                or not isinstance(frame.get("args"), list)
+            ):
+                raise worker_error(
+                    "malformed call frame: an integer id, a verb name and a list of arguments"
+                )
             reply = _serve_call(
-                frame, verbs, grants, deadline, cap, config.ctx, wake, timer
+                frame, verbs, grants, deadline, cap, config.ctx, wake, timer, proc
             )
             if (
                 reply is None
-            ):  # the timer ended the worker during the verb, or the verb timed out
+            ):  # the timer ended the worker, the verb timed out, or the worker died during the verb
                 raise ended()
             try:
                 proc.stdin.write(reply)
@@ -554,14 +663,19 @@ def _converse(
         if kind == "result":
             return RunOutcome(frame.get("value"), stats or {})
         if kind == "error":
-            if frame.get("kind") not in _WORKER_KINDS or frame.get("kind") not in KINDS:
-                raise worker_error(f"error frame with kind {frame.get('kind')!r}")
-            raise ScriptError(
-                str(frame["kind"]), str(frame.get("detail", "")), stats=stats
-            )
-        if frame.get("limit") not in _WORKER_LIMITS:
-            raise worker_error(f"limit frame with limit {frame.get('limit')!r}")
-        raise ScriptLimitError(str(frame["limit"]), frame.get("value"), stats=stats)
+            err_kind = frame.get("kind")
+            # isinstance first: a list or dict is unhashable and `in` on a frozenset would raise TypeError
+            if (
+                not isinstance(err_kind, str)
+                or err_kind not in _WORKER_KINDS
+                or err_kind not in KINDS
+            ):
+                raise worker_error(f"error frame with kind {err_kind!r}")
+            raise ScriptError(err_kind, _text(frame.get("detail", "")), stats=stats)
+        limit = frame.get("limit")
+        if not isinstance(limit, str) or limit not in _WORKER_LIMITS:
+            raise worker_error(f"limit frame with limit {limit!r}")
+        raise ScriptLimitError(limit, frame.get("value"), stats=stats)
 
 
 def _reply_bytes(
@@ -572,8 +686,6 @@ def _reply_bytes(
     error: tuple[str, str] | None = None,
 ) -> bytes:
     """A whole ``reply`` frame; the verb result is spliced in as the bytes ``encode_result`` made."""
-    import json  # noqa: PLC0415
-
     head = f'{{"t":"reply","id":{json.dumps(call_id)},"ok":{"true" if ok else "false"},'.encode()
     if ok:
         assert value_json is not None
@@ -581,14 +693,13 @@ def _reply_bytes(
     else:
         assert error is not None
         kind, message = error
+        # ensure_ascii: a message may hold a lone surrogate, which UTF-8 cannot carry but a \u escape can
         body = (
             head
             + b'"error":'
             + json.dumps(
-                {"kind": kind, "message": message},
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode("utf-8")
+                {"kind": kind, "message": _text(message)}, separators=(",", ":")
+            ).encode("ascii")
             + b"}"
         )
     return len(body).to_bytes(4, "big") + body
@@ -603,8 +714,9 @@ def _serve_call(
     ctx: VerbContext,
     wake: threading.Event,
     timer: _KillTimer,
+    proc: subprocess.Popen[bytes],
 ) -> bytes | None:
-    """The reply frame for one call, or None when the run ended on wall time first."""
+    """The reply frame for one call, or None when the run ended first (wall time, or the worker itself)."""
     call_id = frame.get("id")
     name = frame.get("verb")
     args = frame.get("args")
@@ -630,7 +742,9 @@ def _serve_call(
             return None  # abandon the verb: its thread ends alone and its result is dropped
         if call.finished:
             break
-        wake.wait()
+        if proc.poll() is not None:
+            return None  # the worker died inside the verb: nobody is waiting for the result
+        wake.wait(VERB_POLL_S)
     if call.timed_out:
         timer.force()
         return None

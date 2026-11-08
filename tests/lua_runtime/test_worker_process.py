@@ -36,7 +36,7 @@ from nexus.lua_runtime.errors import (
     ScriptLimitError,
     ScriptWorkerError,
 )
-from nexus.lua_runtime.runtime import Limits
+from nexus.lua_runtime.limits import Limits
 from nexus.lua_runtime.supervisor import WorkerConfig, supervise
 from nexus.lua_runtime.verb_types import VERB_RESULT_CAP_BYTES, VerbError, VerbTimeout
 from tests.lua_runtime._support import (
@@ -522,10 +522,18 @@ def test_a_malformed_frame_ends_the_run_with_a_worker_error(garbage: str) -> Non
 
 
 def test_an_unknown_frame_type_is_a_worker_error() -> None:
+    t0 = time.monotonic()
     err = _worker_error(
         'send({"t": "ready"}); recv(); send({"t": "sing"}); time.sleep(30)'
     )
-    assert "sing" in err.detail
+    # the frame-type guard names the frame as unexpected at once; without it the type falls through to the
+    # exit-status path, which waits out the 5 s exit grace and says "sent 'sing' and then exited"
+    assert "unexpected" in err.detail and "sing" in err.detail, err.detail
+    assert time.monotonic() - t0 < supervisor.EXIT_GRACE_S - 1
+    if sys.platform != "win32":
+        assert (
+            err.signal == signal.SIGKILL and err.returncode is None
+        )  # the parent ended it, it did not exit by itself
 
 
 def test_the_first_frame_must_be_ready() -> None:

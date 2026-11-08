@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from nexus.lua_runtime.runtime import Limits
+from nexus.lua_runtime.limits import Limits
 from nexus.lua_runtime.verb_types import ParamSpec, VerbSpec
 
 #: platform -> test ids registered with ``platform_only``
