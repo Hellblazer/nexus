@@ -665,6 +665,27 @@
       },
       "qualname": "plan_search"
     },
+    "procedure_run": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "args": {
+            "additionalProperties": true,
+            "default": {},
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "qualname": "procedure_run"
+    },
     "query": {
       "is_async": false,
       "meta": {

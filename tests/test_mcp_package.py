@@ -35,6 +35,8 @@ def test_core_registered_tools():
         "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
         "scratch", "scratch_manage", "collection_list",
         "plan_save", "plan_search", "plan_delete",
+        # RDR-240 (bead nexus-qo7ie.31): the library procedure runner.
+        "procedure_run",
         "traverse",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
         # RDR-200 P1c (nexus-4e75w.5): the continuation handoff's
@@ -282,7 +284,7 @@ def test_init_reexports_all():
         "search", "query", "store_put", "store_get", "store_list", "store_get_many",
         "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
         "scratch", "scratch_manage", "collection_list",
-        "plan_save", "plan_search",
+        "plan_save", "plan_search", "procedure_run",
         "traverse",
         "operator_extract", "operator_rank", "operator_compare",
         "operator_summarize", "operator_generate",
