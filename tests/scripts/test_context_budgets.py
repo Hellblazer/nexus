@@ -30,12 +30,13 @@ def _write(root: Path, rel: str, size: int) -> None:
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
-    (tmp_path / "scripts").mkdir()
+    (tmp_path / "tests" / "fixtures").mkdir(parents=True)
     _write(tmp_path, "conexus/skills/a/SKILL.md", 1000)
     _write(tmp_path, "conexus/agents/dev.md", 2000)
     _write(tmp_path, "sn/commands/c.md", 500)
     _write(tmp_path, "prose-edit/agents/e.md", 300)
     _write(tmp_path, "tool-spill/skills/t/SKILL.md", 200)
+    _write(tmp_path, "conexus/resources/shared/P.md", 400)
     _write(tmp_path, "conexus/hooks/notes.md", 9999)  # not a context file
     _write(tmp_path, "conexus/skills/a/run.py", 9999)  # not markdown
     _track(tmp_path)
@@ -51,7 +52,8 @@ def _ceil(root: Path, text: str) -> None:
 
 
 _EXACT = (
-    "conexus/agents/dev.md 2000\nconexus/skills/a/SKILL.md 1000\nprose-edit/agents/e.md 300\n"
+    "conexus/agents/dev.md 2000\nconexus/resources/shared/P.md 400\nconexus/skills/a/SKILL.md 1000\n"
+    "prose-edit/agents/e.md 300\n"
     "sn/commands/c.md 500\ntool-spill/skills/t/SKILL.md 200\n"
 )
 
@@ -59,6 +61,7 @@ _EXACT = (
 def test_scope_is_plugin_skills_agents_commands_markdown(repo: Path) -> None:
     assert cb.measure(repo) == {
         "conexus/agents/dev.md": 2000,
+        "conexus/resources/shared/P.md": 400,
         "conexus/skills/a/SKILL.md": 1000,
         "prose-edit/agents/e.md": 300,
         "sn/commands/c.md": 500,
@@ -89,19 +92,30 @@ def test_a_file_with_no_ceiling_fails(repo: Path) -> None:
     assert any("skills/b/SKILL.md: 10 bytes and no ceiling" in e for e in cb.check(repo))
 
 
-def test_slack_within_tolerance_passes_and_past_it_fails(repo: Path) -> None:
-    _ceil(repo, _EXACT.replace("sn/commands/c.md 500", "sn/commands/c.md 756"))  # 256 of slack
+def test_slack_within_two_headrooms_passes_and_past_it_fails(repo: Path) -> None:
+    _ceil(repo, _EXACT.replace("sn/commands/c.md 500", "sn/commands/c.md 1012"))  # 2 x 256
     assert cb.check(repo) == []
-    _ceil(repo, _EXACT.replace("sn/commands/c.md 500", "sn/commands/c.md 757"))
+    _ceil(repo, _EXACT.replace("sn/commands/c.md 500", "sn/commands/c.md 1013"))
     assert any("lower it in this commit" in e for e in cb.check(repo))
 
 
 def test_slack_fraction_applies_to_large_files(repo: Path) -> None:
     _write(repo, "conexus/agents/dev.md", 20000)  # 5% is 1000, above SLACK_MIN
-    _ceil(repo, _EXACT.replace("dev.md 2000", "dev.md 21000"))
+    _ceil(repo, _EXACT.replace("dev.md 2000", "dev.md 22000"))
     assert cb.check(repo) == []
-    _ceil(repo, _EXACT.replace("dev.md 2000", "dev.md 21001"))
+    _ceil(repo, _EXACT.replace("dev.md 2000", "dev.md 22001"))
     assert any("lower it in this commit" in e for e in cb.check(repo))
+
+
+def test_seeded_ceilings_carry_headroom_so_a_small_growth_passes(repo: Path) -> None:
+    assert cb.update_exceptions(repo, allow_raise=True) == []
+    assert cb.read_ceilings(repo / cb.CEILINGS)["conexus/agents/dev.md"] == 2256
+    _write(repo, "conexus/agents/dev.md", 2200)  # a 200-byte edit
+    assert cb.check(repo) == []
+    assert cb.update_exceptions(repo, allow_raise=False) == [], "an accepted entry is no raise"
+    assert cb.read_ceilings(repo / cb.CEILINGS)["conexus/agents/dev.md"] == 2256, "and is not rewritten"
+    _write(repo, "conexus/agents/dev.md", 2257)
+    assert any("over its ceiling of 2256" in e for e in cb.check(repo))
 
 
 def test_a_stale_entry_fails(repo: Path) -> None:
@@ -117,17 +131,24 @@ def test_counting_nothing_is_an_error(tmp_path: Path) -> None:
 def test_update_lowers_without_flag_and_refuses_raise_and_new(repo: Path) -> None:
     _ceil(repo, _EXACT.replace("dev.md 2000", "dev.md 5000"))
     assert cb.update_exceptions(repo, allow_raise=False) == []
-    assert cb.read_ceilings(repo / cb.CEILINGS)["conexus/agents/dev.md"] == 2000
-    _write(repo, "conexus/agents/dev.md", 2100)
+    assert cb.read_ceilings(repo / cb.CEILINGS)["conexus/agents/dev.md"] == 2256  # size + headroom
+    _write(repo, "conexus/agents/dev.md", 2300)
     _write(repo, "conexus/skills/b/SKILL.md", 10)
     _track(repo)
     before = (repo / cb.CEILINGS).read_text()
     refusals = "\n".join(cb.update_exceptions(repo, allow_raise=False))
-    assert "dev.md: raise 2000 -> 2100" in refusals
+    assert "dev.md: raise 2256 -> 2300" in refusals
     assert "skills/b/SKILL.md: new entry at 10 bytes" in refusals
     assert (repo / cb.CEILINGS).read_text() == before, "a refused update writes nothing"
     assert cb.update_exceptions(repo, allow_raise=True) == []
+    assert cb.read_ceilings(repo / cb.CEILINGS)["conexus/agents/dev.md"] == 2556
     assert cb.check(repo) == []
+
+
+def test_the_ceilings_file_is_fast_lane_eligible() -> None:
+    """A plugin growth commit raises its ceiling in the same commit, and the plugin-only lane
+    refuses scripts/; tests/ is free there (scripts/check_plugin_only_eligibility.py)."""
+    assert cb.CEILINGS.startswith("tests/")
 
 
 def test_malformed_and_duplicate_lines_are_refused(repo: Path) -> None:
@@ -154,7 +175,7 @@ def test_main_exit_codes(repo: Path) -> None:
 def test_repo_context_files_are_within_their_ceilings() -> None:
     sizes = cb.measure(_REPO)
     # Non-vacuity: the globs must reach the skills, agents and commands trees.
-    for kind in ("conexus/skills/", "conexus/agents/", "conexus/commands/", "prose-edit/"):
+    for kind in ("conexus/skills/", "conexus/agents/", "conexus/commands/", "conexus/resources/", "prose-edit/"):
         assert any(p.startswith(kind) for p in sizes), kind
     errors = cb.check(_REPO)
     assert errors == [], "\n".join(errors)
