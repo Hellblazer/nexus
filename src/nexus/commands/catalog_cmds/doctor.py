@@ -1230,6 +1230,12 @@ def _print_name_vs_embed_dim_text(report: dict) -> None:
             click.echo(f"    {u['collection']}  {u['error']}")
 
 
+def _flag(entry: Any) -> dict:
+    """``{"sensitive": True}`` for a flagged document's report row, nothing for any other, so an unflagged row's shape
+    is unchanged (nexus-rfvyy.9 item 2)."""
+    return {"sensitive": True} if getattr(entry, "sensitive", False) is True else {}
+
+
 def _run_store_put_integrity() -> dict:
     """store_put-origin integrity check (nexus-b6enc / GH #1419 Issue 8).
 
@@ -1307,7 +1313,7 @@ def _run_store_put_integrity() -> dict:
             drift.append({
                 "tumbler": tumbler,
                 "title": e.title,
-                "sensitive": e.sensitive is True,
+                **_flag(e),
                 "chunk_count": e.chunk_count,
                 "manifest_count": manifest_count,
             })
@@ -1323,13 +1329,13 @@ def _run_store_put_integrity() -> dict:
             chash = (e.meta or {}).get("doc_id", "")
             if t3_db is None:
                 unverifiable.append({
-                    "tumbler": tumbler, "title": e.title, "sensitive": e.sensitive is True,
+                    "tumbler": tumbler, "title": e.title, **_flag(e),
                     "reason": f"T3 unavailable: {t3_error}",
                 })
                 continue
             if not e.physical_collection:
                 # No collection to look in — nothing can be in T3.
-                ghosts.append({"tumbler": tumbler, "title": e.title, "sensitive": e.sensitive is True, "verified_by": "no_collection"})
+                ghosts.append({"tumbler": tumbler, "title": e.title, **_flag(e), "verified_by": "no_collection"})
                 continue
             # ONE LOOKUP, SHARED WITH `nx catalog verify` (nexus-1uekf). The
             # two instruments called the same 226 rows "legitimate by
@@ -1344,13 +1350,13 @@ def _run_store_put_integrity() -> dict:
                 )
             except Exception as exc:  # noqa: BLE001 — transient per-doc lookup failure: unverifiable, never a false "GONE" verdict
                 unverifiable.append({
-                    "tumbler": tumbler, "title": e.title, "sensitive": e.sensitive is True,
+                    "tumbler": tumbler, "title": e.title, **_flag(e),
                     "reason": f"chunk lookup failed: {exc}",
                 })
                 continue
             if not chunk_present:
                 ghosts.append({
-                    "tumbler": tumbler, "title": e.title, "sensitive": e.sensitive is True, "verified_by": verified_by,
+                    "tumbler": tumbler, "title": e.title, **_flag(e), "verified_by": verified_by,
                 })
 
     report = {

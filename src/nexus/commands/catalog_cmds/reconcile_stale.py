@@ -741,10 +741,11 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
             # the first key it probes T3 by (nexus-1uekf).
             "chash": (getattr(e, "meta", None) or {}).get("doc_id") or "",
             "file_path": e.file_path or "",
-            # nexus-rfvyy.9 item 2: a flagged document's title and paths are content; the census entries are canonical
-            # rows (aliases are dropped above), so the row's own flag is the document's.
-            "sensitive": getattr(e, "sensitive", False) is True,
         }
+        # nexus-rfvyy.9 item 2: a flagged document's title and paths are content; the census entries are canonical
+        # rows (aliases are dropped above), so the row's own flag is the document's.
+        if getattr(e, "sensitive", False) is True:
+            row["sensitive"] = True  # only on a flagged row, so an unflagged row's --json shape is unchanged
 
         if e.physical_collection in vanished_names:
             bucket = report["vanished_empty_manifest" if manifest_len == 0 else "vanished_has_manifest"]
