@@ -225,8 +225,13 @@ class _KillTimer(threading.Thread):
         self.fired = False
 
     def run(self) -> None:
-        if self._cancelled.wait(self._delay):
-            return
+        # Wait in slices no longer than TIMEOUT_MAX (about 4.3e6 s on
+        # Windows): a longer single wait raises OverflowError in this thread,
+        # and the run would then have no wall-time limit at all.
+        deadline = time.monotonic() + self._delay
+        while (left := deadline - time.monotonic()) > 0:
+            if self._cancelled.wait(min(left, threading.TIMEOUT_MAX)):
+                return
         self.force()
 
     def force(self) -> None:

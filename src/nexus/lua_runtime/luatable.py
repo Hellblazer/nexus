@@ -21,15 +21,23 @@ the whole result is one ``table_from``.
 ``WORST_BYTES_PER_JSON_BYTE`` is a measured bound, and a bound is only as
 good as the worst shape tried. What was measured, in Lua bytes per JSON byte
 (``tests/lua_runtime/test_luatable.py`` re-measures every shape on each run
-and fails when one exceeds the constant): session records 2.1 to 2.3, memory
+and fails when one exceeds the constant; the 2 MB deep-chain shapes there
+hide the fixed stack cost, which the reserve covers): session records 2.1 to 2.3, memory
 entries 1.5, ``git.diff_stat`` rows 4.1, a list of empty tables or objects
 25.7 (27.2 on the first series), and chains of single-element arrays
 (``[[[...]]]``) 33 at depth 3, 35.5 at depth 32 and 36.0 from depth 300 on:
 a level costs a 56-byte table and a 16-byte array slot for two JSON bytes,
 and that does not change with depth, so a depth cap would not lower it. 48
 is that worst 36.0 with a third of headroom for allocator rounding and a
-shape not yet found. A shape that costs more than the constant breaks the
-guarantee: ``table_from`` of a subtree judged to fit would overrun and abort
+shape not yet found. One shape exceeds 48 as a ratio, and the reserve covers
+it: a single deep chain, where ``table_from`` grows the Lua stack about four
+slots a level, a fixed cost not proportional to the JSON (depth 700, 1.4 KB,
+costs 50 per byte; depth 5119, 10 KB, 52; over depths 2 to 9998 the worst
+overshoot above 48 x the JSON length is about 40 KB). ``RESERVE_BYTES``
+(256 KB) is held back from the free memory for that and for allocator
+rounding, and ``json.loads`` refuses nesting past about 10,000 levels, so a
+deeper chain never reaches the builder. A shape that costs more than the
+constant plus the reserve breaks the guarantee: ``table_from`` of a subtree judged to fit would overrun and abort
 the process, so the constant must stay above every measured shape. A test
 builds the worst shapes at the cap and must see ``LuaMemoryError``, not an
 abort.
