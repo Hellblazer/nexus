@@ -11,6 +11,8 @@ Every test uses a real file lock in ``tmp_path``; the cross-process ones use a r
 """
 from __future__ import annotations
 
+import contextlib
+import os
 import subprocess
 import sys
 import threading
@@ -20,14 +22,18 @@ import pytest
 
 from nexus.daemon import storage_service_daemon as ssd
 from nexus.daemon.service_registry import (
+    SPAWN_LOCK_TIERS,
     ServiceRegistry,
+    ServiceRegistryError,
     SpawnLockBusyError,
     spawn_lock_filename,
 )
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the pg-upgrade command, the only holder, is POSIX only")
 
-TIERS = ("storage_service", "aspect_worker")
+#: The tiers whose supervisor takes a spawn lock in its ``start()``; the others have nothing to hold.
+TIERS = ("storage_service",)
+NO_SPAWN_LOCK_TIERS = ("aspect_worker",)
 
 _PROBE = (
     "import os, sys\n"
@@ -52,6 +58,19 @@ def test_the_lock_file_is_named_by_the_tier_in_the_registry_dir(tmp_path: Path, 
     assert registry.spawn_lock_path() == tmp_path / f"{tier}_spawn.lock" == tmp_path / spawn_lock_filename(tier)
 
 
+def test_only_the_storage_service_tier_has_a_spawn_lock() -> None:
+    """The set is the supervisors that really take ``<tier>_spawn.lock``: holding another tier's would exclude nothing."""
+    assert SPAWN_LOCK_TIERS == frozenset(TIERS) == frozenset({ssd._REGISTRY_TIER})
+
+
+@pytest.mark.parametrize("tier", NO_SPAWN_LOCK_TIERS)
+def test_a_tier_without_a_spawn_lock_is_refused_not_held(tmp_path: Path, tier: str) -> None:
+    registry = ServiceRegistry(dir=tmp_path, tier=tier)
+    with pytest.raises(ServiceRegistryError, match="no spawn lock"):
+        registry.try_hold_spawn_lock()
+    assert not (tmp_path / spawn_lock_filename(tier)).exists(), "a refused hold must not leave a lock file"
+
+
 def test_the_supervisors_start_uses_the_primitives_lock_file() -> None:
     """One lock, one definition: the file the supervisor's ``start()`` takes is the one the primitive hands out."""
     assert ssd._SPAWN_LOCK_FILE == spawn_lock_filename(ssd._REGISTRY_TIER) == "storage_service_spawn.lock"
@@ -74,8 +93,19 @@ def test_a_hold_excludes_a_second_hold_in_this_process_and_a_child(tmp_path: Pat
 def test_release_is_idempotent_and_the_context_manager_releases(tmp_path: Path) -> None:
     registry = ServiceRegistry(dir=tmp_path, tier="storage_service")
     hold = registry.try_hold_spawn_lock()
+    lock_fd = hold._fd
+    assert lock_fd is not None
     hold.release()
-    hold.release()  # a second release must not close a descriptor that now belongs to someone else
+    # Another open file now owns the descriptor number the lock used (forced, not left to the allocator).
+    other = os.open(str(tmp_path / "other"), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        os.dup2(other, lock_fd)
+        hold.release()  # a second release must not close a descriptor that now belongs to someone else
+        os.fstat(lock_fd)  # still open: raises EBADF if the second release closed it
+    finally:
+        os.close(other)
+        with contextlib.suppress(OSError):
+            os.close(lock_fd)
     with registry.try_hold_spawn_lock():
         assert _probe_exit(registry.spawn_lock_path()) == 3
     assert _probe_exit(registry.spawn_lock_path()) == 0

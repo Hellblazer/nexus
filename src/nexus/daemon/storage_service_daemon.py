@@ -3905,6 +3905,41 @@ class StopOutcome:
         return not self.pids and not self.refused and not self.unreadable and not self.invisible
 
 
+def storage_service_running(config_dir: Path) -> list[str]:
+    """Read-only: what :func:`stop_storage_service` would find and stop for *config_dir*, as printable evidence.
+
+    Finds the service the way the stop does (a live lease from ``ServiceRegistry.discover()``, then the process
+    table through the same matcher and member check), but signals and kills nothing. An empty list means neither
+    found anything; like the stop, it cannot see past an unreadable process table, and it leaves a flagless start
+    whose directory cannot be read alone.
+    """
+    from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        all_process_rows,
+        ancestor_pids,
+        storage_service_member_check,
+        storage_service_stack_matcher,
+    )
+
+    found: list[str] = []
+    record = ServiceRegistry(dir=config_dir, tier=_REGISTRY_TIER).discover(service_identity())
+    if record is not None:
+        pid = record.payload.get("supervisor_pid")
+        found.append(f"a live service lease (supervisor pid {pid})" if isinstance(pid, int) else "a live service lease")
+    try:
+        rows = all_process_rows()
+    except Exception:  # noqa: BLE001 — no process table: the lease is all there is to go on, as in the stop
+        return found
+    me = os.getpid()
+    skip = ancestor_pids(me)
+    matcher = storage_service_stack_matcher(config_dir)
+    member = storage_service_member_check(config_dir)
+    for pid, _age, command in rows:
+        if pid == me or pid in skip or not matcher(command) or member(pid, command) != "member":
+            continue
+        found.append(f"process {pid}")
+    return found
+
+
 def stop_storage_service(
     *,
     config_dir: Path | None = None,
