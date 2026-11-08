@@ -42,7 +42,7 @@ nothing to KILL, but the DIRECTORY itself is reapable debris from the
 instant it exists); (2) updated once the postmaster is confirmed up
 (postmaster identity added; engine fields still ``None``); (3) updated
 again once the JVM ``Popen`` call returns (engine PID added — known
-synchronously, well before the up-to-60s ``_wait_tcp`` call that
+synchronously, well before the bind wait (up to minutes under load) that
 follows it). The original nexus-lgdy1 shape wrote the sidecar only once,
 at the very END of ``_boot()`` — after createdb, role bootstrap, JVM
 spawn, and the full TCP-wait — leaving a real, observed (not
@@ -1759,40 +1759,37 @@ def _read_postmaster_pid(pgdata: str) -> int | None:
         return None
 
 
-def _wait_tcp(host: str, port: int, timeout: float) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=0.3):
-                return
-        except OSError:
-            time.sleep(0.1)
-    raise TimeoutError(f"engine substrate: port {port} not reachable after {timeout}s")
-
-
 #: How many ports a boot tries for each of its two listeners (Postgres, engine) before
 #: it gives up and names the port a foreign listener holds (nexus-kmfz6).
 _PORT_RACE_ATTEMPTS = 4
 
-#: How long the engine may go without MIGRATION PROGRESS before the boot gives up on it. The
-#: old connect-wait was a fixed 60 s from the spawn; under pool load a healthy engine still
-#: applying Liquibase changesets outlived it (develop run 42436306115: vectors-047-1 starting
-#: when the wait expired). Progress is a new ``Running Changeset:`` line or a
-#: ``schema_migration_*`` event, measured from the last one (or the spawn), so this is never
-#: tighter than the 60 s it replaces for a silent JVM, and a slow-but-advancing migration
-#: never trips it. One changeset that is silent longer than this still does, by design.
+#: How long the engine may go without a sign of life before the boot gives up on it. The old
+#: connect-wait was a fixed 60 s from the spawn; under pool load a healthy engine still applying
+#: Liquibase changesets outlived it (develop run 42436306115: vectors-047-1 starting when the
+#: wait expired). This window applies where the log has no migration under way: from the spawn
+#: until ``schema_migration_start`` (a cold JVM) and after ``schema_migration_complete`` (model
+#: init), so it is never tighter than the 60 s it replaces.
 _ENGINE_STALL_S = 60.0
+#: The window while the log shows a migration under way, measured from the last progress (a new
+#: ``Running Changeset:`` line or ``schema_migration_*`` event). Longer than the window above
+#: because one changeset can be silent for a while on a loaded host (the production readiness
+#: monitor allows a migrating engine 600 s); the ceiling still bounds the total.
+_ENGINE_MIGRATING_STALL_S = 180.0
 #: Hard bound on the whole wait, however steadily the log advances. A migration is about 400
 #: changesets and takes about 20 s unloaded; this is 15x that.
 _ENGINE_CEILING_S = 300.0
+#: How long the port may stay unanswered once the ready line is in the log. The engine bound it
+#: before logging, so this is a connect, not a wait for work; a process that died instead is
+#: caught by the poll in the same loop, at once.
+_ENGINE_CONNECT_S = 5.0
 _ENGINE_POLL_S = 0.1
 
 #: The fixed part of the line ``NexusService.start`` logs once ``HttpServer.start``
 #: returned: ``log.info("event=service_started port={}", getPort())``. The boot
 #: appends the port and matches to end of line, so ``port=2018`` never matches a
 #: line for ``port=20184``. ``tests/test_engine_ready_log_line_lint.py`` pins this
-#: text against the Java source; a rename there would otherwise cost every boot the
-#: full readiness timeout.
+#: text against the Java source; a rename there would otherwise cost every boot a stall
+#: window of waiting.
 _ENGINE_READY_PREFIX = "event=service_started port="
 
 #: Text a failed bind leaves behind: the JVM's ``BindException`` message (Windows
@@ -1816,15 +1813,6 @@ class _PortLost(RuntimeError):
         )
 
 
-class _BindWaitTimeout(TimeoutError):
-    """The engine never logged its ready line and the wait stopped for ``reason``:
-    ``"stalled"`` (no migration progress for the stall window) or ``"ceiling"``."""
-
-    def __init__(self, reason: str, detail: str) -> None:
-        self.reason = reason
-        super().__init__(detail)
-
-
 def _bind_wait_phase(scanner: MigrationLogScanner) -> str:
     """Where the engine's log says the boot is, for a timeout message."""
     if scanner.complete:
@@ -1838,7 +1826,8 @@ def _bind_wait_phase(scanner: MigrationLogScanner) -> str:
 
 def _wait_engine_ready(
     proc: subprocess.Popen, port: int, log_path: str, stall_s: float, ceiling_s: float,
-    *, clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+    *, migrating_stall_s: float | None = None, connect_s: float | None = None,
+    clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """Return once THE ENGINE THIS BOOT SPAWNED is serving *port*.
 
@@ -1853,16 +1842,23 @@ def _wait_engine_ready(
     load, so the wait is bounded by progress, not by a fixed clock: it keeps waiting while
     the log shows Liquibase advancing (``MigrationLogScanner``: a new ``Running Changeset``
     line or ``schema_migration_*`` event; other log growth is not progress), and gives up
-    after *stall_s* without any, or at *ceiling_s* in total.
+    after *migrating_stall_s* without any while a migration is under way (*stall_s* before
+    one starts and after it completes, and when *migrating_stall_s* is None), or at
+    *ceiling_s* in total. Once the ready line is in the log the port gets *connect_s*
+    (default ``_ENGINE_CONNECT_S``) to answer, and a process that died after logging it fails
+    at the next poll like any other.
 
     Raises :class:`_PortLost` when the process exited on a bind failure,
     ``RuntimeError`` when it exited for any other reason (at the next poll, never after
-    a wait), and :class:`_BindWaitTimeout` (a ``TimeoutError``) naming whichever bound
+    a wait), and ``TimeoutError`` naming whichever bound
     fired and the changeset the log last showed. *clock* and *sleep* are injectable so a
     test drives the wait without real time.
     """
     marker = f"{_ENGINE_READY_PREFIX}{port}"
     ready_line = re.compile(rf"^.*{re.escape(marker)}\s*$", re.MULTILINE)
+    if connect_s is None:
+        connect_s = _ENGINE_CONNECT_S
+    ready_seen_at: float | None = None
     started_at = clock()
     last_progress_at = started_at
     scanner = MigrationLogScanner()
@@ -1883,8 +1879,21 @@ def _wait_engine_ready(
                 f"exited with rc={rc}. Tail of engine log ({log_path}):\n{text[-2000:]}"
             )
         if ready_line.search(text):
-            # Confirm it answers, then that the same process is still the one answering.
-            _wait_tcp("127.0.0.1", port, timeout=max(1.0, ceiling_s - (clock() - started_at)))
+            # Confirm it answers, then that the same process is still the one answering. One
+            # connect per pass, never a blocking wait: a process that dies after logging the
+            # line leaves nothing listening, and the poll above must still see it.
+            if ready_seen_at is None:
+                ready_seen_at = clock()
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.3).close()
+            except OSError:
+                if clock() - ready_seen_at >= connect_s:
+                    raise TimeoutError(
+                        f"engine substrate: the log has {marker!r} but port {port} did not answer "
+                        f"for {connect_s:.0f}s"
+                    ) from None
+                sleep(_ENGINE_POLL_S)
+                continue
             if proc.poll() is None:
                 return
             continue
@@ -1899,16 +1908,19 @@ def _wait_engine_ready(
         if key != last_key:
             last_key = key
             last_progress_at = now
-        if now - last_progress_at >= stall_s:
-            raise _BindWaitTimeout(
-                "stalled",
+        window = (
+            migrating_stall_s
+            if migrating_stall_s is not None and scanner.migrating
+            else stall_s
+        )
+        if now - last_progress_at >= window:
+            raise TimeoutError(
                 f"stalled {_bind_wait_phase(scanner)} for {now - last_progress_at:.0f}s "
-                f"(no migration progress in the engine log; stall window {stall_s:.0f}s)",
+                f"(no migration progress in the engine log; stall window {window:.0f}s)",
             )
         if now - started_at >= ceiling_s:
             phase = _bind_wait_phase(scanner)
-            raise _BindWaitTimeout(
-                "ceiling",
+            raise TimeoutError(
                 f"ceiling {ceiling_s:.0f}s reached "
                 f"{'while still migrating ' + phase if scanner.started and not scanner.complete else phase}",
             )
@@ -2477,8 +2489,8 @@ def _boot() -> dict:
     # Checkpoint 2 of 3 (nexus-ui654 follow-up, critic Q3): UPDATE the
     # sidecar (not re-create -- `started_at` stays pinned to the earliest
     # write above) now that the postmaster identity is known -- still well
-    # before createdb + role bootstrap + JVM spawn + up to 60s of
-    # TCP-wait, which is where the ORIGINAL nexus-lgdy1 shape wrote the
+    # before createdb + role bootstrap + JVM spawn + the bind wait (up to
+    # minutes under load), which is where the ORIGINAL nexus-lgdy1 shape wrote the
     # sidecar for the first and only time. engine_pid/svc_port are
     # genuinely not known yet -- still None; the reaper skips a None leg
     # rather than treating it as dead or mismatched (verified above), so
@@ -2613,7 +2625,10 @@ def _boot() -> dict:
         try:
             # Proves the listener is THIS engine, not merely that something answers
             # (nexus-kmfz6); see _wait_engine_ready.
-            _wait_engine_ready(svc, svc_port, svc_log_path, _ENGINE_STALL_S, _ENGINE_CEILING_S)
+            _wait_engine_ready(
+                svc, svc_port, svc_log_path, _ENGINE_STALL_S, _ENGINE_CEILING_S,
+                migrating_stall_s=_ENGINE_MIGRATING_STALL_S, connect_s=_ENGINE_CONNECT_S,
+            )
             break
         except _PortLost as lost:
             kill_group(svc)
@@ -2788,7 +2803,7 @@ def _write_sidecar(
     (2) updated immediately once the postmaster is confirmed up
     (postmaster identity added); (3) updated again immediately after the
     JVM ``Popen`` call returns (engine identity added -- known
-    synchronously, well before ``_wait_tcp`` ever gets a chance to time
+    synchronously, well before the bind wait ever gets a chance to time
     out). A leg recorded as ``None`` here is skipped by the reaper
     (``_reap_cluster``'s ``isinstance(pid, int)`` guard -- verified
     directly: an all-``None`` sidecar produces an EMPTY ``legs`` list,
