@@ -14080,6 +14080,168 @@ public final class CatalogRepository {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // RESOLVE OR REGISTER (RDR-193 Part A1 route table, nexus-u5m5g.3)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * What {@link #resolveOrRegister} answers: the document's tumbler, whether this call minted it, and whether it
+     * belongs to another owner (then it was neither adopted nor written, and {@code created} is false).
+     */
+    public record ResolveOutcome(String tumbler, boolean created, boolean foreignOwner) { }
+
+    /**
+     * Resolve a document by {@code (owner, source_uri)} or register it (RDR-193): the one call that replaces the
+     * client's lookup-then-register of {@code _register_or_lookup_doc_id}, {@code _catalog_markdown_hook} and
+     * {@code store_hook}. The owner is a curator, named, and created when absent.
+     *
+     * <ol>
+     *   <li>A live document holding the source_uri (the file_path's derived one when none is sent) under another
+     *       owner is returned as {@code foreignOwner} and left alone.</li>
+     *   <li>One under this owner is returned, its empty title and its zero year filled from the request (never an
+     *       existing value overwritten).</li>
+     *   <li>With {@code title_fallback} and no source_uri match, a GHOST of this owner with exactly that title
+     *       (live, no chunks) is the document: it takes the source_uri, so the next call matches in step 2.</li>
+     *   <li>Otherwise the document is registered ({@link #registerDocumentWithOutcome}).</li>
+     * </ol>
+     *
+     * <p>The ephemeral-worktree guard stays on the client. Request: {@code owner_name} or {@code curator},
+     * {@code source_uri} or an absolute {@code file_path}, {@code title}, and optionally {@code year},
+     * {@code title_fallback}, {@code source_mtime}, {@code content_type}, {@code physical_collection}. A value of the
+     * wrong type is refused, never read as absent.
+     */
+    public ResolveOutcome resolveOrRegister(String tenant, Map<String, Object> req) {
+        if (TenantConstants.isWildcard(tenant)) {
+            throw new IllegalArgumentException("tenant '*' is a reserved sentinel and cannot own catalog entries");
+        }
+        String ownerName = optString(req, "owner_name");
+        if (ownerName == null || ownerName.isBlank()) ownerName = optString(req, "curator");
+        if (ownerName == null || ownerName.isBlank()) {
+            throw new IllegalArgumentException("'owner_name' (or 'curator') required");
+        }
+        final String title = nne(optString(req, "title"));
+        final Integer year = optInt(req, "year");
+        final boolean titleFallback = Boolean.TRUE.equals(optBool(req, "title_fallback"));
+        final Double sourceMtime = optDouble(req, "source_mtime");
+        final String contentType = optString(req, "content_type");
+        final String physicalCollection = optString(req, "physical_collection");
+        final String filePath = nne(optString(req, "file_path"));
+        // curator owners have no repo_root: a relative file_path has no identity of its own
+        final String key = deriveSourceUri(nne(optString(req, "source_uri")), filePath, "");
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException(
+                "a 'source_uri', or an absolute 'file_path' to derive one from, is required: it is the document's identity");
+        }
+        final String ownerPrefix = curatorOwnerPrefix(tenant, ownerName);
+        final String ownerDot = ownerPrefix + ".";
+
+        ResolveOutcome found = UniqueRaceRetry.run("resolveOrRegister", DOCUMENT_NON_ARBITRATED, () ->
+        tenantScope.withTenant(tenant, ctx -> {
+            var hit = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.YEAR)
+                         .from(CATALOG_DOCUMENTS)
+                         .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.SOURCE_URI.eq(key))
+                                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                         .fetchOne();
+            if (hit != null) {
+                if (!hit.value1().startsWith(ownerDot)) return new ResolveOutcome(hit.value1(), false, true);
+                backfillTitleAndYear(ctx, tenant, hit.value1(), hit.value2(), hit.value3(), title, year, null);
+                return new ResolveOutcome(hit.value1(), false, false);
+            }
+            if (titleFallback && !title.isEmpty()) {
+                var ghosts = documentsByTitleQuery(ctx, title, ownerPrefix, null, 0).fetch();
+                if (!ghosts.isEmpty()) {
+                    var ghost = ghosts.get(0);
+                    backfillTitleAndYear(ctx, tenant, ghost.get(CATALOG_DOCUMENTS.TUMBLER), ghost.get(CATALOG_DOCUMENTS.TITLE),
+                        ghost.get(CATALOG_DOCUMENTS.YEAR), title, year, key);
+                    return new ResolveOutcome(ghost.get(CATALOG_DOCUMENTS.TUMBLER), false, false);
+                }
+            }
+            return null;
+        }));
+        if (found != null) return found;
+
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("title", title);
+        if (year != null) fields.put("year", year);
+        fields.put("source_uri", key);
+        if (!filePath.isEmpty()) fields.put("file_path", filePath);
+        fields.put("owner_type", "curator");
+        fields.put("owner_name", ownerName);
+        if (sourceMtime != null) fields.put("source_mtime", sourceMtime);
+        if (contentType != null) fields.put("content_type", contentType);
+        if (physicalCollection != null) fields.put("physical_collection", physicalCollection);
+        RegisterOutcome minted = registerDocumentWithOutcome(tenant, ownerPrefix, fields);
+        // a concurrent registration of the same source_uri under another owner wins the unique index: the answer is theirs
+        return new ResolveOutcome(minted.tumbler(), minted.created(), !minted.tumbler().startsWith(ownerDot));
+    }
+
+    /** The tumbler prefix of the tenant's curator owner of this name; the owner is registered when none exists. */
+    private String curatorOwnerPrefix(String tenant, String name) {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            String prefix = tenantScope.withTenant(tenant, ctx -> ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX)
+                .from(CATALOG_OWNERS)
+                .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.NAME.eq(name))
+                       .and(CATALOG_OWNERS.OWNER_TYPE.eq("curator")))
+                .fetchOne(CATALOG_OWNERS.TUMBLER_PREFIX));
+            if (prefix != null) return prefix;
+            upsertOwner(tenant, Map.of("name", name, "owner_type", "curator"));
+        }
+        throw new IllegalStateException("curator owner '" + name + "' was registered but cannot be read back");
+    }
+
+    /**
+     * Fill an empty title and a zero year of {@code tumbler} from the request (COALESCE on empty: a value already
+     * there is kept), and stamp {@code sourceUri} on it when given (the ghost leg). One statement, and none when
+     * there is nothing to write.
+     */
+    private static void backfillTitleAndYear(DSLContext ctx, String tenant, String tumbler, String storedTitle,
+                                             Integer storedYear, String title, Integer year, String sourceUri) {
+        boolean fillTitle = !title.isEmpty() && (storedTitle == null || storedTitle.isEmpty());
+        boolean fillYear = year != null && year > 0 && (storedYear == null || storedYear == 0);
+        if (!fillTitle && !fillYear && sourceUri == null) return;
+        Map<Field<?>, Object> sets = new LinkedHashMap<>();
+        if (fillTitle) {
+            sets.put(CATALOG_DOCUMENTS.TITLE, DSL.coalesce(DSL.nullif(CATALOG_DOCUMENTS.TITLE, ""), DSL.val(title)));
+        }
+        if (fillYear) {
+            sets.put(CATALOG_DOCUMENTS.YEAR, DSL.coalesce(DSL.nullif(CATALOG_DOCUMENTS.YEAR, 0), DSL.val(year)));
+        }
+        if (sourceUri != null) sets.put(CATALOG_DOCUMENTS.SOURCE_URI, sourceUri);
+        ctx.update(CATALOG_DOCUMENTS).set(sets)
+           .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                  .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute();
+    }
+
+    /** An optional string field: absent or null is null, a non-string is refused. */
+    private static String optString(Map<String, Object> m, String k) {
+        Object v = m.get(k);
+        if (v == null) return null;
+        if (v instanceof String sv) return sv;
+        throw new IllegalArgumentException("'" + k + "' must be a string");
+    }
+
+    /** An optional whole-number field: absent or null is null, anything but an integral number is refused. */
+    private static Integer optInt(Map<String, Object> m, String k) {
+        Object v = m.get(k);
+        if (v == null) return null;
+        if (v instanceof Integer || v instanceof Long || v instanceof Short || v instanceof Byte) return ((Number) v).intValue();
+        throw new IllegalArgumentException("'" + k + "' must be a whole number");
+    }
+
+    private static Double optDouble(Map<String, Object> m, String k) {
+        Object v = m.get(k);
+        if (v == null) return null;
+        if (v instanceof Number n) return n.doubleValue();
+        throw new IllegalArgumentException("'" + k + "' must be a number");
+    }
+
+    private static Boolean optBool(Map<String, Object> m, String k) {
+        Object v = m.get(k);
+        if (v == null) return null;
+        if (v instanceof Boolean b) return b;
+        throw new IllegalArgumentException("'" + k + "' must be true or false");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // HELPERS
     // ══════════════════════════════════════════════════════════════════════════
 

@@ -109,6 +109,9 @@ class NoteUriRouteGateTest {
             "doc/register: lookup, insert and race-loser lookup use the deriveSourceUri result"),
         listed(CAT, "registerDocumentManyWithOutcome",
             "doc/register_many: the pre-batch lookup, the insert and the race-loser lookup use the deriveSourceUri result"),
+        listed(CAT, "resolveOrRegister",
+            "doc/resolve_or_register (RDR-193, nexus-u5m5g.3): the key is the deriveSourceUri result; the lookup, the ghost's "
+                + "stamp and the registration it hands on all use it"),
         listed(CAT, "buildUpdateDocumentQuery",
             "update and update_many: a source_uri in the field map is canonicalized before the SET"),
         listed(CAT, "documentsBySourceUri",
@@ -165,6 +168,7 @@ class NoteUriRouteGateTest {
         exempt(CAT, "DOCUMENTS_LIVE_SOURCE_URI", Cls.PASS_THROUGH, "field: the name of the live-source_uri unique index, not a value"),
         exempt(CAT, "UPDATABLE_DOC_COLUMNS", Cls.PASS_THROUGH, "field: the column allowlist for update; the value is canonicalized in buildUpdateDocumentQuery"),
         exempt(CAT, "liveTumblerForSourceUri", Cls.PASS_THROUGH, "identity guard lookup: receives the already-canonical URI from the listed callers (guardDocumentIdentity)"),
+        exempt(CAT, "backfillTitleAndYear", Cls.PASS_THROUGH, "resolve_or_register (RDR-193): stamps the ghost with the key resolveOrRegister derived (deriveSourceUri); takes none from the caller"),
         exempt(CAT, "mostRecentTombstoned", Cls.PASS_THROUGH, "RDR-243 sensitivity inheritance (nexus-rfvyy.6.24): reads the latest tombstoned row holding the URI; receives the already-canonical URI from register (deriveSourceUri), takes none from the caller"),
         exempt(CAT, "mostRecentTombstonedMany", Cls.PASS_THROUGH, "RDR-243 sensitivity inheritance (nexus-rfvyy.6.24): the batch form of mostRecentTombstoned; its URIs are the already-canonical ones register_many derived"),
         exempt(CAT, "documentFields", Cls.PASS_THROUGH, "column list of a document read; returns the stored value"),
