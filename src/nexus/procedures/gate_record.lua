@@ -44,7 +44,7 @@ end
 local bead = args.bead
 -- Any repo's bead id (nexus-qo7ie.34, ART-12, my-proj-abc12): one token with no space or
 -- comma, since the id goes into a comma-separated tag list and the title.
-if not string.match(bead, "^[%w][%w._-]*$") then
+if not string.match(bead, "^[A-Za-z0-9][A-Za-z0-9._-]*$") then
   error("bead must be a bead id such as nexus-qo7ie.34, with no space or comma; got " .. bead, 0)
 end
 
@@ -66,10 +66,10 @@ if string.match(body, "^%s*$") then
 end
 -- A body that carries the agent's verdict block must agree with the outcome it records.
 -- The block comes last, so an earlier quoted verdict (an example, a prior round) is not it:
--- the last "- **outcome**:" or "* **outcome**:" line is compared, its value bare, in
--- backticks or in bold.
+-- the last "**outcome**" line is compared: with a "-" or "*" bullet or none, the colon
+-- outside or inside the bold, the value bare, in backticks or in bold.
 local stated = nil
-for value in string.gmatch("\n" .. body, "\n%s*[-*] +%*%*outcome%*%*: *[`*]*([%w-]+)") do
+for value in string.gmatch("\n" .. body, "\n[ \t]*[-*]?[ \t]*%*%*outcome:?%*%*:?[ \t]*[`*]*([a-z-]+)") do
   stated = value
 end
 if stated ~= nil and stated ~= args.outcome then
