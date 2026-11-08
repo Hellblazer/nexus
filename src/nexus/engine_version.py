@@ -737,7 +737,14 @@ from __future__ import annotations
 #: nexus-hbnml), which removes the /v1/aspects/queue/* routes this client no
 #: longer calls. Not additive (888057c40), so the pin rises with it and the
 #: deploy pairs with this release.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 181)
+#: 0.1.182 (conexus 7.98.0): pairs with engine-service-v0.1.182 (tagged on
+#: ebc9d82f0). It carries RDR-243 Phase 2 and the Phase 3 engine half: the
+#: vector sensitivity exclude filter (vectors-055,
+#: vector_sensitivity_exclude_supported) and the rerank exclusion of sensitive
+#: text (rerank_sensitive_exclusion_supported). SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION
+#: is 0.1.182, so the pin rises with it. The eleven wire-ledger entries this
+#: release ships are all additive.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 182)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

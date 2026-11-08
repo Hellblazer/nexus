@@ -246,7 +246,12 @@ async def test_search_in_a_child_returns_no_sensitive_hit_and_still_returns_the_
     scoped = await _call(_child_params(tmp_path, posture="llm_bound"), "search", query)
     unscoped = await _call(_child_params(tmp_path, posture=None), "search", query)
 
-    # Non-vacuity: the ordinary note comes back in both, and the unscoped server (today's behaviour) also returns the canary.
+    # Non-vacuity: the ordinary note comes back in both. The unscoped server reads the canary and its output posture
+    # (sensitivity.mcp_output, withhold by default, RDR-243 Phase 3) prints a withheld stub in its place; the scoped
+    # child excludes it at the read, so it has neither the canary nor a stub.
     assert _ORDINARY in scoped, scoped
     assert _CANARY not in scoped, scoped
-    assert _ORDINARY in unscoped and _CANARY in unscoped, unscoped
+    assert "sensitive hit withheld" not in scoped and "content withheld" not in scoped, scoped
+    assert _ORDINARY in unscoped, unscoped
+    assert _CANARY not in unscoped, unscoped
+    assert "[1 sensitive hit withheld]" in unscoped, unscoped

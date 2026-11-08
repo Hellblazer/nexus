@@ -46,8 +46,10 @@ PHASES: Final[tuple[int, ...]] = (1, 2, 3)
 #: Phase 2 (the read filter and the model-bound surfaces) lands: the Phase 2 commit raises it to 2 together with
 #: its canary rows and regenerates ``docs/privacy-policy.md`` and ``docs/sensitivity.md``
 #: (``scripts/gen_privacy_policy_table.py --write``). Raising it earlier makes the docs and every ``--sensitive
-#: --help`` say "excluded" for a surface that still sends the document.
-RELEASE_ENFORCED_PHASE: Final = 1
+#: --help`` say "excluded" for a surface that still sends the document. It is 3 from conexus 7.98.0, the release
+#: that pins engine-service-v0.1.182 (vectors-055 and the rerank exclusion) and carries Phases 2 and 3
+#: (nexus-rfvyy.7, nexus-rfvyy.8 release checklists).
+RELEASE_ENFORCED_PHASE: Final = 3
 
 #: The RDR-243 census has 25 rows; the table has one row for each.
 CENSUS_ROW_COUNT: Final = 25

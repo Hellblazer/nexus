@@ -49,11 +49,11 @@ def _section2(text: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_release_constant_is_one_until_phase_two_lands() -> None:
-    """Phase 1 ships alone until the Phase 2 read filter and its canary rows land (RDR-243 MVV). The generated
-    text says "excluded" for a Phase 2 row only when the release enforces it, so the Phase 2 commit raises this
-    constant to 2 together with its canary rows and regenerates the docs; raising it earlier over-claims
-    (fix round 1, nexus-rfvyy.6.19 / .6.20 ship-blocker).
+def test_the_release_constant_is_three_from_conexus_7_98_0() -> None:
+    """conexus 7.98.0 pins engine-service-v0.1.182 (vectors-055 and the rerank exclusion) and carries Phases 2
+    and 3, so it enforces every phase (nexus-rfvyy.7 and nexus-rfvyy.8 release checklists). The generated text
+    says "excluded" for a row only when the release enforces it; raising the constant before that release would
+    over-claim (fix round 1, nexus-rfvyy.6.19 / .6.20 ship-blocker).
 
     This is a bare equality and nothing more: it fails when the constant moves, and says nothing about whether
     the text is honest. The honesty pins are the pending-line test below
@@ -61,7 +61,7 @@ def test_the_release_constant_is_one_until_phase_two_lands() -> None:
     ``test_the_table_lists_exactly_the_enforced_rows``, ``test_the_help_names_exactly_the_enforced_rows`` and
     ``test_the_real_policy_and_the_real_help_carry_the_line_once``, which read the generated help and docs against
     the registry rows."""
-    assert ls.RELEASE_ENFORCED_PHASE == 1
+    assert ls.RELEASE_ENFORCED_PHASE == 3
 
 
 def _pending_outward(phase: int) -> list[ls.SurfaceRow]:
@@ -124,12 +124,13 @@ def test_phase_two_rows_appear_at_two_and_not_at_one() -> None:
         assert f"| {r.label} |" in at_two
 
 
-def test_phase_three_rows_never_appear_in_the_release_table() -> None:
-    table = ls.render_policy_table(ls.RELEASE_ENFORCED_PHASE)
+def test_phase_three_rows_appear_only_once_the_release_enforces_phase_three() -> None:
+    table, at_two = ls.render_policy_table(ls.RELEASE_ENFORCED_PHASE), ls.render_policy_table(2)
     p3 = [r for r in ls.rows() if r.phase == 3]
     assert p3
     for r in p3:
-        assert f"| {r.label} |" not in table
+        assert f"| {r.label} |" not in at_two
+        assert f"| {r.label} |" in table
 
 
 def test_the_table_names_the_endpoints_the_policy_lacked() -> None:
@@ -277,9 +278,10 @@ def _voyage(r: ls.SurfaceRow) -> bool:
     return "voyage" in r.endpoints
 
 
-def test_the_session_model_rows_the_line_derives_from_exist_above_the_release_phase() -> None:
-    """Non-vacuity: the line has something to be derived from."""
-    pending = [r for r in ls.rows() if r.phase > ls.RELEASE_ENFORCED_PHASE]
+def test_the_session_model_rows_the_line_derives_from_exist_above_phase_one() -> None:
+    """Non-vacuity: at phase 1 the line has something to be derived from (the parametrized tests below render
+    it at phases 1 and 2; the release phase is 3, where it is empty)."""
+    pending = [r for r in ls.rows() if r.phase > 1]
     assert any(_session_model_withhold(r) for r in pending)
     assert any(_voyage(r) for r in pending)
 
@@ -296,8 +298,20 @@ def test_the_help_and_the_table_each_carry_the_line_exactly_once(phase: int) -> 
 
 def test_the_real_policy_and_the_real_help_carry_the_line_once() -> None:
     line = ls.not_yet_enforced_line(ls.RELEASE_ENFORCED_PHASE)
-    assert POLICY.read_text(encoding="utf-8").count(line) == 1
-    assert ls.render_sensitive_help().count(line) == 1
+    if line:
+        assert POLICY.read_text(encoding="utf-8").count(line) == 1
+        assert ls.render_sensitive_help().count(line) == 1
+    else:
+        assert ls.RELEASE_ENFORCED_PHASE == max(ls.PHASES), "an empty line is only right at the last phase"
+        assert "Not yet enforced" not in POLICY.read_text(encoding="utf-8")
+        assert "Not yet enforced" not in SENSITIVITY.read_text(encoding="utf-8")
+        assert "Not yet enforced" not in ls.render_sensitive_help()
+        text = SENSITIVITY.read_text(encoding="utf-8")
+        begin, end = gen.begin_marker("llm-surfaces-pending"), gen.end_marker("llm-surfaces-pending")
+        region = text[text.index(begin) + len(begin):text.index(end)]
+        row18 = next(r for r in ls.rows() if r.census_row == 18)
+        assert row18.label in region, "the generated not-enforced line must name the row no phase covers"
+        assert "Memory rollup" in ls.render_sensitive_help(), "the help must still name the uncovered row"
 
 
 def test_the_line_is_absent_once_every_row_it_derives_from_is_enforced() -> None:
@@ -410,10 +424,10 @@ def test_memory_rollup_is_stated_as_not_enforced() -> None:
     assert row.behaviour == "n/a-not-a-document", "non-vacuity: the row is the gap the page must state"
     section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _NOT_ENFORCED_HEADING)
     assert row.label in section, "row 18 is named in the not-enforced section"
-    para = next(p for p in re.split(r"\n\n|\n- ", section) if row.label in p)
-    assert "not enforced" in para.lower()
-    assert "T2 note" in para
-    assert "memory_consolidate" in para
+    paras = [p for p in re.split(r"\n\n|\n- ", section) if row.label in p]
+    assert any(
+        "not enforced" in p.lower() and "T2 note" in p and "memory_consolidate" in p for p in paras
+    ), "one paragraph naming row 18 states it is not enforced, for T2 notes, via memory_consolidate"
 
 
 @pytest.mark.parametrize(
@@ -443,7 +457,8 @@ def test_the_not_enforced_section_names_each_recorded_gap(gap: str, needles: tup
 def test_the_release_phase_is_stated_by_the_constants_own_value() -> None:
     section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _NOT_ENFORCED_HEADING)
     assert f"`RELEASE_ENFORCED_PHASE` is {ls.RELEASE_ENFORCED_PHASE}" in section
-    assert {r.phase for r in ls.rows() if r.phase > ls.RELEASE_ENFORCED_PHASE} == {2, 3}, "non-vacuity"
+    assert ls.RELEASE_ENFORCED_PHASE == max(ls.PHASES)
+    assert not {r.phase for r in ls.rows() if r.phase > ls.RELEASE_ENFORCED_PHASE}
 
 
 def test_the_how_to_names_commands_and_keys_that_exist() -> None:
