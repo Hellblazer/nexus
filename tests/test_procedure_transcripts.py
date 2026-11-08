@@ -905,12 +905,13 @@ def test_each_querys_field_set_agrees_with_the_verbs_pinned_table() -> None:
     for query in QUERIES:
         got, joined, bodies = _lua_fields(query)
         assert len(got) == len(set(got)), query  # no entry twice
-        # the pin is the verb's: the keys each query returns beyond the four that always come back.
-        # tool_call_count is the one entry the script adds (admit pages by it, for every query)
-        assert set(got) == set(PINNED_FIELDS[query][0]) | {"tool_call_count"}, query
+        # the pin is the verb's: the keys each query returns beyond the four that always come back
+        assert set(got) == set(PINNED_FIELDS[query][0]), query
         assert bodies == PINNED_FIELDS[query][1], query
         assert joined == (PINNED_FIELDS["deferred_tools"][0][0] if query == "tools" else None), query
-    assert PINNED_FIELDS["deferred_tools"][0] == ["deferred_tools"] == [JOINED]
+    # the joined read asks the pinned set less tool_call_count, which admit reads only from the main read
+    assert set(PINNED_FIELDS["deferred_tools"][0]) == {JOINED, "tool_call_count"}
+    assert JOINED == "deferred_tools"
 
 
 def test_tools_reads_deferred_tools_in_a_second_call_per_unit_and_no_other_query_does() -> None:
