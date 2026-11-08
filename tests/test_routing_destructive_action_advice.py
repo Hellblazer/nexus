@@ -524,9 +524,12 @@ def test_two_matching_rows_share_one_envelope(tmp_path: Path) -> None:
     assert "[pattern_kill]" in out["additionalContext"] and "[branch_bulk_delete]" in out["additionalContext"]
 
 
+# Explicit ids: the payload carries the checkout's cwd, and a node id built from it
+# differs per CI shard, which breaks pytest-gate's shard collection check.
 @pytest.mark.parametrize(
     "text",
     [json.dumps(_payload("ls -la src | head -5")), json.dumps({"tool_name": "Read", "tool_input": {}}), "", "not json", "[]"],
+    ids=["bash-no-match", "read-tool", "empty", "not-json", "json-array"],
 )
 def test_no_match_is_silent_and_exits_zero(text: str, tmp_path: Path) -> None:
     proc = _run(text, tmp_path)
