@@ -39,10 +39,12 @@ ParamType: TypeAlias = Literal["string", "number", "integer", "boolean"]
 
 _PARAM_TYPES: frozenset[str] = frozenset({"string", "number", "integer", "boolean"})
 
-# The parent-to-worker verb-result frame cap (gate r3 S3). Provisional:
-# nexus-mdbds.4 sets it from the measured JSON-to-Lua memory ratio under the
-# 64 MB max_memory. A verb whose result could exceed it pages or refuses with
-# VerbError; it never truncates.
+# The parent-to-worker verb-result frame cap (gate r3 S3). 20 MiB was measured
+# (T2 nexus_rdr/242-research-36, nexus-mdbds.4): 0.75 x the 64 MiB max_memory
+# over the 2.3 Lua bytes per JSON byte of the densest session records. It is
+# re-measured on RDR-240's own records by the A2 spike, nexus-qo7ie.31. A verb
+# whose result could exceed it pages or refuses with VerbError; it never
+# truncates.
 VERB_RESULT_CAP_BYTES: int = 20 * 1024 * 1024
 
 # Lua 5.4 integers are 64-bit.

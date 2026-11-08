@@ -49,7 +49,7 @@ import pytest
 
 from nexus.lua_runtime import frames, oslimits, supervisor, verb_types
 from nexus.lua_runtime.luatable import LuaTableBuilder
-from nexus.lua_runtime.runtime import Limits
+from nexus.lua_runtime.limits import Limits
 from nexus.lua_runtime.supervisor import WorkerConfig, supervise
 from tests.lua_runtime._support import start, verb, verb_table
 

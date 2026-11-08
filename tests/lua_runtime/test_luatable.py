@@ -22,7 +22,7 @@ from typing import Any
 import lupa.lua54 as lua
 import pytest
 
-from nexus.lua_runtime import luatable
+from nexus.lua_runtime import luatable, verb_types
 
 _SHAPES = {
     "rows": "[{'id': i, 'title': 'session %d title' % i, 'project': 'nexus', 'ts': 1700000000 + i, 'flag': True, 'tags': ['a', 'b', 'c']} for i in range(n)]",
@@ -34,6 +34,10 @@ _SHAPES = {
     "nested": "[[[i]] for i in range(n)]",
     "dict_of_ints": "{str(i): i for i in range(n)}",
     "long_strings": "['x' * 1000 for _ in range(n // 100)]",
+    # chains of single-element arrays: the densest shape found, 36 Lua bytes per JSON byte at any depth (r1, N1)
+    "deep_chain_3": "[chain(3) for _ in range(n // 6)]",
+    "deep_chain_32": "[chain(32) for _ in range(n // 64)]",
+    "deep_chain_300": "[chain(300) for _ in range(n // 600)]",
 }
 
 _CHILD = textwrap.dedent(
@@ -43,6 +47,11 @@ _CHILD = textwrap.dedent(
     from nexus.lua_runtime.luatable import LuaTableBuilder
     shape, json_bytes, max_memory, mode = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
     SHAPES = %(shapes)r
+    def chain(d):
+        v = []
+        for _ in range(d - 1):
+            v = [v]
+        return v
     n = 1000
     probe = len(json.dumps(eval(SHAPES[shape]), separators=(",", ":")))
     n = max(10, int(1000 * json_bytes / probe))
@@ -164,3 +173,11 @@ def test_a_result_that_fits_is_one_table_from_and_one_that_does_not_is_built_in_
         tight.table_from_calls > 1
     )  # near the limit: split until each piece cannot overrun
     assert len(table) == 2000 and table[2000]["id"] == 1999
+
+
+def test_the_verb_result_cap_is_the_measured_20_mib() -> None:
+    """Default loop. The slow fit test (test_cost_measurement) re-measures this against the ratio; this pins the value."""
+    assert verb_types.VERB_RESULT_CAP_BYTES == 20 * 1024 * 1024, (
+        "VERB_RESULT_CAP_BYTES changed: re-run `pytest -m slow tests/lua_runtime/test_cost_measurement.py -s` on "
+        "every platform and update nexus_rdr/242-research-36 and RDR-240's A2 bound with it"
+    )

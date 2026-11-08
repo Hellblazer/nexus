@@ -3,8 +3,8 @@
 """STEP 2 STAND-IN for the worker's Lua runtime; nexus-mdbds.5 replaces this file.
 
 The seam (T2 ``nexus/rdr242-interfaces``, "The .4 / .5 seam") is
-``run(source, grants, args, limits, call_verb) -> (value, stats)`` and the ``Limits``
-dataclass; the worker (``worker.py``) calls nothing else here. What is below
+``run(source, grants, args, limits, call_verb) -> (value, stats)``, raising
+``ScriptError("lua" | "result", detail, stats=)`` or ``ScriptLimitError(limit, value, stats=)``; the worker (``worker.py``) calls nothing else here. What is below
 is only enough to run a one-line fixture through the real worker process and
 to carry three things Step 2 owns that Step 3 must keep:
 
@@ -19,58 +19,24 @@ Replaced by Step 3: the restricted environment (``_ENV_CHUNK`` here is the
 granted verbs plus a few base functions), ``load`` hardening, the guarded
 ``pcall``, the limit hook, the result walk.
 
-``Limits`` is imported by the parent too, so this module imports ``lupa``
-only inside ``run``.
+This module imports ``lupa`` only inside ``run``. ``Limits`` is in ``limits.py``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from nexus.lua_runtime.errors import ScriptError, ScriptLimitError, Stats
 from nexus.lua_runtime.frames import VerbReplyError
+from nexus.lua_runtime.limits import DEFAULT_LIMITS, Limits
 from nexus.lua_runtime.verb_types import JSONValue
 
-_MIB = 1024 * 1024
 HOOK_EVERY = 10_000
 
 
-@dataclass(frozen=True)
-class Limits:
-    """Technical Design 11's defaults, each lowered by the caller and never raised."""
-
-    instructions: int = 50_000_000
-    memory: int = 64 * _MIB
-    wall_time: float = 60.0
-    result: int = 1 * _MIB
-    depth: int = 32
-
-    def lowered(self, **changes: float) -> Limits:
-        values = dict(self.__dict__)
-        for key, value in changes.items():
-            if key not in values:
-                raise ValueError(f"unknown limit {key!r}")
-            if value > values[key]:
-                raise ValueError(
-                    f"limit {key} can be lowered, not raised ({value} > {values[key]})"
-                )
-            values[key] = type(values[key])(value)
-        return Limits(**values)
-
-    def to_frame(self) -> dict[str, float]:
-        return dict(self.__dict__)
-
-    @classmethod
-    def from_frame(cls, raw: dict[str, Any]) -> Limits:
-        base = cls()
-        return cls(
-            **{k: type(v)(raw[k]) if k in raw else v for k, v in base.__dict__.items()}
-        )
-
-
-DEFAULT_LIMITS = Limits()
+# Limits and DEFAULT_LIMITS live in limits.py (stdlib only, shared with the parent); re-imported here for the
+# runtime's callers.
 
 #: The granted verbs under their namespaces plus a few base functions.
 _ENV_CHUNK = """
@@ -116,7 +82,7 @@ def _refuse(obj: Any, attr: Any, is_setting: bool) -> Any:
 def run(
     source: bytes,
     grants: frozenset[str],
-    args: dict[str, Any],
+    args: Mapping[str, Any],
     limits: Limits,
     call_verb: Callable[[str, list[Any]], JSONValue],
 ) -> tuple[JSONValue, Stats]:
@@ -192,7 +158,7 @@ def run(
         )
         fn = rt.execute(_LOAD_CHUNK)(source.decode("utf-8", "replace"), env)
         rt.execute(_HOOK_CHUNK)(tick, HOOK_EVERY)
-        result = fn(builder.build(args))
+        result = fn(builder.build(dict(args)))
         if state["memory_tripped"]:
             raise lua.LuaMemoryError("verb result did not fit")
         value = _plain(result)
@@ -236,3 +202,6 @@ def _plain(value: Any, depth: int = 0) -> Any:
     if all(isinstance(k, str) for k, _ in pairs):
         return {k: _plain(v, depth + 1) for k, v in pairs}
     raise _NotPlain("a table with mixed keys is not a plain result")
+
+
+__all__ = ["DEFAULT_LIMITS", "Limits", "run"]
