@@ -86,9 +86,9 @@ local CLASSES = {
     patterns = {"^service/"},
     checks = function()
       return {
-        step("the engine main suite",
+        step("the engine main suite (on a pool host: --lab-run needs lab-run on PATH)",
           "scripts/mvnw-leased.sh --lab-run lab-m -q test -Dnexus.ddl.suite=main", true),
-        step("the engine integration group",
+        step("the engine integration group (on a pool host)",
           "scripts/mvnw-leased.sh --lab-run lab-m -q test -Dnexus.ddl.suite=integration"
             .. " -Dtest.excluded.groups= -Dgroups=integration", true),
       }
@@ -152,22 +152,33 @@ local CLASSES = {
     except = {"^web/install%."},
     checks = function()
       -- The selector exits 1 below its floor; the && stops there instead of
-      -- letting an empty list run the whole suite.
+      -- letting an empty list run the whole suite. The list goes through
+      -- xargs, which splits it in any shell (zsh does not split an unquoted
+      -- $f).
       return {
         step("the tests that read docs/",
-          "f=$(uv run python scripts/select_docs_reader_tests.py --repo .) && uv run pytest -q -p no:randomly $f",
+          "f=$(uv run python scripts/select_docs_reader_tests.py --repo .)"
+            .. " && printf '%s\\n' \"$f\" | xargs uv run pytest -q -p no:randomly",
           false),
       }
     end,
   },
 }
 
--- The push train's standing checks for a code push (rule 1), the gate jar
--- first since pytest refuses to start on a stale one.
-local JAR = step("build the gate jar first (pytest refuses a stale one)",
-  "scripts/build-gate-jar.sh --lab-run lab-m", true)
+-- The push train's standing checks for a code push (rule 1). The gate jar
+-- comes first for any push that runs pytest, since pytest refuses to start on
+-- a stale one (the docs readers included: some need the engine).
+local JAR = step("build the gate jar first, pytest refuses a stale one"
+  .. " (a cache miss is a Maven build; in a pool-host shell add --lab-run <class>)",
+  "scripts/build-gate-jar.sh", true)
 
-local function standing()
+local MARK = "'integration and not lived_in and not keyed_voyage and not mandatory_regression_pin'"
+
+local function standing(select_all)
+  local sel = select_all
+    and "uv run python scripts/select_affected_integration_tests.py --repo . --all"
+    or "git diff --no-renames --name-only " .. RANGE
+      .. " | uv run python scripts/select_affected_integration_tests.py --repo ."
   return {
     step("the whole lint bucket",
       "lab-remote -- bash -c 'scripts/build-gate-jar.sh && uv run pytest -q -p no:randomly -m lint -n auto'", true),
@@ -178,10 +189,12 @@ local function standing()
       "uv run scripts/tenant_delta.py --strict --base=" .. quote(base), false),
     step("whether the change needs a native Windows run (it reads origin/develop...HEAD)",
       "uv run scripts/windows_hand_test.py --check", false),
+    -- CI's mark expression (ci.yml INTEGRATION_MARK_EXPR) and its rule that a
+    -- change to the selector selects every integration file.
     step("the integration tests the change affects",
-      "f=$(git diff --no-renames --name-only " .. RANGE
-        .. " | uv run python scripts/select_affected_integration_tests.py --repo .)"
-        .. " && { [ -z \"$f\" ] || lab-remote -- uv run pytest -q -p no:randomly -o addopts= -m integration $f; }",
+      "f=$(" .. sel .. ")"
+        .. " && { [ -z \"$f\" ] || printf '%s\\n' \"$f\" | xargs lab-remote -- uv run pytest -q -p no:randomly"
+        .. " -o addopts= -m " .. MARK .. "; }",
       true),
   }
 end
@@ -244,7 +257,7 @@ end
 
 -- Order: the gate jar, then each class's own checks in table order, with the
 -- standing checks after the python class's quick ones.
-if code then
+if code or #members.docs > 0 then
   add("code", {JAR})
 end
 for _, class in ipairs(CLASSES) do
@@ -252,7 +265,8 @@ for _, class in ipairs(CLASSES) do
     add(class.name, class.checks(members[class.name]))
   end
   if class.name == "python" and code then
-    add("code", standing())
+    add("code", standing(any(names, "^scripts/select_affected_integration_tests%.py$")
+      or any(names, "^scripts/assert_integration_affected_ran%.py$")))
   end
 end
 

@@ -45,6 +45,8 @@ SOURCE = SCRIPT.read_bytes()
 CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 DRIFT = REPO_ROOT / ".github" / "workflows" / "plugin-drift-ledger.yml"
 BASH = shutil.which("bash")
+ZSH = shutil.which("zsh")
+MARK = "'integration and not lived_in and not keyed_voyage and not mandatory_regression_pin'"
 
 
 def _env() -> dict[str, str]:
@@ -203,6 +205,8 @@ def stubs(tmp_path: Path) -> Path:
         stub = d / tool
         stub.write_text(
             "#!/bin/sh\n"
+            # A selector prints its file list on one line, as the real ones do.
+            'case "$*" in *select_*_tests.py*) echo "tests/a.py tests/b c.py"; exit 0;; esac\n'
             f'printf "%s\\n" "{tool}"\n'
             'for a in "$@"; do printf "<%s>\\n" "$a"; done\n',
             encoding="utf-8",
@@ -211,12 +215,14 @@ def stubs(tmp_path: Path) -> Path:
     return d
 
 
-def _shell(repo: Path, stubs: Path, command: str) -> list[str]:
-    assert BASH is not None
+def _shell(
+    repo: Path, stubs: Path, command: str, shell: str | None = BASH
+) -> list[str]:
+    assert shell is not None
     env = _env()
     env["PATH"] = f"{stubs}{os.pathsep}{env.get('PATH', '')}"
     proc = subprocess.run(
-        [BASH, "-c", command],
+        [shell, "-c", command],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -278,14 +284,15 @@ def test_a_python_change_gets_ruff_its_tests_and_the_standing_checks(
         "':(glob)tests/**/test_*.py' | xargs -0 -r uv run pytest -q -p no:randomly --",
     ]
     assert _commands(out)["code"] == [
-        "scripts/build-gate-jar.sh --lab-run lab-m",
+        "scripts/build-gate-jar.sh",
         "lab-remote -- bash -c 'scripts/build-gate-jar.sh && uv run pytest -q -p no:randomly -m lint -n auto'",
         "uv run pytest -q -p no:randomly tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py",
         "uv run scripts/tenant_delta.py --strict --base=base",
         "uv run scripts/windows_hand_test.py --check",
         "f=$(git diff --no-renames --name-only base...HEAD | uv run python "
         "scripts/select_affected_integration_tests.py --repo .) && "
-        '{ [ -z "$f" ] || lab-remote -- uv run pytest -q -p no:randomly -o addopts= -m integration $f; }',
+        '{ [ -z "$f" ] || printf \'%s\\n\' "$f" | xargs lab-remote -- uv run pytest -q -p no:randomly'
+        f" -o addopts= -m {MARK}; }}",
     ]
 
 
@@ -293,7 +300,7 @@ def test_the_gate_jar_comes_before_every_pytest(repo: Path) -> None:
     _change(repo, {"src/nexus/x.py": "x = 1\n", "service/A.java": "x\n"})
     out = _Run(repo)()
     commands = [c["command"] for c in out["checks"]]
-    assert commands[0] == "scripts/build-gate-jar.sh --lab-run lab-m"
+    assert commands[0] == "scripts/build-gate-jar.sh"
     assert all("pytest" not in c for c in commands[:1])
 
 
@@ -374,10 +381,11 @@ def test_a_docs_only_change_gets_the_docs_readers_and_no_code_checks(
     out = _Run(repo)()
     assert out["code"] is False
     assert _commands(out) == {
+        "code": ["scripts/build-gate-jar.sh"],
         "docs": [
             "f=$(uv run python scripts/select_docs_reader_tests.py --repo .)"
-            " && uv run pytest -q -p no:randomly $f"
-        ]
+            " && printf '%s\\n' \"$f\" | xargs uv run pytest -q -p no:randomly"
+        ],
     }
 
 
@@ -579,3 +587,65 @@ def test_it_runs_nothing_but_the_two_git_verbs(repo: Path) -> None:
 def test_each_single_file_row_names_its_class(repo: Path, path: str, cls: str) -> None:
     _change(repo, {path: "x\n"})
     assert _class_names(_Run(repo)()) == [cls]
+
+
+_SHELLS = [
+    pytest.param(
+        BASH, id="bash", marks=pytest.mark.skipif(BASH is None, reason="no bash")
+    ),
+    pytest.param(ZSH, id="zsh", marks=pytest.mark.skipif(ZSH is None, reason="no zsh")),
+]
+
+
+def _args(lines: list[str]) -> list[str]:
+    return [line[1:-1] for line in lines if line.startswith("<") and line.endswith(">")]
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+def test_the_docs_selection_reaches_pytest_as_separate_files(
+    repo: Path, stubs: Path, shell: str
+) -> None:
+    _change(repo, {"docs/a.md": "x\n"})
+    lines = _shell(
+        repo, stubs, _command(_Run(repo)(), "the tests that read docs/"), shell
+    )
+    # xargs splits on blanks, so "b c.py" arrives as two words: the selectors
+    # print repo paths, none of which has a blank.
+    assert _args(lines)[:2] == ["run", "pytest"]
+    assert _args(lines)[-3:] == ["tests/a.py", "tests/b", "c.py"]
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+def test_the_integration_selection_reaches_pytest_as_separate_files(
+    repo: Path, stubs: Path, shell: str
+) -> None:
+    _change(repo, {"src/x.py": "x = 1\n"})
+    command = _command(_Run(repo)(), "the integration tests the change affects")
+    lines = _shell(repo, stubs, command, shell)
+    args = _args(lines)
+    assert lines[0] == "lab-remote"
+    assert args[-3:] == ["tests/a.py", "tests/b", "c.py"]
+    assert MARK.strip("'") in args
+
+
+def test_ci_and_preflight_name_the_same_integration_mark() -> None:
+    m = re.search(r'INTEGRATION_MARK_EXPR: "([^"]+)"', CI.read_text(encoding="utf-8"))
+    assert m is not None
+    assert MARK == f"'{m.group(1)}'"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "scripts/select_affected_integration_tests.py",
+        "scripts/assert_integration_affected_ran.py",
+    ],
+)
+def test_a_change_to_the_selector_selects_every_integration_file(
+    repo: Path, script: str
+) -> None:
+    _change(repo, {script: "x\n"})
+    cmd = _command(_Run(repo)(), "the integration tests the change affects")
+    assert cmd.startswith(
+        "f=$(uv run python scripts/select_affected_integration_tests.py --repo . --all) && "
+    )
