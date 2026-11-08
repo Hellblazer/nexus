@@ -29,6 +29,7 @@ import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -427,6 +428,59 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(outcome.sample().get(0).get("title")).isEqualTo("GC quarantine fixture gcq.doc.p3owner");
         assertThat(outcome.sample().get(0).get("text_prefix")).isEqualTo("x".repeat(80));
         assertThat(outcome.sample().toString()).doesNotContain("STALE");
+    }
+
+    private void flagSensitive(String tenant, String docId) throws SQLException {
+        try (var conn = pg.createConnection("")) {
+            DSL.using(conn, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SENSITIVE, true)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))).execute();
+        }
+    }
+
+    /**
+     * nexus-rfvyy.9 (RDR-243): the gc sample's label names a live owner in ANOTHER collection and shows the shared
+     * text's first 80 characters, so the engine withholds the label (title and text_prefix null, the chash kept) when
+     * a live flagged document anywhere holds the text, on the unbounded and the bounded function alike.
+     */
+    @Test
+    void gcSample_aLiveSensitiveOwnerInAnotherCollectionWithholdsTheLabel() throws Exception {
+        String originCol = originCol("s9-sample");
+        String ownerCol = originCol("s9-sample-owner");
+        String flagged = ch("gcq-s9-flagged");
+        String plain = ch("gcq-s9-plain");
+        seedChunk(TENANT_A, originCol, flagged, "secret ".repeat(20), "STALE row title");
+        seedChunk(TENANT_A, originCol, plain, "plain ".repeat(20), "STALE row title");
+        seedChunk(TENANT_A, ownerCol, flagged, "owner side", "owner side title");
+        seedChunk(TENANT_A, ownerCol, plain, "owner side 2", "owner side title");
+        seedManifest(TENANT_A, "gcq.doc.s9flagged", flagged, ownerCol);
+        seedManifest(TENANT_A, "gcq.doc.s9plain", plain, ownerCol);
+        flagSensitive(TENANT_A, "gcq.doc.s9flagged");
+
+        var outcome = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol("s9-sample"),
+            "2026-08-10T00:00:00Z", 20);
+
+        assertThat(outcome.moved()).isEqualTo(2);
+        var f = outcome.sample().stream().filter(m -> flagged.equals(m.get("chash"))).findFirst().orElseThrow();
+        assertThat(f.get("title")).as("withheld: a live flagged document holds this text").isNull();
+        assertThat(f.get("text_prefix")).isNull();
+        var p = outcome.sample().stream().filter(m -> plain.equals(m.get("chash"))).findFirst().orElseThrow();
+        assertThat(p.get("title")).isEqualTo("GC quarantine fixture gcq.doc.s9plain");
+        assertThat(outcome.sample().toString()).doesNotContain("secret").doesNotContain("s9flagged");
+
+        String bOrigin = originCol("s9-bsample");
+        String bFlagged = ch("gcq-s9-bflagged");
+        seedChunk(TENANT_A, bOrigin, bFlagged, "bsecret ".repeat(20), "STALE row title");
+        seedChunk(TENANT_A, ownerCol, bFlagged, "owner side 3", "owner side title");
+        seedManifest(TENANT_A, "gcq.doc.s9bflagged", bFlagged, ownerCol);
+        flagSensitive(TENANT_A, "gcq.doc.s9bflagged");
+
+        var bounded = vectorRepo.quarantineOrphansBounded(TENANT_A, bOrigin, quarantineCol("s9-bsample"),
+            "2026-08-10T00:00:00Z", 20, 10);
+
+        assertThat(bounded.sample()).hasSize(1);
+        assertThat(bounded.sample().get(0).get("chash")).isEqualTo(bFlagged);
+        assertThat(bounded.sample().get(0).get("title")).isNull();
+        assertThat(bounded.sample().get(0).get("text_prefix")).isNull();
     }
 
     @Test

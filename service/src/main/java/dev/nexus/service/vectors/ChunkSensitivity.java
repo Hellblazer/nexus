@@ -64,6 +64,47 @@ public final class ChunkSensitivity {
     }
 
     /**
+     * EXISTS a live sensitive document, in ANY collection of the tenant, whose manifest names the chunk text at {@code
+     * chash} (nexus-rfvyy.9). The label of a reapable chunk ({@link ChunkOwnerLabel}) names a live owner in another
+     * collection and shows the first characters of the shared text, so it is withheld when this holds. Not collection
+     * scoped like {@link #notSensitive}: the same text held by a flagged document anywhere is that document's text.
+     *
+     * @param chash the chunk row's raw {@code bytea} chash column (not the hex-converted field)
+     */
+    public static Condition ownedSensitiveAnywhere(Field<String> tenantId, Field<byte[]> chash) {
+        var m = CATALOG_DOCUMENT_CHUNKS;
+        var d = CATALOG_DOCUMENTS;
+        return DSL.exists(DSL.selectOne().from(m)
+            .join(d).on(d.TENANT_ID.eq(m.TENANT_ID).and(d.TUMBLER.eq(m.DOC_ID)))
+            .where(m.TENANT_ID.eq(tenantId))
+            .and(m.CHASH.eq(chash))
+            .and(d.DELETED_AT.isNull())
+            .and(d.SENSITIVE));
+    }
+
+    /**
+     * Of {@code chashHexes}, the ones {@link #ownedSensitiveAnywhere} holds for, as lower-case hex; one statement.
+     * For a label built in SQL (the gc quarantine sample, vectors-040) that the engine withholds after the call.
+     */
+    public static Set<String> ownedSensitiveAnywhere(DSLContext ctx, String tenant, Collection<String> chashHexes) {
+        Set<String> out = new HashSet<>();
+        if (chashHexes.isEmpty()) return out;
+        var m = CATALOG_DOCUMENT_CHUNKS;
+        var d = CATALOG_DOCUMENTS;
+        var keys = chashHexes.stream().map(h -> HexFormat.of().parseHex(h)).toList();
+        for (byte[] c : ctx.selectDistinct(m.CHASH).from(m)
+                .join(d).on(d.TENANT_ID.eq(m.TENANT_ID).and(d.TUMBLER.eq(m.DOC_ID)))
+                .where(m.TENANT_ID.eq(tenant))
+                .and(m.CHASH.in(keys))
+                .and(d.DELETED_AT.isNull())
+                .and(d.SENSITIVE)
+                .fetch(m.CHASH)) {
+            out.add(HexFormat.of().formatHex(c));
+        }
+        return out;
+    }
+
+    /**
      * What an exclude read of a chunk by address may serve: it has a LIVE owner and none of its live owners is
      * sensitive (nexus-rfvyy.7.4 review fix F1). {@link #notSensitive} alone passes a chunk with no live owner (its
      * sensitive document tombstoned, the chunk not yet reaped), which search and get never serve because they require a
