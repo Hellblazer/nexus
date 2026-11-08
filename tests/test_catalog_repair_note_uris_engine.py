@@ -54,7 +54,7 @@ def test_dry_run_writes_nothing_and_apply_rewrites_only_the_rewrite_candidate(t2
     runner = CliRunner()
     dry = runner.invoke(main, ["catalog", "repair-note-uris", "--json"])
     assert dry.exit_code == 0, dry.output
-    report = json.loads(dry.output)
+    report = json.loads(dry.stdout)
     assert report["apply"] is False
     assert (report["stale_live"], report["rewrite"], report["merge"], report["merge_twin"],
             report["refused"], report["tombstoned"]) == (2, 1, 1, 1, 0, 1)
@@ -111,7 +111,7 @@ def test_merge_pass_chunks_decide_the_twin_by_default_the_stale_row_when_it_hold
     runner = CliRunner()
     dry = runner.invoke(main, ["catalog", "repair-note-uris", "--merge", "--json"])
     assert dry.exit_code == 0, dry.output
-    plan = {d["winner"]: d for d in json.loads(dry.output)["plan"]}
+    plan = {d["winner"]: d for d in json.loads(dry.stdout)["plan"]}
     assert set(plan) == {w1, s2}
     assert plan[w1]["losers"] == [s1] and plan[w1]["rewrite_needed"] is False
     assert plan[s2]["losers"] == [w2] and plan[s2]["rewrite_needed"] is True
