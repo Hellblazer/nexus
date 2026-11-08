@@ -100,10 +100,10 @@ def test_slack_within_two_headrooms_passes_and_past_it_fails(repo: Path) -> None
 
 
 def test_slack_fraction_applies_to_large_files(repo: Path) -> None:
-    _write(repo, "conexus/agents/dev.md", 20000)  # 5% is 1000, above SLACK_MIN
-    _ceil(repo, _EXACT.replace("dev.md 2000", "dev.md 22000"))
+    _write(repo, "conexus/agents/dev.md", 20000)  # slack from the ceiling: 5% of 22222 is 1111
+    _ceil(repo, _EXACT.replace("dev.md 2000", "dev.md 22222"))
     assert cb.check(repo) == []
-    _ceil(repo, _EXACT.replace("dev.md 2000", "dev.md 22001"))
+    _ceil(repo, _EXACT.replace("dev.md 2000", "dev.md 22223"))
     assert any("lower it in this commit" in e for e in cb.check(repo))
 
 
@@ -146,9 +146,22 @@ def test_update_lowers_without_flag_and_refuses_raise_and_new(repo: Path) -> Non
 
 
 def test_the_ceilings_file_is_fast_lane_eligible() -> None:
-    """A plugin growth commit raises its ceiling in the same commit, and the plugin-only lane
-    refuses scripts/; tests/ is free there (scripts/check_plugin_only_eligibility.py)."""
-    assert cb.CEILINGS.startswith("tests/")
+    """A plugin growth commit raises its ceiling in the same commit, so the table must be a path
+    the plugin-only lane's own classifier accepts (scripts/ and the lane's harness are refused)."""
+    spec = importlib.util.spec_from_file_location("elig", _REPO / "scripts" / "check_plugin_only_eligibility.py")
+    assert spec and spec.loader
+    elig = importlib.util.module_from_spec(spec)
+    sys.modules["elig"] = elig
+    spec.loader.exec_module(elig)
+    for path in (cb.CEILINGS, "conexus/skills/x/SKILL.md"):
+        category, reason = elig.classify(elig.Change("M", path, "100644", "100644"), "base", "head", _REPO)
+        assert reason is None, (path, category, reason)
+    assert elig.classify(elig.Change("M", "scripts/context-budgets.txt", "100644", "100644"), "b", "h", _REPO)[1]
+
+
+def test_a_shrink_by_a_whole_headroom_passes_at_every_size(repo: Path) -> None:
+    for size in (500, 5140, 20000, 60000):
+        assert cb.accepted(size - cb.slack_allowed(size), cb.ceiling_for(size)), size
 
 
 def test_malformed_and_duplicate_lines_are_refused(repo: Path) -> None:

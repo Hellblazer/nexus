@@ -93,6 +93,12 @@ def ceiling_for(size: int) -> int:
     return size + slack_allowed(size)
 
 
+def accepted(size: int, ceiling: int) -> bool:
+    """Whether check accepts this ceiling: not exceeded, and at most two slacks above the file.
+    The slack is taken from the ceiling, so a shrink by a whole headroom passes at every size."""
+    return size <= ceiling <= size + 2 * slack_allowed(ceiling)
+
+
 def check(root: Path) -> list[str]:
     sizes = measure(root)
     ceilings = read_ceilings(root / CEILINGS)
@@ -112,9 +118,9 @@ def check(root: Path) -> list[str]:
                 "loaded on demand (a legitimate raise: update-exceptions --allow-raise, with the "
                 "reason in the commit message)"
             )
-        elif c - n > 2 * slack_allowed(n):
+        elif not accepted(n, c):
             errors.append(
-                f"{p}: {n} bytes, {c - n} below its ceiling of {c} (more than {2 * slack_allowed(n)}); "
+                f"{p}: {n} bytes, {c - n} below its ceiling of {c} (more than {2 * slack_allowed(c)}); "
                 "the shrink is real, so lower it in this commit: "
                 "python3 scripts/context_budgets.py update-exceptions"
             )
@@ -142,7 +148,7 @@ def update_exceptions(root: Path, allow_raise: bool) -> list[str]:
         c = old.get(p)
         # An entry check accepts stays as it is (no churn on a shared file); a new, raised or
         # too-slack one is rewritten at the file's size plus its headroom.
-        new[p] = c if c is not None and n <= c <= n + 2 * slack_allowed(n) else ceiling_for(n)
+        new[p] = c if c is not None and accepted(n, c) else ceiling_for(n)
     (root / CEILINGS).write_text(
         _HEADER + "".join(f"{p} {c}\n" for p, c in new.items()), encoding="utf-8", newline="\n"
     )
