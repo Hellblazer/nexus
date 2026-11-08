@@ -46,6 +46,8 @@ from typing import Any
 import click
 import httpx
 
+from nexus._winsec import open_private
+
 #: The counts a report must carry, as integers, before anything is written on its strength.
 _COUNT_KEYS: tuple[str, ...] = (
     "stale_live",
@@ -299,9 +301,9 @@ def repair_note_uris_cmd(
         else:
             path = ledger_path or _default_ledger_path()
             try:
-                # Owner-only: the ledger names every rewritten note's title.
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-                ledger_fh = os.fdopen(fd, "a", encoding="utf-8")  # noqa: SIM115 — closed in the finally below
+                # Owner-only, on Windows too: the ledger names every rewritten note's title.
+                fd = open_private(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+                ledger_fh = os.fdopen(fd, "a", encoding="utf-8", newline="")  # noqa: SIM115 — closed in the finally below
             except OSError as exc:
                 raise click.ClickException(
                     f"cannot open the ledger {path!r} ({exc}). Nothing was written."
