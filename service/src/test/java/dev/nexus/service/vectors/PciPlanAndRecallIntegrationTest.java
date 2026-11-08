@@ -1135,9 +1135,9 @@ class PciPlanAndRecallIntegrationTest {
      * PciCanaryTest), and the canary's mean and min are the ones a second count gives on the same index (its own
      * exact top-k and arithmetic; the HNSW retrieval is the same engine path). It pins no colour and no recall floor.
      * Canary sensitivity is test 2's and near-query index health is tests 1 and 5's; no test pins far-query recall,
-     * which is a draw on this fixture. The figures, every cell and the pgvector version print before any assert, so
-     * a red in CI carries its own evidence. The first cloud {@code queries=} readings
-     * decide whether one far query turns a healthy production index red.
+     * which is a draw on this fixture. The canary's line prints first and every assert names it; every cell and the
+     * pgvector version print before the counted-figure asserts, so a red in CI carries its own evidence. The first
+     * cloud {@code queries=} readings decide whether one far query turns a healthy production index red.
      */
     @Test
     @Order(19)
