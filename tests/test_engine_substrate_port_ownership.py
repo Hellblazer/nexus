@@ -151,7 +151,23 @@ class _Harness:
                 verdict = harness.engine_script.pop(0) if harness.engine_script else "ok"
                 self.returncode: int | None = None
                 self._polls_before_death: int | None = None
-                if verdict in ("ok", "wrong_port", "longer_port", "dies_after_ready"):
+                self._scripted: list[str] = []
+                self._out = stdout
+                if verdict in ("advancing", "advancing_then_silent"):
+                    # A healthy engine migrating slowly: one scripted line per poll(), then
+                    # (advancing) the ready line, or (advancing_then_silent) nothing more.
+                    listener = _HELD.pop(port)
+                    listener.listen(16)
+                    _ENGINE_SOCKETS.append(listener)
+                    self._scripted.append("INFO  SchemaMigrator - event=schema_migration_pending changesets=400")
+                    count = 80 if verdict == "advancing" else 10
+                    self._scripted += [f"Running Changeset: db/changelog/cs-{n}.xml::cs-{n}::nexus-test" for n in range(count)]
+                    if verdict == "advancing":
+                        self._scripted += [
+                            "INFO  SchemaMigrator - event=schema_migration_complete new_changesets=400",
+                            f"INFO  NexusService - event=service_started port={port}",
+                        ]
+                elif verdict in ("ok", "wrong_port", "longer_port", "dies_after_ready"):
                     # An engine that bound its port: the held socket starts listening.
                     listener = _HELD.pop(port)
                     listener.listen(16)
@@ -171,6 +187,9 @@ class _Harness:
                 stdout.flush()
 
             def poll(self) -> int | None:
+                if self._scripted:
+                    self._out.write(self._scripted.pop(0).encode() + b"\n")
+                    self._out.flush()
                 if self._polls_before_death is not None:
                     if self._polls_before_death > 0:
                         self._polls_before_death -= 1
@@ -210,6 +229,31 @@ def _harness(tmp_path, monkeypatch, *, pg_ports, engine_ports, engine_script, pg
     return h
 
 
+class _FakeTime:
+    """A clock that moves only when the wait sleeps, wired into ``_boot``'s wait so a test
+    of window arithmetic does not depend on how fast a loaded host schedules it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _fake_wait_time(monkeypatch: pytest.MonkeyPatch) -> _FakeTime:
+    fake = _FakeTime()
+    real = sub._wait_engine_ready
+
+    def _wait(*args, **kwargs):
+        return real(*args, **kwargs, clock=fake, sleep=fake.sleep)
+
+    monkeypatch.setattr(sub, "_wait_engine_ready", _wait)
+    return fake
+
+
 class _AliveProc:
     """A process that never exits."""
 
@@ -223,7 +267,7 @@ class TestEngineListenerIdentity:
     ) -> None:
         """The JVM has not bound the port; a foreign listener answers. The connect
         succeeds, and the boot must still not report ready."""
-        monkeypatch.setattr(sub, "_ENGINE_READY_TIMEOUT_S", 0.5, raising=False)
+        monkeypatch.setattr(sub, "_ENGINE_STALL_S", 0.5)
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
         _harness(
             tmp_path, monkeypatch,
@@ -233,6 +277,71 @@ class TestEngineListenerIdentity:
         )
         with pytest.raises(RuntimeError, match=str(foreign_listener.port)):
             sub._boot()
+
+    def test_a_foreign_listener_timeout_names_the_stall_and_keeps_the_log_tail(
+        self, tmp_path, monkeypatch, foreign_listener,
+    ) -> None:
+        fake = _fake_wait_time(monkeypatch)
+        monkeypatch.setattr(sub, "_ENGINE_STALL_S", 5.0)
+        monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
+        _harness(
+            tmp_path, monkeypatch,
+            pg_ports=[_reserve_port()],
+            engine_ports=[foreign_listener.port],
+            engine_script=["silent"],
+        )
+        with pytest.raises(RuntimeError) as err:
+            sub._boot()
+        assert "stalled before any migration output" in str(err.value)
+        assert "Tail of engine log" in str(err.value)
+        assert 5.0 <= fake.now < 6.0
+
+    def test_a_migration_that_outlives_the_stall_window_in_total_still_binds(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Run 42436306115 through ``_boot``: the engine logs a changeset on every poll
+        for 0.8 s of wait time, longer than the 0.5 s window (60 s / 180 s there), then
+        binds. A fixed deadline of that length gave up on it. The clock is the wait's own,
+        so a scheduler pause on a loaded host cannot lapse the window."""
+        fake = _fake_wait_time(monkeypatch)
+        monkeypatch.setattr(sub, "_ENGINE_STALL_S", 0.5)
+        monkeypatch.setattr(sub, "_ENGINE_MIGRATING_STALL_S", 0.5)
+        monkeypatch.setattr(sub, "_ENGINE_CEILING_S", 30.0)
+        monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
+        port = _reserve_port()
+        h = _harness(
+            tmp_path, monkeypatch,
+            pg_ports=[_reserve_port()],
+            engine_ports=[port],
+            engine_script=["advancing"],
+        )
+        state = sub._boot()
+        assert fake.now > 0.5, "the boot ended inside the stall window, so it proved nothing"
+        assert state["base_url"] == f"http://127.0.0.1:{port}"
+        assert h.spawned_ports == [port]
+
+    def test_a_migration_that_stops_advancing_fails_naming_the_changeset_and_the_tail(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        fake = _fake_wait_time(monkeypatch)
+        monkeypatch.setattr(sub, "_ENGINE_STALL_S", 0.3)
+        monkeypatch.setattr(sub, "_ENGINE_MIGRATING_STALL_S", 0.3)
+        monkeypatch.setattr(sub, "_ENGINE_CEILING_S", 30.0)
+        monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
+        _harness(
+            tmp_path, monkeypatch,
+            pg_ports=[_reserve_port()],
+            engine_ports=[_reserve_port()],
+            engine_script=["advancing_then_silent"],
+        )
+        with pytest.raises(RuntimeError) as err:
+            sub._boot()
+        text = str(err.value)
+        assert "did not bind port" in text
+        assert "stalled at db/changelog/cs-9.xml::cs-9::nexus-test" in text
+        assert "Tail of engine log" in text
+        assert "Running Changeset: db/changelog/cs-9.xml" in text
+        assert fake.now < 1.0
 
     def test_an_engine_that_lost_the_bind_race_is_retried_on_a_new_port(
         self, tmp_path, monkeypatch, foreign_listener,
@@ -258,7 +367,7 @@ class TestEngineListenerIdentity:
     ) -> None:
         """A dead JVM is read from ``poll()``, not waited out: with a 30 s readiness
         timeout in force the failure must still land in seconds, carrying the log tail."""
-        monkeypatch.setattr(sub, "_ENGINE_READY_TIMEOUT_S", 30.0, raising=False)
+        monkeypatch.setattr(sub, "_ENGINE_STALL_S", 30.0)
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
         h = _harness(
             tmp_path, monkeypatch,
@@ -281,7 +390,7 @@ class TestEngineListenerIdentity:
         """The right event for a DIFFERENT port (``port=N+1``), and a LONGER port that
         begins with this one's digits (``port=N4``), are not this engine's ready line,
         even though the listener answers a connect."""
-        monkeypatch.setattr(sub, "_ENGINE_READY_TIMEOUT_S", 0.5, raising=False)
+        monkeypatch.setattr(sub, "_ENGINE_STALL_S", 0.5)
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
         _harness(
             tmp_path, monkeypatch,
@@ -300,13 +409,13 @@ class TestEngineListenerIdentity:
         log = tmp_path / "engine.log"
         for ending in ("\n", "\r\n", ""):
             log.write_text(f"INFO  NexusService - {sub._ENGINE_READY_PREFIX}{port}{ending}")
-            sub._wait_engine_ready(_AliveProc(), port, str(log), timeout=0.2)
+            sub._wait_engine_ready(_AliveProc(), port, str(log), stall_s=0.2, ceiling_s=2.0)
 
     def test_an_engine_that_dies_after_the_ready_line_is_not_ready(
         self, tmp_path, monkeypatch,
     ) -> None:
         """Marker present and the port answers, then the process is found dead."""
-        monkeypatch.setattr(sub, "_ENGINE_READY_TIMEOUT_S", 5.0, raising=False)
+        monkeypatch.setattr(sub, "_ENGINE_STALL_S", 5.0)
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
         h = _harness(
             tmp_path, monkeypatch,
@@ -324,7 +433,7 @@ class TestEngineListenerIdentity:
     ) -> None:
         """All three failure branches end in the same state: group killed, log handle
         closed, Postgres stopped."""
-        monkeypatch.setattr(sub, "_ENGINE_READY_TIMEOUT_S", 0.3, raising=False)
+        monkeypatch.setattr(sub, "_ENGINE_STALL_S", 0.3)
         monkeypatch.setattr(sub, "_ENGINE_POLL_S", 0.01, raising=False)
         opened: list = []
         real_open = open
