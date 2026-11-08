@@ -1778,3 +1778,4 @@ Steps 4, 8 and 10-12 from this RDR's acceptance.
   seed gates and an identity-first path resolution. Release gates renamed,
   Step 0 measurement added, open questions costed with recommendations,
   terms defined.
+- 2026-11-08: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `962a93b3c`; critique `nexus_rdr/193-gate-critique-2026-11-08-r3`.
