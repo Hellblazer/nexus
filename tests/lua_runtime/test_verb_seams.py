@@ -21,10 +21,17 @@ import pytest
 
 from nexus.lua_runtime import errors, verb_types, verbs
 from tests._module_seam import setattr_in
-from nexus.lua_runtime.verb_types import ParamSpec, VerbError, VerbSpec, check_args
+from nexus.lua_runtime.verb_types import (
+    ParamSpec,
+    VerbArgError,
+    VerbError,
+    VerbSpec,
+    check_args,
+    encode_result,
+)
 
 
-def _fn(*args: object, deadline: float) -> object:
+def _fn(*args: object, deadline: float, ctx: object) -> object:
     return list(args)
 
 
@@ -158,7 +165,7 @@ def test_build_table_keys_by_name() -> None:
 
 _SPEC_SRC = (
     "from nexus.lua_runtime.verb_types import VerbSpec\n"
-    "def fn(*a, deadline): return None\n"
+    "def fn(*a, deadline, ctx): return None\n"
     "VERBS = (VerbSpec({name!r}, (), fn),)\n"
 )
 
@@ -304,3 +311,55 @@ def test_verb_types_and_errors_import_in_a_bare_child() -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "[]", proc.stdout
+
+
+def test_argument_refusals_are_verb_arg_errors() -> None:
+    # The parent tells bad_args from verb_error by class.
+    with pytest.raises(VerbArgError):
+        check_args(_GET, ["p"])
+    with pytest.raises(VerbArgError):
+        check_args(_GET, ["p", 3])
+    with pytest.raises(VerbArgError):
+        check_args(_GET, "pt")
+
+
+@pytest.mark.parametrize(
+    "fn",
+    [
+        lambda *a: None,
+        lambda *a, deadline: None,
+        lambda *a, ctx: None,
+    ],
+)
+def test_a_verb_fn_without_deadline_and_ctx_keywords_is_refused(fn: object) -> None:
+    with pytest.raises(ValueError, match="takes no keyword"):
+        VerbSpec("x.y", (), fn)  # type: ignore[arg-type]
+
+
+def test_a_verb_fn_with_var_keywords_is_accepted() -> None:
+    VerbSpec("x.y", (), lambda *a, **kw: None)
+
+
+def test_encode_result_is_compact_utf8_and_refuses_non_json() -> None:
+    assert encode_result({"a": ["é", 1]}) == '{"a":["é",1]}'.encode()
+    for bad in (float("nan"), {1, 2}, object()):
+        with pytest.raises(VerbError, match="not JSON"):
+            encode_result(bad)  # type: ignore[arg-type]
+
+
+def test_encode_result_refuses_over_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verb_types, "VERB_RESULT_CAP_BYTES", 8)
+    assert encode_result("123456") == b'"123456"'
+    with pytest.raises(VerbError, match="over the 8 cap"):
+        encode_result("1234567")
+
+
+def test_errors_refuse_unknown_kinds_and_limits_and_carry_stats() -> None:
+    with pytest.raises(ValueError, match="kind"):
+        errors.ScriptError("weird", "x")
+    with pytest.raises(ValueError, match="limit"):
+        errors.ScriptLimitError("weird", 1)
+    e = errors.ScriptLimitError("memory", 64, stats={"peak_lua_bytes": 9})
+    assert e.stats == {"peak_lua_bytes": 9}
+    assert set(errors.KINDS) == {"static_check", "lua", "result", "header", "args"}
+    assert "cpu_time" in errors.LIMITS
