@@ -25,11 +25,13 @@ The pieces, in the order a run meets them:
   per granted verb, and then wipes the real ``_G`` (items 7 and 9).
 * The source is refused when its first byte is 27, then compiled in text mode
   with ``load(src, "=script", "t", env)`` (item 8).
-* A count hook every ``HOOK_EVERY`` instructions enforces the instruction and
-  wall-time limits; once a limit trips it rearms to fire on every instruction,
-  and raises whenever the interrupted code is the script's. The guarded
-  ``pcall`` re-raises a tripped limit, a memory error and a stack overflow
-  (item 11 and the Key Discoveries on the two ``pcall`` escapes).
+* A count hook every ``min(HOOK_EVERY, limits.instructions)`` instructions
+  enforces the instruction and wall-time limits; once a limit trips it rearms to
+  fire on every instruction, and raises whenever the interrupted code is the
+  script's. The guarded ``pcall`` re-raises a tripped limit, a memory error and a
+  stack overflow (item 11 and the Key Discoveries on the two ``pcall`` escapes).
+  The rearmed hook and the guarded ``pcall`` each stop a script that swallows a
+  tripped limit with ``pcall`` without the other (``test_runtime_limits.py``).
 * The returned value is walked into JSON by host Lua, inside a protected call,
   bounded by ``limits.result`` bytes and ``limits.depth`` levels (item 12).
 
@@ -37,7 +39,22 @@ Everything that can fail runs in Lua and comes back as a status and a string,
 so a limit is classified from state the script cannot reach (the ``tripped``
 upvalue of the host chunk), never from a message the script can write. The
 exceptions are a script that spells the message of a memory or a stack error
-itself: it is then filed as that limit, which hurts only the script.
+itself: it is then filed as that limit, which hurts only the script. A verb's
+own error text is not one of them: the verb function remembers the last error it
+raised, and the first time that exact string is caught or reaches the runner it
+is an ordinary Lua error whatever it says.
+
+Text that crosses into Lua is valid UTF-8: the dispatcher re-encodes every
+string it returns (``errors="replace"``) and refuses a string verb result that
+does not encode, so a lone surrogate from the wire never becomes a Python
+exception object in the script. A verb call takes at most ``MAX_VERB_ARGS``
+arguments.
+
+JSON ``null`` in a verb result becomes Lua ``nil``, and a table cannot hold
+``nil``: ``[1, null, 3]`` is a table with a hole (``r[2] == nil``; returning it
+unchanged is "an array with holes"), ``[null, null]`` is ``{}``, ``{"a": null}``
+drops the key ``a``, and an empty list or object is ``{}``. A script that needs
+to tell ``null`` from absent has to ask the verb for a shape without ``null``.
 
 Standard library, ``lupa`` and the worker's own modules only: this runs in
 ``python -I`` with an empty environment.
@@ -62,6 +79,9 @@ from nexus.lua_runtime.verb_types import JSONValue
 
 #: The count hook fires every this many VM instructions. A limit below it is reached at the first hook.
 HOOK_EVERY: int = 10_000
+
+#: A verb call with more arguments than this is refused in Lua before any argument is read (every verb takes four or fewer).
+MAX_VERB_ARGS: int = 16
 
 #: ``LUAI_MAXSTACK`` of Lua 5.4, the value a ``stack`` limit error carries (both the Lua stack and
 #: the C stack overflow are this limit).
@@ -128,9 +148,12 @@ local BASE = __BASE__
 local MEMBERS = __MEMBERS__
 local MEMERR = "not enough memory"
 local MAX_MESSAGE = __MAX_MESSAGE__
+local MAX_ARGS = __MAX_ARGS__
 
 return function(dispatch, fetch, clock, t0, names, max_instr, wall, every, max_depth, max_bytes)
   local count, tripped, peak = 0, nil, 0
+  -- The last error text a verb function raised, until it is first caught or reaches the runner.
+  local verb_error = nil
   local hook
 
   -- The limit state lives here, in upvalues no script can reach.
@@ -160,12 +183,16 @@ return function(dispatch, fetch, clock, t0, names, max_instr, wall, every, max_d
     if ok then return true, ... end
     local e = ...
     if not tripped and type(e) == "string" then
-      if e == MEMERR then
-        tripped = "memory"
-      elseif find(e, "stack overflow", 1, true) or e == "error in error handling" then
-        tripped = "stack"
+      if e == verb_error then
+        verb_error = nil -- a verb's own message: an ordinary error, whatever it says
+      else
+        if e == MEMERR then
+          tripped = "memory"
+        elseif find(e, "stack overflow", 1, true) or e == "error in error handling" then
+          tripped = "stack"
+        end
+        if tripped then sethook(hook, "", 1) end
       end
-      if tripped then sethook(hook, "", 1) end
     end
     if tripped then error(e, 0) end
     return false, ...
@@ -188,6 +215,7 @@ return function(dispatch, fetch, clock, t0, names, max_instr, wall, every, max_d
   local function make_verb(full)
     return function(...)
       local n = select("#", ...)
+      if n > MAX_ARGS then error(full .. ": too many arguments (at most " .. MAX_ARGS .. ")", 0) end
       for i = 1, n do
         local a = select(i, ...)
         local t = type(a)
@@ -202,6 +230,7 @@ return function(dispatch, fetch, clock, t0, names, max_instr, wall, every, max_d
       local err = dispatch(full, n, ...)
       if err then
         if err == true then trip("memory") end
+        verb_error = err
         error(err, 0)
       end
       return fetch()
@@ -235,7 +264,7 @@ return function(dispatch, fetch, clock, t0, names, max_instr, wall, every, max_d
     local ns, member = match(full, "^([^.]+)%.(.+)$")
     local t = namespaces[ns]
     if not t then
-      if env[ns] ~= nil then error("verb namespace collides with the environment: " .. ns, 0) end
+      -- a namespace that collides with the environment was refused by _validated_grants
       t = {}
       namespaces[ns] = t
       env[ns] = t
@@ -344,6 +373,7 @@ return function(dispatch, fetch, clock, t0, names, max_instr, wall, every, max_d
   local function classify(e)
     local t = type(e)
     if t == "string" then
+      if e == verb_error then verb_error = nil return "lua", clean(e) end
       if e == MEMERR then return "limit", "memory" end
       if find(e, "stack overflow", 1, true) or e == "error in error handling" then return "limit", "stack" end
       return "lua", clean(e)
@@ -364,6 +394,7 @@ return function(dispatch, fetch, clock, t0, names, max_instr, wall, every, max_d
     if byte(src, 1) == 27 then return nil, "binary chunks are refused" end
     local f, err = load(src, "=script", "t", env)
     if f then return f end
+    if err == MEMERR then return nil, MEMERR, "memory" end
     return nil, clean(err)
   end
 
@@ -396,6 +427,7 @@ _BOOT = (
     _BOOT_TEMPLATE.replace("__BASE__", _lua_names(BASE_FUNCTIONS))
     .replace("__MEMBERS__", _lua_members(LIB_MEMBERS))
     .replace("__MAX_MESSAGE__", str(MAX_MESSAGE_BYTES))
+    .replace("__MAX_ARGS__", str(MAX_VERB_ARGS))
 )
 
 # --- grants and the dispatcher ----------------------------------------------------------------------
@@ -461,6 +493,13 @@ class _Dispatcher:
         return value
 
     def dispatch(self, name: str, n: int, *args: Any) -> str | bool | None:
+        reply = self._dispatch(name, n, *args)
+        if isinstance(reply, str):
+            # whatever the text, it must encode: lupa raises a Python exception into Lua otherwise
+            reply = reply.encode("utf-8", errors="replace").decode("utf-8")
+        return reply
+
+    def _dispatch(self, name: str, n: int, *args: Any) -> str | bool | None:
         try:
             if name not in self._grants:
                 return f"{name}: verb not granted"
@@ -475,6 +514,8 @@ class _Dispatcher:
                 return str(exc)
             if not isinstance(result, _JSON_RESULT):
                 return f"{name}: the verb returned a value that is not JSON"
+            if isinstance(result, str) and _argument_problem(result):
+                return f"{name}: the verb returned a string that is not valid UTF-8"
             try:
                 self._pending = self._build(result)
             except lua.LuaMemoryError:
@@ -512,21 +553,17 @@ def run(
     """
     started = time.monotonic()
     names = _validated_grants(grants)
-    rt = lua.LuaRuntime(
-        register_eval=False,
-        register_builtins=False,
-        unpack_returned_tuples=False,
-        attribute_filter=_refuse,
-        max_memory=limits.memory,
-    )
-    rt.set_overflow_handler(float)
-    builder = LuaTableBuilder(rt)
+    # Built inside the try below: a memory limit too small for the interpreter itself is the memory limit.
+    rt: lua.LuaRuntime | None = None
+    builder: LuaTableBuilder | None = None
     peak = 0
     lua_stats: Callable[[], tuple[int, float]] | None = None
     lua_status: Callable[[], str | None] | None = None
 
     def sample() -> None:
         nonlocal peak
+        if rt is None:
+            return
         used = rt.get_memory_used() or 0
         if used > peak:
             peak = used
@@ -541,7 +578,12 @@ def run(
                 pass
         return {"peak_lua_bytes": max(peak, int(lua_peak)), "instructions": int(count)}
 
-    dispatcher = _Dispatcher(frozenset(names), call_verb, builder.build, sample)
+    def build(value: Any) -> Any:
+        assert builder is not None
+        return builder.build(value)
+
+    dispatcher = _Dispatcher(frozenset(names), call_verb, build, sample)
+    every = max(1, min(HOOK_EVERY, int(limits.instructions)))
     limit_values = {
         "instructions": limits.instructions,
         "memory": limits.memory,
@@ -556,6 +598,15 @@ def run(
         return ScriptLimitError(name, limit_values[kind], stats=stats())
 
     try:
+        rt = lua.LuaRuntime(
+            register_eval=False,
+            register_builtins=False,
+            unpack_returned_tuples=False,
+            attribute_filter=_refuse,
+            max_memory=limits.memory,
+        )
+        rt.set_overflow_handler(float)
+        builder = LuaTableBuilder(rt)
         boot = rt.execute(_BOOT)
         compile_, run_main, lua_stats, lua_status = boot(
             dispatcher.dispatch,
@@ -565,12 +616,14 @@ def run(
             rt.table_from(names),
             limits.instructions,
             float(limits.wall_time),
-            HOOK_EVERY,
+            every,
             limits.depth,
             limits.result,
         )
         compiled = compile_(source)
         if isinstance(compiled, tuple):
+            if len(compiled) > 2:  # load() ran out of memory
+                raise limit_error("memory")
             raise ScriptError("lua", str(compiled[1]), stats=stats())
         status, payload = run_main(compiled, builder.build(dict(args)))
     except lua.LuaMemoryError:

@@ -20,8 +20,8 @@ import lupa.lua54 as lua
 import pytest
 
 from nexus.lua_runtime import runtime, static_check
-from nexus.lua_runtime.errors import ScriptError
-from tests.lua_runtime._runtime_support import run_lua
+from nexus.lua_runtime.errors import ScriptError, ScriptLimitError
+from tests.lua_runtime._runtime_support import DEFAULT, run_lua
 
 #: Every global named in Key Discoveries and the probes, plus the neighbours a port could add.
 DANGEROUS_GLOBALS = (
@@ -60,8 +60,13 @@ def test_the_runtime_takes_the_static_checks_lists_not_a_copy() -> None:
 
 
 def test_pcall_in_the_environment_is_the_guarded_one() -> None:
-    value, _ = run_lua("return tostring(pcall):sub(1, 9), pcall ~= nil")
-    assert value is not None  # an ordinary function value reaches the script
+    """The native pcall would hand a memory overrun back as a value; the guarded one ends the run."""
+    with pytest.raises(ScriptLimitError) as exc:
+        run_lua(
+            "local ok, e = pcall(string.rep, 'x', 1000000000) return {ok, e}",
+            limits=DEFAULT.with_(memory=16 * 1024 * 1024),
+        )
+    assert exc.value.limit == "memory"
 
 
 # ---- the string metatable and string.dump -------------------------------------------------
@@ -344,8 +349,16 @@ def test_a_verb_function_cannot_be_opened() -> None:
     ],
 )
 def test_a_verb_refuses_an_argument_that_is_not_a_plain_value_before_the_dispatcher(
-    call: str, fragment: str
+    call: str, fragment: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    dispatches: list[object] = []
+    real = runtime._Dispatcher.dispatch
+
+    def counting(self: object, *a: object) -> object:
+        dispatches.append(a)
+        return real(self, *a)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runtime._Dispatcher, "dispatch", counting)
     calls: list[object] = []
     value, _ = run_lua(
         f"local ok, e = pcall(function() return {call} end) return {{ok, type(e), e}}",
@@ -356,6 +369,7 @@ def test_a_verb_refuses_an_argument_that_is_not_a_plain_value_before_the_dispatc
     assert value[1] == "string"
     assert fragment in value[2]
     assert calls == []
+    assert dispatches == []  # the Lua layer refused it; the Python dispatcher was never reached
 
 
 # ---- the corpus of the static check, run with the check bypassed --------------------------------

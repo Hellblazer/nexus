@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 
 import pytest
 
@@ -183,6 +184,17 @@ def test_a_shared_but_acyclic_subtable_is_fine() -> None:
     assert _value("local s = {1} return {s, s, {s}}") == [[1], [1], [[1]]]
 
 
+@pytest.mark.parametrize("size", [10 * MIB, 20 * MIB])
+def test_a_result_string_of_control_bytes_over_the_cap_is_the_result_limit_checked_before_copying(size: int) -> None:
+    """Each \\1 escapes to six bytes; without the size check the escape copy runs out of memory first."""
+    started = time.monotonic()
+    with pytest.raises(ScriptLimitError) as exc:
+        run_lua(f"return string.rep('\\1', {size})", limits=DEFAULT.with_(wall_time=30.0))
+    assert exc.value.limit == "result"
+    assert exc.value.value == 1 * MIB
+    assert time.monotonic() - started < 3
+
+
 def test_a_userdata_result_is_refused_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
     class Thing:
         pass
@@ -255,6 +267,16 @@ def test_a_long_error_message_is_cut_on_a_character_boundary() -> None:
     assert set(detail[:-3]) == {"é"}
 
 
+def test_a_long_error_message_with_three_byte_characters_is_cut_back_to_a_boundary() -> None:
+    """2048 is not a multiple of 3, so the cut lands inside a character and has to move back to its start."""
+    with pytest.raises(ScriptError) as exc:
+        run_lua("error(string.rep('\\u{20ac}', 100000), 0)")
+    detail = exc.value.detail
+    assert detail.endswith("...")
+    assert set(detail[:-3]) == {"\u20ac"}
+    assert len(detail[:-3]) == 682  # 682 whole characters, 2046 bytes: the cut moved back two bytes
+
+
 @pytest.mark.parametrize(
     "source",
     ["return function(", "x = = 1", "return 'unfinished", "return 'unfinished \xff\xfe\n", "goto nowhere", "return \xff"],
@@ -314,3 +336,15 @@ def test_stats_on_success() -> None:
 def test_stats_on_a_result_error_and_a_lua_error() -> None:
     err = _result_error("local s = string.rep('x', 3 * 1024 * 1024) return function() end")
     assert err.stats["peak_lua_bytes"] >= 3 * MIB  # type: ignore[index]
+
+
+def test_a_lua_error_outside_the_scripts_own_pcall_still_carries_stats(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The branch for a Lua error that escapes the runner (here the boot chunk fails): kind lua, with stats."""
+    monkeypatch.setattr(runtime, "_BOOT", 'error("boot failed", 0)')
+    with pytest.raises(ScriptError) as exc:
+        run_lua("return 1")
+    assert exc.value.kind == "lua"
+    assert "boot failed" in exc.value.detail
+    assert exc.value.stats is not None
+    assert set(exc.value.stats) == {"peak_lua_bytes", "instructions"}
+    assert exc.value.stats["peak_lua_bytes"] > 0

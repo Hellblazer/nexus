@@ -116,6 +116,11 @@ _ISOLATED = textwrap.dedent(
         result: int = 1024 * 1024
         depth: int = 32
 
+    patched = runtime._BOOT
+    for old, new in json.loads(sys.argv[2]):
+        assert old in patched, "patch site absent: " + repr(old)
+        patched = patched.replace(old, new)
+    runtime._BOOT = patched
     try:
         runtime.run(sys.argv[1].encode(), frozenset(), {}, L(), lambda n, a: None)
         out = {"ended": "returned"}
@@ -128,7 +133,9 @@ _ISOLATED = textwrap.dedent(
 )
 
 
-def _run_isolated(source: str, timeout: float = 60.0) -> dict[str, str]:
+def _run_isolated(
+    source: str, timeout: float = 60.0, patches: tuple[tuple[str, str], ...] = ()
+) -> dict[str, str]:
     """Run *source* in a fresh ``python -I`` process, so a guard that fails hangs a child, not the suite.
 
     A script at the C-stack limit is the one place the count hook cannot run, so in process nothing
@@ -137,14 +144,14 @@ def _run_isolated(source: str, timeout: float = 60.0) -> dict[str, str]:
     """
     try:
         done = subprocess.run(
-            [sys.executable, "-I", "-c", _ISOLATED, source],
+            [sys.executable, "-I", "-c", _ISOLATED, source, json.dumps(patches)],
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
         )
     except subprocess.TimeoutExpired:
-        pytest.fail(f"the script was still running after {timeout} s: the C-stack guard did not stop it")
+        pytest.fail(f"the script was still running after {timeout} s: a limit layer did not stop it")
     assert done.returncode == 0, done.stderr[-2000:]
     return json.loads(done.stdout.strip().splitlines()[-1])  # type: ignore[no-any-return]
 
@@ -170,6 +177,45 @@ def test_a_pcall_loop_that_dies_at_the_c_stack_limit_in_process_is_a_stack_limit
     )
     assert err.limit == "stack"
     _assert_stats(err)
+
+
+# Each layer alone. Two layers stop a script that swallows a tripped limit with pcall: the hook rearms
+# to fire on every instruction once a limit trips (and raises in the script's code), and the guarded
+# pcall re-raises a tripped limit. Either is enough; each is pinned with the other taken out of the
+# boot chunk, in a child process because a layer that fails leaves a loop that never ends.
+
+_NO_REARM = (('tripped = kind\n    sethook(hook, "", 1)\n', "tripped = kind\n"),)
+_NO_GUARD = (("if tripped then error(e, 0) end\n    return false, ...", "return false, ..."),)
+_NO_RAISE = (('if info and info.source == "=script" then error("script limit: " .. tripped, 0) end', ""),)
+
+_SWALLOWERS = [
+    "while true do pcall(function() while true do end end) end",
+    "while true do pcall(function() pcall(function() while true do end end) end) end",
+    "local n = 0 while true do local ok = pcall(function() n = n + 1 while true do end end) end",
+]
+
+
+@pytest.mark.parametrize("source", _SWALLOWERS)
+def test_the_guarded_pcall_alone_stops_a_swallow_loop(source: str) -> None:
+    out = _run_isolated(source, timeout=30.0, patches=_NO_REARM)
+    assert out == {"ended": "limit", "limit": "instructions"}
+
+
+@pytest.mark.parametrize("source", _SWALLOWERS)
+def test_the_rearmed_hook_alone_stops_a_swallow_loop(source: str) -> None:
+    out = _run_isolated(source, timeout=30.0, patches=_NO_GUARD)
+    assert out == {"ended": "limit", "limit": "instructions"}
+
+
+def test_the_rearmed_hooks_raise_is_what_stops_a_swallow_loop_without_the_guard() -> None:
+    """Without the guard and without the hook's raise nothing is left, so the loop runs on (the child is killed)."""
+    with pytest.raises(pytest.fail.Exception, match="still running"):
+        _run_isolated(_SWALLOWERS[0], timeout=8.0, patches=_NO_GUARD + _NO_RAISE)
+
+
+def test_a_layer_patch_that_matches_nothing_fails_rather_than_passing_vacuously() -> None:
+    with pytest.raises(AssertionError):
+        _run_isolated("return 1", patches=(("no such site", ""),))
 
 
 def test_the_guarded_pcall_still_catches_an_ordinary_error() -> None:
@@ -202,6 +248,85 @@ def test_pcall_around_a_verb_error_returns_to_the_script() -> None:
         verbs={"memory.get": boom},
     )
     assert value == [False, "backend down", False]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "stack overflow",
+        "memory.get: ambiguous: 'stack overflow notes', 'stack overflow tips'",
+        "not enough memory",
+        "error in error handling",
+    ],
+    ids=["stack", "stack_in_text", "memory", "handling"],
+)
+def test_a_verb_error_that_reads_like_a_limit_message_is_a_lua_error_not_a_limit(message: str) -> None:
+    """The classifier reads messages; a verb's message is data the script's backend chose (review r1 I1)."""
+
+    def call_verb(name: str, args: list[object]) -> object:
+        raise VerbReplyError(message)
+
+    value, _ = run_lua(
+        "local ok, e = pcall(memory.get) local ok2, e2 = pcall(memory.get) return {ok, e, ok2, e2 == e}",
+        "memory.get",
+        call_verb=call_verb,
+        limits=SMALL,
+    )
+    assert value == [False, message, False, True]
+    with pytest.raises(ScriptError) as exc:
+        run_lua("return memory.get()", "memory.get", call_verb=call_verb, limits=SMALL)
+    assert exc.value.kind == "lua"
+    assert exc.value.detail == message
+
+
+def test_a_caught_verb_error_does_not_excuse_a_real_memory_overrun_with_the_same_text() -> None:
+    """The exemption is for the verb's own error, once; the allocator's later "not enough memory" still ends the run."""
+
+    def call_verb(name: str, args: list[object]) -> object:
+        raise VerbReplyError("not enough memory")
+
+    err = _limit(
+        "pcall(memory.get) while true do pcall(string.rep, 'x', 1000000000) end",
+        "memory.get",
+        call_verb=call_verb,
+        limits=SMALL.with_(memory=16 * MIB),
+    )
+    assert err.limit == "memory"
+
+
+def test_a_caught_verb_error_does_not_excuse_a_real_stack_overflow() -> None:
+    def call_verb(name: str, args: list[object]) -> object:
+        raise VerbReplyError("stack overflow")
+
+    err = _limit(
+        "pcall(memory.get) local function r() return 1 + r() end return r()",
+        "memory.get",
+        call_verb=call_verb,
+        limits=SMALL.with_(memory=256 * MIB, instructions=50_000_000),
+    )
+    assert err.limit == "stack"
+
+
+# ---- the lowest limits ---------------------------------------------------------------------------------------------
+# The real Limits floors memory at 1 MiB (limits.py); these use the test support's own Limits, which
+# does not, so the runtime itself maps an allocation refused at any point of a run to the memory limit.
+
+
+@pytest.mark.parametrize("memory", [1000, 10_000, 30_000])
+def test_a_memory_limit_the_runtime_cannot_even_start_in_is_the_memory_limit(memory: int) -> None:
+    err = _limit("return 1", limits=SMALL.with_(memory=memory))
+    assert err.limit == "memory"
+    assert err.value == memory
+    assert err.stats is not None and set(err.stats) == {"peak_lua_bytes", "instructions"}
+
+
+def test_a_big_source_that_does_not_fit_the_memory_limit_is_the_memory_limit_not_a_lua_error() -> None:
+    source = "return {" + ",".join(str(i) for i in range(20_000)) + "}"  # about 108 KB
+    assert len(source) > 100_000
+    err = _limit(source, limits=SMALL.with_(memory=300_000))
+    assert err.limit == "memory"
+    assert err.value == 300_000
+    _assert_stats(err)
 
 
 # ---- memory -------------------------------------------------------------------------------------
@@ -299,6 +424,38 @@ def test_unbounded_recursion_fails_with_a_stack_overflow(source: str) -> None:
 def test_a_tail_call_loop_is_not_a_stack_overflow_it_is_the_instruction_limit() -> None:
     err = _limit("local function r(n) return r(n + 1) end return r(1)")
     assert err.limit == "instructions"
+
+
+# ---- the hook interval ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("limit", [1, 500, 2000])
+def test_an_instruction_limit_below_the_hook_interval_still_trips(limit: int) -> None:
+    """The hook fires every min(HOOK_EVERY, limit) instructions, so a short script can still exceed a low limit."""
+    err = _limit("local x = 0 for i = 1, 3000 do x = x + i end return x", limits=SMALL.with_(instructions=limit))
+    assert err.limit == "instructions"
+    assert err.value == limit
+    assert err.stats is not None and err.stats["instructions"] > limit
+
+
+def test_a_script_under_a_low_instruction_limit_returns() -> None:
+    value, _ = run_lua("return 1", limits=SMALL.with_(instructions=2000))
+    assert value == 1
+
+
+def test_the_hook_samples_the_peak_so_freed_memory_still_counts() -> None:
+    """20 MB held across a few hook ticks, then dropped and churned away: the peak is what the hook saw."""
+    _, stats = run_lua(
+        """
+        local s = string.rep('x', 20 * 1024 * 1024)
+        for i = 1, 60000 do end
+        s = nil
+        for i = 1, 300000 do local t = {i} end
+        return 1
+        """,
+        limits=DEFAULT.with_(wall_time=30.0),
+    )
+    assert stats["peak_lua_bytes"] >= 20 * MIB
 
 
 # ---- wall time, the inner layer --------------------------------------------------------------------
