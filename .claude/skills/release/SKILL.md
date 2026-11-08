@@ -145,6 +145,20 @@ the rehearsal now; do not file it (Sam, 2026-08-30, after the RDR-197 cut
 refused three times). Source: memory `feedback_release_and_develop_ci`
 § release_and_ci_mechanics.
 
+**At the cut announcement, list every finished item a peer is holding back from
+this release, and ask Sam in one line whether each ships now (pulled in before
+the cut) or waits.** Never accept a hold silently: what ships is Sam's call, and
+a peer's caution about merge conflicts is a reason to sequence the work, not to
+drop it from the release. On the 7.86.2 cut (2026-10-25) a peer held the
+finished tool-spill plugin out of the window because it touched
+`marketplace.json` and the cut tooling; the hold was accepted and Sam heard only
+after the tag, so the plugin landed on develop pointing at v7.86.2, a tag that
+does not contain it, and could not be installed (Sam: "wtf did the plugin just
+sit there"). A plugin-only item that waits can still ship after the client tag
+through the Plugin-only fast lane below: offer that. The anchored
+`plugin-vX.Y.Z-n` channel is retired; do not revive it. Source: memory
+`feedback_release_and_develop_ci` § peer_holdouts_from_a_release_go_to_sam.
+
 ### 1. Run unit + integration suite
 
 ```bash
@@ -320,7 +334,18 @@ Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f && /^- \*\*/{k=substr($0,1,70); if (seen[k]++) {print "DUPLICATE OPENING: " k; bad=1}; n++} END{print n+0 " bullets examined"; exit bad}' CHANGELOG.md
 ```
 
-When a pair shares an opening, keep the newest version (the one carrying the latest round's wording). `0 bullets examined` is a pass over nothing, not a clean Unreleased. Source: memory `feedback_release_and_develop_ci` § changelog_keep_both_duplicates.
+When a pair shares an opening, keep the newest version (the one carrying the latest round's wording). `0 bullets examined` is a pass over nothing, not a clean Unreleased.
+
+For `docs/wire-contract-pending.md`, the same keep-both slip duplicates ledger entries and their cited shas. Check the entry lines after the resolution:
+
+```bash
+F=docs/wire-contract-pending.md
+echo "$(grep -cE '^- `[0-9a-f]{7,40}`' $F) entries examined"
+grep -E '^- `[0-9a-f]{7,40}`' $F | sort | uniq -d                                     # must print nothing: an exact duplicate entry
+grep -oE '^- `[0-9a-f]{7,40}` -- bead [^ ]+' $F | sort | uniq -c | awk '$1>1'         # a rewritten entry shows here
+```
+
+One commit can carry several entries for one bead (a commit that adds four routes has four), so the last line is a list to compare with each side's counts, not a must-be-empty test; the one above it must be empty. Source: memory `feedback_release_and_develop_ci` § changelog_keep_both_duplicates.
 
 ### 4b. Move this release's wire-ledger entries to Shipped (IN the release commit)
 
@@ -431,8 +456,8 @@ immutable, so a file landed on develop or after the tag can never satisfy the
 check for that tag. On 2026-10-21 v7.83.0 was tagged with the attestation only
 on develop: `--paired-deploy-auto` refused ("no relay attestation"), PyPI got
 nothing, the fix was a whole new release (7.83.1, PR #1618), and main's
-marketplace pinned an unpublished v7.83.0 in between. v7.97.0 (2026-11-07)
-refused the same way. The battery does not run this check; only the release
+marketplace pinned an unpublished v7.83.0 in between. v7.97.0 refused the
+same way (its tag was re-pointed, per git, at 2026-11-07 00:56 UTC). The battery does not run this check; only the release
 workflow does. So before handing over the PR, in the release worktree, re-run
 Step 0's `--paired-deploy engine-service-vX.Y.Z` form (it runs the same relay
 check; so does the workflow's `--paired-deploy-auto` whenever the cloud is
@@ -495,6 +520,8 @@ git commit -m "chore(release): conexus X.Y.Z"
 git push -u origin release/vX.Y.Z
 gh pr create --base main --title "release: conexus X.Y.Z" --body "<release notes>"
 ```
+
+A PR body closes an issue only with `Closes #N`, `Fixes #N` or `Resolves #N`, one per line; a plain reference leaves the issue open (PR #254). If the release PR is meant to close issues, write the keyword lines in the `--body`.
 
 Wait for CI green, then merge:
 
@@ -588,7 +615,7 @@ Do NOT run `uv publish` or `twine upload` manually: the Release workflow handles
 gh api repos/Hellblazer/nexus/commits/<merge-sha>/check-runs --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'   # read once; re-read later, never `gh run watch` or a polling loop (AGENTS.md worktree rule 7)
 ```
 
-Read completion from the check-run `conclusion` (or the run's own status). The jobs API and `statusCheckRollup` can show a job in progress forever on a completed run, and a wait on them never fires (7.6.0, 2026-08-11).
+Read completion from the check-run `conclusion` (or the run's own status). The jobs API and `statusCheckRollup` can show a job in progress forever on a completed run, and a wait on them never fires (7.6.0, 2026-08-11). A run that sits at `waiting` is a deployment-environment approval, a person's click, never runner backlog: find the pending environment and tell Sam (`.claude/rules/ci-and-runners.md` § GitHub Actions traps).
 
 One job must complete: `Build and publish to PyPI`. (2026-07-06 CI-cost
 pass, PR #1375: the tag-time pytest matrix was removed — the tag points at a
@@ -601,7 +628,7 @@ tag == pyproject version before building.)
 yourself (`docs/contributing.md` § Break-glass: a failure in the pipeline retries
 through `workflow_dispatch`; a failure in the tagged tree is fixed by the next
 version, as 7.83.1 was; re-pointing a tag is an admin decision, as the
-re-point of v7.97.0 on 2026-11-06 was, after its run refused for the missing
+re-point of v7.97.0 on 2026-11-07 (00:56 UTC, per git) was, after its run refused for the missing
 attestation and published nothing). Before cutting that next version, reproduce
 the failed job's exact commands locally, fix everything that shape surfaces, not
 only the visible line, then cut once. Each cut that fixes only the visible line hits the next
@@ -809,7 +836,11 @@ session's nx:
 
 `~/.local/bin/claude-restart-sessions` is a symlink to `scripts/claude-restart-sessions`;
 its docstring is the reference for every mode (`--nx`, `--fresh`, `--ask-ready`,
-`--status`, `--revive`). With `--nx` it runs the engine gate (re-reading `/version`
+`--status`, `--revive`). `--fresh` has a cost: the peer-name lease stays held by
+both session ids for up to 300 s after each restart, so `mailbox_send` by name is
+refused while by id works, and anything keyed on the old id (its mailbox, its T1
+board subscriptions, unflagged scratch) is orphaned; the log names each old id
+for `claude --resume <id>` back-out. With `--nx` it runs the engine gate (re-reading `/version`
 every 30 s up to `--engine-wait`, default 1800 s, so a paired release's redeploy
 can land; `--skip-engine-gate` on a local-mode box), then `uv cache clean conexus`
 plus `reinstall-tool.sh conexus==X.Y.Z`, then the marketplace and plugin update,
