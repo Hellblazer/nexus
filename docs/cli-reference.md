@@ -4561,7 +4561,7 @@ with the bundle's `pg_upgrade`. The engine refuses a cluster below 17 and
 It is the scripted form of "A local cluster older than PostgreSQL 17" in
 [the migration runbook](migration-runbook.md). Linux and macOS only.
 
-**Not yet run against a real pre-17 cluster; copy the data directory first.** `--apply` and `--check-only`
+**Run once against a real pre-17 cluster on Linux, not yet with the service start; copy the data directory first.** `--apply` and `--check-only`
 hold the storage service's spawn lock (`<config dir>/storage_service_spawn.lock`, the lock a supervisor takes
 in its start) for the whole run, and are refused up front when another process holds it. A concurrent
 `nx daemon service start` then waits on the lock instead of starting a supervisor on the half-built cluster:
@@ -4594,8 +4594,8 @@ Without a mode flag the command changes nothing: it validates the cluster and
 options nx creates its own clusters with, runs `pg_upgrade --check` against the
 real cluster (it starts and stops the old server on it and does not modify it),
 and removes the temporary directory; the old server must not be running. If the check fails or is interrupted,
-`--check-only` stops the old server only when `pg_upgrade --check` started it (no server's pid file was there
-when it began); a server someone else started meanwhile is left running and the output says so. `--apply`
+`--check-only` stops the old server only when `pg_upgrade --check` started it (`pg_ctl status` found no server
+running when it began; a stale pid file from a crash does not count); a server someone else started meanwhile is left running and the output says so. `--apply`
 checks with the old `pg_ctl` that no server runs, moves the data directory to `<data>.old`, runs
 `initdb` (`--auth=trust` for the upgrade; the next service start converts it to
 `scram-sha-256`), `pg_upgrade --check` and `pg_upgrade`, starts the service, then

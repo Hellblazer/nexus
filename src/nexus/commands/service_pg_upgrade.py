@@ -61,7 +61,7 @@ def _nx_service(verb: str, config_dir: Path) -> int:
     "vacuumdb --all --analyze-in-stages. Any failure after the move removes the new directory and "
     "moves the original back. <data>.old is kept. Refuses while the storage service or the old PostgreSQL "
     "server is running and stops neither: run `nx daemon service stop` first (the message names the commands). "
-    "This command is not yet run against a real pre-17 cluster; copy the data directory first. "
+    "This command was run once against a real pre-17 cluster on Linux, not yet with the service start; copy the data directory first. "
     "Holds the storage service's spawn lock for the whole run (freed just before the service is started "
     "again), so a concurrent `nx daemon service start` waits instead of starting on the half-built cluster; "
     "it does not keep a PostgreSQL server that brew services or systemd restarts from coming back.",

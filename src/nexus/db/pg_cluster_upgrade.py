@@ -78,7 +78,7 @@ _RUNBOOK = (
 
 #: The limit of what is known about this command. Shown in the help, the docs, the dry run and before the move.
 #: Remove it once the command has run against a real pre-17 cluster.
-UNTESTED_NOTE = "not yet run against a real pre-17 cluster; copy the data directory first"
+UNTESTED_NOTE = "run once against a real pre-17 cluster on Linux, not yet with the service start; copy the data directory first"
 #: What the service lock guarantees and what it does not. ``--apply`` and ``--check-only`` hold the storage
 #: service's spawn lock (the one a supervisor's ``start()`` takes) for the whole run, so a concurrent
 #: ``nx daemon service start`` waits on it instead of starting a supervisor on the half-built cluster. It is
@@ -539,15 +539,19 @@ class ClusterUpgrade:
                     workdir = _short_tempdir()
                 except OSError as exc:
                     raise PgUpgradeRefused(f"could not make a temporary directory under {SHORT_TMP_ROOT} ({exc.strerror})") from None
-            # True from just before pg_upgrade --check runs, when no server's pid file was there: only then did
-            # that step start the old server, so only then is a server running afterwards ours to stop.
+            # True from just before pg_upgrade --check runs, when pg_ctl status says no server runs there: only then
+            # does that step start the old server, so only then is a server running afterwards ours to stop. Judged by
+            # status, not by postmaster.pid: an unclean shutdown leaves a stale pid file that postgres replaces.
             check_began = False
             try:
                 new_data = workdir / "data"
                 try:
                     self._initdb(new_data, workdir)
                     self.say("initdb: a temporary cluster was made; running pg_upgrade --check against it")
-                    check_began = not (p.pgdata / "postmaster.pid").exists()
+                    try:
+                        check_began = self._server_state(p.old_bin / "pg_ctl", p.pgdata) != _PG_CTL_RUNNING
+                    except _StepFailed:
+                        check_began = False  # status unreadable: leave whatever runs there alone
                     self._step("pg_upgrade --check", self._upgrade_argv(p.pgdata, new_data, check=True),
                                timeout=_PG_UPGRADE_TIMEOUT_S, cwd=workdir, secret=True)
                 except _StepFailed as exc:
@@ -575,8 +579,8 @@ class ClusterUpgrade:
     def _stop_check_server(self, check_began: bool) -> str | None:
         """After a ``--check-only`` that did not finish cleanly: stop the old server ``pg_upgrade --check`` started.
 
-        *check_began* says that no server's pid file was there when ``pg_upgrade --check`` began, so a server up
-        now is the one it started. When it is False (the check never began, or a server was already there), a
+        *check_began* says that ``pg_ctl status`` found no server running when ``pg_upgrade --check`` began (a stale
+        pid file from an unclean shutdown does not count), so a server up now is the one it started. When it is False (the check never began, or a server was already there), a
         server that runs now belongs to someone else (brew services, systemd, a person): it is left alone and the
         returned note says so. Stopped with the OLD ``pg_ctl``, ``fast`` and bounded; signals are ignored
         meanwhile. Returns a warning naming the command to run when a server of ours cannot be confirmed down.
@@ -608,6 +612,9 @@ class ClusterUpgrade:
         with _interrupts_raise():
             self._lock = self._hold_lock(p)
             try:
+                # The notes go before the work directory exists, so a signal while they print leaks nothing.
+                self.say(f"NOTE: this command is {UNTESTED_NOTE} ({p.pgdata}).")
+                self.say(f"NOTE: {LOCK_NOTE}.")
                 with _interrupts_held():  # no window between the directory existing and workdir naming it
                     try:
                         workdir = _short_tempdir()
@@ -621,8 +628,6 @@ class ClusterUpgrade:
 
     def _apply(self, workdir: Path) -> None:
         p = self.plan
-        self.say(f"NOTE: this command is {UNTESTED_NOTE} ({p.pgdata}).")
-        self.say(f"NOTE: {LOCK_NOTE}.")
         try:
             self._check_idle_and_move()
             self._upgrade(workdir)
