@@ -220,11 +220,11 @@ class TenantKeyedEvictorsTest {
     void reconcileJobs_evictTenant_dropsXsJobsOfEveryOwnerAndNoOneElses() throws Exception {
         var jobs = dev.nexus.service.http.EngineJobs.reconcile(System::currentTimeMillis);
         try {
-            var x1 = jobs.start("rec-x", dev.nexus.service.http.EngineJobs.scopeKey("rec-x", "1.1"), "fp",
+            var x1 = jobs.start("rec-x", "1.1", "fp",
                 (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", "rec-x")));
-            var x2 = jobs.start("rec-x", dev.nexus.service.http.EngineJobs.scopeKey("rec-x", "1.2"), "fp",
+            var x2 = jobs.start("rec-x", "1.2", "fp",
                 (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", "rec-x")));
-            var y = jobs.start("rec-y", dev.nexus.service.http.EngineJobs.scopeKey("rec-y", "1.1"), "fp",
+            var y = jobs.start("rec-y", "1.1", "fp",
                 (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", "rec-y")));
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
             while (x1.job().state() == dev.nexus.service.http.EngineJobs.State.RUNNING

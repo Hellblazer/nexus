@@ -270,6 +270,34 @@ class TenantResetRouteTest {
         assertThat(body.has("failed")).isFalse();
     }
 
+    /**
+     * RDR-193 Step 1 review r1: the name "EngineJobs.reconcile" is registered (the test above), and here it is bound
+     * to this service's own reconcile instance: a reset through the route drops the tenant's reconcile job and
+     * leaves another tenant's.
+     */
+    @Test
+    void aResetDropsTheTenantsReconcileJobs_onTheServicesOwnInstance() throws Exception {
+        String x = "rr-rec-x-" + shortId();
+        String y = "rr-rec-y-" + shortId();
+        var jobs = on.reconcileJobsForTests();
+        var mine = jobs.start(x, "1.1", "fp",
+            (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", x)));
+        var theirs = jobs.start(y, "1.1", "fp",
+            (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", y)));
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (mine.job().state() == dev.nexus.service.http.EngineJobs.State.RUNNING
+                || theirs.job().state() == dev.nexus.service.http.EngineJobs.State.RUNNING) {
+            assertThat(System.nanoTime()).as("both jobs end").isLessThan(deadline);
+            Thread.sleep(5);
+        }
+
+        var resp = post(on, PATH, ROOT, "{\"tenant\":\"" + x + "\"}");
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        assertThat(MAPPER.readTree(resp.body()).get("evicted").get("EngineJobs.reconcile").asInt()).isEqualTo(1);
+        assertThat(jobs.find(mine.job().id(), x)).as("x's reconcile job is gone").isNull();
+        assertThat(jobs.find(theirs.job().id(), y)).as("y's is untouched").isNotNull();
+    }
+
     @Test
     void aResetClearsTenantXAndLeavesTenantY() throws Exception {
         String x = "rr-x-" + shortId();

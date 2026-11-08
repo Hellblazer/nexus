@@ -321,7 +321,7 @@ public final class ChunkKeysSweepJobs {
     public Started start(String tenant, String callerTenant, boolean root, Kind kind, String fingerprint,
                          JobWork work) {
         try {
-            EngineJobs.Started<Job> s = jobs.start(tenant, tenant, kind.wire() + '\u0000' + fingerprint,
+            EngineJobs.Started<Job> s = jobs.start(tenant, null, kind.wire() + '\u0000' + fingerprint,
                 j -> j.data().startedBy(callerTenant, root),
                 core -> new Job(core, callerTenant, root, kind),
                 (core, stage) -> {
@@ -354,7 +354,7 @@ public final class ChunkKeysSweepJobs {
 
     /** The job with this id, or null when the engine holds none (never started, expired, evicted, or another process). */
     public Job find(String id) {
-        EngineJobs.Job<Job> j = jobs.find(id);
+        EngineJobs.Job<Job> j = jobs.findAnyTenant(id);
         return j == null ? null : j.data();
     }
 
