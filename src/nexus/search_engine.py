@@ -673,17 +673,18 @@ def _local_source_path(entry: Any) -> str:
     if not isinstance(uri, str) or not uri.startswith("file://"):
         return ""
     rest = uri[len("file://"):]
-    if m := _DRIVE_PATH.match(rest):
-        if os.name == "nt":
+    if os.name == "nt":
+        if m := _DRIVE_PATH.match(rest):
             drive = rest[m.start(1):]
             return drive[0].upper() + drive[1:].replace("/", "\\")  # resolve() spells the drive upper case
-        if not rest.startswith("/"):
-            return rest  # file://C:\\..., minted on Windows; no POSIX registration mints it
+        if rest.startswith("//"):
+            return ""  # a UNC host form, not a local drive path
     return rest if rest.startswith("/") else ""
 
 
 #: A drive path after ``file://``: ``C:\\...``, ``C:/...`` or ``/C:/...``; group 1 starts at the drive letter.
-#: Off Windows ``/C:/...`` is a POSIX path under a directory named ``C:`` and is kept as written.
+#: Read on Windows only: off Windows ``/C:/...`` is a POSIX path under a directory named ``C:``, and ``C:...`` is
+#: no absolute path, both read as before nexus-rfvyy.9.
 _DRIVE_PATH: re.Pattern[str] = re.compile(r"^/?([A-Za-z]:[\\/])")
 
 
