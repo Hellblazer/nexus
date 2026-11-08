@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.client
 import json
 import lzma
 import os
@@ -129,6 +130,15 @@ SERVICE_TAG_ENV = "NEXUS_SERVICE_TAG"
 
 _REPO = "Hellblazer/nexus"
 _RELEASE_DOWNLOAD_BASE = f"https://github.com/{_REPO}/releases/download"
+#: The REST release API, the fallback when the ``/releases/download/`` redirect
+#: fails with a 5xx or a timeout (nexus-h29w1: on 2026-11-08 the redirect
+#: returned 504 for assets the asset endpoint served).
+_RELEASE_API_BASE = f"https://api.github.com/repos/{_REPO}"
+#: Sleeps between attempts on the download path: one first try, then one retry
+#: per entry, then the REST fallback.
+_RETRY_DELAYS_S: tuple[float, ...] = (2.0, 5.0)
+#: tag -> {asset name -> REST asset URL}; one release lookup per tag per process.
+_release_assets_cache: dict[str, dict[str, str]] = {}
 _BINARY_SIDECAR_NAME = "nexus-service.meta.json"
 _PG_SIDECAR_NAME = "nexus-pg.meta.json"
 _DOWNLOAD_TIMEOUT_S = 120.0
@@ -569,29 +579,115 @@ def _validate_tag(tag: str) -> None:
         )
 
 
-def _download(url: str, dest: Path, *, timeout: float = _DOWNLOAD_TIMEOUT_S) -> None:
-    """Download *url* to *dest* (stdlib urllib — the repo has no ``requests``)."""
-    req = urllib.request.Request(url, headers={"User-Agent": "conexus-install-binary"})
+_USER_AGENT = "conexus-install-binary"
+_DOWNLOAD_HINT = "Check the tag exists, the asset was published for this platform, and the network is up."
+
+
+def _fetch_once(req: urllib.request.Request, dest: Path, timeout: float) -> None:
+    """One GET of *req* streamed to *dest*, truncating what an earlier attempt left."""
+    with urllib.request.urlopen(req, timeout=timeout) as resp, dest.open("wb") as out:
+        for block in iter(lambda: resp.read(_HASH_BLOCK), b""):
+            out.write(block)
+
+
+def _api_request(url: str, accept: str) -> urllib.request.Request:
+    """A REST API request. A token from GITHUB_TOKEN or GH_TOKEN is sent as an
+    unredirected header, so it reaches the API host and never the storage host
+    an asset download redirects to."""
+    req = urllib.request.Request(
+        url, headers={"User-Agent": _USER_AGENT, "Accept": accept}
+    )
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        req.add_unredirected_header("Authorization", f"Bearer {token}")
+    return req
+
+
+def _rest_asset_url(tag: str, name: str, url: str, timeout: float) -> str:
+    """The REST asset URL for *name* in release *tag*, from one cached lookup."""
+    assets = _release_assets_cache.get(tag)
+    if assets is None:
+        req = _api_request(
+            f"{_RELEASE_API_BASE}/releases/tags/{tag}", "application/vnd.github+json"
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.load(resp)
+        assets = {
+            str(a["name"]): str(a["url"])
+            for a in data.get("assets", [])
+            if isinstance(a, dict) and "name" in a and "url" in a
+        }
+        _release_assets_cache[tag] = assets
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp, dest.open("wb") as out:
-            for block in iter(lambda: resp.read(_HASH_BLOCK), b""):
-                out.write(block)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            raise BinaryAssetAbsentError(
-                f"failed to download {url}: HTTP 404, the release does not carry "
-                "this asset. Check the tag exists and the asset was published for "
-                "this platform."
-            ) from exc
+        return assets[name]
+    except KeyError:
+        raise BinaryAssetAbsentError(
+            f"failed to download {url}: release {tag} does not list {name}. "
+            "Check the tag exists and the asset was published for this platform."
+        ) from None
+
+
+def _download(url: str, dest: Path, *, timeout: float = _DOWNLOAD_TIMEOUT_S) -> None:
+    """Download *url* to *dest* (stdlib urllib — the repo has no ``requests``).
+
+    A 404 is :class:`BinaryAssetAbsentError` at once and any other 4xx is
+    :class:`BinaryDownloadError` at once. A 5xx, timeout or connection failure
+    is retried after each delay in ``_RETRY_DELAYS_S``. When *url* is a release
+    download URL and every attempt failed that way, the same asset is fetched
+    once from the REST asset endpoint (nexus-h29w1). The bytes are verified by
+    the callers exactly as before, whichever path served them.
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    last: Exception | None = None
+    delays: tuple[float | None, ...] = (*_RETRY_DELAYS_S, None)
+    for attempt, delay in enumerate(delays, start=1):
+        try:
+            _fetch_once(req, dest, timeout)
+            return
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise BinaryAssetAbsentError(
+                    f"failed to download {url}: HTTP 404, the release does not carry "
+                    "this asset. Check the tag exists and the asset was published for "
+                    "this platform."
+                ) from exc
+            if exc.code < 500:
+                raise BinaryDownloadError(
+                    f"failed to download {url}: {exc}. {_DOWNLOAD_HINT}"
+                ) from exc
+            last = exc
+        except (
+            OSError,
+            http.client.HTTPException,
+        ) as exc:  # network, timeout, a reset mid-body
+            last = exc
+        _log.warning(
+            "binary_download_attempt_failed", url=url, attempt=attempt, error=str(last)
+        )
+        if delay is not None:
+            time.sleep(delay)
+
+    prefix = f"{_RELEASE_DOWNLOAD_BASE}/"
+    tag, _, name = (
+        url.removeprefix(prefix).partition("/")
+        if url.startswith(prefix)
+        else ("", "", "")
+    )
+    if not tag or not name or "/" in name:
         raise BinaryDownloadError(
-            f"failed to download {url}: {exc}. Check the tag exists, the "
-            "asset was published for this platform, and the network is up."
-        ) from exc
-    except Exception as exc:  # network, timeout
+            f"failed to download {url}: {last}. {_DOWNLOAD_HINT}"
+        ) from last
+    try:
+        api_url = _rest_asset_url(tag, name, url, timeout)
+        _fetch_once(_api_request(api_url, "application/octet-stream"), dest, timeout)
+    except BinaryAssetAbsentError:
+        raise
+    except Exception as exc:
         raise BinaryDownloadError(
-            f"failed to download {url}: {exc}. Check the tag exists, the "
-            "asset was published for this platform, and the network is up."
+            f"failed to download {url}: {last}; the REST asset fallback failed too: "
+            f"{exc}. {_DOWNLOAD_HINT}"
         ) from exc
+    _log.info("binary_download_rest_fallback_used", url=url, tag=tag, asset=name)
 
 
 def install_binary(
