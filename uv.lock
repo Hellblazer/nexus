@@ -480,7 +480,7 @@ requires-dist = [
     { name = "fastembed", marker = "extra == 'local'", specifier = ">=0.9.1,<0.10" },
     { name = "httpx", specifier = ">=0.27,<1.0" },
     { name = "llama-index-core", specifier = ">=0.14.21,<0.15" },
-    { name = "lupa", specifier = ">=2.8,<3" },
+    { name = "lupa", specifier = ">=2.8,<2.8.1" },
     { name = "markdown-it-py", specifier = ">=4.0.0,<5" },
     { name = "mcp", specifier = ">=2.3,<3" },
     { name = "mineru", extras = ["pipeline"], marker = "extra == 'pdf'", specifier = ">=3.1.11,<3.1.12" },
