@@ -58,9 +58,7 @@ def _git(args: list[str], *, cwd: Path, deadline: float) -> str:
             timeout=left,
             cwd=cwd,
             env=_env(),
-            text=False,
-            encoding=None,
-            errors=None,
+            text=False,  # bytes: no newline translation; decoded below
         )
     except subprocess.TimeoutExpired:
         raise VerbTimeout("git: the run's time budget ran out during git") from None
