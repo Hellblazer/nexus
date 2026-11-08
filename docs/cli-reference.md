@@ -6955,9 +6955,9 @@ An error prints as `<kind>: <detail>` on standard error and the exit status is 1
 
 `--list` prints one line per procedure, `NAME<TAB>SUMMARY`, with `(repo)` added for a procedure from the checkout's `.nexus/procedures/`. The procedures that ship with `nx` are always listed. A checkout's own procedures run, and are listed, only while the environment variable `NX_PROCEDURES_REPO_ROOT` is exactly `1`; otherwise `--list` says so on standard error, and `nx run NAME` for a name found only there is refused with the reason `repo_root_off`.
 
----
-
 **The `transcripts` procedure.** `nx run transcripts` (arguments `{"query", "since", "until", "project"}`) reads Claude Code transcripts. Its `project` is ONE Claude Code project directory name under `~/.claude/projects`, or `all`. A repository's linked-worktree sessions sit in their own directories (`-Users-me-git-nexus-wt-<name>` beside `-Users-me-git-nexus`), so a per-repository count runs the procedure for each directory and sums them: measured 2026-11-08, 98 of the nexus repository's 178 main sessions in a two-week window were in the primary checkout's directory. Counts are floors where a record was cut to 1 MB (`truncated_records`). A result is paged: run again with `since` set to `next_since` and the returned `until` until `next_since` is absent.
+
+---
 
 ## nx command-context
 
