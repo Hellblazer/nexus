@@ -112,7 +112,6 @@ def test_the_summary_may_be_exactly_100_characters() -> None:
     pytest.param(_lines(P, S, "-- args: Rdr:integer", G), 3, 'breaks [a-z]', id="argument-name-upper-case"),
     pytest.param(_lines(P, S, "-- args: 1rdr:integer", G), 3, 'breaks [a-z]', id="argument-name-digit-first"),
     pytest.param(_lines(P, S, "-- args: " + "a" * 33 + ":integer", G), 3, 'breaks [a-z]', id="argument-name-over-32"),
-    pytest.param(_lines(P, S, "-- args: end:string", G), 3, 'Lua keyword', id="argument-name-lua-keyword"),
     pytest.param(_lines(P, S, "-- args: rdr", G), 3, "has no ':type'", id="argument-without-type"),
     pytest.param(_lines(P, S, "-- args: rdr:integer,, x:string", G), 3, 'an empty args item', id="empty-argument-item"),
     pytest.param(_lines(P, S, "-- args: none, rdr:integer", G), 3, "'none' must stand alone", id="none-with-others"),
@@ -429,3 +428,9 @@ def test_a_missing_or_deleted_directory_is_in_no_repo(tmp_path: Path) -> None:
     with pytest.raises(ScriptError) as e:
         hd.prepare_args(_hdr("repo:string"), {}, cwd=None, clock=lambda: FIXED)
     assert "no repo here" in str(e.value)
+
+
+def test_a_lua_keyword_is_a_valid_argument_name() -> None:
+    # RDR-240 TD5 names the window argument `until`; a script reads it as args["until"].
+    h = hd.parse(_lines("-- procedure: p", S, "-- args: since:string, until:string?", G), name="p")
+    assert [a.name for a in h.args] == ["since", "until"]
