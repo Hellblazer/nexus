@@ -269,6 +269,11 @@ class TombstoneFilterGateTest {
      * particular gate mechanism did.
      */
     private static final List<ExemptEntry> TOMBSTONE_EXEMPT = List.of(
+        new ExemptEntry("CatalogRepository.java", "tombstonedStaleNoteRows",
+            "nexus-bivz3.24: counting the TOMBSTONED stale note rows is the contract. The stale-note repair's census "
+            + "reports them beside the live classes and never rewrites them (catalog-016 constrains only live rows, so "
+            + "a tombstone cannot mint a duplicate); the query requires DELETED_AT.isNotNull() and returns the tumbler, "
+            + "URI and collection only"),
         new ExemptEntry("CatalogRepository.java", "mostRecentTombstoned",
             "nexus-rfvyy.6.4 (RDR-243): reading the most recent TOMBSTONED row of a source URI is the contract. "
             + "A delete-then-re-index registers a NEW tumbler, and the new row inherits the sensitive flag from "

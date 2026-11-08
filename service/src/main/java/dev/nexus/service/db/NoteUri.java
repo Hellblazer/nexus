@@ -118,6 +118,67 @@ public final class NoteUri {
         return startsWith(uri, DSL.val(NOTE + coll + "/")).or(startsWith(uri, DSL.val(LEGACY + coll + "/")));
     }
 
+    /**
+     * SQL pre-filter of the stale-note repair (nexus-bivz3.24): the row's URI is in a note spelling and does NOT open
+     * with its own collection ({@code <scheme><coll>/}). A superset of the stale notes: file-routed residue and a URI
+     * with no title part also pass, and {@link #isNote} / the repair's Java classification settle them.
+     */
+    public static Condition notInOwnCollection(Field<String> uri, Field<String> physicalCollection) {
+        Condition noteScheme = startsWith(uri, DSL.val(NOTE)).or(startsWith(uri, DSL.val(LEGACY)));
+        Condition own = startsWith(uri, DSL.val(NOTE).concat(physicalCollection).concat(DSL.val("/")))
+            .or(startsWith(uri, DSL.val(LEGACY).concat(physicalCollection).concat(DSL.val("/"))));
+        return noteScheme.and(own.not());
+    }
+
+    /** The collection segment of a note URI in either spelling, or null when {@code uri} is not in a note spelling. */
+    public static String collectionOf(String uri) {
+        if (uri == null) {
+            return null;
+        }
+        String rest;
+        if (uri.startsWith(NOTE)) {
+            rest = uri.substring(NOTE.length());
+        } else if (uri.startsWith(LEGACY)) {
+            rest = uri.substring(LEGACY.length());
+        } else {
+            return null;
+        }
+        int slash = rest.indexOf('/');
+        return slash < 0 ? rest : rest.substring(0, slash);
+    }
+
+    /**
+     * The stored spelling of {@code uri} filed under {@code newColl} when it names {@code oldColl}:
+     * {@code nx-note://<old>/rest} and {@code chroma://<old>/rest} both become {@code nx-note://<new>/rest}. Any other
+     * value, and a note naming a different collection, comes back unchanged. The repair's per-row rewrite, where the
+     * old collection varies by row, so no SQL expression of a single literal fits.
+     */
+    public static String retarget(String uri, String oldColl, String newColl) {
+        if (uri == null) {
+            return null;
+        }
+        for (String scheme : List.of(NOTE, LEGACY)) {
+            String prefix = scheme + oldColl + "/";
+            if (uri.startsWith(prefix)) {
+                return NOTE + newColl + "/" + uri.substring(prefix.length());
+            }
+        }
+        return uri;
+    }
+
+    /** True when the collection name opens with a file-routed prefix ({@code rdr__}, {@code docs__}, {@code code__}). */
+    public static boolean isFileRoutedCollection(String collection) {
+        if (collection == null) {
+            return false;
+        }
+        for (String p : FILE_ROUTED_PREFIXES) {
+            if (collection.startsWith(p)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Postgres {@code starts_with}: a literal prefix test, unlike LIKE where '_' matches any char. */
     static Condition startsWith(Field<String> uri, Field<String> prefix) {
         return DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, uri, prefix));
