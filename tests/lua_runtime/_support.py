@@ -51,6 +51,12 @@ def verb(
     return VerbSpec(name, params, fn)
 
 
+def named_in(source: str, table: Any) -> list[str]:
+    """The verbs of *table* that *source* names: a script is granted exactly those (the static check refuses a grant
+    the script does not use, and a verb it uses without one)."""
+    return [name for name in table if name in source]
+
+
 def verb_table(*specs: VerbSpec) -> dict[str, VerbSpec]:
     return {s.name: s for s in specs}
 

@@ -45,6 +45,7 @@ from tests.lua_runtime._support import (
     limits,
     platform_only,
     ready_then,
+    named_in as _named_in,
     start,
     verb,
     verb_table,
@@ -65,7 +66,7 @@ def _run(
     **lowered: int,
 ):
     return supervise(
-        start(source, *(verbs or _TABLE)),
+        start(source, *_named_in(source, verbs or _TABLE)),
         limits=limits(wall, **lowered),
         verbs=verbs or _TABLE,
         config=config or WorkerConfig(),
@@ -933,7 +934,8 @@ _PARENT = textwrap.dedent(
     table = {"fixture.hang": VerbSpec("fixture.hang", (), hang)}
     src = "while true do end" if mode == "spin" else "return fixture.hang()"
     cfg = WorkerConfig(cpu_margins=(-27, -26), on_spawn=lambda p: (print(p.pid, flush=True)))
-    supervise({"name": "n", "source": src, "grants": ["fixture.hang"]},
+    grants = ["fixture.hang"] if mode != "spin" else []  # the static check refuses a grant the script does not use
+    supervise({"name": "n", "source": src, "grants": grants},
               limits=Limits().lowered(wall_time=30), verbs=table, config=cfg)
     """
 )
