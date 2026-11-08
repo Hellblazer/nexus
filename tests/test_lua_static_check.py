@@ -21,9 +21,7 @@ import sys
 
 import pytest
 
-lupa = pytest.importorskip("lupa")
-
-from nexus.lua_runtime import static_check as sc  # noqa: E402 - after the importorskip
+from nexus.lua_runtime import static_check as sc
 
 CORPUS = pathlib.Path(__file__).parent / "fixtures" / "lua_static_check"
 MODULE = pathlib.Path(sc.__file__)
@@ -66,7 +64,7 @@ CASES = sorted(CORPUS.glob("*.lua"))
 
 def test_the_corpus_is_not_vacuous() -> None:
     oks = [p for p in CASES if _case(p)[2] == "ok"]
-    assert len(CASES) >= 48 and len(oks) >= 7, (len(CASES), len(oks))
+    assert len(CASES) >= 57 and len(oks) >= 8, (len(CASES), len(oks))
 
 
 @pytest.mark.parametrize("path", CASES, ids=[p.stem for p in CASES])
@@ -96,7 +94,7 @@ def test_the_size_bound_is_64_kib_of_source() -> None:
     assert _rule("-" + at) == "size"
 
 
-@pytest.mark.parametrize("ch", ["\x00", "\x07", "\x7f", "\xa0", " ", "а"])
+@pytest.mark.parametrize("ch", ["\x00", "\x07", "\x0b", "\x0c", "\x1f", "\x7f", "\xa0", "\u2028", "\u0430"])
 def test_a_byte_outside_printable_ascii_is_refused_with_its_line(ch: str) -> None:
     with pytest.raises(sc.StaticCheckRefusal) as e:
         sc.check(_b(f"local a = 1\nlocal b = '{ch}'\nreturn b"), frozenset(), VERBS_V1)
@@ -106,6 +104,16 @@ def test_a_byte_outside_printable_ascii_is_refused_with_its_line(ch: str) -> Non
 @pytest.mark.parametrize("ch", ["\t", "\r", "\n"])
 def test_tab_cr_and_lf_are_allowed(ch: str) -> None:
     assert _rule(f"local a = 1{ch}return a") == "ok"
+
+
+def _table_of(n: int) -> bytes:
+    return ("return {" + ",".join(f'"k{i}"' for i in range(n)) + "}\n").encode()
+
+
+@pytest.mark.parametrize("n,expect", [(255, "ok"), (256, "env")])
+def test_the_constant_bound_is_exactly_255(n: int, expect: str) -> None:
+    assert len(sc.read_chunk(sc._dump(sc._new_runtime(), _table_of(n))).k) == n
+    assert _rule(_table_of(n)) == expect
 
 
 def test_over_255_constants_in_one_function_is_refused_even_with_no_global() -> None:
@@ -130,6 +138,57 @@ def test_the_refusal_names_the_rule_and_the_line_inside_a_nested_function() -> N
     # The worker sends str(refusal) as the error frame's detail (rdr242-interfaces B).
     assert str(e.value) == "global: load (line 4)"
     assert str(sc.StaticCheckRefusal("grant-unused", "memory.get")) == "grant-unused: memory.get"
+
+
+def _lua_active_lines(src: bytes) -> set[int]:
+    rt = sc._new_runtime()
+    got = rt.execute(
+        "local f = load(...) local r = {} "
+        "for k in pairs(debug.getinfo(f, 'L').activelines) do r[#r + 1] = k end "
+        "return table.concat(r, ' ')", src)
+    return {int(x) for x in got.decode("ascii").split()}
+
+
+@pytest.mark.parametrize("gap", [0, 126, 127, 128, 300, 1000])
+def test_the_line_table_matches_lua_across_loops_and_long_gaps(gap: int) -> None:
+    # Loops step lines backwards (a negative delta); a gap of 128 or more takes the
+    # absolute line entry. Both decode to the lines Lua itself reports.
+    src = ("local t = {}\nfor i = 1, 3 do\n  t[i] = i\nend\n" + "\n" * gap
+           + "while #t > 0 do\n  table.remove(t)\nend\nreturn t\n").encode()
+    p = sc.read_chunk(sc._dump(sc._new_runtime(), src))
+    assert set(p.lines) == _lua_active_lines(src)
+    refused = src.replace(b"return t", b"return load")
+    with pytest.raises(sc.StaticCheckRefusal) as e:
+        sc.check(refused, frozenset())
+    assert (e.value.rule, e.value.line) == ("global", 8 + gap)
+
+
+@pytest.mark.parametrize("src,line", [
+    (b"local a = 1\n\nlocal _ENV = {}\nreturn 1", 3),
+    (b"local function f()\n  local _ENV = {}\nend\nreturn f", 2),
+    (b"local function f(x,\n _ENV) end\nreturn f", 1),
+    (b"local _ENV <const> = ''\nreturn memory", 1),
+    (b"return 1\n-- _ENV", 2),
+])
+def test_an_env_refusal_names_the_line_of_the_declaration(src: bytes, line: int) -> None:
+    with pytest.raises(sc.StaticCheckRefusal) as e:
+        sc.check(src, frozenset())
+    assert (e.value.rule, e.value.line) == ("env", line)
+
+
+@pytest.mark.parametrize("sep", [b"\n", b"\r", b"\r\n", b"\n\r"])
+def test_a_bytes_refusal_counts_lines_as_lua_does(sep: bytes) -> None:
+    src = b"local a = 1" + sep + b"local b = 2" + sep + b"return '\x07'"
+    with pytest.raises(sc.StaticCheckRefusal) as e:
+        sc.check(src, frozenset())
+    assert (e.value.rule, e.value.line) == ("bytes", 3)
+
+
+def test_a_constant_index_outside_the_table_fails_closed() -> None:
+    p = sc.read_chunk(sc._dump(sc._new_runtime(), b"local t = {}\nreturn t.x"))
+    p.kstr = []
+    with pytest.raises(sc.ChunkFormatError):
+        sc._walk(p, frozenset(), sc.VERBS_V1, {"memory"}, set())
 
 
 def test_check_returns_the_verbs_the_script_names() -> None:
@@ -181,6 +240,7 @@ def test_each_check_compiles_in_a_runtime_of_its_own(monkeypatch: pytest.MonkeyP
         made.append(rt)
         return rt
 
+    monkeypatch.setattr(sc, "_calibrated", True)
     monkeypatch.setattr(sc, "_new_runtime", counting)
     sc.check(b"return 1", frozenset())
     sc.check(b"return 2", frozenset())
@@ -208,6 +268,46 @@ def test_calibration_passes_on_the_pinned_lupa() -> None:
     sc.calibrate()
 
 
+def test_check_calibrates_once_before_its_first_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+
+    def broken() -> None:
+        calls.append(1)
+        raise sc.ChunkFormatError("drift")
+
+    monkeypatch.setattr(sc, "_calibrated", False)
+    monkeypatch.setattr(sc, "calibrate", broken)
+    with pytest.raises(sc.ChunkFormatError):
+        sc.check(b"return 1", frozenset())
+    monkeypatch.setattr(sc, "calibrate", lambda: calls.append(2))
+    sc.check(b"return 1", frozenset())
+    sc.check(b"return 2", frozenset())
+    assert calls == [1, 2]
+
+
+@pytest.mark.parametrize("shift", ["swap_b_c", "a_from_k", "b_off_by_one"])
+def test_calibration_fails_when_the_operand_layout_moves(monkeypatch: pytest.MonkeyPatch, shift: str) -> None:
+    real = sc._decode
+
+    def moved(ins: int):
+        op, a, k, b, c = real(ins)
+        if shift == "swap_b_c":
+            return op, a, k, c, b
+        if shift == "a_from_k":
+            return op, (ins >> 8) & 0xFF, k, b, c
+        return op, a, k, (b + 1) & 0xFF, c
+
+    monkeypatch.setattr(sc, "_decode", moved)
+    with pytest.raises(sc.ChunkFormatError):
+        sc.calibrate()
+
+
+def test_calibration_fails_when_a_rule_stops_refusing_its_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sc, "REFUSED_FIELDS", frozenset())
+    with pytest.raises(sc.ChunkFormatError):
+        sc.calibrate()
+
+
 def test_calibration_fails_when_the_opcode_numbering_moves(monkeypatch: pytest.MonkeyPatch) -> None:
     names = list(sc.OPNAMES)
     i, j = names.index("GETFIELD"), names.index("GETTABLE")
@@ -225,7 +325,10 @@ def test_calibration_fails_when_an_opcode_is_added(monkeypatch: pytest.MonkeyPat
         sc.calibrate()
 
 
-@pytest.mark.parametrize("offset,value", [(4, 0x55), (5, 1), (12, 8), (15, 0x79), (30, 0)])
+@pytest.mark.parametrize("offset,value", [
+    (0, 0x1c), (4, 0x55), (5, 1), (6, 0x18), (7, 0x92), (8, 0x0a), (9, 0x0d), (10, 0x1b), (11, 0x0d),
+    (12, 8), (13, 4), (14, 4), (15, 0x79), (30, 0),
+])
 def test_the_reader_refuses_a_changed_chunk_header(offset: int, value: int) -> None:
     blob = bytearray(sc._dump(sc._new_runtime(), b"return 1"))
     blob[offset] = value
@@ -251,3 +354,43 @@ def test_the_reader_decodes_lines_constants_and_nested_prototypes() -> None:
     assert q.linedefined == 2
     assert struct.pack("<d", 2.5) in q.k
     assert 3 in q.lines
+
+
+# ---- the bytecode rules on their own (the _ENV token check would otherwise shadow them) ----
+
+def _walk_rule(src: bytes, grants: frozenset[str] = frozenset()) -> tuple[str, str]:
+    p = sc.read_chunk(sc._dump(sc._new_runtime(), src))
+    try:
+        sc._walk(p, grants, sc.VERBS_V1, {v.split(".")[0] for v in sc.VERBS_V1}, set())
+    except sc.StaticCheckRefusal as e:
+        return e.rule, e.detail
+    return "ok", ""
+
+
+@pytest.mark.parametrize("src", [
+    b"_ENV = {}\nreturn 1",
+    b"local function f() _ENV = nil end\nreturn f",
+    b"local function f() return _ENV end\nreturn f",
+])
+def test_the_walk_refuses_env_as_a_value_without_the_token_check(src: bytes) -> None:
+    assert _walk_rule(src) == ("env", "_ENV used as a value")
+
+
+def _iabc(op: str, a: int, b: int, c: int, k: int = 0) -> int:
+    return sc.OPNAMES.index(op) | a << 7 | k << 15 | b << 16 | c << 24
+
+
+def test_a_namespace_field_read_from_another_register_is_not_a_member_access() -> None:
+    # GETTABUP R0 := _ENV.memory, then GETFIELD R0 := R1.get: the field is read from R1,
+    # not from the namespace, so R0 holding memory is a namespace used as a value.
+    p = sc.Proto(linedefined=0, code=[_iabc("GETTABUP", 0, 0, 0), _iabc("GETFIELD", 0, 1, 1)],
+                 k=[b"memory", b"get"], kstr=["memory", "get"], upnames=[b"_ENV"], lines=[1, 1])
+    with pytest.raises(sc.StaticCheckRefusal) as e:
+        sc._walk(p, frozenset({"memory.get"}), sc.VERBS_V1, {"memory"}, set())
+    assert e.value.rule == "ns-value"
+
+
+def test_calibration_fails_when_a_probe_is_refused_under_another_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sc, "_CALIBRATION_PROBES", ((b"return load", "env"),))
+    with pytest.raises(sc.ChunkFormatError):
+        sc.calibrate()
