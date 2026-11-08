@@ -34,16 +34,20 @@ RESTATING = (
 #: The procedure, by its full MCP name and table name; the call form is nexus-qo7ie.31's.
 PROCEDURE = re.compile(r'mcp__plugin_conexus_nexus__procedure_run\(name="gate_record"')
 UNCHANGED = "passing the returned `project`, `title`, `tags` and `content` unchanged"
+WRITE = "written with `mcp__plugin_conexus_nexus__memory_put`"
+ROUND = '"round": <integer>'
+
 NO_COMPOSE = "never compose the tag string yourself"
 DROP_CLAUSE = "leave out `rdr` when the bead serves no RDR"
-#: A writer composing its own gate tags, the form gate_record replaced, in any spelling:
-#: a tags assignment or field whose value names kind:gate, or the kind:gate,bead: list.
-#: The RDR gate flow's own records in <repo>_rdr (tags="rdr,gate,...") are outside
-#: gate_record (RDR-240 TD6) and are not matched.
-COMPOSED_TAGS = re.compile(
-    r"""tags\s*[=:]\s*\\?["'`]?\s*[^"'`\s]*?kind:gate\b|kind:gate\s*,\s*bead:|bead:[^\s,]*\s*,\s*kind:gate""",
-    re.IGNORECASE,
-)
+#: A writer composing its own gate tags, the form gate_record replaced. Not a list of
+#: spellings: a line that names kind:gate (any spacing around the colon) composes the tags
+#: when it also assigns tags (``tags=``, ``tags:``, ``--tag``) or gives a sibling tag a
+#: value (``bead:<id>``, ``rdr:240``). Prose naming the tags (``the `kind:gate`, `bead:` and
+#: `rdr:` tags``) gives no value and assigns nothing. The RDR gate flow's own records in
+#: <repo>_rdr (tags="rdr,gate,...") name no kind:gate and are outside gate_record (TD6).
+KIND_GATE = re.compile(r"\bkind\s*:\s*gate\b", re.IGNORECASE)
+ASSIGNS_TAGS = re.compile(r"\btags\s*[=:]|--tags?\b", re.IGNORECASE)
+VALUED_SIBLING = re.compile(r"\b(?:bead|rdr)\s*:\s*[^\s`'\",)\]]", re.IGNORECASE)
 #: Every plugin file that can instruct a writer, less the two release ledgers.
 SCANNED = sorted(
     p for d in ("agents", "skills", "commands") for p in (ROOT / "conexus" / d).rglob("*.md")
@@ -78,13 +82,16 @@ def test_the_tag_sentence_is_identical_in_every_writer() -> None:
     )
     sentence = next(iter(found.values()))
     assert PROCEDURE.search(sentence), "the writers' sentence does not name procedure_run(name=\"gate_record\" ...)"
-    for clause in (UNCHANGED, NO_COMPOSE, DROP_CLAUSE):
+    for clause in (UNCHANGED, NO_COMPOSE, DROP_CLAUSE, WRITE, ROUND):
         assert clause in sentence, f"the writers' sentence lacks {clause!r}"
 
 
 def composed_tag_lines(text: str) -> list[str]:
     """Lines of an agent or skill file that compose a gate tag string themselves."""
-    return [line for line in text.splitlines() if COMPOSED_TAGS.search(line)]
+    return [
+        line for line in text.splitlines()
+        if KIND_GATE.search(line) and (ASSIGNS_TAGS.search(line) or VALUED_SIBLING.search(line))
+    ]
 
 
 def test_the_scan_covers_the_plugins_instruction_files() -> None:
@@ -109,6 +116,15 @@ def test_no_plugin_file_composes_its_own_gate_tags(path: Path) -> None:
     "tags: kind:gate,bead:<id>",
     'tags=\\"kind:gate,bead:x\\"',
     "with the tags kind:gate, bead:<id>, rdr:<NNN>",
+    'memory_put(..., tags="rdr:240, kind:gate")',
+    'memory_put(..., tags="bead:x, rdr:240, kind:gate")',
+    'memory_put(..., tags=["kind:gate", "bead:x"])',
+    'tags: ["kind:gate", "bead:x"]',
+    'memory_put(..., tags=("kind:gate", "bead:x"))',
+    "--tag kind:gate --tag bead:x",
+    "kind: gate, bead: x",
+    "bead:x kind:gate",
+    "KIND:GATE,BEAD:X",
 ])
 def test_the_composed_tag_check_sees_every_spelling(line: str) -> None:
     assert composed_tag_lines(line) == [line]
@@ -121,6 +137,8 @@ def test_the_composed_tag_check_sees_every_spelling(line: str) -> None:
     'tags="rdr,gate,fix-check"',
     'memory_put(project="{repo}_rdr", title="{id}-gate-latest", tags="rdr,gate")',
     "a gatekeeper checks it",
+    "bead:x,kind:gateway",
+    "the rollup reads `kind:gate`, then `bead:` and `rdr:`",
 ])
 def test_the_composed_tag_check_leaves_prose_and_other_tags_alone(line: str) -> None:
     assert composed_tag_lines(line) == []
