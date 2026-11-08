@@ -1076,6 +1076,12 @@ QUERIES = {
         {"tool_calls"},
     ),
 }
+# Every query also asks for tool_call_count: transcripts.lua bounds each page by
+# tool calls, loads included (marlowe, 2026-11-08).
+QUERIES = {
+    name: ([*fields, "tool_call_count"], bodies, keys | {"tool_call_count"})
+    for name, (fields, bodies, keys) in QUERIES.items()
+}
 
 
 def _one(fields, bodies=None):
