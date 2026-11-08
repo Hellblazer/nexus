@@ -161,7 +161,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import click
 import structlog
@@ -188,6 +188,7 @@ from nexus.commands.catalog_cmds.integrity import (
 # `reconcile_stale_mod._is_worktree_or_tempdir_path`) keep working
 # unchanged.
 from nexus.repo_identity import is_worktree_or_tempdir_path
+from nexus.sensitive_output import CliDocumentLines, withhold_flagged_rows
 
 # nexus-8tnz2: shared T3-orphan-collection classification -- the SAME
 # function `nx catalog doctor --t3-vs-catalog` (t3_orphans) and `nx catalog
@@ -740,6 +741,9 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
             # the first key it probes T3 by (nexus-1uekf).
             "chash": (getattr(e, "meta", None) or {}).get("doc_id") or "",
             "file_path": e.file_path or "",
+            # nexus-rfvyy.9 item 2: a flagged document's title and paths are content; the census entries are canonical
+            # rows (aliases are dropped above), so the row's own flag is the document's.
+            "sensitive": getattr(e, "sensitive", False) is True,
         }
 
         if e.physical_collection in vanished_names:
@@ -811,9 +815,24 @@ def _assert_empty_manifest(targets: list[dict]) -> tuple[list[dict], list[dict]]
     return ok, skipped
 
 
+#: The posture of the lines this run prints (nexus-rfvyy.9 item 2); set per invocation by the command.
+_DOC_LINES: CliDocumentLines | None = None
+
+
+def _doc_lines() -> CliDocumentLines:
+    global _DOC_LINES  # noqa: PLW0603 — one posture per invocation, read by every sample printer
+    if _DOC_LINES is None:
+        _DOC_LINES = CliDocumentLines()
+    return _DOC_LINES
+
+
 def _echo_sample(rows: list[dict], cap: int, label_fn) -> None:
     for row in rows[:cap]:
-        click.echo(f"    {label_fn(row)}")
+        text = label_fn(row)
+        if row.get("sensitive") is True:
+            # A flagged document's title and paths are content: the stub under Claude Code, a badge in a terminal.
+            text = _doc_lines().label(str(row.get("tumbler", "")), True, text)
+        click.echo(f"    {text}")
     if len(rows) > cap:
         click.echo(f"    ... and {len(rows) - cap} more")
 
@@ -1445,10 +1464,17 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
     t3 = _cat_cmd._make_t3()
     report, unreadable = _classify(cat, t3)
 
+    global _DOC_LINES  # noqa: PLW0603 — see _doc_lines
+    _DOC_LINES = CliDocumentLines()
     if json_out:
-        click.echo(json.dumps(_json_payload(report, unreadable), indent=2))
+        click.echo(json.dumps(withhold_flagged_rows(
+            _json_payload(report, unreadable), _DOC_LINES,
+            keep=("physical_collection", "manifest_len", "chunk_count", "reason"),
+        ), indent=2))
     else:
         _echo_human_report(report, unreadable)
+        lines = _DOC_LINES
+        click.get_current_context().call_on_close(lambda: [click.echo(n) for n in lines.notes()])
 
     _raise_if_unreadable(unreadable)
     _raise_if_anchor_failed(report)

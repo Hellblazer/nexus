@@ -31,8 +31,8 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 __all__ = [
-    "BADGE", "DocumentRows", "McpOutput", "McpOutputSetting", "chunk_row_facts", "cli_output_posture", "first_sensitive_owner", "hidden_endpoints", "hit_is_sensitive",
-    "mcp_output_posture", "mcp_output_setting", "posture_of", "present_document_rows", "present_entries", "stub_line", "tumbler_order_key", "withheld_edges", "withheld_note",
+    "BADGE", "CliDocumentLines", "DocumentRows", "McpOutput", "McpOutputSetting", "chunk_row_facts", "cli_output_posture", "entries_flagged", "first_sensitive_owner", "flagged_tumblers", "hidden_endpoints", "hit_is_sensitive",
+    "mcp_output_posture", "mcp_output_setting", "posture_of", "present_document_rows", "present_entries", "stub_line", "tumbler_order_key", "withheld_edges", "withheld_note", "withhold_flagged_rows",
 ]
 
 McpOutput = Literal["withhold", "flag"]
@@ -142,6 +142,101 @@ def stub_line(tumbler: str = "") -> str:
 def withheld_note(count: int) -> str:
     """The sentence that states how many hits a response withheld (``"1 sensitive hit withheld"``)."""
     return f"{count} sensitive hit{'' if count == 1 else 's'} withheld"
+
+
+# ── CLI lines that name a document (nexus-rfvyy.9 item 2) ───────────────────
+
+
+class CliDocumentLines:
+    """The output posture for a CLI verb that names catalog documents in its own lines (Sam 2026-11-08, ask
+    rfvyy9-cli-posture, option b: the output verbs, not the lookups by exact title).
+
+    :meth:`label` is the text for one line naming a document: unchanged for an unflagged one; for a flagged one the
+    stub line (:func:`stub_line`, the tumbler and no title or path) under ``withhold``, or the text with
+    :data:`BADGE` under ``flag``. The posture is :func:`cli_output_posture` (``withhold`` under Claude Code, ``flag``
+    in a terminal), read once, on the first flagged line. :meth:`notes` are the lines a verb prints after its list:
+    the reader clause when a flagged document was shown, and the withheld count."""
+
+    def __init__(self, posture: McpOutput | None = None) -> None:
+        self._posture = posture
+        self.withheld = 0
+        self.shown = 0
+
+    def withholding(self) -> bool:
+        """True when a flagged document's line is the stub (the posture is ``withhold``)."""
+        if self._posture is None:
+            self._posture = cli_output_posture()
+        return self._posture == "withhold"
+
+    def label(self, tumbler: str, sensitive: bool, text: str) -> str:
+        """*text* as the line naming the document at *tumbler* is to read under the posture."""
+        if not sensitive:
+            return text
+        if self.withholding():
+            self.withheld += 1
+            return stub_line(tumbler)
+        self.shown += 1
+        return f"{text}  {BADGE}"
+
+    def notes(self) -> list[str]:
+        """The lines that follow the list: the reader clause when a flagged document was shown, the withheld count
+        when one was withheld; empty when neither."""
+        out: list[str] = []
+        if self.shown:
+            from nexus.context_annotations import SENSITIVE_READER_CLAUSE  # noqa: PLC0415 - deferred, as the config read
+
+            out.append(SENSITIVE_READER_CLAUSE)
+        if self.withheld:
+            out.append(f"[{withheld_note(self.withheld)}]")
+        return out
+
+
+def withhold_flagged_rows(obj: Any, lines: CliDocumentLines, *, keep: Sequence[str] = ()) -> Any:
+    """*obj* (a CLI verb's JSON payload, any nesting of dicts and lists) with every document row whose
+    ``sensitive`` is ``True`` and that has a ``tumbler`` replaced, under ``withhold``, by its ``tumbler``, the *keep*
+    keys it has (counts and the like, never text), ``sensitive: true`` and ``withheld`` (the stub line); under
+    ``flag`` the row is returned whole with ``badge``. *lines* counts what it withheld or showed."""
+    if isinstance(obj, list):
+        return [withhold_flagged_rows(v, lines, keep=keep) for v in obj]
+    if not isinstance(obj, dict):
+        return obj
+    if obj.get("sensitive") is True and "tumbler" in obj:
+        tumbler = str(obj["tumbler"])
+        lines.label(tumbler, True, "")
+        if lines.withholding():
+            kept = {k: obj[k] for k in ("tumbler", *keep) if k in obj}
+            return {**kept, "sensitive": True, "withheld": stub_line(tumbler)}
+        return {**obj, "badge": BADGE}
+    return {k: withhold_flagged_rows(v, lines, keep=keep) for k, v in obj.items()}
+
+
+def flagged_tumblers(tumblers: Iterable[str], *, cat: Any = None) -> set[str]:
+    """The subset of *tumblers* to treat as flagged for output: :func:`nexus.doc_sensitivity.flagged`, or every one
+    of them when the catalog cannot say (fail closed, as :func:`present_entries` does for an alias)."""
+    from nexus import doc_sensitivity  # noqa: PLC0415 - deferred: the module reaches the catalog factory
+
+    wanted = {str(t) for t in tumblers if t}
+    if not wanted:
+        return set()
+    try:
+        return doc_sensitivity.flagged(wanted, cat=cat)
+    except doc_sensitivity.SensitivityUnknown:
+        return wanted
+
+
+def entries_flagged(entries: Iterable[Any], *, cat: Any = None) -> set[str]:
+    """The tumblers of *entries* (``CatalogEntry`` objects) to treat as flagged for output: the row's own
+    ``sensitive`` column, and for a merged duplicate (``alias_of``, whose own flag is unset) its canonical's flag,
+    read once for all of them, every alias counted flagged when that read fails (as :func:`present_entries`)."""
+    out: set[str] = set()
+    aliases: list[str] = []
+    for e in entries:
+        t = str(getattr(e, "tumbler", "") or "")
+        if getattr(e, "sensitive", False) is True:
+            out.add(t)
+        elif getattr(e, "alias_of", ""):
+            aliases.append(t)
+    return out | flagged_tumblers(aliases, cat=cat)
 
 
 # ── catalog document rows (nexus-rfvyy.1) ────────────────────────────────────

@@ -2313,6 +2313,9 @@ def _run_extraction(
     import dataclasses as _dataclasses  # noqa: PLC0415 — stdlib deferred to call site (startup cost)
     from nexus.db.t2.records import with_doc_id  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.records)
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.mcp_infra)
+    from nexus.sensitive_output import CliDocumentLines  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    skip_lines = CliDocumentLines()
     with T2Database(db_path) as db:  # boundary-allow: read-only handle; the aspect WRITE routes via t2_index_write -> complete_aspect (nexus-hb99x)
         for i, entry in enumerate(entries, 1):
             source_path = entry.file_path or entry.title
@@ -2349,7 +2352,12 @@ def _run_extraction(
                     "aspect_enrich_skipped_sensitive",
                     tumbler=refused.tumbler, surface="enrich_aspects", collection=collection,
                 )
-                click.echo(f"  [{i}/{len(entries)}] {Path(source_path).name}: skipped (sensitive)")
+                # nexus-rfvyy.9 item 2: a flagged document's file name is content (the stub under Claude Code).
+                click.echo(
+                    f"  [{i}/{len(entries)}] "
+                    f"{skip_lines.label(str(refused.tumbler or entry.tumbler), True, Path(source_path).name)}: "
+                    "skipped (sensitive)"
+                )
                 continue
             except SensitivityUnknown as unknown:
                 skipped += 1
@@ -2357,8 +2365,10 @@ def _run_extraction(
                     "aspect_enrich_sensitivity_unknown",
                     source_path=source_path, collection=collection, error=unknown.detail,
                 )
+                # Fail closed: a document the catalog could not judge is named as a flagged one would be.
                 click.echo(
-                    f"  [{i}/{len(entries)}] {Path(source_path).name}: "
+                    f"  [{i}/{len(entries)}] "
+                    f"{skip_lines.label(str(entry.tumbler), True, Path(source_path).name)}: "
                     "skipped (the catalog could not say whether it is sensitive)"
                 )
                 continue
@@ -2504,6 +2514,8 @@ def _run_extraction(
         extractor_str = ", ".join(f"{k}={v}" for k, v in sorted(by_extractor.items()))
         summary += f". by_extractor: {extractor_str}"
     click.echo(summary)
+    for line in skip_lines.notes():
+        click.echo(line)
     return extracted
 
 
@@ -3328,6 +3340,12 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
         click.echo(f"No aspect rows for '{collection}'{suffix}.")
         return
 
+    from nexus.sensitive_output import CliDocumentLines, flagged_tumblers  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    # nexus-rfvyy.9 item 2: a row of a flagged document (aspects extracted before the flag was set) names its path,
+    # which is content: the stub under Claude Code. A row with no doc_id (legacy) cannot be judged and is shown.
+    flagged = flagged_tumblers((getattr(r, "doc_id", "") or "" for r in records))
+    lines = CliDocumentLines()
     for r in records:
         populated = sum(
             1 for v in (
@@ -3342,11 +3360,14 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
         row_scheme = (
             urlparse(r.source_uri).scheme if r.source_uri else "-"
         ) or "-"
+        doc = getattr(r, "doc_id", "") or ""
         click.echo(
-            f"  [{row_scheme:<10}] {r.source_path}  {populated}/5  {r.model_version}"
+            f"  [{row_scheme:<10}] {lines.label(doc, doc in flagged, r.source_path)}  {populated}/5  {r.model_version}"
         )
     suffix = f" matching scheme={scheme!r}" if scheme else ""
     click.echo(f"\n{len(records)} row(s) in '{collection}'{suffix}.")
+    for line in lines.notes():
+        click.echo(line)
 
 
 @enrich.command(name="info")
@@ -3908,20 +3929,27 @@ def aspects_list_cmd(
         # but 407 gaps" -- the audit is not complete without it.
         claimed = {_aspect_identity(e) for e in entries}
         orphaned = sorted(p for p in existing if p not in claimed)
+        from nexus.sensitive_output import CliDocumentLines, entries_flagged, withhold_flagged_rows  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+        # nexus-rfvyy.9 item 2: a flagged document is never extracted, so it is a gap; its title, path and identity
+        # are content (the stub under Claude Code, a badge in a terminal).
+        gap_flagged = entries_flagged(gaps, cat=cat)
+        gap_lines = CliDocumentLines()
         if as_json:
             click.echo(json.dumps({
                 "collection": collection,
                 "entries": len(entries),
                 "aspect_rows": len(existing),
-                "gaps": [
+                "gaps": withhold_flagged_rows([
                     {
                         "tumbler": str(e.tumbler),
                         "title": e.title,
                         "file_path": e.file_path,
                         "identity": _aspect_identity(e),
+                        **({"sensitive": True} if str(e.tumbler) in gap_flagged else {}),
                     }
                     for e in gaps
-                ],
+                ], gap_lines),
                 "orphaned_aspect_rows": orphaned,
             }, indent=2))
             return
@@ -3937,9 +3965,12 @@ def aspects_list_cmd(
                 f"have no aspect record:"
             )
             for e in gaps[:limit] if limit else gaps:
-                click.echo(f"  {e.tumbler}  {_aspect_identity(e)}")
+                t = str(e.tumbler)
+                click.echo(f"  {e.tumbler}  {gap_lines.label(t, t in gap_flagged, _aspect_identity(e))}")
             if limit and len(gaps) > limit:
                 click.echo(f"  ... and {len(gaps) - limit} more.")
+            for line in gap_lines.notes():
+                click.echo(line)
         else:
             click.echo(
                 f"No missing aspects in '{collection}': every catalog "
@@ -3958,10 +3989,30 @@ def aspects_list_cmd(
             collection, limit=(limit if limit else None),
         )
 
+    from nexus.sensitive_output import CliDocumentLines, flagged_tumblers  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    # nexus-rfvyy.9 item 2: a flagged document's aspect record (extracted before the flag was set) is its content:
+    # path, problem and method. Under Claude Code the record is the stub; in a terminal it carries a badge. A record
+    # with no doc_id (legacy) cannot be judged and is shown.
+    rec_flagged = flagged_tumblers((getattr(r, "doc_id", "") or "" for r in records))
+    rec_lines = CliDocumentLines()
+
+    def _is_flagged(r: Any) -> bool:
+        return (getattr(r, "doc_id", "") or "") in rec_flagged
+
     if as_json:
-        click.echo(json.dumps(
-            [_aspect_to_dict(r) for r in records], indent=2,
-        ))
+        out = []
+        for r in records:
+            d = _aspect_to_dict(r)
+            if _is_flagged(r):
+                tumbler = str(r.doc_id)
+                stub = rec_lines.label(tumbler, True, "")  # the stub line, or "" plus the badge
+                if rec_lines.withholding():
+                    d = {"doc_id": tumbler, "collection": d.get("collection"), "sensitive": True, "withheld": stub}
+                else:
+                    d = {**d, "sensitive": True, "badge": stub.strip()}
+            out.append(d)
+        click.echo(json.dumps(out, indent=2))
         return
 
     if not records:
@@ -3974,12 +4025,18 @@ def aspects_list_cmd(
     click.echo(f"{len(records)} aspect record(s) in '{collection}':")
     click.echo("")
     for r in records:
+        if _is_flagged(r) and rec_lines.withholding():
+            click.echo(f"  {rec_lines.label(str(r.doc_id), True, '')}")
+            click.echo("")
+            continue
         problem = (r.problem_formulation or "")[:80]
         method = (r.proposed_method or "")[:80]
-        click.echo(f"  {r.source_path}")
+        click.echo(f"  {rec_lines.label(str(getattr(r, 'doc_id', '') or ''), _is_flagged(r), r.source_path)}")
         click.echo(f"    problem: {problem}{'...' if r.problem_formulation and len(r.problem_formulation) > 80 else ''}")
         click.echo(f"    method:  {method}{'...' if r.proposed_method and len(r.proposed_method) > 80 else ''}")
         click.echo("")
+    for line in rec_lines.notes():
+        click.echo(line)
 
 
 @enrich.command(name="aspects-backfill-uri")
