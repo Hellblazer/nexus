@@ -42,7 +42,6 @@ module calls the five APIs with the arguments the design calls for, not
 that the real kernel32 behaves as documented. The qwentescence run in
 nexus-6y4e0's closing report is what confirms the latter.
 """
-
 from __future__ import annotations
 
 import ctypes
@@ -195,10 +194,7 @@ def _load_kernel32() -> Any | None:
     dll.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
     dll.CreateJobObjectW.restype = wintypes.HANDLE
     dll.SetInformationJobObject.argtypes = [
-        wintypes.HANDLE,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        wintypes.DWORD,
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
     ]
     dll.SetInformationJobObject.restype = wintypes.BOOL
     dll.QueryInformationJobObject.argtypes = [
@@ -350,30 +346,22 @@ def assign_process(job: int | None, pid: int) -> bool:
     hproc = None
     try:
         hproc = _kernel32.OpenProcess(
-            _PROCESS_SET_QUOTA | _PROCESS_TERMINATE,
-            False,
-            pid,
+            _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid,
         )
         if not hproc:
             _log.debug(
-                "win_job_open_process_failed",
-                pid=pid,
-                error=_last_error(),
+                "win_job_open_process_failed", pid=pid, error=_last_error(),
             )
             return False
         ok = bool(_kernel32.AssignProcessToJobObject(job, hproc))
         if not ok:
             _log.debug(
-                "win_job_assign_failed",
-                pid=pid,
-                error=_last_error(),
+                "win_job_assign_failed", pid=pid, error=_last_error(),
             )
         return ok
     except (OSError, ctypes.ArgumentError) as exc:
         _log.debug(
-            "win_job_assign_exception",
-            pid=pid,
-            exc_class=type(exc).__name__,
+            "win_job_assign_exception", pid=pid, exc_class=type(exc).__name__,
         )
         return False
     finally:
@@ -438,9 +426,7 @@ def send_ctrl_break(pid: int) -> bool:
         return False
     if not ok:
         _log.debug(
-            "win_job_ctrl_break_failed",
-            pid=pid,
-            error=_last_error(),
+            "win_job_ctrl_break_failed", pid=pid, error=_last_error(),
         )
     return ok
 

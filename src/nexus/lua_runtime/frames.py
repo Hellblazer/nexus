@@ -13,7 +13,6 @@ Standard library only: the worker imports this module under ``python -I``.
 from __future__ import annotations
 
 import json
-import re
 import struct
 from typing import Any, BinaryIO
 
@@ -44,7 +43,14 @@ _HEADER = struct.Struct(">I")
 INT64_MIN: int = -(2**63)
 INT64_MAX: int = 2**63 - 1
 #: 19 digits is the shortest run that can leave the range; most frames hold none, and skip the checked decode.
-_LONG_DIGITS = re.compile(rb"\d{19}")
+#: The test is a C-speed ``translate`` of every digit to one byte and a substring search (0.3 ms per MB; a
+#: ``\d{19}`` regex took 6 ms per MB, which doubled a 1 MB round trip).
+_DIGITS_TO_D = bytes.maketrans(b"0123456789", b"D" * 10)
+_LONG_RUN = b"D" * 19
+
+
+def _has_long_digit_run(body: bytes) -> bool:
+    return _LONG_RUN in body.translate(_DIGITS_TO_D)
 
 
 class IntOutOfRange(ValueError):
@@ -63,14 +69,14 @@ def _int64(text: str) -> int:
 def _loads(body: bytes) -> Any:
     """``json.loads`` of UTF-8 *body*; an integer outside 64 bits raises :class:`IntOutOfRange`."""
     text = body.decode("utf-8")
-    if _LONG_DIGITS.search(body):
+    if _has_long_digit_run(body):
         return json.loads(text, parse_int=_int64)
     return json.loads(text)
 
 
 def has_wide_ints(data: bytes) -> bool:
     """True when JSON *data* holds an integer outside the 64-bit range (a digit run inside a string does not count)."""
-    if not _LONG_DIGITS.search(data):
+    if not _has_long_digit_run(data):
         return False
     try:
         _loads(data)
