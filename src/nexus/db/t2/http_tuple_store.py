@@ -97,7 +97,7 @@ import re
 import threading
 import time
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
@@ -552,6 +552,20 @@ def _body_to_census(body: dict[str, Any]) -> SubspaceCensus:
     )
 
 
+#: :meth:`HttpTupleStore.rd_from` backs the engine's exclusive cursor off by
+#: this much below the start row, then drops what precedes the row. Rows render
+#: ``created_at`` to the microsecond; a millisecond keeps clear of any rounding.
+_FROM_BACKOFF: timedelta = timedelta(milliseconds=1)
+#: The page :meth:`HttpTupleStore.rd_from` reads while it passes rows that
+#: precede its start inside the back-off window.
+_FROM_PAGE: int = 100
+
+
+def _parse_row_time(value: str) -> datetime:
+    """A row's ``created_at`` as an aware datetime (the engine writes ``Z``)."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def _since_payload(since: tuple[str, str] | None) -> dict[str, str] | None:
     """``since`` on the wire is ``{"created_at": ..., "id": ...}``
     (``TupleHandler.readCursor``); the client-facing shape is the plain
@@ -963,6 +977,51 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         rows, limit = self._rd_request(subspace, keys_pattern, n, since, timeout_s, "desc")
         assert limit is not None  # _require_order_echo raised otherwise
         return NewestRead(rows=rows, limit=limit)
+
+    def rd_from(
+        self,
+        subspace: str,
+        keys_pattern: dict[str, str] | None = None,
+        *,
+        n: int = 1,
+        start: tuple[str, str],
+    ) -> list[TupleRow]:
+        """The row *start* names (its own ``(created_at, id)``) and the rows
+        after it, *n* in all, oldest first (nexus-1d6pz.11.2). The engine's
+        cursor is exclusive and it has no read by id, so this backs the
+        cursor off by :data:`_FROM_BACKOFF` with the largest id, reads pages
+        ascending, and drops the rows ordered before *start*. Raises
+        :class:`LookupError` when *start* is not in the subspace (expired,
+        consumed, or not a row of it): never a silent start at the next row."""
+        created = _parse_row_time(start[0])
+        target = (created, start[1].lower())
+        cursor = ((created - _FROM_BACKOFF).isoformat().replace("+00:00", "Z"), "f" * 64)
+        out: list[TupleRow] = []
+        while len(out) < n:
+            page = self.rd(subspace, keys_pattern, n=_FROM_PAGE, since=cursor)
+            for row in page:
+                if not row.created_at:
+                    continue  # cannot be ordered against start; the engine always sends it
+                key = (_parse_row_time(row.created_at), row.id.lower())
+                if key < target:
+                    continue
+                if not out and key != target:
+                    raise LookupError(
+                        f"tuple {start[1]} created {start[0]} is not in {subspace} "
+                        "(expired, consumed, or not a row of this subspace)"
+                    )
+                out.append(row)
+                if len(out) == n:
+                    break
+            if len(page) < _FROM_PAGE:
+                break
+            cursor = (page[-1].created_at or cursor[0], page[-1].id)
+        if not out:
+            raise LookupError(
+                f"tuple {start[1]} created {start[0]} is not in {subspace} "
+                "(expired, consumed, or not a row of this subspace)"
+            )
+        return out
 
     def _rd_request(
         self,

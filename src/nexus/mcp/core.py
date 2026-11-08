@@ -8989,6 +8989,13 @@ def tuple_rd(
     since_id: Annotated[str, Field(
         description="The id (64 hex characters) of that same row; never a made-up value. See since_created_at.",
     )] = "",
+    from_created_at: Annotated[str, Field(
+        description="The created_at of a row to start AT: it is returned first, then the rows after it. "
+                    "Pair with from_id; not with since. A board notice prints this read for its posts.",
+    )] = "",
+    from_id: Annotated[str, Field(
+        description="The id of that same row (64 hex characters). See from_created_at.",
+    )] = "",
     timeout_s: Annotated[int, Field(
         description="Seconds to park when nothing matches immediately; 0 (default) never blocks. "
                     "At most 25 by default (the engine's NX_TUPLE_TIMEOUT_CAP_SECONDS); a longer value is refused, not clamped.",
@@ -9008,8 +9015,29 @@ def tuple_rd(
     before this client's clock; the claimant and `lease_until` are the
     stale holder's) or `dead`.
     `since_created_at` and `since_id` come from a returned row, together.
+    `from_created_at` and `from_id` name one row to start at, inclusive
+    (nexus-1d6pz.11.2); with no `since` and no `from`, the read starts at the
+    OLDEST row, not the newest.
     """
     try:
+        if bool(from_created_at) != bool(from_id):
+            from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+            raise SchemaViolationError(
+                "from_created_at and from_id come as a pair, both from one row (its created_at and its id)"
+            )
+        if from_created_at and (since_created_at or since_id):
+            from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+            raise SchemaViolationError(
+                "pass from_created_at/from_id (start at a row) or since_created_at/since_id "
+                "(resume after a row), not both"
+            )
+        if from_created_at:
+            if timeout_s:
+                from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+                raise SchemaViolationError("from_created_at reads what is there; it does not park (timeout_s=0)")
+            with _t2_ctx() as db:
+                rows = db.tuples.rd_from(subspace, keys_pattern, n=n, start=(from_created_at, from_id))
+            return [_tuple_row_to_dict(r) for r in rows]
         if bool(since_created_at) != bool(since_id):
             # bead nexus-o9gt2: one half used to be silently ignored, reading from the start.
             from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
