@@ -726,6 +726,72 @@ def test_the_no_lock_warning_is_shown_where_a_user_sees_it(rig: Rig) -> None:
     assert "Nothing locks the service while the upgrade runs" in doc
 
 
+# -- bundle discovery follows --config-dir (nexus-j738q limitation 3)
+
+
+def _install_bundle(config_dir: Path, source_bin: Path, *, without: tuple[str, ...] = ()) -> Path:
+    """Lay out a complete extracted bundle (marker + bundle/bin) under *config_dir* from a fake bin dir."""
+    import shutil  # noqa: PLC0415
+
+    extract_root = config_dir / "pg-bundle"
+    bin_dir = extract_root / "bundle" / "bin"
+    shutil.copytree(source_bin, bin_dir)
+    for name in without:
+        (bin_dir / name).unlink()
+    (extract_root / ".nx_bundle_extracted").write_text("x", encoding="utf-8")
+    return bin_dir
+
+
+def test_the_bundle_is_found_under_the_given_config_dir_not_the_default(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--config-dir`` names where the cluster AND its bundle live; the default dir has neither."""
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    bundle_bin = _install_bundle(rig.cfg, rig.new_bin)
+    elsewhere = rig.root / "default-cfg"
+    elsewhere.mkdir()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(elsewhere))  # what the code used to read
+    assert upgrade_mod.build_plan(rig.cfg, rig.old_bin).new_bins.bin_dir == bundle_bin
+    result = rig.run("--apply", "--config-dir", str(rig.cfg))
+    assert result.exit_code == 0, result.output
+    assert rig.calls("pg_upgrade"), "the bundle's pg_upgrade never ran"
+
+
+def test_the_given_config_dirs_bundle_wins_over_the_default_dirs(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a bundle under BOTH, the one beside the cluster is used (the default one lacks pg_upgrade: using it refuses)."""
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    mine = _install_bundle(rig.cfg, rig.new_bin)
+    default_cfg = rig.root / "default-cfg"
+    default_cfg.mkdir()
+    _install_bundle(default_cfg, rig.new_bin, without=("pg_upgrade",))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(default_cfg))
+    assert upgrade_mod.build_plan(rig.cfg, rig.old_bin).new_bins.bin_dir == mine
+
+
+def test_nexus_pg_bin_still_overrides_the_config_dirs_bundle(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_bundle(rig.cfg, rig.new_bin, without=("pg_upgrade",))  # a bundle that would be refused
+    # the rig's NEXUS_PG_BIN (a complete fake bin) is still set: it comes first
+    assert upgrade_mod.build_plan(rig.cfg, rig.old_bin).new_bins.bin_dir == rig.new_bin
+
+
+def test_no_bundle_under_the_config_dir_is_refused_not_found_elsewhere(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default dir's bundle is not a fallback for another config dir, and no host PostgreSQL is tried."""
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    default_cfg = rig.root / "default-cfg"
+    default_cfg.mkdir()
+    _install_bundle(default_cfg, rig.new_bin)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(default_cfg))
+    with pytest.raises(upgrade_mod.PgUpgradeRefused, match="bundled PostgreSQL 17 is not available"):
+        upgrade_mod.build_plan(rig.cfg, rig.old_bin)
+
+
+def test_discover_pg_binaries_takes_the_config_dir(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    bundle_bin = _install_bundle(rig.cfg, rig.new_bin)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(rig.root / "nowhere"))
+    assert pg_provision.discover_pg_binaries(rig.cfg).bin_dir == bundle_bin
+    with pytest.raises(pg_provision.PgBinaryNotFoundError):
+        pg_provision.discover_pg_binaries()
+
+
 # -- errors (finding 4)
 
 
