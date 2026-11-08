@@ -42,11 +42,6 @@ NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 ARG_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
 VERB_RE = re.compile(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*")
 MAX_SUMMARY: int = 100
-#: Lua 5.4's reserved words: an argument so named could not be read as ``args.<name>``.
-LUA_KEYWORDS: frozenset[str] = frozenset(
-    "and break do else elseif end false for function goto if in local nil not or repeat "
-    "return then true until while".split()
-)
 #: The largest integer a Lua 5.4 integer holds; a JSON integer outside it is refused.
 LUA_INT_MAX: int = 2**63 - 1
 LUA_INT_MIN: int = -(2**63)
@@ -148,8 +143,6 @@ def _parse_args(text: str) -> tuple[ArgSpec, ...]:
         typ = typ.removesuffix("?")
         if not ARG_NAME_RE.fullmatch(name):
             raise _header_error(3, f"argument name '{name}' breaks [a-z][a-z0-9_]{{0,31}}")
-        if name in LUA_KEYWORDS:
-            raise _header_error(3, f"argument name '{name}' is a Lua keyword (args.{name} cannot be written)")
         if typ not in TYPES:
             raise _header_error(3, f"argument '{name}' has unknown type '{typ}'")
         if name in seen:
