@@ -98,7 +98,12 @@ def _recorded_cwds(directory: Path) -> Iterable[Path]:
                     except ValueError:
                         continue
                     cwd = record.get("cwd") if isinstance(record, dict) else None
-                    if isinstance(cwd, str) and os.path.isabs(cwd):
+                    # A NUL byte makes realpath raise ValueError: a corrupt record is skipped, never an error.
+                    if (
+                        isinstance(cwd, str)
+                        and "\x00" not in cwd
+                        and os.path.isabs(cwd)
+                    ):
                         yield Path(os.path.realpath(cwd))
                         break
         except OSError:
