@@ -165,13 +165,13 @@ def test_the_git_subprocess_gets_the_remaining_budget_and_the_repo(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen: list[tuple[float, object]] = []
-    real = subprocess.run
+    real = verbs_git.run_bounded
 
     def spy(*a, **k):
         seen.append((k["timeout"], k["cwd"]))
         return real(*a, **k)
 
-    monkeypatch.setattr(verbs_git.subprocess, "run", spy)
+    monkeypatch.setattr(verbs_git, "run_bounded", spy)
     verbs_git.diff_names("base", deadline=time.monotonic() + 7, ctx=_ctx(repo))
     assert seen and all(0 < t <= 7 and cwd == repo for t, cwd in seen)
 
@@ -182,7 +182,7 @@ def test_a_git_that_outlasts_the_budget_is_a_verb_timeout(
     def slow(*a, **k):
         raise subprocess.TimeoutExpired(a[0], k["timeout"])
 
-    monkeypatch.setattr(verbs_git.subprocess, "run", slow)
+    monkeypatch.setattr(verbs_git, "run_bounded", slow)
     with pytest.raises(VerbTimeout):
         verbs_git.diff_stat("base", deadline=_deadline(), ctx=_ctx(repo))
 

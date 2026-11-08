@@ -22,6 +22,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.lua_runtime.verb_types import (
     JSONValue,
     ParamSpec,
@@ -31,11 +32,6 @@ from nexus.lua_runtime.verb_types import (
     VerbTimeout,
     encode_result,
 )
-
-# -c core.quotepath=false: paths as bytes, never C-quoted; LC_ALL=C: stable
-# messages. Output is read as bytes and decoded with replacement, so a path
-# that is not UTF-8 never carries a lone surrogate into the result.
-_GIT = ("git", "-c", "core.quotepath=false")
 
 
 def _env() -> dict[str, str]:
@@ -53,13 +49,18 @@ def _git(args: list[str], *, cwd: Path, deadline: float) -> str:
     if left <= 0:
         raise VerbTimeout("git: the run's time budget is spent")
     try:
-        proc = subprocess.run(
-            [*_GIT, *args],
-            cwd=cwd,
-            capture_output=True,
+        # core.quotepath=false: paths as bytes, never C-quoted. Output is read
+        # as bytes and decoded with replacement, so a path that is not UTF-8
+        # never carries a lone surrogate into the result. run_bounded resolves
+        # git off the working directory.
+        proc = run_bounded(
+            ["git", "-c", "core.quotepath=false", *args],
             timeout=left,
-            check=False,
+            cwd=cwd,
             env=_env(),
+            text=False,
+            encoding=None,
+            errors=None,
         )
     except subprocess.TimeoutExpired:
         raise VerbTimeout("git: the run's time budget ran out during git") from None
