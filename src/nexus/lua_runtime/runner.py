@@ -60,9 +60,11 @@ def run_procedure(name: str, args: Mapping[str, JSONValue]) -> JSONValue:
 def describe_error(exc: BaseException) -> str | None:
     """``"<kind>: <detail>"`` for an error of :data:`PROCEDURE_ERRORS`, else ``None``.
 
-    The kind is the :class:`ScriptError` kind (``static_check``, ``lua``, ``result``,
-    ``header``, ``args``) or one of ``limit``, ``worker``, ``busy``, ``library`` (detail
-    ``<reason>: <what>``), ``unavailable`` and ``repo``.
+    The kind is the :class:`ScriptError` kind (one of ``errors.KINDS``: ``static_check``,
+    ``lua``, ``result``, ``header``, ``args``, ``name``) or one of ``limit``, ``worker``,
+    ``busy``, ``name`` (a :class:`LibraryError`, detail ``<reason>: <what>``),
+    ``unavailable`` and ``repo``. A :class:`ScriptRunError` this function has no branch for
+    (a new subclass) reads ``<ClassName>: <message>``, so a front door always has text.
     """
     if isinstance(exc, ScriptError):
         return f"{exc.kind}: {exc.detail}"
@@ -78,9 +80,11 @@ def describe_error(exc: BaseException) -> str | None:
     if isinstance(exc, ScriptBusyError):
         return f"busy: {exc}" if str(exc) else "busy: the client already runs its maximum of workers"
     if isinstance(exc, LibraryError):
-        return f"library: {exc.reason}: {exc.detail}"
+        return f"name: {exc.reason}: {exc.detail}"
     if isinstance(exc, RunnerUnavailableError):
         return f"unavailable: {exc}"
     if isinstance(exc, RepoProbeError):
         return f"repo: {exc}"
+    if isinstance(exc, ScriptRunError):
+        return f"{type(exc).__name__}: {exc}"
     return None

@@ -85,6 +85,29 @@ def test_a_missing_arguments_file_is_a_usage_error(monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 2
 
 
+def test_an_arguments_path_that_is_a_directory_is_a_usage_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _install(monkeypatch, lambda name, args: pytest.fail("must not run"))
+    result = _run("x", "--args-file", str(tmp_path))
+    assert result.exit_code == 2
+    assert "cannot read the arguments" in result.output
+
+
+def test_arguments_nested_past_the_parser_are_a_usage_error_not_a_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, lambda name, args: pytest.fail("must not run"))
+    result = _run("x", "-", input="[" * 200_000)
+    assert result.exit_code == 2
+    assert "not valid JSON" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_a_non_finite_number_in_the_arguments_is_a_usage_error(monkeypatch: pytest.MonkeyPatch, constant: str) -> None:
+    _install(monkeypatch, lambda name, args: pytest.fail("must not run"))
+    result = _run("x", "-", input='{"n": %s}' % constant)
+    assert result.exit_code == 2
+    assert constant in result.output
+
+
 def test_a_second_positional_other_than_a_dash_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _install(monkeypatch, lambda name, args: pytest.fail("must not run"))
     assert _run("x", "file.json").exit_code == 2
@@ -97,7 +120,7 @@ def test_a_second_positional_other_than_a_dash_is_refused(monkeypatch: pytest.Mo
         (ScriptError("static_check", "verb-ungranted: memory.get (line 4)"), "static_check: verb-ungranted: memory.get (line 4)"),
         (ScriptLimitError("wall_time", 60.0), "limit: wall_time (60.0) reached"),
         (ScriptBusyError("4 workers run"), "busy: 4 workers run"),
-        (library.LibraryError("not_found", "no procedure x"), "library: not_found: no procedure x"),
+        (library.LibraryError("not_found", "no procedure x"), "name: not_found: no procedure x"),
     ],
 )
 def test_an_error_prints_its_kind_and_detail_and_exits_nonzero(
