@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Context-size ceilings for the markdown a plugin loads into a model's context (nexus-3ceda.12).
+
+    context_budgets.py check                              # exit 0 within every ceiling, 10 otherwise
+    context_budgets.py update-exceptions [--allow-raise]  # rewrite the ceilings to today's sizes
+
+Every tracked ``.md`` under a plugin's ``skills/``, ``agents/`` or ``commands/`` (conexus, sn,
+prose-edit, tool-spill) is loaded into a model's context when it is used, so its size is tokens
+spent per use. Each one has a byte ceiling in ``scripts/context-budgets.txt`` (``<path> <bytes>``):
+
+- a file larger than its ceiling fails: cut it, or move detail into a file loaded on demand;
+- a file with no ceiling fails: add it with ``update-exceptions --allow-raise`` (a new skill or agent
+  is a deliberate cost, so it is recorded);
+- a ceiling more than ``max(256 bytes, 5%)`` above its file fails, so the commit that shrinks a file
+  lowers its ceiling and the ceiling really falls; ordinary edits inside the slack touch nothing;
+- an entry for a file that is gone fails.
+
+``update-exceptions`` lowers and drops entries freely; raising one or adding a file needs
+``--allow-raise`` and a reason in the commit message. The SubagentStart payload has its own byte
+budgets in ``tests/hooks/test_subagent_start_byte_budget.py`` (it depends on runtime state, not on a
+file's size).
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+PLUGINS: tuple[str, ...] = ("conexus", "sn", "prose-edit", "tool-spill")
+KINDS: tuple[str, ...] = ("skills", "agents", "commands")
+CEILINGS: str = "scripts/context-budgets.txt"
+SLACK_MIN: int = 256
+SLACK_FRACTION: float = 0.05
+
+EXIT_OK: int = 0
+EXIT_OVER: int = 10
+
+_HEADER = """\
+# Context-size ceilings in bytes (scripts/context_budgets.py, nexus-3ceda.12). One `<path> <bytes>`
+# per line, for every tracked .md under a plugin's skills/, agents/ or commands/. Ceilings only fall:
+# lower one in the commit that shrinks the file (`python3 scripts/context_budgets.py
+# update-exceptions`); raising one or adding a file needs `--allow-raise` and a reason in the commit.
+"""
+
+
+def measure(root: Path) -> dict[str, int]:
+    """Byte size of every tracked in-scope markdown file, keyed by repo-relative path."""
+    globs = [f"{p}/{k}/**.md" for p in PLUGINS for k in KINDS]
+    out = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--", *globs], check=True, capture_output=True
+    ).stdout.decode()
+    return {p: (root / p).stat().st_size for p in sorted(out.split("\0")) if p and (root / p).is_file()}
+
+
+def read_ceilings(path: Path) -> dict[str, int]:
+    out: dict[str, int] = {}
+    if not path.exists():
+        return out
+    for n, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            raise SystemExit(f"{path}:{n}: expected '<path> <bytes>', got {raw!r}")
+        if parts[0] in out:
+            raise SystemExit(f"{path}:{n}: {parts[0]} is listed twice")
+        out[parts[0]] = int(parts[1])
+    return out
+
+
+def slack_allowed(size: int) -> int:
+    return max(SLACK_MIN, int(SLACK_FRACTION * size))
+
+
+def check(root: Path) -> list[str]:
+    sizes = measure(root)
+    ceilings = read_ceilings(root / CEILINGS)
+    errors: list[str] = []
+    if not sizes:
+        errors.append("counted no skill, agent or command markdown; the globs reach nothing")
+    for p, n in sizes.items():
+        c = ceilings.get(p)
+        if c is None:
+            errors.append(
+                f"{p}: {n} bytes and no ceiling; a new context file is a recorded cost: "
+                "python3 scripts/context_budgets.py update-exceptions --allow-raise"
+            )
+        elif n > c:
+            errors.append(
+                f"{p}: {n} bytes, over its ceiling of {c}; cut it or move detail into a file "
+                "loaded on demand (a legitimate raise: update-exceptions --allow-raise, with the "
+                "reason in the commit message)"
+            )
+        elif c - n > slack_allowed(n):
+            errors.append(
+                f"{p}: {n} bytes, {c - n} below its ceiling of {c} (more than {slack_allowed(n)} "
+                "of slack); lower it in this commit: python3 scripts/context_budgets.py update-exceptions"
+            )
+    errors.extend(f"{p}: listed but not a tracked context file; remove it" for p in sorted(set(ceilings) - set(sizes)))
+    return errors
+
+
+def update_exceptions(root: Path, allow_raise: bool) -> list[str]:
+    sizes = measure(root)
+    old = read_ceilings(root / CEILINGS)
+    refusals: list[str] = []
+    if not allow_raise:
+        for p, n in sizes.items():
+            if p not in old:
+                refusals.append(f"{p}: new entry at {n} bytes")
+            elif n > old[p]:
+                refusals.append(f"{p}: raise {old[p]} -> {n}")
+    if refusals:
+        return refusals
+    (root / CEILINGS).write_text(_HEADER + "".join(f"{p} {n}\n" for p, n in sizes.items()), encoding="utf-8")
+    return []
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("check")
+    up = sub.add_parser("update-exceptions")
+    up.add_argument("--allow-raise", action="store_true")
+    args = ap.parse_args(argv)
+    if args.cmd == "update-exceptions":
+        refusals = update_exceptions(args.root, args.allow_raise)
+        for r in refusals:
+            sys.stderr.write(f"refused: {r}\n")
+        if refusals:
+            sys.stderr.write("ceilings only fall; pass --allow-raise for a legitimate raise\n")
+            return EXIT_OVER
+        sys.stdout.write(f"wrote {CEILINGS}\n")
+        return EXIT_OK
+    errors = check(args.root)
+    for e in errors:
+        sys.stderr.write(f"error: {e}\n")
+    sizes = measure(args.root)
+    sys.stdout.write(f"context_budgets: {len(sizes)} files, {sum(sizes.values())} bytes, {len(errors)} errors\n")
+    return EXIT_OVER if errors else EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

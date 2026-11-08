@@ -216,6 +216,8 @@ respectively) and are constructed independently of `T2Database`.
 
 See `conexus/README.md` for the plugin structure. Skills live in `conexus/skills/<name>/SKILL.md`, agents in `conexus/agents/<name>.md`, and both are registered in `conexus/registry.yaml`.
 
+**Context budgets** (nexus-3ceda.12): every `.md` under a plugin's `skills/`, `agents/` or `commands/` (conexus, sn, prose-edit, tool-spill) is loaded into a model's context when used, so each has a byte ceiling in `scripts/context-budgets.txt` that only falls. A file that grows past its ceiling fails the lint bucket: cut it, or move detail into a file loaded on demand. A new file, or a deliberate raise, is recorded with `python3 scripts/context_budgets.py update-exceptions --allow-raise` and a reason in the commit message; a shrink of more than `max(256 bytes, 5%)` lowers its ceiling in the same commit (`update-exceptions`). Run `python3 scripts/context_budgets.py check` before a push.
+
 **MCP tools in agents**: Agents do NOT declare a `tools:` or `disallowedTools:` field in frontmatter — Claude Code has confirmed bugs where these fields in plugin-defined agents filter out MCP tools or are silently ignored (see RDR-035, RDR-039). Agents inherit all tools from the parent session; the `settings.json` permissions list provides runtime enforcement. Agent body text references MCP tool syntax (not CLI commands) for storage tier operations. See `conexus/README.md` § MCP Servers for tool names and parameters.
 
 ## Version Pinning
