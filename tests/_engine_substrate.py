@@ -101,6 +101,7 @@ import structlog
 
 from nexus._locking import lock_file, unlock_file
 from nexus._winsec import grant_user_tree_access
+from nexus.daemon.readiness import MigrationLogScanner
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
 from tests import _signal_fence
 from tests._child_process import kill_group, pid_alive, popen_in_group, stop_group
@@ -1773,9 +1774,17 @@ def _wait_tcp(host: str, port: int, timeout: float) -> None:
 #: it gives up and names the port a foreign listener holds (nexus-kmfz6).
 _PORT_RACE_ATTEMPTS = 4
 
-#: How long the engine has to log that it bound its port. A cold JVM runs schema
-#: migration and model init first, so this is the old connect-wait's 60 s.
-_ENGINE_READY_TIMEOUT_S = 60.0
+#: How long the engine may go without MIGRATION PROGRESS before the boot gives up on it. The
+#: old connect-wait was a fixed 60 s from the spawn; under pool load a healthy engine still
+#: applying Liquibase changesets outlived it (develop run 42436306115: vectors-047-1 starting
+#: when the wait expired). Progress is a new ``Running Changeset:`` line or a
+#: ``schema_migration_*`` event, measured from the last one (or the spawn), so this is never
+#: tighter than the 60 s it replaces for a silent JVM, and a slow-but-advancing migration
+#: never trips it. One changeset that is silent longer than this still does, by design.
+_ENGINE_STALL_S = 60.0
+#: Hard bound on the whole wait, however steadily the log advances. A migration is about 400
+#: changesets and takes about 20 s unloaded; this is 15x that.
+_ENGINE_CEILING_S = 300.0
 _ENGINE_POLL_S = 0.1
 
 #: The fixed part of the line ``NexusService.start`` logs once ``HttpServer.start``
@@ -1807,8 +1816,29 @@ class _PortLost(RuntimeError):
         )
 
 
+class _BindWaitTimeout(TimeoutError):
+    """The engine never logged its ready line and the wait stopped for ``reason``:
+    ``"stalled"`` (no migration progress for the stall window) or ``"ceiling"``."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason = reason
+        super().__init__(detail)
+
+
+def _bind_wait_phase(scanner: MigrationLogScanner) -> str:
+    """Where the engine's log says the boot is, for a timeout message."""
+    if scanner.complete:
+        return "after schema_migration_complete"
+    if scanner.changeset is not None:
+        return f"at {scanner.changeset}"
+    if scanner.started:
+        return "after schema_migration_start, before the first changeset"
+    return "before any migration output"
+
+
 def _wait_engine_ready(
-    proc: subprocess.Popen, port: int, log_path: str, timeout: float,
+    proc: subprocess.Popen, port: int, log_path: str, stall_s: float, ceiling_s: float,
+    *, clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """Return once THE ENGINE THIS BOOT SPAWNED is serving *port*.
 
@@ -1819,13 +1849,25 @@ def _wait_engine_ready(
     see ``_ENGINE_READY_PREFIX``), and the log is the file this boot's JVM writes
     (truncated per attempt), so no other process can put the line there. A JVM that cannot bind exits, which this reads from ``proc.poll()``.
 
+    The engine migrates before it binds, and how long that takes depends on the host's
+    load, so the wait is bounded by progress, not by a fixed clock: it keeps waiting while
+    the log shows Liquibase advancing (``MigrationLogScanner``: a new ``Running Changeset``
+    line or ``schema_migration_*`` event; other log growth is not progress), and gives up
+    after *stall_s* without any, or at *ceiling_s* in total.
+
     Raises :class:`_PortLost` when the process exited on a bind failure,
-    ``RuntimeError`` when it exited for any other reason, and ``TimeoutError`` when
-    the line never appeared.
+    ``RuntimeError`` when it exited for any other reason (at the next poll, never after
+    a wait), and :class:`_BindWaitTimeout` (a ``TimeoutError``) naming whichever bound
+    fired and the changeset the log last showed. *clock* and *sleep* are injectable so a
+    test drives the wait without real time.
     """
     marker = f"{_ENGINE_READY_PREFIX}{port}"
     ready_line = re.compile(rf"^.*{re.escape(marker)}\s*$", re.MULTILINE)
-    deadline = time.monotonic() + timeout
+    started_at = clock()
+    last_progress_at = started_at
+    scanner = MigrationLogScanner()
+    consumed = 0  # chars of complete lines already fed to the scanner
+    last_key: tuple = (scanner.changeset, scanner.started, scanner.complete, scanner.pending)
     while True:
         rc = proc.poll()
         try:
@@ -1842,15 +1884,35 @@ def _wait_engine_ready(
             )
         if ready_line.search(text):
             # Confirm it answers, then that the same process is still the one answering.
-            _wait_tcp("127.0.0.1", port, timeout=max(1.0, deadline - time.monotonic()))
+            _wait_tcp("127.0.0.1", port, timeout=max(1.0, ceiling_s - (clock() - started_at)))
             if proc.poll() is None:
                 return
             continue
-        if time.monotonic() >= deadline:
-            raise TimeoutError(
-                f"engine substrate: no {marker!r} in {log_path} after {timeout}s"
+        # Only complete lines: a half-written "Running Changeset: db/chang" must not be
+        # read as a changeset name.
+        complete = text[: text.rfind("\n") + 1]
+        if len(complete) > consumed:
+            scanner.feed(complete[consumed:].splitlines())
+            consumed = len(complete)
+        key = (scanner.changeset, scanner.started, scanner.complete, scanner.pending)
+        now = clock()
+        if key != last_key:
+            last_key = key
+            last_progress_at = now
+        if now - last_progress_at >= stall_s:
+            raise _BindWaitTimeout(
+                "stalled",
+                f"stalled {_bind_wait_phase(scanner)} for {now - last_progress_at:.0f}s "
+                f"(no migration progress in the engine log; stall window {stall_s:.0f}s)",
             )
-        time.sleep(_ENGINE_POLL_S)
+        if now - started_at >= ceiling_s:
+            phase = _bind_wait_phase(scanner)
+            raise _BindWaitTimeout(
+                "ceiling",
+                f"ceiling {ceiling_s:.0f}s reached "
+                f"{'while still migrating ' + phase if scanner.started and not scanner.complete else phase}",
+            )
+        sleep(_ENGINE_POLL_S)
 
 
 #: Cross-process bound on concurrent PG *boot* operations (initdb +
@@ -2540,7 +2602,7 @@ def _boot() -> dict:
         )
         # Checkpoint 3 of 3: svc.pid is known SYNCHRONOUSLY the instant Popen
         # returns -- no reason to defer recording it until the engine is ready
-        # (which can legitimately take up to 60s). Update the sidecar now,
+        # (which can legitimately take minutes under load). Update the sidecar now,
         # before the wait, so a kill during the wait still leaves a complete,
         # reapable sidecar (nexus-ui654 follow-up, critic Q3).
         _write_sidecar(
@@ -2551,7 +2613,7 @@ def _boot() -> dict:
         try:
             # Proves the listener is THIS engine, not merely that something answers
             # (nexus-kmfz6); see _wait_engine_ready.
-            _wait_engine_ready(svc, svc_port, svc_log_path, _ENGINE_READY_TIMEOUT_S)
+            _wait_engine_ready(svc, svc_port, svc_log_path, _ENGINE_STALL_S, _ENGINE_CEILING_S)
             break
         except _PortLost as lost:
             kill_group(svc)
@@ -2567,14 +2629,14 @@ def _boot() -> dict:
                 "failed to bind); retrying on a new port (nexus-kmfz6)",
                 stacklevel=2,
             )
-        except TimeoutError:
+        except TimeoutError as timed_out:
             kill_group(svc)
             svc_log.close()
             with open(svc_log_path, encoding="utf-8", errors="replace") as fh:
                 out = fh.read()[-2000:]
             _kill_pg()
             raise RuntimeError(
-                f"T2 engine substrate: service did not bind port {svc_port}. "
+                f"T2 engine substrate: service did not bind port {svc_port}: {timed_out}. "
                 f"Tail of engine log ({svc_log_path}):\n{out}"
             ) from None
         except BaseException:
