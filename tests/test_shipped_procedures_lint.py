@@ -31,7 +31,7 @@ pytestmark = pytest.mark.lint
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROCEDURES = REPO_ROOT / "src" / "nexus" / "procedures"
 #: The procedures that ship at this commit; a sweep that finds fewer is looking in the wrong place.
-SHIPPED_FLOOR = {"research_add", "gate_record"}
+SHIPPED_FLOOR = {"research_add", "gate_record", "transcripts"}
 
 
 def findings(path: Path, verbs: frozenset[str] = static_check.VERBS_V1) -> list[str]:
