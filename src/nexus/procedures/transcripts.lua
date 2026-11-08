@@ -20,9 +20,13 @@
 -- nexus.lua_runtime.transcripts_join.join_pages (it refuses a page whose since is not the
 -- previous next_since). A page adds whole units (days, hours after a split) while its rows
 -- stay under PAGE_BYTES, its verb calls under MAX_UNITS_PER_RUN (every query: a year-long
--- sparse window pages) and, for keyed queries, its sessions under MAX_SESSIONS_PER_RUN. A day
--- whose verb result is too large, or whose rows alone pass PAGE_BYTES, is split into hours;
--- an hour that still does not fit fails with result-window: naming the hour. A transcript
+-- sparse window pages), the tool calls it reads under MAX_TOOL_CALLS_PER_RUN (every query: the
+-- Lua instructions a page takes follow the commands it scans, about 1,300 a call at worst, so
+-- 15,000 calls stay under 20 million of the runtime's 50 million) and, for keyed queries, its
+-- sessions under MAX_SESSIONS_PER_RUN. A day whose verb result is too large, whose rows alone
+-- pass PAGE_BYTES, or whose tool calls alone pass MAX_TOOL_CALLS_PER_RUN, is split into hours
+-- (an hour is taken whole, so a page always advances); an hour that still does not fit
+-- PAGE_BYTES or the verb fails with result-window: naming the hour. A transcript
 -- over 1 MB after the verb's cuts fails with the verb's record-too-large: error, unchanged.
 --
 -- Rows. Size is estimated as twice the UTF-8 bytes of the strings plus 16 bytes a field (the
@@ -48,7 +52,11 @@
 --     Agent and Task calls in time order, each the first call not yet taken at or before its
 --     start, and the run row gets that call's agent_type and, if it named one, its model (cost
 --     is always priced by the model the run used). Unmatched runs are (unattributed); a
---     parent and child in different units do not match.
+--     parent and child in different units do not match. The match pairs by session and start
+--     order only: a dispatch that failed before it started a subagent can shift the later
+--     matches of its session by one (is_error also marks a subagent that ran and failed, so a
+--     failed call cannot be skipped). Per-type counts of runs are exact; the type a run is
+--     named for is a best effort.
 --   skills (keyed scope, kind, name): count, runs_with_skill, long_runs,
 --     long_runs_without_skill sum. kind is skill, dispatch, slash or runs (one row per scope
 --     with the run counts of scripts/skill_routing_census.py). LONG_RUN_TURNS counts distinct
@@ -60,7 +68,14 @@
 -- A Bash command is read by segment (split at ; & | ( ) newlines): quotes pair as the shell
 -- pairs them, comments and heredoc bodies are never a command. nx verbs: nx is a segment's
 -- command word, the verb the bare lowercase word after it, sub the next such word (so for
--- nx search foo, sub is foo; a quoted word, a path or a flag never is).
+-- nx search foo, sub is foo; a quoted word, a path or a flag never is). The command word is
+-- found past env, time, sudo, nohup, uv run, NAME=value and these wrappers with their options:
+-- timeout (its signal and kill options, then its duration), nice (-n N, -N), watch (-n N, -d)
+-- and xargs (-n N, -I str, -P N and the rest of its flags). Known limits: an odd number of
+-- double quotes inside a heredoc message can hide a Claude-Session trailer; 2>&1 in the middle
+-- of a command splits its segment (the & is a separator); $(...) nested inside double quotes is
+-- not scanned; the bodies of bash -c '...' and ssh host '...' are one quoted word and are not
+-- scanned.
 -- Cost. cost_estimate_usd is an ESTIMATE from the price table below, USD per million tokens,
 -- from src/nexus/operators/llm_models.py PRICES (read through Context7 on 2026-10-23; a test
 -- compares them). A model not in it adds to unpriced and costs nothing. Long-prompt tiers
@@ -79,6 +94,7 @@ local PAGE_BYTES = 768 * 1024
 local MAX_SESSIONS_PER_RUN = 1000
 local LONG_RUN_TURNS = 31
 local MAX_UNITS_PER_RUN = 100
+local MAX_TOOL_CALLS_PER_RUN = 15000
 local DAY = 86400
 local HOUR = 3600
 local FIELD_BYTES = 16
@@ -456,10 +472,40 @@ local SKIP = {env = true, time = true, sudo = true, command = true, exec = true,
               uv = true, run = true, ["{"] = true, ["!"] = true, ["then"] = true, ["do"] = true,
               ["else"] = true}
 
+-- Wrappers that run the real command after their own options: the options that take a value
+-- (any other word starting with - is one word), and whether a duration comes first.
+local WRAPPERS = {
+  timeout = {{["-s"] = true, ["-k"] = true, ["--signal"] = true, ["--kill-after"] = true}, true},
+  nice = {{["-n"] = true, ["--adjustment"] = true}, false},
+  watch = {{["-n"] = true, ["--interval"] = true}, false},
+  xargs = {{["-n"] = true, ["-I"] = true, ["-P"] = true, ["-L"] = true, ["-d"] = true, ["-s"] = true,
+            ["-a"] = true, ["-E"] = true, ["--max-args"] = true, ["--max-procs"] = true,
+            ["--delimiter"] = true, ["--arg-file"] = true, ["--max-lines"] = true}, false},
+}
+
+-- The index of the word after a wrapper at k and its options (and a duration).
+local function past_wrapper(seg, k, wrapper)
+  local j = k + 1
+  while seg.w[j] ~= nil and #seg.w[j] > 1 and seg.w[j]:sub(1, 1) == "-" do
+    j = j + (wrapper[1][seg.w[j]] and 2 or 1)
+  end
+  if wrapper[2] and seg.w[j] ~= nil and seg.w[j]:match("^[%d.]+[smhd]?$") then
+    j = j + 1
+  end
+  return j
+end
+
 -- The index of a segment's command word, or nil.
 local function head(seg)
-  for k, w in ipairs(seg.w) do
-    if not (SKIP[w] or w:match("^[%a_][%w_]*=")) then
+  local k = 1
+  while seg.w[k] ~= nil do
+    local w = seg.w[k]
+    local wrapper = WRAPPERS[w:match("[^/]*$")]
+    if SKIP[w] or w:match("^[%a_][%w_]*=") then
+      k = k + 1
+    elseif wrapper ~= nil then
+      k = past_wrapper(seg, k, wrapper)
+    else
       return k
     end
   end
@@ -468,6 +514,16 @@ end
 
 local function is_cmd(w, name)
   return w == name or w:sub(-#name - 1) == "/" .. name
+end
+
+-- Does one of the segment's words contain the text.
+local function names(seg, text)
+  for _, w in ipairs(seg.w) do
+    if w:find(text, 1, true) then
+      return true
+    end
+  end
+  return false
 end
 
 local GIT_ARG = {["-C"] = true, ["-c"] = true, ["--git-dir"] = true, ["--work-tree"] = true,
@@ -893,24 +949,30 @@ local function build_procedures()
             bump(put, "research_add")
           end
         elseif name == "Bash" then
-          local cmd = str(inp.command, "")
-          for _, v in ipairs(nx_verbs(scan(cmd))) do
+          -- By segment, as the nx verbs are: a command word decides, so a quoted word, an echo,
+          -- a comment or a heredoc body is never a hand-written equivalent.
+          local segs = scan(str(inp.command, ""))
+          for _, v in ipairs(nx_verbs(segs)) do
             if v[1] == "run" and v[2] ~= nil and v[2]:match("^[a-z][a-z0-9_]*$") then
               bump(runs, v[2])
             end
           end
-          if cmd:find("nx memory put", 1, true) and cmd:find("kind:gate", 1, true) then
-            bump(put, "gate_record")
-          end
-          if cmd:find("nx rdr research", 1, true) then
-            bump(hand, "research_add")
-          end
-          if cmd:find("select_affected_integration_tests", 1, true)
-            or cmd:find("select_docs_reader_tests", 1, true) then
-            bump(hand, "preflight")
-          end
-          if cmd:find(".claude/projects", 1, true) and cmd:find("jsonl", 1, true) then
-            bump(hand, "transcripts")
+          for _, seg in ipairs(segs) do
+            local k = head(seg)
+            local c = k and seg.w[k] or ""
+            if is_cmd(c, "nx") and seg.w[k + 1] == "memory" and seg.w[k + 2] == "put"
+              and names(seg, "kind:gate") then
+              bump(put, "gate_record")
+            elseif is_cmd(c, "nx") and seg.w[k + 1] == "rdr" and seg.w[k + 2] == "research" then
+              bump(hand, "research_add")
+            elseif k ~= nil and c ~= "echo" and c ~= "printf" then
+              if names(seg, "select_affected_integration_tests") or names(seg, "select_docs_reader_tests") then
+                bump(hand, "preflight")
+              end
+              if names(seg, ".claude/projects") and names(seg, "jsonl") then
+                bump(hand, "transcripts")
+              end
+            end
           end
         end
       end
@@ -982,7 +1044,17 @@ end
 -- the page stands). The page keeps a running byte estimate: a per-session query appends the
 -- unit's rows, a keyed one sums them into the page's accumulator, and a row that is not yet
 -- there is the only growth, so no unit rescans the page.
-local function admit(q, page, recs)
+local function admit(q, page, recs, narrow)
+  local calls = 0
+  for _, rec in ipairs(recs) do
+    calls = calls + #list(rec.tool_calls)
+  end
+  if calls > 0 and page.units > 0 and page.tool_calls + calls > MAX_TOOL_CALLS_PER_RUN then
+    return "full"
+  end
+  if narrow and calls > MAX_TOOL_CALLS_PER_RUN then
+    return "split"
+  end
   if q.keyed and page.units > 0 and page.sessions + #recs > MAX_SESSIONS_PER_RUN then
     return "full"
   end
@@ -1018,11 +1090,12 @@ local function admit(q, page, recs)
   page.bytes = page.bytes + grown
   page.units = page.units + 1
   page.sessions = page.sessions + #recs
+  page.tool_calls = page.tool_calls + calls
   return "ok"
 end
 
 local function window(q, lo, hi)
-  local page = {rows = {}, bytes = 0, units = 0, calls = 0, sessions = 0, truncated = 0}
+  local page = {rows = {}, bytes = 0, units = 0, calls = 0, sessions = 0, tool_calls = 0, truncated = 0}
   if q.keyed then
     page.acc = keyed(q.keys, q.tags)
   end
@@ -1045,7 +1118,7 @@ local function window(q, lo, hi)
     local recs = fetch(q, pos, stop)
     local verdict = "split"
     if recs ~= nil then
-      verdict = admit(q, page, recs)
+      verdict = admit(q, page, recs, stop - pos > HOUR)
     end
     if verdict == "ok" then
       pos = stop

@@ -562,6 +562,39 @@ STASH, FIND, TRAILER = "git-stash", "full-disk-find", "claude-session-trailer"
     ('nx memory put "a $(date)"', None),
     ("nx memory put plain", None),
     ("nx store put `date`", None),
+    # wrappers before the real command: timeout (duration, -s/-k options), nice, watch, xargs
+    ("timeout 5 git stash", STASH),
+    ("timeout 1.5m git stash", STASH),
+    ("timeout -s KILL -k 10 5 git stash", STASH),
+    ("timeout --signal=KILL --kill-after=2s 30 git stash pop", STASH),
+    ("timeout --foreground -v 9 git stash", STASH),
+    ("sudo timeout 5 git stash", STASH),
+    ("timeout 5 find / -name x", FIND),
+    ("nice git stash", STASH),
+    ("nice -n 10 git stash", STASH),
+    ("nice -10 git stash", STASH),
+    ("nice --adjustment=5 git stash", STASH),
+    ("watch git stash", STASH),
+    ("watch -n 2 -d git stash", STASH),
+    ("watch --interval 3 -t git stash", STASH),
+    ("xargs git stash", STASH),
+    ("xargs -n 1 -I {} git stash", STASH),
+    ("xargs -0 -r -P 4 git stash", STASH),
+    ("xargs find /", FIND),
+    ("ls | xargs -I{} find ~ -name x", FIND),
+    ("timeout 5 nice -n 3 xargs git stash", STASH),
+    ("timeout 5", None),
+    ("nice -n", None),
+    # look-alikes are not wrappers; a wrapper word that is an argument is not a command
+    ("timeouts 5 git stash", None),
+    ("nicely git stash", None),
+    ("watcher git stash", None),
+    ("xargs-lite git stash", None),
+    ("echo timeout 5 git stash", None),
+    ("git log timeout 5 stash", None),
+    ("timeout 5 echo git stash", None),
+    ("xargs echo find /", None),
+    ('timeout 5 bd create "fix `x` thing"', BT),
 ])
 def test_the_bash_rules(command: str, rule: str | None) -> None:
     s = rec("s", f"{DAY}T10:00:00Z", calls=[call("Bash", {"command": command})])
@@ -588,6 +621,11 @@ def test_the_bash_rules(command: str, rule: str | None) -> None:
     ("nx memory curate --cold && uv run nx store put x", [("memory", "curate"), ("store", "put")]),
     ("cd x; FOO=1 nx run gate_record -", [("run", "gate_record")]),
     ("echo hi | nx search q", [("search", "q")]),
+    ("timeout 5 nx search foo", [("search", "foo")]),
+    ("nice -n 5 nx doctor", [("doctor", None)]),
+    ("xargs -n1 nx store put", [("store", "put")]),
+    ("watch -n 2 nx scratch list", [("scratch", "list")]),
+    ("timeouts 5 nx search foo", []),
 ])
 def test_nx_verbs_are_read_from_the_command_word_of_a_segment(command: str, verbs: list) -> None:
     s = rec("s", f"{DAY}T10:00:00Z", calls=[call("Bash", {"command": command})])
@@ -603,6 +641,35 @@ def test_a_procedure_run_is_read_the_same_way() -> None:
         call("Bash", {"command": "nx run real_one --args-file -"})])
     out, _ = run([s], "procedures", until="2026-11-04")
     assert by(out["rows"], "procedure") == {("real_one",): {"procedure": "real_one", "runs": 1, "hand_written": 0}}
+
+
+@pytest.mark.parametrize("command,hand", [
+    # a hand-written equivalent is a command, read by segment: not an echo, a quote, a comment or a heredoc
+    ("nx rdr research add 240 --finding x", {"research_add": 1}),
+    ("timeout 9 nx rdr research add 240", {"research_add": 1}),
+    ("echo 'nx rdr research'", {}),
+    ("echo nx rdr research", {}),
+    ("rg 'nx rdr research' docs", {}),
+    ("cat <<EOF\nnx rdr research\nEOF", {}),
+    ("ls # nx rdr research", {}),
+    ("nx memory put p t --tags kind:gate,bead:b", {"gate_record": 1}),
+    ("cd x && nx memory put p t --tags 'kind:gate,bead:b' -", {"gate_record": 1}),
+    ("echo 'nx memory put p t --tags kind:gate'", {}),
+    ("nx memory put p t --tags plain", {}),
+    ("nx memory put p t; echo kind:gate", {}),
+    ("cat ~/.claude/projects/x/y.jsonl | jq .", {"transcripts": 1}),
+    ('jq . "$HOME/.claude/projects/x/y.jsonl"', {"transcripts": 1}),
+    ("grep -h tool_use ~/.claude/projects/x/*.jsonl", {"transcripts": 1}),
+    ('echo "cat ~/.claude/projects/x/y.jsonl"', {}),
+    ("ls # ~/.claude/projects/x/y.jsonl", {}),
+    ("cat ~/.claude/projects/x/notes.txt", {}),
+    ("python scripts/select_affected_integration_tests.py a b", {"preflight": 1}),
+    ("echo select_affected_integration_tests", {}),
+])
+def test_hand_written_equivalents_are_read_by_segment(command: str, hand: dict) -> None:
+    s = rec("s", f"{DAY}T10:00:00Z", calls=[call("Bash", {"command": command})])
+    out, _ = run([s], "procedures", until="2026-11-04")
+    assert {r["procedure"]: r["hand_written"] for r in out["rows"] if r["hand_written"]} == hand, command
 
 
 @pytest.mark.parametrize("text,hit", [
@@ -1022,6 +1089,126 @@ def test_a_page_costs_the_same_however_many_rows_it_already_holds() -> None:
 
     few, many = instructions(10), instructions(80)
     assert many < few * 8 * 1.5  # linear in the units: appending, never copying the held rows
+
+
+BUSY_COMMANDS = [
+    "git status --short",
+    "cd /h/git/nexus && uv run pytest tests/test_x.py -q 2>&1 | tail -5",
+    "nx search 'chunk hash' --corpus code | head -20",
+    "timeout 60 uv run ruff check src && git diff --stat",
+    "git commit -m 'fix the thing\n\nbead nexus-1' && git log -1",
+    "find . -name '*.py' -newer x | xargs grep -n foo",
+    "cat <<'EOF' > /tmp/x\nline one\nline two\nEOF\nnx memory put p t --tags kind:gate,bead:b",
+    "for f in a b c; do echo \"$f\" | wc -l; done",
+]
+
+
+def busy(days: int, *, sessions: int = 100, per_session: int = 149) -> list[dict]:
+    """Busy days: ``sessions`` main sessions a day, each with ``per_session`` Bash calls and a dispatch."""
+    return [rec(f"b{d}-{i}", f"{_day(d)}T{9 + i // 60:02d}:{i % 60:02d}:00Z", calls=[
+        *(call("Bash", {"command": BUSY_COMMANDS[(i + j) % len(BUSY_COMMANDS)]}, "10:01:00", day=_day(d))
+          for j in range(per_session)),
+        call("Agent", {"subagent_type": "developer"}, "10:02:00", day=_day(d))])
+        for d in range(days) for i in range(sessions)]
+
+
+def _budgeted_pages(records: list[dict], query: str, *, since: str, until: str) -> tuple[list[dict], list[int]]:
+    """Every page of a window, with the Lua instructions each took."""
+    pages: list[dict] = []
+    costs: list[int] = []
+    cursor = since
+    while True:
+        out, n = measure(records, query, since=cursor, until=until)
+        pages.append(out)
+        costs.append(n)
+        assert len(pages) < 100
+        if "next_since" not in out:
+            return pages, costs
+        cursor = out["next_since"]
+
+
+def _tool_calls_cap() -> int:
+    return int(re.search(r"^local MAX_TOOL_CALLS_PER_RUN = (\d+)$", TEXT, re.M).group(1))
+
+
+def test_a_busy_window_pages_by_tool_calls_and_every_page_is_under_the_instruction_cap() -> None:
+    cap = _tool_calls_cap()
+    assert 10_000 <= cap <= 20_000
+    records = busy(14)  # 100 main sessions x 150 calls (149 Bash and a dispatch) a day: 15,000 calls a day
+    pages, costs = _budgeted_pages(records, "violations", since=_day(0), until=_day(14))
+    assert len(pages) == 14  # a day is 15,000 calls, so a second day would pass the cap
+    assert all(c < 50_000_000 for c in costs), costs  # the runtime stops a run at 50 million
+    assert all(c < 20_000_000 for c in costs), costs  # and a page stays well under it
+    assert [p.get("next_since") for p in pages] == [_day(d) for d in range(1, 14)] + [None]
+    unbounded = {"MAX_TOOL_CALLS_PER_RUN": "10000000", "MAX_SESSIONS_PER_RUN": "10000000", "MAX_UNITS_PER_RUN": "10000000"}
+    one, _ = run(records, "violations", since=_day(0), until=_day(14), patch=unbounded)
+    assert "next_since" not in one
+    joined = tj.join_pages("violations", pages)["rows"]
+    assert joined == tj.join_pages("violations", [one])["rows"]
+
+
+def test_every_query_fills_a_page_to_the_tool_call_bound_under_the_instruction_cap() -> None:
+    cap = _tool_calls_cap()
+    records = busy(3, per_session=cap // 200 - 1)  # 100 sessions x cap/200 calls: two days fill a page exactly
+    assert sum(len(r["tool_calls"]) for r in records if r["start"].startswith(_day(0))) * 2 == cap
+    for query in ("agents", "tools", "skills", "memory", "violations", "loads", "procedures"):
+        pages, costs = _budgeted_pages(records, query, since=_day(0), until=_day(3))
+        assert [p.get("next_since") for p in pages] == [_day(2), None], query
+        assert all(0 < c < 20_000_000 for c in costs), (query, costs)
+
+
+def test_the_tool_call_bound_acts_on_per_session_queries_and_a_page_always_advances() -> None:
+    records = busy(4, sessions=4, per_session=5)  # 4 sessions x (5 Bash + 1 dispatch) = 24 calls a day
+    for query in ("tools", "skills", "memory"):
+        out, fake = run(records, query, since=_day(0), until=_day(4), patch={"MAX_TOOL_CALLS_PER_RUN": "50"})
+        assert out["next_since"] == _day(2) and len(fake.calls) == 3, query  # two days are 48 calls, a third 72
+    out, _ = run(records, "tools", since=_day(0), until=_day(4), patch={"MAX_TOOL_CALLS_PER_RUN": "47"})
+    assert out["next_since"] == _day(1)
+    out, _ = run(records, "tools", since=_day(0), until=_day(4), patch={"MAX_TOOL_CALLS_PER_RUN": "0"})
+    assert out["next_since"].startswith(_day(0) + "T")  # progress: the first hour with calls is whole
+    out, _ = run(records, "tools", since=_day(0), until=_day(4))
+    assert "next_since" not in out  # the real bound does not split a small window
+    pages, _ = pages_of(records, "tools", since=_day(0), until=_day(4), patch={"MAX_TOOL_CALLS_PER_RUN": "30"})
+    assert len(pages) == 4
+    whole, _ = run(records, "tools", since=_day(0), until=_day(4))
+    assert tj.join_pages("tools", pages)["rows"] == whole["rows"]
+
+
+def test_a_first_day_over_the_bound_is_narrowed_to_hours_and_the_pages_equal_one_pass() -> None:
+    # 30 sessions a day, one an hour from 08:00, 2 calls each (60 a day) against a bound of 25
+    records = [rec(f"h{d}-{i}", f"{_day(d)}T{8 + i:02d}:00:00Z",
+                   calls=[call("Skill", {"skill": "k"}, day=_day(d)), call("Skill", {"skill": "j"}, day=_day(d))])
+               for d in range(2) for i in range(15)]
+    patch = {"MAX_TOOL_CALLS_PER_RUN": "25"}
+    for query in ("skills", "tools"):
+        pages, fakes = pages_of(records, query, since=_day(0), until=_day(2), patch=patch)
+        assert pages[0]["next_since"] == f"{_day(0)}T20:00:00Z", query  # 12 hours of 2 calls, 24 <= 25
+        assert fakes[0].calls[0][:2] == (_day(0), _day(1))  # the day is read, found over, and read by the hour
+        assert fakes[0].calls[1][:2] == (_day(0), f"{_day(0)}T01:00:00Z")
+        assert all(re.fullmatch(r"\d{4}-\d\d-\d\d(T\d\d:00:00Z)?", p["next_since"]) for p in pages[:-1])
+        whole, _ = run(records, query, since=_day(0), until=_day(2))
+        assert tj.join_pages(query, pages)["rows"] == tj.join_pages(query, [whole])["rows"], query
+    # an hour over the bound is taken whole: the page always makes progress
+    heavy = [rec("big", f"{_day(0)}T09:00:00Z", calls=[call("Skill", {"skill": "k"}, day=_day(0)) for _ in range(40)])]
+    pages, _ = pages_of(heavy, "skills", since=_day(0), until=_day(1), patch=patch)
+    assert [p.get("next_since") for p in pages] == [f"{_day(0)}T09:00:00Z", None]  # the empty hours, then the hour
+    assert by(pages[1]["rows"], "kind", "name")[("skill", "k")]["count"] == 40  # and the empty hours after it
+
+
+def test_a_row_with_a_key_the_page_already_holds_adds_no_bytes_to_the_running_estimate() -> None:
+    def day(n: int, skill: str = "k") -> dict:
+        return rec(f"s{n}", f"{_day(n)}T10:00:00Z", calls=[call("Skill", {"skill": skill}, day=_day(n))])
+
+    one, _ = run([day(0)], "skills", since=_day(0), until=_day(1))
+    size = _estimate(one["rows"])  # a unit's rows: the skill row and the runs row
+    # the second day has the same two keys: the page holds both days in exactly one day's bytes
+    out, _ = run([day(0), day(1)], "skills", since=_day(0), until=_day(2), patch={"PAGE_BYTES": str(size)})
+    assert "next_since" not in out
+    assert by(out["rows"], "kind", "name")[("skill", "k")]["count"] == 2
+    # a third day with a new key grows the page, and that is where it stops
+    out, _ = run([day(0), day(1), day(2, "z")], "skills", since=_day(0), until=_day(3), patch={"PAGE_BYTES": str(size)})
+    assert out["next_since"] == _day(2)
+    assert by(out["rows"], "kind", "name")[("skill", "k")]["count"] == 2
 
 
 # ---- the join ---------------------------------------------------------------------------------
