@@ -127,6 +127,11 @@ things to avoid carefully; they are impossible.
    into a verdict any more, so read the `conclusion` of the check runs, not
    the board.
 
+   To watch your own develop push, subscribe after pushing and read the
+   conclusion on your sha's `kind=run` row; one `gh api` read of its check
+   runs is the fallback. Never arm a Monitor or loop that polls check runs
+   per push (Sam, 2026-11-08, ask qo36-conflicts).
+
    Treat the develop run as part of the push. Before stacking more work on a
    develop sha, or cutting a release branch on it, read that sha's check-run
    conclusions. A red there is a finding to diagnose before the next push, not

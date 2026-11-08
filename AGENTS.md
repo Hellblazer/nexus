@@ -92,7 +92,8 @@ These load only when you read a file their `paths:` matches; each is the short-r
 These always-on rules are repeated here because no file read triggers them:
 
 - **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even holding the owner's `gh` token. Report the run id and stop; the click is Sam's.
-- **Never stop processes by pattern on a shared pool user** (chas/qwent `nxtest`): no `pkill -f`, `pkill -u`, `killall` or `kill $(pgrep ...)`; they kill other sessions' work. Stop your own lab-run, or kill one pid you checked with `ps`; report strays to the labrun session. Full text: [labrun README § Stopping work on a shared user](https://github.com/Hellblazer/labrun/blob/main/README.md#stopping-work-on-a-shared-user) (labrun RDR-001 F13).
+- **Never stop processes by pattern, on the laptop or a shared pool user** (chas/qwent `nxtest`): no `pkill -f`, `pkill -u`, `killall` or `kill $(pgrep ...)`; the laptop runs every session's tests as one user, so they kill other sessions' work there too. Stop your own lab-run, or kill one pid you started and checked with `ps`; report strays on a pool host to the labrun session. Full text: [labrun README § Stopping work on a shared user](https://github.com/Hellblazer/labrun/blob/main/README.md#stopping-work-on-a-shared-user) (labrun RDR-001 F13).
+- **A cloud-touching walk runs only inside an announced window**, read-only or not, never "to measure ahead"; measure on a local engine. After TaskStop on a backgrounded command, find the child with `ps` and kill that one pid: the task id is not the process (nexus-ldf2s).
 
 ## Worktrees: one session, one worktree
 
