@@ -42,6 +42,18 @@ def _no_group_signal():
     killpg.assert_not_called()
 
 
+@contextlib.contextmanager
+def _liveness(**kw):
+    """Fake process liveness where the command asks for it. ``start`` and ``stop`` read
+    ``nexus.commands.mineru._is_process_alive``; ``status`` and ``start``'s already-running check
+    read it through ``nexus._mineru_pid.recorded_server_alive`` (nexus-dyfsw site 3). Faking
+    ``os.kill`` covered both on POSIX only: on Windows ``pid_alive`` asks the kernel by handle, so
+    an unfaked check read the recorded pid as dead there."""
+    with patch("nexus.commands.mineru._is_process_alive", **kw) as fake, \
+         patch("nexus._mineru_pid.is_process_alive", new=fake):
+        yield fake
+
+
 def _write_pid(pid_file: Path, pid: int = 12345, port: int = 8010) -> None:
     pid_file.write_text(json.dumps({
         "pid": pid, "port": port, "started_at": "2026-04-02T12:00:00+00:00",
@@ -95,7 +107,7 @@ class TestMineruStart:
     def test_start_already_running(self, runner, pid_file):
         _write_pid(pid_file)
         with patch_in(("nexus.commands.mineru", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill"), \
-             patch("nexus.commands.mineru._is_process_alive", return_value=True), \
+             _liveness(return_value=True), \
              patch_in(("nexus.commands.mineru", "nexus._mineru_spawn"), "subprocess.Popen") as mock_popen:
             result = runner.invoke(main, ["mineru", "start"])
         assert result.exit_code == 0 and "already running" in result.output.lower()
@@ -186,7 +198,7 @@ class TestMineruStop:
 
         with patch_in(("nexus.commands.mineru", "nexus.util.process_group"), "os.killpg", side_effect=_fake_killpg), \
              patch_in(("nexus.commands.mineru", "nexus.util.process_group"), "os.getpgid", lambda pid: pid), \
-             patch("nexus.commands.mineru._is_process_alive", side_effect=_alive), \
+             _liveness(side_effect=_alive), \
              patch("nexus.upgrade_finish.process_command",
                    return_value="python3 mineru-api --host 127.0.0.1"), \
              patch_time("nexus.commands.mineru", "sleep"):
@@ -202,7 +214,7 @@ class TestMineruStop:
         alive = [True, False, False, False]
         with _no_group_signal(), \
              patch("nexus._mineru_spawn.stop_server_group", return_value="exited") as stop, \
-             patch("nexus.commands.mineru._is_process_alive", side_effect=lambda pid: alive.pop(0) if alive else False), \
+             _liveness(side_effect=lambda pid: alive.pop(0) if alive else False), \
              patch("nexus.upgrade_finish.process_command", return_value="python3 mineru-api --host 127.0.0.1"), \
              patch_time("nexus.commands.mineru", "sleep"):
             result = runner.invoke(main, ["mineru", "stop"])
@@ -217,7 +229,7 @@ class TestMineruStop:
         pid file is removed instead."""
         _write_pid(pid_file, pid=12345)
         with _no_group_signal(), patch("nexus._mineru_spawn.stop_server_group") as killpg, \
-             patch("nexus.commands.mineru._is_process_alive", return_value=True), \
+             _liveness(return_value=True), \
              patch("nexus.upgrade_finish.process_command",
                    return_value="/usr/bin/vim unrelated.txt"):
             result = runner.invoke(main, ["mineru", "stop"])
@@ -231,7 +243,7 @@ class TestMineruStop:
         process look alike), so the verb neither signals nor deletes."""
         _write_pid(pid_file, pid=12345)
         with _no_group_signal(), patch("nexus._mineru_spawn.stop_server_group") as killpg, \
-             patch("nexus.commands.mineru._is_process_alive", return_value=True), \
+             _liveness(return_value=True), \
              patch("nexus.upgrade_finish.process_command", return_value=""):
             result = runner.invoke(main, ["mineru", "stop"])
         assert result.exit_code == 0, result.output
@@ -245,8 +257,7 @@ class TestMineruStop:
 
     def test_stop_stale_pid(self, runner, pid_file):
         _write_pid(pid_file, pid=99999)
-        with patch(
-            "nexus.commands.mineru._is_process_alive", return_value=False,
+        with _liveness(return_value=False,
         ):
             result = runner.invoke(main, ["mineru", "stop"])
         assert result.exit_code == 0 and not pid_file.exists()
@@ -291,7 +302,7 @@ class TestMineruStatus:
             if status_code == 200:
                 resp.json.return_value = dict(_REAL_HEALTH_PAYLOAD)
             with patch_in(("nexus.commands.mineru", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill"), \
-             patch("nexus.commands.mineru._is_process_alive", return_value=True), \
+             _liveness(return_value=True), \
                  patch("nexus.commands.mineru.httpx.get", return_value=resp):
                 result = runner.invoke(main, ["mineru", "status"])
         # an unhealthy server exits non-zero (nexus-x3m8e): a script asking
@@ -310,7 +321,7 @@ class TestMineruStatus:
         resp = MagicMock(); resp.status_code = 200
         resp.json.return_value = dict(_REAL_HEALTH_PAYLOAD)
         with patch_in(("nexus.commands.mineru", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill"), \
-             patch("nexus.commands.mineru._is_process_alive", return_value=True), \
+             _liveness(return_value=True), \
              patch("nexus.commands.mineru.httpx.get", return_value=resp):
             result = runner.invoke(main, ["mineru", "status"])
         assert result.exit_code == 0
@@ -329,7 +340,7 @@ class TestMineruStatus:
         resp = MagicMock(); resp.status_code = 200
         resp.json.return_value = {"status": "healthy"}
         with patch_in(("nexus.commands.mineru", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill"), \
-             patch("nexus.commands.mineru._is_process_alive", return_value=True), \
+             _liveness(return_value=True), \
              patch("nexus.commands.mineru.httpx.get", return_value=resp):
             result = runner.invoke(main, ["mineru", "status"])
         assert result.exit_code == 0
