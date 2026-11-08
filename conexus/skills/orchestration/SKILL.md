@@ -152,17 +152,17 @@ ship-blocking. Report it as a Critical and name the fix line that introduced it.
 
 **Implementer brief checklist.** A brief that says only WHAT to change leaves these to the reviewer, and each cost a fix round when omitted. Answer them in the brief, or write `UNKNOWN: resolve first` and the agent resolves it before its first edit (the SubagentStart hook injects the first five of these questions into every implementer dispatch):
 
-1. **Consumers.** Every caller and consumer of what changes, including any consumer that deletes something derived from it (grep for them before the first test run), and which of them filter, re-rank or page after it.
+1. **Consumers.** Every caller and consumer of what changes, including any consumer that deletes something derived from it (grep for them before the first test run, and run any test that deletes a computed path under a throwaway `TMPDIR`, nexus-0tqr7), and which of them filter, re-rank or page after it.
 2. **Final point.** Where the output's real final order or display is decided (after boosts, caps, paging), and that the change acts there, not on a proxy.
 3. **Modes.** Behaviour in local and cloud mode, and which was measured. A mode nobody measured is measured first or left unchanged.
 4. **Bounds.** Which pool, permit, memory or thread limit the change draws on, and its size against that limit on small and large boxes.
 5. **State.** Every cache or shared state touched, who invalidates it, the invalidate-versus-in-flight-fill race, the first-write and empty cases, the test reset hooks.
-6. **Destroys.** Name what the action destroys, not only what it produces: a push produces a commit and can cancel a verdict someone is waiting on, a branch switch can revert a peer's uncommitted files (feedback_destructive_action_guards).
+6. **Destroys.** Name what the action destroys, not only what it produces: a push produces a commit and can cancel or replace a verdict someone is waiting on, a branch switch can revert a peer's uncommitted files (feedback_destructive_action_guards).
 
 **Shared-host clauses.** Every developer, test or debugger brief that touches a test host or the laptop carries these four, verbatim or tightened, because the agent cannot infer them and a stop message arrives after the script has started (feedback_destructive_action_guards):
 
 - Delete only paths your own commands created and recorded, by exact name; use your own directory (`~/tmp/<owner>/`), never a shared filename prefix; never delete by glob or by modification time.
-- No `pkill`, `killall` or `kill $(pgrep ...)` anywhere, the laptop included; signal only a pid you started yourself (from your own `$!` or background task id), found by its parent pid, never one picked out of `ps` by its command line.
+- No `pkill`, `killall` or `kill $(pgrep ...)` anywhere, the laptop included; signal only a pid you started yourself (from your own `$!` or background task id), found by its parent pid, after checking its parent and its working directory (`ps -p <pid> -o pid,ppid,args`, `lsof -a -p <pid> -d cwd`), never one picked out of `ps` by its command line.
 - Run a real hook verb (`nx-hook`, a hook entry's `main`, `session_start`) only inside pytest or with `HOME` and `NEXUS_CONFIG_DIR` both pointed at a scratch directory; measure hook output through `render_session_start`.
 - Scan only the exact roots your run wrote to, depth-bounded on shared roots; when a bead or RDR says to scan a whole home or volume, narrow it and correct its text.
 
