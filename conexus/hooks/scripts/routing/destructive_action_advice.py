@@ -10,9 +10,13 @@
 ONE table-driven PreToolUse hook for the machine-checkable bright lines of
 the destructive-action guard rules. Each :class:`Row` in :data:`ROWS` names a
 rule, the tools it watches, a predicate over the call and the advice text. A
-call that matches no row costs a JSON parse and a handful of substring tests;
-the ``_lib`` framework (and its telemetry) is imported only after a row has
-matched.
+call pays for a JSON parse and one substring hint test per row. Only when a
+hint hits (``|``, ``rm``, ``grep``, ``find`` ... are common) does it also pay
+for one split-and-tokenise pass over the command, shared by every row; a
+predicate that needs the machine's state (``git worktree list``, ``pgrep``)
+spawns under ONE shared deadline of :data:`DEADLINE_S` seconds, and once that
+is spent the answer is "no match". The ``_lib`` framework (and its telemetry)
+is imported only after a row has matched.
 
 MODE. :data:`MODE` is ``"advise"``: a matched call gets the advice as
 ``additionalContext`` and NO permission decision (the ordinary permission flow
@@ -29,7 +33,10 @@ and unwrapped (env assignments, sudo/nohup/xargs, ssh/wsl/lab-remote/lab-run,
 NOT CARRIED, by design (not machine-checkable from the command text): which
 branches are "yours" (ownership), whether a deletion target is alive, whether
 a cloud-touching walk sits inside an announced window, and the brief clauses
-for dispatched agents. Those live in prose.
+for dispatched agents. Those live in prose. Also left out on purpose: a FOREGROUND pipe whose first
+stage is nx, pytest, lab-run, lab-remote or mvnw (``pytest ... | tail`` and
+``lab-remote ... | tail`` are everyday and were judged quiet; the incident was the background
+form, and "filter at read time" lives in the nexus skill).
 
 Stdlib only. Fail-open: a predicate that raises counts as no match.
 """
@@ -39,10 +46,15 @@ import io
 import json
 import os
 import re
+import stat
 import sys
+import time
 from typing import Callable, NamedTuple
 
 RULE_NAME = "destructive_action_advice"
+
+#: Seconds, from the start of the call, that ALL spawns together may take.
+DEADLINE_S = 2.0
 
 #: "advise" (never denies) or "deny". The one-line flip.
 MODE = "advise"
@@ -211,8 +223,40 @@ def _inner_commands(eff: tuple[str, ...]) -> list[str]:
     return []
 
 
-def _analyze(text: str, depth: int = 0) -> tuple[list[Pipe], list[Pipe]]:
-    """``(top-level pipelines, pipelines found inside wrappers)``."""
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_]\w*)\2")
+
+
+def _strip_heredocs(text: str) -> tuple[str, list[str]]:
+    """``(text without heredoc bodies, the bodies)``. A body is data fed to a command, not a command: the
+    operator line stays (its redirect targets matter), the lines up to the closing tag go. An unclosed
+    heredoc runs to the end, as in the shell."""
+    if "<<" not in text:
+        return text, []
+    kept: list[str] = []
+    bodies: list[str] = []
+    pending: list[tuple[str, bool, list[str]]] = []
+    for line in text.split("\n"):
+        if pending:
+            tag, dash, body = pending[0]
+            if (line.lstrip("\t") if dash else line).rstrip() == tag:
+                bodies.append("\n".join(body))
+                pending.pop(0)
+            else:
+                body.append(line)
+            continue
+        kept.append(line)
+        for m in _HEREDOC.finditer(line):
+            pending.append((m.group(3), bool(m.group(1)), []))
+    bodies.extend("\n".join(body) for _tag, _dash, body in pending)
+    return "\n".join(kept), bodies
+
+
+def _analyze(text: str, depth: int = 0, bodies: list[str] | None = None) -> tuple[list[Pipe], list[Pipe]]:
+    """``(top-level pipelines, pipelines found inside wrappers)``. Heredoc bodies are cut first and
+    appended to *bodies* when given."""
+    text, found = _strip_heredocs(text)
+    if bodies is not None:
+        bodies.extend(found)
     top: list[Pipe] = []
     inner: list[Pipe] = []
     cur: list[Seg] = []
@@ -248,6 +292,9 @@ class Ctx:
         self.bg: bool = self.tool_input.get("run_in_background") is True
         self.cwd: str = str(payload.get("cwd") or "") or os.getcwd()
         self.note = ""  # a predicate may set text that leads the advice (reset per row)
+        self.deadline = time.monotonic() + DEADLINE_S  # shared by every spawn of this call
+        self.worktrees: dict[str, int] = {}  # cwd -> worktree count, one lookup per cwd
+        self.bodies: list[str] = []  # heredoc bodies of the command (data, never analysed as commands)
         self._analysis: tuple[list[Pipe], list[Pipe]] | None = None
 
     @property
@@ -256,7 +303,7 @@ class Ctx:
 
     def _get(self) -> tuple[list[Pipe], list[Pipe]]:
         if self._analysis is None:
-            self._analysis = _analyze(self.command)
+            self._analysis = _analyze(self.command, 0, self.bodies)
         return self._analysis
 
     @property
@@ -344,6 +391,9 @@ def _branch_delete(ctx: Ctx) -> bool:
                 return True
             if re.search(r"(?:\$\(|`)\s*git\s+(?:branch|for-each-ref)\b", seg.raw):
                 return True
+            names = [t for t in _positional(opts) if not re.match(r"(?:\d*|&)[<>]", t)]  # not redirects
+            if names and all(re.fullmatch(r"[\w./@+-]+", t) for t in names):
+                continue  # every name is written out in the command: hiding the output loses nothing
             if i + 1 < len(pipe.segs) and pipe.segs[i + 1].cmd in ("wc", "head", "tail", "grep"):
                 return True
             if re.search(r"(?:^|\s)(?:&>|1>|>)\s*/dev/null\b", seg.raw):
@@ -356,26 +406,46 @@ _STASH_WRITES = frozenset(
 )
 
 
-def _worktree_count(cwd: str) -> int:
-    """Worktrees of the repository at *cwd*; 0 when undeterminable."""
+def _which(name: str) -> str | None:
     try:
-        import subprocess  # noqa: PLC0415 -- lazy: only a predicate that spawns pays for it
-
         sys.path.insert(0, _SCRIPTS)
         import _exec_path  # noqa: PLC0415 -- stdlib-only helper beside the hooks
 
-        git = _exec_path.which_off_cwd("git")
-        if git is None:
-            return 0
-        proc = subprocess.run(
-            [git, "worktree", "list", "--porcelain"],
-            cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
+        return _exec_path.which_off_cwd(name)
+    except Exception:  # noqa: BLE001 -- unresolvable: the predicate has no answer
+        return None
+
+
+def _spawn(ctx: Ctx, argv: list[str], cwd: str | None = None):
+    """Run *argv* inside the call's one shared deadline. ``None`` when the deadline is spent, the run
+    times out or cannot start: every caller reads that as "no match". stdin is /dev/null, never the
+    hook's own pipe."""
+    left = ctx.deadline - time.monotonic()
+    if left <= 0:
+        return None
+    try:
+        import subprocess  # noqa: PLC0415 -- lazy: only a predicate that spawns pays for it
+
+        return subprocess.run(
+            argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=left,
         )
     except Exception:  # noqa: BLE001 -- undeterminable: no advice
-        return 0
-    if proc.returncode != 0:
-        return 0
-    return sum(1 for line in proc.stdout.splitlines() if line.startswith("worktree "))
+        return None
+
+
+def _worktree_count(ctx: Ctx, cwd: str) -> int:
+    """Worktrees of the repository at *cwd* (looked up once per cwd); 0 when undeterminable."""
+    if cwd in ctx.worktrees:
+        return ctx.worktrees[cwd]
+    count = 0
+    exe = _which("git")
+    if exe is not None:
+        proc = _spawn(ctx, [exe, "worktree", "list", "--porcelain"], cwd)
+        if proc is not None and proc.returncode == 0:
+            count = sum(1 for line in proc.stdout.splitlines() if line.startswith("worktree "))
+    ctx.worktrees[cwd] = count
+    return count
 
 
 def _stash(ctx: Ctx) -> bool:
@@ -390,7 +460,7 @@ def _stash(ctx: Ctx) -> bool:
             if sub and not sub.startswith("-") and sub not in _STASH_WRITES:
                 continue  # list / show: reads
             cwd = os.path.join(ctx.cwd, chdir) if chdir else ctx.cwd
-            if _worktree_count(cwd) > 1:
+            if _worktree_count(ctx, cwd) > 1:
                 return True
     return False
 
@@ -403,7 +473,9 @@ def _is_shell_script(path: str) -> bool:
         return True
     if os.path.splitext(path)[1]:
         return False
-    try:  # an extensionless file: a bash/sh shebang makes it a shell script
+    try:  # an extensionless REGULAR file: a bash/sh shebang makes it a shell script
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return False  # opening a FIFO blocks until a writer shows up
         with open(path, "rb") as fh:
             head = fh.readline(128)
     except OSError:
@@ -422,55 +494,46 @@ def _script_targets(ctx: Ctx) -> list[str]:
             ):
                 targets += [t for t in seg.eff[1:] if t.endswith(_SHELL_SCRIPT)]
         for seg in pipe.segs:
-            for m in re.finditer(r"(?:>>?|\btee(?:\s+-a)?)\s*(['\"]?)([^\s'\"|;&<>]+\.(?:sh|bash))\1", seg.raw):
+            for m in re.finditer(r"(?:>>?|\btee(?:\s+-a)?)\s*(['\"]?)([^\s'\"|;&<>]+\.(?:sh|bash))(?![\w.-])\1", seg.raw):
                 targets.append(m.group(2))
     return targets
 
 
-def _live_runner(path: str) -> int:
+def _live_runner(ctx: Ctx, path: str) -> int:
     """Pid of a live shell executing the script at *path* (by basename), or 0.
 
     ``pgrep -f`` finds candidates (read-only, ~20 ms); each is then confirmed
     with ``ps`` as a shell whose arguments name the script, or the script run
     directly, so a ``less run.sh`` or ``grep x run.sh`` does not count.
     """
-    try:
-        import subprocess  # noqa: PLC0415 -- lazy: only a predicate that spawns pays for it
-
-        sys.path.insert(0, _SCRIPTS)
-        import _exec_path  # noqa: PLC0415
-
-        pgrep, ps = _exec_path.which_off_cwd("pgrep"), _exec_path.which_off_cwd("ps")
-        if pgrep is None or ps is None:
-            return 0
-        base = os.path.basename(path)
-        found = subprocess.run(
-            [pgrep, "-f", "--", re.escape(base)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
-        )
-        me = {os.getpid(), os.getppid()}
-        for word in found.stdout.split():
-            if not word.isdigit() or int(word) in me:
-                continue
-            args = subprocess.run(
-                [ps, "-ww", "-p", word, "-o", "args="],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
-            ).stdout.split()
-            if not args:
-                continue
-            head = os.path.basename(args[0])
-            if head == base or (
-                head in _SHELLS and any(os.path.basename(t) == base for t in args[1:] if not t.startswith("-"))
-            ):
-                return int(word)
-    except Exception:  # noqa: BLE001 -- undeterminable: no advice
+    pgrep, ps = _which("pgrep"), _which("ps")
+    if pgrep is None or ps is None:
         return 0
+    base = os.path.basename(path)
+    found = _spawn(ctx, [pgrep, "-f", "--", re.escape(base)])
+    if found is None:
+        return 0
+    me = {os.getpid(), os.getppid()}
+    for word in found.stdout.split():
+        if not word.isdigit() or int(word) in me:
+            continue
+        shown = _spawn(ctx, [ps, "-ww", "-p", word, "-o", "args="])
+        if shown is None:
+            return 0  # the deadline is spent
+        args = shown.stdout.split()
+        if not args:
+            continue
+        head = os.path.basename(args[0])
+        if head == base or (
+            head in _SHELLS and any(os.path.basename(t) == base for t in args[1:] if not t.startswith("-"))
+        ):
+            return int(word)
     return 0
 
 
 def _running_script_edit(ctx: Ctx) -> bool:
     for path in _script_targets(ctx):
-        pid = _live_runner(path)
+        pid = _live_runner(ctx, path)
         if pid:
             ctx.note = f"{os.path.basename(path)} is being run by pid {pid}. "
             return True
@@ -505,6 +568,7 @@ _BROAD_ROOT = re.compile(
     r"^(?:/|~|\$HOME|\$\{HOME\}"
     r"|/(?:Users|home)(?:/[^/]+)?"
     r"|/Volumes(?:/[^/]+)?"
+    r"|/Volumes/[^/]+/tmp"
     r"|/mnt/[^/]+/Users(?:/[^/]+)?"
     r"|(?:/private)?/var/folders)$"
 )
@@ -513,6 +577,8 @@ _BROAD_ROOT = re.compile(
 def _is_broad_root(path: str) -> bool:
     p = path.replace("\\", "/")
     p = p.rstrip("/") or "/"
+    if "nx.noindex" in p.split("/"):
+        return True  # a test volume's run tree: 65k+ entries, walked once for 25 minutes
     return bool(_BROAD_ROOT.match(p)) or p == os.path.expanduser("~").rstrip("/")
 
 
@@ -558,9 +624,16 @@ def _whole_disk_scan(ctx: Ctx) -> bool:
     return False
 
 
+#: A home directory's ``tmp`` is shared the moment two agents are told to use ``~/tmp/<prefix>-*``
+#: (the 2026-10-18 ``rm -rf ~/tmp/nx129-*`` took a sibling's scripts and logs with it).
+_HOME_TMP = (
+    r"(?:~|\$HOME|\$\{HOME\}|/Users/[^/]+|/home/[^/]+|"
+    + re.escape(os.path.expanduser("~").replace("\\", "/"))
+    + r")/tmp"
+)
 _SHARED_ROOT = re.compile(
     r"^(?:(?:/private)?/var/folders/[^/]+/[^/]+/T|/private/tmp|/tmp|(?:/private)?/var/folders|/dev/shm"
-    r"|\$\{?TMPDIR\}?)(?:/(?P<rest>.*))?$"
+    r"|\$\{?TMPDIR\}?|" + _HOME_TMP + r")(?:/(?P<rest>.*))?$"
 )
 _PYTEST_OF = re.compile(r"(?:^|/)pytest-of-[^/]+(?:/(?P<rest>.*))?$")
 _GLOB = re.compile(r"[*?\[]")
@@ -604,12 +677,9 @@ def _shared_glob_delete(ctx: Ctx) -> bool:
     return False
 
 
-_HOOK_VERB = re.compile(
-    r"(?<![\w./-])nx-hook(?![\w-])|nexus\._hook_runtime|\bentry\.main\s*\(|(?<!\w)session_start\s*\("
-)
-_RUNNERS = frozenset(
-    {"nx-hook", "uv", "uvx", "python", "python3", "python3.12", "python3.13", "env", "bash", "sh", "zsh"}
-)
+_SESSION_START_CALL = re.compile(r"(?<!\w)session_start\s*\(|\bentry\.main\s*\(")
+_HOOK_MODULE = re.compile(r"nexus\._hook_runtime|nexus\.hooks\.session_start")
+_MAIN_CALL = re.compile(r"\b(?:main|session_start)\s*\(")
 _REAL_HOME = re.compile(r"^(?:\$HOME|\$\{HOME\}|~)(?:/.*)?$")
 
 
@@ -621,13 +691,41 @@ def _scratch_assignment(command: str, name: str, real_marker: str) -> bool:
     return False
 
 
+def _runs_hook_code(code: str) -> bool:
+    """Python source that CALLS a hook entry: ``session_start(...)``, ``entry.main(...)``, or ``main(...)``
+    out of an imported hook module. An import with no call runs no verb."""
+    if _SESSION_START_CALL.search(code):
+        return True
+    return bool(_HOOK_MODULE.search(code) and _MAIN_CALL.search(code))
+
+
+def _runs_hook_verb(seg: Seg, bodies: list[str]) -> bool:
+    """This segment, by its own command word and arguments, runs a hook verb (never a mention of one)."""
+    toks = seg.eff
+    if not toks or any(os.path.basename(t) == "pytest" for t in toks):
+        return False  # inside pytest's fence, or not a runner at all
+    c = seg.cmd
+    if c == "nx-hook":
+        return True
+    if c in {"uv", "uvx"}:
+        rest = [t for t in toks[1:] if t != "run"]
+        first = next((t for t in rest if not t.startswith("-")), "")
+        if os.path.basename(first) == "nx-hook":
+            return True
+    if c in {"uv", "uvx"} or c.startswith("python"):
+        if "-m" in toks[:-1] and toks[toks.index("-m") + 1].startswith("nexus._hook_runtime"):
+            return True
+        if "-c" in toks[:-1] and _runs_hook_code(toks[toks.index("-c") + 1]):
+            return True
+        if "<<" in seg.raw and any(_runs_hook_code(b) for b in bodies):
+            return True
+    return False
+
+
 def _hook_verb_by_hand(ctx: Ctx) -> bool:
     """A real nx-hook / hook-entry / session_start() call outside pytest, without a scratch HOME and NEXUS_CONFIG_DIR."""
-    if not any(s.cmd in _RUNNERS for p in ctx.pipes for s in p.segs):
-        return False
-    if any(os.path.basename(t) == "pytest" for p in ctx.pipes for s in p.segs for t in s.eff):
-        return False
-    if not _HOOK_VERB.search(ctx.command):
+    pipes = ctx.pipes  # fills ctx.bodies
+    if not any(_runs_hook_verb(s, ctx.bodies) for p in pipes for s in p.segs):
         return False
     scratch = _scratch_assignment(ctx.command, "HOME", ".config/nexus") and _scratch_assignment(
         ctx.command, "NEXUS_CONFIG_DIR", ".config/nexus"
@@ -658,10 +756,12 @@ ROWS: tuple[Row, ...] = (
         f"{_SRC} / 'No pattern kills' (R32; R34 pattern forms)",
         _BASH,
         _pattern_kill,
-        "pkill, killall and kill-by-pgrep end every matching process on the machine, other sessions' runs "
-        "included (a pattern kill has ended a peer's lab-remote run). Stop only a pid you started yourself: "
-        "take it from `$!` or your own background task id, check it with `ps -p <pid> -o pid,ppid,args`, then "
-        "`kill <pid>`. Never pick a pid out of ps/pgrep by its command line.",
+        "pkill, killall and kill-by-pgrep end every process the pattern matches, on the laptop as on a shared "
+        "host: a laptop `pkill -f` has been used to end an agent's own queued run, and it cannot tell that run "
+        "from a peer's. A single SIGTERM to a pid picked out of `ps` by its command line has ended another "
+        "session's lab-remote run. Signal only a pid you started yourself (`$!` or your own background task "
+        "id), found by its parent pid, and check it with `ps -p <pid> -o pid,ppid,args` before `kill <pid>`. "
+        "Never take a pid from ps or pgrep by its command line.",
         hints=("kill",),
     ),
     Row(

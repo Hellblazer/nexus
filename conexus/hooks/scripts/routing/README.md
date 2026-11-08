@@ -63,10 +63,13 @@ table: each `Row` in the script's `ROWS` names a rule (and where that rule comes
 from), the tools it watches, a predicate over the call, and the advice text.
 It runs in ADVISE mode: it never denies, it returns the rule and the safe
 alternative as `additionalContext`. The flip to deny is the script's `MODE`
-constant (or a row's own `mode=`). A call that matches no row costs a JSON parse
-and a few substring tests (no `_lib` import); only a matched call pays for the
-framework and the `routing_events` write. New destructive-action shapes get a row,
-not a hook, so the Bash hook count stays put.
+constant (or a row's own `mode=`). Every call pays for a JSON parse and one
+substring hint test per row. A hint hit (`|`, `rm`, `grep` and `find` are common)
+also costs one split-and-tokenise pass over the command, shared by all rows; the
+rows that need machine state (`git worktree list`, `pgrep`) spawn under one shared
+2 s deadline and read a spent deadline as "no match". Only a matched call imports
+the `_lib` framework and pays for the `routing_events` write. New
+destructive-action shapes get a row, not a hook, so the Bash hook count stays put.
 
 The cap is 4. Adding a fifth routing rule in any plugin requires either
 consolidation or a budget revision in a successor RDR. The

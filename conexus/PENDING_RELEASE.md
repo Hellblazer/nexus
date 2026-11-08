@@ -55,5 +55,13 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   nexus-qo7ie.36: the `destructive_action_advice` rule entry.
 - `conexus/hooks/scripts/routing/README.md`
   nexus-qo7ie.36: the cap table counts the third Bash hook and states that new destructive-action shapes get a table row, not a hook.
+- `conexus/skills/orchestration/SKILL.md`
+  nexus-qo7ie.36: the shared-host clauses every developer, test or debugger brief carries (delete scope, no pattern kills, hook verbs only in pytest or a scratch HOME, exact scan roots), a "Destroys" item in the implementer checklist, a deleting-consumer addition to Consumers, a disturbed-run rule under the VERIFY convention, and a Destroys suspect for first-pass reviewers.
+- `conexus/skills/peer-messaging/SKILL.md`
+  nexus-qo7ie.36: "Sharing One Machine" names what an action destroys before it touches shared state.
+- `conexus/skills/nexus/SKILL.md`
+  nexus-qo7ie.36: run long nx commands with full output to a log and filter when reading.
+- `conexus/skills/mailbox/SKILL.md`
+  nexus-qo7ie.36: read the session marker's contents before assuming a `/clear` stopped the watcher.
 
 ## Deferred to the next client release

@@ -59,8 +59,8 @@ MATCHES: list[tuple[str, str, str, dict]] = [
     ("branch_bulk_delete", "glob-target", "git branch -D 'worktree-agent-*'", {}),
     ("branch_bulk_delete", "xargs-no-pipe-to-counter", "git branch --list 'x-*' | xargs git branch -d", {}),
     ("branch_bulk_delete", "names-from-substitution", "git branch -D $(git branch --list 'x-*')", {}),
-    ("branch_bulk_delete", "output-to-tail", "git branch -D a1 2>&1 | tail -1", {}),
-    ("branch_bulk_delete", "output-to-devnull", "git branch -D a1 > /dev/null", {}),
+    ("branch_bulk_delete", "unnamed-set-to-counter", "git branch -D $STALE | wc -l", {}),
+    ("branch_bulk_delete", "unnamed-set-to-devnull", "git branch -D $STALE > /dev/null", {}),
     ("branch_bulk_delete", "long-delete-flag", "git -C /tmp/r branch --delete 'old-*'", {}),
     ("stash_with_worktrees", "census-example", "git stash -- scripts/ci_status.py && pytest -x && git stash pop", {}),
     ("stash_with_worktrees", "bare", "git stash", {}),
@@ -77,16 +77,34 @@ MATCHES: list[tuple[str, str, str, dict]] = [
     ("whole_disk_scan", "rg-users", "rg token /Users/sam", {}),
     ("whole_disk_scan", "grep-volumes", "grep -R foo /Volumes/SanHell", {}),
     ("whole_disk_scan", "mdfind", "mdfind kMDItemFSName=foo", {}),
+    ("whole_disk_scan", "volume-tmp", "grep -rn foo /Volumes/SanHell/tmp", {}),
+    ("whole_disk_scan", "nx-noindex-2026-09-25", "grep -r token /Volumes/SanHell/tmp/nx.noindex", {}),
+    ("whole_disk_scan", "under-nx-noindex", "rg token /Volumes/SanHell/tmp/nx.noindex/run7/out", {}),
+    ("whole_disk_scan", "find-under-nx-noindex", "find /Volumes/SanHell/tmp/nx.noindex -name '*.log'", {}),
     ("shared_glob_delete", "tmp-prefix-glob", "rm -rf /tmp/nexus_t2_substrate_pg_*", {}),
     ("shared_glob_delete", "find-mtime-pytest-of", "find $TMPDIR/pytest-of-sam -newer stamp -exec rm -rf {} +", {}),
     ("shared_glob_delete", "tmp-star", "rm -rf /tmp/*", {}),
     ("shared_glob_delete", "pytest-basetemp-glob", "rm -rf $TMPDIR/pytest-of-sam/pytest-*", {}),
     ("shared_glob_delete", "macos-user-tmpdir", "rm -rf /var/folders/57/abc/T/nexus_*", {}),
     ("shared_glob_delete", "find-delete-mtime", "find /tmp -mtime +1 -delete", {}),
+    ("shared_glob_delete", "home-tmp-2026-10-18", "rm -rf ~/tmp/nx129-*", {}),
+    ("shared_glob_delete", "home-var-tmp", "rm -rf $HOME/tmp/nx129-*", {}),
+    ("shared_glob_delete", "braced-home-tmp", "rm -rf ${HOME}/tmp/nx129-*", {}),
+    ("shared_glob_delete", "absolute-home-tmp", "rm -rf /Users/sam/tmp/nx129-*", {}),
+    ("shared_glob_delete", "linux-home-tmp", "rm -rf /home/nxtest/tmp/*", {}),
+    ("shared_glob_delete", "find-mtime-in-home-tmp", "find ~/tmp -mtime +1 -delete", {}),
     ("hook_verb_by_hand", "session_start-call", """uv run python -c "from nexus.hooks import session_start; session_start('trace')" """, {}),
     ("hook_verb_by_hand", "nx-hook", "uv run nx-hook session-start", {}),
     ("hook_verb_by_hand", "entry-main", "python -m nexus._hook_runtime.entry session-start", {}),
     ("hook_verb_by_hand", "home-only-is-not-enough", "HOME=$S uv run nx-hook session-start", {}),
+    ("hook_verb_by_hand", "module-import-and-call-2026-09-13",
+     """uv run python -c "from nexus.hooks.session_start import main; main()" """, {}),
+    ("hook_verb_by_hand", "plain-import-and-call", "python3 -c 'import nexus.hooks.session_start as s; s.main()'", {}),
+    ("hook_verb_by_hand", "entry-import-and-call",
+     """python3 -c "from nexus._hook_runtime.entry import main; main()" """, {}),
+    ("hook_verb_by_hand", "heredoc-python-body",
+     "uv run python - <<'EOF'\nfrom nexus.hooks import session_start\nsession_start('trace')\nEOF", {}),
+    ("hook_verb_by_hand", "after-and-and", "cd /tmp && uv run nx-hook session-start", {}),
 ]
 
 NEAR_MISSES: list[tuple[str, str, str, dict]] = [
@@ -101,6 +119,8 @@ NEAR_MISSES: list[tuple[str, str, str, dict]] = [
     ("branch_bulk_delete", "merged-delete", "git branch -d feature/x", {}),
     ("branch_bulk_delete", "stderr-only-devnull", "git branch -D a1 2>/dev/null", {}),
     ("branch_bulk_delete", "several-named", "git branch -D a1 b2 c3", {}),
+    ("branch_bulk_delete", "named-then-tail", "git branch -D a1 2>&1 | tail -1", {}),
+    ("branch_bulk_delete", "named-then-devnull", "git branch -D a1 b2 > /dev/null", {}),
     ("stash_with_worktrees", "list", "git stash list", {}),
     ("stash_with_worktrees", "show", "git stash show -p", {}),
     ("stash_with_worktrees", "show-file-copy", "git show HEAD:scripts/ci_status.py > scripts/ci_status.py", {}),
@@ -109,6 +129,8 @@ NEAR_MISSES: list[tuple[str, str, str, dict]] = [
     ("bg_pipe_masks_exit", "bg-without-pipe", "bash run.sh --guided", {"run_in_background": True}),
     ("bg_pipe_masks_exit", "bg-redirect-then-pipe", "bash run.sh > run.log 2>&1 | tail -3", {"run_in_background": True}),
     ("bg_pipe_masks_exit", "foreground-2>&1-pipe", "uv run pytest tests/hooks 2>&1 | tail -20", {}),
+    ("bg_pipe_masks_exit", "foreground-lab-remote-pipe-judged-quiet", "lab-remote -c lab-m -- uv run pytest tests 2>&1 | tail -20", {}),
+    ("bg_pipe_masks_exit", "foreground-nx-pipe-judged-quiet", "nx catalog reconcile 2>&1 | tail -5", {}),
     ("whole_disk_scan", "scoped-find", "find ~/git/nexus/src -name '*.py'", {}),
     ("whole_disk_scan", "depth-bounded-tmp", "find /tmp/x-123 -maxdepth 2 -name '*.log'", {}),
     ("whole_disk_scan", "depth-bounded-home", "find ~ -maxdepth 1 -name x", {}),
@@ -116,15 +138,27 @@ NEAR_MISSES: list[tuple[str, str, str, dict]] = [
     ("whole_disk_scan", "grep-r-scoped", "grep -rn foo src/", {}),
     ("whole_disk_scan", "rg-scoped", "rg token ~/git/nexus/src", {}),
     ("whole_disk_scan", "mdfind-onlyin", "mdfind -onlyin ~/git/nexus foo", {}),
+    ("whole_disk_scan", "nx-noindex-depth-bounded", "find /Volumes/SanHell/tmp/nx.noindex -maxdepth 1 -name x", {}),
+    ("whole_disk_scan", "other-dir-on-a-volume", "grep -rn foo /Volumes/SanHell/tmp/other/out", {}),
     ("shared_glob_delete", "private-dir-glob", "rm -rf /tmp/claude-501/s1/scratchpad/out/*", {}),
     ("shared_glob_delete", "named-private-tree", "rm -rf ~/tmp/dev-a/run42", {}),
     ("shared_glob_delete", "not-recursive", "rm /tmp/x_*", {}),
+    ("shared_glob_delete", "glob-inside-own-dir-under-home-tmp", "rm -rf ~/tmp/dev-a/*", {}),
+    ("shared_glob_delete", "exact-dir-under-home-tmp", "rm -rf $HOME/tmp/nx129-run42", {}),
     ("shared_glob_delete", "find-private-dir", "find /tmp/claude-501/s1 -mtime +1 -delete", {}),
     ("shared_glob_delete", "find-without-time-test", "find /tmp -name x -delete", {}),
     ("hook_verb_by_hand", "pytest-fence", "uv run pytest tests/hooks", {}),
     ("hook_verb_by_hand", "side-effect-free-renderer", """uv run python -c "from nexus.hooks import render_session_start as r; print(len(r('x')))" """, {}),
     ("hook_verb_by_hand", "scratch-home-and-config", "HOME=$S NEXUS_CONFIG_DIR=$S/cfg uv run nx-hook session-start", {}),
     ("hook_verb_by_hand", "grep-for-the-word", "grep -rn nx-hook src", {}),
+    ("hook_verb_by_hand", "word-in-another-segments-commit-message",
+     "uv run ruff check . && git commit -m 'fix nx-hook session-start'", {}),
+    ("hook_verb_by_hand", "pytest-selects-by-name", "uv run pytest -k nx-hook", {}),
+    ("hook_verb_by_hand", "wrapper-script-selects-by-name", "python3 scripts/watched_pytest.py -k nx-hook", {}),
+    ("hook_verb_by_hand", "import-with-no-call", "python3 -c 'import nexus._hook_runtime'", {}),
+    ("hook_verb_by_hand", "import-session-start-module-no-call", "python3 -c 'import nexus.hooks.session_start'", {}),
+    ("hook_verb_by_hand", "echo-the-word", "echo nx-hook", {}),
+    ("hook_verb_by_hand", "heredoc-prose-not-a-runner", "cat > notes.md <<'EOF'\nrun nx-hook session-start\nsession_start('x')\nEOF", {}),
 ]
 
 
@@ -231,6 +265,98 @@ def test_an_extensionless_file_with_a_shell_shebang_counts_as_a_script(tmp_path:
     assert not daa._is_shell_script(str(tmp_path / "missing"))
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a FIFO")
+def test_an_edit_of_a_fifo_does_not_hang_the_hook(tmp_path: Path) -> None:
+    """Round 1: opening an extensionless FIFO blocks until a writer appears; only the 5 s hook timeout ended it."""
+    fifo = tmp_path / "pipe-without-extension"
+    os.mkfifo(fifo)
+    driver = (
+        "import importlib.util, sys\n"
+        "s = importlib.util.spec_from_file_location('daa', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+        "print(m._is_shell_script(sys.argv[2]))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", driver, str(SCRIPT), str(fifo)], capture_output=True, text=True, timeout=10,
+    )
+    assert proc.stdout.strip() == "False", proc
+
+
+def test_a_script_target_ends_at_the_extension(tmp_path: Path) -> None:
+    def targets(command: str) -> list[str]:
+        return daa._script_targets(daa.Ctx(_payload(command, cwd=str(tmp_path))))
+
+    assert targets("cat x > f.sha256") == []
+    assert targets("echo y > notes.shell") == []
+    assert targets("echo y >> run.sh.bak") == []
+    assert targets("sed -i s/a/b/ build.bashrc") == []
+    assert targets("echo y > f.sh") == ["f.sh"]
+    assert targets("echo y | tee -a 'g.bash'") == ["g.bash"]
+
+
+# ---- heredoc bodies are data, not commands --------------------------------------------------
+
+STASH_IN_BODY = "git stash pop"
+
+
+def test_heredoc_bodies_are_not_commands() -> None:
+    body = f"pkill -f x\nfind / -name y\nrm -rf /tmp/*\n{STASH_IN_BODY}\nkill $(pgrep -f z)"
+    for opener in ("<<'EOF'", "<<EOF", '<<"EOF"', "<< EOF"):
+        assert _ids(f"cat > notes.txt {opener}\n{body}\nEOF") == [], opener
+    assert _ids(f"cat > notes.txt <<-EOF\n\t{body}\n\tEOF") == [], "the dash form allows an indented terminator"
+    assert _ids(f"cat <<A; cat <<B\n{body}\nA\n{body}\nB") == [], "two bodies on one line"
+
+
+def test_the_command_after_a_heredoc_is_still_analysed() -> None:
+    assert _ids("cat > n.txt <<'EOF'\nhello\nEOF\npkill -f y") == ["pattern_kill"]
+    assert _ids("cat > n.txt <<'EOF'\npkill -f x\nEOF\nrm -rf /tmp/*") == ["shared_glob_delete"]
+    assert _ids("echo $((1 <<2)) ; pkill -f y") == ["pattern_kill"], "a shift is not a heredoc"
+    assert _ids("cat <<<'pkill -f x'") == [], "a here-string stays one quoted word"
+
+
+def test_nothing_in_a_heredoc_body_spawns(monkeypatch: pytest.MonkeyPatch) -> None:
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(daa, "_spawn", lambda ctx, argv, *a, **kw: spawned.append(argv))
+    assert _ids(f"cat > notes.txt <<'EOF'\n{STASH_IN_BODY}\necho y > other.sh\nEOF") == []
+    assert spawned == [], "no git, pgrep or ps for text inside a body"
+
+
+# ---- one shared deadline, one worktree lookup per cwd ---------------------------------------
+
+
+def test_every_spawn_shares_one_deadline(tmp_path: Path) -> None:
+    ctx = daa.Ctx(_payload("ls", cwd=str(tmp_path)))
+    assert ctx.deadline - daa.time.monotonic() <= daa.DEADLINE_S
+    ctx.deadline = daa.time.monotonic() - 1
+    assert daa._spawn(ctx, [sys.executable, "-c", "print(1)"]) is None, "spent: no spawn, no match"
+    assert daa._worktree_count(ctx, str(tmp_path)) == 0
+    assert daa._live_runner(ctx, str(tmp_path / "x.sh")) == 0
+
+
+def test_a_slow_spawn_is_cut_at_the_deadline_and_reads_no_stdin(tmp_path: Path) -> None:
+    ctx = daa.Ctx(_payload("ls", cwd=str(tmp_path)))
+    reads = daa._spawn(ctx, [sys.executable, "-c", "import sys; print(len(sys.stdin.read()))"])
+    assert reads is not None and reads.stdout.strip() == "0", "stdin is /dev/null, not the hook's own pipe"
+    ctx.deadline = daa.time.monotonic() + 0.4
+    started = daa.time.monotonic()
+    assert daa._spawn(ctx, [sys.executable, "-c", "import time; time.sleep(30)"]) is None
+    assert daa.time.monotonic() - started < 5
+
+
+def test_the_worktree_lookup_runs_once_per_cwd(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _git("worktree", "add", "-q", "-b", "feature/y", str(tmp_path / "wt2"), cwd=repo)
+    calls: list[list[str]] = []
+    real = daa._spawn
+
+    def counting(ctx, argv, *a, **kw):
+        calls.append(argv)
+        return real(ctx, argv, *a, **kw)
+
+    monkeypatch.setattr(daa, "_spawn", counting)
+    assert _ids("git stash pop; git stash drop; git stash push", cwd=str(repo)).count("stash_with_worktrees") == 1
+    assert len(calls) == 1, calls
+
+
 # ---- table integrity ------------------------------------------------------------------------
 
 
@@ -251,11 +377,12 @@ def test_every_row_has_a_match_a_near_miss_and_named_advice() -> None:
 def test_the_advice_names_the_rule_and_the_safe_alternative() -> None:
     for row in daa.ROWS:
         text = daa.render([daa.Hit(row, "")])
-        assert f"[{row.id}]" in text, "the rendered advice names the row"
-        assert "advice" in text
+        assert text == f"destructive-action advice [{row.id}]: {row.advice}", "name, then the row's own advice, nothing else"
+        assert daa.render([daa.Hit(row, "note. ")]).endswith(f"note. {row.advice}"), "a predicate note leads the advice"
     # A safe alternative is spelled out in every row's advice.
     for row, needle in {
         "pattern_kill": "`kill <pid>`",
+        "pattern_kill ": "parent pid",
         "branch_bulk_delete": "one `git branch -D <name>` at a time",
         "stash_with_worktrees": "git show HEAD:f > f",
         "bg_pipe_masks_exit": "ec=$?",
@@ -264,8 +391,19 @@ def test_the_advice_names_the_rule_and_the_safe_alternative() -> None:
         "hook_verb_by_hand": "scratch directory",
         "running_script_edit": "move it",
     }.items():
-        advice = next(r.advice for r in daa.ROWS if r.id == row)
+        advice = next(r.advice for r in daa.ROWS if r.id == row.strip())
         assert needle in advice, (row, needle)
+
+
+def test_the_pattern_kill_advice_tells_the_two_incidents_as_they_happened() -> None:
+    """11-04: a laptop pkill -f meant to end an agent's own queued run. 11-03: a SIGTERM to a pid picked
+    out of ps by its command line ended a peer's lab-remote run. It was not a pattern kill."""
+    advice = next(r.advice for r in daa.ROWS if r.id == "pattern_kill")
+    assert "own queued run" in advice
+    assert "picked out of `ps` by its command line" in advice
+    assert "lab-remote" in advice
+    assert "a pattern kill has ended a peer" not in advice, "the wrong attribution (round 1, W1)"
+    assert "found by its parent pid" in advice
 
 
 def test_advise_is_the_mode_and_no_row_denies_today() -> None:
