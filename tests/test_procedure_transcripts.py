@@ -76,7 +76,7 @@ def load(path: str, size: int, *, ftype: str = "Project", kind: str = "instructi
     return {"path": path, "kind": kind, "type": ftype, "size": size, "time": "2026-11-03T10:00:03Z"}
 
 
-JOINED = "deferred_tools"  # the fields of the second call a tools unit makes
+JOINED = "deferred_tools"  # a read of these alone would be a second read of a window, which no query makes
 
 
 def _call_shape(c: dict, f: vt._Fields) -> dict:
@@ -113,15 +113,13 @@ def shape(r: dict, f: vt._Fields) -> dict:
 class Sessions:
     """A fake transcripts.sessions that filters as the real verb does: window by start, ``fields``
     parsed by the real parser and applied by ``shape`` (nil is every field; assistant_text only
-    when bodies is true), calls counted. ``calls`` holds the window reads of a run, ``joins`` the
-    second ``deferred_tools`` reads a tools unit makes beside them; ``asked`` holds the ``fields``
+    when bodies is true), calls counted. ``calls`` holds the window reads of a run, ``joins`` any
+    read of ``deferred_tools`` alone (none: one read a unit); ``asked`` holds the ``fields``
     of every call in order."""
 
-    def __init__(self, records: list[dict], *, max_records: int | None = None,
-                 max_join_records: int | None = None) -> None:
+    def __init__(self, records: list[dict], *, max_records: int | None = None) -> None:
         self.records = records
         self.max_records = max_records
-        self.max_join_records = max_join_records  # a limit only the second (deferred_tools) read meets
         self.calls: list[tuple] = []
         self.joins: list[tuple] = []
         self.asked: list[str | None] = []
@@ -134,8 +132,7 @@ class Sessions:
         lo, hi = vt._bound(since, "since"), vt._bound(until, "until")
         got = sorted((r for r in self.records if lo <= vt._bound(r["start"], "start") < hi),
                      key=lambda r: r["start"])
-        limit = self.max_join_records if fields == JOINED else self.max_records
-        if limit is not None and len(got) > limit:
+        if self.max_records is not None and len(got) > self.max_records:
             return f"result-too-large: transcripts.sessions: {len(got)} records; narrow the window"
         return [shape(r, f) for r in got]
 
@@ -217,8 +214,7 @@ def _py(x: Any) -> Any:
 
 
 def run(records: list[dict], query: str, **kw: Any) -> tuple[dict, Sessions]:
-    fake = Sessions(records, max_records=kw.pop("max_records", None),
-                    max_join_records=kw.pop("max_join_records", None))
+    fake = Sessions(records, max_records=kw.pop("max_records", None))
     out = Run(fake, patch=kw.pop("patch", None))(query=query, **kw)
     return out, fake
 
@@ -905,30 +901,25 @@ def test_each_querys_field_set_agrees_with_the_verbs_pinned_table() -> None:
     for query in QUERIES:
         got, joined, bodies = _lua_fields(query)
         assert len(got) == len(set(got)), query  # no entry twice
-        # the pin is the verb's: the keys each query returns beyond the four that always come back
-        assert set(got) == set(PINNED_FIELDS[query][0]), query
+        assert joined is None, query  # one read per unit: a second read decodes the window again
+        # the pin is the verb's: the keys each query returns beyond the four that always come back;
+        # it measures tools' deferred_tools as its own set, and tools reads both in one call
+        pinned = set(PINNED_FIELDS[query][0])
+        if query == "tools":
+            pinned |= set(PINNED_FIELDS["deferred_tools"][0])
+        assert set(got) == pinned, query
         assert bodies == PINNED_FIELDS[query][1], query
-        assert joined == (PINNED_FIELDS["deferred_tools"][0][0] if query == "tools" else None), query
-    # the joined read asks the pinned set less tool_call_count, which admit reads only from the main read
-    assert set(PINNED_FIELDS["deferred_tools"][0]) == {JOINED, "tool_call_count"}
-    assert JOINED == "deferred_tools"
 
 
-def test_tools_reads_deferred_tools_in_a_second_call_per_unit_and_no_other_query_does() -> None:
+def test_every_query_makes_one_read_per_unit_and_only_tools_asks_for_deferred_tools() -> None:
     for query in QUERIES:
         _, fake = run(fixture_day(), query, since="2026-11-02", until="2026-11-04", project="p")
-        primary = [f for f in fake.asked if f != JOINED]
-        assert all("deferred_tools" not in f.split(",") for f in primary), query
-        if query != "tools":
-            assert fake.joins == [], query
-            continue
-        assert len(fake.calls) == 2
-        assert [c[:2] for c in fake.joins] == [c[:2] for c in fake.calls]  # the same windows
-        assert all(c[2:] == ("p", False) for c in fake.joins)  # the same project, no bodies
-        assert fake.asked[1::2] == [JOINED, JOINED]  # each window read, then its deferred_tools
+        assert fake.joins == [] and len(fake.calls) == len(fake.asked) == 2, query
+        has = ["deferred_tools" in f.split(",") for f in fake.asked]
+        assert has == [query == "tools"] * 2, query
 
 
-def test_tools_attaches_each_records_own_deferred_tools_by_session_and_agent() -> None:
+def test_tools_flags_each_records_own_deferred_tools_session_and_agent_apart() -> None:
     main = rec("S", f"{DAY}T10:00:00Z", deferred=["A", "B"],
                calls=[call("A", {}), call("B", {}), call("C", {})])
     sub = rec("S", f"{DAY}T10:05:00Z", main=False, agent="a1", deferred=["C"],
@@ -948,24 +939,10 @@ def test_tools_attaches_each_records_own_deferred_tools_by_session_and_agent() -
     assert summaries == {("S", None): (2, 2), ("S", "a1"): (1, 1)}  # none for the two with nothing deferred
 
 
-def test_a_second_read_the_verb_refuses_splits_the_unit_as_a_refused_first_does() -> None:
-    records = [rec(f"s{i}", f"2026-11-03T{i % 24:02d}:{i // 24:02d}:00Z", calls=[call("Read", {})],
-                   deferred=["Read"]) for i in range(60)]
-    out, fake = run(records, "tools", since="2026-11-03", until="2026-11-04", max_join_records=40)
-    assert [c[:2] for c in fake.calls[:2]] == [("2026-11-03", "2026-11-04"), ("2026-11-03", "2026-11-03T01:00:00Z")]
-    assert [c[:2] for c in fake.joins[:2]] == [("2026-11-03", "2026-11-04"), ("2026-11-03", "2026-11-03T01:00:00Z")]
-    assert len(fake.calls) == len(fake.joins) == 1 + 24
-    whole, _ = run(records, "tools", since="2026-11-03", until="2026-11-04")
-    assert out["rows"] == whole["rows"]
-    assert len([r for r in out["rows"] if r["kind"] == "tool"]) == 60
-    assert all(r.get("deferred") for r in out["rows"] if r["kind"] == "tool")  # the split kept the join
-
-
-def test_the_units_cap_counts_verb_reads_so_a_tools_unit_costs_two() -> None:
-    out, fake = run(sparse(30, 1), "skills", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "7"})
-    assert out["next_since"] == _day(7) and len(fake.calls) == 7 and fake.joins == []
-    out, fake = run(sparse(30, 1), "tools", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "7"})
-    assert out["next_since"] == _day(4) and len(fake.calls) == len(fake.joins) == 4  # 8 reads stop it
+def test_the_units_cap_stops_a_page_at_its_count_of_verb_reads() -> None:
+    for query in ("skills", "tools"):
+        out, fake = run(sparse(30, 1), query, since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "7"})
+        assert out["next_since"] == _day(7) and len(fake.calls) == 7 and fake.joins == [], query
 
 
 def test_the_tool_call_bound_counts_the_calls_a_record_had_before_the_filter() -> None:
@@ -1357,11 +1334,6 @@ def test_a_year_long_sparse_window_pages_by_units_and_the_joined_pages_equal_one
 
 
 def test_a_page_stops_at_the_units_cap_and_always_takes_at_least_one_unit() -> None:
-    out, fake = run(sparse(30, 1), "skills", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "7"})
-    assert out["next_since"] == _day(7) and len(fake.calls) == 7
-    # the cap counts verb reads (see the test of the second read): a tools unit is two of them
-    out, fake = run(sparse(30, 1), "tools", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "7"})
-    assert out["next_since"] == _day(4) and len(fake.calls) == 4
     for query in ("skills", "tools"):
         out, fake = run(sparse(30, 1), query, since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "0"})
         assert out["next_since"] == _day(1) and len(fake.calls) == 1, query
