@@ -407,6 +407,12 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // ── Server-side tumbler assignment ────────────────────────────────
         neither("/doc/register", "handleDocRegister"),
         both("/doc/register_many", "handleRegisterMany", POSITIONAL),
+        // RDR-193 Part A1 (nexus-u5m5g.3). resolve_or_register answers one document. The stage route's `rows` are
+        // full landing-row objects (not bare identifiers), so it is not idListAccepting; the handler caps a page at
+        // MAX_BATCH_DOC_IDS anyway. The commit answers one job id, the poll (no case label) one job.
+        neither("/doc/resolve_or_register", "handleResolveOrRegister"),
+        neither("/reconcile/stage", "handleReconcileStage"),
+        neither("/reconcile/commit", "handleReconcileCommit"),
 
         // ── GC audit ──────────────────────────────────────────────────────
         neither("/gc_audit/record", "handleGcAuditRecord"),

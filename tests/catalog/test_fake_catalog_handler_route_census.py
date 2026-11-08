@@ -218,6 +218,30 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "shape (400/404 mapping, the docs-only content_type guard) is pinned "
         "Java-side by CatalogHandlerSetAspectsEnabledTest"
     ),
+    "/reconcile/stage": (
+        "RDR-193 Part A1 (nexus-u5m5g.3): DELIBERATELY engine-only until the client switch "
+        "(Step 6, which adds HttpCatalogClient.reconcile_stage and drops this entry): there is "
+        "no Catalog or HttpCatalogClient method for it yet, so it is outside the shared-surface "
+        "parity gate by construction. Its wire shape is validated Java-side by "
+        "CatalogHandlerReconcileRoutesTest, and the end state it produces is compared with the "
+        "old client path by the Part D parity fixture. The census checks both directions, so "
+        "this entry must go when the fake gains the route"
+    ),
+    "/reconcile/commit": (
+        "RDR-193 Part A1 (nexus-u5m5g.3): the submit half of the reconcile job pair, engine-only "
+        "until the client switch (Step 6) for the same reason as /reconcile/stage above; "
+        "validated Java-side by CatalogHandlerReconcileRoutesTest (202, the same run's running "
+        "job, 409, 503). The poll, GET /reconcile/{job_id}, carries its id in the path and is "
+        "dispatched from the handler's default branch, so the census does not see it as a case "
+        "label"
+    ),
+    "/doc/resolve_or_register": (
+        "RDR-193 Part A1 (nexus-u5m5g.3): DELIBERATELY engine-only until the client switch "
+        "(Step 6 collapses _register_or_lookup_doc_id, _catalog_markdown_hook and store_hook onto "
+        "it and adds HttpCatalogClient.resolve_or_register): no Catalog or HttpCatalogClient "
+        "method exists yet. Validated Java-side by CatalogHandlerReconcileRoutesTest; delete this "
+        "entry when the fake gains the route"
+    ),
     "/update_many": (
         "HttpCatalogClient-only batch optimization (nexus-xedhp) with no "
         "Catalog equivalent method, so it is outside the shared-surface "
