@@ -1130,6 +1130,28 @@ local function admit(q, page, recs, narrow)
   return "ok"
 end
 
+-- The records of a unit grouped by the hour their transcript starts in, in order: {hour, recs}.
+-- A record whose start does not parse goes with the unit's first hour.
+local function by_hour(recs, from)
+  local groups, at = {}, {}
+  for _, rec in ipairs(recs) do
+    local t = ts_value(rec.start)
+    local h = from // HOUR * HOUR
+    if t ~= nil and t > h then
+      h = t // HOUR * HOUR
+    end
+    local g = at[h]
+    if g == nil then
+      g = {hour = h, recs = {}}
+      at[h] = g
+      groups[#groups + 1] = g
+    end
+    g.recs[#g.recs + 1] = rec
+  end
+  table.sort(groups, function(a, b) return a.hour < b.hour end)
+  return groups
+end
+
 local function window(q, lo, hi)
   local page = {rows = {}, bytes = 0, units = 0, calls = 0, sessions = 0, tool_calls = 0, truncated = 0}
   if q.keyed then
@@ -1155,7 +1177,26 @@ local function window(q, lo, hi)
     if recs ~= nil then
       verdict = admit(q, page, recs, stop - pos > HOUR)
     end
-    if verdict == "ok" then
+    if verdict ~= "ok" and recs ~= nil and stop - pos > HOUR then
+      -- The unit was read but does not fit: admit its hours from the records in hand, so the
+      -- page ends at an hour and the next page reads only the rest of the day, once.
+      for _, g in ipairs(by_hour(recs, pos)) do
+        verdict = admit(q, page, g.recs, false)
+        if verdict ~= "ok" then
+          pos = math.max(pos, g.hour)
+          break
+        end
+      end
+      if verdict == "ok" then
+        pos = stop
+      elseif verdict == "full" then
+        next_since = stamp(pos)
+        break
+      else
+        fail("result-window: " .. stamp(pos) .. " to " .. stamp(math.min(stop, pos + HOUR))
+          .. " is too large for one verb result or one page; narrow the window or the project")
+      end
+    elseif verdict == "ok" then
       pos = stop
     elseif verdict == "full" then
       next_since = stamp(pos)

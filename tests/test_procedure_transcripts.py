@@ -1610,3 +1610,42 @@ def test_joined_pages_of_a_keyed_query_equal_one_pass_for_every_keyed_query() ->
         assert len(a) == len(b)
         for x, y in zip(a, b, strict=True):
             assert x == pytest.approx(y), query
+
+
+# ---- a day that does not fit is divided by the hours of the records already read ----------
+
+
+def _hourly(days: int, hours: tuple[int, ...] = (9, 10, 11, 12), per: int = 10) -> list[dict]:
+    """A session at each of ``hours`` every day, each with ``per`` Skill calls."""
+    return [rec(f"h{d}-{h}", f"{_day(d)}T{h:02d}:00:00Z",
+                calls=[call("Skill", {"skill": "k"}, f"{h:02d}:01:00", day=_day(d)) for _ in range(per)])
+            for d in range(days) for h in hours]
+
+
+def test_a_page_that_fills_inside_a_day_ends_at_an_hour_of_the_records_it_read_with_no_hour_reads() -> None:
+    records = _hourly(3)  # 40 calls a day, 10 an hour from 09:00 to 12:00
+    out, fake = run(records, "skills", since=_day(0), until=_day(3), patch=calls_cap(60))
+    assert out["next_since"] == f"{_day(1)}T11:00:00Z"  # day 0 and two hours of day 1 are 60 calls
+    assert [c[:2] for c in fake.calls] == [(_day(0), _day(1)), (_day(1), _day(2))]  # no hour reads
+    out, fake = run(records, "skills", since=out["next_since"], until=_day(3), patch=calls_cap(60))
+    assert [c[:2] for c in fake.calls][0] == (f"{_day(1)}T11:00:00Z", _day(2))  # the rest of the day, once
+    pages, _ = pages_of(records, "skills", since=_day(0), until=_day(3), patch=calls_cap(60))
+    whole, _ = run(records, "skills", since=_day(0), until=_day(3))
+    assert tj.join_pages("skills", pages)["rows"] == tj.join_pages("skills", [whole])["rows"]
+
+
+def test_a_day_whose_calls_alone_pass_the_bound_is_divided_by_the_hours_in_hand() -> None:
+    records = _hourly(1, per=20)  # 80 calls in one day, 20 an hour
+    for query in ("skills", "tools", "violations"):
+        pages, fakes = pages_of(records, query, since=_day(0), until=_day(1), patch=calls_cap(50))
+        assert [p.get("next_since") for p in pages] == [f"{_day(0)}T11:00:00Z", None], query
+        assert [len(f.calls) for f in fakes] == [1, 1], query  # each page reads its window once
+        whole, _ = run(records, query, since=_day(0), until=_day(1))
+        assert tj.join_pages(query, pages)["rows"] == tj.join_pages(query, [whole])["rows"], query
+
+
+def test_an_hour_over_the_bound_on_its_own_is_taken_whole_so_a_page_advances() -> None:
+    records = _hourly(1, hours=(9, 10), per=30)
+    pages, fakes = pages_of(records, "skills", since=_day(0), until=_day(1), patch=calls_cap(20))
+    assert [p.get("next_since") for p in pages] == [f"{_day(0)}T10:00:00Z", None]
+    assert [len(f.calls) for f in fakes] == [1, 1]
