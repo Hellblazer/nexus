@@ -361,7 +361,15 @@ def test_errors_refuse_unknown_kinds_and_limits_and_carry_stats() -> None:
         errors.ScriptLimitError("weird", 1)
     e = errors.ScriptLimitError("memory", 64, stats={"peak_lua_bytes": 9})
     assert e.stats == {"peak_lua_bytes": 9}
-    assert set(errors.KINDS) == {"static_check", "lua", "result", "header", "args"}
+    assert set(errors.KINDS) == {
+        "static_check",
+        "lua",
+        "result",
+        "header",
+        "args",
+        "name",
+    }
+    assert errors.ScriptError("name", "no procedure x").kind == "name"
     assert "cpu_time" in errors.LIMITS
 
 
