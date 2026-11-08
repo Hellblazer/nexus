@@ -29,18 +29,28 @@ def _ids() -> tuple[int, str]:
     return int(os.environ[fence.ROOT_ENV]), os.environ[fence.TOKEN_ENV]
 
 
+def _await_exec(pid: int, deadline: float | None = None) -> int:
+    """Wait, bounded, until *pid*'s argv is :data:`_SLEEP`; returns *pid*.
+
+    Popen returns once the child's close-on-exec error pipe closes, which the kernel does inside exec before it writes
+    the new image's argument area, so /proc/<pid>/cmdline (and environ) can still read empty for a moment and the
+    fence calls the process imageless, so unjudgeable (develop shard 1 at 9098d1de0 read '' as the program name;
+    shard 4 at ffd1846cd judged a fresh group leader unclassified). Every test that classifies a process it just
+    started waits here first."""
+    if not sys.platform.startswith("linux"):
+        return pid
+    want = b"\0".join(a.encode() for a in _SLEEP) + b"\0"
+    deadline = time.monotonic() + 10 if deadline is None else deadline
+    while Path(f"/proc/{pid}/cmdline").read_bytes() != want:
+        assert time.monotonic() < deadline, f"process {pid} never finished its exec"
+        time.sleep(0.01)
+    return pid
+
+
 @pytest.fixture
 def child():
     p = subprocess.Popen(_SLEEP)
-    # Popen returns once the child's close-on-exec error pipe closes, which the kernel does inside exec before it
-    # writes the new image's argument area, so /proc/<pid>/cmdline can still read empty for a moment (develop shard 1
-    # at 9098d1de0 read '' as the program name). Wait, bounded, until the child's argv is the one it was started with.
-    if sys.platform.startswith("linux"):
-        want = b"\0".join(a.encode() for a in _SLEEP) + b"\0"
-        deadline = time.monotonic() + 10
-        while Path(f"/proc/{p.pid}/cmdline").read_bytes() != want:
-            assert time.monotonic() < deadline, "the child never finished its exec"
-            time.sleep(0.01)
+    _await_exec(p.pid)
     yield p
     p.kill()
     p.wait()
@@ -59,12 +69,7 @@ def _orphan(tmp_path: Path, *, env: dict[str, str] | None) -> int:
     while not pidfile.exists() or not pidfile.read_text():
         assert time.monotonic() < deadline, "the orphan never wrote its pid"
         time.sleep(0.05)
-    pid = int(pidfile.read_text())
-    want = b"\0".join(a.encode() for a in _SLEEP) + b"\0"
-    while Path(f"/proc/{pid}/cmdline").read_bytes() != want:  # the exec finished (see the child fixture)
-        assert time.monotonic() < deadline, "the orphan never finished its exec"
-        time.sleep(0.01)
-    return pid
+    return _await_exec(int(pidfile.read_text()), deadline)
 
 
 def _reap(pid: int) -> None:
@@ -149,7 +154,7 @@ def test_a_group_whose_leader_exited_is_judged_by_a_live_member(tmp_path) -> Non
         f"p = subprocess.Popen({_SLEEP!r}); open({str(pidfile)!r}, 'w').write(str(p.pid))")],
         start_new_session=True)
     leader.wait()
-    member = int(pidfile.read_text())
+    member = _await_exec(int(pidfile.read_text()))
     try:
         assert fence._stat(leader.pid) is None, "the leader is gone"
         assert fence.classify("killpg", leader.pid, signal.SIGTERM, root=_ids()[0], token=_ids()[1]) == ("own", member)
@@ -160,6 +165,7 @@ def test_a_group_whose_leader_exited_is_judged_by_a_live_member(tmp_path) -> Non
 @_linux_fence
 def test_a_live_child_with_a_scrubbed_environment_is_the_sessions_by_ancestry() -> None:
     p = subprocess.Popen(_SLEEP, env={"PATH": os.environ.get("PATH", "")})
+    _await_exec(p.pid)
     try:
         root, token = _ids()
         assert not fence._has_token(p.pid, token), "no marker: only the ancestor walk can claim it"
@@ -192,6 +198,7 @@ def test_a_reparented_child_with_a_scrubbed_environment_reads_as_foreign(tmp_pat
 @_linux_fence
 def test_a_group_is_judged_by_its_leader_and_a_group_of_ours_is_ours() -> None:
     p = subprocess.Popen(_SLEEP, start_new_session=True)
+    _await_exec(p.pid)
     try:
         root, token = _ids()
         assert fence.classify("killpg", p.pid, signal.SIGTERM, root=root, token=token) == ("own", p.pid)
