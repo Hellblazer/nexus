@@ -25,6 +25,13 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  * prefix is the label. When several live documents name the chunk the own-collection row wins, then the lowest
  * {@code doc_id}, so the pick does not vary between calls. The SQL form of the same rule is in {@code
  * vectors-040-gc-audit-labels-by-text-and-manifest.xml}.
+ *
+ * <p>A label is WITHHELD, every field null, when any live document in any collection that holds the same text is
+ * sensitive (nexus-rfvyy.9, RDR-243): the owner it names can be that flagged document, and the text prefix is that
+ * document's text, so "a reapable chunk has no live owner" does not make the label safe. Select the label through
+ * {@link #title()}, {@link #docId()}, {@link #filePath()} and {@link #textPrefix()}, never the raw lateral columns.
+ * The gc quarantine sample builds the label in SQL and is withheld after the call ({@code
+ * PgVectorRepository.withholdSensitiveLabels}).
  */
 final class ChunkOwnerLabel {
 
@@ -33,15 +40,39 @@ final class ChunkOwnerLabel {
 
     static final String ALIAS = "owner";
 
-    static final Field<String> DOC_ID = DSL.field(DSL.name(ALIAS, "doc_id"), String.class);
-    static final Field<String> TITLE = DSL.field(DSL.name(ALIAS, "title"), String.class);
-    static final Field<String> FILE_PATH = DSL.field(DSL.name(ALIAS, "file_path"), String.class);
+    private static final Field<String> DOC_ID = DSL.field(DSL.name(ALIAS, "doc_id"), String.class);
+    private static final Field<String> TITLE = DSL.field(DSL.name(ALIAS, "title"), String.class);
+    private static final Field<String> FILE_PATH = DSL.field(DSL.name(ALIAS, "file_path"), String.class);
 
     private ChunkOwnerLabel() {}
 
-    /** {@code left(chunk_text, 80)}. */
+    /** True for a chunk of the enclosing {@code nexus.chunks} query whose label is withheld (see the class doc). */
+    static org.jooq.Condition withheld() {
+        return ChunkSensitivity.ownedSensitiveAnywhere(CHUNKS.TENANT_ID, CHUNKS.CHASH);
+    }
+
+    private static Field<String> unlessWithheld(Field<String> f) {
+        return DSL.when(withheld(), DSL.inline((String) null)).otherwise(f);
+    }
+
+    /** The owner's tumbler, or null (no live owner, or the label is withheld). */
+    static Field<String> docId() {
+        return unlessWithheld(DOC_ID);
+    }
+
+    /** The owner's title, or null (no live owner, or the label is withheld). */
+    static Field<String> title() {
+        return unlessWithheld(TITLE);
+    }
+
+    /** The owner's file path, or null (no live owner, or the label is withheld). */
+    static Field<String> filePath() {
+        return unlessWithheld(FILE_PATH);
+    }
+
+    /** {@code left(chunk_text, 80)}, or null when the label is withheld. */
     static Field<String> textPrefix() {
-        return DSL.left(CHUNKS.CHUNK_TEXT, TEXT_PREFIX_CHARS);
+        return unlessWithheld(DSL.left(CHUNKS.CHUNK_TEXT, TEXT_PREFIX_CHARS));
     }
 
     /**

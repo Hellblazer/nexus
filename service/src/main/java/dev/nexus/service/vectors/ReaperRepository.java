@@ -123,7 +123,7 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
         if (chashHex.isEmpty()) return List.of();
         List<byte[]> keys = chashHex.stream().map(h -> dev.nexus.service.db.Chash.fromHex(h).toBytes()).toList();
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(CHUNKS.CHASH, ChunkOwnerLabel.TITLE, ChunkOwnerLabel.FILE_PATH, ChunkOwnerLabel.textPrefix())
+            ctx.select(CHUNKS.CHASH, ChunkOwnerLabel.title(), ChunkOwnerLabel.filePath(), ChunkOwnerLabel.textPrefix())
                .from(CHUNKS)
                .leftJoin(ChunkOwnerLabel.ownerLateral()).on(DSL.trueCondition())
                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)).and(CHUNKS.CHASH.in(keys)))

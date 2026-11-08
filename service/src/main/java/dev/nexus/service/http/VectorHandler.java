@@ -2546,7 +2546,7 @@ public final class VectorHandler implements HttpHandler {
      * <p>Response 200: {@code {"collection": "...", "grace_seconds": N|null, "returned": N, "next_after":
      * "64-hex"|null, "chunks": [{"chash": "64-hex", "created_at": ISO-8601, "last_written_at": ISO-8601,
      * "ownerless_since": ISO-8601, "title": str|null, "catalog_doc_id": str|null,
-     * "text_prefix": str}, ...]}}.
+     * "text_prefix": str|null}, ...]}}.
      * {@code ownerless_since} is the instant the grace counts from, {@code GREATEST(last_written_at,
      * orphaned_at)} (the later of the last write and the moment the chunk last lost an owner, read from
      * {@code nexus.chunk_orphaned_at}); it is never earlier than {@code last_written_at}, and a chunk with no
@@ -2556,7 +2556,8 @@ public final class VectorHandler implements HttpHandler {
      * the chunk's MANIFEST gives as its owner (its catalog title and tumbler; the own-collection manifest row first,
      * then the lowest tumbler) and are {@code null} when no manifest row names one; {@code text_prefix} is the first
      * 80 characters of the chunk's text. None of them reads the chunk row's metadata, which is last-writer-wins on a
-     * shared chunk (RDR-236 Phase 3).
+     * shared chunk (RDR-236 Phase 3). All three are {@code null} when a live sensitive document in any collection holds
+     * the same text (nexus-rfvyy.9, RDR-243): the owner named can be that document and the prefix is its text.
      * Page by sending {@code next_after} back as {@code after_chash} while it is not null; {@code next_after}
      * is null when fewer than {@code limit} rows came back. Use the cursor, not {@code offset}, for any
      * consumer that acts on a page before fetching the next: acting shrinks the set, and an offset then skips rows.

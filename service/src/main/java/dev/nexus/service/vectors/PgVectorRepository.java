@@ -6234,7 +6234,7 @@ FROM scope s
             ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(afterChash).toBytes());
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(ChashHex.hex(CHUNKS.CHASH), CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT,
-                       ChunkOwnerLabel.TITLE, ChunkOwnerLabel.DOC_ID, ownerlessSince, ChunkOwnerLabel.FILE_PATH,
+                       ChunkOwnerLabel.title(), ChunkOwnerLabel.docId(), ownerlessSince, ChunkOwnerLabel.filePath(),
                        ChunkOwnerLabel.textPrefix())
                .from(CHUNKS)
                .leftJoin(owner).on(DSL.trueCondition())
@@ -6604,7 +6604,8 @@ FROM scope s
             long remaining = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.REMAINING);
             JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.SAMPLE);
             var outcome = new QuarantineBoundedOutcome(
-                moved, fromJsonList(sampleJson != null ? sampleJson.data() : null), remaining);
+                moved, withholdSensitiveLabels(ctx, tenant, fromJsonList(sampleJson != null ? sampleJson.data() : null)),
+                remaining);
             marker.mark(ctx, outcome);
             return outcome;
         });
@@ -6690,7 +6691,7 @@ FROM scope s
             Long moved = rec.get(GC_QUARANTINE_ORPHANS_FLOORED.MOVED);
             var outcome = new QuarantineFlooredOutcome(
                 moved == null ? 0L : moved,
-                fromJsonList(sampleJson != null ? sampleJson.data() : null),
+                withholdSensitiveLabels(ctx, tenant, fromJsonList(sampleJson != null ? sampleJson.data() : null)),
                 rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REMAINING),
                 Boolean.TRUE.equals(rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REFUSED)),
                 rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REAPABLE_COUNT),
@@ -6711,13 +6712,48 @@ FROM scope s
         // A separate, unconditionally-committed Java-side registration here
         // (the pre-fix shape) left a permanently-orphaned projection row behind
         // for every zero-orphan pass; do not reintroduce it.
-        var rec = tenantScope.withTenant(tenant, ctx ->
-            ctx.selectFrom(GC_QUARANTINE_ORPHANS.call(
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rec = ctx.selectFrom(GC_QUARANTINE_ORPHANS.call(
                     dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit))
-               .fetchOne());
-        long moved = rec.get(GC_QUARANTINE_ORPHANS.MOVED);
-        JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS.SAMPLE);
-        return new QuarantineOutcome(moved, fromJsonList(sampleJson != null ? sampleJson.data() : null));
+               .fetchOne();
+            long moved = rec.get(GC_QUARANTINE_ORPHANS.MOVED);
+            JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS.SAMPLE);
+            return new QuarantineOutcome(moved,
+                withholdSensitiveLabels(ctx, tenant, fromJsonList(sampleJson != null ? sampleJson.data() : null)));
+        });
+    }
+
+    /** The sample keys that label a chunk: the owner's title, tumbler and path, and the chunk's text prefix. */
+    private static final List<String> SAMPLE_LABEL_KEYS = List.of("title", "doc_id", "source_path", "text_prefix");
+
+    /**
+     * The gc quarantine sample with the label of every chunk a live sensitive document holds, in any collection, set
+     * to null (nexus-rfvyy.9): {@code gc_quarantine_orphans*} (vectors-040) build the label in SQL from the same
+     * cross-collection owner {@link ChunkOwnerLabel} names, so the engine withholds it here, after the call and in the
+     * same transaction, as the Java label does in its own statement. The chash stays.
+     */
+    static List<Map<String, Object>> withholdSensitiveLabels(DSLContext ctx, String tenant,
+                                                            List<Map<String, Object>> sample) {
+        if (sample == null || sample.isEmpty()) return sample;
+        List<String> hexes = new ArrayList<>();
+        for (Map<String, Object> m : sample) {
+            if (m.get("chash") instanceof String c) hexes.add(c);
+        }
+        Set<String> hit = ChunkSensitivity.ownedSensitiveAnywhere(ctx, tenant, hexes);
+        if (hit.isEmpty()) return sample;
+        List<Map<String, Object>> out = new ArrayList<>(sample.size());
+        for (Map<String, Object> m : sample) {
+            if (m.get("chash") instanceof String c && hit.contains(c)) {
+                Map<String, Object> w = new LinkedHashMap<>(m);
+                for (String k : SAMPLE_LABEL_KEYS) {
+                    if (w.containsKey(k)) w.put(k, null);
+                }
+                out.add(w);
+            } else {
+                out.add(m);
+            }
+        }
+        return out;
     }
 
     /**
