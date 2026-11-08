@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import itertools
+import math
 import os
 import re
-import math
 import contextvars
 import threading
 import time
@@ -674,15 +674,17 @@ def _local_source_path(entry: Any) -> str:
         return ""
     rest = uri[len("file://"):]
     if m := _DRIVE_PATH.match(rest):
-        drive = rest[m.start(1):]
-        return drive.replace("/", "\\") if os.name == "nt" else drive
-    if rest.startswith("/") and not rest.startswith("//"):
-        return rest
-    return ""
+        if os.name == "nt":
+            drive = rest[m.start(1):]
+            return drive[0].upper() + drive[1:].replace("/", "\\")  # resolve() spells the drive upper case
+        if not rest.startswith("/"):
+            return rest  # file://C:\\..., minted on Windows; no POSIX registration mints it
+    return rest if rest.startswith("/") else ""
 
 
 #: A drive path after ``file://``: ``C:\\...``, ``C:/...`` or ``/C:/...``; group 1 starts at the drive letter.
-_DRIVE_PATH = re.compile(r"^/?([A-Za-z]:[\\/])")
+#: Off Windows ``/C:/...`` is a POSIX path under a directory named ``C:`` and is kept as written.
+_DRIVE_PATH: re.Pattern[str] = re.compile(r"^/?([A-Za-z]:[\\/])")
 
 
 def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
