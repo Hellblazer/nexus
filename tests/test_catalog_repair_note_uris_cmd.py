@@ -32,7 +32,8 @@ def _census(**over) -> dict:
             "rewrite": [{"tumbler": "1.1.1", "collection": _Y, "source_uri": f"nx-note://{_X}/a",
                          "new_uri": f"nx-note://{_Y}/a"}],
             "merge": [{"tumbler": "1.1.7", "collection": _Y, "source_uri": f"nx-note://{_X}/m",
-                       "new_uri": f"nx-note://{_Y}/m", "twin": "1.1.8", "reason": "twin"}],
+                       "new_uri": f"nx-note://{_Y}/m", "twin": "1.1.8", "reason": "twin",
+                       "chunk_count": 3, "twin_chunk_count": 0}],
             "refused": [{"tumbler": "1.1.9", "collection": "docs__d__some-model__v1",
                          "source_uri": f"nx-note://{_X}/odd", "reason": "file_routed_collection"}],
             "tombstoned": [{"tumbler": "1.1.5", "collection": _Y, "source_uri": f"nx-note://{_X}/dead"}],
@@ -77,6 +78,23 @@ def _status(code: int, body: str = "") -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "http://test/v1/catalog/note_uri_repair")
     return httpx.HTTPStatusError(f"HTTP {code}", request=request,
                                  response=httpx.Response(code, request=request, text=body))
+
+
+def _step(n: int, remaining: int, *, first: int = 1, **over) -> dict:
+    """An apply response that rewrote ``n`` catalog rows: the report plus its ledger (a satellite row on each)."""
+    ledger = []
+    for i in range(first, first + n):
+        ledger.append({"table": "catalog_documents", "key": f"1.1.{i}",
+                       "old_uri": f"nx-note://{_X}/n{i}", "new_uri": f"nx-note://{_Y}/n{i}"})
+        ledger.append({"table": "document_aspects", "key": str(100 + i), "doc_id": f"1.1.{i}",
+                       "old_uri": f"nx-note://{_X}/p{i}", "new_uri": f"nx-note://{_Y}/p{i}"})
+    return _census(rewritten=n, remaining=remaining, ledger=ledger, **over)
+
+
+@pytest.fixture(autouse=True)
+def _cwd(tmp_path, monkeypatch):
+    """The default ledger lands in the working directory: keep it out of the repo."""
+    monkeypatch.chdir(tmp_path)
 
 
 def _run(*args: str):
@@ -133,11 +151,11 @@ class TestDryRunDefault:
 
 
 class TestApply:
-    def test_censuses_then_rewrites_in_batches_then_censuses_again(self, monkeypatch):
+    def test_censuses_then_rewrites_in_batches_then_censuses_again(self, monkeypatch, tmp_path):
         w = _FakeWriter([
             _census(),
-            _census(rewritten=2, remaining=1),
-            _census(rewritten=1, remaining=0),
+            _step(2, 1, first=1),
+            _step(1, 0, first=3),
             _census(rewrite=0, stale_live=3),
         ])
         _patch(monkeypatch, w)
@@ -151,7 +169,7 @@ class TestApply:
         assert "rewrite candidates (no live twin): 0" in result.output
         assert w.closed
 
-    def test_nothing_to_rewrite_makes_no_apply_call(self, monkeypatch):
+    def test_nothing_to_rewrite_makes_no_apply_call_and_writes_no_ledger(self, monkeypatch, tmp_path):
         w = _FakeWriter([_census(rewrite=0, stale_live=3)])
         _patch(monkeypatch, w)
 
@@ -160,9 +178,10 @@ class TestApply:
         assert result.exit_code == 0, result.output
         assert [c["apply"] for c in w.calls] == [False]
         assert "Nothing to rewrite" in result.output
+        assert list(tmp_path.glob("*.jsonl")) == []
 
-    def test_apply_json_carries_before_after_and_the_total(self, monkeypatch):
-        w = _FakeWriter([_census(), _census(rewritten=3, remaining=0), _census(rewrite=0)])
+    def test_apply_json_carries_before_after_the_total_and_the_ledger_path(self, monkeypatch, tmp_path):
+        w = _FakeWriter([_census(), _step(3, 0), _census(rewrite=0)])
         _patch(monkeypatch, w)
 
         result = _run("--apply", "--json")
@@ -171,9 +190,10 @@ class TestApply:
         doc = json.loads(result.output)
         assert doc["rewritten"] == 3 and doc["batches"] == 1
         assert doc["before"]["rewrite"] == 3 and doc["after"]["rewrite"] == 0
+        assert (tmp_path / doc["ledger"]).is_file()
 
     def test_a_batch_that_rewrites_nothing_while_rows_remain_stops_instead_of_spinning(self, monkeypatch):
-        w = _FakeWriter([_census(), _census(rewritten=0, remaining=3), _census()])
+        w = _FakeWriter([_census(), _census(rewritten=0, remaining=3, ledger=[]), _census()])
         _patch(monkeypatch, w)
 
         result = _run("--apply")
@@ -182,10 +202,10 @@ class TestApply:
         assert [c["apply"] for c in w.calls] == [False, True, False]
         assert "made no progress" in result.output
 
-    def test_a_409_names_the_holder_and_stops_with_the_progress_so_far(self, monkeypatch):
+    def test_a_409_names_the_holder_and_stops_with_the_progress_so_far(self, monkeypatch, tmp_path):
         body = json.dumps({"error": "repairing the stale note URI of 1.1.2 would rewrite a document's "
                                     "source_uri to nx-note://k/a, which live document 1.1.99 in k already holds."})
-        w = _FakeWriter([_census(), _census(rewritten=2, remaining=1), _status(409, body)])
+        w = _FakeWriter([_census(), _step(2, 1), _status(409, body)])
         _patch(monkeypatch, w)
 
         result = _run("--apply", "--batch-size", "2")
@@ -195,6 +215,9 @@ class TestApply:
         assert "2 note URI(s) were rewritten before it" in result.output
         assert "census again" in result.output.lower()
         assert w.closed
+        ledger, = tmp_path.glob("*.jsonl")
+        assert str(ledger.name) in result.output
+        assert len(ledger.read_text().splitlines()) == 4, "the first batch's rows are in the ledger"
 
     def test_other_http_errors_are_not_swallowed(self, monkeypatch):
         w = _FakeWriter([_census(), _status(500)])
@@ -213,6 +236,126 @@ class TestApply:
 
         assert result.exit_code == 1
         assert "may have completed" in result.output
+
+
+class TestLedger:
+    def test_every_rewritten_row_of_every_table_is_written_as_one_json_line_with_its_batch(self, monkeypatch, tmp_path):
+        w = _FakeWriter([_census(rewrite=3), _step(2, 1, first=1), _step(1, 0, first=3), _census(rewrite=0)])
+        _patch(monkeypatch, w)
+
+        result = _run("--apply", "--batch-size", "2")
+
+        assert result.exit_code == 0, result.output
+        ledger, = tmp_path.glob("nx-note-uri-repair-*.jsonl")
+        rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+        assert len(rows) == 6
+        assert [r["batch"] for r in rows] == [1, 1, 1, 1, 2, 2]
+        assert {r["table"] for r in rows} == {"catalog_documents", "document_aspects"}
+        first = rows[0]
+        assert first == {"batch": 1, "table": "catalog_documents", "key": "1.1.1",
+                         "old_uri": f"nx-note://{_X}/n1", "new_uri": f"nx-note://{_Y}/n1"}
+        assert rows[1]["doc_id"] == "1.1.1" and rows[1]["key"] == "101"
+        assert str(ledger.name) in result.output
+
+    def test_ledger_option_names_the_file(self, monkeypatch, tmp_path):
+        w = _FakeWriter([_census(), _step(3, 0), _census(rewrite=0)])
+        _patch(monkeypatch, w)
+        target = tmp_path / "undo" / "mine.jsonl"
+        target.parent.mkdir()
+
+        result = _run("--apply", "--ledger", str(target))
+
+        assert result.exit_code == 0, result.output
+        assert len(target.read_text().splitlines()) == 6
+        assert list(tmp_path.glob("nx-note-uri-repair-*.jsonl")) == []
+        assert str(target) in result.output
+
+    def test_an_existing_ledger_is_appended_to_never_truncated(self, monkeypatch, tmp_path):
+        target = tmp_path / "mine.jsonl"
+        target.write_text('{"earlier": true}\n')
+        _patch(monkeypatch, _FakeWriter([_census(), _step(3, 0), _census(rewrite=0)]))
+
+        assert _run("--apply", "--ledger", str(target)).exit_code == 0
+
+        lines = target.read_text().splitlines()
+        assert lines[0] == '{"earlier": true}' and len(lines) == 7
+
+    def test_a_dry_run_writes_no_ledger_and_refuses_the_ledger_option(self, monkeypatch, tmp_path):
+        _patch(monkeypatch, _FakeWriter([_census()]))
+        assert _run().exit_code == 0
+        assert list(tmp_path.glob("*.jsonl")) == []
+        w = _FakeWriter([_census()])
+        _patch(monkeypatch, w)
+        result = _run("--ledger", str(tmp_path / "x.jsonl"))
+        assert result.exit_code == 2 and "--ledger only applies with --apply" in result.output
+        assert w.calls == [], "the usage error comes before any engine call"
+
+    def test_the_ledger_is_flushed_batch_by_batch_before_the_next_batch_is_asked_for(self, monkeypatch, tmp_path):
+        seen: list[int] = []
+
+        class _Watching(_FakeWriter):
+            def repair_stale_note_uris(self, **kw):
+                if kw["apply"]:
+                    ledgers = list(tmp_path.glob("*.jsonl"))
+                    seen.append(len(ledgers[0].read_text().splitlines()) if ledgers else -1)
+                return super().repair_stale_note_uris(**kw)
+
+        _patch(monkeypatch, _Watching([_census(), _step(2, 1), _step(1, 0, first=3), _census(rewrite=0)]))
+
+        assert _run("--apply", "--batch-size", "2").exit_code == 0
+
+        assert seen == [0, 4], "batch 2 was asked for only after batch 1's four lines were on disk"
+
+    @pytest.mark.parametrize("bad", [
+        None,                                              # no ledger at all
+        [],                                                # rows rewritten, none named
+        [{"table": "catalog_documents", "key": "1.1.1"}],  # no old/new URI
+        "not-a-list",
+    ])
+    def test_a_step_without_a_usable_ledger_is_stopped_on(self, monkeypatch, tmp_path, bad):
+        step = _step(1, 0)
+        step.pop("ledger")
+        if bad is not None:
+            step["ledger"] = bad
+        w = _FakeWriter([_census(), step, _census(rewrite=0)])
+        _patch(monkeypatch, w)
+
+        result = _run("--apply")
+
+        assert result.exit_code == 1
+        assert "without a usable ledger" in result.output or "ledger names" in result.output
+        assert [c["apply"] for c in w.calls] == [False, True], "nothing further was asked for"
+
+
+class TestFixpoint:
+    def test_a_chain_goes_round_again_when_the_census_after_still_lists_rewrite_candidates(self, monkeypatch):
+        # B moved in pass 1, which freed A's target: the census after pass 1 lists A.
+        w = _FakeWriter([
+            _census(rewrite=1),
+            _step(1, 0, first=1), _census(rewrite=1),
+            _step(1, 0, first=2), _census(rewrite=0),
+        ])
+        _patch(monkeypatch, w)
+
+        result = _run("--apply")
+
+        assert result.exit_code == 0, result.output
+        assert [c["apply"] for c in w.calls] == [False, True, False, True, False]
+        assert "Rewrote 2 note URI(s) in 2 batch(es)" in result.output
+
+    def test_a_rewrite_that_never_settles_is_capped_at_about_the_batch_count_plus_two(self, monkeypatch):
+        steps = []
+        for i in range(1, 6):
+            steps += [_step(1, 0, first=i), _census(rewrite=1)]
+        w = _FakeWriter([_census(rewrite=1)] + steps)
+        _patch(monkeypatch, w)
+
+        result = _run("--apply")
+
+        assert result.exit_code == 1
+        applies = [c for c in w.calls if c["apply"]]
+        assert len(applies) == 3, "ceil(1 / 1000) + 2"
+        assert "cap" in result.output.lower() or "cap" in (result.stderr if result.stderr_bytes else "").lower()
 
 
 class TestRefusals:
@@ -240,16 +383,17 @@ class TestRefusals:
         assert [c["apply"] for c in w.calls] == [False]
         assert "unexpected report" in result.output
 
-    def test_a_report_missing_a_class_is_refused(self, monkeypatch):
+    @pytest.mark.parametrize("missing", ["tombstoned", "export_copies_target_moved"])
+    def test_a_report_missing_a_class_is_refused(self, monkeypatch, missing):
         partial = _census()
-        del partial["tombstoned"]
+        del partial[missing]
         w = _FakeWriter([partial])
         _patch(monkeypatch, w)
 
         result = _run()
 
         assert result.exit_code == 1
-        assert "tombstoned" in result.output
+        assert missing in result.output
 
     def test_batch_size_and_sample_are_bounded(self):
         for args in (("--batch-size", "0"), ("--batch-size", "5001"), ("--sample", "-1"), ("--sample", "501")):
