@@ -583,6 +583,16 @@ class TestClientWire:
         assert body == {"apply": True, "limit": 50, "sample": 0}
         assert kw["idempotent"] is False and kw["mutates"] is True
 
+    def test_tumblers_are_sent_only_when_given_and_an_empty_list_is_sent_as_empty(self, client):
+        c, posted = client
+        c.repair_stale_note_uris(apply=True, limit=1, sample=0, tumblers=["1.1.5"])
+        c.repair_stale_note_uris(apply=True, tumblers=[])
+        c.repair_stale_note_uris(apply=True)
+        bodies = [b for _, b, _ in posted]
+        assert bodies[0]["tumblers"] == ["1.1.5"]
+        assert bodies[1]["tumblers"] == [], "none, not all"
+        assert "tumblers" not in bodies[2], "absent means every candidate"
+
     def test_it_is_a_service_only_write_op_on_the_write_proxy(self):
         assert "repair_stale_note_uris" in _SERVICE_ONLY_WRITE_OPS
 

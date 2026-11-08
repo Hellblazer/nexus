@@ -2139,7 +2139,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             idempotent=False,
         ) or {}
 
-    def repair_stale_note_uris(self, *, apply: bool = False, limit: int = 1000, sample: int = 20) -> dict:
+    def repair_stale_note_uris(
+        self,
+        *,
+        apply: bool = False,
+        limit: int = 1000,
+        sample: int = 20,
+        tumblers: list[str] | None = None,
+    ) -> dict:
         """POST /v1/catalog/note_uri_repair — census, and with ``apply`` the rewrite, of NOTE rows whose
         ``source_uri`` names a collection the note no longer lives in (nexus-bivz3.24, RDR-231 critique Issue 7).
 
@@ -2158,10 +2165,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """
         # idempotent=not apply: a dry run is a pure read and keeps the retry. A live call makes one attempt: a
         # blind resend after a read timeout would report the post-rewrite census as the outcome of this call.
-        return self._post(
-            "/note_uri_repair", {"apply": apply, "limit": limit, "sample": sample},
-            idempotent=not apply, mutates=apply, timeout=300.0,
-        ) or {}
+        body: dict = {"apply": apply, "limit": limit, "sample": sample}
+        if tumblers is not None:
+            # ``apply`` then rewrites only these rewrite candidates (an empty list: none); the census stays the tenant's.
+            body["tumblers"] = list(tumblers)
+        return (
+            self._post(
+                "/note_uri_repair",
+                body,
+                idempotent=not apply,
+                mutates=apply,
+                timeout=300.0,
+            )
+            or {}
+        )
 
     def ghost_sweep(self, *, dry_run: bool = True) -> dict:
         """POST /v1/catalog/ghost-sweep — the operator-facing caller for the
