@@ -252,11 +252,17 @@ def run_worker(
                 WorkerHung,
                 f"killed after the {timeout} s watchdog: {message}",
             )
+        # A worker whose stream ended is usually already exiting: wait for it first, so its own exit
+        # status is reported. Killing it first made Windows report 1 (a terminated process) where the
+        # worker exited 7; POSIX keeps the earlier status either way.
         try:
-            proc.kill()
-        except OSError:
-            pass
-        rc = proc.wait()
+            rc = proc.wait(timeout=EXIT_WAIT_S)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            rc = proc.wait()
         return error(f"{message}; worker exit {rc}; stderr: {stderr.text()[-1500:]!r}")
 
     try:
