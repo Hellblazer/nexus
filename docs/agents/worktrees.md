@@ -122,10 +122,12 @@ things to avoid carefully; they are impossible.
    Actions call 403'd (T2 `nexus/github-api-usage-research-2026-09-26`). The
    conexus-hosted adapter still posts one tuple per run and job state change
    to `board/ci/nexus-develop`; subscribe once per session with
-   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")` if
-   you want pings instead of polling. Nothing in this repo folds those posts
-   into a verdict any more, so read the `conclusion` of the check runs, not
-   the board.
+   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")` for
+   pings instead of polling. A `kind=run` row is the adapter's run-level post,
+   carrying the sha, the run, its state and its conclusion; its `conclusion`
+   for your sha is the verdict to read (Sam, 2026-11-08, ask qo36-conflicts).
+   The single `gh api` call above is the fallback. Nothing in this repo folds
+   the job-level posts into a verdict, so do not read one as a verdict.
 
    To watch your own develop push, subscribe after pushing and read the
    conclusion on your sha's `kind=run` row; one `gh api` read of its check
@@ -177,6 +179,27 @@ things to avoid carefully; they are impossible.
    (nexus-agctp) — a `PUSH_REFUSED_LOCK_HELD` names the holder and lease
    expiry; `--skip-lock '<reason>'` is the named escape when the
    tuple space is unreachable.
+
+   **A rebased or cherry-picked branch that cites its own commits in docs**
+   (wire-ledger lines AND the shas inside entry bodies) has every cited sha
+   re-mapped to its landed commit before the push. Map by subject, then
+   confirm with `git range-diff -s old~1..old new~1..new` (expect `=`). On
+   2026-10-02 the RDR-192 restore-verb landing fixed the two leading
+   citations and missed three shas inside entry bodies that still named
+   pre-rebase commits; develop went red at 83f270537. Locally
+   `tests/test_docs_reference_rot.py::test_cited_commit_shas_resolve` PASSED,
+   because stale remote-tracking refs (hellmini and qwent `qr-r*` branches from
+   agents' remote runs) still made the old shas reachable. A local pass is
+   unproven while other remotes' refs exist: check each cited sha with
+   `git branch -r --contains <sha>`, limited to `origin/` lines.
+
+   **Never cite another repository's commit sha in a doc.** The same test
+   requires every sha-shaped token in `docs/` to resolve on develop, so a
+   foreign sha (RDR-236, 2026-10-26: the conexus head in an RDR finding) turns
+   develop red and blocks a peer's push. Keep it in the T2 research record and
+   cite the repository by date in the doc.
+   (Source: memory `feedback_release_and_develop_ci`
+   § rebase_stales_ledger_sha_citations.)
 
    **Batch develop pushes** (Sam, 2026-10-21, nexus-cvtxu): develop CI runs
    two runs at a time, by run-number parity, each slot keeping only its
