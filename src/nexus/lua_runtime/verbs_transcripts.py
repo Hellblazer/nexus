@@ -51,8 +51,8 @@ The record:
 file is parsed: an unselected field, above all a tool call's input, is never
 cleaned or kept, and ``bodies`` true without ``assistant_text`` collects no
 text. That cuts the result's size and the memory a scan retains; it does not
-cut the read: every line is still read and decoded. See ``_parse_fields`` for
-the grammar. ``project`` may also be
+cut the read, and it cuts the decode only of the lines ``_inert`` can vouch
+for. See ``_parse_fields`` for the grammar. ``project`` may also be
 the reserved value ``repo``: every project directory holding the sessions of
 the repository the run started in (``transcripts_projects``); a project
 directory literally named ``repo`` cannot be asked for by name.
@@ -696,6 +696,104 @@ class _Session:
         )
 
 
+# ---- lines no selected field needs -------------------------------------------
+#
+# ``json.loads`` is a third to a half of a scan. Most of the bytes of a
+# transcript are lines that add nothing to the record but a stamp and ids:
+# ``api-request``, ``api-request-blob``, ``api-request-shape``,
+# ``queue-operation`` and the like, whose type is not ``user``, ``assistant`` or
+# ``attachment``. Such a line still counts for four things: its timestamp (the
+# first stamped line decides the window, the last sets ``end``), its
+# ``isSidechain`` (a main file drops such a line), and its ``sessionId`` and
+# ``agentId`` (the first of each wins). ``_inert`` reads those from the raw
+# text and returns them in place of the decoded record.
+#
+# It reads the run of flat ``"key":scalar`` members from the opening brace; its
+# members are top-level, since the run holds no brace and in a JSON string
+# every quote is escaped. The type and each wanted key must be in the run, or
+# the wanted key's quoted name must occur nowhere in the line; otherwise the
+# line is decoded. The line is taken to be what the harness wrote: well-formed
+# JSON, with no repeated top-level key and no key spelled with a ``\\u`` escape
+# past the run (neither would be seen). A line that does not end in a brace, or
+# is not UTF-8, is decoded, and drops as before.
+#
+# User and attachment lines are never skipped: measured on real transcripts,
+# the regexes that prove a tool_result or a prompt line's shape run slower than
+# ``json.loads`` on its string content, and an attachment's stamp sits behind a
+# nested object that only a full parse can step over.
+
+_PREPARSE = True  # a test switches it off to compare
+_PREPARSE_MIN = 4096  # bytes; under it json.loads is as cheap as the scan
+_ACTING = frozenset({"user", "assistant", "attachment"})
+
+_VALUE = rb'(?:"[^"\\\x00-\x1f]{0,512}"|-?[0-9][0-9.eE+\-]{0,31}|true|false|null)'
+_PAIR = re.compile(rb'"([A-Za-z0-9_]+)":(' + _VALUE + rb")")
+_MEMBER = rb'"[A-Za-z0-9_]+":' + _VALUE
+_RUN = re.compile(rb"(?:" + _MEMBER + rb"(?:," + _MEMBER + rb")*+)?+")
+_NEXT = re.compile(rb',"[A-Za-z0-9_]+":|[ \t\r\n]*\}[ \t\r\n]*\Z')
+
+
+def _inert(raw: bytes, s: _Session) -> dict[str, Any] | None:
+    """The stamp and ids of a line that adds nothing else, or None to decode it.
+
+    The result stands in for the decoded record: ``type``, and where the line
+    has them as top-level strings, ``timestamp``, ``sessionId`` and
+    ``agentId``, and ``isSidechain`` when true; the ids only while ``s`` still
+    lacks one.
+    """
+    n = len(raw)
+    if not _PREPARSE or n < _PREPARSE_MIN or raw[:1] != b"{":
+        return None
+    end = _RUN.match(raw, 1).end()  # type: ignore[union-attr]  # always matches
+    found: dict[bytes, bytes] = {}
+    for key, value in _PAIR.findall(raw, 1, end):
+        if key in found:
+            return None
+        found[key] = value
+    kind = _plain(found.get(b"type"))
+    if kind is None or kind in _ACTING or _NEXT.match(raw, end) is None:
+        return None
+    if not raw[-8:].rstrip(b" \t\r\n").endswith(b"}"):
+        return None  # cut short
+    need = [b"timestamp"]
+    if s.main:
+        need.append(b"isSidechain")
+    if s.session_id is None:
+        need.append(b"sessionId")
+    if not s.main and s.agent_id is None:
+        need.append(b"agentId")
+    for key in need:
+        if key not in found and b'"' + key + b'"' in raw:
+            return None  # named in the line, but not in the run: it may be top-level
+    if not raw.isascii():
+        try:
+            raw.decode("utf-8", "surrogatepass")
+        except UnicodeDecodeError:
+            return None
+    rec: dict[str, Any] = {"type": kind}
+    if found.get(b"isSidechain") == b"true":
+        rec["isSidechain"] = True
+    for key in (b"timestamp", b"sessionId", b"agentId"):
+        token = found.get(key)
+        if token is None or token[:1] != b'"':
+            continue  # absent, or not a string: the decoded record reads it as None
+        value = _plain(token)
+        if value is None:
+            return None
+        rec[key.decode()] = value
+    return rec
+
+
+def _plain(token: bytes | None) -> str | None:
+    """A JSON string token with no escape in it, as text; None otherwise."""
+    if token is None or token[:1] != b'"' or token[-1:] != b'"' or len(token) < 2:
+        return None
+    try:
+        return token[1:-1].decode("utf-8", "surrogatepass")
+    except UnicodeDecodeError:
+        return None
+
+
 def _scan(
     path: Path,
     project: str,
@@ -744,10 +842,12 @@ def _scan(
                 next_bytes = read + BYTES_PER_DEADLINE_CHECK
             if long_line or not raw.strip():
                 continue
-            try:
-                rec = json.loads(raw, parse_constant=lambda _c: None)
-            except (ValueError, RecursionError):
-                continue
+            rec = _inert(raw, s)
+            if rec is None:
+                try:
+                    rec = json.loads(raw, parse_constant=lambda _c: None)
+                except (ValueError, RecursionError):
+                    continue
             if not isinstance(rec, dict):
                 continue
             if main and rec.get("isSidechain") is True:
