@@ -97,7 +97,7 @@ class TestSidecarWrittenBeforeTcpWait:
 
         observed: list[dict | None] = []
 
-        def _fake_wait_tcp(_proc, _port, _log_path, _timeout):
+        def _fake_wait_tcp(_proc, _port, _log_path, _stall_s, _ceiling_s):
             assert created, "cluster dir must exist by the time _wait_engine_ready is called"
             sidecar_path = created[0] / sub._SIDECAR_FILENAME
             observed.append(
@@ -162,7 +162,7 @@ class TestSidecarWrittenBeforeTcpWait:
 
         sidecar_at_wait_tcp: list[dict] = []
 
-        def _fake_wait_tcp(_proc, _port, _log_path, _timeout):
+        def _fake_wait_tcp(_proc, _port, _log_path, _stall_s, _ceiling_s):
             sidecar_path = created[0] / sub._SIDECAR_FILENAME
             sidecar_at_wait_tcp.append(json.loads(sidecar_path.read_text()))
 
