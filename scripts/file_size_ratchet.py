@@ -271,6 +271,12 @@ def update_exceptions(root: Path, allow_raise: bool) -> list[str]:
     counts, families = measure_shape(root)
     old_dirs, old_fams = _read_shape(root / SHAPE_EXCEPTIONS)
     new_dirs = {d: n for d, n in counts.items() if n > DIR_MODULE_CAP}
+    if not allow_raise:
+        # check only warns when a listed directory grows, so an update that lowers file ceilings
+        # keeps that directory's entry as it was rather than refusing the whole rewrite.
+        new_dirs = {
+            d: min(n, old_dirs[d]) if d in old_dirs else n for d, n in new_dirs.items()
+        }
     new_fams = set(families)
 
     refusals: list[str] = []
@@ -283,8 +289,6 @@ def update_exceptions(root: Path, allow_raise: bool) -> list[str]:
         for d, n in sorted(new_dirs.items()):
             if d not in old_dirs:
                 refusals.append(f"{d}/: new directory exception at {n} modules")
-            elif n > old_dirs[d]:
-                refusals.append(f"{d}/: raise {old_dirs[d]} -> {n}")
         for f in sorted(new_fams - old_fams):
             refusals.append(f"family {f}: new family exception")
     if refusals:

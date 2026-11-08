@@ -250,10 +250,51 @@ def test_update_refuses_family_and_dir_raise_and_writes_no_shape_file(
     shape_before = "dir src/nexus/pkg 4\n"
     (repo / fsr.SHAPE_EXCEPTIONS).write_text(shape_before)
     refusals = "\n".join(fsr.update_exceptions(repo, allow_raise=False))
-    assert "src/nexus/pkg/: raise 4 -> 5" in refusals
+    assert "pkg" not in refusals, (
+        "a grown listed directory warns in check, so update keeps it"
+    )
     assert "family src/nexus/session: new family exception" in refusals
     assert (repo / fsr.SHAPE_EXCEPTIONS).read_text() == shape_before
     assert not (repo / fsr.SIZE_EXCEPTIONS).exists()
+
+
+def test_update_keeps_a_grown_listed_directory_at_its_ceiling(repo: Path) -> None:
+    for m in ("a", "b", "c", "d", "e"):
+        _write(repo, f"src/nexus/pkg/{m}.py", 1)
+    _write(repo, "src/nexus/big.py", 16)
+    _track(repo)
+    (repo / fsr.SHAPE_EXCEPTIONS).write_text("dir src/nexus/pkg 4\n")
+    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 20\n")
+    assert fsr.update_exceptions(repo, allow_raise=False) == []
+    assert fsr._read_shape(repo / fsr.SHAPE_EXCEPTIONS)[0] == {"src/nexus/pkg": 4}
+    assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 16}
+    assert fsr.update_exceptions(repo, allow_raise=True) == []
+    assert fsr._read_shape(repo / fsr.SHAPE_EXCEPTIONS)[0] == {"src/nexus/pkg": 5}
+
+
+def test_slack_fraction_applies_to_large_files(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fsr, "SOURCE_HARD_CAP", 100)
+    _write(repo, "src/nexus/big.py", 200)
+    _track(repo)
+    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 210\n")  # 5% of 200 is 10
+    assert fsr.check(repo).errors == []
+    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 211\n")
+    assert any("lower it in this commit" in e for e in fsr.check(repo).errors)
+
+
+def test_directory_exactly_at_the_cap_passes(repo: Path) -> None:
+    for m in ("a", "b", "c"):
+        _write(repo, f"src/nexus/pkg/{m}.py", 1)
+    _track(repo)
+    assert fsr.check(repo).errors == []
+
+
+def test_cli_update_refusal_exits_nonzero(repo: Path) -> None:
+    _write(repo, "src/nexus/new.py", 16)
+    _track(repo)
+    assert fsr.main(["--root", str(repo), "update-exceptions"]) == fsr.EXIT_OVER
 
 
 def test_update_seeds_at_the_hard_cap_not_the_soft_cap(repo: Path) -> None:
@@ -268,6 +309,9 @@ def test_duplicate_entries_are_refused(repo: Path) -> None:
     with pytest.raises(SystemExit, match="listed twice"):
         fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS)
     (repo / fsr.SHAPE_EXCEPTIONS).write_text("family src/nexus/x\nfamily src/nexus/x\n")
+    with pytest.raises(SystemExit, match="expected one"):
+        fsr._read_shape(repo / fsr.SHAPE_EXCEPTIONS)
+    (repo / fsr.SHAPE_EXCEPTIONS).write_text("dir src/nexus 50\ndir src/nexus 60\n")
     with pytest.raises(SystemExit, match="expected one"):
         fsr._read_shape(repo / fsr.SHAPE_EXCEPTIONS)
 
