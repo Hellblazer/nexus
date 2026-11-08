@@ -47,4 +47,10 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/agents/code-review-expert.md` (nexus-qo7ie.34): the gate-record write-back names `procedure_run("gate_record", ...)` and the `memory_put` of its four fields unchanged; a writer no longer composes `kind:gate` tags (RDR-240 TD6).
+- `conexus/agents/developer.md` (nexus-qo7ie.34): the gate-record write-back names `procedure_run("gate_record", ...)` and the `memory_put` of its four fields unchanged; a writer no longer composes `kind:gate` tags (RDR-240 TD6).
+- `conexus/agents/substantive-critic.md` (nexus-qo7ie.34): the gate-record write-back names `procedure_run("gate_record", ...)` and the `memory_put` of its four fields unchanged; a writer no longer composes `kind:gate` tags (RDR-240 TD6).
+- `conexus/skills/orchestration/reference.md` (nexus-qo7ie.34): the gate-record write-back names `procedure_run("gate_record", ...)` and the `memory_put` of its four fields unchanged; a writer no longer composes `kind:gate` tags (RDR-240 TD6).
+- `conexus/skills/substantive-critique/SKILL.md` (nexus-qo7ie.34): the gate-record write-back names `procedure_run("gate_record", ...)` and the `memory_put` of its four fields unchanged; a writer no longer composes `kind:gate` tags (RDR-240 TD6).
+
 ## Deferred to the next client release

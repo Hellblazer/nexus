@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Gate-record writers carry one tag sentence, and the reviewers bound their memory.
+"""Gate-record writers build the record with gate_record, and the reviewers bound their memory.
 
 RDR-209 Amendment A1 rolls gate records up at phase close by their
-``kind:gate``, ``bead:`` and ``rdr:`` tags. The instruction lives as a copied
+``kind:gate``, ``bead:`` and ``rdr:`` tags. Since RDR-240 Technical Design 6
+(nexus-qo7ie.34) a writer gets the tags, title and content from
+``procedure_run("gate_record", ...)`` and writes the four returned fields
+unchanged; it never composes the tag string. The instruction lives as a copied
 sentence in three agent definitions, and the orchestration reference and the
 substantive-critique skill restate it, so a copy can drift without anything
 noticing (review of 2064fd94a, nexus-qo7ie.1). The two reviewers also carry
@@ -28,10 +31,14 @@ RESTATING = (
     ROOT / "conexus" / "skills" / "orchestration" / "reference.md",
     ROOT / "conexus" / "skills" / "substantive-critique" / "SKILL.md",
 )
-TAGS = 'tags="kind:gate,bead:<id>,rdr:<NNN>"'
-DROP_CLAUSE = "drop `rdr:` when the bead serves no RDR"
+PROCEDURE = 'procedure_run("gate_record", '
+UNCHANGED = "passing the returned `project`, `title`, `tags` and `content` unchanged"
+NO_COMPOSE = "never compose the tag string yourself"
+DROP_CLAUSE = "leave out `rdr` when the bead serves no RDR"
+#: A writer composing its own gate tags, the form gate_record replaced.
+COMPOSED_TAGS = re.compile(r'tags="kind:gate')
 SENTENCE = re.compile(
-    r"A gate record \(a review, critique, confirmation or fix round\) also passes [^\n]*?\(RDR-209 Amendment A1\)\."
+    r"A gate record \(a review, critique, confirmation or fix round\) is built by [^\n]*?\(RDR-240 TD6, RDR-209 Amendment A1\)\."
 )
 MEMORY_CLAUSES = (
     "never replaces the T2 gate record, which is mandatory",
@@ -58,15 +65,36 @@ def test_the_tag_sentence_is_identical_in_every_writer() -> None:
     assert len(set(found.values())) == 1, (
         f"the tag sentence differs between writers: {found}"
     )
-    assert TAGS in next(iter(found.values()))
-    assert DROP_CLAUSE in next(iter(found.values()))
+    sentence = next(iter(found.values()))
+    for clause in (PROCEDURE, UNCHANGED, NO_COMPOSE, DROP_CLAUSE):
+        assert clause in sentence, f"the writers' sentence lacks {clause!r}"
+
+
+def composed_tag_lines(text: str) -> list[str]:
+    """Lines of an agent or skill file that compose a gate tag string themselves."""
+    return [line for line in text.splitlines() if COMPOSED_TAGS.search(line)]
+
+
+@pytest.mark.parametrize("path", [*(AGENTS_DIR / n for n in WRITERS), *RESTATING], ids=lambda p: p.name)
+def test_no_writer_composes_its_own_gate_tags(path: Path) -> None:
+    lines = composed_tag_lines(path.read_text(encoding="utf-8"))
+    assert not lines, f"{path.relative_to(ROOT)} composes gate tags instead of using gate_record: {lines}"
+
+
+def test_the_composed_tag_check_sees_the_old_write_back_line() -> None:
+    old = (
+        'A gate record (a review, critique, confirmation or fix round) also passes '
+        '`tags="kind:gate,bead:<id>,rdr:<NNN>"` (drop `rdr:` when the bead serves no RDR).'
+    )
+    assert composed_tag_lines(old) == [old]
 
 
 @pytest.mark.parametrize("path", RESTATING, ids=lambda p: p.name)
-def test_restating_files_carry_the_tags_and_the_drop_clause(path: Path) -> None:
+def test_restating_files_name_the_procedure_and_the_unchanged_write(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
-    assert TAGS in text, f"{path.relative_to(ROOT)} does not name the gate tags"
-    assert DROP_CLAUSE in text, f"{path.relative_to(ROOT)} lacks the rdr: drop clause"
+    assert PROCEDURE in text, f"{path.relative_to(ROOT)} does not name procedure_run(\"gate_record\", ...)"
+    assert UNCHANGED in text, f"{path.relative_to(ROOT)} does not say the four fields are written unchanged"
+    assert NO_COMPOSE in text, f"{path.relative_to(ROOT)} does not forbid composing the tag string"
 
 
 @pytest.mark.parametrize("name", REVIEWERS)
