@@ -17,17 +17,23 @@ Decisions the RDR leaves open (T2 nexus/rdr242-interfaces):
 * ``memory.get`` of a missing entry is nil. An ambiguous title prefix is a
   ``VerbError`` naming the candidates, never nil: a script must not read
   "several entries match" as "none does".
-* ``memory.get`` and ``memory.list`` refuse an empty project or title (an
-  empty title is a prefix of every title; ``list_entries`` reads an empty
-  project as every project). ``memory.search`` takes ``""`` for every
+* ``memory.get`` and ``memory.list`` refuse a project that is empty or only
+  whitespace, and ``memory.get`` refuses such a title (an empty title is a
+  prefix of every title; the engine reads a blank project as every project
+  on list and answers 400 on get). ``memory.search`` takes ``""`` for every
   project, as the MCP tool does. Refusals are ``VerbArgError``.
+* A store failure other than a timeout is a ``VerbError`` naming the verb and
+  the HTTP status (or the error class), never the service address.
 * ``memory.search``'s ``limit`` is 1..300 (``MAX_QUERY_RESULTS``); outside it
-  is refused, never clamped. nil means the store default, at most 300 rows.
+  is refused, never clamped. nil means 300: the verb's own cut of every match
+  the engine returns (the engine search has no LIMIT), applied after the fetch.
 * ``memory.search`` passes ``access="silent"``: the store's default,
-  ``"track"``, increments ``access_count``, a write, and this runtime has no
-  write verbs. The engine's resolve endpoint has no such option, so
-  ``memory.get`` still counts one access on the entry it returns, exactly as
-  the MCP ``memory_get`` does (see the hand-back of nexus-mdbds.7).
+  ``"track"``, increments ``access_count``. ``memory.get`` counts one access
+  (``access_count``, ``last_accessed``) on an exact or unique-prefix hit, as
+  MCP ``memory_get`` does, because the engine's resolve endpoint has no
+  silent read; it counts none on a miss or an ambiguous prefix.
+  ``memory.list`` counts none.
+* An ambiguous prefix names at most 20 candidate titles, then "and N more".
 * A result over ``VERB_RESULT_CAP_BYTES`` is refused (``encode_result``),
   never truncated.
 """
@@ -75,12 +81,25 @@ def _within_cap(value: JSONValue) -> JSONValue:
 
 
 def _call_store(verb: str, deadline: float, call):
-    """Run ``call(timeout)`` with the remaining budget; map a store timeout."""
+    """Run ``call(timeout)`` with the remaining budget; map store failures.
+
+    The messages are fixed text: an httpx error's own text carries the service
+    URL and port, which a script must not see.
+    """
     timeout = _remaining(deadline)
     try:
         return call(timeout)
     except httpx.TimeoutException as exc:
         raise VerbTimeout(f"{verb}: the memory store did not answer in time") from exc
+    except httpx.HTTPStatusError as exc:
+        raise VerbError(
+            f"{verb}: the memory store refused the request "
+            f"(HTTP {exc.response.status_code})"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise VerbError(
+            f"{verb}: the memory store request failed ({type(exc).__name__})"
+        ) from exc
 
 
 def _t2():
@@ -89,9 +108,16 @@ def _t2():
     return t2_ctx()
 
 
+#: Ambiguous-prefix candidates named in the error before "and N more".
+_MAX_CANDIDATES_NAMED = 20
+
+
 def _get(project: str, title: str, *, deadline: float, ctx: VerbContext) -> JSONValue:
-    if not title:
+    if not project.strip():
+        raise VerbArgError("memory.get: project must not be empty")
+    if not title.strip():
         raise VerbArgError("memory.get: title must not be empty")
+    _remaining(deadline)  # a spent budget builds no store
     with _t2() as db:
         entry, candidates = _call_store(
             "memory.get",
@@ -103,7 +129,9 @@ def _get(project: str, title: str, *, deadline: float, ctx: VerbContext) -> JSON
     if entry is not None:
         return _within_cap(_plain(entry))
     if candidates:
-        names = ", ".join(repr(c["title"]) for c in candidates)
+        names = ", ".join(repr(c["title"]) for c in candidates[:_MAX_CANDIDATES_NAMED])
+        if len(candidates) > _MAX_CANDIDATES_NAMED:
+            names += f", and {len(candidates) - _MAX_CANDIDATES_NAMED} more"
         raise VerbError(
             f"memory.get: ambiguous title prefix {title!r} in project {project!r}: "
             f"{len(candidates)} entries match ({names}); use the full title or a "
@@ -113,8 +141,9 @@ def _get(project: str, title: str, *, deadline: float, ctx: VerbContext) -> JSON
 
 
 def _list(project: str, *, deadline: float, ctx: VerbContext) -> JSONValue:
-    if not project:
+    if not project.strip():
         raise VerbArgError("memory.list: project must not be empty")
+    _remaining(deadline)  # a spent budget builds no store
     with _t2() as db:
         rows = _call_store(
             "memory.list",
@@ -141,6 +170,7 @@ def _search(
             f"memory.search: limit must be between 1 and {MAX_QUERY_RESULTS}, "
             f"got {limit}"
         )
+    _remaining(deadline)  # a spent budget builds no store
     with _t2() as db:
         try:
             rows = _call_store(

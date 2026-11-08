@@ -82,14 +82,24 @@ def test_the_param_matches_the_rdr_signature() -> None:
     assert _SPEC.params == (ParamSpec("name", "string"),)
 
 
-def test_every_mapped_table_exists_and_loads() -> None:
-    assert len(TABLE_FILES) >= 10, "the map must expose the packaged tables"
+#: A shipped table deliberately NOT reachable from a script. Empty today: a new
+#: .toml must be mapped in TABLE_FILES or named here, so it cannot be forgotten.
+_EXCLUDED_TABLE_FILES: frozenset[str] = frozenset()
+
+
+def test_every_shipped_table_is_mapped_or_explicitly_excluded() -> None:
     shipped = {
         p.name
         for p in importlib.resources.files("nexus.tables").iterdir()
         if p.name.endswith(".toml")
     }
-    assert set(TABLE_FILES.values()) <= shipped
+    assert shipped, "the sweep found no packaged tables: it examined nothing"
+    mapped = set(TABLE_FILES.values())
+    assert not (mapped & _EXCLUDED_TABLE_FILES)
+    assert shipped == mapped | _EXCLUDED_TABLE_FILES
+
+
+def test_every_mapped_table_loads() -> None:
     assert "rdr-lifecycle" in TABLE_FILES
     for name in TABLE_FILES:
         assert _get(name)["id"] == load_packaged_table(TABLE_FILES[name]).id

@@ -26,7 +26,8 @@ from nexus.lua_runtime.verb_types import (
     VerbTimeout,
     check_args,
 )
-from nexus.lua_runtime.verbs_memory import VERBS
+from nexus.lua_runtime import verbs_memory
+from nexus.lua_runtime.verbs_memory import VERBS, _plain
 
 pytestmark = pytest.mark.t2_tenant
 
@@ -107,6 +108,86 @@ def test_get_refuses_an_empty_title(db: T2Database) -> None:
         _call("memory.get", "lv-empty", "")
 
 
+@pytest.mark.parametrize(
+    ("project", "title"), [("", "t"), ("  ", "t"), ("\t\n", "t"), ("p", "  ")]
+)
+def test_get_refuses_a_blank_project_or_title(
+    db: T2Database, project: str, title: str
+) -> None:
+    # the engine answers a blank project with a 400; the verb refuses first
+    with pytest.raises(VerbArgError, match="must not be empty"):
+        _call("memory.get", project, title)
+
+
+def _access_count(db: T2Database, project: str, title: str) -> int:
+    (row,) = [r for r in db.memory.get_all(project) if r["title"] == title]
+    return row["access_count"]
+
+
+def test_get_counts_one_access_on_an_exact_hit(db: T2Database) -> None:
+    _seed(db, "lv-ac-exact", **{"entry.md": "x"})
+    assert _access_count(db, "lv-ac-exact", "entry.md") == 0
+    _call("memory.get", "lv-ac-exact", "entry.md")
+    assert _access_count(db, "lv-ac-exact", "entry.md") == 1
+
+
+def test_get_counts_one_access_on_a_unique_prefix_hit(db: T2Database) -> None:
+    _seed(db, "lv-ac-prefix", **{"088-research-1: full title": "x"})
+    title = "088-research-1: full title"
+    assert _access_count(db, "lv-ac-prefix", title) == 0
+    _call("memory.get", "lv-ac-prefix", "088-research-1")
+    assert _access_count(db, "lv-ac-prefix", title) == 1
+
+
+def test_get_counts_nothing_on_a_miss(db: T2Database) -> None:
+    _seed(db, "lv-ac-miss", **{"bystander.md": "x"})
+    assert _call("memory.get", "lv-ac-miss", "absent.md") is None
+    assert _access_count(db, "lv-ac-miss", "bystander.md") == 0
+
+
+def test_get_counts_nothing_on_an_ambiguous_prefix(db: T2Database) -> None:
+    _seed(db, "lv-ac-amb", **{"report-a": "1", "report-b": "2"})
+    with pytest.raises(VerbError):
+        _call("memory.get", "lv-ac-amb", "report")
+    assert _access_count(db, "lv-ac-amb", "report-a") == 0
+    assert _access_count(db, "lv-ac-amb", "report-b") == 0
+
+
+def test_get_names_at_most_twenty_ambiguous_candidates(db: T2Database) -> None:
+    _seed(db, "lv-many", **{f"cand-{i:02d}": str(i) for i in range(25)})
+    with pytest.raises(VerbError) as exc:
+        _call("memory.get", "lv-many", "cand")
+    message = str(exc.value)
+    assert "25 entries match" in message
+    assert message.count("'cand-") == 20
+    assert "and 5 more" in message
+
+
+def test_get_names_every_candidate_when_there_are_twenty_or_fewer(
+    db: T2Database,
+) -> None:
+    _seed(db, "lv-few", **{f"few-{i:02d}": str(i) for i in range(20)})
+    with pytest.raises(VerbError) as exc:
+        _call("memory.get", "lv-few", "few")
+    assert str(exc.value).count("'few-") == 20
+    assert "more" not in str(exc.value)
+
+
+def test_plain_drops_a_non_scalar_field_and_keeps_scalars() -> None:
+    row = {
+        "a": "s",
+        "b": 1,
+        "c": 1.5,
+        "d": True,
+        "e": None,
+        "f": [1, 2],
+        "g": {"k": "v"},
+        "h": ("t",),
+        "i": object(),
+    }
+    assert _plain(row) == {"a": "s", "b": 1, "c": 1.5, "d": True, "e": None}
+
+
 # ── memory.list ─────────────────────────────────────────────────────────────
 
 
@@ -124,6 +205,14 @@ def test_list_refuses_an_empty_project(db: T2Database) -> None:
     _seed(db, "lv-list-all", t="1")
     with pytest.raises(VerbArgError, match="project"):
         _call("memory.list", "")
+
+
+@pytest.mark.parametrize("project", ["  ", "\t", " \n "])
+def test_list_refuses_a_whitespace_only_project(db: T2Database, project: str) -> None:
+    # the engine reads a blank project as no filter: every project's entries
+    _seed(db, "lv-list-blank", t="1")
+    with pytest.raises(VerbArgError, match="project"):
+        _call("memory.list", project)
 
 
 # ── memory.search ───────────────────────────────────────────────────────────
@@ -248,12 +337,14 @@ def test_every_memory_verb_passes_the_remaining_budget_as_its_timeout(
     _call(verb, *args, budget=30.0)
     (timeout,) = [t for p, t in store_calls if p == path]
     assert timeout is not None
-    assert 0 < timeout <= 30.0
+    # just under the 30 s budget: more than any 3 s reading could be
+    assert 3.0 < timeout <= 30.0
     # a smaller budget gives a smaller timeout: it is the remainder, not a constant
     store_calls.clear()
     _call(verb, *args, budget=3.0)
     (small,) = [t for p, t in store_calls if p == path]
     assert 0 < small <= 3.0
+    assert small < timeout
 
 
 @pytest.mark.parametrize(("verb", "args", "path"), _CALLS)
@@ -267,6 +358,65 @@ def test_a_deadline_already_past_raises_before_any_request(
             *check_args(spec, list(args)), deadline=time.monotonic() - 1.0, ctx=_CTX
         )
     assert [p for p, _ in store_calls if p == path] == []
+
+
+@pytest.mark.parametrize(("verb", "args", "path"), _CALLS)
+def test_a_deadline_already_past_builds_no_store(
+    monkeypatch: pytest.MonkeyPatch, verb: str, args: tuple, path: str
+) -> None:
+    built: list[bool] = []
+
+    def no_store():
+        built.append(True)
+        raise AssertionError("the T2 database was built after the deadline")
+
+    monkeypatch.setattr(verbs_memory, "_t2", no_store)
+    spec = _SPECS[verb]
+    with pytest.raises(VerbTimeout):
+        spec.fn(
+            *check_args(spec, list(args)), deadline=time.monotonic() - 1.0, ctx=_CTX
+        )
+    assert built == []
+
+
+_URL = "http://127.0.0.1:54321/v1/memory/secret-path"
+
+
+def _status_error(*_a, **_kw):
+    request = httpx.Request("GET", _URL)
+    raise httpx.HTTPStatusError(
+        f"Server error '503 Service Unavailable' for url '{_URL}'",
+        request=request,
+        response=httpx.Response(503, request=request),
+    )
+
+
+def _connect_error(*_a, **_kw):
+    raise httpx.ConnectError(f"All connection attempts failed: {_URL}")
+
+
+@pytest.mark.parametrize(("verb", "args", "path"), _CALLS)
+@pytest.mark.parametrize(
+    ("boom", "expect"), [(_status_error, "503"), (_connect_error, "ConnectError")]
+)
+def test_a_store_failure_is_a_verb_error_that_hides_the_service_address(
+    db: T2Database,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+    args: tuple,
+    path: str,
+    boom,
+    expect: str,
+) -> None:
+    monkeypatch.setattr(HttpMemoryStore, "_get", boom)
+    monkeypatch.setattr(HttpMemoryStore, "_post", boom)
+    with pytest.raises(VerbError) as exc:
+        _call(verb, *args)
+    assert type(exc.value) is VerbError  # not VerbTimeout, not VerbArgError
+    message = str(exc.value)
+    assert verb in message and expect in message
+    for leak in ("http://", "127.0.0.1", "54321", "secret-path"):
+        assert leak not in message
 
 
 @pytest.mark.parametrize(("verb", "args", "path"), _CALLS)
