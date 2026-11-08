@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import textwrap
@@ -424,6 +425,174 @@ def test_kill_tree_leaves_nothing_alive_when_the_tree_changes_under_it(tmp_path:
         stray = _live(f"sleep {sleep_a}") + _live(f"sleep {sleep_b}")
         if stray:
             subprocess.run(["kill", "-KILL", *stray], check=False)
+
+
+# A `ps` on PATH in front of the real one. SHIM_PS_DELAY: seconds before each listing (holds kill_tree
+# between its first stop and its kill). SHIM_PS_IMMORTAL: pids every pid,stat listing shows alive.
+# SHIM_PS_EMPTY: every listing prints nothing. SHIM_PS_GROWING=<root>: every pid,ppid listing shows a new
+# child of <root>, a pid no system hands out, so the tree never stops growing.
+_PS_SHIM = """\
+#!/usr/bin/env bash
+sleep "${SHIM_PS_DELAY:-0}"
+[[ -n ${SHIM_PS_EMPTY:-} ]] && exit 0
+if [[ -n ${SHIM_PS_GROWING:-} && " $* " == *ppid=* ]]; then
+    n=$(( $(cat "$SHIM_PS_STATE" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$SHIM_PS_STATE"
+    "$SHIM_REAL_PS" "$@"; echo "$((4000000000 + n)) $SHIM_PS_GROWING"; exit 0
+fi
+if [[ -n ${SHIM_PS_IMMORTAL:-} && " $* " == *stat=* ]]; then
+    "$SHIM_REAL_PS" "$@"; for p in $SHIM_PS_IMMORTAL; do echo "$p S"; done; exit 0
+fi
+exec "$SHIM_REAL_PS" "$@"
+"""
+
+
+def _ps_shim_env(tmp_path: Path, **settings: str) -> dict[str, str]:
+    shim = tmp_path / "shim-bin"
+    shim.mkdir(exist_ok=True)
+    (shim / "ps").write_text(_PS_SHIM)
+    (shim / "ps").chmod(0o755)
+    real = shutil.which("ps")
+    assert real, "ps is missing"
+    return {**os.environ, "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}", "SHIM_REAL_PS": real,
+            "SHIM_PS_STATE": str(tmp_path / "shim-state"), **settings}
+
+
+def _state_of(pid: str) -> str:
+    """The pid's state letter(s) from the real ps, "" when it is gone."""
+    return subprocess.run(["ps", "-o", "stat=", "-p", pid], capture_output=True, text=True).stdout.strip()
+
+
+_SIGNALS = {"HUP": 1, "INT": 2, "TERM": 15}
+
+
+def _default_signals() -> None:
+    for number in _SIGNALS.values():
+        signal.signal(number, signal.SIG_DFL)
+
+
+@pytest.mark.parametrize("name", sorted(_SIGNALS))
+def test_a_signal_to_the_shell_inside_kill_tree_leaves_nothing_stopped(tmp_path: Path, name: str) -> None:
+    # kill_tree stops the tree before it kills it. A HUP, INT or TERM to the shell running it, between the two,
+    # once left the stopped part stopped forever (state T: nothing ever continues or kills it) and the rest
+    # orphaned. The slow ps holds kill_tree there: the root is stopped, its child not yet listed.
+    unique = zlib.crc32(str(tmp_path).encode()) % 100000
+    child = f"sleep 303.{unique:06d}"
+    pidfile = tmp_path / "root.pid"
+    script = (
+        f"source '{SCRIPT}'; ( {child} & wait ) & pid=$!; echo \"$pid\" > '{pidfile}'; "
+        f"for _ in $(seq 300); do pgrep -f '{child}' >/dev/null && break; sleep 0.1; done; "
+        "kill_tree \"$pid\" 'the test tree'; echo finished"
+    )
+    out = tmp_path / "out"
+    root = ""
+    with out.open("w") as o:
+        # A shell started with a signal ignored can never trap it (a pytest run started as a background job
+        # inherits SIGINT ignored, and so would bash), so the child starts with the three at their defaults.
+        proc = subprocess.Popen(["bash", "-c", script], stdout=o, stderr=subprocess.STDOUT,
+                                env=_ps_shim_env(tmp_path, SHIM_PS_DELAY="0.5"), preexec_fn=_default_signals)
+    try:
+        deadline = time.monotonic() + 30
+        while not (root := pidfile.read_text().strip() if pidfile.exists() else "") or not _state_of(root).startswith("T"):
+            assert time.monotonic() < deadline and proc.poll() is None, out.read_text()
+            time.sleep(0.02)
+        proc.send_signal(_SIGNALS[name])
+        rc = proc.wait(timeout=60)
+        assert _live(child) == [] and not _state_of(root).startswith("T"), (
+            f"{name} inside kill_tree left the tree behind: root {root} state {_state_of(root)!r}, child {_live(child)}"
+        )
+        # the signal is not lost: with no trap of the caller's it ends the shell, as it would have
+        assert rc == 128 + _SIGNALS[name] and "finished" not in out.read_text(), (rc, out.read_text())
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        stray = _live(child) + ([root] if root and _state_of(root) and not _state_of(root).startswith("Z") else [])
+        if stray:
+            subprocess.run(["kill", "-KILL", *stray], check=False)
+
+
+def test_a_signal_inside_kill_tree_runs_the_callers_trap_once_the_tree_is_dead(tmp_path: Path) -> None:
+    unique = zlib.crc32(str(tmp_path).encode()) % 100000
+    child = f"sleep 304.{unique:06d}"
+    pidfile = tmp_path / "root.pid"
+    script = (
+        f"source '{SCRIPT}'; trap 'echo caller-trap-ran' TERM; ( {child} & wait ) & pid=$!; echo \"$pid\" > '{pidfile}'; "
+        f"for _ in $(seq 300); do pgrep -f '{child}' >/dev/null && break; sleep 0.1; done; "
+        "kill_tree \"$pid\" 'the test tree'; echo \"kill_tree=$?\"; trap -p TERM"
+    )
+    out = tmp_path / "out"
+    with out.open("w") as o:
+        proc = subprocess.Popen(["bash", "-c", script], stdout=o, stderr=subprocess.STDOUT,
+                                env=_ps_shim_env(tmp_path, SHIM_PS_DELAY="0.5"))
+    try:
+        deadline = time.monotonic() + 30
+        while not (root := pidfile.read_text().strip() if pidfile.exists() else "") or not _state_of(root).startswith("T"):
+            assert time.monotonic() < deadline and proc.poll() is None, out.read_text()
+            time.sleep(0.02)
+        proc.send_signal(15)
+        assert proc.wait(timeout=60) == 0, out.read_text()
+        lines = out.read_text().splitlines()
+        assert lines[:2] == ["caller-trap-ran", "kill_tree=0"], lines
+        assert "echo caller-trap-ran" in lines[2], "the caller's trap is restored"
+        assert _live(child) == []
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        stray = _live(child)
+        if stray:
+            subprocess.run(["kill", "-KILL", *stray], check=False)
+
+
+def _kill_tree_with(tmp_path: Path, *, state: bool, **shim: str) -> tuple[subprocess.CompletedProcess[str], float, Path]:
+    """kill_tree on a fresh `sleep` root under the ps shim; SHIM settings may name the root as ROOT."""
+    unique = zlib.crc32(str(tmp_path).encode()) % 100000
+    child = f"sleep 305.{unique:06d}"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    exports = " ".join(f"export {k}=\"{v.replace('ROOT', '$pid')}\";" for k, v in shim.items())
+    script = (
+        f"source '{SCRIPT}'; {'STATE=' + repr(str(state_dir)) + ';' if state else ''} {child} & pid=$!; {exports} "
+        "kill_tree \"$pid\" 'the test tree'; echo \"kill_tree=$?\"; kill -KILL \"$pid\" 2>/dev/null; true"
+    )
+    started = time.monotonic()
+    out = tmp_path / "out"
+    try:
+        with out.open("w") as o:
+            subprocess.run(["bash", "-c", script], stdout=o, stderr=subprocess.STDOUT, timeout=60, env=_ps_shim_env(tmp_path))
+        took = time.monotonic() - started
+        assert _live(child) == [], "the root is killed whatever kill_tree could verify"
+    finally:
+        stray = _live(child)
+        if stray:
+            subprocess.run(["kill", "-KILL", *stray], check=False)
+    return subprocess.CompletedProcess([], 0, out.read_text(), ""), took, state_dir
+
+
+def test_kill_tree_says_so_when_the_kill_is_not_confirmed_in_3_s(tmp_path: Path) -> None:
+    result, took, state = _kill_tree_with(tmp_path, state=True, SHIM_PS_IMMORTAL="ROOT")
+    assert "kill_tree=1" in result.stdout, result.stdout
+    assert took >= 3, f"the wait is at least 3 s, took {took:.2f}"
+    timeouts = (state / "timeouts").read_text()
+    assert "the test tree: killed processes still alive 3 s after SIGKILL:" in timeouts, timeouts
+
+
+def test_kill_tree_without_a_state_directory_says_it_on_stderr(tmp_path: Path) -> None:
+    result, _, _ = _kill_tree_with(tmp_path, state=False, SHIM_PS_IMMORTAL="ROOT")
+    assert "kill_tree=1" in result.stdout
+    assert "container_io_sampler: the test tree: killed processes still alive 3 s after SIGKILL:" in result.stdout
+
+
+def test_kill_tree_that_cannot_list_processes_kills_the_root_and_says_it_verified_nothing(tmp_path: Path) -> None:
+    result, _, state = _kill_tree_with(tmp_path, state=True, SHIM_PS_EMPTY="1")
+    assert "kill_tree=1" in result.stdout, result.stdout
+    timeouts = (state / "timeouts").read_text()
+    assert "the test tree: could not list processes" in timeouts, timeouts
+
+
+def test_kill_tree_reports_a_tree_that_never_stops_growing_and_kills_what_it_found(tmp_path: Path) -> None:
+    result, _, state = _kill_tree_with(tmp_path, state=True, SHIM_PS_GROWING="ROOT")
+    assert "kill_tree=1" in result.stdout, result.stdout
+    timeouts = (state / "timeouts").read_text()
+    assert "the test tree: the tree still grew after 100 listings" in timeouts, timeouts
 
 
 def test_a_docker_that_stalls_after_the_probe_cannot_hang_the_sampler(world: dict[str, Path]) -> None:
