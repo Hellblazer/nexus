@@ -484,6 +484,9 @@ Per the marketplace-pinned-source playbook (also used by `Hellblazer/palinex`), 
 # merge"). Branching off main would omit develop's unmerged fixes, so the
 # release PR must carry develop's commits + the version-bump commit.
 git checkout develop && git pull
+# Read develop's tip CI before cutting on it; a red is diagnosed first, never
+# carried into the release PR (7.46.0: fix, rebase, force-push, second PR cycle).
+gh api repos/Hellblazer/nexus/commits/$(git rev-parse HEAD)/check-runs --jq '.check_runs[] | [.name, .conclusion] | @tsv'
 git checkout -b release/vX.Y.Z
 
 # PRE-MERGE MAIN FIRST (added 2026-07-04, learned on v6.3.1): a release branch
