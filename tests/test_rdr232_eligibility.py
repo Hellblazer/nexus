@@ -958,7 +958,9 @@ def test_the_filter_wire_shape() -> None:
         "undeclared_builtins", "undeclared_builtin_names", "branches",
         "excluded_total", "excluded_plan_ids", "returned", "selected", "fallback_reason",
         "enforced_reasons", "enforced_excluded_total",  # additive: the exclusions that stay enforced in a shadow
+        "refused_recorded_kinds",  # additive (nexus-q7dpt)
     }
+    assert wire["refused_recorded_kinds"] == {}
     assert wire["enforced_reasons"] == [] and wire["enforced_excluded_total"] == wire["excluded_total"] == 1
     assert wire["shadow_reason"] is None and wire["library_check"] is None and wire["builtins_checked"] is None
     assert wire["undeclared_builtins"] is None and wire["undeclared_builtin_names"] == []
@@ -1363,6 +1365,27 @@ def test_the_lookup_narrowing_runs_in_shadow_like_the_matrix() -> None:
     out, filt = _match([GROWN_SYNTHESIS], [(904, 0.05)], L, enforce=False)
     assert _ids(out) == [904]
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_not_lookup": 1}
+
+
+@pytest.mark.parametrize("enforce", [True, False], ids=["enforced", "shadow"])
+def test_a_lookup_refusal_reports_the_recorded_kind_that_caused_it(enforce) -> None:
+    # nexus-q7dpt: the reason alone does not say which recorded kind the grown plan carried.
+    _, filt = _match([GROWN_SYNTHESIS, GROWN_COMPARISON], [(904, 0.05), (905, 0.06)], L, enforce=enforce)
+    assert filt.to_wire()["refused_recorded_kinds"] == {"comparison": 1, "synthesis": 1}
+
+
+def test_a_matrix_refusal_reports_no_recorded_kind() -> None:
+    _, filt = _match([LOOKUP_473], [(473, 0.1)], S)
+    assert filt.to_wire()["refused_recorded_kinds"] == {}
+
+
+def test_a_grown_plan_refused_for_another_reason_is_not_counted_as_a_lookup_refusal() -> None:
+    """Review r1: a grown plan with a recorded kind refused for a non-lookup request (its route unreviewed) carries
+    recorded_kind too; only grown_route_not_lookup refusals are counted."""
+    _, filt = _match([GROWN_SYNTHESIS], [(904, 0.05)], C)
+    wire = filt.to_wire()
+    assert filt.excluded_plan_ids == [904] and "grown_route_not_lookup" not in wire["branches"]["cosine"]["reasons"]
+    assert wire["refused_recorded_kinds"] == {}
 
 
 def test_the_lookup_narrowing_reason_is_in_the_closed_vocabulary() -> None:

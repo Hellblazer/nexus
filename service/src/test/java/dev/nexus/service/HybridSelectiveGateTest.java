@@ -210,7 +210,7 @@ class HybridSelectiveGateTest {
             .map(c -> Chash.fromHex(c).toBytes())
             .toArray(byte[][]::new);
         Table<?> rankFn = TEXT_GATED_SEARCH_BY_CHASH_1024.call(
-            queryVector(), chashes, new String[] {COLL}, null, null, 50, "voyage-context-3", TENANT);
+            queryVector(), chashes, new String[] {COLL}, null, null, 50, "voyage-context-3", TENANT, false);
         String rankPlan = explain(rankFn);
         // The rank filters by chash (PK) and sorts by exact distance — the ORDER BY embedding
         // can never be pushed into an HNSW index scan (which is what hnsw.max_scan_tuples

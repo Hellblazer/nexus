@@ -1,0 +1,59 @@
+name: Edge idempotency probe (weekly)
+
+# nexus-t0ms7 (RDR-222 close critique). A sweep the client resends on status
+# unknown is safe only while the engine sees its Idempotency-Key; a hop that
+# drops the header (the RDR-007 A5 CloudFront origin request policy did,
+# conexus-c4i2) turns the resend into a second unkeyed run. nexus-yye8l.10
+# verified the edge once. This job re-proves it weekly with
+# `nx doctor --probe-edge`: one keyed no-op expire page against a quarantine
+# collection that can never hold rows (row_limit 1), passing only on the key
+# echo and a committed request-ledger row. Each run adds one ledger row, kept
+# 7 days. Sam approved the weekly job with a production service token as a CI
+# secret (halcyon/edge-probe-schedule, 2026-11-07).
+#
+# Needs repository secret NX_EDGE_PROBE_TOKEN: a production service token for
+# the nexus tenant that may send this one write. Until it is set the job fails
+# saying so: a probe that silently skips is the gap this job closes.
+#
+# CI-cost discipline: one ubuntu job, no build, no matrix, seconds of runtime.
+# Weekly + manual dispatch only.
+
+on:
+  schedule:
+    - cron: "41 12 * * 3"   # 12:41 UTC Wednesdays, off the Monday weekly slots
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-probe-weekly
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: keyed no-op through the production edge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Probe the edge
+        env:
+          NX_SERVICE_URL: https://api.conexus-nexus.com
+          NX_SERVICE_TOKEN: ${{ secrets.NX_EDGE_PROBE_TOKEN }}
+          NX_ALLOW_PROD_WRITE: "weekly edge idempotency probe (nexus-t0ms7): one keyed no-op expire page, row_limit 1, on a sibling that holds no rows"
+          NX_NO_TELEMETRY: "1"
+        run: |
+          set -uo pipefail
+          if [ -z "${NX_SERVICE_TOKEN}" ]; then
+            echo "::error::repository secret NX_EDGE_PROBE_TOKEN is not set; the edge probe did not run (nexus-t0ms7)"
+            exit 1
+          fi
+          set +e
+          uv run --python 3.12 nx doctor --probe-edge --expect-host api.conexus-nexus.com > probe.txt 2>&1
+          rc=$?
+          set -e
+          cat probe.txt
+          { echo '```'; cat probe.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

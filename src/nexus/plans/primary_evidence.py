@@ -63,6 +63,7 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import RDR_FRONTMATTER_ID_META_KEY, CatalogEntry, ManifestRow
 from nexus.plans.document_confinement import CHASH_ALLOW_MAX, valid_chashes
 from nexus.plans.evidence import EvidenceRequest, OwnerResolution, SourceRange, SourceRef, SourceRefError
+from nexus.sensitivity import ReadSensitivity
 
 _log = structlog.get_logger(__name__)
 
@@ -247,13 +248,16 @@ ManifestSampler = Callable[[list[str], int], "tuple[dict[str, list[ManifestRow]]
 ChunkFetcher = Callable[[str, Sequence[str]], Mapping[str, str]]
 
 
-def t3_chunk_fetcher(t3: Any) -> ChunkFetcher:
-    """A :data:`ChunkFetcher` over the T3 client, through ``nx_answer``'s batched fetch."""
+def t3_chunk_fetcher(t3: Any, *, sensitivity: ReadSensitivity) -> ChunkFetcher:
+    """A :data:`ChunkFetcher` over the T3 client, through ``nx_answer``'s batched fetch.
+
+    *sensitivity* (RDR-243 Phase 2, nexus-rfvyy.7.8) is required: the fetcher runs on selector worker threads
+    that do not see the posture, so the caller reads it once and hands it in."""
 
     def fetch(collection: str, chashes: Sequence[str]) -> dict[str, str]:
         from nexus.mcp.core import _batched_get_by_ids  # noqa: PLC0415 — deferred: core imports the plans package
 
-        found = _batched_get_by_ids(t3, collection, list(chashes))
+        found = _batched_get_by_ids(t3, collection, list(chashes), sensitivity=sensitivity)
         return {cid: str(entry["content"]) for cid, entry in found.items() if entry.get("content")}
 
     return fetch
@@ -1720,6 +1724,10 @@ def select_primary_evidence(
             try:
                 got = fetch_chunks(collection, chashes)
             except Exception as exc:  # noqa: BLE001 — those chunks are missing and said so
+                from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+                if isinstance(exc, SensitivityExcludeUnavailable):
+                    raise  # RDR-243 review r1 F5: a refused read is not a missing chunk; the primary read refuses
                 _log.warning("primary_evidence_fetch_failed", collection=collection, count=len(chashes), error=str(exc))
                 fetch_errors += 1
                 continue

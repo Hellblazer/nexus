@@ -54,7 +54,7 @@ class _SiblingT3:
     def list_store(self, name: str, limit: int = 20, offset: int = 0) -> list[dict]:
         return list(self.docs.get(name, {}).values())[offset:offset + limit]
 
-    def get_by_id(self, name: str, doc_id: str) -> dict | None:
+    def get_by_id(self, name: str, doc_id: str, *, sensitivity="include") -> dict | None:
         return self.docs.get(name, {}).get(doc_id)
 
     def find_ids_by_title(self, name: str, title: str) -> list[str]:
@@ -237,10 +237,10 @@ def test_mcp_store_delete_names_the_sibling_that_holds_the_id(t3):
 def test_a_hint_probe_that_fails_leaves_the_plain_not_found(t3, monkeypatch):
     real = t3.get_by_id
 
-    def _sibling_down(name, doc_id):
+    def _sibling_down(name, doc_id, **kw):
         if name == ODD:
             raise RuntimeError("the engine does not serve this family")
-        return real(name, doc_id)
+        return real(name, doc_id, **kw)
 
     monkeypatch.setattr(t3, "get_by_id", _sibling_down)
     result = CliRunner().invoke(main, ["store", "delete", "--collection", "art", "--id", H_ODD, "--yes"])

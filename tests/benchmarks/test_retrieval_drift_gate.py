@@ -347,7 +347,7 @@ def _run_benchmark(client, chash_to_doc) -> dict:
     per_query = []
     for q in queries:
         judgments = {e["doc_id"]: e["relevance"] for e in q["expected"]}
-        rows = client.search(q["query"], [_COLLECTION], n_results=_K)
+        rows = client.search(q["query"], [_COLLECTION], n_results=_K, sensitivity="include")
         relevances = [
             judgments.get(chash_to_doc.get(r.get("id", ""), ""), 0) for r in rows
         ]
@@ -502,7 +502,7 @@ def _run_benchmark_boosted(client, taxonomy, chash_to_doc) -> dict:
         # something.
         rows = search_cross_corpus(
             q["query"], [_COLLECTION], n_results=_K, t3=client,
-            taxonomy=taxonomy, link_boost=False, cluster_by=None,
+            taxonomy=taxonomy, link_boost=False, cluster_by=None, sensitivity="include",
         )
         rows.sort(key=lambda r: max(0.0, r.distance - r.topic_boost))
         rows = rows[:_K]

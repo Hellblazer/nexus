@@ -631,6 +631,79 @@ def test_a_stale_base_only_vcrt_is_topped_up_without_rewriting_its_base_pair(
     assert _gap(cfg, system) is None
 
 
+def test_a_top_up_beside_an_older_base_pair_records_the_mix(
+    cfg: Path, system: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-1oexm (1): the base pair stays (a loaded DLL cannot be replaced), so the directory now
+    holds two redistributable versions. The sidecar says so: the tag each placed DLL came from, and
+    the base-pair DLLs whose bytes differ from that tag's bundle."""
+    where = _put_dlls(cfg / "vcrt")
+    for n in _DLLS:
+        (where / n).write_bytes(b"EARLIER-" + n.encode())
+    net = _new_bundle(monkeypatch)
+    r = _ensure(cfg, system, net, tag="engine-service-v9.9.2")
+    assert r.status == "provisioned", r.detail
+    meta = json.loads((where / "vcrt.meta.json").read_text())
+    assert meta["dll_tags"] == {_ATOMIC_WAIT: "engine-service-v9.9.2"}
+    assert meta["mixed_base"] == {"tag": "engine-service-v9.9.2", "differ": sorted(_DLLS)}
+
+
+def test_a_top_up_beside_the_same_base_pair_records_no_mix(
+    cfg: Path, system: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    where = _put_dlls(cfg / "vcrt")
+    for n in _DLLS:
+        (where / n).write_bytes(_BODY[n])  # the very bytes the bundle carries
+    net = _new_bundle(monkeypatch)
+    assert _ensure(cfg, system, net, tag="engine-service-v9.9.2").status == "provisioned"
+    meta = json.loads((where / "vcrt.meta.json").read_text())
+    assert "mixed_base" not in meta and meta["dll_tags"] == {_ATOMIC_WAIT: "engine-service-v9.9.2"}
+
+
+def test_an_unreadable_kept_dll_never_fails_the_top_up(
+    cfg: Path, system: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-1oexm review r1b: the compare is informational. A kept DLL that cannot be read (an
+    antivirus lock or an ACL on Windows) is skipped; the PDF DLL is still placed."""
+    where = _put_dlls(cfg / "vcrt")
+    real = b.compute_sha256
+
+    def locked(path: Path) -> str:
+        if path.parent == where and path.name in _DLLS:
+            raise PermissionError(13, "locked", str(path))
+        return real(path)
+
+    monkeypatch.setattr(b, "compute_sha256", locked)
+    net = _new_bundle(monkeypatch)
+    r = _ensure(cfg, system, net, tag="engine-service-v9.9.2")
+    assert r.status == "provisioned", r.detail
+    assert (where / _ATOMIC_WAIT).read_bytes() == _BODY[_ATOMIC_WAIT]
+    meta = json.loads((where / "vcrt.meta.json").read_text())
+    assert meta["dll_tags"] == {_ATOMIC_WAIT: "engine-service-v9.9.2"} and "mixed_base" not in meta
+
+
+def test_a_matching_top_up_clears_a_stale_mix_record(
+    cfg: Path, system: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    where = _put_dlls(cfg / "vcrt")
+    for n in _DLLS:
+        (where / n).write_bytes(_BODY[n])
+    (where / "vcrt.meta.json").write_text(
+        json.dumps({"tag": "engine-service-v9.9.1", "mixed_base": {"tag": "old", "differ": list(_DLLS)}}),
+        encoding="utf-8",
+    )
+    net = _new_bundle(monkeypatch)
+    assert _ensure(cfg, system, net, tag="engine-service-v9.9.2").status == "provisioned"
+    assert "mixed_base" not in json.loads((where / "vcrt.meta.json").read_text())
+
+
+def test_a_bundle_without_the_pdf_dll_writes_no_dll_tags(cfg: Path, tmp_path: Path, net: _Net) -> None:
+    """`net` serves the older bundle: nothing is placed, so nothing is tagged."""
+    sysdir = str(_put_dlls(tmp_path / "System32-base"))
+    _ensure(cfg, sysdir, net, tag="engine-service-v9.9.1")
+    assert "dll_tags" not in json.loads((cfg / "vcrt" / "vcrt.meta.json").read_text())
+
+
 def test_an_older_bundle_is_fetched_once_per_pinned_tag_not_on_every_call(
     cfg: Path, tmp_path: Path, net: _Net,
 ) -> None:

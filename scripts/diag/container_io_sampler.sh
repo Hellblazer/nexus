@@ -46,9 +46,13 @@
 #
 # Every docker call is bounded (NX_IO_SAMPLER_DOCKER_TIMEOUT seconds, default 20); after COMMAND ends the
 # sampler loop gets NX_IO_SAMPLER_GRACE seconds (default 10), then is killed, and the final sample gets
-# NX_IO_SAMPLER_FINAL seconds (default 30). A bound that expires is counted in the report, so a stalled
+# NX_IO_SAMPLER_FINAL seconds (default 30). What a bound kills, it kills with everything it started (the
+# tree is frozen before it is killed, so nothing forked meanwhile escapes) and waits until none of it is
+# alive, so no docker call outlives the script. A bound that expires is counted in the report, so a stalled
 # daemon yields a report that says what is missing, not a hang. The sampler loop also ends by itself if
-# this script is killed (SIGKILL). The state directory is on /dev/shm when that is writable
+# this script is killed (SIGKILL), except in the tens of milliseconds while a kill of its tree has that tree
+# stopped (see kill_tree): then it stays stopped until its pids are sent CONT or KILL by hand. A HUP, INT or
+# TERM to the script at that moment is held until the tree is dead. The state directory is on /dev/shm when that is writable
 # (NX_IO_SAMPLER_STATE_BASE overrides), so sampling does not write to the disk it measures.
 #
 # The functions below are sourceable (tests/scripts/test_container_io_sampler.py); main runs only
@@ -173,9 +177,12 @@ pick_state_base() {
 }
 
 # Every process below PID, from the process table (the deep ones too: a bounded docker call sits under
-# a command substitution under the loop).
+# a command substitution under the loop). Fails when the table could not be read: an empty listing is a
+# failure, never "no descendants" (the table always holds at least this shell).
 descendants() {
-    ps -A -o pid=,ppid= 2>/dev/null | awk -v root="$1" '
+    local table
+    table=$(ps -A -o pid=,ppid= 2>/dev/null) && [[ -n $table ]] || return 1
+    awk -v root="$1" '
         { parent[$1] = $2; pids[n++] = $1 }
         END {
             for (i = 0; i < n; i++) {
@@ -183,35 +190,127 @@ descendants() {
                 while ((p in parent) && p != root && p != 0) p = parent[p]
                 if (p == root && pids[i] != root) print pids[i]
             }
-        }'
+        }' <<<"$table"
 }
 
-# Stop PID and everything below it (the descendants are listed first: once PID is gone they are orphans).
+# The pids among the arguments that are still alive (a zombie is dead: only its parent's wait is missing).
+# Fails when the table could not be read, so "nothing alive" is never an unread table.
+live_among() {
+    local table
+    table=$(ps -A -o pid=,stat= 2>/dev/null) && [[ -n $table ]] || return 1
+    awk -v want=" $* " 'index(want, " " $1 " ") && $2 !~ /^Z/ { print $1 }' <<<"$table"
+}
+
+# A line for the report (STATE/timeouts), or for stderr before there is a state directory.
+note_bound() {
+    if [[ -n $STATE ]]; then
+        echo "$*" >>"$STATE/timeouts" 2>/dev/null
+    else
+        echo "container_io_sampler: $*" >&2
+    fi
+}
+
+# Set while kill_tree runs, by its HUP/INT/TERM trap: the signal that arrived, acted on once the tree is dead.
+KT_PENDING=""
+
+# Kill PID and everything below it (WHAT names it in the report), and return once none of it is alive. It
+# fails, and says so in the report, when that is not confirmed: still alive after at least 3 s, a process
+# table it could not read, or a tree still growing after 100 listings (what was found is killed anyway).
+#
+# The tree is frozen first: PID, then every descendant a listing finds, is stopped, and the listing is
+# repeated until it finds no new process. A stopped process cannot fork (a fork that a stop reaches midway is
+# undone), so the frozen set is the whole tree, and only then is it killed. Listing first and signalling
+# after let a process fork between the two: a root whose stalled docker call was killed went on to the next
+# container's call, which no listing held, and that call outlived the bound (develop ebc9d82f0, shard 6). The
+# descendants are found through PID while it is stopped, never after it is gone, when they would be orphans
+# that no listing reaches. No TERM goes before the KILL: a TERM would need the tree running again to act on
+# it, which reopens the fork window, and nothing in a sampler tree (bash subshells, the docker CLI) has
+# cleanup that a TERM would buy.
+#
+# A HUP, INT or TERM to this shell between the stop and the kill would leave the frozen tree stopped for good,
+# so for its whole run kill_tree traps them, finishes the kill, puts the caller's traps back and only then
+# acts on the signal as the caller's disposition says: the caller's trap runs, an ignored one stays ignored,
+# and the default ends the shell with 128+N (bash 3.2 has no BASHPID, so a subshell cannot re-raise it on
+# itself). SIGKILL cannot be trapped: a script SIGKILLed in the tens of milliseconds between the stop and the
+# kill leaves that tree stopped (`kill -CONT` or `-KILL` its pids by hand).
 kill_tree() {
-    local pid=$1 all p
-    all=$(descendants "$pid")
-    for p in $all "$pid"; do
-        kill -TERM "$p" 2>/dev/null
+    local pid=$1 what=${2:-a killed process tree} frozen=" $1 " p kids grew pass=0 left="" tries=0 failure="" caller sig action
+    caller=$(trap -p HUP INT TERM)
+    KT_PENDING=""
+    trap 'KT_PENDING=HUP' HUP
+    trap 'KT_PENDING=INT' INT
+    trap 'KT_PENDING=TERM' TERM
+    kill -STOP "$pid" 2>/dev/null
+    while :; do
+        if ! kids=$(descendants "$pid"); then
+            failure="could not list processes (ps), so its descendants were not found or killed"
+            break
+        fi
+        grew=""
+        for p in $kids; do
+            [[ $frozen == *" $p "* ]] && continue
+            kill -STOP "$p" 2>/dev/null
+            frozen+="$p "
+            grew=1
+        done
+        [[ -n $grew ]] || break
+        if ((++pass >= 100)); then
+            failure="the tree still grew after 100 listings; killed the $(wc -w <<<"$frozen" | tr -d ' ') processes found"
+            break
+        fi
     done
-    sleep 0.3
-    for p in $all "$pid"; do
-        if kill -0 "$p" 2>/dev/null; then kill -KILL "$p" 2>/dev/null; fi
+    for p in $frozen; do
+        kill -KILL "$p" 2>/dev/null
     done
-    return 0
+    # Quietly: when PID is this shell's child, bash prints "<pid> Killed ..." on stderr as it reaps it, ahead of
+    # the report (chas lab-m, 3 of 200 runs). Hence stderr closed while it dies, and the wait once it is dead.
+    # Counted in tries, not SECONDS (whole seconds: a "3 s" deadline would be 2 to 3 s): 60 x 0.05 s at least.
+    while :; do
+        # shellcheck disable=SC2086  # pids, split on purpose
+        if ! left=$(live_among $frozen); then
+            failure=${failure:-"could not list processes (ps) to confirm the kill"}
+            left=unknown
+            break
+        fi
+        [[ -n $left ]] || break
+        if ((++tries >= 60)); then
+            failure=${failure:-"killed processes still alive 3 s after SIGKILL: $(tr '\n' ' ' <<<"$left")"}
+            break
+        fi
+        sleep 0.05
+    done 2>/dev/null
+    [[ -n $left ]] || wait "$pid" 2>/dev/null # dead (a zombie at most), so this cannot block
+    [[ -z $failure ]] || note_bound "$what: $failure"
+    trap - HUP INT TERM
+    eval "$caller"
+    if [[ -n $KT_PENDING ]]; then
+        sig=$KT_PENDING
+        KT_PENDING=""
+        action=$(trap -p "$sig")
+        if [[ -n $action ]]; then
+            eval "set -- $action"
+            [[ -z $3 ]] || eval "$3" # an empty action is the caller ignoring the signal
+        else
+            case $sig in HUP) exit 129 ;; INT) exit 130 ;; *) exit 143 ;; esac
+        fi
+    fi
+    [[ -z $failure ]]
 }
 
 # Run a command (or a function of this script) for at most SECS to SECS+1 seconds; killed after that, and
 # the status is 124 (as timeout(1) gives). Otherwise the command's own status. Output passes through.
 # Plain bash (no timeout(1), absent on macOS) and no watchdog process to leak.
 bounded() {
-    local secs=$1 pid deadline
+    local secs=$1 pid deadline what
     shift
+    what=$1
+    [[ $1 == docker ]] && what="docker ${2:-}"
     "$@" &
     pid=$!
     deadline=$((SECONDS + secs + 1))
     while kill -0 "$pid" 2>/dev/null; do
         if ((SECONDS >= deadline)); then
-            kill_tree "$pid"
+            kill_tree "$pid" "$what, killed at its ${secs}s bound"
             wait "$pid" 2>/dev/null
             return 124
         fi
@@ -474,7 +573,7 @@ stop_sampler() {
     while kill -0 "$pid" 2>/dev/null; do
         if ((SECONDS >= deadline)); then
             echo "sampler loop still running ${SAMPLER_GRACE}s after the command ended; killed" >>"$state/timeouts"
-            kill_tree "$pid"
+            kill_tree "$pid" "the sampler loop, killed at its ${SAMPLER_GRACE}s grace"
             break
         fi
         sleep 0.1
@@ -486,10 +585,11 @@ stop_sampler() {
 SAMPLER_PID=""
 PS_FILTER=() # extra docker listing arguments: --filter <expr> per -f
 
-# A signal to this script stops the sampler; the command, in the same process group, gets it too.
+# A signal to this script stops the sampler, with the docker call it may be inside (killing the loop's pid
+# alone would orphan that call); the command, in the same process group, gets the signal too.
 on_signal() {
     [[ -n $STATE ]] && touch "$STATE/stop"
-    [[ -n $SAMPLER_PID ]] && kill "$SAMPLER_PID" 2>/dev/null
+    if [[ -n $SAMPLER_PID ]] && kill -0 "$SAMPLER_PID" 2>/dev/null; then kill_tree "$SAMPLER_PID" "the sampler loop, killed on a signal"; fi
 }
 
 usage() {

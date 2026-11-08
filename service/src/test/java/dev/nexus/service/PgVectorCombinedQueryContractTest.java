@@ -150,8 +150,10 @@ class PgVectorCombinedQueryContractTest {
             .as("flat envelope: id, content, distance, collection, chash (catalog-008 "
                 + "added the matched-chunk chash for the query() repoint / RDR-086), "
                 + "retention (RDR-169 Gap 2 remainder, bead nexus-4k1vz: "
-                + "vectors-016-combined-query-retention.xml)")
-            .containsExactlyInAnyOrder("id", "content", "distance", "collection", "chash", "retention");
+                + "vectors-016-combined-query-retention.xml), sensitive (RDR-243, nexus-rfvyy.7.3: "
+                + "true when any live owner of the matched chunk is sensitive)")
+            .containsExactlyInAnyOrder("id", "content", "distance", "collection", "chash", "retention",
+                                       "sensitive");
         assertThat(top.get("collection")).isEqualTo(COLL_M);
         assertThat((String) top.get("chash")).as("chash is the matched chunk's hash").isNotBlank();
         assertThat(((Number) top.get("distance")).doubleValue()).isCloseTo(0.0, within());

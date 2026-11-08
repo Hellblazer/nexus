@@ -45,7 +45,18 @@ from nexus.corpus import (
 from nexus.db.t2.records import ReplySpec
 from nexus.db.t3 import verify_collection_deep
 from nexus.migration.banner import degrade_loud_when_migrating
-from nexus.sensitivity import bound_to
+from nexus import sensitivity as _sensitivity  # reads go through the module so one test patch reaches every entry point
+from nexus.sensitivity import ReadSensitivity, bound_to
+from nexus.sensitive_output import (
+    BADGE as _SENSITIVE_BADGE,
+    chunk_row_facts as _chunk_row_facts,
+    first_sensitive_owner as _first_sensitive_owner,
+    hit_facts as _hit_facts,
+    hit_is_sensitive as _hit_is_sensitive,
+    mcp_output_posture as _mcp_output_posture,
+    stub_line as _stub_line,
+    withheld_note as _withheld_note,
+)
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistry as _LockedHookRegistry, install_default_hooks as _install_default_hooks
@@ -2923,12 +2934,14 @@ def _subprocess_tool_grant() -> tuple[dict[str, Any], list[str]]:
     omitted when unset (CLI / non-plugin contexts) so we never inject a
     literal ``${...}`` placeholder.
     """
-    env: dict[str, str] = {}
+    # RDR-243 review r1 F4: the nested servers are LLM-bound by construction. The posture rides the env block of the
+    # server registration itself, so it does not depend on Claude Code handing the parent's environment on (A5).
+    env: dict[str, str] = {_sensitivity.POSTURE_ENV: "llm_bound"}
     plugin_root = _os.environ.get("CLAUDE_PLUGIN_ROOT")
     if plugin_root:
         env["CLAUDE_PLUGIN_ROOT"] = plugin_root
 
-    server_env = {"env": env} if env else {}
+    server_env = {"env": env}
     mcp_servers: dict[str, Any] = {
         "nexus": {"command": "nx-mcp", "args": [], **server_env},
         "nexus_catalog": {"command": "nx-mcp-catalog", "args": [], **server_env},
@@ -2947,7 +2960,7 @@ _TIDY_MAX_ENTRIES = 30
 _TIDY_MAX_CHARS_PER_ENTRY = 2000
 
 
-def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
+def _tidy_prefetch(topic: str, collection: str, *, sensitivity: ReadSensitivity) -> tuple[str, int, str, bool, int]:
     """Retrieve + hydrate the entries to consolidate, server-side.
 
     nexus-mawqw / Fix A. The MCP server holds direct T3 access, so the
@@ -2957,11 +2970,19 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
     post-CC-2.1.162 MCP-server-approval gate that broke the old
     subprocess-calls-MCP-tools design.
 
-    Returns ``(entries_block, n_entries, reason, genuine_miss)``. ``reason`` is
+    Returns ``(entries_block, n_entries, reason, genuine_miss, withheld)``. ``reason`` is
     ``""`` when entries were retrieved, and otherwise says WHY there are none.
     ``genuine_miss`` is True for EXACTLY ONE branch — the collection really had
     nothing near the topic — so the caller can never report a failure as an
     empty result.
+
+    ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.9; census row 15) is the read posture ``nx_tidy`` took once on
+    its own thread, and has no default. Both reads below go through the internal helpers behind ``search`` and
+    ``store_get_many`` with it, so under ``exclude`` the engine drops sensitive chunks from the search and the
+    hydration. On top of that the catalog is asked about every matched chunk: a chunk with a sensitive owner is
+    removed before it is hydrated, and ``withheld`` counts them (it is the catalog check's count: chunks the
+    engine already dropped are not visible to this function). A catalog that cannot say withholds every match.
+    ``withheld`` is 0 under ``include``.
 
     nexus-1obui: this previously collapsed six distinct outcomes to ``("", 0)``
     — search raised, search returned an unstructured payload, zero ids, hydrate
@@ -2972,19 +2993,20 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
     proof the collection held nothing. Every branch now names itself.
     """
     try:
-        hits = search(
+        hits = _search_render(
             query=topic,
             corpus=collection,
             limit=_TIDY_MAX_ENTRIES,
             structured=True,
+            sensitivity=sensitivity,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort path; must not crash caller
         import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         structlog.get_logger().debug("tidy_prefetch_search_failed", exc_info=True)
-        return "", 0, f"retrieval FAILED ({type(exc).__name__}: {exc})", False
+        return "", 0, f"retrieval FAILED ({type(exc).__name__}: {exc})", False, 0
     if not isinstance(hits, dict):
         # search() returns a human-readable string on no-match / error.
-        return "", 0, f"retrieval returned an unstructured payload: {str(hits)[:300]}", False
+        return "", 0, f"retrieval returned an unstructured payload: {str(hits)[:300]}", False, 0
     ids = hits.get("ids") or []
     if not ids:
         # nexus-1obui: the uro6c threshold diagnostic now rides along on the
@@ -2993,17 +3015,42 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
         dropped = bool(hits.get("threshold_dropped"))
         if dropped:
             reason = f"RETRIEVAL THRESHOLD DROPPED every candidate — {reason}"
-        return "", 0, str(reason), not dropped
+        return "", 0, str(reason), not dropped, 0
     cols = hits.get("chunk_collections") or hits.get("collections") or [collection]
+    withheld = 0
+    if sensitivity == "exclude":
+        from nexus.doc_sensitivity import SensitivityUnknown, flagged_owners_of_chashes  # noqa: PLC0415 — deferred: light, used only under the scope
+
+        try:
+            refused = set(flagged_owners_of_chashes([str(i) for i in ids]))
+        except SensitivityUnknown as exc:
+            # RDR-243 review r1 F6: a catalog outage is not a finding that the entries are sensitive. Nothing is
+            # sent to the model (fail closed), and the caller is told the check could not run, as a failure.
+            _log.warning("tidy_prefetch_sensitivity_unknown", matched=len(ids), error=exc.detail)
+            return "", 0, (
+                f"the sensitivity check was unavailable ({exc.detail}); nothing was consolidated, "
+                "so the collection's contents for this topic are UNKNOWN"
+            ), False, 0
+        if refused:
+            _log.info("tidy_prefetch_sensitive_withheld", withheld=len(refused), matched=len(ids))
+            per_id_cols = len(cols) == len(ids)
+            keep = [k for k, i in enumerate(ids) if str(i) not in refused]
+            withheld = len(ids) - len(keep)
+            ids = [ids[k] for k in keep]
+            if per_id_cols:
+                cols = [cols[k] for k in keep]
+            if not ids:
+                return "", 0, f"all {withheld} matching entries are withheld as sensitive", True, withheld
 
     try:
         # The prefetch reads ``contents`` only; skip the owner lookup behind ``source_notes``.
         with without_source_notes():
-            hydrated = store_get_many(
+            hydrated = _store_get_many_impl(
                 ids,
                 cols,
                 max_chars_per_doc=_TIDY_MAX_CHARS_PER_ENTRY,
                 structured=True,
+                sensitivity=sensitivity,
             )
     except Exception as exc:  # noqa: BLE001 — best-effort path; must not crash caller
         import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
@@ -3011,7 +3058,7 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
         return "", 0, (
             f"matched {len(ids)} entries but HYDRATION FAILED "
             f"({type(exc).__name__}: {exc})"
-        ), False
+        ), False, withheld
     if isinstance(hydrated, dict) and hydrated.get("error"):
         # store_get_many caught an internal error and returned it as a
         # structured field rather than raising. Surface it at DEBUG so a
@@ -3026,7 +3073,7 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
         return "", 0, (
             f"matched {len(ids)} entries but HYDRATION RETURNED NO CONTENT"
             + (f" ({err})" if err else "")
-        ), False
+        ), False, withheld
     blocks: list[str] = []
     for i, (doc_id, raw) in enumerate(zip(ids, contents), start=1):
         # nexus-c0sdc: store_get_many truncates at _TIDY_MAX_CHARS_PER_ENTRY.
@@ -3055,8 +3102,8 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
     if not blocks:
         return "", 0, (
             f"matched and hydrated {len(ids)} entries but every body was EMPTY"
-        ), False
-    return "\n\n".join(blocks), len(blocks), "", False
+        ), False, withheld
+    return "\n\n".join(blocks), len(blocks), "", False, withheld
 
 
 # ── Tier-discipline telemetry (Phase 1A nexus-kren) ─────────────────────────
@@ -3300,8 +3347,14 @@ def _search_render(
     structured: bool = False,
     threshold: float | None = None,
     lexical: bool = False,
+    *,
+    sensitivity: ReadSensitivity,
 ) -> "str | dict":
     """Business logic for the ``search`` MCP tool. Paged results (``offset=N`` for next page).
+
+    ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8) is required and has no default: the ``search`` tool
+    reads :func:`nexus.sensitivity.read_sensitivity` once on its own thread and hands the value down, so the
+    retrieval's worker threads never consult the ContextVar. It is part of the page-cache key.
 
     Private render function — NOT ``@mcp.tool()``-decorated. This is what
     plan-runner, ``nx doc cite`` (``_phase5_search``), and every direct
@@ -3365,8 +3418,11 @@ def _search_render(
         from nexus.search_engine import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             apply_file_diversity_cap,
             apply_ranking_boosts,
+            benign_held_degrades as _benign_held_degrades,
             boost_window_size,
+            engine_held_slots as _engine_held_slots,
             flag_displayed_contradictions,
+            restore_held_slots as _restore_held_slots,
             search_cross_corpus,
         )
 
@@ -3420,7 +3476,7 @@ def _search_render(
         allow_key = None if _allow is None else hashlib.sha256("\n".join(sorted(_allow)).encode()).hexdigest()
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
-            topic or "", threshold, lexical, boost_window, allow_key,
+            topic or "", threshold, lexical, boost_window, allow_key, sensitivity,
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
@@ -3433,7 +3489,11 @@ def _search_render(
         #: its lexical rows went back to vector-distance order (RDR-188 Gap 2:
         #: a degrade is surfaced, never only logged).
         rerank_note: str | None = None
-        cached = _page_cache_get(cache_key, need)
+        # RDR-243 review r1 F8: an ``exclude`` read bypasses the page-turn cache, both ways. A page cached before a
+        # document was flagged (the flag can be set from another process) would otherwise be served under
+        # ``exclude`` for up to the TTL. Page turns under ``exclude`` re-run the retrieval.
+        use_page_cache = sensitivity != "exclude"
+        cached = _page_cache_get(cache_key, need) if use_page_cache else None
         #: nexus-ml9vu: the row-preferred model resolver the retrieval builds,
         #: handed to the boosts so the calibration reads the same rows.
         model_of_out: list = []
@@ -3473,6 +3533,7 @@ def _search_render(
                 # page is pool-sensitive (nexus-abdp2), so it keeps the full k.
                 per_collection_k_cap=None if lexical_rerank else _MCP_PER_COLLECTION_K,
                 model_of_out=model_of_out,
+                sensitivity=sensitivity,
             )
             # hybrid scoring + RDR-055 E2 quality boost — parity
             # with the CLI (search_cmd.py), which has applied both since
@@ -3480,6 +3541,9 @@ def _search_render(
             # path ranked by raw vector distance only and never read
             # frecency_score or bib_citation_count at all.
             _cluster_order = [_row_key(r) for r in results] if clustered else None
+            # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): rows the engine held back from a text-exporting reranker keep
+            # the slot it merged them into; read before apply_ranking_boosts re-sorts the list.
+            held_slots = _engine_held_slots(results) if lexical_rerank else []
             results = apply_ranking_boosts(
                 results,
                 hybrid=cfg.get("search", {}).get("hybrid_default", False),
@@ -3496,7 +3560,11 @@ def _search_render(
                 # DEGRADED and others were scored, "scored rows lead" would
                 # sink the degraded family's rows, so every row stays in the
                 # calibrated hybrid_score order apply_ranking_boosts set.
-                degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded"))
+                # An all-sensitive collection's "no rerank performed" degrade is the engine holding every row back,
+                # not a failure: it is not a degrade here (fix r1, review S2) and does not flip the page to the
+                # calibrated order.
+                benign = _benign_held_degrades(rerank_meta, results)
+                degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded") and c not in benign)
                 scored = [r for r in results if "rerank_score" in r.metadata]
                 partial_rerank = bool(degraded) and bool(scored)
                 if partial_rerank:
@@ -3507,7 +3575,17 @@ def _search_render(
                     for r in scored:
                         r.hybrid_score = float(r.metadata["rerank_score"])
                     scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
-                    results = scored + [r for r in results if "rerank_score" not in r.metadata]
+                    held_ids = {id(r) for _slot, r in held_slots}
+                    # Held rows return to the engine's slots (a sensitive top-1 stays top-1).
+                    results = _restore_held_slots(
+                        scored + [r for r in results if "rerank_score" not in r.metadata and id(r) not in held_ids],
+                        held_slots,
+                    )
+                if benign and not degraded:
+                    rerank_note = (
+                        f"{len(benign)} collection(s) not reranked: every candidate row is sensitive and is held "
+                        "back from the reranker"
+                    )
                 if degraded:
                     rerank_note = (
                         f"lexical rerank degraded in {len(degraded)} collection(s) "
@@ -3557,7 +3635,8 @@ def _search_render(
                     results = [r for g in ordered for r in sorted(g, key=_score, reverse=True)]
             # Non-clustered results are now ranked by hybrid_score
             # (apply_ranking_boosts' own sort) rather than raw distance.
-            _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
+            if use_page_cache:
+                _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
         if not results:
             if structured:
                 return _structured_no_results(diag)
@@ -3607,6 +3686,11 @@ def _search_render(
             import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
             structlog.get_logger().debug("relevance_trace_record_failed", exc_info=True)
 
+        # RDR-243 Phase 3 (nexus-rfvyy.8.2): the output posture, over the rows of THIS page after every boost, cap and
+        # slice (what the reader would see). Under withhold a sensitive row keeps its slot in the text render as a stub
+        # and leaves the structured one; under flag it is shown with a badge.
+        posture = _OutputPosture.for_facts([_result_facts(r) for r in page])
+
         # Structured return for plan-runner step output contract.
         # Resolves $stepN.ids / $stepN.collections / $stepN.distances refs.
         # RDR-086 Phase 3.1: chunk_text_hash forwarded per-result so callers
@@ -3631,13 +3715,14 @@ def _search_render(
             # MUST stay a literal ``return {...}`` (not a named
             # intermediate variable) -- _ast_return_keys only recognizes a
             # dict literal directly at the return statement.
+            shown = posture.keep(page)  # RDR-243 Phase 3: a withheld row leaves the structured result (counted below)
             return {
-                "ids": [r.id for r in page],
+                "ids": [r.id for r in shown],
                 # nexus-kkqv7: search_cross_corpus attaches the catalog
                 # tumbler as ``doc_id`` (_attach_doc_ids_from_catalog);
                 # nothing sets ``tumbler``, so this read every row as "".
-                "tumblers": [r.metadata.get("tumbler") or r.metadata.get("doc_id", "") for r in page],
-                "distances": [float(r.distance) for r in page],
+                "tumblers": [r.metadata.get("tumbler") or r.metadata.get("doc_id", "") for r in shown],
+                "distances": [float(r.distance) for r in shown],
                 # The page is ORDERED by hybrid_score, so withholding it left
                 # the consumer reading one number and being served another
                 # (nexus-la5pr). The two answer different questions and both
@@ -3647,24 +3732,25 @@ def _search_render(
                 # so does a lone poor one. A caller wanting a relevance floor
                 # has to read distance; a caller wanting to know why this row
                 # is above that one has to read hybrid_score.
-                "hybrid_scores": [float(r.hybrid_score) for r in page],
+                "hybrid_scores": [float(r.hybrid_score) for r in shown],
                 # Sorted like query()'s: list(set) was nondeterministic and
                 # read as if aligned with ids (zdzm5 F8).
-                "collections": sorted({r.collection for r in page}),
-                "chunk_collections": [r.collection for r in page],
+                "collections": sorted({r.collection for r in shown}),
+                "chunk_collections": [r.collection for r in shown],
                 "chunk_text_hash": [
-                    r.metadata.get("chunk_text_hash", "") for r in page
+                    r.metadata.get("chunk_text_hash", "") for r in shown
                 ],
                 **({"warnings": [w for w in (_failed_collections_note(diag), rerank_note, _chash_allow_note(diag)) if w]}
                    if (_failed_collections_note(diag) or rerank_note or _chash_allow_note(diag)) else {}),
                 **({"chash_allow_dropped": _chash_allow_dropped(diag)} if _chash_allow_dropped(diag) else {}),
+                **posture.structured_keys(),
             }
 
         # nexus-onn7s: the reader instruction leads every text render, and
         # each result carries what is already stored about its age and
         # expiry (context_annotations); the contradiction flag stays on the
         # title line where it has always been.
-        from nexus.context_annotations import READER_INSTRUCTION, hit_annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
+        from nexus.context_annotations import hit_annotation_line, reader_instruction  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
         # Contradiction flag (RDR-057 Phase 3a; search latency, nexus-92q1p follow-up,
         # Sam 2026-10-08). Computed HERE, on `page`: the rows in final display order after
@@ -3674,15 +3760,32 @@ def _search_render(
         # and not for structured output, which carries no flag. One get-embeddings call
         # per collection that holds a mixed-agent pair on this page, none otherwise.
         if cfg.get("search", {}).get("contradiction_check", False):
-            page = flag_displayed_contradictions(page, t3)
+            if posture.withholding:
+                # A withheld row is not compared: the check reads its embedding, and a flag on a row beside it would
+                # say something about what the stub hides. The rows keep their places.
+                _clean = iter(flag_displayed_contradictions(
+                    [r for i, r in enumerate(page) if not posture.withheld(i)], t3,
+                ))
+                page = [r if posture.withheld(i) else next(_clean) for i, r in enumerate(page)]
+            else:
+                page = flag_displayed_contradictions(page, t3)
 
-        lines: list[str] = [READER_INSTRUCTION]
+        lines: list[str] = [reader_instruction(sensitive_shown=posture.shown_sensitive)]
         current_cluster: str | None = None
-        for r in page:
+        _tainted_headers = _headers_naming_withheld_rows(page, posture)
+        for _idx, r in enumerate(page):
+            if posture.withheld(_idx):
+                # RDR-243 Phase 3: the hit's slot holds one line and nothing else of it (no cluster label, title,
+                # path, age note or snippet).
+                lines.append(posture.stub(_idx))
+                continue
             # Emit cluster header when group changes
             # Topic grouping sets _topic_label, Ward clustering
             # _cluster_label; a header prints for either (critique, 29fab0df4).
             cluster_label = r.metadata.get("_cluster_label") or r.metadata.get("_topic_label", "")
+            if cluster_label in _tainted_headers:
+                # RDR-243 Phase 3 (nexus-rfvyy.1): the header is, or may be, derived from a withheld row beside it.
+                cluster_label = _WITHHELD_HEADER
             if clustered and cluster_label and cluster_label != current_cluster:
                 if current_cluster is not None:
                     lines.append("")  # blank separator between clusters
@@ -3712,7 +3815,11 @@ def _search_render(
             # resolved with the display title; the chunk row's are the last writer's.
             note = hit_annotation_line(r.metadata)
             note_line = f"\n  {note}" if note else ""
-            lines.append(f"[{dist}] {label}{flag}{note_line}\n  {snippet}")
+            badge = f" {_SENSITIVE_BADGE}" if posture.flagged(_idx) else ""
+            lines.append(f"[{dist}]{badge} {label}{flag}{note_line}\n  {snippet}")
+
+        if _withheld_line := posture.note_line():
+            lines.append(f"\n{_withheld_line}")
 
         # nexus-vply6 fix round 2, point 2: the SAME note the zero-results
         # path (_no_results_message) already carries, now ALSO reaching the
@@ -3842,6 +3949,7 @@ def search(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
         threshold=threshold, lexical=lexical,
+        sensitivity=_sensitivity.read_sensitivity(),  # RDR-243 Phase 2: read once, here, on the tool's own thread
     )
 
 
@@ -4511,6 +4619,7 @@ def search_metadata_scoped(
         # limit/n_groups) so a group's true top-N isn't truncated away
         # before the merge decides the global top-N. See
         # _grouped_combined_query for the full contract.
+        sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on the tool's thread; the lambda below only closes over it
         rows = _grouped_combined_query(target, lambda group: t3.search_metadata_scoped(
             query, group,
             content_type=content_type or None,
@@ -4519,20 +4628,24 @@ def search_metadata_scoped(
             subtree=(subtree or None),
             where=(where_map or None),
             n_results=limit,
+            sensitivity=sensitivity,
         ), t3=t3)
         # Metadata-scoped is document-level: the function returns one row per
         # matching CHUNK, so a multi-chunk document repeats its tumbler. Collapse
         # to one row per id, keeping the best (nearest) distance, and truncate
         # to `limit` AFTER the merge (see _dedup_by_id_keep_best).
         rows = _dedup_by_id_keep_best(rows, limit)
+        # RDR-243 Phase 3 (nexus-rfvyy.8.2): the output posture over these rows.
+        posture = _OutputPosture.for_facts([_row_facts(r) for r in rows])
         if structured:
             # id IS the document tumbler for metadata-scoped (document-level).
-            ids = [r.get("id", "") for r in rows]
+            shown = posture.keep(rows)  # a withheld row leaves the structured result (counted below)
+            ids = [r.get("id", "") for r in shown]
             return {
                 "ids": ids,
                 "tumblers": ids,
-                "distances": _reported_distances(rows),
-                "collections": [r.get("collection", "") for r in rows],
+                "distances": _reported_distances(shown),
+                "collections": [r.get("collection", "") for r in shown],
                 # contents inline so plan steps can summarize directly via
                 # $stepN.contents WITHOUT store_get_many hydration (which is
                 # chash-keyed and would miss these document tumblers).
@@ -4542,18 +4655,15 @@ def search_metadata_scoped(
                 # PRESENT with value None (vectors-016-combined-query-
                 # retention.xml), which .get(k, "") would pass through as
                 # a literal None rather than coercing to "".
-                "contents": [(r.get("content") or "") for r in rows],
+                "contents": [(r.get("content") or "") for r in shown],
                 # matched-chunk chash per row — the repoint wires this into the
                 # structured chunk_text_hash (RDR-086 chash-citations).
-                "chashes": [r.get("chash", "") for r in rows],
+                "chashes": [r.get("chash", "") for r in shown],
+                **posture.structured_keys(),
             }
         if not rows:
             return "No documents found."
-        return _cap_text_result("\n\n".join(
-            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
-            f"\n{r.get('content') or ''}"
-            for r in rows
-        ), "search_metadata_scoped")
+        return _scoped_rows_text(rows, posture, "search_metadata_scoped")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search_metadata_scoped", e)
 
@@ -4619,36 +4729,37 @@ def search_topic_scoped(
         # against) — classify a collection's VectorServiceError into the
         # SAME named error every other combined-query tool now raises for
         # this engine 422, rather than letting it propagate raw.
+        sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on the tool's thread
         for col in target:
             try:
-                merged.extend(t3.search_topic_scoped(query, topic, col, n_results=limit))
+                merged.extend(t3.search_topic_scoped(query, topic, col, n_results=limit, sensitivity=sensitivity))
             except VectorServiceError as exc:
                 raise classify_vector_service_error(
                     exc, collections=[col], t3=t3,
                 ) from exc
         merged.sort(key=_distance_key)
         merged = merged[:limit]
+        # RDR-243 Phase 3 (nexus-rfvyy.8.2): the output posture over these rows (chunk-level: the id is the chash).
+        posture = _OutputPosture.for_facts([_row_facts(r) for r in merged])
         if structured:
             # Chunk-level: ids are chunk chashes; no document tumbler.
+            shown = posture.keep(merged)  # a withheld row leaves the structured result (counted below)
             return {
-                "ids": [r.get("id", "") for r in merged],
-                "tumblers": ["" for _ in merged],
-                "distances": _reported_distances(merged),
-                "collections": [r.get("collection", "") for r in merged],
+                "ids": [r.get("id", "") for r in shown],
+                "tumblers": ["" for _ in shown],
+                "distances": _reported_distances(shown),
+                "collections": [r.get("collection", "") for r in shown],
                 # contents inline so plan steps summarize via $stepN.contents
                 # without hydration (topic ids are chunk chashes).
                 # RDR-169 Gap 2 remainder (bead nexus-4k1vz): (x or "") not
                 # x.get(..., "") -- see the metadata-scoped tool's identical
                 # comment above.
-                "contents": [(r.get("content") or "") for r in merged],
+                "contents": [(r.get("content") or "") for r in shown],
+                **posture.structured_keys(),
             }
         if not merged:
             return f"No chunks found for topic {topic!r}."
-        return _cap_text_result("\n\n".join(
-            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
-            f"\n{r.get('content') or ''}"
-            for r in merged
-        ), "search_topic_scoped")
+        return _scoped_rows_text(merged, posture, "search_topic_scoped")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search_topic_scoped", e)
 
@@ -4746,6 +4857,7 @@ def search_graph_hop(
         # limit/n_groups) so a group's true top-N isn't truncated away
         # before the merge decides the global top-N. See
         # _grouped_combined_query for the full contract.
+        sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on the tool's thread
         rows = _grouped_combined_query(target, lambda group: t3.search_graph_hop(
             query, seed_list, group,
             link_type=(link_type or None),
@@ -4753,18 +4865,22 @@ def search_graph_hop(
             direction=direction,
             where=(where_dict or None),
             n_results=limit,
+            sensitivity=sensitivity,
         ), t3=t3)
         # Document-level: collapse to one row per tumbler, keeping the best
         # (nearest) distance, and truncate to `limit` AFTER the merge (see
         # _dedup_by_id_keep_best).
         rows = _dedup_by_id_keep_best(rows, limit)
+        # RDR-243 Phase 3 (nexus-rfvyy.8.2): the output posture over these rows.
+        posture = _OutputPosture.for_facts([_row_facts(r) for r in rows])
         if structured:
-            ids = [r.get("id", "") for r in rows]
+            shown = posture.keep(rows)  # a withheld row leaves the structured result (counted below)
+            ids = [r.get("id", "") for r in shown]
             return {
                 "ids": ids,
                 "tumblers": ids,
-                "distances": _reported_distances(rows),
-                "collections": [r.get("collection", "") for r in rows],
+                "distances": _reported_distances(shown),
+                "collections": [r.get("collection", "") for r in shown],
                 # contents inline so plan steps summarize via $stepN.contents WITHOUT
                 # store_get_many hydration (which is chash-keyed and would miss tumblers).
                 # RDR-169 Gap 2 remainder (bead nexus-4k1vz): (x or "") not
@@ -4773,18 +4889,15 @@ def search_graph_hop(
                 # PRESENT with value None (vectors-016-combined-query-
                 # retention.xml), which .get(k, "") would pass through as
                 # a literal None rather than coercing to "".
-                "contents": [(r.get("content") or "") for r in rows],
+                "contents": [(r.get("content") or "") for r in shown],
                 # the matched chunk's chash per row — rzqto wires this into the
                 # structured chunk_text_hash (RDR-086 chash-citations).
-                "chashes": [r.get("chash", "") for r in rows],
+                "chashes": [r.get("chash", "") for r in shown],
+                **posture.structured_keys(),
             }
         if not rows:
             return "No documents found."
-        return _cap_text_result("\n\n".join(
-            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
-            f"\n{r.get('content') or ''}"
-            for r in rows
-        ), "search_graph_hop")
+        return _scoped_rows_text(rows, posture, "search_graph_hop")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search_graph_hop", e)
 
@@ -4905,6 +5018,7 @@ def search_aspect_scoped(
             where_map = parsed or None
         # nexus-3l6gz / nexus-hg745: one combined-query call per embedding-model
         # group, ALL-OR-NOTHING. See _grouped_combined_query for the full contract.
+        sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on the tool's thread
         rows = _grouped_combined_query(target, lambda group: t3.search_aspect_scoped(
             query, group,
             field=(field or None),
@@ -4912,35 +5026,36 @@ def search_aspect_scoped(
             min_confidence=(min_confidence or None),
             where=(where_map or None),
             n_results=limit,
+            sensitivity=sensitivity,
         ), t3=t3)
         # Document-level: the function returns one row per matching CHUNK, so a
         # multi-chunk document repeats its tumbler. Collapse to one row per id,
         # keeping the best (nearest) distance, and truncate to `limit` AFTER the
         # merge (see _dedup_by_id_keep_best).
         rows = _dedup_by_id_keep_best(rows, limit)
+        # RDR-243 Phase 3 (nexus-rfvyy.8.2): the output posture over these rows.
+        posture = _OutputPosture.for_facts([_row_facts(r) for r in rows])
         if structured:
-            ids = [r.get("id", "") for r in rows]
+            shown = posture.keep(rows)  # a withheld row leaves the structured result (counted below)
+            ids = [r.get("id", "") for r in shown]
             return {
                 "ids": ids,
                 "tumblers": ids,
-                "distances": _reported_distances(rows),
-                "collections": [r.get("collection", "") for r in rows],
+                "distances": _reported_distances(shown),
+                "collections": [r.get("collection", "") for r in shown],
                 # RDR-169 Gap 2 remainder (bead nexus-4k1vz): (x or "") not
                 # x.get(..., "") -- the default only fires when the key is
                 # ABSENT, and a reference-only row's "content" key is
                 # PRESENT with value None (vectors-016-combined-query-
                 # retention.xml), which .get(k, "") would pass through as
                 # a literal None rather than coercing to "".
-                "contents": [(r.get("content") or "") for r in rows],
-                "chashes": [r.get("chash", "") for r in rows],
+                "contents": [(r.get("content") or "") for r in shown],
+                "chashes": [r.get("chash", "") for r in shown],
+                **posture.structured_keys(),
             }
         if not rows:
             return "No documents found."
-        return _cap_text_result("\n\n".join(
-            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
-            f"\n{r.get('content') or ''}"
-            for r in rows
-        ), "search_aspect_scoped")
+        return _scoped_rows_text(rows, posture, "search_aspect_scoped")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search_aspect_scoped", e)
 
@@ -5064,6 +5179,9 @@ def query(
       bibliographic quality; the catalog-param path ranks by raw vector
       distance only.
     """
+    # RDR-243 Phase 2 (nexus-rfvyy.7.8): the posture is read once, here, on the tool's own thread, and every read
+    # below (the combined queries, the lambdas their fan-out runs, search_cross_corpus) is handed the value.
+    sensitivity = _sensitivity.read_sensitivity()
     try:
         from nexus.config import get_tuning_config, load_config  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
         from nexus.filters import sanitize_query  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -5256,6 +5374,7 @@ def query(
                             subtree=(subtree or None),
                             where=(where_dict or None),
                             n_results=fetch_n,
+                            sensitivity=sensitivity,
                         ), t3=t3)
                 else:
                     rows = _grouped_combined_query(
@@ -5265,6 +5384,7 @@ def query(
                             depth=depth,
                             where=(where_dict or None),
                             n_results=fetch_n,
+                            sensitivity=sensitivity,
                         ), t3=t3)
             else:
                 # Metadata-scoped path: catalog filters pushed into SQL.
@@ -5276,6 +5396,7 @@ def query(
                         subtree=(subtree or None),
                         where=(where_dict or None),
                         n_results=fetch_n,
+                        sensitivity=sensitivity,
                     ), t3=t3)
 
             # Dedup: one row per tumbler, keeping best (lowest) distance.
@@ -5313,12 +5434,15 @@ def query(
                     )
                 return _no_docs_msg
 
+            # RDR-243 Phase 3 (nexus-rfvyy.8.2): the output posture over this page's rows.
+            posture_svc = _OutputPosture.for_facts([_row_facts(r) for r in rows])
             if structured:
-                tumblers_svc = [r.get("id", "") for r in rows]
+                shown_svc = posture_svc.keep(rows)  # a withheld row leaves the structured result (counted below)
+                tumblers_svc = [r.get("id", "") for r in shown_svc]
                 result: dict = {
                     "ids": tumblers_svc,
                     "tumblers": tumblers_svc,
-                    "distances": _reported_distances(rows),
+                    "distances": _reported_distances(shown_svc),
                     # Present and EMPTY, deliberately. This path reads rows
                     # straight from the service and never runs
                     # apply_hybrid_scoring, so there is no hybrid score to
@@ -5329,19 +5453,20 @@ def query(
                     # a score that was never computed.
                     "hybrid_scores": [],
                     # sorted distinct across rows
-                    "collections": sorted({r.get("collection", "") for r in rows}),
+                    "collections": sorted({r.get("collection", "") for r in shown_svc}),
                     # per-row aligned (RDR-086 / review #7)
-                    "chunk_collections": [r.get("collection", "") for r in rows],
+                    "chunk_collections": [r.get("collection", "") for r in shown_svc],
                     # GH #1524: the other collections the same chunk was found in.
-                    "also_in": [list(r.get("also_in", [])) for r in rows],
-                    "also_in_ids": [list(r.get("also_in_ids", [])) for r in rows],
+                    "also_in": [list(r.get("also_in", [])) for r in shown_svc],
+                    "also_in_ids": [list(r.get("also_in_ids", [])) for r in shown_svc],
                     # HIGH-1: chash per matched chunk row, not a manifest guess
-                    "chunk_text_hash": [r.get("chash", "") for r in rows],
+                    "chunk_text_hash": [r.get("chash", "") for r in shown_svc],
                 }
                 # nexus-descendants-seed-cap: disclose a capped subtree
                 # seed list — never silent (see _MAX_GRAPH_HOP_SEEDS).
                 if seed_scope is not None:
                     result["seed_scope"] = seed_scope
+                result.update(posture_svc.structured_keys())
                 return result
 
             # Text form: re-hydrate per tumbler from the catalog.
@@ -5373,12 +5498,17 @@ def query(
                     f"multiple queries.]"
                 )
             lines_svc.append(f"{routing_note_svc}\n{header_svc}")
-            lines_svc.append(_READER_INSTRUCTION_LINE())
+            lines_svc.append(_READER_INSTRUCTION_LINE(posture_svc.shown_sensitive))
             lines_svc.append("")
             # nexus-6pfgb.12 (RF-10): one batched resolve and one batched manifest read for every row
             # of the page, where each row used to make a round trip of each kind.
             entries_svc, chunk_counts_svc = _catalog_rows_batch(cat, [row.get("id", "") for row in rows])
             for i, row in enumerate(rows, 1):
+                if posture_svc.withheld(i - 1):
+                    # RDR-243 Phase 3: the card is one line; no title, bibliography, snippet or collection.
+                    lines_svc.append(posture_svc.stub(i - 1))
+                    lines_svc.append("")
+                    continue
                 tumbler_str = row.get("id", "")
                 dist = f"{row.get('distance', 0.0):.4f}"
                 # Re-hydrate from catalog
@@ -5394,7 +5524,7 @@ def query(
                 snippet_svc = row.get("content", "")[:300].replace("\n", " ")
                 collection_svc = row.get("collection", "")
 
-                lines_svc.append(f"{i}. [{dist}] {title_svc}")
+                lines_svc.append(f"{i}. [{dist}] {_SENSITIVE_BADGE + ' ' if posture_svc.flagged(i - 1) else ''}{title_svc}")
                 bib_svc: list[str] = []
                 if bib_year_svc:
                     bib_svc.append(str(bib_year_svc))
@@ -5419,6 +5549,8 @@ def query(
                 lines_svc.append(f"   {snippet_svc}")
                 lines_svc.append("")
 
+            if _withheld_svc := posture_svc.note_line():
+                lines_svc.append(_withheld_svc)
             if len(deduped_svc) > limit:
                 lines_svc.append(
                     f"\n--- showing 1-{len(rows)} of {len(deduped_svc)} documents. "
@@ -5473,6 +5605,7 @@ def query(
             # on the managed cloud. The topic BOOST does not depend on
             # cluster_by and still runs.
             cluster_by=None,
+            sensitivity=sensitivity,
         )
         # hybrid scoring + RDR-055 E2 quality boost — parity
         # with the CLI (search_cmd.py). Chunk-level ranking (and, below,
@@ -5516,6 +5649,9 @@ def query(
 
         if structured:
             page = results[:limit]
+            # RDR-243 Phase 3 (nexus-rfvyy.8.2): a withheld hit leaves the structured result, counted below.
+            posture_q = _OutputPosture.for_facts([_result_facts(r) for r in page])
+            page = posture_q.keep(page)
             structured_result: dict = {
                 "ids": [r.id for r in page],
                 # nexus-kkqv7: search_cross_corpus attaches the catalog
@@ -5558,6 +5694,7 @@ def query(
                 # live caller now, kept only so a plain corpus-based query
                 # never sees a NameError.
                 structured_result["graph_scope"] = graph_batch_info
+            structured_result.update(posture_q.structured_keys())
             return structured_result
 
         # Group by document. RDR-108 Phase 4b (nexus-kosc): post-Phase-3 chunks no longer carry
@@ -5571,7 +5708,10 @@ def query(
         from nexus.context_annotations import OWNER_BIB_KEY, OWNER_CHUNK_COUNT_KEY, OWNER_FACTS_KEY  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
-        for r in results:
+        # RDR-243 Phase 3 (nexus-rfvyy.8.2): one catalog read resolves the stub's owner for every sensitive hit that
+        # names none. A document card is sensitive when any hit that contributes to it is.
+        result_marks = _sensitive_marks([_result_facts(r) for r in results])
+        for r, _mark in zip(results, result_marks):
             meta = r.metadata
             doc_key = (
                 meta.get("doc_id")
@@ -5617,6 +5757,7 @@ def query(
                     # that fix's scope, not because it's still dropped.
                     "also_in": list(meta.get("also_in", [])),
                     "also_in_ids": list(meta.get("also_in_ids", [])),
+                    "marks": [],
                 }
             elif r.hybrid_score > docs[doc_key]["hybrid_score"]:
                 # Better matching chunk — update snippet
@@ -5624,11 +5765,16 @@ def query(
                 docs[doc_key]["hybrid_score"] = r.hybrid_score
                 # RDR-169 Phase B fix round 1: see the sibling guard above.
                 docs[doc_key]["snippet"] = (r.content or "")[:300].replace("\n", " ")
+            if _mark is not None:
+                docs[doc_key]["marks"].append(_mark)
 
         # Sort by best match hybrid_score (), limit
         all_docs = sorted(docs.values(), key=lambda d: d["hybrid_score"], reverse=True)
         sorted_docs = all_docs[:limit]
         total = len(all_docs)
+        posture_q = _OutputPosture.of(
+            [_first_sensitive_owner(d["marks"]) if d["marks"] else None for d in sorted_docs],
+        )
 
         header = f"Found {len(sorted_docs)} documents (from {len(results)} chunks across {len(target)} collections)"
         lines: list[str] = []
@@ -5645,9 +5791,14 @@ def query(
                 f"Narrow `subtree` or split into multiple queries.]"
             )
         lines.append(f"{routing_note}\n{header}" if routing_note else header)
-        lines.append(_READER_INSTRUCTION_LINE())
+        lines.append(_READER_INSTRUCTION_LINE(posture_q.shown_sensitive))
         lines.append("")
         for i, d in enumerate(sorted_docs, 1):
+            if posture_q.withheld(i - 1):
+                # RDR-243 Phase 3: the card is one line; no title, bibliography, collection or snippet.
+                lines.append(posture_q.stub(i - 1))
+                lines.append("")
+                continue
             # `sorted_docs` is ordered by hybrid_score (see the sort above),
             # and both numbers were already sitting in this dict -- one
             # printed, one discarded. `d=` is the raw vector distance
@@ -5655,7 +5806,7 @@ def query(
             # (relative to this result window, higher is better). nexus-la5pr.
             dist = f"d={d['distance']:.4f} s={d['hybrid_score']:.3f}"
             title = d["title"][:70]
-            header_parts = [f"[{dist}] {title}"]
+            header_parts = [f"[{dist}] {_SENSITIVE_BADGE + ' ' if posture_q.flagged(i - 1) else ''}{title}"]
             # Bibliographic metadata
             bib_parts: list[str] = []
             if d["bib_year"]:
@@ -5688,6 +5839,8 @@ def query(
             lines.append(f"   {d['snippet']}")
             lines.append("")
 
+        if _withheld_q := posture_q.note_line():
+            lines.append(_withheld_q)
         if total > limit:
             lines.append(f"\n--- showing 1-{len(sorted_docs)} of {total} documents. Results are capped at limit={limit}.")
 
@@ -5741,11 +5894,169 @@ def _catalog_rows_batch(cat: Any, tumblers: list[str]) -> tuple[dict[str, Any], 
     return entries, counts
 
 
-def _READER_INSTRUCTION_LINE() -> str:  # noqa: N802 — reads as the constant it wraps
-    """nexus-onn7s: the response-level reader instruction for ``query``."""
-    from nexus.context_annotations import READER_INSTRUCTION  # noqa: PLC0415 — deferred; keeps core's import surface flat
+def _READER_INSTRUCTION_LINE(sensitive_shown: bool = False) -> str:  # noqa: N802 — reads as the constant it wraps
+    """nexus-onn7s: the response-level reader instruction for ``query``. *sensitive_shown* (RDR-243 Phase 3,
+    nexus-rfvyy.8.2) joins the sensitivity clause, and only then; otherwise the text is the constant, unchanged."""
+    from nexus.context_annotations import reader_instruction  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
-    return READER_INSTRUCTION
+    return reader_instruction(sensitive_shown=sensitive_shown)
+
+
+# ── RDR-243 Phase 3 (nexus-rfvyy.8.2): the MCP output posture ────────────────────────────────────────────────
+#
+# Every MCP read tool hands what it prints to the session model. A hit the engine flags ``sensitive`` is, by
+# default, replaced by ONE line (``[sensitive] <tumbler>: content withheld``) and counted; ``sensitivity.mcp_output:
+# flag`` shows it with a badge and the reader clause instead. The decision is the config key's alone (read from the
+# global config, fail-closed; nexus.sensitive_output) and never a tool argument. The rendering pieces live in
+# nexus.sensitive_output so the CLI and the catalog surfaces print a sensitive hit the same way.
+
+#: One hit's facts: ``(engine says sensitive or an owner is named, sensitive owners already known, chash)``.
+_HitFacts = tuple[bool, tuple[str, ...], str]
+
+_CHASH_SHAPE = re.compile(r"[0-9a-f]{64}")
+
+
+def _result_facts(r: Any) -> _HitFacts:
+    """:data:`_HitFacts` of a ``SearchResult``: its metadata carries the engine's ``sensitive`` and the
+    ``sensitive_owners`` search attached from the chash-positions route."""
+    meta = r.metadata or {}
+    sensitive, owners = _hit_facts(meta)
+    chash = meta.get("chunk_text_hash") or (r.id if _CHASH_SHAPE.fullmatch(str(r.id)) else "")
+    return sensitive, owners, str(chash)
+
+
+def _row_facts(row: dict) -> _HitFacts:
+    """:data:`_HitFacts` of a raw engine row (the combined-query tools, a store-get entry)."""
+    sensitive, owners = _hit_facts(row)
+    chash = row.get("chash") or (row.get("id") if _CHASH_SHAPE.fullmatch(str(row.get("id", ""))) else "")
+    return sensitive, owners, str(chash or "")
+
+
+def _sensitive_marks(facts: list[_HitFacts]) -> list[str | None]:
+    """Per hit: ``None`` for a clean one, else the tumbler its stub line names (``""`` when none resolves).
+
+    A sensitive hit whose owners search did not attach (the manifest path, a raw engine row) is resolved in ONE
+    catalog read for the whole page. The read is best effort: a catalog that cannot answer leaves the tumbler
+    out, which the stub allows; it never un-flags the hit."""
+    need = sorted({chash for sensitive, owners, chash in facts if sensitive and not owners and chash})
+    resolved: dict[str, list[str]] = {}
+    if need:
+        try:
+            from nexus import doc_sensitivity  # noqa: PLC0415 — deferred for startup cost, as the other sensitivity readers
+
+            resolved = doc_sensitivity.flagged_owners_of_chashes(need)
+        except Exception as exc:  # noqa: BLE001 — the stub names no tumbler when the catalog cannot answer; the hit stays withheld
+            _log.info("sensitive_owner_lookup_failed", chashes=len(need), error=f"{type(exc).__name__}: {exc}"[:200])
+    return [
+        _first_sensitive_owner(owners or resolved.get(chash, ())) if sensitive else None
+        for sensitive, owners, chash in facts
+    ]
+
+
+@dataclasses.dataclass(frozen=True)
+class _OutputPosture:
+    """What a read tool does with each hit of one page: ``marks[i]`` is ``None`` for a clean hit, else the tumbler
+    for its stub (``""`` when none resolves). ``withholding`` is the config's decision, taken only when the page
+    holds a sensitive hit, so a clean page never reads the config and renders as it always did."""
+
+    marks: tuple[str | None, ...]
+    withholding: bool
+
+    @classmethod
+    def of(cls, marks: list[str | None]) -> _OutputPosture:
+        tup = tuple(marks)
+        return cls(tup, any(m is not None for m in tup) and _mcp_output_posture() == "withhold")
+
+    @classmethod
+    def for_facts(cls, facts: list[_HitFacts]) -> _OutputPosture:
+        return cls.of(_sensitive_marks(facts))
+
+    def withheld(self, i: int) -> bool:
+        return self.withholding and self.marks[i] is not None
+
+    def flagged(self, i: int) -> bool:
+        """Hit *i* is shown with its content and a badge (``flag``)."""
+        return not self.withholding and self.marks[i] is not None
+
+    @property
+    def count(self) -> int:
+        return sum(1 for i in range(len(self.marks)) if self.withheld(i))
+
+    @property
+    def shown_sensitive(self) -> bool:
+        """A sensitive hit is shown with its content: the reader clause applies."""
+        return not self.withholding and any(m is not None for m in self.marks)
+
+    def stub(self, i: int) -> str:
+        return _stub_line(self.marks[i] or "")
+
+    def note_line(self) -> str:
+        """The sentence that states how many hits were withheld, or ``""`` when none was."""
+        return f"[{_withheld_note(self.count)}]" if self.count else ""
+
+    def keep(self, items: list) -> list:
+        """*items* (aligned with the marks) without the withheld ones."""
+        return [x for i, x in enumerate(items) if not self.withheld(i)] if self.withholding else items
+
+    def structured_keys(self) -> dict:
+        """The additive keys a structured result carries: the count under withhold, a per-hit flag under ``flag``.
+        Empty for a clean page, so a clean page's shape is what it was."""
+        if self.withholding:
+            return {"sensitive_withheld": self.count}
+        if any(m is not None for m in self.marks):
+            return {"sensitive": [m is not None for m in self.marks]}
+        return {}
+
+
+#: What a cluster header reads when its label is, or may be, derived from a withheld row.
+_WITHHELD_HEADER = "label withheld"
+
+
+def _headers_naming_withheld_rows(page: list, posture: _OutputPosture) -> frozenset[str]:
+    """The cluster-header labels a text render must not print because a withheld row names, or may name, them.
+
+    A Ward cluster (``_cluster_label``) is labelled by its best member's catalog title, path or id, so the label
+    that equals a withheld row's own is that title. A topic label (``_topic_label``) comes from the taxonomy, built
+    from the topic's members: until topic terms leave sensitive members out, a topic with a withheld row on the
+    page is treated as derived from it. Empty unless the posture is withholding."""
+    if not posture.withholding:
+        return frozenset()
+    tainted: set[str] = set()
+    for i, r in enumerate(page):
+        if not posture.withheld(i):
+            continue
+        meta = r.metadata or {}
+        derived = meta.get("_display_title") or meta.get("_display_path") or r.id
+        if meta.get("_cluster_label") and meta["_cluster_label"] == derived:
+            tainted.add(derived)
+        if meta.get("_topic_label") and not meta.get("_cluster_label"):
+            tainted.add(meta["_topic_label"])
+    return frozenset(tainted)
+
+
+def _sensitive_reader_clause() -> str:
+    from nexus.context_annotations import SENSITIVE_READER_CLAUSE  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+    return SENSITIVE_READER_CLAUSE
+
+
+def _scoped_rows_text(rows: list[dict], posture: _OutputPosture, tool: str) -> str:
+    """The text render shared by the four combined-query tools: one block per row, a withheld row as its stub."""
+    blocks: list[str] = []
+    for i, r in enumerate(rows):
+        if posture.withheld(i):
+            blocks.append(posture.stub(i))
+            continue
+        badge = f" {_SENSITIVE_BADGE}" if posture.flagged(i) else ""
+        blocks.append(
+            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f}){badge}"
+            f"\n{r.get('content') or ''}"
+        )
+    if posture.shown_sensitive:
+        blocks.insert(0, _sensitive_reader_clause())
+    if note := posture.note_line():
+        blocks.append(note)
+    return _cap_text_result("\n\n".join(blocks), tool)
 
 
 def _annotation_line_for_doc(d: dict) -> str:
@@ -5853,7 +6164,7 @@ def store_put(
         ),
     )] = "",
     session: Annotated[str, Field(
-        description="Optional explicit session_id override. Falls back to the NX_SESSION_ID env var.",
+        description="Deprecated: accepted and ignored. A write stores no session id.",
     )] = "",
     entity_key: Annotated[str, Field(
         description=(
@@ -6176,6 +6487,7 @@ def store_get(
         if not doc_id:
             return _fail("Error: doc_id is required")
         t3 = _get_t3()
+        sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2 (nexus-rfvyy.7.8): once, on the tool's thread
         # nexus-mgqs8: the bare name spans every knowledge collection; any
         # other name is one collection and behaves exactly as before.
         scope = _read_scope(t3, collection)
@@ -6189,7 +6501,7 @@ def store_get(
         also_titled: list[str] = []  # nexus-xkc4n: the other collections holding a title an exact name narrowed
         if looks_like_hash or len(scope) == 1:
             for candidate in scope:
-                entry = t3.get_by_id(candidate, doc_id)
+                entry = t3.get_by_id(candidate, doc_id, sensitivity=sensitivity)
                 if entry is not None:
                     col_name = candidate
                     break
@@ -6214,11 +6526,11 @@ def store_get(
                 col_name, ids = matches[0]
                 # nexus-spujb: every chunk of a split note carries its title,
                 # so several ids can be ONE note rather than an ambiguity.
-                split = split_note_text(t3, col_name, ids) if len(ids) > 1 else None
+                split = split_note_text(t3, col_name, ids, sensitivity=sensitivity) if len(ids) > 1 else None
                 if split is not None:
-                    entry = t3.get_by_id(col_name, split[0])
+                    entry = t3.get_by_id(col_name, split[0], sensitivity=sensitivity)
                 elif len(ids) == 1:
-                    entry = t3.get_by_id(col_name, ids[0])
+                    entry = t3.get_by_id(col_name, ids[0], sensitivity=sensitivity)
                 else:
                     return (
                         f"Multiple documents with title {doc_id!r} in {col_name}: "
@@ -6237,11 +6549,11 @@ def store_get(
                 found = named  # nexus-xkc4n, as for the chunk-title matches above
             if len(found) == 1 and len(found[0][1]) == 1:
                 col_name, (chashes,) = found[0]
-                entry = t3.get_by_id(col_name, chashes[0])
+                entry = t3.get_by_id(col_name, chashes[0], sensitivity=sensitivity)
                 if entry is not None and len(chashes) > 1:
-                    split = split_note_text(t3, col_name, chashes)
+                    split = split_note_text(t3, col_name, chashes, sensitivity=sensitivity)
                     if split is not None:
-                        entry = t3.get_by_id(col_name, split[0]) or entry
+                        entry = t3.get_by_id(col_name, split[0], sensitivity=sensitivity) or entry
             elif found:
                 return (
                     f"Title {doc_id!r} names {sum(len(d) for _c, d in found)} documents"
@@ -6262,6 +6574,14 @@ def store_get(
 
         owner_map = live_owner_entries(col_name, [entry["id"]])
         owners = None if owner_map is None else owner_map.get(entry["id"], [])
+        # RDR-243 Phase 3 (nexus-rfvyy.8.2): the output posture. The engine's flag on the row, or a live owner the
+        # catalog flags, makes the note sensitive; withheld, nothing of it (id, collection, title, tags, body) is
+        # printed beyond the stub.
+        # An unreadable catalog (owners None) is sensitive, as in store_list (nexus-rfvyy.8 fix r1).
+        _sens, _sens_owners = _chunk_row_facts(entry.get("sensitive"), owners)
+        posture = _OutputPosture.for_facts([(_sens, _sens_owners, str(entry["id"]))])
+        if posture.withheld(0):
+            return "\n".join([posture.stub(0), posture.note_line()])
         shown = note_display(
             owners, row=entry, row_title=entry.get("title", ""), row_tags=entry.get("tags", ""),
             row_ttl_days=entry.get("ttl_days"), row_indexed_at=entry.get("indexed_at") or "",
@@ -6276,7 +6596,7 @@ def store_get(
         # nexus-spujb: a note split to its model's token window reads back whole.
         from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
-        split = split_note_text(t3, col_name, [entry["id"]])
+        split = split_note_text(t3, col_name, [entry["id"]], sensitivity=sensitivity)
         # nexus-zdzm5: the ID line names the NOTE (its first chunk, the id
         # store_put reported), not whichever of its chunks the caller passed.
         note_id = split[0] if split is not None else entry["id"]
@@ -6305,6 +6625,8 @@ def store_get(
             lines.append(f"Also titled in: {', '.join(also_titled)}")
         lines.append("")
         lines.append(split[1] if split is not None else entry.get("content", ""))
+        if posture.flagged(0):
+            lines[0:0] = [_SENSITIVE_BADGE, _sensitive_reader_clause()]
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_get", e)
@@ -6635,8 +6957,15 @@ def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
     return out
 
 
-def _batched_get_by_ids(t3: Any, col_name: str, ids: list[str]) -> dict[str, dict]:
+def _batched_get_by_ids(
+    t3: Any, col_name: str, ids: list[str], *, sensitivity: ReadSensitivity,
+) -> dict[str, dict]:
     """Batch-fetch ``ids`` from ``col_name`` in one (paged) round trip.
+
+    ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8) is required and goes to the batch and to the per-id
+    fallback alike. A refused ``exclude`` read (:class:`~nexus.db.http_vector_client.SensitivityExcludeUnavailable`)
+    propagates: it is not a "batch failed, try each id" case, and reading it as one would turn a refusal into a
+    list of missing documents.
 
     Delegates to ``_ServiceCollectionStub.get(ids=...)``, which already
     pages internally at ``QUOTAS.MAX_RECORDS_PER_WRITE`` (300 — smaller
@@ -6683,8 +7012,12 @@ def _batched_get_by_ids(t3: Any, col_name: str, ids: list[str]) -> dict[str, dic
     """
     if not ids:
         return {}
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
     try:
-        result = t3.get_or_create_collection(col_name).get(ids=ids)
+        result = t3.get_or_create_collection(col_name).get(ids=ids, sensitivity=sensitivity)
+    except SensitivityExcludeUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001 — batch-level failure; falls back to per-id retry below, never raises to the caller
         _log.error(
             "store_get_many_batch_fetch_failed",
@@ -6692,11 +7025,12 @@ def _batched_get_by_ids(t3: Any, col_name: str, ids: list[str]) -> dict[str, dic
             id_count=len(ids),
             error=str(exc),
         )
-        return _fallback_get_by_ids_individually(t3, col_name, ids)
+        return _fallback_get_by_ids_individually(t3, col_name, ids, sensitivity=sensitivity)
 
     out_ids = result.get("ids") or []
     docs = result.get("documents") or []
     metas = result.get("metadatas") or []
+    flags = result.get("sensitives")
     id_to_entry: dict[str, dict] = {}
     for i, rid in enumerate(out_ids):
         meta = metas[i] if i < len(metas) else {}
@@ -6706,12 +7040,14 @@ def _batched_get_by_ids(t3: Any, col_name: str, ids: list[str]) -> dict[str, dic
         }
         if isinstance(meta, dict):
             entry.update(meta)
+        if isinstance(flags, list) and i < len(flags):
+            entry["sensitive"] = flags[i] is True  # RDR-243 Phase 3: the engine's flag, set after the metadata
         id_to_entry[rid] = entry
     return id_to_entry
 
 
 def _fallback_get_by_ids_individually(
-    t3: Any, col_name: str, ids: list[str],
+    t3: Any, col_name: str, ids: list[str], *, sensitivity: ReadSensitivity,
 ) -> dict[str, dict]:
     """Per-id retry after a whole-batch fetch failure.
 
@@ -6725,10 +7061,14 @@ def _fallback_get_by_ids_individually(
     the ids end up missing anyway — no worse than the batch path, and the
     per-id calls fail fast (connection-level errors, not slow timeouts).
     """
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
     id_to_entry: dict[str, dict] = {}
     for doc_id in ids:
         try:
-            entry = t3.get_by_id(col_name, doc_id)
+            entry = t3.get_by_id(col_name, doc_id, sensitivity=sensitivity)
+        except SensitivityExcludeUnavailable:
+            raise
         except Exception:  # noqa: BLE001 — per-id graceful degradation, mirrors the pre-fix loop exactly
             entry = None
         if entry is not None:
@@ -6827,6 +7167,53 @@ def store_get_many(
     - Ids are chunk ids, so a note that `store_put` split comes back as its
       separate pieces; use `store_get` for the whole note.
     """
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+    try:
+        return _store_get_many_impl(
+            ids=ids, collections=collections, max_chars_per_doc=max_chars_per_doc, structured=structured,
+            limit_per_source=limit_per_source,
+            sensitivity=_sensitivity.read_sensitivity(),  # RDR-243 Phase 2 (nexus-rfvyy.7.8): once, on the tool's own thread
+            mcp_posture=True,  # RDR-243 Phase 3: this tool prints to the session model
+        )
+    except SensitivityExcludeUnavailable as e:
+        # RDR-243 review r1 F2: the impl lets a refused read propagate to its in-process callers; this MCP
+        # boundary is where it becomes a tool error, and it says what was refused.
+        _log.error("mcp_store_get_many_sensitivity_refused", error=str(e))
+        if structured:
+            return _fail({
+                "contents": [], "missing": [], "sensitivity_refused": True,
+                "error": f"store_get_many refused (SensitivityExcludeUnavailable): {e}",
+            })
+        return _mcp_tool_error("store_get_many", e)
+
+
+def _store_get_many_impl(
+    ids: str | list,
+    collections: str | list = "knowledge",
+    *,
+    max_chars_per_doc: int = 4000,
+    structured: bool = False,
+    limit_per_source: int | list[int] | None = None,
+    sensitivity: ReadSensitivity,
+    mcp_posture: bool = False,
+) -> str | dict:
+    """The body of the ``store_get_many`` tool, with the read posture as an argument.
+
+    ``mcp_posture`` (RDR-243 Phase 3, nexus-rfvyy.8.2) applies the MCP output posture (withhold or flag a row the
+    engine marks sensitive). Only the tool sets it: an in-process caller that holds its own read posture reads the
+    rows as before.
+
+    RDR-243 Phase 2 (nexus-rfvyy.7.9). The tool reads :func:`nexus.sensitivity.read_sensitivity` once on its
+    own thread and calls this; an in-process caller that already holds the posture (the plan runner's
+    hydration, ``nx_tidy``'s prefetch) calls it directly, so it never goes through the tool function and the
+    model-facing schema never grows a ``sensitivity`` parameter. ``sensitivity`` has no default.
+
+    A refused ``exclude`` read (:class:`~nexus.db.http_vector_client.SensitivityExcludeUnavailable`) PROPAGATES
+    (RDR-243 review r1 F2). Turning it into ``{"contents": [], "error": ...}`` made the plan runner treat a read it
+    was refused as zero evidence and answer "no evidence". The ``store_get_many`` tool is the boundary that renders it."""
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
     try:
         # Detect parallel-stream form: ids is a non-empty list of lists.
         parallel_form = (
@@ -7002,7 +7389,7 @@ def store_get_many(
                 break
             for col_name, idxs in idxs_by_collection.items():
                 batch_ids = _unique_preserve_order(id_list[idx] for idx in idxs)
-                id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
+                id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids, sensitivity=sensitivity)
                 for idx in idxs:
                     found = id_to_entry.get(id_list[idx])
                     if found is not None:
@@ -7021,10 +7408,18 @@ def store_get_many(
         # unconditionally (not gated on `structured`) so callers cannot
         # observe stale data by mixing modes.
         section_types: list[str] = []
-        for doc_id, entry in zip(id_list, entries):
+        posture = _OutputPosture.for_facts(
+            [_row_facts(e) if e is not None else (False, (), "") for e in entries],
+        ) if mcp_posture else _OutputPosture.of([None] * len(entries))
+        for idx, (doc_id, entry) in enumerate(zip(id_list, entries)):
             if entry is None:
                 missing.append(doc_id)
                 contents.append("")
+                section_types.append("")
+                continue
+            if posture.withheld(idx):
+                # RDR-243 Phase 3: one line stands for the row; nothing of its text, title or owners is printed.
+                contents.append(posture.stub(idx))
                 section_types.append("")
                 continue
 
@@ -7045,7 +7440,7 @@ def store_get_many(
             # nexus-tko2w: the stored value above is the chunk row's, the last writer's; the
             # label is read from the owning documents' manifest rows (only the structured
             # result carries it, so only that mode pays the lookup).
-            found_flags = [entry is not None for entry in entries]
+            found_flags = [entry is not None and not posture.withheld(i) for i, entry in enumerate(entries)]
             notes_on, section_on = _SOURCE_NOTES_ON.get(), _OWNER_SECTION_TYPES_ON.get()
             lookups = _OWNER_LOOKUPS.get()
             # nexus-sx1t0: with both owner reads switched off and no caller capturing the rows, the
@@ -7081,6 +7476,7 @@ def store_get_many(
                 # ``section_types`` keeps its meaning, and "" there is an unstamped chunk when the basis
                 # is "stored" and owners that disagree when it is "ambiguous".
                 "section_type_basis": section_type_basis,
+                **posture.structured_keys(),
             }
 
         # nexus-z4j8d: the human-readable mode of a HYDRATION tool must
@@ -7092,14 +7488,19 @@ def store_get_many(
         # reconstructing a set from `missing` avoids misattribution if
         # id_list carries a duplicate id.
         lines = [f"Hydrated {len(contents) - len(missing)}/{len(id_list)} docs"]
+        if posture.shown_sensitive:
+            lines.append(_sensitive_reader_clause())
         blocks = [
-            f"[{doc_id}]\n{body}"
-            for doc_id, entry, body in zip(id_list, entries, contents)
+            posture.stub(idx) if posture.withheld(idx)
+            else f"[{doc_id}]{' ' + _SENSITIVE_BADGE if posture.flagged(idx) else ''}\n{body}"
+            for idx, (doc_id, entry, body) in enumerate(zip(id_list, entries, contents))
             if entry is not None
         ]
         if blocks:
             lines.append("")
             lines.append("\n\n".join(blocks))
+        if _withheld_many := posture.note_line():
+            lines.append(_withheld_many)
         if missing:
             missing_line = f"Missing: {', '.join(missing[:10])}"
             if len(missing) > 10:
@@ -7113,6 +7514,8 @@ def store_get_many(
         # other text-returning tool in this file instead of relying on the
         # MCP host's silent truncation.
         return _cap_text_result("\n".join(lines), "store_get_many")
+    except SensitivityExcludeUnavailable:
+        raise
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         if structured:
             # Structured callers (plan-runner hydration) get a dict, not a string —
@@ -7224,7 +7627,22 @@ def store_list(
         from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
 
         owner_map = _store_hook.live_owner_entries(col_name, [e.get("id", "") for e in page])
+        # RDR-243 Phase 3 (nexus-rfvyy.1): a sensitive note's title is content. A chunk is sensitive when the row says
+        # so or a live owner the catalog flags holds it (the read store_get does); a withheld chunk's line is the
+        # stub in the same slot, and the page says how many.
+        _page_facts: list[_HitFacts] = []
         for e in page:
+            # An unreadable catalog (owner_map None) is "could not look", not "no owner": every row is withheld, as
+            # the document view treats it (nexus-rfvyy.8 fix r1, review B1).
+            _sens, _owners = _chunk_row_facts(
+                e.get("sensitive"), None if owner_map is None else owner_map.get(e.get("id", ""), []),
+            )
+            _page_facts.append((_sens, _owners, str(e.get("id", ""))))
+        posture = _OutputPosture.for_facts(_page_facts)
+        for _idx, e in enumerate(page):
+            if posture.withheld(_idx):
+                lines.append(f"  {posture.stub(_idx)}")
+                continue
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
             shown = _store_hook.note_display(
                 None if owner_map is None else owner_map.get(doc_id, []),
@@ -7233,7 +7651,12 @@ def store_list(
             )
             title = shown.title[:40]
             tag_str = f"  [{shown.tags}]" if shown.tags else ""
-            lines.append(f"  {doc_id}  {title:<40}  {shown.ttl:<24}  {shown.indexed}{tag_str}")
+            badge = f"  {_SENSITIVE_BADGE}" if posture.flagged(_idx) else ""
+            lines.append(f"  {doc_id}  {title:<40}  {shown.ttl:<24}  {shown.indexed}{tag_str}{badge}")
+        if posture.shown_sensitive:
+            lines.insert(1, _sensitive_reader_clause())
+        if _withheld_line := posture.note_line():
+            lines.append(_withheld_line)
         shown_end = offset + len(page)
         # A full page is the live signal that more rows may follow; the stored
         # total can exceed the live rows and point at an empty page. "Full" is
@@ -7288,7 +7711,15 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
             f"  NOTE: grouped by chunk, not by manifest — {degraded}. "
             "A split note appears as one row per piece."
         )
+    # RDR-243 Phase 3 (nexus-rfvyy.1): a sensitive document's title and handle are content; its row is the stub.
+    # The listing is sorted by title, so a stub left in place would show where its title falls among the others;
+    # the sensitive rows go last (a stable sort keeps the title order within each group).
+    docs = sorted(docs, key=lambda d: d.sensitive)
+    posture = _OutputPosture.of([doc.key if doc.sensitive else None for doc in docs])
     for i, doc in enumerate(docs, 1):
+        if posture.withheld(i - 1):
+            lines.append(f"  {i:3d}. {posture.stub(i - 1)}")
+            continue
         # The full content-hash (RDR-180) is the doc_id that store_get
         # accepts. Surfaced whole so the list -> get flow round-trips; see
         # DocumentListing.handle.
@@ -7296,7 +7727,12 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
         # nexus-6pfgb.13: the document's own index date (the catalog column); a chunk-keyed row with no
         # catalog document shows its chunk row's.
         indexed = (doc.indexed_at or doc.entry.get("indexed_at") or "")[:10]
-        lines.append(f"  {i:3d}. {doc.handle}  {title:<50}  {doc.chunks:>4} chunks  {indexed}")
+        badge = f"  {_SENSITIVE_BADGE}" if posture.flagged(i - 1) else ""
+        lines.append(f"  {i:3d}. {doc.handle}  {title:<50}  {doc.chunks:>4} chunks  {indexed}{badge}")
+    if posture.shown_sensitive:
+        lines.insert(1, _sensitive_reader_clause())
+    if _withheld_line := posture.note_line():
+        lines.append(_withheld_line)
     return _cap_text_result("\n".join(lines), "store_list")
 
 
@@ -8118,7 +8554,7 @@ def plan_save(
             )
         # nexus-jypmj.4: a $stepN.field inside other text or an object is never substituted,
         # so the plan would fail at run time (nexus-jypmj.1.19). Refuse it at the door.
-        from nexus.plans.runner import claimless_verify_reason, find_embedded_step_ref  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.plans.runner import find_embedded_step_ref, operator_arg_reason  # noqa: PLC0415 — deferred import; rare/branch-local path
 
         embedded = find_embedded_step_ref(parsed_plan)
         if embedded is not None:
@@ -8127,7 +8563,7 @@ def plan_save(
                 f"({embedded.reason})."
             )
         # nexus-z1d0l.1.11: a verify step with no claim is refused when the runner reaches it.
-        if (claimless := claimless_verify_reason(parsed_plan)) is not None:
+        if (claimless := operator_arg_reason(parsed_plan)) is not None:
             return _fail(f"Plan not saved: {claimless}.")
         # nexus-0vh80 (Sam, 2026-11-03): a saved plan declares the kind of answer it serves, so it is never
         # unattested. Required like the verb; "unknown" is a legal answer and serves nothing. Checked after the
@@ -9137,13 +9573,14 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         # live, unrelated document that owns this exact chash under a
         # DIFFERENT collection. A collection-scoped existence check first
         # closes that off before any catalog mutation happens.
-        if t3.get_by_id(col_name, doc_id) is None:
+        # RDR-243 Phase 2: existence only, nothing is returned to the model, and a delete must find a sensitive chunk
+        if t3.get_by_id(col_name, doc_id, sensitivity="include") is None:
             # nexus-jald5: the read tools look further than a delete does; say which
             # collection of the read scope holds the id, as nx store delete does.
             # Best effort: a failing probe leaves the plain answer.
             try:
                 holder = next(
-                    (s for s in _read_scope(t3, collection) if s != col_name and t3.get_by_id(s, doc_id) is not None),
+                    (s for s in _read_scope(t3, collection) if s != col_name and t3.get_by_id(s, doc_id, sensitivity="include") is not None),
                     None,
                 )
             except Exception:  # noqa: BLE001 — the hint only improves a not-found answer; it must not replace it
@@ -9224,11 +9661,29 @@ def collection_info(name: str) -> str:
         if count > 0:
             peek = db.list_store(name, limit=5, offset=0)
             if peek:
+                # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): a sample title is a note's title, content to the session
+                # model: a sensitive note (the row's flag, a live owner the catalog flags, or an unreadable catalog)
+                # is the stub, as in store_list.
+                from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
+
+                owner_map = _store_hook.live_owner_entries(name, [e.get("id", "") for e in peek])
+                posture = _OutputPosture.for_facts([
+                    (*_chunk_row_facts(e.get("sensitive"), None if owner_map is None else owner_map.get(e.get("id", ""), [])),
+                     str(e.get("id", "")))
+                    for e in peek
+                ])
                 lines.append("")
+                if posture.shown_sensitive:
+                    lines.append(_sensitive_reader_clause())
                 lines.append("Sample entries:")
-                for e in peek:
+                for i, e in enumerate(peek):
+                    if posture.withheld(i):
+                        lines.append(f"  - {posture.stub(i)}")
+                        continue
                     title = (e.get("title") or "untitled")[:60]
-                    lines.append(f"  - {title}")
+                    lines.append(f"  - {title}" + (f"  {_SENSITIVE_BADGE}" if posture.flagged(i) else ""))
+                if note := posture.note_line():
+                    lines.append(note)
 
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
@@ -10308,7 +10763,10 @@ from a retrieval step; the runner hydrates them and keeps each item's source.
   verify(claim, ids, collections)
       - Tests ONE claim against the retrieved passages. `claim` is the
         assertion to test and is REQUIRED: a verify step with ids and no
-        claim fails the plan, it is never filled in for you.
+        claim fails the plan, it is never filled in for you. Its evidence is
+        `ids` (or `evidence` text, or the output of the operator step right
+        before it, unless that step is a check or verify); a verify step with
+        none of these fails the plan too.
       - Output: {verified, reason, evidence: [same items as check],
         rejected, requires_review, citations}.
 
@@ -11749,7 +12207,7 @@ async def _nx_answer_primary_stream(
     records = lifecycle.reserved_items() if lifecycle is not None else ()
     try:
         cat = _get_catalog()
-        fetch = t3_chunk_fetcher(_get_t3())
+        fetch = t3_chunk_fetcher(_get_t3(), sensitivity=_sensitivity.read_sensitivity())
 
         def _read() -> "PrimaryEvidence":
             # The capability probe is a (cached) HTTP read, so it runs here with the rest of the blocking I/O.
@@ -12324,7 +12782,8 @@ def _nx_answer_planner_request_block(coverage: "RequestCoverage | None") -> str:
 async def _claimed_verify_plan(
     plan_json: str, prompt: str, plan_from: Callable[[str], Awaitable[str]], *, may_retry: bool,
 ) -> str:
-    """*plan_json*, once no verify step in it lacks a claim (nexus-z1d0l.1.11).
+    """*plan_json*, once no operator step in it lacks an author-supplied argument (a verify's claim or evidence, a
+    check's check_instruction; nexus-z1d0l.1.11, nexus-iy2ep) and, after a retry, it holds no embedded step ref.
 
     ``plan_run`` refuses a verify step with no claim when it reaches it, after the steps before it
     are paid for, and the host never invents a claim. So the planner is asked once more with the
@@ -12333,22 +12792,24 @@ async def _claimed_verify_plan(
     reports it as a planner failure, and nothing is searched, answered or grown. The step is never
     dropped, because the answer would then pass for a checked one.
     """
-    from nexus.plans.runner import claimless_verify_reason, find_claimless_verify  # noqa: PLC0415 — deferred; runner is heavy and this is the planner path
+    from nexus.plans.runner import find_embedded_step_ref, find_operator_arg_defect, operator_arg_reason  # noqa: PLC0415 — deferred; runner is heavy and this is the planner path
 
     import structlog as _slog4  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
 
     log = _slog4.get_logger()
-    index = find_claimless_verify(plan_json)
-    if index is None:
+    defect = find_operator_arg_defect(plan_json)
+    if defect is None:
         return plan_json
+    index, why = defect
     if may_retry:
         log.warning("nx_answer_planner_verify_claim_retry", step=index + 1)
         try:
             retried = await plan_from(
                 prompt
-                + f"\n\nYour previous plan cannot run: step {index + 1} is a verify step with no "
-                + "claim. The host never invents a claim. Give every verify step a claim (text, or a "
-                + "reference such as $stepN.text), or leave verify out."
+                + f"\n\nYour previous plan cannot run: {why}. The host never invents an operator's "
+                + "claim, evidence or instruction. Give every verify step a claim and its evidence (ids, or "
+                + "evidence text), and every check step a check_instruction (text, or a reference such as "
+                + "$stepN.text), or leave the step out."
             )
         except Exception as exc:  # noqa: BLE001 — the retry is best-effort; the first plan's refusal below stands
             log.warning(
@@ -12357,7 +12818,10 @@ async def _claimed_verify_plan(
             )
         else:
             plan_json = retried
-    reason = claimless_verify_reason(plan_json)
+    reason = operator_arg_reason(plan_json)
+    if reason is None and (embedded := find_embedded_step_ref(plan_json)) is not None:
+        # nexus-iy2ep: the retried plan is a new plan, so it is scanned for the embedded-ref defect too.
+        reason = f"step reference {embedded.ref!r}: {embedded.reason}"
     if reason is None:
         return plan_json
     raise ValueError(f"planner plan cannot run: {reason}; no step was run")
@@ -12569,7 +13033,9 @@ async def _nx_answer_plan_miss(
         for step in steps:
             raw_tool = step.get("tool", "")
             bare = raw_tool.rsplit("__", 1)[-1] if raw_tool.startswith("mcp__") else raw_tool
-            bare = _TOOL_ALIASES.get(bare.lower(), bare)
+            # nexus-iy2ep: a planned "Verify" or "Check" is the operator, not a tool to drop silently (dropping a
+            # verify step would let the answer pass for a checked one); the allowlist is all lower case.
+            bare = _TOOL_ALIASES.get(bare.lower(), bare.lower() if bare.lower() in _ALLOWED_TOOLS else bare)
             if bare not in _ALLOWED_TOOLS:
                 _plog.warning("planner_step_dropped", raw_tool=raw_tool, bare=bare)
                 dropped.append(raw_tool or bare or "?")
@@ -15744,8 +16210,9 @@ async def nx_tidy(
     # nexus-mawqw / Fix A: pre-fetch the entries server-side and inline
     # them. The child claude -p then consolidates LLM-only with NO tools,
     # so it can never trip the post-CC-2.1.162 MCP-server-approval gate.
-    entries_block, n_entries, prefetch_reason, genuine_miss = _tidy_prefetch(
-        topic, collection,
+    sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on this thread; the prefetch takes it as an argument
+    entries_block, n_entries, prefetch_reason, genuine_miss, withheld = _tidy_prefetch(
+        topic, collection, sensitivity=sensitivity,
     )
     capped = n_entries >= _TIDY_MAX_ENTRIES
     if capped:
@@ -15809,6 +16276,12 @@ async def nx_tidy(
             f"\nNote: retrieval was capped at {_TIDY_MAX_ENTRIES} entries; "
             "the collection may contain additional matching content not seen "
             "by this consolidation pass."
+        )
+    if sensitivity == "exclude":
+        # RDR-243 Phase 2 (census row 15): the summary says what was kept from the model. The engine's own filter
+        # runs first and is not counted; this is the catalog check's count of matched entries it removed.
+        lines.append(
+            f"\nSensitive entries withheld from this pass: {withheld} (counted after the engine's own filter)."
         )
     if prefetch_reason and not genuine_miss:
         # Belt and braces: the child is instructed to report this, but the
@@ -16103,6 +16576,12 @@ async def setup(
 ) -> str:
     import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
+    # nexus-l3dkq: a cancel abandons the await, not the thread, and that is the stated limit. The
+    # thread does local reads (setup_script, usable_service and its loopback /health probe) and at
+    # most one setup_tools._call_script call, bounded by run_bounded at _SCRIPT_TIMEOUT_SECONDS. A
+    # cancel before that `start` call returns does not stop the install from starting: the install
+    # runs in the setup script's detached process ("the work continues in the background"), which
+    # setup_status reads, and the script's own lock makes a second setup call safe.
     try:
         return await asyncio.to_thread(_setup_tools.run_setup, mode, autostart, slim)
     except _setup_tools.SetupError as exc:
@@ -16349,6 +16828,11 @@ def main():
     from nexus.mcp._stale_host import install_stale_host_hook  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
 
     install_stale_host_hook(mcp)
+    # RDR-243 Phase 2 Step 2.5 (nexus-rfvyy.7.10): a server a dispatched `claude -p` child launched carries
+    # NX_SENSITIVITY_POSTURE=llm_bound; every tools/call then runs inside the sensitivity scope. A no-op otherwise.
+    from nexus.mcp._sensitivity_posture import install_sensitivity_posture_hook  # noqa: PLC0415 — entry-point only
+
+    install_sensitivity_posture_hook(mcp)
     # RDR-144 P5b: surface the embedder advisory to plugin/Desktop/Cowork-first
     # users who never run the Claude Code SessionStart hook. The MCP server
     # cannot print (stdout is JSON-RPC), so the notice rides the server

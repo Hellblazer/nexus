@@ -22,7 +22,7 @@ from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
 from tests.upgrade.conftest import InMemoryCompletionLedger
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung
 from nexus.upgrade_ladder.registry import RUNG_MANIFEST_SECTION_LABELS, RUNG_ORDER, default_registry
-from nexus.upgrade_ladder.rungs.manifest_section_labels import FILLABLE_PROBE_LIMIT, ManifestSectionLabelsRung
+from nexus.upgrade_ladder.rungs.manifest_section_labels import FILLABLE_PROBE_LIMIT, TITLE_RULE_MARK, ManifestSectionLabelsRung
 
 COLL = "docs__art__bge-base-en-v15-768__v1"
 OTHER = "docs__other__bge-base-en-v15-768__v1"
@@ -89,6 +89,8 @@ class World:
         self.owner_reads = 0
         self.position_reads = 0
         self.before_second_manifest_read = None  # called with self, once, before the re-read
+        self.before_append = None  # called with self, once, between the rung's re-read and the engine's compare
+        self.raise_after_append: Exception | None = None  # raised once the engine has written and restamped (an old engine, seen by the client's ack echo)
         self._manifest_reads = 0
         self.tombstoned: list[dict] = []  # manifest rows of deleted documents (nexus-6pfgb.58)
         self.tombstoned_reported = True  # False: an engine before include_tombstoned, which sends no list
@@ -166,16 +168,42 @@ class World:
         return rows, gone
 
     # writer ---------------------------------------------------------------
+    def _guard(self, d: str, new: dict, refused: list) -> bool:
+        """The engine's per-row ``expected`` compare (nexus-tj0wu): True when the row may be written."""
+        expected = new.get("expected")
+        if expected is None:
+            return True
+        old = next((r for r in self.manifests[d] if r.position == new["position"]), None)
+        if old is None:
+            reason = "position_absent"
+        elif old.chash != expected["chash"]:
+            reason = "chash_changed"
+        elif any(k in expected and getattr(old, k) != expected[k]
+                 for k in ("section_title", "section_type", "page_number", "labels_written")):
+            reason = "labels_changed"
+        elif any(k in expected and getattr(old, k) != expected[k]
+                 for k in ()):
+            reason = "span_changed"
+        else:
+            return True
+        refused.append({"doc_id": d, "position": new["position"], "reason": reason})
+        return False
+
     def append_manifest_many(self, docs, *, collection, **kw) -> dict:
         assert not kw, kw
         self.appends.append((collection, [(d, [dict(r) for r in rows]) for d, rows in docs]))
-        failed = []
+        if self.before_append:
+            hook, self.before_append = self.before_append, None
+            hook(self)
+        failed, refused = [], []
         for d, rows in docs:
             if d in self.fail_doc_ids:
                 failed.append(d)
                 continue
-            rows_by_pos = {r.position: i for i, r in enumerate(self.manifests[d])}
             for new in rows:
+                if not self._guard(d, new, refused):
+                    continue
+                rows_by_pos = {r.position: i for i, r in enumerate(self.manifests[d])}
                 i = rows_by_pos[new["position"]]
                 self.manifests[d][i] = replace(
                     self.manifests[d][i], chash=new["chash"], section_title=new["section_title"],
@@ -183,7 +211,10 @@ class World:
                     labels_written=new["labels_written"])
             if self.restamp_on_append is not None:
                 self.docs[d].indexed_at = self.restamp_on_append
-        return {"ok": True, "docs": len(docs), "failed_doc_ids": failed}
+        if self.raise_after_append is not None:
+            raise self.raise_after_append
+        return {"ok": True, "docs": len(docs), "failed_doc_ids": failed,
+                "expected_refused": refused, "expected_refused_count": len(refused)}
 
     def update(self, tumbler: str, **fields) -> None:
         self.single_updates += 1
@@ -277,7 +308,11 @@ def test_a_single_row_chash_takes_the_chunk_rows_label_and_is_marked_written(wor
     assert collection == COLL
     assert docs == [("1.1.1", [{
         "chash": h(1), "position": 0, "section_title": "Refs", "section_type": "references",
-        "page_number": 9, "labels_written": True}])], "chash, position, the three labels and the flag; no span keys, so the engine keeps the stored span"
+        "page_number": 9, "labels_written": True,
+        "expected": {"chash": h(1), "section_title": None, "section_type": None, "page_number": None,
+                     "labels_written": False}}])], (
+        "chash, position, the three labels and the flag, and the values just read for the engine to compare "
+        "(nexus-tj0wu); no span keys, so the engine keeps the stored span")
     assert rung.verify() is True
     assert "1 filled this run" in rung.record_detail()
 
@@ -472,6 +507,24 @@ def test_the_documents_indexed_at_is_restored_after_the_write_so_a_second_pass_c
     assert second.verify() is True
 
 
+def test_a_write_that_raises_after_the_engine_committed_it_still_restores_the_stamps(world: World) -> None:
+    """NEW client + OLD engine (nexus-tj0wu review): the old engine ignores ``expected``, writes the rows and
+    restamps ``indexed_at``; the client's ack echo then raises EngineOlderThanClientError. The raise comes
+    AFTER the commit, so the documents of the request in flight were restamped and must be restored, as the
+    span rung does with its ``in_flight``."""
+    from nexus.errors import EngineOlderThanClientError
+
+    _one_fillable_and_one_newer_row(world)
+    world.restamp_on_append = RUN_TIME
+    world.raise_after_append = EngineOlderThanClientError("append_manifest_many answered without expected_refused_count")
+
+    with pytest.raises(EngineOlderThanClientError):
+        world.rung().converge(Report())
+
+    assert world.docs["1.1.1"].indexed_at == DOC_STAMP, "the stamp the old engine bumped is written back"
+    assert world.updates == [("1.1.1", {"indexed_at": DOC_STAMP})]
+
+
 def test_a_document_that_was_not_written_is_not_restamped(world: World) -> None:
     _one_fillable_and_one_newer_row(world)
     world.fail_doc_ids = {"1.1.1"}
@@ -607,11 +660,64 @@ def test_a_completion_recorded_by_an_earlier_package_version_still_short_circuit
     from nexus.upgrade_ladder.completion import CompletionRecord
 
     _one_fillable_and_one_newer_row(world)
-    old = CompletionRecord(rung_name=RUNG_MANIFEST_SECTION_LABELS, verified_at="t0", package_version="1.0.0")
+    from nexus.upgrade_ladder.rungs.manifest_section_labels import TITLE_RULE_MARK
+
+    old = CompletionRecord(
+        rung_name=RUNG_MANIFEST_SECTION_LABELS, verified_at="t0", package_version="1.0.0",
+        detail=f"0 filled this run; ...; {TITLE_RULE_MARK}",
+    )
 
     status = world.rung(record_fn=lambda: old).detect()
 
     assert (status.applicable, status.converged) == (True, True) and world.listings == 0
+
+
+def _pre_rule_record():
+    from nexus.upgrade_ladder.completion import CompletionRecord
+
+    return CompletionRecord(
+        rung_name=RUNG_MANIFEST_SECTION_LABELS, verified_at="t0", package_version="7.97.0",
+        detail="12 filled this run; 47 document(s) ...",
+    )
+
+
+def test_a_record_written_under_the_old_title_rule_is_pending_once_without_asking_the_engine(world: World) -> None:
+    """nexus-l8o33: the old rule refused every page of a document an ETL import titled after one of its chunks
+    (gate-xr789, 111553 rows), and the record it wrote short-circuited every later detect. A record without
+    TITLE_RULE_MARK reports pending, and the engine's count (an older engine counts by the old rule) is not read."""
+    _one_fillable_and_one_newer_row(world)
+
+    status = world.rung(record_fn=_pre_rule_record).detect()
+
+    assert (status.applicable, status.converged) == (True, False)
+    assert "title rule" in status.pending_detail
+    assert world.engine_reads() == (0, 0, 0, 0, 0)
+
+
+def test_a_pre_rule_record_is_not_scanned_unattended_on_a_managed_service(world: World) -> None:
+    _one_fillable_and_one_newer_row(world)
+    with _bound_auto():
+        status = world.rung(managed_fn=lambda: True, record_fn=_pre_rule_record).detect()
+    assert (status.applicable, status.converged) == (False, False) and world.listings == 0
+
+
+def test_the_walk_over_a_pre_rule_record_rescans_and_rewrites_it_with_the_mark(world: World) -> None:
+    from nexus.upgrade_ladder.rungs.manifest_section_labels import TITLE_RULE_MARK
+
+    _one_fillable_and_one_newer_row(world)
+    ledger = InMemoryCompletionLedger()
+    old = _pre_rule_record()
+    ledger.record_verified(old.rung_name, package_version=old.package_version, detail=old.detail)
+    rung = world.rung(record_fn=lambda: ledger.completions().get(ManifestSectionLabelsRung.name))
+    runner = LadderRunner(LadderRegistry((rung,)), ledger, package_version_fn=lambda: "9.9.9")
+
+    first = runner.run()
+
+    assert [r.outcome for r in first.runs] == [RungOutcome.RECORDED]
+    assert TITLE_RULE_MARK in ledger.completions()[RUNG_MANIFEST_SECTION_LABELS].detail
+    listings = world.listings
+    assert [r.outcome for r in runner.run().runs] == [RungOutcome.ALREADY_RECORDED]
+    assert world.listings == listings, "the rewritten record short-circuits: no second rescan"
 
 
 def test_an_unreadable_ledger_is_not_a_record_and_the_scan_runs(world: World) -> None:
@@ -800,7 +906,7 @@ class _MemoryNote:
     def __init__(self) -> None:
         self.note: dict | None = None
 
-    def load(self):
+    def load(self, *, strict: bool = False):
         return self.note
 
     def save(self, note) -> None:
@@ -996,7 +1102,7 @@ def test_a_bound_deadline_alone_is_a_clock_not_the_unattended_signal(world: Worl
 def test_auto_on_a_managed_service_with_a_recorded_completion_is_still_converged(world: World) -> None:
     _one_fillable_and_one_newer_row(world)
     with _bound_auto():
-        status = world.rung(managed_fn=lambda: True, record_fn=lambda: object()).detect()
+        status = world.rung(managed_fn=lambda: True, record_fn=lambda: SimpleNamespace(detail=TITLE_RULE_MARK)).detect()
     assert (status.applicable, status.converged) == (True, True)
     assert world.engine_reads() == (0, 0, 0, 0, 0), "the record answers before the engine is asked"
 
@@ -1224,7 +1330,62 @@ def test_a_chash_also_held_by_a_tombstoned_document_is_not_filled(world: World) 
     assert "1 also held by a deleted document" in result.detail
     assert [a[1] for a in world.appends] == [[("1.1.2", [{
         "chash": h(2), "position": 0, "section_title": "Refs", "section_type": "references",
-        "page_number": 9, "labels_written": True}])]]
+        "page_number": 9, "labels_written": True,
+        "expected": {"chash": h(2), "section_title": None, "section_type": None, "page_number": None,
+                     "labels_written": False}}])]]
+
+
+# ── nexus-tj0wu: a write racing the rung is refused by the engine, not reverted ────────────────────────────────────
+
+
+def test_a_reindex_between_the_reread_and_the_post_is_refused_and_not_reverted(world: World) -> None:
+    """The rung re-reads, then a re-index puts another chunk at the position, then the POST. Without `expected` the
+    upsert writes the read chash and the label back over the re-index."""
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.before_append = lambda w: w.manifests["1.1.1"].__setitem__(
+        0, replace(w.manifests["1.1.1"][0], chash=h(2)))
+    rung = world.rung()
+
+    result = rung.converge(Report())
+
+    assert world.manifests["1.1.1"][0].chash == h(2), "the re-index stands"
+    assert world.labels("1.1.1") == [(0, None, None, None, False)], "no label was written onto the moved position"
+    c = rung._partial
+    assert (c.raced, c.filled) == (1, 0), c.summary()
+    assert rung._filled == 0
+    assert result.outcome is ConvergeOutcome.COMPLETED
+
+
+def test_a_label_written_between_the_reread_and_the_post_is_not_overwritten(world: World) -> None:
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.before_append = lambda w: w.manifests["1.1.1"].__setitem__(
+        0, replace(w.manifests["1.1.1"][0], section_title="Mine", section_type="body", page_number=2, labels_written=True))
+    rung = world.rung()
+
+    rung.converge(Report())
+
+    assert world.labels("1.1.1") == [(0, "Mine", "body", 2, True)], "the concurrent label write stands"
+    assert (rung._partial.raced, rung._partial.filled) == (1, 0)
+
+
+def test_one_raced_row_does_not_stop_its_neighbour_and_only_the_written_row_counts_as_filled(world: World) -> None:
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    world.row("1.1.1", 1, h(2))
+    _labelled(world, h(1))
+    _labelled(world, h(2))
+    world.before_append = lambda w: w.manifests["1.1.1"].__setitem__(
+        0, replace(w.manifests["1.1.1"][0], chash=h(3)))
+    rung = world.rung()
+
+    rung.converge(Report())
+
+    assert world.labels("1.1.1") == [(0, None, None, None, False), (1, "Refs", "references", 9, True)]
+    assert (rung._partial.raced, rung._partial.filled, rung._filled) == (1, 1, 1)
 
 
 def test_a_tombstoned_holder_of_another_chash_does_not_stop_this_fill(world: World) -> None:
@@ -1396,3 +1557,29 @@ def test_the_auto_time_limit_defers_between_batches_and_the_rest_resumes(world: 
     monkeypatch.setattr("nexus.upgrade_ladder.rungs.manifest_section_labels.active_expired", lambda: False)
     assert rung.converge(Report()).outcome is ConvergeOutcome.COMPLETED
     assert all(world.labels(t)[0][-1] for t in world.docs)
+
+
+def test_a_request_that_raises_after_an_earlier_one_wrote_still_restores_the_written_documents_stamp(
+    world: World,
+) -> None:
+    """nexus-l8o33 (review r1): the engine restamps a document's ``indexed_at`` on every manifest write. A later request
+    that raises (a 409 for a superseded collection, a timeout) must not skip the restore of the documents an earlier
+    request already wrote, or their chunk-newer guard stays off for good."""
+    docs = _many_written_documents(world, 2)
+    real, calls = world.append_manifest_many, []
+
+    def second_request_raises(request, *, collection, **kw):
+        calls.append(request)
+        if len(calls) == 2:
+            raise RuntimeError("engine unavailable")
+        return real(request, collection=collection, **kw)
+
+    world.append_manifest_many = second_request_raises  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="engine unavailable"):
+        world.rung(max_rows=1).converge(Report())
+
+    assert len(calls) == 2
+    assert world.docs[docs[0]].indexed_at == DOC_STAMP, "the document the first request wrote has its stamp back"
+    assert (docs[0], {"indexed_at": DOC_STAMP}) in world.updates
+    assert world.docs[docs[1]].indexed_at == DOC_STAMP, "the second document was never written"

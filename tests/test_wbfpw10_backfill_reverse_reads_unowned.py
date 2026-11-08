@@ -45,7 +45,7 @@ def test_reverse_lookup_sees_an_unowned_chunk(t2_service_env):
 
     # Control: a live read cannot see the chunk, so the assertion below is
     # about the physical read and not about a chunk that happens to be live.
-    assert col.get(ids=[chash], include=["metadatas"])["ids"] == []
+    assert col.get(ids=[chash], include=["metadatas"], sensitivity="include")["ids"] == []
 
     hints, raw = _forward_hints_for_chashes(col, [chash])
     assert hints == {chash: "1.2.3"}

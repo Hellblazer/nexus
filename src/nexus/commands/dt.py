@@ -29,7 +29,7 @@ import structlog
 
 import nexus.devonthink as dt_mod
 from nexus.config import DEFAULT_EXTRACTOR, EXTRACTOR_CHOICES, get_pdf_extractor, resolve_extractor
-from nexus.devonthink import DTNotAvailableError, _is_darwin
+from nexus.devonthink import DTNotAvailableError, DtRecord, _is_darwin
 from nexus.sensitive_write import ack_help, resolve_sensitive_collection, sensitive_help, sensitive_write_kwargs
 
 _log = structlog.get_logger(__name__)
@@ -119,8 +119,10 @@ def _resolve_dt_collection(
 
 
 # nexus-i0cwh: DEVONthink's own metadata for a record, read once per run over
-# the DT MCP (fail-soft), used for the catalog row (title/url/year) and for
-# the page-coverage check (pageCount).
+# the DT MCP (fail-soft), used for the catalog row (title/url) and for the
+# page-coverage check (pageCount). No year: DEVONthink's creationDate is the
+# file's or the import's date, not the publication's (nexus-55clh: a 1986
+# paper was stamped 2025), and a wrong year is worse than none.
 _FACTS_CACHE: dict[str, dict | None] = {}
 
 
@@ -136,20 +138,17 @@ def _reset_facts_cache() -> None:
 
 
 def _dt_record_facts(uuid: str) -> dict | None:
-    """``{name, url, year, page_count}`` from ``get_record_properties``, or
+    """``{name, url, page_count}`` from ``get_record_properties``, or
     ``None`` when the DT MCP is unreachable. Cached for the run."""
     if uuid in _FACTS_CACHE:
         return _FACTS_CACHE[uuid]
     result = _dt_call("get_record_properties", {"uuid": uuid})
     facts: dict | None = None
     if isinstance(result, dict) and result:
-        created = str(result.get("creationDate") or "")
-        year = int(created[:4]) if re.match(r"^\d{4}", created) else 0
         raw_pages = result.get("pageCount")
         facts = {
             "name": str(result.get("name") or ""),
             "url": str(result.get("url") or ""),
-            "year": year,
             "page_count": int(raw_pages) if isinstance(raw_pages, (int, float)) and raw_pages > 0 else 0,
         }
     _FACTS_CACHE[uuid] = facts
@@ -509,13 +508,13 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None
             return False
 
         tumbler = entry.tumbler
-        # nexus-i0cwh: DEVONthink's own url/pageCount/year travel onto the
-        # row; the indexer's PDF-derived year stands when it has one.
+        # nexus-i0cwh: DEVONthink's own url/pageCount travel onto the row.
+        # The year stays the indexer's (nexus-55clh: none from DEVONthink).
         meta: dict = {"devonthink_uri": dt_uri}
         fields: dict = {}
         if facts:
             # The catalog title is DEVONthink's record name (the bead's
-            # acceptance names DEVONthink's title/url/year), not the
+            # acceptance names DEVONthink's title/url), not the
             # indexer's PDF-derived guess.
             if facts.get("name") and facts["name"] != getattr(entry, "title", ""):
                 fields["title"] = facts["name"]
@@ -523,8 +522,6 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None
                 meta["devonthink_url"] = facts["url"]
             if facts.get("page_count"):
                 meta["devonthink_page_count"] = facts["page_count"]
-            if facts.get("year") and not getattr(entry, "year", 0):
-                fields["year"] = facts["year"]
         writer.update(
             tumbler,
             source_uri=dt_uri,
@@ -1099,6 +1096,10 @@ def index_cmd(
 
     Exactly one selector flag must be provided: ``--selection``,
     ``--tag``, ``--group``, ``--smart-group``, or one or more ``--uuid``.
+
+    A record the operator excluded from AI in DEVONthink (the record's or its database's
+    "exclude from chat" property) is imported as sensitive, as if ``--sensitive`` were given for it
+    alone, and takes the same rules, including ``--ack-external-embedder``. Nothing is written to DEVONthink.
     """
     # nexus-tr1rj.14: no flag means the `pdf.extractor` setting, like `nx index pdf`.
     extractor = get_pdf_extractor() if extractor is None else resolve_extractor(extractor, source="--extractor")
@@ -1109,8 +1110,10 @@ def index_cmd(
             "re-embed."
         )
     # RDR-243: the engine refusal and the --enrich refusal, before DEVONthink is read or any record touched.
+    # The ack alone is allowed here: a record DEVONthink excludes from AI imports as sensitive and needs it too.
+    # Whether any record is excluded is known only after the read below, which settles the "means nothing" case.
     sens_kw = sensitive_write_kwargs(
-        sensitive, "nx dt index --sensitive", ack=ack_external_embedder, dry_run=dry_run, enrich=enrich)
+        sensitive, "nx dt index --sensitive", ack=ack_external_embedder and sensitive, dry_run=dry_run, enrich=enrich)
 
     selectors_used = sum([
         use_selection,
@@ -1142,20 +1145,26 @@ def index_cmd(
     except DTNotAvailableError as e:
         raise click.ClickException(str(e)) from e
 
+    if ack_external_embedder and not sensitive and not any(getattr(r, "excluded", False) for r in records):
+        raise click.UsageError(
+            "--ack-external-embedder only means something with --sensitive, or when DEVONthink excludes "
+            "a selected record from AI (it then imports as sensitive).")
+
     if not records:
         click.echo("No records found.")
         return
 
     if dry_run:
         click.echo(f"Would index {len(records)} record(s):")
-        for uuid, path in records:
-            click.echo(f"  {uuid}\t{path}")
+        for rec in records:
+            note = "\t(excluded from AI in DEVONthink: imports as sensitive)" if getattr(rec, "excluded", False) else ""
+            click.echo(f"  {rec[0]}\t{rec[1]}{note}")
         return
 
     # nexus-2k66t.4.2: a PDF record needs the PDF stack. Settled once, before
     # the first record is touched: installed (and this command re-run in the new
     # generation) or stopped with exit 69/75/70 and the command to run.
-    if any(Path(p).suffix.lower() == ".pdf" for _uuid, p in records):
+    if any(Path(r[1]).suffix.lower() == ".pdf" for r in records):
         from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
 
         pdf_stack.refuse_bad_mineru_bounds(extractor)
@@ -1254,7 +1263,30 @@ def index_cmd(
 
         dt_content_active = _dt.available(transport="http")
 
-    for uuid, path in records:
+    # RDR-243 Q7 / A6: a record the operator excluded from AI in DEVONthink (on the record or its database)
+    # imports as sensitive, by the same path as an explicit --sensitive: the same cloud rule, engine
+    # refusal, Q3 routing and ack. Computed once, and only when a record needs it; a refusal here fails
+    # the excluded records (nothing written for them) and not the batch. --enrich is not refused for them:
+    # the enrichment pass skips a sensitive catalog row loudly.
+    excl_kw: dict[str, bool] | None = None
+    excl_refusal: str | None = None
+    if not sensitive and any(getattr(r, "excluded", False) for r in records):
+        try:
+            excl_kw = sensitive_write_kwargs(
+                True, "nx dt index (a record excluded from AI in DEVONthink)", ack=ack_external_embedder)
+        except click.ClickException as exc:
+            excl_refusal = exc.format_message()
+
+    for rec in records:
+        uuid, path = rec[0], rec[1]
+        # Whether THIS record is imported as sensitive, and the keywords that carry it to the indexer.
+        rec_excluded = getattr(rec, "excluded", False)
+        rec_sensitive = sensitive or rec_excluded
+        rec_kw = sens_kw if sensitive else ((excl_kw or {}) if rec_excluded else {})
+        if rec_excluded and not sensitive and excl_kw is None:
+            failed.append((uuid, path, excl_refusal or "refused: excluded from AI in DEVONthink; nothing was written"))
+            errored_failed += 1
+            continue
         ext = Path(path).suffix.lower()
         if ext not in _SUPPORTED_EXTS:
             # RDR-139 Layer D: non-file-backed record. With --dt-content and a
@@ -1262,7 +1294,7 @@ def index_cmd(
             # exactly as before.
             if dt_content_active:
                 dt_collection = _resolve_dt_collection(collection, corpus, ext)
-                if sensitive:
+                if rec_sensitive:
                     try:
                         dt_collection = resolve_sensitive_collection(
                             dt_collection, ack=ack_external_embedder, what="nx dt index --sensitive")
@@ -1273,7 +1305,7 @@ def index_cmd(
                 try:
                     content_indexed = _index_dt_content_record(
                         uuid, collection=dt_collection, corpus=corpus, force=force,
-                        force_re_embed=re_embed, **sens_kw,
+                        force_re_embed=re_embed, **rec_kw,
                     )
                 except PER_RECORD_SURVIVABLE_EXCEPTIONS as exc:
                     # nexus-hb10j (substantive-critic, 2xu6t adjudication,
@@ -1377,7 +1409,7 @@ def index_cmd(
             not_attempted.append((uuid, path, f"not attempted (the run stopped at {mineru_stop.name})"))
             continue
         resolved_collection = _resolve_dt_collection(collection, corpus, ext)
-        if sensitive:
+        if rec_sensitive:
             try:
                 resolved_collection = resolve_sensitive_collection(
                     resolved_collection, ack=ack_external_embedder, what="nx dt index --sensitive")
@@ -1395,7 +1427,7 @@ def index_cmd(
                 extractor=extractor,
                 force=force,
                 force_re_embed=re_embed,
-                **sens_kw,
+                **rec_kw,
             )
             degraded_pages: dict[str, list[int]] = {}
             extraction_method = ""
@@ -1531,7 +1563,14 @@ def index_cmd(
         # nexus-i0cwh: page coverage against DEVONthink's pageCount, on a
         # fresh PDF index only (markdown has no pages; an unchanged document
         # was checked when it was indexed).
-        if ext == ".pdf" and chunks:
+        if ext == ".pdf" and chunks and rec_excluded:
+            # RDR-243 Q7: DEVONthink's MCP refuses an excluded record's UUID, so the pageCount read cannot
+            # succeed for it. Say so once, instead of counting it under "MCP unreachable".
+            click.echo(
+                f"  page coverage not checked: {uuid} is excluded from AI in DEVONthink, "
+                "so DEVONthink's MCP refuses to report its page count"
+            )
+        elif ext == ".pdf" and chunks:
             facts = _dt_record_facts(uuid) if pages_seen is not None else None
             if pages_seen is None or facts is None or facts["page_count"] <= 0:
                 # Unverified, never covered (code review [24938] finding 2:
@@ -1791,8 +1830,8 @@ def _gather_records(
     smart_group: str | None,
     uuids: tuple[str, ...],
     database: str | None,
-) -> list[tuple[str, str]]:
-    """Resolve the chosen selector to ``[(uuid, path), ...]``.
+) -> list[DtRecord]:
+    """Resolve the chosen selector to ``[(uuid, path), ...]`` (:class:`~nexus.devonthink.DtRecord`: each also says whether DEVONthink excludes it from AI).
 
     Mutual exclusion is enforced upstream — exactly one branch fires.
     Selectors are accessed via the :mod:`nexus.devonthink` module
@@ -1808,7 +1847,7 @@ def _gather_records(
     if smart_group is not None:
         return dt_mod._dt_smart_group_records(smart_group, database=database)
     # uuids — one resolver call per UUID, results merged.
-    out: list[tuple[str, str]] = []
+    out: list[DtRecord] = []
     for u in uuids:
         out.extend(dt_mod._dt_uuid_record(u))
     return out

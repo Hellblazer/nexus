@@ -24,6 +24,7 @@ from nexus.catalog.tumbler import Tumbler
 
 if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader
+    from nexus.sensitive_output import DocumentRows
 from nexus.db.http_vector_client import VectorServiceError
 
 _log = structlog.get_logger(__name__)
@@ -399,6 +400,31 @@ def _resolve_owner_option(cat: "CatalogReader", owner: str) -> Tumbler:
         return matches[0]
 
 
+def _present_cli_rows(cat: "CatalogReader", entries: list) -> "DocumentRows":
+    """*entries* as the CLI reader is to see them (RDR-243 Q2): withheld under Claude Code, badged in a terminal."""
+    from nexus.sensitive_output import cli_output_posture, present_entries  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    return present_entries(cat, entries, posture=cli_output_posture())
+
+
+def _echo_document_rows(presented: "DocumentRows") -> None:
+    """The ``list`` / ``search`` text lines: a stub takes its row's slot, a badged row keeps its content, and a
+    page with a sensitive row says so (the reader clause under a badge, the count under a withhold)."""
+    from nexus.context_annotations import SENSITIVE_READER_CLAUSE  # noqa: PLC0415 — deferred to avoid CLI startup cost
+    from nexus.sensitive_output import BADGE, withheld_note  # noqa: PLC0415 — as above
+
+    if presented.shown_sensitive:
+        click.echo(SENSITIVE_READER_CLAUSE)
+    for row in presented.rows:
+        if row.get("withheld"):
+            click.echo(row["withheld"])
+            continue
+        badge = f" {BADGE}" if row.get("badge") else ""
+        click.echo(f"{str(row['tumbler']):<12} {row['content_type']:<10}{badge} {row['title']}")
+    if presented.withheld:
+        click.echo(withheld_note(presented.withheld))
+
+
 @catalog.command("list")
 @click.option("--owner", default="")
 @click.option("--type", "content_type", default="")
@@ -455,11 +481,11 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filter
     total = len(entries)
     entries = entries[offset:offset + limit]
 
+    presented = _present_cli_rows(cat, entries)
     if as_json:
-        click.echo(json.dumps([e.to_dict() for e in entries], indent=2))
+        click.echo(json.dumps(presented.rows, indent=2))
     else:
-        for e in entries:
-            click.echo(f"{str(e.tumbler):<12} {e.content_type:<10} {e.title}")
+        _echo_document_rows(presented)
         if offset + limit < total:
             click.echo(f"\n  Next page: --offset {offset + limit}")
 
@@ -520,13 +546,55 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
     if entry is None:
         raise click.ClickException(f"Not found: {tumbler_or_title}")
 
+    _show_document(cat, entry, as_json)
+
+
+def _link_dict(lnk) -> dict:
+    return lnk if isinstance(lnk, dict) else lnk.to_dict()
+
+
+def _hidden_link_endpoints(cat: "CatalogReader", presented: "DocumentRows", tumblers: set[str], posture: str) -> frozenset[str]:
+    """The documents an edge of the shown card must not describe: the shown document when it is withheld, and under a
+    withhold every other endpoint whose catalog row is sensitive (its span text and its edge ``meta`` are content).
+    A flag read that fails hides every endpoint (fail closed)."""
+    from nexus.sensitive_output import hidden_endpoints  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    return hidden_endpoints(cat, presented.hidden, tumblers, posture=posture)
+
+
+def _show_document(cat: "CatalogReader", entry, as_json: bool) -> None:
+    """``nx catalog show`` for one document under the CLI posture (RDR-243 Q2): under Claude Code a sensitive
+    document is its stub card and an edge that touches a sensitive document keeps its tumblers and type and loses
+    its ``meta`` and its span text; in a terminal the card prints whole with a ``[sensitive]`` badge."""
+    from nexus.context_annotations import SENSITIVE_READER_CLAUSE  # noqa: PLC0415 — deferred to avoid CLI startup cost
+    from nexus.sensitive_output import BADGE, cli_output_posture, present_entries, withheld_edges  # noqa: PLC0415 — as above
+
+    posture = cli_output_posture()
+    presented = present_entries(cat, [entry], posture=posture)
+    row = presented.rows[0]
+    out_links = [_link_dict(l) for l in cat.links_from(entry.tumbler)]
+    in_links = [_link_dict(l) for l in cat.links_to(entry.tumbler)]
+    ends = {str(l["to"]) for l in out_links} | {str(l["from"]) for l in in_links}
+    hidden = _hidden_link_endpoints(cat, presented, ends, posture)
+
     if as_json:
-        d = entry.to_dict()
-        d["links_from"] = [l.to_dict() for l in cat.links_from(entry.tumbler)]
-        d["links_to"] = [l.to_dict() for l in cat.links_to(entry.tumbler)]
+        d = dict(row)
+        d["links_from"] = withheld_edges(out_links, hidden)
+        d["links_to"] = withheld_edges(in_links, hidden)
         click.echo(json.dumps(d, indent=2))
+        return
+
+    if presented.shown_sensitive:
+        click.echo(SENSITIVE_READER_CLAUSE)
+    if row.get("withheld"):
+        click.echo(f"Tumbler:    {row['tumbler']}")
+        click.echo(row["withheld"])
+        click.echo(f"Type:       {row['content_type']}")
+        click.echo(f"Collection: {row['physical_collection']}")
+        click.echo(f"Chunks:     {row['chunk_count']}")
+        click.echo(f"Indexed:    {row['indexed_at']}")
     else:
-        click.echo(f"Tumbler:    {entry.tumbler}")
+        click.echo(f"Tumbler:    {entry.tumbler}" + (f"  {BADGE}" if row.get("badge") else ""))
         click.echo(f"Title:      {entry.title}")
         click.echo(f"Author:     {entry.author}")
         click.echo(f"Year:       {entry.year}")
@@ -551,38 +619,36 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
             click.echo(f"Bib Venue:   {entry.bib_venue}")
         if entry.bib_citation_count:
             click.echo(f"Citations:   {entry.bib_citation_count}")
-        out_links = cat.links_from(entry.tumbler)
-        in_links = cat.links_to(entry.tumbler)
-        if out_links:
-            click.echo("Links out:")
-            for lnk in out_links:
-                span_note = f" [{lnk.to_span}]" if lnk.to_span else ""
-                click.echo(f"  → {lnk.to_tumbler} ({lnk.link_type}){span_note}")
-                if lnk.to_span:
-                    # nexus-ib6uy: a degraded vector service renders an
-                    # explicit marker, never a silent missing preview.
-                    try:
-                        text = cat.resolve_span_text(lnk.to_tumbler, lnk.to_span)
-                    except VectorServiceError:
-                        click.echo("    [span unavailable — vector service degraded]")
-                        text = None
-                    if text:
-                        preview = text[:120].replace("\n", " ")
-                        click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
-        if in_links:
-            click.echo("Links in:")
-            for lnk in in_links:
-                span_note = f" [{lnk.from_span}]" if lnk.from_span else ""
-                click.echo(f"  ← {lnk.from_tumbler} ({lnk.link_type}){span_note}")
-                if lnk.from_span:
-                    try:
-                        text = cat.resolve_span_text(lnk.from_tumbler, lnk.from_span)
-                    except VectorServiceError:
-                        click.echo("    [span unavailable — vector service degraded]")
-                        text = None
-                    if text:
-                        preview = text[:120].replace("\n", " ")
-                        click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
+
+    def _preview(other: str, span: str) -> None:
+        """The first 120 characters of the span's text, unless the document it sits in is withheld."""
+        if other in hidden:
+            return
+        # nexus-ib6uy: a degraded vector service renders an
+        # explicit marker, never a silent missing preview.
+        try:
+            text = cat.resolve_span_text(other, span)
+        except VectorServiceError:
+            click.echo("    [span unavailable — vector service degraded]")
+            text = None
+        if text:
+            preview = text[:120].replace("\n", " ")
+            click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
+
+    if out_links:
+        click.echo("Links out:")
+        for lnk in out_links:
+            span_note = f" [{lnk['to_span']}]" if lnk["to_span"] else ""
+            click.echo(f"  → {lnk['to']} ({lnk['type']}){span_note}")
+            if lnk["to_span"]:
+                _preview(str(lnk["to"]), lnk["to_span"])
+    if in_links:
+        click.echo("Links in:")
+        for lnk in in_links:
+            span_note = f" [{lnk['from_span']}]" if lnk["from_span"] else ""
+            click.echo(f"  ← {lnk['from']} ({lnk['type']}){span_note}")
+            if lnk["from_span"]:
+                _preview(str(lnk["from"]), lnk["from_span"])
 
 
 # _manifest_verify_list and manifest_verify_cmd (`nx catalog manifest-verify`,
@@ -611,14 +677,14 @@ def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
     fetched = cat.find(query, limit=offset + limit + 1)
     results = fetched[offset:offset + limit]
     total = len(fetched)
+    presented = _present_cli_rows(cat, results)
     if as_json:
-        click.echo(json.dumps([e.to_dict() for e in results], indent=2))
+        click.echo(json.dumps(presented.rows, indent=2))
     else:
         if not results:
             click.echo("No results.")
             return
-        for e in results:
-            click.echo(f"{str(e.tumbler):<12} {e.content_type:<10} {e.title}")
+        _echo_document_rows(presented)
         if offset + limit < total:
             click.echo(f"\n  Next page: --offset {offset + limit}")
 
@@ -1443,7 +1509,7 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
                 # with no live owner is exactly what a backfill exists to register.
                 result = col.get(
                     include=["metadatas"], limit=200, offset=offset,
-                    include_non_live=True,
+                    include_non_live=True, sensitivity="include",
                 )
                 metas = result.get("metadatas", [])
                 if metas and use_doc_id is None:
@@ -1640,7 +1706,7 @@ def _backfill_papers(
         meta: dict | None = None
         try:
             col = t3.get_or_create_collection(col_name)
-            result = col.get(limit=1, include=["metadatas"], include_non_live=True)
+            result = col.get(limit=1, include=["metadatas"], include_non_live=True, sensitivity="include")
             if result.get("ids") and result.get("metadatas"):
                 first_id, meta = result["ids"][0], result["metadatas"][0]
         except VectorServiceError as exc:
@@ -1877,7 +1943,7 @@ def _backfill_per_file_from_t3(
     while True:
         page = col.get(
             include=["metadatas"], limit=page_size, offset=offset,
-            include_non_live=True,
+            include_non_live=True, sensitivity="include",
         )
         ids = page.get("ids") or []
         if not ids:

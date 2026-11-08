@@ -34,7 +34,7 @@ class _WideT3:
         self.max_active = 0
         self._lock = threading.Lock()
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         col = collection_names[0]
         i = int(col.rsplit("c", 1)[1])
         return [
@@ -64,7 +64,7 @@ def _cols() -> list[str]:
 
 def test_embedding_fetch_is_bounded_by_the_page_cap_not_the_pool() -> None:
     t3 = _WideT3()
-    results = search_cross_corpus("q", _cols(), n_results=10, t3=t3)
+    results = search_cross_corpus("q", _cols(), n_results=10, t3=t3, sensitivity="include")
 
     assert len(results) == 300
     assert len(t3.embedding_ids) == 300, (
@@ -76,7 +76,7 @@ def test_embedding_fetch_is_bounded_by_the_page_cap_not_the_pool() -> None:
 
 def test_embedding_fetch_runs_collections_in_parallel() -> None:
     t3 = _WideT3()
-    search_cross_corpus("q", _cols(), n_results=10, t3=t3)
+    search_cross_corpus("q", _cols(), n_results=10, t3=t3, sensitivity="include")
     assert t3.max_active > 1, "one embedding round trip at a time"
 
 
@@ -110,7 +110,7 @@ def test_pool_cap_scales_with_the_requested_page() -> None:
     """A caller asking for more than MAX_QUERY_RESULTS (nx search -m 1000)
     must get a pool at least that large (critic finding on 8f31f90f9)."""
     t3 = _WideT3()
-    results = search_cross_corpus("q", _cols(), n_results=100, t3=t3)
+    results = search_cross_corpus("q", _cols(), n_results=100, t3=t3, sensitivity="include")
     assert len(results) == 400
 
 
@@ -125,7 +125,7 @@ def test_search_stops_at_a_stage_boundary_once_its_deadline_passes() -> None:
     token = call_deadline.set_deadline(time.monotonic() - 1.0)
     try:
         with pytest.raises(call_deadline.DeadlineExceeded):
-            search_cross_corpus("q", _cols(), n_results=10, t3=t3)
+            search_cross_corpus("q", _cols(), n_results=10, t3=t3, sensitivity="include")
     finally:
         call_deadline.reset(token)
     assert t3.embedding_ids == []

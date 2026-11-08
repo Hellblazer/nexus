@@ -669,7 +669,7 @@ class TestReadChromaUri:
             length is over — proving the ids-specific check (not just
             the documents check) is what catches it."""
 
-            def get(self, ids=None, include=None):  # noqa: ANN001
+            def get(self, ids=None, include=None, *, sensitivity="include"):  # noqa: ANN001
                 return {
                     "ids": [*ids, "phantom"],
                     "documents": [f"t-{i}" for i in ids],

@@ -729,7 +729,7 @@ class _ReembedDb:
             def count(self) -> int:
                 return len(outer.ids)
 
-            def get(self, *, limit, offset, include):
+            def get(self, *, limit, offset, include, sensitivity="include"):
                 ids = outer.ids[offset:offset + limit]
                 return {"ids": ids, "documents": [f"text {i}" for i in ids], "metadatas": [{} for _ in ids]}
 

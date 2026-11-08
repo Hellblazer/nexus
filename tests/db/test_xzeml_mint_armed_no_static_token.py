@@ -98,7 +98,7 @@ def test_armed_box_runs_on_data_tokens_with_no_static_token(
         )
         # The chunk is owned (seeded above), so a live read sees it; the
         # rewritten title proves the data-token POST landed.
-        present = client.get_collection(collection).get(ids=[chash], include=["metadatas"])
+        present = client.get_collection(collection).get(ids=[chash], include=["metadatas"], sensitivity="include")
         assert chash in (present.get("ids") or [])
         assert present["metadatas"][0]["title"] == "xzeml", "the rewrite landed"
 

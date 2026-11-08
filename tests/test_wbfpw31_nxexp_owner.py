@@ -233,7 +233,7 @@ def test_round_trip_multi_batch_document_stays_owned(t2_service_env, tmp_path, m
     assert import_result["owned_count"] == 5
 
     for chash in doc_a_chashes + doc_b_chashes:
-        got = client.get_collection(dst).get(ids=[chash], include=[])
+        got = client.get_collection(dst).get(ids=[chash], include=[], sensitivity="include")
         assert chash in got["ids"], f"{chash} not live in {dst}"
 
     # Copy, not move (Sam, 2026-09-27): dst gets its own documents under the
@@ -263,12 +263,12 @@ def test_round_trip_multi_batch_document_stays_owned(t2_service_env, tmp_path, m
     # The source collection is still live, and both collections answer search
     # (the bead's acceptance criterion names search, not just get).
     for chash in doc_a_chashes + doc_b_chashes:
-        got = client.get_collection(src).get(ids=[chash], include=[])
+        got = client.get_collection(src).get(ids=[chash], include=[], sensitivity="include")
         assert chash in got["ids"], f"{chash} no longer live in {src}"
     for coll in (src, dst):
         hits = client.search(
             "wbfpw31 doc a chunk one", [coll], n_results=10,
-            threshold=float("inf"), structured=True,
+            threshold=float("inf"), structured=True, sensitivity="include",
         )
         assert set(doc_a_chashes) <= set(hits["ids"]), f"search on {coll} missed doc A"
 
@@ -526,7 +526,7 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     assert reader.get_collection(seeded)["owner_id"] == owner_segment_for_tumbler(str(owner))
     assert _resolve_import_owner_tumbler(seeded, reader, writer) == owner
     for r in records:
-        assert r["id"] in client.get_collection(dst).get(ids=[r["id"]], include=[])["ids"]
+        assert r["id"] in client.get_collection(dst).get(ids=[r["id"]], include=[], sensitivity="include")["ids"]
 
 
 def test_resolve_import_owner_tumbler_uses_knowledge_curator_for_knowledge_collection(
@@ -604,7 +604,7 @@ def test_legacy_doc_id_records_are_owned_even_when_skipped(t2_service_env, tmp_p
 
     for chashes in by_doc.values():
         for chash in chashes:
-            got = client.get_collection(dst).get(ids=[chash], include=[])
+            got = client.get_collection(dst).get(ids=[chash], include=[], sensitivity="include")
             assert chash in got["ids"], f"{chash} not live in {dst}"
 
     # The live original document keeps its chunks, in chunk_index order.
@@ -667,7 +667,7 @@ def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service
     rows = sorted(reader.get_manifest(doc), key=lambda r: r.position)
     assert [r.chash for r in rows] == chashes
     for chash in chashes:
-        assert chash in client.get_collection(dst).get(ids=[chash], include=[])["ids"]
+        assert chash in client.get_collection(dst).get(ids=[chash], include=[], sensitivity="include")["ids"]
 
 
 def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_env, tmp_path, monkeypatch):
@@ -706,8 +706,8 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
 
     assert [r.chash for r in reader.get_manifest(doc)] == [v2], "the import replaced the current manifest"
     assert doc not in writes, "the import must not write to a document that keeps its manifest"
-    assert v2 in client.get_collection(coll).get(ids=[v2], include=[])["ids"], "the correction must stay visible"
-    assert v1 not in client.get_collection(coll).get(ids=[v1], include=[])["ids"], "the old export must not resurrect v1"
+    assert v2 in client.get_collection(coll).get(ids=[v2], include=[], sensitivity="include")["ids"], "the correction must stay visible"
+    assert v1 not in client.get_collection(coll).get(ids=[v1], include=[], sensitivity="include")["ids"], "the old export must not resurrect v1"
     # The read above is live-filtered, so it cannot tell "not written" from "written ownerless":
     # nothing carrying v1 may have been sent at all.
     assert v1 not in writes.chashes, "a kept document's chunk was sent to the engine"
@@ -757,7 +757,7 @@ def test_legacy_doc_id_import_leaves_an_existing_documents_manifest_alone(t2_ser
     result = import_collection(db=client, input_path=f, target_collection=coll)
 
     assert [r.chash for r in reader.get_manifest(doc)] == [v2], "the legacy import replaced the current manifest"
-    assert v2 in client.get_collection(coll).get(ids=[v2], include=[])["ids"]
+    assert v2 in client.get_collection(coll).get(ids=[v2], include=[], sensitivity="include")["ids"]
     assert (result["owned_count"], result["unowned_count"]) == (0, 1)
     # RDR-223: the stale record's chunk is left out of the import, not stored hidden.
     assert client.existing_ids(coll, [v3]) == set(), "a chunk of a kept document must not be stored"
@@ -817,7 +817,7 @@ def test_delete_then_import_restores_a_document_from_the_file(t2_service_env, tm
     assert deleted.exit_code == 0, deleted.output
     result = import_collection(db=client, input_path=out, target_collection=coll)
     assert (result["owned_count"], result["unowned_count"]) == (1, 0), result
-    assert v1 in client.get_collection(coll).get(ids=[v1], include=[])["ids"], "the restored chunk must be visible"
+    assert v1 in client.get_collection(coll).get(ids=[v1], include=[], sensitivity="include")["ids"], "the restored chunk must be visible"
 
 
 def test_the_printed_delete_command_quotes_a_hostile_title(t2_service_env, tmp_path):

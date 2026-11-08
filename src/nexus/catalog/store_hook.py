@@ -28,6 +28,7 @@ import structlog
 
 from nexus.aspect_readers import uri_for
 from nexus.catalog.meta_filter import ABSENT_MEANS
+from nexus.sensitivity import ReadSensitivity
 from nexus.catalog.types import manifest_row_wire
 from nexus.embed_window import window_for_model
 
@@ -343,6 +344,23 @@ class DocumentListing:
     #: The document's own ``indexed_at`` (the catalog column, nexus-6pfgb.13), ``""`` for a chunk-keyed
     #: row with no catalog document; the listing then shows the chunk row's.
     indexed_at: str = ""
+    #: The catalog document is flagged sensitive (RDR-243): its title and chunk handle are content to a reader
+    #: that feeds the session model. False for a chunk-keyed row no catalog document owns.
+    sensitive: bool = False
+
+
+def _sensitive_document_keys(collection: str, catalog_keys: Any) -> set[str]:
+    """Tumblers of *collection*'s sensitive live documents (one listing read), for :func:`group_documents`.
+
+    When the catalog cannot answer, every document key the manifest index named is treated as sensitive: a
+    listing that cannot say which titles are content withholds the titles it can attribute to a document."""
+    from nexus import doc_sensitivity  # noqa: PLC0415 — deferred: this module loads on every CLI start
+
+    try:
+        return {str(getattr(e, "tumbler", "")) for e in doc_sensitivity.flagged_in_collection(collection)}
+    except doc_sensitivity.SensitivityUnknown as exc:
+        _log.warning("document_listing_sensitivity_unknown", collection=collection, error=exc.detail)
+        return {str(k) for k in catalog_keys}
 
 
 def group_documents(
@@ -373,6 +391,9 @@ def group_documents(
                 seen.setdefault(key, e)
                 counts[key] = counts.get(key, 0) + 1
         offset += 300
+    # Only a degraded index has no document keys to attribute; it is already reported, and the call is skipped
+    # when no catalog document was named at all.
+    flagged_keys = _sensitive_document_keys(collection, doc_titles) if doc_titles else set()
     rows = [
         DocumentListing(
             key=key,
@@ -381,6 +402,7 @@ def group_documents(
             chunks=counts[key],
             entry=e,
             indexed_at=doc_stamps.get(key, ""),
+            sensitive=key in flagged_keys,
         )
         for key, e in seen.items()
     ]
@@ -388,7 +410,9 @@ def group_documents(
     return rows, degraded
 
 
-def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str, str, int] | None:
+def split_note_text(
+    t3: Any, collection: str, chunk_ids: list[str], *, sensitivity: ReadSensitivity,
+) -> tuple[str, str, int] | None:
     """``(first chunk id, full text, chunk count)`` when *chunk_ids* are
     chunks of ONE split note, else ``None`` (nexus-spujb, nexus-b2tld).
 
@@ -409,6 +433,9 @@ def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str
     The manifest is now the only authority: ``len(chashes) < 2`` below is
     the honest test of whether a document is split, and it costs one catalog
     round trip per read that the short-circuit used to save.
+
+    *sensitivity* (RDR-243 Phase 2, nexus-rfvyy.7.8) is required: it is the read's, passed to every piece. Under
+    ``exclude`` a piece the engine withholds makes the note unreadable (``None``), never a text with a hole.
     """
     if not chunk_ids:
         return None
@@ -425,7 +452,7 @@ def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str
             continue
         parts: list[tuple[str, int | None, int | None]] = []
         for chash in chashes:
-            entry = t3.get_by_id(collection, chash)
+            entry = t3.get_by_id(collection, chash, sensitivity=sensitivity)
             if entry is None:
                 return None
             parts.append((

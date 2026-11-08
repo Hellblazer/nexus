@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import logging
 import os
+import re
 from pathlib import Path
 
 import click
 import structlog
 
 from nexus.config import get_telemetry_config, get_tuning_config, load_config
-from nexus.context_annotations import DISPLAY_SOURCE_PATH_KEY
+from nexus.context_annotations import DISPLAY_SOURCE_PATH_KEY, SENSITIVE_READER_CLAUSE
 from nexus.corpus import is_conformant_collection_name, resolve_corpus
 from nexus.commands.store import _t3
 from nexus.formatters import (
@@ -19,14 +20,20 @@ from nexus.formatters import (
     format_vimgrep,
 )
 from nexus.scoring import round_robin_interleave
+from nexus.sensitive_output import BADGE, first_sensitive_owner, hit_facts, stub_line, withheld_note
+from nexus.session import started_by_claude_code
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.errors import SearchEmbeddingProfileMismatchError
+from nexus import sensitivity as _sens
 from nexus.search_engine import (
     LexicalLegUnavailableError,
     SearchDiagnostics,
     apply_file_diversity_cap,
     apply_ranking_boosts,
+    benign_held_degrades,
     boost_window_size,
+    engine_held_slots,
+    restore_held_slots,
     search_cross_corpus,
 )
 from nexus.types import SearchResult
@@ -47,6 +54,17 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
         raise click.BadParameter(str(e), param_hint="'--where'")
 
 _CONTENT_MAX_CHARS: int = 200
+
+_VIMGREP_PREFIX = re.compile(r"^(.*?:\d+:\d+:)(.*)$", re.DOTALL)
+
+
+def _badged(line: str, *, vimgrep: bool) -> str:
+    """*line* with the ``[sensitive]`` badge in front; a vimgrep line keeps its ``path:line:col:`` prefix so the
+    quickfix list still parses, and the badge leads the text."""
+    if vimgrep and (m := _VIMGREP_PREFIX.match(line)):
+        return f"{m.group(1)}{BADGE} {m.group(2)}"
+    return f"{BADGE} {line}"
+
 
 # Threshold recommendation offset: worst-offender threshold + this value is
 # suggested as the ``--threshold`` users should try first. 0.20 empirically
@@ -488,6 +506,10 @@ def search_cmd(
     #: to the boosts so the calibration reads the same rows (no second read).
     model_of_out: list = []
 
+    #: RDR-243 Phase 2 (nexus-rfvyy.7.8): read once, on the command's own thread. A `nx search` a model runs
+    #: through Bash inherits NX_SENSITIVITY_POSTURE=llm_bound from its parent and excludes; a person's does not.
+    _sensitivity = _sens.read_sensitivity()
+
     def _retrieve(q: str) -> list[SearchResult]:
         # Pass taxonomy for topic grouping + topic boost (RDR-070)
         from nexus.commands._helpers import default_db_path as _db_path  # noqa: PLC0415 — deferred import; only needed in this branch
@@ -508,6 +530,7 @@ def search_cmd(
                 # after retrieval, so they need the deep per-collection floor.
                 deep_candidates=resolved is not None or max_file_chunks is not None,
                 model_of_out=model_of_out,
+                sensitivity=_sensitivity,
             )
         return raw
 
@@ -635,6 +658,9 @@ def search_cmd(
     # attachment via search_cross_corpus (see the comment on
     # make_catalog_reader() above).
     _scoring_cat = _search_catalog  # nexus-mw2kg: reuse the reader passed to search_cross_corpus
+    # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): rows the engine held back from a text-exporting reranker keep the slot
+    # the engine merged them into; read before apply_ranking_boosts re-sorts the list.
+    _held_slots = engine_held_slots(results) if want_server_rerank else []
     # nexus: hybrid scoring + RDR-055 E2 quality boost — shared with the MCP
     # search()/query() paths via apply_ranking_boosts (search_engine.py) so
     # both surfaces rank identically for identical inputs.
@@ -662,8 +688,18 @@ def search_cmd(
     # on stderr — never WARN-only invisible, never a silent input-order
     # fallback (the retired scoring._rerank_cloud anti-pattern).
     _scored = [r for r in results if "rerank_score" in r.metadata] if want_server_rerank else []
+    # An all-sensitive collection's "no rerank performed" degrade is the engine holding every row back, not a
+    # failure: it neither warns as one nor turns the page into the calibrated order (fix r1, review S2).
+    _benign = benign_held_degrades(rerank_meta, results) if want_server_rerank else set()
+    if _benign:
+        click.echo(
+            f"Note: {len(_benign)} collection(s) were not reranked: every candidate row is sensitive and is held "
+            "back from the reranker; they stay in their vector-order slots.",
+            err=True,
+        )
+    _real_degrades = {c: m for c, m in rerank_meta.items() if m.get("degraded") and c not in _benign}
     if want_server_rerank:
-        _degraded = {c: m for c, m in rerank_meta.items() if m.get("degraded")}
+        _degraded = _real_degrades
         if _degraded:
             _reasons = {m.get("error") or "unknown" for m in _degraded.values()}
             _reason = next(iter(sorted(_reasons)))
@@ -681,9 +717,7 @@ def search_cmd(
     # every row of the degraded family (one rate-limited group would sink a
     # whole family). Order every row by the calibrated hybrid_score that
     # apply_ranking_boosts already set; the degrade warning above stays.
-    _partial_rerank = bool(_scored) and want_server_rerank and any(
-        m.get("degraded") for m in rerank_meta.values()
-    )
+    _partial_rerank = bool(_scored) and want_server_rerank and bool(_real_degrades)
     if _scored and _partial_rerank:
         # apply_ranking_boosts returned the rows in that order already (and
         # past its boost window in distance order, nexus-cbg2s), so it is kept
@@ -698,7 +732,8 @@ def search_cmd(
         for r in _scored:
             r.hybrid_score = float(r.metadata["rerank_score"])
         _scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
-        _unscored = [r for r in results if "rerank_score" not in r.metadata]
+        _held_ids = {id(r) for _slot, r in _held_slots}
+        _unscored = [r for r in results if "rerank_score" not in r.metadata and id(r) not in _held_ids]
         # nexus-0bmhd: the file-diversity cap is the LAST ordering step
         # before the page truncation, unconditionally (every CLI
         # invocation renders for a reader) — capping before this re-sort
@@ -710,8 +745,11 @@ def search_cmd(
         # cap's "kept" head ahead of a scored row that overflowed its file's
         # quota; a scored row always outranks an unscored one, so the groups
         # are capped separately and joined.
-        results = (
-            apply_file_diversity_cap(_scored) + apply_file_diversity_cap(_unscored)
+        #
+        # Held rows (the engine kept them out of the reranker) go back to their engine slots AFTER the cap, so a
+        # sensitive top-1 stays top-1 end to end (RerankStage's slot-preserving merge, review S2).
+        results = restore_held_slots(
+            apply_file_diversity_cap(_scored) + apply_file_diversity_cap(_unscored), _held_slots,
         )[:n]
     else:
         # No server scores (rerank off, single collection, legacy backend, or
@@ -734,25 +772,17 @@ def search_cmd(
     if reverse:
         results = list(reversed(results))
 
-    # Output format
+    # RDR-243 Phase 3 (Q2, nexus-rfvyy.8.3): stdout is often read by Claude Code's Bash tool, so under Claude
+    # Code a sensitive hit is replaced by one stub line and counted in every format; in a terminal it prints
+    # with a [sensitive] badge. The posture applies to the FINAL page (after boosts, the diversity cap, paging
+    # and --reverse), so what is withheld is exactly what would have been shown.
+    withhold = started_by_claude_code()
     if json_out:
-        click.echo(format_json(results))
-    elif vimgrep:
-        for line in format_vimgrep(results, query=query):
-            click.echo(line)
-    elif files_only:
-        # nexus-1qed: the catalog-resolved _display_path (nexus-6pfgb.49: never
-        # the row's source_path, the last writer's file).
-        seen: set[str] = set()
-        for r in results:
-            file_path = r.metadata.get("_display_path", "")
-            if file_path and file_path not in seen:
-                seen.add(file_path)
-                click.echo(file_path)
-    elif compact:
-        for line in format_compact(results, query=query):
-            click.echo(line)
-    else:
+        click.echo(format_json(results, withhold_sensitive=withhold))
+        return
+
+    use_bat_effective = False
+    if not (vimgrep or files_only or compact):
         # Check bat applicability
         use_bat_effective = (
             use_bat
@@ -763,19 +793,73 @@ def search_cmd(
             click.echo("Warning: bat not found; showing plain output", err=True)
             use_bat_effective = False
 
+    seen_files: set[str] = set()
+
+    def _render(chunk: list[SearchResult]) -> list[str]:
+        """The lines the chosen format prints for *chunk*, in order (never the stub or badge)."""
+        if vimgrep:
+            return format_vimgrep(chunk, query=query)
+        if files_only:
+            # nexus-1qed: the catalog-resolved _display_path (nexus-6pfgb.49: never
+            # the row's source_path, the last writer's file).
+            out_files: list[str] = []
+            for r in chunk:
+                file_path = r.metadata.get("_display_path", "")
+                if file_path and file_path not in seen_files:
+                    seen_files.add(file_path)
+                    out_files.append(file_path)
+            return out_files
+        if compact:
+            return format_compact(chunk, query=query)
         if use_bat_effective:
-            click.echo(_format_with_bat(results))
-        else:
-            for result in results:
-                for line in format_plain_with_context(
-                    [result],
-                    lines_after=lines_after,
-                    lines_before=lines_before,
-                    query=query,
-                ):
-                    click.echo(line)
-                if show_content:
-                    text = result.content
-                    if len(text) > _CONTENT_MAX_CHARS:
-                        text = text[:_CONTENT_MAX_CHARS] + "..."
-                    click.echo(f"  {text}")
+            return [_format_with_bat(chunk)]
+        out_lines: list[str] = []
+        for result in chunk:
+            out_lines.extend(format_plain_with_context(
+                [result], lines_after=lines_after, lines_before=lines_before, query=query,
+            ))
+            if show_content:
+                text = result.content or ""
+                if len(text) > _CONTENT_MAX_CHARS:
+                    text = text[:_CONTENT_MAX_CHARS] + "..."
+                out_lines.append(f"  {text}")
+        return out_lines
+
+    facts = [hit_facts(r.metadata) for r in results]
+    shown_sensitive = (not withhold) and any(is_sens for is_sens, _ in facts)
+    # The reader clause leads a render that is read as prose; a quickfix list or a path list has no place for it.
+    if shown_sensitive and not (vimgrep or files_only):
+        click.echo(SENSITIVE_READER_CLAUSE)
+
+    withheld = 0
+    run: list[SearchResult] = []
+    for r, (is_sens, owners) in zip(results, facts, strict=True):
+        if not is_sens:
+            run.append(r)
+            continue
+        if run:
+            for line in _render(run):
+                click.echo(line)
+            run = []
+        if withhold:
+            withheld += 1
+            owner = first_sensitive_owner(owners)
+            if files_only:
+                continue  # a path list holds paths only: the row is omitted and counted below (fix r1, review minor)
+            if vimgrep:
+                # Keep the quickfix shape (path:line:col:text); the "path" names the document by tumbler.
+                click.echo(f"{owner or 'sensitive'}:1:1:{stub_line(owner)}")
+                continue
+            click.echo(stub_line(owner))
+            continue
+        lines = _render([r])
+        if lines and not files_only:  # a path list stays pipeable: the terminal reader knows their own files
+            lines[0] = _badged(lines[0], vimgrep=vimgrep)
+        for line in lines:
+            click.echo(line)
+    if run:
+        for line in _render(run):
+            click.echo(line)
+    if withheld:
+        # A path list and a quickfix list must stay machine-readable: their count goes to stderr.
+        click.echo(withheld_note(withheld), err=files_only or vimgrep)

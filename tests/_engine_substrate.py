@@ -102,6 +102,7 @@ import structlog
 from nexus._locking import lock_file, unlock_file
 from nexus._winsec import grant_user_tree_access
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
+from tests import _signal_fence
 from tests._child_process import kill_group, pid_alive, popen_in_group, stop_group
 from tests._ddl_counter import PROBE_SQL, READY_LABEL, RESTART_LABEL, START_LABEL, log_conf, mark_sql
 from tests._ddl_counter import enabled as ddl_count_enabled
@@ -2790,6 +2791,9 @@ class SweepResult:
     stale_tmp_removed: list[str] = field(default_factory=list)
 
 
+# nexus-xzorj: both sweeps signal an earlier, dead session's engine and postmaster on purpose, after their owner-record
+# checks; the signal fence counts those kills sanctioned, never foreign, whichever caller runs the sweep.
+@_signal_fence.sanctioned("stale substrate cluster sweep")
 def sweep_stale_substrate_clusters(*, tmp_root: Path | None = None) -> SweepResult:
     """Reap crash-orphaned ``nexus_t2_substrate_pg_*`` clusters.
 
@@ -2822,6 +2826,7 @@ def sweep_stale_substrate_clusters(*, tmp_root: Path | None = None) -> SweepResu
     return result
 
 
+@_signal_fence.sanctioned("stale integration owner-record sweep")
 def sweep_integration_owner_records() -> SweepResult:
     """:func:`sweep_stale_substrate_clusters` restricted to the integration owner
     records, under every root the sweep covers."""

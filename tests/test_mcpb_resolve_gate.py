@@ -35,6 +35,31 @@ _FAKE_UV = '''#!{python}
 import json, pathlib, sys
 cfg = json.loads(pathlib.Path({cfg!r}).read_text())
 args = sys.argv[1:]
+if args[:2] == ["pip", "compile"]:
+    # the per-platform compile (nexus-tlt23): record the call, resolve from the constraints, honour the config
+    import os
+    req = pathlib.Path(args[2]).read_text()
+    opt = lambda flag: args[args.index(flag) + 1]
+    call = {{"platform": opt("--python-platform"), "python": opt("--python-version"), "requirements": req,
+             "overrides": pathlib.Path(opt("--overrides")).read_text(), "constraints": opt("--constraints"),
+             "macos": os.environ.get("MACOSX_DEPLOYMENT_TARGET")}}
+    # the gate compiles the cells in parallel: one O_APPEND line per call, never a read-modify-write
+    with open(cfg["record"] + ".pip", "a", encoding="utf-8") as log:
+        log.write(json.dumps(call) + "\\n")
+    if call["platform"] == cfg.get("no_wheel_on"):
+        print("error: Because onnxruntime==1.31.0 has no wheels with a matching platform tag", file=sys.stderr)
+        sys.exit(1)
+    pdf = "conexus[pdf]" in req
+    lines = ["conexus @ file:///somewhere"]
+    for l in pathlib.Path(opt("--constraints")).read_text().splitlines():
+        if not l.strip() or l.startswith("#") or l.startswith("conexus"):
+            continue
+        name, version = l.split("==", 1)
+        if not pdf and name in ("mineru", "torch"):
+            continue
+        lines.append(name + "==" + version.split(";")[0].strip())
+    pathlib.Path(opt("--output-file")).write_text("\\n".join(lines[: cfg.get("compile_limit", 10**9)]) + "\\n")
+    sys.exit(0)
 bundle = pathlib.Path(args[args.index("--directory") + 1])
 pyproject = (bundle / "pyproject.toml").read_text()
 sent = {{"argv": args, "pyproject": pyproject, "constraints": (bundle / "constraints.txt").read_text()}}
@@ -104,6 +129,11 @@ def _calls(record: Path) -> list[dict]:
     return json.loads(Path(str(record) + ".all").read_text(encoding="utf-8"))
 
 
+def _pip_calls(record: Path) -> list[dict]:
+    lines = Path(str(record) + ".pip").read_text(encoding="utf-8").splitlines()
+    return [json.loads(ln) for ln in lines]
+
+
 def _conexus_reqs(pyproject: str) -> list[str]:
     return [d for d in tomllib.loads(pyproject)["project"]["dependencies"] if d.startswith("conexus")]
 
@@ -147,6 +177,73 @@ def test_a_wheel_is_resolved_instead_of_the_checkout(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
     doc = tomllib.loads(json.loads(record.read_text(encoding="utf-8"))["pyproject"])
     assert Path(doc["tool"]["uv"]["sources"]["conexus"]["path"]) == wheel.resolve()
+
+
+# ── per-platform resolves (nexus-tlt23) ──────────────────────────────────────
+
+@_FAKE_UV_POSIX_ONLY
+def test_every_variant_is_compiled_on_every_platform_and_python_and_the_verdict_counts_them(tmp_path: Path) -> None:
+    """A universal lock needs one wheel per package; the per-target compiles are what see a missing one."""
+    proc, record = _gate(tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    calls = _pip_calls(record)
+    assert len(calls) == 16, "two variants x four platforms x two pythons"
+    cells = {(c["platform"], c["python"]) for c in calls}
+    assert cells == {(p, py) for p in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+                                       "x86_64-pc-windows-msvc", "aarch64-apple-darwin") for py in ("3.12", "3.13")}
+    # macOS is compiled at its declared floor, and only macOS gets a deployment target
+    assert {c["macos"] for c in calls if c["platform"] == "aarch64-apple-darwin"} == {"14.0"}
+    assert {c["macos"] for c in calls if c["platform"] != "aarch64-apple-darwin"} == {None}
+    # the bundle's own requirements, conexus from the checkout, under the bundle's own overrides and the staged lock
+    bare, pdf = calls[0]["requirements"], calls[-1]["requirements"]
+    assert bare.startswith("conexus @ file://") and "[pdf]" not in bare
+    assert pdf.startswith("conexus[pdf] @ file://")
+    assert "av; sys_platform == 'never'" in calls[0]["overrides"]
+    assert calls[0]["constraints"].endswith("constraints.txt")
+    verdict = next(ln for ln in proc.stdout.splitlines() if ln.startswith("MCPB RESOLVE GATE PASSED"))
+    assert "bare per platform: 8 of 8 cells resolved" in verdict and "pdf per platform: 8 of 8 cells resolved" in verdict
+
+
+@_FAKE_UV_POSIX_ONLY
+@pytest.mark.parametrize("platform,cell", [
+    ("aarch64-apple-darwin", "macos14-arm64-py3.12"),
+    ("x86_64-pc-windows-msvc", "windows-x64-py3.13"),
+    ("aarch64-unknown-linux-gnu", "linux-aarch64-py3.12"),
+])
+def test_a_wheel_missing_on_one_platform_fails_though_the_universal_lock_resolves(
+        tmp_path: Path, platform: str, cell: str) -> None:
+    """The fixture the bead asks for: ``uv lock`` (the fake's lock branch) succeeds, one platform's compile does not."""
+    proc, record = _gate(tmp_path, no_wheel_on=platform)
+    assert proc.returncode == 1 and "PASSED" not in proc.stdout
+    assert "MCPB RESOLVE GATE FAILED" in proc.stdout and cell in proc.stdout
+    assert "no wheels with a matching platform tag" in proc.stdout
+    # the lock really did pass: both variants' locks ran, and the first variant's compiles are what failed
+    assert [c["argv"][0] for c in _calls(record)] == ["lock"]
+    assert platform in {c["platform"] for c in _pip_calls(record)}
+
+
+@_FAKE_UV_POSIX_ONLY
+def test_a_near_empty_platform_compile_fails_instead_of_passing_over_nothing(tmp_path: Path) -> None:
+    proc, _ = _gate(tmp_path, compile_limit=5)
+    assert proc.returncode == 1 and "platform cells do not resolve" in proc.stdout
+    assert "examined almost nothing" in proc.stdout
+
+
+@_FAKE_UV_POSIX_ONLY
+def test_a_cell_table_shrunk_below_the_declared_count_fails(tmp_path: Path) -> None:
+    """EXPECTED_CELLS is a literal: deleting a platform or python must fail the gate, not shrink it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("check_mcpb_resolve_cells", GATE)
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    assert len(gate.PLATFORMS) * len(gate.PYTHONS) == gate.EXPECTED_CELLS == 8
+    gate.PLATFORMS = gate.PLATFORMS[:-1]
+    exe, _ = _fake_uv(tmp_path)
+    import argparse
+
+    rc, _ = gate._platform_check(argparse.Namespace(uv=str(exe)), tmp_path, tmp_path, "9.9.9", "bare")
+    assert rc == 1
 
 
 def test_the_checkout_itself_is_not_edited(tmp_path: Path) -> None:

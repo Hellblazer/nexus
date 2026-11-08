@@ -1340,6 +1340,7 @@ public final class CatalogHandler implements HttpHandler {
                 }
                 List<Map<String, Object>> rows = strictRows(in.get("rows"));
                 requireCanonicalChashes(rows);
+                requireWellFormedExpected(rows);
                 Map<String, Object> doc = new LinkedHashMap<>();
                 doc.put("doc_id", docId);
                 doc.put("rows", rows);
@@ -1933,8 +1934,9 @@ public final class CatalogHandler implements HttpHandler {
      * full span string client-side and sends only the truncated chash +
      * collection so the server does a simple keyed lookup.
      *
-     * <p>Response: {@code {"chunk_text": "...", "metadata": {...}, "chunk_hash": "..."}}
-     * or 404 on miss.
+     * <p>Response: {@code {"chunk_text": "...", "metadata": {...}, "chunk_hash": "...", "sensitive": false}}
+     * or 404 on miss. Optional {@code sensitivity=exclude} (nexus-rfvyy.7.4, RDR-243; any other value is a 400) makes
+     * a chunk with a live sensitive owner a miss; {@code sensitive} is true when any live owner is sensitive.
      */
     private void handleResolveSpan(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -1943,7 +1945,8 @@ public final class CatalogHandler implements HttpHandler {
         if (spanChash == null || spanChash.isBlank() || collection == null || collection.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"span_chash and collection query params required\"}"); return;
         }
-        var result = repo.resolveSpan(tenant, collection, spanChash);
+        boolean excludeSensitive = dev.nexus.service.vectors.ChunkSensitivity.excludeFlag(queryParam(exchange, "sensitivity"));
+        var result = repo.resolveSpan(tenant, collection, spanChash, excludeSensitive);
         if (result == null) {
             HttpUtil.send(exchange, 404, "{\"error\":\"chunk not found\"}"); return;
         }
@@ -1958,7 +1961,9 @@ public final class CatalogHandler implements HttpHandler {
      * provided) then newest created_at.
      *
      * <p>Response: {@code {"chash": "...", "chunk_hash": "...", "physical_collection": "...",
-     * "doc_id": "...", "chunk_text": "...", "metadata": {...}}} or 404 on miss.
+     * "doc_id": "...", "chunk_text": "...", "metadata": {...}, "sensitive": false}} or 404 on miss. Optional
+     * {@code sensitivity=exclude} (nexus-rfvyy.7.4, RDR-243; any other value is a 400) skips candidates with a live
+     * sensitive owner; {@code sensitive} is true when any live owner of the returned chunk is sensitive.
      */
     private void handleResolveChash(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -1967,7 +1972,8 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"chash query param required\"}"); return;
         }
         String preferCollection = queryParam(exchange, "prefer_collection"); // may be null
-        var result = repo.resolveChash(tenant, chash, preferCollection);
+        boolean excludeSensitive = dev.nexus.service.vectors.ChunkSensitivity.excludeFlag(queryParam(exchange, "sensitivity"));
+        var result = repo.resolveChash(tenant, chash, preferCollection, excludeSensitive);
         if (result == null) {
             HttpUtil.send(exchange, 404, "{\"error\":\"chunk not found\"}"); return;
         }
@@ -3564,6 +3570,53 @@ public final class CatalogHandler implements HttpHandler {
             }
             rows.get(i).put("chash",
                 dev.nexus.service.db.Chash.requireCanonical(s, "rows[" + i + "]"));
+        }
+    }
+
+    /**
+     * nexus-tj0wu: the per-row {@code expected} guard of {@code manifest/append_many}, parsed at the boundary:
+     * absent or null is no guard; otherwise an object with a canonical 64-hex {@code chash} (written back
+     * lower-case) and, optionally, the labels the caller read: {@code section_title}/{@code section_type}
+     * (string or null), {@code page_number} (integer or null) and {@code labels_written} (boolean), and the span
+     * columns {@code line_start}, {@code line_end}, {@code char_start}, {@code char_end} (integer or null). A key
+     * that is absent is not compared. Anything else is a 400, before any transaction: a guard that parsed as "no guard"
+     * would write the row unguarded.
+     */
+    @SuppressWarnings("unchecked")
+    private static void requireWellFormedExpected(List<Map<String, Object>> rows) {
+        for (int i = 0; i < rows.size(); i++) {
+            Object raw = rows.get(i).get("expected");
+            if (raw == null) continue;
+            String at = "rows[" + i + "].expected";
+            if (!(raw instanceof Map<?, ?> m)) {
+                throw new IllegalArgumentException(at + " must be an object");
+            }
+            Map<String, Object> expected = (Map<String, Object>) m;
+            if (!(expected.get("chash") instanceof String chash)) {
+                throw new IllegalArgumentException(at + ".chash required (string)");
+            }
+            expected.put("chash", dev.nexus.service.db.Chash.requireCanonical(chash, at));
+            for (String k : List.of("section_title", "section_type")) {
+                if (expected.containsKey(k) && expected.get(k) != null && !(expected.get(k) instanceof String)) {
+                    throw new IllegalArgumentException(at + "." + k + " must be a string or null");
+                }
+            }
+            for (String k : List.of("page_number", "line_start", "line_end", "char_start", "char_end")) {
+                Object n = expected.get(k);
+                if (expected.containsKey(k) && n != null
+                        && !(n instanceof Integer || n instanceof Long || n instanceof Short)) {
+                    throw new IllegalArgumentException(at + "." + k + " must be an integer or null");
+                }
+            }
+            if (expected.containsKey("labels_written") && !(expected.get("labels_written") instanceof Boolean)) {
+                throw new IllegalArgumentException(at + ".labels_written must be a boolean");
+            }
+            for (String k : expected.keySet()) {
+                if (!List.of("chash", "section_title", "section_type", "page_number", "labels_written",
+                        "line_start", "line_end", "char_start", "char_end").contains(k)) {
+                    throw new IllegalArgumentException(at + "." + k + " is not an expected-value field");
+                }
+            }
         }
     }
 

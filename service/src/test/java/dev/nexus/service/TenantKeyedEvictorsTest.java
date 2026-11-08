@@ -12,6 +12,7 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TokenCache;
 import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.db.TupleRepository;
+import dev.nexus.service.http.ChunkKeysSweepJobs;
 import dev.nexus.service.http.MintRateLimiter;
 import dev.nexus.service.tuples.TemplateRegistry;
 import dev.nexus.service.vectors.OwnerlessLogLimiter;
@@ -187,6 +188,30 @@ class TenantKeyedEvictorsTest {
         limiter.tryAcquire("cred-2", "mint-x");
         limiter.tryAcquire("cred-2", "mint-y");
         assertThat(limiter.evictTenant("mint-x")).isEqualTo(2);
+    }
+
+    // ── ChunkKeysSweepJobs.jobs ──────────────────────────────────────────────────────────────────
+
+    @Test
+    void chunkKeysSweepJobs_evictTenant_dropsXsJobsAndTheirCountsOnly() throws Exception {
+        var jobs = new ChunkKeysSweepJobs();
+        try {
+            var x = jobs.start("job-x", "job-x", false, "fp", stage -> new ChunkKeysSweepJobs.Outcome(200, Map.of("tenant", "job-x")));
+            var y = jobs.start("job-y", "job-y", false, "fp", stage -> new ChunkKeysSweepJobs.Outcome(200, Map.of("tenant", "job-y")));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            while (jobs.find(x.job().id()).state() == ChunkKeysSweepJobs.State.RUNNING
+                    || jobs.find(y.job().id()).state() == ChunkKeysSweepJobs.State.RUNNING) {
+                assertThat(System.nanoTime()).as("both jobs end").isLessThan(deadline);
+                Thread.sleep(5);
+            }
+
+            assertThat(jobs.evictTenant("job-x")).isEqualTo(1);
+
+            assertThat(jobs.find(x.job().id())).as("X's job and its counts are gone").isNull();
+            assertThat(jobs.find(y.job().id())).as("Y's job is intact").isNotNull();
+        } finally {
+            jobs.shutdown();
+        }
     }
 
     // ── OwnerlessLogLimiter.states ───────────────────────────────────────────────────────────────

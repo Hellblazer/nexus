@@ -983,7 +983,7 @@ def test_restore_reaches_what_the_reaper_moved_when_the_origins_catalog_row_disa
 
 def _visible(origin: str, chash: str) -> bool:
     """Whether the engine's store-get returns the chunk: live(c) hides one no live manifest row names."""
-    return HttpVectorClient().get_by_id(origin, chash) is not None
+    return HttpVectorClient().get_by_id(origin, chash, sensitivity="include") is not None
 
 
 def test_reattach_makes_a_restored_chunk_visible_again_against_the_real_engine(

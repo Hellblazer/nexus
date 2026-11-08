@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 import structlog
 
 from nexus import call_deadline
+from nexus import sensitivity as _sensitivity  # through the module, so one test patch reaches every entry point
 from nexus.plans.document_confinement import (
     CONFINED_TOOLS,
     DocumentConfinement,
@@ -68,6 +69,7 @@ from nexus.plans.document_confinement import (
     empty_confined_output,
 )
 from nexus.plans.match import Match
+from nexus.sensitivity import ReadSensitivity
 from nexus.plans.owner_narrowing import OWNERS_BINDING
 
 if TYPE_CHECKING:
@@ -117,6 +119,8 @@ __all__ = [
     "ToolDispatcher",
     "claimless_verify_reason",
     "find_claimless_verify",
+    "find_operator_arg_defect",
+    "operator_arg_reason",
     "find_embedded_step_ref",
     "merge_bindings",
     "plan_run",
@@ -476,6 +480,12 @@ class StepRecord:
     #: 0-based plan indices this one dispatch fused. Empty for every
     #: other source.
     bundled_steps: list[int] = field(default_factory=list)
+    #: RDR-243 Phase 2 (nexus-rfvyy.7.9): one ``{"tumbler", "surface", "route", ...}`` dict per sensitive document
+    #: (or chunk) the hydration behind this record refused to hand to a model, in the order it refused them. The
+    #: lines gathered since the previous record are attached to the next one, because hydration runs before the
+    #: step it feeds is recorded. Empty for a step that refused nothing, which is every step outside ``llm_bound``.
+    #: In-process only, like the rest of this record: the engine-side ``nx_answer_steps`` write does not carry it.
+    sensitive_skips: list[dict[str, str]] = field(default_factory=list)
 
     # Same landmine as DispatchUsage (dispatch.py): frozen=True + a
     # mutable list field would auto-generate a __hash__ that raises
@@ -752,6 +762,71 @@ from nexus.operators.witness import EvidenceRecord, bind as _bind_witness, defer
 #: attribute never hydrates (a test fake): it is handed the resolved args as it always was.
 _HYDRATES_ATTR: str = "hydrates_operator_args"
 _PREHYDRATED: ContextVar[bool] = ContextVar("nexus_operator_args_prehydrated", default=False)
+
+
+#: RDR-243 Phase 2 (nexus-rfvyy.7.9). The refusals hydration made since the last :class:`StepRecord`, collected for
+#: the run by :func:`plan_run` (``None`` outside a run: a refusal is then logged and not recorded). The list is
+#: shared by reference, so a hydration that runs on a worker thread holding a copy of the context still appends to it.
+_SENSITIVE_SKIPS: ContextVar[list[dict[str, str]] | None] = ContextVar("nexus_plan_run_sensitive_skips", default=None)
+
+
+@contextlib.contextmanager
+def _sensitive_skip_scope() -> Any:
+    token = _SENSITIVE_SKIPS.set([])
+    try:
+        yield
+    finally:
+        _SENSITIVE_SKIPS.reset(token)
+
+
+def _note_sensitive_skip(tumbler: str, route: str, *, chash: str = "", reason: str = "sensitive") -> None:
+    """Log one refusal and, inside a run, put it on the run record's next :class:`StepRecord`.
+
+    *tumbler* is the refused document (``""`` when the catalog could not say, *reason* then says so); *route* is
+    ``tumbler`` or ``chash``, the hydration path that met it (the coverage repair fetch uses the chash path); the surface is the registry name of the
+    innermost ``llm_bound`` scope, which names the surface that would have sent the text."""
+    from nexus.sensitivity import current_surface  # noqa: PLC0415 — deferred: the runner imports stay lazy
+
+    surface = current_surface() or ""
+    _log.info("sensitive_document_refused", tumbler=tumbler, surface=surface, route=route, chash=chash, reason=reason)
+    sink = _SENSITIVE_SKIPS.get()
+    if sink is not None:
+        line = {"tumbler": tumbler, "surface": surface, "route": route, "reason": reason}
+        if chash:
+            line["chash"] = chash
+        if line not in sink:  # a second hydration of the same step (the coverage repair) must not repeat a line
+            sink.append(line)
+
+
+def _drain_sensitive_skips() -> list[dict[str, str]]:
+    sink = _SENSITIVE_SKIPS.get()
+    if not sink:
+        return []
+    taken = list(sink)
+    sink.clear()
+    return taken
+
+
+def _withheld_sensitive_chashes(chashes: list[str], *, cat: Any = None) -> set[str]:
+    """The subset of *chashes* a model must not be handed because a sensitive live document owns it.
+
+    The explicit refusal on the chash route, beside the engine's ``exclude``: the engine drops these chunks from the
+    read, and this names the document (the skip line carries its tumbler) and still refuses on an engine or double
+    that does not filter. A catalog that cannot say fails closed: every chash is withheld, one line each."""
+    from nexus.doc_sensitivity import SensitivityUnknown, flagged_owners_of_chashes  # noqa: PLC0415 — deferred
+
+    ids = [str(c) for c in chashes if c]
+    try:
+        flagged_map = flagged_owners_of_chashes(ids, cat=cat)
+    except SensitivityUnknown as exc:
+        _log.warning("sensitive_chash_gate_unknown", chash_count=len(ids), error=exc.detail)
+        for c in dict.fromkeys(ids):
+            _note_sensitive_skip("", "chash", chash=c, reason="sensitivity unknown: withheld")
+        return set(ids)
+    for c, owners in flagged_map.items():
+        for t in owners:
+            _note_sensitive_skip(t, "chash", chash=c)
+    return set(flagged_map)
 
 
 def operator_args_prehydrated() -> bool:
@@ -1156,10 +1231,7 @@ def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
         return None
     for index, step in enumerate(steps):
         tool = step.get("tool") if isinstance(step, dict) else None
-        if not isinstance(tool, str) or not (
-            tool in _VERIFY_TOOL_NAMES
-            or (tool.startswith("mcp__") and tool.endswith(tuple(f"__{n}" for n in _VERIFY_TOOL_NAMES)))
-        ):
+        if not isinstance(tool, str) or not _is_named(tool, _VERIFY_TOOL_NAMES):
             continue
         args = step.get("args")
         claim = args.get("claim") if isinstance(args, dict) else None
@@ -1169,15 +1241,100 @@ def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
 
 
 def claimless_verify_reason(plan: "str | dict[str, Any] | None") -> str | None:
-    """Why *plan* cannot run, when :func:`find_claimless_verify` finds a step, else ``None``: the
-    one wording every door reports."""
+    """Why *plan* cannot run, when :func:`find_claimless_verify` finds a step, else ``None``."""
     index = find_claimless_verify(plan)
-    if index is None:
-        return None
+    return None if index is None else _claimless_text(index)
+
+
+def _claimless_text(index: int) -> str:
     return (
         f"step {index + 1} is a verify step with no claim; the host never invents one, "
         "so the step cannot check anything"
     )
+
+
+#: The names a check step goes by in plan JSON, before an ``mcp__...__`` prefix.
+_CHECK_TOOL_NAMES: tuple[str, ...] = ("check", "operator_check")
+
+
+def _is_named(tool: str, names: tuple[str, ...]) -> bool:
+    """*tool* is one of *names*, as ``plan_run`` reads it: case kept, an ``mcp__`` prefix matched by suffix."""
+    return tool in names or (tool.startswith("mcp__") and tool.endswith(tuple(f"__{n}" for n in names)))
+
+
+def _feeds_next_in_bundle(step: dict[str, Any]) -> bool:
+    """Whether *step* hands its output to the next step inside one bundle, by :func:`segment_steps`' own rule: a
+    bundleable operator that is not a witness (a ``check`` or ``verify`` ends its bundle, so the step after it runs
+    without that output). Assumes default bundling (``plan_run(bundle_operators=True)``, every production caller)."""
+    name = _extract_tool_name(step)
+    return _is_operator_tool(name) and not _is_witness_tool(name)
+
+
+def _blank(value: Any) -> bool:
+    return not (isinstance(value, str) and value.strip())
+
+
+def find_operator_arg_defect(plan: "str | dict[str, Any] | None") -> tuple[int, str] | None:
+    """``(0-based index, reason)`` of the first step missing an operator argument the plan author must supply,
+    else ``None`` (nexus-iy2ep, extending nexus-z1d0l.1.11).
+
+    ``plan_run`` refuses such a step only when it reaches it, after the steps before it have run and been paid
+    for, so every door a plan comes through asks this first (the inline planner, ``plan_save``, the seed loader,
+    the matcher and ``nx plan hygiene``). Three defects, in step order:
+
+    * a verify step with no non-blank ``claim`` (the host never invents one);
+    * a verify step with neither ``ids`` nor ``evidence`` that does not directly follow a non-witness operator step
+      (nothing to check the claim against; after such a step, a bundle hands it that step's output as its evidence;
+      a check or verify ends its bundle, so a verify after one gets nothing);
+    * a check step with no non-blank ``check_instruction`` (the claim or question it checks).
+
+    A claim or instruction counts only as a non-blank string (``$stepN.text`` is one); evidence counts as a
+    non-blank string or a non-empty list. A deferred-ref mapping exists only inside a running bundle, never in
+    plan JSON. Other missing args (a check with no items, a summarize with no content) are not scanned. Anything that is not a plan with a ``steps`` list returns
+    ``None``, as :func:`find_embedded_step_ref` does.
+    """
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except (TypeError, ValueError):
+            return None
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return None
+    after_operator = False
+    for index, step in enumerate(steps):
+        tool = step.get("tool") if isinstance(step, dict) else None
+        if not isinstance(tool, str):
+            after_operator = False
+            continue
+        follows_operator, after_operator = after_operator, _feeds_next_in_bundle(step)
+        args = step.get("args")
+        args = args if isinstance(args, dict) else {}
+        if _is_named(tool, _VERIFY_TOOL_NAMES):
+            if _blank(args.get("claim")):
+                return index, _claimless_text(index)
+            evidence = args.get("evidence")
+            if (
+                not follows_operator and "ids" not in args and _blank(evidence)
+                and not (isinstance(evidence, list) and evidence)
+            ):
+                return index, (
+                    f"step {index + 1} is a verify step with neither ids nor evidence, "
+                    "so it has nothing to check its claim against"
+                )
+        elif _is_named(tool, _CHECK_TOOL_NAMES) and _blank(args.get("check_instruction")):
+            return index, (
+                f"step {index + 1} is a check step with no check_instruction, "
+                "so it has no claim or question to check"
+            )
+    return None
+
+
+def operator_arg_reason(plan: "str | dict[str, Any] | None") -> str | None:
+    """Why *plan* cannot run, when :func:`find_operator_arg_defect` finds a step, else ``None``: the one wording
+    every door reports."""
+    defect = find_operator_arg_defect(plan)
+    return None if defect is None else defect[1]
 
 
 def _resolve_args(
@@ -2204,7 +2361,42 @@ def _zero_evidence_witness(resolved_tool: str, text: str) -> dict[str, Any]:
     return {**_bind_witness(reply, None, verb), "text": text}
 
 
-def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
+def _refuse_sensitive_tumblers(tumbler_ids: list[str], cat: Any) -> set[str]:
+    """The tumblers of *tumbler_ids* hydration refuses under ``exclude``, each with a skip line.
+
+    One batched catalog read. A catalog that cannot answer refuses every tumbler (a gate that cannot tell never
+    sends); the line says so."""
+    from nexus.doc_sensitivity import SensitivityUnknown, flagged  # noqa: PLC0415 — deferred
+
+    try:
+        refused = flagged(tumbler_ids, cat=cat)
+    except SensitivityUnknown as exc:
+        _log.warning("hydrate_tumbler_ids_sensitivity_unknown", tumbler_count=len(tumbler_ids), error=exc.detail)
+        for t in dict.fromkeys(tumbler_ids):
+            _note_sensitive_skip(t, "tumbler", reason="sensitivity unknown: withheld")
+        return set(tumbler_ids)
+    for t in tumbler_ids:
+        if t in refused:
+            _note_sensitive_skip(t, "tumbler")
+    return refused
+
+
+def _hydrate_chunks_or_refuse(*, tool: str, **kwargs: Any) -> Any:
+    """``store_get_many``'s body, with a refused ``exclude`` read turned into a failed plan (RDR-243 review r1 F2).
+
+    The engine could not be shown to filter sensitive chunks, so the read was refused. Handing the operator step an
+    empty result instead would read as "no evidence" for a corpus it was never allowed to read."""
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred; runner imports stay lazy
+
+    from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (avoid circular import)
+
+    try:
+        return mcp_core._store_get_many_impl(**kwargs)
+    except SensitivityExcludeUnavailable as exc:
+        raise PlanRunRetrievalRefusedError(tool=tool, message=str(exc)) from exc
+
+
+def _hydrate_tumbler_ids(tumbler_ids: list[str], *, sensitivity: ReadSensitivity) -> dict[str, Any]:
     """Resolve document tumblers to T3 content via the catalog manifest
     (nexus-mm5tx / nexus-zekpl class).
 
@@ -2222,6 +2414,12 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     Returns the same ``{contents, missing}`` shape ``store_get_many``
     returns (aligned 1:1 with *tumbler_ids*), so it slots into the same
     ``non_empty`` filtering the caller already does for the chash path.
+
+    *sensitivity* (RDR-243 Phase 2, nexus-rfvyy.7.9) is the read posture the caller took once on its own thread; it
+    has no default. ``exclude`` refuses every document whose catalog row is sensitive: it contributes no chunk, it is
+    reported in ``missing`` like any unusable document, and a skip line names it (:func:`_note_sensitive_skip`).
+    A catalog that cannot say refuses them all. The chunk read below is the internal helper behind
+    ``store_get_many`` with the same value, so the engine drops sensitive chunks as well.
     """
     from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.mcp_infra import get_catalog as _get_catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -2265,6 +2463,8 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         doc_id for doc_id, entry in catalog_entries.items()
         if _entry_is_non_evidentiary(entry)
     }
+    if sensitivity == "exclude":
+        excluded_doc_ids |= _refuse_sensitive_tumblers(tumbler_ids, cat)
 
     flat_ids: list[str] = []
     flat_collections: list[str] = []
@@ -2316,8 +2516,9 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         _stack.enter_context(mcp_core.without_source_notes())
         if None not in flat_manifest_types:
             _stack.enter_context(mcp_core.without_owner_section_types())
-        hydrated = mcp_core.store_get_many(
-            ids=flat_ids, collections=flat_collections, structured=True,
+        hydrated = _hydrate_chunks_or_refuse(
+            tool="store_get_many",
+            ids=flat_ids, collections=flat_collections, structured=True, sensitivity=sensitivity,
         )
     chunk_contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
     # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's decision 3):
@@ -2811,6 +3012,9 @@ def _hydrate_operator_args(
     """
     from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
+    # RDR-243 Phase 2 (nexus-rfvyy.7.9): the read posture, taken ONCE here on this thread and handed to every
+    # hydration below as an argument. ``llm_bound`` (the nx_answer scope) is ``exclude``.
+    sensitivity: ReadSensitivity = _sensitivity.read_sensitivity()
     resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
     evidence_source = args.get(_EVIDENCE_SOURCE_KEY)
     if _EVIDENCE_SOURCE_KEY in args:
@@ -2848,7 +3052,7 @@ def _hydrate_operator_args(
             )
             return resolved_tool, {
                 "_precomputed_result": _hydrate_tumbler_ids(
-                    [str(i) for i in id_list_raw],
+                    [str(i) for i in id_list_raw], sensitivity=sensitivity,
                 ),
             }
 
@@ -2887,12 +3091,13 @@ def _hydrate_operator_args(
                 tool=tool, resolved_tool=resolved_tool,
                 id_count=len(id_list_raw),
             )
-            hydrated = _hydrate_tumbler_ids([str(i) for i in id_list_raw])
+            hydrated = _hydrate_tumbler_ids([str(i) for i in id_list_raw], sensitivity=sensitivity)
             excluded_ids: set[str] = set()
         else:
             with mcp_core.capturing_owner_lookups() as owner_lookups:
-                hydrated = mcp_core.store_get_many(
-                    ids=ids, collections=collections, structured=True,
+                hydrated = _hydrate_chunks_or_refuse(
+                    tool=resolved_tool,
+                    ids=ids, collections=collections, structured=True, sensitivity=sensitivity,
                 )
             # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review
             # round 3): the chash-shaped path -- the far more common
@@ -2909,6 +3114,10 @@ def _hydrate_operator_args(
             # section_types the store_get_many call above already
             # fetched -- no extra round trip.
             excluded_ids |= _import_only_ids_from_hydrated(hydrated, id_list_raw)
+            if sensitivity == "exclude":
+                # RDR-243 Phase 2: the engine dropped the sensitive chunks; the catalog names their documents,
+                # writes the skip lines and refuses a chunk an unfiltering engine returned.
+                excluded_ids |= _withheld_sensitive_chashes([str(i) for i in id_list_raw])
         contents_raw = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
         if excluded_ids:
             contents = [
@@ -3219,6 +3428,12 @@ async def _dispatch_resolve(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _dispatchable_tool_names(mcp_core: Any) -> frozenset[str]:
+    """Names a plan step may dispatch: the registered MCP tools plus the operators, never a private name."""
+    registered = {t.name for t in mcp_core.mcp._tool_manager.list_tools()}
+    return frozenset(n for n in registered | _OPERATOR_RESOLVED_TOOLS if not n.startswith("_"))
+
+
 async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """Dispatch *tool* against the live MCP tool registry.
 
@@ -3351,12 +3566,18 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
         args = dict(args)
         _chash_allow = list(args.pop("chash_allow") or ())
 
-    fn = getattr(mcp_core, resolved_tool, None)
+    # RDR-243 review r1 F1: dispatch ONLY a registered MCP tool or an operator. ``nexus.mcp.core`` also holds
+    # private helpers that take ``sensitivity=`` (``_store_get_many_impl``, ``_search_render``, ...); a plan step
+    # naming one could pass ``"include"``, and the posture is enforced only by the registered tools' schema
+    # having no such argument. A leading underscore is refused outright, then the name must be registered.
+    _dispatchable = _dispatchable_tool_names(mcp_core)
+    fn = (
+        getattr(mcp_core, resolved_tool, None)
+        if not resolved_tool.startswith("_") and resolved_tool in _dispatchable
+        else None
+    )
     if fn is None or not callable(fn):
-        available = sorted(
-            name for name in dir(mcp_core)
-            if not name.startswith("_") and callable(getattr(mcp_core, name, None))
-        )[:20]
+        available = sorted(_dispatchable)[:20]
         raise PlanRunToolNotFoundError(
             tool=tool,
             reason=(
@@ -3487,7 +3708,15 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # (RDR-156 P4 search_metadata_scoped / search_topic_scoped, whose
     # structured output carries chunk text inline) degrade to an empty
     # summarize in local mode rather than raising PlanRunStepRefError.
+    if isinstance(result, dict) and result.get("sensitivity_refused") is True:
+        # RDR-243 review r1 F2: the ``store_get_many`` tool's structured refusal (the engine cannot be shown to
+        # filter sensitive chunks). The plan fails; it does not carry on with the empty ``contents``.
+        raise PlanRunRetrievalRefusedError(tool=tool, message=str(result.get("error") or _sensitivity.EXCLUDE_REFUSED_MARKER))
     if isinstance(result, str):
+        if tool in _RETRIEVAL_TOOLS and _sensitivity.EXCLUDE_REFUSED_MARKER in result:
+            # The same refusal rendered to text by a search/query tool boundary: not a plan-binding problem to
+            # synthesize an empty result past (F2; the search legs re-raise it, F5).
+            raise PlanRunRetrievalRefusedError(tool=tool, message=result)
         if tool in _RETRIEVAL_TOOLS:
             # nexus-vply6 fix round 2, SHIP-BLOCKER (critique T2 [26773]):
             # an embedding-profile-mismatch refusal is NOT a plan-binding
@@ -3880,6 +4109,7 @@ async def _plan_run_impl(
             cache_creation_input_tokens=cache_creation,
             cost_usd=cost, elapsed_ms=elapsed_ms, ok=ok,
             bundled_steps=list(bundled_steps) if bundled_steps else [],
+            sensitive_skips=_drain_sensitive_skips(),
         ))
 
     # One authoritative segmentation. When bundling is off or the caller
@@ -4036,6 +4266,9 @@ async def _plan_run_impl(
             raise PlanRunStepRefError(ref="store_get_many", reason="the repair fetch did not return one content per id")
         by_tumbler = bool(ids) and all(_is_tumbler_shaped(i) for i in ids)
         excluded = set() if by_tumbler else _resolve_non_evidentiary_chashes(ids) | _import_only_ids_from_hydrated(out, ids)
+        if not by_tumbler and _sensitivity.read_sensitivity() == "exclude":
+            # RDR-243 Phase 2: the repair fetch is a model-bound read like the operator's own (row 14).
+            excluded |= _withheld_sensitive_chashes(ids)
         notes = out.get("source_notes")
         items: list[SupplementItem] = []
         for k, (hit, text) in enumerate(zip(hits, contents)):
@@ -5125,7 +5358,7 @@ async def plan_run(
         _recorder.reset_run()
     supplement = RepairSupplement() if coverage_boundary is not None else None
     with reserved_scope(reserved_stream), supplement_scope(supplement), registry_listing_scope(), \
-            confinement_scope(document_confinement):
+            confinement_scope(document_confinement), _sensitive_skip_scope():
         result = await _plan_run_impl(
             match, bindings, dispatcher=dispatcher, bundle_operators=bundle_operators,
             deadline=deadline, budget_usd_remaining=budget_usd_remaining,

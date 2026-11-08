@@ -43,6 +43,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -87,6 +89,12 @@ import javax.crypto.spec.SecretKeySpec;
  * the retired-key predicate, so it repeats nothing; but a collection whose census would block it now and did not at
  * the first call is still swept by the replay, until a call without a token runs the census again.
  *
+ * <p><b>A dry run's counts are never handed to an apply (nexus-v75nw).</b> The first call of every run counts the
+ * preconditions itself, so a residue that grew since the dry run is refused as it would be on a synchronous apply. The
+ * background apply job (the handler's {@code async} apply) is exactly this loop run inside the engine: call 1 counts,
+ * the later calls carry the token the previous one returned, and {@link Progress}'s {@code stop} ends it at a batch
+ * boundary.
+ *
  * <p><b>By tenant, explicitly.</b> Every statement carries {@code tenant_id = ?} beside the RLS stamp: the owner role
  * sees every tenant's rows (RF-16), and a sweep run as that role must not depend on the stamp.
  *
@@ -98,7 +106,9 @@ import javax.crypto.spec.SecretKeySpec;
  * projection as a duration.
  *
  * <p><b>What it does not census.</b> The two equalities the CHECKs add ({@code chunk_text_hash} against the chash and
- * {@code embedding_model} against the column) are counted here and refuse the table-wide add, not the sweep. The Phase 3
+ * {@code embedding_model} against the column) are counted here and refuse the table-wide add, not the sweep. The manifest
+ * redundancy the RDR's Phase 4 adds ({@code labels_written} false beside a label) is counted beside them as {@code
+ * manifest_unwritten_label_rows} and refuses nothing (nexus-6pfgb.42). The Phase 3
  * capability flags (the manifest-keyed reads the sweep's removal of POSITION and DOCUMENT keys depends on, RDR-236) are
  * constants in this binary, true by construction wherever this route exists, so the sweep does not read them from
  * {@code /version}.
@@ -370,6 +380,23 @@ public final class ChunkKeySweep {
         return DSL.condition(DSL.function("jsonb_exists", SQLDataType.BOOLEAN, metadata, DSL.val(key)));
     }
 
+    /** The key holds a JSON integer (a number written without a fraction or exponent; not a string, bool or null). */
+    private static Condition anyInt(Field<JSONB> metadata, String key) {
+        return jsonIntegerText(metadata, key, "^-?[0-9]+$");
+    }
+
+    /** The key holds a JSON integer above zero (the value {@code manifest_span} treats as recorded). */
+    private static Condition positiveInt(Field<JSONB> metadata, String key) {
+        return jsonIntegerText(metadata, key, "^[1-9][0-9]*$");
+    }
+
+    private static Condition jsonIntegerText(Field<JSONB> metadata, String key, String regex) {
+        Field<JSONB> value = DSL.jsonbGetAttribute(metadata, key);
+        Field<String> typeOf = DSL.function("jsonb_typeof", SQLDataType.VARCHAR, value);
+        // typeOf is NULL for an absent key and the AND is then NULL, which no WHERE or FILTER admits.
+        return typeOf.eq("number").and(DSL.jsonbGetAttributeAsText(metadata, key).likeRegex(regex));
+    }
+
     /** A row's {@code chunk_text_hash} that is not its chash in hex (a row without the key passes, as the CHECK does). */
     static Condition hashMismatch() {
         Field<String> hash = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "chunk_text_hash");
@@ -429,13 +456,17 @@ public final class ChunkKeySweep {
 
     /** As {@link #preconditions}, with the breakdown of {@code generated_nulls} and {@code null_span_rows}. */
     public Preconditions preconditionReport(String tenant, ChunkKeyPlan plan) {
+        return preconditionReport(tenant, plan, stage -> { });
+    }
+
+    private Preconditions preconditionReport(String tenant, ChunkKeyPlan plan, Consumer<String> stage) {
         return scope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, BATCH_STATEMENT_MS, BATCH_LOCK_MS);
-            return countPreconditions(ctx, tenant, plan);
+            return countPreconditions(ctx, tenant, plan, stage);
         });
     }
 
-    private Preconditions countPreconditions(DSLContext ctx, String tenant, ChunkKeyPlan plan) {
+    private Preconditions countPreconditions(DSLContext ctx, String tenant, ChunkKeyPlan plan, Consumer<String> stage) {
         Map<String, Long> out = new LinkedHashMap<>();
         Map<String, Object> details = new LinkedHashMap<>();
         CatalogDocuments d = CATALOG_DOCUMENTS.as("d");
@@ -444,6 +475,7 @@ public final class ChunkKeySweep {
         Condition liveDoc = d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull());
 
         // A legacy manifest row (labels_written false) whose label is on the chunk row only: the sweep would lose it.
+        stage.accept("precondition:legacy_label_rows");
         out.put("legacy_label_rows", (long) ctx.fetchCount(
             DSL.selectOne().from(m)
                 .join(d).on(d.TENANT_ID.eq(m.TENANT_ID).and(d.TUMBLER.eq(m.DOC_ID)))
@@ -452,12 +484,14 @@ public final class ChunkKeySweep {
                 .and(hasAny(c.METADATA, LABEL_KEYS))));
 
         // A live note with no put_at in its catalog meta: its TTL and tags are read from the chunk row until it has one.
+        stage.accept("precondition:keyless_notes");
         out.put("keyless_notes", (long) ctx.fetchCount(
             DSL.selectOne().from(d)
                 .where(liveDoc).and(d.CONTENT_TYPE.eq(NOTE_CONTENT_TYPE))
                 .and(DSL.coalesce(hasKeyAsField(d.METADATA, "put_at"), DSL.inline(false)).isFalse())));
 
         // A chunk row that records a TTL no live owner's catalog meta records: the sweep would make that note permanent.
+        stage.accept("precondition:keyless_ttl_rows");
         Field<String> rowTtl = DSL.jsonbGetAttributeAsText(c.METADATA, "ttl_days");
         out.put("keyless_ttl_rows", (long) ctx.fetchCount(
             DSL.selectOne().from(c)
@@ -470,15 +504,23 @@ public final class ChunkKeySweep {
                     .and(DSL.coalesce(hasKeyAsField(d.METADATA, "ttl_days"), DSL.inline(false)).isTrue()))));
 
         // A live document with no physical collection: its chunks have no home the manifest can name (RDR-191).
+        stage.accept("precondition:homeless_documents");
         out.put("homeless_documents", (long) ctx.fetchCount(
             DSL.selectOne().from(d).where(liveDoc).and(d.PHYSICAL_COLLECTION.eq(""))));
 
-        // A manifest span column that is NULL while the chunk row holds the matching key: the sweep would lose that
-        // position. Counted per column (the sweep deletes all four keys), and a row once whatever columns it lacks.
-        Condition lineStart = m.LINE_START.isNull().and(hasKey(c.METADATA, "line_start"));
-        Condition lineEnd = m.LINE_END.isNull().and(hasKey(c.METADATA, "line_end"));
-        Condition charStart = m.CHAR_START.isNull().and(hasKey(c.METADATA, "chunk_start_char"));
-        Condition charEnd = m.CHAR_END.isNull().and(hasKey(c.METADATA, "chunk_end_char"));
+        // A manifest span column that is NULL while the chunk row RECORDS the matching value: the sweep would lose that
+        // position. "Recorded" is the Python client's manifest_span rule, by value: make_chunk_metadata writes 0 for "not
+        // recorded", so a key that is present is not a position. A line is recorded when it is a positive integer, the
+        // char end likewise, and the char start when it is a positive integer or an integer beside a recorded end (0 is
+        // the head of the text only then). A string, float, boolean or null is never recorded. Counted per column (the
+        // sweep deletes all four keys), and a row once whatever columns it lacks.
+        stage.accept("precondition:null_span_rows");
+        Condition endRecorded = positiveInt(c.METADATA, "chunk_end_char");
+        Condition lineStart = m.LINE_START.isNull().and(positiveInt(c.METADATA, "line_start"));
+        Condition lineEnd = m.LINE_END.isNull().and(positiveInt(c.METADATA, "line_end"));
+        Condition charStart = m.CHAR_START.isNull().and(
+            positiveInt(c.METADATA, "chunk_start_char").or(anyInt(c.METADATA, "chunk_start_char").and(endRecorded)));
+        Condition charEnd = m.CHAR_END.isNull().and(endRecorded);
         var spanRow = ctx.select(
                 DSL.count(),
                 DSL.count().filterWhere(lineStart), DSL.count().filterWhere(lineEnd),
@@ -498,6 +540,7 @@ public final class ChunkKeySweep {
 
         // An indexed document that lacks a stored source_format, tags or category (backfill-meta's residue), by content
         // type and by which key is missing: the count alone does not say whether backfill-meta has run for the type.
+        stage.accept("precondition:generated_nulls");
         Condition missingAny = DSL.coalesce(DSL.function("jsonb_exists_all", SQLDataType.BOOLEAN, d.METADATA,
             keyArray(DERIVED_META_KEYS)), DSL.inline(false)).isFalse();
         Result<?> gen = ctx.select(d.CONTENT_TYPE, DSL.count(),
@@ -530,21 +573,35 @@ public final class ChunkKeySweep {
         details.put("generated_nulls", genDetail);
 
         // The constraints' own equalities and the width, counted over every collection of the tenant.
+        stage.accept("precondition:chunk_text_hash_mismatch");
         out.put("chunk_text_hash_mismatch", (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(hashMismatch())));
+        stage.accept("precondition:embedding_model_mismatch");
         out.put("embedding_model_mismatch", (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(modelMismatch())));
+        stage.accept("precondition:wrong_width_rows");
         out.put("wrong_width_rows", (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(width(false))));
 
+        // RDR-236 Phase 4 Step 3 census (a) (nexus-6pfgb.42): the manifest CHECK "labels_written OR (section_title,
+        // section_type, page_number all NULL)" would refuse these rows. Every manifest row of the tenant, whether or not
+        // its document is live: the CHECK applies to all of them. Informational: not an acceptable residue, so it never
+        // blocks a sweep; the manifest constraints wait for the Phase 4 cut.
+        out.put("manifest_unwritten_label_rows", (long) ctx.fetchCount(
+            DSL.selectOne().from(m).where(m.TENANT_ID.eq(tenant)).and(m.LABELS_WRITTEN.isFalse())
+                .and(m.SECTION_TITLE.isNotNull().or(m.SECTION_TYPE.isNotNull()).or(m.PAGE_NUMBER.isNotNull()))));
+
         // Rows the sweep cannot rewrite by key: a metadata value that is not a JSON object.
+        stage.accept("precondition:non_object_metadata_rows");
         out.put("non_object_metadata_rows", (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(DSL.not(isObject(CHUNKS.METADATA)))));
 
         // Rows an earlier restore left half-stamped: the engine's row keys on a live row, and the implication broken.
+        stage.accept("precondition:row_keys_on_live_rows");
         out.put("row_keys_on_live_rows", plan.rowKeys().isEmpty() ? 0L : (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant))
                 .and(notBypass(CHUNKS.COLLECTION, plan)).and(hasAny(CHUNKS.METADATA, plan.rowKeys()))));
+        stage.accept("precondition:quarantine_implication_violations");
         out.put("quarantine_implication_violations", plan.quarantineImplies().isEmpty() ? 0L : (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(quarantineBreach(plan))));
         return new Preconditions(out, details);
@@ -595,13 +652,25 @@ public final class ChunkKeySweep {
      */
     public DryRun dryRun(String tenant, ChunkKeyPlan plan, Map<String, Long> accepted, int batchSize,
                          boolean measureBatch) {
+        return dryRun(tenant, plan, accepted, batchSize, measureBatch, stage -> { });
+    }
+
+    /**
+     * As above, naming each step to {@code stage} before it starts: {@code collections}, {@code census I/N: COLLECTION} per censused collection, one {@code precondition:NAME}
+     * per precondition count, {@code sampling}. The asynchronous dry run (nexus-v75nw) shows the latest one to a client
+     * that polls; the answer is the same as the one-argument form's whatever the sink does.
+     */
+    public DryRun dryRun(String tenant, ChunkKeyPlan plan, Map<String, Long> accepted, int batchSize,
+                         boolean measureBatch, Consumer<String> stage) {
         int size = clampBatch(batchSize);
-        List<CollectionCount> collections = collectionsOf(tenant, plan);
-        Preconditions pre = preconditionReport(tenant, plan);
+        stage.accept("collections");
+        List<CollectionCount> collections = collectionsOf(tenant, plan, stage);
+        Preconditions pre = preconditionReport(tenant, plan, stage);
         List<String> blocking = blocking(pre.counts(), accepted);
         List<Sample> samples = List.of();
         List<String> sweepable = new ArrayList<>(sweepableCollections(collections));
         if (measureBatch && !sweepable.isEmpty()) {
+            stage.accept("sampling");
             samples = sample(tenant, plan, sweepable, size);
         }
         return new DryRun(tenant, collections, pre.counts(), pre.details(), Map.copyOf(accepted), blocking, samples, size);
@@ -663,13 +732,34 @@ public final class ChunkKeySweep {
     }
 
     /**
-     * What an {@link #apply} call has committed so far. Each batch is its own transaction, so a call that throws in
-     * batch N has already committed batches 1..N-1; the caller that must record the call (the root audit) reads these
-     * counts after the throw. Written by the thread that runs the call, read after it returns or throws.
+     * What an {@link #apply} call has committed so far, and the hooks a caller that runs it in the background hands in.
+     * Each batch is its own transaction, so a call that throws in batch N has already committed batches 1..N-1; the
+     * caller that must record the call (the root audit) reads these counts after the throw. Written by the thread that
+     * runs the call, read after it returns or throws (and, for a poll, while it runs).
+     *
+     * <p>{@code stop} is asked before each batch, never inside one: a call that is told to stop ends at the batch
+     * boundary with the batches it has committed ({@link #stopped}), and {@code done} false (nexus-v75nw: the cancel
+     * and the wall-clock cap of the apply job). {@code onBatch} is given the progress after each committed batch; {@code stage} names
+     * the call's steps: the dry run's stages while a first call counts, then {@code sweeping}.
      */
     public static final class Progress {
         private volatile long rowsSwept;
         private volatile int batches;
+        private volatile long remaining = -1;
+        private volatile boolean stopped;
+        private final BooleanSupplier stop;
+        private final Consumer<Progress> onBatch;
+        private final Consumer<String> stage;
+
+        public Progress() {
+            this(() -> false, p -> { }, s -> { });
+        }
+
+        public Progress(BooleanSupplier stop, Consumer<Progress> onBatch, Consumer<String> stage) {
+            this.stop = stop;
+            this.onBatch = onBatch;
+            this.stage = stage;
+        }
 
         public long rowsSwept() {
             return rowsSwept;
@@ -677,6 +767,16 @@ public final class ChunkKeySweep {
 
         public int batches() {
             return batches;
+        }
+
+        /** The rows still to sweep as the call's first count (or its token) had them, less what this call swept; -1 before it knows. */
+        public long remaining() {
+            return remaining;
+        }
+
+        /** True when the call ended because {@code stop} said so, with rows left. */
+        public boolean stopped() {
+            return stopped;
         }
     }
 
@@ -697,7 +797,7 @@ public final class ChunkKeySweep {
             ignored = true;
         }
         if (resume == null) {
-            DryRun report = dryRun(tenant, plan, accepted, size, false);
+            DryRun report = dryRun(tenant, plan, accepted, size, false, progress.stage);
             if (!report.blocking().isEmpty()) {
                 throw new PreconditionRefused(report);
             }
@@ -728,7 +828,14 @@ public final class ChunkKeySweep {
         int batches = 0;
         long firstMs = 0;
         boolean finished = sweepable.isEmpty();
+        progress.remaining = remaining;
+        progress.stage.accept("sweeping");
         while (!finished && batches < maxBatches && Duration.ofNanos(System.nanoTime() - t0).compareTo(budget) < 0) {
+            if (progress.stop.getAsBoolean()) {
+                // Asked between batches: the batch that ran is whole, the next one does not start.
+                progress.stopped = true;
+                break;
+            }
             Cursor from = cursor;
             Batch b = scope.withTenant(tenant, ctx -> {
                 PgSession.setStatementAndLockBounds(ctx, BATCH_STATEMENT_MS, BATCH_LOCK_MS);
@@ -751,6 +858,8 @@ public final class ChunkKeySweep {
             swept += b.updated();
             progress.rowsSwept = swept;
             progress.batches = batches;
+            progress.remaining = Math.max(0L, remaining - swept);
+            progress.onBatch.accept(progress);
             if (b.rows() == 0) {
                 finished = true;
             } else {
@@ -877,13 +986,24 @@ public final class ChunkKeySweep {
 
     /** Per-collection standing of one tenant, each collection with rows to sweep censused. */
     public List<CollectionCount> collectionsOf(String tenant, ChunkKeyPlan plan) {
+        return collectionsOf(tenant, plan, stage -> { });
+    }
+
+    private List<CollectionCount> collectionsOf(String tenant, ChunkKeyPlan plan, Consumer<String> stage) {
         List<CollectionCount> raw = scope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, BATCH_STATEMENT_MS, BATCH_LOCK_MS);
             return retiredByCollection(ctx, tenant, plan);
         });
         List<CollectionCount> collections = new ArrayList<>();
+        int censused = 0;
+        long toCensus = raw.stream().filter(c -> c.retiredRows() - c.wrongWidthRows() > 0).count();
         for (CollectionCount c : raw) {
-            collections.add(c.retiredRows() - c.wrongWidthRows() > 0 ? withCensus(tenant, c) : c);
+            if (c.retiredRows() - c.wrongWidthRows() > 0) {
+                stage.accept("census " + (++censused) + "/" + toCensus + ": " + c.collection());
+                collections.add(withCensus(tenant, c));
+            } else {
+                collections.add(c);
+            }
         }
         return collections;
     }

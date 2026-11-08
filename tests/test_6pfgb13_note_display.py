@@ -69,7 +69,7 @@ class _StubT3:
     def list_store(self, name: str, limit: int = 20, offset: int = 0) -> list[dict]:
         return [dict(d) for d in list(self.docs.values())[offset:offset + limit]]
 
-    def get_by_id(self, name: str, doc_id: str) -> dict | None:
+    def get_by_id(self, name: str, doc_id: str, *, sensitivity="include") -> dict | None:
         return dict(self.docs[doc_id]) if name == self.name and doc_id in self.docs else None
 
     def find_ids_by_title(self, name: str, title: str) -> list[str]:
@@ -98,6 +98,10 @@ def _entry(tumbler: str, title: str, meta: dict, indexed_at: str, collection: st
 
 @pytest.fixture
 def world(monkeypatch):
+    # RDR-243 Phase 3: the CLI's output posture reads the environment's Claude Code markers, and a suite run from
+    # inside Claude Code carries them; these tests are about the note display, so run them as a terminal does.
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
     t3 = _StubT3()
     state = SimpleNamespace(owners={}, entries={}, t3=t3, fail=False, title_hits={}, owner_calls=0, resolve_calls=0)
 
@@ -234,12 +238,22 @@ def test_a_chunk_of_two_keyless_notes_shows_none_of_the_rows_values(world, get) 
 
 
 @pytest.mark.parametrize("get", [_mcp_get, _cli_get], ids=["mcp", "cli"])
-def test_an_unowned_chunk_and_a_down_catalog_show_the_row(world, get) -> None:
+def test_an_unowned_chunk_and_a_down_catalog_show_the_row(world, get, monkeypatch) -> None:
     out = get(H_U)
     assert _line(out, "Tags:") == "Tags:       row-u" and _line(out, "Indexed:") == "Indexed:    2026-10-11"
     world.fail = True
+    # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): a down catalog cannot say the note is not sensitive, so the default
+    # posture withholds it (Q2: the CLI in a terminal shows it badged; the MCP posture is the config's, set to
+    # ``flag`` here so the row display under test is reachable). The display falls back to the row as before.
+    monkeypatch.setattr("nexus.mcp.core._mcp_output_posture", lambda: "flag")
     down = get(H_S)
     assert _line(down, "Tags:") == "Tags:       beta,row-b", "no owner could be read: the row is the only record"
+
+
+def test_a_down_catalog_withholds_the_note_under_the_default_mcp_posture(world) -> None:
+    world.fail = True
+    down = _mcp_get(H_S)
+    assert "content withheld" in down and "Tags:" not in down
 
 
 # ── store_list: one lookup for the page, each chunk from its own owners ───────────────────────

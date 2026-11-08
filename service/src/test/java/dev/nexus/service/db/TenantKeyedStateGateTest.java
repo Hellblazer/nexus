@@ -449,6 +449,7 @@ public class TenantKeyedStateGateTest {
         private static final String OWNERLESS_LOG = "OwnerlessLogLimiter";
         private static final String REAPER = "ChunkReaper";
         private static final String DATA_SWEEP = "NexusService.dataSweepFailuresByTenant";
+        private static final String CHUNK_KEYS_JOBS = "ChunkKeysSweepJobs";
 
         private static final String HANDLE =
             "a TenantScope handle: it holds the DataSource wrapper only, the tenant is a per-call argument";
@@ -518,8 +519,19 @@ public class TenantKeyedStateGateTest {
             keyed.put("NexusService.dataSweepFailuresByTenant", DATA_SWEEP);
             keyed.put("TupleWaitRegistry.WaitKey.tenant", TUPLE_WAITS);   // the key of groups
             keyed.put("TokenCache.Entry.tenantId", TOKEN_CACHE);   // the value of map
+            keyed.put("ChunkKeysSweepJobs.jobs", CHUNK_KEYS_JOBS);   // the background retire-keys dry runs (nexus-v75nw)
+            keyed.put("ChunkKeysSweepJobs.Job.tenant", CHUNK_KEYS_JOBS);   // the value of jobs
+            keyed.put("ChunkKeysSweepJobs.Job.callerTenant", CHUNK_KEYS_JOBS);   // the value of jobs
+            keyed.put("ChunkKeysSweepJobs.Job.outcome", CHUNK_KEYS_JOBS);   // the value of jobs: the tenant's counts
+            keyed.put("ChunkKeysSweepJobs.Outcome.body", CHUNK_KEYS_JOBS);   // the counts, held by the job's outcome
 
             // Not keyed: each with the reason it holds nothing a reset must clear.
+            notKeyed.put("ChunkKeysSweepJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
+                + "job that holds it is evicted under ChunkKeysSweepJobs.jobs");
+            notKeyed.put("NexusService.chunkKeysSweepForTests", TEST_HOOK);
+            notKeyed.put("NexusService.chunkKeysCredentialLiveForTests", TEST_HOOK);
+            notKeyed.put("ChunkKeysSweepJobs.maxRuntime", "the wall-clock cap a job is started with (a configured duration, "
+                + "settable by a test): no tenant's data");
             for (String f : List.of("NexusService.tenantScope", "TaxonomyCentroidRepository.tenantScope",
                 "PgVectorRepository.tenantScope", "ReaperRepository.tenantScope", "WhoamiHandler.tenantScope",
                 "RemapRepository.tenantScope", "CombinedWriteService.tenantScope", "TaxonomyRepository.tenantScope",
@@ -570,6 +582,17 @@ public class TenantKeyedStateGateTest {
                 notKeyed.put(f, "a field of the audit trail of ONE sweep request (built per request, dropped with "
                     + "its response); the handler holds no reference to it afterwards");
             }
+            // nexus-6pfgb.44: the catalog TTL CHECK routes hold nothing between requests.
+            notKeyed.put("CatalogTtlCheckAdmin.TenantCensus.tenant", "a component of one table-wide census row (the "
+                + "tenant name beside its counts), built for that request and dropped with its response");
+            notKeyed.put("CatalogTtlCheckHandler.tenants", "a supplier of the known tenant names (TokenStore#"
+                + "listKnownTenants), read on each request; it caches nothing");
+            notKeyed.put("CatalogTtlCheckHandler.Survey.checked", "a component of one request's survey (the tenants "
+                + "that request covered), built for that request and dropped with its response");
+            notKeyed.put("CatalogTtlCheckHandler.Survey.census", "a component of one request's survey (the census rows "
+                + "it read), built for that request and dropped with its response");
+            notKeyed.put("NexusService.catalogTtlCheckAdmin", "the admin-connection DDL object bound once at boot; "
+                + "table-wide, it opens a connection per call and holds no per-tenant state");
             notKeyed.put("NexusService.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("AuthFilter.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("TokenAdminHandler.cache", TOKEN_CACHE_REF);
@@ -725,7 +748,7 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, COUNTER);
             }
-            // TEST_HOOK (21)
+            // TEST_HOOK (22)
             for (String f : List.of(
                 "CatalogRepository.afterChunkUpsertHookForTests",
                 "CatalogRepository.afterMoveCompletedHookForTests",
@@ -741,6 +764,7 @@ public class TenantKeyedStateGateTest {
                 "PgVectorRepository.afterExistencePartitionHookForTests",
                 "PgVectorRepository.afterNeedEmbedResolvedHookForTests",
                 "PgVectorRepository.afterSweepSqlHookForTests",
+                "PgVectorRepository.beforeSensitiveLookupHookForTests",
                 "PgVectorRepository.keyedRestoreSiblingHookForTests",
                 "RequestLedger.claimPhaseHookForTests",
                 "TaxonomyRepository.betweenOwnAndCrossPassHookForTests",

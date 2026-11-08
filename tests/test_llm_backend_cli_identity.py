@@ -6,6 +6,10 @@ the dispatch body moved into ``CliBackend`` (develop ab583e34c); the test
 re-runs the same matrix after the move and compares. A regression in argv,
 env, cwd, the stdin file, the return value or the usage sink shows up as a
 diff against the recorded literal, not against a re-derivation of itself.
+
+One deliberate change since the recording: every child env carries
+``NX_SENSITIVITY_POSTURE=llm_bound`` (RDR-243 Phase 2 Step 2.5, nexus-rfvyy.7.10:
+``_build_dispatch_env`` exports it in every mode), added to each env below by hand.
 """
 from __future__ import annotations
 
@@ -81,10 +85,17 @@ def _proc(stdout: bytes) -> MagicMock:
     return proc
 
 
-def run_case(kwargs: dict, extra_env: dict[str, str]) -> dict:
+def run_case(kwargs: dict, extra_env: dict[str, str], *, restriction=None, restriction_calls: list | None = None) -> dict:
     """Run one claude_dispatch against a fake subprocess; return what the
     spawn saw plus what the caller got back. Pure of ambient state: the env
-    is replaced, cwd/session/mint/uuid are pinned."""
+    is replaced, cwd/session/mint/uuid are pinned.
+
+    *restriction* (RDR-243 Phase 3 fix r1) replaces the catalog read that decides which source files a
+    file-tool grant must deny; the default is "no sensitive documents", so the recorded argv is unchanged."""
+    from nexus.operators.sensitive_paths import FileToolRestriction  # noqa: PLC0415 — test-local
+
+    if restriction is None:
+        restriction = FileToolRestriction()
     seen: dict = {}
 
     async def intercept(*args, **kw):
@@ -112,7 +123,14 @@ def run_case(kwargs: dict, extra_env: dict[str, str]) -> dict:
         patch("nexus.util.stable_cwd.current_project_root", return_value="/proj"),
         patch("nexus.util.stable_cwd.cwd_was_healed", return_value=False),
         patch("nexus.operators.dispatch.uuid4", return_value=_FIXED_UUID),
+        # Windows resolves a bare ``claude`` off the working directory and raises when no ``claude`` is on PATH;
+        # the spawn is intercepted here, so there is no binary to find and the argv stays as recorded.
+        patch("nexus.operators.dispatch.argv_off_cwd", side_effect=lambda argv, **kw: list(argv)),
         patch("nexus.operators.dispatch._close_dispatch_session"),
+        patch(
+            "nexus.operators.sensitive_paths.file_tool_restriction",
+            side_effect=lambda *a, **kw: (restriction_calls.append(1) if restriction_calls is not None else None) or restriction,
+        ),
         patch(
             "nexus.db.t1.mint_t1_session_token",
             side_effect=lambda sid, *, context: {"session_token": f"tok-{sid}"},
@@ -161,6 +179,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                 'env': {'HOME': '/home/x',
                         'NX_DISPATCH_MAX_BUDGET_USD': '0.5',
                         'NX_SESSION_ID': 'parent-session-1',
+                        'NX_SENSITIVITY_POSTURE': 'llm_bound',
                         'PATH': '/usr/bin'},
                 'returned': {'result': 'ok'},
                 'stdin_text': 'the prompt',
@@ -186,6 +205,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                   'cwd': '/proj',
                   'env': {'HOME': '/home/x',
                           'NX_SESSION_ID': 'parent-session-1',
+                          'NX_SENSITIVITY_POSTURE': 'llm_bound',
                           'PATH': '/usr/bin'},
                   'returned': {'result': 'ok'},
                   'stdin_text': 'the prompt',
@@ -207,7 +227,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                       '--tools',
                       ''],
              'cwd': '/proj',
-             'env': {'HOME': '/home/x', 'NX_SESSION_ID': 'parent-session-1', 'PATH': '/usr/bin'},
+             'env': {'HOME': '/home/x', 'NX_SENSITIVITY_POSTURE': 'llm_bound', 'NX_SESSION_ID': 'parent-session-1', 'PATH': '/usr/bin'},
              'returned': {'result': 'ok'},
              'stdin_text': 'the prompt',
              'usage_cost': 0.0123,
@@ -230,7 +250,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                     '--tools',
                     ''],
            'cwd': '/proj',
-           'env': {'HOME': '/home/x', 'NX_SESSION_ID': 'parent-session-1', 'PATH': '/usr/bin'},
+           'env': {'HOME': '/home/x', 'NX_SENSITIVITY_POSTURE': 'llm_bound', 'NX_SESSION_ID': 'parent-session-1', 'PATH': '/usr/bin'},
            'returned': {'result': 'ok'},
            'stdin_text': 'the prompt',
            'usage_cost': 0.0123,
@@ -251,6 +271,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                   'cwd': '/proj',
                   'env': {'HOME': '/home/x',
                           'NX_SESSION_ID': 'parent-session-1',
+                          'NX_SENSITIVITY_POSTURE': 'llm_bound',
                           'PATH': '/usr/bin', 'NX_STOP_WAKE_GUARD': '0'},
                   'returned': {'result': 'ok'},
                   'stdin_text': 'the prompt',
@@ -276,6 +297,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                 'cwd': '/proj',
                 'env': {'HOME': '/home/x',
                         'NX_SESSION_ID': 'parent-session-1',
+                        'NX_SENSITIVITY_POSTURE': 'llm_bound',
                         'NX_T1_SESSION': 'tok-00000000-0000-4000-8000-000000000001',
                         'NX_T1_SESSION_ID': '00000000-0000-4000-8000-000000000001',
                         'PATH': '/usr/bin'},

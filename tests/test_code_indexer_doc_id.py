@@ -180,7 +180,7 @@ def test_code_indexer_writes_manifest_rows_for_each_document(
     assert code_collection, "registry should record code_collection after indexing"
 
     code_col = local_t3.get_collection(code_collection)
-    result = code_col.get(include=["metadatas"])
+    result = code_col.get(include=["metadatas"], sensitivity="include")
     assert result["ids"], "expected at least one code chunk in T3 code collection"
 
     # Phase 3: chunks must NOT carry doc_id any more.
@@ -229,7 +229,7 @@ def test_code_indexer_doc_id_absent_when_catalog_uninitialized(
     code_collection = info.get("code_collection") or info["collection"]
     assert code_collection
     code_col = local_t3.get_collection(code_collection)
-    result = code_col.get(include=["metadatas"])
+    result = code_col.get(include=["metadatas"], sensitivity="include")
     assert result["ids"], "indexer should still write chunks when catalog absent"
 
     for meta in result["metadatas"]:

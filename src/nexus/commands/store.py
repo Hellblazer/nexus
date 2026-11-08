@@ -24,6 +24,7 @@ from nexus.db.t3 import T3Database
 from nexus.entity_keys import EntityConfigError, EntityKeyError
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.metadata_schema import ttl_listing_label
+from nexus import sensitivity as _sens
 from nexus.sensitive_write import (
     ExternalEmbedderRefusedError,
     SensitiveFlagNotSetError,
@@ -82,7 +83,8 @@ def store() -> None:
                    "matches it. A re-put without it removes the stored key.")
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
 @click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
-@click.option("--session-id", default="", hidden=True)
+@click.option("--session-id", default="", hidden=True,
+              help="Deprecated: accepted and ignored. A write stores no session id.")
 @click.option("--agent", default="", hidden=True, help="Source agent name")
 def put_cmd(
     source: str,
@@ -339,9 +341,28 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
     # nexus-6pfgb.13 (RDR-236 Phase 2): as the MCP store_list, each chunk's title, tags, expiry and
     # index date are its owning note's own (note_display), from one owner lookup for the page.
     from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred to avoid CLI startup cost
+    from nexus.context_annotations import SENSITIVE_READER_CLAUSE  # noqa: PLC0415 — as above
+    from nexus.sensitive_output import (  # noqa: PLC0415 — as above
+        BADGE, chunk_row_facts, cli_output_posture, first_sensitive_owner, stub_line, withheld_note,
+    )
 
     owner_map = _store_hook.live_owner_entries(col_name, [e.get("id", "") for e in entries])
-    for e in entries:
+    # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): a sensitive note's title is content, and what this verb prints under
+    # Claude Code reaches the session model (Q2): the stub in the row's slot, or the row with a badge in a terminal.
+    # An unreadable catalog makes every row sensitive.
+    withhold = cli_output_posture() == "withhold"
+    facts = [
+        chunk_row_facts(e.get("sensitive"), None if owner_map is None else owner_map.get(e.get("id", ""), []))
+        for e in entries
+    ]
+    if not withhold and any(sens for sens, _o in facts):
+        click.echo(SENSITIVE_READER_CLAUSE)
+    withheld = 0
+    for e, (sens, owners) in zip(entries, facts):
+        if sens and withhold:
+            withheld += 1
+            click.echo(f"  {stub_line(first_sensitive_owner(owners))}")
+            continue
         doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
         shown = _store_hook.note_display(
             None if owner_map is None else owner_map.get(doc_id, []),
@@ -350,7 +371,10 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
         )
         title = shown.title[:40]
         tag_str = f"  [{shown.tags}]" if shown.tags else ""
-        click.echo(f"  {doc_id}  {title:<40}  {shown.ttl:<24}  {shown.indexed}{tag_str}")
+        badge = f"  {BADGE}" if sens else ""
+        click.echo(f"  {doc_id}  {title:<40}  {shown.ttl:<24}  {shown.indexed}{tag_str}{badge}")
+    if withheld:
+        click.echo(f"[{withheld_note(withheld)}]")
 
     # A full page is the live signal that more rows may follow; the stored
     # total can exceed the live rows and point at an empty page (review of
@@ -498,10 +522,28 @@ def _list_documents(db: T3Database, col_name: str, *, also: str = "") -> None:
     # promoted extraction_method to canonical, but this compact list table
     # wasn't extended to show it (`nx store get` displays the per-chunk
     # value — see its display path).
+    # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): a sensitive document's title is content (Q2, as the MCP docs view): the
+    # stub under Claude Code, the row with a badge in a terminal. The list is sorted by title, so a stub left in place
+    # would show where its title falls among the others: the sensitive rows go last (a stable sort).
+    from nexus.context_annotations import SENSITIVE_READER_CLAUSE  # noqa: PLC0415 — deferred to avoid CLI startup cost
+    from nexus.sensitive_output import BADGE, cli_output_posture, stub_line, withheld_note  # noqa: PLC0415 — as above
+
+    withhold = cli_output_posture() == "withhold"
+    docs = sorted(docs, key=lambda d: d.sensitive)
+    if not withhold and any(d.sensitive for d in docs):
+        click.echo(SENSITIVE_READER_CLAUSE)
+    withheld = 0
     for i, doc in enumerate(docs, 1):
+        if doc.sensitive and withhold:
+            withheld += 1
+            click.echo(f"  {i:3d}. {stub_line(doc.key)}")
+            continue
         title = (doc.title or "untitled")[:60]
         indexed = (doc.indexed_at or doc.entry.get("indexed_at") or "")[:10]  # nexus-6pfgb.13: the document's own date first
-        click.echo(f"  {i:3d}. {title:<60}  {doc.chunks:>4} chunks  {indexed}")
+        badge = f"  {BADGE}" if doc.sensitive else ""
+        click.echo(f"  {i:3d}. {title:<60}  {doc.chunks:>4} chunks  {indexed}{badge}")
+    if withheld:
+        click.echo(f"[{withheld_note(withheld)}]")
 
 
 
@@ -557,15 +599,17 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
     # reads (nexus-50uw6); a fully-qualified name is that one collection.
     scope, _rows = _store_scope(collection, db)
     col_name, entry = scope[0], None
+    # RDR-243 Phase 2 (nexus-rfvyy.7.8): read once; a `nx store get` a model runs under NX_SENSITIVITY_POSTURE excludes.
+    sensitivity = _sens.read_sensitivity()
     for candidate in scope:
-        entry = db.get_by_id(candidate, doc_id)
+        entry = db.get_by_id(candidate, doc_id, sensitivity=sensitivity)
         if entry is not None:
             col_name = candidate
             break
     if entry is None:
         raise click.ClickException(f"Entry {doc_id!r} not found in {', '.join(scope)}")
     # nexus-spujb: a note split to its model's token window reads back whole.
-    split = _split_note_text(db, col_name, [entry["id"]])
+    split = _split_note_text(db, col_name, [entry["id"]], sensitivity=sensitivity)
     if split is not None:
         entry = {**entry, "content": split[1], "chunk_count": split[2]}
 
@@ -577,6 +621,25 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
 
     owner_map = live_owner_entries(col_name, [entry["id"]])
     owners = None if owner_map is None else owner_map.get(entry["id"], [])
+
+    # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): Q2's posture, as the MCP store_get. A sensitive note read under Claude
+    # Code is the stub (nothing of it, id and body included); in a terminal it prints with a badge and the reader
+    # clause. An unreadable catalog makes the note sensitive.
+    from nexus.context_annotations import SENSITIVE_READER_CLAUSE  # noqa: PLC0415 — deferred to avoid CLI startup cost
+    from nexus.sensitive_output import (  # noqa: PLC0415 — as above
+        BADGE, chunk_row_facts, cli_output_posture, first_sensitive_owner, stub_line, withheld_note,
+    )
+
+    sens, sens_owners = chunk_row_facts(entry.get("sensitive"), owners)
+    if sens and cli_output_posture() == "withhold":
+        stub = stub_line(first_sensitive_owner(sens_owners))
+        if json_out:
+            import json  # noqa: PLC0415 — stdlib import kept branch-local
+            click.echo(json.dumps({"sensitive": True, "withheld": stub}, indent=2))
+        else:
+            click.echo(stub)
+            click.echo(f"[{withheld_note(1)}]")
+        return
     shown = note_display(
         owners, row=entry, row_title=entry.get("title", ""), row_tags=entry.get("tags", ""),
         row_ttl_days=entry.get("ttl_days"), row_indexed_at=entry.get("indexed_at") or "",
@@ -604,9 +667,15 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
                 out["degraded_pages"] = [
                     {"tumbler": t, "title": title, "extraction_pages": pages} for t, title, pages in rows
                 ]
+        if sens:
+            out["sensitive"] = True
+            out["badge"] = BADGE
         click.echo(json.dumps(out, indent=2))
     else:
         title, tags, indexed_at = shown.title, shown.tags, shown.indexed
+        if sens:
+            click.echo(BADGE)
+            click.echo(SENSITIVE_READER_CLAUSE)
         # nexus-6pfgb.16: as the MCP store_get, the extractor, override and source are the owning
         # documents' catalog facts (extraction_lines), never the chunk row's.
         click.echo(f"ID:         {entry['id']}")
@@ -707,10 +776,10 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
         # F10c bug class this whole area exists to fix. The reap is now
         # collection-scoped itself (nexus-r3cdg); this check stays as the
         # primary layer.
-        if db.get_by_id(col_name, doc_id) is None:
+        if db.get_by_id(col_name, doc_id, sensitivity="include") is None:
             # nexus-9ts7n: a delete stays in the one collection it names (reads span
             # the corpus's siblings, a delete does not), so say which sibling has it.
-            hint = _holder_hint(db, collection, col_name, lambda s: db.get_by_id(s, doc_id) is not None)
+            hint = _holder_hint(db, collection, col_name, lambda s: db.get_by_id(s, doc_id, sensitivity="include") is not None)
             raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}{hint}")
 
         # nexus-o8dil.5 (RDR-191 F10c follow-up): reap BEFORE delete, not
@@ -785,7 +854,7 @@ def _delete_by_title(
     row_ids = db.find_ids_by_title(col_name, title)
 
     def present(chash: str) -> bool:
-        return db.get_by_id(col_name, chash) is not None
+        return db.get_by_id(col_name, chash, sensitivity="include") is not None
 
     docs = reap_catalog_documents_by_title(col_name, title, row_ids, present) if yes else None
     if not yes:

@@ -107,7 +107,9 @@ surfaces the whole fix list. The checks:
   is MERGE-BLOCKING on every PR to main, not just at tag time. It also fails when
   `REQUIRED_ENGINE_VERSION` is below `NOTE_URI_MIN_ENGINE_VERSION` (RDR-231: a
   release must pin an engine that can hold `nx-note://`; the floor leads the pin
-  on develop, which no develop run checks);
+  on develop, which no develop run checks), and when it is below
+  `SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION` (RDR-243 Phase 2: a release must pin an
+  engine with vectors-055, or every `nx_answer` search step is refused);
 - `ci-evidence-contexts` -- the required-context drift tests, run with `-m ""` so
   the integration-marked live branch-protection check actually executes;
 - `mandatory-pins` -- the GitHub-backed `mandatory_regression_pin` tests under
@@ -558,7 +560,10 @@ Both must report `vX.Y.Z` / `X.Y.Z`. **Do not declare done before this check pas
 git checkout develop && git pull
 git merge origin/main --no-edit    # trivially clean right after a release:
                                    # the release branch just CONTAINED develop
-scripts/git-push-develop.sh HEAD
+scripts/git-push-develop.sh --allowed-paths-from-range HEAD
+# step 1 prints the files and a digest and pushes nothing; read the list
+# (it should be the release's bump files and main's release commits), then:
+scripts/git-push-develop.sh --allowed-paths-from-range=<digest> HEAD
 # the merge commit vouches for what it merged in (nexus-9wxu6)
 ```
 

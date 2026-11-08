@@ -16,6 +16,11 @@ from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 _COLLECTION = "knowledge__1-1__bge-base-en-v15-768__v1"
 
 
+def _read_kw(read: str) -> dict:
+    """``chunk_rows`` returns chunk text and takes ``sensitivity``; ``_note_rows`` reads metadata only."""
+    return {"sensitivity": "include"} if read == "chunk_rows" else {}
+
+
 def _client() -> HttpVectorClient:
     return HttpVectorClient.__new__(HttpVectorClient)
 
@@ -45,13 +50,13 @@ def test_chunk_rows_raises_on_a_store_error(wire):
     _calls, state = wire
     state["error"] = VectorServiceError("503 from store-get", code=503)
     with pytest.raises(VectorServiceError):
-        _client().chunk_rows(_COLLECTION, ["a" * 64])
+        _client().chunk_rows(_COLLECTION, ["a" * 64], sensitivity="include")
 
 
 def test_chunk_rows_returns_the_flat_row_shape_and_leaves_out_absent_ids(wire):
     _calls, state = wire
     state["rows"] = {"a" * 64: {"doc": "piece one", "meta": {"title": "t", "catalog_doc_id": "1.1.1"}}}
-    rows = _client().chunk_rows(_COLLECTION, ["a" * 64, "b" * 64])
+    rows = _client().chunk_rows(_COLLECTION, ["a" * 64, "b" * 64], sensitivity="include")
     assert rows == {"a" * 64: {"id": "a" * 64, "content": "piece one", "title": "t", "catalog_doc_id": "1.1.1"}}
 
 
@@ -59,7 +64,7 @@ def test_chunk_rows_pages_at_300_ids(wire):
     calls, state = wire
     ids = [f"{i:064x}" for i in range(301)]
     state["rows"] = {i: {"doc": "x", "meta": {}} for i in ids}
-    rows = _client().chunk_rows(_COLLECTION, ids)
+    rows = _client().chunk_rows(_COLLECTION, ids, sensitivity="include")
     assert len(rows) == 301
     assert [len(c["ids"]) for c in calls] == [300, 1]
 
@@ -69,7 +74,7 @@ def test_a_response_without_documents_gives_empty_content(wire):
     _calls, state = wire
     state["rows"] = {"a" * 64: {"doc": "ignored", "meta": {}}}
     state["drop_documents"] = True
-    assert _client().chunk_rows(_COLLECTION, ["a" * 64])["a" * 64]["content"] == ""
+    assert _client().chunk_rows(_COLLECTION, ["a" * 64], sensitivity="include")["a" * 64]["content"] == ""
 
 
 @pytest.mark.parametrize("read", ["chunk_rows", "_note_rows"])
@@ -81,8 +86,8 @@ def test_a_store_get_with_no_count_warns_once_and_still_returns_the_rows(wire, m
     _calls, state = wire
     state["rows"] = {"a" * 64: {"doc": "x", "meta": {"title": "t"}}}
     with capture_logs() as logs:
-        first = getattr(_client(), read)(_COLLECTION, ["a" * 64])
-        getattr(_client(), read)(_COLLECTION, ["a" * 64])
+        first = getattr(_client(), read)(_COLLECTION, ["a" * 64], **_read_kw(read))
+        getattr(_client(), read)(_COLLECTION, ["a" * 64], **_read_kw(read))
     assert "a" * 64 in first
     events = [e for e in logs if e["event"] == "store_get_count_unreported"]
     assert len(events) == 1 and events[0]["log_level"] == "warning"
@@ -101,7 +106,7 @@ def test_a_store_get_that_reports_its_count_does_not_warn(wire, monkeypatch):
     _calls, state = wire
     state["rows"] = {"a" * 64: {"doc": "x", "meta": {}}}
     with capture_logs() as logs:
-        _client().chunk_rows(_COLLECTION, ["a" * 64])
+        _client().chunk_rows(_COLLECTION, ["a" * 64], sensitivity="include")
     assert [e for e in logs if e["event"] == "store_get_count_unreported"] == []
 
 
@@ -118,7 +123,7 @@ def test_chunk_rows_raises_when_the_engine_reports_more_rows_than_it_returned(wi
     _calls, state = wire
     state["rows"] = {"a" * 64: {"doc": "x", "meta": {}}}
     with pytest.raises(VectorServiceError, match="matched-live rows"):
-        _client().chunk_rows(_COLLECTION, ["a" * 64])
+        _client().chunk_rows(_COLLECTION, ["a" * 64], sensitivity="include")
 
 
 @pytest.mark.parametrize("read", ["chunk_rows", "_note_rows"])
@@ -129,7 +134,7 @@ def test_the_paged_reader_count_warning_does_not_claim_a_heuristic(wire, monkeyp
     _calls, state = wire
     state["rows"] = {"a" * 64: {"doc": "x", "meta": {"title": "t"}}}
     with capture_logs() as logs:
-        getattr(_client(), read)(_COLLECTION, ["a" * 64])
+        getattr(_client(), read)(_COLLECTION, ["a" * 64], **_read_kw(read))
     (event,) = [e for e in logs if e["event"] == "store_get_count_unreported"]
     assert "Degrading" not in event["detail"], event["detail"]
     assert "no truncation heuristic" in event["detail"], event["detail"]
@@ -152,8 +157,8 @@ def test_each_count_unreported_message_prints_once_whichever_comes_first(wire, m
     state["rows"] = {"a" * 64: {"doc": "x", "meta": {"title": "t"}}}
     with capture_logs() as logs:
         hvc._warn_store_get_count_unreported(_COLLECTION)  # the stub's, heuristic text
-        _client().chunk_rows(_COLLECTION, ["a" * 64])  # the paged reader's
-        _client().chunk_rows(_COLLECTION, ["a" * 64])  # repeats are debug
+        _client().chunk_rows(_COLLECTION, ["a" * 64], sensitivity="include")  # the paged reader's
+        _client().chunk_rows(_COLLECTION, ["a" * 64], sensitivity="include")  # repeats are debug
         hvc._warn_store_get_count_unreported(_COLLECTION)
     warnings = [e for e in logs if e["event"] == "store_get_count_unreported" and e["log_level"] == "warning"]
     assert len(warnings) == 2, warnings

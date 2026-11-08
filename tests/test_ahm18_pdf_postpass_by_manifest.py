@@ -44,7 +44,7 @@ class _Store:
         self.updates: list[tuple[list[str], list[dict], list[str]]] = []
 
     # the collection handle
-    def get(self, *, ids=None, where=None, include=None, limit=None, offset=0):
+    def get(self, *, ids=None, where=None, include=None, limit=None, offset=0, sensitivity="include"):
         self.get_calls.append({"ids": ids, "where": where, "limit": limit})
         if ids is not None:
             found = [i for i in ids if i in self.rows]

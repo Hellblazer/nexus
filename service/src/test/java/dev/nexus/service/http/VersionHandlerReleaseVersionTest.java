@@ -242,4 +242,22 @@ class VersionHandlerReleaseVersionTest {
         VersionHandler.appendVectorSearchChashAllowCapabilityField(body);
         assertThat(body.toString()).isEqualTo(",\"vector_search_chash_allow_supported\":true");
     }
+
+    // ── nexus-rfvyy.7.4 (RDR-243 Phase 2): sensitivity=exclude on every chunk-text route ──
+
+    @Test
+    void versionAdvertisesTheSensitivityExcludeReadsAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendVectorSensitivityExcludeCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"vector_sensitivity_exclude_supported\":true");
+    }
+
+    // ── RDR-243 Phase 3 fix r1 (S5): the rerank stage withholds sensitive rows from an off-machine reranker ──
+
+    @Test
+    void versionAdvertisesTheRerankSensitiveExclusionAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendRerankSensitiveExclusionCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"rerank_sensitive_exclusion_supported\":true");
+    }
 }

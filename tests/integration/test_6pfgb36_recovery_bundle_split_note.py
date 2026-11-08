@@ -49,7 +49,7 @@ def _stored_text(reader, client, collection: str, title: str) -> tuple[str, int]
     doc = reader.by_source_uri(uri_for(collection, title))
     assert doc is not None, title
     rows = sorted(reader.get_manifest(str(doc.tumbler)), key=lambda r: r.position)
-    pieces = [client.get_by_id(collection, r.chash) for r in rows]
+    pieces = [client.get_by_id(collection, r.chash, sensitivity="include") for r in rows]
     assert all(p is not None for p in pieces), title
     return "".join(p["content"] for p in pieces), len(rows)
 

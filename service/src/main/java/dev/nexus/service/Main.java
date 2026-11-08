@@ -589,6 +589,8 @@ public final class Main {
         service.chunksLeaves(leafBloatSweep::status, leafBloatSweep::periodSeconds, pciReconciler::maintenance);
         // nexus-6pfgb.43: the chunk CHECK add/validate routes run DDL on the admin connection; nothing calls them.
         service.chunkConstraintAdmin(new dev.nexus.service.vectors.ChunkConstraintAdmin(adminConnection));
+        // nexus-6pfgb.44: the same for the catalog TTL CHECK census/add/validate routes; nothing calls them.
+        service.catalogTtlCheckAdmin(new dev.nexus.service.db.CatalogTtlCheckAdmin(adminConnection));
         // nexus-hbnml: a retired aspect_extraction_queue table that still holds rows (aspects-005-2 keeps it) is
         // drained onto the aspects tuples once, shortly after boot; the next boot's guard drops the emptied table.
         service.aspectQueueDrain(adminConnection);

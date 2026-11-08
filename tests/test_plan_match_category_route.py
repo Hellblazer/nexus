@@ -334,8 +334,8 @@ def test_cosine_only_predicate_matches_comma_tokens(tags, expected):
         ("", False),
         (None, False),
         ("ad-hoc,grown", False),
-        # Comma-token, not substring — the naive `in` test _classify_origin
-        # uses would call this a template.
+        # Comma-token, not substring: a naive `in` test (what _classify_origin
+        # used before nexus-7bwe) would call this a template.
         ("not-a-builtin-template-really", False),
     ],
 )

@@ -333,13 +333,15 @@ here are the ones each pass found on a named page or table.
   non-alphanumeric character replaced by `-`; the primary is the parent of the
   git common directory, found by reading `.git` (a directory, or a `gitdir:`
   file and its `commondir`), and by `git rev-parse --git-common-dir` only when
-  `GIT_DIR`, `GIT_COMMON_DIR` or `GIT_CEILING_DIRECTORIES` is set or the layout is unrecognised. A missing
+  `GIT_DIR` or `GIT_COMMON_DIR` is set, a `GIT_CEILING_DIRECTORIES` entry lies above the working
+  directory, or the layout is unrecognised; that call runs in the caller's environment. A missing
   directory, a non-repository or a failed fallback git call gives nothing. Near-duplicates (S-7) are file pairs whose
   frontmatter name and description tokens overlap at Jaccard 0.5 or more; files
   with fewer than 4 tokens are skipped. The `--t2` census reads "phase closed" as
-  the RDR's frontmatter `status: closed`, so a closed phase of a still-open RDR
-  is not flagged; per-phase flagging is nexus-qo7ie.28. Technical Design 3's
-  mapping sentence is read with this entry.
+  the RDR's frontmatter `status: closed`, or (nexus-qo7ie.28, 2026-11-06) as the
+  phase's own heading carrying the close marker, with the record's phase taken from
+  its title; RDR-209 Phase 3 Step 4 states the rule. Technical Design 3's mapping
+  sentence is read with this entry.
 - **2026-11-05, Sam's answer on hub-linked files (nexus-qo7ie.29).** A memory
   file counts as indexed when either index file names it, or when a memory file
   that an index names links it with a markdown link: one hub level, no deeper,

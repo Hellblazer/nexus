@@ -83,7 +83,7 @@ def _run_nx_answer(scope: str) -> tuple[dict, str]:
         return {"ids": [_h(t)], "tumblers": [SEED], "collections": [RDR], "chunk_collections": [RDR],
                 "chunk_text_hash": [_h(t)], "distances": [0.1]}
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": [texts_by_id[i] for i in ids]}
 
     async def stub_summarize(**kwargs):
@@ -112,7 +112,7 @@ def _run_nx_answer(scope: str) -> tuple[dict, str]:
          patch("nexus.mcp.core.scratch", return_value="ok"), \
          patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
          patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()), \
-         patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "store_get_many", stub_get_many), \
+         patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "_store_get_many_impl", stub_get_many), \
          patch.object(mcp_core, "operator_summarize", stub_summarize):
         ctx.return_value.__enter__.return_value = db_stub
         env = asyncio.run(mcp_core.nx_answer(

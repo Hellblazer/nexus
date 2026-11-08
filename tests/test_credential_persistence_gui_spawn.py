@@ -129,7 +129,7 @@ def test_service_token_error_self_explains(monkeypatch):
 
     client = HttpVectorClient()
     with pytest.raises(RuntimeError) as exc_info:
-        client.search("anything", ["knowledge__x__minilm-l6-v2-384__v1"])
+        client.search("anything", ["knowledge__x__minilm-l6-v2-384__v1"], sensitivity="include")
 
     msg = str(exc_info.value)
     assert "NX_SERVICE_TOKEN" in msg

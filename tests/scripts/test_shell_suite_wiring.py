@@ -155,8 +155,8 @@ def _bin_bash_is_pre_4() -> bool:
 
 #: ``lock_test.sh`` passes this many assertions where its flock tests (10-16, nexus-fuz9t) run,
 #: and this many where they print one skip line instead (darwin, no flock(1)).
-_LOCK_SUITE_FLOOR_WITH_FLOCK = 46
-_LOCK_SUITE_FLOOR_WITHOUT_FLOCK = 32
+_LOCK_SUITE_FLOOR_WITH_FLOCK = 51
+_LOCK_SUITE_FLOOR_WITHOUT_FLOCK = 35
 
 
 def _lock_suite_has_flock_tests() -> bool:
@@ -189,7 +189,7 @@ SUITES = [
     _Suite("scripts/lib/gate-jar-cache_test.sh", 24),
     _Suite("scripts/lib/release-props-lease_test.sh", 28),
     _Suite("tests/e2e/local_service_gate_guard_test.sh", 9),
-    _Suite("tests/e2e/dual_embedder_gate_guard_test.sh", 81),  # 81 pass: 49 (nexus-8x0tg) + the canned-engine checks (nexus-clvut)
+    _Suite("tests/e2e/dual_embedder_gate_guard_test.sh", 100),  # 100 pass: 49 (nexus-8x0tg) + the canned-engine checks (nexus-clvut) + the nearest-vector checks (nexus-lpu6e)
     # Round 2 (nexus-fcjt7): found by the substantive-critic pass on round 1
     # plus a re-check of round 1's own "already wired" claim about the two
     # build-lease suites (see module docstring).

@@ -168,7 +168,8 @@ def phantom_repo_with_rdr(tmp_path: Path) -> Path:
     alongside code/prose/pdf) is a SEPARATE discovery pass from
     ``candidate_files`` and had no zero-byte guard of its own -- a
     zero-byte RDR ``.md`` file still minted a phantom catalog document
-    even after the candidate_files-loop fix.
+    even after the candidate_files-loop fix. nexus-nawd0 adds an RDR that
+    is not valid UTF-8.
     """
     repo = tmp_path / "phantom-repo-rdr"
     repo.mkdir()
@@ -176,6 +177,15 @@ def phantom_repo_with_rdr(tmp_path: Path) -> Path:
     empty_rdr = repo / "docs" / "rdr" / "rdr-empty.md"
     empty_rdr.parent.mkdir(parents=True)
     empty_rdr.write_bytes(b"")
+
+    # nexus-nawd0: intrastate's a6-dot-derivability.md shape, ordinary markdown with a
+    # broken UTF-8 sequence (an em dash pasted as cat -v text), here past the sniff's
+    # default 64 KB prefix (70 KB of prose first), which the RDR walk reads whole.
+    undecodable_rdr = repo / "docs" / "rdr" / "rdr-undecodable.md"
+    undecodable_rdr.write_bytes(
+        b"# RDR: Spike\n\n" + b"Ordinary prose.\n" * 4400
+        + b"over-approximation \xe2M-^@M-^T unicode caf\xc3\xa9\n"
+    )
 
     real_rdr = repo / "docs" / "rdr" / "rdr-real.md"
     real_rdr.write_text(
@@ -196,18 +206,22 @@ def registry_rdr(tmp_path: Path, phantom_repo_with_rdr: Path) -> RepoRegistry:
 
 class TestRdrWalkUnchunkableFilesNeverRegister:
     """nexus-rqsh1 round 2: the rdr_md_paths walk gets the same zero-byte
-    guard as candidate_files. RDR files are markdown text by
-    construction (unlike the extension-agnostic candidate_files walk,
-    which can encounter arbitrary binary content), so a zero-byte skip
-    is the whole fix -- no binary-content sniff is needed here."""
+    guard as candidate_files. nexus-nawd0: and the same undecodable-content
+    sniff. A ``.md`` name does not make a file UTF-8 text: one broken byte
+    sequence 8 KB in made the prose indexer's read fail after
+    registration, leaving a failed, zero-chunk document every run."""
 
-    def test_zero_byte_rdr_file_gets_no_catalog_document(
+    def test_zero_byte_and_undecodable_rdr_files_get_no_catalog_document(
         self, phantom_repo_with_rdr: Path, registry_rdr: RepoRegistry, local_t3: T3Database,
     ) -> None:
         _index(phantom_repo_with_rdr, registry_rdr, local_t3)
         assert documents_by_file_path("docs/rdr/rdr-empty.md") == [], (
             "a zero-byte RDR file was registered as a catalog document even "
             "though it can never produce a chunk -- nexus-rqsh1 round-2 regression"
+        )
+        assert documents_by_file_path("docs/rdr/rdr-undecodable.md") == [], (
+            "an RDR file that is not valid UTF-8 was registered as a catalog document "
+            "though its read can never succeed -- nexus-nawd0 regression"
         )
 
     def test_real_rdr_file_still_registers(

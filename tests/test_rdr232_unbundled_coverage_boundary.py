@@ -317,7 +317,7 @@ async def _run(
     mode = "repair" if repair else ("supports" if supports else "neutral")
     retrieve = _retrieve_for(repair=repair)
     with patch.object(mcp_core, "search", retrieve), patch.object(mcp_core, "query", retrieve), \
-         patch.object(mcp_core, "traverse", _traverse), patch.object(mcp_core, "store_get_many", fetch or _get_many), \
+         patch.object(mcp_core, "traverse", _traverse), patch.object(mcp_core, "_store_get_many_impl", fetch or _get_many), \
          patch.object(mcp_core, "operator_groupby", calls.count("groupby", _groupby)), \
          patch.object(mcp_core, "operator_aggregate", calls.count("aggregate", _aggregate)), \
          patch.object(mcp_core, "operator_summarize", calls.count("summarize", _text)), \

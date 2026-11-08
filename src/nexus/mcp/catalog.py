@@ -13,6 +13,7 @@ from pydantic import Field
 
 from nexus.mcp._server_version import server_version as _server_version
 from nexus.mcp._tool_failure import fail as _fail
+from nexus.sensitive_output import DocumentRows, hidden_endpoints, present_entries, withheld_edges
 from nexus.mcp_infra import (
     get_catalog_writer as _get_catalog_writer,
     get_recent_search_traces as _get_recent_search_traces,
@@ -33,6 +34,15 @@ from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call
 _TOOL_CALL_LOG_STATUS: str = _install_tool_call_log(mcp)
 
 _BULK_DELETE_CONFIRM_THRESHOLD = 10
+
+
+# ── RDR-243 Phase 3 (nexus-rfvyy.1): document rows under the output posture ──────────────────────────────────
+
+
+def _present_entries(cat, entries) -> DocumentRows:
+    """*entries* as the MCP reader is to see them (``sensitivity.mcp_output``); the rule is
+    :func:`nexus.sensitive_output.present_entries`, shared with the CLI."""
+    return present_entries(cat, entries)
 
 
 # ── Registered tools ─────────────────────────────────────────────────────────
@@ -180,7 +190,9 @@ def catalog_search(
     within those collections.
 
     Returns catalog entries with tumbler, physical_collection, and
-    metadata — never document content. A truncated page appends a
+    metadata — never document content. A sensitive document's row keeps
+    its tumbler and carries `withheld` in place of its title and path;
+    a `_withheld` entry counts them. A truncated page appends a
     `_pagination` entry with `next_offset`.
 
     Constraints:
@@ -259,7 +271,8 @@ def catalog_search(
                 "all before that offset."
             )}]
         has_more = len(entries) > limit
-        result = [e.to_dict() for e in entries[:limit]]
+        presented = _present_entries(cat, entries[:limit])
+        result = presented.rows + presented.trailer()
         if has_more:
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
@@ -282,7 +295,9 @@ def catalog_show(
     Use `links` instead when you only need the link graph, not the
     entry's own metadata. Returns all metadata plus `links_from` and
     `links_to` arrays in one call, or `{"kind": "owner", ...}` when
-    `tumbler` names an owner prefix rather than a document.
+    `tumbler` names an owner prefix rather than a document. A sensitive
+    document returns its tumbler and `withheld` in place of its title
+    and path; its links keep tumblers and types only.
     """
     cat, err = _require_catalog()
     if err:
@@ -318,10 +333,20 @@ def catalog_show(
         if entry is None:
             return _fail({"error": f"Not found: {tumbler or title}"})
 
-        d = entry.to_dict()
+        # RDR-243 Phase 3 (nexus-rfvyy.1): a sensitive entry is its stub (kept columns, `withheld`); its links keep
+        # their tumblers, types and spans and lose `meta`, which may say what the document is about.
+        presented = _present_entries(cat, [entry])
+        d = presented.rows[0]
         # links_from/links_to return list[CatalogLink] (SQLite) or list[dict] (service mode).
-        d["links_from"] = [l if isinstance(l, dict) else l.to_dict() for l in cat.links_from(entry.tumbler)]
-        d["links_to"] = [l if isinstance(l, dict) else l.to_dict() for l in cat.links_to(entry.tumbler)]
+        links_from = [l if isinstance(l, dict) else l.to_dict() for l in cat.links_from(entry.tumbler)]
+        links_to = [l if isinstance(l, dict) else l.to_dict() for l in cat.links_to(entry.tumbler)]
+        # One rule for every edge this server returns: an edge touching a withheld document, the shown one or a
+        # neighbour, loses its `meta` (nexus-rfvyy.8 fix r1).
+        ends = {str(l.get("to")) for l in links_from} | {str(l.get("from")) for l in links_to}
+        hidden = hidden_endpoints(cat, presented.hidden, ends)
+        d["links_from"] = withheld_edges(links_from, hidden)
+        d["links_to"] = withheld_edges(links_to, hidden)
+        d.update(presented.keys())
         return d
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return _fail({"error": str(e)})
@@ -343,8 +368,9 @@ def catalog_list(
 
     Use `search` (this server) instead when you need a free-text or
     author/corpus/file_path filter. Returns a paged list of catalog
-    entries; a truncated page appends a `_pagination` entry with
-    `next_offset`.
+    entries (a sensitive document's row carries `withheld` in place of
+    its title and path, counted in a `_withheld` entry); a truncated
+    page appends a `_pagination` entry with `next_offset`.
     """
     cat, err = _require_catalog()
     if err:
@@ -375,8 +401,8 @@ def catalog_list(
                     all_docs = cat.all_documents(limit + offset + 1)
                     entries = all_docs[offset:offset + limit + 1]
         has_more = len(entries) > limit
-        page = entries[:limit]
-        result = [e.to_dict() for e in page]
+        presented = _present_entries(cat, entries[:limit])
+        result = presented.rows + presented.trailer()
         if has_more:
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
@@ -676,7 +702,8 @@ def catalog_links(
 
     Use `link_query` instead for an admin/audit view that also includes
     links to deleted (orphaned) documents. Returns
-    `{"nodes": [entry dicts], "edges": [link dicts]}`.
+    `{"nodes": [entry dicts], "edges": [link dicts]}`. A sensitive node
+    carries `withheld` in place of its title and path; its edges stay.
     """
     cat, err = _require_catalog()
     if err:
@@ -696,9 +723,15 @@ def catalog_links(
         # now converts wire dicts to typed objects — the isinstance(n, dict)
         # guard nexus-qtj24 added here is no longer reachable and has been
         # dropped; mirrors catalog_link_query's unconditional .to_dict()).
+        # RDR-243 Phase 3 (nexus-rfvyy.1): a sensitive node is its stub; the edges keep both tumblers, the type
+        # and the spans, and an edge that touches a withheld node loses its `meta`.
+        presented = _present_entries(cat, list(result["nodes"]))
+        edge_dicts = [e.to_dict() for e in result["edges"]]
+        ends = {str(e.get("from")) for e in edge_dicts} | {str(e.get("to")) for e in edge_dicts}
         return {
-            "nodes": [n.to_dict() for n in result["nodes"]],
-            "edges": [e.to_dict() for e in result["edges"]],
+            "nodes": presented.rows,
+            "edges": withheld_edges(edge_dicts, hidden_endpoints(cat, presented.hidden, ends)),
+            **presented.keys(),
         }
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return _fail({"error": str(e)})
@@ -743,6 +776,9 @@ def catalog_link_query(
         links = links[:limit]
         # link_query returns list[CatalogLink] (SQLite) or list[dict] (service mode).
         result = [l if isinstance(l, dict) else l.to_dict() for l in links]
+        # An edge touching a withheld document loses its `meta`, as in `show` and `links` (nexus-rfvyy.8 fix r1).
+        ends = {str(l.get("from")) for l in result} | {str(l.get("to")) for l in result}
+        result = withheld_edges(result, hidden_endpoints(cat, (), ends))
         if has_more:
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result

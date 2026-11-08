@@ -43,7 +43,7 @@ class TestSearchMetadataScoped:
         got = HttpVectorClient().search_metadata_scoped(
             "how does x work", ["code__a__model-x__v1"],
             content_type="paper", author="alice", year=2024, corpus="research",
-            n_results=5)
+            n_results=5, sensitivity="include")
 
         assert got == rows
         assert len(calls) == 1
@@ -63,7 +63,7 @@ class TestSearchMetadataScoped:
         calls = _patch_post(monkeypatch, lambda p, b: [])
 
         HttpVectorClient().search_metadata_scoped(
-            "q", ["code__a__model-x__v1"], content_type="paper")
+            "q", ["code__a__model-x__v1"], content_type="paper", sensitivity="include")
 
         _, body = calls[0]
         assert body == {
@@ -78,13 +78,13 @@ class TestSearchMetadataScoped:
 
     def test_returns_empty_list_passthrough(self, monkeypatch):
         _patch_post(monkeypatch, lambda p, b: [])
-        assert HttpVectorClient().search_metadata_scoped("q", ["code__a__model-x__v1"]) == []
+        assert HttpVectorClient().search_metadata_scoped("q", ["code__a__model-x__v1"], sensitivity="include") == []
 
     def test_subtree_and_where_forwarded(self, monkeypatch):
         # catalog-008 (nexus-889ff): subtree + where(dict) reach the body; empty where omitted.
         calls = _patch_post(monkeypatch, lambda p, b: [])
         HttpVectorClient().search_metadata_scoped(
-            "q", ["code__a__model-x__v1"], subtree="1.2", where={"lang": "java"})
+            "q", ["code__a__model-x__v1"], subtree="1.2", where={"lang": "java"}, sensitivity="include")
         _, body = calls[0]
         assert body["subtree"] == "1.2"
         assert body["where"] == {"lang": "java"}
@@ -92,7 +92,7 @@ class TestSearchMetadataScoped:
     def test_empty_where_omitted(self, monkeypatch):
         calls = _patch_post(monkeypatch, lambda p, b: [])
         HttpVectorClient().search_metadata_scoped(
-            "q", ["code__a__model-x__v1"], where={})
+            "q", ["code__a__model-x__v1"], where={}, sensitivity="include")
         _, body = calls[0]
         assert "where" not in body
         assert "subtree" not in body
@@ -106,7 +106,7 @@ class TestSearchTopicScoped:
 
         got = HttpVectorClient().search_topic_scoped(
             "vector search", "Vector Search",
-            "knowledge__b__minilm-l6-v2-384__v1", n_results=3)
+            "knowledge__b__minilm-l6-v2-384__v1", n_results=3, sensitivity="include")
 
         assert got == rows
         path, body = calls[0]
@@ -120,7 +120,7 @@ class TestSearchTopicScoped:
 
     def test_default_n_results(self, monkeypatch):
         calls = _patch_post(monkeypatch, lambda p, b: [])
-        HttpVectorClient().search_topic_scoped("q", "T", "knowledge__b__minilm-l6-v2-384__v1")
+        HttpVectorClient().search_topic_scoped("q", "T", "knowledge__b__minilm-l6-v2-384__v1", sensitivity="include")
         _, body = calls[0]
         assert body["n_results"] == 10
 
@@ -136,7 +136,7 @@ class TestSearchGraphHop:
 
         got = HttpVectorClient().search_graph_hop(
             "how does x work", ["1.2.3"], ["rdr__a__model-x__v1"],
-            link_type="cites", depth=2, direction="out", n_results=5)
+            link_type="cites", depth=2, direction="out", n_results=5, sensitivity="include")
 
         assert got == rows
         assert len(calls) == 1
@@ -157,7 +157,7 @@ class TestSearchGraphHop:
         calls = _patch_post(monkeypatch, lambda p, b: [])
 
         HttpVectorClient().search_graph_hop(
-            "q", ["1.1"], ["rdr__a__model-x__v1"], where={"lang": "python"})
+            "q", ["1.1"], ["rdr__a__model-x__v1"], where={"lang": "python"}, sensitivity="include")
 
         _, body = calls[0]
         assert body["where"] == {"lang": "python"}
@@ -166,7 +166,7 @@ class TestSearchGraphHop:
         calls = _patch_post(monkeypatch, lambda p, b: [])
 
         HttpVectorClient().search_graph_hop(
-            "q", ["1.1"], ["rdr__a__model-x__v1"], where={})
+            "q", ["1.1"], ["rdr__a__model-x__v1"], where={}, sensitivity="include")
 
         _, body = calls[0]
         assert "where" not in body
@@ -174,7 +174,7 @@ class TestSearchGraphHop:
     def test_omits_none_link_type_and_defaults(self, monkeypatch):
         calls = _patch_post(monkeypatch, lambda p, b: [])
 
-        HttpVectorClient().search_graph_hop("q", ["1.1"], ["rdr__a__model-x__v1"])
+        HttpVectorClient().search_graph_hop("q", ["1.1"], ["rdr__a__model-x__v1"], sensitivity="include")
 
         _, body = calls[0]
         assert body == {
@@ -190,7 +190,7 @@ class TestSearchGraphHop:
     def test_returns_empty_list_passthrough(self, monkeypatch):
         _patch_post(monkeypatch, lambda p, b: [])
         assert HttpVectorClient().search_graph_hop(
-            "q", ["1.1"], ["rdr__a__model-x__v1"]) == []
+            "q", ["1.1"], ["rdr__a__model-x__v1"], sensitivity="include") == []
 
 
 class TestSearchAspectScoped:
@@ -207,7 +207,7 @@ class TestSearchAspectScoped:
         got = HttpVectorClient().search_aspect_scoped(
             "gradient descent", ["knowledge__a__model-ctx__v1"],
             field="proposed_method", pattern="gradient", min_confidence=0.5,
-            n_results=5)
+            n_results=5, sensitivity="include")
 
         assert got == rows
         assert len(calls) == 1
@@ -228,7 +228,7 @@ class TestSearchAspectScoped:
         calls = _patch_post(monkeypatch, lambda p, b: [])
 
         HttpVectorClient().search_aspect_scoped(
-            "q", ["knowledge__a__model-ctx__v1"])
+            "q", ["knowledge__a__model-ctx__v1"], sensitivity="include")
 
         _, body = calls[0]
         assert body == {
@@ -246,13 +246,13 @@ class TestSearchAspectScoped:
         reason as the sibling test above."""
         calls = _patch_post(monkeypatch, lambda p, b: [])
         HttpVectorClient().search_aspect_scoped(
-            "q", ["knowledge__a__model-ctx__v1"], where={"lang": "java"})
+            "q", ["knowledge__a__model-ctx__v1"], where={"lang": "java"}, sensitivity="include")
         _, body = calls[0]
         assert body["where"] == {"lang": "java"}
 
         calls2 = _patch_post(monkeypatch, lambda p, b: [])
         HttpVectorClient().search_aspect_scoped(
-            "q", ["knowledge__a__model-ctx__v1"], where={})
+            "q", ["knowledge__a__model-ctx__v1"], where={}, sensitivity="include")
         _, body2 = calls2[0]
         assert "where" not in body2
 
@@ -261,7 +261,7 @@ class TestSearchAspectScoped:
         reason as the sibling test above."""
         _patch_post(monkeypatch, lambda p, b: [])
         assert HttpVectorClient().search_aspect_scoped(
-            "q", ["knowledge__a__model-ctx__v1"]) == []
+            "q", ["knowledge__a__model-ctx__v1"], sensitivity="include") == []
 
     def test_field_allowlist_matches_locked_wire_contract(self):
         # Locked wire contract (RDR-156 D5): FIVE fields, not the seven

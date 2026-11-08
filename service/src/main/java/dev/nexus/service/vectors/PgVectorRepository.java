@@ -1478,6 +1478,23 @@ public final class PgVectorRepository {
                                                                Map<String, Object> where,
                                                                boolean includeSourceUri,
                                                                byte[][] chashAllow) {
+        return searchWithTokens(tenant, queryText, collectionNames, nResults, where, includeSourceUri, chashAllow,
+                                false);
+    }
+
+    /**
+     * {@link #searchWithTokens} with {@code sensitivity=exclude} (nexus-rfvyy.7.3, RDR-243): when {@code
+     * excludeSensitive} is true a chunk with any live sensitive owner is dropped INSIDE the search statement (the
+     * functions' {@code p_exclude_sensitive}), so the page is filled to k from the rows that remain, never cut down
+     * after the search. {@code false} is the search as it was; every row carries {@code sensitive} either way.
+     */
+    public Tokened<List<Map<String, Object>>> searchWithTokens(String tenant, String queryText,
+                                                               List<String> collectionNames,
+                                                               int nResults,
+                                                               Map<String, Object> where,
+                                                               boolean includeSourceUri,
+                                                               byte[][] chashAllow,
+                                                               boolean excludeSensitive) {
         if (chashAllow != null && chashAllow.length == 0) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -1485,12 +1502,13 @@ public final class PgVectorRepository {
         var labelSplit = ManifestLabelStage.split(where);
         if (!labelSplit.active()) {
             return searchWithTokensUnlabelled(tenant, queryText, collectionNames, nResults, where, includeSourceUri,
-                                              false, null, chashAllow);
+                                              false, null, chashAllow, excludeSensitive);
         }
         // nexus-p89h4: the positive part of the predicate also runs inside the search, so a rare label is found.
         var wide = searchWithTokensUnlabelled(tenant, queryText, collectionNames,
                                               ManifestLabelStage.widen(nResults), labelSplit.rest(), includeSourceUri,
-                                              true, ManifestPushdown.of(labelSplit.labels()), chashAllow);
+                                              true, ManifestPushdown.of(labelSplit.labels()), chashAllow,
+                                              excludeSensitive);
         return new Tokened<>(labelStage().apply(tenant, wide.value(), labelSplit.labels(), nResults),
                              wide.tokens(), wide.skippedCollections(), wide.queryVector());
     }
@@ -1508,7 +1526,8 @@ public final class PgVectorRepository {
                                                                           boolean includeSourceUri,
                                                                           boolean labelStageFollows,
                                                                           ManifestPushdown.Plan manifest,
-                                                                          byte[][] chashAllow) {
+                                                                          byte[][] chashAllow,
+                                                                          boolean excludeSensitive) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -1540,7 +1559,7 @@ public final class PgVectorRepository {
         // (same convention as the Chroma path).
         EmbedResult embedResult = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embedResult.embeddings().get(0));
-        WherePlan wherePlan = planWhere(where).withManifest(manifest);
+        WherePlan wherePlan = planWhere(where).withManifest(manifest).withExcludeSensitive(excludeSensitive);
         String[] colls = collectionNames.toArray(String[]::new);
 
         org.jooq.Table<?> fn = chashAllow == null
@@ -1558,7 +1577,7 @@ public final class PgVectorRepository {
             ? QueryVector.alone(model, embedResult.embeddings().get(0), collectionNames.get(0))
             : new QueryVector(model, embedResult.embeddings().get(0), nearestCollection(result));
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
-        enrichSearchRows(tenant, rows, includeSourceUri, labelStageFollows);
+        enrichSearchRows(tenant, rows, includeSourceUri, labelStageFollows, excludeSensitive);
         return new Tokened<>(rows, embedResult.tokens(), skippedCollections, ringVector);
     }
 
@@ -1577,11 +1596,14 @@ public final class PgVectorRepository {
         }
         return switch (dim) {
             case 384  -> PLAIN_SEARCH_384.call(
-                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                wherePlan.excludeSensitive());
             case 768  -> PLAIN_SEARCH_768.call(
-                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                wherePlan.excludeSensitive());
             case 1024 -> PLAIN_SEARCH_1024.call(
-                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                wherePlan.excludeSensitive());
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
     }
@@ -1603,13 +1625,13 @@ public final class PgVectorRepository {
         return switch (dim) {
             case 384  -> MANIFEST_SEARCH_384.call(
                 queryVec, queryText, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                m.containment(), m.jsonPath(), nResults, model, tenant);
+                m.containment(), m.jsonPath(), nResults, model, tenant, wherePlan.excludeSensitive());
             case 768  -> MANIFEST_SEARCH_768.call(
                 queryVec, queryText, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                m.containment(), m.jsonPath(), nResults, model, tenant);
+                m.containment(), m.jsonPath(), nResults, model, tenant, wherePlan.excludeSensitive());
             case 1024 -> MANIFEST_SEARCH_1024.call(
                 queryVec, queryText, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                m.containment(), m.jsonPath(), nResults, model, tenant);
+                m.containment(), m.jsonPath(), nResults, model, tenant, wherePlan.excludeSensitive());
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
     }
@@ -1633,11 +1655,14 @@ public final class PgVectorRepository {
         }
         return switch (dim) {
             case 384  -> TEXT_GATED_SEARCH_BY_CHASH_384.call(
-                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                wherePlan.excludeSensitive());
             case 768  -> TEXT_GATED_SEARCH_BY_CHASH_768.call(
-                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                wherePlan.excludeSensitive());
             case 1024 -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(
-                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                wherePlan.excludeSensitive());
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
     }
@@ -2259,10 +2284,11 @@ public final class PgVectorRepository {
      * The lexical arm of one collection in a {@link #searchPerCollection} request that asked for it
      * ({@code lexical}, nexus-xd2rc), aligned with {@link PerCollectionResult#perCollection()}.
      *
-     * @param count     rows the collection's text-gated statement returned (0 on error)
+     * @param count     rows the collection's text-gated statement returned (0 on error), less any row the
+     *                  {@code sensitivity=exclude} race drop removed after the statement ran (nexus-rfvyy.7.17)
      * @param ids       their ids, best first; every one is in the response, as a vector row or as a
-     *                  {@link PerCollectionResult#lexicalRows()} row. Empty when the collection's vector arm
-     *                  failed: its lexical rows are not served either
+     *                  {@link PerCollectionResult#lexicalRows()} row, so a row the race drop removed is not listed.
+     *                  Empty when the collection's vector arm failed: its lexical rows are not served either
      * @param error     the failure text when the lexical statement returned nothing, else {@code null}
      * @param errorKind the stable failure kind (set exactly when {@code error} is), else {@code null}
      */
@@ -2858,6 +2884,23 @@ public final class PgVectorRepository {
                                PgSession.startupSearchStatementTimeoutMs()), chashAllow);
     }
 
+    /** As above with {@code sensitivity=exclude} (nexus-rfvyy.7.3); see the overload with {@link FanoutSettings}. */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings,
+                                                   boolean lexical,
+                                                   byte[][] chashAllow,
+                                                   boolean excludeSensitive) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, includeEmbeddings, lexical,
+            new FanoutSettings(defaultFanoutParallelism(), defaultFanoutBudgetMs(),
+                               PgSession.startupSearchStatementTimeoutMs()), chashAllow, excludeSensitive);
+    }
+
     /** As above with every fan-out knob explicit; a test seam. */
     public PerCollectionResult searchPerCollection(String tenant, String queryText,
                                                    List<String> collectionNames,
@@ -2915,33 +2958,63 @@ public final class PgVectorRepository {
                                                    boolean lexical,
                                                    FanoutSettings settings,
                                                    byte[][] chashAllow) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, includeEmbeddings, lexical, settings, chashAllow, false);
+    }
+
+    /**
+     * As above with {@code sensitivity=exclude} (nexus-rfvyy.7.3, RDR-243): every arm, the vector arm and the lexical
+     * arm alike, drops a chunk with a live sensitive owner inside its own statement, so each collection's top-K is
+     * filled from the rows that remain. Every row carries {@code sensitive}.
+     */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings,
+                                                   boolean lexical,
+                                                   FanoutSettings settings,
+                                                   byte[][] chashAllow,
+                                                   boolean excludeSensitive) {
         var labelSplit = ManifestLabelStage.split(where);
         boolean validBounds = perCollectionK >= 1 && perCollectionK <= MAX_PER_COLLECTION_K
             && limit >= 1 && limit <= MAX_FANOUT_LIMIT;
         if (!labelSplit.active() || !validBounds) {
             // An out-of-range K or limit is refused by the fan-out itself, with its own wording.
             return searchPerCollectionUnlabelled(tenant, queryText, collectionNames, perCollectionK, limit,
-                thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings, false, null, chashAllow);
+                thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings, false, null, chashAllow,
+                excludeSensitive);
         }
         var wide = searchPerCollectionUnlabelled(tenant, queryText, collectionNames,
             Math.min(MAX_PER_COLLECTION_K, ManifestLabelStage.widen(perCollectionK)),
             Math.min(MAX_FANOUT_LIMIT, ManifestLabelStage.widen(limit)),
             thresholds, labelSplit.rest(), includeSourceUri, includeEmbeddings, lexical, settings, true,
-            ManifestPushdown.of(labelSplit.labels()), chashAllow);
+            ManifestPushdown.of(labelSplit.labels()), chashAllow, excludeSensitive);
         var stage = labelStage();
         List<Map<String, Object>> rows = stage.apply(tenant, wide.rows(), labelSplit.labels(), limit);
         List<Map<String, Object>> lexicalRows = wide.lexicalRows().isEmpty()
             ? wide.lexicalRows()
-            : stage.apply(tenant, wide.lexicalRows(), labelSplit.labels(), Integer.MAX_VALUE);
+            // nexus-6cmam: not "no cut". Each lexical hit expands to at most MAX_OWNERS_PER_HIT rows, so the extras
+            // are bounded by the rows the lexical arm handed over times that, whatever the filter keeps.
+            : stage.apply(tenant, wide.lexicalRows(), labelSplit.labels(),
+                          ManifestLabelStage.expansionBound(wide.lexicalRows().size()));
         // Every id a lexical arm reports must still be in the response: drop the ones the filter removed.
         List<LexicalStat> lexicalStats = wide.lexical();
         if (!lexicalStats.isEmpty()) {
+            // keyed by (collection, id): one chash can be a hit in two collections and be filtered out of only one
             Set<String> served = new HashSet<>();
-            for (var row : rows) served.add(String.valueOf(row.get("id")));
-            for (var row : lexicalRows) served.add(String.valueOf(row.get("id")));
+            for (var row : rows) served.add(rowKey(String.valueOf(row.get("collection")), String.valueOf(row.get("id"))));
+            for (var row : lexicalRows) {
+                served.add(rowKey(String.valueOf(row.get("collection")), String.valueOf(row.get("id"))));
+            }
             List<LexicalStat> kept = new ArrayList<>(lexicalStats.size());
-            for (LexicalStat st : lexicalStats) {
-                kept.add(new LexicalStat(st.count(), st.ids().stream().filter(served::contains).toList(),
+            for (int i = 0; i < lexicalStats.size(); i++) {
+                LexicalStat st = lexicalStats.get(i);
+                String collection = wide.perCollection().get(i).collection();
+                kept.add(new LexicalStat(st.count(),
+                                         st.ids().stream().filter(id -> served.contains(rowKey(collection, id))).toList(),
                                          st.error(), st.errorKind()));
             }
             lexicalStats = kept;
@@ -2963,7 +3036,8 @@ public final class PgVectorRepository {
                                                               FanoutSettings settings,
                                                               boolean labelStageFollows,
                                                               ManifestPushdown.Plan manifest,
-                                                              byte[][] chashAllow) {
+                                                              byte[][] chashAllow,
+                                                              boolean excludeSensitive) {
         final int parallelism = settings.parallelism();
         final long fanoutBudgetMs = settings.fanoutBudgetMs();
         final int searchBoundMs = settings.searchBoundMs();
@@ -2993,7 +3067,7 @@ public final class PgVectorRepository {
         List<String> skipped = new ArrayList<>();
         List<String> cols = registeredSurvivors(tenant, requested, "searchPerCollection", skipped);
         final String model = requireHomogeneousModel(tenant, cols);
-        WherePlan wherePlan = planWhere(where).withManifest(manifest);
+        WherePlan wherePlan = planWhere(where).withManifest(manifest).withExcludeSensitive(excludeSensitive);
 
         // Embed ONCE, before any arm borrows a connection (embed-before-borrow). The vector's width
         // is the reference each collection's dispatch dimension is checked against.
@@ -3134,7 +3208,19 @@ public final class PgVectorRepository {
             served.addAll(lexicalRows);
         }
         long enrichStartNanos = System.nanoTime();
-        enrichSearchRows(tenant, served, includeSourceUri, labelStageFollows);
+        List<String> racedFromServed = enrichSearchRows(tenant, served, includeSourceUri, labelStageFollows,
+                                                        excludeSensitive);
+        if (excludeSensitive) {
+            // served IS rows when the lexical leg added nothing, so the lookup dropped from rows in place and its
+            // return (racedFromServed) is the only record of it; when the leg added rows served is a copy, and the
+            // rows the response carries are dropped here by the flag the lookup put on the shared row maps
+            Set<String> raced = new HashSet<>(racedFromServed);
+            raced.addAll(dropSensitiveRows(rows));
+            raced.addAll(dropSensitiveRows(lexicalRows));
+            if (!raced.isEmpty() && !lexicalStats.isEmpty()) {
+                lexicalStats = withoutRacedIds(stats, lexicalStats, raced);
+            }
+        }
         final long enrichMs = (System.nanoTime() - enrichStartNanos) / 1_000_000L;
         long fillStartNanos = System.nanoTime();
         if (includeEmbeddings) {
@@ -3655,6 +3741,35 @@ public final class PgVectorRepository {
                                                                       boolean includeSourceUri,
                                                                       int selectiveGateMax,
                                                                       byte[][] chashAllow) {
+        return hybridSearchWithTokens(tenant, queryText, collectionNames, nResults, where, includeSourceUri,
+                                      selectiveGateMax, chashAllow, false);
+    }
+
+    /**
+     * {@link #hybridSearchWithTokens} with {@code sensitivity=exclude} (nexus-rfvyy.7.3, RDR-243): the gate probe,
+     * the selective by-chash rank and the HNSW-first rank all take the argument, so a chunk with a live sensitive
+     * owner is dropped inside the statement and the page is filled from the rows that remain.
+     */
+    public Tokened<List<Map<String, Object>>> hybridSearchWithTokens(String tenant, String queryText,
+                                                                      List<String> collectionNames,
+                                                                      int nResults,
+                                                                      Map<String, Object> where,
+                                                                      boolean includeSourceUri,
+                                                                      byte[][] chashAllow,
+                                                                      boolean excludeSensitive) {
+        return hybridSearchWithTokens(tenant, queryText, collectionNames, nResults, where, includeSourceUri,
+                                      SELECTIVE_GATE_MAX, chashAllow, excludeSensitive);
+    }
+
+    /** Every knob explicit: the gate-selectivity cutoff, the {@code chash_allow} restriction and the exclusion. */
+    public Tokened<List<Map<String, Object>>> hybridSearchWithTokens(String tenant, String queryText,
+                                                                      List<String> collectionNames,
+                                                                      int nResults,
+                                                                      Map<String, Object> where,
+                                                                      boolean includeSourceUri,
+                                                                      int selectiveGateMax,
+                                                                      byte[][] chashAllow,
+                                                                      boolean excludeSensitive) {
         if (chashAllow != null && chashAllow.length == 0) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -3667,14 +3782,15 @@ public final class PgVectorRepository {
             tenant, queryText, collectionNames,
             labelSplit.active() ? ManifestLabelStage.widen(nResults) : nResults,
             labelSplit.rest(), selectiveGateMax, tokensOut, skippedOut,
-            labelSplit.active() ? ManifestPushdown.of(labelSplit.labels()) : null, chashAllow, ringOut);
+            labelSplit.active() ? ManifestPushdown.of(labelSplit.labels()) : null, chashAllow, ringOut,
+            excludeSensitive);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in).
         // Enrichment runs BEFORE the label stage (nexus-tko2w): it resolves ONE owner's source_uri per
         // chash and writes it on every row of that chash, so a stage that had already expanded a shared
         // chunk into one row per document would have each of them overwritten with the same URI. The
         // stage re-points source_uri on the rows it expands, as searchWithTokens and
         // searchPerCollection do.
-        enrichSearchRows(tenant, rows, includeSourceUri, labelSplit.active());
+        enrichSearchRows(tenant, rows, includeSourceUri, labelSplit.active(), excludeSensitive);
         if (labelSplit.active()) {
             rows = labelStage().apply(tenant, rows, labelSplit.labels(), nResults);
         }
@@ -3711,7 +3827,7 @@ public final class PgVectorRepository {
                                            Map<String, Object> where,
                                            int selectiveGateMax) {
         return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null, null, null, null,
-                            null);
+                            null, false);
     }
 
     /**
@@ -3741,7 +3857,8 @@ public final class PgVectorRepository {
                                            List<String> skippedOut,
                                            ManifestPushdown.Plan manifest,
                                            byte[][] chashAllow,
-                                           QueryVector[] ringOut) {
+                                           QueryVector[] ringOut,
+                                           boolean excludeSensitive) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
         }
@@ -3781,7 +3898,7 @@ public final class PgVectorRepository {
         EmbedResult hybridEmbed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         if (tokensOut != null) tokensOut[0] = hybridEmbed.tokens();
         Vector queryVec = Vector.of(hybridEmbed.embeddings().get(0));
-        WherePlan wherePlan = planWhere(where).withManifest(manifest);
+        WherePlan wherePlan = planWhere(where).withManifest(manifest).withExcludeSensitive(excludeSensitive);
         String[] colls = collectionNames.toArray(String[]::new);
         String gateQueryText = queryText;
 
@@ -3860,13 +3977,13 @@ public final class PgVectorRepository {
             org.jooq.Table<?> allowedFn = switch (dim) {
                 case 384  -> TEXT_GATED_SEARCH_ALLOWED_384.call(
                     queryVec, gateQueryText, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                    nResults, model, tenant);
+                    nResults, model, tenant, wherePlan.excludeSensitive());
                 case 768  -> TEXT_GATED_SEARCH_ALLOWED_768.call(
                     queryVec, gateQueryText, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                    nResults, model, tenant);
+                    nResults, model, tenant, wherePlan.excludeSensitive());
                 case 1024 -> TEXT_GATED_SEARCH_ALLOWED_1024.call(
                     queryVec, gateQueryText, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                    nResults, model, tenant);
+                    nResults, model, tenant, wherePlan.excludeSensitive());
                 default   -> throw new IllegalArgumentException("unsupported dim " + dim);
             };
             return ctx.selectFrom(allowedFn).fetch();
@@ -3920,11 +4037,14 @@ public final class PgVectorRepository {
             }
             org.jooq.Table<?> fn = switch (dim) {
                 case 384  -> TEXT_GATED_SEARCH_BY_CHASH_384.call(
-                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                    wherePlan.excludeSensitive());
                 case 768  -> TEXT_GATED_SEARCH_BY_CHASH_768.call(
-                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                    wherePlan.excludeSensitive());
                 case 1024 -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(
-                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                    wherePlan.excludeSensitive());
                 default   -> throw new IllegalArgumentException("unsupported dim " + dim);
             };
             return ctx.selectFrom(fn).fetch();
@@ -3947,11 +4067,14 @@ public final class PgVectorRepository {
         }
         org.jooq.Table<?> hnswFirstFn = switch (dim) {
             case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
-                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                wherePlan.excludeSensitive());
             case 768  -> TEXT_GATED_SEARCH_HNSW_FIRST_768.call(
-                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                wherePlan.excludeSensitive());
             case 1024 -> TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
-                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
+                wherePlan.excludeSensitive());
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         // nexus-bq06h: exactOnUnderReturn wraps ONLY the HNSW-first branch, exactly
@@ -3974,9 +4097,23 @@ public final class PgVectorRepository {
     public Map<String, Object> get(String tenant, String collection,
                                    List<String> ids, int limit, int offset,
                                    boolean includeSourceUri) {
+        return get(tenant, collection, ids, limit, offset, includeSourceUri, false);
+    }
+
+    /**
+     * {@link #get(String, String, List, int, int, boolean)} with RDR-243's {@code sensitivity} (nexus-rfvyy.7.4).
+     * When {@code excludeSensitive} is true a chunk with any live sensitive owner is dropped INSIDE the statement's
+     * WHERE ({@link ChunkSensitivity#notSensitive}), so {@code limit}, {@code offset} and the {@code count} window
+     * are all taken over the surviving rows, never trimmed after the fetch. The envelope always carries {@code
+     * sensitives}, a list of booleans parallel to {@code ids}, from one {@code chunk_sensitive_many} call over the
+     * returned chashes after the read; under the exclusion every entry is false.
+     */
+    public Map<String, Object> get(String tenant, String collection,
+                                   List<String> ids, int limit, int offset,
+                                   boolean includeSourceUri, boolean excludeSensitive) {
         int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) {
-            return Map.of("ids", List.of(), "documents", List.of(), "metadatas", List.of());
+            return Map.of("ids", List.of(), "documents", List.of(), "metadatas", List.of(), "sensitives", List.of());
         }
 
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
@@ -3999,7 +4136,8 @@ public final class PgVectorRepository {
         final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         var result = tenantScope.withTenant(tenant, ctx -> {
             org.jooq.Condition cond = scope.and(ch.chash().in(ids))
-                                          .and(liveChunksCondition(ctx, ch));
+                                          .and(liveChunksCondition(ctx, ch))
+                                          .and(excludeSensitive ? notSensitiveCondition(ch) : DSL.trueCondition());
             var rows = ctx.select(ch.chash(), ch.chunkText(), ch.metadata(), countField)
                .from(ch.table())
                // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
@@ -4045,7 +4183,46 @@ public final class PgVectorRepository {
         // single-snapshot (see above) — never a race between two reads.
         envelope.put("count", matchedLive);
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
-        return enrichGetEnvelope(tenant, collection, envelope, includeSourceUri);
+        return withSensitives(tenant, collection, enrichGetEnvelope(tenant, collection, envelope, includeSourceUri),
+                              excludeSensitive);
+    }
+
+    /** The exclusion predicate over a chunk-table row: no live owner of the chunk is sensitive. */
+    private static org.jooq.Condition notSensitiveCondition(DimTables.ChunkTable ch) {
+        return ChunkSensitivity.notSensitive(ch.tenantId(), ch.collection(), ch.table().field("chash", byte[].class));
+    }
+
+    /**
+     * Add {@code sensitives} to a get envelope: booleans parallel to {@code ids}, true when any LIVE owner of the
+     * chunk is sensitive, from ONE {@code chunk_sensitive_many} call over the returned chashes (nexus-rfvyy.7.4,
+     * RDR-243 Technical Design item 3). The existing keys are untouched.
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> withSensitives(String tenant, String collection, Map<String, Object> envelope,
+                                               boolean excludeSensitive) {
+        List<String> ids = (List<String>) envelope.get("ids");
+        if (!ids.isEmpty()) runBeforeSensitiveLookupHook();
+        Set<String> sensitiveIds = ids.isEmpty() ? Set.of()
+            : tenantScope.withTenant(tenant, ctx -> ChunkSensitivity.sensitiveChashes(ctx, tenant, collection, ids));
+        List<Boolean> flags = new ArrayList<>(ids.size());
+        for (String id : ids) flags.add(sensitiveIds.contains(id));
+        Map<String, Object> out = new LinkedHashMap<>(envelope);
+        out.put("sensitives", flags);
+        if (excludeSensitive && flags.contains(Boolean.TRUE)) {
+            // A document flagged since the read: drop its rows from every list parallel to ids, and from the count.
+            // Under exclude no returned row is sensitive, so "sensitives" comes back all false.
+            int dropped = 0;
+            for (Boolean f : flags) if (f) dropped++;
+            for (var e : out.entrySet()) {
+                if (e.getValue() instanceof List<?> l && l.size() == ids.size()) {
+                    List<Object> kept = new ArrayList<>(ids.size() - dropped);
+                    for (int i = 0; i < l.size(); i++) if (!flags.get(i)) kept.add(l.get(i));
+                    e.setValue(kept);
+                }
+            }
+            if (out.get("count") instanceof Number n) out.put("count", Math.max(0L, n.longValue() - dropped));
+        }
+        return out;
     }
 
     /**
@@ -4060,6 +4237,15 @@ public final class PgVectorRepository {
      * live owner. The where-scan reads offer the same with {@code includeNonLive}.
      */
     public Map<String, Object> presentRows(String tenant, String collection, List<String> ids) {
+        return presentRows(tenant, collection, ids, false);
+    }
+
+    /**
+     * {@link #presentRows(String, String, List)} under RDR-243's {@code sensitivity} (nexus-rfvyy.7.4): with {@code
+     * excludeSensitive} a chunk with a live sensitive owner is not listed, as on the content reads.
+     */
+    public Map<String, Object> presentRows(String tenant, String collection, List<String> ids,
+                                           boolean excludeSensitive) {
         if (ids == null || ids.isEmpty()) {
             return Map.of("ids", List.of(), "metadatas", List.of());
         }
@@ -4069,7 +4255,8 @@ public final class PgVectorRepository {
         var rows = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
-               .where(scope.and(ch.chash().in(ids)))
+               .where(scope.and(ch.chash().in(ids))
+                   .and(excludeSensitive ? notSensitiveCondition(ch) : DSL.trueCondition()))
                .orderBy(ch.chash().asc())
                .fetch());
         List<String> outIds = new ArrayList<>(rows.size());
@@ -4219,6 +4406,24 @@ public final class PgVectorRepository {
                                         int limit, int offset,
                                         boolean includeSourceUri,
                                         boolean includeNonLive) {
+        return getWhere(tenant, collection, where, limit, offset, includeSourceUri, includeNonLive, false);
+    }
+
+    /**
+     * {@link #getWhere(String, String, Map, int, int, boolean, boolean)} with RDR-243's {@code sensitivity}
+     * (nexus-rfvyy.7.4): under {@code excludeSensitive} the live read drops a chunk with any live sensitive owner
+     * inside its WHERE ({@link ChunkSensitivity#notSensitive}), so paging is taken over the surviving rows, and the
+     * envelope carries {@code sensitives} parallel to {@code ids}. The physical-scan mode ({@code includeNonLive})
+     * returns ids and metadata, never text, and so is not flagged; under {@code excludeSensitive} it too drops a
+     * chunk with a live sensitive owner, so "exclude" means one thing on every branch of the route (a chunk with no
+     * live owner is never sensitive, so the maintenance inventory that reads the unowned chunks is unaffected).
+     */
+    public Map<String, Object> getWhere(String tenant, String collection,
+                                        Map<String, Object> where,
+                                        int limit, int offset,
+                                        boolean includeSourceUri,
+                                        boolean includeNonLive,
+                                        boolean excludeSensitive) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         org.jooq.Condition finalCond = chunkScope(ch, tenant, collection).and(getWhereCondition(ch, where));
@@ -4231,7 +4436,7 @@ public final class PgVectorRepository {
                 PgSession.setSearchPlanCacheMode(ctx);
                 return ctx.select(ch.chash(), ch.metadata())
                    .from(ch.table())
-                   .where(finalCond)
+                   .where(finalCond.and(excludeSensitive ? notSensitiveCondition(ch) : DSL.trueCondition()))
                    .orderBy(ch.chash().asc())
                    .limit(limit).offset(offset)
                    .fetch();
@@ -4255,7 +4460,8 @@ public final class PgVectorRepository {
                // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
                // this fetch-by-where read was structurally invisible to the
                // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
-               .where(finalCond.and(liveChunksCondition(ctx, ch)).and(driver))
+               .where(finalCond.and(liveChunksCondition(ctx, ch)).and(driver)
+                   .and(excludeSensitive ? notSensitiveCondition(ch) : DSL.trueCondition()))
                .orderBy(ch.chash().asc())
                .limit(limit).offset(offset)
                .fetch();
@@ -4271,9 +4477,9 @@ public final class PgVectorRepository {
             outMetas.add(fromJson(meta != null ? meta.data() : null));
         }
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
-        return enrichGetEnvelope(tenant, collection,
+        return withSensitives(tenant, collection, enrichGetEnvelope(tenant, collection,
             new LinkedHashMap<>(Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas)),
-            includeSourceUri);
+            includeSourceUri), excludeSensitive);
     }
 
     /**
@@ -4631,6 +4837,18 @@ public final class PgVectorRepository {
             String tenant, String queryText, List<String> collectionNames,
             String contentType, String author, Integer year, String corpus,
             String subtree, Map<String, Object> where, int nResults) {
+        return searchMetadataScopedWithTokens(tenant, queryText, collectionNames, contentType, author, year, corpus,
+                                              subtree, where, nResults, false);
+    }
+
+    /**
+     * As above with {@code sensitivity=exclude} (nexus-rfvyy.7.3, RDR-243): a chunk with a live sensitive owner is
+     * dropped inside the search statement, whichever document the row is for. Every row carries {@code sensitive}.
+     */
+    public Tokened<List<Map<String, Object>>> searchMetadataScopedWithTokens(
+            String tenant, String queryText, List<String> collectionNames,
+            String contentType, String author, Integer year, String corpus,
+            String subtree, Map<String, Object> where, int nResults, boolean excludeSensitive) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -4656,16 +4874,16 @@ public final class PgVectorRepository {
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_METADATA_SCOPED_384.call(
                 queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant);
+                nResults, model, tenant, excludeSensitive);
             case 768  -> SEARCH_METADATA_SCOPED_768.call(
                 queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant);
+                nResults, model, tenant, excludeSensitive);
             case 1024 -> SEARCH_METADATA_SCOPED_1024.call(
                 queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant);
+                nResults, model, tenant, excludeSensitive);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true, excludeSensitive);
         return new Tokened<>(rows, embed.tokens(), skippedCollections,
                              scopedRingVector(model, embed.embeddings().get(0), collectionNames));
     }
@@ -4750,6 +4968,15 @@ public final class PgVectorRepository {
             String tenant, String queryText, List<String> collectionNames,
             String field, String pattern, Double minConfidence,
             Map<String, Object> where, int nResults) {
+        return searchAspectScopedWithTokens(tenant, queryText, collectionNames, field, pattern, minConfidence, where,
+                                            nResults, false);
+    }
+
+    /** As above with {@code sensitivity=exclude} (nexus-rfvyy.7.3, RDR-243); every row carries {@code sensitive}. */
+    public Tokened<List<Map<String, Object>>> searchAspectScopedWithTokens(
+            String tenant, String queryText, List<String> collectionNames,
+            String field, String pattern, Double minConfidence,
+            Map<String, Object> where, int nResults, boolean excludeSensitive) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -4780,17 +5007,17 @@ public final class PgVectorRepository {
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_ASPECT_SCOPED_384.call(
                 queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant);
+                nResults, model, tenant, excludeSensitive);
             case 768  -> SEARCH_ASPECT_SCOPED_768.call(
                 queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant);
+                nResults, model, tenant, excludeSensitive);
             case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
                 queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant);
+                nResults, model, tenant, excludeSensitive);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         // countable = false: the aspect join can give one occurrence several rows (runCombinedQueryWithChash).
-        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, false);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, false, excludeSensitive);
         return new Tokened<>(rows, embed.tokens(), skippedCollections,
                              scopedRingVector(model, embed.embeddings().get(0), collectionNames));
     }
@@ -4816,6 +5043,13 @@ public final class PgVectorRepository {
      */
     public Tokened<List<Map<String, Object>>> searchTopicScopedWithTokens(
             String tenant, String queryText, String topicLabel, String collection, int nResults) {
+        return searchTopicScopedWithTokens(tenant, queryText, topicLabel, collection, nResults, false);
+    }
+
+    /** As above with {@code sensitivity=exclude} (nexus-rfvyy.7.3, RDR-243); every row carries {@code sensitive}. */
+    public Tokened<List<Map<String, Object>>> searchTopicScopedWithTokens(
+            String tenant, String queryText, String topicLabel, String collection, int nResults,
+            boolean excludeSensitive) {
         if (collection == null || collection.isBlank()) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -4828,12 +5062,15 @@ public final class PgVectorRepository {
         Vector queryVec = Vector.of(embed.embeddings().get(0));
 
         org.jooq.Table<?> fn = switch (dim) {
-            case 384  -> SEARCH_TOPIC_SCOPED_384.call(queryVec, topicLabel, collection, nResults, model, tenant);
-            case 768  -> SEARCH_TOPIC_SCOPED_768.call(queryVec, topicLabel, collection, nResults, model, tenant);
-            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(queryVec, topicLabel, collection, nResults, model, tenant);
+            case 384  -> SEARCH_TOPIC_SCOPED_384.call(queryVec, topicLabel, collection, nResults, model, tenant,
+                excludeSensitive);
+            case 768  -> SEARCH_TOPIC_SCOPED_768.call(queryVec, topicLabel, collection, nResults, model, tenant,
+                excludeSensitive);
+            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(queryVec, topicLabel, collection, nResults, model, tenant,
+                excludeSensitive);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQuery(tenant, fn, nResults), embed.tokens(), List.of(),
+        return new Tokened<>(runCombinedQuery(tenant, fn, nResults, excludeSensitive), embed.tokens(), List.of(),
                              QueryVector.alone(model, embed.embeddings().get(0), collection));
     }
 
@@ -4900,6 +5137,15 @@ public final class PgVectorRepository {
     public Tokened<List<Map<String, Object>>> searchGraphHopWithTokens(
             String tenant, String queryText, List<String> seeds, List<String> collectionNames,
             String linkType, int depth, String direction, Map<String, Object> where, int nResults) {
+        return searchGraphHopWithTokens(tenant, queryText, seeds, collectionNames, linkType, depth, direction, where,
+                                        nResults, false);
+    }
+
+    /** As above with {@code sensitivity=exclude} (nexus-rfvyy.7.3, RDR-243); every row carries {@code sensitive}. */
+    public Tokened<List<Map<String, Object>>> searchGraphHopWithTokens(
+            String tenant, String queryText, List<String> seeds, List<String> collectionNames,
+            String linkType, int depth, String direction, Map<String, Object> where, int nResults,
+            boolean excludeSensitive) {
         if (seeds == null || seeds.isEmpty()
                 || collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
@@ -4933,16 +5179,16 @@ public final class PgVectorRepository {
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_GRAPH_HOP_384.call(
                 queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant);
+                nResults, model, tenant, excludeSensitive);
             case 768  -> SEARCH_GRAPH_HOP_768.call(
                 queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant);
+                nResults, model, tenant, excludeSensitive);
             case 1024 -> SEARCH_GRAPH_HOP_1024.call(
                 queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant);
+                nResults, model, tenant, excludeSensitive);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true, excludeSensitive);
         return new Tokened<>(rows, embed.tokens(), skippedCollections,
                              scopedRingVector(model, embed.embeddings().get(0), collectionNames));
     }
@@ -5105,7 +5351,7 @@ public final class PgVectorRepository {
      * allowlist).
      */
     private List<Map<String, Object>> runCombinedQuery(
-            String tenant, org.jooq.Table<?> fn, int nResults) {
+            String tenant, org.jooq.Table<?> fn, int nResults, boolean excludeSensitive) {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours. First, so the
@@ -5137,6 +5383,7 @@ public final class PgVectorRepository {
             row.put("retention",  rec.get("retention", String.class));
             rows.add(row);
         }
+        attachSensitive(tenant, rows, excludeSensitive);
         return rows;
     }
 
@@ -5172,7 +5419,7 @@ public final class PgVectorRepository {
      */
     private List<Map<String, Object>> runCombinedQueryWithChash(
             String tenant, org.jooq.Table<?> fn, int nResults, RouteBWhere rb, String[] colls, String model,
-            boolean countable) {
+            boolean countable, boolean excludeSensitive) {
         boolean manifestPredicate = rb.hasManifest();
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             // nexus-g17tf: bound the statement first (see runCombinedQuery), so the GUC round
@@ -5191,7 +5438,8 @@ public final class PgVectorRepository {
                 ? exactSelectFrom(ctx, nResults, fn, null, true, tenant, String.join(",", colls),
                                   countable && rb.countable()
                                       ? manifestQualifying(ctx, colls, new WherePlan(rb.containment(), null,
-                                                                                     rb.manifest()), model, tenant,
+                                                                                     rb.manifest(), excludeSensitive),
+                                                                          model, tenant,
                                                                           false, null)
                                       : null)
                 : ctx.selectFrom(fn).fetch();
@@ -5212,6 +5460,7 @@ public final class PgVectorRepository {
             row.put("retention",  rec.get("retention", String.class));
             rows.add(row);
         }
+        attachSensitive(tenant, rows, excludeSensitive);
         return rows;
     }
 
@@ -6384,8 +6633,25 @@ FROM scope s
                                                               Double floorFraction, Integer floorMinChunks,
                                                               boolean force) {
         return quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit,
-            rowLimit, floorFraction, floorMinChunks, force, dimForCollection(tenant, collection),
-            LedgerMarker.none());
+            rowLimit, floorFraction, floorMinChunks, force, null);
+    }
+
+    /**
+     * nexus-alsq3: as above, with the client's retention. A non-null {@code quarantineExpiresAt}
+     * ({@code yyyy-MM-ddTHH:mm:ssZ}) is written by {@code nexus.gc_quarantine_orphans_floored} (vectors-056) as the
+     * metadata key {@code quarantine_expires_at} on the rows this call moved, and the engine's expiry of client-moved
+     * knowledge quarantine then waits for the later of its own retention and that instant. Null writes nothing. The
+     * floor may be absent (null {@code floorFraction}) and the stamp still ride the call: the wrapper takes no gate of
+     * its own and judges nothing, and the move is the unbounded or bounded base function untouched.
+     */
+    public QuarantineFlooredOutcome quarantineOrphansFloored(String tenant, String collection,
+                                                              String quarantineCollection, String quarantinedAt,
+                                                              int sampleLimit, Integer rowLimit,
+                                                              Double floorFraction, Integer floorMinChunks,
+                                                              boolean force, String quarantineExpiresAt) {
+        return quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit,
+            rowLimit, floorFraction, floorMinChunks, force, quarantineExpiresAt,
+            dimForCollection(tenant, collection), LedgerMarker.none());
     }
 
     /**
@@ -6398,6 +6664,17 @@ FROM scope s
                                                               Double floorFraction, Integer floorMinChunks,
                                                               boolean force, int dim,
                                                               LedgerMarker<QuarantineFlooredOutcome> marker) {
+        return quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit,
+            rowLimit, floorFraction, floorMinChunks, force, null, dim, marker);
+    }
+
+    /** The keyed route's form with the client's retention (nexus-alsq3); see the form above. */
+    public QuarantineFlooredOutcome quarantineOrphansFloored(String tenant, String collection,
+                                                              String quarantineCollection, String quarantinedAt,
+                                                              int sampleLimit, Integer rowLimit,
+                                                              Double floorFraction, Integer floorMinChunks,
+                                                              boolean force, String quarantineExpiresAt, int dim,
+                                                              LedgerMarker<QuarantineFlooredOutcome> marker) {
         return tenantScope.withTenant(tenant, ctx -> {
             if (rowLimit != null) {
                 PgSession.setStatementAndLockBounds(ctx,
@@ -6406,7 +6683,7 @@ FROM scope s
             }
             var rec = ctx.selectFrom(GC_QUARANTINE_ORPHANS_FLOORED.call(
                     dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit,
-                    floorFraction, floorMinChunks, force))
+                    floorFraction, floorMinChunks, force, quarantineExpiresAt))
                .fetchOne();
             runAfterSweepSqlHook();
             JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_FLOORED.SAMPLE);
@@ -8486,7 +8763,7 @@ FROM scope s
             int fetchCap = distinctChunks && cap > 1 && cap <= Integer.MAX_VALUE / 2 ? 2 * cap : cap;
             Result<?> rows = ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
                 colls, wherePlan.containment(), wherePlan.jsonPath(), m.containment(), m.jsonPath(),
-                fetchCap, model, tenant, queryText)).fetch();
+                fetchCap, model, tenant, queryText, wherePlan.excludeSensitive())).fetch();
             if (!distinctChunks) {
                 return rows.size();
             }
@@ -8831,10 +9108,14 @@ FROM scope s
      * cast to {@code jsonpath} INSIDE the function body -- never SQL string
      * concatenation. Either or both may be {@code null} (no predicate of that kind).
      */
-    record WherePlan(JSONB containment, String jsonPath, ManifestPushdown.Plan manifest) {
+    record WherePlan(JSONB containment, String jsonPath, ManifestPushdown.Plan manifest, boolean excludeSensitive) {
 
         WherePlan(JSONB containment, String jsonPath) {
-            this(containment, jsonPath, null);
+            this(containment, jsonPath, null, false);
+        }
+
+        WherePlan(JSONB containment, String jsonPath, ManifestPushdown.Plan manifest) {
+            this(containment, jsonPath, manifest, false);
         }
 
         /**
@@ -8842,7 +9123,16 @@ FROM scope s
          * through {@code manifest_search_<dim>}, which also tests an EXISTS on the catalog manifest.
          */
         WherePlan withManifest(ManifestPushdown.Plan manifestPlan) {
-            return new WherePlan(containment, jsonPath, manifestPlan);
+            return new WherePlan(containment, jsonPath, manifestPlan, excludeSensitive);
+        }
+
+        /**
+         * This plan with {@code sensitivity=exclude} (nexus-rfvyy.7.3, RDR-243): every search function the plan
+         * is passed to receives it as {@code p_exclude_sensitive}, so a chunk with a live sensitive owner is
+         * dropped INSIDE the search predicate and the page is still filled to k from the rows that remain.
+         */
+        WherePlan withExcludeSensitive(boolean exclude) {
+            return new WherePlan(containment, jsonPath, manifest, exclude);
         }
     }
 
@@ -9424,10 +9714,14 @@ FROM scope s
      * @param rows             the chunk-level search result rows to enrich (mutated in-place)
      * @param includeSourceUri when true, resolves source_uri via a catalog JOIN
      * @param labelStageFollows true when a label or document-key filter's stage runs over these rows next
+     * @param excludeSensitive  true when the request asked for {@code sensitivity=exclude}: a row the sensitive lookup
+     *                          then flags is dropped from {@code rows} ({@link #attachSensitive})
+     * @return the {@code (collection, id)} keys of the rows that drop removed, for a caller that reports ids it served
      */
-    private void enrichSearchRows(String tenant, List<Map<String, Object>> rows,
-                                  boolean includeSourceUri, boolean labelStageFollows) {
-        if (rows.isEmpty()) return;
+    private List<String> enrichSearchRows(String tenant, List<Map<String, Object>> rows,
+                                          boolean includeSourceUri, boolean labelStageFollows,
+                                          boolean excludeSensitive) {
+        if (rows.isEmpty()) return List.of();
         // nexus-6pfgb.26: ONE lookup per window, whether or not source_uri was asked for: the owner's
         // doc_id, position and span come from the same row, so every chunk-level row needs it. Under a
         // label or document-key filter none: the stage that runs next re-points source_uri, doc_id,
@@ -9483,6 +9777,102 @@ FROM scope s
                 row.put("source_uri", owner != null ? owner.sourceUri() : null);
             }
         }
+        return attachSensitive(tenant, rows, excludeSensitive);
+    }
+
+    /**
+     * Put {@code sensitive} on every hit (nexus-rfvyy.7.3, RDR-243): true when ANY LIVE owner of the hit's chunk is
+     * sensitive, whether or not the request asked for the exclusion. One {@code nexus.chunk_sensitive_many} call per
+     * collection the page holds, over that collection's result chashes, in one tenant-scoped transaction after the
+     * search; a row carries the chunk's chash as {@code chash} (document-level rows, whose {@code id} is a tumbler) or
+     * as its {@code id}. A lookup that fails fails the search: a hit is never served with its flag unknown.
+     */
+    private List<String> attachSensitive(String tenant, List<Map<String, Object>> rows, boolean excludeSensitive) {
+        if (rows.isEmpty()) return List.of();
+        Map<String, Set<String>> chashesByCollection = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            Object chash = row.get("chash") instanceof String c ? c : row.get("id");
+            if (!(chash instanceof String hex) || !HEX64.matcher(hex).matches()
+                    || !(row.get("collection") instanceof String coll)) {
+                throw new IllegalStateException(
+                    "attachSensitive: a search row names no chunk (chash " + chash + ", collection "
+                    + row.get("collection") + ")");
+            }
+            chashesByCollection.computeIfAbsent(coll, k -> new LinkedHashSet<>()).add(hex);
+        }
+        runBeforeSensitiveLookupHook();
+        Set<String> sensitiveKeys = tenantScope.withTenant(tenant, ctx -> {
+            Set<String> out = new HashSet<>();
+            for (var e : chashesByCollection.entrySet()) {
+                for (String hex : ChunkSensitivity.sensitiveChashes(ctx, tenant, e.getKey(), e.getValue())) {
+                    out.add(ManifestLabelStage.ownerKey(e.getKey(), hex));
+                }
+            }
+            return out;
+        });
+        for (Map<String, Object> row : rows) {
+            String hex = row.get("chash") instanceof String c ? c : (String) row.get("id");
+            row.put("sensitive", sensitiveKeys.contains(ManifestLabelStage.ownerKey((String) row.get("collection"), hex)));
+        }
+        return excludeSensitive ? dropSensitiveRows(rows) : List.of();
+    }
+
+    /**
+     * Drop the rows flagged {@code sensitive}. The search ran in one transaction and the flag lookup runs in another,
+     * so a document flagged in between yields a row the search admitted that the lookup then reports sensitive; under
+     * {@code sensitivity=exclude} such a row must not be served (review fix F2, nexus-rfvyy.7.4). A flag lookup never
+     * adds a row, so the page can only come back shorter than the search made it, never wrong.
+     */
+    private static List<String> dropSensitiveRows(List<Map<String, Object>> rows) {
+        if (rows.isEmpty()) return List.of();
+        List<String> dropped = new ArrayList<>();
+        rows.removeIf(r -> {
+            if (!Boolean.TRUE.equals(r.get("sensitive"))) return false;
+            dropped.add(rowKey(String.valueOf(r.get("collection")), String.valueOf(r.get("id"))));
+            return true;
+        });
+        return dropped;
+    }
+
+    private static String rowKey(String collection, String id) {
+        return collection + "\u0000" + id;
+    }
+
+    /**
+     * Take the ids the race drop removed out of each collection's lexical report (nexus-rfvyy.7.17): a
+     * {@link LexicalStat#ids()} entry is documented as "in the response", and the id of a row dropped after the
+     * search is not. The count falls with the ids; both stay as the statement returned them when nothing was dropped.
+     * Keyed by (collection, id), because one chash can be a hit in two collections and be flagged in only one.
+     */
+    private static List<LexicalStat> withoutRacedIds(List<PerCollectionStat> stats, List<LexicalStat> lexicalStats,
+                                                     Set<String> raced) {
+        List<LexicalStat> out = new ArrayList<>(lexicalStats.size());
+        for (int i = 0; i < lexicalStats.size(); i++) {
+            LexicalStat st = lexicalStats.get(i);
+            String collection = stats.get(i).collection();
+            List<String> kept = st.ids().stream().filter(id -> !raced.contains(rowKey(collection, id))).toList();
+            int removed = st.ids().size() - kept.size();
+            out.add(removed == 0 ? st
+                : new LexicalStat(Math.max(0, st.count() - removed), kept, st.error(), st.errorKind()));
+        }
+        return out;
+    }
+
+    /**
+     * Test seam (review fix F2): runs between the search or read and the sensitive-flag lookup, the window in which a
+     * document can be flagged. Null in production.
+     */
+    private static volatile Runnable beforeSensitiveLookupHookForTests;
+
+    /** Install (or, with null, clear) the {@link #beforeSensitiveLookupHookForTests}; for tests only. */
+    public static void setBeforeSensitiveLookupHookForTests(Runnable hook) {
+        beforeSensitiveLookupHookForTests = hook;
+    }
+
+    /** Run the seam if a test installed one; the catalog by-address reads call it too (CatalogRepository). */
+    public static void runBeforeSensitiveLookupHook() {
+        Runnable h = beforeSensitiveLookupHookForTests;
+        if (h != null) h.run();
     }
 
     /**

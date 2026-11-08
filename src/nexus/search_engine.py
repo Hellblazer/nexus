@@ -16,6 +16,8 @@ import structlog
 
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
+from nexus.sensitive_output import tumbler_order_key
+from nexus.sensitivity import ReadSensitivity
 from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exported: callers import it from here
     DISPLAY_SOURCE_PATH_KEY,
     OWNER_AGENTS_KEY,
@@ -38,6 +40,7 @@ from nexus.corpus import (
 from nexus.db.http_vector_client import (
     HttpVectorClient,
     PerCollectionEnvelopeError,
+    SensitivityExcludeUnavailable,
     VectorServiceError,
     per_collection_route_enabled,
     route_lexical_enabled,
@@ -176,6 +179,20 @@ def _positions_owner(candidates: list[dict], collection: str) -> dict | None:
     return min(pool, key=lambda c: c["doc_id"]) if pool else None
 
 
+#: Metadata key: the owner lookup that says which documents (and whether any is sensitive) hold a hit failed, so a
+#: hit the engine did not flag cannot be shown to be clean. Read by ``nexus.sensitive_output.hit_facts``.
+OWNER_LOOKUP_FAILED_KEY = "_owner_lookup_failed"
+
+
+def _mark_owner_lookup_failed(results: list[SearchResult]) -> None:
+    """RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): stamp every hit whose engine row carried no ``sensitive`` flag (an
+    engine that predates the field) with :data:`OWNER_LOOKUP_FAILED_KEY`. The output posture then treats it as
+    sensitive: "could not look" is not "clean". A hit with the engine's flag keeps it; the engine is the authority."""
+    for r in results:
+        if not isinstance(r.metadata.get("sensitive"), bool):
+            r.metadata[OWNER_LOOKUP_FAILED_KEY] = True
+
+
 def _attach_from_chash_positions(
     results: list[SearchResult], chashes: list[str], catalog: Any,
 ) -> bool:
@@ -203,8 +220,10 @@ def _attach_from_chash_positions(
         rows = lookup([c for c in chashes if c])
     except Exception:  # noqa: BLE001 — best-effort; the manifest path below still runs
         _log.debug("attach_chash_positions_failed", exc_info=True)
+        _mark_owner_lookup_failed(results)
         return False
     if not isinstance(rows, list):
+        _mark_owner_lookup_failed(results)
         return False
     by_chash: dict[str, list[dict]] = {}
     for row in rows:
@@ -228,6 +247,16 @@ def _attach_from_chash_positions(
     for r, chash, match in plan:
         # nexus-sis0m.5: every document holding the chash, for the title.
         r.metadata["_owner_doc_ids"] = list(dict.fromkeys(c["doc_id"] for c in by_chash[chash]))
+        # RDR-243 Phase 3 (nexus-rfvyy.8.2): EVERY live owner the route flags sensitive, not just the chosen one's
+        # flag. A chash held by a sensitive and a plain document still names the sensitive one here, and the output
+        # posture takes the lowest of them for its stub line. Stamped only when there is one, so a clean page's
+        # metadata is what it was. The engine's own per-hit ``sensitive`` field stays the authority on whether the
+        # hit is sensitive; this says which documents.
+        sensitive_owners = sorted(
+            {c["doc_id"] for c in by_chash[chash] if c.get("sensitive") is True}, key=tumbler_order_key,
+        )
+        if sensitive_owners:
+            r.metadata["sensitive_owners"] = sensitive_owners
         if not r.metadata.get("doc_id"):
             r.metadata["doc_id"] = match["doc_id"]
             r.metadata[DOC_ID_INFERRED_KEY] = True
@@ -1392,8 +1421,15 @@ def search_cross_corpus(
     content_chars: int | None = None,
     per_collection_k_cap: int | None = None,
     model_of_out: "list[Callable[[str], str | None]] | None" = None,
+    *,
+    sensitivity: ReadSensitivity,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
+
+    *sensitivity* (RDR-243 Phase 2, nexus-rfvyy.7.8) is required and has no default. It is handed to every read
+    this call makes, in every pool task, as an ARGUMENT: a worker thread started without a context copy does not
+    see the posture ContextVar (RDR-243 A7), so no task consults it. The caller reads
+    :func:`nexus.sensitivity.read_sensitivity` once, on its own thread (``exclude`` under ``llm_bound``).
 
     Over-fetch: a batch is sized at ``max(n_results * mult, len(group) *
     floor)`` candidates (:func:`_desired_candidate_count`), where *mult* is
@@ -1725,7 +1761,7 @@ def search_cross_corpus(
                 lex_meta: dict = {}
                 lex_raw = t3.hybrid_search(
                     query, cols, n_results=per_k, where=effective_where,
-                    rerank=True, rerank_meta_out=lex_meta, **chash_kw,
+                    rerank=True, rerank_meta_out=lex_meta, sensitivity=sensitivity, **chash_kw,
                 )
                 # A degrade on EITHER leg is a degrade for this batch;
                 # merged rather than overwritten so the vector leg's
@@ -1734,7 +1770,9 @@ def search_cross_corpus(
                     rerank_meta.update(lex_meta)
             else:
                 lex_raw = t3.hybrid_search(query, cols, n_results=per_k,
-                                           where=effective_where, **chash_kw)
+                                           where=effective_where, sensitivity=sensitivity, **chash_kw)
+        except SensitivityExcludeUnavailable:
+            raise  # RDR-243 review r1 F5: a refusal is not a lexical-leg failure, and `retry without --lexical` would be wrong advice
         except VectorServiceError as lex_exc:
             raise LexicalLegUnavailableError(
                 f"the lexical leg failed for {cols}: {lex_exc}. Refusing "
@@ -1785,9 +1823,11 @@ def search_cross_corpus(
         try:
             if server_rerank:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where,
-                                rerank=True, rerank_meta_out=rerank_meta, **rerank_cap_kw, **chash_kw)
+                                rerank=True, rerank_meta_out=rerank_meta, sensitivity=sensitivity,
+                                **rerank_cap_kw, **chash_kw)
             else:
-                raw = t3.search(query, cols, n_results=per_k, where=effective_where, **chash_kw)
+                raw = t3.search(query, cols, n_results=per_k, where=effective_where,
+                                sensitivity=sensitivity, **chash_kw)
             if lexical:
                 # ADDITIVE: the lexical rows join the vector rows rather than
                 # replacing them, deduplicated by chunk id with the vector row
@@ -1819,6 +1859,11 @@ def search_cross_corpus(
                 seen_ids = {r.get("id") for r in raw}
                 raw = list(raw) + [r for r in lex_raw
                                    if r.get("id") not in seen_ids]
+        except SensitivityExcludeUnavailable:
+            # RDR-243 review r1 F5: the engine cannot be shown to filter sensitive chunks. That holds for every
+            # collection, so it is not one collection's failure to isolate, and a per-collection fallback
+            # would re-probe and could return a partial result that looks complete.
+            raise
         except VectorServiceError as exc:
             # nexus-pebfx.8 / nexus-9tsdf (nexus-d9xt2 follow-on): one
             # unservable collection in the batch (embedding-space mismatch,
@@ -2045,6 +2090,7 @@ def search_cross_corpus(
                 query, group, per_collection_k=per_collection_k, limit=limit,
                 thresholds=thresholds or None, where=effective_where,
                 rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
+                sensitivity=sensitivity,
                 **rerank_cap_kw, **chash_kw,
                 # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
                 **({"content_chars": content_chars} if content_chars is not None else {}),
@@ -2072,6 +2118,8 @@ def search_cross_corpus(
                 consequence="this group is searched by the batched /search path",
             )
             return None
+        except SensitivityExcludeUnavailable:
+            raise  # RDR-243 review r1 F5: a refused read is not this group's failure
         except VectorServiceError as exc:
             if allow_split and len(group) > 1 and _is_mixed_model_error(exc):
                 _log.warning(
@@ -2630,6 +2678,49 @@ def boost_window_size(page_size: int) -> int:
     asks, and the one the file-diversity cap's ``window`` argument takes.
     """
     return max(_BOOST_WINDOW_FLOOR, 3 * max(1, page_size))
+
+
+def engine_held_slots(results: list[SearchResult]) -> list[tuple[int, SearchResult]]:
+    """``(slot, row)`` of each row the engine HELD back from a text-exporting reranker (RDR-243 Phase 3).
+
+    The engine's RerankStage merges a held row back at the index it had in the input list; it carries
+    ``sensitive: true`` and no ``rerank_score``. *results* is the list ``search_cross_corpus`` returned, in the
+    engine's order, so a row's index here is its slot. Call it BEFORE ``apply_ranking_boosts`` re-sorts the list."""
+    return [
+        (i, r) for i, r in enumerate(results)
+        if r.metadata.get("sensitive") is True and "rerank_score" not in r.metadata
+    ]
+
+
+def restore_held_slots(ordered: list[SearchResult], held: list[tuple[int, SearchResult]]) -> list[SearchResult]:
+    """*ordered* (the scored-first order the consumers build) with each held row put back at its engine slot.
+
+    A held row in *ordered* is taken out first (it sorts with the unscored rows), then each is inserted at its slot
+    in ascending order, so "a sensitive top-1 stays top-1". A slot past the end appends. Returns a new list."""
+    if not held:
+        return list(ordered)
+    held_ids = {id(r) for _slot, r in held}
+    out = [r for r in ordered if id(r) not in held_ids]
+    for slot, r in sorted(held, key=lambda sr: sr[0]):
+        out.insert(min(slot, len(out)), r)
+    return out
+
+
+def benign_held_degrades(rerank_meta: dict[str, dict], results: list[SearchResult]) -> set[str]:
+    """Collections whose reported rerank degrade is only the engine's "every rerankable row is sensitive" case.
+
+    The engine makes no reranker call when every row with text is held back, and says so as a loud degrade. That
+    is not a failure and must not turn the whole page into the calibrated ``partial_rerank`` order (RDR-210
+    Technical Design 12) or a warning: a collection counts here when it has rows with text and every one of them is
+    a held row (sensitive, no ``rerank_score``). A collection with any other contentful row is a real degrade."""
+    benign: set[str] = set()
+    for col, meta in rerank_meta.items():
+        if not meta.get("degraded"):
+            continue
+        rows = [r for r in results if r.collection == col and (r.content or "").strip()]
+        if rows and all(r.metadata.get("sensitive") is True and "rerank_score" not in r.metadata for r in rows):
+            benign.add(col)
+    return benign
 
 
 def apply_ranking_boosts(
@@ -3255,11 +3346,22 @@ def _relabel_clusters(results: list[SearchResult]) -> None:
     """
     from nexus.search_clusterer import _cluster_label  # noqa: PLC0415 — branch-local; only when clustering applied
 
+    from nexus.sensitive_output import hit_facts  # noqa: PLC0415 — branch-local; only when clustering applied
+
+    # RDR-243 Phase 3 (nexus-rfvyy.1): the label is a catalog title, so a sensitive member (which the MCP output
+    # withholds) must not name its cluster: the best member that is NOT sensitive does. A cluster whose members are
+    # all sensitive keeps the best one's label; its header never prints under the default posture.
     best: dict[int, SearchResult] = {}
+    best_clean: dict[int, SearchResult] = {}
     for r in results:
         idx = r.metadata.get(_CLUSTER_INDEX_KEY)
-        if idx is not None and (idx not in best or r.distance < best[idx].distance):
+        if idx is None:
+            continue
+        if idx not in best or r.distance < best[idx].distance:
             best[idx] = r
+        if not hit_facts(r.metadata)[0] and (idx not in best_clean or r.distance < best_clean[idx].distance):
+            best_clean[idx] = r
+    best = {idx: best_clean.get(idx, r) for idx, r in best.items()}
     labels = {
         idx: _cluster_label({"id": r.id, "metadata": r.metadata}) for idx, r in best.items()
     }

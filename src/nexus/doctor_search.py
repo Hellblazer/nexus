@@ -232,7 +232,7 @@ def _default_probe_for(t3, col: str) -> list[tuple[str, str]]:
     it BY ID; a document-title query was tried and rejected on measurement
     (chunk titles are often synthetic, "README.md:chunk-20").
     """
-    got = t3.get_or_create_collection(col).get(include=["documents"], limit=_PROBE_SAMPLES)
+    got = t3.get_or_create_collection(col).get(include=["documents"], limit=_PROBE_SAMPLES, sensitivity="include")
     out: list[tuple[str, str]] = []
     for cid, doc in zip(got.get("ids") or [], got.get("documents") or []):
         text = " ".join((doc or "").split())[:_PROBE_QUERY_CHARS]
@@ -303,7 +303,8 @@ def _neighbour_probe(
         threshold = threshold_for(col) if threshold_for else _default_threshold_for(col, t3)
         for text, self_id in samples:
             rows = search_fn(text, [col], n_results + 1, t3,
-                             diagnostics_out=[], threshold_override=float("inf"))
+                             diagnostics_out=[], threshold_override=float("inf"),
+                             sensitivity="include")  # a probe over canned text, read by no model
             # search_cross_corpus over-fetches (up to 4x) and returns the
             # whole pool; judge only the n_results nearest real neighbours so
             # the evidence line's count is the window actually used. The
@@ -419,7 +420,7 @@ def run_retrieval_quality_probe(
             diag_list: list[Any] = []
             search_fn(
                 query, [col], n_results, t3,
-                diagnostics_out=diag_list,
+                diagnostics_out=diag_list, sensitivity="include",
             )
         except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
             out.append(

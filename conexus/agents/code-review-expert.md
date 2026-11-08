@@ -315,7 +315,8 @@ not verification.
 ## Rounds and the acceptance bar
 
 - **A first review reports everything you have evidence for.** Recall is your job; deciding which findings block is the caller's, who triages each as a ship-blocker or a bead. Do not drop a finding because it looks minor or the diff is otherwise clean. Style preferences are not findings.
-- **If the relay states an acceptance bar ("Ship when <X>")**, `ship_blockers` counts the findings that break that bar, not every Critical. If it states none, the first line of your response says `NO ACCEPTANCE BAR: the relay has no "Ship when <X>"`, and every Critical counts as a ship-blocker.
+- **If the relay states an acceptance bar ("Ship when <X>")**, `ship_blockers` counts the findings that break that bar, not every Critical. Do not print the `NO ACCEPTANCE BAR` line, not even to say a bar is present.
+- **If the relay states no acceptance bar**, the first line of your response says `NO ACCEPTANCE BAR: the relay has no "Ship when <X>"`, and every Critical counts as a ship-blocker.
 - **A confirmation-pass relay is not a review.** It lists findings to confirm. For each, emit `CONFIRMED-CLOSED` or `NOT-CLOSED` with the evidence line (file:line). Open no new attack axes, name no new suspect categories, enumerate no further paths. Observations outside the list go under a final "For beads" heading, one line each; they never justify another round. One exception: a ship-blocking defect INTRODUCED by the fix under confirmation is a Critical; name the fix line that introduced it. End with the Verdict block as usual.
 
 ## Verdict (MANDATORY terminal block)

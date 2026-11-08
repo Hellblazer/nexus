@@ -1,0 +1,5375 @@
+{
+ "datasets": {
+  "codetrans-contest": {
+   "collection": "knowledge__contest-code-translation__bge-base-en-v15-768__v1",
+   "corpus_fraction": 1.0,
+   "corpus_loaded": 1008,
+   "corpus_total": 1008,
+   "documents_merged": 0,
+   "duplicate_classes": 0,
+   "excluded_documents": 0,
+   "excluded_queries": [],
+   "ingest": {
+    "documents": 1008,
+    "seconds": 570.9003490246832
+   },
+   "licence": "Apache-2.0",
+   "loaded_whole": true,
+   "per_query": [
+    {
+     "latency_s": 1.3600673298351467,
+     "ndcg@10": 0.0,
+     "query_id": "q100",
+     "ranked": [
+      [
+       "codetrans-contest:c618",
+       0
+      ],
+      [
+       "codetrans-contest:c829",
+       0
+      ],
+      [
+       "codetrans-contest:c103",
+       0
+      ],
+      [
+       "codetrans-contest:c153",
+       0
+      ],
+      [
+       "codetrans-contest:c980",
+       0
+      ],
+      [
+       "codetrans-contest:c523",
+       0
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c889",
+       0
+      ],
+      [
+       "codetrans-contest:c643",
+       0
+      ],
+      [
+       "codetrans-contest:c389",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.088330483995378,
+     "ndcg@10": 0.5,
+     "query_id": "q102",
+     "ranked": [
+      [
+       "codetrans-contest:c727",
+       0
+      ],
+      [
+       "codetrans-contest:c290",
+       0
+      ],
+      [
+       "codetrans-contest:c134",
+       1
+      ],
+      [
+       "codetrans-contest:c677",
+       0
+      ],
+      [
+       "codetrans-contest:c376",
+       0
+      ],
+      [
+       "codetrans-contest:c779",
+       0
+      ],
+      [
+       "codetrans-contest:c153",
+       0
+      ],
+      [
+       "codetrans-contest:c17",
+       0
+      ],
+      [
+       "codetrans-contest:c281",
+       0
+      ],
+      [
+       "codetrans-contest:c766",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.3333333333333333,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4706934043206275,
+     "ndcg@10": 1.0,
+     "query_id": "q119",
+     "ranked": [
+      [
+       "codetrans-contest:c152",
+       1
+      ],
+      [
+       "codetrans-contest:c43",
+       0
+      ],
+      [
+       "codetrans-contest:c890",
+       0
+      ],
+      [
+       "codetrans-contest:c492",
+       0
+      ],
+      [
+       "codetrans-contest:c60",
+       0
+      ],
+      [
+       "codetrans-contest:c970",
+       0
+      ],
+      [
+       "codetrans-contest:c414",
+       0
+      ],
+      [
+       "codetrans-contest:c271",
+       0
+      ],
+      [
+       "codetrans-contest:c807",
+       0
+      ],
+      [
+       "codetrans-contest:c381",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4720751037821174,
+     "ndcg@10": 0.5,
+     "query_id": "q120",
+     "ranked": [
+      [
+       "codetrans-contest:c413",
+       0
+      ],
+      [
+       "codetrans-contest:c421",
+       0
+      ],
+      [
+       "codetrans-contest:c153",
+       1
+      ],
+      [
+       "codetrans-contest:c196",
+       0
+      ],
+      [
+       "codetrans-contest:c182",
+       0
+      ],
+      [
+       "codetrans-contest:c731",
+       0
+      ],
+      [
+       "codetrans-contest:c1017",
+       0
+      ],
+      [
+       "codetrans-contest:c856",
+       0
+      ],
+      [
+       "codetrans-contest:c106",
+       0
+      ],
+      [
+       "codetrans-contest:c15",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.3333333333333333,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.2833749540150166,
+     "ndcg@10": 1.0,
+     "query_id": "q122",
+     "ranked": [
+      [
+       "codetrans-contest:c155",
+       1
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c552",
+       0
+      ],
+      [
+       "codetrans-contest:c1003",
+       0
+      ],
+      [
+       "codetrans-contest:c290",
+       0
+      ],
+      [
+       "codetrans-contest:c588",
+       0
+      ],
+      [
+       "codetrans-contest:c212",
+       0
+      ],
+      [
+       "codetrans-contest:c164",
+       0
+      ],
+      [
+       "codetrans-contest:c249",
+       0
+      ],
+      [
+       "codetrans-contest:c560",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4676891965791583,
+     "ndcg@10": 0.38685280723454163,
+     "query_id": "q125",
+     "ranked": [
+      [
+       "codetrans-contest:c15",
+       0
+      ],
+      [
+       "codetrans-contest:c344",
+       0
+      ],
+      [
+       "codetrans-contest:c492",
+       0
+      ],
+      [
+       "codetrans-contest:c333",
+       0
+      ],
+      [
+       "codetrans-contest:c158",
+       1
+      ],
+      [
+       "codetrans-contest:c346",
+       0
+      ],
+      [
+       "codetrans-contest:c319",
+       0
+      ],
+      [
+       "codetrans-contest:c491",
+       0
+      ],
+      [
+       "codetrans-contest:c51",
+       0
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.2,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.2829038938507438,
+     "ndcg@10": 0.2890648263178879,
+     "query_id": "q126",
+     "ranked": [
+      [
+       "codetrans-contest:c83",
+       0
+      ],
+      [
+       "codetrans-contest:c618",
+       0
+      ],
+      [
+       "codetrans-contest:c132",
+       0
+      ],
+      [
+       "codetrans-contest:c258",
+       0
+      ],
+      [
+       "codetrans-contest:c414",
+       0
+      ],
+      [
+       "codetrans-contest:c1020",
+       0
+      ],
+      [
+       "codetrans-contest:c1000",
+       0
+      ],
+      [
+       "codetrans-contest:c702",
+       0
+      ],
+      [
+       "codetrans-contest:c930",
+       0
+      ],
+      [
+       "codetrans-contest:c159",
+       1
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.1,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.3859632480889559,
+     "ndcg@10": 0.3562071871080222,
+     "query_id": "q128",
+     "ranked": [
+      [
+       "codetrans-contest:c488",
+       0
+      ],
+      [
+       "codetrans-contest:c152",
+       0
+      ],
+      [
+       "codetrans-contest:c911",
+       0
+      ],
+      [
+       "codetrans-contest:c194",
+       0
+      ],
+      [
+       "codetrans-contest:c898",
+       0
+      ],
+      [
+       "codetrans-contest:c161",
+       1
+      ],
+      [
+       "codetrans-contest:c492",
+       0
+      ],
+      [
+       "codetrans-contest:c344",
+       0
+      ],
+      [
+       "codetrans-contest:c12",
+       0
+      ],
+      [
+       "codetrans-contest:c654",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.16666666666666666,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4881880250759423,
+     "ndcg@10": 0.0,
+     "query_id": "q130",
+     "ranked": [
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c489",
+       0
+      ],
+      [
+       "codetrans-contest:c708",
+       0
+      ],
+      [
+       "codetrans-contest:c309",
+       0
+      ],
+      [
+       "codetrans-contest:c503",
+       0
+      ],
+      [
+       "codetrans-contest:c876",
+       0
+      ],
+      [
+       "codetrans-contest:c21",
+       0
+      ],
+      [
+       "codetrans-contest:c314",
+       0
+      ],
+      [
+       "codetrans-contest:c728",
+       0
+      ],
+      [
+       "codetrans-contest:c675",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.2631485699675977,
+     "ndcg@10": 0.0,
+     "query_id": "q153",
+     "ranked": [
+      [
+       "codetrans-contest:c103",
+       0
+      ],
+      [
+       "codetrans-contest:c132",
+       0
+      ],
+      [
+       "codetrans-contest:c889",
+       0
+      ],
+      [
+       "codetrans-contest:c930",
+       0
+      ],
+      [
+       "codetrans-contest:c661",
+       0
+      ],
+      [
+       "codetrans-contest:c460",
+       0
+      ],
+      [
+       "codetrans-contest:c155",
+       0
+      ],
+      [
+       "codetrans-contest:c147",
+       0
+      ],
+      [
+       "codetrans-contest:c618",
+       0
+      ],
+      [
+       "codetrans-contest:c422",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.1750984312966466,
+     "ndcg@10": 1.0,
+     "query_id": "q157",
+     "ranked": [
+      [
+       "codetrans-contest:c191",
+       1
+      ],
+      [
+       "codetrans-contest:c746",
+       0
+      ],
+      [
+       "codetrans-contest:c326",
+       0
+      ],
+      [
+       "codetrans-contest:c1044",
+       0
+      ],
+      [
+       "codetrans-contest:c36",
+       0
+      ],
+      [
+       "codetrans-contest:c335",
+       0
+      ],
+      [
+       "codetrans-contest:c491",
+       0
+      ],
+      [
+       "codetrans-contest:c623",
+       0
+      ],
+      [
+       "codetrans-contest:c52",
+       0
+      ],
+      [
+       "codetrans-contest:c964",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4964457610622048,
+     "ndcg@10": 1.0,
+     "query_id": "q161",
+     "ranked": [
+      [
+       "codetrans-contest:c195",
+       1
+      ],
+      [
+       "codetrans-contest:c494",
+       0
+      ],
+      [
+       "codetrans-contest:c422",
+       0
+      ],
+      [
+       "codetrans-contest:c307",
+       0
+      ],
+      [
+       "codetrans-contest:c20",
+       0
+      ],
+      [
+       "codetrans-contest:c153",
+       0
+      ],
+      [
+       "codetrans-contest:c471",
+       0
+      ],
+      [
+       "codetrans-contest:c633",
+       0
+      ],
+      [
+       "codetrans-contest:c189",
+       0
+      ],
+      [
+       "codetrans-contest:c707",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.0690208827145398,
+     "ndcg@10": 0.0,
+     "query_id": "q164",
+     "ranked": [
+      [
+       "codetrans-contest:c153",
+       0
+      ],
+      [
+       "codetrans-contest:c290",
+       0
+      ],
+      [
+       "codetrans-contest:c945",
+       0
+      ],
+      [
+       "codetrans-contest:c284",
+       0
+      ],
+      [
+       "codetrans-contest:c498",
+       0
+      ],
+      [
+       "codetrans-contest:c344",
+       0
+      ],
+      [
+       "codetrans-contest:c46",
+       0
+      ],
+      [
+       "codetrans-contest:c27",
+       0
+      ],
+      [
+       "codetrans-contest:c200",
+       0
+      ],
+      [
+       "codetrans-contest:c716",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4724308573640883,
+     "ndcg@10": 0.2890648263178879,
+     "query_id": "q173",
+     "ranked": [
+      [
+       "codetrans-contest:c70",
+       0
+      ],
+      [
+       "codetrans-contest:c793",
+       0
+      ],
+      [
+       "codetrans-contest:c153",
+       0
+      ],
+      [
+       "codetrans-contest:c619",
+       0
+      ],
+      [
+       "codetrans-contest:c1019",
+       0
+      ],
+      [
+       "codetrans-contest:c148",
+       0
+      ],
+      [
+       "codetrans-contest:c130",
+       0
+      ],
+      [
+       "codetrans-contest:c467",
+       0
+      ],
+      [
+       "codetrans-contest:c106",
+       0
+      ],
+      [
+       "codetrans-contest:c207",
+       1
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.1,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.1754172230139375,
+     "ndcg@10": 0.0,
+     "query_id": "q174",
+     "ranked": [
+      [
+       "codetrans-contest:c106",
+       0
+      ],
+      [
+       "codetrans-contest:c284",
+       0
+      ],
+      [
+       "codetrans-contest:c153",
+       0
+      ],
+      [
+       "codetrans-contest:c70",
+       0
+      ],
+      [
+       "codetrans-contest:c459",
+       0
+      ],
+      [
+       "codetrans-contest:c248",
+       0
+      ],
+      [
+       "codetrans-contest:c1019",
+       0
+      ],
+      [
+       "codetrans-contest:c691",
+       0
+      ],
+      [
+       "codetrans-contest:c498",
+       0
+      ],
+      [
+       "codetrans-contest:c139",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4973394102416933,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "q180",
+     "ranked": [
+      [
+       "codetrans-contest:c455",
+       0
+      ],
+      [
+       "codetrans-contest:c215",
+       1
+      ],
+      [
+       "codetrans-contest:c268",
+       0
+      ],
+      [
+       "codetrans-contest:c246",
+       0
+      ],
+      [
+       "codetrans-contest:c1009",
+       0
+      ],
+      [
+       "codetrans-contest:c237",
+       0
+      ],
+      [
+       "codetrans-contest:c883",
+       0
+      ],
+      [
+       "codetrans-contest:c60",
+       0
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c605",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4184285518713295,
+     "ndcg@10": 0.0,
+     "query_id": "q181",
+     "ranked": [
+      [
+       "codetrans-contest:c728",
+       0
+      ],
+      [
+       "codetrans-contest:c60",
+       0
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c413",
+       0
+      ],
+      [
+       "codetrans-contest:c15",
+       0
+      ],
+      [
+       "codetrans-contest:c606",
+       0
+      ],
+      [
+       "codetrans-contest:c437",
+       0
+      ],
+      [
+       "codetrans-contest:c346",
+       0
+      ],
+      [
+       "codetrans-contest:c102",
+       0
+      ],
+      [
+       "codetrans-contest:c333",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.3254477446898818,
+     "ndcg@10": 0.3333333333333333,
+     "query_id": "q187",
+     "ranked": [
+      [
+       "codetrans-contest:c1000",
+       0
+      ],
+      [
+       "codetrans-contest:c103",
+       0
+      ],
+      [
+       "codetrans-contest:c132",
+       0
+      ],
+      [
+       "codetrans-contest:c19",
+       0
+      ],
+      [
+       "codetrans-contest:c460",
+       0
+      ],
+      [
+       "codetrans-contest:c721",
+       0
+      ],
+      [
+       "codetrans-contest:c223",
+       1
+      ],
+      [
+       "codetrans-contest:c829",
+       0
+      ],
+      [
+       "codetrans-contest:c618",
+       0
+      ],
+      [
+       "codetrans-contest:c889",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.14285714285714285,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.179901217110455,
+     "ndcg@10": 0.0,
+     "query_id": "q192",
+     "ranked": [
+      [
+       "codetrans-contest:c627",
+       0
+      ],
+      [
+       "codetrans-contest:c1028",
+       0
+      ],
+      [
+       "codetrans-contest:c633",
+       0
+      ],
+      [
+       "codetrans-contest:c43",
+       0
+      ],
+      [
+       "codetrans-contest:c728",
+       0
+      ],
+      [
+       "codetrans-contest:c533",
+       0
+      ],
+      [
+       "codetrans-contest:c414",
+       0
+      ],
+      [
+       "codetrans-contest:c336",
+       0
+      ],
+      [
+       "codetrans-contest:c873",
+       0
+      ],
+      [
+       "codetrans-contest:c307",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.0191134959459305,
+     "ndcg@10": 0.0,
+     "query_id": "q196",
+     "ranked": [
+      [
+       "codetrans-contest:c293",
+       0
+      ],
+      [
+       "codetrans-contest:c1051",
+       0
+      ],
+      [
+       "codetrans-contest:c491",
+       0
+      ],
+      [
+       "codetrans-contest:c747",
+       0
+      ],
+      [
+       "codetrans-contest:c191",
+       0
+      ],
+      [
+       "codetrans-contest:c178",
+       0
+      ],
+      [
+       "codetrans-contest:c332",
+       0
+      ],
+      [
+       "codetrans-contest:c158",
+       0
+      ],
+      [
+       "codetrans-contest:c536",
+       0
+      ],
+      [
+       "codetrans-contest:c326",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.103513297624886,
+     "ndcg@10": 1.0,
+     "query_id": "q207",
+     "ranked": [
+      [
+       "codetrans-contest:c232",
+       1
+      ],
+      [
+       "codetrans-contest:c574",
+       0
+      ],
+      [
+       "codetrans-contest:c429",
+       0
+      ],
+      [
+       "codetrans-contest:c589",
+       0
+      ],
+      [
+       "codetrans-contest:c555",
+       0
+      ],
+      [
+       "codetrans-contest:c538",
+       0
+      ],
+      [
+       "codetrans-contest:c64",
+       0
+      ],
+      [
+       "codetrans-contest:c242",
+       0
+      ],
+      [
+       "codetrans-contest:c719",
+       0
+      ],
+      [
+       "codetrans-contest:c867",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4465135280042887,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "q212",
+     "ranked": [
+      [
+       "codetrans-contest:c514",
+       0
+      ],
+      [
+       "codetrans-contest:c237",
+       1
+      ],
+      [
+       "codetrans-contest:c246",
+       0
+      ],
+      [
+       "codetrans-contest:c728",
+       0
+      ],
+      [
+       "codetrans-contest:c20",
+       0
+      ],
+      [
+       "codetrans-contest:c196",
+       0
+      ],
+      [
+       "codetrans-contest:c503",
+       0
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c930",
+       0
+      ],
+      [
+       "codetrans-contest:c446",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.0494895516894758,
+     "ndcg@10": 0.0,
+     "query_id": "q218",
+     "ranked": [
+      [
+       "codetrans-contest:c1018",
+       0
+      ],
+      [
+       "codetrans-contest:c238",
+       0
+      ],
+      [
+       "codetrans-contest:c46",
+       0
+      ],
+      [
+       "codetrans-contest:c307",
+       0
+      ],
+      [
+       "codetrans-contest:c177",
+       0
+      ],
+      [
+       "codetrans-contest:c283",
+       0
+      ],
+      [
+       "codetrans-contest:c268",
+       0
+      ],
+      [
+       "codetrans-contest:c801",
+       0
+      ],
+      [
+       "codetrans-contest:c619",
+       0
+      ],
+      [
+       "codetrans-contest:c178",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4739472232758999,
+     "ndcg@10": 1.0,
+     "query_id": "q263",
+     "ranked": [
+      [
+       "codetrans-contest:c248",
+       1
+      ],
+      [
+       "codetrans-contest:c1005",
+       0
+      ],
+      [
+       "codetrans-contest:c955",
+       0
+      ],
+      [
+       "codetrans-contest:c46",
+       0
+      ],
+      [
+       "codetrans-contest:c257",
+       0
+      ],
+      [
+       "codetrans-contest:c498",
+       0
+      ],
+      [
+       "codetrans-contest:c262",
+       0
+      ],
+      [
+       "codetrans-contest:c486",
+       0
+      ],
+      [
+       "codetrans-contest:c153",
+       0
+      ],
+      [
+       "codetrans-contest:c74",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.1725568869151175,
+     "ndcg@10": 1.0,
+     "query_id": "q283",
+     "ranked": [
+      [
+       "codetrans-contest:c251",
+       1
+      ],
+      [
+       "codetrans-contest:c417",
+       0
+      ],
+      [
+       "codetrans-contest:c779",
+       0
+      ],
+      [
+       "codetrans-contest:c155",
+       0
+      ],
+      [
+       "codetrans-contest:c307",
+       0
+      ],
+      [
+       "codetrans-contest:c515",
+       0
+      ],
+      [
+       "codetrans-contest:c177",
+       0
+      ],
+      [
+       "codetrans-contest:c377",
+       0
+      ],
+      [
+       "codetrans-contest:c552",
+       0
+      ],
+      [
+       "codetrans-contest:c530",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4777135411277413,
+     "ndcg@10": 1.0,
+     "query_id": "q294",
+     "ranked": [
+      [
+       "codetrans-contest:c261",
+       1
+      ],
+      [
+       "codetrans-contest:c12",
+       0
+      ],
+      [
+       "codetrans-contest:c259",
+       0
+      ],
+      [
+       "codetrans-contest:c249",
+       0
+      ],
+      [
+       "codetrans-contest:c387",
+       0
+      ],
+      [
+       "codetrans-contest:c811",
+       0
+      ],
+      [
+       "codetrans-contest:c469",
+       0
+      ],
+      [
+       "codetrans-contest:c797",
+       0
+      ],
+      [
+       "codetrans-contest:c500",
+       0
+      ],
+      [
+       "codetrans-contest:c143",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.151628206949681,
+     "ndcg@10": 1.0,
+     "query_id": "q297",
+     "ranked": [
+      [
+       "codetrans-contest:c264",
+       1
+      ],
+      [
+       "codetrans-contest:c290",
+       0
+      ],
+      [
+       "codetrans-contest:c187",
+       0
+      ],
+      [
+       "codetrans-contest:c38",
+       0
+      ],
+      [
+       "codetrans-contest:c341",
+       0
+      ],
+      [
+       "codetrans-contest:c998",
+       0
+      ],
+      [
+       "codetrans-contest:c153",
+       0
+      ],
+      [
+       "codetrans-contest:c889",
+       0
+      ],
+      [
+       "codetrans-contest:c159",
+       0
+      ],
+      [
+       "codetrans-contest:c132",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4742358583025634,
+     "ndcg@10": 0.0,
+     "query_id": "q300",
+     "ranked": [
+      [
+       "codetrans-contest:c60",
+       0
+      ],
+      [
+       "codetrans-contest:c257",
+       0
+      ],
+      [
+       "codetrans-contest:c628",
+       0
+      ],
+      [
+       "codetrans-contest:c102",
+       0
+      ],
+      [
+       "codetrans-contest:c759",
+       0
+      ],
+      [
+       "codetrans-contest:c710",
+       0
+      ],
+      [
+       "codetrans-contest:c332",
+       0
+      ],
+      [
+       "codetrans-contest:c606",
+       0
+      ],
+      [
+       "codetrans-contest:c43",
+       0
+      ],
+      [
+       "codetrans-contest:c856",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.3344213631935418,
+     "ndcg@10": 0.2890648263178879,
+     "query_id": "q306",
+     "ranked": [
+      [
+       "codetrans-contest:c38",
+       0
+      ],
+      [
+       "codetrans-contest:c660",
+       0
+      ],
+      [
+       "codetrans-contest:c661",
+       0
+      ],
+      [
+       "codetrans-contest:c269",
+       0
+      ],
+      [
+       "codetrans-contest:c618",
+       0
+      ],
+      [
+       "codetrans-contest:c467",
+       0
+      ],
+      [
+       "codetrans-contest:c980",
+       0
+      ],
+      [
+       "codetrans-contest:c728",
+       0
+      ],
+      [
+       "codetrans-contest:c246",
+       0
+      ],
+      [
+       "codetrans-contest:c273",
+       1
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.1,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.1154305087402463,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "q309",
+     "ranked": [
+      [
+       "codetrans-contest:c257",
+       0
+      ],
+      [
+       "codetrans-contest:c276",
+       1
+      ],
+      [
+       "codetrans-contest:c507",
+       0
+      ],
+      [
+       "codetrans-contest:c813",
+       0
+      ],
+      [
+       "codetrans-contest:c178",
+       0
+      ],
+      [
+       "codetrans-contest:c179",
+       0
+      ],
+      [
+       "codetrans-contest:c568",
+       0
+      ],
+      [
+       "codetrans-contest:c623",
+       0
+      ],
+      [
+       "codetrans-contest:c616",
+       0
+      ],
+      [
+       "codetrans-contest:c1005",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4133058516308665,
+     "ndcg@10": 0.0,
+     "query_id": "q311",
+     "ranked": [
+      [
+       "codetrans-contest:c228",
+       0
+      ],
+      [
+       "codetrans-contest:c592",
+       0
+      ],
+      [
+       "codetrans-contest:c258",
+       0
+      ],
+      [
+       "codetrans-contest:c413",
+       0
+      ],
+      [
+       "codetrans-contest:c633",
+       0
+      ],
+      [
+       "codetrans-contest:c94",
+       0
+      ],
+      [
+       "codetrans-contest:c533",
+       0
+      ],
+      [
+       "codetrans-contest:c328",
+       0
+      ],
+      [
+       "codetrans-contest:c196",
+       0
+      ],
+      [
+       "codetrans-contest:c280",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5215004598721862,
+     "ndcg@10": 1.0,
+     "query_id": "q315",
+     "ranked": [
+      [
+       "codetrans-contest:c282",
+       1
+      ],
+      [
+       "codetrans-contest:c759",
+       0
+      ],
+      [
+       "codetrans-contest:c856",
+       0
+      ],
+      [
+       "codetrans-contest:c182",
+       0
+      ],
+      [
+       "codetrans-contest:c150",
+       0
+      ],
+      [
+       "codetrans-contest:c106",
+       0
+      ],
+      [
+       "codetrans-contest:c157",
+       0
+      ],
+      [
+       "codetrans-contest:c451",
+       0
+      ],
+      [
+       "codetrans-contest:c888",
+       0
+      ],
+      [
+       "codetrans-contest:c717",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.1440608049742877,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "q319",
+     "ranked": [
+      [
+       "codetrans-contest:c132",
+       0
+      ],
+      [
+       "codetrans-contest:c286",
+       1
+      ],
+      [
+       "codetrans-contest:c618",
+       0
+      ],
+      [
+       "codetrans-contest:c389",
+       0
+      ],
+      [
+       "codetrans-contest:c83",
+       0
+      ],
+      [
+       "codetrans-contest:c103",
+       0
+      ],
+      [
+       "codetrans-contest:c889",
+       0
+      ],
+      [
+       "codetrans-contest:c247",
+       0
+      ],
+      [
+       "codetrans-contest:c223",
+       0
+      ],
+      [
+       "codetrans-contest:c1000",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5436256127431989,
+     "ndcg@10": 0.0,
+     "query_id": "q322",
+     "ranked": [
+      [
+       "codetrans-contest:c268",
+       0
+      ],
+      [
+       "codetrans-contest:c514",
+       0
+      ],
+      [
+       "codetrans-contest:c883",
+       0
+      ],
+      [
+       "codetrans-contest:c432",
+       0
+      ],
+      [
+       "codetrans-contest:c574",
+       0
+      ],
+      [
+       "codetrans-contest:c336",
+       0
+      ],
+      [
+       "codetrans-contest:c85",
+       0
+      ],
+      [
+       "codetrans-contest:c244",
+       0
+      ],
+      [
+       "codetrans-contest:c232",
+       0
+      ],
+      [
+       "codetrans-contest:c238",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.3835889608599246,
+     "ndcg@10": 1.0,
+     "query_id": "q326",
+     "ranked": [
+      [
+       "codetrans-contest:c293",
+       1
+      ],
+      [
+       "codetrans-contest:c533",
+       0
+      ],
+      [
+       "codetrans-contest:c481",
+       0
+      ],
+      [
+       "codetrans-contest:c882",
+       0
+      ],
+      [
+       "codetrans-contest:c536",
+       0
+      ],
+      [
+       "codetrans-contest:c616",
+       0
+      ],
+      [
+       "codetrans-contest:c52",
+       0
+      ],
+      [
+       "codetrans-contest:c178",
+       0
+      ],
+      [
+       "codetrans-contest:c994",
+       0
+      ],
+      [
+       "codetrans-contest:c895",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 0.9804207039996982,
+     "ndcg@10": 1.0,
+     "query_id": "q376",
+     "ranked": [
+      [
+       "codetrans-contest:c305",
+       1
+      ],
+      [
+       "codetrans-contest:c468",
+       0
+      ],
+      [
+       "codetrans-contest:c641",
+       0
+      ],
+      [
+       "codetrans-contest:c189",
+       0
+      ],
+      [
+       "codetrans-contest:c994",
+       0
+      ],
+      [
+       "codetrans-contest:c229",
+       0
+      ],
+      [
+       "codetrans-contest:c891",
+       0
+      ],
+      [
+       "codetrans-contest:c159",
+       0
+      ],
+      [
+       "codetrans-contest:c548",
+       0
+      ],
+      [
+       "codetrans-contest:c59",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.341324838809669,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "q383",
+     "ranked": [
+      [
+       "codetrans-contest:c923",
+       0
+      ],
+      [
+       "codetrans-contest:c309",
+       1
+      ],
+      [
+       "codetrans-contest:c552",
+       0
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c979",
+       0
+      ],
+      [
+       "codetrans-contest:c1038",
+       0
+      ],
+      [
+       "codetrans-contest:c128",
+       0
+      ],
+      [
+       "codetrans-contest:c782",
+       0
+      ],
+      [
+       "codetrans-contest:c377",
+       0
+      ],
+      [
+       "codetrans-contest:c277",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.098770935088396,
+     "ndcg@10": 0.0,
+     "query_id": "q385",
+     "ranked": [
+      [
+       "codetrans-contest:c785",
+       0
+      ],
+      [
+       "codetrans-contest:c104",
+       0
+      ],
+      [
+       "codetrans-contest:c139",
+       0
+      ],
+      [
+       "codetrans-contest:c2",
+       0
+      ],
+      [
+       "codetrans-contest:c713",
+       0
+      ],
+      [
+       "codetrans-contest:c547",
+       0
+      ],
+      [
+       "codetrans-contest:c941",
+       0
+      ],
+      [
+       "codetrans-contest:c353",
+       0
+      ],
+      [
+       "codetrans-contest:c383",
+       0
+      ],
+      [
+       "codetrans-contest:c313",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.1772376843728125,
+     "ndcg@10": 1.0,
+     "query_id": "q455",
+     "ranked": [
+      [
+       "codetrans-contest:c319",
+       1
+      ],
+      [
+       "codetrans-contest:c102",
+       0
+      ],
+      [
+       "codetrans-contest:c491",
+       0
+      ],
+      [
+       "codetrans-contest:c346",
+       0
+      ],
+      [
+       "codetrans-contest:c383",
+       0
+      ],
+      [
+       "codetrans-contest:c979",
+       0
+      ],
+      [
+       "codetrans-contest:c333",
+       0
+      ],
+      [
+       "codetrans-contest:c393",
+       0
+      ],
+      [
+       "codetrans-contest:c640",
+       0
+      ],
+      [
+       "codetrans-contest:c279",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.42737259529531,
+     "ndcg@10": 1.0,
+     "query_id": "q457",
+     "ranked": [
+      [
+       "codetrans-contest:c321",
+       1
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c928",
+       0
+      ],
+      [
+       "codetrans-contest:c883",
+       0
+      ],
+      [
+       "codetrans-contest:c313",
+       0
+      ],
+      [
+       "codetrans-contest:c153",
+       0
+      ],
+      [
+       "codetrans-contest:c574",
+       0
+      ],
+      [
+       "codetrans-contest:c923",
+       0
+      ],
+      [
+       "codetrans-contest:c344",
+       0
+      ],
+      [
+       "codetrans-contest:c500",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.2016675118356943,
+     "ndcg@10": 1.0,
+     "query_id": "q469",
+     "ranked": [
+      [
+       "codetrans-contest:c333",
+       1
+      ],
+      [
+       "codetrans-contest:c346",
+       0
+      ],
+      [
+       "codetrans-contest:c70",
+       0
+      ],
+      [
+       "codetrans-contest:c104",
+       0
+      ],
+      [
+       "codetrans-contest:c640",
+       0
+      ],
+      [
+       "codetrans-contest:c102",
+       0
+      ],
+      [
+       "codetrans-contest:c42",
+       0
+      ],
+      [
+       "codetrans-contest:c319",
+       0
+      ],
+      [
+       "codetrans-contest:c383",
+       0
+      ],
+      [
+       "codetrans-contest:c207",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.1989104310050607,
+     "ndcg@10": 0.43067655807339306,
+     "query_id": "q473",
+     "ranked": [
+      [
+       "codetrans-contest:c923",
+       0
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c766",
+       0
+      ],
+      [
+       "codetrans-contest:c337",
+       1
+      ],
+      [
+       "codetrans-contest:c388",
+       0
+      ],
+      [
+       "codetrans-contest:c70",
+       0
+      ],
+      [
+       "codetrans-contest:c60",
+       0
+      ],
+      [
+       "codetrans-contest:c150",
+       0
+      ],
+      [
+       "codetrans-contest:c759",
+       0
+      ],
+      [
+       "codetrans-contest:c106",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.25,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.1768765109591186,
+     "ndcg@10": 1.0,
+     "query_id": "q474",
+     "ranked": [
+      [
+       "codetrans-contest:c338",
+       1
+      ],
+      [
+       "codetrans-contest:c779",
+       0
+      ],
+      [
+       "codetrans-contest:c3",
+       0
+      ],
+      [
+       "codetrans-contest:c347",
+       0
+      ],
+      [
+       "codetrans-contest:c580",
+       0
+      ],
+      [
+       "codetrans-contest:c174",
+       0
+      ],
+      [
+       "codetrans-contest:c12",
+       0
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c388",
+       0
+      ],
+      [
+       "codetrans-contest:c282",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4618509425781667,
+     "ndcg@10": 1.0,
+     "query_id": "q477",
+     "ranked": [
+      [
+       "codetrans-contest:c341",
+       1
+      ],
+      [
+       "codetrans-contest:c9",
+       0
+      ],
+      [
+       "codetrans-contest:c196",
+       0
+      ],
+      [
+       "codetrans-contest:c856",
+       0
+      ],
+      [
+       "codetrans-contest:c102",
+       0
+      ],
+      [
+       "codetrans-contest:c540",
+       0
+      ],
+      [
+       "codetrans-contest:c319",
+       0
+      ],
+      [
+       "codetrans-contest:c1023",
+       0
+      ],
+      [
+       "codetrans-contest:c731",
+       0
+      ],
+      [
+       "codetrans-contest:c578",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.2396869915537536,
+     "ndcg@10": 0.0,
+     "query_id": "q478",
+     "ranked": [
+      [
+       "codetrans-contest:c257",
+       0
+      ],
+      [
+       "codetrans-contest:c568",
+       0
+      ],
+      [
+       "codetrans-contest:c178",
+       0
+      ],
+      [
+       "codetrans-contest:c507",
+       0
+      ],
+      [
+       "codetrans-contest:c813",
+       0
+      ],
+      [
+       "codetrans-contest:c153",
+       0
+      ],
+      [
+       "codetrans-contest:c46",
+       0
+      ],
+      [
+       "codetrans-contest:c623",
+       0
+      ],
+      [
+       "codetrans-contest:c60",
+       0
+      ],
+      [
+       "codetrans-contest:c276",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.0406621098518372,
+     "ndcg@10": 0.0,
+     "query_id": "q479",
+     "ranked": [
+      [
+       "codetrans-contest:c284",
+       0
+      ],
+      [
+       "codetrans-contest:c498",
+       0
+      ],
+      [
+       "codetrans-contest:c467",
+       0
+      ],
+      [
+       "codetrans-contest:c54",
+       0
+      ],
+      [
+       "codetrans-contest:c920",
+       0
+      ],
+      [
+       "codetrans-contest:c111",
+       0
+      ],
+      [
+       "codetrans-contest:c533",
+       0
+      ],
+      [
+       "codetrans-contest:c70",
+       0
+      ],
+      [
+       "codetrans-contest:c153",
+       0
+      ],
+      [
+       "codetrans-contest:c541",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.1683657066896558,
+     "ndcg@10": 0.3333333333333333,
+     "query_id": "q481",
+     "ranked": [
+      [
+       "codetrans-contest:c500",
+       0
+      ],
+      [
+       "codetrans-contest:c126",
+       0
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c150",
+       0
+      ],
+      [
+       "codetrans-contest:c910",
+       0
+      ],
+      [
+       "codetrans-contest:c981",
+       0
+      ],
+      [
+       "codetrans-contest:c345",
+       1
+      ],
+      [
+       "codetrans-contest:c16",
+       0
+      ],
+      [
+       "codetrans-contest:c157",
+       0
+      ],
+      [
+       "codetrans-contest:c442",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.14285714285714285,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.470916154794395,
+     "ndcg@10": 0.0,
+     "query_id": "q484",
+     "ranked": [
+      [
+       "codetrans-contest:c414",
+       0
+      ],
+      [
+       "codetrans-contest:c152",
+       0
+      ],
+      [
+       "codetrans-contest:c344",
+       0
+      ],
+      [
+       "codetrans-contest:c928",
+       0
+      ],
+      [
+       "codetrans-contest:c43",
+       0
+      ],
+      [
+       "codetrans-contest:c469",
+       0
+      ],
+      [
+       "codetrans-contest:c492",
+       0
+      ],
+      [
+       "codetrans-contest:c42",
+       0
+      ],
+      [
+       "codetrans-contest:c488",
+       0
+      ],
+      [
+       "codetrans-contest:c10",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.2669451762922108,
+     "ndcg@10": 1.0,
+     "query_id": "q492",
+     "ranked": [
+      [
+       "codetrans-contest:c356",
+       1
+      ],
+      [
+       "codetrans-contest:c53",
+       0
+      ],
+      [
+       "codetrans-contest:c801",
+       0
+      ],
+      [
+       "codetrans-contest:c346",
+       0
+      ],
+      [
+       "codetrans-contest:c252",
+       0
+      ],
+      [
+       "codetrans-contest:c221",
+       0
+      ],
+      [
+       "codetrans-contest:c963",
+       0
+      ],
+      [
+       "codetrans-contest:c97",
+       0
+      ],
+      [
+       "codetrans-contest:c333",
+       0
+      ],
+      [
+       "codetrans-contest:c46",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.2704204428009689,
+     "ndcg@10": 1.0,
+     "query_id": "q96",
+     "ranked": [
+      [
+       "codetrans-contest:c128",
+       1
+      ],
+      [
+       "codetrans-contest:c923",
+       0
+      ],
+      [
+       "codetrans-contest:c785",
+       0
+      ],
+      [
+       "codetrans-contest:c979",
+       0
+      ],
+      [
+       "codetrans-contest:c102",
+       0
+      ],
+      [
+       "codetrans-contest:c139",
+       0
+      ],
+      [
+       "codetrans-contest:c640",
+       0
+      ],
+      [
+       "codetrans-contest:c346",
+       0
+      ],
+      [
+       "codetrans-contest:c313",
+       0
+      ],
+      [
+       "codetrans-contest:c104",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    }
+   ],
+   "query_set_sha256": "2946b881ba051a28cd79dc134cddda407914d57ded3d0e33a596557d6a4c22f7",
+   "revisions": {
+    "qrels": "981ff059af50f8d336dc17a0e46dc6e4b7bd1ca5",
+    "queries-corpus": "60a64fc853989c538f1d7495514bdd428b641371"
+   },
+   "summary": {
+    "latency_p50_s": {
+     "ci95": [
+      1.179901217110455,
+      1.3859632480889559
+     ],
+     "value": 1.2829038938507438
+    },
+    "latency_p95_s": {
+     "ci95": [
+      1.4742358583025634,
+      1.5436256127431989
+     ],
+     "value": 1.4973394102416933
+    },
+    "mrr": {
+     "ci95": [
+      0.3475238095238095,
+      0.5873333333333334
+     ],
+     "value": 0.4673809523809524
+    },
+    "n": 50,
+    "ndcg@10": {
+     "ci95": [
+      0.4010643599526643,
+      0.6320978480186441
+     ],
+     "value": 0.5172449293178715
+    },
+    "recall@10": {
+     "ci95": [
+      0.54,
+      0.8
+     ],
+     "value": 0.68
+    },
+    "shared_rows": 0,
+    "short_queries": 0
+   },
+   "taxonomy_assignments": 0,
+   "warmup": "unscored test query"
+  },
+  "codetrans-dl": {
+   "collection": "knowledge__deep-learning-code-translation__bge-base-en-v15-768__v1",
+   "corpus_fraction": 1.0,
+   "corpus_loaded": 816,
+   "corpus_total": 816,
+   "documents_merged": 550,
+   "duplicate_classes": 266,
+   "excluded_documents": 0,
+   "excluded_queries": [],
+   "ingest": {
+    "documents": 816,
+    "seconds": 216.1872028443031
+   },
+   "licence": "Apache-2.0",
+   "loaded_whole": true,
+   "per_query": [
+    {
+     "latency_s": 1.7211968060582876,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "637",
+     "ranked": [
+      [
+       "codetrans-dl:c667",
+       0
+      ],
+      [
+       "codetrans-dl:c637",
+       1
+      ],
+      [
+       "codetrans-dl:c652",
+       0
+      ],
+      [
+       "codetrans-dl:c639",
+       0
+      ],
+      [
+       "codetrans-dl:c669",
+       0
+      ],
+      [
+       "codetrans-dl:c684",
+       0
+      ],
+      [
+       "codetrans-dl:c699",
+       0
+      ],
+      [
+       "codetrans-dl:c638",
+       0
+      ],
+      [
+       "codetrans-dl:c582",
+       0
+      ],
+      [
+       "codetrans-dl:c588",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 2,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.657541908789426,
+     "ndcg@10": 0.3562071871080222,
+     "query_id": "639",
+     "ranked": [
+      [
+       "codetrans-dl:c669",
+       0
+      ],
+      [
+       "codetrans-dl:c684",
+       0
+      ],
+      [
+       "codetrans-dl:c699",
+       0
+      ],
+      [
+       "codetrans-dl:c654",
+       0
+      ],
+      [
+       "codetrans-dl:c714",
+       0
+      ],
+      [
+       "codetrans-dl:c639",
+       1
+      ],
+      [
+       "codetrans-dl:c572",
+       0
+      ],
+      [
+       "codetrans-dl:c596",
+       0
+      ],
+      [
+       "codetrans-dl:c179",
+       0
+      ],
+      [
+       "codetrans-dl:c132",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.16666666666666666,
+     "shared_rows": 3,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5937769641168416,
+     "ndcg@10": 0.5,
+     "query_id": "643",
+     "ranked": [
+      [
+       "codetrans-dl:c658",
+       0
+      ],
+      [
+       "codetrans-dl:c673",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       1
+      ],
+      [
+       "codetrans-dl:c657",
+       0
+      ],
+      [
+       "codetrans-dl:c672",
+       0
+      ],
+      [
+       "codetrans-dl:c642",
+       0
+      ],
+      [
+       "codetrans-dl:c249",
+       0
+      ],
+      [
+       "codetrans-dl:c14",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c287",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.3333333333333333,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.259482502937317,
+     "ndcg@10": 0.3562071871080222,
+     "query_id": "656",
+     "ranked": [
+      [
+       "codetrans-dl:c641",
+       0
+      ],
+      [
+       "codetrans-dl:c640",
+       0
+      ],
+      [
+       "codetrans-dl:c642",
+       0
+      ],
+      [
+       "codetrans-dl:c671",
+       0
+      ],
+      [
+       "codetrans-dl:c14",
+       0
+      ],
+      [
+       "codetrans-dl:c656",
+       1
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c290",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.16666666666666666,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.215219123288989,
+     "ndcg@10": 0.31546487678572877,
+     "query_id": "657",
+     "ranked": [
+      [
+       "codetrans-dl:c642",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c641",
+       0
+      ],
+      [
+       "codetrans-dl:c14",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c640",
+       0
+      ],
+      [
+       "codetrans-dl:c657",
+       1
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c672",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.125,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5966841480694711,
+     "ndcg@10": 0.3010299956639812,
+     "query_id": "659",
+     "ranked": [
+      [
+       "codetrans-dl:c644",
+       0
+      ],
+      [
+       "codetrans-dl:c290",
+       0
+      ],
+      [
+       "codetrans-dl:c674",
+       0
+      ],
+      [
+       "codetrans-dl:c325",
+       0
+      ],
+      [
+       "codetrans-dl:c321",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c650",
+       0
+      ],
+      [
+       "codetrans-dl:c659",
+       1
+      ],
+      [
+       "codetrans-dl:c291",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.1111111111111111,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.587916508782655,
+     "ndcg@10": 0.0,
+     "query_id": "660",
+     "ranked": [
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c321",
+       0
+      ],
+      [
+       "codetrans-dl:c648",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c649",
+       0
+      ],
+      [
+       "codetrans-dl:c325",
+       0
+      ],
+      [
+       "codetrans-dl:c650",
+       0
+      ],
+      [
+       "codetrans-dl:c21",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4175660549663007,
+     "ndcg@10": 0.0,
+     "query_id": "662",
+     "ranked": [
+      [
+       "codetrans-dl:c647",
+       0
+      ],
+      [
+       "codetrans-dl:c20",
+       0
+      ],
+      [
+       "codetrans-dl:c17",
+       0
+      ],
+      [
+       "codetrans-dl:c568",
+       0
+      ],
+      [
+       "codetrans-dl:c318",
+       0
+      ],
+      [
+       "codetrans-dl:c10",
+       0
+      ],
+      [
+       "codetrans-dl:c31",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c15",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4238547091372311,
+     "ndcg@10": 0.3333333333333333,
+     "query_id": "663",
+     "ranked": [
+      [
+       "codetrans-dl:c648",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c649",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c678",
+       0
+      ],
+      [
+       "codetrans-dl:c321",
+       0
+      ],
+      [
+       "codetrans-dl:c663",
+       1
+      ],
+      [
+       "codetrans-dl:c325",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.14285714285714285,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.6362099051475525,
+     "ndcg@10": 0.0,
+     "query_id": "665",
+     "ranked": [
+      [
+       "codetrans-dl:c650",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c321",
+       0
+      ],
+      [
+       "codetrans-dl:c680",
+       0
+      ],
+      [
+       "codetrans-dl:c695",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c31",
+       0
+      ],
+      [
+       "codetrans-dl:c21",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c325",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 1,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.582101149018854,
+     "ndcg@10": 0.5,
+     "query_id": "667",
+     "ranked": [
+      [
+       "codetrans-dl:c652",
+       0
+      ],
+      [
+       "codetrans-dl:c653",
+       0
+      ],
+      [
+       "codetrans-dl:c667",
+       1
+      ],
+      [
+       "codetrans-dl:c637",
+       0
+      ],
+      [
+       "codetrans-dl:c576",
+       0
+      ],
+      [
+       "codetrans-dl:c600",
+       0
+      ],
+      [
+       "codetrans-dl:c575",
+       0
+      ],
+      [
+       "codetrans-dl:c599",
+       0
+      ],
+      [
+       "codetrans-dl:c574",
+       0
+      ],
+      [
+       "codetrans-dl:c654",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.3333333333333333,
+     "shared_rows": 2,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.58518658997491,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "673",
+     "ranked": [
+      [
+       "codetrans-dl:c658",
+       0
+      ],
+      [
+       "codetrans-dl:c673",
+       1
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c657",
+       0
+      ],
+      [
+       "codetrans-dl:c642",
+       0
+      ],
+      [
+       "codetrans-dl:c249",
+       0
+      ],
+      [
+       "codetrans-dl:c672",
+       0
+      ],
+      [
+       "codetrans-dl:c655",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c14",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5701132230460644,
+     "ndcg@10": 0.0,
+     "query_id": "690",
+     "ranked": [
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c321",
+       0
+      ],
+      [
+       "codetrans-dl:c648",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c649",
+       0
+      ],
+      [
+       "codetrans-dl:c325",
+       0
+      ],
+      [
+       "codetrans-dl:c650",
+       0
+      ],
+      [
+       "codetrans-dl:c21",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.6195477759465575,
+     "ndcg@10": 0.3562071871080222,
+     "query_id": "694",
+     "ranked": [
+      [
+       "codetrans-dl:c649",
+       0
+      ],
+      [
+       "codetrans-dl:c648",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c321",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c679",
+       1
+      ],
+      [
+       "codetrans-dl:c21",
+       0
+      ],
+      [
+       "codetrans-dl:c664",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c325",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.16666666666666666,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5960535961203277,
+     "ndcg@10": 0.2890648263178879,
+     "query_id": "698",
+     "ranked": [
+      [
+       "codetrans-dl:c653",
+       0
+      ],
+      [
+       "codetrans-dl:c638",
+       0
+      ],
+      [
+       "codetrans-dl:c669",
+       0
+      ],
+      [
+       "codetrans-dl:c684",
+       0
+      ],
+      [
+       "codetrans-dl:c699",
+       0
+      ],
+      [
+       "codetrans-dl:c639",
+       0
+      ],
+      [
+       "codetrans-dl:c652",
+       0
+      ],
+      [
+       "codetrans-dl:c667",
+       0
+      ],
+      [
+       "codetrans-dl:c113",
+       0
+      ],
+      [
+       "codetrans-dl:c668",
+       1
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.1,
+     "shared_rows": 1,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.2311140117235482,
+     "ndcg@10": 1.0,
+     "query_id": "701",
+     "ranked": [
+      [
+       "codetrans-dl:c671",
+       1
+      ],
+      [
+       "codetrans-dl:c656",
+       0
+      ],
+      [
+       "codetrans-dl:c641",
+       0
+      ],
+      [
+       "codetrans-dl:c670",
+       0
+      ],
+      [
+       "codetrans-dl:c675",
+       0
+      ],
+      [
+       "codetrans-dl:c640",
+       0
+      ],
+      [
+       "codetrans-dl:c239",
+       0
+      ],
+      [
+       "codetrans-dl:c192",
+       0
+      ],
+      [
+       "codetrans-dl:c672",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.6041144100017846,
+     "ndcg@10": 1.0,
+     "query_id": "710",
+     "ranked": [
+      [
+       "codetrans-dl:c680",
+       1
+      ],
+      [
+       "codetrans-dl:c695",
+       0
+      ],
+      [
+       "codetrans-dl:c665",
+       0
+      ],
+      [
+       "codetrans-dl:c133",
+       0
+      ],
+      [
+       "codetrans-dl:c180",
+       0
+      ],
+      [
+       "codetrans-dl:c650",
+       0
+      ],
+      [
+       "codetrans-dl:c162",
+       0
+      ],
+      [
+       "codetrans-dl:c115",
+       0
+      ],
+      [
+       "codetrans-dl:c274",
+       0
+      ],
+      [
+       "codetrans-dl:c137",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 1,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.1529046590439975,
+     "ndcg@10": 0.38685280723454163,
+     "query_id": "711",
+     "ranked": [
+      [
+       "codetrans-dl:c666",
+       0
+      ],
+      [
+       "codetrans-dl:c257",
+       0
+      ],
+      [
+       "codetrans-dl:c273",
+       0
+      ],
+      [
+       "codetrans-dl:c267",
+       0
+      ],
+      [
+       "codetrans-dl:c681",
+       1
+      ],
+      [
+       "codetrans-dl:c132",
+       0
+      ],
+      [
+       "codetrans-dl:c270",
+       0
+      ],
+      [
+       "codetrans-dl:c179",
+       0
+      ],
+      [
+       "codetrans-dl:c654",
+       0
+      ],
+      [
+       "codetrans-dl:c714",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.2,
+     "shared_rows": 1,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.2092532780952752,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "716",
+     "ranked": [
+      [
+       "codetrans-dl:c671",
+       0
+      ],
+      [
+       "codetrans-dl:c656",
+       1
+      ],
+      [
+       "codetrans-dl:c641",
+       0
+      ],
+      [
+       "codetrans-dl:c670",
+       0
+      ],
+      [
+       "codetrans-dl:c675",
+       0
+      ],
+      [
+       "codetrans-dl:c640",
+       0
+      ],
+      [
+       "codetrans-dl:c239",
+       0
+      ],
+      [
+       "codetrans-dl:c192",
+       0
+      ],
+      [
+       "codetrans-dl:c672",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.1958253416232765,
+     "ndcg@10": 1.0,
+     "query_id": "717",
+     "ranked": [
+      [
+       "codetrans-dl:c657",
+       1
+      ],
+      [
+       "codetrans-dl:c672",
+       0
+      ],
+      [
+       "codetrans-dl:c642",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c249",
+       0
+      ],
+      [
+       "codetrans-dl:c675",
+       0
+      ],
+      [
+       "codetrans-dl:c108",
+       0
+      ],
+      [
+       "codetrans-dl:c239",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c673",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5880320672877133,
+     "ndcg@10": 1.0,
+     "query_id": "718",
+     "ranked": [
+      [
+       "codetrans-dl:c658",
+       1
+      ],
+      [
+       "codetrans-dl:c673",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c657",
+       0
+      ],
+      [
+       "codetrans-dl:c672",
+       0
+      ],
+      [
+       "codetrans-dl:c642",
+       0
+      ],
+      [
+       "codetrans-dl:c249",
+       0
+      ],
+      [
+       "codetrans-dl:c14",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c287",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.6022962336428463,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "724",
+     "ranked": [
+      [
+       "codetrans-dl:c679",
+       0
+      ],
+      [
+       "codetrans-dl:c664",
+       1
+      ],
+      [
+       "codetrans-dl:c649",
+       0
+      ],
+      [
+       "codetrans-dl:c256",
+       0
+      ],
+      [
+       "codetrans-dl:c115",
+       0
+      ],
+      [
+       "codetrans-dl:c678",
+       0
+      ],
+      [
+       "codetrans-dl:c162",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c663",
+       0
+      ],
+      [
+       "codetrans-dl:c180",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.132602741010487,
+     "ndcg@10": 1.0,
+     "query_id": "726",
+     "ranked": [
+      [
+       "codetrans-dl:c666",
+       1
+      ],
+      [
+       "codetrans-dl:c257",
+       0
+      ],
+      [
+       "codetrans-dl:c273",
+       0
+      ],
+      [
+       "codetrans-dl:c267",
+       0
+      ],
+      [
+       "codetrans-dl:c681",
+       0
+      ],
+      [
+       "codetrans-dl:c132",
+       0
+      ],
+      [
+       "codetrans-dl:c270",
+       0
+      ],
+      [
+       "codetrans-dl:c179",
+       0
+      ],
+      [
+       "codetrans-dl:c654",
+       0
+      ],
+      [
+       "codetrans-dl:c714",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 1,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5479560601525009,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "728",
+     "ranked": [
+      [
+       "codetrans-dl:c653",
+       0
+      ],
+      [
+       "codetrans-dl:c638",
+       1
+      ],
+      [
+       "codetrans-dl:c669",
+       0
+      ],
+      [
+       "codetrans-dl:c684",
+       0
+      ],
+      [
+       "codetrans-dl:c699",
+       0
+      ],
+      [
+       "codetrans-dl:c639",
+       0
+      ],
+      [
+       "codetrans-dl:c652",
+       0
+      ],
+      [
+       "codetrans-dl:c667",
+       0
+      ],
+      [
+       "codetrans-dl:c113",
+       0
+      ],
+      [
+       "codetrans-dl:c668",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 1,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5873166751116514,
+     "ndcg@10": 0.5,
+     "query_id": "730",
+     "ranked": [
+      [
+       "codetrans-dl:c655",
+       0
+      ],
+      [
+       "codetrans-dl:c670",
+       0
+      ],
+      [
+       "codetrans-dl:c640",
+       1
+      ],
+      [
+       "codetrans-dl:c656",
+       0
+      ],
+      [
+       "codetrans-dl:c671",
+       0
+      ],
+      [
+       "codetrans-dl:c657",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c660",
+       0
+      ],
+      [
+       "codetrans-dl:c675",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.3333333333333333,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.225174375809729,
+     "ndcg@10": 0.5,
+     "query_id": "731",
+     "ranked": [
+      [
+       "codetrans-dl:c671",
+       0
+      ],
+      [
+       "codetrans-dl:c656",
+       0
+      ],
+      [
+       "codetrans-dl:c641",
+       1
+      ],
+      [
+       "codetrans-dl:c670",
+       0
+      ],
+      [
+       "codetrans-dl:c675",
+       0
+      ],
+      [
+       "codetrans-dl:c640",
+       0
+      ],
+      [
+       "codetrans-dl:c239",
+       0
+      ],
+      [
+       "codetrans-dl:c192",
+       0
+      ],
+      [
+       "codetrans-dl:c672",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.3333333333333333,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.6000119782984257,
+     "ndcg@10": 0.5,
+     "query_id": "733",
+     "ranked": [
+      [
+       "codetrans-dl:c658",
+       0
+      ],
+      [
+       "codetrans-dl:c673",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       1
+      ],
+      [
+       "codetrans-dl:c657",
+       0
+      ],
+      [
+       "codetrans-dl:c672",
+       0
+      ],
+      [
+       "codetrans-dl:c642",
+       0
+      ],
+      [
+       "codetrans-dl:c249",
+       0
+      ],
+      [
+       "codetrans-dl:c14",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c287",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.3333333333333333,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4033599072135985,
+     "ndcg@10": 0.5,
+     "query_id": "738",
+     "ranked": [
+      [
+       "codetrans-dl:c678",
+       0
+      ],
+      [
+       "codetrans-dl:c663",
+       0
+      ],
+      [
+       "codetrans-dl:c648",
+       1
+      ],
+      [
+       "codetrans-dl:c679",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c676",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c649",
+       0
+      ],
+      [
+       "codetrans-dl:c675",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.3333333333333333,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5938097857870162,
+     "ndcg@10": 0.0,
+     "query_id": "744",
+     "ranked": [
+      [
+       "codetrans-dl:c639",
+       0
+      ],
+      [
+       "codetrans-dl:c22",
+       0
+      ],
+      [
+       "codetrans-dl:c319",
+       0
+      ],
+      [
+       "codetrans-dl:c24",
+       0
+      ],
+      [
+       "codetrans-dl:c669",
+       0
+      ],
+      [
+       "codetrans-dl:c684",
+       0
+      ],
+      [
+       "codetrans-dl:c699",
+       0
+      ],
+      [
+       "codetrans-dl:c318",
+       0
+      ],
+      [
+       "codetrans-dl:c566",
+       0
+      ],
+      [
+       "codetrans-dl:c314",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 1,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5923694339580834,
+     "ndcg@10": 0.5,
+     "query_id": "745",
+     "ranked": [
+      [
+       "codetrans-dl:c640",
+       0
+      ],
+      [
+       "codetrans-dl:c670",
+       0
+      ],
+      [
+       "codetrans-dl:c655",
+       1
+      ],
+      [
+       "codetrans-dl:c641",
+       0
+      ],
+      [
+       "codetrans-dl:c642",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c14",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c290",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.3333333333333333,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.574218382127583,
+     "ndcg@10": 0.3010299956639812,
+     "query_id": "749",
+     "ranked": [
+      [
+       "codetrans-dl:c644",
+       0
+      ],
+      [
+       "codetrans-dl:c290",
+       0
+      ],
+      [
+       "codetrans-dl:c674",
+       0
+      ],
+      [
+       "codetrans-dl:c325",
+       0
+      ],
+      [
+       "codetrans-dl:c321",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c650",
+       0
+      ],
+      [
+       "codetrans-dl:c659",
+       1
+      ],
+      [
+       "codetrans-dl:c291",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.1111111111111111,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4198530772700906,
+     "ndcg@10": 0.0,
+     "query_id": "752",
+     "ranked": [
+      [
+       "codetrans-dl:c647",
+       0
+      ],
+      [
+       "codetrans-dl:c20",
+       0
+      ],
+      [
+       "codetrans-dl:c17",
+       0
+      ],
+      [
+       "codetrans-dl:c568",
+       0
+      ],
+      [
+       "codetrans-dl:c318",
+       0
+      ],
+      [
+       "codetrans-dl:c10",
+       0
+      ],
+      [
+       "codetrans-dl:c31",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c15",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5411036699078977,
+     "ndcg@10": 0.31546487678572877,
+     "query_id": "754",
+     "ranked": [
+      [
+       "codetrans-dl:c649",
+       0
+      ],
+      [
+       "codetrans-dl:c648",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c321",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c679",
+       0
+      ],
+      [
+       "codetrans-dl:c21",
+       0
+      ],
+      [
+       "codetrans-dl:c664",
+       1
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c325",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.125,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5906211300753057,
+     "ndcg@10": 0.0,
+     "query_id": "755",
+     "ranked": [
+      [
+       "codetrans-dl:c650",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c321",
+       0
+      ],
+      [
+       "codetrans-dl:c680",
+       0
+      ],
+      [
+       "codetrans-dl:c695",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c31",
+       0
+      ],
+      [
+       "codetrans-dl:c21",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c325",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 1,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.2260546898469329,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "762",
+     "ranked": [
+      [
+       "codetrans-dl:c657",
+       0
+      ],
+      [
+       "codetrans-dl:c672",
+       1
+      ],
+      [
+       "codetrans-dl:c249",
+       0
+      ],
+      [
+       "codetrans-dl:c642",
+       0
+      ],
+      [
+       "codetrans-dl:c239",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c660",
+       0
+      ],
+      [
+       "codetrans-dl:c662",
+       0
+      ],
+      [
+       "codetrans-dl:c253",
+       0
+      ],
+      [
+       "codetrans-dl:c656",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.581821870058775,
+     "ndcg@10": 0.0,
+     "query_id": "765",
+     "ranked": [
+      [
+       "codetrans-dl:c660",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c662",
+       0
+      ],
+      [
+       "codetrans-dl:c256",
+       0
+      ],
+      [
+       "codetrans-dl:c274",
+       0
+      ],
+      [
+       "codetrans-dl:c719",
+       0
+      ],
+      [
+       "codetrans-dl:c664",
+       0
+      ],
+      [
+       "codetrans-dl:c574",
+       0
+      ],
+      [
+       "codetrans-dl:c253",
+       0
+      ],
+      [
+       "codetrans-dl:c278",
+       0
+      ]
+     ],
+     "recall@10": 0.0,
+     "rows": 100,
+     "rr": 0.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.3207324352115393,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "768",
+     "ranked": [
+      [
+       "codetrans-dl:c663",
+       0
+      ],
+      [
+       "codetrans-dl:c678",
+       1
+      ],
+      [
+       "codetrans-dl:c648",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c664",
+       0
+      ],
+      [
+       "codetrans-dl:c660",
+       0
+      ],
+      [
+       "codetrans-dl:c662",
+       0
+      ],
+      [
+       "codetrans-dl:c679",
+       0
+      ],
+      [
+       "codetrans-dl:c256",
+       0
+      ],
+      [
+       "codetrans-dl:c649",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.684371542185545,
+     "ndcg@10": 0.3562071871080222,
+     "query_id": "774",
+     "ranked": [
+      [
+       "codetrans-dl:c639",
+       0
+      ],
+      [
+       "codetrans-dl:c22",
+       0
+      ],
+      [
+       "codetrans-dl:c319",
+       0
+      ],
+      [
+       "codetrans-dl:c24",
+       0
+      ],
+      [
+       "codetrans-dl:c669",
+       0
+      ],
+      [
+       "codetrans-dl:c684",
+       1
+      ],
+      [
+       "codetrans-dl:c699",
+       0
+      ],
+      [
+       "codetrans-dl:c318",
+       0
+      ],
+      [
+       "codetrans-dl:c566",
+       0
+      ],
+      [
+       "codetrans-dl:c314",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.16666666666666666,
+     "shared_rows": 1,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.227960110642016,
+     "ndcg@10": 0.2890648263178879,
+     "query_id": "777",
+     "ranked": [
+      [
+       "codetrans-dl:c642",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c641",
+       0
+      ],
+      [
+       "codetrans-dl:c14",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c640",
+       0
+      ],
+      [
+       "codetrans-dl:c657",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c672",
+       1
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.1,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.7091702679172158,
+     "ndcg@10": 0.5,
+     "query_id": "779",
+     "ranked": [
+      [
+       "codetrans-dl:c644",
+       0
+      ],
+      [
+       "codetrans-dl:c290",
+       0
+      ],
+      [
+       "codetrans-dl:c674",
+       1
+      ],
+      [
+       "codetrans-dl:c325",
+       0
+      ],
+      [
+       "codetrans-dl:c321",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c650",
+       0
+      ],
+      [
+       "codetrans-dl:c659",
+       0
+      ],
+      [
+       "codetrans-dl:c291",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.3333333333333333,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.3938939278014004,
+     "ndcg@10": 0.38685280723454163,
+     "query_id": "783",
+     "ranked": [
+      [
+       "codetrans-dl:c648",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c649",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c678",
+       1
+      ],
+      [
+       "codetrans-dl:c321",
+       0
+      ],
+      [
+       "codetrans-dl:c663",
+       0
+      ],
+      [
+       "codetrans-dl:c325",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.2,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.6382104246877134,
+     "ndcg@10": 1.0,
+     "query_id": "787",
+     "ranked": [
+      [
+       "codetrans-dl:c667",
+       1
+      ],
+      [
+       "codetrans-dl:c637",
+       0
+      ],
+      [
+       "codetrans-dl:c652",
+       0
+      ],
+      [
+       "codetrans-dl:c639",
+       0
+      ],
+      [
+       "codetrans-dl:c669",
+       0
+      ],
+      [
+       "codetrans-dl:c684",
+       0
+      ],
+      [
+       "codetrans-dl:c699",
+       0
+      ],
+      [
+       "codetrans-dl:c638",
+       0
+      ],
+      [
+       "codetrans-dl:c582",
+       0
+      ],
+      [
+       "codetrans-dl:c588",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 2,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5779878147877753,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "790",
+     "ranked": [
+      [
+       "codetrans-dl:c655",
+       0
+      ],
+      [
+       "codetrans-dl:c670",
+       1
+      ],
+      [
+       "codetrans-dl:c640",
+       0
+      ],
+      [
+       "codetrans-dl:c656",
+       0
+      ],
+      [
+       "codetrans-dl:c671",
+       0
+      ],
+      [
+       "codetrans-dl:c657",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c660",
+       0
+      ],
+      [
+       "codetrans-dl:c675",
+       0
+      ],
+      [
+       "codetrans-dl:c18",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5767343156039715,
+     "ndcg@10": 1.0,
+     "query_id": "794",
+     "ranked": [
+      [
+       "codetrans-dl:c674",
+       1
+      ],
+      [
+       "codetrans-dl:c659",
+       0
+      ],
+      [
+       "codetrans-dl:c644",
+       0
+      ],
+      [
+       "codetrans-dl:c719",
+       0
+      ],
+      [
+       "codetrans-dl:c243",
+       0
+      ],
+      [
+       "codetrans-dl:c137",
+       0
+      ],
+      [
+       "codetrans-dl:c184",
+       0
+      ],
+      [
+       "codetrans-dl:c231",
+       0
+      ],
+      [
+       "codetrans-dl:c133",
+       0
+      ],
+      [
+       "codetrans-dl:c278",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 1,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5614676848053932,
+     "ndcg@10": 1.0,
+     "query_id": "795",
+     "ranked": [
+      [
+       "codetrans-dl:c675",
+       1
+      ],
+      [
+       "codetrans-dl:c660",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ],
+      [
+       "codetrans-dl:c180",
+       0
+      ],
+      [
+       "codetrans-dl:c133",
+       0
+      ],
+      [
+       "codetrans-dl:c256",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c274",
+       0
+      ],
+      [
+       "codetrans-dl:c162",
+       0
+      ],
+      [
+       "codetrans-dl:c115",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.4401909820735455,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "796",
+     "ranked": [
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c676",
+       1
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c675",
+       0
+      ],
+      [
+       "codetrans-dl:c662",
+       0
+      ],
+      [
+       "codetrans-dl:c678",
+       0
+      ],
+      [
+       "codetrans-dl:c660",
+       0
+      ],
+      [
+       "codetrans-dl:c256",
+       0
+      ],
+      [
+       "codetrans-dl:c162",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.5530725391581655,
+     "ndcg@10": 0.5,
+     "query_id": "802",
+     "ranked": [
+      [
+       "codetrans-dl:c667",
+       0
+      ],
+      [
+       "codetrans-dl:c637",
+       0
+      ],
+      [
+       "codetrans-dl:c652",
+       1
+      ],
+      [
+       "codetrans-dl:c639",
+       0
+      ],
+      [
+       "codetrans-dl:c669",
+       0
+      ],
+      [
+       "codetrans-dl:c684",
+       0
+      ],
+      [
+       "codetrans-dl:c699",
+       0
+      ],
+      [
+       "codetrans-dl:c638",
+       0
+      ],
+      [
+       "codetrans-dl:c582",
+       0
+      ],
+      [
+       "codetrans-dl:c588",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.3333333333333333,
+     "shared_rows": 2,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.544753547757864,
+     "ndcg@10": 1.0,
+     "query_id": "803",
+     "ranked": [
+      [
+       "codetrans-dl:c653",
+       1
+      ],
+      [
+       "codetrans-dl:c638",
+       0
+      ],
+      [
+       "codetrans-dl:c669",
+       0
+      ],
+      [
+       "codetrans-dl:c684",
+       0
+      ],
+      [
+       "codetrans-dl:c699",
+       0
+      ],
+      [
+       "codetrans-dl:c639",
+       0
+      ],
+      [
+       "codetrans-dl:c652",
+       0
+      ],
+      [
+       "codetrans-dl:c667",
+       0
+      ],
+      [
+       "codetrans-dl:c113",
+       0
+      ],
+      [
+       "codetrans-dl:c668",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 1,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.225210775155574,
+     "ndcg@10": 1.0,
+     "query_id": "807",
+     "ranked": [
+      [
+       "codetrans-dl:c657",
+       1
+      ],
+      [
+       "codetrans-dl:c672",
+       0
+      ],
+      [
+       "codetrans-dl:c642",
+       0
+      ],
+      [
+       "codetrans-dl:c643",
+       0
+      ],
+      [
+       "codetrans-dl:c249",
+       0
+      ],
+      [
+       "codetrans-dl:c675",
+       0
+      ],
+      [
+       "codetrans-dl:c108",
+       0
+      ],
+      [
+       "codetrans-dl:c239",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c673",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 1.0,
+     "shared_rows": 0,
+     "short_by": 0
+    },
+    {
+     "latency_s": 1.3991342224180698,
+     "ndcg@10": 0.6309297535714575,
+     "query_id": "813",
+     "ranked": [
+      [
+       "codetrans-dl:c678",
+       0
+      ],
+      [
+       "codetrans-dl:c663",
+       1
+      ],
+      [
+       "codetrans-dl:c648",
+       0
+      ],
+      [
+       "codetrans-dl:c679",
+       0
+      ],
+      [
+       "codetrans-dl:c661",
+       0
+      ],
+      [
+       "codetrans-dl:c676",
+       0
+      ],
+      [
+       "codetrans-dl:c646",
+       0
+      ],
+      [
+       "codetrans-dl:c649",
+       0
+      ],
+      [
+       "codetrans-dl:c675",
+       0
+      ],
+      [
+       "codetrans-dl:c645",
+       0
+      ]
+     ],
+     "recall@10": 1.0,
+     "rows": 100,
+     "rr": 0.5,
+     "shared_rows": 0,
+     "short_by": 0
+    }
+   ],
+   "query_set_sha256": "7436cf6262e89e3bfb697ac5689f6a88832ad61d53792e675eef937fdb92c2c6",
+   "revisions": {
+    "qrels": "3c26def7e3903a50c219584fedc85d3ad77fac43",
+    "queries-corpus": "328b6b6870fce952a3d5d49a8672518a0e6f6f58"
+   },
+   "summary": {
+    "latency_p50_s": {
+     "ci95": [
+      1.4238547091372311,
+      1.5873166751116514
+     ],
+     "value": 1.5701132230460644
+    },
+    "latency_p95_s": {
+     "ci95": [
+      1.6195477759465575,
+      1.7211968060582876
+     ],
+     "value": 1.684371542185545
+    },
+    "mrr": {
+     "ci95": [
+      0.30716666666666664,
+      0.4963253968253968
+     ],
+     "value": 0.3976349206349207
+    },
+    "n": 50,
+    "ndcg@10": {
+     "ci95": [
+      0.4164817606051672,
+      0.592773234851907
+     ],
+     "value": 0.5030456925896856
+    },
+    "recall@10": {
+     "ci95": [
+      0.74,
+      0.94
+     ],
+     "value": 0.84
+    },
+    "shared_rows": 22,
+    "short_queries": 0
+   },
+   "taxonomy_assignments": 0,
+   "warmup": "unscored test query"
+  }
+ },
+ "dropped": {
+  "codefeedback-st": "codefeedback-st: ingest passed 1800 s"
+ },
+ "licence_source": "CoIR paper licence table and the upstream sources (Apache-2.0); the Hugging Face cards state no licence (T2 nexus_rdr/244-research-15; Sam, 2026-11-06)",
+ "pins": {
+  "conexus": "7.97.0",
+  "corpus_cap": 5000,
+  "distance_threshold": "none: a bge collection gets no threshold (search_engine._threshold_for_collection_model)",
+  "duplicate_text": "equivalence classes (ask rdr244-duplicate-text)",
+  "embedding_model": "bge-base-en-v15-768",
+  "engine": {
+   "embedding_mode": "onnx-local",
+   "embedding_profile": "bge",
+   "release_version": "0.1.181",
+   "version": null
+  },
+  "frecency": "frecency_score is on every row and inert: hybrid off scores 1.0 * vector_norm",
+  "gain": "2^g-1 (grades checked to be 1)",
+  "git_dirty": false,
+  "git_sha": "cc378a4a6cd51d9e59b07da37e27b7ea8a598bb5",
+  "hybrid_default": false,
+  "ingest_cap_s": 1800,
+  "k": 10,
+  "max_results": 100,
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+  "pyarrow": "26.0.1",
+  "python": "3.13.16",
+  "queries_per_dataset": 50,
+  "query_text": "passed whole to nx search, length unchecked; the embedder's handling past its window is unmeasured",
+  "rank_order": "nx search output order; key order within equal-distance runs",
+  "resamples": 10000,
+  "retrieval_unit": "chunks from put_note's chunker, deduplicated to documents after retrieval",
+  "search_flags": [],
+  "seed": 2026
+ },
+ "pooled_latency_secondary": {
+  "n": 100,
+  "p50_s": 1.4184285518713295,
+  "p95_s": 1.6362099051475525
+ },
+ "track": "A"
+}

@@ -47,7 +47,7 @@ class _FakeServiceT3:
 
     def search_graph_hop(
         self, query, seeds, collection_names, *, link_type=None,
-        depth=1, direction="both", where=None, n_results=10,
+        depth=1, direction="both", where=None, n_results=10, sensitivity="include",
     ):
         self.graph_calls.append(
             (query, list(seeds), list(collection_names), link_type,

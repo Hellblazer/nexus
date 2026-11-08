@@ -40,6 +40,13 @@ is dropped. NOT_ATTEMPTED and failed runs leave entries alone: the rung was not
 walked, or it failed loudly (which stops the upgrade and says so), and neither
 is evidence that a streak ended.
 
+A walk whose read of the note FAILS (the store raised, as opposed to holding no
+note) writes nothing and is not counted: saving would put the deferring rungs at
+1 over streaks it could not see (nexus-4qygk). Content that does not parse is
+read as no note and is overwritten by the next write. While the store stays
+unreadable the streaks stand still, and the doctor row says the log could not be
+read (:meth:`DeferralLog.readable`).
+
 The note is a T2 row any version or tool may have written. Only the documented
 shape is read; an entry of any other shape is ignored and dropped by the next
 write. Callers run every operation through :func:`~nexus.upgrade_ladder.census_progress.guarded`:
@@ -53,10 +60,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import structlog
+
 from nexus.upgrade_ladder.census_progress import (
     PROGRESS_PROJECT,
     STARVED_AFTER,
     NoteStore,
+    NoteUnreadable,
     T2NoteStore,
     _safe_text,
 )
@@ -83,6 +93,8 @@ _DETAIL_STORE_MAX = 300
 #: with stdlib only; a test pins that the two agree).
 CHILD_LOG_RELATIVE = Path("logs") / "upgrade-auto-child.log"
 
+
+_log = structlog.get_logger(__name__)
 
 def t2_deferral_log() -> DeferralLog:
     """The production log: the T2 note named :data:`DEFERRAL_TITLE`."""
@@ -173,9 +185,10 @@ class DeferralLog:
         self._store = store
         self._now = now_fn
 
-    def _entries(self) -> dict[str, dict[str, Any]]:
-        """The well-formed entries of the stored note; anything else is dropped."""
-        note = self._store.load()
+    def _entries(self, *, strict: bool = False) -> dict[str, dict[str, Any]]:
+        """The well-formed entries of the stored note; anything else is dropped. *strict* raises
+        :class:`NoteUnreadable` on a failed read instead of reading it as no note."""
+        note = self._store.load(strict=strict)
         rungs = note.get("rungs") if isinstance(note, dict) else None
         if not isinstance(rungs, dict):
             return {}
@@ -187,7 +200,13 @@ class DeferralLog:
         deferred = counted_deferrals(report)
         if not deferred:
             return  # nothing to add: no storage is touched
-        entries = self._entries()
+        try:
+            entries = self._entries(strict=True)
+        except NoteUnreadable as exc:
+            # Saving now would write the deferring rungs at n=1 over streaks that could not be read
+            # (nexus-4qygk). Skipping loses this walk's deferral instead: a late escalation, never a reset.
+            _log.warning("upgrade_ladder_deferral_log_unreadable", error=str(exc))
+            return
         before = {name: dict(e) for name, e in entries.items()}
         now = self._now()
         stamp, last = now.isoformat(timespec="seconds"), now.isoformat()  # ``last`` keeps the fraction: it is compared with a completion's
@@ -203,6 +222,15 @@ class DeferralLog:
             }
         if entries != before:
             self._store.save({"rungs": entries})
+
+    def readable(self) -> bool:
+        """False when the note store could not be read. ``record`` then skips its write, so the streaks
+        stand still until a read succeeds; the doctor says so (nexus-4qygk)."""
+        try:
+            self._entries(strict=True)
+        except NoteUnreadable:
+            return False
+        return True
 
     def deferrals(self) -> dict[str, RungDeferral]:
         """Every rung with a streak, by name."""

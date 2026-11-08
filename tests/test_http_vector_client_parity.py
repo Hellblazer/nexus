@@ -166,14 +166,28 @@ class TestSignatureParity:
         t3_sig = inspect.signature(getattr(T3Database, method_name))
         http_sig = inspect.signature(getattr(HttpVectorClient, method_name))
 
+        # RDR-243 Phase 2 (nexus-rfvyy.7.8): the prefix is the POSITIONAL surface. A keyword-only parameter has no
+        # position, and Http puts its own keyword-only extras (cluster_by, ...) before ``sensitivity`` where T3 has
+        # nothing between. Every required keyword-only parameter of T3 must exist on Http, checked below.
         t3_params = [
-            name for name in t3_sig.parameters
-            if name != "self"
+            name for name, p in t3_sig.parameters.items()
+            if name != "self" and p.kind is not inspect.Parameter.KEYWORD_ONLY
         ]
         http_params = [
-            name for name in http_sig.parameters
-            if name != "self"
+            name for name, p in http_sig.parameters.items()
+            if name != "self" and p.kind is not inspect.Parameter.KEYWORD_ONLY
         ]
+        t3_required_kw = {
+            name for name, p in t3_sig.parameters.items()
+            if p.kind is inspect.Parameter.KEYWORD_ONLY and p.default is inspect.Parameter.empty
+        }
+        http_kw = {
+            name for name, p in http_sig.parameters.items() if p.kind is inspect.Parameter.KEYWORD_ONLY
+        }
+        assert t3_required_kw <= http_kw, (
+            f"{method_name}: T3Database requires keyword-only {sorted(t3_required_kw - http_kw)} that "
+            "HttpVectorClient does not take"
+        )
 
         # Http must have AT LEAST as many params as T3 for the shared prefix
         assert len(http_params) >= len(t3_params), (
@@ -418,7 +432,7 @@ class TestSearchCollectionNamesParam:
 
         client.search(
             query="test query",
-            collection_names=["knowledge__nexus__minilm-l6-v2-384__v1"],
+            collection_names=["knowledge__nexus__minilm-l6-v2-384__v1"], sensitivity="include",
         )
         assert calls
 
@@ -454,7 +468,7 @@ class TestSearchCollectionNamesParam:
 
         client.search(
             query="q",
-            collection_names=["col1", "col2"],
+            collection_names=["col1", "col2"], sensitivity="include",
         )
         assert "collections" in calls[0], (
             "HTTP body must still use 'collections' key (Java server reads this)"

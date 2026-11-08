@@ -44,12 +44,15 @@ Contract, every branch of which ``tests/test_plugin_lockstep.py`` pins:
   each needing a full uninstall+install) is accepted to exceed 120 s -- a
   timed-out detached action just retries next session, never a hang.
 * A plugin whose registry version already EQUALS the wheel is also checked
-  for a moved release ref (nexus-konsk): a plugin-only cut (RDR-197) can
+  for a moved release ref (nexus-konsk): a plugin-only cut (RDR-197) could
   land a new commit under an anchored tag (``plugin-v{version}-{n}``)
   without ever moving the client version, and ``claude plugin update``
   reports "already at the latest version" and does nothing in that case
   (measured, nexus-semdv) -- invisible to the version-only comparison
-  above. For each such plugin, its marketplace is refreshed
+  above. The anchored channel is retired (nexus-rbmja.8) and nothing cuts
+  such a ref now, but installs that saw one still carry a registry sha that
+  differs from the marketplace ref, so the check stays. For each such
+  plugin, its marketplace is refreshed
   (``claude plugin marketplace update <name>``, at most once per DISTINCT
   marketplace per call, shared across every plugin on it) and the
   marketplace's own pinned ``source.ref`` is resolved to a commit inside
@@ -57,8 +60,8 @@ Contract, every branch of which ``tests/test_plugin_lockstep.py`` pins:
   and compared against the registry's own ``gitCommitSha``. A mismatch
   means the ref moved to content the install does not have yet, so this
   runs ``claude plugin uninstall <id> -s <scope> -y`` THEN
-  ``claude plugin install <id> -s <scope> -y`` (not ``update`` -- an
-  anchored ref names no new *version* for ``update`` to move to; and not
+  ``claude plugin install <id> -s <scope> -y`` (not ``update`` -- a
+  moved ref names no new *version* for ``update`` to move to; and not
   a bare ``install`` alone -- measured against the real CLI, nexus-konsk
   gate rehearsal 2026-09-11, ``install`` on an already-installed plugin
   at the SAME declared version is a no-op even when the ref moved

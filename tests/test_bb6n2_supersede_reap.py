@@ -34,7 +34,7 @@ def _chunk_present(client, chash: str) -> bool:
     from nexus.errors import CollectionNotFoundError
 
     try:
-        result = client.get_collection(_COLLECTION).get(ids=[chash], include=[])
+        result = client.get_collection(_COLLECTION).get(ids=[chash], include=[], sensitivity="include")
     except CollectionNotFoundError:
         return False
     return chash in (result.get("ids") or [])

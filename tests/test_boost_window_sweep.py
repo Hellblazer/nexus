@@ -150,10 +150,10 @@ def swept(t2_service_env, monkeypatch):
             )
         monkeypatch.setattr(mcp_core, "_MCP_PER_COLLECTION_K", k)
         mcp_core._reset_page_cache_for_tests()
-        text = mcp_core._search_render(query=query, corpus=corpus, cluster_by="", limit=10)
+        text = mcp_core._search_render(query=query, corpus=corpus, cluster_by="", limit=10, sensitivity="include")
         mcp_core._reset_page_cache_for_tests()
         ids = mcp_core._search_render(
-            query=query, corpus=corpus, cluster_by="", limit=10, structured=True,
+            query=query, corpus=corpus, cluster_by="", limit=10, structured=True, sensitivity="include",
         )["ids"]
         return text, ids
 

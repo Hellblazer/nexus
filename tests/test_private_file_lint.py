@@ -50,6 +50,7 @@ NON_CREDENTIAL: dict[tuple[str, str], int] = {
     ("src/nexus/db/t1.py", "_acquire_t1_mint_lock"): 1,  # the T1 mint flock (nexus-g5mir)
     ("src/nexus/upgrade_ladder/rungs/rdr192_manifest_backfill.py", "_cross_process_lock"): 1,
     ("src/nexus/util/upgrade_auto_lock.py", "acquire_auto_lock"): 1,  # the nx upgrade --auto single-instance flock; holds only a pid (nexus-75w5d)
+    ("src/nexus/commands/ask.py", "live_lock"): 1,  # the flock around a batch record's read-modify-write (nexus-wc4jj.14)
     ("src/nexus/commands/enrich.py", "_validation_file_lock"): 1,  # the sibling flock of the aspect validation files (nexus-z1d0l.1.6)
     # PID files and a restart-timestamp sentinel.
     ("src/nexus/_mineru_spawn.py", "_write_pid_file"): 1,

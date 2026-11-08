@@ -24,7 +24,8 @@ from typing import Any
 import pytest
 
 from nexus import _winsec
-from nexus.db import pg_bundle, pg_provision as pp
+from nexus.db import pg_bundle
+from nexus.db import pg_provision as pp
 from nexus.db.pg_provision import (
     PgBinaries,
     PgRootUserError,
@@ -34,6 +35,7 @@ from nexus.db.pg_provision import (
     bootstrap_superuser,
     windows_superuser_name,
 )
+from tests._child_process import kill_if_identity
 from tests._module_seam import setattr_in
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -410,7 +412,8 @@ def test_start_returns_while_a_descendant_still_holds_pg_ctls_output(tmp_path: P
     script.write_text(
         f"#!{sys.executable}\n"
         "import subprocess, sys\n"
-        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        # the pid file's path on the grandchild's command line identifies it at cleanup (nexus-xzorj)
+        f"g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', {str(pidfile)!r}])\n"
         f"open({str(pidfile)!r}, 'w').write(str(g.pid))\n"
         "print('waiting for server to start... done')\n"
     )
@@ -438,11 +441,8 @@ def test_start_returns_while_a_descendant_still_holds_pg_ctls_output(tmp_path: P
         assert elapsed < 20
         assert "done" in (pgdata / "pg_ctl.out").read_text()
     finally:
-        if pidfile.exists():
-            try:
-                os.kill(int(pidfile.read_text()), 9)
-            except OSError:
-                pass
+        if pidfile.exists():  # a pid from a file: signal it only while it is still this grandchild
+            kill_if_identity(int(pidfile.read_text()), str(pidfile), sig=9)
 
 
 # ── the ACL guard (initdb 0xC0000135 under an elevated session) ──────────────────

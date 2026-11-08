@@ -468,6 +468,19 @@ def test_assertion_4_keeps_its_post_stop_and_pg_log_checks_live() -> None:
     )
 
 
+def test_assertion_2_names_what_the_session_called_when_the_store_is_missing() -> None:
+    """2026-11-07 gate run on 7.97.0 (nexus-y3y8d's run) failed A2 with 'no store_put of the nonce'
+    while every other assertion passed, and the run kept no transcript to say why. The failure now
+    lists the session's tool_use names with counts and whether any call's input carried the nonce,
+    so the next red names its cause: a skipped step, a renamed tool, or a transcript shape the view
+    does not read. Names and a yes/no only; no input text, which can carry a token."""
+    text = _text()
+    a2 = text[text.index("Run-Assertion 2 "):text.index("Run-Assertion 3 ")]
+    fail_line = next(ln for ln in a2.splitlines() if "no store_put of the nonce" in ln)
+    assert "$seen" in fail_line and "$nonceAnywhere" in fail_line
+    assert "Group-Object" in a2 and "(K $_ 'name')" in a2
+
+
 def test_assertion_2_keeps_its_outside_session_check_live() -> None:
     text = _text()
     a2 = text[text.index("Run-Assertion 2 "):text.index("Run-Assertion 3 ")]

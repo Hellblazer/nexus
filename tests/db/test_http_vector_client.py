@@ -219,11 +219,11 @@ class TestSearch:
             lambda path, body, **kw: fake_results
         )
         # Flat (default) shape.
-        results = client.search("hello world", ["col"], n_results=5)
+        results = client.search("hello world", ["col"], n_results=5, sensitivity="include")
         assert results == fake_results
 
         # structured=True unpacks into a dict of parallel lists.
-        result = client.search("hello", ["col"], structured=True)
+        result = client.search("hello", ["col"], structured=True, sensitivity="include")
         assert isinstance(result, dict)
         assert result["ids"] == ["c1"]
         assert result["distances"] == [0.1]
@@ -236,10 +236,10 @@ class TestSearch:
             calls.append(body)
             return []
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        client.search("q", ["c"], where={"topic": "ml"})
+        client.search("q", ["c"], where={"topic": "ml"}, sensitivity="include")
         assert calls[0]["where"] == {"topic": "ml"}
 
-        client.search("q", ["c"])
+        client.search("q", ["c"], sensitivity="include")
         assert "where" not in calls[1]
 
 
@@ -280,7 +280,7 @@ class TestExistingIdsAndGetByIdStayTruncationSafe:
             calls2.append(body)
             return {"ids": ["id1"], "documents": ["text"], "metadatas": [{}]}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post_single)
-        client.get_by_id("col", "id1")
+        client.get_by_id("col", "id1", sensitivity="include")
         assert calls2[0]["ids"] == ["id1"]
 
 
@@ -302,7 +302,7 @@ class TestGetById:
                                "title": "t"}],
             },
         )
-        result = client.get_by_id("col", "id1")
+        result = client.get_by_id("col", "id1", sensitivity="include")
         assert result == {
             "id": "id1",
             "content": "text",
@@ -319,13 +319,13 @@ class TestGetById:
             "nexus.db.http_vector_client._post",
             lambda p, b, **kw: {"ids": [], "documents": [], "metadatas": []}
         )
-        assert client.get_by_id("col", "missing-id") is None
+        assert client.get_by_id("col", "missing-id", sensitivity="include") is None
 
         # Service error -> None (never raises).
         def raise_err(p, b, **kw):
             raise VectorServiceError("404 not found")
         monkeypatch.setattr("nexus.db.http_vector_client._post", raise_err)
-        assert client.get_by_id("col", "any-id") is None
+        assert client.get_by_id("col", "any-id", sensitivity="include") is None
 
 
 class TestDeleteById:
@@ -528,7 +528,7 @@ class TestServiceCollectionStubGetWithIds:
             return {"ids": ["id1"], "documents": ["text"], "metadatas": [{"k": "v"}]}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
-        result = stub.get(ids=["id1"], include=["metadatas"])
+        result = stub.get(ids=["id1"], include=["metadatas"], sensitivity="include")
         assert len(calls) == 1
         path, body = calls[0]
         assert path == "/v1/vectors/store-get"
@@ -544,7 +544,7 @@ class TestServiceCollectionStubGetWithIds:
             return {"ids": [], "documents": [], "metadatas": []}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
-        stub.get(where={"source_path": "/foo.py"}, limit=10, offset=0)
+        stub.get(where={"source_path": "/foo.py"}, limit=10, offset=0, sensitivity="include")
         assert calls[0][0] == "/v1/vectors/get"
 
     def test_neither_ids_nor_where_routes_to_get(self, monkeypatch):
@@ -555,7 +555,7 @@ class TestServiceCollectionStubGetWithIds:
             return {"ids": [], "documents": [], "metadatas": []}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
-        stub.get(limit=5, offset=0)
+        stub.get(limit=5, offset=0, sensitivity="include")
         assert calls[0][0] == "/v1/vectors/get"
 
     def test_default_limit_none_resolves_to_len_ids(self, monkeypatch):
@@ -575,7 +575,7 @@ class TestServiceCollectionStubGetWithIds:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         ids = [f"id{i:03d}" for i in range(37)]
-        result = stub.get(ids=ids)
+        result = stub.get(ids=ids, sensitivity="include")
         assert len(calls) == 1
         assert calls[0][1]["limit"] == 37
         assert result["ids"] == ids
@@ -592,7 +592,7 @@ class TestServiceCollectionStubGetWithIds:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         ids = [f"id{i:03d}" for i in range(157)]
-        stub.get(ids=ids)
+        stub.get(ids=ids, sensitivity="include")
         assert calls, "expected at least one store-get POST"
         for path, body in calls:
             assert path == "/v1/vectors/store-get"
@@ -611,7 +611,7 @@ class TestServiceCollectionStubGetWithIds:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         ids = [f"id{i:04d}" for i in range(157)]
-        result = stub.get(ids=ids)
+        result = stub.get(ids=ids, sensitivity="include")
         assert len(calls) == 1
         assert calls[0][1]["limit"] == 157
         assert calls[0][1]["ids"] == ids
@@ -633,7 +633,7 @@ class TestServiceCollectionStubGetWithIds:
         stub = _ServiceCollectionStub("col__test__m__v1")
         page = QUOTAS.MAX_RECORDS_PER_WRITE
         ids = [f"id{i:05d}" for i in range(page + 50)]
-        result = stub.get(ids=ids)
+        result = stub.get(ids=ids, sensitivity="include")
         assert len(calls) == 2, f"expected 2 paged POSTs for {len(ids)} ids, got {len(calls)}"
         assert len(calls[0][1]["ids"]) == page
         assert calls[0][1]["limit"] == page
@@ -653,7 +653,7 @@ class TestServiceCollectionStubGetWithIds:
             return {"ids": ["a", "b"], "documents": ["x", "y"], "metadatas": [{}, {}]}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
-        stub.get(ids=["a", "b", "c"], limit=2)
+        stub.get(ids=["a", "b", "c"], limit=2, sensitivity="include")
         assert len(calls) == 1
         assert calls[0][1]["limit"] == 2
 
@@ -669,7 +669,7 @@ class TestServiceCollectionStubGetWithIds:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         with pytest.raises(ValueError, match="offset"):
-            stub.get(ids=["a", "b"], offset=5)
+            stub.get(ids=["a", "b"], offset=5, sensitivity="include")
 
     def test_zero_or_none_offset_on_ids_branch_is_fine(self, monkeypatch):
         """offset=0 (the default) and offset=None are both accepted on
@@ -682,8 +682,8 @@ class TestServiceCollectionStubGetWithIds:
             return {"ids": ["a"], "documents": ["x"], "metadatas": [{}]}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
-        stub.get(ids=["a"], offset=0)
-        stub.get(ids=["a"], offset=None)
+        stub.get(ids=["a"], offset=0, sensitivity="include")
+        stub.get(ids=["a"], offset=None, sensitivity="include")
         assert len(calls) == 2
 
     def test_explicit_limit_with_multipage_ids_raises(self, monkeypatch):
@@ -701,7 +701,7 @@ class TestServiceCollectionStubGetWithIds:
         stub = _ServiceCollectionStub("col__test__m__v1")
         ids = [f"id{i:04d}" for i in range(QUOTAS.MAX_RECORDS_PER_WRITE + 50)]
         with pytest.raises(ValueError, match="limit"):
-            stub.get(ids=ids, limit=50)
+            stub.get(ids=ids, limit=50, sensitivity="include")
 
     def test_explicit_limit_with_single_page_ids_still_works(self, monkeypatch):
         """The multi-page + explicit-limit boundary is the only thing
@@ -716,7 +716,7 @@ class TestServiceCollectionStubGetWithIds:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         ids = [f"id{i:04d}" for i in range(QUOTAS.MAX_RECORDS_PER_WRITE)]
-        stub.get(ids=ids, limit=5)
+        stub.get(ids=ids, limit=5, sensitivity="include")
         assert len(calls) == 1
         assert calls[0]["limit"] == 5
 
@@ -731,7 +731,7 @@ class TestServiceCollectionStubGetWithIds:
             return {"ids": [], "documents": [], "metadatas": []}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
-        stub.get(where={"source_path": "/foo.py"})
+        stub.get(where={"source_path": "/foo.py"}, sensitivity="include")
         assert calls[0][1]["limit"] == 10
 
     def test_truncation_warning_fires_when_page_returns_exactly_limit(self, monkeypatch):
@@ -754,7 +754,7 @@ class TestServiceCollectionStubGetWithIds:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         with capture_logs() as logs:
-            result = stub.get(ids=ids, limit=5)
+            result = stub.get(ids=ids, limit=5, sensitivity="include")
         events = [e for e in logs if e["event"] == "store_get_truncated_at_limit"]
         assert len(events) == 1
         assert events[0]["limit_sent"] == 5
@@ -780,7 +780,7 @@ class TestServiceCollectionStubGetWithIds:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         with capture_logs() as logs:
-            stub.get(ids=ids)
+            stub.get(ids=ids, sensitivity="include")
         events = [e for e in logs if e["event"] == "store_get_truncated_at_limit"]
         assert events == []
 
@@ -795,8 +795,8 @@ class TestServiceCollectionStubGetWithIds:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         with capture_logs() as logs:
-            stub.get(ids=[f"id{i}" for i in range(10)], limit=3)
-            stub.get(ids=[f"id{i}" for i in range(10)], limit=3)
+            stub.get(ids=[f"id{i}" for i in range(10)], limit=3, sensitivity="include")
+            stub.get(ids=[f"id{i}" for i in range(10)], limit=3, sensitivity="include")
         events = [e for e in logs if e["event"] == "store_get_truncated_at_limit"]
         assert len(events) == 1
 
@@ -825,7 +825,7 @@ class TestServiceCollectionStubGetCountField:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         with capture_logs() as logs:
-            result = stub.get(ids=["a"])
+            result = stub.get(ids=["a"], sensitivity="include")
         events = [e for e in logs if e["event"] == "store_get_count_unreported"]
         assert len(events) == 1
         assert result["ids"] == ["a"]
@@ -840,8 +840,8 @@ class TestServiceCollectionStubGetCountField:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         with capture_logs() as logs:
-            stub.get(ids=["a"])
-            stub.get(ids=["a"])
+            stub.get(ids=["a"], sensitivity="include")
+            stub.get(ids=["a"], sensitivity="include")
         events = [e for e in logs if e["event"] == "store_get_count_unreported"]
         assert len(events) == 1
 
@@ -859,7 +859,7 @@ class TestServiceCollectionStubGetCountField:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         with capture_logs() as logs:
-            result = stub.get(ids=["a", "b", "c"])
+            result = stub.get(ids=["a", "b", "c"], sensitivity="include")
         assert result["ids"] == ["a", "b", "c"]
         assert [e for e in logs if e["event"] == "store_get_count_unreported"] == []
 
@@ -882,7 +882,7 @@ class TestServiceCollectionStubGetCountField:
         stub = _ServiceCollectionStub("col__test__m__v1")
         ids = [f"id{i}" for i in range(5)]
         with pytest.raises(VectorServiceError, match="matched-live"):
-            stub.get(ids=ids, limit=2)
+            stub.get(ids=ids, limit=2, sensitivity="include")
 
     def test_count_equal_to_returned_when_ids_partially_absent_does_not_raise(self, monkeypatch):
         """count reflects the matched-LIVE set, not the requested set —
@@ -901,7 +901,7 @@ class TestServiceCollectionStubGetCountField:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         stub = _ServiceCollectionStub("col__test__m__v1")
         ids = [f"id{i}" for i in range(5)]
-        result = stub.get(ids=ids)
+        result = stub.get(ids=ids, sensitivity="include")
         assert result["ids"] == ids[:2]
 
 
@@ -4158,7 +4158,7 @@ class TestSkippedCollectionsHeaderLogging:
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search("q", ["docs__ghost__model-ctx__v1", "code__gone__model-code__v1", "docs__live__model-ctx__v1"])
+            client.search("q", ["docs__ghost__model-ctx__v1", "code__gone__model-code__v1", "docs__live__model-ctx__v1"], sensitivity="include")
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search"
@@ -4175,7 +4175,7 @@ class TestSkippedCollectionsHeaderLogging:
         _wire_fake_opener(monkeypatch, [])
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search("q", ["docs__live__model-ctx__v1"])
+            client.search("q", ["docs__live__model-ctx__v1"], sensitivity="include")
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert events == []
 
@@ -4190,7 +4190,7 @@ class TestSkippedCollectionsHeaderLogging:
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search_metadata_scoped("q", ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"])
+            client.search_metadata_scoped("q", ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"], sensitivity="include")
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search_metadata_scoped"
@@ -4207,7 +4207,7 @@ class TestSkippedCollectionsHeaderLogging:
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search_graph_hop("q", ["1.1"], ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"])
+            client.search_graph_hop("q", ["1.1"], ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"], sensitivity="include")
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search_graph_hop"
@@ -4224,7 +4224,7 @@ class TestSkippedCollectionsHeaderLogging:
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search_aspect_scoped("q", ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"])
+            client.search_aspect_scoped("q", ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"], sensitivity="include")
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search_aspect_scoped"
@@ -4257,7 +4257,7 @@ class TestSkippedCollectionsHeaderLogging:
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.hybrid_search("q", ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"])
+            client.hybrid_search("q", ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"], sensitivity="include")
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "hybrid_search"
@@ -4280,11 +4280,11 @@ class TestSkippedCollectionsHeaderLogging:
         opener = _FakeOpener([], {"X-Nexus-Skipped-Collections": "docs__ghost__model-ctx__v1"})
         monkeypatch.setattr(hv, "_keepalive_opener", lambda: opener)
         client = HttpVectorClient()
-        client.search("q", ["docs__ghost__model-ctx__v1"])  # primes the thread-local
+        client.search("q", ["docs__ghost__model-ctx__v1"], sensitivity="include")  # primes the thread-local
 
         opener._headers = None  # second call's real response carries no header
         with capture_logs() as logs:
-            client.search("q", ["docs__live__model-ctx__v1"])
+            client.search("q", ["docs__live__model-ctx__v1"], sensitivity="include")
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert events == []
 
@@ -4323,7 +4323,7 @@ class TestSingleCollectionUnregistered422IsActionable:
 
         client = HttpVectorClient()
         with pytest.raises(VectorServiceError) as excinfo:
-            client.search("q", ["docs__ghost__model-ctx__v1"])
+            client.search("q", ["docs__ghost__model-ctx__v1"], sensitivity="include")
         msg = str(excinfo.value)
         assert "docs__ghost__model-ctx__v1" in msg
         assert "is not registered" in msg

@@ -297,7 +297,7 @@ def _entry_meta(collection: str, title: str) -> dict:
 
 def _chunk_metadatas(client: HttpVectorClient, collection: str, content: str) -> list[dict]:
     chash = hashlib.sha256(content.encode()).hexdigest()
-    got = client.get_collection(collection).get(ids=[chash], include=["metadatas"])
+    got = client.get_collection(collection).get(ids=[chash], include=["metadatas"], sensitivity="include")
     return list(got["metadatas"])
 
 

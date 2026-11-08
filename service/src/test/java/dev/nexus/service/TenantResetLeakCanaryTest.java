@@ -186,6 +186,9 @@ class TenantResetLeakCanaryTest {
     /** The evictors the census names that this canary does NOT feed, each with why. A new evictor lands in neither
      *  this map nor {@link #FED} and fails {@code theCataloguesEvictorsAreEachFed...} until it is placed in one. */
     private static final Map<String, String> UNFED = new TreeMap<>(Map.of(
+        "ChunkKeysSweepJobs", "its jobs are filled by a background dry run of the key-retirement sweep (the "
+            + "sweep route's async field), which needs a registered root or tenant credential and a vector backend; "
+            + "ChunkKeysSweepJobsTest and TenantKeyedEvictorsTest cover its evictor",
         "ChunkReaper", "its timeout streaks and resume cursors are filled by a reaper pass over a T3 collection, "
             + "which needs a vector backend this engine does not have; TenantKeyedEvictorsTest covers its evictor",
         "OwnerlessLogLimiter", "its states are filled by an ownerless-chunk log line the reaper emits, so it needs "

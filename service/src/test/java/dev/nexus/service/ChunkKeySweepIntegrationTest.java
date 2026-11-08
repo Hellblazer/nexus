@@ -3,10 +3,12 @@
 package dev.nexus.service;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TokenStore;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -239,6 +241,33 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
         JsonNode dry = json(sweep(f.token(), plan()));
         assertThat(dry.path("totals").path("retired_key_rows").asLong()).isZero();
         assertThat(dry.path("collections")).isEmpty();
+    }
+
+    @Test
+    void aKeyOutsideTheAllowListOnAQuarantineRowSurvivesTheSweep_theRetentionStampLivesThereOnPurpose()
+            throws Exception {
+        // nexus-alsq3: quarantine_expires_at is not an allow-list key (neither CHUNK nor ROW), so the sweep would
+        // strip it from a live row. It sits on a quarantine-* row, a bypass collection the sweep never reads.
+        String tenant = "sw-qexp"; // its own tenant: sw-stamp is the stamp test's fixture above, and a shared chash would collide
+        String token = tenantToken(tenant);
+        String live = conformant(tenant);
+        String quarantine = "quarantine-" + live;
+        String stamp = "2026-12-01T00:00:00Z";
+        assertThat((List<String>) plan().get("allowed_keys")).doesNotContain("quarantine_expires_at");
+        List<String> liveRow = seed(tenant, live, rows(
+            "stray", legacy(keyed(tenant, live, "stray", "quarantine_expires_at", stamp))));
+        List<String> quarantined = seed(tenant, quarantine, rows(
+            "q1", keyed(tenant, quarantine, "q1", "quarantined_at", "2026-11-01T00:00:00Z",
+                "origin_collection", live, "quarantine_expires_at", stamp)));
+
+        HttpResponse<String> r = sweep(token, applyBody());
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        assertThat(metadataOf(tenant, quarantine, quarantined.get(0)))
+            .as("the stamp on a quarantine-* row is left alone").containsEntry("quarantine_expires_at", stamp);
+        assertThat(metadataOf(tenant, live, liveRow.get(0)))
+            .as("the same key on a live row is not on the allow-list, so the sweep strips it")
+            .doesNotContainKey("quarantine_expires_at");
     }
 
     @Test
@@ -529,10 +558,28 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
      * carries a char-end key and its manifest row has every span but the char end (a partial NULL); c3 records a TTL no
      * owner records; note.1 has no put_at and no collection; the owner document and doc.notags lack derived meta keys
      * (the first lacks all three, the second only tags). c5/c6 break the two equalities, c8 is half stamped, c9
-     * carries a row key in a live collection. Counter-examples, counted by nothing: c11 carries a line key and its
-     * manifest row holds all four spans; note.2 has a put_at and a collection; doc.full holds every derived key.
+     * carries a row key in a live collection. c12 is owned by a manifest row that is unwritten and carries a section
+     * type and nothing else (the branch of the labels_written CHECK's OR no other row reaches); c13 is held only by
+     * {@code doc.dead}, a TOMBSTONED document, whose manifest row is unwritten with a title: the CHECK covers every
+     * manifest row, live or not, so the census (a) counts it. Counter-examples, counted by nothing: c11 carries a line
+     * key and its manifest row holds all four spans; note.2 has a put_at and a collection; doc.full holds every derived
+     * key; doc.dead itself (its one row is c13's).
      */
     private record Pre(String tenant, String token, String live) {}
+
+    /** The label columns and {@code labels_written} of the manifest row that names {@code hex}. */
+    private void manifestLabels(String tenant, String collection, String hex, boolean written, String title,
+                                String type, Integer page) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, written)
+                .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, title).set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, type)
+                .set(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, page)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes())).execute();
+        }
+    }
 
     private Pre preconditionTenant(String tenant) throws Exception {
         String token = tenantToken(tenant);
@@ -550,6 +597,8 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
         r.put("c9", keyed(tenant, live, "c9", "quarantined_at", "2026-01-02T00:00:00Z"));
         r.put("c10", keyed(tenant, live, "c10", "chunk_end_char", 9, "line_start", 1));
         r.put("c11", keyed(tenant, live, "c11", "line_end", 5));
+        r.put("c12", keyed(tenant, live, "c12"));
+        r.put("c13", keyed(tenant, live, "c13"));
         seed(tenant, live, r);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -557,7 +606,8 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
             // c1, c2, c4, c10 and c11 are owned by a document of the collection (its manifest rows are legacy:
             // labels_written false, spans NULL), through the helper every other fixture uses.
             PgContainerHelper.ownChunks(ctx, tenant, live, hexOf(tenant, live, "c1"), hexOf(tenant, live, "c2"),
-                hexOf(tenant, live, "c4"), hexOf(tenant, live, "c10"), hexOf(tenant, live, "c11"));
+                hexOf(tenant, live, "c4"), hexOf(tenant, live, "c10"), hexOf(tenant, live, "c11"),
+                hexOf(tenant, live, "c12"));
             // A note: content type knowledge, no put_at in its meta, no physical collection.
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                     CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE)
@@ -566,6 +616,29 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
         // The partial-NULL span (c10: every column but the char end) and its counter-example (c11: all four).
         manifestSpans(tenant, live, hexOf(tenant, live, "c10"), 1, 2, 3, null);
         manifestSpans(tenant, live, hexOf(tenant, live, "c11"), 1, 2, 3, 4);
+        // The manifest rows census (a) of RDR-236 Phase 4 Step 3 (nexus-6pfgb.42): labels_written false with a label
+        // set. c2 (a title) and c4 (a page number only) violate it; c10 is WRITTEN with a title (the constraint's
+        // own allowed shape) and c11 is unwritten with no label (every other legacy row looks like this).
+        manifestLabels(tenant, live, hexOf(tenant, live, "c2"), false, "Intro", null, null);
+        manifestLabels(tenant, live, hexOf(tenant, live, "c4"), false, null, null, 3);
+        manifestLabels(tenant, live, hexOf(tenant, live, "c10"), true, "Intro", "body", 1);
+        // c12 is unwritten with a section type and nothing else: the branch of the CHECK's OR that no other row reaches.
+        manifestLabels(tenant, live, hexOf(tenant, live, "c12"), false, null, "body", null);
+        // c13 is held only by a TOMBSTONED document: the CHECK covers every manifest row, live or not, so it counts.
+        document(tenant, "doc.dead", "code", live, "{\"source_format\":\"py\",\"tags\":\"a\",\"category\":\"c\"}");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "doc.dead")
+                .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                .set(CATALOG_DOCUMENT_CHUNKS.CHASH, Chash.fromHex(hexOf(tenant, live, "c13")).toBytes())
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, live).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+                .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, false)
+                .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, "Gone").execute();
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq("doc.dead")).execute();
+        }
         // Counter-examples for the three document-level counts.
         document(tenant, "note.2", "knowledge", live, "{\"put_at\":\"2026-01-01T00:00:00Z\"}");
         document(tenant, "doc.full", "code", live, "{\"source_format\":\"py\",\"tags\":\"a\",\"category\":\"c\"}");
@@ -575,6 +648,8 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
 
     @Test
     void theDryRunCountsEachPreconditionFromTheRows() throws Exception {
+        // A second tenant with the same unwritten-label rows: its rows are nobody else's count.
+        preconditionTenant("sw-pre-count-other");
         Pre p = preconditionTenant("sw-pre-count");
 
         JsonNode body = json(sweep(p.token(), plan()));
@@ -607,6 +682,10 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
         assertThat(gen.path("missing_key").path("category").asLong()).isEqualTo(1);
         assertThat(pre.path("chunk_text_hash_mismatch").asLong()).isEqualTo(1);
         assertThat(pre.path("embedding_model_mismatch").asLong()).isEqualTo(1);
+        assertThat(pre.path("manifest_unwritten_label_rows").asLong())
+            .as("c2 (title), c4 (page number), c12 (section type only) and c13 (on a tombstoned document) are unwritten "
+                + "with a label; c10 is written, c11 and the rest carry none; the other tenant's four are not ours")
+            .isEqualTo(4);
         assertThat(pre.path("quarantine_implication_violations").asLong()).isEqualTo(1);
         assertThat(pre.path("row_keys_on_live_rows").asLong()).as("c8 and c9").isEqualTo(2);
         assertThat(pre.path("wrong_width_rows").asLong()).isZero();
@@ -659,6 +738,110 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
         assertThat(ok.statusCode()).as(ok.body()).isEqualTo(200);
         assertThat(json(ok).path("rows_swept").asLong()).isEqualTo(5);
         assertThat(retiredRowCount(p.tenant(), p.live())).isZero();
+    }
+
+    /**
+     * nexus-qmrfi: {@code null_span_rows} counts a chunk key by VALUE, as the client's {@code manifest_span} does. The
+     * writer's default for "not recorded" is 0, so a key that is present is not a position. z1 holds all four keys as 0
+     * (counted by nothing); z2 holds a 0 char start beside a recorded end (a real start of 0: two columns counted);
+     * z3 holds values that are not integers (a string, a float, a bool) and a 0 start beside an unrecorded end
+     * (counted by nothing); z4 holds one positive line (one column). Filling the recorded columns brings the count to 0
+     * while z1 and z3 keep their NULL columns: zero is reachable.
+     */
+    @Test
+    void nullSpanRowsCountsARecordedValue_aZeroOrANonIntegerKeyIsNotAPosition() throws Exception {
+        String tenant = "sw-span-value";
+        String token = tenantToken(tenant);
+        String live = conformant(tenant);
+        Map<String, Map<String, Object>> r = new LinkedHashMap<>();
+        r.put("z1", keyed(tenant, live, "z1", "line_start", 0, "line_end", 0, "chunk_start_char", 0, "chunk_end_char", 0));
+        r.put("z2", keyed(tenant, live, "z2", "line_start", 0, "line_end", 0, "chunk_start_char", 0, "chunk_end_char", 9));
+        r.put("z3", keyed(tenant, live, "z3", "line_start", "7", "line_end", true, "chunk_start_char", 0,
+            "chunk_end_char", 9.0));
+        r.put("z4", keyed(tenant, live, "z4", "line_start", 12, "line_end", 0, "chunk_start_char", 0, "chunk_end_char", 0));
+        seed(tenant, live, r);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.ownChunks(DSL.using(su, SQLDialect.POSTGRES), tenant, live, hexOf(tenant, live, "z1"),
+                hexOf(tenant, live, "z2"), hexOf(tenant, live, "z3"), hexOf(tenant, live, "z4"));
+        }
+
+        JsonNode pre = json(sweep(token, plan()));
+        JsonNode count = pre.path("preconditions").path("null_span_rows");
+        assertThat(count.asLong()).as("z2 and z4 record a position; z1 and z3 record none").isEqualTo(2);
+        JsonNode byField = pre.path("precondition_details").path("null_span_rows").path("by_field");
+        assertThat(byField.path("line_start").asLong()).as("z4 only: z3's \"7\" is a string").isEqualTo(1);
+        assertThat(byField.path("line_end").asLong()).as("a 0 and a bool are not lines").isZero();
+        assertThat(byField.path("chunk_start_char").asLong()).as("z2: 0 beside a recorded end; not z1, z3, z4").isEqualTo(1);
+        assertThat(byField.path("chunk_end_char").asLong()).as("z2; z3's 9.0 is a float").isEqualTo(1);
+
+        // The columns the client's fill rung writes: only what a chunk records. The rest stay NULL and stay uncounted.
+        manifestSpans(tenant, live, hexOf(tenant, live, "z2"), null, null, 0, 9);
+        manifestSpans(tenant, live, hexOf(tenant, live, "z4"), 12, null, null, null);
+        JsonNode after = json(sweep(token, plan()));
+        assertThat(after.path("preconditions").path("null_span_rows").asLong())
+            .as("only unrecorded keys remain: the count reaches zero").isZero();
+        assertThat(after.path("blocking").toString()).doesNotContain("null_span_rows");
+    }
+
+    /**
+     * The span value rule held to ONE table (nexus-qmrfi, review of c58372716): {@code manifest-span-cases.json}, which
+     * {@code tests/catalog/test_manifest_span_cases.py} holds the client's {@code manifest_span} to. One owned chunk per
+     * case, its manifest row NULL in all four span columns; {@code null_span_rows} must count the cases that record
+     * anything, and {@code by_field} each column the table records. A case whose chunk holds a value the sweep drops
+     * unrecorded (a string, a float, a 0) is counted by nothing: the sweep may delete those keys, because they are not
+     * spans {@code manifest_span} would write.
+     */
+    @Test
+    void nullSpanRowsFollowsTheSharedSpanCaseTable() throws Exception {
+        JsonNode table;
+        try (java.io.InputStream in = ChunkKeySweepIntegrationTest.class.getResourceAsStream("/manifest-span-cases.json")) {
+            assertThat(in).as("resource manifest-span-cases.json").isNotNull();
+            table = MAPPER.readTree(in).path("cases");
+        }
+        assertThat(table.size()).as("the table is read whole").isGreaterThanOrEqualTo(20);
+        List<String> spanKeys = List.of("line_start", "line_end", "chunk_start_char", "chunk_end_char");
+        String tenant = "sw-span-table";
+        String token = tenantToken(tenant);
+        String live = conformant(tenant);
+        Map<String, Map<String, Object>> rows = new LinkedHashMap<>();
+        Map<String, Long> wantByField = new LinkedHashMap<>();
+        for (String key : spanKeys) {
+            wantByField.put(key, 0L);
+        }
+        long wantRows = 0;
+        for (JsonNode c : table) {
+            String id = c.path("id").asText();
+            Map<String, Object> meta = keyed(tenant, live, id);
+            meta.putAll(MAPPER.convertValue(c.path("chunk"), new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() { }));
+            rows.put(id, meta);
+            boolean any = false;
+            for (String key : spanKeys) {
+                if (!c.path("recorded").path(key).isNull()) {
+                    wantByField.merge(key, 1L, Long::sum);
+                    any = true;
+                }
+            }
+            if (any) {
+                wantRows++;
+            }
+        }
+        seed(tenant, live, rows);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.ownChunks(DSL.using(su, SQLDialect.POSTGRES), tenant, live,
+                rows.keySet().stream().map(id -> hexOf(tenant, live, id)).toArray(String[]::new));
+        }
+
+        JsonNode pre = json(sweep(token, plan()));
+
+        assertThat(pre.path("preconditions").path("null_span_rows").asLong())
+            .as("one row per case that records any column").isEqualTo(wantRows);
+        JsonNode byField = pre.path("precondition_details").path("null_span_rows").path("by_field");
+        for (var want : wantByField.entrySet()) {
+            assertThat(byField.path(want.getKey()).asLong()).as("by_field %s", want.getKey()).isEqualTo(want.getValue());
+        }
+        assertThat(wantRows).as("the table has cases that record and cases that do not").isBetween(1L, (long) table.size() - 1);
     }
 
     @Test

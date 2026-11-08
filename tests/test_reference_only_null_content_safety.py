@@ -93,7 +93,7 @@ class TestSearchCrossCorpusNoneContentBoundary:
         class _RefOnlyFakeT3:
             _voyage_client = None
 
-            def search(self, query, collection_names, n_results=10, where=None):
+            def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
                 return [{
                     "id": "refonly-chash", "content": None, "distance": 0.05,
                     "collection": collection_names[0],
@@ -109,7 +109,7 @@ class TestSearchCrossCorpusNoneContentBoundary:
 
         results = search_cross_corpus(
             "q", ["knowledge__refonly"], 10, _RefOnlyFakeT3(),
-            threshold_override=float("inf"), cluster_by=None,
+            threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         assert len(results) == 1
         assert results[0].content == ""
@@ -137,7 +137,7 @@ class TestMcpRenderNoneContentSafety:
              patch("nexus.mcp.core._search_taxonomy", _no_taxonomy), \
              patch("nexus.mcp.core._get_catalog", return_value=None), \
              patch("nexus.mcp.core._get_t1", _no_t1_session):
-            out = _search_render(query="anything", corpus="knowledge__refonly")
+            out = _search_render(query="anything", corpus="knowledge__refonly", sensitivity="include")
         assert isinstance(out, str)
         assert not out.startswith("Error:")
         # id used as the label fallback (no title/source metadata)

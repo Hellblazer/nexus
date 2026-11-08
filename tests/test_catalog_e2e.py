@@ -454,7 +454,7 @@ class TestChashSpan:
         code_docs = [d for d in cat.by_content_type("code") if d.physical_collection]
         assert code_docs
         result = local_t3._client.get_collection(code_docs[0].physical_collection).get(
-            limit=5, include=["documents", "metadatas"],
+            limit=5, include=["documents", "metadatas"], sensitivity="include",
         )
         assert result["ids"]
         for chunk_id, doc_text, meta in zip(

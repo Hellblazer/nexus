@@ -183,7 +183,7 @@ def test_prose_indexer_writes_manifest_rows_for_each_document(
     assert docs_collection, "registry should record docs_collection after indexing"
 
     docs_col = local_t3.get_collection(docs_collection)
-    result = docs_col.get(include=["metadatas"])
+    result = docs_col.get(include=["metadatas"], sensitivity="include")
     assert result["ids"], "expected at least one prose chunk in T3 docs collection"
 
     # Phase 3: chunks must NOT carry doc_id any more (catalog manifest
@@ -252,7 +252,7 @@ def test_prose_indexer_doc_id_absent_when_catalog_uninitialized(
     docs_collection = info.get("docs_collection")
     assert docs_collection
     docs_col = local_t3.get_collection(docs_collection)
-    result = docs_col.get(include=["metadatas"])
+    result = docs_col.get(include=["metadatas"], sensitivity="include")
     assert result["ids"], "indexer should still write chunks when catalog absent"
 
     for meta in result["metadatas"]:

@@ -6,7 +6,7 @@ effort: medium
 
 # RDR Fix Skill
 
-The fix step of the RDR lifecycle: between a gate critique and the next gate. Delegates the diff-scoped fix check to the **substantive-critic** agent. See [registry.yaml](../../registry.yaml).
+The fix step of the RDR lifecycle: between a gate critique and the next gate. Delegates the diff-scoped fix check to the **substantive-critic** agent. See [${CLAUDE_PLUGIN_ROOT}/registry.yaml](../../registry.yaml).
 
 ## When This Skill Activates
 

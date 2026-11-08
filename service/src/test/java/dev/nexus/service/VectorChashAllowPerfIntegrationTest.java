@@ -171,9 +171,9 @@ class VectorChashAllowPerfIntegrationTest {
         assertThat(hybridRows).isEqualTo(10);
 
         Vector q = Vector.of(unit());
-        Table<?> byChash = TEXT_GATED_SEARCH_BY_CHASH_384.call(q, allow, new String[] {COLL}, null, null, 10, MODEL, TENANT);
+        Table<?> byChash = TEXT_GATED_SEARCH_BY_CHASH_384.call(q, allow, new String[] {COLL}, null, null, 10, MODEL, TENANT, false);
         Table<?> allowed = TEXT_GATED_SEARCH_ALLOWED_384.call(q, GATE, gateAllow, new String[] {COLL}, null, null, 10,
-                                                              MODEL, TENANT);
+                                                              MODEL, TENANT, false);
         String planPlain = scope.withTenant(TENANT, ctx -> {
             PgSession.disableIndexScanForExactFallback(ctx);
             PgSession.setSearchPlanCacheMode(ctx);

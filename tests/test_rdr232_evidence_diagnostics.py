@@ -201,7 +201,7 @@ async def test_plan_run_marks_the_step_and_resets_the_recorder_per_run() -> None
         return {"ids": [_h("hit")], "tumblers": ["1.1"], "distances": [0.1], "collections": [RDR_COLL],
                 "chunk_text_hash": [_h("hit")], "chunk_collections": [RDR_COLL]}
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": ["hit" for _ in ids]}
 
     async def stub_rank(**kwargs):
@@ -217,7 +217,7 @@ async def test_plan_run_marks_the_step_and_resets_the_recorder_per_run() -> None
                   default_bindings={}, parent_dims=None)
     rec = ReducerInputRecorder()
     rec.note(["stale from a previous run"])
-    with patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "store_get_many", stub_get_many), \
+    with patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "_store_get_many_impl", stub_get_many), \
          patch.object(mcp_core, "operator_rank", stub_rank), \
          patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()), \
          reducer_input_scope(rec):
@@ -873,7 +873,7 @@ async def test_a_headless_nx_answer_run_records_the_reducer_input_the_operator_w
     async def stub_search(**kwargs):  # noqa: ARG001
         return _search_out([text], [RDR_COLL])
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": [text for _ in ids]}
 
     async def stub_summarize(**kwargs):  # noqa: ARG001
@@ -893,7 +893,7 @@ async def test_a_headless_nx_answer_run_records_the_reducer_input_the_operator_w
          patch("nexus.mcp.core.scratch", return_value="ok"), \
          patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
          patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()), \
-         patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "store_get_many", stub_get_many), \
+         patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "_store_get_many_impl", stub_get_many), \
          patch.object(mcp_core, "operator_summarize", stub_summarize):
         ctx.return_value.__enter__.return_value = db_stub
         env = await nx_answer(question="q", scope="rdr", structured=True)

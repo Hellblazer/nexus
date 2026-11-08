@@ -160,7 +160,7 @@ def test_mcp_store_put_writes_catalog_doc_id_into_t3_chunk_metadata(
     expected_doc_id = str(rows[0].tumbler)
 
     stored_col = local_t3._client.get_collection(stored_col_name)
-    chunk_result = stored_col.get(include=["metadatas"])
+    chunk_result = stored_col.get(include=["metadatas"], sensitivity="include")
     matching_metas = [
         m for m in chunk_result["metadatas"]
         if m.get("title") == "mcp-finding-doc-id"
@@ -425,7 +425,7 @@ def test_mcp_store_put_doc_id_absent_when_catalog_uninitialized(
 
     stored_col_name = result.split("->")[-1].strip()
     stored_col = local_t3._client.get_collection(stored_col_name)
-    chunk_result = stored_col.get(include=["metadatas"])
+    chunk_result = stored_col.get(include=["metadatas"], sensitivity="include")
 
     for m in chunk_result["metadatas"]:
         if m.get("title") == "mcp-finding-no-catalog":

@@ -323,7 +323,7 @@ def test_prune_misclassified_shared_chash_second_live_document_protected(t2_serv
         "F10c protection check below would pass on an empty set without "
         "this second live owner"
     )
-    present = client.get_collection(_SHARED_COLL).get(ids=[chash], include=[])
+    present = client.get_collection(_SHARED_COLL).get(ids=[chash], include=[], sensitivity="include")
     assert chash in (present.get("ids") or []), (
         "precondition: the shared chunk physically exists before the prune runs"
     )
@@ -359,7 +359,7 @@ def test_prune_misclassified_shared_chash_second_live_document_protected(t2_serv
         "document B's manifest reference must be completely untouched by a "
         "prune call that never named B's doc_id"
     )
-    present_after = client.get_collection(_SHARED_COLL).get(ids=[chash], include=[])
+    present_after = client.get_collection(_SHARED_COLL).get(ids=[chash], include=[], sensitivity="include")
     assert chash in (present_after.get("ids") or []), (
         "F10c: the shared chunk must physically SURVIVE -- document B's "
         "still-live manifest reference (collection-scoped, matching the "

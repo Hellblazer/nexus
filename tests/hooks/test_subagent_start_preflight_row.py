@@ -36,6 +36,35 @@ def test_the_row_is_withheld_when_no_repo_root_was_found() -> None:
     assert subagent_start._worktree_preflight_row("") == ""
 
 
+def test_nexus_13mbx_cwd_inside_a_checkout_gives_the_row_when_git_found_no_root(tmp_path: Path) -> None:
+    script = tmp_path / subagent_start._WORKTREE_PREFLIGHT_SCRIPT
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    deep = tmp_path / "src" / "pkg"
+    deep.mkdir(parents=True)
+    assert subagent_start._worktree_preflight_row("", str(deep)) == subagent_start._WORKTREE_PREFLIGHT
+    assert subagent_start._worktree_preflight_row(str(tmp_path / "elsewhere"), str(deep)) \
+        == subagent_start._WORKTREE_PREFLIGHT
+
+
+def test_nexus_13mbx_cwd_with_no_script_above_it_gives_no_row(tmp_path: Path) -> None:
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    assert subagent_start._worktree_preflight_row("", str(tmp_path / "a" / "b")) == ""
+    assert subagent_start._worktree_preflight_row("", str(tmp_path / "missing")) == ""
+
+
+def test_nexus_13mbx_a_project_nested_under_a_checkout_with_the_script_gets_no_row(tmp_path: Path) -> None:
+    """The walk stops at the cwd's own checkout: a clone inside a nexus tree is another project."""
+    script = tmp_path / subagent_start._WORKTREE_PREFLIGHT_SCRIPT
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    nested = tmp_path / "vendor" / "other"
+    (nested / "src").mkdir(parents=True)
+    (nested / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")  # a worktree's .git file
+    assert subagent_start._worktree_preflight_row("", str(nested / "src")) == ""
+    assert subagent_start._worktree_preflight_row("", "${cwd}") == ""
+
+
 def test_the_nexus_repo_itself_still_gets_the_row() -> None:
     repo = Path(__file__).resolve().parents[2]
     assert (repo / subagent_start._WORKTREE_PREFLIGHT_SCRIPT).is_file()
@@ -68,6 +97,27 @@ def test_a_dispatch_in_another_project_gets_no_preflight_row(tmp_path: Path) -> 
 
 @pytest.mark.t2_tenant
 def test_a_dispatch_in_a_project_with_the_script_gets_the_row(tmp_path: Path) -> None:
+    """Also nexus-13mbx, in the same tenant (the storage-touch ceiling counts tests that mint
+    one): the hook process runs outside any repo, so git finds no root, and the payload's cwd is
+    a checkout carrying the script (a bare repo with worktrees, or a git that timed out). Before
+    nexus-13mbx the row was withheld there."""
     ctx = _injected(_repo(tmp_path / "nexus-like", with_script=True))
     assert "| Preflight |" in ctx
     assert "agent-worktree-preflight.sh" in ctx
+
+    checkout = tmp_path / "checkout"
+    script = checkout / subagent_start._WORKTREE_PREFLIGHT_SCRIPT
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    result = _run_hook(cwd=str(outside), stdin=_payload_with_cwd(checkout),
+                       env_overrides={"GIT_CEILING_DIRECTORIES": str(tmp_path)})
+    assert result.returncode == 0, result.stderr
+    assert "| Preflight |" in json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def _payload_with_cwd(cwd: Path) -> str:
+    return json.dumps({"session_id": "test-session", "hook_event_name": "SubagentStart",
+                       "task": "general research task", "prompt": "look into something",
+                       "cwd": str(cwd)})

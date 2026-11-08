@@ -2254,7 +2254,7 @@ class TestStampDtUriOnEntry:
             lambda uuid: {
                 "name": "Self-Aware Vector Embeddings for Retrieval-Augmented "
                          "Generation: Encoding Relational Knowledge",
-                "url": "", "year": 0, "page_count": 0,
+                "url": "", "page_count": 0,
             },
         )
         monkeypatch.setattr(
@@ -2801,8 +2801,9 @@ class TestPageCoverage:
         assert _missing_pages([], 0) == []
         assert _missing_pages([2, 2, 1], 2) == []
 
-    def test_stamp_writes_devonthink_title_url_year(self, monkeypatch, tmp_path):
-        """critique [24937] Critical 2: DEVONthink's name becomes the catalog title."""
+    def test_stamp_writes_devonthink_title_url_and_no_year(self, monkeypatch, tmp_path):
+        """critique [24937] Critical 2: DEVONthink's name becomes the catalog title. nexus-55clh: the
+        stamp writes no year, even when the facts carry one (an older cache shape)."""
         import nexus.commands.dt as dt_mod
         from types import SimpleNamespace
 
@@ -2834,7 +2835,7 @@ class TestPageCoverage:
         facts = {"name": "DT Name", "url": "https://x/y.pdf", "year": 2013, "page_count": 20}
         assert dt_mod._stamp_dt_uri_on_entry(tmp_path / "a.pdf", "U1", facts=facts)
         tumbler, fields = updates[0]
-        assert fields["title"] == "DT Name" and fields["year"] == 2013
+        assert fields["title"] == "DT Name" and "year" not in fields
         assert fields["source_uri"] == "x-devonthink-item://U1"
         assert fields["meta"]["devonthink_url"] == "https://x/y.pdf" and fields["meta"]["devonthink_page_count"] == 20
 
@@ -2843,12 +2844,13 @@ class TestPageCoverage:
 
         payload = {
             "name": "A Reference Schema", "url": "https://example.org/x.pdf",
-            "creationDate": "2013-09-25T20:58:15-07:00", "pageCount": 20,
+            # nexus-55clh: Grossberg & Stone 1986, imported 2025. creationDate is the file's date.
+            "creationDate": "2025-03-14T10:00:00-07:00", "pageCount": 20,
         }
         monkeypatch.setattr(dt_mod, "_dt_call", lambda tool, args: payload)
         dt_mod._reset_facts_cache()
         facts = dt_mod._dt_record_facts("U1")
-        assert facts == {"name": "A Reference Schema", "url": "https://example.org/x.pdf", "year": 2013, "page_count": 20}
+        assert facts == {"name": "A Reference Schema", "url": "https://example.org/x.pdf", "page_count": 20}
         monkeypatch.setattr(dt_mod, "_dt_call", lambda tool, args: None)
         assert dt_mod._dt_record_facts("U1") == facts, "cached per run"
         dt_mod._reset_facts_cache()
@@ -2866,7 +2868,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U-GAP", "/a.pdf")]
         self._dispatch(monkeypatch, [1, 2, 3])
-        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 5})
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "page_count": 5})
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code != 0, result.output
         assert "1 page-coverage failed" in result.output
@@ -2879,7 +2881,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U-GAP", "/a.pdf")]
         self._dispatch(monkeypatch, [1, 2, 3])
-        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 5})
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "page_count": 5})
         result = runner.invoke(main, ["dt", "index", "--selection", "--allow-page-gap"])
         assert result.exit_code == 0, result.output
         assert "1 page gap allowed" in result.output
@@ -2891,7 +2893,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U-OK", "/a.pdf")]
         self._dispatch(monkeypatch, [1, 2, 3, 4, 5])
-        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 5})
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "page_count": 5})
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output
         assert "page" not in result.output.lower().replace("pages", "")
@@ -2907,7 +2909,7 @@ class TestPageCoverage:
         def record(uuid, path, *, collection, corpus, dry_run, extractor="mineru", force=False, force_re_embed=False):
             return True, 3, None
         monkeypatch.setattr("nexus.commands.dt._index_record", record)
-        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 5})
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "page_count": 5})
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output
         assert "1 page coverage unverified" in result.output
@@ -2920,7 +2922,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U", "/a.pdf")]
         self._dispatch(monkeypatch, [1, 2])
-        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 0})
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "page_count": 0})
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output
         assert "1 page coverage unverified" in result.output
@@ -2938,6 +2940,35 @@ class TestPageCoverage:
         assert "1 page coverage unverified" in result.output
         assert "DEVONthink MCP" in result.output
 
+    def test_an_excluded_pdf_skips_the_coverage_check_with_one_clear_line(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        """RDR-243 Q7 (nexus-rfvyy.8): DEVONthink's MCP refuses an excluded record's UUID, so the
+        pageCount read can only fail for it. The check is skipped for that record, with one line saying
+        why, and the run does not report 'MCP unreachable' or count it unverified."""
+        from nexus.cli import main
+        import nexus.commands.dt as dt_mod
+        from nexus.devonthink import DtRecord
+
+        fake_selectors["selection"].return_value = [DtRecord("U-EX", "/ex.pdf", excluded=True), ("U-OK", "/ok.pdf")]
+        monkeypatch.setattr("nexus.sensitive_write.require_sensitive_engine", lambda what: None)
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)  # the module's cloud_mode pin would refuse the sensitive record
+        monkeypatch.setattr("nexus.commands.dt._index_record", lambda uuid, path, **kw: (True, 5, [1, 2]))
+        monkeypatch.setattr("nexus.commands.dt._stamp_page_gap", lambda uuid, missing: True)
+        asked: list[str] = []
+
+        def facts(uuid):
+            asked.append(uuid)
+            return {"name": "a", "url": "", "year": 0, "page_count": 2}
+
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", facts)
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert asked == ["U-OK"], "the excluded record's pageCount is never asked of the MCP"
+        lines = [ln for ln in result.output.splitlines() if "page coverage not checked" in ln]
+        assert len(lines) == 1 and "U-EX" in lines[0] and "excluded from AI" in lines[0], result.output
+        assert "unreachable" not in result.output and "unverified" not in result.output, result.output
+
     def test_markdown_and_unchanged_records_are_not_checked(self, runner, fake_selectors, monkeypatch):
         from nexus.cli import main
         import nexus.commands.dt as dt_mod
@@ -2951,7 +2982,7 @@ class TestPageCoverage:
 
         def facts(uuid):
             calls.append(uuid)
-            return {"name": "x", "url": "", "year": 0, "page_count": 9}
+            return {"name": "x", "url": "", "page_count": 9}
         monkeypatch.setattr(dt_mod, "_dt_record_facts", facts)
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output

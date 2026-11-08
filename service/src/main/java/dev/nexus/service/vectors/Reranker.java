@@ -41,6 +41,17 @@ public interface Reranker {
     }
 
     /**
+     * Whether {@link #rerank} sends the documents' text to another machine (nexus-rfvyy.8.4, RDR-243 Q4). The
+     * default is TRUE, so a reranker that does not say otherwise (a future remote one) is kept away from sensitive
+     * rows; fail-open would send them. {@link VoyageReranker} is true; the local cross-encoder runs in this process
+     * and overrides this to false. The fused rerank stage keeps sensitive rows out of a reranker for which this
+     * is true.
+     */
+    default boolean sendsTextOffMachine() {
+        return true;
+    }
+
+    /**
      * Rerank {@code documents} against {@code query}, returning
      * {@code (input index, relevance score)} pairs ordered by relevance
      * descending. With {@code topK} set, at most {@code topK} entries return.

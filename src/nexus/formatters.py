@@ -21,6 +21,7 @@ from nexus.context_annotations import (
     OWNER_FRECENCY_KEY,
     OWNER_QUALITY_KEY,
 )
+from nexus.sensitive_output import first_sensitive_owner, hit_facts, stub_line
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
@@ -450,16 +451,26 @@ def format_vimgrep(results: list[SearchResult], query: str | None = None) -> lis
     return lines
 
 
-def format_json(results: list[SearchResult]) -> str:
+def format_json(results: list[SearchResult], *, withhold_sensitive: bool = False) -> str:
     """Format results as a JSON array with id, content, distance,
     hybrid_score, collection, and metadata.
 
     Metadata fields are spread into the top-level object first, then the canonical
     fields (id, content, distance, collection) are written last so they always win
     over any metadata keys with the same name.
+
+    Every item carries ``sensitive`` (a bool, canonical like ``title``; RDR-243 nexus-rfvyy.8.3). With
+    *withhold_sensitive* a sensitive hit is replaced by a stub item that keeps the flag, the owner and the stub
+    line and nothing that names or quotes the document (no ``content``, ``title``, path or metadata), so the
+    list keeps its length and nothing thins silently.
     """
     items: list[dict[str, Any]] = []
     for r in results:
+        is_sensitive, owners = hit_facts(r.metadata)
+        if withhold_sensitive and is_sensitive:
+            owner = first_sensitive_owner(owners)
+            items.append({"sensitive": True, "sensitive_owner": owner or None, "stub": stub_line(owner)})
+            continue
         item: dict[str, Any] = {
             # _owner_doc_ids (nexus-sis0m.5) and _owner_facts (nexus-6pfgb.11)
             # are the search's own working keys, not result fields.
@@ -476,6 +487,7 @@ def format_json(results: list[SearchResult]) -> str:
         # it is never output; a hit whose catalog title did not resolve carries ``"title": null``
         # (the key stays, so the JSON schema does not change with whether the catalog resolved).
         item["title"] = display_title(r.metadata) or None
+        item["sensitive"] = is_sensitive
         items.append(item)
     return json.dumps(items, indent=2, default=str)
 

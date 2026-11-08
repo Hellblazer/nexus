@@ -484,7 +484,7 @@ def test_metadata_scoped_visible_after_public_api_write(
 
     query = "cqtripwire test1 alpha combined query visibility"
 
-    rows = vec_client.search_metadata_scoped(query, [_COLLECTION])
+    rows = vec_client.search_metadata_scoped(query, [_COLLECTION], sensitivity="include")
     matching = [r for r in rows if r["id"] == str(t)]
     assert matching, (
         f"search_metadata_scoped returned no row for tumbler {t!s} after a "
@@ -502,14 +502,14 @@ def test_metadata_scoped_visible_after_public_api_write(
     # Non-vacuity negative control: a mismatching `where` on the identical
     # query MUST return empty, proving `where` is a live predicate.
     where_match = vec_client.search_metadata_scoped(
-        query, [_COLLECTION], where={"kind": "cq-tripwire"}
+        query, [_COLLECTION], where={"kind": "cq-tripwire"}, sensitivity="include"
     )
     assert any(r["id"] == str(t) for r in where_match), (
         "matching where={'kind': 'cq-tripwire'} did not return the doc — "
         "catalog-012 where-equality shape is broken for the positive case"
     )
     where_mismatch = vec_client.search_metadata_scoped(
-        query, [_COLLECTION], where={"kind": "no-such-value"}
+        query, [_COLLECTION], where={"kind": "no-such-value"}, sensitivity="include"
     )
     assert where_mismatch == [], (
         f"mismatching where={{'kind': 'no-such-value'}} on the SAME query "
@@ -570,7 +570,7 @@ def test_manifest_rewrite_keeps_combined_query_visibility(
 
     query = "cqtripwire test2 first pass manifest rewrite regression"
 
-    rows_after_first = vec_client.search_metadata_scoped(query, [_COLLECTION])
+    rows_after_first = vec_client.search_metadata_scoped(query, [_COLLECTION], sensitivity="include")
     matching_first = [r for r in rows_after_first if r["id"] == str(t)]
     assert matching_first, (
         f"search_metadata_scoped returned no row for {t!s} after the FIRST "
@@ -587,7 +587,7 @@ def test_manifest_rewrite_keeps_combined_query_visibility(
     # if the two calls ever diverge.
     cat_client.write_manifest(str(t), manifest_rows, collection=_COLLECTION)
 
-    rows_after_second = vec_client.search_metadata_scoped(query, [_COLLECTION])
+    rows_after_second = vec_client.search_metadata_scoped(query, [_COLLECTION], sensitivity="include")
     matching_second = [r for r in rows_after_second if r["id"] == str(t)]
     assert matching_second, (
         f"search_metadata_scoped returned NO row for {t!s} after a SECOND "
@@ -665,7 +665,7 @@ def test_graph_hop_visible_through_link(cat_client, vec_client, seed_chunks) -> 
     query = "cqtripwire test3 doc b linked target graph hop reachability"
 
     hop_rows = vec_client.search_graph_hop(
-        query, seeds=[str(doc_a)], collection_names=[_COLLECTION], depth=1
+        query, seeds=[str(doc_a)], collection_names=[_COLLECTION], depth=1, sensitivity="include"
     )
     assert any(r["id"] == str(doc_b) for r in hop_rows), (
         f"search_graph_hop from seed {doc_a!s} did not surface linked doc "
@@ -679,7 +679,7 @@ def test_graph_hop_visible_through_link(cat_client, vec_client, seed_chunks) -> 
         seeds=[str(doc_a)],
         collection_names=[_COLLECTION],
         depth=1,
-        where={"kind": "cq-tripwire-hop"},
+        where={"kind": "cq-tripwire-hop"}, sensitivity="include",
     )
     assert any(r["id"] == str(doc_b) for r in hop_where_match), (
         "matching where={'kind': 'cq-tripwire-hop'} did not return doc B "
@@ -691,7 +691,7 @@ def test_graph_hop_visible_through_link(cat_client, vec_client, seed_chunks) -> 
         seeds=[str(doc_a)],
         collection_names=[_COLLECTION],
         depth=1,
-        where={"kind": "no-such-value"},
+        where={"kind": "no-such-value"}, sensitivity="include",
     )
     assert hop_where_mismatch == [], (
         f"mismatching where={{'kind': 'no-such-value'}} on the SAME graph "
@@ -767,7 +767,7 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client, seed_c
     cat_client.append_manifest_chunks(str(doc_app), append_rows, collection=_COLLECTION)
 
     query_app = "cqtripwire test4 append seam manifest on-conflict writer"
-    rows = vec_client.search_metadata_scoped(query_app, [_COLLECTION])
+    rows = vec_client.search_metadata_scoped(query_app, [_COLLECTION], sensitivity="include")
     matching = [r for r in rows if r["id"] == str(doc_app)]
     assert matching, (
         f"search_metadata_scoped returned no row for {doc_app!s} after "
@@ -782,7 +782,7 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client, seed_c
     # Re-append the same rows = ON CONFLICT DO UPDATE branch. Visibility
     # must survive (see docstring for what this is and isn't sensitive to).
     cat_client.append_manifest_chunks(str(doc_app), append_rows, collection=_COLLECTION)
-    rows2 = vec_client.search_metadata_scoped(query_app, [_COLLECTION])
+    rows2 = vec_client.search_metadata_scoped(query_app, [_COLLECTION], sensitivity="include")
     assert any(r["id"] == str(doc_app) for r in rows2), (
         f"doc {doc_app!s} vanished from combined-query results after a "
         "REPEAT append_manifest_chunks call — the append seam's ON CONFLICT "
@@ -819,7 +819,7 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client, seed_c
     )
 
     query_imp = "cqtripwire test4 import seam migration chunk batch writer"
-    rows = vec_client.search_metadata_scoped(query_imp, [_COLLECTION])
+    rows = vec_client.search_metadata_scoped(query_imp, [_COLLECTION], sensitivity="include")
     matching = [r for r in rows if r["id"] == str(doc_imp)]
     assert matching, (
         f"search_metadata_scoped returned no row for {doc_imp!s} after "
@@ -837,7 +837,7 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client, seed_c
         "/import/chunk",
         {"doc_id": str(doc_imp), "collection": _COLLECTION, "rows": import_rows},
     )
-    rows2 = vec_client.search_metadata_scoped(query_imp, [_COLLECTION])
+    rows2 = vec_client.search_metadata_scoped(query_imp, [_COLLECTION], sensitivity="include")
     assert any(r["id"] == str(doc_imp) for r in rows2), (
         f"doc {doc_imp!s} vanished from combined-query results after a "
         "REPEAT /import/chunk call — the import seam's ON CONFLICT DO "

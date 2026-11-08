@@ -162,12 +162,12 @@ def test_search_surface_degrades_loud() -> None:
         "nexus.mcp.core._get_collection_names", return_value=[]
     ):
         # not-migrating: untouched (cheap "no collections" path).
-        baseline = _search_render("q", corpus="zzznope")
+        baseline = _search_render("q", corpus="zzznope", sensitivity="include")
         assert isinstance(baseline, str)
         assert "knowledge migrating" not in baseline
 
         _set_migrating(done=2, total=6)
-        migrating = _search_render("q", corpus="zzznope")
+        migrating = _search_render("q", corpus="zzznope", sensitivity="include")
         assert "knowledge migrating: 2/6" in migrating
         # The landed body (the real surface message) is still present.
         assert "No collections match corpus" in migrating

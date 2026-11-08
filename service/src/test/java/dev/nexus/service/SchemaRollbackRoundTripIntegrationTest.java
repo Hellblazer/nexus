@@ -744,6 +744,150 @@ class SchemaRollbackRoundTripIntegrationTest {
             .toList();
     }
 
+    // ── vectors-055 rollback vs the state before it (nexus-rfvyy.7.18) ───────
+
+    /** The families vectors-055-1 widened; each exists for 384, 768 and 1024. */
+    private static final List<String> SENSITIVITY_FAMILIES = List.of(
+        "plain_search", "hybrid_search", "manifest_search", "text_gated_search_allowed",
+        "text_gated_search_by_chash", "text_gated_search_hnsw_first", "search_metadata_scoped",
+        "search_aspect_scoped", "search_graph_hop", "search_topic_scoped");
+
+    /** The function names vectors-055-1 touches: 10 families x 3 dimensions plus manifest_qualifying_hits. */
+    private static List<String> sensitivityFunctionNames() {
+        List<String> names = new ArrayList<>();
+        for (String family : SENSITIVITY_FAMILIES) {
+            for (int dim : new int[] {384, 768, 1024}) {
+                names.add(family + "_" + dim);
+            }
+        }
+        names.add("manifest_qualifying_hits");
+        return names;
+    }
+
+    private static boolean carriesExcludeSensitive(PgCatalogProbes.FunctionDefinition f) {
+        return f.arguments().contains("p_exclude_sensitive");
+    }
+
+    /**
+     * Applies the Liquibase rollback of vectors-055-1 (and nothing older) and compares every function in
+     * schema nexus with a second database migrated only up to the changeset before it. The 31 search
+     * functions are compared on argument list, return type, body, {@code pg_get_functiondef} text, volatility,
+     * language, SECURITY DEFINER flag, SET clauses, owner and ACL; the comparison runs over the whole schema
+     * so a rollback that touched a neighbour shows up too. Normalized database state, not changeset text: the
+     * rollback is XML and the forward definitions it restores were written in an earlier file, so the two can
+     * differ in entity escaping alone (three hybrid bodies do) while the database holds the same function.
+     *
+     * <p>The oracle is a database that never saw vectors-055, built by {@code update(n)} with n the number of
+     * changesets that precede vectors-055-1 in a first-boot execution order (which is master order). It is not
+     * the rolled-back database compared with itself, and not a copy of the previous changeset's text.
+     */
+    @Test
+    void vectors055Rollback_restoresTheFunctionsAndGrantsOfThePreviousState() throws Exception {
+        List<String> names = sensitivityFunctionNames();
+        assertThat(names).as("10 families x 3 dimensions + manifest_qualifying_hits").hasSize(31);
+
+        // Both containers are assigned inside the try, so a failure starting the second still stops the first.
+        PostgreSQLContainer<?> rolledPg = null;
+        PostgreSQLContainer<?> baselinePg = null;
+        try {
+            rolledPg = PgContainerHelper.startEmptyDatabase();
+            baselinePg = PgContainerHelper.startEmptyDatabase();
+            try (Connection su = rolledPg.createConnection("")) {
+                dbaBootstrap(su);
+            }
+            try (Connection su = baselinePg.createConnection("")) {
+                dbaBootstrap(su);
+            }
+
+            int precedingRows;
+            Map<String, PgCatalogProbes.FunctionDefinition> rolledBack;
+            try (HikariDataSource ds = newAdminPool(rolledPg, "nexus-admin-rollback-vectors055")) {
+                SchemaMigrator.migrate(ds);
+                try (Connection c = ds.getConnection()) {
+                    long widened = PgCatalogProbes.functionDefinitionsIn(dsl(c), "nexus").values().stream()
+                        .filter(SchemaRollbackRoundTripIntegrationTest::carriesExcludeSensitive).count();
+                    assertThat(widened)
+                        .as("forward: exactly the 31 search functions carry p_exclude_sensitive "
+                            + "(non-vacuity: otherwise the rollback below restores nothing)")
+                        .isEqualTo(31);
+                    int depth = rollbackDepthThrough(c, "vectors-055-1");
+                    assertThat(depth).as("vectors-055-1 must have executed, or the rollback below is a no-op")
+                        .isGreaterThan(0);
+                    // First boot: execution order is master order, so the rows before 055 are those the
+                    // baseline database must apply.
+                    precedingRows = changelogRowCount(c) - depth;
+                    assertThatCode(() -> rollbackEverything(ds, depth)).doesNotThrowAnyException();
+                }
+                try (Connection c = ds.getConnection()) {
+                    assertThat(changelogRowCount(c)).as("the rollback stops at vectors-055-1's predecessor")
+                        .isEqualTo(precedingRows);
+                    rolledBack = PgCatalogProbes.functionDefinitionsIn(dsl(c), "nexus");
+                }
+            }
+
+            Map<String, PgCatalogProbes.FunctionDefinition> baseline;
+            try (HikariDataSource ds = newAdminPool(baselinePg, "nexus-admin-baseline-before-vectors055")) {
+                reapplyForward(ds, precedingRows);
+                try (Connection c = ds.getConnection()) {
+                    assertThat(executionTail(c, 1))
+                        .as("the baseline stops at the changeset before vectors-055-1")
+                        .containsExactly("vectors-054-2");
+                    assertThat(changelogRowCount(c))
+                        .as("the baseline applied exactly the rows that precede vectors-055-1 (the rolled-back "
+                            + "database's count), not merely a tail that ends at vectors-054-2")
+                        .isEqualTo(precedingRows);
+                    baseline = PgCatalogProbes.functionDefinitionsIn(dsl(c), "nexus");
+                }
+            }
+
+            assertThat(baseline.values().stream().filter(SchemaRollbackRoundTripIntegrationTest::carriesExcludeSensitive))
+                .as("the baseline predates the argument").isEmpty();
+            assertThat(rolledBack.values().stream().filter(SchemaRollbackRoundTripIntegrationTest::carriesExcludeSensitive)
+                    .map(PgCatalogProbes.FunctionDefinition::identity).toList())
+                .as("after the rollback no function carries p_exclude_sensitive").isEmpty();
+            for (String name : names) {
+                assertThat(baseline.keySet().stream().filter(k -> k.startsWith(name + "(")).toList())
+                    .as("baseline: exactly one signature of %s (non-vacuity)", name).hasSize(1);
+                assertThat(rolledBack.keySet().stream().filter(k -> k.startsWith(name + "(")).toList())
+                    .as("rolled back: exactly one signature of %s (the old one, no overload left behind)", name)
+                    .hasSize(1);
+            }
+            assertThat(rolledBack.keySet())
+                .as("the rollback restored exactly the functions that existed before vectors-055")
+                .containsExactlyElementsOf(baseline.keySet());
+            for (var entry : baseline.entrySet()) {
+                var want = entry.getValue();
+                var got = rolledBack.get(entry.getKey());
+                String id = entry.getKey();
+                assertThat(got.arguments()).as("%s: argument list", id).isEqualTo(want.arguments());
+                assertThat(got.result()).as("%s: return type", id).isEqualTo(want.result());
+                assertThat(got.body()).as("%s: body", id).isEqualTo(want.body());
+                assertThat(got.definition()).as("%s: pg_get_functiondef", id).isEqualTo(want.definition());
+                assertThat(got.volatility()).as("%s: volatility", id).isEqualTo(want.volatility());
+                assertThat(got.language()).as("%s: language", id).isEqualTo(want.language());
+                assertThat(got.securityDefiner()).as("%s: SECURITY DEFINER", id).isEqualTo(want.securityDefiner());
+                assertThat(got.config()).as("%s: SET clauses", id).isEqualTo(want.config());
+                assertThat(got.owner()).as("%s: owner", id).isEqualTo(want.owner());
+                assertThat(got.acl()).as("%s: ACL (the grants the DROP took with it)", id).isEqualTo(want.acl());
+            }
+            // The grants differ across the 31 (28 hold an explicit nexus_svc grant, the three hybrid_search_<dim>
+            // do not): pin the count, so an ACL comparison of null with null cannot be the whole result.
+            long withSvcGrant = names.stream()
+                .map(n -> baseline.entrySet().stream().filter(e -> e.getKey().startsWith(n + "(")).findFirst().orElseThrow())
+                .filter(e -> e.getValue().acl() != null && e.getValue().acl().contains("nexus_svc=X/"))
+                .count();
+            assertThat(withSvcGrant)
+                .as("baseline: 28 of the 31 hold an explicit nexus_svc EXECUTE grant (hybrid_search_<dim> never had one)")
+                .isEqualTo(28);
+        } finally {
+            try {
+                if (baselinePg != null) baselinePg.stop();
+            } finally {
+                if (rolledPg != null) rolledPg.stop();
+            }
+        }
+    }
+
     // ── Data-fidelity round trip (nexus-cck6z) ───────────────────────────────
     //
     // The round trip above proves the rollback SQL RUNS; it seeds no rows, so

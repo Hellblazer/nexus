@@ -510,51 +510,51 @@ class ReadPathLeafPruningIntegrationTest {
         String t = paramTenant;
         return switch (family) {
             case "plain_search" -> switch (dim) {
-                case 384 -> PLAIN_SEARCH_384.call(q, colls, null, null, 10, model, t);
-                case 768 -> PLAIN_SEARCH_768.call(q, colls, null, null, 10, model, t);
-                default -> PLAIN_SEARCH_1024.call(q, colls, null, null, 10, model, t);
+                case 384 -> PLAIN_SEARCH_384.call(q, colls, null, null, 10, model, t, false);
+                case 768 -> PLAIN_SEARCH_768.call(q, colls, null, null, 10, model, t, false);
+                default -> PLAIN_SEARCH_1024.call(q, colls, null, null, 10, model, t, false);
             };
             case "manifest_search" -> switch (dim) {
                 // nexus-6pfgb.25: the EXISTS on the catalog manifest is satisfiable by every fixture row (an empty
                 // section_title), so it is evaluated per candidate and the rows are plain_search's.
-                case 384 -> MANIFEST_SEARCH_384.call(q, null, null, colls, null, null, MANIFEST_ANY, null, 10, model, t);
-                case 768 -> MANIFEST_SEARCH_768.call(q, null, null, colls, null, null, MANIFEST_ANY, null, 10, model, t);
-                default -> MANIFEST_SEARCH_1024.call(q, null, null, colls, null, null, MANIFEST_ANY, null, 10, model, t);
+                case 384 -> MANIFEST_SEARCH_384.call(q, null, null, colls, null, null, MANIFEST_ANY, null, 10, model, t, false);
+                case 768 -> MANIFEST_SEARCH_768.call(q, null, null, colls, null, null, MANIFEST_ANY, null, 10, model, t, false);
+                default -> MANIFEST_SEARCH_1024.call(q, null, null, colls, null, null, MANIFEST_ANY, null, 10, model, t, false);
             };
             case "text_gated_search_hnsw_first" -> switch (dim) {
-                case 384 -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(q, COMMON, colls, null, null, 10, model, t);
-                case 768 -> TEXT_GATED_SEARCH_HNSW_FIRST_768.call(q, COMMON, colls, null, null, 10, model, t);
-                default -> TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(q, COMMON, colls, null, null, 10, model, t);
+                case 384 -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(q, COMMON, colls, null, null, 10, model, t, false);
+                case 768 -> TEXT_GATED_SEARCH_HNSW_FIRST_768.call(q, COMMON, colls, null, null, 10, model, t, false);
+                default -> TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(q, COMMON, colls, null, null, 10, model, t, false);
             };
             case "text_gated_search_by_chash" -> switch (dim) {
-                case 384 -> TEXT_GATED_SEARCH_BY_CHASH_384.call(q, raw, colls, null, null, 10, model, t);
-                case 768 -> TEXT_GATED_SEARCH_BY_CHASH_768.call(q, raw, colls, null, null, 10, model, t);
-                default -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(q, raw, colls, null, null, 10, model, t);
+                case 384 -> TEXT_GATED_SEARCH_BY_CHASH_384.call(q, raw, colls, null, null, 10, model, t, false);
+                case 768 -> TEXT_GATED_SEARCH_BY_CHASH_768.call(q, raw, colls, null, null, 10, model, t, false);
+                default -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(q, raw, colls, null, null, 10, model, t, false);
             };
             case "text_gated_search_allowed" -> switch (dim) {
-                case 384 -> TEXT_GATED_SEARCH_ALLOWED_384.call(q, COMMON, raw, colls, null, null, 10, model, t);
-                case 768 -> TEXT_GATED_SEARCH_ALLOWED_768.call(q, COMMON, raw, colls, null, null, 10, model, t);
-                default -> TEXT_GATED_SEARCH_ALLOWED_1024.call(q, COMMON, raw, colls, null, null, 10, model, t);
+                case 384 -> TEXT_GATED_SEARCH_ALLOWED_384.call(q, COMMON, raw, colls, null, null, 10, model, t, false);
+                case 768 -> TEXT_GATED_SEARCH_ALLOWED_768.call(q, COMMON, raw, colls, null, null, 10, model, t, false);
+                default -> TEXT_GATED_SEARCH_ALLOWED_1024.call(q, COMMON, raw, colls, null, null, 10, model, t, false);
             };
             case "search_metadata_scoped" -> switch (dim) {
-                case 384 -> SEARCH_METADATA_SCOPED_384.call(q, colls, null, null, null, null, null, null, null, null, 10, model, t);
-                case 768 -> SEARCH_METADATA_SCOPED_768.call(q, colls, null, null, null, null, null, null, null, null, 10, model, t);
-                default -> SEARCH_METADATA_SCOPED_1024.call(q, colls, null, null, null, null, null, null, null, null, 10, model, t);
+                case 384 -> SEARCH_METADATA_SCOPED_384.call(q, colls, null, null, null, null, null, null, null, null, 10, model, t, false);
+                case 768 -> SEARCH_METADATA_SCOPED_768.call(q, colls, null, null, null, null, null, null, null, null, 10, model, t, false);
+                default -> SEARCH_METADATA_SCOPED_1024.call(q, colls, null, null, null, null, null, null, null, null, 10, model, t, false);
             };
             case "search_aspect_scoped" -> switch (dim) {
-                case 384 -> SEARCH_ASPECT_SCOPED_384.call(q, colls, null, null, null, null, null, null, 10, model, t);
-                case 768 -> SEARCH_ASPECT_SCOPED_768.call(q, colls, null, null, null, null, null, null, 10, model, t);
-                default -> SEARCH_ASPECT_SCOPED_1024.call(q, colls, null, null, null, null, null, null, 10, model, t);
+                case 384 -> SEARCH_ASPECT_SCOPED_384.call(q, colls, null, null, null, null, null, null, 10, model, t, false);
+                case 768 -> SEARCH_ASPECT_SCOPED_768.call(q, colls, null, null, null, null, null, null, 10, model, t, false);
+                default -> SEARCH_ASPECT_SCOPED_1024.call(q, colls, null, null, null, null, null, null, 10, model, t, false);
             };
             case "search_graph_hop" -> switch (dim) {
-                case 384 -> SEARCH_GRAPH_HOP_384.call(q, seeds, colls, null, 1, "both", null, null, null, 10, model, t);
-                case 768 -> SEARCH_GRAPH_HOP_768.call(q, seeds, colls, null, 1, "both", null, null, null, 10, model, t);
-                default -> SEARCH_GRAPH_HOP_1024.call(q, seeds, colls, null, 1, "both", null, null, null, 10, model, t);
+                case 384 -> SEARCH_GRAPH_HOP_384.call(q, seeds, colls, null, 1, "both", null, null, null, 10, model, t, false);
+                case 768 -> SEARCH_GRAPH_HOP_768.call(q, seeds, colls, null, 1, "both", null, null, null, 10, model, t, false);
+                default -> SEARCH_GRAPH_HOP_1024.call(q, seeds, colls, null, 1, "both", null, null, null, 10, model, t, false);
             };
             case "search_topic_scoped" -> switch (dim) {
-                case 384 -> SEARCH_TOPIC_SCOPED_384.call(q, TOPIC, coll, 10, model, t);
-                case 768 -> SEARCH_TOPIC_SCOPED_768.call(q, TOPIC, coll, 10, model, t);
-                default -> SEARCH_TOPIC_SCOPED_1024.call(q, TOPIC, coll, 10, model, t);
+                case 384 -> SEARCH_TOPIC_SCOPED_384.call(q, TOPIC, coll, 10, model, t, false);
+                case 768 -> SEARCH_TOPIC_SCOPED_768.call(q, TOPIC, coll, 10, model, t, false);
+                default -> SEARCH_TOPIC_SCOPED_1024.call(q, TOPIC, coll, 10, model, t, false);
             };
             case "text_gate_probe" -> switch (dim) {
                 case 384 -> TEXT_GATE_PROBE_384.call(COMMON, colls, null, null, 100, model, t);

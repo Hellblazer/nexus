@@ -175,6 +175,7 @@ printf %s "$KEY" | nx config set openai_compat_api_key --stdin              # op
 | `search.distance_threshold.default` | — | `0.55` | Maximum distance for unknown corpus types |
 | `search.cluster_by` | — | `null` | Set to `semantic` to group search results by Ward hierarchical clustering. Disabled by default |
 | `search.contradiction_check` | — | `false` | JIT contradiction detection (RDR-057), opt-in. Flags result pairs with high similarity but different `source_agent` provenance. Adds `[CONTRADICTS ANOTHER RESULT]` to search output. Set to `true` to enable. The check runs in the MCP `search` tool over the page it renders, not in `nx search` or `query`. It fetches embeddings only for rows on that page that carry a `source_agent` while another row of the same collection on the page carries a different one: one round trip per such collection, none when no collection on the page has a mixed-agent pair |
+| `sensitivity.mcp_output` | — | `withhold` | What the MCP read tools (`search`, `query`, `store_get`, `store_get_many`, `search_metadata_scoped`, `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`) print for a hit the engine marks sensitive (RDR-243). `withhold` replaces the hit with one line, `[sensitive] <tumbler>: content withheld` (the tumbler is the hit's first sensitive owner in tumbler order, left out when none resolves), with no title, path or snippet, and states how many hits it withheld; a structured result drops the hit and carries `sensitive_withheld`. `flag` returns the content with a `[sensitive]` badge and adds a reader instruction not to quote it. Any other value is read as `withhold`. Read from the global `config.yml` only: a repository's `.nexus.yml` cannot set it. There is no tool argument |
 
 Embedding models are selected automatically (see [Storage Tiers](storage-tiers.md)). In the Voyage posture (cloud mode, or a local service given a Voyage key) that is `voyage-code-3` for code and `voyage-context-3` (CCE) for docs/rdr/knowledge. In the local default every content type uses bge-768 (`NX_EMBED_PROFILE` below). All collections use the same model for both index and query.
 
@@ -334,10 +335,12 @@ run:
    (NOSUPERUSER NOBYPASSRLS NOINHERIT LOGIN data role). The engine refuses
    to boot (`event=service_role_bypassrls_refused`, exit 1) when the role it
    connects as (`NX_DB_USER`) has `BYPASSRLS` and is not a superuser
-   (nexus-b1adx): the changelog's `partition_copy_access` skips `BYPASSRLS`
-   grantees, so a `BYPASSRLS` service role would get no DML grant on any
-   tenant leaf or model partition created afterwards, and row-level security
-   would not bind it. The message names the fix, `ALTER ROLE <role>
+   (nexus-b1adx): row-level security does not bind a `BYPASSRLS` role, even
+   under `FORCE ROW LEVEL SECURITY`, whether it owns the tables or holds grants
+   on them, so tenant isolation would not be enforced (nexus-2jfoj). Also, the
+   changelog's `partition_copy_access` skips `BYPASSRLS` grantees, so a direct
+   write to a tenant leaf or model partition created afterwards that the role
+   does not own fails with `permission denied`. The message names the fix, `ALTER ROLE <role>
    NOBYPASSRLS`. A superuser passes (single-role development setups) with a `WARN`
    (`event=service_role_superuser_isolation_not_enforced`, naming the role): row-level
    security does not bind a superuser either, so tenant isolation is not enforced for a

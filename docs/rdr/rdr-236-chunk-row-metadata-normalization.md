@@ -552,6 +552,71 @@ critiqued once before Sam's gate decision (T2
   rollback block on a retired table. `plain_search_<dim>` takes `p_where`
   and `p_where_path`. The indexers write "" for a file with no extension.
   The epic has 36 open children after .44.
+- **RF-25 (Decided by the implementer as a reversible default, nexus-6cmam, 2026-11-07).**
+  The label stage expands a hit once per owning document, and that was uncapped:
+  a boilerplate chunk held by N documents took `min(N, limit)` slots of a page,
+  and the lexical extras of `searchPerCollection` were cut at `Integer.MAX_VALUE`,
+  so they were hits times owners. `ManifestLabelStage.MAX_OWNERS_PER_HIT` (5)
+  now bounds one hit's expansion to its first owners in `doc_id` order (the
+  lookup orders occurrences by `doc_id`, then position, so the rows kept are the
+  same on every call); the owners past it are dropped from that response, not
+  paged to. Five keeps every shared-chunk case the tests pin (two owners) and
+  the few real ones (a copied section, a vendored file), and leaves a page of
+  ten room for other hits. The cap applies to route (a) only, the stage that
+  runs when a search's `where` names a label key or a document key
+  (`section_*`, `page_number`, `title`, `author`, `content_type`, `tags`,
+  `bib_*` ...). Route (b) (metadata-scoped, graph-hop, aspect-scoped and
+  `manifest_search_*` reads) returns one row per owner and is NOT capped, so a
+  reader of link expansion is not looking at a capped list. The cap counts the
+  owners that PASS the filter, so a document-key read naming owner 7 of 10 still
+  finds it. The lexical extras are cut at
+  `expansionBound(hits received) = hits * 5`, not at no limit; that bound is a
+  derived invariant of the cap (the stage cannot emit more than hits times the
+  cap, so the bound never binds), not an independent control, and no test
+  fails if the call site goes back to `Integer.MAX_VALUE`. The `shared`
+  flag is decided before the cap (over the documents the lookup read, below). The class javadoc's
+  settled semantics (a hit passes once per owning document) now carry the cap.
+  Changing the constant changes what a response drops and nothing else.
+  Statement budget (nexus-6cmam remainder): the occurrence lookup behind the
+  stage now reads at most `ManifestLabelStage.DOCUMENTS_PER_CHASH` (64) live
+  DOCUMENTS per chash: the first 64 in `doc_id` order, with every position each
+  holds the chash at, cut in SQL by a per-chash
+  `LATERAL (SELECT DISTINCT doc_id ... ORDER BY doc_id LIMIT 64)` and joined
+  back to the manifest rows. The unit is the document, not the position: one
+  document can hold a chunk at many positions (a repeated page footer), and it
+  must not use up the bound for the others or hide them from the `shared`
+  decision. The filter still runs in Java
+  after the lookup, so the bound is larger than the owner cap (about twelve
+  times). What it drops: a document past the first 64 live holders is never
+  seen, so a hit whose first 64 holders all fail the filter returns no row, and
+  one whose passing owners straddle the bound returns only those inside it. Only
+  a chunk held by more than 64 live documents can lose anything. Route (b)
+  reaches the owners past the bound; a narrower filter does not, because the
+  filter runs after the lookup. The `shared` decision is taken over the
+  documents read: two of them make the chunk shared, and a lookup that read one
+  document asks the database whether any other document holds the chunk, but
+  only when some occurrence lacks a span field (otherwise the flag cannot
+  matter). The bound is on documents only: one document's own repeats of the
+  chunk are not bounded, so the rows read per chash can reach 64 times the
+  positions a document holds it at (a repeated page footer holds it at tens or
+  hundreds).
+  What it saves: the rows sent to the engine's Java side, the projection and
+  detoast of the wide columns of the rows past the bound, and the Java objects
+  built from them. What it does not save: the database still visits every
+  holder's index entry, heap row and `catalog_documents` row (the tombstone
+  join) and sorts them, so the statement's cost is not bounded. Bounding it
+  would take an index on `(tenant_id, chash, doc_id, position)`, which is not
+  added; that is a separate decision.
+  Measured 2026-11-07 (PostgreSQL 17, `EXPLAIN (ANALYZE, SERIALIZE, BUFFERS)`,
+  warm, median of 5, about 6,000 documents with wide rows): one chash held by
+  5,000 documents runs 1.19 ms bounded against 6.20 ms unbounded and sends 17 kB
+  against 1,342 kB (client wall 4.0 against 13.2 ms); the ordinary page, 100 keys
+  held by 1 to 3 documents each, runs 1.38 ms bounded against 0.69 ms unbounded
+  with the same rows (client wall 4.1 against 2.6 ms), the per-key LATERAL loop's
+  cost. Kept as the reversible default: the hot-path cost is under a millisecond
+  a page, the boilerplate saving is the engine-heap problem nexus-6cmam was
+  filed for. If the hot-path cost matters, the next lever is the unbounded form
+  with a per-chash `dense_rank()` by `doc_id` cut before the projection.
 
 ### Critical Assumptions
 

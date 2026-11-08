@@ -393,7 +393,7 @@ def _collection_rows(t3: Any, collection: str, chashes: list[str]) -> dict[str, 
     )
 
     try:
-        return t3.chunk_rows(collection, chashes)
+        return t3.chunk_rows(collection, chashes, sensitivity="include")
     except VectorServiceError as exc:
         if not is_unregistered_collection_error(exc):
             raise
@@ -543,7 +543,7 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
     """Full export: one catalog walk, batch manifest fetch, link
     denormalization, JSONL write. Read-only against the store.
 
-    *t3* must offer ``chunk_rows(collection, chashes)``
+    *t3* must offer ``chunk_rows(collection, chashes, *, sensitivity)``
     (:meth:`~nexus.db.http_vector_client.HttpVectorClient.chunk_rows`), which raises when the store
     cannot be read; the error propagates and no bundle is written, since the file is written last."""
     summary = ExportSummary()

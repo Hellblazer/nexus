@@ -765,6 +765,8 @@ class EligibilityFilter:
         self._judged: dict[int, tuple[PlanStanding, Verdict]] = {}
         self._excluded_ids: list[int] = []
         self._enforced_excluded = 0
+        #: nexus-q7dpt: per recorded kind, the ``grown_route_not_lookup`` exclusions (counted like ``excluded``).
+        self._refused_recorded_kinds: dict[str, int] = {}
         self._returned: dict[str, int] | None = None
         self._selected: dict[str, Any] | None = None
         self._fallback: str | None = None
@@ -786,6 +788,9 @@ class EligibilityFilter:
             return True
         counts["excluded"] += 1
         counts["reasons"][verdict.reason] = counts["reasons"].get(verdict.reason, 0) + 1
+        if verdict.reason == "grown_route_not_lookup" and standing.recorded_kind is not None:
+            kind = standing.recorded_kind.value
+            self._refused_recorded_kinds[kind] = self._refused_recorded_kinds.get(kind, 0) + 1
         if isinstance(plan_id, int) and plan_id not in self._excluded_ids:
             self._excluded_ids.append(plan_id)
         if self.enforce or verdict.reason in self.enforced_reasons:
@@ -885,6 +890,7 @@ class EligibilityFilter:
             "branches": {b: {**c, "reasons": dict(c["reasons"])} for b, c in self._branches.items()},
             "excluded_total": self.excluded_total,
             "enforced_excluded_total": self._enforced_excluded,
+            "refused_recorded_kinds": dict(sorted(self._refused_recorded_kinds.items())),
             "excluded_plan_ids": self._excluded_ids[:_MAX_LISTED_IDS],
             "returned": dict(self._returned) if self._returned is not None else None,
             "selected": dict(self._selected) if self._selected is not None else None,

@@ -28,10 +28,25 @@ boundary): the end of a turn is where a promise lives, and a status line near th
 block a message that ends on a question to Sam. It is split into sentences and clauses (each
 capped at ``_CLAUSE_CAP`` characters, which also bounds the regex cost). A clause is DROPPED when
 its actor is Sam (it addresses "you", asks a question, says "say go and I'll", is a ``!`` command,
-names Sam, or names an approval: a go, go-ahead, approval, ack, sign-off, ruling, decision,
-authorization) or when it names a peer, mailbox, notification or restart as the wake, or when it is
-a past-tense report. If the LAST clause addresses Sam, the whole message is allowed: Sam's reply is
-the wake. A block follows when any surviving clause is (a) a CI or run wait, (b) a promise to check
+names Sam, or is gated on an approval: a gate word (once, when, after, until, pending, if, awaits, needs,
+hold for) governing an approval predicate, however it is phrased: "once it is cleared", "when someone gives
+the word", "pending the ack"; see ``is_sam_gated``. An approval word alone, as the subject of a test or a
+log ("approval-flow tests", "the decision log"), gates nothing) or when it names a peer, mailbox, notification or restart as the wake, or when it is
+a past-tense report. If the LAST clause asks Sam something, tells him to do something or gates on his
+approval, the whole message is allowed: Sam's reply is the wake. A courtesy to him ("I'll keep you posted",
+"see you then") is not such a clause.
+
+The gate is on a PRINCIPAL (Sam, you, the user, the operator, the owner, the maintainer, the human; one pattern,
+``_PRINCIPAL``). Approval terms come in two kinds: strong ones (approval, sign off, the nod, the word, okays,
+greenlit) gate under any gate word; weak ones (cleared, settled, granted, permitted, ok, decision, permission,
+told, confirmed) gate only when their subject is a pronoun or a principal, so "once it is cleared" waits on a
+person and "once the lock clears" waits on a run. A role word ("the user", "the owner", "the operator") is the person only when a verb, an auxiliary or the end of the
+phrase follows it ("the user weighs in"); "the user migration" is code. A handover ("Over to Sam.", "Sam will cut
+the tag.", "Sam is away.") passes the turn: will, going to or needs to plus a turn-passing verb (cut, tag, run, push,
+approve, decide, review, merge, release), has the ball, it's his move. A habit or an ownership ("Sam runs the nightly
+at 2am", "Sam owns the pipeline config") passes nothing. Merely naming Sam ("I'll ping Sam once the build finishes") and an offer ("Sam can review") are
+not. A reviewer, critic, peer or named colleague who approves is a peer's wake, like one who reports. What hangs
+from a Sam clause survives at most ``_CHAIN_GAP`` clauses that are neither Sam's nor chained. A block follows when any surviving clause is (a) a CI or run wait, (b) a promise to check
 or do something later, or (c) a timed step (clock time, date, "in N minutes"). The block is
 ``{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": ...}}``, which continues the
 turn like ``decision: block`` does but without the "Stop hook error occurred" notice Claude Code
@@ -124,37 +139,216 @@ def clauses(text: str) -> list[str]:
 # Drops: Sam is the actor, a peer or notification is the wake, past-tense report
 # ---------------------------------------------------------------------------
 
-#: A clause that addresses Sam or asks him something. "you" in any form is enough; the one
-#: exception is the default-proceed idiom "unless you'd rather ...", which names Sam only to
-#: offer an override while the session carries on.
-#: "Sam's ruling" is an object, not an actor; a bare "Sam" is still Sam.
-_SAM_YOU = re.compile(r"\b(?:you|your|yours|you'd|you'll|you've|you're|yourself|sam)\b(?!')", re.I)
-#: Sam named in any form ("Sam's" included). A clause that only names him is not dropped (it may be
-#: about his work), but what hangs from it is his to unblock.
-_SAM_NAME = re.compile(r"\b(?:sam|hal)(?:'s)?\b", re.I)
-#: An approval is a gate that only Sam (the operator) opens, however the sentence is phrased: "once the
-#: release go arrives", "pending the ack", "it is approved", "after approval".
-_APPROVAL = re.compile(
-    r"\b(?:approv\w*|authori[sz]\w*|sign-?off|go-?ahead|green[- ]?light|say-?so|rulings?|decisions?|permission|"
-    r"acks?|acknowledg\w*|consent|blessing)\b"
-    r"|\b(?:the|a|his|her|their|sam's|operator's|owner's|release|ship|final) go\b"
-    r"|\b(?:sam|operator|owner)'s (?:call|word|nod|okay|ok|choice|pick|say)\b|\b(?:ok|okay) from\b|\bgreen signal\b",
+#: A clause that addresses the user or asks him something. "you" in any form is enough; the one
+#: exception is the default-proceed idiom "unless you'd rather ...", which names him only to offer an
+#: override while the session carries on. Naming Sam ("I'll ping Sam once the build finishes") is NOT
+#: addressing him: a name alone drops nothing. A handover to him is a separate, structural test
+#: (``is_sam_gated``).
+_SAM_YOU = re.compile(r"\b(?:you|your|yours|you'd|you'll|you've|you're|yourself)\b(?!')", re.I)
+
+#: The principal: the person whose reply is the wake. One pattern for every rule below. Sam, Hal and "you" are
+#: always the person. "the user", "the owner", "the operator" (a role word) count only when what follows is a
+#: verb, an auxiliary, a function word or the end of the phrase: "the user weighs in", "the user is back" name the
+#: person, "the user migration", "the owner index", "the operator reconcile loop" head a noun phrase about code.
+_ROLE = r"(?:the (?:user|human|maintainer|owner|operator)|operator|owner)"
+_FUNCTION_WORDS = (
+    r"is|are|was|were|be|been|being|has|have|had|will|would|can|could|may|might|should|must|shall|does|did|do|to|and|or|"
+    r"but|then|also|just|not|now|still|already|if|when|once|until|after|before|for|with|at|in|on|back|here|away|out|about|"
+    r"from|by|as|that|who|which|me|it|us|gave|said|saw|went|told|came|took|got|made|ran|read|wrote|chose|spoke|left|sent|"
+    r"met|knew|held|kept|let|put|set"
+)
+#: Plural nouns that end in -s and would pass for a third-person verb: a backstop, pinned by corpus rows.
+_NOUN_BACKSTOP = (
+    r"tests?|logs?|scripts?|events?|permissions?|settings?|records?|accounts?|sessions?|agents?|stor(?:y|ies)|stores?|models?|"
+    r"ids|names|configs?|preferences?|objects?|interfaces?|inputs?|tables?|schemas?|flows?|counts?|services?|jobs?|builds?|"
+    r"checks?|files?|users?|roles?|groups?|teams?|bots?"
+)
+_ROLE_FOLLOWED_BY_A_VERB = (
+    r"(?=$|[^\w\s-]|\s*$|'(?:ll|re|ve|d)\b|\s+(?:" + _FUNCTION_WORDS + r")\b|\s+\w+(?:ed|ly)\b"
+    r"|\s+(?!\w*(?:ss|us|is)\b)\w+s\b)(?!\s+(?:" + _NOUN_BACKSTOP + r")\b)"
+)
+_PRINCIPAL = r"(?:sam|hal|you|" + _ROLE + _ROLE_FOLLOWED_BY_A_VERB + r")"
+_PRINCIPAL_NAME = r"(?:sam|hal|the (?:user|human|maintainer|owner|operator)|operator|owner)"
+_P = r"\b" + _PRINCIPAL + r"\b(?!'s\b)"
+_P_RE = re.compile(_P, re.I)
+
+#: A gate word: the clause waits on whatever follows it ("once", "pending", "awaits", "needs", "hold for"). "unless" is
+#: not one: "unless you'd rather ..." is the default-proceed idiom, the session carries on.
+_GATE = re.compile(
+    r"\b(?:once|when|whenever|after|until|till|upon|pending|if|as soon as|awaits?|awaiting|"
+    r"wait(?:s|ing)? (?:on|for)|standing by for|hold(?:s|ing)?(?: off)?(?: on| for| until)|needs?|requires?|"
+    r"gated (?:on|by)|subject to|depends? on|contingent on|blocked on)\b"
+    r"|\bon(?=\s+(?:confirmation|approval|sign-?off|authori[sz]ation|the (?:word|nod|go)\b))",
+    re.I,
+)
+
+#: An approval word that names a test, a log or a workflow is a subject, not a predicate. The lookahead only
+#: works when the word cannot give characters back, so every open-ended stem below is possessive (``\w*+``).
+_NOT_A_SUBJECT = (
+    r"(?!\w)(?![- ]?(?:flows?|workflows?|tests?|suites?|logs?|handl\w*+|banners?|tables?|modules?|handlers?|queues?|code|"
+    r"paths?|pipelines?|jobs?|steps?|runs?|checks?|errors?|failures?|models?|polic\w++|ui|screens?|dialogs?|buttons?|trees?|"
+    r"lists?|files?|configs?)\b)"
+)
+#: STRONG terms: an approval whatever its subject. Under any gate word they gate on a person ("once approved",
+#: "pending the nod", "when someone gives the word"). A word on this list is NOT a gate by itself.
+_STRONG_SRC = (
+    r"approv\w*+|authori[sz]\w*+|sign(?:s|ed|ing)?[- ]?off|go-?ahead|green[- ]?(?:light\w*+|signal)|greenlit|greenlights?|"
+    r"say-?so|says? so|rulings?|ruled|acks?|acked|acknowledg\w*+|consent\w*+|blessing|nods?|nodded|"
+    r"okay(?:s|ed)|oks|ok'd|(?:the|an?|your|his|her|their) (?:ok|okay)|(?:ok|okay) from|thumbs?[- ]up|hear(?:s|d)? back|"
+    r"(?:gives?|gave|giving|get|got|has|have) the (?:word|nod|go|ok|okay)|"
+    r"(?:the|a|his|her|their|your|sam's|operator's|owner's|release|ship|final) go\b"
+    r"(?!\s+(?:build\w*+|binary|toolchain|vet|mod|install|run|version|test\w*+|\d))"
+)
+#: WEAK terms: ordinary state-change words ("cleared", "settled", "granted", "ok", "decision", "permission"). They
+#: gate on a person only when the subject is a pronoun or a principal ("once it is cleared", "when Sam decides"), or
+#: the term is a noun that arrives ("when a decision comes"). "Once the lock clears" and "the token is granted
+#: by the auth server" are run and infrastructure waits.
+_WEAK_SRC = (
+    r"clear(?:ed|s|ance)|settled|settles|granted|grants?|permitted|permits?|(?:ok|okay)|decisions?|decides?|decided|"
+    r"permission\w*+|told(?: to)?|confirm\w*+"
+)
+_STRONG_TERM = re.compile(r"(?<![\w-])(?:" + _STRONG_SRC + r")" + _NOT_A_SUBJECT, re.I)
+_WEAK_TERM = re.compile(r"(?<![\w-])(?:" + _WEAK_SRC + r")" + _NOT_A_SUBJECT, re.I)
+
+#: Who the gate sits on, between a gate word and the term: a run or a store (backstop), or someone who is not
+#: the principal ("the reviewer approves", "once Bob approves" are a peer's wake, not Sam's).
+_NOT_AN_APPROVER = re.compile(
+    r"\b(?:finish\w*|complet\w*|pass\w*|green|publish\w*|runs?|builds?|ci|shards?|suite|jobs?|cache\w*|queues?|buffers?|"
+    r"backlog|disk|logs?|checks?|pipelines?|rollouts?|clusters?|limits?|locks?|alerts?|tokens?|status|conflicts?)\b",
+    re.I,
+)
+_NON_SAM_ACTOR = re.compile(
+    r"\b(?:reviewers?|critics?|peers?|agents?|bots?|planner|review(?!\s+(?:is|was|has been))|bob|linda|wren|halcyon|kimi|marlowe|tamsin|steve|steven|"
+    r"kestrel|elsinore|labrun|mailbox)\b",
+    re.I,
+)
+_SUBJECT_SPLIT = re.compile(r"\b(?:and|or|but|then|while)\b", re.I)
+_AUX = r"(?:is|are|was|were|be|been|being|has|have|had|gets?|got|also|finally|officially|explicitly|formally|properly|fully|really|actually|just|now|yet|already|still|only|ever|not|then)"
+_WEAK_SUBJECT = re.compile(
+    r"(?:(?:it|that|this|they|he|she|we|someone|somebody|anyone|whoever|everything|" + _PRINCIPAL + r"|"
+    r"the (?:request|release|plan|proposal|change|pr|tag|merge|push|patch|design|rfc|rdr|go)|"
+    r"my (?:request|change|pr|proposal|plan))(?:'s|'re|'ve|'d)?\s*)?(?:" + _AUX + r"\s*)*",
+    re.I,
+)
+_ARRIVES = re.compile(r"\s+(?:comes?|arrives?|lands?|drops?|is (?:in|back|given|made|recorded|available))\b", re.I)
+_WEAK_NOUN = ("decision", "permission", "ok", "confirm", "clearance")
+
+#: The user acts: a possessive approval noun ("Sam's call"), or the principal with an approval verb. A modal of
+#: permission between them ("Sam can review", "you can approve") is an offer, not a wait.
+_SAM_POSSESSIVE = re.compile(
+    r"\b" + _PRINCIPAL_NAME + r"'s (?:calls?|words?|nods?|ok|okay|choice|pick|say|go|approval|decisions?|rulings?|"
+    r"sign-?off|go-?ahead|blessing|permission)\b",
+    re.I,
+)
+_SAM_VERB = re.compile(
+    _P + r"(?:(?!\b(?:can|could|may|might)\b)[^,.;:!?]){0,25}?\b(?:decid\w*+|approv\w*+|"
+    r"rule[sd]?|sign\w*+|okay\w*+|ok\w*+|greenlight\w*+|authori[sz]\w*+|merges?|clears?|cleared|permits?|says?|gives?|gave|calls?|"
+    r"chooses|picks|nods?)\b",
+    re.I,
+)
+#: Turn-passing actions only: what the user does next, not what he habitually does or owns.
+_TURN_VERBS = (
+    r"cut|tag|run|push|approve|decide|review|merge|release|look|sign|ship|deploy|pick|choose|confirm|answer|reply|respond"
+)
+_TURN_PROGRESSIVE = r"cutting|tagging|running|pushing|merging|reviewing|approving|deciding|releasing|signing|shipping|deploying"
+#: The turn is handed over: "Over to Sam.", "It's up to Sam.", "Handed to Sam.", "The diff is with Sam.", "The next
+#: step is Sam's.", "Sam will cut the tag.", "Sam needs to look at it.", "Sam is reviewing.", "Sam is away.", "Sam's
+#: back". A modal of permission ("Sam can review") is not a handover; will, must, should, needs to, going to and the
+#: progressive are.
+_HANDOVER = re.compile(
+    r"\b(?:over|up|parked|belongs?|falls?)\s+(?:to|with|on|for)\s+" + _P
+    + r"|\b(?:handed|handing|passed|passing|left|deferred)\s+(?:[\w']+\s+){0,5}?(?:to|with)\s+" + _P
+    + r"|\b(?:is|are|was|now|goes|sits|lies)\s+(?:with|on|for|to)\s+" + _P
+    + r"|\b(?:is|are|it's|that's|'s)\s+" + _PRINCIPAL_NAME + r"'s\s*[.!]?$"
+    r"|" + _P + r"\s+(?:will|'ll|shall|must|should|has to|have to|needs? to|is going to|is about to|are going to|going to|to)\s+"
+    r"(?:\w+ly\s+)?(?:" + _TURN_VERBS + r")\b"
+    r"|" + _P + r"\s+(?:is|are)\s+(?:" + _TURN_PROGRESSIVE + r")\b"
+    r"|" + _P + r"\s+(?:runs|cuts|tags|pushes|merges|ships|releases)\s+(?:the |a )?(?:tag|release|cut|install|command|migration|it|this|that|push|merge|deploy)\b(?!\s+(?:at|every|each|daily|nightly))"
+    r"|" + _P + r"\s+has the (?:ball|tag|release|call|decision|move)\b"
+    r"|\b(?:it'?s|it is)\s+(?:his|her|their|your|" + _PRINCIPAL_NAME + r"'s)\s+(?:move|turn)\b|\b(?:your|" + _PRINCIPAL_NAME + r"'s)\s+(?:move|turn)\b"
+    r"|\b" + _PRINCIPAL_NAME + r"(?:'s|\s+is|\s+are)\s+(?:back|away|out|gone|offline|unavailable|available|free|ready|happy|"
+    r"satisfied|around|here|returns?|returned|returning)\b",
     re.I,
 )
 #: "I'll record Sam's ruling" acts ON an approval already given; it is a step, not a wait. Only when
-#: no gate word ("once", "pending", "needs") makes it a wait.
+#: no gate word makes it a wait.
 _APPROVAL_OBJECT = re.compile(
     r"\b(?:record|write|file|apply|implement|log|store|capture|document|note|save|enter|add)\b[^,.]{0,30}"
     r"\b(?:rulings?|decisions?)\b",
     re.I,
 )
+#: How far past a gate word the predicate may sit, and what ends the search.
+_GATE_SPAN = 70
+_SPAN_END = re.compile(r"[,.;:!?]")
+_REMINDER_GATE = re.compile(r"\b(?:once|when|whenever|after|until|pending|if|awaits?)\b", re.I)
+
+
+def _windows(clause: str):
+    for gate in _GATE.finditer(clause):
+        yield _SPAN_END.split(clause[gate.end() : gate.end() + _GATE_SPAN], 1)[0]
+
+
+#: "Blocked on the maintainer's review", "until Sam's answer": the principal's own act, under a gate.
+_POSSESSED_ACT = re.compile(
+    r"\b" + _PRINCIPAL_NAME + r"'s (?:review|answer|reply|verdict|response|input|feedback|look|confirmation|thumbs?[- ]up|read)\b", re.I
+)
+
+
+def _gate_level(window: str) -> int:
+    """0 nothing; 1 a gate on "you" alone; 2 a gate on an approval predicate or on a named principal."""
+    if _POSSESSED_ACT.search(window):
+        return 2
+    level = 0
+    hit = _P_RE.search(window)
+    if hit:
+        level = 1 if hit.group(0).lower() == "you" else 2
+    for pattern, strong in ((_STRONG_TERM, True), (_WEAK_TERM, False)):
+        for hit in pattern.finditer(window):
+            subject = _SUBJECT_SPLIT.split(window[: hit.start()])[-1].strip()
+            if _NOT_AN_APPROVER.search(subject) or _NON_SAM_ACTOR.search(subject):
+                continue
+            if strong or _WEAK_SUBJECT.fullmatch(subject):
+                return 2
+            if hit.group(0).lower().startswith(_WEAK_NOUN) and _ARRIVES.match(window, hit.end()):
+                return 2
+    return level
+
+
+def sam_gate_level(clause: str) -> int:
+    """How strongly the clause waits on the user: 0 not at all; 1 a condition on "you" ("Waiting on you", "Ready when
+    you are"); 2 an approval or a handover (what hangs from it, even "once it lands", is his to unblock)."""
+    if _COURTESY.search(clause):
+        return 0
+    if _SAM_VERB.search(clause) or _HANDOVER.search(clause):
+        return 2
+    if _SAM_POSSESSIVE.search(clause) and not (_APPROVAL_OBJECT.search(clause) and not _GATE_WORD.search(clause)):
+        return 2
+    if _APPROVAL_PENDING.search(clause):
+        return 2
+    return max((_gate_level(w) for w in _windows(clause)), default=0)
+
+
+def is_sam_gated(clause: str) -> bool:
+    """The clause waits on an approval that only the user (Sam, the operator) gives, however it is phrased.
+
+    Structural, not a word list: a gate word (once, when, after, until, pending, if, awaits, needs, ...)
+    governing the principal or an approval predicate on a person; an approval named as pending; a possessive
+    approval noun ("Sam's call"); the principal as the actor of an approval verb ("Sam will decide"); or the turn
+    handed over ("Over to Sam.", "Sam will cut the tag.", "Sam is away."). An approval word alone
+    ("approval-flow tests", "the decision log"), a state change ("once the lock clears") and a bare mention of
+    Sam ("I'll ping Sam once the build finishes") gate nothing.
+    """
+    return sam_gate_level(clause) > 0
+
+
+#: "The approval is pending", "the ruling has not come": an approval named together with its open state.
+_APPROVAL_PENDING = re.compile(
+    r"(?<![\w-])(?:" + _STRONG_SRC + r"|decisions?|permission\w*+)" + _NOT_A_SUBJECT
+    + r"[^,.;:!?]{0,30}?\b(?:pending|outstanding|awaited|needed|required|missing|open|unresolved|undecided|"
+    r"not (?:yet )?(?:given|in|here|granted|arrived)|(?:isn't|hasn't|has not|is not) (?:yet )?(?:come|arrived|landed|given|granted|in))\b",
+    re.I,
+)
 _GATE_WORD = re.compile(r"\b(?:once|when|after|until|before|pending|waiting|awaiting|needs?|gated|if|unless)\b", re.I)
-
-
-def _has_approval(clause: str) -> bool:
-    if not _APPROVAL.search(clause):
-        return False
-    return not (_APPROVAL_OBJECT.search(clause) and not _GATE_WORD.search(clause))
 
 
 _SAM_DEFAULT_PROCEED = re.compile(r"\bunless you(?:'d| would| want| prefer)\b", re.I)
@@ -167,16 +361,22 @@ _SAM_IMPERATIVE = re.compile(
 #: A clause that gates on Sam (a condition about "you", a hand-off to you, a wait on you, a question)
 #: makes the sentences that chain from it ("After it publishes, ...") Sam's too.
 _SAM_GATE = re.compile(
-    r"\b(?:once|when|if|after|until|before|as soon as)\b[^,.]{0,40}\byou\b|\b(?:hand|give|send|ask) you\b|"
-    r"\bwait(?:s|ing)? (?:on|for) you|\byour (?:go|call|decision|approval)\b",
+    r"\b(?:once|when|if|after|until|before|as soon as)\b[^,.]{0,40}" + _P + r"|\b(?:hand|give|send|ask) " + _P + r"|"
+    r"\bwait(?:s|ing)? (?:on|for) " + _P + r"|\byour (?:go|call|decision|approval)\b",
     re.I,
 )
+#: Clauses that may sit between a gate on Sam and the follow-up that hangs from it.
+_CHAIN_GAP = 2
 _WAIT_WORD = re.compile(r"\b(?:once|when|if|after|until|as soon as|waiting|waits?|holding)\b", re.I)
+#: A follow-up that ends on a pointer back at the gate: "I'll push then.", "I'll proceed accordingly."
+_CHAIN_TAIL = re.compile(r"\b(?:then|accordingly|afterwards|after that|from there)\s*[.!]?$", re.I)
 _CHAIN_START = re.compile(r"^(?:after|then|next|once|when|and then|afterwards|finally)\b", re.I)
 #: A follow-up that hangs from the gate without starting on a chain word: "I'll proceed once that
 #: comes through", "I'll push when it is granted", "I'll check the publish after".
 _CHAIN_CONT = re.compile(
-    r"\b(?:once|when|after|as soon as|until)\s+(?:that|this|it|they|he|she|then)\b"
+    r"\b(?:once|when|after|as soon as|until)\s+(?:that|this|it|he|she|then)\b"
+    # "they" is the user or a peer ("when they reply"), not the shards ("once they finish").
+    r"|\b(?:once|when|after|as soon as|until)\s+they\b(?!\s+(?:finish\w*|complete\w*|pass\w*|run\b|build\w*|go\b))"
     r"|\b(?:after|afterwards|then|later|pending)\s*[.!]?$|\bthen\b",
     re.I,
 )
@@ -186,13 +386,15 @@ _PEER_NAMES = (
     "bob", "linda", "wren", "halcyon", "kimi", "marlowe", "tamsin", "steve", "steven", "kestrel",
     "elsinore", "conexus", "labrun", "peer", "peers", "mailbox", "notification", "notifications",
     "notified", "notify", "another session", "other session", "other sessions", "sibling", "restart",
-    "restarts", "restarted", "restarting", "ready ask", "all-clear", "roll call", "the go", "go comes", "their",
+    "restarts", "restarted", "restarting", "ready ask", "all-clear", "roll call", "go comes", "their",
     "reconnect", "reconnects", "reconnected", "resumes", "resumed", "compaction", "compacts", "compacted",
 )
 _PEER = re.compile(
-    r"\b(?:" + "|".join(re.escape(n) for n in _PEER_NAMES) + r")\b|\b[a-z]+_[0-9a-z]{0,4}\d[0-9a-z]{0,4}\b"
+    r"\b(?:" + "|".join(re.escape(n) for n in _PEER_NAMES) + r")\b"
+    # "the go" is a peer's go-ahead, but "the go build" is the Go toolchain.
+    r"|\bthe go\b(?!\s+(?:build\w*|binary|toolchain|vet|mod|install|run|version|test\w*|\d))|\b[a-z]+_[0-9a-z]{0,4}\d[0-9a-z]{0,4}\b"
     r"|\b(?:once|when|until|after|if)\b[^.]{0,60}\b(?:reports?|replies|reply|answers?|responds?|sends?|posts?|"
-    r"confirms?|announces?|hands?|tells?|says?|asks?)\b"
+    r"confirms?|announces?|hands?|tells?|says?|asks?|approves?|signs? off|okays?|greenlights?)\b"
     r"|\bwaiting (?:on|for) (?:a |the )?(?:peer|session|agent|reply|answer|ack|message)\b"
     r"|\b(?:once|when|until|after)\b[^.]{0,40}\bthe script\b"
     r"|\b(?:it|they|he|she) will (?:send|tell|post|reply|ping|notify|message|let me)\b",
@@ -272,43 +474,76 @@ class Verdict(NamedTuple):
     final_sam: bool = False  # the last clause addresses Sam, so a would-be block was allowed
 
 
+#: A courtesy to Sam, not a request to him: "keep you posted", "update you", "report back to Sam", "see you
+#: then", "thanks for your patience", "you will hear from me". It names him without handing him the turn.
+_COURTESY = re.compile(
+    r"\b(?:keep|keeping) (?:you|sam) (?:posted|informed|in the loop)\b|\bupdat(?:e|es|ing) (?:you|sam)\b|"
+    r"\b(?:report(?:ing)?|get|circle|come|check|write) back to (?:you|sam)\b|\bsee you\b|\bthank(?:s| you)\b|"
+    r"\byour patience\b|\byou(?:'ll| will) (?:hear|get|see) (?:from|back from) me\b|\bhear from me\b",
+    re.I,
+)
+
+
 def _is_sam(clause: str) -> bool:
-    if clause.endswith("?") or _SAM_IMPERATIVE.search(clause) or _has_approval(clause):
+    if clause.endswith("?") or _SAM_IMPERATIVE.search(clause) or is_sam_gated(clause):
         return True
-    if _SAM_YOU.search(clause) and not _SAM_DEFAULT_PROCEED.search(clause):
+    if _SAM_YOU.search(clause) and not _SAM_DEFAULT_PROCEED.search(clause) and not _COURTESY.search(clause):
         return True
     return False
 
 
-def _addresses_sam(clause: str) -> bool:
-    # "Sam's ruling" as an object ("I'll record Sam's ruling") does not address him; "Sam will decide" does.
-    return _is_sam(clause)
+#: A closing clause that waits on Sam: his reply is the wake. "wait on you", "your call", "needs Sam".
+_SAM_WAIT = re.compile(r"\bwait(?:s|ing)? (?:on|for) " + _P + r"|\byour (?:go|calls?|decision|approval)\b", re.I)
+
+
+def _ends_on_sam(clause: str) -> bool:
+    """The last clause asks Sam something, tells him to do something, or gates on his approval.
+
+    A bare "you" is not enough: "I'll keep you posted", "See you then" and "Thanks for your patience" are
+    courtesies, and the promise before them still has nothing to wake it.
+    """
+    if _SAM_DEFAULT_PROCEED.search(clause) or _COURTESY.search(clause):
+        return False
+    return bool(
+        clause.endswith("?")
+        or _SAM_IMPERATIVE.search(clause)
+        or _SAM_GATE.search(clause)
+        or _SAM_WAIT.search(clause)
+        or is_sam_gated(clause)
+    )
 
 
 def evaluate_text(text: str) -> Verdict:
     """Classify a closing text. Pure: no environment, no I/O."""
     sam = peer = past = 0
-    #: 0 none; 1 a gate on "you" (a follow-up that starts on a chain word hangs from it); 2 an approval or
-    #: Sam named (a follow-up that merely depends on "that" or "it" hangs from it too).
+    #: 0 none; 1 a gate on "you" or a question (a follow-up that starts on a chain word hangs from it); 2 an
+    #: approval gate on Sam (a follow-up that merely depends on "that" or "it" hangs from it too). A clause that
+    #: only names Sam or an approval word chains nothing: "Sam can review. After CI, I'll check." still waits on CI.
     chain = 0
+    #: A chain survives at most ``_CHAIN_GAP`` clauses that are neither Sam's nor chained: a status line or two
+    #: between the gate and its follow-up (fixture sel3-25), not a paragraph.
+    gap = 0
     parts = clauses(text)
-    final_sam = bool(parts) and _addresses_sam(parts[-1])
+    final_sam = bool(parts) and _ends_on_sam(parts[-1])
     for clause in parts:
-        names_sam = bool(_SAM_NAME.search(clause))
         if _is_sam(clause):
             sam += 1
-            if names_sam or _has_approval(clause):
-                chain = 2
+            gap = 0
+            level = sam_gate_level(clause)
+            if level:
+                chain = level
             elif clause.endswith("?") or _SAM_GATE.search(clause):
                 chain = 1
             else:
                 chain = 0
             continue
-        if chain and (_CHAIN_START.search(clause) or (chain == 2 and _CHAIN_CONT.search(clause))):
+        if chain and (_CHAIN_START.search(clause) or _CHAIN_TAIL.search(clause) or (chain == 2 and _CHAIN_CONT.search(clause))):
             sam += 1
+            gap = 0
             continue
-        if names_sam:
-            chain = 2
+        gap += 1
+        if gap > _CHAIN_GAP:
+            chain = 0
         if _RESTRAINT.search(clause):
             past += 1
             continue
@@ -318,13 +553,21 @@ def evaluate_text(text: str) -> Verdict:
         if _PEER.search(clause):
             peer += 1
             chain = 1 if _WAIT_WORD.search(clause) else 0
+            gap = 0
             continue
         for cls, pattern in _CLASS_ORDER:
-            if pattern.search(clause) and not (cls == CLASS_CI_WAIT and _NEGATED_STATE.search(clause)):
-                if final_sam:
-                    # The message ends on Sam (a question, a hand-off, an approval to wait for): his reply is the wake.
-                    return Verdict(False, cls, clause, sam, peer, past, True)
-                return Verdict(True, cls, clause, sam, peer, past)
+            if not pattern.search(clause):
+                continue
+            if cls == CLASS_CI_WAIT and _NEGATED_STATE.search(clause):
+                # A run state that is denied ("no suite is still running") is a clause of its own: what hung from
+                # the last Sam clause does not reach past it. A clause that matches no class stays transparent
+                # up to ``_CHAIN_GAP`` clauses.
+                chain = 0
+                continue
+            if final_sam:
+                # The message ends on Sam (a question, a hand-off, an approval to wait for): his reply is the wake.
+                return Verdict(False, cls, clause, sam, peer, past, True)
+            return Verdict(True, cls, clause, sam, peer, past)
     return Verdict(False, "", "", sam, peer, past)
 
 
@@ -375,13 +618,15 @@ def block_reason(cls: str, clause: str) -> str:
         CLASS_PROMISE: "a promise to check or do something later",
         CLASS_TIMED: "a timed step",
     }.get(cls, "an open step")
-    # A clause that names an approval is never told "do it now": the step may be gated on Sam.
-    do_now = "" if _has_approval(quoted) or _SAM_NAME.search(quoted) else "If the step can be done right now, do it. "
+    # "Do it now" is wrong when the step may be gated on the user (an approval gate or a handover) and for any clause
+    # that carries a gate word outside the CI-wait class: those wait on something, and the model should say who.
+    gated = is_sam_gated(quoted) or (cls != CLASS_CI_WAIT and bool(_REMINDER_GATE.search(quoted)))
+    do_now = "" if gated else "If the step can be done right now, do it. "
     return (
         f'Stop-hook wake guard: your last message closes on {what} ("{quoted}"), and nothing is armed to wake this '
         "session: no background task, Monitor or scheduled wakeup is running. Arm the wake now, then end the turn: "
         "a Monitor or a background Bash until-loop for a run or CI, ScheduleWakeup or CronCreate for a timed step. "
-        f"{do_now}If the wake is someone else (Sam, a peer, a notification), say "
+        f"{do_now}If the wake is someone else (the user, a peer, a notification), say "
         "plainly in one sentence who it is, then end the turn."
     )
 

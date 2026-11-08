@@ -295,7 +295,7 @@ def _metadata_for_doc_id(col: Any, doc_id: str) -> list[dict]:
         reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe
     if not chashes:
         return []
-    batch = _vector_with_retry(col.get, ids=chashes, include=["metadatas"])
+    batch = _vector_with_retry(col.get, ids=chashes, include=["metadatas"], sensitivity="include")
     return batch.get("metadatas", [])
 
 
@@ -509,7 +509,7 @@ def _own_chunk_metadata(col: Any, doc_id: str) -> dict | None:
         return None
     if not rows:
         return None
-    batch = _vector_with_retry(col.get, ids=[rows[0].chash], include=["metadatas"])
+    batch = _vector_with_retry(col.get, ids=[rows[0].chash], include=["metadatas"], sensitivity="include")
     metas = (batch or {}).get("metadatas") or []
     return metas[0] if metas and metas[0] is not None else None
 
@@ -2747,7 +2747,8 @@ def _markdown_chunks(
     """
     from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    raw_text = md_path.read_text(encoding="utf-8")
+    # nexus-0ib6r: utf-8-sig drops a leading BOM, which hid the frontmatter and started chunk 1.
+    raw_text = md_path.read_text(encoding="utf-8-sig")
     frontmatter, body = parse_frontmatter(raw_text, source=str(md_path), strict=True)
     frontmatter_len = len(raw_text) - len(body)
 
@@ -3425,7 +3426,7 @@ def index_pdf(
                             where=meta_where,
                             include=["metadatas"],
                             limit=300,
-                            offset=offset,
+                            offset=offset, sensitivity="include",
                         )
                         all_meta.extend(batch.get("metadatas", []))
                         if len(batch.get("ids", [])) < 300:
@@ -3818,7 +3819,7 @@ def _parse_md_frontmatter(md_path: Path) -> tuple[str, int, str]:
     year = 0
     author = ""
     try:
-        text = md_path.read_text(encoding="utf-8")
+        text = md_path.read_text(encoding="utf-8-sig")  # nexus-0ib6r: a BOM hid the frontmatter
         if text.startswith("---"):
             import re  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
             m = re.search(r"^title:\s*(.+)$", text, re.MULTILINE)

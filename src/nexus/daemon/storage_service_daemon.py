@@ -82,6 +82,7 @@ import sys
 _popen = subprocess.Popen
 import threading
 import time
+import dataclasses
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -3557,6 +3558,80 @@ def _announce_reembed_hint() -> None:
         _log.debug("reembed_hint_failed", error=str(exc))
 
 
+_BELOW_FLOOR_RECHECK_S: float = 5.0
+"""How often a supervisor holding a below-floor refusal re-reads PG_VERSION (nexus-3qhls).
+
+One small file read. Short enough that a start through the autostart unit after an upgrade
+(``_UNIT_START_WAIT_S``, 60 s) sees the engine come up instead of timing out."""
+
+
+class _ClusterFloorWait:
+    """What a below-floor wait ended with (nexus-3qhls)."""
+
+    STOPPED = "stopped"  # a stop request arrived: exit 0
+    RETRY = "retry"  # the marker passes and the credentials are unchanged: start again in place
+    RESTART = "restart"  # the marker passes but the credentials changed (a re-init): exit for a fresh process
+
+
+def _creds_file_bytes(config_dir: Path) -> bytes | None:
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred import — pg_provision is loaded only on this path
+
+    try:
+        return (config_dir / CREDENTIALS_FILENAME).read_bytes()
+    except OSError:
+        return None
+
+
+def _wait_for_cluster_at_floor(
+    sup: StorageServiceSupervisor,
+    exc: StorageServiceStartError,
+    stop_requested: threading.Event,
+    flush_logging: Callable[[], None],
+) -> str | None:
+    """Hold a below-floor refusal until the cluster reaches the floor or a stop arrives (nexus-3qhls).
+
+    Returns None when ``exc`` is not that refusal, so the caller re-raises it unchanged. Otherwise
+    logs the refusal once and re-reads the cluster's PG_VERSION every ``_BELOW_FLOOR_RECHECK_S``,
+    returning a :class:`_ClusterFloorWait` value. The wait is a loop of waits no longer than
+    ``DEFAULT_HEARTBEAT_INTERVAL``: on Windows a SIGBREAK handler runs only between them (RDR-224,
+    src/nexus/daemon/AGENTS.md). A credentials file that changed since the refusal (the cluster was
+    moved aside and ``nx init`` re-run, possibly with a new PG_DATA) asks for a fresh process at the
+    next check, since this one holds the old port, password, data path and artifact.
+    """
+    from nexus.db.pg_provision import PgClusterBelowFloorError, refuse_cluster_below_floor  # noqa: PLC0415 — deferred import — pg_provision is loaded only on this path
+
+    if not isinstance(exc.__cause__, PgClusterBelowFloorError):
+        return None
+    pgdata = Path(sup._creds.get("PG_DATA", ""))
+    creds_at_refusal = _creds_file_bytes(sup._config_dir)
+    _log.error(
+        "storage_service_cluster_below_floor",
+        error=str(exc),
+        recheck_s=_BELOW_FLOOR_RECHECK_S,
+        msg="waiting for the cluster to be upgraded; the supervisor stays up and does not exit",
+    )
+    flush_logging()
+    while True:
+        deadline = time.monotonic() + _BELOW_FLOOR_RECHECK_S
+        while (left := deadline - time.monotonic()) > 0:
+            if stop_requested.wait(min(left, DEFAULT_HEARTBEAT_INTERVAL)):
+                return _ClusterFloorWait.STOPPED
+        if stop_requested.is_set():
+            return _ClusterFloorWait.STOPPED
+        if _creds_file_bytes(sup._config_dir) != creds_at_refusal:
+            # A re-init, wherever its PG_DATA now points: a fresh process reads the new credentials.
+            _log.info("storage_service_credentials_changed_while_refused", pgdata=str(pgdata))
+            flush_logging()
+            return _ClusterFloorWait.RESTART
+        try:
+            refuse_cluster_below_floor(pgdata)
+        except PgClusterBelowFloorError:
+            continue
+        _log.info("storage_service_cluster_at_floor", pgdata=str(pgdata))
+        flush_logging()
+        return _ClusterFloorWait.RETRY
+
+
 def _supervise_until_stopped(
     sup: StorageServiceSupervisor,
     stop_requested: threading.Event,
@@ -3571,30 +3646,50 @@ def _supervise_until_stopped(
     whole process (which re-runs ``start()`` — including a fresh PG bring-up),
     instead of an in-process respawn. The lone in-place recovery is the
     ``(True, False)`` PG-only arm: PG is restarted directly while the alive JVM
-    keeps running (the OS supervises the supervisor process, not PG)."""
-    try:
-        sup.start(stop_requested=stop_requested)
-    except readiness.ReadinessStopRequestedError:
-        # nexus-cd1k0.19: a SIGTERM/SIGINT arrived while start() was still
-        # waiting for readiness. This is a CLEAN stop, not a crash: the
-        # not-yet-ready process was already killed inside
-        # _wait_for_service_ready, and no lease was ever published for
-        # this attempt (publish happens only after health succeeds), so
-        # sup.stop() below has nothing further to reclaim — it is still
-        # safe to call unconditionally (mark_shutting_down/relinquish
-        # no-op when self._registry/self._supervisor were never assigned).
-        # Exit 0: this is the SAME "deliberate stand-down, not a failure"
-        # reasoning as the fenced-exit path (fenced_exit_code) — a
-        # non-zero exit here would trip the OS unit's restart policy into
-        # respawning a supervisor that would just start over from scratch
-        # anyway, having lost nothing worth resuming.
-        _log.info(
-            "storage_service_start_stopped_cleanly",
-            msg="SIGTERM/SIGINT arrived mid-start; standing down without a lease",
-        )
-        flush_logging()
-        sup.stop()
-        return 0
+    keeps running (the OS supervises the supervisor process, not PG).
+
+    A cluster below the PostgreSQL floor is a permanent refusal, so exiting
+    on it would only buy an OS respawn every 30 s forever (nexus-3qhls). The
+    supervisor stays up instead, re-reads the cluster's version marker every
+    ``_BELOW_FLOOR_RECHECK_S`` and starts once it reaches the floor (or exits 3
+    for a fresh process when the credentials changed meanwhile); a stop while
+    it waits exits 0. Nothing gives up, and nothing respawns."""
+    while True:
+        try:
+            sup.start(stop_requested=stop_requested)
+        except readiness.ReadinessStopRequestedError:
+            # nexus-cd1k0.19: a SIGTERM/SIGINT arrived while start() was still
+            # waiting for readiness. This is a CLEAN stop, not a crash: the
+            # not-yet-ready process was already killed inside
+            # _wait_for_service_ready, and no lease was ever published for
+            # this attempt (publish happens only after health succeeds), so
+            # sup.stop() below has nothing further to reclaim — it is still
+            # safe to call unconditionally (mark_shutting_down/relinquish
+            # no-op when self._registry/self._supervisor were never assigned).
+            # Exit 0: this is the SAME "deliberate stand-down, not a failure"
+            # reasoning as the fenced-exit path (fenced_exit_code) — a
+            # non-zero exit here would trip the OS unit's restart policy into
+            # respawning a supervisor that would just start over from scratch
+            # anyway, having lost nothing worth resuming.
+            _log.info(
+                "storage_service_start_stopped_cleanly",
+                msg="SIGTERM/SIGINT arrived mid-start; standing down without a lease",
+            )
+            flush_logging()
+            sup.stop()
+            return 0
+        except StorageServiceStartError as exc:
+            waited = _wait_for_cluster_at_floor(sup, exc, stop_requested, flush_logging)
+            if waited is None:
+                raise
+            if waited == _ClusterFloorWait.RETRY:
+                continue
+            flush_logging()
+            sup.stop()
+            # A stop is a stand-down (0). New credentials need a fresh process: exit 3 so the OS
+            # unit restarts the supervisor, which reads them (RDR-175's ordinary restart).
+            return 0 if waited == _ClusterFloorWait.STOPPED else 3
+        break
 
     # GH #1369, shared across tiers (RDR-149 §shared primitive) via
     # exit_if_process_unowned: start() may have found an existing, healthy
@@ -3796,10 +3891,15 @@ class StopOutcome:
     #: were NOT signalled and may still be running, so ``sweep_verified`` is
     #: False and the outcome is not "already stopped".
     unreadable: tuple[int, ...] = ()
+    #: Supervisor pids a FRESH lease names that are not visible from this process
+    #: (nexus-dyfsw): a supervisor in another PID namespace sharing the config
+    #: directory, still heartbeating. Nothing was signalled and the lease was kept,
+    #: so this stop did not bring the service down.
+    invisible: tuple[int, ...] = ()
 
     @property
     def already_stopped(self) -> bool:
-        return not self.pids and not self.refused and not self.unreadable
+        return not self.pids and not self.refused and not self.unreadable and not self.invisible
 
 
 def stop_storage_service(
@@ -3882,14 +3982,18 @@ def stop_storage_service(
         # The marker is the launcher's hint, never a precondition of stopping: a
         # config dir that cannot take the file must not stop the stop itself.
         _log.warning("storage_service_stop_marker_failed", error=str(exc))
+    invisible: list[int] = []
     outcome = _stop_marked_service(
         config_dir=config_dir,
         registry=registry,
         scope=scope,
         platform=platform,
         console_api=console_api,
+        invisible_out=invisible,
     )
-    if outcome.refused or outcome.stubborn:
+    if invisible:
+        outcome = dataclasses.replace(outcome, invisible=tuple(invisible))
+    if outcome.refused or outcome.stubborn or outcome.invisible:
         # The marker said "this service is meant to stay down". It must be
         # written BEFORE the signal (the signal itself can produce the exit the
         # launcher would otherwise answer with a respawn), so it cannot wait for
@@ -3908,10 +4012,14 @@ def _stop_marked_service(
     scope: str,
     platform: str | None,
     console_api: Any,
+    invisible_out: list[int] | None = None,
 ) -> StopOutcome:
     """The signalling half of :func:`stop_storage_service`, run with the stop
-    marker already on disk (Windows)."""
+    marker already on disk (Windows). A fresh lease whose supervisor pid this
+    process cannot see is appended to *invisible_out* and left alone."""
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        lease_from_other_pid_namespace,
+        lease_holder_invisible,
         storage_service_member_check,
         storage_service_stack_matcher,
         sweep_matching_processes,
@@ -3936,11 +4044,27 @@ def _stop_marked_service(
 
         # Only trust supervisor_pid from a FRESH lease (guaranteed above by
         # discover()'s TTL reap), and only when the process is still alive.
-        if (
-            isinstance(supervisor_pid, int)
-            and supervisor_pid > 0
+        # A pid recorded in another PID namespace names nothing here: a live pid with the
+        # same number is someone else's, so it is never signalled (nexus-dyfsw).
+        supervisor_seen = (
+            isinstance(supervisor_pid, int) and supervisor_pid > 0
+            and not lease_from_other_pid_namespace(record)
             and _pid_is_alive(supervisor_pid)
+        )
+        if (
+            not supervisor_seen
+            and isinstance(supervisor_pid, int)
+            and supervisor_pid > 0
+            and lease_holder_invisible(record, supervisor_pid, alive=_pid_is_alive)
         ):
+            # nexus-dyfsw: the lease still heartbeats, so its supervisor is alive
+            # somewhere this process cannot see (another PID namespace sharing
+            # this directory). Signalling the endpoint pid or relinquishing the
+            # lease would let a second service start beside it.
+            _log.warning("storage_service_stop_supervisor_not_visible", supervisor_pid=supervisor_pid)
+            if invisible_out is not None:
+                invisible_out.append(supervisor_pid)
+        elif supervisor_seen:
             source = "lease"
             _log.info(
                 "storage_service_stopping_supervisor", supervisor_pid=supervisor_pid
@@ -4008,7 +4132,7 @@ def _stop_marked_service(
                     registry, record, budget=_STOP_ELECTION_BUDGET,
                 )
             signalled.append(supervisor_pid)
-        elif isinstance(pid_to_signal, int) and pid_to_signal > 0:
+        elif isinstance(pid_to_signal, int) and pid_to_signal > 0 and not lease_from_other_pid_namespace(record):
             source = "lease"
             if (platform if platform is not None else sys.platform) == "win32":
                 # No process group to signal there. CTRL_BREAK through the
@@ -4047,9 +4171,18 @@ def _stop_marked_service(
                     hard_kill_pid(pid_to_signal, platform=platform)
                     lease_stubborn.extend(wait_for_exit([pid_to_signal]))
             else:
+                from nexus.daemon.service_registry import process_command  # noqa: PLC0415 — deferred import — stop path only
                 from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
-                safe_killpg(pid_to_signal, signal.SIGTERM)
+                # nexus-dyfsw: a legacy lease's endpoint pid may have been reused.
+                # Signal its group only when its live command line is this
+                # directory's stack; an unreadable one keeps the old behaviour.
+                live_cmd = process_command(pid_to_signal, platform=platform)
+                if live_cmd and not storage_service_stack_matcher(config_dir, platform=platform)(live_cmd):
+                    _log.warning("storage_service_stop_endpoint_pid_not_ours", pid=pid_to_signal)
+                    pid_to_signal = None  # not signalled; the stale lease is still released below
+                else:
+                    safe_killpg(pid_to_signal, signal.SIGTERM)
             # Clean up the lease record. Bounded (nexus-cd1k0 review round 3
             # finding 6): this is the OUTER ``stop_storage_service`` caller
             # (e.g. the CLI's ``nx daemon service stop``) doing its own
@@ -4058,8 +4191,9 @@ def _stop_marked_service(
             # a supervisor process, so it gets the same budget.
             with contextlib.suppress(Exception):
                 registry.relinquish(record, budget=_STOP_ELECTION_BUDGET)
-            _log.info("storage_service_stopped", pid=pid_to_signal)
-            signalled.append(pid_to_signal)
+            if pid_to_signal is not None:
+                _log.info("storage_service_stopped", pid=pid_to_signal)
+                signalled.append(pid_to_signal)
 
     # Phase 2/3: consult the process table. Runs even after a lease-based
     # signal above (tree-signalling requirement — the engine child can

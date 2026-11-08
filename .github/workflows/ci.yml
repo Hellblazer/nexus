@@ -849,6 +849,39 @@ jobs:
           UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
         run: uv sync --group dev
 
+      - name: Require the real PID namespace on qwent (nexus-odkc0)
+        # The real-PID-namespace tests (tests/test_tmp_root.py, tests/test_engine_substrate_owner_lock.py) skip
+        # unless NX_REQUIRE_PIDNS=1, which turns an unshare refusal into a failure. The lab-6c18g label spans chas
+        # (unshare refused there) and qwent's WSL (PrivatePIDs runner unit, where it works), and no runner name or
+        # label tells them apart (labrun_559, 2026-11-07), so the host name decides: on qwent the tests run, on
+        # chas they keep skipping. Hosted runners (NX_CI_POOL=off, fork PRs) never reach this step (the if:).
+        # unshare inside the PrivatePIDs runner unit had not been run before this step's first CI run, so on qwent
+        # it is probed first: when it works the tests are armed and must pass; when it is refused the step warns in
+        # the job summary and leaves them unarmed, rather than red develop. A warning on a qwent shard is the
+        # signal to read.
+        id: pidns
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          host="$(hostname)"
+          case "${host,,}" in
+            qwentescence)
+              if unshare --pid --fork --map-root-user true 2>/dev/null; then
+                echo "NX_REQUIRE_PIDNS=1" >> "$GITHUB_ENV"
+                echo "on_qwent=true" >> "$GITHUB_OUTPUT"
+                echo "host $host: unshare works; NX_REQUIRE_PIDNS=1 armed (the real-PID-namespace tests must run here)"
+              else
+                echo "::warning::host $host: unshare --pid --fork --map-root-user refused inside this runner unit; the real-PID-namespace tests stay unarmed (nexus-odkc0)"
+                echo "- real PID namespace: unshare refused on $host, tests not armed (nexus-odkc0)" >> "$GITHUB_STEP_SUMMARY"
+              fi ;;
+            chas)
+              echo "host $host: not qwent, NX_REQUIRE_PIDNS left unset" ;;
+            *)
+              # A renamed or new pool host would silently put the tests back to skip-passing on qwent.
+              echo "::error::unknown lab pool host '$host': name it in this step (nexus-odkc0) so the real-PID-namespace tests stay armed"
+              exit 1 ;;
+          esac
+
       - name: Run tests (shard ${{ matrix.shard }}/6)
         # nexus-n0ful: pytest-split partitions the SAME collection every leg
         # sees (addopts' `-m 'not integration and not slow'` applies
@@ -968,6 +1001,36 @@ jobs:
           summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' shard-output.txt | tail -1)" || summary=""
           [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 1500 ] \
             || { echo "::error::test shard ${{ matrix.shard }} passed fewer than 1500 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
+
+      - name: Real PID namespace on this qwent shard (nexus-odkc0)
+        # The two tests sit in one shard each, and a shard lands on chas or qwent per run, so the split alone
+        # proves them only some runs and records nothing (the shard runs -q). Every shard that lands on qwent
+        # therefore runs both by node id with NX_REQUIRE_PIDNS=1 (set by the step above) and requires
+        # "2 passed" and no skip: any run with at least one qwent shard proves them. A run whose six shards all
+        # land on chas proves nothing here; that is the stated limit, not a pass.
+        if: steps.pidns.outputs.on_qwent == 'true'
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
+          UV_NO_SYNC: ${{ steps.sharedvenv.outputs.used == 'true' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          export TMPDIR="$RUNNER_TEMP/tmp"
+          mkdir -p "$TMPDIR"
+          report="$RUNNER_TEMP/pidns-junit.xml"
+          out="$(uv run pytest -q -rs -p no:cacheprovider --junitxml="$report" \
+            tests/test_tmp_root.py::TestOwnerLock::test_a_run_in_another_pid_namespace_is_not_swept \
+            tests/test_engine_substrate_owner_lock.py::TestSidecarClusterOwnerLock::test_a_cluster_in_another_pid_namespace_is_not_swept \
+            2>&1)" || { printf '%s\n' "$out"; echo "::error::the real-PID-namespace tests failed on qwent"; exit 1; }
+          printf '%s\n' "$out" | tail -n 3
+          # The verdict reads the junit counts, never the printed text: the output also carries the
+          # storage-touch census line ("skipped=0"), which a substring test for "skipped" misread as a skip
+          # and made develop red at cb1f5587d on a clean "2 passed, 2 warnings" run.
+          if verdict="$(uv run python scripts/ci_junit_verdict.py "$report" --expect 2 2>&1)"; then
+            echo "real PID namespace: $verdict on $(hostname)"
+          else
+            echo "::error::the real-PID-namespace tests did not both pass unskipped on qwent: $verdict"
+            exit 1
+          fi
 
       # nexus-ekp7w / nexus-2rhif: the DDL and bytes-written ratchet. THE GATE IS NOT HERE.
       # One shard's bytes per test and DDL per test move with which tests the split gave it
@@ -1655,7 +1718,7 @@ jobs:
     # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, mcpb-resolve-gate]
+    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, mcpb-resolve-gate, constraints-resolve-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1672,6 +1735,7 @@ jobs:
           integration_any="${{ needs.changes.outputs.integration_any }}"
           integration_result="${{ needs.test-integration-affected.result }}"
           mcpb_result="${{ needs.mcpb-resolve-gate.result }}"
+          constraints_result="${{ needs.constraints-resolve-gate.result }}"
           event_name="${{ github.event_name }}"
           base_ref="${{ github.base_ref }}"
 
@@ -1782,6 +1846,19 @@ jobs:
             fi
           elif [ "$mcpb_result" != "success" ]; then
             echo "::warning::mcpb-resolve-gate reported '$mcpb_result' (advisory off the release PR; release.yml blocks before publish)"
+          fi
+
+          # constraints-resolve-gate (nexus-imhgf): same rule as mcpb-resolve-gate. Blocking on a PR into main;
+          # elsewhere reported, not blocking (develop is pushed directly, and the release battery's resolve leg runs
+          # the same gate before a tag).
+          echo "constraints-resolve-gate result: $constraints_result"
+          if [ "$event_name" = "pull_request" ] && [ "$base_ref" = "main" ]; then
+            if [ "$constraints_result" != "success" ]; then
+              echo "::error::PR targets main but constraints-resolve-gate reported '$constraints_result' instead of success — the shipped install lock must resolve on every supported target before a release PR can merge"
+              exit 1
+            fi
+          elif [ "$constraints_result" != "success" ]; then
+            echo "::warning::constraints-resolve-gate reported '$constraints_result' (advisory off the release PR; the release battery's resolve leg blocks before a tag)"
           fi
 
           # nexus-rpaat: the affected-integration job MUST succeed when the
@@ -2828,3 +2905,55 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/check_mcpb_resolve.py
+
+  constraints-resolve-gate:
+    # nexus-imhgf — the shipped install lock must RESOLVE on every supported target, checked on the change that
+    # breaks it. The release battery's resolve leg (tests/e2e/constraints-resolve-gate.sh) ran only after release
+    # prep; the failure it catches appears when constraints.txt, overrides.txt, uv.lock or pyproject.toml change.
+    # Same PATH GATE shape as mcpb-resolve-gate: the job always runs and reports, the resolve (uv pip compile per
+    # target, off-host, nothing installed; about 3 s warm) runs only when an input changed, and the non-vacuity
+    # step fails an unusable filter output instead of skipping under a green check. The battery leg stays as the
+    # release-time backstop.
+    name: install constraints resolve gate (nexus-imhgf)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: changes
+        with:
+          filters: |
+            constraints:
+              - 'src/nexus/_install/constraints.txt'
+              - 'src/nexus/_install/overrides.txt'
+              - 'uv.lock'
+              - 'pyproject.toml'
+              - 'tests/e2e/constraints-resolve-gate.sh'
+              - 'tests/e2e/lib/python.sh'
+
+      - name: Verify the constraints predicate is usable (fail loud, never default-skip)
+        run: |
+          set -euo pipefail
+          constraints="${{ steps.changes.outputs.constraints }}"
+          case "$constraints" in
+            true|false) ;;
+            *)
+              echo "::error::paths-filter produced no usable constraints output ('$constraints') — cannot prove whether the install lock inputs changed, refusing to silently skip the resolve"
+              exit 1
+              ;;
+          esac
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        if: steps.changes.outputs.constraints == 'true'
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Resolve the shipped lock on every supported target
+        if: steps.changes.outputs.constraints == 'true'
+        run: |
+          set -euo pipefail
+          tests/e2e/constraints-resolve-gate.sh

@@ -59,7 +59,8 @@ ledger read, for release-branch PR CI.
 
 **Note-URI floor** (RDR-231, nexus-bivz3.15/.16): ``--ledger-only`` and the bare/auto-paired forms
 also fail when ``REQUIRED_ENGINE_VERSION`` is below ``NOTE_URI_MIN_ENGINE_VERSION``
-(:func:`check_note_uri_floor_vs_pin`). Develop pushes run neither mode, so the floor leading the pin
+(:func:`check_note_uri_floor_vs_pin`), and when it is below ``SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION``
+(RDR-243 Phase 2, :func:`check_sensitivity_exclude_floor_vs_pin`). Develop pushes run neither mode, so the floor leading the pin
 there is not flagged.
 
 **Client-precondition mode** (``--client-precondition [TAG]``, nexus-9ssih):
@@ -503,25 +504,55 @@ def check_note_uri_floor_vs_pin() -> int:
 
     Returns ``0`` (unset floor, or pin >= floor) or ``1``.
     """
-    floor = _engine_version.NOTE_URI_MIN_ENGINE_VERSION
+    return _floor_vs_pin(
+        "NOTE_URI_MIN_ENGINE_VERSION", _engine_version.NOTE_URI_MIN_ENGINE_VERSION, "note-URI", "NOTE URI",
+        "This client mints nx-note source URIs, so a release pinning v{pin} would converge every local install "
+        "to an engine that cannot hold them and every note write would be refused.",
+    )
+
+
+def check_sensitivity_exclude_floor_vs_pin() -> int:
+    """A release must pin an engine that carries ``sensitivity=exclude`` (RDR-243 Phase 2, nexus-rfvyy.7).
+
+    The phase 2 client sends ``sensitivity="exclude"`` on every llm_bound read and refuses the read
+    (fails closed) when the engine lacks ``vector_sensitivity_exclude_supported``. A release pinning an
+    older engine would converge every local install to one that refuses every ``nx_answer`` search step.
+    Same shape and the same callers as :func:`check_note_uri_floor_vs_pin`: the floor leads the pin on
+    develop and only the release-gated modes compare them. Returns ``0`` (unset floor, or pin >= floor) or ``1``.
+    """
+    return _floor_vs_pin(
+        "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION", _engine_version.SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION,
+        "sensitivity-exclude", "SENSITIVITY EXCLUDE",
+        "This client sends sensitivity=exclude on every llm_bound read and refuses the read on an engine "
+        "without vectors-055, so a release pinning v{pin} would converge every local install to an engine "
+        "on which every nx_answer search step is refused.",
+    )
+
+
+def check_feature_floors_vs_pin() -> int:
+    """Every feature floor a release pin must meet (note-URI, sensitivity-exclude). Runs them all, so one
+    run names every failing floor; returns ``1`` when any fails."""
+    rcs = [check_note_uri_floor_vs_pin(), check_sensitivity_exclude_floor_vs_pin()]
+    return 1 if any(rcs) else 0
+
+
+def _floor_vs_pin(name: str, floor: tuple[int, int, int], label: str, banner: str, consequence: str) -> int:
     pin = _engine_version.REQUIRED_ENGINE_VERSION
     floor_s = ".".join(str(p) for p in floor)
     pin_s = ".".join(str(p) for p in pin)
     if floor == (0, 0, 0):
-        print("note-URI floor is unset (0.0.0): nothing to compare against the pin")
+        print(f"{label} floor is unset (0.0.0): nothing to compare against the pin")
         return 0
     if pin < floor:
         print(
-            f"NOTE URI FLOOR CHECK FAILED: REQUIRED_ENGINE_VERSION v{pin_s} is below "
-            f"NOTE_URI_MIN_ENGINE_VERSION v{floor_s}. This client mints nx-note source URIs, so a "
-            f"release pinning v{pin_s} would converge every local install to an engine that cannot hold "
-            "them and every note write would be refused. "
+            f"{banner} FLOOR CHECK FAILED: REQUIRED_ENGINE_VERSION v{pin_s} is below "
+            f"{name} v{floor_s}. " + consequence.format(pin=pin_s) + " "
             f"Remedy: bump REQUIRED_ENGINE_VERSION (src/nexus/engine_version.py) to v{floor_s} or newer "
             "in the release (the paired-release choreography, docs/agents/engine-service-release.md).",
             file=sys.stderr,
         )
         return 1
-    print(f"note-URI floor holds: REQUIRED_ENGINE_VERSION v{pin_s} >= NOTE_URI_MIN_ENGINE_VERSION v{floor_s}")
+    print(f"{label} floor holds: REQUIRED_ENGINE_VERSION v{pin_s} >= {name} v{floor_s}")
     return 0
 
 
@@ -1512,10 +1543,10 @@ def main(argv: list[str] | None = None) -> int:
         return check_client_precondition(args.client_precondition or _pinned_engine_tag())
     if args.ledger_only:
         ledger_rc = check_client_lag_ledger()
-        floor_rc = check_note_uri_floor_vs_pin()
+        floor_rc = check_feature_floors_vs_pin()
         return ledger_rc or floor_rc
     # RDR-231: tree-static and local, so it runs before the network probe (a failure here is actionable alone).
-    note_floor_rc = check_note_uri_floor_vs_pin()
+    note_floor_rc = check_feature_floors_vs_pin()
     if note_floor_rc != 0:
         return note_floor_rc
     rc = check_floor(

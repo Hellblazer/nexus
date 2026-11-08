@@ -2996,6 +2996,22 @@ def opencv_pair_uninstall_remedy() -> str:
     )
 
 
+def _libgl_loadable(loader: Callable[[str], object] | None = None) -> bool:
+    """Whether the dynamic loader finds ``libGL.so.1``, the library whose absence the two-OpenCV row
+    exists for (nexus-0ib6r). Necessary for ``import cv2`` of the non-headless build, not sufficient:
+    it also links glib and a few X libraries, and a box without those still fails behind an amber
+    row. A probe that cannot load it, for any reason, answers False and keeps the row red."""
+    try:
+        if loader is None:
+            import ctypes  # noqa: PLC0415 — deferred import (startup cost), only on the two-build path
+
+            loader = ctypes.CDLL
+        loader("libGL.so.1")
+    except Exception:  # noqa: BLE001 — a doctor probe never raises; any failure reads as absent
+        return False
+    return True
+
+
 def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
     """The healthy "PDF support" row, unless both OpenCV builds are installed.
 
@@ -3012,15 +3028,17 @@ def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
 
     if len(_installed_opencv_builds()) < 2:
         return HealthResult(label="PDF support", ok=True, detail=detail)
-    on_linux = sys.platform.startswith("linux")
+    # nexus-0ib6r (3): red only where `import cv2` can actually fail, a Linux box with no libGL.so.1.
+    # With libGL the non-headless build loads, so the pair is the same warning as elsewhere.
+    red = sys.platform.startswith("linux") and not _libgl_loadable()
     consequence = (
-        "On Linux the non-headless build needs libGL.so.1, so `import cv2` can fail "
-        "and PDF extraction with it"
-        if on_linux else
+        "On Linux the non-headless build needs libGL.so.1, which this box does not have, so `import cv2` "
+        "can fail and PDF extraction with it"
+        if red else
         "Both write site-packages/cv2/, so which one loads depends on install order"
     )
     return HealthResult(
-        label="PDF support", ok=False, warn=not on_linux,
+        label="PDF support", ok=False, warn=not red,
         detail=(
             f"{detail}; but both opencv-python and opencv-python-headless are installed. "
             f"{consequence}. The release's uv overrides keep only the headless build; "
@@ -5860,6 +5878,8 @@ def _check_prose_index_recall(collections: object = _ENGINE_STATUS_UNSET) -> lis
             "Measure the recall of each named collection's own HNSW index (RDR-227 Gap 1): for k of 40, 60, 80, 100 "
             "and 120, compare the index's top-k with an exact top-k, on query vectors written for the collection's "
             "own topics (not random vectors); the target is 0.99 or better at every k",
+            "The nexus source tree carries a script that runs that check against the configured engine, read-only "
+            "(the prose index recall check; nx doctor's entry in the CLI reference names it and its options)",
         ],
     )]
 
@@ -6137,7 +6157,11 @@ def _settle_setup_row(results: list[HealthResult]) -> list[HealthResult]:
 def _benign_warning(row: HealthResult) -> bool:
     """A soft warning that says nothing is wrong: a managed deployment's row that cannot be probed from a
     client by design (nexus-y3wuu), which warns on every cloud box. Without this a cloud box never reaches the
-    "every other row is fine" that lets the setup row stand down."""
+    "every other row is fine" that lets the setup row stand down.
+
+    nexus-8qnuk: only that kind. The rows nexus-9b0ih made ok=False (two OpenCV builds, a warning off Linux
+    and a failure on it; a Windows box missing the PDF runtime; a dependency-lock rebuild owed) are not benign: each names a fix the user
+    still owes, and a failed setup run can be their cause, so they keep the setup warning up."""
     return row.warn and not row.ok and is_managed_not_probeable(row)
 
 
@@ -6421,7 +6445,9 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
             "(event=pg_version_below_floor in the service log, or, started cold, a refusal before pg_ctl runs)"
         ),
         fix_suggestions=[
-            f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS): "
+            f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} (Linux and macOS): "
+            "`nx daemon service pg-upgrade --old-bin <bin dir of the PostgreSQL that made it>` (a dry run; "
+            "--apply upgrades), or by hand: "
             "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md (section 'A local cluster older than PostgreSQL 17')",
         ],
     )]
@@ -9968,6 +9994,10 @@ def _check_pending_rungs() -> list[HealthResult]:
         stuck = guarded("deferral_log_read", _escalated_text, [])
         if stuck:
             parts.insert(0, "REPEATEDLY DEFERRED: " + "; ".join(stuck))
+        # nexus-4qygk: an unreadable log keeps its streaks rather than reset them, so it cannot show a rung
+        # that defers every walk. Say so instead of reading as "nothing deferred".
+        elif not guarded("deferral_log_probe", lambda: t2_deferral_log().readable(), True):
+            parts.append("the upgrade deferral log could not be read, so a rung deferring every run would not show here")
     else:
         parts.append(f"no pending rungs among those checked ({len(statuses) - len(not_checked)} of {len(statuses)})")
     if not_checked:
@@ -10380,10 +10410,12 @@ def _check_embedding_profile() -> list[HealthResult]:
                 "nx index repo or nx t3 gc moved expire on the client's own run, after "
                 "NX_GC_QUARANTINE_DAYS (default 14); the client never expires a chunk the "
                 "engine reaper moved. A newer engine (an older one does not) also expires the "
-                "chunks a client moved into a knowledge__ quarantine, "
-                "NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS (default 14) after the move and "
-                "whatever NX_GC_QUARANTINE_DAYS says; it never expires a chunk a client moved "
-                "into a code, docs or rdr quarantine. Curate with nx collection shape",
+                "chunks a client moved into a knowledge__ quarantine, at the later of "
+                "NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS (default 14) after the move and the "
+                "NX_GC_QUARANTINE_DAYS the client stamped on the row when it moved it (an engine "
+                "without the stamp, or a row moved before it, uses the engine's setting alone); it "
+                "never expires a chunk a client moved into a code, docs or rdr quarantine. "
+                "Curate with nx collection shape",
             ],
         ) if quarantined else HealthResult(label=_QUARANTINED_LABEL, ok=True, detail="none")
     )
@@ -12040,7 +12072,7 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
     def _read(chashes: list[str]) -> None:
         for start in range(0, len(chashes), page_size):
             batch = chashes[start:start + page_size]
-            page = col.get(ids=batch, include=["metadatas"], limit=len(batch))
+            page = col.get(ids=batch, include=["metadatas"], limit=len(batch), sensitivity="include")
             for chash, meta in zip(page.get("ids") or [], page.get("metadatas") or []):
                 rows[chash] = meta or {}
 

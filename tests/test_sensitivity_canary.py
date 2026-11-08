@@ -3,12 +3,12 @@
 """RDR-243 Phase 1 Step 1 (nexus-rfvyy.6.2): the sensitivity canary.
 
 A document flagged ``--sensitive`` carries a unique string. Every surface in
-``src/nexus/tables/llm-surfaces.toml`` whose behaviour is ``refuse`` or ``skip``
-runs against a corpus that holds that document, with a capturing LLM backend
-and an ``httpx`` mock transport in place, and the string must appear in no
-captured LLM payload and no captured outbound request. The test is
-parametrized over the table, so a new row brings its own case; it reads the
-row's enforcing phase, never a row name.
+``src/nexus/tables/llm-surfaces.toml`` whose behaviour is ``refuse``, ``skip`` or ``exclude``
+and whose phase is at or below ``PHASE_UNDER_TEST`` runs against a corpus that holds that
+document, with a capturing LLM backend and an ``httpx`` mock transport in place, and the string
+must appear in no captured LLM payload, outbound request, spawn, store write or return value.
+The test is parametrized over the table, so a new row brings its own case; it reads the row's
+enforcing phase, never a row name.
 
 The registry landed at nexus-rfvyy.6.16. Each ``refuse`` or ``skip`` row at or below
 ``PHASE_UNDER_TEST`` is a case, and a case with no driver in ``SURFACE_DRIVERS`` FAILS naming the
@@ -53,6 +53,7 @@ import hashlib
 import json
 import os
 import threading
+import types
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -73,15 +74,28 @@ def _no_document_is_sensitive() -> None:
     """Overrides tests/conftest.py's fixture of this name: the canary's subject is the gates, so
     every surface reads the real catalog, where the sensitive document is flagged."""
 
-#: Behaviours the canary judges. ``exclude`` and ``withhold`` are read-side
-#: behaviours (phase 2 and 3) with their own scenarios; ``disclose`` and the
-#: ``n/a-*`` behaviours send nothing sensitive by definition.
-CANARY_BEHAVIOURS: frozenset[str] = frozenset({"refuse", "skip"})
+#: Behaviours the canary judges. ``exclude`` is the read-side behaviour of Phase 2 (the engine
+#: drops a sensitive chunk from a read made under ``llm_bound``); ``withhold`` is Phase 3's output
+#: side (the MCP read tools and the CLI replace a sensitive hit with a one-line stub); ``disclose``
+#: and the ``n/a-*`` behaviours send nothing sensitive by definition.
+CANARY_BEHAVIOURS: frozenset[str] = frozenset({"refuse", "skip", "exclude", "withhold"})
 
-#: Rows enforced at or below this phase run. Phase 1 rows run at nexus-rfvyy.6.21;
-#: the Phase 2 rows (``nx_answer`` over two embedding models) raise this to 2 at
-#: nexus-rfvyy.7.13.
-PHASE_UNDER_TEST = 1
+#: Rows enforced at or below this phase run. Phase 1 rows (``refuse``/``skip``) landed at
+#: nexus-rfvyy.6.21; the Phase 2 ``exclude`` rows (the ``nx_answer`` family, ``nx_tidy``,
+#: ``nx_enrich_beads``, ``nx_plan_audit``) at nexus-rfvyy.7.13; the Phase 3 rows (the Knowledge Map
+#: and the rerank ``exclude`` rows, the MCP read tools and the CLI ``withhold`` rows) at
+#: nexus-rfvyy.8 fix r1.
+PHASE_UNDER_TEST = 3
+
+#: Judged ``exclude`` rows whose surface makes no search through ``search_cross_corpus``, keyed by
+#: the row's primary target, with the reason. An ``exclude`` row not named here must show, in its own
+#: case, that a search ran on a ``ThreadPoolExecutor`` worker: a read that never fanned out proves
+#: nothing about the engine filter the pools carry.
+NON_SEARCH_EXCLUDE_ROWS: dict[str, str] = {
+    "nexus.hooks.subagent_start:_knowledge_map_section": (
+        "the Knowledge Map is topic labels read from a cache file the taxonomy wrote; no search runs"
+    ),
+}
 
 #: Collection model tokens the substrate embeds locally, with no Voyage key.
 MODEL_BGE = "bge-base-en-v15-768"
@@ -104,7 +118,15 @@ def _registry_cases() -> list[Any]:
         (s for s in surfaces if s.behaviour in CANARY_BEHAVIOURS and s.phase <= PHASE_UNDER_TEST),
         key=lambda s: s.name,
     )
-    return [pytest.param(s, id=s.name) for s in selected]
+    # An ``exclude`` row reads through the engine's filter, so it needs the live ``read_sensitivity``
+    # (conftest pins ``include`` otherwise); a write-side row keeps the pin it has always run under.
+    # ``plan_grow_generalizer`` releases the conftest stub of ``_generalize_grown_match_description``, which
+    # the plan-helpers row drives for real (its dispatch ends in the capturing backend, never a model).
+    read_marks = [pytest.mark.sensitivity_reads, pytest.mark.plan_grow_generalizer]
+    return [
+        pytest.param(s, id=s.name, marks=read_marks if s.behaviour == "exclude" else [])
+        for s in selected
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -120,6 +142,15 @@ class Capture:
     requests: list[str] = field(default_factory=list)
     spawns: list[str] = field(default_factory=list)
     stores: list[str] = field(default_factory=list)
+    #: What a surface handed BACK to its caller (the session model reads it): a tool's return value, a
+    #: plan run's step outputs and final answer.
+    returns: list[str] = field(default_factory=list)
+    #: Every request the capturing backend served, as the object the funnel built, for a driver that
+    #: asserts on the tool grant a dispatch carried.
+    dispatched: list[Any] = field(default_factory=list)
+    #: ``operator name -> (request) -> structured reply``: what a driver scripts a dispatch to answer
+    #: (the planner must hand back a plan, or the surface stops before it reads anything).
+    scripted: dict[str, Callable[[Any], Any]] = field(default_factory=dict)
     engine_request_count: int = 0
     #: What the capturing backend answers a schema-less request with.
     reply_text: str = "{}"
@@ -146,9 +177,14 @@ class Capture:
         that left the surface, and it is read back by the drain."""
         self.stores.append(json.dumps({"label": label, **kw}, default=_json_default, sort_keys=True))
 
+    def record_return(self, label: str, **kw: Any) -> None:
+        """What a surface returned to its caller. A value the session model reads is as much an outbound
+        payload as a prompt, and an ``exclude`` row's reads end there."""
+        self.returns.append(json.dumps({"label": label, **kw}, default=_json_default, sort_keys=True))
+
     @property
     def everything(self) -> str:
-        return "\n".join([*self.llm_payloads, *self.requests, *self.spawns, *self.stores])
+        return "\n".join([*self.llm_payloads, *self.requests, *self.spawns, *self.stores, *self.returns])
 
     def where(self, needle: str) -> str:
         """Which sinks hold *needle*, for the failure message."""
@@ -156,6 +192,7 @@ class Capture:
             f"{name}[{i}]"
             for name, sink in (
                 ("llm", self.llm_payloads), ("request", self.requests), ("spawn", self.spawns), ("store", self.stores),
+                ("return", self.returns),
             )
             for i, entry in enumerate(sink) if needle in entry
         ]
@@ -195,6 +232,7 @@ class CapturingBackend:
     async def run(self, req: Any) -> Any:
         from nexus.operators.llm_backend import DispatchResult  # noqa: PLC0415 - as above
 
+        self._capture.dispatched.append(req)
         self._capture.llm_payloads.append(json.dumps({
             "prompt": req.prompt,
             "json_schema": req.json_schema,
@@ -202,6 +240,9 @@ class CapturingBackend:
             "allowed_tools": req.allowed_tools,
             "mcp_servers": req.mcp_servers,
         }, default=_json_default, sort_keys=True))
+        scripted = self._capture.scripted.get(req.operator)
+        if scripted is not None:
+            return DispatchResult(structured=scripted(req))
         if req.json_schema is None:
             return DispatchResult(text=self._capture.reply_text)
         return DispatchResult(structured=_schema_default(req.json_schema))
@@ -868,6 +909,404 @@ def _drive_mineru_remote(world: CanaryWorld) -> None:
     )
 
 
+# Rows 12-17 -- the Phase 2 ``exclude`` rows: the read side. ----------------------------------------
+#
+# These run the surface under its own ``llm_bound`` scope with the LIVE ``read_sensitivity()`` (the
+# case carries ``sensitivity_reads``), against the real engine and the real catalog, over the two-model
+# corpus, so the search fans out to its pools and the engine's own ``exclude`` filter is the first line.
+# Nothing is stubbed on the read path: the capturing backend stands in for the model, and a surface
+# that hydrates through the catalog keeps its catalog refusal (the second line). A leak is judged on
+# the canary string AND on the sensitive chunk's id (``judge(..., reads=True)``): a chunk the engine let
+# through and the runner then caught still turns the case red, because the engine filter is the line
+# these rows are about.
+
+#: What the search steps ask. The corpus text answers it, so both documents are near.
+_READ_QUERY = "tuple lease renewal does not change attempts"
+
+
+def _arm_reads(world: CanaryWorld) -> None:
+    """A search page cached by an earlier case in this worker must not answer this one."""
+    from nexus.mcp import core  # noqa: PLC0415 - after the substrate is pinned
+
+    core._page_cache_invalidate()
+
+
+def _corpus_arg(world: CanaryWorld) -> str:
+    return ",".join(world.collections)
+
+
+def _search_step(world: CanaryWorld) -> dict[str, Any]:
+    return {
+        "tool": "search",
+        "args": {"query": _READ_QUERY, "corpus": _corpus_arg(world), "limit": 10, "threshold": float("inf")},
+    }
+
+
+def _run_plan(world: CanaryWorld, plan: dict[str, Any], *, surface: str, bundle: bool = False) -> Any:
+    """Run *plan* the way ``nx_answer`` runs one, inside the row's own scope; what comes back is recorded
+    as a return value (the step outputs are what the next step and the caller read)."""
+    from nexus.plans.match import Match  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.plans.runner import plan_run  # noqa: PLC0415 - as above
+    from nexus.sensitivity import llm_bound  # noqa: PLC0415 - as above
+
+    match = Match(
+        plan_id=1, name="canary", description="canary", confidence=0.9, dimensions={"verb": "test"}, tags="",
+        plan_json=json.dumps(plan), required_bindings=[], optional_bindings=[], default_bindings={}, parent_dims=None,
+    )
+
+    async def run() -> Any:
+        with llm_bound(surface):
+            return await plan_run(match, {}, bundle_operators=bundle)
+
+    result = asyncio.run(run())
+    world.capture.record_return(f"plan_run:{surface}", steps=result.steps, final=result.final)
+    return result
+
+
+@driver("nexus.mcp.core:operator_extract")
+def _drive_nx_answer_operators(world: CanaryWorld) -> None:
+    """Census row 12. Two plans run inside ``nx_answer_operators``. The chash route: a search over both
+    models' collections, then ``summarize`` and ``extract`` over the hit ids, hydrated by chunk id. The
+    tumbler route: ``summarize`` over the two documents' tumblers named outright (no search, so the
+    catalog's refusal is the only line). The control document's text must reach an operator prompt on
+    the chash route, and the sensitive chunk's id must not be among the search hits."""
+    _arm_reads(world)
+    chash_plan = {"steps": [
+        _search_step(world),
+        {"tool": "summarize", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "extract", "args": {"ids": "$step1.ids", "collections": "$step1.collections", "fields": "title"}},
+    ]}
+    result = _run_plan(world, chash_plan, surface="nx_answer_operators")
+    assert result.steps[0].get("ids"), "harness: the search step found nothing, so no operator was handed a hit"
+    tumbler_plan = {"steps": [
+        {"tool": "summarize", "args": {"ids": [world.sensitive_tumbler, world.control_tumbler]}},
+    ]}
+    _run_plan(world, tumbler_plan, surface="nx_answer_operators")
+
+
+@driver("nexus.plans.bundle:dispatch_bundle")
+def _drive_nx_answer_bundle(world: CanaryWorld) -> None:
+    """Census row 13. A search, then two adjacent operators fused into ONE dispatch
+    (``bundle_operators=True``): the fused step's inputs are hydrated from the hit ids."""
+    _arm_reads(world)
+    plan = {"steps": [
+        _search_step(world),
+        {"tool": "summarize", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "generate", "args": {"template": "memo", "context": "$step2.summary"}},
+    ]}
+    result = _run_plan(world, plan, surface="nx_answer_bundle", bundle=True)
+    assert any(r.source == "bundle" for r in result.step_records), (
+        f"harness: no step ran as a fused bundle ({[r.source for r in result.step_records]}), so dispatch_bundle did not run"
+    )
+
+
+@driver("nexus.mcp.core:_nx_answer_plan_miss")
+def _drive_nx_answer_plan_helpers(world: CanaryWorld) -> None:
+    """Census row 14. The three helpers run in the order ``nx_answer`` runs them on a plan miss: request
+    coverage, the planner (scripted to answer a search-and-summarize plan, so the miss path reaches a
+    read), the plan itself under ``nx_answer_operators``, then the grown-plan description. The helpers
+    send the question and plan text, never a document, so what this row proves is that nothing a read
+    brought back reaches THEM: the planner prompt, the coverage extraction and the generalizer prompt are
+    each captured and held to the canary, and the read the plan makes is the one the other rows judge."""
+    from nexus.mcp import core  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.operators import dispatch  # noqa: PLC0415 - as above
+
+    _arm_reads(world)
+    # The suite's autouse guard (tests/conftest.py ``_no_live_structured_extraction``) makes the coverage
+    # extraction fail before it reaches a backend. Here the backend is the capturing one, so no model is
+    # called: the guard's own documented release is to replace ``claude_dispatch``, and the unwrapped function
+    # still ends in ``_backend_for``, which ``_arm_llm`` has pointed at the capture.
+    _mp(world).setattr(dispatch, "claude_dispatch", dispatch.claude_dispatch.__wrapped__)
+    plan = {"steps": [
+        _search_step(world),
+        {"tool": "summarize", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+    ]}
+    world.capture.scripted["planner"] = lambda req: plan
+
+    async def helpers() -> Any:
+        evidence = await core._nx_answer_evidence_request(bindings=None, scope=_corpus_arg(world))
+        coverage = await core._nx_answer_request_coverage(
+            question=_READ_QUERY, scope=_corpus_arg(world), evidence_request=evidence,
+            explicit_kind=None, deadline=None, trace=False,
+        )
+        match = await core._nx_answer_plan_miss(_READ_QUERY, scope=_corpus_arg(world), coverage=coverage)
+        return match
+
+    match = asyncio.run(helpers())
+    result = _run_plan(world, json.loads(match.plan_json), surface="nx_answer_operators")
+    assert result.steps[0].get("ids"), "harness: the planned search found nothing"
+    asyncio.run(core._generalize_grown_match_description(question=_READ_QUERY, plan_json=match.plan_json))
+    dispatched = [getattr(r, "operator", None) for r in world.capture.dispatched]
+    for operator, what in (
+        ("request_coverage_extract", "the request-coverage extraction"),
+        ("planner", "the planner"),
+        ("plan_grow_generalize", "the grown-plan description"),
+    ):
+        assert operator in dispatched, f"harness: {what} was never dispatched (saw {dispatched}), so that helper was not judged"
+
+
+@driver("nexus.mcp.core:nx_tidy")
+def _drive_nx_tidy(world: CanaryWorld) -> None:
+    """Census row 15. ``nx_tidy`` over both collections: its prefetch searches and hydrates, and inlines
+    the entries into the prompt. The summary line counts what the CATALOG check removed after the
+    engine's filter; a nonzero count means the engine let a sensitive entry through."""
+    from nexus.mcp import core  # noqa: PLC0415 - after the substrate is pinned
+
+    _arm_reads(world)
+    out = asyncio.run(core.nx_tidy(topic=_READ_QUERY, collection=_corpus_arg(world)))
+    world.capture.record_return("nx_tidy", result=out)
+    assert "Sensitive entries withheld from this pass: 0" in out, (
+        f"nx_tidy withheld sensitive entries the engine should have excluded, or did not report the exclude posture: {out!r}"
+    )
+
+
+def _child_reads(world: CanaryWorld, request: Any) -> None:
+    """What the dispatched ``claude -p`` child's nested ``nx-mcp`` would hand its model.
+
+    No test launches ``claude``. The grant the dispatch carried is checked (the nested servers are named
+    in ``allowed_tools`` and their registration exports ``llm_bound``), and then the child's read tools are
+    called in process the way the server calls them: inside ``child_scope()``, the scope the nested
+    server's middleware enters for every ``tools/call``. ``search`` and ``store_get_many`` are the reads
+    the child's exploration uses; each result is what the child's model would read, so it is a payload."""
+    from nexus.mcp import core  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.sensitivity import POSTURE_ENV, child_scope  # noqa: PLC0415 - as above
+
+    servers = request.mcp_servers or {}
+    assert "mcp__nexus" in (request.allowed_tools or []), f"harness: the dispatch granted no nx MCP tools: {request.allowed_tools}"
+    assert servers.get("nexus", {}).get("env", {}).get(POSTURE_ENV) == "llm_bound", (
+        f"the child's nx-mcp registration does not export {POSTURE_ENV}=llm_bound: {servers.get('nexus')}"
+    )
+    core._page_cache_invalidate()
+    with child_scope():
+        found = core.search(query=_READ_QUERY, corpus=_corpus_arg(world), limit=10, threshold=float("inf"))
+        world.capture.record_llm("child_tool_result", tool="search", result=found)
+        got = core.store_get_many(
+            ids=[world.chash_sensitive, world.chash_control],
+            collections=[world.collection_bge, world.collection_minilm],
+        )
+        # The tool names an id it could not return in its ``missing`` list, so the sensitive id the child ASKED
+        # for comes back in the result whether or not the chunk was read. It is not a read; the canary text is
+        # the evidence here (a chunk that was read carries it), so the echoed id is masked.
+        masked = str(got).replace(world.chash_sensitive, "<the sensitive id the child asked for>")
+        world.capture.record_llm("child_tool_result", tool="store_get_many", result=masked)
+
+
+@driver("nexus.mcp.core:nx_enrich_beads")
+def _drive_nx_enrich_beads(world: CanaryWorld) -> None:
+    """Census row 16. ``nx_enrich_beads`` dispatches with the nx MCP tools granted; the child's reads are
+    driven in process (``_child_reads``)."""
+    from nexus.mcp import core  # noqa: PLC0415 - after the substrate is pinned
+
+    _arm_reads(world)
+    out = asyncio.run(core.nx_enrich_beads(bead_description="Renew the tuple lease on a schedule."))
+    world.capture.record_return("nx_enrich_beads", result=out)
+    (request,) = [r for r in world.capture.dispatched if r.mcp_servers]
+    _child_reads(world, request)
+
+
+@driver("nexus.mcp.core:nx_plan_audit")
+def _drive_nx_plan_audit(world: CanaryWorld) -> None:
+    """Census row 17. As row 16, for ``nx_plan_audit``."""
+    from nexus.mcp import core  # noqa: PLC0415 - after the substrate is pinned
+
+    _arm_reads(world)
+    out = asyncio.run(core.nx_plan_audit(plan_json='{"steps": [{"tool": "search", "args": {"query": "lease"}}]}'))
+    world.capture.record_return("nx_plan_audit", result=out)
+    (request,) = [r for r in world.capture.dispatched if r.mcp_servers]
+    _child_reads(world, request)
+
+
+# Rows 11, 20, 23 and 24 -- the Phase 3 rows: the Knowledge Map, rerank, and the two output postures. ----
+#
+# Rows 23 and 24 (``withhold``) run the surface with its DEFAULT output posture against the real engine and
+# the real catalog, with the default read posture (``include``), so the sensitive hit reaches the output
+# layer flagged by the engine and the posture is the only protection: the canary text and title must be
+# in no return value, and the control twin's must be. Row 11 (the Knowledge Map) and row 20 (rerank) are
+# judged where Python can observe them (see each driver). A mutation case per row removes the row's gate
+# and must turn it red (``test_harness_a_phase_3_gate_removed_turns_its_row_red``).
+
+
+class _KnowledgeMapTaxonomy:
+    """Two root topics whose labels were computed BEFORE the sensitive document was flagged: the sensitive
+    document's topic carries its canary in the label (a label is words of the topic's members), the control's
+    carries the control's. Each topic holds its document's one chunk."""
+
+    def __init__(self, world: CanaryWorld) -> None:
+        self.topics: dict[int, dict[str, Any]] = {
+            1: {"id": 1, "label": f"{world.canary_sensitive} lease renewal", "parent_id": None,
+                "collection": world.collection_bge, "doc_count": 9},
+            2: {"id": 2, "label": f"{world.canary_control} lease renewal", "parent_id": None,
+                "collection": world.collection_minilm, "doc_count": 4},
+        }
+        self.assignments = {world.chash_sensitive: 1, world.chash_control: 2}
+
+    def get_topics(self, *, parent_id: int | None = None) -> list[dict[str, Any]]:
+        return sorted((t for t in self.topics.values() if t["parent_id"] == parent_id), key=lambda t: -t["doc_count"])
+
+    def get_assignments_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
+        return {d: self.assignments[d] for d in doc_ids if d in self.assignments}
+
+    def get_topic_by_id(self, topic_id: int) -> dict[str, Any] | None:
+        return self.topics.get(topic_id)
+
+    def update_topic_label(self, topic_id: int, label: str) -> None:
+        self.topics[topic_id] = {**self.topics[topic_id], "label": label}
+
+
+@driver("nexus.hooks.subagent_start:_knowledge_map_section")
+def _drive_knowledge_map(world: CanaryWorld) -> None:
+    """Census row 11. The sensitive document was flagged after its topic was built, so the topic's label
+    carries its words. The flagging step (what ``nx catalog sensitive`` runs after setting the flag:
+    ``sensitive_topics.withhold_after_flag``, against the real catalog and a taxonomy double) relabels the
+    topics holding the document and drops the cached map; the Knowledge Map is then generated and read back
+    the way the SubagentStart hook reads it, and that section is what every subagent's context receives."""
+    import hashlib  # noqa: PLC0415 - stdlib, scoped to the driver
+
+    from nexus import context, sensitive_topics  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 - as above
+    from nexus.hooks.subagent_start import _knowledge_map_section  # noqa: PLC0415 - as above
+
+    mp = _mp(world)
+    assert world.workdir is not None
+    mp.setenv("NEXUS_CONFIG_DIR", str(world.workdir))
+    taxonomy = _KnowledgeMapTaxonomy(world)
+
+    # The relabel reaches T2 through ``nexus.mcp_infra.t2_index_write``; the taxonomy double stands in for the
+    # tenant's topics (the topics are seeded by this driver, not by a discover run).
+    mp.setattr(
+        "nexus.mcp_infra.t2_index_write",
+        lambda write_fn, **_kw: write_fn(types.SimpleNamespace(taxonomy=taxonomy)),
+    )
+    with HttpCatalogClient() as cat:
+        sensitive_topics.withhold_after_flag(cat, [world.sensitive_tumbler])
+    repo_root = str(world.workdir / "repo")
+    cache = world.workdir / "context" / f"repo-{hashlib.sha1(repo_root.encode()).hexdigest()[:8]}.txt"  # noqa: S324 - the hook's cache key
+    context.generate_context_l1(taxonomy, output_path=cache)
+    section = _knowledge_map_section(repo_root)
+    assert section.strip(), "harness: the Knowledge Map section the hook reads is empty"
+    world.capture.record_llm("knowledge_map_section", section=section)
+
+
+@driver("nexus.search_engine:search_cross_corpus")
+def _drive_rerank(world: CanaryWorld) -> None:
+    """Census row 20. The Voyage rerank request itself is made by the engine, to a fixed host, and what the
+    engine puts in it is pinned ONLY in Java: ``VoyageRerankSensitivityTest`` asserts the raw request bodies
+    (the sensitive row's text is in none of them) and is the named engine check for this row. Python cannot
+    observe that leg, so this driver judges the leg Python owns, the client's rerank gate
+    (``HttpVectorClient._rerank_permitted``), against the real engine:
+
+    * a ``lexical=true`` ``include`` search through the real route must actually ASK the engine to rerank (a
+      ``rerank: true`` search body is captured at ``_post``). A search that never requested one proves nothing
+      about the hold, so that is a harness failure, not a pass;
+    * the engine's own report of whether it keeps sensitive rows out of the reranker (``GET /version``'s
+      ``rerank_sensitive_exclusion_supported``) is read through the same ``_get`` the client uses, and a rerank
+      request that goes to an engine that does not report it is recorded as the sensitive text handed over: an
+      engine without the hold reranks every candidate it is given through Voyage, sensitive rows included.
+
+    The read is an ``include`` read whatever the case's marks say: the session model's own search, the one that
+    can reach a sensitive row, is what the hold exists for (an ``exclude`` read would never see the row). The
+    page the session model reads is captured as a return value, so the output posture is judged here too."""
+    from nexus.db import http_vector_client as hvc  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.mcp import core  # noqa: PLC0415 - as above
+
+    mp = _mp(world)
+    mp.setattr("nexus.sensitivity.read_sensitivity", lambda posture=None: "include")
+    _arm_reads(world)
+    rerank_bodies: list[dict[str, Any]] = []
+    tenants: list[str] = []
+    real_post = hvc._post
+
+    def spy(path: str, body: dict, **kw: Any) -> Any:
+        if path.startswith("/v1/vectors/") and "search" in path and isinstance(body, dict) and body.get("rerank") is True:
+            rerank_bodies.append({"path": path, "sensitivity": body.get("sensitivity")})
+            tenants.append(kw.get("tenant", "default"))
+        return real_post(path, body, **kw)
+
+    mp.setattr(hvc, "_post", spy)
+    out = core.search(query=_READ_QUERY, corpus=_corpus_arg(world), limit=10, threshold=float("inf"), lexical=True)
+    world.capture.record_return("search(lexical=true)", result=out)
+    assert rerank_bodies, (
+        "harness: the include search never asked the engine to rerank (no search body carried rerank: true), so "
+        "the row's gate was not exercised"
+    )
+    info = hvc._get("/version", tenant=tenants[0], timeout=10.0)
+    holds = isinstance(info, dict) and info.get("rerank_sensitive_exclusion_supported") is True
+    if not holds:
+        world.capture.record_outbound(
+            "rerank_request_to_an_engine_without_the_hold", requests=rerank_bodies, would_hand_over=world.canary_sensitive,
+        )
+
+
+@driver("nexus.mcp.core:search")
+def _drive_mcp_read_tools(world: CanaryWorld) -> None:
+    """Census row 23. The MCP read tools, each called as the session model calls it, over the pair; what each
+    returns is a return value. ``search``, ``query``, ``store_get``/``store_get_many`` by the sensitive chunk's
+    id, ``store_list`` (flat and by document), the scoped searches that take a query and a corpus, and the
+    catalog tools (``search``, ``show``, ``list``, ``links``, ``link_query``) over the sensitive document's
+    tumbler. The default output posture (``withhold``) is the only protection."""
+    from nexus.mcp import core  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.mcp_server import (  # noqa: PLC0415 - as above
+        catalog_link_query, catalog_links, catalog_list, catalog_search, catalog_show,
+    )
+
+    cap = world.capture
+    _arm_reads(world)
+    corpus = _corpus_arg(world)
+    cap.record_return("search", result=core.search(query=_READ_QUERY, corpus=corpus, limit=10, threshold=float("inf")))
+    cap.record_return("query", result=core.query(question=_READ_QUERY, corpus=corpus, limit=10))
+    cap.record_return("search_metadata_scoped", result=core.search_metadata_scoped(query=_READ_QUERY, corpus=corpus, limit=10))
+    cap.record_return("store_get", result=core.store_get(world.chash_sensitive, collection=world.collection_bge))
+    cap.record_return("store_get", result=core.store_get(world.chash_control, collection=world.collection_minilm))
+    cap.record_return(
+        "store_get_many",
+        result=core.store_get_many(
+            ids=[world.chash_sensitive, world.chash_control], collections=[world.collection_bge, world.collection_minilm],
+        ),
+    )
+    for collection in world.collections:
+        cap.record_return("store_list", result=core.store_list(collection=collection))
+        cap.record_return("store_list(docs)", result=core.store_list(collection=collection, docs=True))
+    cap.record_return("catalog_search", result=catalog_search(query="lease memo"))
+    cap.record_return("catalog_list", result=catalog_list(content_type="knowledge"))
+    cap.record_return("catalog_show", result=catalog_show(tumbler=world.sensitive_tumbler))
+    cap.record_return("catalog_show", result=catalog_show(tumbler=world.control_tumbler))
+    cap.record_return("catalog_links", result=catalog_links(tumbler=world.sensitive_tumbler))
+    cap.record_return("catalog_link_query", result=catalog_link_query(tumbler=world.sensitive_tumbler))
+
+
+@driver("nexus.commands.search_cmd:search_cmd")
+def _drive_cli_output(world: CanaryWorld) -> None:
+    """Census row 24. The CLI verbs a Claude Code Bash call reads, run under the Claude Code marker so the
+    posture is the one Q2 decided (``withhold``): ``nx search`` in each text format and ``--json``,
+    ``nx store list`` and ``nx store list --docs``, ``nx store get`` of the sensitive chunk, and
+    ``nx catalog show``/``list``/``search``/``links``. Their stdout is a return value."""
+    from click.testing import CliRunner  # noqa: PLC0415 - scoped to the driver
+
+    from nexus.cli import main  # noqa: PLC0415 - after the substrate is pinned
+
+    mp = _mp(world)
+    mp.setenv("CLAUDECODE", "1")
+    cap = world.capture
+    corpus = _corpus_arg(world)
+    runs: list[list[str]] = []
+    for flags in ([], ["--content"], ["--compact"], ["--vimgrep"], ["--files"], ["--json"]):
+        runs.append(["search", _READ_QUERY, "--corpus", corpus, "--no-threshold", *flags])
+    for collection in world.collections:
+        runs.append(["store", "list", "-c", collection])
+        runs.append(["store", "list", "-c", collection, "--docs"])
+    runs.append(["store", "get", world.chash_sensitive, "-c", world.collection_bge])
+    runs.append(["store", "get", world.chash_control, "-c", world.collection_minilm])
+    runs.append(["catalog", "show", world.sensitive_tumbler])
+    runs.append(["catalog", "show", world.control_tumbler])
+    runs.append(["catalog", "list", "--json"])
+    runs.append(["catalog", "search", "lease memo"])
+    runs.append(["catalog", "links", world.sensitive_tumbler, "--json"])
+    runs.append(["catalog", "links", world.control_tumbler, "--resolve"])
+    for argv in runs:
+        result = CliRunner().invoke(main, argv)
+        cap.record_return("nx " + " ".join(argv[:2]), exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)
+
+
 def _run_search_fanout(world: CanaryWorld, tenant: Any) -> list[Any]:
     """The search every read-side surface goes through, over both models."""
     import nexus.db.http_vector_client as hvc  # noqa: PLC0415 - after the substrate is pinned
@@ -876,7 +1315,7 @@ def _run_search_fanout(world: CanaryWorld, tenant: Any) -> list[Any]:
     client = hvc.HttpVectorClient(tenant=tenant)
     return search_cross_corpus(
         "tuple lease renewal does not change attempts", world.collections, 5, client,
-        threshold_override=float("inf"), cluster_by=None,
+        threshold_override=float("inf"), cluster_by=None, sensitivity="include",
     )
 
 
@@ -901,29 +1340,46 @@ def test_canary_is_absent_from_every_payload_of_a_refusing_surface(
     world = build_world(monkeypatch, workdir=tmp_path)
     assert len({c.split("__")[2] for c in world.collections}) >= MIN_MODELS_IN_CORPUS
     driver(world)
-    problem = judge(world, surface.name)
+    reads = surface.behaviour == "exclude"
+    problem = judge(world, surface.name, reads=reads, pool=reads and surface.target not in NON_SEARCH_EXCLUDE_ROWS)
     assert problem is None, problem
 
 
-def judge(world: CanaryWorld, surface_name: str) -> str | None:
+def judge(world: CanaryWorld, surface_name: str, *, reads: bool = False, pool: bool = False) -> str | None:
     """The canary's verdict on one finished run: ``None`` when it holds, else why not.
 
     Two halves, both required: the sensitive string went nowhere, AND the control
-    twin's string did reach a payload (else the run proved nothing)."""
+    twin's string did reach a payload (else the run proved nothing).
+
+    ``reads`` (an ``exclude`` row) adds the engine's line: the sensitive chunk's id is in no payload either.
+    A catalog refusal downstream can keep the text out of a prompt after the engine let the chunk through,
+    and the id is what shows the engine did not drop it. ``pool`` (a search-shaped row) adds that a search
+    ran on a ``ThreadPoolExecutor`` worker in THIS case, so the read went through ``search_cross_corpus``'s
+    pools and not around them."""
     cap = world.capture
     counts = (
         f"{len(cap.llm_payloads)} LLM payload(s), {len(cap.requests)} outbound request(s), "
-        f"{len(cap.spawns)} spawn(s), {len(cap.stores)} store write(s)"
+        f"{len(cap.spawns)} spawn(s), {len(cap.stores)} store write(s), {len(cap.returns)} return value(s)"
     )
     if world.canary_sensitive in cap.everything:
         return (
             f"surface {surface_name!r} sent the sensitive document's text out: the canary string is in "
             f"{cap.where(world.canary_sensitive)} of {counts}"
         )
+    if reads and world.chash_sensitive in cap.everything:
+        return (
+            f"surface {surface_name!r} read the sensitive chunk: its id is in {cap.where(world.chash_sensitive)} of "
+            f"{counts}, so the engine's exclude did not drop it from a read made under llm_bound"
+        )
     if world.canary_control not in cap.everything:
         return (
             f"surface {surface_name!r} never sent the control document either ({counts}): the run did not "
             "reach the LLM, so the absence of the sensitive canary proves nothing"
+        )
+    if pool and world.probe.pool_tasks_ran < 1:
+        return (
+            f"surface {surface_name!r} ran no search on a ThreadPoolExecutor worker (threads: "
+            f"{sorted(set(world.probe.threads))}): its read did not fan out through search_cross_corpus's pools"
         )
     return None
 
@@ -989,4 +1445,168 @@ def test_harness_judge_fails_a_leak_and_fails_a_run_that_reached_nothing(
     asyncio.run(claude_dispatch(f"label {other.canary_control}", {"type": "object", "properties": {}}))
     assert "sent the sensitive document's text out" in (judge(other, "leaks-by-http") or ""), (
         "a leak in an outbound HTTP body, with a clean LLM payload, is caught"
+    )
+
+
+def test_harness_judge_of_a_read_row_fails_a_chunk_id_leak_and_a_missing_pool(
+    t2_service_env: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two extra halves of an ``exclude`` verdict each go red on a fake surface, and a write-side
+    verdict (``reads=False``) ignores them, so the Phase 1 rows keep the verdict they always had."""
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 - stdlib, scoped to the test
+
+    world = build_world(monkeypatch, flag=False)
+    world.capture.record_llm("operator", text=world.canary_control)
+    assert judge(world, "reader", reads=True) is None, "a clean run with the control present holds"
+    assert "ThreadPoolExecutor" in (judge(world, "reader", reads=True, pool=True) or ""), (
+        "a search-shaped row whose read ran on no pool worker is red"
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(world.probe.record).result()
+    assert judge(world, "reader", reads=True, pool=True) is None, "a pool worker ran a search in this case"
+
+    world.capture.record_return("search", ids=[world.chash_sensitive])
+    assert "did not drop it" in (judge(world, "reader", reads=True, pool=True) or ""), (
+        "the sensitive chunk's id in a return value is a read of the chunk, even with its text kept out"
+    )
+    assert judge(world, "writer") is None, "a refuse or skip row is not judged on the chunk id"
+
+
+def _exclude_cases() -> list[Any]:
+    """The ``exclude`` rows that read through the search pools. A non-search row (the Knowledge Map) is not
+    moved by a search mutation; its own gate is removed in ``test_harness_a_phase_3_gate_removed_turns_its_row_red``."""
+    return [
+        c for c in _registry_cases()
+        if c.values and c.values[0] is not None and c.values[0].behaviour == "exclude"
+        and c.values[0].target not in NON_SEARCH_EXCLUDE_ROWS
+    ]
+
+
+@pytest.mark.sensitivity_reads
+@pytest.mark.parametrize("surface", _exclude_cases())
+def test_harness_a_read_path_that_ignores_the_posture_turns_every_exclude_row_red(
+    surface: Surface, t2_service_env: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The mutation, in the suite: ``HttpVectorClient.search_per_collection`` (the route the cross-corpus
+    pools and the MCP search take) is made to send ``include`` whatever the caller passed, which is what
+    hard-coding ``sensitivity="include"`` at its ``search_engine`` call site does. Every Phase 2 row must
+    go red: with the engine filter gone, the canary text, the sensitive chunk's id or the surface's own
+    report of it reaches a payload. A row that stays green here would pass with its filter deleted."""
+    import nexus.db.http_vector_client as hvc  # noqa: PLC0415 - after the substrate is pinned
+
+    world = build_world(monkeypatch, workdir=tmp_path)
+    current = hvc.HttpVectorClient.search_per_collection
+
+    def include_always(self: Any, *a: Any, **kw: Any) -> Any:
+        kw["sensitivity"] = "include"
+        return current(self, *a, **kw)
+
+    monkeypatch.setattr(hvc.HttpVectorClient, "search_per_collection", include_always)
+    # RDR-243 Phase 3 (nexus-rfvyy.8.2): the MCP search tools now withhold a sensitive hit at their output whatever
+    # the read asked for, so with the engine filter deleted that second layer would hide the leak this mutation is
+    # meant to show. The mutation removes both layers: the output posture reads ``flag`` for the run.
+    import nexus.sensitive_output as so  # noqa: PLC0415 - after the substrate is pinned
+
+    monkeypatch.setattr(so, "mcp_output_setting", lambda: so.McpOutputSetting("flag", "flag"))
+    try:
+        SURFACE_DRIVERS[surface.target](world)
+    except AssertionError as exc:
+        red = str(exc)
+    else:
+        red = judge(world, surface.name, reads=True, pool=True) or ""
+    assert any(k in red for k in ("sensitive", "engine")), (
+        f"row {surface.name!r} stayed green with every search read as include: {red!r}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3: one real-substrate end-to-end test, and a mutation per row.
+# --------------------------------------------------------------------------- #
+
+
+def test_mcp_withhold_end_to_end_on_the_real_engine(
+    t2_service_env: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Real engine row -> ``SearchResult.metadata`` -> stub. The engine flags the sensitive hit (``sensitive:
+    true``, from the live owner's catalog flag) and ``search_cross_corpus`` carries the flag into the result's
+    metadata; the MCP ``search`` tool, under the default output posture, replaces that hit with the stub line
+    that names the document's tumbler and prints the control twin whole."""
+    from nexus.mcp import core  # noqa: PLC0415 - after the substrate is pinned
+
+    world = build_world(monkeypatch, workdir=tmp_path)
+    hits = _run_search_fanout(world, t2_service_env)
+    flags = {r.collection: r.metadata.get("sensitive") for r in hits}
+    assert flags[world.collection_bge] is True, f"the engine did not flag the sensitive hit: {flags}"
+    assert flags[world.collection_minilm] is False, f"the engine flagged the control hit: {flags}"
+
+    core._page_cache_invalidate()
+    out = core.search(query=_READ_QUERY, corpus=_corpus_arg(world), limit=10, threshold=float("inf"))
+    assert f"[sensitive] {world.sensitive_tumbler}: content withheld" in out, out
+    assert "1 sensitive hit withheld" in out
+    assert world.canary_control in out, "the control twin prints whole"
+    assert world.canary_sensitive not in out and world.chash_sensitive not in out, out
+
+
+def _mutate_labels_not_withheld(mp: pytest.MonkeyPatch) -> None:
+    mp.setattr("nexus.sensitive_topics.withhold_topic_labels", lambda *a, **k: [])
+
+
+def _mutate_mcp_posture_off(mp: pytest.MonkeyPatch) -> None:
+    import nexus.sensitive_output as so  # noqa: PLC0415 - after the substrate is pinned
+
+    mp.setattr(so, "mcp_output_setting", lambda: so.McpOutputSetting("flag", "flag"))
+
+
+def _mutate_rerank_gate_removed_on_a_keyless_engine(mp: pytest.MonkeyPatch) -> None:
+    """Row 20's gate removed: the engine answers ``/version`` without ``rerank_sensitive_exclusion_supported``
+    (an engine that predates the hold) and the client's ``_rerank_permitted`` is bypassed, so an ``include``
+    search sends ``rerank: true`` to it."""
+    import nexus.db.http_vector_client as hvc  # noqa: PLC0415 - after the substrate is pinned
+
+    real_get = hvc._get
+
+    def keyless_get(path: str, **kw: Any) -> Any:
+        out = real_get(path, **kw)
+        if path == "/version" and isinstance(out, dict):
+            return {k: v for k, v in out.items() if k != "rerank_sensitive_exclusion_supported"}
+        return out
+
+    mp.setattr(hvc, "_get", keyless_get)
+    mp.setattr(hvc.HttpVectorClient, "_rerank_permitted", lambda self, rerank, sensitivity, rerank_meta_out: rerank)
+
+
+def _mutate_cli_posture_off(mp: pytest.MonkeyPatch) -> None:
+    mp.setattr("nexus.session.started_by_claude_code", lambda: False)
+    mp.setattr("nexus.commands.search_cmd.started_by_claude_code", lambda: False)
+
+
+#: The gate each Phase 3 row stands on, removed. A row with no entry here fails
+#: ``tests/test_sensitivity_canary_drivers.py::test_every_phase_3_row_has_a_mutation``.
+PHASE_3_MUTATIONS: dict[str, Callable[[pytest.MonkeyPatch], None]] = {
+    "nexus.hooks.subagent_start:_knowledge_map_section": _mutate_labels_not_withheld,
+    "nexus.search_engine:search_cross_corpus": _mutate_rerank_gate_removed_on_a_keyless_engine,
+    "nexus.mcp.core:search": _mutate_mcp_posture_off,
+    "nexus.commands.search_cmd:search_cmd": _mutate_cli_posture_off,
+}
+
+
+def _phase_3_cases() -> list[Any]:
+    return [c for c in _registry_cases() if c.values and c.values[0] is not None and c.values[0].phase == 3]
+
+
+@pytest.mark.parametrize("surface", _phase_3_cases())
+def test_harness_a_phase_3_gate_removed_turns_its_row_red(
+    surface: Surface, t2_service_env: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The mutation, per Phase 3 row: the gate the row stands on is removed (labels left as they were, the MCP
+    output posture off, the CLI treated as a terminal) and the row's own driver must show the leak."""
+    mutate = PHASE_3_MUTATIONS.get(surface.target)
+    assert mutate is not None, f"row {surface.name!r} has no mutation in PHASE_3_MUTATIONS"
+    world = build_world(monkeypatch, workdir=tmp_path)
+    mutate(monkeypatch)
+    SURFACE_DRIVERS[surface.target](world)
+    red = judge(world, surface.name, reads=surface.behaviour == "exclude")
+    assert red is not None and "sent the sensitive document's text out" in red, (
+        f"row {surface.name!r} stayed green with its gate removed: {red!r}"
     )

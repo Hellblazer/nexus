@@ -957,7 +957,7 @@ class TestEveryIntegrationClusterGetsTheConf:
         "db/test_pg_provision.py": 4,
         "db/test_pg_provision_ca3_bundle.py": 1,
         "db/test_pg_bundle_relocation.py": 1,
-        "db/test_pg_scram_auth.py": 1,
+        "db/test_pg_scram_auth.py": 2,
         "daemon/test_storage_service_daemon_pg_monitor_backfill.py": 1,
     }
 

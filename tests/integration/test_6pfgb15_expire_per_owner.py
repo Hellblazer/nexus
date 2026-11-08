@@ -73,7 +73,7 @@ class _World:
         reader = make_catalog_reader()
         assert reader is not None
         for manifest_row in reader.get_manifest(str(entry.tumbler)):
-            row = self.client.get_by_id(self.collection, manifest_row.chash)
+            row = self.client.get_by_id(self.collection, manifest_row.chash, sensitivity="include")
             if row is not None and row.get("title") == title:
                 seed_chunks_direct(
                     self.collection, ids=[manifest_row.chash], documents=[row["content"]],
@@ -96,7 +96,7 @@ class _World:
 
     def chunk_served(self, body: str) -> bool:
         """The chunk is visible to a read, which the engine allows only while a live document owns it."""
-        return self.client.get_by_id(self.collection, _chash(body)) is not None
+        return self.client.get_by_id(self.collection, _chash(body), sensitivity="include") is not None
 
 
 def test_a_ttl_note_expires_when_a_permanent_note_with_the_same_text_wrote_last(t2_service_env):

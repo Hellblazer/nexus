@@ -168,14 +168,52 @@ _WORKTREE_PREFLIGHT = (
 _WORKTREE_PREFLIGHT_SCRIPT: str = "scripts/agent-worktree-preflight.sh"
 
 
-def _worktree_preflight_row(repo_root: str) -> str:
+def _carries_preflight_script(start: str) -> bool:
+    """True when ``start``, or a directory above it up to the first git checkout, holds the
+    preflight script. The walk stops at a ``.git`` entry (a directory, or a worktree's file), so a
+    project nested under a nexus checkout, or under a stray ``scripts/`` copy, is not told to run it."""
+    if not start or start.startswith("${"):  # an unsubstituted hook template is no path
+        return False
+    try:
+        here = os.path.realpath(start)
+    except Exception:  # noqa: BLE001 — carried: an unresolvable path holds no script
+        return False
+    while True:
+        if os.path.isfile(os.path.join(here, _WORKTREE_PREFLIGHT_SCRIPT)):
+            return True
+        if os.path.lexists(os.path.join(here, ".git")):
+            return False  # the checkout the cwd is in: a project above it is not this one
+        parent = os.path.dirname(here)
+        if parent == here:
+            return False
+        here = parent
+
+
+def _process_cwd() -> str:
+    try:
+        return os.getcwd()
+    except OSError:  # a deleted cwd: no checkout to find
+        return ""
+
+
+def _worktree_preflight_row(repo_root: str, cwd: str = "") -> str:
     """The Preflight row, only for a project that has the script.
 
     nexus-z7ddd: the row used to go into every dispatch in every project, so a
     worktree agent outside the nexus repo was told to run, as its first action, a
     script its project does not have.
+
+    nexus-13mbx: the main repo root alone withheld the row whenever git could not
+    resolve it (a bare repo with worktrees, a git timeout, a hook started outside
+    the checkout). The row is also given when ``cwd`` (the payload's, else the
+    hook process's, tried second) lies in a checkout that carries the script, which
+    keys it on the agent's own worktree as well. A cwd above every checkout still
+    gets no row; a worktree-isolated dispatch, the only one the row is for, runs in
+    its worktree.
     """
     if repo_root and os.path.isfile(os.path.join(repo_root, _WORKTREE_PREFLIGHT_SCRIPT)):
+        return _WORKTREE_PREFLIGHT
+    if _carries_preflight_script(cwd):
         return _WORKTREE_PREFLIGHT
     return ""
 
@@ -451,8 +489,10 @@ def _linked_rdrs_section(task_text: str, env: dict[str, str]) -> str:
         return ""
     link_chunks: list[str] = []
     for fp in file_paths:
+        # --for-model: this text is injected into a subagent's context, so a sensitive peer is withheld whatever
+        # the environment marker says (RDR-243 Phase 3 fix r1, nexus-rfvyy.8).
         raw = _run_captured(
-            nx_argv("catalog", "links-for-file", fp), env=env, timeout=30
+            nx_argv("catalog", "links-for-file", "--for-model", fp), env=env, timeout=30
         )
         matched = [ln for ln in raw.splitlines() if _ARROW_LINE_RE.match(ln)]
         if matched:
@@ -587,7 +627,8 @@ def run(payload: dict | None) -> HookResult:
 
     parts.append(_RELAY)
     parts.append(_ORCH)
-    parts.append(_worktree_preflight_row(repo_root))
+    parts.append(_worktree_preflight_row(repo_root, str(data.get("cwd") or ""))
+                 or _worktree_preflight_row("", _process_cwd()))
 
     skip_storage_docs, skip_operators = _classify(agent_type, task_text)
 

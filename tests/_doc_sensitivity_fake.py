@@ -17,6 +17,9 @@ class NoSensitiveDocuments:
     def resolve_many(self, doc_ids: list[str]) -> dict[str, Any]:
         return {}
 
+    def all_documents(self, *, limit: int = 0) -> list[Any]:
+        return []
+
     def by_doc_id(self, doc_id: str) -> None:
         return None
 
@@ -31,6 +34,9 @@ class NoSensitiveDocuments:
 
     def list_by_collection(self, collection: str, *, limit: int | None = None) -> list[Any]:
         return []
+
+    def docs_for_chashes(self, chashes: list[str]) -> dict[str, list[str]]:
+        return {}
 
     def get_manifests(self, doc_ids: list[str]) -> dict[str, list[Any]]:
         return {}

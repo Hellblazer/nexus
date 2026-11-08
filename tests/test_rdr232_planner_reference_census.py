@@ -160,7 +160,7 @@ def test_a_documented_ids_arg_reaches_the_ids_merge_site(op: str, arg: str) -> N
 
     texts = ["secondary 0", "secondary 1"]
     args = {arg: ["id-a", "id-b"], "claim": "c", "check_instruction": "c"}
-    with patch("nexus.mcp.core.store_get_many", return_value={"contents": list(texts)}), patch(
+    with patch("nexus.mcp.core._store_get_many_impl", return_value={"contents": list(texts)}), patch(
         "nexus.mcp_infra.get_catalog", return_value=None
     ):
         items, report = _reducer_input(op, args)

@@ -62,6 +62,7 @@ from nexus.db.engine_reasons import QUARANTINE_RESTORE_BUSY_REASON, UNREGISTERED
 from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import DEADLINE_OUTCOME_HEADER, is_deadline_abort, parse_retry_after
 from nexus.redact import redact_credentials
+from nexus.sensitivity import ReadSensitivity, check_read_sensitivity
 
 _log = structlog.get_logger(__name__)
 
@@ -1969,6 +1970,20 @@ def _request_deadline_ms_for(path: str) -> int | None:
 #: ``budget_seconds`` and by the census it runs first, so this is a ceiling above both.
 _CHUNK_KEYS_TIMEOUT_S = 300
 
+#: A retire-keys dry run that runs as an engine job (nexus-v75nw): seconds slept after the 1st, 2nd, ... poll of the
+#: job, the last repeated. The edge logs every root-credential request as ``edge_passthrough_unattributed`` and its
+#: alarm sums those over 5 minutes at a threshold of 20 (bob, 2026-11-07): a 2 s poll is about 150 requests in that
+#: window and would page security, this backs off to one poll every 30 s, which is 10 in 5 minutes at steady state.
+_CHUNK_KEYS_JOB_POLL_SCHEDULE: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 30.0)
+#: How long the client waits for the job before it stops waiting (the job goes on, and the same command joins it).
+_CHUNK_KEYS_JOB_MAX_WAIT_S = 1800.0
+#: The same for an apply job, which sweeps for as long as the tenant needs: the engine stops a job at 4 hours of wall
+#: clock (``ChunkKeysSweepJobs.MAX_RUNTIME``), so the client waits that long and a quarter of an hour more.
+_CHUNK_KEYS_APPLY_MAX_WAIT_S = 4.25 * 3600.0
+#: Polls that fail in a row (a 5xx, the edge's 504, a 429, a dropped connection) before the dry run gives up. A poll is
+#: a cheap read and the job does not depend on it, so a single bad one is not the job's failure.
+_CHUNK_KEYS_JOB_POLL_FAILURES = 5
+
 #: The validate route scans the whole chunk table (the engine allows it 30 minutes); the socket outlasts that.
 _CHUNK_KEYS_VALIDATE_TIMEOUT_S = 2100
 
@@ -2762,6 +2777,95 @@ class VectorServiceError(RuntimeError):
         self.edge_refusal = edge_refusal
 
 
+class SensitivityExcludeUnavailable(VectorServiceError):
+    """A ``sensitivity="exclude"`` read was refused before any request was sent (RDR-243 Phase 2, nexus-rfvyy.7.8).
+
+    The engine filters sensitive chunks out of a read only when it carries ``vector_sensitivity_exclude_supported``;
+    an engine without it answers HTTP 200 to the key and returns the sensitive rows (a flag it does not list reads the
+    same on the public edge). So the client reads the flag first and refuses unless it is JSON ``true``: when the
+    engine reports it absent or false, and when the question could not be asked (the probe failed or timed out). It
+    never falls back to an unfiltered read. The first two are real answers and are cached; the third is not, so the
+    next read asks again (Sam's ruling on nexus-rfvyy.3)."""
+
+
+#: The value of every read's ``sensitivity`` argument. ``exclude`` asks the engine to drop chunks with a live
+#: sensitive owner; ``include`` sends nothing, the request the client made before the argument existed.
+Sensitivity = ReadSensitivity
+_check_sensitivity = check_read_sensitivity
+
+
+class ChunkKeysDryRunTimeout(VectorServiceError):
+    """The client stopped waiting for a retire-keys job (nexus-v75nw); the job is still running in the engine.
+
+    The same command again joins it: the engine runs one job per tenant and hands a repeat of the same running request
+    the one that is running (a ``--apply`` that finds its tenant's dry run counting waits for it, and one that finds
+    the same apply running joins that). ``what`` is ``"dry run"`` or ``"apply"``; an apply keeps sweeping while the
+    client is away."""
+
+    def __init__(self, job_id: str, waited_s: float, what: str = "dry run") -> None:
+        goes_on = "it goes on in the engine" + (" and keeps sweeping" if what == "apply" else "")
+        super().__init__(
+            f"the retire-keys {what} (job {job_id}) was still running after {waited_s:.0f} s; {goes_on}. "
+            "Run the same command again to join it, or raise --wait-seconds.",
+            reason="sweep_job_still_running", engine_body={"job_id": job_id},
+        )
+        self.job_id = job_id
+        self.what = what
+
+
+class ChunkKeysJobLeftRunning(VectorServiceError):
+    """The operator interrupted the wait (Ctrl-C) and the job was left running in the engine (nexus-v75nw).
+
+    Nothing is lost: an apply that goes on sweeps whole batches only, and the same command joins the running job.
+
+    ``gone`` is the other end of a cancel: the operator asked to cancel and the engine no longer holds the job (it
+    restarted, or the job expired), so there is nothing to join and the apply is NOT started again; the batches it
+    committed are kept (reason ``sweep_job_gone_after_cancel``)."""
+
+    def __init__(self, job_id: str, what: str, *, gone: bool = False) -> None:
+        if gone:
+            super().__init__(
+                f"the engine no longer holds the retire-keys {what} (job {job_id}) that you asked to cancel (it "
+                "restarted, or the job expired). It was not started again. The batches it committed are kept; run "
+                "the same command again to count and take what is left.",
+                reason="sweep_job_gone_after_cancel", engine_body={"job_id": job_id},
+            )
+        else:
+            super().__init__(
+                f"stopped waiting for the retire-keys {what} (job {job_id}); it is still running in the engine"
+                + (" and keeps sweeping" if what == "apply" else "") + ". Run the same command again to join it.",
+                reason="sweep_job_left_running", engine_body={"job_id": job_id},
+            )
+        self.job_id = job_id
+        self.what = what
+
+
+@dataclass(frozen=True)
+class ChunkKeysApplyResult:
+    """What :meth:`HttpVectorClient.chunk_keys_apply` ended with. ``job_id`` is the engine job that swept, whose
+    outcome is ``body`` (the totals of the whole run: ``rows_swept``, ``done``, ``remaining_rows`` and, when the job
+    stopped early, ``stopped``). ``job_id`` is None when the engine predates the apply job and answered the first call
+    of the synchronous loop itself: ``body`` is then that one call's answer, with its ``resume``, and the caller goes
+    on with the loop."""
+
+    body: dict
+    job_id: str | None
+
+
+def _sweep_job_answer(what: str, job_id: str, job: dict) -> dict:
+    """What the synchronous call would have answered, read off an ended job: the body, or its error."""
+    status = job.get("http_status")
+    body = job.get("body")
+    if status == 200 and isinstance(body, dict):
+        return body
+    err = body if isinstance(body, dict) else {}
+    raise VectorServiceError(
+        f"the retire-keys {what} (job {job_id}) ended in HTTP {status}: "
+        f"{redact_credentials(str(err.get('error', 'no body')))}",
+        code=status if isinstance(status, int) else None, reason=error_reason(err), engine_body=err or None,
+    )
+
+
 class IdempotencyKeyRefusedError(VectorServiceError):
     """The engine refused a keyed request's ``Idempotency-Key`` (RDR-222): 422
     ``idempotency_key_reused`` (the key was first used with another body), or 400
@@ -2818,9 +2922,30 @@ class _ServiceCollectionStub:
     adding a full Chroma collection client to the service mode.
     """
 
-    def __init__(self, name: str, tenant: str = "default") -> None:
+    def __init__(
+        self,
+        name: str,
+        tenant: str = "default",
+        *,
+        sensitivity_gate: Callable[[], None] | None = None,
+    ) -> None:
         self._name = name
         self._tenant = tenant
+        #: RDR-243 Phase 2 (nexus-rfvyy.7.8): the owning client's ``_require_sensitivity_exclude``. A stub built
+        #: without one cannot show the engine filters, so it refuses an ``exclude`` read (fails closed).
+        self._sensitivity_gate = sensitivity_gate
+
+    def _stamp_sensitivity(self, body: dict[str, Any], sensitivity: Sensitivity) -> None:
+        _check_sensitivity(sensitivity)
+        if sensitivity != "exclude":
+            return
+        if self._sensitivity_gate is None:
+            raise SensitivityExcludeUnavailable(
+                f"sensitivity='exclude' read refused for {self._name!r}: this collection handle has no client to "
+                "read the engine's capability from, so it cannot be shown to filter sensitive chunks."
+            )
+        self._sensitivity_gate()
+        body["sensitivity"] = "exclude"
 
     def get(
         self,
@@ -2832,6 +2957,7 @@ class _ServiceCollectionStub:
         *,
         include_source_uri: bool = False,
         include_non_live: bool = False,
+        sensitivity: Sensitivity,
     ) -> dict:
         """Query chunks from the service. Returns Chroma-style result dict.
 
@@ -2931,7 +3057,14 @@ class _ServiceCollectionStub:
         this stub does not fabricate them. An engine older than the amendment
         ignores the field and answers from its own read filter, which already
         returned unowned chunks.
+
+        ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8; see :meth:`HttpVectorClient.search`) is required, on
+        both branches and every page: ``exclude`` sends ``"sensitivity": "exclude"`` and the engine drops chunks
+        with a live sensitive owner from the rows and from the ``count`` it reports; ``include`` sends nothing.
+        A metadata-only read (``include=["metadatas"]``) takes it too: the rule is one rule, and ``include`` is
+        what maintenance code passes.
         """
+        _check_sensitivity(sensitivity)
         if ids is not None:
             from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
             page_size = QUOTAS.MAX_RECORDS_PER_WRITE
@@ -2972,6 +3105,7 @@ class _ServiceCollectionStub:
                     body["include_source_uri"] = True
                 if include_non_live:
                     body["include_non_live"] = True
+                self._stamp_sensitivity(body, sensitivity)
                 page = _post("/v1/vectors/store-get", body, tenant=self._tenant)
                 page_ids = page.get("ids", []) or []
                 # nexus-hdx2u E4 (fix-round): engine-side count (E3, now a
@@ -3011,7 +3145,9 @@ class _ServiceCollectionStub:
                 out_ids.extend(page_ids)
                 out_docs.extend(page.get("documents", []) or [])
                 out_metas.extend(page.get("metadatas", []) or [])
-                for key in ("chashes", "source_uris", "spans"):
+                # RDR-243 Phase 3 (nexus-rfvyy.8.2): ``sensitives`` is the engine's per-row flag (parallel to
+                # ``ids``, sent on every call); carried through for the MCP output posture, never read from metadata.
+                for key in ("chashes", "source_uris", "spans", "sensitives"):
                     if key in page:
                         extra.setdefault(key, []).extend(page[key] or [])
             out: dict[str, Any] = {
@@ -3037,6 +3173,7 @@ class _ServiceCollectionStub:
                 body["include_source_uri"] = True
             if include_non_live:
                 body["include_non_live"] = True
+            self._stamp_sensitivity(body, sensitivity)
             result = _post("/v1/vectors/get", body, tenant=self._tenant)
             # Normalise to Chroma shape: {ids, documents, metadatas}.
             # RDR-169 G5 (nexus-jkv85): chashes + spans always present when service is G5+.
@@ -3049,7 +3186,7 @@ class _ServiceCollectionStub:
                 "documents": result.get("documents", []),
                 "metadatas": result.get("metadatas", []),
             }
-            for key in ("chashes", "source_uris", "spans"):
+            for key in ("chashes", "source_uris", "spans", "sensitives"):
                 if key in result:
                     out[key] = result[key]
             return out
@@ -4021,6 +4158,124 @@ class HttpVectorClient:
         self._chash_allow_fetched_at = _monotonic()
         return flag
 
+    #: RDR-243 Phase 2 (nexus-rfvyy.7.8): the longest a real ``GET /version`` answer is trusted for the
+    #: ``sensitivity=exclude`` capability. Only a real answer (true or false) is held; see
+    #: :meth:`supports_sensitivity_exclude`.
+    _SENSITIVITY_EXCLUDE_TTL_S: float = 300.0
+    _sensitivity_exclude_flag: bool | None = None
+    _sensitivity_exclude_fetched_at: float | None = None
+
+    def supports_sensitivity_exclude(self) -> bool:
+        """Does the engine drop chunks with a live sensitive owner from a read that sends ``"sensitivity":
+        "exclude"`` (``GET /version``'s ``vector_sensitivity_exclude_supported``, nexus-rfvyy.7.4)? Only a JSON
+        ``true`` counts; an absent key, ``false`` and any other value are ``False``.
+
+        Unlike :meth:`supports_chash_allow` this RAISES when the question cannot be asked
+        (:class:`SensitivityExcludeUnavailable`: the request failed or timed out, or the answer was not an
+        object), because the safe direction here is a refused read, and a ``False`` returned for an outage would
+        be cached as if the engine had said it. Only a real answer, true or false, is cached for
+        :attr:`_SENSITIVITY_EXCLUDE_TTL_S`. A failed probe is not: it is retried on the next read, so an outage
+        costs exactly the reads made during it (Sam's ruling on nexus-rfvyy.3)."""
+        fetched = self._sensitivity_exclude_fetched_at
+        if (
+            self._sensitivity_exclude_flag is not None and fetched is not None
+            and _monotonic() - fetched < self._SENSITIVITY_EXCLUDE_TTL_S
+        ):
+            return self._sensitivity_exclude_flag
+        try:
+            info = _get("/version", tenant=self._tenant, timeout=10.0)
+        except Exception as exc:  # noqa: BLE001 — any failure to ask is "could not show the engine filters"
+            raise SensitivityExcludeUnavailable(
+                f"sensitivity='exclude' read refused: could not read the engine's /version to learn whether it "
+                f"filters sensitive chunks ({type(exc).__name__}: {exc}). Nothing was cached; the next read asks again."
+            ) from exc
+        if not isinstance(info, dict):
+            raise SensitivityExcludeUnavailable(
+                "sensitivity='exclude' read refused: the engine's /version answer was not an object, so it cannot "
+                "be shown to filter sensitive chunks. Nothing was cached; the next read asks again."
+            )
+        flag = info.get("vector_sensitivity_exclude_supported") is True
+        self._sensitivity_exclude_flag = flag
+        self._sensitivity_exclude_fetched_at = _monotonic()
+        return flag
+
+    #: RDR-243 Phase 3 fix r1 (critic S5): the longest a real ``GET /version`` answer is trusted for the rerank
+    #: capability. Only a real answer (true or false) is held, as for :meth:`supports_sensitivity_exclude`.
+    _RERANK_SENSITIVE_TTL_S: float = 300.0
+    _rerank_sensitive_flag: bool | None = None
+    _rerank_sensitive_fetched_at: float | None = None
+
+    def supports_rerank_sensitive_exclusion(self) -> bool:
+        """Does the engine keep sensitive rows out of the reranker when the reranker sends text to another
+        machine (``GET /version``'s ``rerank_sensitive_exclusion_supported``)? Only a JSON ``true`` counts.
+
+        An engine without it reranks every candidate it is handed through Voyage, sensitive rows included, so a
+        search that may return sensitive rows (``sensitivity="include"``) must not ask it to rerank. A failed
+        or non-object ``/version`` answer is ``False`` for this call and is NOT cached: the safe direction is no
+        rerank, and an outage must not be remembered as the engine's answer."""
+        fetched = self._rerank_sensitive_fetched_at
+        if (
+            self._rerank_sensitive_flag is not None and fetched is not None
+            and _monotonic() - fetched < self._RERANK_SENSITIVE_TTL_S
+        ):
+            return self._rerank_sensitive_flag
+        try:
+            info = _get("/version", tenant=self._tenant, timeout=10.0)
+        except Exception as exc:  # noqa: BLE001 — any failure to ask is "could not show the engine withholds"
+            _log.warning("rerank_sensitive_exclusion_probe_failed", error=f"{type(exc).__name__}: {exc}"[:300])
+            return False
+        if not isinstance(info, dict):
+            return False
+        flag = info.get("rerank_sensitive_exclusion_supported") is True
+        self._rerank_sensitive_flag = flag
+        self._rerank_sensitive_fetched_at = _monotonic()
+        return flag
+
+    def _rerank_permitted(self, rerank: bool, sensitivity: Sensitivity, rerank_meta_out: dict | None) -> bool:
+        """The *rerank* flag a search may actually send (RDR-243 Phase 3 fix r1, critic S5).
+
+        A search with ``sensitivity="exclude"`` returns no sensitive rows, so the reranker can never be handed
+        one: *rerank* stands. A search with ``"include"`` may return them, and an engine that does not report
+        ``rerank_sensitive_exclusion_supported`` would send their text to Voyage: the search then goes without
+        rerank, and *rerank_meta_out* says so as a degrade (the caller surfaces it like any other), never a
+        silent drop."""
+        if not rerank or sensitivity == "exclude":
+            return rerank
+        if self.supports_rerank_sensitive_exclusion():
+            return True
+        _log.warning("rerank_dropped_engine_cannot_withhold_sensitive_rows")
+        if rerank_meta_out is not None:
+            rerank_meta_out.update({
+                "degraded": True,
+                "stale_engine": True,
+                "error": (
+                    "rerank not requested: this search may return sensitive documents and the engine does not "
+                    "report rerank_sensitive_exclusion_supported, so it would send their text to the Voyage "
+                    "reranker; results are in vector order. `nx upgrade` converges the local engine (managed "
+                    "cloud: server upgrade pending)"
+                ),
+                "model": None,
+                "retry_after_seconds": None,
+            })
+        return False
+
+    def _require_sensitivity_exclude(self) -> None:
+        """Raise :class:`SensitivityExcludeUnavailable` unless the engine is shown to filter. Never falls back."""
+        if not self.supports_sensitivity_exclude():
+            raise SensitivityExcludeUnavailable(
+                "sensitivity='exclude' read refused: the engine does not report "
+                "vector_sensitivity_exclude_supported, so it would return sensitive chunks in full (it answers "
+                "HTTP 200 to a key it does not know). Upgrade the engine; nothing was read."
+            )
+
+    def _stamp_sensitivity(self, body: dict[str, Any], sensitivity: Sensitivity) -> None:
+        """Validate *sensitivity*, and for ``exclude`` check the engine can honour it (raising before any request)
+        and put the key in *body*. ``include`` adds nothing. Call BEFORE building anything else a request needs."""
+        _check_sensitivity(sensitivity)
+        if sensitivity == "exclude":
+            self._require_sensitivity_exclude()
+            body["sensitivity"] = "exclude"
+
     def search(
         self,
         query: str,
@@ -4037,8 +4292,16 @@ class HttpVectorClient:
         rerank_max_candidates: int | None = None,
         rerank_meta_out: dict | None = None,
         chash_allow: Sequence[str] | None = None,
+        sensitivity: Sensitivity,
     ) -> list[dict] | dict:
         """Semantic search via the Java service.
+
+        ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8) is required and has no default: ``"exclude"`` sends
+        ``"sensitivity": "exclude"`` and the engine drops every chunk with a live sensitive owner (refused first,
+        with :class:`SensitivityExcludeUnavailable`, unless :meth:`supports_sensitivity_exclude`); ``"include"``
+        sends nothing, the request this method made before the argument. Every hit carries ``sensitive``; the
+        client passes it through and never reads ``False`` as clean, because the engine does the excluding. The
+        same holds for every read below.
 
         ``chash_allow`` (nexus-jypmj, the document confinement; ``vector_search_chash_allow_supported``): at most
         3000 distinct 64-hex chunk hashes. The engine restricts its candidates to those chunks and ranks them
@@ -4104,6 +4367,8 @@ class HttpVectorClient:
             "collections": collection_names,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)
+        rerank = self._rerank_permitted(rerank, sensitivity, rerank_meta_out)
         if where:
             body["where"] = where
         if include_source_uri:
@@ -4169,6 +4434,7 @@ class HttpVectorClient:
         rerank_top_k: int | None = None,
         rerank_meta_out: dict | None = None,
         chash_allow: Sequence[str] | None = None,
+        sensitivity: Sensitivity,
     ) -> list[dict]:
         """Hybrid lexical+vector search via ``POST /v1/vectors/hybrid-search``
         (RDR-217 P2.1, bead nexus-lqo4p.6).
@@ -4230,6 +4496,8 @@ class HttpVectorClient:
             "collections": collection_names,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
+        rerank = self._rerank_permitted(rerank, sensitivity, rerank_meta_out)  # Phase 3 fix r1 (S5): see search()
         if where:
             body["where"] = where
         if include_source_uri:
@@ -4306,6 +4574,7 @@ class HttpVectorClient:
         content_chars: int | None = None,
         lexical: bool = False,
         chash_allow: Sequence[str] | None = None,
+        sensitivity: Sensitivity,
     ) -> dict | None:
         """Per-collection top-K over ONE embedding-model group via
         ``POST /v1/vectors/search-per-collection`` (nexus-tu8wp.1 engine half,
@@ -4386,6 +4655,7 @@ class HttpVectorClient:
         not echo the field (it predates it and ignored it): the caller then
         runs the lexical leg on ``/hybrid-search`` itself.
         """
+        _check_sensitivity(sensitivity)  # before the write-off return: a bad value is never read as include
         if self._per_collection_written_off():
             return None
 
@@ -4395,6 +4665,8 @@ class HttpVectorClient:
             "per_collection_k": per_collection_k,
             "limit": limit,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
+        rerank = self._rerank_permitted(rerank, sensitivity, rerank_meta_out)  # Phase 3 fix r1 (S5): see search()
         finite: dict[str, float] = {}
         for name, value in (thresholds or {}).items():
             if name in collection_names and value is not None and math.isfinite(value):
@@ -4640,6 +4912,7 @@ class HttpVectorClient:
         subtree: str | None = None,
         where: dict | None = None,
         n_results: int = 10,
+        sensitivity: Sensitivity,
     ) -> list[dict]:
         """Metadata-scoped combined search (RDR-156 P4, Decision 5; catalog-008).
 
@@ -4660,6 +4933,7 @@ class HttpVectorClient:
             "collections": collection_names,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
         if content_type is not None:
             body["content_type"] = content_type
         if author is not None:
@@ -4683,6 +4957,7 @@ class HttpVectorClient:
         collection: str,
         *,
         n_results: int = 10,
+        sensitivity: Sensitivity,
     ) -> list[dict]:
         """Topic-scoped combined search (RDR-156 P4, Decision 5).
 
@@ -4698,6 +4973,7 @@ class HttpVectorClient:
             "collection": collection,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
         return _post("/v1/vectors/search-topic-scoped", body, tenant=self._tenant)
 
     def search_graph_hop(
@@ -4711,6 +4987,7 @@ class HttpVectorClient:
         direction: str = "both",
         where: dict | None = None,
         n_results: int = 10,
+        sensitivity: Sensitivity,
     ) -> list[dict]:
         """Graph-hop combined search (RDR-156 P4 follow-on, Decision 5, bead nexus-houg9).
 
@@ -4736,6 +5013,7 @@ class HttpVectorClient:
             "direction": direction,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
         if link_type is not None:
             body["link_type"] = link_type
         if where:
@@ -4770,6 +5048,7 @@ class HttpVectorClient:
         min_confidence: float | None = None,
         where: dict | None = None,
         n_results: int = 10,
+        sensitivity: Sensitivity,
     ) -> list[dict]:
         """Aspect-scoped combined search (RDR-156 Decision 5, bead nexus-ubnwk).
 
@@ -4832,6 +5111,7 @@ class HttpVectorClient:
             "collections": collection_names,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
         if field is not None:
             body["field"] = field
         if pattern is not None:
@@ -4844,8 +5124,13 @@ class HttpVectorClient:
         _warn_skipped_collections("search_aspect_scoped", collection_names)
         return result
 
-    def get_by_id(self, collection: str, doc_id: str) -> dict | None:
+    def get_by_id(self, collection: str, doc_id: str, *, sensitivity: Sensitivity) -> dict | None:
         """Fetch a single chunk by ID.
+
+        ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8; see :meth:`search`): under ``exclude`` a chunk with a
+        live sensitive owner is absent from the engine's answer and this returns ``None``. A refusal
+        (:class:`SensitivityExcludeUnavailable`) is raised BEFORE the request, outside the ``try`` below that reads
+        a service error as "no such chunk", so a refused read is never mistaken for a miss.
 
         Returns a FLAT dict of ``id`` + ``content`` + all metadata fields, to
         match ``T3Database.get_by_id`` (the drop-in oracle). nexus-ij9hg: the
@@ -4856,12 +5141,10 @@ class HttpVectorClient:
         post-P4a default). That is the nexus-7zuzz behavioural-divergence class
         signature parity cannot catch.
         """
+        request: dict[str, Any] = {"collection": collection, "ids": [doc_id]}
+        self._stamp_sensitivity(request, sensitivity)
         try:
-            result = _post(
-                "/v1/vectors/store-get",
-                {"collection": collection, "ids": [doc_id]},
-                tenant=self._tenant,
-            )
+            result = _post("/v1/vectors/store-get", request, tenant=self._tenant)
         except VectorServiceError:
             return None
 
@@ -4871,10 +5154,15 @@ class HttpVectorClient:
         docs = result.get("documents") or []
         metas = result.get("metadatas") or []
         meta = metas[0] if metas else {}
+        flags = result.get("sensitives")
         return {
             "id": ids[0],
             "content": docs[0] if docs else "",
             **(meta if isinstance(meta, dict) else {}),
+            # RDR-243 Phase 3 (nexus-rfvyy.8.2): the engine's flag for this row, present only when the engine sent
+            # it (an older engine sends none, and the row then reads as it did). Set AFTER the metadata so a chunk
+            # row can never speak for it.
+            **({"sensitive": flags[0] is True} if isinstance(flags, list) and flags else {}),
         }
 
     def delete_by_id(self, collection: str, doc_id: str) -> bool:
@@ -4973,11 +5261,23 @@ class HttpVectorClient:
             body["floor_min_chunks"] = floor_min_chunks
         return body
 
+    @staticmethod
+    def _expires_body(quarantine_expires_at: str | None) -> dict:
+        """The optional retention stamp of the move route (nexus-alsq3), additive.
+
+        ``quarantine_expires_at`` is the absolute instant (``yyyy-MM-ddTHH:mm:ssZ``) the client wants the moved
+        rows kept until (``quarantined_at`` plus ``NX_GC_QUARANTINE_DAYS``). An engine that carries vectors-056
+        writes it on the rows it moves and its expiry of client-moved knowledge quarantine then waits for the
+        later of its own retention and the stamp; an older engine ignores the field and expires at its own
+        retention, and its response does not say so. Sent only when given.
+        """
+        return {} if quarantine_expires_at is None else {"quarantine_expires_at": quarantine_expires_at}
+
     def gc_quarantine_orphans(
         self, collection: str, quarantine_collection: str,
         quarantined_at: str, sample_limit: int = 20, *,
         floor_fraction: float | None = None, floor_min_chunks: int | None = None,
-        force: bool = False,
+        force: bool = False, quarantine_expires_at: str | None = None,
     ) -> dict:
         """POST /v1/vectors/gc/quarantine-orphans.
 
@@ -4996,6 +5296,7 @@ class HttpVectorClient:
                 "quarantined_at": quarantined_at,
                 "sample_limit": sample_limit,
                 **self._floor_body(floor_fraction, floor_min_chunks, force),
+                **self._expires_body(quarantine_expires_at),
             },
             tenant=self._tenant,
         )
@@ -5004,7 +5305,7 @@ class HttpVectorClient:
         self, collection: str, quarantine_collection: str,
         quarantined_at: str, sample_limit: int, row_limit: int, *,
         floor_fraction: float | None = None, floor_min_chunks: int | None = None,
-        force: bool = False,
+        force: bool = False, quarantine_expires_at: str | None = None,
     ) -> dict:
         """POST /v1/vectors/gc/quarantine-orphans with ``row_limit`` (catalog-037/
         nexus-a6mon's engine route; wired client-side at nexus-e8h5x review
@@ -5044,6 +5345,7 @@ class HttpVectorClient:
                 "sample_limit": sample_limit,
                 "row_limit": row_limit,
                 **self._floor_body(floor_fraction, floor_min_chunks, force),
+                **self._expires_body(quarantine_expires_at),
             },
             tenant=self._tenant, gate_busy=True,
         )
@@ -5398,7 +5700,7 @@ class HttpVectorClient:
         self, *, dry_run: bool = True, accept: Mapping[str, int] | None = None, collection: str | None = None,
         batch_size: int | None = None, max_batches: int | None = None, budget_seconds: int | None = None,
         measure_batch: bool | None = None, resume: Mapping[str, Any] | None = None, tenant: str | None = None,
-        operator: str | None = None,
+        operator: str | None = None, start_job: bool = False,
     ) -> dict:
         """POST /v1/admin/chunk-keys/sweep: the retire-keys sweep of THIS credential's tenant, or of ``tenant`` when the
         credential is the root one (nexus-6pfgb.43).
@@ -5444,11 +5746,20 @@ class HttpVectorClient:
         (:func:`~nexus.db.service_endpoint.guard_production_write`, ``NX_ALLOW_PROD_WRITE``) before the first
         request; a dry run does not.
 
+        ``start_job`` (nexus-v75nw) asks the engine to run the call in the background, a dry run's count or the whole
+        apply loop: the answer is then ``{"job_id", "tenant", "kind", "state": "running", "stage", "elapsed_ms"}`` at
+        once, and the outcome comes from ``GET /v1/admin/chunk-keys/sweep/jobs/{job_id}``. Use
+        :meth:`chunk_keys_dry_run` or :meth:`chunk_keys_apply`, which poll. An apply job takes no ``resume``: it counts
+        every precondition itself on its first call. An engine that predates the field ignores it and answers the
+        call itself, with no ``job_id``.
+
         Raises :class:`VectorServiceError` (``code=404`` on an engine that predates the route).
         """
         from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
 
         body: dict[str, Any] = {**engine_plan(), "dry_run": dry_run}
+        if start_job:
+            body["async"] = True
         if tenant is not None:
             body["tenant"] = tenant
         if operator is not None:
@@ -5466,6 +5777,167 @@ class HttpVectorClient:
         if not dry_run:
             _guard_chunk_keys_write()
         return _post("/v1/admin/chunk-keys/sweep", body, tenant=self._tenant, timeout=_CHUNK_KEYS_TIMEOUT_S)
+
+    def chunk_keys_dry_run(
+        self, *, accept: Mapping[str, int] | None = None, collection: str | None = None,
+        batch_size: int | None = None, measure_batch: bool | None = None, tenant: str | None = None,
+        operator: str | None = None, progress: Callable[[dict], None] | None = None,
+        max_wait_s: float = _CHUNK_KEYS_JOB_MAX_WAIT_S,
+        poll_schedule: Sequence[float] = _CHUNK_KEYS_JOB_POLL_SCHEDULE,
+        sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
+    ) -> dict:
+        """The retire-keys dry run, through the engine's background job when it has one (nexus-v75nw).
+
+        The counts of a large tenant take longer than the public edge's origin timeout (about 30 s: four 504s on the
+        production tenant), so the synchronous call cannot carry them. This starts the dry run as a job
+        (``POST .../sweep`` with ``async``), polls ``GET .../sweep/jobs/{id}`` for up to ``max_wait_s``, sleeping
+        ``poll_schedule[i]`` after the i-th poll (the last entry repeats: 2, 4, 8, 16, then 30 s, so a long count sends
+        about 10 polls in 5 minutes, under the edge's alarm on root-credential requests), and answers what the synchronous call would have: the same dict, or the same
+        :class:`VectorServiceError` (the job's ``http_status`` and ``body`` are the call's).
+
+        ``progress`` is called with ``{"event": "started" | "poll" | "restarted" | "synchronous", ...}`` (a poll
+        carries ``job_id``, ``state``, ``stage`` and ``elapsed_ms``). ``synchronous`` means the engine predates the
+        job and answered the dry run itself in the one request: this is the fallback, and the answer is complete.
+
+        An engine that no longer holds the job (it restarted, or the job expired) is asked once more; the second time
+        raises ``VectorServiceError`` with ``reason == "sweep_job_not_found"``. A wait that runs out raises
+        :class:`ChunkKeysDryRunTimeout`; the job goes on in the engine, and starting the same dry run again joins it.
+        """
+        note = progress or (lambda event: None)
+        restarted = False
+        while True:
+            reply = self.chunk_keys_sweep(
+                dry_run=True, accept=accept, collection=collection, batch_size=batch_size,
+                measure_batch=measure_batch, tenant=tenant, operator=operator, start_job=True,
+            )
+            job_id = reply.get("job_id") if isinstance(reply, dict) else None
+            if not job_id or reply.get("state") is None:
+                note({"event": "synchronous"})
+                return reply
+            note({"event": "restarted" if restarted else "started", "job_id": job_id})
+            try:
+                return self._await_sweep_job(str(job_id), note, max_wait_s, tuple(poll_schedule), sleep, monotonic,
+                                             what="dry run", on_interrupt=None)
+            except VectorServiceError as exc:
+                if exc.reason != "sweep_job_not_found" or restarted:
+                    raise
+                restarted = True
+
+    def chunk_keys_apply(
+        self, *, accept: Mapping[str, int] | None = None, collection: str | None = None,
+        batch_size: int | None = None, max_batches: int | None = None, budget_seconds: int | None = None,
+        tenant: str | None = None, operator: str | None = None, progress: Callable[[dict], None] | None = None,
+        max_wait_s: float = _CHUNK_KEYS_APPLY_MAX_WAIT_S,
+        poll_schedule: Sequence[float] = _CHUNK_KEYS_JOB_POLL_SCHEDULE,
+        sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
+        on_interrupt: Callable[[str], bool] | None = None,
+    ) -> ChunkKeysApplyResult:
+        """The retire-keys apply, through the engine's background job when it has one (nexus-v75nw).
+
+        The job is the synchronous client loop run inside the engine: its first call counts every precondition and
+        refuses on a residue that is not accepted exactly as a synchronous apply does (the refusal arrives here as the
+        :class:`VectorServiceError` the synchronous call would have raised), then it sweeps batch by batch until the
+        tenant is done. The client sends one start and a poll on the dry run's back-off schedule, instead of a
+        root-credential request every few seconds for hours. ``progress`` is called with ``{"event": "started" |
+        "restarted" | "poll" | "cancel_requested" | "synchronous", ...}``; a poll carries ``job_id``, ``state``,
+        ``stage``, ``elapsed_ms``, ``batches``, ``rows_swept`` and ``remaining_rows``.
+
+        A Ctrl-C while waiting calls ``on_interrupt(job_id)``: True asks the engine to cancel (it stops at the next
+        batch boundary, never inside a batch, and the wait goes on to read the outcome, whose ``stopped`` is
+        ``"cancelled"``), False leaves the job running and raises :class:`ChunkKeysJobLeftRunning`. A second Ctrl-C while
+        the cancel is pending also leaves it. No ``on_interrupt`` means leave it running.
+
+        An engine that predates the apply job ignores the field and answers the first call of the synchronous loop: the
+        result then has ``job_id`` None and the caller carries on with the loop from that answer. A wait that runs out
+        raises :class:`ChunkKeysDryRunTimeout` (``what == "apply"``); the job goes on in the engine and the same command
+        joins it. An engine that lost the job is asked once more (a second start recounts and takes what is left),
+        except after a cancel was asked: a job the engine lost then raises :class:`ChunkKeysJobLeftRunning` (``gone``)
+        and is never started again.
+        """
+        note = progress or (lambda event: None)
+        restarted = False
+        while True:
+            reply = self.chunk_keys_sweep(
+                dry_run=False, accept=accept, collection=collection, batch_size=batch_size,
+                max_batches=max_batches, budget_seconds=budget_seconds, tenant=tenant, operator=operator,
+                start_job=True,
+            )
+            job_id = reply.get("job_id") if isinstance(reply, dict) else None
+            if not job_id or reply.get("state") is None:
+                note({"event": "synchronous"})
+                return ChunkKeysApplyResult(reply, None)
+            note({"event": "restarted" if restarted else "started", "job_id": job_id})
+            try:
+                body = self._await_sweep_job(str(job_id), note, max_wait_s, tuple(poll_schedule), sleep, monotonic,
+                                             what="apply", on_interrupt=on_interrupt)
+                return ChunkKeysApplyResult(body, str(job_id))
+            except VectorServiceError as exc:
+                if exc.reason != "sweep_job_not_found" or restarted:
+                    raise
+                restarted = True
+
+    def chunk_keys_cancel_job(self, job_id: str) -> dict:
+        """POST /v1/admin/chunk-keys/sweep/jobs/{job_id}/cancel: ask a running apply job to stop at its next batch
+        boundary (nexus-v75nw). Answers the job as a poll does, plus ``cancel_accepted`` (false when it had already
+        ended). A dry run is not cancellable (409 ``sweep_job_not_cancellable``)."""
+        return _post(f"/v1/admin/chunk-keys/sweep/jobs/{job_id}/cancel", {}, tenant=self._tenant)
+
+    def _await_sweep_job(
+        self, job_id: str, note: Callable[[dict], None], max_wait_s: float, poll_schedule: tuple[float, ...],
+        sleep: Callable[[float], None], monotonic: Callable[[], float], *, what: str,
+        on_interrupt: Callable[[str], bool] | None,
+    ) -> dict:
+        deadline = monotonic() + max_wait_s
+        failures = 0
+        polls = 0
+        cancelling = False   # the operator asked to cancel: the job must not be started again if the engine lost it
+        while True:
+            polls += 1
+            try:
+                try:
+                    job = _get(f"/v1/admin/chunk-keys/sweep/jobs/{job_id}", tenant=self._tenant)
+                except VectorServiceError as exc:
+                    # A 429 is the edge or the engine asking for less: a bad poll like a 5xx (the job does not depend
+                    # on it), counted toward the allowance, not a refusal of the request.
+                    if exc.reason == "sweep_job_not_found" and cancelling:
+                        raise ChunkKeysJobLeftRunning(job_id, what, gone=True) from None
+                    if exc.reason == "sweep_job_not_found" or (
+                            exc.code is not None and exc.code < 500 and exc.code != 429):
+                        raise
+                    failures += 1
+                    if failures >= _CHUNK_KEYS_JOB_POLL_FAILURES:
+                        raise
+                except (OSError, TimeoutError):   # urllib.error.URLError is an OSError
+                    failures += 1
+                    if failures >= _CHUNK_KEYS_JOB_POLL_FAILURES:
+                        raise
+                else:
+                    failures = 0
+                    state = job.get("state")
+                    note({"event": "poll", "job_id": job_id, "state": state, "stage": job.get("stage"),
+                          "elapsed_ms": job.get("elapsed_ms"), "batches": job.get("batches"),
+                          "rows_swept": job.get("rows_swept"), "remaining_rows": job.get("remaining_rows")})
+                    if state != "running":
+                        return _sweep_job_answer(what, job_id, job)
+                if monotonic() >= deadline:
+                    raise ChunkKeysDryRunTimeout(job_id, max_wait_s, what)
+                wait = poll_schedule[min(polls - 1, len(poll_schedule) - 1)]
+                sleep(max(0.0, min(wait, deadline - monotonic())))
+            except KeyboardInterrupt:
+                if cancelling or on_interrupt is None or not on_interrupt(job_id):
+                    raise ChunkKeysJobLeftRunning(job_id, what) from None
+                cancelling = True
+                try:
+                    self.chunk_keys_cancel_job(job_id)
+                except KeyboardInterrupt:
+                    # A second Ctrl-C while the cancel is in flight: the cancel may or may not have landed. Leave the
+                    # job and say which one it is, instead of a raw traceback with no job id.
+                    raise ChunkKeysJobLeftRunning(job_id, what) from None
+                except VectorServiceError as exc:
+                    if exc.reason == "sweep_job_not_found":
+                        raise ChunkKeysJobLeftRunning(job_id, what, gone=True) from None
+                    raise
+                note({"event": "cancel_requested", "job_id": job_id})
 
     def chunk_keys_add_constraints(self, *, replace: bool = False) -> dict:
         """POST /v1/admin/chunk-keys/add-constraints: the table-wide add of the chunk CHECKs, NOT VALID (nexus-6pfgb.43).
@@ -6155,7 +6627,9 @@ class HttpVectorClient:
             raise CollectionNotFoundError(
                 f"service unavailable checking collection {name!r}"
             ) from exc
-        return _ServiceCollectionStub(name=name, tenant=self._tenant)
+        return _ServiceCollectionStub(
+            name=name, tenant=self._tenant, sensitivity_gate=self._require_sensitivity_exclude,
+        )
 
     def get_or_create_collection(self, name: str) -> "_ServiceCollectionStub":
         """Return a stub collection handle for staleness checks.
@@ -6170,7 +6644,9 @@ class HttpVectorClient:
         ``/v1/vectors/store-delete``, making both paths work end-to-end
         against the Java service.
         """
-        return _ServiceCollectionStub(name=name, tenant=self._tenant)
+        return _ServiceCollectionStub(
+            name=name, tenant=self._tenant, sensitivity_gate=self._require_sensitivity_exclude,
+        )
 
     def get_embeddings(
         self,
@@ -6454,9 +6930,18 @@ class HttpVectorClient:
             raise
         ids = result.get("ids", []) or []
         metas = result.get("metadatas", []) or []
+        flags = result.get("sensitives")
+        flags = flags if isinstance(flags, list) else []
         return [
-            {"id": doc_id, **(meta if isinstance(meta, dict) else {})}
-            for doc_id, meta in zip(ids, metas)
+            {
+                "id": doc_id,
+                **(meta if isinstance(meta, dict) else {}),
+                # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): the engine's flag for this row, set AFTER the metadata so a
+                # chunk row can never speak for it; none when the engine sent none (an older engine), and the display
+                # then asks the catalog and treats an unreadable catalog as sensitive.
+                **({"sensitive": flags[i] is True} if i < len(flags) else {}),
+            }
+            for i, (doc_id, meta) in enumerate(zip(ids, metas))
         ]
 
     def update_source_path(
@@ -6839,22 +7324,31 @@ class HttpVectorClient:
         (a chash with no live row is absent; the note being judged is live, so its chunks are). Pages at 300 ids per request. Raises on any
         service failure: the caller (the TTL sweep's guard, nexus-6pfgb.30) treats "could not read" as
         "do not retire", never as "no row"."""
-        return {doc_id: meta for doc_id, _doc, meta in self._store_get_pages(collection, chashes)}
+        # The text of each row is dropped here: this reads the note's TTL keys, and the sweep has to see every row.
+        return {
+            doc_id: meta
+            for doc_id, _doc, meta in self._store_get_pages(collection, chashes, sensitivity="include")
+        }
 
-    def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+    def chunk_rows(self, collection: str, chashes: list[str], *, sensitivity: Sensitivity) -> dict[str, dict]:
         """``chash -> row`` for the live chunks of *collection* named by *chashes*, each row the flat
         shape :meth:`get_by_id` returns (``id``, ``content`` and the metadata fields). A chash with no
         live row is absent. Pages at 300 ids per request.
 
         Unlike :meth:`get_by_id`, which reads any service failure as "no such chunk", this raises
         :class:`VectorServiceError`: the recovery-bundle export (nexus-6pfgb.36) must not report a
-        piece it could not read as a piece that is gone."""
+        piece it could not read as a piece that is gone.
+
+        ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8; see :meth:`search`): under ``exclude`` a chash whose
+        chunk has a live sensitive owner is absent, like a chash with no live row."""
         return {
             doc_id: {"id": doc_id, "content": doc, **meta}
-            for doc_id, doc, meta in self._store_get_pages(collection, chashes)
+            for doc_id, doc, meta in self._store_get_pages(collection, chashes, sensitivity=sensitivity)
         }
 
-    def _store_get_pages(self, collection: str, chashes: list[str]) -> Iterator[tuple[str, str, dict]]:
+    def _store_get_pages(
+        self, collection: str, chashes: list[str], *, sensitivity: Sensitivity,
+    ) -> Iterator[tuple[str, str, dict]]:
         """``(id, document, metadata)`` for each live row of *collection* named by *chashes*, 300 ids
         per ``/v1/vectors/store-get`` request. Raises :class:`VectorServiceError` on any service
         failure and when the engine reports more matched rows than it returned; an engine that sends no
@@ -6862,11 +7356,9 @@ class HttpVectorClient:
         page = 300
         for start in range(0, len(chashes), page):
             batch = chashes[start:start + page]
-            result = _post(
-                "/v1/vectors/store-get",
-                {"collection": collection, "ids": batch, "limit": len(batch)},
-                tenant=self._tenant,
-            )
+            request: dict[str, Any] = {"collection": collection, "ids": batch, "limit": len(batch)}
+            self._stamp_sensitivity(request, sensitivity)
+            result = _post("/v1/vectors/store-get", request, tenant=self._tenant)
             ids = result.get("ids") or []
             docs = result.get("documents") or []
             metas = result.get("metadatas") or []

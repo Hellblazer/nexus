@@ -468,6 +468,32 @@ class ManifestSectionLabelFillableTest {
     }
 
     @Test
+    void aDocumentTitledAfterOneOfItsChunksOwnsItsOtherPages() throws Exception {
+        // nexus-l8o33, the gate-xr789 shape: an ETL import titled the document after one of its chunks and gave it
+        // no file path; its other pages' chunks name the same file with another page suffix.
+        String d = doc(TOKEN, TENANT, "papers/x.pdf:page-3", "", DOC_AT, "{}");
+        chunk(TENANT, h(90), labelled("2026-10-01T11:59:00+00:00", "papers/x.pdf:page-11"));
+        manifest(d, h(90));
+        assertThat(fillable()).isEqualTo(1);
+    }
+
+    @Test
+    void aPageSuffixOnBothSidesDoesNotMakeTwoFilesOne() throws Exception {
+        String d = doc(TOKEN, TENANT, "papers/a.pdf:page-2", "", DOC_AT, "{}");
+        chunk(TENANT, h(91), labelled("2026-10-01T11:59:00+00:00", "papers/b.pdf:page-6"));
+        manifest(d, h(91));
+        assertThat(fillableBesideAControl()).isEqualTo(0);
+    }
+
+    @Test
+    void aDocumentTitleThatIsOnlyASuffixDoesNotMatchAnEmptiedChunkTitle() throws Exception {
+        String d = doc(TOKEN, TENANT, ":page-3", "", DOC_AT, "{}");
+        chunk(TENANT, h(92), labelled("2026-10-01T11:59:00+00:00", ":chunk-3"));
+        manifest(d, h(92));
+        assertThat(fillableBesideAControl()).isEqualTo(0);
+    }
+
+    @Test
     void aChunkWithNoTitleIsNotContradicted() throws Exception {
         String d = doc(TOKEN, TENANT, "any", "docs/any.md", DOC_AT, "{}");
         chunk(TENANT, h(25), labelled("2026-10-01T11:59:00+00:00"));

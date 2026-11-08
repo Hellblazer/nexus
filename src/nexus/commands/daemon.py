@@ -459,6 +459,15 @@ def service_group() -> None:
     """Storage-service daemon: managed native service binary + local Postgres."""
 
 
+from nexus.commands.service_pg_upgrade import pg_upgrade_cmd as _pg_upgrade_cmd  # noqa: E402 — needs service_group above
+
+service_group.add_command(_pg_upgrade_cmd, "pg-upgrade")
+
+from nexus.commands.service_note_uri_pairs import note_uri_pairs_cmd as _note_uri_pairs_cmd  # noqa: E402 — needs service_group above
+
+service_group.add_command(_note_uri_pairs_cmd, "note-uri-pairs")
+
+
 @service_group.command("install")
 @click.option(
     "--autostart",
@@ -618,6 +627,36 @@ def _migration_halt_cause(supervisor_error: str | None, engine_marks: dict[Path,
     return "" if found is None else f"The engine reported: {found[1]}\n"
 
 
+def _refuse_cluster_below_floor_before_start(config_dir: Path) -> None:
+    """Raise StorageServiceStartError when the stopped bundled cluster's PG_VERSION is below the floor (nexus-3qhls).
+
+    The same rule as the supervisor's own refusal: a cluster already accepting on its port is left
+    to the engine. Missing or unreadable credentials, and a config with no PG_DATA (managed
+    PostgreSQL), are left to the supervisor, which reports them itself.
+    """
+    from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+        CREDENTIALS_FILENAME,
+        PgClusterBelowFloorError,
+        refuse_cluster_below_floor,
+    )
+
+    try:
+        creds = _ssd._read_pg_credentials(config_dir / CREDENTIALS_FILENAME)
+    except (OSError, ValueError):
+        return
+    pg_data = creds.get("PG_DATA", "")
+    if not pg_data:
+        return
+    port = creds.get("PG_PORT", "")
+    if port.isdigit() and _ssd._port_accepting(_ssd._SERVICE_HOST, int(port)):
+        return  # a running cluster is the engine's to refuse, as in the supervisor (nexus-hck2c)
+    try:
+        refuse_cluster_below_floor(Path(pg_data))
+    except PgClusterBelowFloorError as exc:
+        raise _ssd.StorageServiceStartError(str(exc)) from exc
+
+
 def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     """Ensure a persistent (heartbeated) storage-service supervisor owns the lease.
 
@@ -683,6 +722,14 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = service_identity()
+    # nexus-3qhls: a stopped cluster below the PostgreSQL floor is refused here,
+    # before anything starts and before the stop marker below is cleared (a
+    # refused start must not undo a stop). A supervisor that meets the refusal
+    # itself stays up and waits for an upgrade, which is right for the unit's
+    # own supervisor (the OS would otherwise respawn it every 30 s); one started
+    # from here would linger, and this caller would wait out the lease timeout
+    # instead of saying why.
+    _refuse_cluster_below_floor_before_start(config_dir)
     # A start is the user's "run again": it ends any earlier stop request, whether
     # or not a supervisor turns out to be running already (RDR-224, nexus-f9bgu.33).
     clear_stop_marker(config_dir, "storage_service", scope)
@@ -1470,9 +1517,9 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # printed, never just the first (review finding 1) — a partial pid
     # list is a partial truth for a command whose entire point here is
     # honest reporting.
-    if outcome.refused and not outcome.pids:
-        # Printed below, with the refusal; "stopped" or "already stopped"
-        # would both be false here.
+    if (outcome.refused or outcome.invisible) and not outcome.pids:
+        # Printed below, with the refusal or the invisible-supervisor warning;
+        # "stopped" or "already stopped" would both be false here.
         pass
     elif outcome.source == "none" and outcome.unreadable:
         # nexus-oacd3: a flagless start whose directory could not be read is
@@ -1525,6 +1572,15 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # dropping that caveat. Skipped when source is already
     # "process_table_unavailable" — that branch's own message already
     # covers this.
+    if outcome.invisible:
+        click.echo(
+            f"Warning: the storage-service lease is still heartbeating, but its supervisor "
+            f"(pid {', '.join(str(p) for p in outcome.invisible)}) is not visible from here: "
+            "it runs in another PID namespace that shares this config directory (a container, "
+            "or a namespaced CI job). Nothing was signalled and the lease was kept; stop it from "
+            "where it runs.",
+            err=True,
+        )
     if outcome.unreadable:
         click.echo(
             f"Warning: pid(s) {', '.join(str(p) for p in outcome.unreadable)} "
@@ -1587,7 +1643,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
             "'nx daemon service start' until this is resolved manually.",
             err=True,
         )
-    if stubborn_only or outcome.refused:
+    if stubborn_only or outcome.refused or outcome.invisible:
         sys.exit(1)
     if outcome.source == "process_table_unavailable" and not outcome.pids:
         click.echo(
@@ -1854,6 +1910,12 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     record = registry.discover(scope)
 
     if record is None:
+        # nexus-3qhls: a supervisor refused for an old cluster stays up without a lease; say why.
+        refusal: str | None = None
+        try:
+            _refuse_cluster_below_floor_before_start(config_dir)
+        except Exception as exc:  # noqa: BLE001 — status reports; it never fails on the reason lookup
+            refusal = str(exc)
         if as_json:
             # nexus-sis0m.4: --json promises JSON on stdout; a script parsing
             # it got plain text (shakeout 7.64.1 Surface E F11). Still exit 1.
@@ -1864,12 +1926,15 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
                 "detail": "No storage service lease found; this install either "
                           "runs against a managed endpoint or the local service "
                           "is not running (nx daemon service start).",
+                **({"refused": refusal} if refusal else {}),
             }, indent=2))
             sys.exit(1)
         click.echo(
             "No storage service lease found — is the service running?",
             err=True,
         )
+        if refusal:
+            click.echo(refusal, err=True)
         sys.exit(1)
 
     ep = record.endpoint
@@ -2080,7 +2145,7 @@ def aspect_worker_stop_cmd(config_dir_str: str | None) -> None:
     result = stop_aspect_workers(config_dir)
     if result.stopped:
         click.echo(f"Aspect-worker stopped (pid {', '.join(str(p) for p in result.stopped)}).")
-    elif not (result.survivors or result.unreadable or result.foreign):
+    elif not (result.survivors or result.unreadable or result.foreign or result.invisible):
         click.echo("No aspect-worker running.")
     failed = False
     if result.survivors or result.unreadable:
@@ -2093,6 +2158,15 @@ def aspect_worker_stop_cmd(config_dir_str: str | None) -> None:
             f"Pid {pids} is alive but is not an aspect worker serving {config_dir}; "
             "not signalled, and its lease is kept. If it is a stale lease whose pid was "
             "recycled, remove the aspect_worker_addr.* file in that directory.",
+            err=True,
+        )
+        failed = True
+    if result.invisible:
+        pids = ", ".join(str(p) for p in result.invisible)
+        click.echo(
+            f"Pid {pids} is not visible from here, but its lease is still heartbeating, so a "
+            "worker in another PID namespace (a container sharing this directory) may hold it; "
+            "not signalled, and its lease is kept. Stop it from where it runs.",
             err=True,
         )
         failed = True

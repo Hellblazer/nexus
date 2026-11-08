@@ -44,7 +44,7 @@ def _seed(t3) -> str:
 
 
 def _stored(t3, chash: str) -> dict:
-    got = t3.get_or_create_collection(_COLLECTION).get(ids=[chash], include=["metadatas"])
+    got = t3.get_or_create_collection(_COLLECTION).get(ids=[chash], include=["metadatas"], sensitivity="include")
     assert got["ids"] == [chash], got
     return got["metadatas"][0]
 

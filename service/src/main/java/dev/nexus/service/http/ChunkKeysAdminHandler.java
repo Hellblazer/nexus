@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import dev.nexus.service.db.AdminDdlSession;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.vectors.ChunkConstraintAdmin;
@@ -65,6 +66,34 @@ import java.util.function.Supplier;
  * rows left by a lock are reported as {@code locked_skipped_rows} and {@code done} stays false.
  * DATA EFFECT: the metadata of every swept row loses its retired keys; nothing else on the row changes.
  *
+ * <p><b>The sweep as a job (nexus-v75nw).</b> The preconditions are tenant-wide joins, and on the largest tenant they
+ * outlast the edge's origin timeout (about 30 s, a 504), and an apply that sweeps for hours would otherwise be a
+ * client loop sending a root request every few seconds (the edge alarms at 20 root requests in 5 minutes). So a
+ * request that carries {@code "async": true} is started in the background ({@link ChunkKeysSweepJobs}) and answers 202
+ * {@code {job_id, tenant, kind, state, stage, elapsed_ms}} at once, a dry run and an apply alike. {@code GET
+ * /v1/admin/chunk-keys/sweep/jobs/{job_id}} then answers the same fields with the latest {@code stage} ({@code
+ * collections}, {@code census I/N: COLLECTION}, {@code precondition:NAME}, {@code sampling}, {@code sweeping}), an
+ * apply's progress ({@code batches}, {@code rows_swept}, {@code remaining_rows}) and, when {@code state} is {@code
+ * done} or {@code failed}, {@code http_status} and {@code body}: the status and body the synchronous call would have
+ * answered, counts included. Everything that decides whether the call may run (credential, tenant, plan, the audit sink
+ * and a root credential's intent row) happens on the request thread before the 202, so a refusal is the synchronous
+ * refusal; the outcome row is written by the job when it ends.
+ *
+ * <p><b>The apply job is the client loop, run inside the engine.</b> Its first call counts every precondition and
+ * refuses on a residue that is not accepted exactly as a synchronous apply does (the outcome is then a 409 {@code
+ * sweep_preconditions_not_met} body); it then sweeps batch by batch with the request's {@code max_batches} and {@code
+ * budget_seconds} per call, carrying the signed token from one call to the next, until the sweep is done, so what the
+ * job sweeps equals what the synchronous loop would reach on the same tenant. A dry run's counts are never handed to an
+ * apply: every apply job counts for itself. {@code POST .../jobs/{job_id}/cancel} (the starter only) stops the apply at
+ * the next batch boundary, never inside a batch: the outcome carries {@code stopped: "cancelled"} and the counts so
+ * far. A job stops by itself after {@link ChunkKeysSweepJobs#MAX_RUNTIME} ({@code stopped: "wall_clock_cap"}). The
+ * root audit's outcome row records either, with the counts. One tenant has one running job, dry run or apply: the same
+ * request is handed that job, a different one is 409 {@code sweep_job_running}; a full engine is 503 {@code
+ * sweep_jobs_busy}; a finished job is only read, never joined. A job can be read only by the credential that started
+ * it (404 otherwise, also for an id the engine does not hold: the registry is in memory and an engine restart loses
+ * it). An engine that predates the field ignores it and answers the call itself, which a client reads by the absence
+ * of {@code job_id}.
+ *
  * <p><b>Add and validate</b> are table-wide. Both begin with the probe ({@link ChunkConstraintAdmin#probe}): one pass over
  * {@code nexus.chunks} on the admin session, so a tenant with chunk rows and no {@code service_tokens} row is checked
  * too (the checked set is the default tenant, every known tenant, and every tenant the probe found, named in the
@@ -113,6 +142,11 @@ import java.util.function.Supplier;
 public final class ChunkKeysAdminHandler implements HttpHandler {
 
     public static final String PATH = "/v1/admin/chunk-keys";
+    /** The status route of a sweep job: {@code GET /v1/admin/chunk-keys/sweep/jobs/{job_id}}; {@code POST .../cancel} stops it. */
+    static final String JOBS_PREFIX = "/sweep/jobs/";
+    static final String CANCEL_SUFFIX = "/cancel";
+    /** Consecutive apply calls of a job that sweep nothing while rows remain before the job ends (the verb's stall limit). */
+    static final int JOB_STALL_LIMIT = 3;
 
     private static final Logger log = LoggerFactory.getLogger(ChunkKeysAdminHandler.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -124,10 +158,13 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
     static final int MAX_BUDGET_SECONDS = 120;
     static final int MAX_OPERATOR_LABEL = 80;
 
-    private final ChunkKeySweep sweep;
+    private final Supplier<ChunkKeySweep> sweepSource;
+    private final ChunkKeysSweepJobs jobs;
     private final Supplier<ChunkConstraintAdmin> constraints;
     private final Supplier<List<String>> tenants;
     private final Supplier<Audit> auditSink;
+    /** Whether a credential (the {@code sha256Hex} of the bearer) still resolves: a job asks at each batch boundary. */
+    private final java.util.function.Predicate<String> credentialLive;
 
     /** Where a root-targeted sweep call is recorded: {@code CatalogRepository#recordGcAudit} in the engine. */
     @FunctionalInterface
@@ -160,10 +197,37 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
     /** As above, the sink read per request (it may be bound late or replaced; a supplier answering null: 503). */
     public ChunkKeysAdminHandler(ChunkKeySweep sweep, Supplier<ChunkConstraintAdmin> constraints,
                                  Supplier<List<String>> tenants, Supplier<Audit> auditSink) {
-        this.sweep = sweep;
+        this(() -> sweep, constraints, tenants, auditSink, new ChunkKeysSweepJobs());
+    }
+
+    /**
+     * As above, the sweep read per request (a test seam can replace it; null: 503) and the registry the asynchronous
+     * dry runs live in, which the engine owns so its tenant reset and its shutdown reach it.
+     */
+    public ChunkKeysAdminHandler(Supplier<ChunkKeySweep> sweepSource, Supplier<ChunkConstraintAdmin> constraints,
+                                 Supplier<List<String>> tenants, Supplier<Audit> auditSink, ChunkKeysSweepJobs jobs) {
+        this(sweepSource, constraints, tenants, auditSink, jobs, hash -> true);
+    }
+
+    /**
+     * As above, with the check a job makes of its starter's credential at each batch boundary: {@code
+     * credentialLive} answers whether the bearer (the {@code sha256Hex} of the token) still resolves, as the auth
+     * filter resolves it (a revoked or expired token does not). A job whose credential no longer resolves stops like
+     * a cancel, with {@code stopped: "credential_revoked"}.
+     */
+    public ChunkKeysAdminHandler(Supplier<ChunkKeySweep> sweepSource, Supplier<ChunkConstraintAdmin> constraints,
+                                 Supplier<List<String>> tenants, Supplier<Audit> auditSink, ChunkKeysSweepJobs jobs,
+                                 java.util.function.Predicate<String> credentialLive) {
+        this.credentialLive = credentialLive;
+        this.sweepSource = sweepSource;
         this.constraints = constraints;
         this.tenants = tenants;
         this.auditSink = auditSink;
+        this.jobs = jobs;
+    }
+
+    private ChunkKeySweep sweep() {
+        return sweepSource.get();
     }
 
     @Override
@@ -174,15 +238,29 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             return;
         }
         String op = ex.getRequestURI().getPath().replaceFirst("^" + PATH, "");
-        if (sweep == null) {
+        if (sweep() == null) {
             HttpUtil.send(ex, 503, "{\"error\":\"this engine has no pgvector repository: the chunk-key routes are unavailable\"}");
             return;
         }
-        if (!"POST".equals(ex.getRequestMethod().toUpperCase(Locale.ROOT))) {
+        boolean jobRoute = op.startsWith(JOBS_PREFIX);
+        String rest = jobRoute ? op.substring(JOBS_PREFIX.length()) : "";
+        boolean cancel = jobRoute && rest.endsWith(CANCEL_SUFFIX);
+        String jobId = cancel ? rest.substring(0, rest.length() - CANCEL_SUFFIX.length()) : rest;
+        if (jobRoute && (jobId.isEmpty() || "cancel".equals(jobId))) {
+            // No id: ".../jobs/", ".../jobs//cancel" and ".../jobs/cancel" name no job. Whatever the method, the route
+            // is not found (a job id is a UUID, never the word cancel).
+            HttpUtil.send(ex, 404, "{\"error\":\"not found\"}");
+            return;
+        }
+        if (!(jobRoute && !cancel ? "GET" : "POST").equals(ex.getRequestMethod().toUpperCase(Locale.ROOT))) {
             HttpUtil.send(ex, 405, "{\"error\":\"method not allowed\"}");
             return;
         }
         try {
+            if (jobRoute) {
+                handleJob(ex, tenant, jobId, cancel);
+                return;
+            }
             switch (op) {
                 case "/sweep" -> handleSweep(ex, tenant);
                 case "/add-constraints" -> handleConstraints(ex, true);
@@ -191,7 +269,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             }
         } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException e) {
             HttpUtil.send(ex, 400, json(Map.of("error", String.valueOf(e.getMessage()))));
-        } catch (ChunkConstraintAdmin.Refused e) {
+        } catch (AdminDdlSession.Refused e) {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("error", e.getMessage());
             body.put("reason", e.reason());
@@ -256,6 +334,11 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         String operatorLabel = operatorLabel(body);
         int maxBatches = dryRun ? 0 : intField(body, "max_batches", DEFAULT_MAX_BATCHES, 1, MAX_MAX_BATCHES);
         int budget = dryRun ? 0 : intField(body, "budget_seconds", DEFAULT_BUDGET_SECONDS, 1, MAX_BUDGET_SECONDS);
+        boolean async = Boolean.TRUE.equals(body.get("async"));
+        if (async && !dryRun && body.get("resume") != null) {
+            // The job runs the whole loop, call 1 included, and counts for itself: a token has no place in it.
+            throw new IllegalArgumentException("an asynchronous apply takes no 'resume': the job runs the whole sweep");
+        }
         ChunkKeySweep.Resume resume = dryRun ? null : resume(body);
 
         // The intent row goes in before the sweep reads or changes any chunk row (only the tenant-registry existence
@@ -276,6 +359,20 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             }
         }
 
+        if (async) {
+            // nexus-v75nw: the counts of a large tenant outlast the edge's origin timeout, and an apply is a loop of
+            // calls that the edge would see one by one, so the call answers with a job to poll. An engine that
+            // predates the field ignores it and answers the call itself, which is the fallback a client reads by the
+            // absence of job_id.
+            if (dryRun) {
+                startDryRunJob(ex, tenant, callerTenant, root, trail, plan, accepted, batchSize,
+                    !Boolean.FALSE.equals(body.get("measure_batch")), only);
+            } else {
+                startApplyJob(ex, tenant, callerTenant, root, trail, plan, accepted, only, batchSize, maxBatches, budget);
+            }
+            return;
+        }
+
         Map<String, Object> counts = new LinkedHashMap<>();
         Map<String, Object> out = null;
         ChunkKeySweep.Progress progress = new ChunkKeySweep.Progress();
@@ -284,18 +381,14 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         try {
             if (dryRun) {
                 boolean measure = !Boolean.FALSE.equals(body.get("measure_batch"));
-                var report = sweep.dryRun(tenant, plan, accepted, batchSize, measure);
+                var report = sweep().dryRun(tenant, plan, accepted, batchSize, measure);
                 log.info("event=retire_keys_dry_run tenant={} caller_tenant={} sweepable={} blocked={} blocking={}",
                     tenant, callerTenant, report.sweepableRows(), report.blockedRows(), report.blocking());
-                counts.put("retired_key_rows", report.retiredRows());
-                counts.put("sweepable_rows", report.sweepableRows());
-                counts.put("blocked_rows", report.blockedRows());
-                counts.put("wrong_width_rows", report.wrongWidthRows());
-                counts.put("blocking", report.blocking());
+                counts.putAll(dryRunCounts(report));
                 out = dryRunBody(report);
                 out.put("dry_run", true);
             } else {
-                var applied = sweep.apply(tenant, plan, accepted, only, batchSize, maxBatches,
+                var applied = sweep().apply(tenant, plan, accepted, only, batchSize, maxBatches,
                     Duration.ofSeconds(budget), resume, progress);
                 counts.put("rows_swept", applied.rowsSwept());
                 counts.put("batches", applied.batches());
@@ -303,8 +396,9 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
                 counts.put("remaining_rows", applied.remainingRows());
                 counts.put("locked_skipped_rows", applied.lockedSkippedRows());
                 counts.put("blocked_collections", applied.blocked().size());
+                boolean resumeIgnored = applied.resumeIgnored();
                 counts.put("resumed", resume != null && !applied.resumeIgnored());
-                counts.put("resume_ignored", applied.resumeIgnored());
+                counts.put("resume_ignored", resumeIgnored);
                 out = new LinkedHashMap<>();
                 out.put("tenant", applied.tenant());
                 out.put("dry_run", false);
@@ -317,7 +411,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
                 out.put("elapsed_ms", applied.totalMs());
                 out.put("blocked_collections", blockedList(applied.blocked()));
                 out.put("resume", applied.resume() == null ? null : resumeBody(applied.resume()));
-                out.put("resume_ignored", applied.resumeIgnored());
+                out.put("resume_ignored", resumeIgnored);
             }
             completed = true;
         } catch (RuntimeException e) {
@@ -389,6 +483,507 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         HttpUtil.send(ex, 200, json(out));
     }
 
+    private static Map<String, Object> dryRunCounts(ChunkKeySweep.DryRun report) {
+        Map<String, Object> counts = new LinkedHashMap<>();
+        counts.put("retired_key_rows", report.retiredRows());
+        counts.put("sweepable_rows", report.sweepableRows());
+        counts.put("blocked_rows", report.blockedRows());
+        counts.put("wrong_width_rows", report.wrongWidthRows());
+        counts.put("blocking", report.blocking());
+        return counts;
+    }
+
+    // ---- the sweep as a job (nexus-v75nw) -----------------------------------------------------------------------
+
+    /**
+     * Starts the dry run in the background. Everything that decides whether the call may run (credential, tenant, plan,
+     * audit sink and the intent row) was settled by the caller on the request thread, so a refusal is the same answer as
+     * the synchronous call's.
+     */
+    private void startDryRunJob(HttpExchange ex, String tenant, String callerTenant, boolean root, Trail trail,
+                                ChunkKeyPlan plan, Map<String, Long> accepted, int batchSize, boolean measure,
+                                String only) throws IOException {
+        String fingerprint = "dry_run|" + new TreeMap<>(accepted) + "|" + batchSize + "|" + measure + "|" + only + "|"
+            + plan.fingerprint();
+        startJob(ex, tenant, callerTenant, root, trail, ChunkKeysSweepJobs.Kind.DRY_RUN, fingerprint,
+            (job, stage) -> runDryRun(job, tenant, callerTenant, trail, plan, accepted, batchSize, measure, stage));
+    }
+
+    /**
+     * Starts the apply in the background: the client's call loop, run here. Same fingerprint rule as the dry run, over
+     * everything that shapes the loop ({@code max_batches} and {@code budget_seconds} included), so only the same
+     * request is handed a running apply.
+     */
+    private void startApplyJob(HttpExchange ex, String tenant, String callerTenant, boolean root, Trail trail,
+                               ChunkKeyPlan plan, Map<String, Long> accepted, String only, int batchSize, int maxBatches,
+                               int budget) throws IOException {
+        String fingerprint = "apply|" + new TreeMap<>(accepted) + "|" + batchSize + "|" + only + "|" + maxBatches + "|"
+            + budget + "|" + plan.fingerprint();
+        String credential = RequestContext.credentialHash();   // read here: the job runs on another thread
+        startJob(ex, tenant, callerTenant, root, trail, ChunkKeysSweepJobs.Kind.APPLY, fingerprint,
+            (job, stage) -> runApply(job, tenant, callerTenant, credential, trail, plan, accepted, only, batchSize,
+                maxBatches, budget, stage));
+    }
+
+    /**
+     * The common start: the job answers 202 with its id. The job ends the root credential's audit with its outcome row,
+     * as the synchronous call does; a start that joins an already running job, or is refused for want of room, closes
+     * its own intent row on the spot.
+     */
+    private void startJob(HttpExchange ex, String tenant, String callerTenant, boolean root, Trail trail,
+                          ChunkKeysSweepJobs.Kind kind, String fingerprint, ChunkKeysSweepJobs.JobWork work)
+            throws IOException {
+        ChunkKeysSweepJobs.Started started;
+        try {
+            started = jobs.start(tenant, callerTenant, root, kind, fingerprint, work);
+        } catch (ChunkKeysSweepJobs.Conflict | ChunkKeysSweepJobs.Busy refused) {
+            if (trail != null) {
+                trail.outcome(new LinkedHashMap<>(), refused);
+            }
+            boolean conflict = refused instanceof ChunkKeysSweepJobs.Conflict;
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("tenant", tenant);
+            err.put("error", refused.getMessage());
+            err.put("reason", conflict ? "sweep_job_running" : "sweep_jobs_busy");
+            if (refused instanceof ChunkKeysSweepJobs.Conflict c) {
+                err.put("job_id", c.jobId());
+                err.put("kind", c.kind().wire());
+            }
+            if (trail != null) {
+                err.put("audit", trail.body());
+            }
+            HttpUtil.send(ex, conflict ? 409 : 503, json(err));
+            return;
+        }
+        if (trail != null && !started.created()) {
+            // This request's intent row has no job of its own to write its outcome: close it here.
+            trail.outcome(new LinkedHashMap<>(Map.of("joined_job_id", started.job().id())), null);
+        }
+        noStore(ex);
+        HttpUtil.send(ex, 202, json(jobBody(started.job(), false)));
+    }
+
+    /** A job answer is the state of one moment: no cache keeps it. */
+    private static void noStore(HttpExchange ex) {
+        ex.getResponseHeaders().set("Cache-Control", "no-store");
+    }
+
+    /**
+     * The work of one dry-run job: the dry run, its counts, and (root) the outcome row; the status and body it answers.
+     * Failures map as the synchronous call maps them: a pool exhaustion is the retryable 503, an {@link
+     * IllegalArgumentException} a 400, anything else {@code sweep_failed}. The job asks at each stage whether it was
+     * told to stop (the wall-clock cap, a tenant reset) and ends {@code sweep_job_stopped} if so.
+     */
+    private ChunkKeysSweepJobs.Outcome runDryRun(ChunkKeysSweepJobs.Job job, String tenant, String callerTenant,
+                                                 Trail trail, ChunkKeyPlan plan, Map<String, Long> accepted,
+                                                 int batchSize, boolean measure,
+                                                 java.util.function.Consumer<String> stage) {
+        Map<String, Object> counts = new LinkedHashMap<>();
+        Map<String, Object> out = null;
+        RuntimeException failure = null;
+        boolean completed = false;
+        try {
+            var report = sweep().dryRun(tenant, plan, accepted, batchSize, measure, name -> {
+                String why = job.stopReason();
+                if (why != null) {
+                    throw new ChunkKeysSweepJobs.Stopped(why);
+                }
+                stage.accept(name);
+            });
+            log.info("event=retire_keys_dry_run tenant={} caller_tenant={} sweepable={} blocked={} blocking={} async=true",
+                tenant, callerTenant, report.sweepableRows(), report.blockedRows(), report.blocking());
+            counts.putAll(dryRunCounts(report));
+            out = dryRunBody(report);
+            out.put("dry_run", true);
+            completed = true;
+        } catch (RuntimeException e) {
+            failure = e;
+        } finally {
+            // An Error skips the catch: still a failed call, never a "finished" outcome with empty counts. A job the
+            // tenant reset dropped writes no row into the reset tenant.
+            if (trail != null && !jobs.evicted(job.id())) {
+                trail.outcome(counts, failure != null || completed ? failure
+                    : new IllegalStateException("the dry run did not complete"));
+            }
+        }
+        if (failure != null) {
+            if (failure instanceof ChunkKeysSweepJobs.Stopped stopped) {
+                return stoppedOutcome(stopped, tenant, true, trail);
+            }
+            if (HttpUtil.isPoolExhausted(failure)) {
+                log.warn("event=chunk_keys_admin_pool_exhausted tenant={} dry_run=true async=true error={}", tenant,
+                    failure.getMessage());
+                return new ChunkKeysSweepJobs.Outcome(503,
+                    new LinkedHashMap<>(Map.of("error", "database connection pool exhausted, retry")));
+            }
+            if (failure instanceof IllegalArgumentException) {
+                return new ChunkKeysSweepJobs.Outcome(400,
+                    new LinkedHashMap<>(Map.of("error", String.valueOf(failure.getMessage()))));
+            }
+            log.error("event=retire_keys_sweep_failed tenant={} caller_tenant={} dry_run=true async=true error={}",
+                tenant, callerTenant, failure.getMessage(), failure);
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("tenant", tenant);
+            err.put("error", "the dry run failed: " + failure.getClass().getSimpleName() + "; nothing was changed; "
+                + "re-run the same command");
+            err.put("reason", "sweep_failed");
+            err.put("dry_run", true);
+            err.put("rows_swept", 0L);
+            err.put("rows_changed", false);
+            if (trail != null) {
+                err.put("audit", trail.body());
+            }
+            return new ChunkKeysSweepJobs.Outcome(500, err);
+        }
+        if (trail != null) {
+            out.put("audit", trail.body());
+            if (trail.outcomeFailed) {
+                out.put("error", "the sweep ran but its outcome audit row could not be written; this call's counts "
+                    + "are in this answer");
+                out.put("reason", "audit_write_failed");
+                out.put("rows_changed", false);
+                return new ChunkKeysSweepJobs.Outcome(500, out);
+            }
+        }
+        return new ChunkKeysSweepJobs.Outcome(200, out);
+    }
+
+    /** A dry run that was told to stop at a stage boundary: nothing was written; the cap says so, a reset hides the job. */
+    private static ChunkKeysSweepJobs.Outcome stoppedOutcome(ChunkKeysSweepJobs.Stopped stopped, String tenant,
+                                                             boolean dryRun, Trail trail) {
+        Map<String, Object> err = new LinkedHashMap<>();
+        err.put("tenant", tenant);
+        err.put("error", "the job was stopped (" + stopped.reason() + ") before it finished; nothing was changed; "
+            + "re-run the same command");
+        err.put("reason", "sweep_job_stopped");
+        err.put("stopped", stopped.reason());
+        err.put("dry_run", dryRun);
+        err.put("rows_changed", false);
+        if (trail != null) {
+            err.put("audit", trail.body());
+        }
+        return new ChunkKeysSweepJobs.Outcome(500, err);
+    }
+
+    /**
+     * The work of one apply job: the synchronous client loop, inside the engine. Call 1 carries no token and counts
+     * every precondition (a residue that is not accepted refuses the job exactly as it refuses a synchronous apply);
+     * the later calls carry the token the previous one returned, each with the request's {@code max_batches} and
+     * {@code budget_seconds}, until the sweep is done. The stop request (cancel, the wall-clock cap, a tenant reset,
+     * the starter's credential no longer resolving) is asked before every batch and never inside one, so a stopped job
+     * holds whole batches only; it is also asked at each stage of call 1's count, where a stop sweeps nothing and ends
+     * the job {@code stopped} with no rows counted ({@code remaining_rows} null). The credential is looked up again at
+     * each of those points, as the synchronous loop authenticates on every call. Three calls in a row
+     * that sweep nothing while rows remain (a writer's locks) end the job unfinished, as the verb's loop gives up.
+     * Failures map as the synchronous call maps them, with the rows the committed batches swept.
+     */
+    private ChunkKeysSweepJobs.Outcome runApply(ChunkKeysSweepJobs.Job job, String tenant, String callerTenant,
+                                                String credential, Trail trail, ChunkKeyPlan plan,
+                                                Map<String, Long> accepted, String only, int batchSize, int maxBatches,
+                                                int budgetSeconds, java.util.function.Consumer<String> stage) {
+        long t0 = System.nanoTime();
+        ChunkKeySweep sweep = sweep();   // one instance for the whole loop: its token verifies only against itself
+        Map<String, Object> counts = new LinkedHashMap<>();
+        java.util.concurrent.atomic.AtomicReference<String> stopReason = new java.util.concurrent.atomic.AtomicReference<>();
+        // Call 1's count: a stop asked at one of its stages ends the job there (nothing is swept yet), as the dry run
+        // job ends. The "sweeping" stage that closes the count is left to the batch check, which keeps the counts.
+        java.util.function.Consumer<String> countStage = name -> {
+            if (!"sweeping".equals(name)) {
+                String why = stopWhy(job, credential);
+                if (why != null) {
+                    throw new ChunkKeysSweepJobs.Stopped(why);
+                }
+            }
+            stage.accept(name);
+        };
+        ChunkKeySweep.Applied last = null;
+        ChunkKeySweep.Resume resume = null;
+        ChunkKeySweep.Progress current = null;
+        long rows = 0;
+        int batches = 0;
+        int calls = 0;
+        int stalled = 0;
+        long firstBatchMs = 0;
+        boolean stalledOut = false;
+        boolean stoppedByRequest = false;
+        boolean completed = false;
+        long sweptTotal;
+        int batchesTotal;
+        RuntimeException failure = null;
+        try {
+            while (true) {
+                final long rowsBefore = rows;
+                final int batchesBefore = batches;
+                current = new ChunkKeySweep.Progress(
+                    () -> {
+                        String why = stopWhy(job, credential);
+                        if (why != null) {
+                            stopReason.set(why);
+                        }
+                        return why != null;
+                    },
+                    p -> job.progress(batchesBefore + p.batches(), rowsBefore + p.rowsSwept(), p.remaining()),
+                    countStage);
+                ChunkKeySweep.Applied a = sweep.apply(tenant, plan, accepted, only, batchSize, maxBatches,
+                    Duration.ofSeconds(budgetSeconds), resume, current);
+                calls++;
+                rows += a.rowsSwept();
+                batches += a.batches();
+                if (calls == 1) {
+                    firstBatchMs = a.firstBatchMs();
+                }
+                last = a;
+                job.progress(batches, rows, a.remainingRows());
+                if (a.done()) {
+                    break;
+                }
+                if (current.stopped()) {
+                    stoppedByRequest = true;
+                    break;
+                }
+                stalled = a.rowsSwept() == 0 ? stalled + 1 : 0;
+                if (stalled >= JOB_STALL_LIMIT) {
+                    stalledOut = true;
+                    break;
+                }
+                resume = a.resume();
+            }
+            completed = true;
+        } catch (ChunkKeysSweepJobs.Stopped stopped) {
+            // Told to stop at a stage of call 1's count: nothing was swept, and the count did not finish.
+            stoppedByRequest = true;
+            stopReason.set(stopped.reason());
+            completed = true;
+        } catch (RuntimeException e) {
+            failure = e;
+        } finally {
+            // The rows of the call that did not finish: its batches 1..N-1 committed. An Error skips the catch and
+            // still lands here with completed false: a failed outcome row, never a "finished" one with empty counts.
+            sweptTotal = rows + (!completed && current != null ? current.rowsSwept() : 0);
+            batchesTotal = batches + (!completed && current != null ? current.batches() : 0);
+            if (completed) {
+                counts.put("rows_swept", rows);
+                counts.put("batches", batches);
+                counts.put("calls", calls);
+                counts.put("done", last != null && last.done());
+                counts.put("remaining_rows", last == null ? null : last.remainingRows());
+                counts.put("locked_skipped_rows", last == null ? 0L : last.lockedSkippedRows());
+                counts.put("blocked_collections", last == null ? 0 : last.blocked().size());
+                if (stoppedByRequest) {
+                    counts.put("stopped", stopReason.get());
+                    counts.put("cancelled", "cancelled".equals(stopReason.get()));
+                }
+                if (stalledOut) {
+                    counts.put("stalled", true);
+                }
+            } else {
+                counts.put("rows_swept", sweptTotal);
+                counts.put("batches", batchesTotal);
+                counts.put("calls", calls);
+                if (failure instanceof ChunkKeySweep.PreconditionRefused refused) {
+                    counts.put("blocking", refused.report().blocking());
+                }
+            }
+            if (trail != null && !jobs.evicted(job.id())) {
+                // Never throws: a failure to write the outcome is reported to the caller, it does not hide the work.
+                trail.outcome(counts, failure != null || completed ? failure
+                    : new IllegalStateException("the sweep did not complete"));
+            }
+        }
+
+        if (failure != null) {
+            if (failure instanceof ChunkKeySweep.PreconditionRefused refused) {
+                Map<String, Object> refusal = preconditionBody(refused);
+                if (trail != null) {
+                    refusal.put("audit", trail.body());
+                }
+                return new ChunkKeysSweepJobs.Outcome(409, refusal);
+            }
+            if (HttpUtil.isPoolExhausted(failure)) {
+                log.warn("event=chunk_keys_admin_pool_exhausted tenant={} dry_run=false async=true rows_swept={} error={}",
+                    tenant, sweptTotal, failure.getMessage());
+                Map<String, Object> busy = new LinkedHashMap<>();
+                busy.put("error", "database connection pool exhausted, retry");
+                busy.put("rows_swept", sweptTotal);
+                busy.put("rows_changed", sweptTotal > 0);
+                return new ChunkKeysSweepJobs.Outcome(503, busy);
+            }
+            if (failure instanceof IllegalArgumentException && sweptTotal == 0) {
+                return new ChunkKeysSweepJobs.Outcome(400,
+                    new LinkedHashMap<>(Map.of("error", String.valueOf(failure.getMessage()))));
+            }
+            log.error("event=retire_keys_sweep_failed tenant={} caller_tenant={} rows_swept={} batches={} async=true error={}",
+                tenant, callerTenant, sweptTotal, batchesTotal, failure.getMessage(), failure);
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("tenant", tenant);
+            err.put("error", "the sweep failed after " + sweptTotal + " rows in " + batchesTotal
+                + " batches: " + failure.getClass().getSimpleName() + "; the rows counted were committed and are "
+                + "not undone; re-run the same command, the sweep takes up where the rows left are");
+            err.put("reason", "sweep_failed");
+            err.put("dry_run", false);
+            err.put("rows_swept", sweptTotal);
+            err.put("batches", batchesTotal);
+            err.put("rows_changed", sweptTotal > 0);
+            if (trail != null) {
+                err.put("audit", trail.body());
+            }
+            return new ChunkKeysSweepJobs.Outcome(500, err);
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("tenant", tenant);
+        out.put("dry_run", false);
+        out.put("rows_swept", rows);
+        out.put("batches", batches);
+        out.put("calls", calls);
+        out.put("done", last != null && last.done());
+        out.put("remaining_rows", last == null ? null : last.remainingRows());
+        out.put("locked_skipped_rows", last == null ? 0L : last.lockedSkippedRows());
+        out.put("first_batch_ms", firstBatchMs);
+        out.put("elapsed_ms", Duration.ofNanos(System.nanoTime() - t0).toMillis());
+        out.put("blocked_collections", last == null ? List.of() : blockedList(last.blocked()));
+        out.put("resume", null);
+        out.put("resume_ignored", false);
+        if (stoppedByRequest) {
+            out.put("stopped", stopReason.get());
+            out.put("cancelled", "cancelled".equals(stopReason.get()));
+        }
+        if (stalledOut) {
+            out.put("stalled", true);
+        }
+        if (trail != null) {
+            out.put("audit", trail.body());
+            if (trail.outcomeFailed) {
+                out.put("error", "the sweep ran but its outcome audit row could not be written; this call's counts "
+                    + "are in this answer");
+                out.put("reason", "audit_write_failed");
+                out.put("rows_changed", rows > 0);
+                return new ChunkKeysSweepJobs.Outcome(500, out);
+            }
+        }
+        return new ChunkKeysSweepJobs.Outcome(200, out);
+    }
+
+    /**
+     * Why an apply job should stop at its next boundary, or null. The starter's credential is looked up first: one
+     * that no longer resolves (revoked, or past its expiry) stops the job like a cancel ({@code credential_revoked}),
+     * so a job does not outlive the authority it was started under. Then the job's own reasons (cancel, the cap, a
+     * tenant reset).
+     */
+    private String stopWhy(ChunkKeysSweepJobs.Job job, String credential) {
+        if (credential != null && !credentialLive.test(credential)) {
+            job.stopFor("credential_revoked");
+        }
+        return job.stopReason();
+    }
+
+    /**
+     * {@code GET /v1/admin/chunk-keys/sweep/jobs/{id}}: 200 with {@code {job_id, tenant, kind, state, stage,
+     * elapsed_ms}} and, for an apply, {@code batches}, {@code rows_swept} and {@code remaining_rows}; once the job has
+     * ended also {@code http_status} and {@code body}, the status and body the synchronous call would have answered (a
+     * client treats a non-200 {@code http_status} as it would that answer). 404 for an id the engine does not hold, and
+     * for one another credential started: it learns nothing about other callers' jobs.
+     *
+     * <p>{@code POST .../{id}/cancel} (the credential that started the job) asks a running apply to stop at its next
+     * batch boundary and answers the job as a poll does, with {@code cancel_accepted} (false when the job had ended).
+     * A dry run is not cancellable (409 {@code sweep_job_not_cancellable}): it writes nothing and ends by itself.
+     */
+    private void handleJob(HttpExchange ex, String callerTenant, String id, boolean cancel) throws IOException {
+        // The answer is one moment's state: never cached, found or not.
+        noStore(ex);
+        String scopeName = RequestContext.scope();
+        if (!TokenStore.SCOPE_ROOT.equals(scopeName) && !TokenStore.SCOPE_TENANT.equals(scopeName)) {
+            HttpUtil.send(ex, 403, json(Map.of("error",
+                "the sweep needs a tenant or root credential, not scope " + scopeName)));
+            return;
+        }
+        ChunkKeysSweepJobs.Job job = id.isEmpty() || id.contains("/") || id.contains("..") ? null : jobs.find(id);
+        if (job == null || !job.startedBy(callerTenant, RequestContext.isOperator())) {
+            HttpUtil.send(ex, 404, json(Map.of("error", "no such sweep job on this engine (it may have expired, "
+                + "or the engine restarted): start the command again", "reason", "sweep_job_not_found")));
+            return;
+        }
+        if (!cancel) {
+            HttpUtil.send(ex, 200, json(jobBody(job, true)));
+            return;
+        }
+        if (job.kind() != ChunkKeysSweepJobs.Kind.APPLY) {
+            HttpUtil.send(ex, 409, json(Map.of("error", "a dry run writes nothing and cannot be cancelled; it ends by "
+                + "itself", "reason", "sweep_job_not_cancellable", "job_id", job.id())));
+            return;
+        }
+        boolean accepted = job.requestCancel();
+        log.info("event=retire_keys_job_cancel job={} tenant={} caller_tenant={} accepted={}", job.id(), job.tenant(),
+            callerTenant, accepted);
+        Map<String, Object> m = jobBody(job, true);
+        m.put("cancel_accepted", accepted);
+        if (accepted && RequestContext.isOperator()) {
+            // A root credential's sweep is recorded in gc_audit; so is the root credential that stopped it. The cancel
+            // is already in force: a sink that cannot take the row is reported, it does not undo the stop.
+            m.put("cancel_audit_id", recordCancel(job, callerTenant));
+        }
+        HttpUtil.send(ex, 200, json(m));
+    }
+
+    /** The gc_audit row naming the root credential that cancelled {@code job}; its id, or null when it was not written. */
+    private Long recordCancel(ChunkKeysSweepJobs.Job job, String callerTenant) {
+        Audit audit = auditSink.get();
+        String hash = RequestContext.credentialHash();
+        String actor = "root:" + (hash == null ? "unknown" : hash.substring(0, Math.min(16, hash.length())));
+        if (audit == null) {
+            log.error("event=retire_keys_cancel_audit_failed job={} tenant={} actor={} error=no audit sink", job.id(),
+                job.tenant(), actor);
+            return null;
+        }
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("phase", "cancel_requested");
+        details.put("mode", "apply");
+        details.put("target_tenant", job.tenant());
+        details.put("caller_tenant", callerTenant);
+        details.put("scope", RequestContext.scope());
+        details.put("job_id", job.id());
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("operation", AUDIT_OPERATION);
+        row.put("collection", "");
+        row.put("actor", actor);
+        row.put("dry_run", false);
+        row.put("details", details);
+        try {
+            return audit.record(job.tenant(), row);
+        } catch (RuntimeException e) {
+            log.error("event=retire_keys_cancel_audit_failed job={} tenant={} actor={} error={}", job.id(), job.tenant(),
+                actor, e.getMessage(), e);
+            return null;
+        }
+    }
+
+    private Map<String, Object> jobBody(ChunkKeysSweepJobs.Job job, boolean withOutcome) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("job_id", job.id());
+        m.put("tenant", job.tenant());
+        m.put("kind", job.kind().wire());
+        m.put("state", job.state().wire());
+        m.put("stage", job.stage());
+        m.put("elapsed_ms", job.elapsedMs(jobs.nowMs()));
+        if (job.kind() == ChunkKeysSweepJobs.Kind.APPLY) {
+            m.put("batches", job.batches());
+            m.put("rows_swept", job.rowsSwept());
+            m.put("remaining_rows", job.remaining() < 0 ? null : job.remaining());
+        }
+        if (job.state() == ChunkKeysSweepJobs.State.RUNNING) {
+            String stopping = job.stopReason();
+            if (stopping != null) {
+                m.put("stopping", stopping);
+            }
+        }
+        ChunkKeysSweepJobs.Outcome outcome = job.outcome();
+        if (withOutcome && outcome != null) {
+            m.put("http_status", outcome.httpStatus());
+            m.put("body", outcome.body());
+        }
+        return m;
+    }
+
     private static Map<String, Object> preconditionBody(ChunkKeySweep.PreconditionRefused e) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("error", e.getMessage());
@@ -438,7 +1033,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             return false;
         }
         return TenantConstants.DEFAULT_TENANT.equals(tenant) || tenants.get().contains(tenant)
-            || sweep.hasChunkRows(tenant);
+            || sweep().hasChunkRows(tenant);
     }
 
     /**
@@ -459,6 +1054,8 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         private final boolean resumed;
         private final String operatorLabel;
         private final String actor;
+        /** The credential's scope, read on the request thread: a job writes its outcome row on another thread. */
+        private final String scope = RequestContext.scope();
         private long intentId = -1;
         private long outcomeId = -1;
         boolean outcomeFailed;
@@ -528,7 +1125,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             details.put("mode", dryRun ? "dry-run" : "apply");
             details.put("target_tenant", target);
             details.put("caller_tenant", callerTenant);
-            details.put("scope", RequestContext.scope());
+            details.put("scope", scope);
             return details;
         }
 
@@ -666,12 +1263,12 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         checked.addAll(tenants.get());
         Map<String, Long> scoped = new LinkedHashMap<>();
         for (String t : checked) {
-            scoped.put(t, sweep.rowCount(t));
+            scoped.put(t, sweep().rowCount(t));
         }
         List<ChunkConstraintAdmin.TenantProbe> probe = admin.probe(plan);
         List<String> undercounted = undercounted(probe, scoped);
         if (!undercounted.isEmpty()) {
-            throw new ChunkConstraintAdmin.Refused(503, "admin_probe_undercount",
+            throw new AdminDdlSession.Refused(503, "admin_probe_undercount",
                 "the table-wide probe counted fewer chunk rows than a tenant-scoped count for tenant(s) "
                     + undercounted + ": the admin session is not reading every row, so no constraint check can be "
                     + "trusted. Nothing was changed; if rows were deleted while this ran, retry");
@@ -689,7 +1286,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             Map<String, Object> row = new LinkedHashMap<>();
             if (add) {
                 if (p.retiredRows() > 0) {
-                    var cols = sweep.collectionsOf(p.tenant(), plan);
+                    var cols = sweep().collectionsOf(p.tenant(), plan);
                     long seen = cols.stream().mapToLong(ChunkKeySweep.CollectionCount::retiredRows).sum();
                     long sweepable = cols.stream().mapToLong(ChunkKeySweep.CollectionCount::sweepableRows).sum();
                     if (sweepable > 0) {
@@ -787,6 +1384,14 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         for (var p : probe) {
             seen.merge(p.tenant(), p.rows(), Long::sum);
         }
+        return undercounted(seen, scoped);
+    }
+
+    /**
+     * The same comparison over the table-wide counts per tenant ({@code seen}); shared with the catalog TTL CHECK
+     * routes (nexus-6pfgb.44), which count a different table.
+     */
+    static List<String> undercounted(Map<String, Long> seen, Map<String, Long> scoped) {
         List<String> out = new ArrayList<>();
         for (var e : scoped.entrySet()) {
             if (seen.getOrDefault(e.getKey(), 0L) < e.getValue()) {

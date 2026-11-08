@@ -69,7 +69,6 @@ from pathlib import Path
 from typing import NamedTuple
 
 from plugin_channel import (
-    GitCommandError,
     TagVisibilityError,
     assert_tag_visibility,
     client_version_of,
@@ -145,7 +144,7 @@ def _resolve(ref: str, cwd: Path, label: str) -> None:
     if version is not None:
         try:
             assert_tag_visibility(version, cwd=cwd)
-        except (TagVisibilityError, GitCommandError) as exc:
+        except TagVisibilityError as exc:
             raise Unverifiable(f"--{label} {ref}: {exc}") from exc
         return
     probe = _git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd)

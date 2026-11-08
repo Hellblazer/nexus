@@ -319,7 +319,7 @@ def test_search_retries_on_503(t3_mock) -> None:
         {"ids": [["id-1"]], "documents": [["content"]],
          "metadatas": [[{"source_path": "f.py"}]], "distances": [[0.1]]},
     ]
-    assert len(db.search("query text", ["code__myrepo"])) == 1
+    assert len(db.search("query text", ["code__myrepo"], sensitivity="include")) == 1
 
 
 @pytest.mark.t2_tenant

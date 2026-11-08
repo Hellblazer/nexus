@@ -32,7 +32,7 @@ _STANDIN = _ROOT / "conexus" / "launch" / "nx_standin.py"
 
 #: The first install on THIS platform, as README.md gives it (Linux names the CPU
 #: build of torch).
-_FIRST = "uv tool install conexus --python 3.12" + (" --torch-backend cpu" if sys.platform.startswith("linux") else "")
+_FIRST = "uv tool install conexus --python 3.12"
 _MANUAL_COMMANDS = (_FIRST, "nx self install", "nx init")
 _INSTALL_PAGE = "https://hellblazer.github.io/nexus/"
 
@@ -439,11 +439,9 @@ async def test_no_cli_and_nx_mcp_catalog_is_a_stand_in_with_no_tools(tmp_path: P
 
 
 def test_the_commands_are_the_platform_s_own_and_the_instructions_name_them() -> None:
-    """README.md: on Linux the first command names the CPU build of torch, and
-    without it uv installs 4.3 GB that Nexus never uses."""
+    """README.md: the bare install is the same on every platform and takes no --torch-backend (nexus-n6a8v)."""
     mod = _standin()
-    assert mod.manual_commands("linux")[0] == "uv tool install conexus --python 3.12 --torch-backend cpu"
-    for platform in ("darwin", "win32"):
+    for platform in ("linux", "darwin", "win32"):
         assert mod.manual_commands(platform)[0] == "uv tool install conexus --python 3.12"
     for platform in ("linux", "darwin", "win32"):
         assert mod.manual_commands(platform)[1:] == ("nx self install", "nx init")
@@ -453,12 +451,12 @@ def test_the_commands_are_the_platform_s_own_and_the_instructions_name_them() ->
             assert command in text and command in mod.setup_text(platform)
 
 
-def test_linux_is_told_which_uv_the_first_command_needs() -> None:
-    """README.md: `--torch-backend` needs uv 0.9.19 or newer."""
+def test_no_platform_is_told_about_the_torch_backend_option() -> None:
+    """The bare install takes no --torch-backend, so no platform needs the uv version that option needs."""
     mod = _standin()
-    assert "uv 0.9.19 or newer" in mod.setup_text("linux") and "uv self update" in mod.setup_text("linux")
-    for platform in ("darwin", "win32"):
-        assert "0.9.19" not in mod.setup_text(platform)
+    for platform in ("linux", "darwin", "win32"):
+        text = mod.setup_text(platform)
+        assert "--torch-backend" not in text and "0.9.19" not in text, text
 
 
 def test_serving_the_stand_in_leaves_no_bytecode_in_the_plugin(tmp_path: Path) -> None:

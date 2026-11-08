@@ -121,7 +121,7 @@ class _World:
 
     def chunk_meta(self, name: str) -> dict:
         col = make_t3().get_or_create_collection(self.collection)
-        got = col.get(ids=[self.ch[name]], include=["metadatas"])
+        got = col.get(ids=[self.ch[name]], include=["metadatas"], sensitivity="include")
         assert got["ids"] == [self.ch[name]], f"{name} is not readable: {got}"
         return got["metadatas"][0]
 

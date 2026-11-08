@@ -23,6 +23,13 @@
 #                         the engine. Stays; a client write is refused.
 #               LEGACY    retired vocabulary, readable on old rows, swept.
 #               NOT_ROW   listed so no one looks for it on the row.
+#               STAMP     written by the engine at move time on quarantine-*
+#                         rows ONLY, never on a live row. Not in the ROW set
+#                         (so the key-retirement plan digest is unchanged) and
+#                         not in the allow-list: it is safe only because the
+#                         quarantine-* collections are exempt BY NAME (a
+#                         bypass prefix), which the sweep never touches and
+#                         the CHECK exempts. The Java generator ignores it.
 #   kind      metadata-key (a key of the chunks.metadata JSON), column
 #             (a chunks column), table (a whole table), catalog (a catalog
 #             column). Only metadata-key rows reach the generated Java sets.
@@ -115,7 +122,7 @@ domain = [
   "frecency_score", "frecency_computed_at", "source_agent", "session_id", "catalog_doc_id", "content_hash",
   "section_title", "section_type", "page_number",
   "line_start", "line_end", "chunk_start_char", "chunk_end_char",
-  "quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at",
+  "quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at", "quarantine_expires_at",
   "last_written_at", "retention", "collection",
   "chunk_type", "doc_id", "chunk_index", "chunk_count", "source_path", "store_type", "corpus",
   "git_meta", "git_project_name", "git_branch", "git_commit_hash", "git_remote_url",
@@ -249,6 +256,13 @@ emit = { class = "ROW", kind = "metadata-key", on_row = "engine", home = "the ro
 id = "row-columns"
 match = { key = ["last_written_at", "retention", "collection"] }
 emit = { class = "ROW", kind = "column", on_row = "absent", home = "columns of nexus.chunks", remedy = "keep", moved_by = "stays" }
+
+# ---- STAMP -----------------------------------------------------------------
+
+[[row]]
+id = "quarantine-expires-at"
+match = { key = "quarantine_expires_at" }
+emit = { class = "STAMP", kind = "metadata-key", on_row = "engine", home = "quarantine-* rows only, written by the engine at move time (vectors-056, nexus-alsq3); outside the allow-list because the quarantine-* collections are exempt by name, so ChunkKeySweep never touches it and the CHECK admits it; a stray one on a live row is not admitted and is sweepable", remedy = "keep", moved_by = "stays; nexus-alsq3" }
 
 # ---- LEGACY ----------------------------------------------------------------
 

@@ -236,14 +236,14 @@ def test_union_guard_keeps_shared_chunk_at_the_production_wiring(tmp_path) -> No
     )
 
     col = t3_a.get_or_create_collection(collection)
-    shared_row = col.get(ids=[shared_chash], include=[])
+    shared_row = col.get(ids=[shared_chash], include=[], sensitivity="include")
     assert shared_row.get("ids") == [shared_chash], (
         "the shared chunk's T3 row was deleted despite doc B still "
         f"referencing it — got {shared_row}"
     )
     # The genuinely-exclusive-to-A chunk must still be pruned — the guard
     # must not degrade into "never delete anything".
-    exclusive_row = col.get(ids=[exclusive_a_chash], include=[])
+    exclusive_row = col.get(ids=[exclusive_a_chash], include=[], sensitivity="include")
     assert exclusive_row.get("ids") == [], (
         "the chunk exclusively owned by doc A's PRIOR version was not "
         f"pruned — got {exclusive_row}"

@@ -1003,7 +1003,7 @@ def seed_staleness_cache_from_catalog(
     for start in range(0, len(chashes), _SEED_PROBE_BATCH):
         batch = chashes[start:start + _SEED_PROBE_BATCH]
         try:
-            got = _vector_with_retry(col.get, ids=batch, include=["metadatas"])  # type: ignore[attr-defined]
+            got = _vector_with_retry(col.get, ids=batch, include=["metadatas"], sensitivity="include")  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001 — best-effort seed; the documents behind this batch stay unseeded
             log.warning("seed_staleness_t3_read_failed", collection=name, exc_info=True)
             continue

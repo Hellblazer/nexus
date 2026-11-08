@@ -16,6 +16,7 @@ write runs.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -28,7 +29,7 @@ __all__ = [
     "BGE_TOKEN", "ExternalEmbedderRefusedError", "catalog_flags_uri", "flagged_for_import", "SENSITIVE_REASON", "SensitiveEnrichRefusedError",
     "SensitiveFlagNotSetError", "ack_help", "bge_sibling", "catalog_sensitive", "cloud_disclosure",
     "cloud_refusal_text", "external_legs_gate", "gate_sensitive_import", "gate_sensitive_reindex", "import_ack_help", "is_external_embedder", "raise_flag", "refuse_external_existing",
-    "refuse_external_existing_note", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help", "route_for_index",
+    "refuse_external_existing_note", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_glob_hits", "sensitive_glob_matches", "sensitive_glob_help", "sensitive_help", "route_for_index",
     "sensitive_write_kwargs",
 ]
 
@@ -554,6 +555,112 @@ def sensitive_write_kwargs(
     return {"sensitive": True, **({"ack_external_embedder": True} if ack else {})}
 
 
+def sensitive_glob_help() -> str:
+    """Help for ``nx index repo --sensitive-glob`` (RDR-243 Q8, Technical Design item 8)."""
+    return (
+        "Register every file whose repo-relative path matches PATTERN as sensitive (repeatable), with "
+        "gitignore-like matching: a pattern with no '/' (other than a trailing one) is matched against "
+        "every file and directory name at any depth, and a directory name matches its whole subtree "
+        "('secrets', 'secrets/'); a pattern with a '/' is anchored at the repo root; '**/' matches zero "
+        "or more directories ('**/*.pem' finds a top-level a.pem, 'secrets/**/x' finds secrets/x); "
+        "'*' also matches across '/' (so 'secrets/*' is the whole subtree); a trailing '/' matches "
+        "directories only. The run prints how many files each pattern matched and warns when a "
+        "pattern matched none. With --since-head only the files the delta visits are flagged. "
+        "The flag is set before any chunk is written and is never lowered by a later run. "
+        "A repo run has no --ack-external-embedder: a matched file whose collection embeds with Voyage AI "
+        "(every collection in cloud mode) is skipped with a warning, not sent; in local mode on a bge "
+        "install it is indexed on this machine, and a matched PDF is extracted by the local MinerU "
+        "subprocess. Refuses before any write when the engine cannot hold the flag. "
+        f"What a sensitive file means (the registry rows enforced in this release): {sensitive_help()}"
+    )
+
+
+def _glob_regex(pat: str) -> str:
+    """Translate one glob (already normalised: no leading './' or '/', no trailing '/') to a regex source.
+
+    ``**/`` is zero or more directories, a bare ``**`` and ``*`` match anything (``/`` included: the
+    documented, over-flagging-is-safe contract), ``?`` one character, ``[...]`` a class.
+    """
+    out: list[str] = []
+    i, n = 0, len(pat)
+    while i < n:
+        c = pat[i]
+        if c == "*":
+            if pat.startswith("**/", i):
+                out.append("(?:.*/)?")
+                i += 3
+                continue
+            j = i
+            while j < n and pat[j] == "*":
+                j += 1
+            out.append(".*")
+            i = j
+            continue
+        if c == "?":
+            out.append(".")
+        elif c == "[":
+            j = pat.find("]", i + 1 + (pat[i + 1:i + 2] in ("!", "^")) + 1)
+            if j == -1:
+                out.append("\\[")
+            else:
+                body = pat[i + 1:j]
+                neg = body[:1] in ("!", "^")
+                out.append("[" + ("^" if neg else "") + body[neg:].replace("\\", "\\\\") + "]")
+                i = j
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return "".join(out)
+
+
+def _compile_glob(glob: str) -> tuple[re.Pattern[str], bool, bool]:
+    """``(regex, anchored, dir_only)`` for one ``--sensitive-glob`` pattern."""
+    pat = glob.replace("\\", "/").strip()
+    while pat.startswith("./"):
+        pat = pat[2:]
+    dir_only = pat.endswith("/")
+    pat = pat.rstrip("/")
+    anchored = "/" in pat
+    pat = pat.lstrip("/")
+    return re.compile(_glob_regex(pat) + r"\Z", re.DOTALL), anchored, dir_only
+
+
+def sensitive_glob_hits(rel_path: str, globs: Sequence[str]) -> list[int]:
+    """Indexes of the *globs* that match *rel_path* (``--sensitive-glob``, gitignore-like).
+
+    A pattern with no ``/`` (a trailing one aside) is tried against every path component, so
+    ``*.pem`` finds ``deploy/keys/a.pem`` and a directory name (``secrets``) matches its whole subtree;
+    one with a ``/`` is anchored at the repo root and tried against the file path and each of its
+    directory prefixes (so ``secrets/x`` takes ``secrets/x/y``). ``**/`` matches zero or more
+    directories (``**/*.pem`` takes a top-level ``a.pem``, ``secrets/**/x`` takes ``secrets/x``);
+    ``*`` also crosses ``/``. A trailing ``/`` matches directories only. Case-sensitive, and the
+    ``fnmatch``-free translation works on any Python (``PurePath.full_match`` needs 3.13).
+    """
+    if not globs:
+        return []
+    parts = [p for p in rel_path.replace("\\", "/").split("/") if p]
+    if not parts:
+        return []
+    hits: list[int] = []
+    for idx, g in enumerate(globs):
+        rx, anchored, dir_only = _compile_glob(g)
+        last = len(parts)
+        # prefix i is the first i components; the whole path is a file, every shorter prefix a directory
+        for i in range(1, last + 1):
+            if dir_only and i == last:
+                continue
+            cand = "/".join(parts[:i]) if anchored else parts[i - 1]
+            if rx.match(cand):
+                hits.append(idx)
+                break
+    return hits
+
+
+def sensitive_glob_matches(rel_path: str, globs: Sequence[str]) -> bool:
+    """True when *rel_path* (repo-relative, any separator) matches one of *globs* (see :func:`sensitive_glob_hits`)."""
+    return bool(sensitive_glob_hits(rel_path, globs))
+
+
 def raise_flag(writer: Any, tumbler: str, *, what: str) -> None:
     """Put ``sensitive = true`` on the existing document *tumbler* through the audited route.
 
@@ -568,3 +675,10 @@ def raise_flag(writer: Any, tumbler: str, *, what: str) -> None:
             f"Nothing was written to it."
         ) from exc
     _log.debug("sensitive_flag_raised", tumbler=tumbler, updated=(out or {}).get("updated") if isinstance(out, dict) else out)
+    if isinstance(out, dict) and out.get("updated") == [1]:
+        # A document flagged after it was indexed may sit in topics whose label was computed from it (RDR-243
+        # Phase 3 fix r1, nexus-rfvyy.8): replace that label now, as `nx catalog sensitive` does. Best effort: the
+        # flag is set and the write may proceed; the log names a topic that could not be relabelled.
+        from nexus import sensitive_topics  # noqa: PLC0415 - deferred: only a late flag needs it
+
+        sensitive_topics.withhold_after_flag_best_effort(writer, [tumbler], source="raise_flag")

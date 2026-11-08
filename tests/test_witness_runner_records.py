@@ -532,7 +532,7 @@ async def test_a_check_with_ids_composes_an_envelope_with_no_evidence_records() 
 
     cut = classify_continuation_cut(steps)
     catalog = _rows_catalog()  # the owner lookup reads the catalog; never reach real storage
-    with patch.object(mcp_core, "store_get_many", stub_store_get_many), patch(
+    with patch.object(mcp_core, "_store_get_many_impl", stub_store_get_many), patch(
         "nexus.mcp_infra.get_catalog", return_value=catalog,
     ), patch("nexus.mcp.core._get_catalog", return_value=catalog):
         envelope = assemble_continuation_envelope(
@@ -612,14 +612,14 @@ class TestVerifyIdsHydration:
     def test_ids_without_a_claim_fail_loudly_before_anything_is_fetched(self) -> None:
         """Decision (RDR-189 P1): the host never invents a claim. A verify step with ids and no claim is
         a plan-authoring bug and stops the plan, before store_get_many pays for a fetch."""
-        with patch("nexus.mcp.core.store_get_many") as fetch, pytest.raises(runner.PlanRunOperatorArgMissingError) as err:
+        with patch("nexus.mcp.core._store_get_many_impl") as fetch, pytest.raises(runner.PlanRunOperatorArgMissingError) as err:
             runner._hydrate_operator_args("verify", {"ids": [X], "collections": COLL})
         assert err.value.missing_arg == "claim" and err.value.tool == "operator_verify"
         fetch.assert_not_called()
 
     @pytest.mark.parametrize("blank", ["", "   ", None])
     def test_a_blank_claim_is_no_claim(self, blank) -> None:
-        with patch("nexus.mcp.core.store_get_many") as fetch, pytest.raises(runner.PlanRunOperatorArgMissingError):
+        with patch("nexus.mcp.core._store_get_many_impl") as fetch, pytest.raises(runner.PlanRunOperatorArgMissingError):
             runner._hydrate_operator_args("verify", {"ids": [X], "collections": COLL, "claim": blank})
         fetch.assert_not_called()
 

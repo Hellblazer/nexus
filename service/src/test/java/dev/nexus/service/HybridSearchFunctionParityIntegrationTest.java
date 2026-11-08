@@ -524,13 +524,13 @@ class HybridSearchFunctionParityIntegrationTest {
         Table<?> fn;
         switch (dim) {
             case 384:
-                fn = HYBRID_SEARCH_384.call(Vector.of(vec), queryText, cols, null, n);
+                fn = HYBRID_SEARCH_384.call(Vector.of(vec), queryText, cols, null, n, false);
                 break;
             case 768:
-                fn = HYBRID_SEARCH_768.call(Vector.of(vec), queryText, cols, null, n);
+                fn = HYBRID_SEARCH_768.call(Vector.of(vec), queryText, cols, null, n, false);
                 break;
             case 1024:
-                fn = HYBRID_SEARCH_1024.call(Vector.of(vec), queryText, cols, null, n);
+                fn = HYBRID_SEARCH_1024.call(Vector.of(vec), queryText, cols, null, n, false);
                 break;
             default:
                 throw new IllegalArgumentException("unsupported dim: " + dim);
@@ -695,7 +695,7 @@ class HybridSearchFunctionParityIntegrationTest {
         String q = queries.get(0);
         float[] vec = embedQuery(TENANT_A, COL_MAIN, q);
         Table<?> fn = HYBRID_SEARCH_384.call(
-            Vector.of(vec), q, new String[] {COL_MAIN}, null, K);
+            Vector.of(vec), q, new String[] {COL_MAIN}, null, K, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("hybrid_search_%d must be plannable/INLINABLE (LANGUAGE sql, STABLE, "
@@ -1015,7 +1015,7 @@ class HybridSearchFunctionParityIntegrationTest {
         List<Map<String, Object>> rows = tenantScope.withTenant(TENANT_CROSS, ctx -> {
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
             Table<?> fn = HYBRID_SEARCH_768.call(
-                Vector.of(vec), CROSS_QUERY_TEXT, new String[] {COL_CROSS_A}, null, 10);
+                Vector.of(vec), CROSS_QUERY_TEXT, new String[] {COL_CROSS_A}, null, 10, false);
             Field<String> id = DSL.field(DSL.name("id"), String.class);
             return ctx.select(id).from(fn).fetch().map(rec -> {
                 Map<String, Object> row = new LinkedHashMap<>();

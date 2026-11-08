@@ -107,7 +107,7 @@ class TestGetEmbeddingsRequestOrder:
             documents=["text for b", "text for a"],
             metadatas=[{"k": "b"}, {"k": "a"}],
         )
-        direct = col.get(ids=["id-a", "id-b"], include=["embeddings"])
+        direct = col.get(ids=["id-a", "id-b"], include=["embeddings"], sensitivity="include")
         by_id = dict(zip(direct["ids"], direct["embeddings"]))
 
         result = t3.get_embeddings("knowledge__ordertest", ["id-a", "id-b"])

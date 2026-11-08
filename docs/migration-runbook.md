@@ -19,9 +19,9 @@ nx upgrade
 ```
 
 It converges a set of PRECONDITIONS and then walks the data ladder.
-`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds three rungs:
-`rdr192-manifest-backfill`, `note-tags-array` and
-`manifest-section-labels`, each described below the table. Everything else in `nx upgrade` is precondition work:
+`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds four rungs:
+`rdr192-manifest-backfill`, `note-tags-array`,
+`manifest-section-labels` and `manifest-span-fill`, each described below the table. Everything else in `nx upgrade` is precondition work:
 
 | Precondition | Converges |
 |---|---|
@@ -236,7 +236,7 @@ without a gate and nineteen walked the cloud catalog at once).
   run. (`manifest-section-labels` asks the engine for one count when the engine has the
   route: `--auto` then REPORTS the count, zero as converged and more as pending, and its
   `converge()` is deferred without a read or a write. An interactive `nx upgrade` does the
-  fill and records the completion.) The rungs: `manifest-section-labels` and `note-tags-array`. The `rdr192-manifest-backfill` census (one engine
+  fill and records the completion.) The rungs: `manifest-section-labels`, `manifest-span-fill` (it has no engine count, so `--auto` reads nothing and calls it not applicable) and `note-tags-array`. The `rdr192-manifest-backfill` census (one engine
   scan per collection) is refused the same way in `converge()`: reported deferred, no
   census call. The version-transition callout that any `nx` command can print asks every
   `detect()` as an unattended run too. **On a managed tenant the labels, note-tags and
@@ -255,11 +255,15 @@ is *legacy*: NULL labels, flag false, and readers fall back to the shared T3 chu
 row's label, which belongs to whichever document wrote that chunk last. `doc_indexer`
 skips unchanged files, so a re-index never fills them. This rung fills the rows where
 the chunk row's label is exact (nexus-1nrcu). The scan runs until a completion is
-recorded, then never again: `detect()` answers from the recorded completion (at any
-package version) without listing a document, since `nx doctor`, each session start's
+recorded: `detect()` then answers from the recorded completion (at any package
+version) without listing a document, since `nx doctor`, each session start's
 `nx upgrade --auto` and every walk call it. A row left legacy by design (shared
 chash, no label keys, a chunk titled for another file) stays legacy, and a forced
-re-index of its document is the only later path.
+re-index of its document is the only later path. One exception: a completion
+recorded before the title guard stripped the document title's suffix (below) has
+no `title rule 2` in its detail and is scanned once more, with no engine count read,
+then recorded again with the mark. Against a managed service that pass needs one
+interactive `nx upgrade`; unattended it is not applicable, as a first scan is.
 
 - **The rule.** A legacy row takes the chunk row's label only when its chash has
   exactly one live manifest row in the tenant, and that row is this one. One *owner*
@@ -271,7 +275,12 @@ re-index of its document is the only later path.
   than the document's plus five minutes (a later row was written by someone else).
   Its `title` (the last writer's) must name this document: the document's title, its
   file path or file name, with or without the `:12-30` / `:chunk-3` / `:page-2`
-  suffix the indexers add; a row with no title is not contradicted, and one that
+  suffix the indexers add, on either side (an import can title a document after one
+  of its chunks, `paper.pdf:page-3`, and its other pages' chunks then name
+  `paper.pdf:page-11`; gate-xr789 had 111553 such rows, nexus-l8o33); a name that is
+  only a suffix is empty once stripped and matches nothing; a document titled with a
+  bare file name takes a chunk titled for that name in any directory, which the
+  ownership guards bound; a row with no title is not contradicted, and one that
   names another file stays legacy and is counted as "chunk row not attributable".
   Just before each write the batch's manifests and ownership are read again; a row
   that became written, moved or gained a co-owner is skipped.
@@ -305,6 +314,108 @@ re-index of its document is the only later path.
   empty tenant converges having examined 0 documents, and says so. The rung is not
   applicable when no catalog is available or the engine has no
   `/manifest/chash_positions` route.
+
+### The `manifest-span-fill` rung
+
+The retire-keys sweep deletes the four span keys from the chunk rows (`line_start`, `line_end`,
+`chunk_start_char`, `chunk_end_char`); the manifest's span columns (`line_start`, `line_end`, `char_start`,
+`char_end`) are then the only copy. A manifest row written without a span (the orphan backfill writes NULL on
+purpose) has NULL columns where its chunk row still holds one, and the engine counts it in `null_span_rows`.
+This rung copies the chunk row's span onto those rows where it is exact (nexus-l8o33), before the sweep. It is
+independent of `manifest-section-labels` (that rung is recorded once and reads converged after that, so it cannot
+run a span pass), and shares its rule and guards, the title-rule record mark included:
+
+- **The rule.** The chash has exactly one live manifest row in the tenant, that row is this one, and no tombstoned
+  document holds it. A span is a property of one position in one file: a chunk shared by two rows holds the span of
+  whichever wrote last, so every shared row stays NULL. Orphan-minted documents (`meta.backfill_from` is
+  `t3_orphan`) are skipped. The chunk row's `indexed_at` and `title` must be attributable to the document, as for
+  labels.
+- **Column by column, fill-only, and only when the chunk row agrees.** Only a column that is NULL on the manifest row
+  is written. A column the manifest already holds is never sent. A row whose stored column DIFFERS from a value the
+  chunk row records is not filled at all and counted ("whose chunk row differs from a column the manifest already
+  holds"): the disagreement is the one piece of evidence that the chunk row describes another position, and filling
+  the row's other columns from it would join the lines of one writer to the characters of another. A partial row
+  whose stored columns agree with the chunk row, or that the chunk row does not record, is filled on its NULL
+  columns. A chunk value of 0 is "not recorded" (`make_chunk_metadata` writes 0 for it) and is not copied.
+- **The engine counts by recorded value, so the count can reach zero.** The engine's `null_span_rows` counts a row with
+  a NULL manifest column whose chunk key RECORDS a value, by the same rule as the rung (a positive line, a positive
+  end, a start that is positive or beside a recorded end, integers only; nexus-qmrfi). A chunk written without lines
+  (the writer puts 0) is not counted: there is nothing recorded to lose. Only a recorded span the rung leaves
+  unused (shared chunk, deleted co-owner, unattributable chunk, contradicted column) stays in the count, and it
+  reaches 0 when none remains. An engine older than the change counts every present key, so there the count does not
+  reach zero for lineless chunks and the residue is accepted by name.
+  **The sweep may drop values the count ignores.** A key that is present but is not a recorded span (a string
+  such as `"7"`, a float such as `9.0`, a boolean, a null, a 0 or negative line, or a 0 start beside an
+  unrecorded end) is not counted and does not hold the sweep back, and `nx t3 retire-keys --apply` deletes it
+  with the other keys. `manifest_span` declines to write every one of those (the manifest columns hold recorded
+  integer spans only), so no value the rung could have copied is lost. A string or float span that older indexing
+  left on a chunk row is lost, though, and the dry run's `null_span_rows` cannot tell you it was there. The one
+  table both halves are held to is `service/src/test/resources/manifest-span-cases.json`.
+- **Labels are untouched.** The only write route (`append_manifest_many`) rewrites a row's labels from the request,
+  so the rung sends the labels and `labels_written` it read just before the write, unchanged. A label written in
+  the window between the scan and the write is carried, not reverted. A span column another writer filled in that
+  window is kept when it equals the chunk row's value; when it differs, the row is not written at all (counted as
+  changed before the write), by the same rule as a stored column that disagrees. The document's `indexed_at` is
+  written back after each batch, as for labels, also when a request fails partway (including a request the engine
+  committed before the client lost the answer).
+- **Detect.** Converged from the recorded completion. Otherwise the dry run (a scan with no write). Unattended
+  (`--auto`) against a managed service it reads nothing and is not applicable; the interactive `nx upgrade` scans,
+  fills, verifies and records. Run it before `nx t3 retire-keys --apply`, then take the dry run's `null_span_rows`
+  and accept only what the summary accounts for.
+- **A write racing the rung is refused, not reverted** (nexus-tj0wu). The append puts a row's chash and labels
+  from the request, so each row the rung sends carries `expected`: the chash, labels, `labels_written` and span
+  columns it just read. The engine writes the row only while the stored row still holds them; a re-index, a label
+  write or a span write that landed after the re-read makes it refuse that one row, and the rung counts it as
+  "changed before the write" and goes on (the next `nx upgrade` takes it up again). The same guard protects
+  `manifest-section-labels`. Not guarded: a row that gains a co-owner in that window (the engine does not see
+  it), so still prefer a quiet tenant. **New client, engine without the guard:** such an engine ignores
+  `expected`, writes the first request's rows unguarded (the rung's own fill of what it had just re-read, the
+  behaviour before the guard) and restamps the documents' `indexed_at`; the client sees no
+  `expected_refused_count` in the answer and raises `EngineOlderThanClientError`, so nothing is counted as
+  guarded and the walk stops. Both rungs write the stamps of that request's documents back before the error
+  leaves them (the labels rung as well as this one). Deploy the engine that carries the guard before running
+  `nx upgrade` with this client; until then these two rungs end on that error, one request in.
+- **The managed path is interactive, and slow.** Against a managed service `--auto` reads nothing; the interactive
+  `nx upgrade` makes three walks of the whole catalog (the detect dry run, the fill, the verify dry run). Completion
+  is recorded once: a manifest row that gains a NULL span later (an orphan backfill, say) is not refilled, and shows
+  only in the retire-keys count.
+- **Reading the result.** "Engine-comparable" is the count of rows with a NULL column and a chunk key that records a
+  value (by value, not by presence), the same predicate `null_span_rows` uses, over the documents this scan walks.
+  Against an engine older than nexus-qmrfi the engine's count is by key presence, so it is higher than this one
+  and the rung's "engine count once written" line is a floor that engine will not reach. The scan skips `alias_of` documents and the
+  engine does not, so compare the number with the retire-keys dry run's `null_span_rows` yourself: a difference is
+  rows on alias documents, which the rung does not touch. The rung itself checks only its own bookkeeping, that the
+  count equals the fillable rows plus the left
+  rows, each left bucket named (shared with another document, repeated inside the document, also held by a deleted
+  document, orphan-minted, ownership listing named another row, chunk row newer than the document or without
+  `indexed_at` or titled for another document, chunk row differs from a stored column). Every counted row has a
+  recorded span on the chunk row, so every left row is a recorded span that stays unused. It also prints the engine
+  count to expect after the pass (the counted rows minus the fillable ones), and, apart, the rows the engine never
+  counts because nothing is recorded (chunk missing, chunk with no key for the NULL columns, chunk whose keys are 0
+  or not a number). A 409 from the engine for a request (a superseded collection, which the client raises as
+  `SupersededCollectionWriteError`, or any other 409) defers those rows
+  (`write_refused_409`) and the run goes on; the rung ends deferred and retries on the next `nx upgrade`.
+
+### The retire-keys sweep as an engine job
+
+`nx t3 retire-keys` counts and sweeps through the engine as a background job (`docs/cli-reference.md` § `nx t3
+retire-keys` has the verb). Four things an operator running it should know:
+
+- **A job keeps sweeping until something stops it.** Closing the terminal, a lost network or a `--wait-seconds`
+  that ran out does not stop an apply; the same command joins it. What stops it: the tenant is done, a cancel
+  (Ctrl-C and yes, or `POST .../jobs/{job_id}/cancel` by the credential that started it), the 4-hour wall-clock
+  cap, a tenant reset, or its starter's credential no longer resolving. The engine looks the credential up again
+  at each stage of the first count and before each batch, so a revoked or expired token stops the job at the next
+  boundary with `stopped: credential_revoked` (the batches that ran are kept).
+- **Cancel and the cap are honoured during the first count too.** A stop asked while the apply is still counting
+  ends it there with nothing swept and no rows counted (`remaining_rows` null).
+- **Two jobs run at a time, engine-wide.** A long apply holds one of the two workers for as long as it sweeps, so
+  with two long applies running (any two tenants) a third job waits in the queue, and a dry run's client waits only
+  `--wait-seconds` (default 1800) before giving up on it. The 4-hour cap starts when a job starts RUNNING, not
+  when it was queued: time in the queue does not count against it.
+- **A root cancel is audited.** A cancel by a root credential writes a `gc_audit` row (`phase:
+  cancel_requested`, the job id, an actor naming the credential by a hash prefix) in the target tenant, next to
+  the job's own intent and outcome rows.
 
 ### Restoring chunks the reaper quarantined
 
@@ -601,6 +712,21 @@ PostgreSQL is gone, install the same major version first (for example Homebrew
 `postgresql@16`). If you do not need the data, skip all of this: move the data
 directory aside, and `nx init` provisions a new PostgreSQL 17 cluster.
 
+`nx daemon service pg-upgrade --old-bin <bin dir>` does all of this for you: with no
+other flag it prints the plan and changes nothing, `--check-only` runs
+`pg_upgrade --check` against the real cluster with a temporary new one, and `--apply`
+upgrades with a rollback on any failure (see `docs/cli-reference.md`). The command is
+not yet run against a real pre-17 cluster; copy the data directory first. The manual
+steps below are the same procedure, and the way to recover by hand.
+
+Save the block as a script and run it with `bash <file>`; do not paste it into
+a shell. Steps 2 to 4 end the script with `exit 1` when they fail (step 2
+when a `$DATA.old` is already there), so nothing after the failure runs. Pasted,
+the `exit` can leave the rest of the block running in the shell you pasted into.
+The script's variables (`CFG`, `OLD_BIN`, `NEW_BIN`, `DATA`) live only while it
+runs: before you run any recovery command below in your own shell, set them
+there exactly as the script's first four lines do.
+
 ```bash
 CFG="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
 OLD_BIN=/opt/homebrew/opt/postgresql@16/bin   # the PostgreSQL that created the cluster
@@ -616,23 +742,31 @@ nx daemon service stop
 "$OLD_BIN/pg_ctl" -D "$DATA" -m fast stop
 "$OLD_BIN/pg_ctl" -D "$DATA" status           # "no server running"
 
-# 2. Move the old directory aside, unless a previous attempt left one.
-if [ -e "$DATA.old" ]; then echo "$DATA.old exists: move it away first"; else mv "$DATA" "$DATA.old"; fi
+# 2. Move the old directory aside. If a previous attempt left one, STOP: this
+#    ends the script (exit 1), so nothing below it runs. `$DATA.old` is your
+#    ORIGINAL cluster: do not remove it. If the service has never run on the new
+#    cluster (the earlier attempt failed), follow "To back out before the
+#    service starts" below (remove the new `$DATA`, then
+#    `mv "$DATA.old" "$DATA"`), and run the script again. If the service has
+#    run on the new cluster, the upgrade already succeeded: keep both, and do
+#    not run this script again.
+if [ -e "$DATA.old" ]; then echo "STOP: $DATA.old exists and is the pre-upgrade cluster: keep it. If the service never ran on the new cluster, follow \"To back out before the service starts\" in the runbook; if it did, the upgrade is done" >&2; exit 1; fi
+mv "$DATA" "$DATA.old" || exit 1
 
 # 3. A new cluster with the options nx creates its own with, trust auth for the
 #    upgrade (the next service start converts it to scram-sha-256). Run from a
 #    fresh short directory: pg_upgrade puts its sockets there, and macOS caps a
 #    socket path at 103 bytes.
 WORK="$(mktemp -d /tmp/pgup.XXXXXX)" && cd "$WORK"
-"$NEW_BIN/initdb" -D "$DATA" --no-locale -E UTF8 --auth=trust --username "$USER"
+"$NEW_BIN/initdb" -D "$DATA" --no-locale -E UTF8 --auth=trust --username "$USER" || exit 1
 
 # 4. The old cluster asks for a password once nx has converted it to
 #    scram-sha-256 (any nx release from nexus-ja4pq on does that on service
 #    start). pg_upgrade reads it from PGPASSWORD; set it without printing it,
 #    and unset it before the service starts, so the service does not inherit it.
 export PGPASSWORD="$(sed -n 's/^PG_SUPERUSER_PASS=//p' "$CFG/pg_credentials")"
-"$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER" --check
-"$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER"
+"$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER" --check || exit 1
+"$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER" || exit 1
 unset PGPASSWORD
 
 # 5. Start, then the follow-up pg_upgrade prints. The managed configuration
@@ -647,7 +781,8 @@ unset PASS
 nx doctor   # "Local PostgreSQL version" passes; "Local PostgreSQL authentication" shows scram-sha-256
 ```
 
-Run `--check` first: it changes nothing and reports anything that would stop
+The script stops at a failed `initdb` or `--check` (`|| exit 1`) before the real
+`pg_upgrade` runs. `--check` changes nothing and reports anything that would stop
 the upgrade. If it reports an encoding or locale mismatch, the old cluster was
 made with other options; remove the new `$DATA`, run `initdb` again with the old
 cluster's encoding and locale, and check again. `--username` is the superuser
@@ -661,6 +796,14 @@ you need it running. Keep `$DATA.old` until the service is up and your data
 reads back, then remove it by hand.
 
 ## If the RDR-231 note-URI backfill halts startup
+
+**Upgrade the client first.** The `nx daemon service note-uri-pairs` verb that the
+local steps below use ships in the first client release after 7.97.0 (it is in
+CHANGELOG's `[Unreleased]` section until that release is cut). Client releases
+7.88.0 through 7.97.0 carry the backfill without it. A halted engine does not
+block `uv tool upgrade conexus`, so upgrade the client before step 1. If you
+cannot, step 1 has a short POSIX fallback for an older client; there is none for
+Windows.
 
 **Symptom.** The new engine does not come up. `nx daemon service start` exits 2,
 within a few seconds when it starts the supervisor directly and after 60 seconds
@@ -697,19 +840,44 @@ rewrote none. (Changesets of the same engine tag that sit before
 `note-uri-001-1` did commit. The previous engine starts over that schema and is
 used only to merge, then stopped.)
 
-**1. List the pairs.** Run this as a role that bypasses row-level security: the
-superuser of the nx-managed cluster locally, the operator's diagnostic role in
-the cloud. It is the guard's own test, one row per pair.
+**1. List the pairs.** The query runs as a role that bypasses row-level security: the
+superuser of the nx-managed cluster locally, the operator's diagnostic role in the
+cloud. It is the guard's own test, one row per pair.
 
-Locally the cluster listens only on TCP at `127.0.0.1` (no Unix socket) and
-every `pg_hba.conf` line is `scram-sha-256`. The superuser role is named for the
-OS login that provisioned the cluster (`$USER`), not `postgres`. Its password is
-`PG_SUPERUSER_PASS` and the port is `PG_PORT`, both in `<config>/pg_credentials`
-(`~/.config/nexus` unless `NEXUS_CONFIG_DIR` says otherwise). Use the PostgreSQL
-client nx extracted under `<config>/pg-bundle`; nx never falls back to a host
-`psql`. The cluster keeps running when the service stops, so this works while the
-engine is halted. This opens a session without printing the password or putting
-it on a command line. **It is for Linux and macOS.**
+Locally, run the verb. It works on Linux, macOS and Windows, and while the engine
+is halted (the cluster keeps running when the service stops).
+
+```bash
+nx daemon service note-uri-pairs
+```
+
+It prints the number of pairs, one line per pair (`tenant_id`, `chroma_row`,
+`nx_note_row`, `source_uri`), and whether changeset `note-uri-001-1` has run. It
+finds the cluster's port, the bundled `psql` (nx never falls back to a host
+`psql`), the superuser's name and its password itself. The name is the login name
+(`$USER`) on Linux and macOS, or `postgres` for a cluster provisioned from a
+process with neither `USER` nor `LOGNAME`; on Windows it is `nx_` plus the first
+16 hex digits of the SHA-256 of the service account's SID (`windows_superuser_name`
+in `src/nexus/db/pg_provision.py`). The password is `PG_SUPERUSER_PASS` in
+`<config>/pg_credentials` (`~/.config/nexus` unless `NEXUS_CONFIG_DIR` says
+otherwise). It goes to `psql` only in that child's environment, never on a command
+line and never to the screen. On a managed or cloud install there is no local
+cluster: the verb says so and exits 1, and the cloud steps below apply.
+
+A cluster that predates `PG_SUPERUSER_PASS` was `trust` with no password. The
+supervisor converts it to `scram-sha-256`, with a generated password written to
+`pg_credentials` (`harden_cluster_auth`), the first time it provisions the cluster,
+and it does that before it starts the engine, so by the time you see this halt the
+key is there. If `pg_credentials` still has no `PG_SUPERUSER_PASS` line, nx refuses
+to loosen `pg_hba.conf` (`PgAuthLockedError`), and the verb reports that the role
+was refused. Restore the key from a backup of `pg_credentials`, or reset the role's
+password in single-user mode and record it there (the exception's message has the
+steps).
+
+**An older client (Linux and macOS only).** Open a session as the superuser and paste
+the query below at the psql prompt. The role is `$USER`, or `postgres` (see the
+verb's account above); the password and port are in `pg_credentials`, and the
+password is set for that one command without printing it.
 
 ```bash
 CFG="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
@@ -718,28 +886,8 @@ PGPASSWORD="$(sed -n 's/^PG_SUPERUSER_PASS=//p' "$CFG/pg_credentials")" \
   -p "$(sed -n 's/^PG_PORT=//p' "$CFG/pg_credentials")" -U "$USER" -d nexus
 ```
 
-Three ways this can differ on your machine:
-
-- **Windows.** The command above does not apply. The superuser role there is
-  `nx_` plus the first 16 hex digits of the SHA-256 of the service account's SID
-  (`windows_superuser_name` in `src/nexus/db/pg_provision.py`), not your login
-  name, and the shell syntax is POSIX. A verb that runs this for you is planned
-  (nexus-bivz3.28); until then there is no copy-and-paste command for Windows.
-- **`role "<you>" does not exist`.** The cluster was provisioned from a process
-  with neither `USER` nor `LOGNAME` set (a service manager, `cron`), and
-  `bootstrap_superuser` falls back to `postgres` for the role. Use `-U postgres`
-  with the same password.
-- **A password prompt nobody can answer.** A cluster that predates
-  `PG_SUPERUSER_PASS` was `trust` with no password. The supervisor converts it to
-  `scram-sha-256`, with a generated password written to `pg_credentials`
-  (`harden_cluster_auth`), the first time it provisions the cluster, and it does
-  that before it starts the engine, so by the time you see this halt the key is
-  there. If `pg_credentials` still has no `PG_SUPERUSER_PASS` line, nx refuses to
-  loosen `pg_hba.conf` (`PgAuthLockedError`); its message says to restore the key
-  from a backup of `pg_credentials`, or to reset the role's password in
-  single-user mode and record it there.
-
-Paste the query below at the psql prompt.
+In the cloud, run the query below as the operator's diagnostic role, or paste it
+into any session that bypasses row-level security. It is the query the verb runs.
 
 ```sql
 WITH o AS (
@@ -783,8 +931,10 @@ into such an empty one leaves the note's lookups resolving to a row with no chun
 Then merge the other row (the duplicate) into the one you keep, in the tenant that
 owns both. The CLI call is `nx catalog merge <duplicate> <canonical>` and the
 engine route is `POST /v1/catalog/merge` with
-`{"duplicate": "<tumbler>", "canonical": "<tumbler>"}`. Run the step 1 query
-again: it must return no rows.
+`{"duplicate": "<tumbler>", "canonical": "<tumbler>"}`. Run
+`nx daemon service note-uri-pairs --check` again: it must exit 0, meaning no pair is
+left (exit 3 lists the pairs that remain). In the cloud, run the step 1 query again:
+it must return no rows.
 
 If both rows have chunks, the merge does not combine them. The duplicate stays a
 live catalog row, and a chunk is live while any live document owns it (a manifest
@@ -809,10 +959,11 @@ did:
 
 - `nx daemon service status` lists `service_release_version` as the new engine's
   version (the `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`).
-- In psql (step 1), `SELECT id, exectype FROM public.databasechangelog WHERE id =
-  'note-uri-001-1'` returns the row with `EXECUTED`. Liquibase's own tables are in
-  the `public` schema, not `nexus` (`nexus.databasechangelog` does not exist). The
-  query returns no row while the backfill has not run.
+- `nx daemon service note-uri-pairs --check` exits 0 (no pair) and its last line is
+  `Changeset note-uri-001-1: EXECUTED`. That line reads `not run` while the backfill
+  has not run. (It reads `public.databasechangelog`: Liquibase's own tables are in the
+  `public` schema, not `nexus`. In the cloud, `SELECT id, exectype FROM
+  public.databasechangelog WHERE id = 'note-uri-001-1'` returns the same row.)
 - `nx catalog show <the canonical>` prints `URI:` with an `nx-note://` spelling.
 
 ### Cloud
@@ -839,7 +990,7 @@ the client release before RDR-231).
 nx daemon service stop                                   # normally prints "already stopped": the supervisor exited with the halted engine. Harmless, and it makes sure nothing is retrying
 nx daemon service install-binary engine-service-v0.1.165 --no-pg-bundle   # the PREVIOUS engine tag, binary only
 nx daemon service start                                  # previous engine, same database
-# step 1: list the pairs (psql over TCP as the superuser, see step 1 above)
+nx daemon service note-uri-pairs                         # step 1: list the pairs
 nx catalog merge <duplicate> <canonical>                 # step 2, once per pair
 nx daemon service stop
 nx daemon service install-binary <the new engine tag>    # the tag in the new client release's changelog entry

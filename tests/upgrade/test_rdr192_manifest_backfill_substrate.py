@@ -67,7 +67,7 @@ def _live(tenant: str, collection: str, chash: str) -> bool:
     import nexus.db.http_vector_client as hvc  # noqa: PLC0415
 
     col = hvc.HttpVectorClient(tenant=tenant).get_collection(collection)
-    return chash in col.get(ids=[chash], include=["metadatas"])["ids"]
+    return chash in col.get(ids=[chash], include=["metadatas"], sensitivity="include")["ids"]
 
 
 def _legacy_note(

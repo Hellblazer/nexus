@@ -721,7 +721,8 @@ _TREE_ALLOWED: dict[tuple[str, str, str], str] = {
     ("nexus/health.py", "_probe_mcp_server", "unresolved-spawn-argv"):
         "head is _resolve_mcp_binary's result: a hit accepted only from the PATH directory "
         "being scanned (nexus-f9bgu.35), so never the working directory",
-    ("nexus/_mineru_spawn.py", "spawn_server_process", "unresolved-spawn-argv"):
+    ("nexus/_mineru_spawn.py", "spawn_server_process", "aliased-spawner"):
+        "subprocess.Popen handed to service_registry.popen_outliving_host_job (nexus-dmhxw); the "
         "head is _resolve_mineru_api_bin: an interpreter or source-tree sibling, or which_off_cwd",
     # -- POSIX-only branches: the program does not exist on Windows -------------------
     ("nexus/_install/census_core.py", "ps_snapshot", "unresolved-spawn-argv"):

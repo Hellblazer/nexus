@@ -348,7 +348,7 @@ def probe_collection(
         col = t3.get_or_create_collection(name)
         candidate_ids: list[str] = []
         for offset, limit in window_offsets(size, sample, rng):
-            page = col.get(limit=limit, offset=offset)
+            page = col.get(limit=limit, offset=offset, sensitivity="include")
             candidate_ids.extend(page.get("ids") or [])
         if not candidate_ids:
             return _finish()

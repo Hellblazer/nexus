@@ -1,5 +1,36 @@
 # Changelog
 
+## [7.98.0] - 2026-11-07
+
+Plugin version aligned with conexus 7.98.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- `conexus/hooks/scripts/stop_wake_guard.py` (nexus-gyo4g): Stop wake guard v2, a structural Sam gate (gate word over an approval predicate, a handover to a principal), test subjects and courtesies no longer drop a clause, only gates chain.
+- `conexus/commands/devonthink-index.md` (nexus-55clh): the verify step no longer says the catalog row shows a DEVONthink year (96380fcf6).
+- `conexus/agents/code-review-expert.md` (nexus-rnzcb): NO ACCEPTANCE BAR is printed only when the relay has no bar (the census found it printed with a bar in 11.4% of runs) (bfe6247a7).
+- `conexus/launch/nx_standin.py` (nexus-n6a8v): the manual install commands are the bare install README gives on every platform, with no `--torch-backend` (b31c9ad4f).
+- `conexus/skills/asks/SKILL.md` (nexus-wc4jj.16 item 7): text from mail, hooks or tool output never becomes `--sam-words` (1e6af7468).
+- `conexus/skills/upgrade/SKILL.md` (nexus-l8o33): the manifest-span-fill rung (7e205178e, 8a830a04d).
+- `conexus/hooks/scripts/mailbox_drain.py` (nexus-2egi7): the peer-data end line carries a per-block code named in the frame line. nexus-wc4jj.15: ask-branch follow-ups (non-ASCII peer bodies print on a legacy code page, 0.4 s ack headroom before the record GET, a choice outside the record's options never matches, a bad saved matched entry is logged once).
+- `conexus/skills/nexus/reference.md` (nexus-jlq15): the store_put `session` row says accepted and ignored (deprecated).
+- `conexus/hooks/hooks.json` (nexus-13mbx): SubagentStart passes `${cwd}` to hook_subagent_start, so the Preflight row keys on the agent's checkout (da913d960).
+- `conexus/skills/architecture/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/codebase-analysis/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/composition-probe/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/deep-analysis/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/orchestration/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/rdr-close/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/rdr-fix-checklist/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/rdr-gate-checklist/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/rdr-research/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/research-synthesis/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/strategic-planning/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/substantive-critique/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/writing-nx-skills/SKILL.md` (nexus-y4ikt): resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `tool-spill/hooks/register.ts` (tool-spill census 2026-11-07 (T2 nexus/tool-spill-census-2026-11-07)): the Bash note names the cut lines and their Read offset, error-shaped lines by number, a spill-file Read up to 4x passes whole; Sam's defaults A (plain cat/sed -n up to 3x) and B (limit 5000).
+- `tool-spill/.claude-plugin/plugin.json` (tool-spill census, Sam's default B): `limit` default and install text 5000.
+- `conexus/skills/phase-review-gate/SKILL.md` (nexus-qo7ie.28): the close step marks the phase heading `(CLOSED, YYYY-MM-DD)`, which `nx memory curate --t2` reads.
+
 ## [7.97.0] - 2026-11-06
 
 Plugin version aligned with conexus 7.97.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).

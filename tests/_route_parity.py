@@ -275,7 +275,7 @@ def measure_query(
 
     def _run(fn, client):
         with CallLog(client) as log:
-            out = fn(query, cols, n, client, **kw)
+            out = fn(query, cols, n, client, sensitivity="include", **kw)
         return out, log
 
     # Each side is checked the moment it has run, so a run that cannot mean

@@ -15,7 +15,7 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 
-from tests import _storage_touch_guard
+from tests import _signal_fence, _storage_touch_guard
 
 # nexus-pfuns round 2: enables the `pytester` fixture (pytest's own
 # built-in sandbox-subprocess testing plugin) for
@@ -39,9 +39,12 @@ import sys as _sys  # noqa: E402
 # guard; active in the default substrate (optin), inert under none.
 # tests._ddl_counter (nexus-sz651): DDL statements per run, printed in the terminal summary.
 # tests._shard_collection_plugin (nexus-bo5lv): a CI shard records the collection it split, for pytest-gate.
+# tests._signal_fence (nexus-xzorj): every os.kill/os.killpg target is classified as this session's or not, Linux
+# only; listed in the terminal summary, and a foreign signal fails the run in fail mode (report is the default until
+# develop CI measures zero foreign with the two ownership rules).
 pytest_plugins = [
     "pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter", "tests._tenant_pool",
-    "tests._shard_collection_plugin",
+    "tests._shard_collection_plugin", "tests._signal_fence",
 ]
 if _sys.platform != "win32":
     pytest_plugins.insert(1, "tests._posix_spawn")
@@ -113,6 +116,15 @@ def pytest_configure(config):
         uv run pytest                          # quiet (WARNING)
         uv run pytest --log-level=DEBUG        # full debug output
     """
+    # Regroup path arguments so a directory revisited in the list keeps its conftest.py (pytest 9.1.1
+    # drops tests/daemon/conftest.py's fixtures for `tests/daemon/a.py tests/b.py tests/daemon/c.py`).
+    # tests/_arg_grouping.py; NX_TEST_KEEP_ARG_ORDER=1 keeps the order as typed.
+    if os.environ.get("NX_TEST_KEEP_ARG_ORDER") != "1":
+        from tests._arg_grouping import group_args_by_directory  # noqa: PLC0415 — deferred, only an argument list needs it
+
+        grouped = group_args_by_directory(list(config.args), str(config.invocation_params.dir))
+        if grouped != list(config.args):
+            config.args[:] = grouped
     # nexus-kyujr: basetemp and TMPDIR on tmpfs inside a lab-run grant, decided once
     # by the controller BEFORE it spawns workers (they inherit the environment).
     # First, so everything below (the cluster log, the fenced home) follows TMPDIR.
@@ -5078,7 +5090,8 @@ def _drain_stale_tmp_run(pytest_root: Path, *, _kill=None) -> None:
     :func:`stale_pytest_roots` never sees it. Same scoped reaper, one ``ps``.
     *_kill* is the reaper's test seam (``(pid, signal_name)``)."""
     snapshot = _ps_all()
-    reap_leaked_test_daemons(tmp_root=pytest_root, _list_procs=lambda: snapshot, _kill=_kill)
+    with _signal_fence.sanctioned("stale tmp-run drain"):  # an earlier, dead run's daemons (nexus-xzorj)
+        reap_leaked_test_daemons(tmp_root=pytest_root, _list_procs=lambda: snapshot, _kill=_kill)
 
 
 def _matches_class(cmd: str, label: str) -> bool:
@@ -5323,10 +5336,13 @@ def _reap_leaked_test_daemons(tmp_path_factory):
             snapshot = _ps_all()
         except Exception:  # noqa: BLE001 -- a startup probe is never a verdict
             snapshot = []
-        for stale in stale_roots:
-            drained.extend(
-                reap_leaked_test_daemons(tmp_root=stale, _list_procs=lambda: snapshot)
-            )
+        # nexus-xzorj: these kills target an earlier, dead session's daemons on purpose; the signal fence counts
+        # them sanctioned, not foreign.
+        with _signal_fence.sanctioned("conftest START stale-daemon reaper"):
+            for stale in stale_roots:
+                drained.extend(
+                    reap_leaked_test_daemons(tmp_root=stale, _list_procs=lambda: snapshot)
+                )
     if drained:
         print(f"\n[nexus-1odsl] reaped {len(drained)} daemon(s) stranded by "
               f"earlier runs: {drained}")
@@ -5411,7 +5427,7 @@ def no_mineru_child_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _suite_runs_inside_the_sensitivity_scope(monkeypatch):
+def _suite_runs_inside_the_sensitivity_scope(monkeypatch, request):
     """RDR-243 Phase 1 Step 4a (nexus-rfvyy.6.13): ``claude_dispatch``, ``run_text_sync`` and
     ``_run_claude_isolated`` raise ``DispatchOutsideSensitivityScope`` unless the caller entered
     ``nexus.sensitivity.llm_bound``. Many tests call a root directly with a fake backend, so the suite
@@ -5419,9 +5435,15 @@ def _suite_runs_inside_the_sensitivity_scope(monkeypatch):
     which every thread and subprocess sees. tests/test_sensitivity_scope.py deletes it to test the roots
     as production sees them, and pins that every surface enters the scope itself.
 
-    When a later phase makes the posture change read behaviour (Phase 2 reads exclude under
-    ``llm_bound``), a test that reads documents must not inherit this blanket; narrow it then."""
+    Phase 2 (nexus-rfvyy.7.8) made the posture read behaviour: an entry point's reads are ``exclude`` under
+    ``llm_bound``, and an ``exclude`` read needs an engine that reports ``vector_sensitivity_exclude_supported``.
+    This blanket therefore covers the dispatch asserts and the gates only. ``nexus.sensitivity.read_sensitivity``
+    is pinned to ``include`` for every test, and every entry point calls it through the module, so one patch
+    reaches them all. A test of the read behaviour carries ``@pytest.mark.sensitivity_reads`` and gets the real
+    function (and the env, which a child of a scoped parent sees)."""
     monkeypatch.setenv("NX_SENSITIVITY_POSTURE", "llm_bound")
+    if request.node.get_closest_marker("sensitivity_reads") is None:
+        monkeypatch.setattr("nexus.sensitivity.read_sensitivity", lambda posture=None: "include")
 
 
 @pytest.fixture(autouse=True)
@@ -5436,3 +5458,6 @@ def _no_document_is_sensitive(monkeypatch):
     from tests._doc_sensitivity_fake import NoSensitiveDocuments  # noqa: PLC0415 — as above
 
     monkeypatch.setattr(doc_sensitivity, "_catalog_reader", NoSensitiveDocuments)
+    # RDR-243 Phase 3: a dispatch that grants Read/Grep/Glob lists the catalog for sensitive source files; the same
+    # stand-in answers "none" (tests/test_dispatch_sensitive_file_deny.py passes its own reader and owns the rule).
+    monkeypatch.setattr("nexus.operators.sensitive_paths._default_reader", NoSensitiveDocuments)

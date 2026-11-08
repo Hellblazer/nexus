@@ -6,7 +6,7 @@ effort: medium
 
 # RDR Close Skill
 
-Gates on open bead status before closing. Archives post-mortem directly via `mcp__plugin_conexus_nexus__store_put`. See [registry.yaml](../../registry.yaml).
+Gates on open bead status before closing. Archives post-mortem directly via `mcp__plugin_conexus_nexus__store_put`. See [${CLAUDE_PLUGIN_ROOT}/registry.yaml](../../registry.yaml).
 
 ## When This Skill Activates
 

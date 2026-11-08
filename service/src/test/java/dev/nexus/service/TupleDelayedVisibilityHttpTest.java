@@ -89,6 +89,14 @@ class TupleDelayedVisibilityHttpTest {
                 HttpResponse.BodyHandlers.ofString());
     }
 
+    private HttpResponse<String> sendRaw(String path, String json) throws Exception {
+        var b = TestHttp.request("http://127.0.0.1:" + port + path)
+                .header("Authorization", "Bearer " + TENANT_TOKEN)
+                .header("Content-Type", "application/json");
+        return http.send(b.POST(HttpRequest.BodyPublishers.ofString(json)).build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
     private JsonNode post(String path, Object body) throws Exception {
         var r = send(path, body);
         assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
@@ -285,5 +293,123 @@ class TupleDelayedVisibilityHttpTest {
         }
         assertThat(post("/v1/tuples/rdp", Map.of("subspace", sub, "keys_pattern", pat))
                 .get("tuples").size()).as("nothing written").isZero();
+    }
+
+    /** nexus-14xl5: one rule on the wire for the four whole-second fields. A fraction (1.5) and an
+     *  integer beyond long range (2^64+60, which used to wrap to 60) are each a 400 naming the field,
+     *  never a silent truncation or wrap, on every route that reads lease_s, ttl_seconds, delay_s or
+     *  retry_after_s. */
+    @Test
+    void aFractionalOrOutOfRangeWholeSecondsField_isRefusedWith400_namingTheField() throws Exception {
+        String q = newQueue();
+        String sub = "queue/" + q;
+        Map<String, String> pat = Map.of("queue", q);
+        Object[] bad = {1.5, new java.math.BigInteger("18446744073709551676")};
+        for (Object value : bad) {
+            Map<String, Object> outDelay = outBody(q, "n-w1");
+            outDelay.put("delay_s", value);
+            Map<String, Object> outTtl = outBody(q, "n-w2");
+            outTtl.put("ttl_seconds", value);
+            Map<String, Object> ackReplyTtl = Map.of("claim_id", "c", "claimant", "w", "reply", Map.of(
+                    "subspace", sub, "keys", Map.of("queue", q), "dims", Map.of("from", "consumer"),
+                    "body", "r", "ttl_seconds", value));
+            Object[][] cases = {
+                {"/v1/tuples/out", outDelay, "delay_s"},
+                {"/v1/tuples/out", outTtl, "ttl_seconds"},
+                {"/v1/tuples/ack", ackReplyTtl, "reply.ttl_seconds"},
+                {"/v1/tuples/nack", Map.of("claim_id", "c", "claimant", "w", "retry_after_s", value),
+                        "retry_after_s"},
+                {"/v1/tuples/inp", Map.of("subspace", sub, "keys_pattern", pat, "claimant", "w", "lease_s", value),
+                        "lease_s"},
+                {"/v1/tuples/in", Map.of("subspace", sub, "keys_pattern", pat, "claimant", "w", "lease_s", value),
+                        "lease_s"},
+                {"/v1/tuples/renew", Map.of("claim_id", "c", "claimant", "w", "lease_s", value), "lease_s"},
+            };
+            for (Object[] c : cases) {
+                var r = send((String) c[0], c[1]);
+                String field = (String) c[2];
+                assertThat(r.statusCode()).as("%s %s=%s: %s", c[0], field, value, r.body()).isEqualTo(400);
+                assertThat(MAPPER.readTree(r.body()).get("error").asText()).as("%s %s=%s", c[0], field, value)
+                        .startsWith(field + " must be a whole number");
+            }
+        }
+        assertThat(post("/v1/tuples/rdp", Map.of("subspace", sub, "keys_pattern", pat))
+                .get("tuples").size()).as("nothing written").isZero();
+    }
+
+    /** nexus-14xl5: the refusal must not over-reach. A JSON number that is whole in value is accepted
+     *  however it is spelled (7.0, 30.0, 1e2, 0.0), an absent field keeps its default, and a number
+     *  beyond long range is refused in either direction and in either representation (a double and a
+     *  BigInteger). Pins the fraction test to "has a fractional part", not "was written with a point". */
+    @Test
+    void aWholeValuedNumber_isAccepted_andAnAbsentFieldKeepsItsDefault_andOutOfRangeIsRefused() throws Exception {
+        String q = newQueue();
+        String sub = "queue/" + q;
+        String pat = "{\"queue\":\"" + q + "\"}";
+        for (String lease : new String[] {"7.0", "30.0", "1e2", "60"}) {
+            var r = sendRaw("/v1/tuples/in", "{\"subspace\":\"" + sub + "\",\"keys_pattern\":" + pat
+                    + ",\"claimant\":\"w\",\"lease_s\":" + lease + "}");
+            assertThat(r.statusCode()).as("in lease_s=%s: %s", lease, r.body()).isEqualTo(200);
+        }
+        var absent = sendRaw("/v1/tuples/inp", "{\"subspace\":\"" + sub + "\",\"keys_pattern\":" + pat
+                + ",\"claimant\":\"w\"}");
+        // The queue template has no default lease, so an absent lease_s is the engine's long-standing
+        // "lease_s required", untouched by the whole-seconds rule (a null is not a refused value).
+        assertThat(absent.statusCode()).as("inp without lease_s: %s", absent.body()).isEqualTo(400);
+        assertThat(MAPPER.readTree(absent.body()).get("error").asText()).isEqualTo("lease_s required");
+        post("/v1/tuples/out", outBody(q, "n-a-absent")); // absent delay_s / ttl_seconds: accepted as before
+        for (String ttl : new String[] {"1e2", "100.0", "7.0"}) {
+            Map<String, Object> o = outBody(q, "n-a-" + ttl);
+            var r = sendRaw("/v1/tuples/out", MAPPER.writeValueAsString(o).replaceFirst("\\}$", ",\"ttl_seconds\":" + ttl + "}"));
+            assertThat(r.statusCode()).as("out ttl_seconds=%s: %s", ttl, r.body()).isEqualTo(200);
+        }
+        Map<String, Object> zeroDelay = outBody(q, "n-a-zero");
+        zeroDelay.put("delay_s", 0.0);
+        post("/v1/tuples/out", zeroDelay);
+
+        Map<String, Object> hugeDouble = outBody(q, "n-a-big");
+        hugeDouble.put("ttl_seconds", 1e30);
+        var rd = send("/v1/tuples/out", hugeDouble);
+        assertThat(rd.statusCode()).as("ttl_seconds=1e30: %s", rd.body()).isEqualTo(400);
+        assertThat(MAPPER.readTree(rd.body()).get("error").asText()).startsWith("ttl_seconds must be a whole number");
+        var rb = send("/v1/tuples/inp", Map.of("subspace", sub, "keys_pattern", Map.of("queue", q),
+                "claimant", "w", "lease_s", new java.math.BigInteger("-18446744073709551616")));
+        assertThat(rb.statusCode()).as("lease_s=-2^64: %s", rb.body()).isEqualTo(400);
+        assertThat(MAPPER.readTree(rb.body()).get("error").asText()).startsWith("lease_s must be a whole number");
+    }
+
+    /** nexus-14xl5: the fields that are not whole-second fields still go through the shared number
+     *  reader, which no longer wraps. {@code timeout_s}, {@code interval_s} and {@code max} refuse a
+     *  value beyond long; {@code n} (an int) refuses one beyond int, where 2^32+5000 used to become 5000. */
+    @Test
+    void aNumberFieldBeyondItsRange_isRefusedWith400_namingTheField_onTheNonSecondsFields() throws Exception {
+        String q = newQueue();
+        String sub = "queue/" + q;
+        Map<String, String> pat = Map.of("queue", q);
+        java.math.BigInteger beyondLong = new java.math.BigInteger("18446744073709551676");
+        long beyondInt = (1L << 32) + 5000;
+        Map<String, Object> announceInterval = Map.of("subspaces", java.util.List.of(Map.of(
+                "subspace", sub, "keys_pattern", pat, "announce", Map.of("interval_s", beyondLong, "max", 1))));
+        Map<String, Object> announceMax = Map.of("subspaces", java.util.List.of(Map.of(
+                "subspace", sub, "keys_pattern", pat, "announce", Map.of("interval_s", 1, "max", beyondLong))));
+        Map<String, Object> waitN = Map.of("subspaces", java.util.List.of(Map.of(
+                "subspace", sub, "keys_pattern", pat, "n", beyondInt)));
+        Object[][] cases = {
+            {"/v1/tuples/in", Map.of("subspace", sub, "keys_pattern", pat, "claimant", "w", "timeout_s", beyondLong),
+                    "timeout_s"},
+            {"/v1/tuples/rd", Map.of("subspace", sub, "keys_pattern", pat, "timeout_s", beyondLong), "timeout_s"},
+            {"/v1/tuples/wait", announceInterval, "interval_s"},
+            {"/v1/tuples/wait", announceMax, "max"},
+            {"/v1/tuples/rd", Map.of("subspace", sub, "keys_pattern", pat, "n", beyondInt), "n"},
+            {"/v1/tuples/rdp", Map.of("subspace", sub, "keys_pattern", pat, "n", beyondInt), "n"},
+            {"/v1/tuples/wait", waitN, "n"},
+        };
+        for (Object[] c : cases) {
+            var r = send((String) c[0], c[1]);
+            String field = (String) c[2];
+            assertThat(r.statusCode()).as("%s %s: %s", c[0], field, r.body()).isEqualTo(400);
+            assertThat(MAPPER.readTree(r.body()).get("error").asText()).as("%s %s", c[0], field)
+                    .startsWith(field + " must be a whole number");
+        }
     }
 }

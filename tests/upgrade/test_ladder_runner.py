@@ -25,6 +25,7 @@ from nexus.upgrade_ladder.protocol import (
 )
 from nexus.upgrade_ladder.registry import (
     RUNG_MANIFEST_SECTION_LABELS,
+    RUNG_MANIFEST_SPAN_FILL,
     RUNG_ORDER,
     RUNG_RDR192_MANIFEST_BACKFILL,
     LadderOrderError,
@@ -244,13 +245,15 @@ def test_with_no_edges_a_deferral_stops_nothing_after_it(store: InMemoryLedger) 
     assert _outcomes(report) == [("deferred", RungOutcome.DEFERRED), ("later", RungOutcome.RECORDED)]
 
 
-def test_the_production_edges_hold_section_labels_behind_the_backfill_only() -> None:
-    """The section-labels rung fills the rows the RDR-192 backfill adds and then reads converged for good, so it waits
-    on the backfill; the other rungs depend on nothing (nexus-dfemn review r1)."""
+def test_the_production_edges_hold_the_manifest_fills_behind_the_backfill_only() -> None:
+    """The section-labels and span-fill rungs fill the rows the RDR-192 backfill adds and then read converged for
+    good, so each waits on the backfill; the other rungs depend on nothing (nexus-dfemn review r1, nexus-l8o33)."""
     registry = default_registry()
     assert [r.name for r in registry] == list(RUNG_ORDER)
-    assert registry.prerequisites(RUNG_MANIFEST_SECTION_LABELS) == frozenset({RUNG_RDR192_MANIFEST_BACKFILL})
-    others = [n for n in RUNG_ORDER if n != RUNG_MANIFEST_SECTION_LABELS]
+    fills = (RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL)
+    for n in fills:
+        assert registry.prerequisites(n) == frozenset({RUNG_RDR192_MANIFEST_BACKFILL}), n
+    others = [n for n in RUNG_ORDER if n not in fills]
     assert all(registry.prerequisites(n) == frozenset() for n in others)
 
 
@@ -261,8 +264,9 @@ def test_a_deferred_backfill_holds_section_labels_and_lets_the_others_run(store:
     outcomes = dict(_outcomes(report))
     assert outcomes[RUNG_RDR192_MANIFEST_BACKFILL] is RungOutcome.DEFERRED
     assert outcomes[RUNG_MANIFEST_SECTION_LABELS] is RungOutcome.NOT_ATTEMPTED
+    assert outcomes[RUNG_MANIFEST_SPAN_FILL] is RungOutcome.NOT_ATTEMPTED
     assert all(outcomes[n] is RungOutcome.RECORDED for n in RUNG_ORDER
-               if n not in (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SECTION_LABELS))
+               if n not in (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL))
 
 
 def test_an_edge_against_the_order_is_refused() -> None:

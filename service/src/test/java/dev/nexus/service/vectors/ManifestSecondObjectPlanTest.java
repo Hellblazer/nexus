@@ -145,7 +145,7 @@ class ManifestSecondObjectPlanTest {
     private String routeBPlan(Map<String, Object> where) {
         PgVectorRepository.RouteBWhere rb = PgVectorRepository.routeBWhere(where);
         return explain(SEARCH_METADATA_SCOPED_384.call(query(), new String[] {COLL}, null, null, null, null, null,
-            rb.containment(), rb.manifestContainment(), rb.manifestPath(), 10, MODEL, TENANT));
+            rb.containment(), rb.manifestContainment(), rb.manifestPath(), 10, MODEL, TENANT, false));
     }
 
     /** The plan of {@code manifest_search_384} for {@code where}, with the predicate route (a) really pushes. */
@@ -153,7 +153,7 @@ class ManifestSecondObjectPlanTest {
         ManifestPushdown.Plan plan = ManifestPushdown.of(ManifestLabelStage.split(where).labels());
         assertThat(plan).as("the predicate must be one route (a) pushes: %s", where).isNotNull();
         return explain(MANIFEST_SEARCH_384.call(query(), null, null, new String[] {COLL}, null, null,
-            plan.containment(), plan.jsonPath(), 10, MODEL, TENANT));
+            plan.containment(), plan.jsonPath(), 10, MODEL, TENANT, false));
     }
 
     /**

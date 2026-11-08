@@ -39,7 +39,7 @@ def _fresh_process_state(monkeypatch):
 def _k_sent(monkeypatch, cols: list[str], n: int, **kw) -> int:
     engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
     search_cross_corpus("q", cols, n, engine.client, threshold_override=float("inf"),
-                        cluster_by=None, **kw)
+                        cluster_by=None, **kw, sensitivity="include")
     (call,) = engine.route_calls()
     return call["per_collection_k"]
 

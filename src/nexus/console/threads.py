@@ -24,7 +24,10 @@ and nothing typed into the body can move it.
 
 Structured asks (RDR-245): an ``ask:`` line opens a block of ask-level lines
 (see ``ASK_KEYS``) that ends at the next ``ask:``, a heading or a thread field.
-Inside a block the Sam-mention backstop is off. ``ask_version``, ``classify``
+A lone ``ask:`` line (no ask-level line after it, before the next heading, thread field or ``ask:``) is
+legacy prose, whatever its value: ``ask: sam`` is a note to Sam, not an ask with the id ``sam``. An ``ask:``
+line that opens no block but has ask-level lines after it (a bad id, or a thread field in between) is an
+unopened ask: the thread says so in its ``needs_sam`` and ``Thread.unopened`` names it and the cause. Inside a block the Sam-mention backstop is off. ``ask_version``, ``classify``
 and ``lint`` are pure functions over parsed entries; the caller supplies the
 clock and the answer records.
 """
@@ -34,7 +37,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -114,6 +117,29 @@ class Ask:
 
 
 @dataclass(frozen=True)
+class UnopenedAsk:
+    """An ``ask:`` block whose id is not ``[a-z0-9-]{1,40}``, so it opened no ``Ask`` and cannot be answered."""
+
+    id: str  #: the id as written (may be empty)
+    question: str  #: the ``question:`` line that followed it, if any
+    entry: str = ""
+    thread: str = ""
+    session_id: str = ""
+    bad_id: bool = True  #: the id is not ``[a-z0-9-]{1,40}``
+    after_thread_field: bool = False  #: its ask-level lines come after a thread field, which ended the block
+
+    @property
+    def reason(self) -> str:
+        """Why no block opened, in words for a person."""
+        causes = []
+        if self.after_thread_field:
+            causes.append("its fields come after a thread field (state:, ref:, ...), which ends an ask block")
+        if self.bad_id:
+            causes.append("its id is not [a-z0-9-]{1,40}")
+        return " and ".join(causes)
+
+
+@dataclass(frozen=True)
 class Thread:
     title: str
     refs: tuple[str, ...] = ()
@@ -122,6 +148,7 @@ class Thread:
     needs_sam: str = ""
     notes: tuple[str, ...] = ()
     asks: tuple[Ask, ...] = ()
+    unopened: tuple[UnopenedAsk, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -330,7 +357,13 @@ def _build_ask(
 
 def _new_thread(title: str) -> dict[str, Any]:
     return {"title": title, "refs": [], "state": "", "waiting_on": "", "needs_sam": "", "notes": [],
-            "ask_next": False, "ops": [], "block": None, "blocks": []}
+            "ask_next": False, "ops": [], "block": None, "blocks": [], "unopened": []}
+
+
+def _unopened_text(ask_id: str, question: str, bad_id: bool, after_thread_field: bool) -> str:
+    named = f"ask block {ask_id!r}" if ask_id else "an ask block with no id"
+    why = UnopenedAsk(ask_id, question, bad_id=bad_id, after_thread_field=after_thread_field).reason
+    return f"{named} cannot be answered ({why})" + (f": {question}" if question else "")
 
 
 def _apply(current: str, kind: str, text: str) -> str:
@@ -351,6 +384,32 @@ def _pointer(text: str) -> tuple[str, str] | None:
     return ("pointer", m.group(1).lower()) if m else None
 
 
+def _following_fields(lines: list[str], i: int, *, past_thread_fields: bool = False) -> list[tuple[str, str]]:
+    """The ask-level lines (other than ``ask:``) that follow ``lines[i]`` and would sit in its block.
+
+    The scan stops where a block would end: a heading, a thread field or another ``ask:`` line. ``session:`` and
+    ``updated:`` lines are skipped, as the parser skips them. Empty means ``lines[i]`` is a lone ``ask:`` line.
+    With ``past_thread_fields`` a thread field does not stop the scan (only a heading or the next ``ask:`` does):
+    it finds ask-level lines the writer put after a thread field, which no block would hold.
+    """
+    found: list[tuple[str, str]] = []
+    for line in lines[i + 1:]:
+        if _HEADING.match(line):
+            break
+        field = _split_field(line)
+        if field is None:
+            continue
+        if field[0] == "ask" or (field[0] in _THREAD_FIELDS and not past_thread_fields):
+            break
+        if field[0] in _THREAD_FIELDS:
+            continue
+        if field[0] == "session" or field[0] in _IGNORED_KEYS:
+            continue
+        if field[0] in ASK_KEYS:
+            found.append((field[0], field[1]))
+    return found
+
+
 def parse_session(name: str, content: str) -> Session:
     notes: list[str] = []
     threads: list[dict[str, Any]] = []
@@ -367,10 +426,8 @@ def parse_session(name: str, content: str) -> Session:
             close_block()
             threads.append(cur)
 
-    for raw in content.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
+    lines = [ln for ln in (raw.strip() for raw in content.splitlines()) if ln]
+    for i, line in enumerate(lines):
         if heading := _HEADING.match(line):
             flush()
             cur = _new_thread(heading.group(1).strip())
@@ -384,23 +441,38 @@ def parse_session(name: str, content: str) -> Session:
         known = field is not None and field[0] in _THREAD_FIELDS
         if known and cur is not None:
             close_block()
-        # Only `ask: <id>` opens a block; `ask: Sam please pick the port` is prose and parses as it always did,
-        # as does an `ask:` line that is the value of a `needs_sam:` left empty on the line above.
-        if (
-            field is not None
-            and field[0] == "ask"
-            and _ID.fullmatch(field[1])
-            and not (cur is not None and cur["ask_next"])
-        ):
+        # `ask: <id>` opens a block only when ask-level lines follow it; a lone `ask: sam` or `ask: Sam please pick
+        # the port` is prose and parses as it always did, as does a lone `ask:` line that is the value of a
+        # `needs_sam:` left empty on the line above. An `ask: <id>` with fields after it opens a block even then.
+        is_ask_line = field is not None and field[0] == "ask"
+        following = _following_fields(lines, i) if is_ask_line else []
+        if is_ask_line and following and _ID.fullmatch(field[1]):
             if cur is None:
                 cur = _new_thread(name or "(unnamed session)")
             close_block()
             cur["ask_next"] = False
             cur["block"] = [("ask", field[1], line)]
             continue
-        if field is not None and field[0] == "ask":
-            # an ask: line whose value is not an id still ends the open block; what follows is outside it
+        consumed = False
+        if is_ask_line:
+            # an ask: line that opens no block still ends the open block; what follows is outside it
             close_block()
+            late = [] if following else _following_fields(lines, i, past_thread_fields=True)
+            if field[1].strip().lower() == "sam" or not any(k == "question" for k, _ in late):
+                # the late scan reaches past thread fields, so it needs a stronger signal than any ask key:
+                # a legacy `ask: sam` is a note to Sam, and fields with no question are not a split ask
+                late = []
+            if following or late:
+                # ask-level lines follow, but no block can hold them (a bad id, or a thread field in between):
+                # the writer meant a structured ask. Say so instead of losing it.
+                if cur is None:
+                    cur = _new_thread(name or "(unnamed session)")
+                cur["ask_next"] = False
+                question = next((v for k, v in (following or late) if k == "question"), "")
+                found = (field[1], question, not _ID.fullmatch(field[1]), not following)
+                cur["unopened"].append(found)
+                _add_ask(cur, _unopened_text(*found))
+                consumed = True  # the line is now accounted for: the Sam-mention backstop must not add it again
         if cur is not None and cur["block"] is not None:
             # inside an ask block the Sam-mention backstop is off
             if field is not None and field[0] in ASK_KEYS:
@@ -410,7 +482,9 @@ def parse_session(name: str, content: str) -> Session:
             continue
         ask = field is not None and not known and _is_ask_key(field[2]) and has_value(field[1])
         # an ask key answered "none" stays a non-ask; only other text naming Sam is surfaced
-        free_ask = not known and not (field is not None and _is_ask_key(field[2])) and _mentions_sam(line)
+        free_ask = (
+            not known and not consumed and not (field is not None and _is_ask_key(field[2])) and _mentions_sam(line)
+        )
         if cur is None:
             if not (known or ask or free_ask):
                 notes.append(line)
@@ -480,6 +554,9 @@ def _finish_thread(t: dict[str, Any], entry: str, session_id: str) -> Thread:
         needs_sam=needs_sam,
         notes=tuple(t["notes"]),
         asks=asks,
+        unopened=tuple(
+            UnopenedAsk(i, q, entry, t["title"], session_id, bad, late) for i, q, bad, late in t["unopened"]
+        ),
     )
 
 
@@ -569,6 +646,9 @@ class Asks:
     #: Structured asks not folded into a bead and not conditional. Answered asks are not removed here: the
     #: board has no answer records; ``classify`` does.
     structured: tuple[OpenAsk, ...] = ()
+    #: Unconditional structured asks with a ``sent`` answer record whose block the session has not yet removed.
+    #: Not counted: "answered, awaiting pickup" (RDR-245).
+    answered: tuple[OpenAsk, ...] = ()
 
     @property
     def count(self) -> int:
@@ -576,7 +656,10 @@ class Asks:
 
 
 def merge_asks(
-    needs_you: Iterable[NeedsItem], beads: Iterable[Bead], structured: Iterable[NeedsItem] = ()
+    needs_you: Iterable[NeedsItem],
+    beads: Iterable[Bead],
+    structured: Iterable[NeedsItem] = (),
+    records: Mapping[str, Any] | Iterable[Mapping[str, Any]] = (),
 ) -> Asks:
     """A thread whose refs name a listed bead is that bead's ask, not a second one.
 
@@ -584,12 +667,18 @@ def merge_asks(
     bead's ``raised_by`` once and each of its asks adds an ``ask_pointers`` entry. A structured ask
     that matches no bead is returned in ``Asks.structured`` (and counted) unless it is conditional;
     ``classify`` gives the full classes.
+
+    ``records`` are the answer records (as ``classify`` takes them). A structured ask with a ``sent`` record for
+    its exact version is answered: it is not counted, not listed, and not pointed to from a bead. Without
+    records every unconditional ask is open, which over-counts rather than hides.
     """
+    statuses = _record_statuses(records)
     bead_list = tuple(beads)
     by_id = {b.id.lower(): [] for b in bead_list}
     pointers: dict[str, list[str]] = {b.id.lower(): [] for b in bead_list}
     lone: list[NeedsItem] = []
     open_asks: list[OpenAsk] = []
+    answered: list[OpenAsk] = []
     for item in needs_you:
         hits = [r.lower() for r in item.thread.refs if r.lower() in by_id]
         if hits:
@@ -597,19 +686,31 @@ def merge_asks(
         else:
             lone.append(item)
     for item in structured:
+        unanswered = tuple(a for a in item.thread.asks if not _is_answered(a, statuses))
+        answered.extend(
+            OpenAsk(a, item.session, item.age)
+            for a in item.thread.asks
+            if _is_answered(a, statuses) and not a.conditional
+        )
+        if not unanswered:
+            continue
         hits = [r.lower() for r in item.thread.refs if r.lower() in by_id]
         if not hits:
-            open_asks.extend(OpenAsk(a, item.session, item.age) for a in item.thread.asks if not a.conditional)
+            open_asks.extend(OpenAsk(a, item.session, item.age) for a in unanswered if not a.conditional)
             continue
         if not any(prior.thread is item.thread for prior in by_id[hits[0]]):
-            by_id[hits[0]].append(item)
-        pointers[hits[0]].extend(f"{a.entry}/{a.id}" for a in item.thread.asks)
+            shown = item if len(unanswered) == len(item.thread.asks) else NeedsItem(
+                item.session, replace(item.thread, asks=unanswered), item.age
+            )
+            by_id[hits[0]].append(shown)
+        pointers[hits[0]].extend(f"{a.entry}/{a.id}" for a in unanswered)
     return Asks(
         threads=tuple(lone),
         beads=tuple(
             BeadAsk(b, tuple(by_id[b.id.lower()]), tuple(pointers[b.id.lower()])) for b in bead_list
         ),
         structured=tuple(open_asks),
+        answered=tuple(answered),
     )
 
 
@@ -673,6 +774,8 @@ class Classification:
     answered: tuple[ClassedAsk, ...] = ()
     #: Titles of entries that could not be read; their asks are in no group, so a caller must say so.
     unreadable: tuple[str, ...] = ()
+    #: ``ask:`` blocks with a bad id. They opened no ``Ask`` and are in no group above; a caller must say so.
+    malformed: tuple[UnopenedAsk, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -694,6 +797,10 @@ def answer_title(ask: Ask) -> str:
     if not ask.session_id:
         return ""
     return f"{ask.session_id.lower()}/{ask.id}/{ask.version}"
+
+
+def _is_answered(ask: Ask, statuses: Mapping[str, str]) -> bool:
+    return bool(ask.session_id) and statuses.get(answer_title(ask)) == "sent"
 
 
 def _record_status(record: Any) -> str:
@@ -754,7 +861,9 @@ def classify(
     statuses = _record_statuses(records)
     groups: dict[str, list[ClassedAsk]] = {g: [] for g in ("interrupt", "batch", "quiet", "conditional", "answered")}
     read, unreadable = _read_entries(entries)
+    malformed: list[UnopenedAsk] = []
     for _title, session, stamp in read:
+        malformed.extend(u for thread in session.threads for u in thread.unopened)
         delta = None if stamp is None else now - stamp
         greyed = delta is None or delta > STALE_AFTER
         for thread in session.threads:
@@ -762,7 +871,7 @@ def classify(
                 mark = ""
                 if ask.conditional:
                     group = "conditional"
-                elif ask.session_id and statuses.get(answer_title(ask)) == "sent":
+                elif _is_answered(ask, statuses):
                     group = "answered"
                 elif ask.blocking:
                     group = "interrupt"
@@ -776,24 +885,39 @@ def classify(
     return Classification(
         **{g: tuple(sorted(items, key=lambda c: _by_key(c.ask))) for g, items in groups.items()},
         unreadable=tuple(unreadable),
+        malformed=tuple(malformed),
     )
 
 
 def _unopened_asks(entry: str, thread: Thread) -> list[Finding]:
-    """An ``ask:`` line that opened no block (its value is not an id) in a thread that otherwise holds ask lines.
+    """``ask:`` lines that opened no block.
 
-    Prose such as ``ask: Sam please pick the port`` in a legacy thread is left alone; a thread with ask blocks,
-    or with other ask-key lines among its notes, shows the writer meant a structured ask.
+    * ``ask-after-thread-field``: ask-level lines follow, but a thread field came between (``Thread.unopened``).
+    * ``bad-id``: the value is not an id, in a thread that otherwise holds ask lines. Prose such as
+      ``ask: Sam please pick the port`` in a legacy thread is left alone; a thread with ask blocks, or with other
+      ask-key lines among its notes, shows the writer meant a structured ask. A valid id is never a bad id.
+    * ``lone-ask``: an id-shaped value with no ask-level line after it at all. ``ask: sam`` is the legacy
+      note to Sam and is not in the notes, so it is not flagged.
     """
+    found = [
+        Finding(entry, u.id, "ask-after-thread-field", f"{u.reason}, so the ask: block was not opened")
+        for u in thread.unopened
+        if u.after_thread_field
+    ]
+    taken = {u.id for u in thread.unopened}
     keys = [f for f in (_split_field(n) for n in thread.notes) if f is not None]
     structured = bool(thread.asks) or any(k in ASK_KEYS and k != "ask" for k, _v, _r in keys)
-    if not structured:
-        return []
-    return [
-        Finding(entry, v, "bad-id", f"id {v!r} is not [a-z0-9-]{{1,40}}, so the ask: block was not opened")
-        for k, v, _r in keys
-        if k == "ask"
-    ]
+    for k, v, _r in keys:
+        if k != "ask":
+            continue
+        if not _ID.fullmatch(v):
+            if structured:
+                found.append(
+                    Finding(entry, v, "bad-id", f"id {v!r} is not [a-z0-9-]{{1,40}}, so the ask: block was not opened")
+                )
+        elif v not in taken:
+            found.append(Finding(entry, v, "lone-ask", f"ask: {v} has no ask lines after it, so it is a note, not an ask"))
+    return found
 
 
 def lint(entries: Iterable[Mapping[str, Any]]) -> tuple[Finding, ...]:
@@ -825,8 +949,9 @@ def lint(entries: Iterable[Mapping[str, Any]]) -> tuple[Finding, ...]:
             seen.add(a.id)
             for field in a.missing:
                 add("missing-field", f"missing required field: {field}")
-            if len(a.options) < 2:
-                add("few-options", f"{len(a.options)} option line(s); an ask needs at least two")
+            filled = sum(1 for o in a.options if o.text)
+            if filled < 2:
+                add("few-options", f"{filled} option line(s) with text; an ask needs at least two")
             if a.rec is not None and not 1 <= a.rec <= len(a.options):
                 add("rec-range", f"rec: {a.rec_raw} is outside 1..{len(a.options)}")
             if any(not o.text for o in a.options):

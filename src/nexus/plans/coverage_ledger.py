@@ -144,6 +144,7 @@ from nexus.plans.evidence_diagnostics import (
 )
 from nexus.plans.coverage_repair import (
     MAX_ANCHORS_PER_ASSESSMENT_CALL,
+    MAX_LEXICAL_REPAIR_QUERIES,
     MAX_REPAIR_ITEMS,
     MAX_REPAIR_QUERIES,
     MIN_REPAIR_QUERY_S,
@@ -588,8 +589,9 @@ class CoverageResult:
 
     @property
     def conflicted_facet_ids(self) -> tuple[str, ...]:
-        """Facets that are covered and also contradicted by other evidence: answered, but the reduction and the
-        notice say the evidence conflicts."""
+        """Facets that are covered and also contradicted by other evidence. A plain conflicted facet is answered,
+        with the reduction and the notice saying the evidence conflicts; one that started contradicted
+        (``conflicted_from_contradicted``) is listed as unresolved in both (nexus-2hx2u)."""
         return tuple(f.facet_id for f in self.ledger.findings if f.state == "covered" and f.reason in CONFLICTED_REASONS)
 
     @property
@@ -915,6 +917,8 @@ class CoverageBoundary:
     confinement: Any = None
     skip_generation_when_uncovered: bool = True
     max_repair_queries: int = MAX_REPAIR_QUERIES
+    #: The repair's lexical twins of its vector queries (nexus-0ihqj, :mod:`nexus.plans.coverage_repair`); ``0`` emits none.
+    max_lexical_repair_queries: int = MAX_LEXICAL_REPAIR_QUERIES
     max_repair_items: int = MAX_REPAIR_ITEMS
     max_facets_per_call: int = MAX_FACETS_PER_ASSESSMENT_CALL
     call_timeout_s: float = ASSESSMENT_CALL_TIMEOUT_S
@@ -1169,8 +1173,15 @@ class CoverageBoundary:
             return result
         by_id = {f.id: f for f in self.request.facets}
         state_of = {f.facet_id: f.state for f in result.ledger.findings}
+        reason_of = {f.facet_id: f.reason for f in result.ledger.findings}
         listed = [(by_id[fid], state_of[fid]) for fid in ids if fid in by_id]
-        listed += [(by_id[fid], CONFLICTED_REASON) for fid in conflicted if fid in by_id]
+        # nexus-2hx2u: a facet that started contradicted (Sam's option b) is listed as unresolved in the user notice,
+        # so the generator is told the same: state it as unresolved, not answer it from the supporting evidence.
+        listed += [
+            (by_id[fid], CONFLICTED_FROM_CONTRADICTED_REASON if reason_of.get(fid) == CONFLICTED_FROM_CONTRADICTED_REASON
+             else CONFLICTED_REASON)
+            for fid in conflicted if fid in by_id
+        ]
         if not listed:
             return result
         note = unresolved_note(listed)
@@ -1496,6 +1507,7 @@ class CoverageBoundary:
             queries = build_repair_queries(
                 [f for f in facets if f.id in unsupported_ids], primary_collections=primary, plan_targets=plan,
                 max_queries=self.max_repair_queries, limit=limit, primary_subtree=primary_subtree,
+                max_lexical=self.max_lexical_repair_queries,
             )
             if confinement is not None and getattr(confinement, "sends_filter", False):
                 for q in queries:
@@ -1508,22 +1520,39 @@ class CoverageBoundary:
         # fetch slot and an inflated ``found``. The unread anchors are reassessed from the first ledger (``prior``),
         # not through retrieval.
         held_hashes = {a.chash.lower() for a in first.ledger.anchors if a.chash}
+        # nexus-0ihqj: the lexical twins come after every vector query (``build_repair_queries``), so their hits join
+        # after every vector hit and the fetch window and the item cap cut them first.
         hits: dict[str, RepairHit] = {}
         issued, failure = 0, ""
         # What went wrong in the retrieval, when the repair then goes on only to reassess the unread anchors:
         # ``(outcome, detail)``, so the report does not read as a plain ``completed`` (nexus-jypmj.23).
         retrieval_note: tuple[RepairOutcome, str] | None = None
+        twins_left = sum(1 for q in queries if q.args.get("lexical"))
         for q in queries:
             left = queries_until - time.monotonic()
             if left < MIN_REPAIR_QUERY_S:
                 break
+            twin = bool(q.args.get("lexical"))
+            if twin:
+                # Each twin gets an equal share of what is left, so one that hangs leaves the others their time.
+                left = max(MIN_REPAIR_QUERY_S, left / max(1, twins_left))
+                twins_left -= 1
             issued += 1
             try:
                 out = await view.retrieve(q.tool, q.args, timeout=left)
             except Exception as exc:  # noqa: BLE001 — a failed repair call leaves the first ledger in force
+                # By name: the runner imports this module, so its error class cannot be imported here.
+                if twin and not any(c.__name__ == "PlanRunRetrievalRefusedError" for c in type(exc).__mro__):
+                    # nexus-0ihqj: a twin is extra; its failure or timeout is skipped and is not, on its own, a failed
+                    # retrieval. A refusal (the sensitivity posture) ends the repair as it does for any query.
+                    _log.warning("nx_answer_coverage_repair_lexical_query_failed", error=type(exc).__name__)
+                    continue
                 failure = type(exc).__name__
                 _log.warning("nx_answer_coverage_repair_query_failed", tool=q.tool, error=failure)
                 break
+            if twin and isinstance(out, dict) and out.get("error"):
+                # A backend with no lexical route refuses (RDR-217); the runner hands that back as an error page.
+                _log.warning("nx_answer_coverage_repair_lexical_query_failed", error="error_page")
             for hit in _hits(out):
                 if (hit.chash or hit.id).lower() not in held_hashes and self._hit_in_scope(hit):
                     hits.setdefault(hit.id, hit)

@@ -59,7 +59,7 @@ Implementation plan with tasks and dependencies
 - [ ] Success criteria defined per task
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
 
 ## Planning Methodology
 

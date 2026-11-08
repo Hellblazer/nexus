@@ -15,6 +15,16 @@ import pytest
 from nexus.db import http_vector_client as hvc
 
 
+@pytest.fixture(autouse=True)
+def _rerank_capable_engine(monkeypatch):
+    """These tests simulate a current engine. A rerank with ``sensitivity="include"`` reads the engine's
+    ``rerank_sensitive_exclusion_supported`` first (RDR-243 Phase 3 fix r1, critic S5); the probe and its
+    absent-key behaviour are tests/db/test_rerank_sensitive_exclusion_probe.py's subject."""
+    from nexus.db import http_vector_client as _hvc  # noqa: PLC0415 — test-local
+
+    monkeypatch.setattr(_hvc.HttpVectorClient, "supports_rerank_sensitive_exclusion", lambda self: True)
+
+
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(hvc.HttpVectorClient, "__init__", lambda self: None)
@@ -45,7 +55,7 @@ def test_rerank_fields_sent_and_envelope_unpacked(client, monkeypatch):
 
     meta: dict = {}
     rows = client.search("q", ["knowledge__t"], n_results=5,
-                         rerank=True, rerank_top_k=3, rerank_meta_out=meta)
+                         rerank=True, rerank_top_k=3, rerank_meta_out=meta, sensitivity="include")
 
     body = captured[0]["body"]
     assert body["rerank"] is True
@@ -66,7 +76,7 @@ def test_degraded_envelope_reported(client, monkeypatch):
     }, [])
 
     meta: dict = {}
-    rows = client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta)
+    rows = client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta, sensitivity="include")
 
     assert meta["degraded"] is True
     assert "HTTP 500" in meta["error"]
@@ -89,7 +99,7 @@ def test_rate_limited_degrade_reports_retry_after_and_engages_brake(client, monk
     rate_brake.reset_brake()
 
     meta: dict = {}
-    rows = client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta)
+    rows = client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta, sensitivity="include")
 
     assert meta["degraded"] is True
     assert meta["retry_after_seconds"] == 7
@@ -116,7 +126,7 @@ def test_absurd_retry_after_is_clamped_before_tripping_the_brake(client, monkeyp
     rate_brake.reset_brake()
 
     meta: dict = {}
-    client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta)
+    client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta, sensitivity="include")
 
     assert meta["retry_after_seconds"] == rate_brake._RETRY_AFTER_CLAMP_MAX  # noqa: SLF001
     brake = rate_brake.get_brake()
@@ -137,7 +147,7 @@ def test_non_numeric_retry_after_warns_and_does_not_trip_the_brake(client, monke
     rate_brake.reset_brake()
 
     meta: dict = {}
-    client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta)
+    client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta, sensitivity="include")
 
     assert meta["retry_after_seconds"] == "soon"
     brake = rate_brake.get_brake()
@@ -161,11 +171,11 @@ def test_rerank_request_waits_on_a_tripped_brake(client, monkeypatch):
     waits: list[float] = []
     monkeypatch.setattr(brake, "wait", lambda: waits.append(1.0) or 1.0)
 
-    client.search("q", ["knowledge__t"], rerank=True)
+    client.search("q", ["knowledge__t"], rerank=True, sensitivity="include")
     assert waits == [1.0], "rerank search must consult the brake before posting"
 
     waits.clear()
-    client.search("q", ["knowledge__t"], rerank=False)
+    client.search("q", ["knowledge__t"], rerank=False, sensitivity="include")
     assert waits == [], "a plain search never touches the brake"
     rate_brake.reset_brake()
 
@@ -184,7 +194,7 @@ def test_non_rate_limited_degrade_reports_no_retry_after_and_does_not_engage_bra
     rate_brake.reset_brake()
 
     meta: dict = {}
-    client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta)
+    client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta, sensitivity="include")
 
     assert meta["degraded"] is True
     assert meta["retry_after_seconds"] is None
@@ -200,7 +210,7 @@ def test_stale_engine_bare_array_reports_convergence_degrade(client, monkeypatch
     ], [])
 
     meta: dict = {}
-    rows = client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta)
+    rows = client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta, sensitivity="include")
 
     assert rows[0]["id"] == "a"
     assert meta["degraded"] is True
@@ -214,7 +224,7 @@ def test_no_rerank_request_body_and_return_unchanged(client, monkeypatch):
         {"id": "a", "content": "x", "distance": 0.2, "collection": "knowledge__t"},
     ], captured)
 
-    rows = client.search("q", ["knowledge__t"])
+    rows = client.search("q", ["knowledge__t"], sensitivity="include")
 
     assert "rerank" not in captured[0]["body"]
     assert "rerank_top_k" not in captured[0]["body"]
@@ -305,15 +315,15 @@ def test_search_sends_rerank_max_candidates_only_with_rerank(client, monkeypatch
     captured: list[dict] = []
     _patch_post(monkeypatch, {"results": [], "rerank_degraded": False}, captured)
 
-    client.search("q", ["knowledge__t"], rerank=True, rerank_max_candidates=30)
+    client.search("q", ["knowledge__t"], rerank=True, rerank_max_candidates=30, sensitivity="include")
     assert captured[-1]["body"]["rerank_max_candidates"] == 30
 
-    client.search("q", ["knowledge__t"], rerank=True)
+    client.search("q", ["knowledge__t"], rerank=True, sensitivity="include")
     assert "rerank_max_candidates" not in captured[-1]["body"]
 
     # Without rerank the engine would 400 on the field; the client never sends it.
     _patch_post(monkeypatch, [], captured)
-    client.search("q", ["knowledge__t"], rerank_max_candidates=30)
+    client.search("q", ["knowledge__t"], rerank_max_candidates=30, sensitivity="include")
     assert "rerank_max_candidates" not in captured[-1]["body"]
 
 
@@ -327,13 +337,13 @@ def test_search_per_collection_sends_rerank_max_candidates_only_with_rerank(clie
     _patch_post(monkeypatch, envelope, captured)
 
     client.search_per_collection("q", ["knowledge__t"], per_collection_k=5, limit=10,
-                                 rerank=True, rerank_max_candidates=30)
+                                 rerank=True, rerank_max_candidates=30, sensitivity="include")
     assert captured[-1]["body"]["rerank_max_candidates"] == 30
 
-    client.search_per_collection("q", ["knowledge__t"], per_collection_k=5, limit=10, rerank=True)
+    client.search_per_collection("q", ["knowledge__t"], per_collection_k=5, limit=10, rerank=True, sensitivity="include")
     assert "rerank_max_candidates" not in captured[-1]["body"]
 
     _patch_post(monkeypatch, {k: v for k, v in envelope.items() if k != "rerank_degraded"}, captured)
     client.search_per_collection("q", ["knowledge__t"], per_collection_k=5, limit=10,
-                                 rerank_max_candidates=30)
+                                 rerank_max_candidates=30, sensitivity="include")
     assert "rerank_max_candidates" not in captured[-1]["body"]

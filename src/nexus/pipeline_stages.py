@@ -2877,7 +2877,7 @@ def _stored_rows_by_id(col: Any, chashes: list[str]) -> dict[str, dict]:
         batch = _vector_with_retry(
             col.get,
             ids=chashes[start:start + _MANIFEST_ID_BATCH],
-            include=["metadatas"],
+            include=["metadatas"], sensitivity="include",
         )
         stored.update(zip(batch.get("ids", []), batch.get("metadatas", [])))
     return stored
@@ -2943,7 +2943,7 @@ def _throwaway_ids_by_content_hash(col: Any, content_hash: str) -> list[str]:
             col.get,
             where={"content_hash": content_hash},
             limit=300,
-            offset=offset,
+            offset=offset, sensitivity="include",
         )
         ids.extend(batch.get("ids", []))
         if len(batch.get("ids", [])) < 300:
@@ -3039,7 +3039,7 @@ def _update_chunk_metadata(
                     where={"content_hash": content_hash},
                     include=["metadatas"],
                     limit=300,
-                    offset=offset,
+                    offset=offset, sensitivity="include",
                 )
                 all_ids.extend(batch.get("ids", []))
                 all_metas.extend(batch.get("metadatas", []))

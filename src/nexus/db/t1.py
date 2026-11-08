@@ -390,7 +390,7 @@ class T1Database:
         # the access-count side effect; callers do).
         try:
             exact = self._exec(
-                lambda: self._col.get(ids=[id], include=["metadatas"])
+                lambda: self._col.get(ids=[id], include=["metadatas"], sensitivity="include")
             )
         except Exception:  # noqa: BLE001 — boundary catch of undocumented chromadb get() failures; fall back to the prefix scan
             exact = {"ids": []}
@@ -435,7 +435,7 @@ class T1Database:
                     session_id=self._session_id,
                 )
             return None
-        result = self._exec(lambda: self._col.get(ids=[resolved], include=["documents", "metadatas"]))
+        result = self._exec(lambda: self._col.get(ids=[resolved], include=["documents", "metadatas"], sensitivity="include"))
         if not result["ids"]:
             # Bug 1 (nexus-bug-report-2026-04-22): users hit Not-found on
             # ids freshly returned by put(). The path is unreproducible in
@@ -475,7 +475,7 @@ class T1Database:
 
         def _query() -> list[dict]:
             # Count session-scoped documents to avoid n_results > matching count error.
-            session_docs = self._col.get(where=session_filter, include=[])
+            session_docs = self._col.get(where=session_filter, include=[], sensitivity="include")
             session_count = len(session_docs["ids"])
             if session_count == 0:
                 return []
@@ -547,7 +547,7 @@ class T1Database:
                 where={"session_id": self._session_id},
                 include=["documents", "metadatas"],
                 limit=300,
-                offset=offset,
+                offset=offset, sensitivity="include",
             )
 
         while True:
@@ -577,7 +577,7 @@ class T1Database:
         ``scratch_sessions`` / ``{session_id}_{id}``.
         """
         def _do() -> None:
-            existing = self._col.get(ids=[id], include=["metadatas"])
+            existing = self._col.get(ids=[id], include=["metadatas"], sensitivity="include")
             if not existing["ids"]:
                 raise KeyError(f"No scratch entry: {id!r}")
             meta = dict(existing["metadatas"][0])
@@ -591,7 +591,7 @@ class T1Database:
     def unflag(self, id: str) -> None:
         """Remove the flush-on-SessionEnd marking from *id*."""
         def _do() -> None:
-            existing = self._col.get(ids=[id], include=["metadatas"])
+            existing = self._col.get(ids=[id], include=["metadatas"], sensitivity="include")
             if not existing["ids"]:
                 raise KeyError(f"No scratch entry: {id!r}")
             meta = dict(existing["metadatas"][0])
@@ -634,7 +634,7 @@ class T1Database:
         from nexus.types import PromotionReport  # noqa: PLC0415 — circular-dep avoidance (nexus.types imports from db)
 
         # Fetch without incrementing access_count (promote is a write-path, not a read)
-        result = self._exec(lambda: self._col.get(ids=[id], include=["documents", "metadatas"]))
+        result = self._exec(lambda: self._col.get(ids=[id], include=["documents", "metadatas"], sensitivity="include"))
         if not result["ids"]:
             raise KeyError(f"No scratch entry: {id!r}")
         entry = self._to_row(result["ids"][0], result["documents"][0], result["metadatas"][0])
@@ -678,7 +678,7 @@ class T1Database:
             return False
 
         def _do() -> bool:
-            result = self._col.get(ids=[resolved], include=["metadatas"])
+            result = self._col.get(ids=[resolved], include=["metadatas"], sensitivity="include")
             if not result["ids"]:
                 return False
             if result["metadatas"][0].get("session_id") != self._session_id:
@@ -717,7 +717,7 @@ class T1Database:
                     where={"session_id": self._session_id},
                     include=[],
                     limit=300,
-                    offset=offset,
+                    offset=offset, sensitivity="include",
                 )
                 all_ids.extend(result["ids"])
                 if len(result["ids"]) < 300:

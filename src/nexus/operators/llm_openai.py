@@ -46,7 +46,7 @@ from nexus.operators.llm_api import (
 )
 from nexus.operators.llm_backend import BackendStatus, DispatchRequest
 from nexus.operators.llm_models import ModelPrice
-from nexus.operators.llm_types import OperatorAPIError, OperatorError
+from nexus.operators.llm_types import OperatorAPIError, OperatorError, request_id_tag, safe_error_type
 
 _log = structlog.get_logger(__name__)
 
@@ -54,8 +54,8 @@ _FENCE = re.compile(r"^```(?:json)?\s*\n(.*?)\n?```\s*$", re.DOTALL)
 
 
 class _OpenAIStream(StreamState):
-    def __init__(self, scrub: Any) -> None:
-        self._scrub = scrub
+    def __init__(self, clean: Any) -> None:
+        self._clean = clean
         self.reset()
 
     def reset(self) -> None:
@@ -85,16 +85,16 @@ class _OpenAIStream(StreamState):
         if err:
             if isinstance(err, dict):
                 code = err.get("code")
-                message = self._scrub(str(err.get("message") or ""))[:300]
-                etype = str(err.get("type")) if err.get("type") else None
+                message = self._clean(str(err.get("message") or ""))[:300]
+                etype = safe_error_type(err.get("type"), self._clean)
             else:
-                code, message, etype = None, self._scrub(str(err))[:300], None
+                code, message, etype = None, self._clean(str(err))[:300], None
             status = code if isinstance(code, int) and 400 <= code <= 599 else 500
             raise OperatorAPIError(
                 f"openai_compat: the stream carried an error: {message}",
                 status=status, error_type=etype, request_id=self.request_id,
             )
-        self.model = data.get("model") or self.model
+        self.model = self._clean(str(data["model"]))[:100] if data.get("model") else self.model
         usage = data.get("usage")
         if isinstance(usage, dict):
             self.usage = usage
@@ -353,7 +353,7 @@ class OpenAICompatBackend(ApiBackend):
             return NO_VALUE
 
     def _new_stream(self) -> StreamState:
-        return _OpenAIStream(self._scrub)
+        return _OpenAIStream(self._clean)
 
     def _http_error(self, status: int, headers: httpx.Headers, body: bytes) -> OperatorAPIError:
         etype: str | None = None
@@ -365,11 +365,11 @@ class OpenAICompatBackend(ApiBackend):
         if isinstance(parsed, dict):
             err = parsed.get("error", parsed.get("detail"))
             if isinstance(err, dict):
-                etype = str(err.get("type")) if err.get("type") else None
+                etype = safe_error_type(err.get("type"), self._scrub)
                 message = str(err.get("message") or "")
             elif err:
                 message = str(err)
-        message = self._scrub(message)[:300]
+        message = self._clean(message)[:300]
         text = f"openai_compat API error {status}"
         if etype:
             text += f" ({etype})"
@@ -381,7 +381,7 @@ class OpenAICompatBackend(ApiBackend):
             text,
             status=status,
             error_type=etype,
-            request_id=headers.get("x-request-id"),
+            request_id=request_id_tag(headers.get("x-request-id"), self._scrub),
             retry_after=parse_retry_after(headers.get("retry-after")),
         )
 

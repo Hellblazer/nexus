@@ -135,7 +135,7 @@ class TestWriteSemantics:
         col.upsert(ids=["a"], embeddings=[_E1], documents=["second"],
                    metadatas=[{"v": 2}])
         assert col.count() == 1
-        got = col.get(ids=["a"], include=["documents", "metadatas"])
+        got = col.get(ids=["a"], include=["documents", "metadatas"], sensitivity="include")
         assert got["documents"] == ["second"]
         assert got["metadatas"][0]["v"] == 2
 
@@ -149,7 +149,7 @@ class TestWriteSemantics:
                    metadatas=[{"x": 1, "y": "keep"}])
         col.upsert(ids=["a"], embeddings=[_E1], documents=["second"],
                    metadatas=[{"x": 2}])
-        got = col.get(ids=["a"], include=["documents", "metadatas"])
+        got = col.get(ids=["a"], include=["documents", "metadatas"], sensitivity="include")
         assert got["documents"] == ["second"]
         assert got["metadatas"][0] == {"x": 2, "y": "keep"}
 
@@ -160,7 +160,7 @@ class TestWriteSemantics:
         raw = [0.25, 0.5, 0.125, 0.0625]
         col = _make(substrate)
         col.add(ids=["a"], embeddings=[raw], documents=["d"])
-        got = col.get(ids=["a"], include=["embeddings"])["embeddings"][0]
+        got = col.get(ids=["a"], include=["embeddings"], sensitivity="include")["embeddings"][0]
         assert [float(v) for v in got] == raw
 
     def test_dimension_mismatch_query_raises_dimension_error(self, substrate) -> None:
@@ -191,7 +191,7 @@ class TestWriteSemantics:
         col = _make(substrate)
         meta = {"s": "text", "i": 7, "f": 0.5, "b": True}
         col.add(ids=["a"], embeddings=[_E1], documents=["d"], metadatas=[meta])
-        got = col.get(ids=["a"], include=["metadatas"])["metadatas"][0]
+        got = col.get(ids=["a"], include=["metadatas"], sensitivity="include")["metadatas"][0]
         for key, value in meta.items():
             assert got[key] == value
             assert type(got[key]) is type(value)
@@ -208,7 +208,7 @@ class TestUpdateSemantics:
         col.add(ids=["a"], embeddings=[_E1], documents=["orig doc"],
                 metadatas=[{"x": 1, "y": "keep"}])
         col.update(ids=["a"], metadatas=[{"x": 2}])
-        got = col.get(ids=["a"], include=["documents", "metadatas"])
+        got = col.get(ids=["a"], include=["documents", "metadatas"], sensitivity="include")
         assert got["documents"] == ["orig doc"]
         assert got["metadatas"][0] == {"x": 2, "y": "keep"}
         # embedding untouched: still nearest to _E1 (unit vector, so
@@ -222,7 +222,7 @@ class TestUpdateSemantics:
         col.add(ids=["b"], embeddings=[_E2], documents=["old"],
                 metadatas=[{"m": 1}])
         col.update(ids=["b"], documents=["new"], embeddings=[_E1])
-        got = col.get(ids=["b"], include=["documents", "metadatas"])
+        got = col.get(ids=["b"], include=["documents", "metadatas"], sensitivity="include")
         assert got["documents"] == ["new"]
         assert got["metadatas"][0] == {"m": 1}
         res = col.query(query_embeddings=[_E1], n_results=1)
@@ -232,7 +232,7 @@ class TestUpdateSemantics:
         col = _make(substrate)
         col.add(ids=["a"], embeddings=[_E1], documents=["d"])
         col.update(ids=["missing"], metadatas=[{"z": 9}])
-        assert col.get(ids=["missing"])["ids"] == []
+        assert col.get(ids=["missing"], sensitivity="include")["ids"] == []
         assert col.count() == 1
 
     def test_batched_update(self, substrate) -> None:
@@ -241,7 +241,7 @@ class TestUpdateSemantics:
                 documents=["da", "db"],
                 metadatas=[{"n": 0}, {"n": 0}])
         col.update(ids=["a", "b"], metadatas=[{"n": 1}, {"n": 2}])
-        got = col.get(ids=["a", "b"], include=["metadatas"])
+        got = col.get(ids=["a", "b"], include=["metadatas"], sensitivity="include")
         by_id = dict(zip(got["ids"], got["metadatas"]))
         assert by_id["a"]["n"] == 1
         assert by_id["b"]["n"] == 2
@@ -268,38 +268,38 @@ class TestGetSemantics:
     def test_get_by_ids_preserves_request_shape(self, substrate) -> None:
         col = _make(substrate)
         _seed(col)
-        got = col.get(ids=["a", "c"], include=["documents"])
+        got = col.get(ids=["a", "c"], include=["documents"], sensitivity="include")
         assert sorted(got["ids"]) == ["a", "c"]
         assert len(got["documents"]) == 2
 
     def test_where_implicit_eq(self, substrate) -> None:
         col = _make(substrate)
         _seed(col)
-        got = col.get(where={"kind": "x"})
+        got = col.get(where={"kind": "x"}, sensitivity="include")
         assert sorted(got["ids"]) == ["a", "c"]
 
     def test_where_explicit_eq(self, substrate) -> None:
         col = _make(substrate)
         _seed(col)
-        got = col.get(where={"kind": {"$eq": "y"}})
+        got = col.get(where={"kind": {"$eq": "y"}}, sensitivity="include")
         assert got["ids"] == ["b"]
 
     def test_where_in(self, substrate) -> None:
         col = _make(substrate)
         _seed(col)
-        got = col.get(where={"kind": {"$in": ["y", "z"]}})
+        got = col.get(where={"kind": {"$in": ["y", "z"]}}, sensitivity="include")
         assert sorted(got["ids"]) == ["b", "d"]
 
     def test_where_and(self, substrate) -> None:
         col = _make(substrate)
         _seed(col)
-        got = col.get(where={"$and": [{"kind": "x"}, {"rank": 3}]})
+        got = col.get(where={"$and": [{"kind": "x"}, {"rank": 3}]}, sensitivity="include")
         assert got["ids"] == ["c"]
 
     def test_where_no_match_is_empty_not_error(self, substrate) -> None:
         col = _make(substrate)
         _seed(col)
-        got = col.get(where={"kind": "nope"})
+        got = col.get(where={"kind": "nope"}, sensitivity="include")
         assert got["ids"] == []
 
     def test_where_numeric_comparisons(self, substrate) -> None:
@@ -307,17 +307,17 @@ class TestGetSemantics:
         $gt (t3.py). Oracle-verified 2026-07-23."""
         col = _make(substrate)
         _seed(col)
-        assert sorted(col.get(where={"rank": {"$gt": 2}})["ids"]) == ["c", "d"]
-        assert sorted(col.get(where={"rank": {"$gte": 3}})["ids"]) == ["c", "d"]
-        assert sorted(col.get(where={"rank": {"$lt": 2}})["ids"]) == ["a"]
-        assert sorted(col.get(where={"rank": {"$lte": 2}})["ids"]) == ["a", "b"]
+        assert sorted(col.get(where={"rank": {"$gt": 2}}, sensitivity="include")["ids"]) == ["c", "d"]
+        assert sorted(col.get(where={"rank": {"$gte": 3}}, sensitivity="include")["ids"]) == ["c", "d"]
+        assert sorted(col.get(where={"rank": {"$lt": 2}}, sensitivity="include")["ids"]) == ["a"]
+        assert sorted(col.get(where={"rank": {"$lte": 2}}, sensitivity="include")["ids"]) == ["a", "b"]
 
     def test_where_comparison_skips_rows_missing_the_field(self, substrate) -> None:
         col = _make(substrate)
         _seed(col)
         col.add(ids=["e"], embeddings=[_E2], documents=["doc e"],
                 metadatas=[{"other": 5}])
-        got = col.get(where={"rank": {"$gt": 0}})
+        got = col.get(where={"rank": {"$gt": 0}}, sensitivity="include")
         assert "e" not in got["ids"]
         assert sorted(got["ids"]) == ["a", "b", "c", "d"]
 
@@ -335,8 +335,8 @@ class TestGetSemantics:
     def test_limit_offset_page_through_everything(self, substrate) -> None:
         col = _make(substrate)
         _seed(col)
-        page1 = col.get(limit=3, offset=0)
-        page2 = col.get(limit=3, offset=3)
+        page1 = col.get(limit=3, offset=0, sensitivity="include")
+        page2 = col.get(limit=3, offset=3, sensitivity="include")
         seen = sorted(page1["ids"] + page2["ids"])
         assert seen == ["a", "b", "c", "d"]
         assert len(page1["ids"]) == 3
@@ -393,13 +393,13 @@ class TestDeleteSemantics:
         _seed(col)
         col.delete(ids=["a", "d"])
         assert col.count() == 2
-        assert sorted(col.get()["ids"]) == ["b", "c"]
+        assert sorted(col.get(sensitivity="include")["ids"]) == ["b", "c"]
 
     def test_delete_by_where(self, substrate) -> None:
         col = _make(substrate)
         _seed(col)
         col.delete(where={"kind": "x"})
-        assert sorted(col.get()["ids"]) == ["b", "d"]
+        assert sorted(col.get(sensitivity="include")["ids"]) == ["b", "d"]
 
     def test_delete_missing_id_is_noop(self, substrate) -> None:
         col = _make(substrate)
@@ -470,7 +470,7 @@ class TestT3FacadeWrap:
         col.add(ids=["c1", "c2"], documents=["alpha beta", "gamma delta"],
                 metadatas=[{"page_number": 1}, {"page_number": 2}])
         preview = t3.get_or_create_collection(name).get(
-            include=["documents", "metadatas"],
+            include=["documents", "metadatas"], sensitivity="include",
         )
         assert sorted(preview["ids"]) == ["c1", "c2"]
         assert len(preview["documents"]) == 2

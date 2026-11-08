@@ -10,8 +10,14 @@ import pytest
 
 COMMANDS_DIR = Path(__file__).parent.parent / "src" / "nexus" / "commands"
 
-# Files that are NOT click command groups (helpers, hidden internals)
-_NOT_COMMANDS = {"_helpers.py", "_provision.py", "__init__.py", "__pycache__"}
+# Files that are NOT top-level click command groups (helpers, hidden internals, and subcommand modules that
+# another group registers: service_pg_upgrade.py is `nx daemon service pg-upgrade`, added to daemon.py's
+# service group, which tests/test_service_pg_upgrade.py invokes by that path; nexus-j738q; likewise
+# service_note_uri_pairs.py is `nx daemon service note-uri-pairs`, pinned below and by
+# tests/test_service_note_uri_pairs.py; nexus-bivz3.28)
+_NOT_COMMANDS = {
+    "_helpers.py", "_provision.py", "__init__.py", "__pycache__", "service_pg_upgrade.py", "service_note_uri_pairs.py",
+}
 
 
 def _command_modules() -> list[str]:

@@ -253,7 +253,7 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
      *  generated typed table function -- not raw SQL, native Vector binding. */
     private List<String> plainSearch384(float[] vec, int n) {
         Table<?> fn = PLAIN_SEARCH_384.call(
-            Vector.of(vec), new String[] {COLLECTION}, null, null, n, "minilm-l6-v2-384", TENANT);
+            Vector.of(vec), new String[] {COLLECTION}, null, null, n, "minilm-l6-v2-384", TENANT, false);
         return tenantScope.withTenant(TENANT, ctx -> ctx.selectFrom(fn)
             .fetch(r -> r.get("id", String.class)));
     }

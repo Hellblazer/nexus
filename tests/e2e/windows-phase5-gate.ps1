@@ -691,7 +691,15 @@ Run-Assertion 2 'MCP store_put then search from the live session returns the sto
     if (-not $script:view) { Fail 'no live session identified (V0 failed)' }
     $v = $script:view
     $stores = @($v.uses.Values | Where-Object { (K $_ 'name') -eq 'mcp__plugin_conexus_nexus__store_put' -and "$(K (K $_ 'input') 'content')" -like "*$nonce*" })
-    if ($stores.Count -eq 0) { Fail "no store_put of the nonce $nonce in live session $($script:sid)" }
+    if ($stores.Count -eq 0) {
+        # 2026-11-07 (7.97.0): this failed with nothing else to go on. Name the session's tool calls and
+        # whether any call's input carried the nonce: a skipped step, a renamed tool or a transcript
+        # shape this view does not read then read differently. Names and yes/no only, never input text.
+        $seen = (@($v.uses.Values | Group-Object { "$(K $_ 'name')" } | Sort-Object Name | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', ')
+        if (-not $seen) { $seen = 'none' }
+        $nonceAnywhere = if (@($v.uses.Values | Where-Object { (ConvertTo-Json -Compress -Depth 8 (K $_ 'input')) -like "*$nonce*" }).Count -gt 0) { 'yes' } else { 'no' }
+        Fail "no store_put of the nonce $nonce in live session $($script:sid); its tool calls: $seen; the nonce in any call's input: $nonceAnywhere"
+    }
     $okStore = @($stores | Where-Object { $v.results.ContainsKey((K $_ 'id')) -and -not $v.results[(K $_ 'id')].is_error })
     if ($okStore.Count -eq 0) { Fail 'the store_put of the nonce has no successful tool_result' }
     $hits = @($v.uses.Values | Where-Object {

@@ -31,6 +31,7 @@ __all__ = [
     "SensitivityUnknown",
     "flagged",
     "flagged_in_collection",
+    "flagged_owners_of_chashes",
     "is_sensitive",
     "refuse_if_sensitive",
     "sensitive_chashes",
@@ -109,6 +110,43 @@ def flagged_in_collection(collection: str, *, cat: Any = None) -> list[Any]:
         return [e for e in cat.list_by_collection(collection, limit=1_000_000) if _entry_flag(e)]
     except Exception as exc:  # noqa: BLE001 — see flagged()
         raise SensitivityUnknown(f"{type(exc).__name__}: {exc}"[:300]) from exc
+
+
+def flagged_owners_of_chashes(
+    chashes: Iterable[str], *, cat: Any = None, owners: dict[str, list[str]] | None = None,
+) -> dict[str, list[str]]:
+    """``{chash: [sensitive owner tumbler, ...]}`` for each chunk with a sensitive live owner (RDR-243 Phase 2).
+
+    The read side of a chash-keyed hydration: the engine's ``exclude`` filter drops these chunks, and this is the
+    catalog's own answer, so a surface that can name the withheld document does and one whose engine cannot
+    filter (a double, a stale engine) still refuses. A chunk shared with a plain document counts, as it does
+    for the engine's ``NOT EXISTS``: the shared row cannot be told apart.
+
+    *owners* is a chash -> owner-tumblers map the caller already holds (``store_get_many``'s owner rows); with
+    none, ``docs_for_chashes`` is asked once for the whole batch. Raises :class:`SensitivityUnknown` when the
+    catalog cannot be read."""
+    wanted = sorted({c for c in chashes if c})
+    if not wanted:
+        return {}
+    try:
+        cat = cat if cat is not None else _catalog_reader()
+        if cat is None:
+            raise RuntimeError("no catalog reader")
+        if owners is None:
+            found = cat.docs_for_chashes(wanted) or {}
+            owners = {c: [str(d) for d in (found.get(c) or [])] for c in wanted}
+        docs = sorted({d for c in wanted for d in owners.get(c, ()) if d})
+        bad = flagged(docs, cat=cat) if docs else set()
+    except SensitivityUnknown:
+        raise
+    except Exception as exc:  # noqa: BLE001 — see flagged()
+        raise SensitivityUnknown(f"{type(exc).__name__}: {exc}"[:300]) from exc
+    out: dict[str, list[str]] = {}
+    for c in wanted:
+        hit = [d for d in owners.get(c, ()) if d in bad]
+        if hit:
+            out[c] = hit
+    return out
 
 
 def is_sensitive(tumbler: str, *, cat: Any = None) -> bool:

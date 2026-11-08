@@ -75,7 +75,7 @@ def _make_t3_mock(collection_name: str, chunks: list[dict]) -> tuple:
     mock_col = MagicMock()
     ids = [f"id-{i}" for i in range(len(chunks))]
 
-    def _get(limit=300, offset=0, include=None, where=None):
+    def _get(limit=300, offset=0, include=None, where=None, **_kw):
         # Filter by where if provided (only equality on source_path supported here).
         filt_chunks = chunks
         filt_ids = ids

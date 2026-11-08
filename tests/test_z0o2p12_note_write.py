@@ -243,7 +243,7 @@ class TestOneRequest:
         write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, title="z0o2p12-meta",
                    tags="a,b", category="cat", source_agent="agent-x",
                    ttl_days=30, cat=real_cat)
-        got = vec.get_collection(_COLLECTION).get(ids=[_chash(pieces[0])], include=["metadatas"])
+        got = vec.get_collection(_COLLECTION).get(ids=[_chash(pieces[0])], include=["metadatas"], sensitivity="include")
         meta = got["metadatas"][0]
         assert meta["title"] == "z0o2p12-meta" and meta["tags"] == "a,b" and meta["category"] == "cat"
         assert meta["source_agent"] == "agent-x" and meta["ttl_days"] == 30
@@ -683,7 +683,7 @@ def test_the_default_writer_is_made_and_closed_by_the_call(vec):
 
 class TestChunkMetadata:
     def _meta(self, vec, chash: str, collection: str = _COLLECTION) -> dict:
-        got = vec.get_collection(collection).get(ids=[chash], include=["metadatas"])
+        got = vec.get_collection(collection).get(ids=[chash], include=["metadatas"], sensitivity="include")
         return got["metadatas"][0]
 
     def test_content_type_and_indexed_at_reach_the_engine_and_session_id_does_not(self, vec, real_cat):
@@ -1224,7 +1224,7 @@ class TestSettlingFromEveryAttempt:
         res = write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="new",
                          ttl_days=30, category="c2", cat=cat)
         assert res.recovered is True and cat.calls.count("write_manifest_many") == 2
-        got = vec.get_collection(_COLLECTION).get(ids=[_chash(pieces[0])], include=["metadatas"])
+        got = vec.get_collection(_COLLECTION).get(ids=[_chash(pieces[0])], include=["metadatas"], sensitivity="include")
         meta = got["metadatas"][0]
         assert (meta["tags"], meta["ttl_days"], meta["category"]) == ("new", 30, "c2")
 

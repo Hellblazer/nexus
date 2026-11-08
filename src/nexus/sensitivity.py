@@ -14,7 +14,8 @@ and on threads that were handed a copy of its context (``asyncio`` tasks and
 ``asyncio.to_thread`` copy it; ``loop.run_in_executor`` and ``threading.Thread`` do
 not). When the variable is unset the process environment decides: a child process
 started by a scoped parent carries ``NX_SENSITIVITY_POSTURE=llm_bound`` (exported
-by a later phase) and is in the scope from its first line.
+by ``_build_dispatch_env``; the nested ``nx-mcp`` also enters the scope per tool call,
+``nexus.mcp._sensitivity_posture``) and is in the scope from its first line.
 
 Imports nothing beyond the standard library: this module sits on the dispatch hot
 path and on CLI startup.
@@ -30,11 +31,16 @@ from contextvars import ContextVar
 from typing import Any, Final, Literal, TypeVar
 
 __all__ = [
-    "DispatchOutsideSensitivityScope", "POSTURE_ENV", "Posture", "SensitiveDocumentRefused", "assert_llm_bound",
-    "bound_to", "current_posture", "current_surface", "llm_bound",
+    "DispatchOutsideSensitivityScope", "POSTURE_ENV", "Posture", "ReadSensitivity", "SensitiveDocumentRefused",
+    "CHILD_SURFACE", "assert_llm_bound", "bound_to", "child_scope", "check_read_sensitivity", "current_posture", "current_surface", "llm_bound",
+    "read_sensitivity",
 ]
 
 Posture = Literal["default", "llm_bound"]
+
+#: The ``sensitivity`` argument every vector read that returns chunk text takes (RDR-243 Phase 2, nexus-rfvyy.7.8):
+#: ``exclude`` asks the engine to drop chunks with a live sensitive owner, ``include`` reads as before.
+ReadSensitivity = Literal["exclude", "include"]
 
 #: The environment variable a child process reads its posture from. It is for nexus parents only: a scoped
 #: nexus process exports it to the children it starts. Setting it by hand (a shell, a hook) puts the process
@@ -43,6 +49,11 @@ Posture = Literal["default", "llm_bound"]
 #: LLM call). It cannot grant protection: the document gates read the catalog flag whatever the posture, and
 #: Phase 2 reads exclude under ``llm_bound`` by the surface's own entry, never from this variable alone.
 POSTURE_ENV: Final = "NX_SENSITIVITY_POSTURE"
+
+#: The phrase every ``SensitivityExcludeUnavailable`` message carries (RDR-243 review r1 F2). A tool boundary renders
+#: the exception to text, so the plan runner recognises a refused read by this phrase and fails the plan instead of
+#: treating the error text as an empty result.
+EXCLUDE_REFUSED_MARKER: Final = "sensitivity='exclude' read refused"
 
 #: ``None`` means "never set on this context": the environment is then consulted.
 _POSTURE: ContextVar[Posture | None] = ContextVar("nexus_sensitivity_posture", default=None)
@@ -81,6 +92,21 @@ def current_posture() -> Posture:
     return "llm_bound" if os.environ.get(POSTURE_ENV) == "llm_bound" else "default"
 
 
+def read_sensitivity(posture: Posture | None = None) -> ReadSensitivity:
+    """The ``sensitivity`` value a read takes for *posture*: ``llm_bound`` excludes, ``default`` includes.
+
+    An entry point calls this ONCE, on its own thread, and hands the value down as an argument. Reads never look at
+    the ContextVar themselves: a worker thread started with ``threading.Thread`` or ``run_in_executor`` does not
+    inherit it (RDR-243 A7). With no *posture* it reads :func:`current_posture` now."""
+    return "exclude" if (current_posture() if posture is None else posture) == "llm_bound" else "include"
+
+
+def check_read_sensitivity(value: object) -> None:
+    """Raise ``ValueError`` for anything but ``"exclude"`` or ``"include"``: ``None`` or a typo must not read as include."""
+    if not isinstance(value, str) or value not in ("exclude", "include"):
+        raise ValueError(f"sensitivity must be 'exclude' or 'include', got {value!r}")
+
+
 def current_surface() -> str | None:
     """The registry name of the innermost :func:`llm_bound` on this context, or ``None``."""
     return _SURFACE.get()
@@ -96,6 +122,19 @@ def llm_bound(surface: str) -> Iterator[None]:
     finally:
         _SURFACE.reset(surface_token)
         _POSTURE.reset(posture_token)
+
+
+#: The scope name a nested ``nx-mcp`` server enters when its parent dispatched it with
+#: ``NX_SENSITIVITY_POSTURE=llm_bound`` (RDR-243 Phase 2 Step 2.5). It is not a registry row: the child
+#: makes no LLM call of its own, it serves reads to a parent surface that does.
+CHILD_SURFACE: Final = "nx_mcp_child"
+
+
+@contextlib.contextmanager
+def child_scope() -> Iterator[None]:
+    """Enter :func:`llm_bound` as a scoped parent's child, under :data:`CHILD_SURFACE`."""
+    with llm_bound(CHILD_SURFACE):
+        yield
 
 
 def assert_llm_bound(root: str) -> None:

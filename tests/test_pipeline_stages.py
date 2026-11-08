@@ -1769,7 +1769,7 @@ class TestPipelineIndexPdfDryRun:
         assert total == 1
         manifest.assert_not_called()
         col = throwaway_t3.get_or_create_collection("docs__test")
-        (meta,) = col.get(where={"content_hash": "dryrun456"}, include=["metadatas"])["metadatas"]
+        (meta,) = col.get(where={"content_hash": "dryrun456"}, include=["metadatas"], sensitivity="include")["metadatas"]
         assert meta["title"] == "Preview Title", "the preview's post-pass ran, selecting by content_hash"
 
     def test_dry_run_with_default_hooks_uploader_loop_fires_zero_hooks(

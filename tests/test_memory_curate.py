@@ -11,6 +11,8 @@ verb imports them); they run against real tmp git repositories and tmp directori
 """
 from __future__ import annotations
 
+import re
+
 import inspect
 import json
 import os
@@ -264,7 +266,7 @@ def test_the_read_does_not_ask_git_but_the_fallback_cases_do(
     repo = _make_repo(tmp_path)
     wt = _linked_worktree(tmp_path, repo)
     asked: list[Path] = []
-    monkeypatch.setattr(md, "_primary_via_git", lambda cwd: asked.append(cwd) or Path("/via/git"))
+    monkeypatch.setattr(md, "_primary_via_git", lambda cwd, env=None: asked.append(cwd) or Path("/via/git"))
     for cwd in (repo, repo, wt):
         assert md.primary_checkout_root(cwd, {}) == repo
     assert md.primary_checkout_root(tmp_path / "plain", {}) is None  # no .git above: not a repository
@@ -274,6 +276,10 @@ def test_the_read_does_not_ask_git_but_the_fallback_cases_do(
     assert md.primary_checkout_root(repo, {"GIT_COMMON_DIR": str(repo / ".git")}) == Path("/via/git")
     # GIT_CEILING_DIRECTORIES can stop git's search above cwd, which the read does not model: ask git
     assert md.primary_checkout_root(repo / "sub", {"GIT_CEILING_DIRECTORIES": str(repo)}) == Path("/via/git")
+    assert len(asked) == 3
+    # a ceiling that is not strictly above cwd cannot change git's answer: read, do not ask (nexus-nrqqk)
+    for ceiling in (str(repo), str(tmp_path / "elsewhere"), "relative/dir", ""):
+        assert md.primary_checkout_root(repo, {"GIT_CEILING_DIRECTORIES": ceiling}) == repo, ceiling
     assert len(asked) == 3
     # an unrecognised layout: ask git
     broken = tmp_path / "broken"
@@ -854,12 +860,6 @@ def test_t2_census_flags_old_ttl_free_gate_records_of_a_closed_phase(db: T2Datab
 
 
 @pytest.mark.t2_tenant
-def test_t2_census_with_no_closed_rdr_flags_nothing(db: T2Database) -> None:
-    _put(db, "planted-gate", tags="kind:gate,bead:b1,rdr:238", age_days=40)
-    assert _t2(db, closed=set()).census == []
-
-
-@pytest.mark.t2_tenant
 def test_t2_section_text(db: T2Database) -> None:
     _put(db, "alpha-notes", age_days=5)
     _put(db, "alpha-notes-v2", "replaces: alpha-notes")
@@ -955,9 +955,12 @@ def test_the_command_adds_exactly_one_row_the_report_and_deletes_nothing(
     _put(db, "alpha-notes", age_days=5)
     _put(db, "alpha-notes-v2", "replaces: alpha-notes")
     _put(db, "census-gate", tags="kind:gate,bead:b,rdr:238", age_days=40)
+    _put(db, "rdr-246-p2-critique", tags="kind:gate,bead:c,rdr:246", age_days=40)
     before = _snapshot(db)
     res = _curate(db)
     assert res.exit_code == 0, res.output
+    # nexus-qo7ie.28: the command reads the working tree's phase headings, not only RDR statuses
+    assert "rdr-246-p2-critique (RDR-246 Phase 2, " in res.output
     after = _snapshot(db)
     title = f"curation-report-{datetime.now(UTC):%Y-%m-%d}"
     # The no-delete clause runs first, so a planted delete fails with its own message
@@ -980,6 +983,94 @@ def test_closed_rdrs_reads_frontmatter_status_only(tmp_path: Path) -> None:
     assert mc.closed_rdr_numbers(tmp_path / "no-such-root") == set()
 
 
+def test_closed_phases_read_from_phase_headings(tmp_path: Path) -> None:
+    """nexus-qo7ie.28: a phase is closed when its heading carries the marker the phase-review-gate close
+    step writes, a parenthetical or a dash-led CLOSED, SHIPPED, DONE or COMPLETE (the form rdr-222 and
+    rdr-227 already use). A marker word in the heading's own title text is not a marker."""
+    rdr = tmp_path / "docs" / "rdr"
+    rdr.mkdir(parents=True)
+    (rdr / "rdr-245-a.md").write_text(
+        "---\nstatus: accepted\n---\n"
+        "### Phase 0 (SHIPPED, engine-service-v0.1.137): instrument\n"
+        "### Phase 1a (shipped with Phase 1): keyed expire\n"
+        "### Phase 2: Complete the migration\n"              # title words, not a marker
+        "### Phase 2.5 (CLOSED): a dotted phase is not Phase 2\n"
+        "### Phase 3 (CLOSED, 2026-11-06)\n"
+        "#### Phase 4: Measure (decides the approach) — done 2026-10-09\n"
+        "### Phase 6: closed vocabularies table\n"            # title words again
+        "### Phase 7 — Complete the migration\n"             # a dash-led title word
+        "### Phase 9 (Done criteria)\n"                       # a parenthetical title word
+        "### Phase 12 - Complete the migration\n"            # a spaced-hyphen title word
+        "### Phase 13: wire x (done in v2)\n"                 # a later parenthetical that is title text
+        "### Phase 14 – Closed vocabularies\n"
+        "### Phase 10 (CLOSED)\n"
+        "### Phase 11 — complete\n"
+        "Phase 7 closed in prose is not a heading.\n"
+        "# Phase 8 (CLOSED) at the top level is a title, not a phase\n")
+    (rdr / "rdr-223-b.md").write_text("---\nstatus: draft\n---\n### Phase 1: plan\n")
+    assert mc.closed_phase_numbers(tmp_path) == {"245": {"0", "1a", "3", "4", "10", "11"}}
+    assert mc.closed_phase_numbers(tmp_path / "no-such-root") == {}
+
+
+def test_the_phase_review_gate_close_step_writes_the_marker_the_census_reads() -> None:
+    """The skill's step 5 and the census regexes must agree, or a closed phase is never seen."""
+    skill = (Path(__file__).resolve().parents[1] / "conexus" / "skills" / "phase-review-gate" / "SKILL.md").read_text()
+    form = re.search(r"`(### Phase N \(CLOSED, YYYY-MM-DD\)[^`]*)`", skill)
+    assert form, "phase-review-gate no longer names the heading marker"
+    heading = form.group(1).replace("N", "3", 1).replace("YYYY-MM-DD", "2026-11-06")
+    h = mc._PHASE_HEADING.match(heading)
+    assert h and h.group(1) == "3" and mc._PHASE_CLOSED_MARK.search(h.group(2)), heading
+
+
+@pytest.mark.parametrize(("title", "phases"), [
+    ("rdr-238-p3a-critique-2026-11-03", ["3a"]),
+    ("rdr238-p3-batch3-r1", ["3"]),
+    ("244-phase-2-gate", ["2"]),
+    ("244-phase2-gate", ["2"]),
+    ("155-P4a-gate-result", ["4a"]),
+    ("244-p2-p3-gate", ["2", "3"]),
+    ("238-gate-critique-x", []),
+    ("244-step1-gate", []),
+    ("upgrade-plan-gate", []),            # "plan" is not p<N>
+])
+def test_phases_named_by_a_gate_record_title(title: str, phases: list[str]) -> None:
+    assert mc._phases_of(title) == phases
+
+
+@pytest.mark.parametrize(("named", "closed", "flag"), [
+    (["3"], {"3"}, True),
+    (["3a"], {"3"}, True),        # a sub-phase of a closed phase is closed
+    (["3"], {"3a"}, False),       # one closed sub-phase does not close its phase
+    (["3b"], {"3a"}, False),
+    (["2", "3"], {"3"}, False),   # every phase the title names must be closed
+    (["2", "3"], {"2", "3"}, True),
+    ([], {"3"}, False),
+])
+def test_a_record_is_of_a_closed_phase_only_when_every_named_phase_is(named, closed, flag) -> None:
+    assert mc._all_closed(named, closed) is flag
+
+
+@pytest.mark.t2_tenant
+def test_t2_census_flags_a_closed_phase_of_an_open_rdr(db: T2Database) -> None:
+    """nexus-qo7ie.28: before, only a closed RDR's records were judged, so an open multi-phase RDR's
+    closed phases were never flagged. Also: with nothing closed, nothing is flagged (one tenant for
+    both, since the storage-touch ceiling counts tests that mint one)."""
+    _put(db, "planted-gate", tags="kind:gate,bead:b1,rdr:238", age_days=40)
+    assert _t2(db, closed=set()).census == []
+    _put(db, "rdr-245-p3-critique", tags="kind:gate,rdr:245", age_days=40)                # phase 3 closed
+    _put(db, "245-p3a-fix-check", tags="rdr,gate", project=f"{REPO}_rdr", age_days=40)    # sub-phase of 3
+    _put(db, "245-p4-gate", tags="rdr,gate", project=f"{REPO}_rdr", age_days=40)           # phase 4 open
+    _put(db, "245-gate-no-phase", tags="rdr,gate", project=f"{REPO}_rdr", age_days=40)     # names no phase
+    _put(db, "rdr-245-p3-recent", tags="kind:gate,rdr:245", age_days=10)                   # too new
+    got = mc.t2_findings(db, REPO, closed_rdrs={"238"}, closed_phases={"245": {"3"}}, now=datetime.now(UTC))
+    flagged = sorted((c.title, c.rdr, c.phase) for c in got.census)
+    assert flagged == [("245-p3a-fix-check", "245", "3a"), ("planted-gate", "238", None),
+                       ("rdr-245-p3-critique", "245", "3")]
+    text = "\n".join(mc.t2_section(db, REPO, closed_rdrs={"238"}, closed_phases={"245": {"3"}},
+                                   now=datetime.now(UTC)))
+    assert "rdr-245-p3-critique (RDR-245 Phase 3, " in text
+
+
 # ── the command ──────────────────────────────────────────────────────────────────
 
 def _t2_cm(db: object) -> MagicMock:
@@ -998,6 +1089,8 @@ def curate_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, P
     _agent(agents, "conexus-code-review-expert", _E1 + _E1, {"h1.md": "x"})
     (repo / "docs" / "rdr").mkdir(parents=True)
     (repo / "docs" / "rdr" / "rdr-238-x.md").write_text("---\nid: RDR-238\nstatus: closed\n---\n")
+    (repo / "docs" / "rdr" / "rdr-246-y.md").write_text("---\nid: RDR-246\nstatus: accepted\n---\n"
+                                                       "### Phase 2 (CLOSED, 2026-11-06): z\n")
     monkeypatch.chdir(repo)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
     monkeypatch.setenv("NX_NO_TELEMETRY", "1")
@@ -1116,3 +1209,57 @@ def test_the_command_is_registered_and_documented() -> None:
         assert flag in section, flag
     for needle in ("near-duplicates", "S-7", "90-day TTL", "Jaccard", "closed"):
         assert needle in section, needle
+
+
+def _no_git_env() -> dict[str, str]:
+    """This process's environment without GIT_* (a git hook running the suite exports GIT_DIR)."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def test_a_ceiling_at_the_repository_root_really_stops_git_below_it(tmp_path: Path) -> None:
+    # nexus-nrqqk: the real-git case behind the ceiling trigger. Git examines cwd and never moves up into a ceiling.
+    repo = _make_repo(tmp_path)
+    (repo / "sub").mkdir()
+    assert md.primary_checkout_root(repo / "sub", {}) == repo
+    assert md.primary_checkout_root(repo / "sub", {**_no_git_env(), "GIT_CEILING_DIRECTORIES": str(repo)}) is None
+    assert md.primary_checkout_root(repo, {**_no_git_env(), "GIT_CEILING_DIRECTORIES": str(repo)}) == repo
+    assert md.primary_checkout_root(repo / "sub", {**_no_git_env(), "GIT_CEILING_DIRECTORIES": str(tmp_path)}) == repo
+
+
+def test_the_git_fallback_runs_in_the_callers_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # nexus-nrqqk: a GIT_DIR given only in the caller's mapping must reach git, not just the trigger.
+    repo = _make_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.delenv("GIT_DIR", raising=False)
+    assert md.primary_checkout_root(outside, {}) is None
+    assert md.primary_checkout_root(outside, {**_no_git_env(), "GIT_DIR": str(repo / ".git")}) == repo
+
+
+def test_ceilings_and_cwds_through_symlinks_match_git(tmp_path: Path) -> None:
+    # nexus-nrqqk r1: the resolved forms are what git compares, so each case below goes red if one is dropped.
+    repo = _make_repo(tmp_path)
+    (repo / "sub").mkdir()
+    ceiling_link = tmp_path / "ceiling-link"
+    ceiling_link.symlink_to(repo, target_is_directory=True)
+    sub_link = tmp_path / "sub-link"
+    sub_link.symlink_to(repo / "sub", target_is_directory=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    cases = [
+        (repo / "sub", str(ceiling_link)),  # a ceiling written through a symlink still stops git
+        (sub_link, str(repo)),  # a cwd reached through a symlink is below the real ceiling
+        (repo / "sub", f"{tmp_path / 'elsewhere'}{os.pathsep}{repo}"),  # the second entry of a list counts
+    ]
+    for cwd, ceiling in cases:
+        assert md.primary_checkout_root(cwd, {**env, "GIT_CEILING_DIRECTORIES": ceiling}) is None, (cwd, ceiling)
+        assert md._primary_via_git(cwd, {**env, "GIT_CEILING_DIRECTORIES": ceiling}) is None, (cwd, ceiling)
+    # with no ceiling, a symlinked cwd is searched from its target, as git does
+    assert md.primary_checkout_root(sub_link, env) == repo == md._primary_via_git(sub_link, env)
+
+
+def test_an_empty_git_dir_is_asked_of_git(tmp_path: Path) -> None:
+    # nexus-nrqqk r1: git treats GIT_DIR="" as set and refuses; reading the layout would answer otherwise.
+    repo = _make_repo(tmp_path)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    assert md.primary_checkout_root(repo, env) == repo
+    assert md.primary_checkout_root(repo, {**env, "GIT_DIR": ""}) is None

@@ -1561,7 +1561,7 @@ class TestHydrateInputsTranslation:
         from nexus.plans.runner import _hydrate_operator_args
 
         with patch(
-            "nexus.mcp.core.store_get_many",
+            "nexus.mcp.core._store_get_many_impl",
             return_value={"contents": ["doc-a body", "doc-b body"]},
         ):
             tool, args = _hydrate_operator_args(
@@ -1664,7 +1664,7 @@ class TestHydrateInputsTranslation:
         key, value = extra_kwarg
         fake_contents = {"contents": ["doc-a body", "doc-b body"]}
         with patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_contents,
         ):
             tool, args = _hydrate_operator_args(
                 op, {"ids": ["doc-a", "doc-b"], key: value},
@@ -1696,7 +1696,7 @@ class TestHydrateInputsTranslation:
         oversized = [f"item-{i}" for i in range(_OPERATOR_MAX_INPUTS + 50)]
         fake_contents = {"contents": oversized}
         with patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_contents,
         ):
             tool, args = _hydrate_operator_args(
                 "groupby",
@@ -1726,7 +1726,7 @@ class TestHydrateInputsTranslation:
         small = [f"item-{i}" for i in range(10)]
         fake_contents = {"contents": small}
         with patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_contents,
         ):
             tool, args = _hydrate_operator_args(
                 "groupby",
@@ -1761,7 +1761,7 @@ class TestHydrateInputsTranslation:
                        "key": "year" if op == "groupby" else None}
             args_in = {k: v for k, v in args_in.items() if v is not None}
             with patch(
-                "nexus.mcp.core.store_get_many", return_value=fake_contents,
+                "nexus.mcp.core._store_get_many_impl", return_value=fake_contents,
             ):
                 _, args = _hydrate_operator_args(op, args_in)
             assert "_truncation_metadata" in args, (
@@ -1791,7 +1791,7 @@ class TestHydrateInputsTranslation:
         oversized = [f"item-{i}" for i in range(_OPERATOR_MAX_INPUTS + 50)]
         fake_contents = {"contents": oversized}
         with patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_contents,
         ):
             tool, args = _hydrate_operator_args(
                 "filter",
@@ -1818,7 +1818,7 @@ class TestHydrateInputsTranslation:
         oversized = [f"item-{i}" for i in range(_OPERATOR_MAX_INPUTS + 50)]
         fake_contents = {"contents": oversized}
         with patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_contents,
         ):
             tool, args = _hydrate_operator_args(
                 "extract",
@@ -2048,7 +2048,7 @@ class TestTumblerAwareHydration:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ) as mock_hydrate:
             tool, args = _hydrate_operator_args(
                 "summarize", {"ids": ["1.1.5", "1.1.6"]},
@@ -2090,7 +2090,7 @@ class TestTumblerAwareHydration:
         with patch(
             "nexus.mcp_infra.get_catalog",
         ) as mock_get_catalog, patch(
-            "nexus.mcp.core.store_get_many",
+            "nexus.mcp.core._store_get_many_impl",
             return_value={"contents": ["x", "y"]},
         ) as mock_hydrate:
             tool, args = _hydrate_operator_args(
@@ -2122,7 +2122,7 @@ class TestTumblerAwareHydration:
         with patch(
             "nexus.mcp_infra.get_catalog",
         ) as mock_get_catalog, patch(
-            "nexus.mcp.core.store_get_many",
+            "nexus.mcp.core._store_get_many_impl",
             return_value={"contents": ["x", "y"]},
         ):
             _, args = _hydrate_operator_args("summarize", {"ids": mixed_ids})
@@ -2143,7 +2143,7 @@ class TestTumblerAwareHydration:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many",
+            "nexus.mcp.core._store_get_many_impl",
         ) as mock_hydrate:
             tool, args = _hydrate_operator_args(
                 "summarize", {"ids": ["1.1.5"]},
@@ -2172,7 +2172,7 @@ class TestTumblerAwareHydration:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=None,
         ), patch(
-            "nexus.mcp.core.store_get_many",
+            "nexus.mcp.core._store_get_many_impl",
         ) as mock_hydrate:
             tool, args = _hydrate_operator_args(
                 "summarize", {"ids": ["1.1.5", "1.1.6"]},
@@ -2206,7 +2206,7 @@ class TestTumblerAwareHydration:
         with structlog.testing.capture_logs() as captured, patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ) as mock_hydrate:
             tool, args = _hydrate_operator_args(
                 "summarize", {"ids": ["1.1.5"]},
@@ -2255,7 +2255,7 @@ class TestStoreGetManyExplicitStepTumblerRouting:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ) as mock_hydrate:
             result = await _default_dispatcher(
                 "store_get_many",
@@ -2279,7 +2279,7 @@ class TestStoreGetManyExplicitStepTumblerRouting:
         with patch(
             "nexus.mcp_infra.get_catalog",
         ) as mock_get_catalog, patch(
-            "nexus.mcp.core.store_get_many",
+            "nexus.mcp.core._store_get_many_impl",
             return_value={"contents": ["x"], "missing": []},
         ) as mock_hydrate:
             result = await _default_dispatcher(
@@ -2310,7 +2310,7 @@ class TestZeroEvidenceShortCircuit:
         from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX, _hydrate_operator_args
 
         with patch(
-            "nexus.mcp.core.store_get_many",
+            "nexus.mcp.core._store_get_many_impl",
             return_value={"contents": ["", ""]},
         ):
             _, args = _hydrate_operator_args("compare", {"ids": ["a", "b"]})
@@ -2324,7 +2324,7 @@ class TestZeroEvidenceShortCircuit:
         from nexus.plans.runner import _hydrate_operator_args
 
         with patch(
-            "nexus.mcp.core.store_get_many",
+            "nexus.mcp.core._store_get_many_impl",
             return_value={"contents": ["real body", ""]},
         ):
             _, args = _hydrate_operator_args("compare", {"ids": ["a", "b"]})
@@ -2350,7 +2350,7 @@ class TestZeroEvidenceShortCircuit:
         from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX, _default_dispatcher
 
         with patch(
-            "nexus.mcp.core.store_get_many",
+            "nexus.mcp.core._store_get_many_impl",
             return_value={"contents": ["", "", ""]},
         ), patch(
             "nexus.mcp.core.operator_compare",
@@ -2614,7 +2614,7 @@ class TestNonEvidentiaryStamp:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ) as mock_hydrate:
             _, args = _hydrate_operator_args(
                 "rank", {"ids": ["1.1.5", "1.1.6"]},
@@ -2658,7 +2658,7 @@ class TestNonEvidentiaryStamp:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ) as mock_hydrate:
             _, args = _hydrate_operator_args("rank", {"ids": ["1.1.5"]})
         mock_hydrate.assert_called_once()
@@ -2693,7 +2693,7 @@ class TestNonEvidentiaryStamp:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
             _, args = _hydrate_operator_args(
                 "rank", {"ids": [chash_stamped, chash_ok]},
@@ -2723,7 +2723,7 @@ class TestNonEvidentiaryStamp:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
             _, args = _hydrate_operator_args("rank", {"ids": [shared_chash]})
         assert json.loads(args["items"]) == ["shared passage"]
@@ -2748,7 +2748,7 @@ class TestNonEvidentiaryStamp:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
             _, args = _hydrate_operator_args("rank", {"ids": [shared_chash]})
         assert json.loads(args["items"]) == []
@@ -2772,7 +2772,7 @@ class TestNonEvidentiaryStamp:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
             _, args = _hydrate_operator_args(
                 "rank", {"ids": [chash_a, chash_b]},
@@ -2805,7 +2805,7 @@ class TestNonEvidentiaryStamp:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
             _hydrate_operator_args("rank", {"ids": chashes})
         assert calls["docs_for_chashes"] <= 1
@@ -2822,7 +2822,7 @@ class TestNonEvidentiaryStamp:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=None,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
             _, args = _hydrate_operator_args(
                 "rank", {"ids": ["a" * 64, "b" * 64]},
@@ -2843,7 +2843,7 @@ class TestNonEvidentiaryStamp:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
             _, args = _hydrate_operator_args(
                 "rank", {"ids": ["a" * 64, "b" * 64]},
@@ -2913,7 +2913,7 @@ class TestImportOnlySectionTypeExclusion:
         with patch(
             "nexus.mcp_infra.get_catalog",
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
             _, args = _hydrate_operator_args(
                 "rank", {"ids": [chash_header, chash_real]},
@@ -2938,7 +2938,7 @@ class TestImportOnlySectionTypeExclusion:
         with patch(
             "nexus.mcp_infra.get_catalog",
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
             _, args = _hydrate_operator_args(
                 "rank", {"ids": [chash_a, chash_b]},
@@ -2995,9 +2995,9 @@ class TestImportOnlySectionTypeExclusion:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
-            result = _hydrate_tumbler_ids(["1.1.5"])
+            result = _hydrate_tumbler_ids(["1.1.5"], sensitivity="include")
         assert result["contents"] == ["public void realMethod() {}"]
         assert result["missing"] == []
 
@@ -3026,9 +3026,9 @@ class TestImportOnlySectionTypeExclusion:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
-            result = _hydrate_tumbler_ids(["1.1.5"])
+            result = _hydrate_tumbler_ids(["1.1.5"], sensitivity="include")
         assert result["contents"] == [""]
         assert result["missing"] == ["1.1.5"]
 
@@ -3051,9 +3051,9 @@ class TestImportOnlySectionTypeExclusion:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
-            result = _hydrate_tumbler_ids(["1.1.5"])
+            result = _hydrate_tumbler_ids(["1.1.5"], sensitivity="include")
         assert result["contents"] == ["some content"]
         assert result["missing"] == []
 
@@ -3089,9 +3089,9 @@ class TestImportOnlySectionTypeExclusion:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
-            result = _hydrate_tumbler_ids(["1.1.5"])
+            result = _hydrate_tumbler_ids(["1.1.5"], sensitivity="include")
         assert result["contents"] == ["shared body"]
 
     def test_tumbler_hydration_trusts_a_written_empty_label_over_the_chunk_rows_foreign_one(
@@ -3116,9 +3116,9 @@ class TestImportOnlySectionTypeExclusion:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
-            result = _hydrate_tumbler_ids(["1.1.5"])
+            result = _hydrate_tumbler_ids(["1.1.5"], sensitivity="include")
         assert result["contents"] == ["real body"]
 
     def test_tumbler_hydration_falls_back_to_the_hydrated_type_for_an_unlabelled_manifest_row(
@@ -3140,9 +3140,9 @@ class TestImportOnlySectionTypeExclusion:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
-            result = _hydrate_tumbler_ids(["1.1.5"])
+            result = _hydrate_tumbler_ids(["1.1.5"], sensitivity="include")
         assert result["contents"] == [""]
 
 
@@ -3367,7 +3367,7 @@ async def test_default_dispatcher_groupby_truncation_pop_and_merge(monkeypatch) 
 
     monkeypatch.setattr(mcp_core, "operator_groupby", fake_groupby)
     with patch(
-        "nexus.mcp.core.store_get_many", return_value=oversized_contents,
+        "nexus.mcp.core._store_get_many_impl", return_value=oversized_contents,
     ):
         result = await _default_dispatcher(
             "groupby",
@@ -5132,7 +5132,7 @@ class TestHydrationCarriesDisplayTruncationMarker:
     def _stub(monkeypatch, bodies: list[str]) -> None:
         from nexus.mcp import core as mcp_core
 
-        def fake_store_get_many(*, ids, collections, structured, max_chars_per_doc=4000):
+        def fake_store_get_many(*, ids, collections, structured, max_chars_per_doc=4000, **_kw):
             cut = [
                 b[:max_chars_per_doc] + "…"
                 + mcp_core.display_truncation_marker(max_chars_per_doc)
@@ -5141,7 +5141,7 @@ class TestHydrationCarriesDisplayTruncationMarker:
             ]
             return {"contents": cut, "missing": []}
 
-        monkeypatch.setattr(mcp_core, "store_get_many", fake_store_get_many)
+        monkeypatch.setattr(mcp_core, "_store_get_many_impl", fake_store_get_many)
 
     @pytest.mark.t2_tenant
     def test_ids_branch_summarize_content_carries_marker(self, monkeypatch):
@@ -5211,7 +5211,7 @@ class TestSourceNotesOnHydratedContent:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+            "nexus.mcp.core._store_get_many_impl", return_value=fake_hydrated,
         ):
             _, args = _hydrate_operator_args(
                 "summarize", {"ids": ["a" * 64, "b" * 64]},
@@ -5230,7 +5230,7 @@ class TestSourceNotesOnHydratedContent:
         with patch(
             "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
         ), patch(
-            "nexus.mcp.core.store_get_many", return_value={"contents": ["p1", "p2"]},
+            "nexus.mcp.core._store_get_many_impl", return_value={"contents": ["p1", "p2"]},
         ):
             _, args = _hydrate_operator_args("rank", {"ids": ["a" * 64, "b" * 64]})
         assert json.loads(args["items"]) == ["p1", "p2"]

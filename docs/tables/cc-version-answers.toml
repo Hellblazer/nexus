@@ -9,7 +9,7 @@
 #                                        answer" and passes; add the rows below
 #
 # A Claude Code pin bump (container/Dockerfile ARG CLAUDE_CODE_VERSION) re-runs
-# 06 and 07 and updates this table. Nothing may be deleted, or relied on, on the
+# 06, 07, 33 and 34 and updates this table. Nothing may be deleted, or relied on, on the
 # strength of a row here.
 #
 # Consumed by tests/cc-validation/lib/version_answers.py (stdlib only, so the

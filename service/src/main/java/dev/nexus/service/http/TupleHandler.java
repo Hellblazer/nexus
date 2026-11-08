@@ -267,7 +267,7 @@ public final class TupleHandler implements HttpHandler {
         Map<String, String> dims = stringMap((Map<String, Object>) body.get("dims"));
         String tupleBody = (String) body.get("body");
         String nonce = (String) body.get("nonce");
-        Long ttlSeconds = numberOrNull("ttl_seconds", body.get("ttl_seconds"));
+        Long ttlSeconds = wholeSecondsOrNull("ttl_seconds", body.get("ttl_seconds"));
         // nexus-5r2sc.2.1 (RDR-235 E1): optional, whole seconds. Range checks live in the repository.
         Long delaySeconds = wholeSecondsOrNull("delay_s", body.get("delay_s"));
         // nexus-5r2sc.2.2 (RDR-235 E4): absent or "replace" only. The value is not echoed back.
@@ -410,7 +410,7 @@ public final class TupleHandler implements HttpHandler {
         String subspace = requireString(body, "subspace");
         Map<String, String> pattern = stringMap((Map<String, Object>) body.get("keys_pattern"));
         String claimant = requireString(body, "claimant");
-        Long leaseS = numberOrNull("lease_s", body.get("lease_s"));
+        Long leaseS = wholeSecondsOrNull("lease_s", body.get("lease_s"));
         long timeoutS = longOrDefault("timeout_s", body.get("timeout_s"), 0);
 
         Optional<TupleRepository.ClaimedTuple> result = repo.in(tenant, subspace, pattern, claimant, leaseS, timeoutS);
@@ -432,7 +432,7 @@ public final class TupleHandler implements HttpHandler {
         // lease_s against the template's take.default_lease_seconds) --
         // kept symmetric with /in rather than leaving the probe form as the
         // one endpoint that still hard-requires it.
-        Long leaseS = numberOrNull("lease_s", body.get("lease_s"));
+        Long leaseS = wholeSecondsOrNull("lease_s", body.get("lease_s"));
 
         Optional<TupleRepository.ClaimedTuple> result = repo.inp(tenant, subspace, pattern, claimant, leaseS);
         HttpUtil.send(ex, 200, renderClaim(result));
@@ -492,7 +492,7 @@ public final class TupleHandler implements HttpHandler {
                 stringMap((Map<String, Object>) r.get("keys")),
                 stringMap((Map<String, Object>) r.get("dims")),
                 (String) r.get("body"),
-                numberOrNull("reply.ttl_seconds", r.get("ttl_seconds")));
+                wholeSecondsOrNull("reply.ttl_seconds", r.get("ttl_seconds")));
     }
 
     private void handleNack(HttpExchange ex, String tenant, String method) throws IOException {
@@ -530,7 +530,7 @@ public final class TupleHandler implements HttpHandler {
         }
         Map<String, Object> body = readBody(ex);
         var leaseUntil = repo.renew(tenant, requireString(body, "claim_id"),
-                requireString(body, "claimant"), requireLong(body, "lease_s"));
+                requireString(body, "claimant"), requireWholeSeconds(body, "lease_s"));
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(Map.of("lease_until", leaseUntil)));
     }
 
@@ -918,6 +918,14 @@ public final class TupleHandler implements HttpHandler {
         return v;
     }
 
+    private static long requireWholeSeconds(Map<String, Object> body, String field) {
+        Long v = wholeSecondsOrNull(field, body.get(field));
+        if (v == null) {
+            throw new IllegalArgumentException(field + " required");
+        }
+        return v;
+    }
+
     private static Map<String, String> stringMap(Map<String, Object> raw) {
         if (raw == null) {
             return Map.of();
@@ -929,18 +937,31 @@ public final class TupleHandler implements HttpHandler {
         return out;
     }
 
-    /** {@link #numberOrNull} for a field that must be a whole number of seconds (nexus-5r2sc.2.1): a
-     *  fractional JSON number is refused rather than truncated, so {@code delay_s: 1.5} is a 400
-     *  and not a silent 1. A non-numeric string is refused naming the field (nexus-wy51x).
-     *  Both surface as {@link IllegalArgumentException} -&gt; 400. */
+    /** {@link #numberOrNull} for a field that must be a whole number of seconds: {@code lease_s},
+     *  {@code ttl_seconds}, {@code delay_s}, {@code retry_after_s} (nexus-5r2sc.2.1, nexus-14xl5).
+     *  One rule for all four: a fractional JSON number is refused rather than truncated, so
+     *  {@code lease_s: 1.5} is a 400 and not a silent 1, and an integer beyond long range is refused
+     *  rather than wrapped (2^64+60 is not 60). A non-numeric string is refused naming the field
+     *  (nexus-wy51x). Every refusal is an {@link IllegalArgumentException} -&gt; 400. */
     private static Long wholeSecondsOrNull(String field, Object v) {
-        if (v instanceof Double || v instanceof Float || v instanceof java.math.BigDecimal) {
-            double d = ((Number) v).doubleValue();
-            if (d != Math.rint(d) || Double.isInfinite(d)) {
-                throw new IllegalArgumentException(field + " must be a whole number of seconds");
+        if (v instanceof Number n && !(n instanceof Byte || n instanceof Short
+                || n instanceof Integer || n instanceof Long)) {
+            java.math.BigDecimal d = exactDecimal(n);
+            if (d == null || d.signum() != 0 && d.stripTrailingZeros().scale() > 0) {
+                throw new IllegalArgumentException(field + " must be a whole number of seconds, got: " + v);
             }
         }
         return numberOrNull(field, v, "must be a whole number of seconds");
+    }
+
+    /** The exact decimal value of a non-primitive-integer JSON number, or null when it has none
+     *  (NaN, an infinity). */
+    private static java.math.BigDecimal exactDecimal(Number n) {
+        try {
+            return n instanceof java.math.BigDecimal bd ? bd : new java.math.BigDecimal(n.toString());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private static Long numberOrNull(String field, Object v) {
@@ -955,7 +976,21 @@ public final class TupleHandler implements HttpHandler {
             return null;
         }
         if (v instanceof Number n) {
-            return n.longValue();
+            if (n instanceof Byte || n instanceof Short || n instanceof Integer || n instanceof Long) {
+                return n.longValue();
+            }
+            // Never wrap or saturate (nexus-14xl5): a BigInteger beyond long range, or a double
+            // beyond it, is a caller error. A fraction still truncates here; the whole-seconds
+            // fields refuse it first in wholeSecondsOrNull.
+            java.math.BigDecimal d = exactDecimal(n);
+            try {
+                if (d != null) {
+                    return d.toBigInteger().longValueExact();
+                }
+            } catch (ArithmeticException e) {
+                // fall through to the refusal
+            }
+            throw new IllegalArgumentException(field + " " + requirement + ", got: " + v);
         }
         try {
             return Long.parseLong(String.valueOf(v));
@@ -976,7 +1011,14 @@ public final class TupleHandler implements HttpHandler {
 
     private static int intOrDefault(String field, Object v, int def) {
         Long l = numberOrNull(field, v);
-        return l == null ? def : l.intValue();
+        if (l == null) {
+            return def;
+        }
+        // nexus-14xl5: l.intValue() wrapped, so n = 2^32+5000 read as 5000.
+        if (l < Integer.MIN_VALUE || l > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(field + " must be a whole number within int range, got: " + v);
+        }
+        return l.intValue();
     }
 
     private static long longOrDefault(String field, Object v, long def) {

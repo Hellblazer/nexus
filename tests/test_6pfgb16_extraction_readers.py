@@ -59,7 +59,7 @@ class _StubT3:
     def collection_info(self, name: str) -> dict:
         return {"count": len(self.docs), "metadata": {}}
 
-    def get_by_id(self, name: str, doc_id: str) -> dict | None:
+    def get_by_id(self, name: str, doc_id: str, *, sensitivity="include") -> dict | None:
         return dict(self.docs[doc_id]) if name == self.name and doc_id in self.docs else None
 
     def find_ids_by_title(self, name: str, title: str) -> list[str]:
@@ -193,8 +193,20 @@ def test_an_unreadable_catalog_prints_no_extractor_line_never_the_rows(world, ge
         raise ConnectionError("catalog down")
 
     monkeypatch.setattr(catalog_factory, "make_catalog_reader", boom)
+    # RDR-243 Phase 3 (nexus-rfvyy.8 fix r1): an unreadable catalog withholds the hit under the default MCP output
+    # posture (pinned below); ``flag`` reaches the row display under test, which falls back to the row as before.
+    monkeypatch.setattr("nexus.mcp.core._mcp_output_posture", lambda: "flag")
     out = get(H_S)
     assert _lines(out, "Extractor:") == [] and "shared page text" in out, "get still answers; the row's mineru is B's"
+
+
+def test_an_unreadable_catalog_withholds_the_mcp_hit_by_default(world, monkeypatch) -> None:
+    def boom():
+        raise ConnectionError("catalog down")
+
+    monkeypatch.setattr(catalog_factory, "make_catalog_reader", boom)
+    out = _mcp_get(H_S)
+    assert "shared page text" not in out and "content withheld" in out, "fail closed: no catalog, no text"
 
 
 def test_one_owner_lookup_serves_the_whole_get(world) -> None:
@@ -255,7 +267,7 @@ class _Col:
         self.rows = rows
         self.reads: list[list[str]] = []
 
-    def get(self, *, ids=None, where=None, include=None, limit=None):
+    def get(self, *, ids=None, where=None, include=None, limit=None, sensitivity="include"):
         assert where is None, "the scan reads the rows its catalog names, by id"
         self.reads.append(list(ids))
         hit = [c for c in ids if c in self.rows]

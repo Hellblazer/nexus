@@ -592,7 +592,7 @@ def test_search_cross_corpus_sends_chash_allow_on_the_per_collection_route(engin
 
     fake, cols = engine
     with chash_allow_scope([IN_A, IN_B]):
-        search_cross_corpus("q", cols, 5, fake.client, threshold_override=float("inf"), cluster_by=None)
+        search_cross_corpus("q", cols, 5, fake.client, threshold_override=float("inf"), cluster_by=None, sensitivity="include")
     (call,) = fake.route_calls()
     assert call["chash_allow"] == [IN_A, IN_B]
 
@@ -603,7 +603,7 @@ def test_search_cross_corpus_sends_chash_allow_on_the_flat_search_and_the_hybrid
     fake, cols = engine
     fake.route = False  # an engine without the per-collection route: the batched /search, and /hybrid-search for lexical
     with chash_allow_scope([IN_A]):
-        search_cross_corpus("q", cols, 5, fake.client, threshold_override=float("inf"), cluster_by=None, lexical=True)
+        search_cross_corpus("q", cols, 5, fake.client, threshold_override=float("inf"), cluster_by=None, lexical=True, sensitivity="include")
     bodies = {p: b for p, b in fake.calls if p in ("/v1/vectors/search", "/v1/vectors/hybrid-search")}
     assert set(bodies) == {"/v1/vectors/search", "/v1/vectors/hybrid-search"}, bodies.keys()
     assert all(b["chash_allow"] == [IN_A] for b in bodies.values())
@@ -616,7 +616,7 @@ def test_the_reranked_flat_and_hybrid_legs_send_chash_allow_too(engine) -> None:
     fake.route = False
     with chash_allow_scope([IN_A, IN_B]):
         search_cross_corpus(
-            "q", cols, 5, fake.client, threshold_override=float("inf"), cluster_by=None, lexical=True, rerank=True,
+            "q", cols, 5, fake.client, threshold_override=float("inf"), cluster_by=None, lexical=True, rerank=True, sensitivity="include",
         )
     bodies = [b for p, b in fake.calls if p in ("/v1/vectors/search", "/v1/vectors/hybrid-search")]
     assert len(bodies) == 2 and all(b.get("rerank") is True and b["chash_allow"] == [IN_A, IN_B] for b in bodies), bodies
@@ -626,7 +626,7 @@ def test_search_cross_corpus_sends_no_key_without_a_scope(engine) -> None:
     from nexus.search_engine import search_cross_corpus
 
     fake, cols = engine
-    search_cross_corpus("q", cols, 5, fake.client, threshold_override=float("inf"), cluster_by=None)
+    search_cross_corpus("q", cols, 5, fake.client, threshold_override=float("inf"), cluster_by=None, sensitivity="include")
     assert "chash_allow" not in fake.route_calls()[0]
 
 
@@ -635,7 +635,7 @@ def test_an_empty_allow_list_is_sent_as_an_empty_array_which_the_engine_answers_
 
     fake, cols = engine
     with chash_allow_scope([]):
-        search_cross_corpus("q", cols, 5, fake.client, threshold_override=float("inf"), cluster_by=None)
+        search_cross_corpus("q", cols, 5, fake.client, threshold_override=float("inf"), cluster_by=None, sensitivity="include")
     assert fake.route_calls()[0]["chash_allow"] == []
 
 
@@ -1083,7 +1083,7 @@ def test_rows_an_engine_returns_outside_the_allow_list_are_dropped_and_counted(i
     diag: list = []
     with chash_allow_scope([IN_A, IN_B]):
         rows = search_cross_corpus(
-            "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag)
+            "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag, sensitivity="include")
     assert fake.route_calls()[0]["chash_allow"] == sorted([IN_A, IN_B]), "the key was sent; the engine ignored it"
     assert {r.id for r in rows} == {IN_A, IN_B}, "the sibling's chunk the engine returned is not handed on"
     assert diag[0].chash_allow_dropped == 1
@@ -1105,7 +1105,7 @@ def test_a_row_identified_by_its_chunk_text_hash_metadata_is_checked_by_that_has
     diag: list = []
     with chash_allow_scope([IN_A]):
         rows = search_cross_corpus(
-            "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag)
+            "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag, sensitivity="include")
     assert [r.metadata["chunk_text_hash"] for r in rows] == [IN_A] and diag[0].chash_allow_dropped == 2
 
 
@@ -1128,7 +1128,7 @@ def test_a_row_with_a_stale_metadata_hash_is_kept_when_its_id_is_allowed(ignorin
     diag: list = []
     with chash_allow_scope([IN_A]):
         rows = search_cross_corpus(
-            "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag)
+            "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag, sensitivity="include")
     assert [r.id for r in rows] == [IN_A] and diag[0].chash_allow_dropped == 2
 
 
@@ -1142,7 +1142,7 @@ def test_the_flat_search_and_the_lexical_leg_are_checked_too(ignoring_engine) ->
     with chash_allow_scope([IN_A]):
         rows = search_cross_corpus(
             "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, lexical=True,
-            diagnostics_out=diag)
+            diagnostics_out=diag, sensitivity="include")
     assert {r.id for r in rows} <= {IN_A}, "neither the flat rows nor the lexical row outside the list survive"
     assert diag[0].chash_allow_dropped >= 2
 
@@ -1153,7 +1153,7 @@ def test_an_unconfined_search_drops_nothing(ignoring_engine) -> None:
     fake, col = ignoring_engine
     diag: list = []
     rows = search_cross_corpus(
-        "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag)
+        "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag, sensitivity="include")
     assert len(rows) == 3 and diag[0].chash_allow_dropped == 0
 
 

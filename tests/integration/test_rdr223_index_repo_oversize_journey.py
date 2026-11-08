@@ -557,7 +557,7 @@ def test_reindexing_an_edited_file_sweeps_only_what_the_edit_dropped(env: _Env) 
 
 
 def _stored_metadata(collection: str, chashes: list[str]) -> dict[str, dict]:
-    got = HttpVectorClient().get_collection(collection).get(ids=chashes, include=["metadatas"])
+    got = HttpVectorClient().get_collection(collection).get(ids=chashes, include=["metadatas"], sensitivity="include")
     assert len(got["ids"]) == len(chashes), "every chunk is stored"
     return dict(zip(got["ids"], got["metadatas"]))
 

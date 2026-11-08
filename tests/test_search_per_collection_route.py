@@ -113,6 +113,10 @@ class _FakeEngine:
         return {"id": rid, "content": f"text {rid}", "distance": dist, "collection": col}
 
     def _request(self, method, path, *, tenant, timeout, body):
+        if method == "GET" and path == "/version":
+            # A current engine. The capability read behind a rerank with sensitivity="include" (RDR-243 Phase 3
+            # fix r1) is not a search request, so it is answered here and not recorded in ``calls``.
+            return {"vector_sensitivity_exclude_supported": True, "rerank_sensitive_exclusion_supported": True}
         self.calls.append((path, body))
         if path == _ROUTE:
             if self.on_route is not None:
@@ -212,7 +216,7 @@ def _rows(prefix: str, n: int, base: float, step: float = 0.001) -> list[tuple[s
 def _search(engine: _FakeEngine, cols: list[str], n: int = 5, **kw):
     kw.setdefault("threshold_override", float("inf"))
     kw.setdefault("cluster_by", None)
-    return search_cross_corpus("q", cols, n, engine.client, **kw)
+    return search_cross_corpus("q", cols, n, engine.client, **kw, sensitivity="include")
 
 
 # ── the flow: one request per model group ────────────────────────────────────
@@ -290,7 +294,7 @@ class TestOneRequestPerModelGroup:
         cols = _cols("code", _BGE, 300)
         engine = _FakeEngine(monkeypatch, {c: _rows("r", 1, 0.2) for c in cols})
         # Confirm the route first so the probe lock is out of the picture.
-        engine.client.search_per_collection("q", cols[:2], per_collection_k=5, limit=300)
+        engine.client.search_per_collection("q", cols[:2], per_collection_k=5, limit=300, sensitivity="include")
         barrier = threading.Barrier(2)
         engine.on_route = lambda body: barrier.wait(timeout=5)  # serial -> BrokenBarrierError
         results = _search(engine, cols, n=5)
@@ -327,12 +331,12 @@ class TestThresholds:
         engine = _FakeEngine(monkeypatch, {c: _rows("r", 1, 0.2) for c in cols})
         engine.client.search_per_collection(
             "q", cols, per_collection_k=5, limit=300,
-            thresholds={cols[0]: float("nan"), cols[1]: None, "other": 0.3},
+            thresholds={cols[0]: float("nan"), cols[1]: None, "other": 0.3}, sensitivity="include",
         )
         assert "thresholds" not in engine.route_calls()[0]
         engine.client.search_per_collection(
             "q", cols, per_collection_k=5, limit=300,
-            thresholds={cols[0]: 0.4, cols[1]: float("inf"), "other": 0.3},
+            thresholds={cols[0]: 0.4, cols[1]: float("inf"), "other": 0.3}, sensitivity="include",
         )
         assert engine.route_calls()[1]["thresholds"] == {cols[0]: 0.4}
 
@@ -586,7 +590,7 @@ class TestFirstProbeIsSingleFlight:
         def go():
             barrier.wait(timeout=5)
             out.append(engine.client.search_per_collection(
-                "q", cols, per_collection_k=5, limit=300))
+                "q", cols, per_collection_k=5, limit=300, sensitivity="include"))
 
         threads = [threading.Thread(target=go) for _ in range(6)]
         for t in threads:
@@ -599,7 +603,7 @@ class TestFirstProbeIsSingleFlight:
     def test_once_the_route_is_confirmed_requests_run_in_parallel(self, monkeypatch):
         cols = _cols("code", _BGE, 2)
         engine = _FakeEngine(monkeypatch, {c: _rows("r", 2, 0.2) for c in cols})
-        engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300)
+        engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300, sensitivity="include")
         barrier = threading.Barrier(4)
         engine.on_route = lambda body: barrier.wait(timeout=5)  # BrokenBarrierError if serialised
         results: list = []
@@ -608,7 +612,7 @@ class TestFirstProbeIsSingleFlight:
         def go():
             try:
                 results.append(engine.client.search_per_collection(
-                    "q", cols, per_collection_k=5, limit=300))
+                    "q", cols, per_collection_k=5, limit=300, sensitivity="include"))
             except Exception as exc:  # noqa: BLE001 - the assertion below names it
                 errors.append(exc)
 
@@ -680,7 +684,7 @@ class TestMalformedEnvelopeIsRefused:
         engine = _FakeEngine(monkeypatch, {c: _rows("r", 2, 0.2) for c in cols})
         engine.mutate = _MALFORMED[name]
         with pytest.raises(PerCollectionEnvelopeError):
-            engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300)
+            engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300, sensitivity="include")
 
     def test_a_refusal_switches_the_route_off_for_60_seconds(self, monkeypatch):
         cols = _cols("code", _BGE, 2)
@@ -689,14 +693,14 @@ class TestMalformedEnvelopeIsRefused:
         clock = [0.0]
         monkeypatch.setattr(hvc, "_monotonic", lambda: clock[0])
         with pytest.raises(PerCollectionEnvelopeError):
-            engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300)
+            engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300, sensitivity="include")
         n_calls = len(engine.calls)
         assert engine.client.search_per_collection(
-            "q", cols, per_collection_k=5, limit=300) is None
+            "q", cols, per_collection_k=5, limit=300, sensitivity="include") is None
         assert len(engine.calls) == n_calls
         clock[0] += 61.0
         with pytest.raises(PerCollectionEnvelopeError):
-            engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300)
+            engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300, sensitivity="include")
         assert len(engine.calls) == n_calls + 1
 
     def test_the_search_falls_back_to_the_batched_path_instead_of_failing(self, monkeypatch):
@@ -741,7 +745,7 @@ class TestMalformedEnvelopeIsRefused:
         engine.skipped = {cols[1]}
         events = []
         monkeypatch.setattr(hvc._log, "warning", lambda event, **kw: events.append((event, kw)))
-        engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300)
+        engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300, sensitivity="include")
         assert events and events[0][0] == "vector_read_skipped_unregistered_collections"
         assert events[0][1]["skipped"] == [cols[1]]
         assert events[0][1]["route"] == "search_per_collection"
@@ -1233,7 +1237,7 @@ class TestLexicalLeg:
             "per_collection": [{**e, "lexical_ids": "r0"} for e in env["per_collection"]],
         }
         with pytest.raises(PerCollectionEnvelopeError, match="lexical_ids"):
-            engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300, lexical=True)
+            engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300, lexical=True, sensitivity="include")
 
     def test_without_lexical_the_request_does_not_carry_the_field(self, monkeypatch):
         cols = _cols("code", _BGE, 2)

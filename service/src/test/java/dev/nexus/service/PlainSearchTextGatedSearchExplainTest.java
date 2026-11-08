@@ -258,7 +258,7 @@ class PlainSearchTextGatedSearchExplainTest {
 
     @Test
     void explain_plainSearch_usesHnswIndex_notFunctionScan() {
-        Table<?> fn = PLAIN_SEARCH_1024.call(vec(1.0, 0.0), colls(COLL), null, null, 10, MODEL, TENANT);
+        Table<?> fn = PLAIN_SEARCH_1024.call(vec(1.0, 0.0), colls(COLL), null, null, 10, MODEL, TENANT, false);
         String plan = explain(ctx -> ctx.select(fn.field("id")).from(fn));
         assertThat(plan)
             .as("plain_search_1024 must use the HNSW index idx_chunks_embedding_1024 for "
@@ -288,7 +288,7 @@ class PlainSearchTextGatedSearchExplainTest {
     @Test
     void explain_manifestSearch_usesHnswIndexWithTheExistsAsAFilter_notSeqScan() {
         Table<?> fn = MANIFEST_SEARCH_1024.call(vec(1.0, 0.0), null, null, colls(COLL), null, null,
-            org.jooq.JSONB.valueOf("{\"section_title\": \"\"}"), null, 10, MODEL, TENANT);
+            org.jooq.JSONB.valueOf("{\"section_title\": \"\"}"), null, 10, MODEL, TENANT, false);
         String plan = explain(ctx -> ctx.select(fn.field("id")).from(fn));
         assertThat(plan)
             .as("manifest_search_1024 must be driven by the HNSW index on its leaf. Plan was:%n%s", plan)
@@ -334,7 +334,7 @@ class PlainSearchTextGatedSearchExplainTest {
         // what the planner actually chooses under real cost pressure (the same
         // discipline the retired text_gated_search_1024 test used).
         Table<?> fn = TEXT_GATED_SEARCH_BY_CHASH_1024.call(
-            vec(1.0, 0.0), chashes(targetChashes), colls(COLL), null, null, 50, MODEL, TENANT);
+            vec(1.0, 0.0), chashes(targetChashes), colls(COLL), null, null, 50, MODEL, TENANT, false);
         String plan = explainSeqscanOff(ctx -> ctx.select(fn.field("id")).from(fn));
         assertThat(plan)
             .as("a Function Scan node means the function is not inlinable (plpgsql) — "
@@ -398,7 +398,7 @@ class PlainSearchTextGatedSearchExplainTest {
         // the regime where hybridSearch's Java dispatch routes to
         // text_gated_search_hnsw_first_1024, not the selective by-chash function.
         Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
-            vec(1.0, 0.0), DENSE_TOKEN, colls(DENSE_COLL), null, null, 50, MODEL, TENANT);
+            vec(1.0, 0.0), DENSE_TOKEN, colls(DENSE_COLL), null, null, 50, MODEL, TENANT, false);
         String plan = explain(ctx -> ctx.select(fn.field("id")).from(fn));
         assertThat(plan)
             .as("text_gated_search_hnsw_first_1024 must use the HNSW index "
@@ -495,7 +495,7 @@ class PlainSearchTextGatedSearchExplainTest {
         // correctness independent of when Java chooses to call it (coordinator: "add the
         // same oracle against the hnsw-first function").
         Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
-            vec(1.0, 0.0), ORDER_TOKEN, colls(ORDER_COLL), null, null, 50, MODEL, TENANT);
+            vec(1.0, 0.0), ORDER_TOKEN, colls(ORDER_COLL), null, null, 50, MODEL, TENANT, false);
         List<String> ids = new ArrayList<>();
         List<Double> distances = new ArrayList<>();
         tenantScope.withTenant(TENANT, ctx -> {

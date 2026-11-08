@@ -50,9 +50,22 @@ def regions() -> list[tuple[pathlib.Path, str, str]]:
         (SENSITIVITY, "llm-surfaces", ls.render_policy_table(phase, include_pending_line=False)),
         (
             SENSITIVITY, "llm-surfaces-pending",
-            ls.not_yet_enforced_line(phase) or "Every registry row is enforced in this release.",
+            ls.not_yet_enforced_line(phase) or _all_phases_line(ls),
         ),
     ]
+
+
+def _all_phases_line(ls) -> str:  # noqa: ANN001 — the registry module, imported lazily above
+    """The pending region at the last phase: every phase-gated row is enforced, so it names the rows that send a
+    document's text outward and that no phase covers (behaviour ``n/a-not-a-document``; today census row 18)."""
+    uncovered = [r for r in ls.rows() if r.behaviour == "n/a-not-a-document" and r.endpoints != ("none",)]
+    if not uncovered:
+        return "Every registry row is enforced in this release."
+    names = "; ".join(f"{r.label} (census row {r.census_row})" for r in uncovered)
+    return (
+        "Every phase-gated surface is enforced in this release. Not covered by any phase, described below: "
+        f"{names}."
+    )
 
 
 def splice(text: str, region: str, name: str = "llm-surfaces") -> str | None:

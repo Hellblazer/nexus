@@ -175,7 +175,7 @@ Store content in the T3 permanent knowledge store.
 | `tags` | str | `""` | Comma-separated tags |
 | `ttl` | str | `"permanent"` | TTL: `Nd`, `Nw`, or `"permanent"` |
 | `agent` | str | `""` | Subagent/role attribution (mirrors `memory_put`, nexus-4ftd7). Falls back to `NX_AGENT` env, then a distinct `"mcp"` marker — never left empty, never the T3 indexer's own default. Always pass it explicitly; an unmarked write collapses onto `"mcp"` and defeats `_flag_contradictions`'s agent-diversity precondition. |
-| `session` | str | `""` | Optional explicit session_id override |
+| `session` | str | `""` | Deprecated: accepted and ignored |
 
 ```
 mcp__plugin_conexus_nexus__store_put(content="finding text", collection="<subject>", title="research-topic", tags="arch", agent="<your-role>"

@@ -1,41 +1,33 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Channel primitives for the plugin-only release channel (RDR-197 P1a, nexus-a2wmi.1).
+"""Channel allowlist and helpers for the plugin-only fast lane (nexus-a2wmi.1, pruned by nexus-rbmja.9).
 
-Tests-first for ``scripts/plugin_channel.py`` — importable here because
+Tests for ``scripts/plugin_channel.py`` — importable here because
 pyproject sets ``pythonpath = ["scripts"]``, and deliberately OFF the
 wheel surface (asserted below): the channel's machinery must never ship
 in the wheel it polices.
-
-The module's docstring is the single home of invariants R and W and the
-anchoring rule. These tests pin the behaviours; they do not restate the
-doctrine.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
 import pytest
 
+from check_plugin_only_eligibility import FREE_EXACT, FREE_PREFIXES
 from plugin_channel import (
     ALLOWED_EXACT,
     ALLOWED_PREFIXES,
     DENIED_PREFIXES,
-    NEVER_DELIVERED_PREFIXES,
-    client_version_of,
-    cut_head_sha,
     PLUGIN_BY_ALLOWLIST_PREFIX,
-    GitCommandError,
     TagVisibilityError,
-    current_branch_name,
-    format_plugin_tag,
-    is_cut_branch_for,
-    next_plugin_tag_number,
-    parse_plugin_tag,
+    assert_tag_visibility,
+    client_version_of,
+    is_channel_path,
     path_has_prefix,
 )
 
@@ -80,158 +72,23 @@ def blind_repo(tmp_path: Path) -> Path:
     return _make_repo(tmp_path, base_tag=False)
 
 
-class TestTagShape:
-    def test_format_produces_the_anchored_form(self) -> None:
-        assert format_plugin_tag(VERSION, 3) == "plugin-v7.15.0-3"
-
-    @pytest.mark.parametrize(
-        ("ref", "expected"),
-        [
-            ("plugin-v7.15.0-1", ("7.15.0", 1)),
-            ("plugin-v7.15.0-12", ("7.15.0", 12)),
-        ],
-    )
-    def test_parse_accepts_the_anchored_form(
-        self, ref: str, expected: tuple[str, int]
-    ) -> None:
-        assert parse_plugin_tag(ref) == expected
-
-    @pytest.mark.parametrize(
-        "ref",
-        [
-            "plugin-v7.15.0",
-            "plugin-v7.15.0-0",
-            "plugin-v7.15.0-01",
-            "v7.15.0",
-            "plugin-v7.15-1",
-            "plugin-v7.15.0-1-2",
-            "engine-service-v0.1.85",
-            "plugin-v7.15.0-1\n",
-        ],
-    )
-    def test_parse_rejects_everything_else(self, ref: str) -> None:
-        assert parse_plugin_tag(ref) is None
-
-    def test_format_parse_round_trip(self) -> None:
-        assert parse_plugin_tag(format_plugin_tag(VERSION, 7)) == (VERSION, 7)
-
-
-class TestNextPluginTagNumber:
-    def test_empty_tag_list_with_visibility_is_one(self, sighted_repo: Path) -> None:
-        assert next_plugin_tag_number(VERSION, cwd=sighted_repo) == 1
-
-    def test_counts_past_existing_tags(self, sighted_repo: Path) -> None:
-        _git("tag", "plugin-v7.15.0-1", cwd=sighted_repo)
-        _git("tag", "plugin-v7.15.0-2", cwd=sighted_repo)
-        assert next_plugin_tag_number(VERSION, cwd=sighted_repo) == 3
-
-    def test_counts_from_the_highest_not_the_count(self, sighted_repo: Path) -> None:
-        _git("tag", "plugin-v7.15.0-3", cwd=sighted_repo)
-        assert next_plugin_tag_number(VERSION, cwd=sighted_repo) == 4
-
-    def test_ignores_a_malformed_tag(self, sighted_repo: Path) -> None:
-        _git("tag", "plugin-v7.15.0-x", cwd=sighted_repo)
-        _git("tag", "plugin-v7.15.0-1", cwd=sighted_repo)
-        assert next_plugin_tag_number(VERSION, cwd=sighted_repo) == 2
-
-    def test_is_scoped_to_the_version(self, sighted_repo: Path) -> None:
-        _git("tag", "plugin-v7.14.0-5", cwd=sighted_repo)
-        assert next_plugin_tag_number(VERSION, cwd=sighted_repo) == 1
-
-    def test_raises_when_the_enumeration_fails(
-        self, sighted_repo: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An unreadable tag list must never read as an empty one."""
-        import plugin_channel
-
-        real = plugin_channel._run_git
-
-        def failing(args: list[str], cwd: object) -> subprocess.CompletedProcess[str]:
-            if args[0] == "tag":
-                return subprocess.CompletedProcess(args, 128, stdout="", stderr="boom")
-            return real(args, cwd)
-
-        monkeypatch.setattr(plugin_channel, "_run_git", failing)
-        with pytest.raises(GitCommandError):
-            next_plugin_tag_number(VERSION, cwd=sighted_repo)
-
-
 class TestBlindCheckoutSentinel:
-    def test_a_blind_checkout_raises_instead_of_returning_one(
-        self, blind_repo: Path
-    ) -> None:
-        """The whole point of the sentinel: unfetched must never read as empty.
+    def test_a_sighted_checkout_passes(self, sighted_repo: Path) -> None:
+        assert_tag_visibility(VERSION, cwd=sighted_repo)
 
-        Window condition (b) consults next_plugin_tag_number; in a blind
-        checkout that evaluation raises, so the window composition (.4)
-        cannot grant a window here. Remove assert_tag_visibility from
-        next_plugin_tag_number and this test fails — by design.
-        """
-        with pytest.raises(TagVisibilityError):
-            next_plugin_tag_number(VERSION, cwd=blind_repo)
+    def test_a_blind_checkout_raises(self, blind_repo: Path) -> None:
+        """Unfetched must never read as clean: the eligibility gate calls this
+        before it trusts a diff from the base tag."""
+        with pytest.raises(TagVisibilityError, match="blind to tags"):
+            assert_tag_visibility(VERSION, cwd=blind_repo)
 
-    def test_existing_plugin_tags_do_not_substitute_for_the_base_tag(
+    def test_other_tags_do_not_substitute_for_the_base_tag(
         self, blind_repo: Path
     ) -> None:
         """Visibility means the BASE CLIENT tag resolves, nothing weaker."""
-        _git("tag", "plugin-v7.15.0-2", cwd=blind_repo)
+        _git("tag", "unrelated-tag", cwd=blind_repo)
         with pytest.raises(TagVisibilityError):
-            next_plugin_tag_number(VERSION, cwd=blind_repo)
-
-
-class TestCurrentBranchName:
-    def test_prefers_github_head_ref(
-        self, sighted_repo: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("GITHUB_HEAD_REF", "plugin-release/7.15.0-2")
-        assert current_branch_name(cwd=sighted_repo) == "plugin-release/7.15.0-2"
-
-    def test_falls_back_to_the_git_branch(
-        self, sighted_repo: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
-        assert current_branch_name(cwd=sighted_repo) == "main"
-
-    def test_an_empty_env_hint_is_no_hint(
-        self, sighted_repo: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("GITHUB_HEAD_REF", "")
-        assert current_branch_name(cwd=sighted_repo) == "main"
-
-    def test_detached_head_with_no_hint_is_none(
-        self, sighted_repo: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Never guess: no name means no window, not a fabricated name."""
-        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
-        _git("checkout", "-q", "--detach", cwd=sighted_repo)
-        assert current_branch_name(cwd=sighted_repo) is None
-
-
-class TestIsCutBranchFor:
-    def test_true_only_on_the_exactly_matching_cut_branch(
-        self, sighted_repo: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
-        _git("checkout", "-q", "-b", "plugin-release/7.15.0-2", cwd=sighted_repo)
-        assert is_cut_branch_for(VERSION, 2, cwd=sighted_repo) is True
-        assert is_cut_branch_for(VERSION, 3, cwd=sighted_repo) is False
-        assert is_cut_branch_for("7.14.0", 2, cwd=sighted_repo) is False
-
-    @pytest.mark.parametrize("branch", ["main", "develop"])
-    def test_false_on_ordinary_branches(
-        self, sighted_repo: Path, monkeypatch: pytest.MonkeyPatch, branch: str
-    ) -> None:
-        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
-        if branch != "main":
-            _git("checkout", "-q", "-b", branch, cwd=sighted_repo)
-        assert is_cut_branch_for(VERSION, 1, cwd=sighted_repo) is False
-
-    def test_false_when_no_branch_name_resolves(
-        self, sighted_repo: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
-        _git("checkout", "-q", "--detach", cwd=sighted_repo)
-        assert is_cut_branch_for(VERSION, 1, cwd=sighted_repo) is False
+            assert_tag_visibility(VERSION, cwd=blind_repo)
 
 
 class TestPathPrefixHelper:
@@ -273,130 +130,66 @@ def test_scripts_is_off_the_wheel_and_sdist_surface() -> None:
     ("ref", "expected"),
     [
         ("v7.24.0", "7.24.0"),
-        ("plugin-v7.24.0-1", "7.24.0"),
-        ("plugin-v7.24.0-12", "7.24.0"),
+        ("plugin-v7.24.0-1", None),  # the retired anchored form
         ("7.24.0", None),
         ("v7.24", None),
-        ("plugin-v7.24.0-0", None),
-        ("plugin-v7.24.0", None),
+        ("v7.24.0\n", None),
         ("", None),
     ],
 )
-def test_client_version_of_reads_either_ref_shape(ref: str, expected: str | None) -> None:
-    """The canonical pin reader: both invariant-R shapes yield the client
-    version, everything else None (never a ValueError from int('plugin-v7'))."""
+def test_client_version_of_reads_the_client_form_only(ref: str, expected: str | None) -> None:
+    """The canonical pin reader: the client form yields its version,
+    everything else None (never a ValueError from int('plugin-v7'))."""
     assert client_version_of(ref) == expected
 
 
-class TestCutHeadSha:
-    """The canonical pre-tag proof target (ANCHORING rule)."""
-
-    @pytest.fixture
-    def repo(self, tmp_path: Path) -> Path:
-        repo = tmp_path / "r"
-        repo.mkdir()
-        _git("init", "-q", "-b", "main", cwd=repo)
-        _git("config", "user.email", "t@t.invalid", cwd=repo)
-        _git("config", "user.name", "t", cwd=repo)
-        (repo / "seed").write_text("seed\n", encoding="utf-8")
-        _git("add", "seed", cwd=repo)
-        _git("commit", "-q", "-m", "seed", cwd=repo)
-        return repo
-
-    @pytest.fixture(autouse=True)
-    def _no_github_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
-        monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
-
-    def test_outside_github_the_target_is_head(self, repo: Path) -> None:
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
-        ).stdout.strip()
-        assert cut_head_sha(cwd=repo) == head
-
-    def test_on_a_pull_request_event_the_target_is_the_pr_head(
-        self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """R1 of the a2wmi.12 fix: HEAD on a pull_request checkout is the
-        synthetic merge ref; the payload's pull_request.head.sha is the cut."""
-        event = tmp_path / "event.json"
-        event.write_text(json.dumps({"pull_request": {"head": {"sha": "pr-head-sha"}}}))
-        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
-        monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
-        assert cut_head_sha(cwd=repo) == "pr-head-sha"
-
-    def test_a_non_pull_request_event_uses_head(
-        self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        event = tmp_path / "event.json"
-        event.write_text(json.dumps({"after": "push-sha"}))
-        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
-        monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
-        ).stdout.strip()
-        assert cut_head_sha(cwd=repo) == head
-
-    def test_a_pull_request_payload_without_a_head_sha_raises(
-        self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        event = tmp_path / "event.json"
-        event.write_text(json.dumps({"pull_request": {}}))
-        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
-        monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
-        with pytest.raises(GitCommandError, match="head.sha"):
-            cut_head_sha(cwd=repo)
-
-    def test_an_unresolvable_head_raises(self, tmp_path: Path) -> None:
-        empty = tmp_path / "empty"
-        empty.mkdir()
-        _git("init", "-q", "-b", "main", cwd=empty)
-        with pytest.raises(GitCommandError, match="HEAD does not resolve"):
-            cut_head_sha(cwd=empty)
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("conexus/skills/a/SKILL.md", True),
+        ("sn/hooks/hooks.json", True),
+        ("tool-spill/hooks/x.py", True),
+        ("prose-edit/skills/p/SKILL.md", True),
+        (".claude-plugin/marketplace.json", True),
+        ("conexus/plans/builtin/x.yml", False),  # wheel package data, carved out
+        ("conexus/daemon/x.yml", False),
+        ("src/nexus/cli.py", False),
+        ("tests/test_a.py", False),
+    ],
+)
+def test_is_channel_path(path: str, expected: bool) -> None:
+    """Empty DENIED_PREFIXES and the two carve-out rows fail: the plugin trees
+    hold wheel content that a plugin-only release may never alter."""
+    assert is_channel_path(path) is expected
 
 
-def test_never_delivered_prefixes_are_off_the_wheel_and_sdist_surface() -> None:
-    """The proof's carve-out may only ever name paths that cannot reach an
-    installed user: none of NEVER_DELIVERED_PREFIXES may appear in, or
-    contain, a wheel force-include or sdist include entry. Add one that
-    does and this fails — the carve-out can never hide wheel content."""
-    assert NEVER_DELIVERED_PREFIXES, "the carve-out must not be empty"
-    for never in NEVER_DELIVERED_PREFIXES:
-        for entry in _wheel_and_sdist_entries():
-            assert not path_has_prefix(entry, never), (entry, never)
-            assert not path_has_prefix(never, entry), (entry, never)
+def test_free_paths_are_off_the_wheel_and_sdist_surface() -> None:
+    """The eligibility gate treats FREE_PREFIXES and FREE_EXACT as paths that
+    never reach the nx code under test. That holds only while none of them is
+    in, or contains, a wheel force-include or sdist include entry (nexus-rbmja.9;
+    this replaces the pin that went with the wheel-surface proof). Add an entry
+    that overlaps and this fails: a free path can never hide wheel content."""
+    assert FREE_PREFIXES and FREE_EXACT, "the free set must not be empty"
+    entries = _wheel_and_sdist_entries()
+    assert entries, "no wheel or sdist entries parsed: the check examined nothing"
+    for free in (*FREE_PREFIXES, *FREE_EXACT):
+        for entry in entries:
+            assert not path_has_prefix(entry, free), (entry, free)
+            assert not path_has_prefix(free, entry), (entry, free)
 
 
-def test_never_delivered_paths_are_not_offenders(tmp_path: Path) -> None:
-    """A range whose only off-channel changes are never-delivered
-    (tests/, docs/, scripts/, .github/) proves clean; src/ still offends."""
-    from plugin_channel import wheel_surface_offenders
-
-    repo = tmp_path / "r"
-    repo.mkdir()
-
-    def run(*args: str) -> None:
-        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
-
-    run("init", "-q", "-b", "main")
-    run("config", "user.email", "t@t.invalid")
-    run("config", "user.name", "t")
-    (repo / "seed").write_text("seed\n", encoding="utf-8")
-    run("add", "seed")
-    run("commit", "-q", "-m", "seed")
-    run("tag", "v0.0.1")
-    for rel in ("tests/test_a.py", "docs/a.md", "scripts/a.py", ".github/workflows/a.yml", "conexus/skills/a.md"):
-        target = repo / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("x\n", encoding="utf-8")
-        run("add", rel)
-    run("commit", "-q", "-m", "machinery + plugin")
-    assert wheel_surface_offenders("v0.0.1", "HEAD", cwd=repo) == []
-    (repo / "src").mkdir()
-    (repo / "src" / "w.py").write_text("wheel\n", encoding="utf-8")
-    run("add", "src/w.py")
-    run("commit", "-q", "-m", "wheel")
-    assert wheel_surface_offenders("v0.0.1", "HEAD", cwd=repo) == ["src/w.py"]
+@pytest.mark.parametrize("planted", ["docs/", "tests/e2e/lib", "CHANGELOG.md", "tests"])
+def test_the_free_path_pin_fires_on_a_planted_entry(
+    planted: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-vacuity: a scratch copy of the entry list with a free path planted
+    in it (the real pyproject is never touched) must fail the pin."""
+    real = _wheel_and_sdist_entries()
+    monkeypatch.setattr(
+        sys.modules[__name__], "_wheel_and_sdist_entries", lambda: [*real, planted]
+    )
+    with pytest.raises(AssertionError):
+        test_free_paths_are_off_the_wheel_and_sdist_surface()
 
 
 def test_the_allowlist_carves_out_every_wheel_path() -> None:

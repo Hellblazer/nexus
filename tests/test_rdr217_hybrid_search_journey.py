@@ -103,7 +103,7 @@ def test_hybrid_search_returns_flat_rows_from_the_real_engine(t2_service_env) ->
     db = hvc.HttpVectorClient(tenant=tenant)
     ids = _seed(db)
 
-    rows = db.hybrid_search(_QUERY, [_COLLECTION], n_results=5)
+    rows = db.hybrid_search(_QUERY, [_COLLECTION], n_results=5, sensitivity="include")
 
     assert rows, (
         "the lexical gate matched nothing against documents carrying the "
@@ -146,11 +146,11 @@ def test_rerank_on_the_hybrid_route_carries_the_same_envelope(t2_service_env) ->
     db = hvc.HttpVectorClient(tenant=tenant)
     _seed(db)
 
-    plain = db.hybrid_search(_QUERY, [_COLLECTION], n_results=5)
+    plain = db.hybrid_search(_QUERY, [_COLLECTION], n_results=5, sensitivity="include")
     meta: dict = {}
     reranked = db.hybrid_search(_QUERY, [_COLLECTION], n_results=5,
                                 rerank=True, rerank_top_k=3,
-                                rerank_meta_out=meta)
+                                rerank_meta_out=meta, sensitivity="include")
 
     assert set(meta) >= {"degraded", "error", "model", "retry_after_seconds"}
     assert isinstance(meta["degraded"], bool)
@@ -182,7 +182,7 @@ def test_a_bearer_bound_to_another_tenant_gets_422_not_an_empty_list(
     tenant_a = t2_service_env
     db_a = hvc.HttpVectorClient(tenant=tenant_a)
     _seed(db_a)
-    assert db_a.hybrid_search(_QUERY, [_COLLECTION], n_results=5), (
+    assert db_a.hybrid_search(_QUERY, [_COLLECTION], n_results=5, sensitivity="include"), (
         "precondition: tenant A must be able to read its own rows, or the "
         "refusal below would prove nothing"
     )
@@ -192,7 +192,7 @@ def test_a_bearer_bound_to_another_tenant_gets_422_not_an_empty_list(
     db_b = hvc.HttpVectorClient(tenant=tenant_a)  # A's collection, B's bearer
 
     with pytest.raises(VectorServiceError) as exc:
-        db_b.hybrid_search(_QUERY, [_COLLECTION], n_results=5)
+        db_b.hybrid_search(_QUERY, [_COLLECTION], n_results=5, sensitivity="include")
     assert exc.value.code == 422, exc.value
     assert _COLLECTION in str(exc.value)
 
@@ -235,9 +235,9 @@ def test_the_text_gate_is_live_and_an_empty_result_is_the_gate_not_a_dead_route(
     # depended on a neighbour it never named. A control that needs a neighbour
     # is not a control. The live-route call is therefore inline, and this test
     # now reds on its own against a dead route.
-    alive = db.hybrid_search(_QUERY, [_COLLECTION], n_results=5)
-    gated = db.hybrid_search(semantic_only, [_COLLECTION], n_results=5)
-    vector = db.search(semantic_only, [_COLLECTION], n_results=5)
+    alive = db.hybrid_search(_QUERY, [_COLLECTION], n_results=5, sensitivity="include")
+    gated = db.hybrid_search(semantic_only, [_COLLECTION], n_results=5, sensitivity="include")
+    vector = db.search(semantic_only, [_COLLECTION], n_results=5, sensitivity="include")
 
     assert alive, (
         "control failed: the hybrid route returned nothing for a query whose "

@@ -84,7 +84,7 @@ def test_a_fence_less_document_is_stale_then_indexed_then_skipped(t2_service_env
     # Controls: the legacy shape the old gate skipped on. A chunk row carries the file's hash and
     # the document has no fence at all.
     col = client.get_collection(_COLLECTION)
-    rows = col.get(ids=[prepared[0][0]], include=["metadatas"])["metadatas"]
+    rows = col.get(ids=[prepared[0][0]], include=["metadatas"], sensitivity="include")["metadatas"]
     assert rows and rows[0].get("content_hash") == content_hash
     before = _doc_for(md)
     assert before.index_state is None and not before.index_content_hash, before

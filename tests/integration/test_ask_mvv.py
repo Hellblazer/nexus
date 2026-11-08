@@ -10,15 +10,18 @@ and the answer-record GET are the engine's own routes.
 Four engine tests and one bound:
 
 * ``test_steps_1_to_4_...``: the ``--via cli`` path under a pty (POSIX only), then the drain frame, then
-  the stale-version and deleted-ask arms. Run without a T1 session, as Sam at a bare terminal, so the
+  the stale-version and deleted-ask arms, then a second cli answer that must reuse the minted sender id. Run without a T1 session, as Sam at a bare terminal, so the
   engine stamps nothing and the frame says "no stamp".
 * ``test_mediator_answer_...``: ``--via mediator`` without a pty and without ``--note``, so the frame's
   words can only have come from the record's ``sam_words``.
 * ``test_a_session_carrying_a_t1_token_...``: the stamp control. The same mediator call from a process
   holding the fixture's T1 token must make the frame print that session's id, so "no stamp" elsewhere is
   a measured absence.
-* ``test_step_5_...``: an ask with ``after:`` is refused and writes nothing; the same call succeeds once
-  the line is gone.
+* ``test_step_5_...``: an ask with ``after:`` is refused and writes nothing, on both ``--via`` routes (the
+  cli arm without a pty); the mediator call succeeds once the line is gone.
+
+The assertions pin what the RDR requires (the refusal's reason, the versions and text it prints, the ref in
+the sent line, a canonical UUID sender), not the CLI's exact sentences.
 
 The only skip this module declares is the Windows one on the pty test, and
 ``test_the_only_declared_skip_is_the_windows_pty_one`` bounds it. A skip raised by a fixture (the engine
@@ -240,7 +243,7 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
     # Step 2: without a TTY the call is refused and writes nothing, so the pty below is what lets it through.
     answer = ["ask", "answer", REF, "1", "--expect", version, "--via", "cli", "--note", "accept the gap"]
     refused = _nx(answer, env, tmp_path)  # stdin is /dev/null
-    assert refused.returncode != 0 and "needs stdin to be a TTY" in refused.stderr, refused.stderr
+    assert refused.returncode != 0 and "tty" in refused.stderr.lower(), refused.stderr  # the RDR: "stdin must be a TTY"
     assert _rows("asks") == [] and _mailbox(ASKER) == []
 
     # ... under a pty it writes exactly one `sent` record and exactly one mailbox tuple.
@@ -258,16 +261,17 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
     mail = tuples[0]
     assert record["tuple_id"] == mail.id
     assert mail.subspace == f"mailbox/{ASKER}" and mail.keys == {"to": ASKER}
-    cli_sender = (tmp_path / "config" / "ask-cli-sender").read_text(encoding="utf-8").strip()
-    assert str(uuid.UUID(cli_sender)) == cli_sender, "the cli sender id minted under the config dir is a canonical UUID"
-    assert mail.dims.get("from") == cli_sender and mail.dims.get("address_kind") == "session"
+    cli_sender = str(mail.dims.get("from"))
+    assert str(uuid.UUID(cli_sender)) == cli_sender != ASKER, "the cli sender is a canonical UUID, not the asker's own id"
+    assert mail.dims.get("address_kind") == "session"
     assert mail.dims.get("kind") == "reply" and mail.dims.get("correlation_id") == f"ask:{ASK_ID}@{version}"
     assert mail.body == (
         f"nx-ask-answer v1\nask: {ASK_ID}\nversion: {version}\nchoice: 1\nvia: cli\nanswer: {record['answer_id']}\n"
     )
     assert "accept the gap" not in (mail.body or ""), "Sam's words travel in the record, never the mail"
     assert not mail.sender_session, f"the CLI ran without a T1 session, so the engine stamps nothing: {mail.sender_session!r}"
-    assert f"sent: {REF}@{version} choice 1 via cli; tuple {mail.id}" in sent.stdout
+    # The sent line names the ask, the version, the choice, the route and the tuple (wording is the CLI's).
+    assert all(part in sent.stdout for part in (REF, version, "choice 1", "cli", mail.id)), sent.stdout
     assert _groups_of(_list(env, tmp_path), REF) == ["answered"], "the answered ask moves to the answered group"
 
     # Step 3: the asker's drain hook renders the unverified-claim frame from the RECORD.
@@ -291,8 +295,9 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
     # Under the pty the TTY check passes, so the version mismatch is the only refusal that can fire. It prints the current text.
     stale = _nx_under_pty(["ask", "answer", REF, "1", "--expect", mail_version, "--via", "cli"], env, tmp_path)
     assert stale.returncode != 0
-    assert f"--expect {mail_version} is not the current version {after['version']}" in stale.stderr, stale.stderr
-    assert f"question: {after['question']}" in stale.stderr and f"1. {after['options'][0]['text']}" in stale.stderr, stale.stderr
+    # The RDR requires the refusal to name both versions and to print the ask's current text.
+    assert mail_version in stale.stderr and after["version"] in stale.stderr, stale.stderr
+    assert after["question"] in stale.stderr and after["options"][0]["text"] in stale.stderr, stale.stderr
     assert len(_rows("asks")) == 1 and _mailbox(ASKER) == [], "the refused call wrote no record and no tuple"
 
     # ... and when the ask block is gone altogether, the asker's re-read says so.
@@ -300,8 +305,18 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
     assert f"ask: {ASK_ID}" not in gone
     _put("threads", ENTRY, gone)
     missing = _nx(["ask", "show", REF], env, tmp_path)
-    assert missing.returncode != 0 and f"no ask '{REF}' on the board" in missing.stderr, missing.stderr
+    assert missing.returncode != 0 and REF in missing.stderr and "Traceback" not in missing.stderr, missing.stderr
     assert _groups_of(_list(env, tmp_path), REF) == []
+
+    # Step 6, "minted once" (RDR: "for `cli` a UUID minted once in the nexus config dir"): the ask is back on the
+    # board at a new version, and a second cli answer under the same config dir carries the same `from`.
+    _put("threads", ENTRY, edited)
+    again = _nx_under_pty(["ask", "answer", REF, "1", "--expect", after["version"], "--via", "cli"], env, tmp_path)
+    assert again.returncode == 0, again.stderr
+    second = _mailbox(ASKER)
+    assert len(second) == 1 and second[0].id != mail.id, [t.id for t in second]
+    assert second[0].dims.get("from") == cli_sender, "the cli sender id is minted once per config dir, not per call"
+    assert len(_rows("asks")) == 2
 
 
 # --- the mediator path and the stamp control ----------------------------------------------------
@@ -374,9 +389,16 @@ def test_step_5_an_ask_with_an_after_line_is_refused_and_writes_nothing(t2_servi
 
     refused = _nx(_mediator_call(ref, ask["version"]), env, tmp_path)
     assert refused.returncode != 0
-    assert "after:" in refused.stderr and "engine 0.1.180 deploys" in refused.stderr and "not answerable" in refused.stderr, refused.stderr
+    assert "after" in refused.stderr and "engine 0.1.180 deploys" in refused.stderr, refused.stderr
     assert _rows("asks") == [], "the refusal wrote no answer record"
     assert _mailbox(other) == [], "the refusal wrote no tuple"
+
+    # The cli route, without a pty: after: is checked before the TTY, so the refusal is the after: one and not
+    # the missing-terminal one. A reordering would show the TTY refusal here (or, under a pty, a send).
+    cli = _nx(["ask", "answer", ref, "1", "--expect", ask["version"], "--via", "cli"], env, tmp_path)
+    assert cli.returncode != 0
+    assert "after" in cli.stderr and "engine 0.1.180 deploys" in cli.stderr and "tty" not in cli.stderr.lower(), cli.stderr
+    assert _rows("asks") == [] and _mailbox(other) == [], "the cli refusal wrote nothing either"
 
     # Positive control: with the line gone (a new version) the same call goes through, so the empty reads above
     # were measurements of a working record store and mailbox.

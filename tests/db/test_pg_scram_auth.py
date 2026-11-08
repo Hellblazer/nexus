@@ -469,3 +469,76 @@ class TestOutsideRepairLegsAuthenticate:
     ) -> None:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(box.config_dir))
         assert pp._psql_tuples(box.bins, box.port, "nexus", _os_user(), "SELECT 1") == "1"
+
+
+# ── nx daemon service note-uri-pairs against the server's real answers (nexus-bivz3.28) ────────────────────────
+
+
+def _seed_pair_tables(box: _Box, role: str) -> None:
+    """The two tables the verb reads, with one pair and the executed changeset row. The engine is not involved."""
+    with pp.superuser_auth(box.creds["PG_SUPERUSER_PASS"]):
+        pp._psql(
+            box.bins, box.port, "nexus", role,
+            "CREATE SCHEMA IF NOT EXISTS nexus; "
+            "CREATE TABLE nexus.catalog_documents (tenant_id text, tumbler text, source_uri text, deleted_at timestamptz); "
+            "CREATE TABLE IF NOT EXISTS public.databasechangelog (id text, exectype text); "
+            "INSERT INTO nexus.catalog_documents VALUES "
+            "('default', '1.1.9', 'chroma://knowledge__scram/n', NULL), ('default', '1.1.10', 'nx-note://knowledge__scram/n', NULL); "
+            "INSERT INTO public.databasechangelog VALUES ('note-uri-001-1', 'EXECUTED')",
+        )
+
+
+@pytest.fixture
+def box_without_login_env(bins: pp.PgBinaries, monkeypatch: pytest.MonkeyPatch):
+    """A cluster provisioned from a process with neither USER nor LOGNAME (cron, a service manager): its superuser
+    is `postgres`, which is not the login name the verb derives afterwards."""
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.delenv("LOGNAME", raising=False)
+    config_dir = Path(pg_data_tempdir("nexus_scram_pg_"))
+    try:
+        pp.provision(config_dir, force_new_port=True)
+        apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)
+        yield _Box(config_dir, bins)
+    finally:
+        _remove(bins, config_dir)
+
+
+class TestNoteUriPairsOnARealScramCluster:
+    def test_the_password_reaches_a_real_psql_as_pgpassword(self, box: _Box) -> None:
+        """The verb's default runner against a scram cluster: it authenticates only if PGPASSWORD got through."""
+        from nexus.db.note_uri_pairs import NoteUriPairsError, list_note_uri_pairs  # noqa: PLC0415
+
+        _seed_pair_tables(box, _os_user())
+        report = list_note_uri_pairs(box.config_dir)
+        assert report.role == _os_user()
+        assert [(p.tenant_id, p.chroma_row, p.nx_note_row) for p in report.pairs] == [("default", "1.1.9", "1.1.10")]
+        assert report.changeset == "EXECUTED"
+        assert box.creds["PG_SUPERUSER_PASS"] not in "\n".join(report.lines())
+
+        # Control: the same cluster, credentials with the password removed, is refused by the real server.
+        bare = box.config_dir / "no-password"
+        bare.mkdir()
+        (bare / "pg_credentials").write_text(f"PG_PORT={box.port}\n", encoding="utf-8")
+        with pytest.raises(NoteUriPairsError, match="PG_SUPERUSER_PASS is recorded"):
+            list_note_uri_pairs(bare)
+
+    def test_a_missing_role_is_answered_like_a_wrong_password_never_as_a_missing_role(self, box: _Box) -> None:
+        """The premise of the `postgres` fallback's key: scram hides which roles exist."""
+        res = _login(box.bins, box.port, "nx_no_such_role", box.creds["PG_SUPERUSER_PASS"])
+        assert res.returncode == 2
+        assert "password authentication failed" in res.stderr
+        assert "does not exist" not in res.stderr
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows has one derivation and no postgres fallback")
+    def test_a_cluster_whose_superuser_is_postgres_is_reached_by_the_fallback(
+        self, box_without_login_env: _Box, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nexus.db.note_uri_pairs import list_note_uri_pairs  # noqa: PLC0415
+
+        b = box_without_login_env
+        assert b.creds["PG_SUPERUSER_PASS"]
+        _seed_pair_tables(b, "postgres")
+        monkeypatch.setenv("USER", "nx_login_that_owns_nothing")  # what a later interactive shell would derive
+        report = list_note_uri_pairs(b.config_dir)
+        assert report.role == "postgres"
+        assert [(p.chroma_row, p.nx_note_row) for p in report.pairs] == [("1.1.9", "1.1.10")]

@@ -72,6 +72,13 @@ def repo(tmp_path: Path) -> Path:
     return repo
 
 
+def _load(name: str):
+    spec = importlib.util.spec_from_file_location(name, SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ, NX_NO_TELEMETRY="1")
     return subprocess.run([sys.executable, str(SCRIPT), "--repo", str(repo), "--base", "develop", *args],
@@ -195,7 +202,7 @@ def test_a_base_unpacked_under_a_symlinked_temp_dir_attributes_a_failing_module(
     _git(repo, "checkout", "-q", "develop")
     _commit(repo, {"tests/test_b.py": "import no_such_module_at_base\n\ndef test_free():\n    pass\n"}, "bad base")
     base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    counts, failed = td.base_census(repo, base, ["tests/test_a.py", "tests/test_b.py"],
+    counts, failed, _skipped = td.base_census(repo, base, ["tests/test_a.py", "tests/test_b.py"],
                                     deadline=time.monotonic() + 120)
     assert counts == {"tests/test_a.py": 2}
     assert list(failed) == ["tests/test_b.py"] and "no_such_module_at_base" in failed["tests/test_b.py"]
@@ -287,3 +294,73 @@ def test_a_deselected_test_is_not_counted(repo: Path) -> None:
     proc = _run(repo)
     assert proc.returncode == 0, proc.stderr
     assert "tests/test_b.py" not in proc.stdout
+
+
+# --- nexus-xxuvz: a module skipped at collection is uncounted, on either side, and never refused -----------------------
+
+_SKIPPED_AT_COLLECTION = "import pytest\n\npytest.importorskip('no_such_module_anywhere')\n\n"
+
+
+def test_the_census_returns_a_collection_skipped_module_apart_from_the_failed_ones(repo: Path) -> None:
+    td = _load("tenant_delta_skipped")
+    _commit(repo, {"tests/test_b.py": _SKIPPED_AT_COLLECTION + "@pytest.mark.t2_tenant\ndef test_m():\n    pass\n"},
+            "head")
+    counts, failed, skipped = td.census(repo, ["tests/test_a.py", "tests/test_b.py"],
+                                        deadline=time.monotonic() + 120)
+    assert counts == {"tests/test_a.py": 2}
+    assert failed == {}
+    assert list(skipped) == ["tests/test_b.py"] and "no_such_module_anywhere" in skipped["tests/test_b.py"]
+
+
+def test_a_module_skipped_at_head_with_a_base_count_is_a_warning_not_a_drop_to_zero(repo: Path) -> None:
+    """test_a counts 2 at the base; skipped at collection at head it would read 2 -> 0 (-2). It is named as a
+    WARNING instead (a count the head hides), left out of the delta, and --strict fails on it as on the base side."""
+    _commit(repo, {"tests/test_a.py": _SKIPPED_AT_COLLECTION + "@pytest.mark.t2_tenant\ndef test_one():\n    pass\n"},
+            "head")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "tests/test_a.py: 2 -> 0" not in proc.stdout
+    assert "WARNING: tests/test_a.py: skipped at collection at head, 2 at the merge base" in proc.stdout
+    assert "no_such_module_anywhere" in proc.stdout
+    assert "tenant delta: +0 test(s)" in proc.stdout and "1 skipped at collection" in proc.stdout
+    assert _run(repo, "--strict").returncode == 1
+    assert _run(repo, "--quiet-if-zero").stdout != "", "a hidden base count is not silent under --quiet-if-zero"
+
+
+def test_a_module_skipped_at_head_with_no_base_count_is_a_note_and_not_strict(repo: Path) -> None:
+    _commit(repo, {"tests/test_b.py": _SKIPPED_AT_COLLECTION + "@pytest.mark.t2_tenant\ndef test_m():\n    pass\n"},
+            "head")
+    proc = _run(repo, "--strict")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "NOTE: tests/test_b.py: skipped at collection at head" in proc.stdout
+    assert "WARNING" not in proc.stdout
+
+
+def test_a_module_skipped_at_the_base_with_tenant_tests_at_head_is_named_and_cannot_rule_out_a_rise(
+        repo: Path) -> None:
+    _git(repo, "checkout", "-q", "develop")
+    _commit(repo, {"tests/test_b.py": _SKIPPED_AT_COLLECTION + "def test_free():\n    pass\n"}, "base skips test_b")
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "rebase", "-q", "develop")
+    _commit(repo, {"tests/test_b.py": "import pytest\n\n@pytest.mark.t2_tenant\ndef test_m():\n    pass\n"}, "head")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "tests/test_b.py: 0 -> 1" not in proc.stdout
+    assert "WARNING: tests/test_b.py: skipped at collection at the merge base, 1 at head" in proc.stdout
+    assert "no_such_module_anywhere" in proc.stdout
+    assert _run(repo, "--strict").returncode == 1
+
+
+def test_a_module_skipped_on_both_sides_is_quiet_under_quiet_if_zero_and_never_refused(repo: Path) -> None:
+    """A platform-conditional skip holds on every push: it must not say 'could not count' (exit 2) each time."""
+    text = _SKIPPED_AT_COLLECTION + "def test_free():\n    pass\n"
+    _git(repo, "checkout", "-q", "develop")
+    _commit(repo, {"tests/test_b.py": text}, "base skips test_b")
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "rebase", "-q", "develop")
+    _commit(repo, {"tests/test_b.py": text + "\ndef test_more():\n    pass\n"}, "head")
+    quiet = _run(repo, "--quiet-if-zero", "--strict")
+    assert quiet.returncode == 0 and quiet.stdout == "" and quiet.stderr == "", quiet.stdout + quiet.stderr
+    loud = _run(repo, "--strict")
+    assert loud.returncode == 0 and "could not count" not in loud.stderr
+    assert "skipped at collection" in loud.stdout

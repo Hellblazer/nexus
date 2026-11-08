@@ -396,7 +396,7 @@ def test_voyage_code3_index_and_query():
              "embedding_model": "voyage-code-3", "expires_at": "", "ttl_days": 0},
         ) == chunk_id(code)
         results = db.search(query=f"user authentication JWT {uid}",
-                            collection_names=[collection], n_results=3)
+                            collection_names=[collection], n_results=3, sensitivity="include")
         assert results and any(uid in r.get("content", "") for r in results)
         _assert_engine_embedded_with(db, collection, "voyage-code-3")
     finally:
@@ -441,7 +441,7 @@ def test_cce_query_retrieves_cce_indexed_markdown():
         try:
             assert index_markdown(md_path, corpus=f"int-cce-{uid}", t3=db) > 0
             results = db.search(query=f"authentication JWT bcrypt {uid}",
-                                collection_names=[collection], n_results=5)
+                                collection_names=[collection], n_results=5, sensitivity="include")
             assert results and any(uid in r.get("content", "") for r in results)
             assert results[0].get("embedding_model") == "voyage-context-3"
             _assert_engine_embedded_with(db, collection, "voyage-context-3")
@@ -475,7 +475,7 @@ def test_t3_put_embedding_model_in_search_metadata():
         )
         assert doc_id
         results = db.search(query=f"provenance test {uid}",
-                            collection_names=[collection], n_results=5)
+                            collection_names=[collection], n_results=5, sensitivity="include")
         assert results
         matching = [r for r in results if uid in r.get("content", "")]
         assert matching and matching[0].get("embedding_model") == "voyage-context-3"

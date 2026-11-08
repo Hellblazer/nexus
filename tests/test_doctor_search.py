@@ -529,7 +529,7 @@ class _ChunkT3:
         n = self.n_chunks
 
         class _Coll:
-            def get(self, include=None, limit=None):
+            def get(self, include=None, limit=None, *, sensitivity="include"):
                 k = min(n, limit or n)
                 return {"ids": [f"{col}#{i}" for i in range(k)],
                         "documents": [f"text {i} of {col}" for i in range(k)]}
@@ -541,7 +541,7 @@ def _neighbour_search(neighbour_distance, self_distance=0.0, include_self=True):
     or absent) plus four neighbours at neighbour_distance(col)."""
     from nexus.search_engine import SearchResult
 
-    def search(query, cols, n_results, t3, diagnostics_out=None, threshold_override=None):
+    def search(query, cols, n_results, t3, diagnostics_out=None, threshold_override=None, *, sensitivity="include"):
         col = cols[0]
         sid = f"{col}#{query.split()[1]}"
         rows = [SearchResult(id=f"{col}-n{j}", content="", distance=neighbour_distance(col) + j * 0.01,
@@ -571,7 +571,7 @@ def test_the_canned_query_reads_threshold_drop_on_healthy_collections() -> None:
     """The defect, reproduced: a canned query far from every collection."""
     from nexus.search_engine import SearchDiagnostics
 
-    def canned_search(query, cols, n_results, t3, diagnostics_out=None):
+    def canned_search(query, cols, n_results, t3, diagnostics_out=None, **_sens_kw):
         diagnostics_out.append(SearchDiagnostics(
             per_collection={cols[0]: (4, 4, 0.5, 0.8)}, total_dropped=4, total_raw=4,
             failed_collections={}))
@@ -618,7 +618,7 @@ def test_the_verdict_is_the_median_over_the_samples() -> None:
     t3 = _ChunkT3()
     from nexus.search_engine import SearchResult
 
-    def search(query, cols, n_results, t3_, diagnostics_out=None, threshold_override=None):
+    def search(query, cols, n_results, t3_, diagnostics_out=None, threshold_override=None, *, sensitivity="include"):
         col = cols[0]
         i = int(query.split()[1])
         d = 0.6 if i == 0 else 0.3  # sample 0 alone sits past the threshold
@@ -687,7 +687,7 @@ def test_a_near_duplicate_neighbour_does_not_make_a_high_floor_collection_health
     threshold_drop as matched."""
     from nexus.search_engine import SearchResult
 
-    def search(query, cols, n_results, t3, diagnostics_out=None, threshold_override=None):
+    def search(query, cols, n_results, t3, diagnostics_out=None, threshold_override=None, *, sensitivity="include"):
         col = cols[0]
         return [SearchResult(id=f"{col}-dup", content="", distance=0.001, collection=col, metadata={}),
                 SearchResult(id=f"{col}-far", content="", distance=0.7, collection=col, metadata={})]
@@ -703,7 +703,7 @@ def test_the_neighbour_count_is_the_window_judged_not_the_overfetched_pool() -> 
     neighbours than the probe's own depth."""
     from nexus.search_engine import SearchResult
 
-    def wide_search(query, cols, n_results, t3, diagnostics_out=None, threshold_override=None):
+    def wide_search(query, cols, n_results, t3, diagnostics_out=None, threshold_override=None, **_sens_kw):
         col = cols[0]
         return [SearchResult(id=f"{col}-n{j}", content="", distance=0.3 + j * 0.01,
                              collection=col, metadata={}) for j in range(24)]

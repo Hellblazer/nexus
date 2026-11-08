@@ -136,7 +136,7 @@ def test_init_cmd_does_not_start_service_when_no_binary(tmp_path, monkeypatch):
 
     started = {"called": False}
 
-    def _start_must_not_run():
+    def _start_must_not_run(cd):
         started["called"] = True
 
     monkeypatch.setattr(init_mod, "_start_service_step", _start_must_not_run)

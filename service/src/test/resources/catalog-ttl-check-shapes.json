@@ -1,0 +1,214 @@
+[
+ {
+  "name": "int-7",
+  "meta_json": "{\"ttl_days\":7}",
+  "carries_ttl": true
+ },
+ {
+  "name": "int-1",
+  "meta_json": "{\"ttl_days\":1}",
+  "carries_ttl": true
+ },
+ {
+  "name": "int-999999999",
+  "meta_json": "{\"ttl_days\":999999999}",
+  "carries_ttl": true
+ },
+ {
+  "name": "int-1000000000-past-timedelta",
+  "meta_json": "{\"ttl_days\":1000000000}",
+  "carries_ttl": false
+ },
+ {
+  "name": "float-7.5-truncates-to-7",
+  "meta_json": "{\"ttl_days\":7.5}",
+  "carries_ttl": true
+ },
+ {
+  "name": "float-0.5-truncates-to-0",
+  "meta_json": "{\"ttl_days\":0.5}",
+  "carries_ttl": false
+ },
+ {
+  "name": "float-999999999.9",
+  "meta_json": "{\"ttl_days\":999999999.9}",
+  "carries_ttl": true
+ },
+ {
+  "name": "number-1e400",
+  "meta_json": "{\"ttl_days\":1e400}",
+  "carries_ttl": false
+ },
+ {
+  "name": "zero-the-retraction-value",
+  "meta_json": "{\"ttl_days\":0}",
+  "carries_ttl": false
+ },
+ {
+  "name": "negative",
+  "meta_json": "{\"ttl_days\":-3}",
+  "carries_ttl": false
+ },
+ {
+  "name": "string-7",
+  "meta_json": "{\"ttl_days\":\"7\"}",
+  "carries_ttl": true
+ },
+ {
+  "name": "string-padded",
+  "meta_json": "{\"ttl_days\":\" 7 \"}",
+  "carries_ttl": true
+ },
+ {
+  "name": "string-plus",
+  "meta_json": "{\"ttl_days\":\"+7\"}",
+  "carries_ttl": true
+ },
+ {
+  "name": "string-leading-zeros",
+  "meta_json": "{\"ttl_days\":\"007\"}",
+  "carries_ttl": true
+ },
+ {
+  "name": "string-999999999",
+  "meta_json": "{\"ttl_days\":\"999999999\"}",
+  "carries_ttl": true
+ },
+ {
+  "name": "string-1000000000",
+  "meta_json": "{\"ttl_days\":\"1000000000\"}",
+  "carries_ttl": false
+ },
+ {
+  "name": "string-zero",
+  "meta_json": "{\"ttl_days\":\"0\"}",
+  "carries_ttl": false
+ },
+ {
+  "name": "string-negative",
+  "meta_json": "{\"ttl_days\":\"-7\"}",
+  "carries_ttl": false
+ },
+ {
+  "name": "string-abc",
+  "meta_json": "{\"ttl_days\":\"abc\"}",
+  "carries_ttl": false
+ },
+ {
+  "name": "string-empty",
+  "meta_json": "{\"ttl_days\":\"\"}",
+  "carries_ttl": false
+ },
+ {
+  "name": "string-decimal",
+  "meta_json": "{\"ttl_days\":\"7.0\"}",
+  "carries_ttl": false
+ },
+ {
+  "name": "string-200-digits",
+  "meta_json": "{\"ttl_days\":\"99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999\"}",
+  "carries_ttl": false
+ },
+ {
+  "name": "string-underscore-digits",
+  "meta_json": "{\"ttl_days\":\"1_0\"}",
+  "carries_ttl": false,
+  "reader_ttl": true,
+  "differs_from_reader": "int('1_0') is 10 in Python; the CHECK does not read underscores, so such an entry is not counted and expires late through the indexed_at fallback, never early"
+ },
+ {
+  "name": "string-arabic-indic-digit",
+  "meta_json": "{\"ttl_days\":\"\\u0667\"}",
+  "carries_ttl": false,
+  "reader_ttl": true,
+  "differs_from_reader": "int() reads non-ASCII decimal digits; the CHECK reads ASCII only (same late-expiry fallback)"
+ },
+ {
+  "name": "boolean-true",
+  "meta_json": "{\"ttl_days\":true}",
+  "carries_ttl": false
+ },
+ {
+  "name": "boolean-false",
+  "meta_json": "{\"ttl_days\":false}",
+  "carries_ttl": false
+ },
+ {
+  "name": "json-null",
+  "meta_json": "{\"ttl_days\":null}",
+  "carries_ttl": false
+ },
+ {
+  "name": "object",
+  "meta_json": "{\"ttl_days\":{\"days\":7}}",
+  "carries_ttl": false
+ },
+ {
+  "name": "array",
+  "meta_json": "{\"ttl_days\":[7]}",
+  "carries_ttl": false
+ },
+ {
+  "name": "absent",
+  "meta_json": "{}",
+  "carries_ttl": false
+ },
+ {
+  "name": "other-keys-only",
+  "meta_json": "{\"tags\":[\"a\"],\"category\":\"x\"}",
+  "carries_ttl": false
+ },
+ {
+  "name": "metadata-is-a-json-null",
+  "meta_json": "null",
+  "carries_ttl": false
+ },
+ {
+  "name": "metadata-is-an-array",
+  "meta_json": "[7]",
+  "carries_ttl": false
+ },
+ {
+  "name": "metadata-is-a-scalar",
+  "meta_json": "7",
+  "carries_ttl": false
+ },
+ {
+  "name": "string-tab-newline-padded",
+  "meta_json": "{\"ttl_days\":\"\\t7\\n\"}",
+  "carries_ttl": true
+ },
+ {
+  "name": "string-nbsp-padded",
+  "meta_json": "{\"ttl_days\":\"\\u00a07\"}",
+  "carries_ttl": false,
+  "reader_ttl": true,
+  "differs_from_reader": "int() strips Unicode whitespace such as a no-break space; the CHECK's regular expression reads ASCII whitespace only (the same late-expiry fallback)"
+ },
+ {
+  "name": "string-fullwidth-digit",
+  "meta_json": "{\"ttl_days\":\"\\uff17\"}",
+  "carries_ttl": false,
+  "reader_ttl": true,
+  "differs_from_reader": "int() reads a full-width decimal digit; the CHECK reads ASCII digits only (the same late-expiry fallback)"
+ },
+ {
+  "name": "float-rounds-up-to-one-in-python",
+  "meta_json": "{\"ttl_days\":0.99999999999999999999}",
+  "carries_ttl": false,
+  "reader_ttl": true,
+  "differs_from_reader": "json.loads rounds this number to the float 1.0, which int() reads as 1; the stored numeric is below 1, so the CHECK does not count it (the same late-expiry fallback)"
+ },
+ {
+  "name": "float-rounds-up-to-the-ceiling-in-python",
+  "meta_json": "{\"ttl_days\":999999999.9999999999999}",
+  "carries_ttl": true,
+  "reader_ttl": false,
+  "differs_from_reader": "json.loads rounds this number to the float 1e9, past timedelta.max.days, so the reader treats it as permanent; the stored numeric is below the ceiling, so the CHECK counts it (the stricter direction: the census names the entry and the add waits for a stamp, so nothing is frozen and nothing expires early)"
+ },
+ {
+  "name": "metadata-is-a-json-string",
+  "meta_json": "\"{\\\"ttl_days\\\":7}\"",
+  "carries_ttl": false
+ }
+]

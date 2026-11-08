@@ -25,7 +25,7 @@ _RENDEZVOUS_S = 5.0
 class _FakeT3:
     _voyage_client = None
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         return [
             {"id": f"c{i}", "content": f"text {i}", "distance": 0.1 + 0.01 * i,
              "chunk_text_hash": f"{i:064x}"}
@@ -89,7 +89,7 @@ def test_catalog_attach_and_topic_reads_overlap() -> None:
     catalog, taxonomy = _wired()
     results = search_cross_corpus(
         "q", [_COL], n_results=4, t3=_FakeT3(), catalog=catalog,
-        taxonomy=taxonomy, cluster_by=None, link_boost=False,
+        taxonomy=taxonomy, cluster_by=None, link_boost=False, sensitivity="include",
     )
     # A serial implementation would leave one side waiting the full timeout.
     assert catalog.saw_taxonomy_in_flight
@@ -103,7 +103,7 @@ def test_a_failed_assignments_read_leaves_results_unboosted() -> None:
     catalog, taxonomy = _wired(assignments_error=RuntimeError("taxonomy down"))
     results = search_cross_corpus(
         "q", [_COL], n_results=4, t3=_FakeT3(), catalog=catalog,
-        taxonomy=taxonomy, cluster_by=None, link_boost=False,
+        taxonomy=taxonomy, cluster_by=None, link_boost=False, sensitivity="include",
     )
     assert len(results) == 4
     assert all(r.topic_boost == 0.0 for r in results)
@@ -114,7 +114,7 @@ def test_a_failed_link_read_skips_the_boost_as_before() -> None:
     catalog, taxonomy = _wired(links_error=RuntimeError("links down"))
     results = search_cross_corpus(
         "q", [_COL], n_results=4, t3=_FakeT3(), catalog=catalog,
-        taxonomy=taxonomy, cluster_by=None, link_boost=False,
+        taxonomy=taxonomy, cluster_by=None, link_boost=False, sensitivity="include",
     )
     assert len(results) == 4
     assert all(r.topic_boost == 0.0 for r in results)
@@ -125,7 +125,7 @@ def test_no_taxonomy_still_attaches_doc_ids() -> None:
     catalog._taxonomy_started.set()  # nothing to wait for
     results = search_cross_corpus(
         "q", [_COL], n_results=4, t3=_FakeT3(), catalog=catalog,
-        taxonomy=None, cluster_by=None, link_boost=False,
+        taxonomy=None, cluster_by=None, link_boost=False, sensitivity="include",
     )
     assert {r.metadata.get("doc_id") for r in results} == {"1.1.0", "1.1.1", "1.1.2", "1.1.3"}
 

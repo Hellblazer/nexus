@@ -860,7 +860,7 @@ class TestOtherCallersOfEnsure:
         with patch.object(daemon_mod, "_popen") as popen, patch.object(
             init_mod, "_report_stray_t2_launchagent_cleanup"
         ):
-            lease = init_mod._start_service_step()
+            lease = init_mod._start_service_step(config_dir)
         assert manager.calls == [["systemctl", "--user", "start", "nexus-service.service"]]
         popen.assert_not_called()
         assert lease.endpoint["port"] == 18091
@@ -878,7 +878,7 @@ class TestOtherCallersOfEnsure:
         with patch.object(daemon_mod, "_popen") as popen, patch.object(
             init_mod, "_report_stray_t2_launchagent_cleanup"
         ):
-            lease = init_mod._start_service_step()
+            lease = init_mod._start_service_step(config_dir)
         assert manager.calls == []
         popen.assert_not_called()
         assert lease.endpoint["port"] == 18094
@@ -895,7 +895,7 @@ class TestOtherCallersOfEnsure:
             lambda dest, *, tier: _probe(installer.ActivationState.NOT_ACTIVE, "disabled"),
         )
         with patch.object(init_mod, "_report_stray_t2_launchagent_cleanup"):
-            lease = init_mod._start_service_step()
+            lease = init_mod._start_service_step(config_dir)
         today.assert_called_once()
         assert manager.calls == []
         assert lease.endpoint["port"] == 18093

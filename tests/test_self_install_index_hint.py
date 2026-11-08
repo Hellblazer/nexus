@@ -423,7 +423,17 @@ class TestTheCu128Hint:
     def test_auto_counts_only_when_uv_names_cu128(self):
         env = {"NX_TORCH_BACKEND": "auto"}
         assert self_cmd.torch_backend_hint(self._UNSATISFIABLE, env=env, system="linux") is None
-        assert self_cmd.torch_backend_hint("torch==2.13.0+cu128", env=env, system="linux") is not None
+        cu128_unsat = self._UNSATISFIABLE + "  torch==2.13.0+cu128 has no wheels\n"
+        assert self_cmd.torch_backend_hint(cu128_unsat, env=env, system="linux") is not None
+
+    def test_auto_does_not_count_a_failure_that_is_not_a_resolve(self):
+        """nexus-0ib6r (4): a cu128 wheel that timed out downloading names cu128 too, and cu126 is no fix."""
+        env = {"NX_TORCH_BACKEND": "auto"}
+        timeout = (
+            "error: Failed to download `torch==2.13.0+cu128`\n"
+            "  Caused by: operation timed out\n"
+        )
+        assert self_cmd.torch_backend_hint(timeout, env=env, system="linux") is None
 
     def test_other_backends_and_hosts_get_none(self):
         assert self_cmd.torch_backend_hint(self._UNSATISFIABLE, env={}, system="linux") is None

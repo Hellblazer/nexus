@@ -321,13 +321,21 @@ class TransportReadFailure(RuntimeError):
 def is_transport_failure(exc: BaseException) -> bool:
     """True if *exc* is a transient failure of the transport or the service: an
     httpx/urllib connectivity error, a timeout, or any HTTP 5xx or 429. A
-    ValueError, an assertion or a 4xx is a fact about the request and is not."""
+    ValueError, an assertion or a 4xx is a fact about the request and is not. A refused
+    ``sensitivity='exclude'`` read (``SensitivityExcludeUnavailable``) counts as transient."""
     from nexus.retry import (  # noqa: PLC0415 — deferred: retry pulls httpx and the Voyage predicates
         _extract_status_and_retry_after,
         _is_retryable_vector_error,
     )
 
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred like the above
+
     if isinstance(exc, TransportReadFailure):
+        return True
+    if isinstance(exc, SensitivityExcludeUnavailable):
+        # RDR-243 (Sam's nexus-rfvyy.3 ruling): a refused exclude read is a fact about the engine at this moment
+        # (no vector_sensitivity_exclude_supported, or a failed /version probe that is never cached), so the task
+        # is retried on the ladder, never dropped as unreachable.
         return True
     try:
         if _is_retryable_vector_error(exc):
@@ -548,7 +556,9 @@ def _gather_chroma_chunks_by_field(
                 requested_batch = ids[batch_start : batch_start + page_limit]
                 page = coll.get(
                     ids=requested_batch,
-                    include=["documents", "metadatas"],
+                    # RDR-243 review r1 F7: this text goes to an LLM extractor. ``exclude`` applies the shared-chunk
+                    # rule (a chunk with any live sensitive owner is withheld) on top of the per-document gate.
+                    include=["documents", "metadatas"], sensitivity="exclude",
                 )
                 page_ids = page.get("ids") or []
                 docs = page.get("documents") or []
@@ -599,7 +609,7 @@ def _gather_chroma_chunks_by_field(
                     where={identity_field: match_value},
                     limit=page_limit,
                     offset=offset,
-                    include=["documents", "metadatas"],
+                    include=["documents", "metadatas"], sensitivity="exclude",  # as above: LLM-bound text (F7)
                 )
                 docs = page.get("documents") or []
                 mds = page.get("metadatas") or []

@@ -166,7 +166,7 @@ def test_the_estimate_matches_what_a_healthy_search_really_sends(monkeypatch):
     for n in (5, 30):
         engine.calls.clear()
         search_cross_corpus("q", cols, n, make_client(False), cluster_by=None,
-                            threshold_override=float("inf"), deep_candidates=True)
+                            threshold_override=float("inf"), deep_candidates=True, sensitivity="include")
         route_per, batched_per = rp.estimate_batched_calls(cols, n, deep=True)
         assert engine.paths().count("/v1/vectors/search") == batched_per
 

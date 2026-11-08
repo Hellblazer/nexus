@@ -159,7 +159,7 @@ def gather_titled_chunks(
         # Stored rows, owned or not: an orphan is by definition a chunk no
         # manifest owns, and a live read hides it (RDR-192 Step 5, nexus-wbfpw.10).
         batch = col.get(
-            limit=_PAGE, offset=offset, include=["metadatas"], include_non_live=True,
+            limit=_PAGE, offset=offset, include=["metadatas"], include_non_live=True, sensitivity="include",
         )
         cids = batch.get("ids") or []
         metas = batch.get("metadatas") or []
@@ -943,7 +943,7 @@ def link_by_content_hash(
     offset = 0
     while offset < n:
         batch = col.get(
-            limit=_PAGE, offset=offset, include=["metadatas"], include_non_live=True,
+            limit=_PAGE, offset=offset, include=["metadatas"], include_non_live=True, sensitivity="include",
         )
         cids = batch.get("ids") or []
         metas = batch.get("metadatas") or []

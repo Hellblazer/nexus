@@ -125,7 +125,7 @@ def sample_live_distances(
     """
     col = t3.get_or_create_collection(collection)
     try:
-        got = col.get(limit=n, include=["embeddings"])
+        got = col.get(limit=n, include=["embeddings"], sensitivity="include")
     except Exception as _exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
         # nexus-ou4tb walk: a degraded vector service gets a WARNING (the
         # empty histogram it produces is otherwise identical to a genuinely

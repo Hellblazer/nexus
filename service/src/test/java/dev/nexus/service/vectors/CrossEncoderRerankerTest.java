@@ -92,6 +92,22 @@ class CrossEncoderRerankerTest {
         assertThat(voyageLike.available()).isTrue();
     }
 
+    @Test
+    void sendsTextOffMachineIsTrueForAnyRerankerThatDoesNotSayOtherwise_theInterfaceDefaultFailsClosed() {
+        // RDR-243 Q4: a future off-machine reranker that forgets to declare itself must be treated as one, so the
+        // fused stage still keeps sensitive rows out of it. A local reranker has to say it stays on the machine.
+        Reranker undeclared = new Reranker() {
+            @Override public String modelToken() { return "some-future-remote-reranker"; }
+            @Override public List<Scored> rerank(String q, List<String> d, Integer k) { return List.of(); }
+        };
+        assertThat(undeclared.sendsTextOffMachine()).isTrue();
+    }
+
+    @Test
+    void theLocalCrossEncoderDeclaresThatItSendsNothingOffTheMachine() {
+        assertThat(new CrossEncoderReranker().sendsTextOffMachine()).isFalse();
+    }
+
     // ── Scoring/order seam (static, model-free) ──────────────────────────────
 
     @Test

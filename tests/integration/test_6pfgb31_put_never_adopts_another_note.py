@@ -67,7 +67,7 @@ class _World:
             metadatas=[{"indexed_at": aged, "ttl_days": 1}], embed=True)
 
     def chunk_served(self, body: str) -> bool:
-        return self.client.get_by_id(self.collection, _chash(body)) is not None
+        return self.client.get_by_id(self.collection, _chash(body), sensitivity="include") is not None
 
 
 def _snapshot(doc) -> tuple:

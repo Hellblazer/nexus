@@ -24,23 +24,31 @@ import click
 
 
 def _classify_origin(row: dict) -> str:
-    """Heuristic origin label. nexus-7bwe tracks adding an explicit
-    ``origin`` column to the plans T2 table so this stops inferring from
-    tags + project; deferred until a cross-session origin-filter
-    reliability complaint drives the change.
+    """The row's origin label, read from what the writers stamp (nexus-7bwe).
 
-    - ``builtin``  — tags carry the ``builtin-template`` token (seeded
-      from ``conexus/plans/builtin/*.yml`` by ``nx catalog setup``).
-    - ``grown``    — ``project=='personal'`` with no recognisable user
-      tag, the shape ``_nx_answer_plan_grow`` produces.
-    - ``user``     — anything else (called via ``plan_save`` MCP tool
-      or written by an ad-hoc skill).
+    - ``grown``    the ``grown`` tag token (``_nx_answer_plan_grow`` writes ``ad-hoc,grown`` under the
+      session's project) or a grown answer-kind declaration in ``plan_json``; and the legacy grown shape,
+      ``project=='personal'`` with no tags.
+    - ``builtin``  the ``builtin-template`` tag token (seeded from the shipped templates).
+    - ``user``     anything else (``plan_save`` or an ad-hoc skill).
+
+    Tags are read as comma tokens, as the eligibility gate reads them; a grown token wins over the builtin
+    one, as it does there.
     """
+    from nexus.plans.answer_kind import decode_declaration  # noqa: PLC0415 — command-local import
+    from nexus.plans.eligibility import BUILTIN_TAG, GROWN_TAG  # noqa: PLC0415 — command-local import
+
     tags = row.get("tags") or ""
-    if "builtin-template" in tags:
+    tokens = {t.strip() for t in tags.split(",") if t.strip()} if isinstance(tags, str) else set()
+    try:
+        grown_declared = decode_declaration(row.get("plan_json")).provenance == "grown"
+    except Exception:  # noqa: BLE001 — an unreadable plan_json labels by tags alone
+        grown_declared = False
+    if GROWN_TAG in tokens or grown_declared:
+        return "grown"
+    if BUILTIN_TAG in tokens:
         return "builtin"
-    project = row.get("project") or ""
-    if project == "personal" and not tags:
+    if (row.get("project") or "") == "personal" and not tokens:
         return "grown"
     return "user"
 
@@ -96,7 +104,7 @@ def _hygiene_scan(library) -> list[dict]:
     import json as _json  # noqa: PLC0415 — command-local import
 
     from nexus.plans.matcher import _is_always_failing  # noqa: PLC0415 — command-local import
-    from nexus.plans.runner import claimless_verify_reason, find_embedded_step_ref  # noqa: PLC0415 — command-local import
+    from nexus.plans.runner import find_embedded_step_ref, operator_arg_reason  # noqa: PLC0415 — command-local import
     from nexus.plans.schema import PlanTemplateSchemaError, validate_plan_steps  # noqa: PLC0415 — command-local import
 
     findings: list[dict] = []
@@ -128,7 +136,7 @@ def _hygiene_scan(library) -> list[dict]:
                     f"({embedded.reason}); the runner refuses it before dispatch"
                 )
         if reason is None:
-            reason = claimless_verify_reason(parsed)  # nexus-z1d0l.1.11
+            reason = operator_arg_reason(parsed)  # nexus-z1d0l.1.11, nexus-iy2ep
         if reason is None and not (row.get("verb") or "").strip():
             reason = "null-verb (pre-fiovt pollution; unmatchable by verb-filtered nx_answer)"
         if reason is None and _is_always_failing(row):
@@ -165,8 +173,9 @@ def _hygiene_apply(library, findings: list[dict]) -> int:
 @click.option("--apply", "apply_", is_flag=True,
               help="Disable the flagged plans (default: report only).")
 def hygiene_cmd(apply_: bool) -> None:
-    """Scan the plan library for bead-dumps, embedded step references,
-    null-verb rows, and always-failing plans; --apply DISABLES them (reversible via
+    """Scan the plan library for bead-dumps, embedded step references, operator
+    steps missing a claim, evidence or check_instruction, null-verb rows, and
+    always-failing plans; --apply DISABLES them (reversible via
     `nx plan enable` — never deletes).
 
     Routes through HttpPlanLibrary, so it cleans the live engine-served
@@ -178,7 +187,8 @@ def hygiene_cmd(apply_: bool) -> None:
         return
     findings = _hygiene_scan(library)
     if not findings:
-        click.echo("Plan library clean: no bead-dumps, embedded step references, null-verb, or always-failing plans.")
+        click.echo("Plan library clean: no bead-dumps, embedded step references, operator steps missing a claim, evidence "
+                   "or check_instruction, null-verb, or always-failing plans.")
         return
     click.echo(f"{len(findings)} plan(s) flagged:")
     for f in findings:
@@ -201,7 +211,7 @@ def hygiene_cmd(apply_: bool) -> None:
     "--origin",
     type=click.Choice(["builtin", "grown", "user"], case_sensitive=False),
     default=None,
-    help="Filter by inferred origin (heuristic; nexus-7bwe tracks an explicit origin column).",
+    help="Filter by origin, read from the row's tags and its answer-kind declaration.",
 )
 @click.option(
     "--name",
@@ -235,9 +245,10 @@ def list_cmd(
     """Tabulate plans in the library.
 
     \b
-    Origin is heuristic (nexus-7bwe tracks the explicit ``origin`` column):
-      - ``builtin``  tags include ``builtin-template``
-      - ``grown``    project=='personal' AND empty tags
+    Origin is read from the row's tags and its answer-kind declaration:
+      - ``grown``    the ``grown`` tag, a grown declaration, or the legacy
+                     shape (project ``personal``, no tags)
+      - ``builtin``  the ``builtin-template`` tag
       - ``user``     everything else
 
     Examples:
@@ -258,7 +269,7 @@ def list_cmd(
     finally:
         lib.close()
 
-    # Apply post-filters in Python so the heuristic origin filter
+    # Apply post-filters in Python so the origin filter
     # doesn't leak into the storage layer (where it doesn't exist).
     filtered = []
     for r in rows:

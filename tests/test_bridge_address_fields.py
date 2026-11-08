@@ -103,7 +103,7 @@ class TestSearchDefaultPath:
         client = _make_client()
 
         with patch("nexus.db.http_vector_client._post", return_value=rows) as mock_post:
-            result = client.search("test query", ["knowledge__test__model-ctx__v1"])
+            result = client.search("test query", ["knowledge__test__model-ctx__v1"], sensitivity="include")
 
         # include_source_uri must NOT be in the posted body
         posted_body = mock_post.call_args[0][1]
@@ -125,7 +125,7 @@ class TestSearchDefaultPath:
             result = client.search(
                 "test query",
                 ["knowledge__test__model-ctx__v1"],
-                structured=True,
+                structured=True, sensitivity="include",
             )
 
         assert result["ids"] == ["abc123def456abc1230000000000000"]
@@ -149,7 +149,7 @@ class TestSearchOptIn:
             result = client.search(
                 "test query",
                 ["knowledge__test__model-ctx__v1"],
-                include_source_uri=True,
+                include_source_uri=True, sensitivity="include",
             )
 
         # Flag forwarded
@@ -175,7 +175,7 @@ class TestSearchBackwardCompat:
         client = _make_client()
 
         with patch("nexus.db.http_vector_client._post", return_value=rows):
-            result = client.search("test", ["knowledge__test__model-ctx__v1"])
+            result = client.search("test", ["knowledge__test__model-ctx__v1"], sensitivity="include")
 
         row = result[0]
         assert row["id"] == "deadbeef00000000000000000000000a"
@@ -196,7 +196,7 @@ class TestGetEnvelope:
         stub = _ServiceCollectionStub("knowledge__test__model-ctx__v1", "test-tenant")
 
         with patch("nexus.db.http_vector_client._post", return_value=env) as mock_post:
-            raw = stub.get(ids=["abc123def456abc1230000000000000"], include_source_uri=True)
+            raw = stub.get(ids=["abc123def456abc1230000000000000"], include_source_uri=True, sensitivity="include")
 
         posted_body = mock_post.call_args[0][1]
         assert posted_body.get("include_source_uri") is True
@@ -212,7 +212,7 @@ class TestGetEnvelope:
         stub = _ServiceCollectionStub("knowledge__test__model-ctx__v1", "test-tenant")
 
         with patch("nexus.db.http_vector_client._post", return_value=env) as mock_post:
-            raw = stub.get(where={})
+            raw = stub.get(where={}, sensitivity="include")
 
         posted_body = mock_post.call_args[0][1]
         assert "include_source_uri" not in posted_body
@@ -228,7 +228,7 @@ class TestGetEnvelope:
         stub = _ServiceCollectionStub("knowledge__test__model-ctx__v1", "test-tenant")
 
         with patch("nexus.db.http_vector_client._post", return_value=env):
-            raw = stub.get(where={})
+            raw = stub.get(where={}, sensitivity="include")
 
         assert raw["ids"] == ["deadbeef00000000000000000000000a"]
         assert raw.get("chashes") is None

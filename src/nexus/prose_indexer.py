@@ -82,7 +82,9 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         raise UnextractableContentError(f"{file_path}: {reason}")
 
     try:
-        content = file_path.read_text(encoding="utf-8")
+        # nexus-0ib6r: utf-8-sig, as nx index md reads it, so a BOM neither hides the frontmatter nor
+        # starts the first chunk, and one file chunks the same through both paths.
+        content = file_path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         # The walk listed this file and it was deleted or renamed before
         # this read (a commit landing mid-run). That is a deletion, not

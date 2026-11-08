@@ -123,7 +123,7 @@ def test_cross_corpus_overfetch():
     # code__r → 2x (20), docs__d → 4x (40)
     search_cross_corpus(
         query="test", collections=["code__r", "docs__d"],
-        n_results=10, t3=mock_t3
+        n_results=10, t3=mock_t3, sensitivity="include"
     )
     calls = mock_t3.search.call_args_list
     assert len(calls) == 2
@@ -217,7 +217,7 @@ class _ThresholdFakeT3:
         self._results = results_by_col
         self._voyage_client = "fake-voyage" if voyage else None
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         return self._results.get(collection_names[0], [])
 
 
@@ -301,7 +301,7 @@ class TestThresholdOverride:
     ):
         t3 = _ThresholdFakeT3({collection: rows}, voyage=voyage)
         results = search_cross_corpus(
-            "test", [collection], 10, t3, threshold_override=threshold_override,
+            "test", [collection], 10, t3, threshold_override=threshold_override, sensitivity="include",
         )
         assert {r.id for r in results} == expected_ids
 
@@ -324,7 +324,7 @@ class _ConcurrentFakeT3:
         self._inflight = 0
         self.max_inflight = 0
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         import time
         from nexus.db.http_vector_client import VectorServiceError
         name = collection_names[0]
@@ -363,7 +363,7 @@ class TestParallelFanOut:
         )
         results = search_cross_corpus(
             "test", cols, 10, t3, threshold_override=float("inf"),
-            cluster_by=None,
+            cluster_by=None, sensitivity="include",
         )
         assert [r.collection for r in results] == cols
         assert [r.id for r in results] == ["a", "b", "c"]
@@ -376,7 +376,7 @@ class TestParallelFanOut:
         )
         search_cross_corpus(
             "test", cols, 10, t3, threshold_override=float("inf"),
-            cluster_by=None,
+            cluster_by=None, sensitivity="include",
         )
         assert t3.max_inflight > 1  # genuinely parallel, not serialized
 
@@ -391,7 +391,7 @@ class TestParallelFanOut:
         )
         results = search_cross_corpus(
             "test", cols, 10, t3, threshold_override=float("inf"),
-            cluster_by=None,
+            cluster_by=None, sensitivity="include",
         )
         assert {r.id for r in results} == {"ok", "ok2"}
 
@@ -409,7 +409,7 @@ class TestParallelFanOut:
         })
         results = search_cross_corpus(
             "test", ["code__nexus", "knowledge__papers"], 10, t3,
-            threshold_override=0.50,
+            threshold_override=0.50, sensitivity="include",
         )
         assert {r.id for r in results} == {"c1", "k1"}
 
@@ -428,7 +428,7 @@ class TestSearchDiagnostics:
         t3 = _ThresholdFakeT3({
             "code__nexus": [{"id": "a", "content": "ok", "distance": 0.30}],
         })
-        results = search_cross_corpus("test", ["code__nexus"], 10, t3)
+        results = search_cross_corpus("test", ["code__nexus"], 10, t3, sensitivity="include")
         assert len(results) == 1
 
     def test_diagnostics_populated_when_requested(self):
@@ -443,7 +443,7 @@ class TestSearchDiagnostics:
         })
         diag_out: list = []
         search_cross_corpus(
-            "test", ["code__nexus"], 10, t3, diagnostics_out=diag_out,
+            "test", ["code__nexus"], 10, t3, diagnostics_out=diag_out, sensitivity="include",
         )
         assert len(diag_out) == 1
         diag = diag_out[0]
@@ -461,7 +461,7 @@ class TestSearchDiagnostics:
         })
         diag_out: list = []
         search_cross_corpus(
-            "test", ["code__nexus"], 10, t3, diagnostics_out=diag_out,
+            "test", ["code__nexus"], 10, t3, diagnostics_out=diag_out, sensitivity="include",
         )
         diag = diag_out[0]
         assert diag.total_dropped == 0
@@ -511,7 +511,7 @@ class TestSearchDiagnostics:
     ):
         t3 = _ThresholdFakeT3(collections_data)
         diag_out: list = []
-        search_cross_corpus("test", search_cols, 10, t3, diagnostics_out=diag_out)
+        search_cross_corpus("test", search_cols, 10, t3, diagnostics_out=diag_out, sensitivity="include")
         worst = diag_out[0].worst_offender()
         assert worst is not None
         name, _threshold, top_distance = worst
@@ -526,7 +526,7 @@ class TestSearchDiagnostics:
         })
         diag_out: list = []
         search_cross_corpus(
-            "test", ["code__a"], 10, t3, diagnostics_out=diag_out,
+            "test", ["code__a"], 10, t3, diagnostics_out=diag_out, sensitivity="include",
         )
         assert diag_out[0].worst_offender() is None
 
@@ -543,7 +543,7 @@ class TestSearchDiagnostics:
         diag_out: list = []
         search_cross_corpus(
             "test", ["code__a", "knowledge__b", "docs__c"], 10, t3,
-            diagnostics_out=diag_out,
+            diagnostics_out=diag_out, sensitivity="include",
         )
         assert diag_out[0].collections_with_drops() == 2
 
@@ -582,7 +582,7 @@ class TestSearchTelemetryHotPath:
         })
         search_cross_corpus(
             "query one", ["code__a", "knowledge__b"], 10, t3,
-            telemetry=telemetry,
+            telemetry=telemetry, sensitivity="include",
         )
         assert len(telemetry.batches) == 1
         rows = telemetry.batches[0]
@@ -602,7 +602,7 @@ class TestSearchTelemetryHotPath:
             ],
         })
         search_cross_corpus(
-            "my query", ["code__a"], 10, t3, telemetry=telemetry,
+            "my query", ["code__a"], 10, t3, telemetry=telemetry, sensitivity="include",
         )
         rows = telemetry.batches[0]
         assert len(rows) == 1
@@ -621,7 +621,7 @@ class TestSearchTelemetryHotPath:
         telemetry = _StubTelemetry()
         t3 = _ThresholdFakeT3({"code__empty": []})
         search_cross_corpus(
-            "any", ["code__empty"], 10, t3, telemetry=telemetry,
+            "any", ["code__empty"], 10, t3, telemetry=telemetry, sensitivity="include",
         )
         rows = telemetry.batches[0]
         assert len(rows) == 1
@@ -635,7 +635,7 @@ class TestSearchTelemetryHotPath:
         t3 = _ThresholdFakeT3({
             "code__a": [{"id": "a", "content": "x", "distance": 0.30}],
         })
-        results = search_cross_corpus("q", ["code__a"], 10, t3)
+        results = search_cross_corpus("q", ["code__a"], 10, t3, sensitivity="include")
         assert len(results) == 1
 
     def test_config_flag_disables_insert(self, monkeypatch):
@@ -651,7 +651,7 @@ class TestSearchTelemetryHotPath:
 
         monkeypatch.setattr("nexus.search_engine.load_config", fake_load_config)
         search_cross_corpus(
-            "q", ["code__a"], 10, t3, telemetry=telemetry,
+            "q", ["code__a"], 10, t3, telemetry=telemetry, sensitivity="include",
         )
         assert telemetry.batches == []
 
@@ -663,7 +663,7 @@ class TestSearchTelemetryHotPath:
             voyage=False,
         )
         search_cross_corpus(
-            "q", ["code__a"], 10, t3, telemetry=telemetry,
+            "q", ["code__a"], 10, t3, telemetry=telemetry, sensitivity="include",
         )
         rows = telemetry.batches[0]
         _, _, _, raw, kept, _, threshold = rows[0]
@@ -1080,7 +1080,7 @@ class _FailingT3:
         self._voyage_client = "fake-voyage" if voyage else None
         self._fail_message = fail_message or self._DEFAULT_MESSAGE
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         from nexus.db.http_vector_client import VectorServiceError
 
         col = collection_names[0]
@@ -1107,7 +1107,7 @@ class TestPerCollectionErrorIsolation:
             "q",
             ["code__nexus", "knowledge__seam-b-test__minilm-l6-v2-384__v1"],
             10,
-            t3,
+            t3, sensitivity="include",
         )
         assert {r.id for r in results} == {"a"}
 
@@ -1121,7 +1121,7 @@ class TestPerCollectionErrorIsolation:
         diags: list[SearchDiagnostics] = []
         search_cross_corpus(
             "q", ["code__nexus", "knowledge__seam"], 10, t3,
-            diagnostics_out=diags,
+            diagnostics_out=diags, sensitivity="include",
         )
         assert list(diags[0].failed_collections) == ["knowledge__seam"]
         assert "HTTP 400" in diags[0].failed_collections["knowledge__seam"]
@@ -1136,7 +1136,7 @@ class TestPerCollectionErrorIsolation:
         diags: list[SearchDiagnostics] = []
         search_cross_corpus(
             "q", ["code__nexus", "knowledge__seam"], 10, t3,
-            diagnostics_out=diags,
+            diagnostics_out=diags, sensitivity="include",
         )
         assert "knowledge__seam" not in diags[0].per_collection
         assert list(diags[0].per_collection) == ["code__nexus"]
@@ -1156,7 +1156,7 @@ class TestPerCollectionErrorIsolation:
             fail_message="POST /v1/vectors/search → HTTP 503: service unavailable",
         )
         with pytest.raises(VectorServiceError, match="all 2 collections failed"):
-            search_cross_corpus("q", ["code__a", "knowledge__b"], 10, t3)
+            search_cross_corpus("q", ["code__a", "knowledge__b"], 10, t3, sensitivity="include")
 
     def test_duplicate_collections_all_failing_still_reraises(self):
         """The all-fail guard must not be defeated by a duplicated input
@@ -1168,7 +1168,7 @@ class TestPerCollectionErrorIsolation:
             fail_message="POST /v1/vectors/search → HTTP 503: service unavailable",
         )
         with pytest.raises(VectorServiceError, match="all 1 collections failed"):
-            search_cross_corpus("q", ["code__a", "code__a"], 10, t3)
+            search_cross_corpus("q", ["code__a", "code__a"], 10, t3, sensitivity="include")
 
     @pytest.mark.t2_tenant
     def test_all_collections_dimension_mismatched_raises_named_error_not_generic(self):
@@ -1182,7 +1182,7 @@ class TestPerCollectionErrorIsolation:
 
         t3 = _FailingT3({}, failing={"code__a", "knowledge__b"})
         with pytest.raises(SearchEmbeddingProfileMismatchError):
-            search_cross_corpus("q", ["code__a", "knowledge__b"], 10, t3)
+            search_cross_corpus("q", ["code__a", "knowledge__b"], 10, t3, sensitivity="include")
 
     def test_failure_log_event_name_locked(self):
         """Lock the ``collection_search_failed`` structlog event name —
@@ -1194,7 +1194,7 @@ class TestPerCollectionErrorIsolation:
             failing={"knowledge__seam"},
         )
         with capture_logs() as logs:
-            search_cross_corpus("q", ["code__nexus", "knowledge__seam"], 10, t3)
+            search_cross_corpus("q", ["code__nexus", "knowledge__seam"], 10, t3, sensitivity="include")
         assert any(
             entry["event"] == "collection_search_failed"
             and entry["collection"] == "knowledge__seam"
@@ -1246,7 +1246,7 @@ class TestDimensionMismatchLoggingQuieted:
         with capture_logs() as logs:
             search_cross_corpus(
                 "q", [*good_cols, "knowledge__orphan__minilm-l6-v2-384__v1"],
-                10, t3,
+                10, t3, sensitivity="include",
             )
         matches = [
             e for e in logs
@@ -1267,7 +1267,7 @@ class TestDimensionMismatchLoggingQuieted:
             {c: [] for c in good_cols}, failing=set(bad_cols),
         )
         with capture_logs() as logs:
-            search_cross_corpus("q", [*good_cols, *bad_cols], 10, t3)
+            search_cross_corpus("q", [*good_cols, *bad_cols], 10, t3, sensitivity="include")
         levels = {
             e["log_level"] for e in logs
             if e["event"] == "collection_search_failed" and e.get("collection") in bad_cols
@@ -1287,14 +1287,14 @@ class TestDimensionMismatchLoggingQuieted:
 
         real_search = t3.search
 
-        def _search(query, collection_names, n_results=10, where=None):
+        def _search(query, collection_names, n_results=10, where=None, **_sens_kw):
             if collection_names[0] == "code__c0":
                 raise VectorServiceError("POST /v1/vectors/search -> HTTP 503: service unavailable")
             return real_search(query, collection_names, n_results, where)
 
         t3.search = _search
         with capture_logs() as logs:
-            search_cross_corpus("q", good_cols, 10, t3)
+            search_cross_corpus("q", good_cols, 10, t3, sensitivity="include")
         matches = [
             e for e in logs
             if e["event"] == "collection_search_failed" and e.get("collection") == "code__c0"
@@ -1316,7 +1316,7 @@ class TestDimensionMismatchLoggingQuieted:
         t3 = _FailingT3({}, failing=set(bad_cols))
 
         with pytest.raises(SearchEmbeddingProfileMismatchError) as excinfo:
-            search_cross_corpus("q", bad_cols, 10, t3)
+            search_cross_corpus("q", bad_cols, 10, t3, sensitivity="include")
 
         assert set(excinfo.value.mismatches) == set(bad_cols)
 
@@ -1331,7 +1331,7 @@ class TestDimensionMismatchLoggingQuieted:
             failing={bad},
         )
 
-        results = search_cross_corpus("q", [*good_cols, bad], 10, t3)
+        results = search_cross_corpus("q", [*good_cols, bad], 10, t3, sensitivity="include")
 
         assert {r.id for r in results} == {f"{c}-hit" for c in good_cols}
 
@@ -1587,7 +1587,7 @@ class TestThresholdGateServiceMode:
         client = HttpVectorClient()
         monkeypatch.setattr(
             client.__class__, "search",
-            lambda self, query, collection_names, n_results=10, where=None:
+            lambda self, query, collection_names, n_results=10, where=None, **_sens_kw:
                 TestThresholdGateServiceMode._ROWS.get(collection_names[0], []),
         )
         monkeypatch.setattr(client.__class__, "embedding_mode", lambda self: mode)
@@ -1617,14 +1617,14 @@ class TestThresholdGateServiceMode:
         if set_irrelevant_voyage_key:
             monkeypatch.setenv("VOYAGE_API_KEY", "sk-configured-but-irrelevant")
         t3 = self._service_t3(monkeypatch, mode)
-        results = search_cross_corpus("test", ["code__nexus"], 10, t3)
+        results = search_cross_corpus("test", ["code__nexus"], 10, t3, sensitivity="include")
         assert {r.id for r in results} == expected_ids
 
     def test_non_service_fake_keeps_attribute_gate(self):
         # Regression guard for the existing unit-test contract: a fake t3
         # without _voyage_client (and not an HttpVectorClient) stays unfiltered.
         t3 = _ThresholdFakeT3(self._ROWS, voyage=False)
-        results = search_cross_corpus("test", ["code__nexus"], 10, t3)
+        results = search_cross_corpus("test", ["code__nexus"], 10, t3, sensitivity="include")
         assert {r.id for r in results} == {"a", "b"}
 
 
@@ -1723,7 +1723,7 @@ class TestModelGroupedFanOutRequestCount:
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
             "q", cols, 10, fake.client,
-            threshold_override=float("inf"), cluster_by=None,
+            threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         assert len(fake.search_calls) == 1
         assert set(fake.search_calls[0]["collections"]) == set(cols)
@@ -1739,7 +1739,7 @@ class TestModelGroupedFanOutRequestCount:
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
             "q", cols, 10, fake.client,
-            threshold_override=float("inf"), cluster_by=None,
+            threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         assert len(fake.search_calls) == 2
         call_sets = [set(c["collections"]) for c in fake.search_calls]
@@ -1754,7 +1754,7 @@ class TestModelGroupedFanOutRequestCount:
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
             "q", cols, 10, fake.client,
-            threshold_override=float("inf"), cluster_by=None,
+            threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         assert len(fake.search_calls) == 1
         assert fake.search_calls[0]["n_results"] == 100
@@ -1766,7 +1766,7 @@ class TestModelGroupedFanOutRequestCount:
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
             "q", cols, 10, fake.client,
-            threshold_override=float("inf"), cluster_by=None,
+            threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         assert len(fake.search_calls) == 2
         call_sets = [set(c["collections"]) for c in fake.search_calls]
@@ -1793,7 +1793,7 @@ class TestModelGroupedFanOutRequestCount:
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
             "q", all_cols, 10, fake.client,
-            threshold_override=float("inf"), cluster_by=None,
+            threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         assert len(fake.search_calls) == 2
         code_calls = [c for c in fake.search_calls if set(c["collections"]) <= set(code_cols)]
@@ -1829,7 +1829,7 @@ class TestModelGroupedFanOutRequestCount:
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
             "q", context_cols + code_cols, 30, fake.client,
-            threshold_override=float("inf"), cluster_by=None,
+            threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         assert len(fake.search_calls) == 6
         code_calls = [c for c in fake.search_calls if set(c["collections"]) <= set(code_cols)]
@@ -1864,7 +1864,7 @@ class TestModelGroupedFanOutRequestCount:
             )
         search_cross_corpus(
             "q", context_cols + code_cols, 30, fake.client,
-            threshold_override=float("inf"), cluster_by=None, **kwargs,
+            threshold_override=float("inf"), cluster_by=None, **kwargs, sensitivity="include",
         )
         assert len(fake.search_calls) == 28
         assert sorted(c["n_results"] for c in fake.search_calls) == [120] + [300] * 27
@@ -1880,7 +1880,7 @@ class TestModelGroupedFanOutRequestCount:
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
             "q", cols, 300, fake.client,
-            threshold_override=float("inf"), cluster_by=None,
+            threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         assert len(fake.search_calls) == 14
         assert {c["n_results"] for c in fake.search_calls} == {300}
@@ -1895,7 +1895,7 @@ class TestModelGroupedFanOutRequestCount:
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
             "q", cols, 10, fake.client,
-            threshold_override=float("inf"), cluster_by=None,
+            threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         # The grouped fan-out issues 1 call here, never len(cols)=12.
         assert len(fake.search_calls) == 1
@@ -2040,7 +2040,7 @@ class TestBatchPlanInvariants:
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
             "q", cols, n, fake.client,
-            threshold_override=float("inf"), cluster_by=None,
+            threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         cap = QUOTAS.MAX_QUERY_RESULTS
         sizes = [c["n_results"] for c in fake.search_calls]
@@ -2091,7 +2091,7 @@ class _PoisonableFakeT3:
         self._inflight = 0
         self.max_inflight = 0
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         import time
 
         from nexus.db.http_vector_client import VectorServiceError
@@ -2146,7 +2146,7 @@ class TestBatchFailureFallbackAndPoisoning:
     def test_multi_collection_fallback_isolates_the_bad_member(self):
         good, bad, cols, t3 = self._setup()
         results = search_cross_corpus(
-            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         # The bad collection is excluded; every healthy one survives.
         assert {r.id for r in results} == {f"{c}-0" for c in good}
@@ -2168,7 +2168,7 @@ class TestBatchFailureFallbackAndPoisoning:
         # (bounded at min(8, len(cols))) will.
         _good, _bad, cols, t3 = self._setup(n_good=5, delay=0.05)
         search_cross_corpus(
-            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         assert t3.max_inflight > 1
 
@@ -2177,7 +2177,7 @@ class TestBatchFailureFallbackAndPoisoning:
         # First call: discovers and memoizes the poisoned collection via
         # the fallback.
         search_cross_corpus(
-            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         t3.calls.clear()
 
@@ -2185,7 +2185,7 @@ class TestBatchFailureFallbackAndPoisoning:
         # OWN singleton batch from the START -- never bundled with its
         # healthy siblings again, so the healthy group stays fast.
         search_cross_corpus(
-            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         assert [bad] in t3.calls
         healthy_calls = [c for c in t3.calls if bad not in c]
@@ -2199,10 +2199,10 @@ class TestBatchFailureFallbackAndPoisoning:
         _good, _bad, cols, t3 = self._setup()
         with capture_logs() as logs:
             search_cross_corpus(
-                "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+                "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None, sensitivity="include",
             )
             search_cross_corpus(
-                "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+                "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None, sensitivity="include",
             )
         poisoning_events = [
             e for e in logs if e["event"] == "collection_poisoned_excluded_from_batching"
@@ -2233,7 +2233,7 @@ class _TransientFailureFakeT3:
         self._flaky_call_count = 0
         self.calls: list[list[str]] = []
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         from nexus.db.http_vector_client import VectorServiceError
 
         self.calls.append(list(collection_names))
@@ -2276,7 +2276,7 @@ class TestTransientFailureIsNotPoisoned:
         good, flaky, cols, t3 = self._setup(fail_until_call=2)
 
         first = search_cross_corpus(
-            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         # First call: flaky fails even in isolation -- excluded from this
         # call's results, same as the permanent case would look on its
@@ -2290,7 +2290,7 @@ class TestTransientFailureIsNotPoisoned:
 
         t3.calls.clear()
         second = search_cross_corpus(
-            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         # Second call: flaky is retried bundled with its healthy siblings
         # (not routed to a permanent singleton) and, self-healed, now
@@ -2308,12 +2308,12 @@ class TestTransientFailureIsNotPoisoned:
         good, flaky, cols, t3 = self._setup(fail_until_call=100)
 
         first = search_cross_corpus(
-            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         assert {r.id for r in first} == {f"{c}-0" for c in good}
 
         second = search_cross_corpus(
-            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None,
+            "q", cols, 10, t3, threshold_override=float("inf"), cluster_by=None, sensitivity="include",
         )
         # Still failing, still not memoized -- flaky stays bundled with
         # its healthy siblings on every call rather than being permanently

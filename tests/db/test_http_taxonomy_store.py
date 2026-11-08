@@ -1967,7 +1967,7 @@ class _FakeChromaColl:
         self._embs = embeddings or {}
         self._order = list((documents or embeddings or {}).keys())
 
-    def get(self, ids=None, include=None, limit=None, offset=None):
+    def get(self, ids=None, include=None, limit=None, offset=None, *, sensitivity="include"):
         include = include or []
         if ids is not None:
             keys = [i for i in ids if i in self._docs or i in self._embs]
@@ -2346,7 +2346,7 @@ class TestOrchestrators:
             lambda *a, **k: {"topic_id": 10, "collection_name": "c", "child_specs": []})
 
         class _OverReturningColl:
-            def get(self, ids=None, include=None, limit=None, offset=None):  # noqa: ANN001
+            def get(self, ids=None, include=None, limit=None, offset=None, *, sensitivity="include"):  # noqa: ANN001
                 return {
                     "ids": [*ids, "phantom"],
                     "documents": [*[f"t-{i}" for i in ids], "ghost"],
@@ -2391,7 +2391,7 @@ class TestOrchestrators:
             """Simulates the production symptom: the service only resolves
             2 of the 5 requested ids (rows unavailable/deleted server-side)."""
 
-            def get(self, ids=None, include=None, limit=None, offset=None):  # noqa: ANN001
+            def get(self, ids=None, include=None, limit=None, offset=None, *, sensitivity="include"):  # noqa: ANN001
                 found = (ids or [])[:2]
                 return {"ids": found, "documents": [f"t-{i}" for i in found]}
 

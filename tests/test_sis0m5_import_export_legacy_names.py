@@ -67,7 +67,7 @@ def test_import_into_a_two_segment_name_lands_where_other_verbs_read(t2_service_
     assert imported.exit_code == 0, imported.output
     assert f"into {resolved}" in imported.output, imported.output
     assert listed.exit_code == 0 and "sis0m5 import note" in listed.output, listed.output
-    assert chash in client.get_collection(resolved).get(ids=[chash], include=[])["ids"]
+    assert chash in client.get_collection(resolved).get(ids=[chash], include=[], sensitivity="include")["ids"]
 
 
 def test_export_of_a_two_segment_name_finds_the_conformant_collection(t2_service_env, tmp_path):

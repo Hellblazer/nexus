@@ -150,7 +150,7 @@ def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
     expected_doc_id = str(rows[0].tumbler)
 
     stored_col = local_t3._client.get_collection(stored_col_name)
-    chunk_result = stored_col.get(include=["metadatas"])
+    chunk_result = stored_col.get(include=["metadatas"], sensitivity="include")
     assert chunk_result["ids"], (
         f"expected at least one chunk in {stored_col_name}"
     )
@@ -214,7 +214,7 @@ def test_store_put_doc_id_absent_when_catalog_uninitialized(
     stored_line = next(line for line in result.output.splitlines() if "Stored:" in line)
     stored_col_name = stored_line.split("→")[-1].strip()
     stored_col = local_t3._client.get_collection(stored_col_name)
-    chunk_result = stored_col.get(include=["metadatas"])
+    chunk_result = stored_col.get(include=["metadatas"], sensitivity="include")
     assert chunk_result["ids"]
 
     for m in chunk_result["metadatas"]:
@@ -294,7 +294,7 @@ def test_enrich_preserves_doc_id_round_trip(
     assert result.exit_code == 0, f"enrich bib failed: {result.output}"
 
     # Re-read the chunk and verify doc_id survived the col.update merge.
-    after = col.get(ids=["chunk-1"], include=["metadatas"])
+    after = col.get(ids=["chunk-1"], include=["metadatas"], sensitivity="include")
     assert after["ids"] == ["chunk-1"]
     after_meta = after["metadatas"][0]
     assert after_meta.get("bib_year") == 2024, (

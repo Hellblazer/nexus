@@ -283,7 +283,7 @@ class _FakeChromaCollection:
     def count(self) -> int:
         return len(self._chunks)
 
-    def get(self, *, limit: int, offset: int, include, include_non_live: bool = False) -> dict:
+    def get(self, *, limit: int, offset: int, include, include_non_live: bool = False, sensitivity="include") -> dict:
         # The walk must read stored rows: an orphan has no owner, so a live
         # read (RDR-192 Step 5) would never return it.
         assert include_non_live is True, "orphan backfill must read stored rows"

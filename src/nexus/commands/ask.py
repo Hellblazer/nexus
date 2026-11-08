@@ -7,22 +7,24 @@ to the asking session; ``digest`` lists what was answered. The record shape and 
 contract pinned by ``tests/fixtures/asks/``.
 
 Every external effect goes through ``Seams``: the T2 reader/writer, the tuple writer, the TTY probe and the
-own-session resolver, plus the clock, the beads reader, the ``cli`` sender id and the answer-id source. The
-click context carries them (``obj=Seams(...)``); a run without them builds the live ones.
+own-session resolver, plus the clock, the beads reader, the ``cli`` sender id, the answer-id source and the lock
+around a batch record's read-modify-write. The click context carries them (``obj=Seams(...)``); a run without them builds the live ones.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import secrets
 import shutil
 import sys
+import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import Any, ContextManager, Protocol
 
 import click
 
@@ -114,7 +116,7 @@ def live_tty() -> str | None:
 
 
 def live_session() -> str:
-    """This session's own id the way ``mailbox_send`` finds it (tuple-watch marker, then ``NX_T1_SESSION_ID``);
+    """This session's own id the way ``mailbox_send`` finds it (tuple-watch marker, then ``NX_T1_SESSION_ID``, then ``NX_SESSION_ID``);
     empty when nothing resolves."""
     from nexus.tuple_directory import resolve_default_from  # noqa: PLC0415 -- deferred: CLI startup cost
 
@@ -128,6 +130,48 @@ def live_beads() -> BeadsResult:
     from nexus.console.routes.threads import run_bd_needs_sam  # noqa: PLC0415 -- deferred: console import is heavy
 
     return run_bd_needs_sam()
+
+
+LOCK_WAIT = 5.0  #: seconds ``live_lock`` waits for a holder before giving up
+
+
+@contextlib.contextmanager
+def live_lock(timeout: float = LOCK_WAIT) -> Iterator[None]:
+    """Exclusive advisory lock (``nexus._locking``) on ``ask-answer.lock`` in the nexus config dir.
+
+    It serializes the read-modify-write of a batch record across ``nx ask answer`` processes on this machine.
+    A holder that dies releases it (the OS drops the lock with the descriptor). Waits at most ``timeout`` seconds,
+    then raises ``TimeoutError``: a hung holder must not stall a process whose mail already went out. A lock file
+    that cannot be opened is a warning, not a failure: the block runs unlocked, since a lost batch record costs
+    more than the narrow race the lock closes.
+    """
+    from nexus import config as _nx_config  # noqa: PLC0415 -- deferred: CLI startup cost
+    from nexus._locking import lock_fd, unlock_fd  # noqa: PLC0415 -- deferred: CLI startup cost
+
+    path = _nx_config.nexus_config_dir() / "ask-answer.lock"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError as exc:
+        click.echo(_out(f"warning: cannot open the answer lock at {path}: {exc}; continuing without it"), err=True)
+        yield
+        return
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                lock_fd(fd, blocking=False)  # lifecycle-gate-allow: a bounded mutex over one batch record's read-modify-write, not a lifecycle election
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"the answer lock {path} is held by another process") from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            unlock_fd(fd)
+    finally:
+        os.close(fd)
 
 
 def default_cli_sender() -> str:
@@ -179,6 +223,7 @@ class Seams:
     beads: Callable[[], BeadsResult] = live_beads
     cli_sender: Callable[[], str] = default_cli_sender
     answer_id: Callable[[], str] = _new_answer_id
+    lock: Callable[[], ContextManager[None]] = live_lock
 
 
 def _seams(ctx: click.Context) -> Seams:
@@ -298,8 +343,9 @@ def _fit(line: str, width: int) -> str:
     return line if len(line) <= width else line[: max(width - 1, 1)] + "…"
 
 
-#: C0, DEL and C1 controls: an ESC sequence or a carriage return in a field can repaint a terminal.
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+#: C0, DEL and C1 controls (an ESC sequence or a carriage return in a field can repaint a terminal), plus the
+#: bidi controls and zero-width characters that make text read differently from what it is.
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
 _LINE_BREAKS = frozenset("\t\n\r\x0b\x0c\x1c\x1d\x1e\x85")
 
 
@@ -324,23 +370,49 @@ def _one_line(value: str) -> str:
 # --- answer records and the digest ------------------------------------------------------------------
 
 
-def _answer_entries(s: Seams, now: datetime, window: timedelta) -> list[dict[str, Any]]:
-    """Answer records inside ``window``, newest first, each with the words of the batch it came from."""
-    rows = [r for r in s.t2.get_all(project=ASKS_PROJECT) if isinstance(r, dict)]
-    batches = {
-        str(r.get("title", "")): rec
-        for r in rows
-        if str(r.get("title", "")).startswith("batch/") and (rec := _json_obj(r)) is not None
-    }
+def _answer_rows(s: Seams) -> list[dict[str, Any]]:
+    return [r for r in s.t2.get_all(project=ASKS_PROJECT) if isinstance(r, dict)]
+
+
+def _answer_entries(
+    rows: list[dict[str, Any]], now: datetime, window: timedelta
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Answer records inside ``window``, newest first, each with the words of the batch it came from; and the
+    titles of the rows that are neither a readable answer nor a readable batch record.
+
+    A row is skipped, not hidden: the digest is the audit trail, so a record it cannot read is named. An
+    unreadable row whose own T2 time is older than the window is left out of that list.
+    """
+    batches: dict[str, dict[str, Any]] = {}
+    skipped: list[str] = []
+
+    def skip(row: dict[str, Any]) -> None:
+        stamp = parse_timestamp(str(row.get("timestamp", "") or ""))
+        if stamp is None or now - stamp <= window:
+            skipped.append(str(row.get("title", "")))
+
+    for row in rows:
+        title = str(row.get("title", ""))
+        if title.startswith("batch/"):
+            if (rec := _json_obj(row)) is not None:
+                batches[title] = rec
+            else:
+                skip(row)
     out: list[tuple[datetime, dict[str, Any]]] = []
     for row in rows:
         title = str(row.get("title", ""))
+        if title.startswith("batch/"):
+            continue
         m = _ANSWER_TITLE.fullmatch(title)
         rec = _json_obj(row) if m else None
         if m is None or rec is None:
+            skip(row)
             continue
         when = parse_timestamp(str(rec.get("time", ""))) or parse_timestamp(str(row.get("timestamp", "") or ""))
-        if when is None or now - when > window:
+        if when is None:
+            skipped.append(title)
+            continue
+        if now - when > window:
             continue
         batch = batches.get(str(rec.get("batch_title") or ""))
         out.append((when, {
@@ -359,7 +431,19 @@ def _answer_entries(s: Seams, now: datetime, window: timedelta) -> list[dict[str
             "error": rec.get("error"),
         }))
     out.sort(key=lambda p: p[0], reverse=True)
-    return [e for _, e in out]
+    return [e for _, e in out], sorted(skipped)
+
+
+_SKIPPED_SHOWN = 5
+
+
+def _skipped_line(skipped: list[str]) -> list[str]:
+    """One line naming rows of T2 project ``asks`` the digest could not read; nothing when there are none."""
+    if not skipped:
+        return []
+    shown = ", ".join(_c(t) for t in skipped[:_SKIPPED_SHOWN]) + (", ..." if len(skipped) > _SKIPPED_SHOWN else "")
+    noun = "row" if len(skipped) == 1 else "rows"
+    return [f"skipped {len(skipped)} {noun} in T2 project asks that are not readable answer or batch records: {shown}"]
 
 
 def _digest_lines(entries: list[dict[str, Any]]) -> list[str]:
@@ -380,23 +464,33 @@ def _digest_lines(entries: list[dict[str, Any]]) -> list[str]:
 # --- list -------------------------------------------------------------------------------------------
 
 
-def _group_line(c: ClassedAsk, width: int) -> str:
+def _answer_mark(records: dict[str, dict[str, Any]], ask: Ask) -> str:
+    """What the list shows of an answer record that is not ``sent``: a send in progress, a failure, or junk."""
+    status = _answer_status(records, ask)
+    if status in ("", "sent"):
+        return ""
+    if status == "unreadable":
+        return "answer record unreadable"
+    if status == "sending" and _is_outcome_unknown(_json_obj(records[answer_title(ask)])):
+        return "answer sending: outcome unknown"
+    return f"answer {status}"
+
+
+def _answer_status(records: dict[str, dict[str, Any]], ask: Ask) -> str:
+    """The status of the answer record for this ask version: sending, sent, failed, unreadable, or empty (none)."""
+    title = answer_title(ask)
+    row = records.get(title) if title else None
+    if row is None:
+        return ""
+    rec = _json_obj(row)
+    status = rec.get("status") if rec else None
+    return status if isinstance(status, str) and status in _ANSWER_STATUS else "unreadable"
+
+
+def _group_line(c: ClassedAsk, width: int, records: dict[str, dict[str, Any]]) -> str:
     a = c.ask
-    meta = "".join(f" [{m}]" for m in ((f"by {a.by}" if a.by else ""), c.mark) if m)
+    meta = "".join(f" [{m}]" for m in ((f"by {a.by}" if a.by else ""), c.mark, _answer_mark(records, a)) if m)
     return _fit(_c(f"  {_ref(a)}  {a.version}{meta}  {a.question}"), width)
-
-
-def _records_for(s: Seams, asks: list[tuple[Ask, datetime | None]]) -> dict[str, Any]:
-    """Answer records by exact title, one read per ask that could be answered."""
-    records: dict[str, Any] = {}
-    for ask, _stamp in asks:
-        title = answer_title(ask)
-        if not title or ask.conditional or title in records:
-            continue
-        row = s.t2.get(project=ASKS_PROJECT, title=title)
-        if row is not None:
-            records[title] = row
-    return records
 
 
 @click.group(name="ask")
@@ -413,22 +507,23 @@ def list_cmd(ctx: click.Context, as_json: bool, show_all: bool) -> None:
     s = _seams(ctx)
     now = s.now()
     rows = _read_rows(s)
-    asks = _all_asks(rows)
-    classes = classify(rows, now, _records_for(s, asks))
+    answer_rows = _answer_rows(s)  # one read serves both the classes and the digest
+    records = {str(r.get("title", "")): r for r in answer_rows}
+    classes = classify(rows, now, records)
     board = build_board(rows, now)
     beads = s.beads()
-    merged = merge_asks(board.needs_you, beads.beads, board.structured)
+    merged = merge_asks(board.needs_you, beads.beads, board.structured, records)
     findings = lint(rows)
-    digest = _answer_entries(s, now, LIST_DIGEST_WINDOW)
+    digest, skipped = _answer_entries(answer_rows, now, LIST_DIGEST_WINDOW)
     if as_json:
-        click.echo(json.dumps(_list_json(classes, merged, beads, findings, digest, board.unreadable), indent=2))
+        click.echo(json.dumps(_list_json(classes, merged, beads, findings, digest, board.unreadable, records, skipped), indent=2))
         return
     width = _width()
     out: list[str] = []
     for name in ("interrupt", "batch"):
         group = getattr(classes, name)
         out.append(f"{name.capitalize()} ({len(group)})")
-        out.extend(_group_line(c, width) for c in group)
+        out.extend(_group_line(c, width, records) for c in group)
     counts = ", ".join(f"{n} {len(getattr(classes, n))}" for n in ("quiet", "conditional", "answered"))
     out.append(f"Also: {counts}")
     if show_all:
@@ -436,7 +531,13 @@ def list_cmd(ctx: click.Context, as_json: bool, show_all: bool) -> None:
             group = getattr(classes, name)
             if group:
                 out.append(f"{name.capitalize()} ({len(group)})")
-                out.extend(_group_line(c, width) for c in group)
+                out.extend(_group_line(c, width, records) for c in group)
+    if classes.malformed:
+        out.append(f"Malformed asks ({len(classes.malformed)}): no block opened, so they cannot be answered")
+        out.extend(
+            _fit(_c(f"  {u.entry}/{u.id or '(no id)'}: {u.reason}" + (f": {u.question}" if u.question else "")), width)
+            for u in classes.malformed
+        )
     if merged.threads:
         out.append(f"Legacy asks ({len(merged.threads)})")
         out.extend(
@@ -457,18 +558,27 @@ def list_cmd(ctx: click.Context, as_json: bool, show_all: bool) -> None:
         out.append("Unreadable entries (their asks are not listed): " + ", ".join(_c(t) for t in classes.unreadable))
     out.append(f"Digest, last 48 hours ({len(digest)})")
     out.extend(_digest_lines(digest))
+    out.extend(_skipped_line(skipped))
     _say("\n".join(out))
 
 
 def _list_json(classes: Any, merged: Any, beads: BeadsResult, findings: Any, digest: list[dict[str, Any]],
-               unreadable: tuple[str, ...]) -> dict[str, Any]:
+               unreadable: tuple[str, ...], records: dict[str, dict[str, Any]], skipped: list[str]) -> dict[str, Any]:
     data: dict[str, Any] = {
-        name: [_ask_json(c.ask, c.group, c.mark) for c in getattr(classes, name)] for name in _GROUPS
+        name: [
+            {**_ask_json(c.ask, c.group, c.mark), "answer_status": _answer_status(records, c.ask)}
+            for c in getattr(classes, name)
+        ]
+        for name in _GROUPS
     }
     data["legacy"] = [
         {"session": i.session, "thread": i.thread.title, "needs_sam": i.thread.needs_sam, "age": i.age,
          "refs": list(i.thread.refs)}
         for i in merged.threads
+    ]
+    data["malformed"] = [
+        {"entry": u.entry, "thread": u.thread, "id": u.id, "question": u.question, "reason": u.reason}
+        for u in classes.malformed
     ]
     data["beads"] = [
         {
@@ -485,14 +595,25 @@ def _list_json(classes: Any, merged: Any, beads: BeadsResult, findings: Any, dig
     data["lint"] = [{"entry": f.entry, "ask": f.ask, "rule": f.rule, "message": f.message} for f in findings]
     data["unreadable"] = sorted({*classes.unreadable, *unreadable})
     data["digest"] = digest
+    data["digest_skipped"] = skipped
     return data
 
 
 _ANSWER_STATUS = frozenset({"sending", "sent", "failed"})
+#: The start of the ``error`` of a record left at ``sending`` because the ``tuple_out`` outcome is unknown.
+OUTCOME_UNKNOWN = "outcome unknown: "
 _VIA = re.compile(rf"cli|mediator:{_UUID}")
 _ISO_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2})?(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})")
 _HEX16 = re.compile(r"[0-9a-f]{16}")
 _TUPLE_ID = re.compile(r"[0-9a-f-]{1,64}")
+
+
+def _is_outcome_unknown(rec: dict[str, Any] | None) -> bool:
+    """A ``sending`` record whose ``error`` says the ``tuple_out`` outcome is unknown (the CLI's own prefix)."""
+    if rec is None:
+        return False
+    error = rec.get("error")
+    return rec.get("status") == "sending" and isinstance(error, str) and error.startswith(OUTCOME_UNKNOWN)
 
 
 def _closed_answer(rec: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -515,7 +636,10 @@ def _closed_answer(rec: dict[str, Any] | None) -> dict[str, Any] | None:
     )
     if not ok:
         return None
-    return {"answer_id": answer_id, "choice": choice, "via": via, "time": when, "status": status, "tuple_id": tuple_id}
+    closed = {"answer_id": answer_id, "choice": choice, "via": via, "time": when, "status": status, "tuple_id": tuple_id}
+    if _is_outcome_unknown(rec):
+        closed["outcome_unknown"] = True  # a flag derived from the CLI's own prefix; the free text stays behind
+    return closed
 
 
 # --- show -------------------------------------------------------------------------------------------
@@ -564,11 +688,19 @@ def show_cmd(ctx: click.Context, ref: str, as_json: bool) -> None:
     out.append(f"by: {_c(ask.by) or '-'}")
     if ask.missing:
         out.append(f"missing: {', '.join(ask.missing)}")
+    if ask.repeated:
+        out.append(f"repeated: {_c(', '.join(ask.repeated))} (given more than once; the first one counts)")
+    if ask.bad_values:
+        out.append(f"bad values: {_c(', '.join(ask.bad_values))}")
+    out.append("lines:")
+    out.extend(f"  {_c(line)}" for line in ask.lines)
     if answer == {"unreadable": True}:
         out.append("answer record present, unreadable")
     elif answer is not None:
         choice = "none" if answer["choice"] is None else answer["choice"]
         out.append(f"answer: {answer['status']} at {answer['time']} via {answer['via']} (choice {choice})")
+        if answer.get("outcome_unknown"):
+            out.append("outcome unknown: the mail may have been delivered; a re-send is refused for 10 minutes")
     _say("\n".join(out))
 
 
@@ -580,11 +712,9 @@ def show_cmd(ctx: click.Context, ref: str, as_json: bool) -> None:
 def digest_cmd(ctx: click.Context) -> None:
     """Every answer of the last seven days, newest first: when, via, Sam's words, the batch reply, the tuple id."""
     s = _seams(ctx)
-    entries = _answer_entries(s, s.now(), DIGEST_WINDOW)
-    if not entries:
-        click.echo("no answers in the last 7 days")
-        return
-    _say("\n".join(_digest_lines(entries)))
+    entries, skipped = _answer_entries(_answer_rows(s), s.now(), DIGEST_WINDOW)
+    lines = _digest_lines(entries) if entries else ["no answers in the last 7 days"]
+    _say("\n".join(lines + _skipped_line(skipped)))
 
 
 # --- answer -----------------------------------------------------------------------------------------
@@ -645,6 +775,59 @@ def _batch_title_for(s: Seams, mediator: str, words: str, now: datetime) -> tupl
     while f"{prefix}{moment.strftime('%Y%m%dT%H%M%SZ')}" in taken:
         moment += timedelta(seconds=1)
     return f"{prefix}{moment.strftime('%Y%m%dT%H%M%SZ')}", None
+
+
+def _outcome_unknown(exc: BaseException) -> bool:
+    """True when the failed ``tuple_out`` may still have committed: the request went out and the answer was lost
+    (a read or write timeout, a dropped connection, a half-read response, a 502, 503 or 504 from the edge).
+
+    The whole exception chain is read (``__cause__`` and ``__context__``): a retry layer that saw a ReadTimeout
+    and then failed to connect raises the ConnectError with the ReadTimeout behind it, and the first attempt may
+    have committed. Any ambiguous link makes the outcome unknown. A 503 counts as ambiguous too: the client's own
+    gateway retry re-sends a 502/503/504 outside its except block, so a 504 followed by a 503 reaches here as a
+    bare 503 with no chain. A refusal the engine answered (a typed tuple error, a 4xx, a 500), a client
+    pre-check, and a connect failure or timeout (nothing was sent) are definite: the mail was not posted. The one
+    residual is a 504 the gateway retry follows with a 500 or 4xx, which reads as definite."""
+    import httpx  # noqa: PLC0415 -- deferred: CLI startup cost
+
+    never_sent = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError, httpx.UnsupportedProtocol)
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        link = stack.pop()
+        if id(link) in seen:
+            continue
+        seen.add(id(link))
+        if isinstance(link, httpx.HTTPStatusError):
+            if link.response.status_code in (502, 503, 504):
+                return True
+        elif isinstance(link, httpx.TransportError):
+            if not isinstance(link, never_sent):
+                return True
+        elif isinstance(link, (TimeoutError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return True
+        stack.extend(x for x in (link.__cause__, link.__context__) if x is not None)
+    return False
+
+
+def _join_batch(s: Seams, batch_title: str, batch_words: str, via: str, answer_title_: str, now: datetime) -> None:
+    """Add this answer's title to its batch record. The read-modify-write is under ``Seams.lock`` and re-reads
+    the record inside it, so two answers joining one batch at once both keep their title."""
+    with s.lock():
+        row = s.t2.get(project=ASKS_PROJECT, title=batch_title)
+        prior = _json_obj(row) if row is not None else None
+        titles = prior.get("answer_titles") if prior else None
+        titles = list(titles) if isinstance(titles, list) and all(isinstance(t, str) for t in titles) else []
+        if answer_title_ not in titles:
+            titles.append(answer_title_)
+        stamp = prior.get("time") if prior else None
+        batch = {
+            "batch_words": batch_words,
+            "via": via,
+            "time": stamp if isinstance(stamp, str) and stamp else _fmt_time(now),
+            "answer_titles": titles,
+        }
+        s.t2.put(project=ASKS_PROJECT, title=batch_title, content=json.dumps(batch, ensure_ascii=False), tags="ask-batch")
 
 
 def _mail_body(ask: Ask, choice: int | None, via: str, answer_id: str) -> str:
@@ -729,7 +912,7 @@ def answer_cmd(
             sender = str(uuid.UUID(s.session().strip()))
         except (ValueError, AttributeError):
             raise _refuse("--via mediator needs this session's own id, and it did not resolve to a UUID "
-                          "(tuple-watch marker, then NX_T1_SESSION_ID)") from None
+                          "(tuple-watch marker, then NX_T1_SESSION_ID, then NX_SESSION_ID)") from None
         via_value = f"mediator:{sender}"
         words = sam_words
 
@@ -737,9 +920,8 @@ def answer_cmd(
     _gate_existing(s.t2.get(project=ASKS_PROJECT, title=title), now, replace, title)
 
     batch_title: str | None = None
-    batch_prior: dict[str, Any] | None = None
     if batch_words:
-        batch_title, batch_prior = _batch_title_for(s, sender, batch_words, now)
+        batch_title, _prior = _batch_title_for(s, sender, batch_words, now)
     answer_id = s.answer_id()
     record: dict[str, Any] = {
         "answer_id": answer_id,
@@ -766,8 +948,12 @@ def answer_cmd(
         raise _refuse(f"another answer was recorded first (answer {winner}); nothing was sent")
 
     def settle(status: str, tuple_id: str | None, error: str | None) -> bool:
-        """Write the final record; one retry. False when both writes failed."""
+        """Write the final record; one retry. False when both writes failed.
+
+        A ``failed`` record never joins a batch, so it carries no batch title."""
         final = {**record, "status": status, "tuple_id": tuple_id, "error": error}
+        if status == "failed":
+            final["batch_title"] = None
         for _attempt in range(2):
             try:
                 s.t2.put(project=ASKS_PROJECT, title=title, content=json.dumps(final, ensure_ascii=False), tags="ask-answer")
@@ -776,18 +962,16 @@ def answer_cmd(
                 continue
         return False
 
+    def join_batch() -> None:
+        """After the mail: only an answer whose mail went (or may have gone) is in the batch record."""
+        if not batch_title:
+            return
+        try:
+            _join_batch(s, batch_title, batch_words or "", via_value, title, now)
+        except Exception as exc:  # noqa: BLE001 -- the mail is out; the batch record is the digest's extra
+            click.echo(_out(f"warning: the batch record {batch_title} was not updated: {exc}"), err=True)
+
     try:
-        if batch_title:
-            titles = list(batch_prior["answer_titles"]) if batch_prior else []
-            if title not in titles:
-                titles.append(title)
-            batch = {
-                "batch_words": batch_words,
-                "via": via_value,
-                "time": batch_prior["time"] if batch_prior else _fmt_time(now),
-                "answer_titles": titles,
-            }
-            s.t2.put(project=ASKS_PROJECT, title=batch_title, content=json.dumps(batch, ensure_ascii=False), tags="ask-batch")
         tuple_id = s.tuple_out(
             f"mailbox/{ask.session_id}",
             {"to": ask.session_id},
@@ -802,10 +986,23 @@ def answer_cmd(
         )
     except Exception as exc:  # noqa: BLE001 -- CLI boundary: the failure is recorded on the answer and printed
         error = f"{type(exc).__name__}: {exc}" if not str(exc) else str(exc)
+        if _outcome_unknown(exc):
+            # The mail may be posted: the record stays `sending` (the drain hook accepts it with the mail's answer id,
+            # choice and via) and the ten-minute rule is the only retry path. The error says why it is still sending.
+            settle("sending", None, f"{OUTCOME_UNKNOWN}{error}")
+            join_batch()
+            click.echo(
+                _out(f"outcome unknown: {error}; the mail may have been delivered; answer record left at sending; "
+                     f"do not re-run (a retry is allowed after {int(SENDING_STALE.total_seconds() // 60)} minutes)"),
+                err=True,
+            )
+            ctx.exit(1)
         note = "" if settle("failed", None, error) else "; the answer record was not updated and is left at sending"
         click.echo(_out(f"failed: {error}{note}"), err=True)
         ctx.exit(1)
-    if not settle("sent", str(tuple_id), None):
+    settled = settle("sent", str(tuple_id), None)  # the answer's state first; only the batch title waits
+    join_batch()
+    if not settled:
         click.echo(
             _out(f"mail sent (tuple {tuple_id}); answer record left at sending; do not re-run"), err=True,
         )

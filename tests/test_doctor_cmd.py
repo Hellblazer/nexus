@@ -278,6 +278,26 @@ class TestSupplementaryChecks:
         assert "Remaining opt-in-only checks" in result.output
 
 
+def test_default_sweep_never_sends_the_edge_probe(monkeypatch):
+    """nexus-t0ms7: --probe-edge sends a mutating request, so the default sweep's supplementary
+    checks must never reach it. Structural and tenant-free: every promoted check is a stub, the
+    sweep runs over them, and the probe is a recording stub the sweep cannot swallow.
+    (`nx doctor --json` refusing --probe-edge is pinned in tests/test_doctor_edge_probe.py.)"""
+    from unittest.mock import MagicMock
+
+    import nexus.commands.doctor as doctor_mod
+    import nexus.doctor_edge_probe as probe_mod
+
+    probe = MagicMock(name="run_edge_probe")
+    monkeypatch.setattr(probe_mod, "run_edge_probe", probe)
+    stubbed = [n for n in dir(doctor_mod) if n.startswith("_run_check_")]
+    assert stubbed, "no supplementary runners found to stub"
+    for n in stubbed:
+        monkeypatch.setattr(doctor_mod, n, MagicMock(name=n, return_value=None))
+    doctor_mod._run_supplementary_checks()
+    probe.assert_not_called()
+
+
 # ── --check-fanout-floor census content (nexus-rbhci) ───────────────────────
 #
 # The marker-presence test above (test_each_promoted_check_runs) only

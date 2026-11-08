@@ -94,7 +94,7 @@ def _rows() -> list[tuple[str, float]]:
 def _run(engine, cols, n: int = 20, **kw):
     kw.setdefault("threshold_override", float("inf"))
     kw.setdefault("cluster_by", None)
-    return search_cross_corpus("q", cols, n, engine.client, **kw)
+    return search_cross_corpus("q", cols, n, engine.client, **kw, sensitivity="include")
 
 
 def _mixed_engine(monkeypatch, route: bool, *, check: bool = True):
@@ -326,7 +326,7 @@ def _render(rows: list[SearchResult], *, names: list[str], cfg=_CHECK_ON, fn="se
          patch("nexus.mcp.core._get_catalog", return_value=None):
         if fn == "query":
             return mcp_core.query(question="anything", corpus=",".join(names), **kw)
-        return mcp_core._search_render(query="anything", corpus=",".join(names), **kw)
+        return mcp_core._search_render(query="anything", corpus=",".join(names), **kw, sensitivity="include")
 
 
 def _labels(out: str) -> dict[str, bool]:

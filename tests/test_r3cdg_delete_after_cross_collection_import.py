@@ -72,7 +72,7 @@ def _exported_and_imported(client, tmp_path, src: str, dst: str) -> None:
 
 def _live_in(client, collection: str, chash: str) -> bool:
     try:
-        return chash in client.get_collection(collection).get(ids=[chash], include=[])["ids"]
+        return chash in client.get_collection(collection).get(ids=[chash], include=[], sensitivity="include")["ids"]
     except CollectionNotFoundError:
         # Deleting the last chunk leaves the collection with no rows.
         return False

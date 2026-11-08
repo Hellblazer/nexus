@@ -1073,6 +1073,159 @@ class TestRunHousekeeping:
         assert any(str(l.to_tumbler) == str(other_t) and l.link_type == "implements" for l in out)
         assert any(str(l.from_tumbler) == str(other_t) and l.link_type == "quotes" for l in inc)
 
+    def test_rename_keeps_the_spans_of_a_moved_link(self, tmp_path, monkeypatch):
+        """nexus-12ml0: the renamed entry's text is the same (same content_hash), so a span into it still
+        points at the same text; a moved link keeps from_span and to_span, outgoing and incoming."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        cat.register_owner("nexus", "repo", repo_hash="aaa121")
+        owner_t = cat.owner_for_repo("aaa121")
+        old_t = cat.register(owner_t, "old.md", content_type="docs", file_path="docs/old.md",
+                             meta={"content_hash": "5ca1ab1e"})
+        other_t = cat.register(owner_t, "rdr-3", content_type="rdr", file_path="docs/rdr/rdr-3.md")
+        cat.link(old_t, other_t, "cites", created_by="test", from_span="3-7", to_span="12-14")
+        cat.link(other_t, old_t, "quotes", created_by="test", from_span="1-2", to_span="20-25")
+        new_t = cat.register(owner_t, "new.md", content_type="docs", file_path="docs/new.md",
+                             meta={"content_hash": "5ca1ab1e"})
+
+        _run_housekeeping(cat, owner_t, indexed_set={"docs/new.md", "docs/rdr/rdr-3.md"})
+
+        out = [l for l in cat.links_from(new_t) if l.link_type == "cites"]
+        inc = [l for l in cat.links_to(new_t) if l.link_type == "quotes"]
+        assert [(l.from_span, l.to_span) for l in out] == [("3-7", "12-14")], out
+        assert [(l.from_span, l.to_span) for l in inc] == [("1-2", "20-25")], inc
+
+    def test_rename_of_two_entries_in_one_run_redirects_a_link_between_them(self, tmp_path, monkeypatch):
+        """nexus-12ml0: when A and B are both renamed in one run and A links to B, the moved link joins the two
+        new entries. Copying it as A'->B would leave A' linked to B, which the same run deletes."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        cat.register_owner("nexus", "repo", repo_hash="bbb121")
+        owner_t = cat.owner_for_repo("bbb121")
+        a_t = cat.register(owner_t, "a.md", content_type="docs", file_path="docs/a.md",
+                           meta={"content_hash": "aaaa0001"})
+        b_t = cat.register(owner_t, "b.md", content_type="docs", file_path="docs/b.md",
+                           meta={"content_hash": "bbbb0002"})
+        cat.link(a_t, b_t, "cites", created_by="test")
+        cat.link(b_t, a_t, "quotes", created_by="test")
+        a2_t = cat.register(owner_t, "a2.md", content_type="docs", file_path="docs/a2.md",
+                            meta={"content_hash": "aaaa0001"})
+        b2_t = cat.register(owner_t, "b2.md", content_type="docs", file_path="docs/b2.md",
+                            meta={"content_hash": "bbbb0002"})
+
+        _run_housekeeping(cat, owner_t, indexed_set={"docs/a2.md", "docs/b2.md"})
+
+        assert cat.resolve(a_t) is None and cat.resolve(b_t) is None
+        gone = {str(a_t), str(b_t)}
+        for t in (a2_t, b2_t):
+            touching = cat.links_from(t) + cat.links_to(t)
+            assert not [l for l in touching if {str(l.from_tumbler), str(l.to_tumbler)} & gone], touching
+        assert [l.link_type for l in cat.links_from(a2_t) if str(l.to_tumbler) == str(b2_t)] == ["cites"]
+        assert [l.link_type for l in cat.links_from(b2_t) if str(l.to_tumbler) == str(a2_t)] == ["quotes"]
+
+    def test_a_second_rename_does_not_move_a_link_from_an_entry_deleted_in_an_earlier_run(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-12ml0: a delete is a tombstone, so after run 1 renames A to A2 the row A->X is still read when
+        run 2 renames X to X2. Moving it as A->X2 hit the engine's dangling-endpoint refusal, which aborted
+        housekeeping on that run and every later one; it is not moved, and X is retired."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        cat.register_owner("nexus", "repo", repo_hash="ddd121")
+        owner_t = cat.owner_for_repo("ddd121")
+        a_t = cat.register(owner_t, "a.md", content_type="docs", file_path="docs/a.md",
+                           meta={"content_hash": "aaaa1201"})
+        x_t = cat.register(owner_t, "x.md", content_type="docs", file_path="docs/x.md",
+                           meta={"content_hash": "eeee1202"})
+        cat.link(a_t, x_t, "cites", created_by="test")
+        a2_t = cat.register(owner_t, "a2.md", content_type="docs", file_path="docs/a2.md",
+                            meta={"content_hash": "aaaa1201"})
+        _run_housekeeping(cat, owner_t, indexed_set={"docs/a2.md", "docs/x.md"})
+        assert cat.resolve(a_t) is None
+
+        x2_t = cat.register(owner_t, "x2.md", content_type="docs", file_path="docs/x2.md",
+                            meta={"content_hash": "eeee1202"})
+        _run_housekeeping(cat, owner_t, indexed_set={"docs/a2.md", "docs/x2.md"})
+
+        assert cat.resolve(x_t) is None
+        assert not [l for l in cat.links_to(x2_t) if str(l.from_tumbler) == str(a_t)]
+        assert [l.link_type for l in cat.links_from(a2_t) if str(l.to_tumbler) == str(x2_t)] == ["cites"]
+
+    def test_a_second_rename_does_not_move_a_link_to_an_entry_deleted_in_an_earlier_run(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-12ml0, the outgoing mirror: run 1 renames T to T2 and leaves the row X->T; run 2 renames X to X2.
+        X->T is not moved as X2->T, and X->T2 moves as X2->T2."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        cat.register_owner("nexus", "repo", repo_hash="ddd122")
+        owner_t = cat.owner_for_repo("ddd122")
+        x_t = cat.register(owner_t, "x.md", content_type="docs", file_path="docs/x.md",
+                           meta={"content_hash": "eeee1222"})
+        t_t = cat.register(owner_t, "t.md", content_type="docs", file_path="docs/t.md",
+                           meta={"content_hash": "ffff1221"})
+        cat.link(x_t, t_t, "cites", created_by="test")
+        t2_t = cat.register(owner_t, "t2.md", content_type="docs", file_path="docs/t2.md",
+                            meta={"content_hash": "ffff1221"})
+        _run_housekeeping(cat, owner_t, indexed_set={"docs/x.md", "docs/t2.md"})
+        assert cat.resolve(t_t) is None
+
+        x2_t = cat.register(owner_t, "x2.md", content_type="docs", file_path="docs/x2.md",
+                            meta={"content_hash": "eeee1222"})
+        _run_housekeeping(cat, owner_t, indexed_set={"docs/x2.md", "docs/t2.md"})
+
+        assert cat.resolve(x_t) is None
+        assert not [l for l in cat.links_from(x2_t) if str(l.to_tumbler) == str(t_t)]
+        assert [l.link_type for l in cat.links_from(x2_t) if str(l.to_tumbler) == str(t2_t)] == ["cites"]
+
+    @pytest.mark.parametrize("orphan_first", [True, False])
+    def test_rename_does_not_move_a_link_to_an_orphan_the_same_run_deletes(self, tmp_path, monkeypatch, orphan_first):
+        """nexus-12ml0: an orphan on its second miss is deleted in the same run that renames an entry it links
+        with. Its link is not moved onto the new entry, whichever is processed first: before, the move hit the
+        engine's dangling-endpoint refusal; after, it would point at the deleted orphan."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        cat.register_owner("nexus", "repo", repo_hash="ccc12" + ("1" if orphan_first else "2"))
+        owner_t = cat.owner_for_repo("ccc12" + ("1" if orphan_first else "2"))
+
+        def _orphan():
+            return cat.register(owner_t, "gone.md", content_type="docs", file_path="docs/gone.md",
+                                meta={"miss_count": 1})
+
+        def _old():
+            return cat.register(owner_t, "old.md", content_type="docs", file_path="docs/old.md",
+                                meta={"content_hash": "c0ffee12"})
+
+        if orphan_first:
+            orphan_t, old_t = _orphan(), _old()
+        else:
+            old_t, orphan_t = _old(), _orphan()
+        cat.link(orphan_t, old_t, "cites", created_by="test")
+        cat.link(old_t, orphan_t, "quotes", created_by="test")
+        new_t = cat.register(owner_t, "new.md", content_type="docs", file_path="docs/new.md",
+                             meta={"content_hash": "c0ffee12"})
+
+        _run_housekeeping(cat, owner_t, indexed_set={"docs/new.md"})
+
+        assert cat.resolve(orphan_t) is None and cat.resolve(old_t) is None
+        touching = cat.links_from(new_t) + cat.links_to(new_t)
+        assert not [l for l in touching if str(orphan_t) in (str(l.from_tumbler), str(l.to_tumbler))], touching
+
     def test_rename_carries_non_evidentiary_stamp_to_new_entry(self, tmp_path, monkeypatch):
         """nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round
         4): a manually-stamped document survives a rename. Without this,

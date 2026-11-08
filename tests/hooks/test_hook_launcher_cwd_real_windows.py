@@ -151,13 +151,13 @@ def _run(
 @pytest.mark.skipif(not ON_WINDOWS, reason="needs a real Windows venv layout and uv's Windows interpreter discovery")
 class TestRealWindows:
     def test_the_walk_finds_the_uv_entries(self) -> None:
-        """Non-vacuity: nineteen conexus entries and four sn entries launch through uv
+        """Non-vacuity: twenty conexus entries and four sn entries launch through uv
         (7 until RDR-228, nexus-sv2wx.8, put seven entries behind the launcher and
         added the setup notice hook; 15 until nexus-3lqxv added the compaction
         checkpoint's pre, post and inject entries; 18 until nexus-mtheb.3 added the
-        SubagentStop T1 nudge)."""
+        SubagentStop T1 nudge; 19 until nexus-4cgop added the Stop wake guard)."""
         counts = {p: sum(1 for plugin, _, _ in _uv_entries() if plugin == p) for p in _PLUGINS}
-        assert counts == {"conexus": 19, "sn": 4}, counts
+        assert counts == {"conexus": 20, "sn": 4}, counts
 
     def test_a_launcher_entry_really_starts_the_launcher(self, clean: SimpleNamespace) -> None:
         """The never-runs cases prove nothing about an entry whose script did not

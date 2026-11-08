@@ -165,6 +165,16 @@ def test_the_match_rule_over_the_contract_records(hook: ModuleType, record: str,
     assert hook._ask_matches(rec, parsed) is (rec["status"] in ("sent", "sending"))
 
 
+def test_an_outcome_unknown_sending_record_still_matches(hook: ModuleType) -> None:
+    """nx ask answer leaves an ambiguous send `sending` with an `outcome unknown: ...` error (nexus-wc4jj.14):
+    the mail may have arrived, and the hook must still match it."""
+    rec = {**_record("answer_record_v1.json"), "status": "sending", "tuple_id": None,
+           "error": "outcome unknown: ReadTimeout('read timed out')"}
+    parsed = hook._ask_parse_body(_CORR, _text("mail_body_v1.txt").replace("5c1e9a7f0b2d4a83", rec["answer_id"]))
+    assert parsed is not None
+    assert hook._ask_matches(rec, parsed) is True
+
+
 def test_the_match_rule_edges(hook: ModuleType) -> None:
     rec = _record("answer_record_v1.json")
     parsed = hook._ask_parse_body(_CORR, _text("mail_body_v1.txt"))

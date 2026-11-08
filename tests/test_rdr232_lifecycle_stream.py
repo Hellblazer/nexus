@@ -550,10 +550,10 @@ def test_with_ids_over_the_operator_cap_both_records_reach_the_operator() -> Non
     stream = _lifecycle_stream(10)
     ids = [f"{0xA000 + i:064x}" for i in range(150)]
 
-    def fake(ids, collections=None, structured=False):  # noqa: ARG001
+    def fake(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": [f"secondary {k}" for k, _ in enumerate(ids)]}
 
-    with patch("nexus.mcp.core.store_get_many", side_effect=fake), \
+    with patch("nexus.mcp.core._store_get_many_impl", side_effect=fake), \
          patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()):
         _, args = _hydrate("rank", {"ids": ids, "criterion": "c"}, stream)
     items = json.loads(args["items"])

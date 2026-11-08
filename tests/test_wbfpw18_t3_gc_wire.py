@@ -55,7 +55,11 @@ def runner() -> CliRunner:
 @pytest.fixture
 def real_client():
     reset_http_vector_client_for_tests()
-    yield HttpVectorClient()
+    # nexus-alsq3: a move asks the catalog whether its origin is a knowledge collection (the retention stamp is
+    # sent for knowledge only). The scripted engine below answers POSTs only, so the client resolves rows through
+    # a stub that finds none: no stamp, the same bodies as before, and no catalog read past the patch, which
+    # reached storage without a tenant on the first move of a CI worker (develop b5c92b844, shard 4).
+    yield HttpVectorClient(_row_resolver=lambda _collection: None)
     reset_http_vector_client_for_tests()
 
 

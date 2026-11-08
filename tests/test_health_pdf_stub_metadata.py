@@ -384,6 +384,25 @@ def test_a_stub_only_in_an_unsampled_chunk_is_missed_and_the_output_says_it_was_
     assert row.ok and "clean on a sample" in row.detail, row.detail
 
 
+def test_a_placeholder_suffix_of_a_method_less_document_is_caught_through_the_last_probe(monkeypatch) -> None:
+    """nexus-4z845, the scan side only. A method-less document whose placeholder sits on a suffix of its
+    manifest, ending at the last chunk, is seen by the last probe and then read in full. That is the shape
+    a post-pass leaves when the process dies between two of update_chunks' 300-id batches (they go in
+    manifest order and stop at the first failure) before the catalog hook records a method. A post-pass
+    that fails by exception is not this case: the hook still records extraction_method, so the scan skips
+    the document, and it is the stranded-indexing row (index_state stays 'indexing' when the post-pass did
+    not land) that names it, with the kept buffer retrying the post-pass on the next run. The fixture is
+    scaled down (3 of 20 chunks, which no probe but the last, of 0, 6, 13 and 19, reaches); it exercises
+    the scan, not the producer's batching. If the manifest's last chunk is another document's restamped
+    row, the suffix ends before it and only an earlier probe can see it."""
+    _legacy_collection(monkeypatch, [20] * 30, stub_chunks={(3, i) for i in range(17, 20)})
+
+    row = _row(health._check_pdf_stub_metadata())
+
+    assert not row.ok, row.detail
+    assert "3 PDF chunk(s)" in row.detail and "/doc3.pdf (3)" in row.detail, row.detail
+
+
 def test_empty_and_repeated_manifest_chashes_do_not_take_probe_slots(monkeypatch) -> None:
     """A manifest row with no chash, or a repeat of one, is not a chunk. Left in, they shift the spread:
     here chunk 6, which the four probes of a clean 20-chunk document reach, would be skipped."""

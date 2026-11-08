@@ -91,11 +91,6 @@ _KWARGS_READ: dict[str, str] = {
     ),
     "src/nexus/hooks/upgrade_auto.py:196": "same ``common`` dict as :193",
     "src/nexus/hooks/upgrade_auto.py:199": "same ``common`` dict as :193",
-    "src/nexus/_mineru_spawn.py:302": (
-        "``stable`` is ``service_registry.detached_spawn_kwargs()`` minus its ``env``: a "
-        "lone ``cwd`` key (nexus-x3m8e); stdout and stderr are the child log handle, "
-        "binary, and the server is detached"
-    ),
     "src/nexus/hooks/agent_dispatch_record.py:99": (
         "``common`` is the null device for all three streams, ``close_fds`` and "
         "``stable_cwd.detached_spawn_kwargs()``; ``extra`` is the session or creation "
@@ -106,12 +101,12 @@ _KWARGS_READ: dict[str, str] = {
         "an ``env`` copy carrying NEXUS_REPO_ROOT (nexus-x3m8e); stdio is the null "
         "device and nothing reads the child as text"
     ),
-    "src/nexus/commands/index.py:2616": (
+    "src/nexus/commands/index.py:2661": (
         "``**isolation_popen_kwargs()`` (inert flags) plus ``**detached_spawn_kwargs()``, "
         "which holds only ``cwd`` (and an ``env`` copy when NEXUS_CONFIG_DIR is relative; "
         "nexus-x3m8e); stdout and stderr are a binary log handle, nothing reads it as text"
     ),
-    "tests/test_mcpb_bootstrap.py:187": (
+    "tests/test_mcpb_bootstrap.py:188": (
         "a test double for ``bootstrap._sync_with_retry``'s ``run`` argument: the kwargs are the "
         "bootstrap's own, which carry encoding='utf-8' and errors='replace' and no text "
         "(pinned by test_sync_does_not_inherit_the_hosts_stdin_and_decodes_utf8)"

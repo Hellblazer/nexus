@@ -193,10 +193,10 @@ count" below refers to it.
 | 9 | Taxonomy label | commands/taxonomy_cmd.py:1712 (dispatch 1774) | topic terms (c-TF-IDF, a per-topic term weighting) plus sample document names | sensitive documents never appear as sample names; a topic with a sensitive member keeps its terms label and skips the LLM label (phase 1), loudly |
 | 10 | Taxonomy review `--auto` | taxonomy_cmd.py:1824 (dispatch 1904) | label, terms, document names | as row 9 |
 | 11 | Knowledge Map in SubagentStart | hook output | topic labels into every agent's context | phase 3: sensitive members excluded from term computation |
-| 12 | `nx_answer` operators (extract, rank, compare, summarize, generate, filter, check, verify, groupby, aggregate) | mcp/core.py:9191, 9212, 9236, 9268, 9289, 9314, 9388, 9438, 9490, 9565 | hydrated chunk text to the LLM | run enters the scope; retrieval excludes at the engine; hydration (runner.py:2697, 2112, 3890) refuses sensitive ids with a skip line in the run record |
+| 12 | `nx_answer` operators (extract, rank, compare, summarize, generate, filter, check, verify, groupby, aggregate) | mcp/core.py:9191, 9212, 9236, 9268, 9289, 9314, 9388, 9438, 9490, 9565 | hydrated chunk text to the LLM | run enters the scope; retrieval excludes at the engine; hydration (runner.py:2697, 2112, 3890) refuses sensitive ids the catalog flags, with a `sensitive_document_refused` log line and a skip entry on the step's in-process record; a hit the engine already dropped leaves no line, and a refused `exclude` read fails the plan |
 | 13 | `nx_answer` bundle | plans/bundle.py:883 | bundled step inputs | as row 12 (shared hydration) |
 | 14 | Plan miss, request coverage, grown-match description | mcp/core.py:12184, 11030, 10529 | question and plan text; coverage may carry hits | scope required; reads exclude |
-| 15 | `nx_tidy` | mcp/core.py:15496 (dispatch 15586) | prefetched T3 entries, inlined | scope; prefetch excludes; summary states how many were withheld |
+| 15 | `nx_tidy` | mcp/core.py:15496 (dispatch 15586) | prefetched T3 entries, inlined | scope; prefetch excludes; the summary states how many entries the catalog check withheld after the engine's own filter (zero when the engine filtered them all), and a catalog outage says the check was unavailable |
 | 16 | `nx_enrich_beads` | mcp/core.py:15615 (dispatch 15654, with `mcp_servers`) | bead text, plus nx MCP tools in the child | posture exported to the child; the child's reads exclude |
 | 17 | `nx_plan_audit` | mcp/core.py:15682 (dispatch 15761, with `mcp_servers`) | plan text, plus MCP tools in the child | as row 16 |
 | 18 | Memory rollup / `memory_consolidate` | memory_rollup.py:152 | T2 notes to the LLM | `n/a-not-a-document`; recorded as an unprotected gap (a note quoting a sensitive document) |
@@ -294,6 +294,25 @@ as unsupported.
 enumerates records with `_run_osascript` (devonthink.py:105), not through
 DEVONthink's MCP server, so DEVONthink's own exclusion does not stop nexus
 from indexing an excluded record.
+
+**Documented: `traverse` and `catalog_link_query` list tumblers and chunk hashes,
+not text.** The census (Gap 4, row 23) names `traverse` on the premise that it
+returns chunk text. It returns tumblers, chash values and collection names. A
+hash is not content, and hydrating one goes through `store_get_many`, which is
+withheld. They are out of the output withhold's scope (nexus-rfvyy.8, fix round
+r1, S7). The edge `meta` they carry is withheld for an edge that touches a
+withheld document; the spans stay.
+
+**Documented: DEVONthink group inheritance is unverified live.** The Q7 import
+treats a record as excluded when any ancestor group has the exclusion set, as an
+ancestor walk over the record's `parents`. A property DEVONthink cannot read
+fails closed on DEVONthink 4 or later (the record is treated as excluded and a
+warning names it), so a wrong property name over-excludes and never leaks. The
+walk's AppleScript has not run against a live DEVONthink 4: DEVONthink 4.4.2
+answered its version on 2026-11-07 but hung on every database query. Tests assert
+the script text and the fail-closed paths only. Verify it when DEVONthink
+answers: the property on a group and on the database root, the `parents` chain,
+and `osacompile` of the script.
 
 ### Critical Assumptions
 
@@ -428,14 +447,25 @@ route returns `sensitive` per (chash, doc_id) row. The vector search
 routes accept `sensitivity=exclude` and return `sensitive` per hit,
 computed in one batched query over the result chashes after the search, so
 the `RETURNS TABLE` shapes of the search functions do not change. The
-get-by-id and store-get routes return `sensitive` per row the same way.
+get-by-id and store-get routes return the flag the same way, as
+`sensitives`, a list parallel to `ids` like the envelope's other parallel
+lists. `sensitive` is chunk-level: true when any live owner of the chunk
+is sensitive, not only the document the row came from. Because the flag
+is read in a statement after the search or read, a document flagged in
+between is seen only there; under `exclude` such a row is dropped, so a
+route never serves text with `sensitive=true` under `exclude`. The two
+catalog by-address reads, `GET /v1/catalog/resolve_span` and
+`/resolve_chash`, return chunk text too, so they take the same
+`sensitivity=exclude` query parameter and return `sensitive`.
 The engine advertises two capabilities as boolean keys on `GET /version`,
 the mechanism already in use (`nexus_rdr/243-research-22`):
 `catalog_sensitivity_supported`, added with the catalog changeset in
 phase 1, and `vector_sensitivity_exclude_supported`, added with the
-vectors changeset in phase 2. The client reads them through cached probes
-like `supports_chash_allow`, where a failed or absent answer reads as
-unsupported. A `--sensitive` write (`index pdf`, `index md`, `dt index`,
+vectors changeset in phase 2. The client reads them through probes that
+cache only a real `/version` answer, true or false; a failed or timed-out
+probe is not cached and is retried on the next read (Sam, 2026-11-04,
+nexus-rfvyy.3: fail closed, with no cached failure). A real false, an
+absent key, or a failed probe reads as unsupported. A `--sensitive` write (`index pdf`, `index md`, `dt index`,
 `dt capture`, `store put`, MCP `store_put`) refuses before the register
 call, and `nx catalog sensitive` before its route call, unless
 `catalog_sensitivity_supported` is true, because an engine without the
@@ -448,8 +478,24 @@ writes and `exclude` reads.
 **4. Read-side filter (phase 2).** Each search function family takes the
 parameter and, when it is `exclude`, adds `NOT EXISTS` over live sensitive
 owners inside the search predicate, so the HNSW iterative scan fills `k`
-from non-sensitive rows (A3). Get-by-id and get-many routes apply the same
-filter.
+from non-sensitive rows (A3). The `NOT EXISTS` is written inline in each
+function rather than as a call to `chunk_sensitive`, because a scalar SQL
+function that holds a subquery is not inlined by the planner and would run
+once per row; a test checks that the two flag the same chunks. Each
+function takes a trailing `p_exclude_sensitive boolean DEFAULT false` and
+the old signature is dropped in the same changeset, so there is one
+function per name. Get-by-id and get-many routes apply the same filter.
+Search and get only ever return chunks with a live owner; under `exclude`
+the by-address reads also require one, so a chunk whose only owner is a
+tombstoned sensitive document is not served before the reaper collects
+it, and `resolve_chash` falls through to another collection's copy only
+when that copy has a live, non-sensitive owner. Write paths, the reaper's
+labels (chunks with no live owner) and routes that return no chunk text
+are exempt; a route parity test derives the chunk-text routes and the
+text-returning functions from the route table and `pg_proc` and fails on
+one that lacks the parameter. Titles, metadata and embeddings served by
+`/get-all-metadata`, `/store-list` and `/get-embeddings` are not filtered;
+withholding them is output-side work (phase 3).
 
 **5. Python scope.** New module `src/nexus/sensitivity.py`:
 
@@ -723,6 +769,20 @@ does not depend on callers telling the truth.
   1 and keeps only its terms label.
 - Negative: sensitive results rank by vector order alone, because Q4 keeps them
   from the Voyage reranker.
+- Negative: sensitivity governs nexus reads, not the filesystem. A `claude -p`
+  child that nexus dispatches keeps Read, Grep and Glob, so it could read a
+  sensitive document's source file from its working tree without passing
+  through the filter. Sam accepted this as a stated limit for phase 2
+  (nexus-rfvyy.7.19, 2026-11-06). Phase 3 closes it for the files the catalog
+  names (nexus-rfvyy.8, fix round r1): each dispatch whose grant names a file
+  tool lists the catalog's live sensitive documents and passes one deny rule
+  per source file (`Read(//abs/path)`, a `file://` source URI or an absolute
+  `file_path`; other schemes are skipped) as `--disallowedTools`. Claude Code
+  applies a Read deny rule to Grep and Glob as a best effort, so those two are
+  covered to that extent. The bound is 100 rules; past it one rule per parent
+  directory; past that, or when the catalog cannot be listed, Read, Grep and
+  Glob are removed from the child by name. The limit that remains is a copy
+  of the content at a path the catalog does not name.
 
 ### Risks and Mitigations
 
@@ -858,8 +918,10 @@ release that carries phases 1 and 2.
 ### Phase 3: Output side and external services
 
 The MCP output posture (Q1); the CLI badge, `--json` field and Claude Code
-posture (Q2); the reader instruction line; rerank exclusion (Q4);
-DEVONthink exclusion
+posture (Q2); the reader instruction line; rerank exclusion (Q4); the
+child file-read deny (a `claude -p` child that keeps Read, Grep or Glob gets
+`--disallowedTools` rules for the catalog's sensitive source files; see
+Consequences); DEVONthink exclusion
 import (Q7, A6; this RDR adds no write to DEVONthink, Sam 2026-11-04); taxonomy discover
 without sensitive members; the `sensitive_in_external_embedder` doctor row;
 complete `docs/sensitivity.md` (the Phase 1 stub grows).
@@ -1112,3 +1174,7 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-05: Implementation notes under Technical Design item 8 record how Phase 1 applies the catalog flag (index paths, repo and batch skips, re-embed hold-back, note re-put, dry runs, reindex). No design change.
 - 2026-11-05: Sam's ruling: Phase 1 ships alone in conexus 7.96.0 (paired with engine-service-v0.1.180), superseding the 2026-11-04 ship-together ruling; the release text claims phase 1 only.
 - 2026-11-06: census rows 1 and 2, item 10 and the Test Plan follow the aspect queue onto the tuple drain (nexus-hbnml, 3ff3041ad; follow-ups 04aa4afc5, e7bfef5e4, e47aa0e33): the one enqueue gate and the one drain gate, a dead task not counted by `sensitive_with_aspects`, and requeue-failed leaving a flagged task dead. Wording only; the behaviour is the reviewed code.
+- 2026-11-06: Technical Design items 3 and 4 follow the reviewed phase 2 engine (nexus-rfvyy.7.3, .7.4 and their review fixes): `sensitives` on get envelopes, chunk-level `sensitive`, the post-lookup drop under `exclude`, the gated catalog by-address reads with a live owner required, the inline `NOT EXISTS` and one function per name, the exempt routes, and the probes' no-cached-failure rule from Sam's nexus-rfvyy.3 ruling. Wording only.
+- 2026-11-06: census rows 12 and 15 follow the reviewed phase 2 client (nexus-rfvyy.7.9, Python review r1 S3 and r2 M2): the skip record is a log line and an in-process step entry, not a persisted run-record line, and the `nx_tidy` withheld count measures the catalog check after the engine filter.
+- 2026-11-06: Consequences states the child file-read limit Sam accepted for phase 2 (nexus-rfvyy.7.19, ask child-file-reads, option 1).
+- 2026-11-07: Phase 3 list and Key Discoveries follow the reviewed phase 3 code (nexus-rfvyy.8, fix rounds r1 to r3): the child file-read deny is in the Phase 3 list, `traverse` and `catalog_link_query` are recorded as out of the withhold's scope, and DEVONthink group inheritance is recorded as unverified live. Wording only.

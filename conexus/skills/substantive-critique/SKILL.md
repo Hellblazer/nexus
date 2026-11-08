@@ -6,7 +6,7 @@ effort: high
 
 # Deep Critique Skill
 
-Delegates to the **substantive-critic** agent. See [registry.yaml](../../registry.yaml) for details.
+Delegates to the **substantive-critic** agent. See [${CLAUDE_PLUGIN_ROOT}/registry.yaml](../../registry.yaml) for details.
 
 ## When This Skill Activates
 
@@ -65,7 +65,7 @@ Critique report with prioritized findings
 - [ ] Recommendations are specific and actionable
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
 
 ## Critique Methodology
 

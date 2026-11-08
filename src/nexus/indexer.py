@@ -16,17 +16,20 @@ Per-file indexing logic lives in focused sub-modules (RDR-032):
   nexus.indexer_utils  — staleness check, credential check, shared helpers
   nexus.index_context  — IndexContext dataclass
 """
+import contextlib
 import os
+import sys
 import subprocess
 import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 import structlog
 
+from nexus import _locking
 from nexus._locking import lock_file, unlock_file
 from nexus.bounded_subprocess import run_bounded
 from nexus.catalog.indexed_meta import document_register_meta, fill_only_meta
@@ -328,7 +331,6 @@ def _repo_lock_path(repo: Path) -> Path:
     return nexus_config_dir() / "locks" / f"{path_hash}.lock"
 
 
-_LOCK_STALE_SECONDS = 5  # lock files older than this with no live PID are stale
 #: Page size for the batched catalog register_many pass (nexus-9dvqy). Matches
 #: the server's MAX_BATCH_DOC_IDS cap. Module-level so tests can shrink it to
 #: force multi-page behaviour without a 1000+ file corpus.
@@ -380,40 +382,66 @@ def _gc_floor_fraction() -> float:
     return val
 
 
-def _clear_stale_lock(lock_path: Path) -> None:
-    """Delete *lock_path* if it is stale (dead PID or old empty file).
+def _acquire_repo_lock(lock_path: Path, on_locked: str) -> IO[str] | None:
+    """Open and lock the repo lock file; the open file, or None when *on_locked* is 'skip' and it is held.
 
-    A lock file is stale when:
-    - It contains a PID that no longer exists (ESRCH), OR
-    - It has no parseable PID and is older than ``_LOCK_STALE_SECONDS``.
-
-    The second case handles background processes (disown/&) that were killed
-    before writing their PID, leaving empty 0-byte lock files forever.
-
-    This is advisory cleanup — the platform lock from
-    :mod:`nexus._locking` provides the real mutual exclusion.
+    Locks the file the path names at the moment it returns: a sweep may unlink the inode between
+    this process's open and its lock (nexus-dyfsw), and a lock on an unlinked inode excludes
+    nobody, so the loop re-opens the path and locks again. A sweep's own probe holds an unheld
+    file for microseconds, so a 'skip' caller asks once more before reading the lock as held.
     """
-    if not lock_path.exists():
-        return
-    try:
-        pid = int(lock_path.read_text(encoding="utf-8").strip())
-    except (ValueError, OSError):
-        # No readable PID — check file age.  A just-opened lock will be
-        # younger than _LOCK_STALE_SECONDS; an orphan from a crashed
-        # process will be much older.
+    probe_retried = False
+    while True:
+        raw_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        lock_fd = os.fdopen(raw_fd, "r+", encoding="utf-8")  # noqa: SIM115  (must stay open while locked)
         try:
-            age = time.time() - lock_path.stat().st_mtime
-        except OSError:
-            return
-        if age > _LOCK_STALE_SECONDS:
-            _remove_stale(lock_path)
-        return
-    from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred: advisory cleanup path only
+            lock_file(lock_fd, blocking=(on_locked == "wait"))
+        except BlockingIOError:
+            # on_locked == "skip" and another process holds the lock.
+            # Nothing has been written to the file — close and leave the
+            # holder's content exactly as it was. A sweep's probe holds an
+            # unheld file for microseconds (nexus-dyfsw), so ask once more
+            # before reading the lock as a live indexer's.
+            lock_fd.close()
+            if not probe_retried:
+                probe_retried = True
+                time.sleep(0.05)
+                continue
+            return None
+        # nexus-dyfsw: another process's sweep may have unlinked this file
+        # between our open and our lock; a lock on an unlinked inode
+        # excludes nobody, so take the lock on the file the path names now.
+        if sys.platform == "win32" or _same_file(lock_fd.fileno(), lock_path):
+            return lock_fd
+        lock_fd.close()
 
-    # pid_alive reads only ESRCH (Windows: no such process) as dead, so an
-    # ambiguous probe leaves the lock, as before (nexus-f9bgu.25).
-    if not pid_alive(pid):
-        _remove_stale(lock_path)
+
+def _clear_stale_lock(lock_path: Path) -> None:
+    """Delete *lock_path* when no process holds its platform lock.
+
+    The lock itself is the test, not the PID written in the file (nexus-dyfsw): a holder in
+    another PID namespace has a PID this process cannot see, so a PID test unlinked a live
+    holder's file and let a second indexer lock a fresh inode. A file that nobody holds is stale
+    whatever it contains, an empty one left by a process killed before it wrote its PID
+    included. The lock is held across the unlink on POSIX; Windows cannot unlink an open file,
+    so it is released first, and a file someone opened in that gap is left. A holder that locked
+    the inode just unlinked notices and retries (the lock loop in :func:`index_repository`).
+    """
+    try:
+        fd = os.open(str(lock_path), os.O_RDWR)
+    except OSError:
+        return  # absent, or not ours to open: nothing to sweep
+    try:
+        try:
+            _locking.lock_fd(fd, blocking=False)
+        except (BlockingIOError, OSError):
+            return  # held: a live indexer
+        if sys.platform != "win32":
+            _remove_stale(lock_path)
+            return
+    finally:
+        os.close(fd)  # also releases the lock
+    _remove_stale(lock_path)
 
 
 def _sweep_stale_locks(lock_dir: Path) -> None:
@@ -425,12 +453,21 @@ def _sweep_stale_locks(lock_dir: Path) -> None:
 
 
 def _remove_stale(lock_path: Path) -> None:
-    """Unlink *lock_path*, ignoring FileNotFoundError (concurrent cleanup)."""
+    """Unlink *lock_path*, ignoring a concurrent cleanup and, on Windows, a file another process has open."""
     try:
         lock_path.unlink()
         _log.debug("stale_lock_removed", path=str(lock_path))
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         pass
+
+
+def _same_file(fd: int, lock_path: Path) -> bool:
+    """True when *lock_path* still names the file open on *fd* (a sweep may have unlinked it)."""
+    try:
+        here, there = os.fstat(fd), os.stat(lock_path)
+    except OSError:
+        return False
+    return (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino)
 
 
 def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
@@ -1302,8 +1339,19 @@ def _catalog_hook(
     needs_fence: dict[str, tuple[str, str]] | None = None,
     unregistered: dict[Path, str] | None = None,
     housekeeping_keep: list[Path] | None = None,
+    sensitive_globs: tuple[str, ...] = (),
+    sensitive_wanted: set[Path] | None = None,
+    sensitive_confirmed: set[Path] | None = None,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
+
+    ``sensitive_globs`` (RDR-243 Q8, nexus-rfvyy.8.8) are the ``--sensitive-glob`` patterns. A file whose
+    repo-relative path matches one is registered with ``sensitive = true`` (a new document carries it in
+    its register request), and an existing document that is not yet flagged is raised through the audited
+    ``set_sensitivity`` route, also when nothing else about the file changed. ``sensitive_wanted`` is an
+    OUT-param holding every matching file; ``sensitive_confirmed`` holds those the catalog now holds
+    flagged. A caller that embeds must not embed a wanted file that is not confirmed (the flag is the
+    only thing the later skips and local-only legs read).
 
     ``housekeeping_keep`` (nexus-2k66t.4.2) names files that exist but were
     deliberately not offered for registration this run (PDFs held back because
@@ -1511,6 +1559,8 @@ def _catalog_hook(
         _stage_t0 = time.monotonic()
         _stage_s: dict[str, float] = {}
         new_batch: list[tuple[Path, dict]] = []
+        # RDR-243 Q8: existing documents matched by --sensitive-glob that are not flagged yet.
+        raise_batch: list[tuple[Path, str]] = []
         # nexus-xedhp: changed-but-existing docs, batched via update_many
         # (Pass 1b, below) instead of an inline per-file writer.update().
         changed_batch: list[tuple[Path, dict]] = []
@@ -1522,11 +1572,15 @@ def _catalog_hook(
         # existing RDR whose CONTENT hash changed is re-fed to the
         # dependency generator as if new; head-hash-only bumps are not.
         relink_rdr_tumblers: list = []
+        from nexus.sensitive_write import sensitive_glob_matches  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
         for abs_path, content_type, collection_name in indexed_files:
             try:
                 rel_path = str(abs_path.relative_to(repo))
             except ValueError:
                 rel_path = abs_path.name
+            _sens_glob = bool(sensitive_globs) and sensitive_glob_matches(rel_path, sensitive_globs)
+            if _sens_glob and sensitive_wanted is not None:
+                sensitive_wanted.add(abs_path)
 
             # nexus-u8n4r: refuse registration of files whose REGISTERED
             # identity (owner's main-repo root + rel_path — never the raw
@@ -1655,8 +1709,15 @@ def _catalog_hook(
                         "head_hash": head_hash,
                         "meta": _register_time_meta(rel_path, file_hash, rdr_stamp),
                         "source_mtime": source_mtime,
+                        **({"sensitive": True} if _sens_glob else {}),
                     }))
                 else:
+                    if _sens_glob:
+                        if getattr(existing, "sensitive", False) is True:
+                            if sensitive_confirmed is not None:
+                                sensitive_confirmed.add(abs_path)
+                        else:
+                            raise_batch.append((abs_path, str(existing.tumbler)))
                     # nexus-dst5h: skip the write when nothing changed —
                     # a warm re-run otherwise pays one serial update
                     # round-trip per file. An empty file_hash (read
@@ -1755,6 +1816,34 @@ def _catalog_hook(
 
         _stage_s["pass1_resolve"] = time.monotonic() - _stage_t0
         _stage_mark = time.monotonic()
+
+        # RDR-243 Q8 (nexus-rfvyy.8.8): raise the flag on EXISTING documents a --sensitive-glob matches, through
+        # the audited route (``sensitive`` is not an updatable column, so update_many would be refused). It
+        # runs whether or not anything else about the file changed. A page that fails leaves its files
+        # unconfirmed, and the caller then does not embed them.
+        if raise_batch:
+            from nexus.sensitive_write import SENSITIVE_REASON  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+            _set_sens = getattr(writer, "set_sensitivity", None)
+            for _start in range(0, len(raise_batch), _CATALOG_REGISTER_PAGE):
+                _page = raise_batch[_start : _start + _CATALOG_REGISTER_PAGE]
+                try:
+                    if not callable(_set_sens):
+                        raise RuntimeError("the catalog writer has no set_sensitivity")
+                    _set_sens([t for _, t in _page], True, reason=f"{SENSITIVE_REASON}: nx index repo --sensitive-glob")
+                except Exception as exc:  # noqa: BLE001 — boundary: any failure of the audited route leaves these files unflagged, and the run does not embed them
+                    _log.warning(
+                        "sensitive_glob_flag_not_set", repo=repo_name, files=len(_page),
+                        error_type=type(exc).__name__, error=str(exc),
+                    )
+                    continue
+                if sensitive_confirmed is not None:
+                    sensitive_confirmed.update(p for p, _ in _page)
+                # An existing document indexed before the glob matched may sit in topics labelled from its text
+                # (RDR-243 Phase 3 fix r3, nexus-rfvyy.8, N1): relabel them, best effort and logged, as
+                # raise_flag does.
+                from nexus import sensitive_topics  # noqa: PLC0415 - deferred: only a late flag needs it
+
+                sensitive_topics.withhold_after_flag_best_effort(writer, [t for _, t in _page], source="index repo --sensitive-glob")
 
         # Pass 1b: batch-update the CHANGED existing docs (nexus-xedhp,
         # duoak.11 follow-up). A HEAD bump flips every doc's stored head_hash
@@ -1888,6 +1977,8 @@ def _catalog_hook(
                     )
                 for (path, doc), (tum, created) in zip(page, pairs):
                     file_to_doc_id[path] = str(tum)
+                    if doc.get("sensitive") and sensitive_confirmed is not None:
+                        sensitive_confirmed.add(path)
                     _fp = doc.get("file_path", "")
                     _conflict = _conflicts_by_path.get(_fp) or None
                     if created:
@@ -1985,6 +2076,8 @@ def _catalog_hook(
                             **{k: v for k, v in doc.items() if k != "title"},
                         )
                         file_to_doc_id[path] = str(tum)
+                        if doc.get("sensitive") and sensitive_confirmed is not None:
+                            sensitive_confirmed.add(path)
                         if created:
                             new_tumblers.append(tum)
                             new_content_types.add(doc.get("content_type", ""))
@@ -2406,6 +2499,11 @@ def _indexed_relpaths(indexed_files: list, repo: "Path") -> set[str]:
     return out
 
 
+# Consecutive index runs an orphan may be missing before housekeeping
+# deletes it; the rename link pre-pass predicts the same sweep from it.
+_ORPHAN_DELETE_MISSES: int = 2
+
+
 def _run_housekeeping(
     cat: "CatalogReader",
     owner: "Tumbler",
@@ -2419,7 +2517,7 @@ def _run_housekeeping(
     - If the file is present in *indexed_set*, reset miss_count to 0.
     - If absent and a content_hash match exists at a new path, treat as rename:
       transfer links to the new entry and delete the old one.
-    - If absent with no rename match, increment miss_count. Delete at threshold >= 2.
+    - If absent with no rename match, increment miss_count. Delete once it reaches ``_ORPHAN_DELETE_MISSES``.
     """
     # RDR-146 P1.2 strict split: reads via ``cat``, writes via ``w``
     # (the write-only proxy; defaults to ``cat`` for single-object callers).
@@ -2432,6 +2530,39 @@ def _run_housekeeping(
         ch = (e.meta or {}).get("content_hash", "")
         if ch and e.file_path in indexed_set:
             hash_to_entry[ch] = e
+
+    # Every entry this run retires as a rename, old tumbler -> new tumbler,
+    # built before any link moves so a link between two renamed entries can
+    # be redirected whichever one is processed first (nexus-12ml0).
+    # Orphans the miss-count sweep below deletes in this same run: a link
+    # to or from one of them is not moved, since the engine refuses an edge
+    # to a deleted entry and an edge to one about to go would dangle.
+    renamed_to: dict[str, object] = {}
+    swept: set[str] = set()
+    for e in owner_entries:
+        if e.file_path in indexed_set:
+            continue
+        ch = (e.meta or {}).get("content_hash", "")
+        if ch and ch in hash_to_entry:
+            renamed_to[str(e.tumbler)] = hash_to_entry[ch].tumbler
+        elif int((e.meta or {}).get("miss_count", 0)) + 1 >= _ORPHAN_DELETE_MISSES:
+            swept.add(str(e.tumbler))
+
+    def _moved(t: object) -> object:
+        return renamed_to.get(str(t), t)
+
+    # A delete is a tombstone and leaves its link rows, so a link read here
+    # can name an entry deleted in an EARLIER run (a second rename of a
+    # file whose partner was renamed before). The engine refuses an edge to
+    # it, which used to abort housekeeping on every later run; such a link
+    # is not moved (nexus-12ml0). Liveness is looked up once per tumbler.
+    live: dict[str, bool] = {}
+
+    def _is_live(t: object) -> bool:
+        key = str(t)
+        if key not in live:
+            live[key] = cat.resolve(t) is not None
+        return live[key]
 
     for entry in owner_entries:
         if entry.file_path in indexed_set:
@@ -2465,28 +2596,28 @@ def _run_housekeeping(
                 if not new_meta.get(NON_EVIDENTIARY_META_KEY):
                     new_meta[NON_EVIDENTIARY_META_KEY] = True
                     w.update(new_entry.tumbler, meta=new_meta)
-            # Transfer links from old entry to new entry. A link between the
-            # two entries (a symlink ghost citing its own target, or the
-            # target citing the ghost) would land as a self-link on the new
-            # entry, and a self-link on the old entry would leave the new one
-            # linked to the deleted entry, so both are dropped (nexus-x3bxj).
-            pair = {str(new_entry.tumbler), str(entry.tumbler)}
-            old_links = cat.links_from(entry.tumbler)
-            for lnk in old_links:
-                if str(lnk.to_tumbler) in pair:
+            # Transfer links from old entry to new entry, both directions.
+            # Each endpoint that names an entry renamed in this run is
+            # redirected to that entry's new tumbler, so a link between two
+            # renamed entries joins their new entries rather than pointing
+            # at one this run deletes (nexus-12ml0). A link that then joins
+            # an entry to itself (a symlink ghost citing its own target, the
+            # target citing the ghost, the ghost's own self-link) is dropped
+            # (nexus-x3bxj). The text is unchanged (same content_hash), so
+            # the spans move with the link (nexus-12ml0). link_if_absent
+            # keys on (from, to, type): when the new entry already holds
+            # that edge, the existing row and its spans are left as they are.
+            for lnk in cat.links_from(entry.tumbler) + cat.links_to(entry.tumbler):
+                src, dst = _moved(lnk.from_tumbler), _moved(lnk.to_tumbler)
+                if str(src) == str(dst) or {str(src), str(dst)} & swept:
+                    continue
+                other = dst if str(src) == str(new_entry.tumbler) else src
+                if not _is_live(other):
                     continue
                 w.link_if_absent(
-                    new_entry.tumbler, lnk.to_tumbler, lnk.link_type,
+                    src, dst, lnk.link_type,
                     created_by=lnk.created_by,
-                )
-            # Also transfer incoming links
-            incoming = cat.links_to(entry.tumbler)
-            for lnk in incoming:
-                if str(lnk.from_tumbler) in pair:
-                    continue
-                w.link_if_absent(
-                    lnk.from_tumbler, new_entry.tumbler, lnk.link_type,
-                    created_by=lnk.created_by,
+                    from_span=lnk.from_span, to_span=lnk.to_span,
                 )
             w.delete_document(entry.tumbler)
             _log.info(
@@ -2502,7 +2633,7 @@ def _run_housekeeping(
         meta = dict(entry.meta or {})
         miss_count = int(meta.get("miss_count", 0)) + 1
 
-        if miss_count >= 2:
+        if miss_count >= _ORPHAN_DELETE_MISSES:
             w.delete_document(entry.tumbler)
             _log.info(
                 "housekeeping_orphan_deleted",
@@ -2559,8 +2690,12 @@ def index_repository(
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
     hooks: "HookRegistry | None" = None,
     client: "httpx.Client | None" = None,
+    sensitive_globs: tuple[str, ...] = (),
 ) -> dict[str, int]:
     """Index all files in *repo* into T3 code__ and docs__ collections.
+
+    *sensitive_globs* (RDR-243 Q8, ``nx index repo --sensitive-glob``): files whose repo-relative path
+    matches one are registered ``sensitive`` before anything is embedded. See :func:`_catalog_hook`.
 
     Files are classified and routed:
     - Code → code__ collection (voyage-code-3, AST chunking)
@@ -2620,15 +2755,8 @@ def index_repository(
         # known, so a loser left its own (soon-dead) PID in the file the
         # winner still held; the next arrival's stale-lock sweep then saw
         # ESRCH on that dead PID and unlinked the live holder's lock.
-        raw_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
-        lock_fd = os.fdopen(raw_fd, "r+", encoding="utf-8")  # noqa: SIM115  (must stay open while locked)
-        try:
-            lock_file(lock_fd, blocking=(on_locked == "wait"))
-        except BlockingIOError:
-            # on_locked == "skip" and another process holds the lock.
-            # Nothing has been written to the file — close and leave the
-            # holder's content exactly as it was.
-            lock_fd.close()
+        lock_fd = _acquire_repo_lock(lock_path, on_locked)
+        if lock_fd is None:
             return {}
         # We now hold the exclusive flock: safe to stamp our own PID.
         try:
@@ -2679,7 +2807,7 @@ def index_repository(
                 _run_index_frecency_only(repo, registry)
                 stats: dict[str, int] = {}
             else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_start=on_start, on_rdr_start=on_rdr_start, on_refused=on_refused, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_start=on_start, on_rdr_start=on_rdr_start, on_refused=on_refused, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state, sensitive_globs=sensitive_globs)
                 _relink_changed_pdfs(_fence_run_state)
                 # nexus-6m9zy.6 (#12): owners.head_hash is the BASE the
                 # NEXT --since-head run diffs from. Advancing it past a
@@ -2725,14 +2853,23 @@ def index_repository(
                     _set_owner_head_hash(repo, _current_head(repo))
             return stats
         finally:
-            if lock_fd is not None:
+            # nexus-dyfsw: unlink while still holding the lock, and only the file
+            # the path still names, so a waiter cannot lock this inode in the gap
+            # and then lose its path to a third arrival. Windows cannot unlink an
+            # open file, so it releases first, as before.
+            if lock_fd is not None and lock_path is not None and sys.platform != "win32":
+                if _same_file(lock_fd.fileno(), lock_path):
+                    with contextlib.suppress(FileNotFoundError):
+                        lock_path.unlink()
                 unlock_file(lock_fd)
                 lock_fd.close()
-            if lock_path is not None:
-                try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass  # already gone — harmless
+            else:
+                if lock_fd is not None:
+                    unlock_file(lock_fd)
+                    lock_fd.close()
+                if lock_path is not None:
+                    with contextlib.suppress(FileNotFoundError, PermissionError):
+                        lock_path.unlink()
             # nexus-hg2dw point (2): runs on EVERY exit — normal return, an
             # exception propagating out of `_run_index`, or a KeyboardInterrupt
             # (SIGINT) — fail-stamping anything Pass 1 registered as needing
@@ -2978,7 +3115,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                 natural_ids = [r.chash for r in manifest if r.chash]  # RDR-180: full digest
                 if natural_ids:
                     try:
-                        present = col.get(ids=natural_ids, include=[])
+                        present = col.get(ids=natural_ids, include=[], sensitivity="include")
                     except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                         present = None
                     if present and present.get("ids"):
@@ -3942,7 +4079,7 @@ def _paginated_get(
             kwargs["where"] = where
         if include_non_live:
             kwargs["include_non_live"] = True
-        batch = _vector_with_retry(col.get, **kwargs)
+        batch = _vector_with_retry(col.get, sensitivity="include", **kwargs)
         batch_ids: list[str] = batch["ids"] or []
         all_ids.extend(batch_ids)
         if has_metas:
@@ -3989,7 +4126,7 @@ def _present_ids(col: object, ids: list[str]) -> set[str]:
 
     if isinstance(col, _ServiceCollectionStub):
         return set(col.existing_ids(ids))
-    return set(col.get(ids=ids, include=[]).get("ids") or [])
+    return set(col.get(ids=ids, include=[], sensitivity="include").get("ids") or [])
 
 
 def _batched_delete(col: object, ids: list[str]) -> int:
@@ -5408,6 +5545,7 @@ def _run_index(
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
     hooks: "HookRegistry | None" = None,
     fence_run_state: dict | None = None,
+    sensitive_globs: tuple[str, ...] = (),
 ) -> dict[str, int]:
     """Full indexing pipeline: classify → route → embed → upsert → prune.
 
@@ -5641,10 +5779,8 @@ def _run_index(
                     # chunks (same mechanism as the candidate_files zero-byte
                     # guard below) and would otherwise still reach
                     # indexed_for_catalog, minting an unclearable phantom.
-                    # RDR files are markdown text by construction (unlike
-                    # candidate_files' arbitrary extensions), so a zero-byte
-                    # check alone suffices here — no binary-content sniff
-                    # needed.
+                    # nexus-nawd0: a .md name does not make the file UTF-8
+                    # text, so the binary-content sniff below runs here too.
                     _md_size: int | None = None
                     try:
                         _md_size = md_file.stat().st_size
@@ -5657,6 +5793,22 @@ def _run_index(
                             continue
                     except OSError:
                         pass  # defer to per-file path
+                    # nexus-nawd0: intrastate's a6-dot-derivability.md held a
+                    # broken UTF-8 sequence 8 KB in; it registered, then the
+                    # prose indexer's strict read failed every run. The sniff
+                    # reads the whole file here, not its default 64 KB prefix:
+                    # RDRs are small, and a bad byte past the prefix fails the
+                    # same read. A warning, since a whole RDR leaves search.
+                    if looks_like_binary_content(
+                        md_file, sample_bytes=max(_md_size or 0, 65536),
+                    ):
+                        skipped_unchunkable.append((md_file, "binary_content"))
+                        _log.warning(
+                            "unchunkable_binary_content_rdr_skipped",
+                            path=str(md_file),
+                            reason="not valid UTF-8 text",
+                        )
+                        continue
                     # nexus-5j8fp: whitespace-only text chunks to nothing too.
                     if (
                         _md_size is not None
@@ -6287,6 +6439,22 @@ def _run_index(
     _needs_fence: dict[str, tuple[str, str]] = {}
     # nexus-z0o2p.20: why each file the hook could not resolve has no document.
     _unregistered_causes: dict[Path, str] = {}
+    # RDR-243 Q8: files --sensitive-glob matched, and those the catalog now holds flagged.
+    _sensitive_wanted: set[Path] = set()
+    _sensitive_confirmed: set[Path] = set()
+    # RDR-243 Q8: how many of the files this run visited each --sensitive-glob pattern matched
+    # (a pattern that matched none is a typo or a stale pattern, and the CLI says so loudly).
+    _sensitive_glob_counts: dict[str, int] = {}
+    if sensitive_globs:
+        from nexus.sensitive_write import sensitive_glob_hits  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+        _sensitive_glob_counts = {g: 0 for g in sensitive_globs}
+        for _abs, _ct, _coll in indexed_for_catalog:
+            try:
+                _rel = str(_abs.relative_to(repo))
+            except ValueError:
+                _rel = _abs.name
+            for _gi in sensitive_glob_hits(_rel, sensitive_globs):
+                _sensitive_glob_counts[sensitive_globs[_gi]] += 1
     file_to_doc_id = _catalog_hook(
         repo=repo,
         repo_name=_repo_basename,
@@ -6302,6 +6470,9 @@ def _run_index(
         needs_fence=_needs_fence,
         unregistered=_unregistered_causes,
         housekeeping_keep=_pdf_held,
+        sensitive_globs=sensitive_globs,
+        sensitive_wanted=_sensitive_wanted,
+        sensitive_confirmed=_sensitive_confirmed,
     )
     if on_phase is not None:
         on_phase(
@@ -6368,6 +6539,17 @@ def _run_index(
             indexed_for_catalog, file_to_doc_id, _unregistered_causes,
             on_phase=on_phase,
         )
+    # RDR-243 Q8: a file a --sensitive-glob matched whose flag the catalog did not confirm is not embedded.
+    # Every later skip and local-only leg reads that flag, so an unflagged one would go out as ordinary.
+    _glob_unflagged = _sensitive_wanted - _sensitive_confirmed
+    if _glob_unflagged:
+        _refused_paths = {*_refused_paths, *_glob_unflagged}
+        for _p in sorted(_glob_unflagged):
+            _log.warning(
+                "sensitive_glob_file_refused_unflagged", path=str(_p),
+                note="the catalog did not confirm the sensitive flag for this file; it was not indexed")
+        if on_phase is not None:
+            on_phase(f"{len(_glob_unflagged)} file(s) matching --sensitive-glob not indexed: the flag could not be set")
     _identity_less_dropped = sum(
         1 for _p, _cause in _identity_less_refusals
         if not _cause.startswith("ephemeral:")
@@ -7984,6 +8166,8 @@ def _run_index(
         "rdr_current": rdr_current,
         "rdr_failed": rdr_failed,
         "files_changed": _files_written,
+        # RDR-243 Q8: per --sensitive-glob pattern, the files this run visited that it matched ({} without the option).
+        "sensitive_glob_counts": _sensitive_glob_counts,
         # nexus-wbfpw.29 round 3 through round 5 carried a
         # "self_heal_confirmed_doc_ids" stat here (tumblers this run's own
         # self-heal pass provably fully repaired, per ManifestHealResult.

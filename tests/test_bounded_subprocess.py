@@ -36,6 +36,8 @@ import time
 import pytest
 
 from nexus.bounded_subprocess import kill_child_and_descendants, run_bounded
+from nexus.util.process_group import safe_killpg_group
+from tests._child_process import pid_alive
 from tests._module_seam import delattr_in
 from tests.test_win_job import live_children, reap_live_children
 
@@ -355,6 +357,43 @@ def test_returns_completed_process_on_success() -> None:
     result = run_bounded([sys.executable, "-c", "print('ok')"], timeout=30)
     assert result.returncode == 0
     assert result.stdout.strip() == "ok"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups and signals")
+@pytest.mark.parametrize("kill_on_interrupt", [True, False], ids=["kill", "default-leaves-it"])
+def test_kill_on_interrupt_reaps_a_child_that_ignores_signals(tmp_path, kill_on_interrupt: bool) -> None:
+    """nexus-j738q: an interrupt of the wait kills the child's group only when asked.
+
+    The child ignores INT/TERM/HUP, so only the group kill ends it. By default an interrupt leaves it running
+    (the pre-existing behaviour every other caller keeps).
+    """
+    import signal  # noqa: PLC0415
+    import threading  # noqa: PLC0415
+
+    pidfile = tmp_path / "pid"
+    script = f"trap '' INT TERM HUP; echo $$ > {pidfile}; while :; do sleep 0.05; done"
+
+    def fire() -> None:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if pidfile.exists() and pidfile.read_text(encoding="utf-8").strip():
+                time.sleep(0.3)
+                os.kill(os.getpid(), signal.SIGINT)  # a real signal: it ends the main thread's select
+                return
+            time.sleep(0.02)
+
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)  # CI starts pytest with SIGINT ignored
+    pid = None
+    try:
+        threading.Thread(target=fire, daemon=True).start()
+        with pytest.raises(KeyboardInterrupt):
+            run_bounded(["/bin/sh", "-c", script], timeout=60, kill_on_interrupt=kill_on_interrupt)
+        pid = int(pidfile.read_text(encoding="utf-8"))
+        assert pid_alive(pid) is (not kill_on_interrupt)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        if pid is not None:
+            safe_killpg_group(pid)  # only does anything if the code under test left the child running
 
 
 def test_check_true_raises_called_process_error() -> None:

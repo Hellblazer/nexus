@@ -562,7 +562,7 @@ def test_on_conflict_idempotency(
 
     # Metadata refresh: the stored chunk must now carry v2 metadata. The rows
     # are owned (seeded above), so get_by_id (live(c)-gated) sees them.
-    entry = client.get_by_id(coll, ids[0])
+    entry = client.get_by_id(coll, ids[0], sensitivity="include")
     assert entry is not None, "get_by_id returned None for a just-upserted chunk"
     # The content field carries the chunk text (flat T3Database shape)
     assert "conflict_gate" in entry.get("content", ""), (
@@ -643,7 +643,7 @@ def test_nul_bytes_sanitized_server_side(
     found = client.existing_ids(coll, [chunk_id])
     assert found == {chunk_id}, "NUL-bearing chunk was not stored under its chash"
 
-    entry = client.get_by_id(coll, chunk_id)
+    entry = client.get_by_id(coll, chunk_id, sensitivity="include")
     assert entry is not None, "get_by_id returned None for the NUL-sanitized chunk"
     stored = entry.get("content", "")
     assert "\x00" not in stored, (

@@ -147,7 +147,7 @@ def probe_collection(t3: Any, name: str, size: int, sample: int, rng: random.Ran
         col = t3.get_or_create_collection(name)
         texts: dict[str, str] = {}
         for offset, limit in window_offsets(size, sample, rng):
-            page = _call(col.get, include=["documents"], limit=limit, offset=offset)
+            page = _call(col.get, include=["documents"], limit=limit, offset=offset, sensitivity="include")
             for cid, text in zip(page.get("ids") or [], page.get("documents") or []):
                 if text:
                     texts.setdefault(cid, text)

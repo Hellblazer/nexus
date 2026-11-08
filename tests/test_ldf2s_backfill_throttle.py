@@ -45,9 +45,9 @@ class _Counting(_World):
         self.events.append(("owners", len(chashes)))
         return super().chash_positions(chashes)
 
-    def chunk_rows(self, collection, chashes):
+    def chunk_rows(self, collection, chashes, *, sensitivity="include"):
         self.events.append(("rows", collection, tuple(chashes)))
-        return super().chunk_rows(collection, chashes)
+        return super().chunk_rows(collection, chashes, sensitivity=sensitivity)
 
     def update_many(self, payloads):
         self.events.append(("write", len(payloads)))
@@ -218,7 +218,7 @@ def test_the_pause_follows_each_rounds_reads_and_its_write_and_not_the_last_writ
     w = _world_with_one_of_each()
     events: list = []
     w.chunk_rows_orig = w.chunk_rows
-    w.chunk_rows = lambda c, hs: (events.append("rows"), w.chunk_rows_orig(c, hs))[1]       # type: ignore[method-assign]
+    w.chunk_rows = lambda c, hs, **kw: (events.append("rows"), w.chunk_rows_orig(c, hs, **kw))[1]       # type: ignore[method-assign]
     w.update_many_orig = w.update_many
     w.update_many = lambda ps: (events.append("write"), w.update_many_orig(ps))[1]           # type: ignore[method-assign]
     mb.backfill_meta(w, w, w, apply=True, batch=2, pause_ms=250, sleep=lambda s: events.append(("sleep", s)))
@@ -353,9 +353,9 @@ def test_the_command_counts_requests_through_the_gate_and_prints_them(monkeypatc
             request_gate.before_request()
             return super().get_manifests(ids)
 
-        def chunk_rows(self, collection, chashes):
+        def chunk_rows(self, collection, chashes, *, sensitivity="include"):
             request_gate.before_request()
-            return super().chunk_rows(collection, chashes)
+            return super().chunk_rows(collection, chashes, sensitivity=sensitivity)
 
         def update_many(self, payloads):
             request_gate.before_request()
@@ -390,10 +390,10 @@ class _Interrupting(_Counting):
 
     stop_at_call: int = 2
 
-    def chunk_rows(self, collection, chashes):
+    def chunk_rows(self, collection, chashes, *, sensitivity="include"):
         if len([e for e in self.events if e[0] == "rows"]) + 1 >= self.stop_at_call:
             raise KeyboardInterrupt
-        return super().chunk_rows(collection, chashes)
+        return super().chunk_rows(collection, chashes, sensitivity=sensitivity)
 
 
 def _first_round_only() -> dict:
@@ -466,11 +466,11 @@ def test_the_first_ctrl_c_finishes_the_round_and_stops_and_the_second_aborts_it(
         raised = 0
         times = 1
 
-        def chunk_rows(self, collection, chashes):
+        def chunk_rows(self, collection, chashes, *, sensitivity="include"):
             if self.raised < self.times:
                 self.raised += 1
                 signal.raise_signal(signal.SIGINT)
-            return super().chunk_rows(collection, chashes)
+            return super().chunk_rows(collection, chashes, sensitivity=sensitivity)
 
     try:
         first = _catalog(world=_Once)
@@ -500,11 +500,11 @@ def test_the_command_survives_a_ctrl_c_in_a_round_by_finishing_it(monkeypatch):
     class _Once(_Counting):
         sent = False
 
-        def chunk_rows(self, collection, chashes):
+        def chunk_rows(self, collection, chashes, *, sensitivity="include"):
             if not self.sent:
                 self.sent = True
                 signal.raise_signal(signal.SIGINT)
-            return super().chunk_rows(collection, chashes)
+            return super().chunk_rows(collection, chashes, sensitivity=sensitivity)
 
     try:
         w = _catalog(world=_Once)
@@ -539,12 +539,12 @@ class _FailingRounds(_Counting):
 
     bad_rounds: frozenset = frozenset()
 
-    def chunk_rows(self, collection, chashes):
+    def chunk_rows(self, collection, chashes, *, sensitivity="include"):
         round_ = len([e for e in self.events if e[0] == "manifests"])
         if round_ in self.bad_rounds:
             self.events.append(("rows", collection, tuple(chashes)))
             raise RuntimeError("store-get down")
-        return super().chunk_rows(collection, chashes)
+        return super().chunk_rows(collection, chashes, sensitivity=sensitivity)
 
 
 def _failing(rounds: set[int]) -> _FailingRounds:
@@ -771,11 +771,11 @@ def test_sigterm_is_the_first_sigint_a_polite_stop_and_the_previous_disposition_
     class _Term(_Counting):
         sent = False
 
-        def chunk_rows(self, collection, chashes):
+        def chunk_rows(self, collection, chashes, *, sensitivity="include"):
             if not self.sent:
                 self.sent = True
                 signal.raise_signal(signal.SIGTERM)
-            return super().chunk_rows(collection, chashes)
+            return super().chunk_rows(collection, chashes, sensitivity=sensitivity)
 
     try:
         w = _catalog(world=_Term)
@@ -799,11 +799,11 @@ def test_the_command_exits_143_after_a_sigterm(monkeypatch):
     class _Term(_Counting):
         sent = False
 
-        def chunk_rows(self, collection, chashes):
+        def chunk_rows(self, collection, chashes, *, sensitivity="include"):
             if not self.sent:
                 self.sent = True
                 signal.raise_signal(signal.SIGTERM)
-            return super().chunk_rows(collection, chashes)
+            return super().chunk_rows(collection, chashes, sensitivity=sensitivity)
 
     try:
         w = _catalog(world=_Term)

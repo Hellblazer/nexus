@@ -455,7 +455,7 @@ def test_store_put_get_roundtrip_ij9hg(
     # 3) Metadata keys content_type + embedding_model must be present on the
     #    stored chunk (denormalised identity the read/search path relies on).
     client = get_http_vector_client()
-    entry = client.get_by_id(collection, doc_id)
+    entry = client.get_by_id(collection, doc_id, sensitivity="include")
     assert entry is not None, "get_by_id returned None for a just-stored chunk"
     # Assert the FLAT T3Database shape DIRECTLY — not entry.get("metadata", entry),
     # which would pass for BOTH the flat fix and the old nested shape (the bug),
@@ -470,7 +470,7 @@ def test_store_put_get_roundtrip_ij9hg(
 
     # 4) The content must be findable via semantic search (collection_names
     #    kwarg — the exact T3Database-vs-HttpVectorClient drift of nexus-7zuzz).
-    results = client.search(marker, [collection], n_results=5)
+    results = client.search(marker, [collection], n_results=5, sensitivity="include")
     assert results, "search returned no results — stored chunk is not findable"
     assert any(marker in r.get("content", "") for r in results), (
         f"search results do not contain the stored marker: "

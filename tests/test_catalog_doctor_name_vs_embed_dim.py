@@ -72,7 +72,7 @@ def _fake_t3(client, names: list[str]):
         def get_embeddings(self, collection_name, ids):
             import numpy as np
             col = client.get_collection(collection_name)
-            result = col.get(ids=ids, include=["embeddings"])
+            result = col.get(ids=ids, include=["embeddings"], sensitivity="include")
             by_id = dict(zip(result["ids"], result["embeddings"]))
             return np.array(
                 [by_id[i] for i in ids if i in by_id], dtype=np.float32,
@@ -99,7 +99,7 @@ def _fake_t3_service_like(client, names: list[str]):
         def get_embeddings(self, collection_name, ids):
             import numpy as np
             col = client.get_collection(collection_name)
-            result = col.get(ids=ids, include=["embeddings"])
+            result = col.get(ids=ids, include=["embeddings"], sensitivity="include")
             by_id = dict(zip(result["ids"], result["embeddings"]))
             return np.array(
                 [by_id[i] for i in ids if i in by_id], dtype=np.float32,

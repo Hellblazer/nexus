@@ -593,6 +593,7 @@
   "fallback_reason": null,
   "kind_decision": "heuristic",
   "library_check": "unreadable",
+  "refused_recorded_kinds": {},
   "request_kind": "synthesis",
   "returned": {
    "eligible": 0,

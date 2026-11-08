@@ -20,12 +20,12 @@ There is nothing to set up. The install lists four options as "not set", and `/p
 
 | Option | Blank means | What it changes, and why you might |
 |---|---|---|
-| `limit` | 4000 bytes | Output larger than this is cut. Raise it to see more whole; lower it to save more context. |
+| `limit` | 5000 bytes | Output larger than this is cut. Raise it to see more whole; lower it to save more context. |
 | `head` | 1400 bytes | How much of the start the model still sees. |
 | `tail` | 800 bytes | How much of the end the model still sees; a test summary or a script's failure usually sits there. |
 | `includeHeadless` | off | Whether `claude -p` runs are cut too. Off, because nobody is there to follow the note. |
 
-A cut result ends its head with a line like `[tool-spill: 14 KB, 3001 lines; 2470 middle lines cut, 0 of them mention an error or failure. Full output: <path>. ...]`, which is how you can tell it is working. It loads when a session starts. To turn it off, `claude plugin disable conexus-tool-spill`. The `nexus-plugins` marketplace is the one `conexus` and `sn` come from; add it first with `/plugin marketplace add Hellblazer/nexus` if you have not.
+A cut result ends its head with a line like `[tool-spill: 14 KB, 3001 lines; lines 312-2781 cut. Full output: <path>; Read offset 312 limit 1450, in slices.]`, which is how you can tell it is working. It loads when a session starts. To turn it off, `claude plugin disable conexus-tool-spill`. The `nexus-plugins` marketplace is the one `conexus` and `sn` come from; add it first with `/plugin marketplace add Hellblazer/nexus` if you have not.
 
 **This plugin replaces any machine-local copy of the mod.** If you wrote a `tool-spill` mod under `~/.claude/mods/` (or any other `tool.call` hook that cuts output), remove it before installing: two loaded together would both act on the same result.
 
@@ -35,7 +35,7 @@ It hooks `tool.call` and touches only `Bash` and `Read`, and only in the main co
 
 | Tool | Result over the limit |
 |---|---|
-| `Bash` | Each stream longer than `head` + `tail` is cut to the first `head` bytes and the last `tail` bytes, at line ends. A note between them gives the size, the line count, the number of middle lines cut, how many of those mention an error or failure (`error`, `fail`, `traceback`, `panic`, `exception`, `fatal`, `denied`, `not found`, `no such`, `cannot`, `refused`, `timed out`, `unable`; a count, not a verdict), and the path of the full output (stdout, then stderr after a `--- stderr ---` line), with a pointer to read a slice of it with the `Read` tool. A script's verdict on its last line, even with exit code 0, is in the tail. |
+| `Bash` | Each stream longer than `head` + `tail` is cut to the first `head` bytes and the last `tail` bytes, at line ends. A note between them gives the size, the line count, the line numbers cut (as lines of the spill file), the path of the full output (stdout, then stderr after a `--- stderr ---` line), and the `Read` `offset` and `limit` that return exactly the cut lines; a cut too big for one read gets a `limit` of about 4 times `limit` bytes and says "in slices". When cut lines look like an error report (a pytest `E ` line, its `FAILED` summary or result column, a Go `--- FAIL:` or `FAIL`, a `Traceback`, `SomethingError: ...` or `...Exception: ...` outside an `except` line, `fatal:` at the start of a line or after a tool's name, `No such file`, `command not found`, a line starting `ERROR:`, `Error:` or `error:`, Maven's `[ERROR]`, `npm ERR!`, `make: *** ... Error`, a compiler's `file:line: error:`, a Go `panic:`), the note names the first three by line number and counts the rest. A line that only uses an error word (`error_count = 0`, `--fail-fast`, `2 failed, 40 passed`, `FAILED` or `FATAL:` quoted inside source or JSON) is not named. A script's verdict on its last line, even with exit code 0, is in the tail. |
 | `Read` (whole file) | The text is cut to the first `head` + `tail` bytes, with a note giving the line count, the `offset` to read next and a `limit` to use, and a reminder not to `Edit` text the model has not seen. Nothing is written: the file is already on disk. |
 
 Passed through whole:
@@ -45,7 +45,9 @@ Passed through whole:
 - a `Read` with an `offset` or a `limit`: the model sliced it itself, so following the note, or reading a slice of a spill file, costs nothing extra and is never cut again;
 - a `Read` of an instruction file (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `REGISTER.md`, or anything under a `skills/`, `agents/`, `commands/` or `rules/` directory, so a large source file under, say, `src/app/commands/` also passes whole; either path separator, any case);
 - `Bash` output Claude Code has already moved to a file of its own (past about 30 KB: `persistedOutputPath`, `rawOutputPath`, or output that starts with its `<persisted-output>` marker; output that only quotes the marker further in is still cut), and image output;
-- a `Bash` call whose command names the spill directory, up to 4 times `limit` (16 KB by default, the slice the `Read` note suggests): it is reading a spill file back (`sed -n`, `head`, `grep` on it), and cutting it would only spill the spill. The match is on the directory's name, `claude-tool-spill-<user>`, so `$TMPDIR/...`, a `cd` into it and either separator count. A larger read is cut and saved like any other;
+- a `Bash` call whose command names the spill directory, up to 4 times `limit` (20 KB by default, the slice the `Read` note suggests): it is reading a spill file back (`sed -n`, `head`, `grep` on it), and cutting it would only spill the spill. The match is on the directory's name, `claude-tool-spill-<user>`, so `$TMPDIR/...`, a `cd` into it and either separator count. A larger read is cut and saved like any other;
+- a whole-file `Read` of a spill file, up to 4 times `limit`, by the same rule: cutting it would only show its head again. A larger one is cut like any other `Read`;
+- a plain read of one file, `cat FILE` or `sed -n A,Bp FILE` as the whole command (no pipe, no `;`, `&&`, redirection, glob or brace list: one file), up to 3 times `limit` (15 KB by default): the model chose that slice itself, as with a sliced `Read`. A larger one is cut like any other;
 - every call a subagent makes;
 - every call in a headless run, unless `includeHeadless` is on.
 
@@ -59,7 +61,7 @@ Set in the install screen, in `/config`, or in settings under `pluginConfigs`. A
 
 | Option | Default | Meaning |
 |---|---|---|
-| `limit` | `4000` | Bytes. A `Bash` result (stdout and stderr together) or a `Read` larger than this is cut. |
+| `limit` | `5000` | Bytes. A `Bash` result (stdout and stderr together) or a `Read` larger than this is cut. |
 | `head` | `1400` | Bytes kept from the start. |
 | `tail` | `800` | Bytes kept from the end of a `Bash` stream. |
 | `includeHeadless` | off | Also cut results in `claude -p` runs. |

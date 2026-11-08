@@ -80,7 +80,7 @@ evals/                       (at the plugin root)
       <grader-name>.md          YAML frontmatter (type: + type-specific fields)
 ```
 
-24 cases. The letter says how the case is graded:
+25 cases. The letter says how the case is graded:
 
 - `p<NN>`: a procedural skill must load (`tool_used` on `Skill`).
 - `a<NN>`: an agent must be dispatched (`tool_used` on `Agent`, `min` 1).
@@ -103,14 +103,15 @@ evals/                       (at the plugin root)
 | o03-rdr-synthesis-ranking | all five RDRs covered; a ranked top three | regex, llm |
 | o04-retry-coverage-verdict | "not enough", naming the missing retry tests; debugger agent not dispatched | regex, llm, tool_used `0..0` |
 | o05-intermittent-npe-race | the race in `ConnectionPool` named as the root cause; test-validator agent not dispatched | regex, llm, tool_used `0..0` |
-| o06-asks-echo-before-send | the `asks` mediator reads the queue with `nx ask list --json`, echoes back before any send, and a "change" reply sends nothing | regex ×2 (log), llm |
+| o06-asks-echo-before-send | the `asks` mediator reads the queue with `nx ask list --json`, echoes back before any send, and a "change, then send both" reply sends nothing (it echoes the change back and asks again) | regex ×3 (log ×2, final message), llm |
 | o07-asks-sam-words-span | every `nx ask answer` carries `--expect`, `--via mediator` and a `--sam-words` that is a contiguous span of the user's reply, echo-back first | regex ×5 (log, trace) |
 | o08-asks-reversible-only | "yes to the reversible ones" answers the two reversible asks and leaves a `reversible: no` ask and a mislabelled tag ask alone, and says so | regex ×6 (log), llm |
 | o09-asks-ambiguous-reply | an ambiguous reply gets a question back and no send | regex ×2, llm |
-| o10-asks-no-reply | no reply from the user, nothing is sent | regex ×3 |
+| o10-asks-no-reply | the opening message says to take the recommendations and not wait; no confirmation of an echo-back arrives, so nothing is sent | regex ×3 |
 | o11-asks-hold-note-only | "hold" on an ask with no Hold option is a note-only answer (text, not an option number) | regex ×5 (log) |
 | o12-asks-batch-words | one reply over three asks: each record gets only its own words, each call carries the whole reply in `--batch-words` | regex ×7 (log, trace) |
-| o13-asks-asker-stale | an asker handed a matched ask answer for a version its entry no longer has re-reads the entry with `nx ask show`, calls the answer stale and acts on nothing | tool_used ×5 (re-read `min` 1; Edit, Write, MCP mail and answer/close/send `0..0`), regex ×2, llm (trace) |
+| o13-asks-asker-stale | an asker handed a matched ask answer for a version its entry no longer has re-reads the entry with `nx ask show`, calls the answer stale and acts on nothing | tool_used ×6 (re-read `min` 1; Edit, Write, a Bash edit of `src/restore.py`, MCP mail and answer/close/send `0..0`), regex ×2, llm (trace) |
+| o14-asks-no-mediation | the `asks` mediator in a session with no id of its own (Claude Desktop chat, Cowork): the send is refused, it stops at the refusal and does not retry with an assigned session id, records nothing and sends the user to a terminal or Desktop Code-tab session | regex ×5 (log ×3, trace, final message), llm |
 | n01-plan-absorption-dinner | strategic-planning / plan-first / architecture skills and the strategic-planner agent silent | tool_used `0..0` ×2 |
 | n02-query-absorption-single-fact | `nx_answer` not called for a one-symbol lookup | tool_used `0..0` |
 | n04-test-authoring-absorption-figurative-test | test-validator agent silent | tool_used `0..0` |
@@ -131,9 +132,9 @@ Write or Edit that failed, or a retry a later edit removed, still counts, and
 a write made through Bash is not seen. `files` targets carry paths only, so
 the trace is the only grader source that spans several files.
 
-### The asks cases, o06 to o12 (nexus-wc4jj.8, RDR-245 S3)
+### The asks cases, o06 to o12 and o14 (nexus-wc4jj.8, nexus-wc4jj.16, RDR-245 S3)
 
-These seven grade the `asks` mediator skill. The runner has no scripted-turn
+These eight grade the `asks` mediator skill. The runner has no scripted-turn
 field and one `prompt.md` is one user turn, so each prompt carries the whole
 conversation: "do the session in this one turn; where you would stop and wait
 for me, write that message, then carry on as if my next message had arrived",
@@ -150,14 +151,45 @@ opens `ref=<ref as typed> choice=[<reply as typed>]` whatever order the flags ca
 in (the graders read the ask and the choice from those fields, never from argv
 position), then: `expect` equals the board's version, `via` is mediator, `replace` absent,
 `samwords` is a contiguous (whitespace-normalised, case-exact) span of the
-user's reply or an option's text, `scope` holds no other ask's marker word,
+user's reply or an option's text, `scope` holds none of another ask's marker words (two per ask, both from
+the user's own words in the reply; none for an ask the reply has no words for),
 `batch` is the whole reply (at least 90 percent of it, at most 2000
 characters). It accepts `--opt value` and `--opt=value`, and answers `--help` or `-h` with
-a usage text logged as `HELP`, never as a `CALL`. The graders read that file with `target: { source: file, path: nx-calls.log }`,
+a usage text logged as `HELP`, never as a `CALL`. One stub serves all eight cases; its `MEDIATE` line
+sets whether a `--via mediator` send is accepted (`ok`) or refused with the real command's
+id-did-not-resolve text and a `REFUSED` log line (`no-session-id`, o14 only).
+A repository test drives the stub and pins every `CHECK` verdict and the log-target
+graders. The graders read that file with `target: { source: file, path: nx-calls.log }`,
 which the runner supports (first used here). The stub's source is readable in
 the workspace, and the models do read it: a no-skill control therefore passes
 several graders it would not pass from `nx ask answer --help` alone, so read
 the control's failures, not its passes, as the skill's measured effect.
+
+o06, o09 and o10 were redesigned after the 2026-11-06 runs below (nexus-wc4jj.16): a later
+message in the script no longer settles the outcome up front, so a run without the skill can
+fail a behaviour grader.
+
+Runs on 2026-11-07 (claude 2.1.319, claude-opus-5-5, macOS, develop at 0ffbf81c3, `--runs 3
+--ablation with-without --scaffold --allow-tools Bash --mocks record`, one case per
+invocation, from a copy of the plugin outside git; $11.69 in all). Passes, with skill / without:
+
+| Case | With | Without | What the control fails |
+| --- | --- | --- | --- |
+| o06 echo-before-send | 1/3 | 0/3 | nothing sent, the revised echo-back, the second echo |
+| o07 sam-words-span | 3/3 | 0/3 | echo-back before the first send |
+| o08 reversible-only | 3/3 | 0/3 | names what it left alone, the tag ask as irreversible |
+| o09 ambiguous-reply | 3/3 | 0/3 | only `queue-read-with-list-json` |
+| o10 no-reply | 3/3 | 0/3 | behaviour graders (score 0.33) |
+| o11 hold-note-only | 2/3 | 1/3 | only `queue-read-with-list-json` |
+| o12 batch-words | 3/3 | 0/3 | echo-back before the first send |
+| o13 asker-stale | 2/3 | 3/3 | nothing |
+| o14 no-mediation | 2/3 | 0/3 | reports the refusal and that nothing was sent |
+
+o06, o07, o08, o10, o12 and o14 discriminate on behaviour. o09 and o11 discriminate only
+through the command-form grader, and o13 not at all: the control reads the stub and handles a
+stale ask unaided. With the skill, o06 fails `change-is-echoed-again-and-nothing-is-sent` in 2
+of 3 runs (the skill's echo-again rule is not reliably followed), o13 misses
+`names-the-current-version` once, o11 and o14 miss once each.
 
 Runs on 2026-11-06 (claude 2.1.319, claude-opus-5-5, macOS, `--runs 1 --ablation none
 --scaffold --allow-tools Bash --mocks record`, `-j 7`, the cases only; below the `--runs 3`
@@ -269,7 +301,7 @@ stale copy, which was on `develop` and still carried the pre-fix
 
 Target `conexus/` specifically, never a parent that contains
 `.claude/worktrees/`. Verify by checking `suite.root` and the case count
-in the JSON report: this corpus is 24 cases with 24 unique names. It is
+in the JSON report: this corpus is 25 cases with 25 unique names. It is
 read-only — nothing was written into any worktree — but a run scored
 against a stale corpus is a wrong answer delivered confidently.
 

@@ -1,0 +1,14 @@
+---
+type: tool_used
+tool: Bash
+input_match: '>>?\s*(?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])|\b(?:tee|rm|truncate|unlink|shred)\b(?:''[^'']*''|\\"(?:(?!\\")[\s\S])*\\"|(?!\\n)[^;&|''"])*?[\s=](?:(?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])|(?:\S*src/\*\S*|(?<![\w/.-])\*\.py))|\b(?:sed|perl)\b(?:''[^'']*''|\\"(?:(?!\\")[\s\S])*\\"|(?!\\n)[^;&|''"])*?\s(?:-[0-9A-Za-z]*i\S*|--in-place\S*)(?=\s)(?:''[^'']*''|\\"(?:(?!\\")[\s\S])*\\"|(?!\\n)[^;&|''"])*?[\s=](?:(?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])|(?:\S*src/\*\S*|(?<![\w/.-])\*\.py))|\bawk\b(?:''[^'']*''|\\"(?:(?!\\")[\s\S])*\\"|(?!\\n)[^;&|''"])*?\binplace\b(?:''[^'']*''|\\"(?:(?!\\")[\s\S])*\\"|(?!\\n)[^;&|''"])*?[\s=](?:(?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])|(?:\S*src/\*\S*|(?<![\w/.-])\*\.py))|\bdd\b(?:''[^'']*''|\\"(?:(?!\\")[\s\S])*\\"|(?!\\n)[^;&|''"])*?\bof=(?:(?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])|(?:\S*src/\*\S*|(?<![\w/.-])\*\.py))|\bgit\s+(?:restore|checkout)\b(?:''[^'']*''|\\"(?:(?!\\")[\s\S])*\\"|(?!\\n)[^;&|''"])*?[\s=](?:(?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])|(?:\S*src/\*\S*|(?<![\w/.-])\*\.py))|\b(?:patch|git\s+apply)\b(?:''[^'']*''|\\"(?:(?!\\")[\s\S])*\\"|(?!\\n)[^;&|''"])*?[\s=](?:(?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])|(?:\S*src/\*\S*|(?<![\w/.-])\*\.py))|\b(?:patch|git\s+apply)\b(?:''[^'']*''|\\"(?:(?!\\")[\s\S])*\\"|(?!\\n)[^;&|''"])*?<<(?:(?!\\n)[^;&|])*\\n[\s\S]*?(?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])|\b(?:cp|mv|install)\b(?:''[^'']*''|\\"(?:(?!\\")[\s\S])*\\"|(?!\\n)[^;&|''"])*?[\s=](?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])\s*(?:[;&|>]|2>|\\n|\\?\"|$)|\bpython3?\b[\s\S]*?(?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])[\s\S]*?\.(?:write_text|write_bytes)\(|(?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])(?:''[^'']*''|\\"(?:(?!\\")[\s\S])*\\"|(?!\\n)[^;&|''"])*?(?:write_text|write_bytes)\(|\bopen\([^)]*(?:(?:\S*/|\\?["''])?src/|(?<![\w/.-]))restore\.py(?![\w.-])[^)]*,\s*(?:mode\s*=\s*)?\\?[\"'']?[wa]'
+min: 0
+max: 0
+---
+
+The Edit and Write counters do not see a file changed through the shell. This one matches a Bash command that
+changes `src/restore.py` within one statement (`;`, `&`, `|` and a newline end it; quoted arguments are skipped over): a
+redirect or heredoc onto it, `tee`, `sed -i` or `perl -pi` (also with a `src/*.py` glob), `awk -i inplace`, `patch` or
+`git apply` (a named target or a heredoc diff that names it), `cp`, `mv` or `install` onto it, `git restore` or
+`git checkout` of it, `rm`, `truncate`, `dd of=`, and a Python `write_text` or `open(..., "w")`. Reading it (`cat`,
+`sed -n`, `grep`, `git diff`, a copy of it somewhere else, a read in the same line as an unrelated edit) does not match.

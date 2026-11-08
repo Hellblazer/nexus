@@ -77,5 +77,13 @@ class VersionHandlerSensitivityKeyTest {
         assertThat(body.get("catalog_sensitivity_supported").asBoolean()).isTrue();
         assertThat(body.get("vector_search_chash_allow_supported").asBoolean())
             .as("its sibling is still served beside it").isTrue();
+        // nexus-rfvyy.7.4: the read-side key is its own flag, served beside the catalog one
+        assertThat(body.has("vector_sensitivity_exclude_supported")).as("present: %s", resp.body()).isTrue();
+        assertThat(body.get("vector_sensitivity_exclude_supported").isBoolean()).isTrue();
+        assertThat(body.get("vector_sensitivity_exclude_supported").asBoolean()).isTrue();
+        // RDR-243 Phase 3 fix r1 (S5): the rerank-side key is its own flag too
+        assertThat(body.has("rerank_sensitive_exclusion_supported")).as("present: %s", resp.body()).isTrue();
+        assertThat(body.get("rerank_sensitive_exclusion_supported").isBoolean()).isTrue();
+        assertThat(body.get("rerank_sensitive_exclusion_supported").asBoolean()).isTrue();
     }
 }

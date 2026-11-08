@@ -37,7 +37,7 @@ class _CatalogFilteringT3:
 
     def search_metadata_scoped(self, query, collection_names, *, content_type=None,
                                author=None, year=None, corpus=None, subtree=None,
-                               where=None, n_results=10):
+                               where=None, n_results=10, sensitivity="include"):
         self.meta_calls.append(list(collection_names))
         return [RDR_HIT] if RDR_COL in collection_names else []
 

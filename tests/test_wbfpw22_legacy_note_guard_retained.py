@@ -134,7 +134,7 @@ def _present(client, chash: str) -> bool:
         # include_non_live: the chunk under test has no live own-collection owner (the
         # legacy note carries no manifest row), so live(c) hides it from a plain get while
         # it is still stored. Whether it is STORED is the question.
-        result = client.get_collection(_COLL).get(ids=[chash], include=[], include_non_live=True)
+        result = client.get_collection(_COLL).get(ids=[chash], include=[], include_non_live=True, sensitivity="include")
     except CollectionNotFoundError:
         return False
     return chash in (result.get("ids") or [])

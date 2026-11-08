@@ -1715,6 +1715,180 @@ class TestResyncChunkCount:
         )
 
 
+# ── nexus-njrcn.8: live wire for resolve_span / resolve_chash ──────────────────
+
+# The OLDER collection sorts FIRST by name ("...1" < "...2" under any collation), so the
+# repository's third sort key (collection ASC) would pick OLD and only the created_at DESC
+# key picks NEW: dropping or reversing created_at in the tie-break fails the no-preference test.
+_RESOLVE_COLL_OLD = "knowledge__resolvewire1__bge-base-en-v15-768__v1"
+_RESOLVE_COLL_NEW = "knowledge__resolvewire2__bge-base-en-v15-768__v1"
+
+
+def _seed_resolvable_chunk(
+    pg: dict, tenant: str, collection: str, chash_hex: str, *,
+    text: str, metadata_json: str, created_at: str,
+) -> None:
+    """Seed a real ``nexus.chunks`` row with distinguishing text, JSONB metadata and
+    ``created_at`` (``_seed_chunks`` writes the literal text ``seed`` and no metadata,
+    which cannot show a wire round-trip). Text and metadata are dollar-quoted so the
+    unicode and quotes in them reach the column unchanged.
+
+    It does not use ``tests/_chunk_seed.py::chunks_insert_sql`` (the helper
+    ``tests/AGENTS.md`` names for a module with its own initdb) because that statement
+    has no ``created_at`` column parameter, and the tie-break test needs two copies of
+    one chash with different ``created_at``. This module's own PG and service match the
+    sibling ``_seed_chunks`` hand INSERT."""
+    model = "bge-base-en-v15-768"
+    vec = "[" + ",".join(["0"] * 768) + "]"
+    _psql(pg, (
+        "INSERT INTO nexus.catalog_collections "
+        "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
+        f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model}', 'live') "
+        "ON CONFLICT DO NOTHING; "
+        "INSERT INTO nexus.chunks "
+        "(tenant_id, collection, chash, chunk_text, embedding_768, embedding_model, metadata, created_at) "
+        f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), "
+        f"$t${text}$t$, '{vec}'::nexus.vector, '{model}', $m${metadata_json}$m$::jsonb, "
+        f"'{created_at}'::timestamptz);"
+    ))
+
+
+class TestResolveSpanAndChashLiveWire:
+    """nexus-njrcn.8: ``HttpCatalogClient.resolve_span`` / ``resolve_chash`` over real HTTP
+    through ``CatalogHandler`` -> ``CatalogRepository`` -> ``nexus.chunks``.
+
+    The unit tests drive a fake server and the Java tests call the repository directly;
+    neither covers the JSONB metadata wire round-trip (Postgres -> Jackson -> client), the
+    ``prefer_collection`` bind, the live ``doc_id`` join to the manifest, or the handler's
+    tenant scope. Most assertions are real repository results: the stored ``chunk_text``,
+    the JSONB ``metadata``, ``physical_collection``, ``doc_id`` and the misses. Two kinds
+    are CLIENT-derived and cannot fail on a server break: the ``chunk_hash`` / ``chash``
+    equality asserts (the client echoes the requested hash) and the ``char_range`` slice
+    (``HttpCatalogClient`` cuts the served text itself); they pin the client's mapping
+    only. A broken route, a dropped ``withTenant``, a mis-bound tie-break or a metadata
+    parser that returns ``{}`` fails a repository-derived assertion. Every miss or
+    tenant test carries a positive control in the same test, because the client maps a
+    404 to ``None`` and a dead route would otherwise pass them.
+    """
+
+    _TEXT = "Résumé: chunk body with 'quotes', \"double\" and ünïcode.\nSecond line."
+    _META = '{"title": "wire doc", "page": 7, "nested": {"tags": ["a", "b"], "ok": true}}'
+
+    @pytest.fixture(scope="class")
+    def seeded(self, cat, pg_instance):
+        shared = _ch("resolve_wire_shared_chunk")
+        only_old = _ch("resolve_wire_only_old_chunk")
+        _seed_resolvable_chunk(
+            pg_instance, "default", _RESOLVE_COLL_OLD, shared,
+            text=self._TEXT, metadata_json=self._META, created_at="2026-01-01T00:00:00Z",
+        )
+        _seed_resolvable_chunk(
+            pg_instance, "default", _RESOLVE_COLL_NEW, shared,
+            text="NEWER copy of the shared chunk", metadata_json='{"which": "new"}',
+            created_at="2026-06-01T00:00:00Z",
+        )
+        _seed_resolvable_chunk(
+            pg_instance, "default", _RESOLVE_COLL_OLD, only_old,
+            text="only in the old collection", metadata_json="{}",
+            created_at="2026-01-01T00:00:00Z",
+        )
+        doc = cat.register(
+            "1.1", "Resolve Wire Doc", content_type="paper",
+            source_uri="file:///resolve-wire/doc.md",
+        )
+        cat.write_manifest(
+            str(doc), [{"position": 0, "chash": shared}], collection=_RESOLVE_COLL_OLD,
+        )
+        return {"shared": shared, "only_old": only_old, "doc": doc}
+
+    # ── resolve_span ──────────────────────────────────────────────────────────
+
+    def test_resolve_span_returns_the_stored_text_and_jsonb_metadata(self, cat, seeded) -> None:
+        got = cat.resolve_span(f"chash:{seeded['shared']}", _RESOLVE_COLL_OLD)
+        assert got is not None
+        assert got["chunk_text"] == self._TEXT
+        assert got["chunk_hash"] == seeded["shared"]
+        assert got["metadata"] == {
+            "title": "wire doc", "page": 7, "nested": {"tags": ["a", "b"], "ok": True},
+        }
+
+    def test_resolve_span_is_scoped_to_the_named_collection(self, cat, seeded) -> None:
+        new = cat.resolve_span(f"chash:{seeded['shared']}", _RESOLVE_COLL_NEW)
+        assert new is not None and new["chunk_text"] == "NEWER copy of the shared chunk"
+        assert new["metadata"] == {"which": "new"}
+        # A chash that lives only in the old collection is a miss in the new one.
+        assert cat.resolve_span(f"chash:{seeded['only_old']}", _RESOLVE_COLL_NEW) is None
+
+    def test_resolve_span_applies_the_char_range_to_the_served_text(self, cat, seeded) -> None:
+        got = cat.resolve_span(f"chash:{seeded['shared']}:3-9", _RESOLVE_COLL_OLD)
+        assert got is not None
+        assert got["chunk_text"] == self._TEXT[3:9]
+        assert got["char_range"] == (3, 9)
+
+    def test_resolve_span_misses_are_none(self, cat, seeded) -> None:
+        # Positive control: the route answers for a stored chunk, so a None below is a
+        # miss and not a dead route (the client maps 404 to None).
+        stored = cat.resolve_span(f"chash:{seeded['shared']}", _RESOLVE_COLL_OLD)
+        assert stored is not None and stored["chunk_text"] == self._TEXT
+        unknown = _ch("resolve_wire_never_stored")
+        assert cat.resolve_span(f"chash:{unknown}", _RESOLVE_COLL_OLD) is None
+        # A legacy 32-hex reference is a miss on the wire, not an error (nexus-lgdel.l1).
+        assert cat.resolve_span(f"chash:{seeded['shared'][:32]}", _RESOLVE_COLL_OLD) is None
+
+    # ── resolve_chash ─────────────────────────────────────────────────────────
+
+    def test_resolve_chash_returns_collection_doc_id_text_and_metadata(self, cat, seeded) -> None:
+        got = cat.resolve_chash(seeded["only_old"])
+        assert got is not None
+        assert got["physical_collection"] == _RESOLVE_COLL_OLD
+        assert got["chunk_text"] == "only in the old collection"
+        assert got["chash"] == got["chunk_hash"] == seeded["only_old"]
+        assert got["metadata"] == {}
+        # No manifest row references this chunk, so the doc_id join is empty.
+        assert got["doc_id"] == ""
+
+    def test_resolve_chash_joins_the_live_manifest_for_doc_id(self, cat, seeded) -> None:
+        got = cat.resolve_chash(seeded["shared"], prefer_collection=_RESOLVE_COLL_OLD)
+        assert got is not None
+        assert got["doc_id"] == str(seeded["doc"])
+        assert got["physical_collection"] == _RESOLVE_COLL_OLD
+        assert got["metadata"]["nested"] == {"tags": ["a", "b"], "ok": True}
+
+    def test_resolve_chash_tie_break_newest_wins_without_a_preference(self, cat, seeded) -> None:
+        # prefer_collection is absent on the wire: the repository binds it as "", no row
+        # is preferred, and created_at DESC decides. The older collection sorts first by
+        # name, so dropping or reversing the created_at key returns the other copy. This
+        # does not tell a NULL bind from an empty one (both leave every row unpreferred).
+        got = cat.resolve_chash(seeded["shared"])
+        assert got is not None
+        assert got["physical_collection"] == _RESOLVE_COLL_NEW
+        assert got["chunk_text"] == "NEWER copy of the shared chunk"
+
+    def test_resolve_chash_prefer_collection_overrides_recency(self, cat, seeded) -> None:
+        got = cat.resolve_chash(seeded["shared"], prefer_collection=_RESOLVE_COLL_OLD)
+        assert got is not None
+        assert got["physical_collection"] == _RESOLVE_COLL_OLD
+        assert got["chunk_text"] == self._TEXT
+
+    def test_resolve_chash_miss_is_none(self, cat, seeded) -> None:
+        stored = cat.resolve_chash(seeded["only_old"])  # positive control: the route answers
+        assert stored is not None and stored["chunk_text"] == "only in the old collection"
+        assert cat.resolve_chash(_ch("resolve_wire_never_stored")) is None
+
+    # ── tenant scope at the handler ───────────────────────────────────────────
+
+    def test_another_tenant_cannot_resolve_the_chunk_either_way(self, cat, cat_b, seeded) -> None:
+        # Positive control: the owning tenant resolves the same chunks over the same
+        # routes, so a None for the other tenant is isolation and not a 404 route.
+        own_span = cat.resolve_span(f"chash:{seeded['shared']}", _RESOLVE_COLL_OLD)
+        assert own_span is not None and own_span["chunk_text"] == self._TEXT
+        own_chash = cat.resolve_chash(seeded["shared"])
+        assert own_chash is not None and own_chash["physical_collection"] == _RESOLVE_COLL_NEW
+        assert cat_b.resolve_span(f"chash:{seeded['shared']}", _RESOLVE_COLL_OLD) is None
+        assert cat_b.resolve_chash(seeded["shared"]) is None
+        assert cat_b.resolve_chash(seeded["only_old"], prefer_collection=_RESOLVE_COLL_OLD) is None
+
+
 # ── RDR-168 P4 (nexus-pwclh): live service-mode index MVV ───────────────────────
 
 

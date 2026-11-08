@@ -6,6 +6,8 @@ Test-suite conventions for AI coding agents. The project-root `AGENTS.md` covers
 
 Default local dev loop: `uv run pytest -n auto`. `pytest-xdist` is a `dev`-group dependency, opt-in via `-n`: it is deliberately NOT baked into `addopts`, so CI's `pytest-split` duration-balanced sharding (`.github/workflows/ci.yml`) is untouched. CI passes `-n 4` itself on the self-hosted pool shards and on the lint job, and nothing on hosted shards. Serial (`uv run pytest`, no `-n`) stays available for debugging output interleaving or fixture-isolation issues that parallel workers can mask.
 
+**Path arguments are regrouped by directory** (`tests/_arg_grouping.py`, applied in `pytest_configure`). pytest 9.1.1 drops a directory's `conftest.py` fixtures for tests collected from it again after a whole file from another directory (`tests/daemon/a.py tests/b.py tests/daemon/c.py` runs `c.py` without `tests/daemon/conftest.py`), so a hand run over a list of changed files is sorted stably by directory first. `NX_TEST_KEEP_ARG_ORDER=1` keeps the typed order; `tests/test_arg_grouping.py` holds both and goes red the day pytest fixes it.
+
 **`-n auto` is capped twice** (`tests/_xdist_cap.py`; `NX_XDIST_NO_CAP=1` opts out of both):
 
 - *Shared memory* (nexus-6qp25). Every worker boots its own Postgres cluster, each holding one SysV segment against `kern.sysv.shmmni`, a budget shared with every other cluster on the box (a gate, a peer's suite, a cluster orphaned by a killed battery). When it runs out, `initdb` dies with `shmget: No space left on device` and EVERY substrate-backed test errors at setup: thousands of errors that look like a catastrophic regression and are contention. Diagnose with `ipcs -m` before suspecting the code. The cap does nothing on a quiet machine.
@@ -208,6 +210,10 @@ deselects them, so no census has said which of them touch storage.
   refuses (`NX_PUSH_TENANT_CHECK=0` skips it). A `WARNING:` line means a count was not taken: a module
   the merge base could not collect (named, with its head count; `--strict` fails on it), or the whole
   count (over its budget, or a head module that does not collect); count that module by hand.
+  A module skipped at collection (a module-level `importorskip` or `skip`) is left out of the delta and
+  never refused (nexus-xxuvz): a `NOTE:` line names one that hides no count, a `WARNING:` line one that
+  does (skipped at head with a count at the merge base, or the reverse; `--strict` fails on it). One skipped
+  on both sides is a `NOTE:` and silent under `--quiet-if-zero`.
 - A guard test that asserts a nested session or child process FAILED goes through
   `assert_session_failed_for(result, "<reason>")` / `assert_exit_failed_for(code, output, "<reason>")`
   (`tests/test_storage_touch_guard.py`), never a bare `ret != 0` or `== 1`: under the default
@@ -230,6 +236,22 @@ By default `t2_service_env` / `t2_tenant` lease one lazily minted tenant per xdi
 - **Opt out with `@pytest.mark.fresh_tenant`** a test that mints or drops tenants, rotates or revokes the tenant's own token, or needs a tenant whose partition leaves have never held data. The tenant it gets is the old per-test mint.
 - A writer that commits between one test's teardown and the next test's setup is caught by the lease-start census. A writer that fires DURING the next test's body is NOT detected: the next teardown wipes its rows before the census, so it shows up, if at all, only as an unexplained failure in that test. The A/B found one such writer, the engine reaper (now off in the pool's engine); fix the writer, never the census.
 - The summary ends with `tenant pool: leases=N mints=M retired=R fresh_tenant=K workers=W ...`. A pool tenant that is not empty at the end, or tenant tests that took no lease, fail the run. `tests/test_tenant_pool.py` drives each behaviour against the real engine, each with a control that skips the eviction (or the lease-start census) and must show the stale state. Its engine-backed tests skip under `NX_TEST_TENANT_POOL=0`; there `tests/test_tenant_pool_end_to_end.py` runs the file in a child with the pool on (must run at least one test, pass all, skip none) and asserts the engine posture of the flag unset and `0`.
+
+## The signal fence (nexus-xzorj item 3)
+
+`tests/_signal_fence.py` wraps `os.kill` and `os.killpg` in every Linux test process and classifies each target as
+the session's or foreign; it always sends the signal unchanged. The session's: a descendant of the root pytest
+process, a carrier of `NX_TEST_SIGNAL_FENCE_TOKEN`, a process whose argv or environment names a path inside the
+session's basetemp (rule A), or a member of a group whose live leader is the session's (rule B). **A foreign signal
+fails the run** in `fail` mode (Sam 2026-11-07; the default once develop CI with the two rules reads zero
+foreign across every shard, `report` until then): the summary line `signal fence (fail mode, nexus-xzorj):
+signals=N own=N foreign=N unclassified=N sanctioned=N errors=N`, a `signal fence FAILED` line, then `foreign:` lines
+naming the test, call site, signal and target program. Fix the kill (identity-check the pid:
+`tests/_child_process.kill_if_identity`), or make the target name its own tmp_path (rule A). A deliberate signal to
+an earlier, dead session's leftovers (a session-start reaper) goes inside `with _signal_fence.sanctioned("<who>"):`
+and counts `sanctioned`. `NX_TEST_SIGNAL_FENCE=report` lists only, `fail` fails, `off` removes it (any other value means the default). A child pytest session a test spawns runs in report mode, so its count never fails the exit code the
+parent asserts; it is not counted in the parent's line, and neither are a crashed xdist worker's counts. The ownership tests skip when pytest is pid 1 of its
+namespace (every orphan reparents to it there).
 
 ## Bytes written and DDL per run (nexus-sz651)
 

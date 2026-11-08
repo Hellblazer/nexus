@@ -19,6 +19,7 @@ from nexus.config import EXTRACTOR_CHOICES
 from nexus.sensitive_write import (
     ack_help,
     route_for_index as _route_sensitive_index,
+    sensitive_glob_help,
     sensitive_help,
     sensitive_write_kwargs as _sensitive_write_kwargs,
 )
@@ -970,6 +971,33 @@ class _PhaseHeartbeat:
             self._echo(msg, True)
 
 
+def _echo_sensitive_glob_counts(globs: tuple[str, ...], stats: dict, *, since_head: bool) -> None:
+    """Print, per ``--sensitive-glob`` pattern, how many visited files it matched, and warn on zero (RDR-243 Q8).
+
+    A pattern that matched nothing is a typo or a stale pattern, and the files it was meant to protect were
+    indexed as ordinary: a sweep that found nothing is a failure, not a pass. The warning goes to stderr.
+    """
+    counts = stats.get("sensitive_glob_counts") or {}
+    click.echo("  --sensitive-glob matches:")
+    unmatched: list[str] = []
+    for g in globs:
+        n = int(counts.get(g, 0))
+        click.echo(f"    {g}: {n} file(s)")
+        if n == 0:
+            unmatched.append(g)
+    for g in unmatched:
+        extra = (
+            " --since-head visits only the files changed since the last run, so a file this pattern "
+            "protects may simply not have changed; run without --since-head to sweep every file."
+            if since_head else ""
+        )
+        click.echo(
+            f"WARNING: --sensitive-glob {g!r} matched 0 files. Check the pattern: a file it was meant to "
+            f"protect was NOT flagged sensitive.{extra}",
+            err=True,
+        )
+
+
 @index.command("repo")
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
@@ -1038,10 +1066,13 @@ class _PhaseHeartbeat:
         "go to code__. GH #451."
     ),
 )
+@click.option(
+    "--sensitive-glob", "sensitive_globs", multiple=True, metavar="PATTERN", help=sensitive_glob_help(),
+)
 def index_repo_cmd(
     path: Path, frecency_only: bool, force: bool, re_embed: bool, monitor: bool,
     since_head: bool, on_locked: str, no_taxonomy: bool,
-    debug_timing: bool, corpus_choice: str,
+    debug_timing: bool, corpus_choice: str, sensitive_globs: tuple[str, ...] = (),
 ) -> None:
     """Register and immediately index a code repository at PATH.
 
@@ -1065,6 +1096,17 @@ def index_repo_cmd(
             "skips never reaches the server, so there is nothing to "
             "re-embed."
         )
+    if sensitive_globs:
+        # RDR-243 Q8: an engine that cannot hold the flag would drop it without an error, so the run
+        # refuses before any register call (and before the owner is registered below).
+        from nexus.sensitive_write import require_sensitive_engine  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+
+        if frecency_only:
+            raise click.UsageError("--sensitive-glob does nothing with --frecency-only (nothing is registered).")
+        try:
+            require_sensitive_engine("nx index repo --sensitive-glob")
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
 
     reg = _registry()
     path = path.resolve()
@@ -1610,7 +1652,8 @@ def index_repo_cmd(
                                      on_phase=on_phase,
                                      on_flush=on_flush_progress if monitor else None,
                                      on_stage_timers=on_stage_timers,
-                                     client=_t2_client) or {}
+                                     client=_t2_client,
+                                     **({"sensitive_globs": tuple(sensitive_globs)} if sensitive_globs else {})) or {}
         except pdf_stack.RerunRequired:
             # nexus-2k66t.4.2: the walk found PDFs and installed the PDF stack
             # into a new generation. index_repository has released its index
@@ -1660,6 +1703,8 @@ def index_repo_cmd(
                 f"  skipped: index fresh (use --force) — {skipped_files} of "
                 f"{n} file(s) unchanged"
             )
+        if sensitive_globs and not frecency_only:
+            _echo_sensitive_glob_counts(tuple(sensitive_globs), stats, since_head=since_head)
         if not frecency_only and stats:
             rdr_indexed = stats.get("rdr_indexed", 0)
             rdr_current = stats.get("rdr_current", 0)
@@ -3626,7 +3671,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 corpus, collection_exists=lambda name: local_t3.collection_exists(name),
             )
         col = local_t3.get_or_create_collection(col_name)
-        result = col.get(include=["documents", "metadatas"])
+        result = col.get(include=["documents", "metadatas"], sensitivity="include")
         docs: list[str] = result.get("documents") or []
         metas: list[dict] = result.get("metadatas") or []
 

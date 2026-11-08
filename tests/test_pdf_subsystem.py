@@ -305,7 +305,7 @@ class TestIndexPdfPipeline:
         )
         monkeypatch.setattr(
             "nexus.doc_indexer._own_chunk_metadata",
-            lambda col, doc_id: col.get(limit=1, include=["metadatas"])["metadatas"][0],
+            lambda col, doc_id: col.get(limit=1, include=["metadatas"], sensitivity="include")["metadatas"][0],
         )
 
         # nexus-sghyo: see test_upserts_chunks_with_real_extraction above.

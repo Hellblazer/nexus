@@ -60,7 +60,7 @@ class _FakeCollection:
         self._parent = parent
         self._name = name
 
-    def get(self, ids=None, include=None, limit=None, offset=0):
+    def get(self, ids=None, include=None, limit=None, offset=0, *, sensitivity="include"):
         self._parent.get_calls.append({"collection": self._name, "ids": list(ids or [])})
         visible = self._parent.visible.get(self._name, set())
         got = [i for i in (ids or []) if i in visible]
@@ -451,9 +451,9 @@ class _PhysicalReaderCollection:
     def __init__(self, real) -> None:
         self._real = real
 
-    def get(self, ids=None, include=None, limit=None, offset=0):
+    def get(self, ids=None, include=None, limit=None, offset=0, *, sensitivity="include"):
         return self._real.get(ids=ids, include=include, limit=limit, offset=offset,
-                              include_non_live=True)
+                              include_non_live=True, sensitivity="include")
 
 
 class _RegressedT3:
@@ -541,10 +541,10 @@ def test_the_engine_returns_no_text_for_a_non_live_chunk(t2_service_env):
     collection, _tumbler, v1_chash = _strand_a_superseded_chunk(
         client, "wbfpw26-notext", "wbfpw26 notext note")
     col = client.get_or_create_collection(collection)
-    physical = col.get(ids=[v1_chash], include_non_live=True)
+    physical = col.get(ids=[v1_chash], include_non_live=True, sensitivity="include")
     assert physical["ids"] == [v1_chash], "control: the chunk is physically stored"
     assert not physical["documents"], "include_non_live never returns content"
-    assert col.get(ids=[v1_chash])["ids"] == [], "and live(c) hides it from the normal reader"
+    assert col.get(ids=[v1_chash], sensitivity="include")["ids"] == [], "and live(c) hides it from the normal reader"
 
 
 def test_a_virgin_tenant_is_not_applicable(t2_service_env):

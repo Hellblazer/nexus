@@ -120,7 +120,7 @@ class TestIndexPdfE2E:
             count = index_pdf(simple_pdf, "pdf-e2e-simple", t3=local_t3, embed_fn=_local_embed)
 
         assert count > 0, "Expected at least one chunk indexed"
-        results = local_t3.search("hello world test document", ["docs__pdf-e2e-simple__voyage-context-3__v1"])
+        results = local_t3.search("hello world test document", ["docs__pdf-e2e-simple__voyage-context-3__v1"], sensitivity="include")
         assert results, "Expected search results after indexing"
         assert results[0]["distance"] < 1.0, f"distance={results[0]['distance']} too large"
         # RDR-101 Phase 5c: store_type dropped; content_type is canonical.
@@ -137,7 +137,7 @@ class TestIndexPdfE2E:
         results = local_t3.search(
             "database transactions ACID consistency storage systems",
             ["docs__pdf-e2e-multipage__voyage-context-3__v1"],
-            n_results=3,
+            n_results=3, sensitivity="include",
         )
         assert results, "Expected search results for database transactions query"
         page_numbers = [r.get("page_number") for r in results]
@@ -166,7 +166,7 @@ class TestIndexPdfE2E:
              patch(
                  "nexus.doc_indexer._own_chunk_metadata",
                  side_effect=lambda col, doc_id: next(
-                     iter(col.get(limit=1, include=["metadatas"])["metadatas"]), None,
+                     iter(col.get(limit=1, include=["metadatas"], sensitivity="include")["metadatas"]), None,
                  ),
              ):
             first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed)
@@ -234,7 +234,7 @@ class TestIndexPdfFileE2E:
             embed_fn=lambda texts: _local_embed(texts, model)[0],
         )
 
-        results = local_t3.search("hello world test document", [collection_name])
+        results = local_t3.search("hello world test document", [collection_name], sensitivity="include")
         assert results, "Expected search results after indexing"
         assert results[0].get("source_agent") == "nexus-indexer"
         assert results[0].get("tags") == "pdf"

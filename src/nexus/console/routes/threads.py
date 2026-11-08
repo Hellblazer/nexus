@@ -34,6 +34,7 @@ _log = structlog.get_logger(__name__)
 router = APIRouter(tags=["threads"])
 
 THREADS_PROJECT = "threads"
+ASKS_PROJECT = "asks"
 BD_TIMEOUT_SECONDS = 10.0
 _BD_ARGV = ["bd", "list", "--label", "needs-sam", "--status", "open,in_progress,blocked", "--limit", "0", "--json"]
 
@@ -42,6 +43,7 @@ _NO_BEADS_DATABASE = "no beads database found"
 
 BdRunner = Callable[[], BeadsResult]
 ThreadsReader = Callable[[], list[dict[str, Any]]]
+AnswersReader = Callable[[], list[dict[str, Any]]]
 Clock = Callable[[], datetime]
 
 
@@ -91,6 +93,14 @@ def read_threads_entries() -> list[dict[str, Any]]:
         return list(db.memory.get_all(project=THREADS_PROJECT))
 
 
+def read_answer_records() -> list[dict[str, Any]]:
+    """Every row in T2 project ``asks`` (answer records and batches; ``merge_asks`` reads the ``sent`` answers)."""
+    from nexus.commands._helpers import t2_handle  # noqa: PLC0415 -- deferred: keeps console import light
+
+    with t2_handle() as db:
+        return list(db.memory.get_all(project=ASKS_PROJECT))
+
+
 def _collect(request: Request) -> dict[str, Any]:
     state = request.app.state
     bd_runner: BdRunner = getattr(state, "bd_runner", run_bd_needs_sam)
@@ -107,7 +117,14 @@ def _collect(request: Request) -> dict[str, Any]:
     now = clock()
     board = build_board(entries, now)
     beads = bd_runner()
-    asks = merge_asks(board.needs_you, beads.beads, board.structured)
+    records: list[dict[str, Any]] = []
+    if board.structured:  # the answers are only needed to retire a structured ask
+        answers: AnswersReader = getattr(state, "answers_reader", read_answer_records)
+        try:
+            records = answers()
+        except Exception as exc:  # noqa: BLE001 -- unread answers leave every ask open: over-counts, never hides
+            _log.warning("console_threads_answers_failed", error=str(exc))
+    asks = merge_asks(board.needs_you, beads.beads, board.structured, records)
     # False when a source failed or an entry could not be read: "nothing needs you" would then be a guess.
     checked_everything = beads.ok and not t2_error and not board.unreadable
     return {

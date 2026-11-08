@@ -68,8 +68,8 @@ def test_seeded_chunk_is_stored_but_has_no_live_owner(t2_service_env: str) -> No
     client = hvc.HttpVectorClient(tenant=t2_service_env)
     assert set(client.existing_ids(_COLL, [chash])) == {chash}, "physically stored"
     # live(c): a chunk with no live manifest row is hidden from content reads.
-    assert client.get_collection(_COLL).get(ids=[chash], include=[])["ids"] == []
-    assert client.get_collection(_COLL).get(ids=[chash], include=["metadatas"], include_non_live=True)["ids"] == [chash]
+    assert client.get_collection(_COLL).get(ids=[chash], include=[], sensitivity="include")["ids"] == []
+    assert client.get_collection(_COLL).get(ids=[chash], include=["metadatas"], include_non_live=True, sensitivity="include")["ids"] == [chash]
 
 
 def test_seed_lands_in_the_ambient_tenant_only(t2_service_env: str, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -19,17 +19,19 @@ from nexus import health
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.registry import (
     RUNG_MANIFEST_SECTION_LABELS,
+    RUNG_MANIFEST_SPAN_FILL,
     RUNG_NOTE_TAGS_ARRAY,
     LadderRegistry,
     default_registry,
 )
 from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
+from nexus.upgrade_ladder.rungs.manifest_section_labels import TITLE_RULE_MARK
 from tests.upgrade.conftest import InMemoryCompletionLedger
 
 #: The rungs that answer an unattended run on a managed service only from a record (or, on an engine with the route,
 #: manifest-section-labels from the engine's count; this install's fake engine has none). The aspect-queue rung
-#: was retired with the table (nexus-hbnml).
-REFUSABLE = (RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS)
+#: was retired with the table (nexus-hbnml). manifest-span-fill has no engine count at all (nexus-l8o33).
+REFUSABLE = (RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL)
 
 
 class _Install:
@@ -135,7 +137,7 @@ def test_the_interactive_run_the_remedy_names_clears_every_not_checked_entry(ins
     refusing = LadderRegistry(tuple(r for r in default_registry() if r.name in REFUSABLE))
     report = LadderRunner(refusing, install.ledger, package_version_fn=lambda: "9.9.9").run()
     assert [(r.name, r.outcome) for r in report.runs] == [(n, RungOutcome.RECORDED) for n in (
-        RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS)], [
+        RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL)], [
         (r.name, r.outcome, r.detail) for r in report.runs]
     assert install.ledger.verified_rungs() == frozenset(REFUSABLE)
     install.scan_reads.clear()
@@ -155,7 +157,9 @@ def test_a_walk_over_the_production_registry_under_auto_lists_nothing_once_recor
     from nexus.upgrade_ladder.unattended import unattended_run
 
     for rung in REFUSABLE:
-        install.ledger.record_verified(rung, package_version="9.9.9")
+        # the two manifest rungs read a record as current only under the title rule (nexus-l8o33)
+        detail = TITLE_RULE_MARK if rung in (RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL) else ""
+        install.ledger.record_verified(rung, package_version="9.9.9", detail=detail)
     refusing = LadderRegistry(tuple(r for r in default_registry() if r.name in REFUSABLE))
     with unattended_run():
         report = LadderRunner(refusing, install.ledger, package_version_fn=lambda: "9.9.9").run()
@@ -181,4 +185,4 @@ def test_a_row_answered_from_a_record_says_so_and_when_the_record_was_made(insta
     assert "not a read of the data" in row.detail and "stale" in note
     for rung in answered:
         assert f"{rung} (recorded {records[rung].verified_at})" in note, (rung, row.detail)
-    assert RUNG_MANIFEST_SECTION_LABELS not in note
+    assert RUNG_MANIFEST_SECTION_LABELS not in note and RUNG_MANIFEST_SPAN_FILL not in note

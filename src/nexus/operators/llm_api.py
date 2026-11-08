@@ -41,7 +41,6 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, ClassVar
-from urllib.parse import urlsplit
 
 import httpx
 import structlog
@@ -57,9 +56,15 @@ from nexus.operators.llm_types import (
     OperatorOutputError,
     OperatorTimeoutError,
     record_usage,
+    request_id_tag,
 )
 
 _log = structlog.get_logger(__name__)
+
+#: Control characters, the Unicode line separators, bidi overrides and
+#: zero-width characters: none of them belongs in a one-line message.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200d\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+")
+_LOCATION_HOST = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://(?:[^/?#@]*@)?([^/?#:]*|\[[^\]]*\])")
 
 NX_LLM_MAX_CONCURRENCY_ENV: str = "NX_LLM_MAX_CONCURRENCY"
 NX_LLM_MAX_TOKENS_ENV: str = "NX_LLM_MAX_TOKENS"
@@ -450,6 +455,13 @@ class ApiBackend:
             text = text.replace(self._api_key, "[REDACTED]")
         return re.sub(r"sk-[A-Za-z0-9_-]{8,}", "[REDACTED]", text)
 
+    def _clean(self, text: str) -> str:
+        """:meth:`_scrub`, then every control character (newlines, tabs, the
+        Unicode line separators) collapsed to one space. Applied to
+        server-chosen text that lands inside a one-line exception message or
+        log field, so it cannot start a fake line there (nexus-1wqz1)."""
+        return _CONTROL.sub(" ", self._scrub(text)).strip()
+
     # -- the call ------------------------------------------------------------
 
     async def run(self, req: DispatchRequest) -> DispatchResult:
@@ -512,7 +524,7 @@ class ApiBackend:
                 if outcome.stop == "refusal":
                     settle()
                     raise OperatorError(
-                        f"{self.name}: the model refused the request{(' (' + outcome.detail + ')') if outcome.detail else ''}"
+                        f"{self.name}: the model refused the request{(' (' + self._clean(outcome.detail)[:300] + ')') if outcome.detail else ''}"
                         f"{_for_operator(req.operator)}"
                     )
                 if outcome.stop == "max_tokens":
@@ -529,7 +541,7 @@ class ApiBackend:
                     settle()
                     raise OperatorOutputError(
                         f"{self.name}: the response stopped early ({outcome.stop}"
-                        f"{': ' + outcome.detail if outcome.detail else ''}){_for_operator(req.operator)}"
+                        f"{': ' + self._clean(outcome.detail)[:300] if outcome.detail else ''}){_for_operator(req.operator)}"
                     )
 
                 if schema is None:
@@ -712,10 +724,13 @@ class ApiBackend:
                 try:
                     async with client.stream("POST", url, headers=headers, json=body) as resp:
                         if 300 <= resp.status_code < 400:
-                            where = urlsplit(resp.headers.get("location", "")).hostname
+                            # Scrub the raw Location before any parsing: urlsplit lowercases the
+                            # host, which would defeat an exact-key match.
+                            m = _LOCATION_HOST.match(self._clean(resp.headers.get("location", "")))
+                            where = m.group(1) if m else ""
                             raise OperatorAPIError(
                                 f"{self.name}: the server answered {resp.status_code}, a redirect"
-                                f"{' to ' + self._scrub(where) if where else ''}; redirects are not followed, "
+                                f"{' to ' + where[:100] if where else ''}; redirects are not followed, "
                                 "so point base_url at the final endpoint",
                                 status=resp.status_code, retryable=False,
                             )
@@ -730,18 +745,20 @@ class ApiBackend:
                         if "text/event-stream" not in ctype.lower():
                             raise OperatorAPIError(
                                 f"{self.name}: the server answered {resp.status_code} with content-type "
-                                f"{self._scrub(ctype)[:80]!r}, not text/event-stream; is base_url a streaming "
+                                f"{self._clean(ctype)[:80]!r}, not text/event-stream; is base_url a streaming "
                                 "endpoint of this API?",
                                 status=resp.status_code, retryable=False,
                             )
-                        stream.request_id = resp.headers.get("request-id") or resp.headers.get("x-request-id")
+                        stream.request_id = request_id_tag(
+                            resp.headers.get("request-id") or resp.headers.get("x-request-id"), self._scrub,
+                        )
                         async for ev in iter_sse(resp.aiter_lines()):
                             first_event.set()
                             stream.feed(ev)
                 except httpx.HTTPError as exc:
                     # Raised below, outside the handler: no exception chain keeps the
                     # transport's own text, which can quote the URL (and so the key).
-                    failure = f"{self.name}: connection failed ({type(exc).__name__}: {self._scrub(str(exc))[:200]})"
+                    failure = f"{self.name}: connection failed ({type(exc).__name__}: {self._clean(str(exc))[:200]})"
                 if failure is not None:
                     raise OperatorAPIError(failure)
                 if not stream.finished:

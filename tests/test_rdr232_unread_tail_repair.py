@@ -360,6 +360,11 @@ async def test_a_contradicted_facet_turned_conflicted_by_the_tail_keeps_the_run_
     assert "were not read by the coverage check" in text, "the unread count is still disclosed"
     note = d.args_of("generate")[0]["context"]
     assert "f1" in note and "conflicts" in note, "the reduction is told the evidence on f1 conflicts"
+    # nexus-2hx2u: the notice lists f1 as unresolved, so the generator is told to state it as unresolved, not to answer
+    # it from the supporting evidence.
+    unsettled, _, settled = note.partition("The evidence supplied conflicts on the points below")
+    assert "State each one as unresolved" in unsettled and "- f1:" in unsettled, note
+    assert "- f1:" not in settled, note
 
 
 @pytest.mark.asyncio

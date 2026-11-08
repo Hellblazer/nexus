@@ -271,6 +271,11 @@ def test_a_last_run_warning_becomes_information_when_every_other_row_passes(name
 @pytest.mark.parametrize("name", _LAST_RUN_CASES)
 @pytest.mark.parametrize("other", [
     HealthResult(label="Service", ok=False, warn=True, detail="not running"),
+    # nexus-8qnuk: the three rows nexus-9b0ih turned from ok=True into warnings each name a fix the
+    # user still owes, so they hold the setup warning rather than count as benign.
+    HealthResult(label="PDF support", ok=False, warn=True, detail="two OpenCV builds installed"),
+    HealthResult(label="PDF support", ok=False, warn=True, detail="not installed, and it cannot be installed yet"),
+    HealthResult(label="Dependency lock", ok=False, warn=True, detail="a rebuild with the release's lock is owed"),
     HealthResult(label="T3", ok=False, detail="unreachable"),
     HealthResult(label="Engine", ok=False, fatal=True, detail="down"),
 ])

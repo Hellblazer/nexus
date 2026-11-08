@@ -115,7 +115,7 @@ def _tumbler_hydrate(manifest_rows: dict[str, list[ManifestRow]], entries, posit
     ), patch("nexus.mcp.core._get_catalog", return_value=catalog), patch(
         "nexus.mcp.core._read_scope", return_value=[COLL],
     ):
-        return catalog, _hydrate_tumbler_ids(list(manifest_rows))
+        return catalog, _hydrate_tumbler_ids(list(manifest_rows), sensitivity="include")
 
 
 def _labelled(chash: str, label: str) -> ManifestRow:

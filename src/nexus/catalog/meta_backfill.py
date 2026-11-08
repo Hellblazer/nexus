@@ -20,7 +20,11 @@ decides, per document, which keys the catalog may take from those rows, and noth
   ``ttl_days`` 0, and leaves the keyless count. The rules are the helpers the expiry sweep and the
   recovery-bundle export use; they are not forked here. An entry that already holds a note key is
   authoritative (an absent key is an unset one): only ``put_at`` may still be filled, and only from a row
-  whose TTL is the entry's.
+  whose TTL is the entry's. ``put_at`` counts as unset when it is absent, or when the entry carries a TTL and
+  the key holds no non-empty string (``""``, null, a number): the table CHECK of nexus-6pfgb.44 reads those as
+  absent, so they are filled too. A ``put_at`` of ``""`` on an entry with no TTL is the retraction and stays.
+  KNOWN GAP: a TOMBSTONED note is never listed or updated here (the engine refuses to update a tombstone), so
+  a tombstoned entry with a TTL and no ``put_at`` is left to the remedies in the tombstoned-violators section of that CHECK's runbook (prose; the backfill does not stamp it).
 * **Indexed documents**: ``source_format`` (nexus-6pfgb.23, Sam's option A) is DERIVED from the entry's own
   ``content_type`` and ``file_path`` by :func:`~nexus.catalog.indexed_meta.catalog_source_format`, the copy of
   the engine's ``nexus.catalog_source_format``, so it reads no chunk row and needs no ownership: a pair the
@@ -147,6 +151,20 @@ def _attributable(entry: Any, row_meta: dict, skew: Any = PUT_SKEW) -> str:
 
 # ── notes ──────────────────────────────────────────────────────────────────────────────────────────
 
+def put_at_is_open(meta: dict[str, Any]) -> bool:
+    """Whether a note's ``put_at`` may still be filled: the key is absent, or the entry carries a TTL and the
+    key holds no stamp (``""``, null, a number, anything but a non-empty string).
+
+    A key's presence is final everywhere else in this module. This is the one exception, because the table
+    CHECK on ``nexus.catalog_documents`` (nexus-6pfgb.44) reads a ``put_at`` of ``""`` as absent, so an entry
+    with a TTL and ``put_at: ""`` is a violator the backfill must repair or the census never reads zero. An
+    entry with no TTL of its own keeps ``""``: that pair is the retraction ``_NOTE_META_UNSET`` writes."""
+    if "put_at" not in meta:
+        return True
+    stamp = meta["put_at"]
+    return note_ttl_days(meta) > 0 and not (isinstance(stamp, str) and stamp != "")
+
+
 def plan_note(
     entry: Any, pieces: Sequence[tuple[str, dict | None]], sole: Iterable[str], *, skew: Any = PUT_SKEW,
 ) -> Plan:
@@ -162,7 +180,7 @@ def plan_note(
         plan.outcome["tags_legacy_string"] = PRESENT  # the .38 rung converts it; this verb never does
     if not held:
         wanted = list(NOTE_KEYS)
-    elif "put_at" not in meta:
+    elif put_at_is_open(meta):
         wanted = ["put_at"]
     else:
         wanted = []
@@ -225,7 +243,7 @@ def note_needs_ownership(entry: Any, pieces: Sequence[tuple[str, dict | None]]) 
     """The chashes whose live owners :func:`plan_note` needs: none when the entry has nothing to fill or
     a row the note itself wrote decides it, else the pieces a sole-owner row could come from."""
     meta = _meta(entry)
-    if any(k in meta for k in NOTE_META_KEYS) and "put_at" in meta:
+    if any(k in meta for k in NOTE_META_KEYS) and not put_at_is_open(meta):
         return []
     tumbler, title = entry.tumbler, getattr(entry, "title", "") or ""
     if any(r is not None and row_written_by(tumbler, r, owner_title=title) for _c, r in pieces):
@@ -478,7 +496,7 @@ def _chunk_rows(t3: Any, collection: str, chashes: list[str]) -> dict[str, dict]
     from nexus.db.http_vector_client import VectorServiceError, is_unregistered_collection_error  # noqa: PLC0415 — deferred, heavy import graph
 
     try:
-        return t3.chunk_rows(collection, chashes)
+        return t3.chunk_rows(collection, chashes, sensitivity="include")
     except VectorServiceError as exc:
         if not is_unregistered_collection_error(exc):
             raise
@@ -721,7 +739,7 @@ def _run_batch(
     report.documents_notes += len(notes)
 
     needs_rows_docs = [e for e in docs if doc_row_keys_wanted(e)]
-    needs_rows_notes = [e for e in notes if not ("put_at" in _meta(e))]
+    needs_rows_notes = [e for e in notes if put_at_is_open(_meta(e))]
     plans: dict[str, tuple[str, Plan]] = {}
     failed: set[str] = set()
 
@@ -811,7 +829,7 @@ def _run_batch(
             _log.warning("meta_backfill_owner_lookup_failed", chashes=len(want_owner), error=str(exc))
     for e in notes:
         tid = str(e.tumbler)
-        if "put_at" in _meta(e):
+        if not put_at_is_open(_meta(e)):
             plans[tid] = ("note", plan_note(e, [], ()))
         elif tid in note_pieces:
             need = note_needs_ownership(e, note_pieces[tid])

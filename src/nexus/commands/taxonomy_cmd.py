@@ -127,7 +127,12 @@ def _fetch_service_vectors(
         if offset >= _next and _next < n:
             _progress(f"    fetching {offset:,}/{n:,} chunks ({100 * offset // n}%)")
             _next += _milestone
-        page = stub.get(include=["documents"], limit=page_size, offset=offset)
+        # RDR-243 Phase 3 (nexus-rfvyy.8.6): sensitive chunks never reach clustering or the c-TF-IDF
+        # vectorizer, so no term only a sensitive document carries can become a topic label (the
+        # Knowledge Map prints those labels). The engine drops them inside the read, so paging stays
+        # consistent; `n` above still counts them, which the short-page break below absorbs. An engine
+        # that cannot filter raises SensitivityExcludeUnavailable: discover fails, it never reads unfiltered.
+        page = stub.get(include=["documents"], limit=page_size, offset=offset, sensitivity="exclude")
         page_ids = page.get("ids") or []
         page_docs = page.get("documents") or []
         if not page_ids:

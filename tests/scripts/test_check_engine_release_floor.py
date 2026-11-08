@@ -37,6 +37,8 @@ def _note_uri_floor_at_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     """The release shape: the note-URI floor equal to the pin (nexus-bivz3.20 set the floor on develop,
     where it leads the pin until the paired client release). Tests of the floor check set their own."""
     monkeypatch.setattr(gate._engine_version, "NOTE_URI_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
+    # RDR-243 Phase 2 (nexus-rfvyy.7): the sensitivity-exclude floor leads the pin on develop the same way.
+    monkeypatch.setattr(gate._engine_version, "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
 
 
 @pytest.fixture(autouse=True)
@@ -607,6 +609,55 @@ def test_ledger_only_and_the_bare_form_both_run_the_note_uri_floor_check(monkeyp
         assert gate.main(["--url", _TEST_URL]) == 1
         assert gate.main(["--paired-deploy-auto"]) == 1
     probe.assert_not_called()
+
+
+# ── RDR-243 Phase 2 sensitivity-exclude floor vs the pin (nexus-rfvyy.7) ────
+
+def test_a_pin_below_the_sensitivity_exclude_floor_fails_the_release_check(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(gate._engine_version, "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
+    assert gate.check_sensitivity_exclude_floor_vs_pin() == 1
+    err = capsys.readouterr().err
+    assert "SENSITIVITY EXCLUDE FLOOR CHECK FAILED" in err and ".".join(map(str, _PIN_BELOW_FLOOR)) in err
+
+
+@pytest.mark.parametrize(
+    "floor",
+    [pytest.param((0, 0, 0), id="unset"), pytest.param(REQUIRED_ENGINE_VERSION, id="equal"),
+     pytest.param((0, 0, 1), id="below")],
+)
+def test_a_pin_at_or_above_the_sensitivity_exclude_floor_passes(monkeypatch, floor) -> None:
+    monkeypatch.setattr(gate._engine_version, "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION", floor)
+    assert gate.check_sensitivity_exclude_floor_vs_pin() == 0
+
+
+def test_ledger_only_and_the_bare_form_both_run_the_sensitivity_exclude_floor_check(monkeypatch, tmp_path) -> None:
+    """The note-URI floor at the pin, so only the sensitivity floor can fail these; the probe never runs."""
+    monkeypatch.setattr(gate._engine_version, "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", _write_ledger(tmp_path, None)):
+        assert gate.main(["--ledger-only"]) == 1
+    with patch.object(gate, "probe_managed_service") as probe, \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+        assert gate.main(["--url", _TEST_URL]) == 1
+        assert gate.main(["--paired-deploy-auto"]) == 1
+    probe.assert_not_called()
+
+
+def test_one_run_names_both_failing_feature_floors(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(gate._engine_version, "NOTE_URI_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
+    monkeypatch.setattr(gate._engine_version, "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
+    assert gate.check_feature_floors_vs_pin() == 1
+    err = capsys.readouterr().err
+    assert "NOTE URI FLOOR CHECK FAILED" in err and "SENSITIVITY EXCLUDE FLOOR CHECK FAILED" in err
+
+
+def test_the_live_sensitivity_floor_leads_or_meets_the_pin() -> None:
+    """The tree's literal (the autouse fixture patches the attribute, so read the source): never unset while
+    the phase 2 client is in the tree, and never below the first engine that can carry vectors-055."""
+    import re
+    src = (REPO_ROOT / "src" / "nexus" / "engine_version.py").read_text(encoding="utf-8")
+    m = re.search(r"^SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src, re.M)
+    assert m is not None
+    assert tuple(int(g) for g in m.groups()) >= (0, 1, 182)
 
 
 # ── --client-precondition (nexus-9ssih deploy-order gate) ───────────────────

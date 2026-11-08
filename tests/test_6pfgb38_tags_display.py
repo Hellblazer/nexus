@@ -53,7 +53,7 @@ class _StubT3:
     def list_store(self, name: str, limit: int = 20, offset: int = 0) -> list[dict]:
         return [dict(d) for d in list(self.docs.values())[offset:offset + limit]]
 
-    def get_by_id(self, name: str, doc_id: str) -> dict | None:
+    def get_by_id(self, name: str, doc_id: str, *, sensitivity="include") -> dict | None:
         return dict(self.docs[doc_id]) if name == self.name and doc_id in self.docs else None
 
     def find_ids_by_title(self, name: str, title: str) -> list[str]:
@@ -81,6 +81,10 @@ def _entry(title: str, meta: dict, collection: str = "") -> SimpleNamespace:
 
 @pytest.fixture
 def world(monkeypatch):
+    # RDR-243 Phase 3: the CLI's output posture reads the environment's Claude Code markers, and a suite run from
+    # inside Claude Code carries them; these tests are about the tag display, so run them as a terminal does.
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
     t3 = _StubT3()
     state = SimpleNamespace(owners={}, entries={}, t3=t3, fail=False)
 
@@ -203,8 +207,11 @@ def test_list_makes_one_lookup_for_the_page(world, lines, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("lines", [_list_lines_mcp, _list_lines_cli], ids=["mcp", "cli"])
-def test_list_survives_a_down_catalog_with_the_rows_tags(world, lines) -> None:
+def test_list_survives_a_down_catalog_with_the_rows_tags(world, lines, monkeypatch) -> None:
     world.fail = True
+    # RDR-243 Phase 3 fix r1: a down catalog makes every row sensitive, so the MCP default posture withholds it
+    # (pinned in tests/mcp/test_p3fix_r1_store_list.py); ``flag`` here reaches the display this test is about.
+    monkeypatch.setattr("nexus.mcp.core._mcp_output_posture", lambda: "flag")
     text = "\n".join(lines())
     assert "[beta,row-only]" in text and "[row-file]" in text
 

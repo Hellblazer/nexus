@@ -114,7 +114,7 @@ def generate(
     offset = 0
     cap = max(count * 5, 200)
     while len(chunks) < cap:
-        res = coll.get(limit=300, offset=offset, include=["documents", "metadatas"])
+        res = coll.get(limit=300, offset=offset, include=["documents", "metadatas"], sensitivity="include")
         ids = res.get("ids", []) or []
         if not ids:
             break

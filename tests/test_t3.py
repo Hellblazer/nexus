@@ -416,7 +416,7 @@ def test_search_single_corpus_results_ordered(mock_db):
         "metadatas": [[{"title": "t1", "tags": "x"}, {"title": "t2", "tags": "y"}]],
         "distances": [[0.1, 0.5]],
     }
-    results = db.search("my query", ["knowledge__security"], n_results=5)
+    results = db.search("my query", ["knowledge__security"], n_results=5, sensitivity="include")
     assert len(results) == 2
     assert results[0]["id"] == "id-1"
     assert results[0]["distance"] == 0.1
@@ -430,7 +430,7 @@ def test_search_caps_n_results_to_collection_count(mock_db):
         "ids": [["id-a", "id-b"]], "documents": [["doc a", "doc b"]],
         "metadatas": [[{}, {}]], "distances": [[0.2, 0.8]],
     }
-    db.search("query", ["knowledge__sec"], n_results=10)
+    db.search("query", ["knowledge__sec"], n_results=10, sensitivity="include")
     mock_col.query.assert_called_once_with(
         query_texts=["query"], n_results=2, include=["documents", "metadatas", "distances"],
     )
@@ -439,7 +439,7 @@ def test_search_caps_n_results_to_collection_count(mock_db):
 def test_search_empty_collection_returns_empty(mock_db):
     db, mock_col, _ = mock_db
     mock_col.count.return_value = 0
-    results = db.search("query", ["knowledge__sec"], n_results=10)
+    results = db.search("query", ["knowledge__sec"], n_results=10, sensitivity="include")
     assert results == []
     mock_col.query.assert_not_called()
 
@@ -453,7 +453,7 @@ def test_search_skips_missing_collection_without_creating(mock_chromadb):
         tenant="t", database="d", api_key="k", _client=mock_client,
         _ef_override=MagicMock(name="ef_override"),
     )
-    assert db.search("query", ["knowledge__missing"], n_results=10) == []
+    assert db.search("query", ["knowledge__missing"], n_results=10, sensitivity="include") == []
     mock_client.get_or_create_collection.assert_not_called()
 
 
@@ -477,7 +477,7 @@ def test_search_skips_dimension_mismatch_rather_than_crashing(mock_db):
         "Collection expecting embedding with dimension of 384, got 768"
     )
     # Single-collection call: search must return empty, not raise.
-    results = db.search("q", ["knowledge__stale"], n_results=5)
+    results = db.search("q", ["knowledge__stale"], n_results=5, sensitivity="include")
     assert results == []
 
 
@@ -513,7 +513,7 @@ def test_search_continues_past_dimension_mismatch_to_next_collection(
         _ef_override=MagicMock(name="ef_override"),
     )
     results = db.search(
-        "q", ["knowledge__stale", "code__healthy"], n_results=5,
+        "q", ["knowledge__stale", "code__healthy"], n_results=5, sensitivity="include",
     )
     assert len(results) == 1
     assert results[0]["id"] == "g-1"
@@ -531,7 +531,7 @@ def test_search_propagates_non_dimension_invalid_argument_errors(mock_db):
         "invalid where clause: unknown operator $weird"
     )
     with pytest.raises(ValueError):
-        db.search("q", ["code__x"], n_results=5)
+        db.search("q", ["code__x"], n_results=5, sensitivity="include")
 
 
 # nexus-sghyo (2026-08-06): test_search_cce_collection_uses_query_embeddings
@@ -552,7 +552,7 @@ def test_search_cce_skipped_without_voyage_api_key(mock_db):
     mock_col.query.return_value = {
         "ids": [["id-1"]], "documents": [["doc"]], "metadatas": [[{}]], "distances": [[0.2]],
     }
-    db.search("query", ["docs__manual"], n_results=5)
+    db.search("query", ["docs__manual"], n_results=5, sensitivity="include")
     call_kwargs = mock_col.query.call_args.kwargs
     assert "query_texts" in call_kwargs
     assert "query_embeddings" not in call_kwargs
@@ -565,7 +565,7 @@ def test_search_passes_where_filter(mock_db):
         "ids": [["id-1"]], "documents": [["content"]],
         "metadatas": [[{"title": "t"}]], "distances": [[0.1]],
     }
-    db.search("query", ["knowledge__sec"], where={"source_agent": "indexer"})
+    db.search("query", ["knowledge__sec"], where={"source_agent": "indexer"}, sensitivity="include")
     assert mock_col.query.call_args.kwargs["where"] == {"source_agent": "indexer"}
 
 
@@ -730,7 +730,7 @@ def test_put_then_delete_by_title_cross_collapses_shared_content():
     assert db.find_ids_by_title(collection, "beta.md") == [id_beta]
 
     # The shared row resolves; its content carries the latest write.
-    row = db.get_by_id(collection, id_beta)
+    row = db.get_by_id(collection, id_beta, sensitivity="include")
     assert row is not None
     assert row["content"] == shared_content
 
@@ -742,7 +742,7 @@ def test_put_then_delete_by_title_cross_collapses_shared_content():
     # After the delete neither title resolves and the shared row is gone.
     assert db.find_ids_by_title(collection, "alpha.md") == []
     assert db.find_ids_by_title(collection, "beta.md") == []
-    assert db.get_by_id(collection, id_beta) is None
+    assert db.get_by_id(collection, id_beta, sensitivity="include") is None
 
 
 # ── Oversized put raises (GH #244 + nexus-akof) ─────────────────────────────
@@ -1392,7 +1392,7 @@ def test_search_returns_closest_document_first(local_t3: T3Database):
     local_t3.put(collection=col, content="Python web framework for building REST APIs with Django and Flask", title="python-web")
     local_t3.put(collection=col, content="Quantum physics experiments studying wave-particle duality and entanglement", title="quantum")
     local_t3.put(collection=col, content="Italian cooking recipes for homemade pasta carbonara and risotto", title="cooking")
-    results = local_t3.search(query="Django REST API web development Python", collection_names=[col], n_results=3)
+    results = local_t3.search(query="Django REST API web development Python", collection_names=[col], n_results=3, sensitivity="include")
     # nexus-oe2i: exact == 3 (3 docs seeded; n_results=3). >= 3 would
     # silently pass if the seed accidentally double-inserted.
     assert len(results) == 3
@@ -1402,8 +1402,8 @@ def test_search_returns_closest_document_first(local_t3: T3Database):
 def test_search_unrelated_query_produces_higher_distance(local_t3: T3Database):
     col = "knowledge__distance_test"
     local_t3.put(collection=col, content="Machine learning model training with PyTorch neural networks and gradient descent", title="ml")
-    relevant = local_t3.search(query="deep learning neural network training", collection_names=[col], n_results=1)
-    unrelated = local_t3.search(query="medieval castle architecture stone walls", collection_names=[col], n_results=1)
+    relevant = local_t3.search(query="deep learning neural network training", collection_names=[col], n_results=1, sensitivity="include")
+    unrelated = local_t3.search(query="medieval castle architecture stone walls", collection_names=[col], n_results=1, sensitivity="include")
     assert relevant and unrelated
     assert unrelated[0]["distance"] > relevant[0]["distance"]
 
@@ -1411,7 +1411,7 @@ def test_search_unrelated_query_produces_higher_distance(local_t3: T3Database):
 def test_search_single_chunk_document_retrievable(local_t3: T3Database):
     col = "docs__single_chunk_test"
     local_t3.put(collection=col, content="Authentication tokens use RS256 signing with rotating key schedules", title="auth-tokens")
-    results = local_t3.search(query="JWT RS256 authentication token signing", collection_names=[col], n_results=1)
+    results = local_t3.search(query="JWT RS256 authentication token signing", collection_names=[col], n_results=1, sensitivity="include")
     assert results
     assert "RS256" in results[0]["content"] or "authentication" in results[0]["content"].lower()
 

@@ -183,6 +183,7 @@ _BASE_VALUES = {
     "needs.test-integration-affected.result": "skipped",
     # nexus-zzkko: the always-run mcpb resolve gate (resolves only when its inputs changed).
     "needs.mcpb-resolve-gate.result": "success",
+    "needs.constraints-resolve-gate.result": "success",
     "github.event_name": "push",
     "github.base_ref": "",
 }
@@ -298,3 +299,41 @@ def test_fanin_only_warns_on_a_failed_mcpb_resolve_off_the_release_pr() -> None:
     proc = _run(_pytest_gate_script(**{"needs.mcpb-resolve-gate.result": "failure"}))
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert "::warning::mcpb-resolve-gate" in proc.stdout + proc.stderr
+
+
+def test_fanin_blocks_a_main_pr_when_the_constraints_resolve_gate_did_not_succeed() -> None:
+    """nexus-imhgf: the release PR cannot merge with an install lock that does not resolve on every supported
+    target. Same rule as the mcpb resolve gate, exercised as real bash."""
+    for bad_result in ("failure", "cancelled", "skipped"):
+        proc = _run(_pytest_gate_script(**{
+            "github.event_name": "pull_request",
+            "github.base_ref": "main",
+            "needs.release-ledger-gate.result": "success",
+            "needs.constraints-resolve-gate.result": bad_result,
+        }))
+        assert proc.returncode == 1, (bad_result, proc.stdout, proc.stderr)
+        assert "constraints-resolve-gate" in proc.stdout + proc.stderr
+
+
+def test_fanin_only_warns_on_a_failed_constraints_resolve_off_the_release_pr() -> None:
+    proc = _run(_pytest_gate_script(**{"needs.constraints-resolve-gate.result": "failure"}))
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "::warning::constraints-resolve-gate" in proc.stdout + proc.stderr
+
+
+def test_the_constraints_resolve_job_is_path_gated_on_the_lock_inputs_and_fails_an_unusable_filter() -> None:
+    """nexus-imhgf: the job always runs (so pytest-gate sees success when nothing changed), resolves only when an
+    input of the lock changed, and fails loud on a filter output that is neither true nor false."""
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    job = doc["jobs"]["constraints-resolve-gate"]
+    assert "if" not in job, "the job itself always runs"
+    assert "constraints-resolve-gate" in doc["jobs"]["pytest-gate"]["needs"]
+    steps = job["steps"]
+    filt = next(s for s in steps if str(s.get("uses", "")).startswith("dorny/paths-filter@"))
+    paths = yaml.safe_load(filt["with"]["filters"])["constraints"]
+    assert set(paths) >= {"src/nexus/_install/constraints.txt", "src/nexus/_install/overrides.txt", "uv.lock",
+                          "pyproject.toml", "tests/e2e/constraints-resolve-gate.sh", "tests/e2e/lib/python.sh"}
+    guard = next(s for s in steps if "predicate is usable" in s.get("name", ""))
+    assert "if" not in guard and "exit 1" in guard["run"], "the non-vacuity step runs every time"
+    run = next(s for s in steps if "tests/e2e/constraints-resolve-gate.sh" in s.get("run", ""))
+    assert run["if"] == "steps.changes.outputs.constraints == 'true'"

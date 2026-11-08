@@ -310,6 +310,8 @@ public final class NexusService {
     private volatile java.util.function.Supplier<dev.nexus.service.vectors.PciMaintenanceStatus> chunksLeavesCanary;
     /** nexus-6pfgb.43: the admin-connection DDL behind {@code /v1/admin/chunk-keys/add-constraints} and {@code validate-constraints}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.vectors.ChunkConstraintAdmin chunkConstraintAdmin;
+    /** nexus-6pfgb.44: the admin-connection DDL behind {@code /v1/admin/catalog-ttl-check/*}; null until {@code Main} binds it. */
+    private volatile dev.nexus.service.db.CatalogTtlCheckAdmin catalogTtlCheckAdmin;
     /**
      * nexus-hbnml: the result of the engine-start drain of the retired aspect queue table, served by
      * {@code GET /v1/status} as {@code aspect_queue_table_present} / {@code aspect_queue_rows_retained}. Null until
@@ -325,6 +327,15 @@ public final class NexusService {
      * construction of the route; {@link #chunkKeysAudit} replaces it (a test seam: the routes read it per request).
      */
     private volatile dev.nexus.service.http.ChunkKeysAdminHandler.Audit chunkKeysAudit;
+    /**
+     * nexus-v75nw: the retire-keys dry runs that run in the background (tenant-keyed: a job holds its tenant's counts;
+     * {@code ChunkKeysSweepJobs} is the evictor the tenant reset route runs). Built before the route is registered.
+     */
+    private final dev.nexus.service.http.ChunkKeysSweepJobs chunkKeysJobs = new dev.nexus.service.http.ChunkKeysSweepJobs();
+    /** Test seam: when set, the chunk-keys routes use this sweep instead of the one built over the vector repository. */
+    private volatile dev.nexus.service.vectors.ChunkKeySweep chunkKeysSweepForTests;
+    /** Test seam (nexus-v75nw): when set, replaces the credential lookup an apply job makes at each boundary. */
+    private volatile java.util.function.Predicate<String> chunkKeysCredentialLiveForTests;
 
     /**
      * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} does
@@ -831,14 +842,27 @@ public final class NexusService {
         // rather than a 404 that reads as an unknown route. Nothing in the engine calls these routes; the admin
         // connection the constraint routes run on is bound late, from Main (chunkConstraintAdmin).
         this.chunkKeysAudit = catalogRepo::recordGcAudit;
+        final dev.nexus.service.vectors.ChunkKeySweep chunkKeySweep = pgVectorRepository == null ? null
+                : new dev.nexus.service.vectors.ChunkKeySweep(tenantScope, pgVectorRepository);
         var chunkKeysCtx = server.createContext(dev.nexus.service.http.ChunkKeysAdminHandler.PATH,
                 new dev.nexus.service.http.ChunkKeysAdminHandler(
-                        pgVectorRepository == null ? null
-                            : new dev.nexus.service.vectors.ChunkKeySweep(tenantScope, pgVectorRepository),
+                        () -> chunkKeysSweepForTests != null ? chunkKeysSweepForTests : chunkKeySweep,
                         () -> chunkConstraintAdmin,
                         tokenStore::listKnownTenants,
-                        () -> chunkKeysAudit));
+                        () -> chunkKeysAudit,
+                        chunkKeysJobs,
+                        // A job looks its starter's credential up again at each batch boundary, as the auth filter does.
+                        hash -> chunkKeysCredentialLiveForTests != null ? chunkKeysCredentialLiveForTests.test(hash)
+                                : tokenCache.resolve(hash).isPresent()));
         chunkKeysCtx.getFilters().addAll(authFilter);
+
+        // /v1/admin/catalog-ttl-check/* — RDR-236 (nexus-6pfgb.44): the census, add-NOT-VALID and VALIDATE of the
+        // catalog TTL CHECK, a step of its own (not the chunk routes above). Nothing in the engine calls them; the
+        // admin connection they run on is bound late, from Main (catalogTtlCheckAdmin).
+        var catalogTtlCtx = server.createContext(dev.nexus.service.http.CatalogTtlCheckHandler.PATH,
+                new dev.nexus.service.http.CatalogTtlCheckHandler(
+                        () -> catalogTtlCheckAdmin, tokenStore::listKnownTenants, tenantScope));
+        catalogTtlCtx.getFilters().addAll(authFilter);
 
         // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
         // only when a boot-checked TemplateRegistry was supplied (see the constructor
@@ -1048,7 +1072,8 @@ public final class NexusService {
             dev.nexus.service.db.TenantKeyedState.of("ChunkReaper",
                 t -> chunkReaper == null ? 0 : chunkReaper.evictTenant(t)),
             dev.nexus.service.db.TenantKeyedState.of("NexusService.dataSweepFailuresByTenant",
-                t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0));
+                t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0),
+            dev.nexus.service.db.TenantKeyedState.of("ChunkKeysSweepJobs", chunkKeysJobs::evictTenant));
     }
 
     /** The evictors the tenant reset route runs, in order; empty-safe, built whether or not the route is enabled. */
@@ -1210,6 +1235,14 @@ public final class NexusService {
     }
 
     /**
+     * Bind the admin-connection DDL behind the catalog TTL CHECK routes (nexus-6pfgb.44). {@code Main} calls it once,
+     * with the same {@code NX_DB_ADMIN_*} values; until then the routes answer 503.
+     */
+    public void catalogTtlCheckAdmin(dev.nexus.service.db.CatalogTtlCheckAdmin admin) {
+        this.catalogTtlCheckAdmin = admin;
+    }
+
+    /**
      * Bind the engine-start drain of the retired {@code aspect_extraction_queue} table (nexus-hbnml) and schedule it
      * once, {@value #ASPECT_QUEUE_DRAIN_DELAY_SECONDS} seconds after the call, on the sweep thread. {@code Main}
      * calls it once with the same {@code NX_DB_ADMIN_*} values the migrator uses (the table's owner, which can count
@@ -1249,6 +1282,27 @@ public final class NexusService {
      */
     public void chunkKeysAudit(dev.nexus.service.http.ChunkKeysAdminHandler.Audit audit) {
         this.chunkKeysAudit = audit;
+    }
+
+    /**
+     * Test seam (nexus-v75nw): serve the chunk-keys routes from {@code sweep}, so a test can make the count slow; null
+     * restores the engine's own.
+     */
+    void chunkKeysSweepForTests(dev.nexus.service.vectors.ChunkKeySweep sweep) {
+        this.chunkKeysSweepForTests = sweep;
+    }
+
+    /**
+     * Test seam (nexus-v75nw): replaces the credential lookup an apply job makes at each boundary (it is given the
+     * bearer's hash), so a test can hold the job at a boundary; null restores the token cache's.
+     */
+    void chunkKeysCredentialLiveForTests(java.util.function.Predicate<String> live) {
+        this.chunkKeysCredentialLiveForTests = live;
+    }
+
+    /** Test seam (nexus-v75nw): the registry the asynchronous dry runs live in, to run the tenant reset's evictor. */
+    dev.nexus.service.http.ChunkKeysSweepJobs chunkKeysJobsForTests() {
+        return chunkKeysJobs;
     }
 
     /** The sink bound now (see {@link #chunkKeysAudit(dev.nexus.service.http.ChunkKeysAdminHandler.Audit)}). */
@@ -2075,6 +2129,7 @@ public final class NexusService {
      *  executor immediately. */
     public void stop() {
         sweepScheduler.shutdownNow();
+        chunkKeysJobs.shutdown();
         // The runner's executor too; an in-flight batch is interrupted, and a job left running resumes from its
         // cursor on the next boot.
         if (reembedExecutor != null) {

@@ -49,11 +49,11 @@ def _section2(text: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_release_constant_is_one_until_phase_two_lands() -> None:
-    """Phase 1 ships alone until the Phase 2 read filter and its canary rows land (RDR-243 MVV). The generated
-    text says "excluded" for a Phase 2 row only when the release enforces it, so the Phase 2 commit raises this
-    constant to 2 together with its canary rows and regenerates the docs; raising it earlier over-claims
-    (fix round 1, nexus-rfvyy.6.19 / .6.20 ship-blocker).
+def test_the_release_constant_is_three_from_conexus_7_98_0() -> None:
+    """conexus 7.98.0 pins engine-service-v0.1.182 (vectors-055 and the rerank exclusion) and carries Phases 2
+    and 3, so it enforces every phase (nexus-rfvyy.7 and nexus-rfvyy.8 release checklists). The generated text
+    says "excluded" for a row only when the release enforces it; raising the constant before that release would
+    over-claim (fix round 1, nexus-rfvyy.6.19 / .6.20 ship-blocker).
 
     This is a bare equality and nothing more: it fails when the constant moves, and says nothing about whether
     the text is honest. The honesty pins are the pending-line test below
@@ -61,7 +61,7 @@ def test_the_release_constant_is_one_until_phase_two_lands() -> None:
     ``test_the_table_lists_exactly_the_enforced_rows``, ``test_the_help_names_exactly_the_enforced_rows`` and
     ``test_the_real_policy_and_the_real_help_carry_the_line_once``, which read the generated help and docs against
     the registry rows."""
-    assert ls.RELEASE_ENFORCED_PHASE == 1
+    assert ls.RELEASE_ENFORCED_PHASE == 3
 
 
 def _pending_outward(phase: int) -> list[ls.SurfaceRow]:
@@ -124,12 +124,13 @@ def test_phase_two_rows_appear_at_two_and_not_at_one() -> None:
         assert f"| {r.label} |" in at_two
 
 
-def test_phase_three_rows_never_appear_in_the_release_table() -> None:
-    table = ls.render_policy_table(ls.RELEASE_ENFORCED_PHASE)
+def test_phase_three_rows_appear_only_once_the_release_enforces_phase_three() -> None:
+    table, at_two = ls.render_policy_table(ls.RELEASE_ENFORCED_PHASE), ls.render_policy_table(2)
     p3 = [r for r in ls.rows() if r.phase == 3]
     assert p3
     for r in p3:
-        assert f"| {r.label} |" not in table
+        assert f"| {r.label} |" not in at_two
+        assert f"| {r.label} |" in table
 
 
 def test_the_table_names_the_endpoints_the_policy_lacked() -> None:
@@ -201,7 +202,7 @@ def test_write_then_check_is_clean(tmp_path, monkeypatch) -> None:
     doc = tmp_path / "privacy-policy.md"
     doc.write_text(POLICY.read_text(encoding="utf-8").replace("OpenAlex", "OpenAlexx", 1), encoding="utf-8")
     sens = tmp_path / "sensitivity.md"
-    sens.write_text(SENSITIVITY.read_text(encoding="utf-8").replace("Voyage AI", "Voyage AIx", 1), encoding="utf-8")
+    sens.write_text(SENSITIVITY.read_text(encoding="utf-8").replace("Voyage AI (`api.voyageai.com`)", "Voyage AIx (`api.voyageai.com`)", 1), encoding="utf-8")
     monkeypatch.setattr(gen, "POLICY", doc)
     monkeypatch.setattr(gen, "SENSITIVITY", sens)
     assert gen.main(["--check"]) == 1
@@ -277,9 +278,10 @@ def _voyage(r: ls.SurfaceRow) -> bool:
     return "voyage" in r.endpoints
 
 
-def test_the_session_model_rows_the_line_derives_from_exist_above_the_release_phase() -> None:
-    """Non-vacuity: the line has something to be derived from."""
-    pending = [r for r in ls.rows() if r.phase > ls.RELEASE_ENFORCED_PHASE]
+def test_the_session_model_rows_the_line_derives_from_exist_above_phase_one() -> None:
+    """Non-vacuity: at phase 1 the line has something to be derived from (the parametrized tests below render
+    it at phases 1 and 2; the release phase is 3, where it is empty)."""
+    pending = [r for r in ls.rows() if r.phase > 1]
     assert any(_session_model_withhold(r) for r in pending)
     assert any(_voyage(r) for r in pending)
 
@@ -296,8 +298,20 @@ def test_the_help_and_the_table_each_carry_the_line_exactly_once(phase: int) -> 
 
 def test_the_real_policy_and_the_real_help_carry_the_line_once() -> None:
     line = ls.not_yet_enforced_line(ls.RELEASE_ENFORCED_PHASE)
-    assert POLICY.read_text(encoding="utf-8").count(line) == 1
-    assert ls.render_sensitive_help().count(line) == 1
+    if line:
+        assert POLICY.read_text(encoding="utf-8").count(line) == 1
+        assert ls.render_sensitive_help().count(line) == 1
+    else:
+        assert ls.RELEASE_ENFORCED_PHASE == max(ls.PHASES), "an empty line is only right at the last phase"
+        assert "Not yet enforced" not in POLICY.read_text(encoding="utf-8")
+        assert "Not yet enforced" not in SENSITIVITY.read_text(encoding="utf-8")
+        assert "Not yet enforced" not in ls.render_sensitive_help()
+        text = SENSITIVITY.read_text(encoding="utf-8")
+        begin, end = gen.begin_marker("llm-surfaces-pending"), gen.end_marker("llm-surfaces-pending")
+        region = text[text.index(begin) + len(begin):text.index(end)]
+        row18 = next(r for r in ls.rows() if r.census_row == 18)
+        assert row18.label in region, "the generated not-enforced line must name the row no phase covers"
+        assert "Memory rollup" in ls.render_sensitive_help(), "the help must still name the uncovered row"
 
 
 def test_the_line_is_absent_once_every_row_it_derives_from_is_enforced() -> None:
@@ -347,3 +361,147 @@ def test_sensitivity_stub_has_its_sections_and_points_at_the_rdr() -> None:
     assert "rdr/rdr-243-first-class-document-sensitivity.md" in text
     assert "T2 note" in text
     assert ls.not_yet_enforced_line(ls.RELEASE_ENFORCED_PHASE) in text
+
+
+# --------------------------------------------------------------------------- #
+# docs/sensitivity.md as the operator's page (RDR-243 Phase 3 Step 3.8, nexus-rfvyy.8.9).
+#
+# The page lists EVERY registry row in its per-surface table with the row's behaviour and enforcing phase, not
+# only the rows at or below RELEASE_ENFORCED_PHASE: the generated regions above stay honest about what a
+# release enforces, and this table is where an operator reads what each surface does and when. The rows are
+# read from the loader, never typed here, so a new registry row fails this test until the page names it.
+# --------------------------------------------------------------------------- #
+
+_SURFACE_HEADING = "## What each surface does"
+_NOT_ENFORCED_HEADING = "## What it does not enforce"
+
+
+def _doc_section(text: str, heading: str) -> str:
+    """The text under *heading* up to the next ``## `` heading; the test fails when the heading is absent."""
+    start = text.find("\n" + heading + "\n")
+    assert start >= 0, f"docs/sensitivity.md has no {heading!r} section"
+    start += 1
+    end = text.find("\n## ", start + len(heading))
+    return text[start:end if end >= 0 else len(text)]
+
+
+def _table_cells(section: str, label: str) -> list[str]:
+    """The cells of the table row whose first cell is *label*, or ``[]``."""
+    for line in section.splitlines():
+        if line.startswith(f"| {label} |"):
+            return [c.strip() for c in line.strip().strip("|").split(" | ")]
+    return []
+
+
+def test_every_registry_row_is_in_the_surface_table_with_its_behaviour_and_phase() -> None:
+    section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _SURFACE_HEADING)
+    registry = ls.rows()
+    assert len(registry) >= ls.CENSUS_ROW_COUNT, "non-vacuity: the registry has the census's rows"
+    missing, wrong = [], []
+    for r in registry:
+        cells = _table_cells(section, r.label)
+        if not cells:
+            missing.append(r.name)
+            continue
+        # columns: Surface | Behaviour | Phase | What happens to a sensitive document
+        if len(cells) != 4 or cells[1] != f"`{r.behaviour}`" or cells[2] != str(r.phase) or not cells[3].strip():
+            wrong.append((r.name, cells))
+    assert not missing, f"docs/sensitivity.md has no row for: {missing}"
+    assert not wrong, f"docs/sensitivity.md has a row with the wrong behaviour, phase or an empty description: {wrong}"
+    rows_in_table = [ln for ln in section.splitlines() if ln.startswith("| ") and not ln.startswith(("| Surface", "| ---"))]
+    assert len(rows_in_table) == len(registry), "the table has a row the registry does not"
+
+
+def test_the_surface_table_is_not_a_second_generated_region() -> None:
+    """The generated table prints the policy words; this one is written by hand and tested against the loader."""
+    section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _SURFACE_HEADING)
+    assert "BEGIN GENERATED" not in section
+
+
+def test_memory_rollup_is_stated_as_not_enforced() -> None:
+    """Census row 18: a T2 note that quotes a sensitive document reaches the LLM, and no part of RDR-243 prevents it."""
+    row = ls.row_for("memory_rollup")
+    assert row.behaviour == "n/a-not-a-document", "non-vacuity: the row is the gap the page must state"
+    section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _NOT_ENFORCED_HEADING)
+    assert row.label in section, "row 18 is named in the not-enforced section"
+    paras = [p for p in re.split(r"\n\n|\n- ", section) if row.label in p]
+    assert any(
+        "not enforced" in p.lower() and "T2 note" in p and "memory_consolidate" in p for p in paras
+    ), "one paragraph naming row 18 states it is not enforced, for T2 notes, via memory_consolidate"
+
+
+@pytest.mark.parametrize(
+    ("gap", "needles"),
+    [
+        ("the release phase", ("RELEASE_ENFORCED_PHASE",)),
+        ("DEVONthink group inheritance", ("DEVONthink", "group", "not been verified")),
+        ("the cloud edge key", ("edge", "allowlist", "catalog_sensitivity_supported")),
+        ("traverse and catalog_link_query", ("traverse", "catalog_link_query", "hash")),
+        ("pdf staging rows", ("staging",)),
+        ("the audit table has no CLI view", ("catalog_sensitivity_changes", "no CLI view")),
+        ("the shell bypass", ("CLAUDECODE", "Bash")),
+        ("delete, purge-trash, re-register", ("purge-trash", "no audit row", "source URI")),
+        ("repo runs bound for a Voyage collection", ("--sensitive-glob", "--ack-external-embedder", "not indexed")),
+        ("CLI verbs outside the output posture", ("nx catalog delete", "nx catalog trash", "nx catalog gc", "nx enrich aspects")),
+        ("title, author and path are discoverable", ("catalog_show(title=)", "store_get", "author", "discoverable")),
+        ("the audit table readers", ("nexus_diag", "managed-cloud tenant", "service database role")),
+        ("the edge allowlist bead", ("nexus-rfvyy.7.5", "2026-11-07")),
+    ],
+)
+def test_the_not_enforced_section_names_each_recorded_gap(gap: str, needles: tuple[str, ...]) -> None:
+    section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _NOT_ENFORCED_HEADING)
+    for needle in needles:
+        assert needle in section, f"the not-enforced section does not state {gap}: no {needle!r}"
+
+
+def test_the_release_phase_is_stated_by_the_constants_own_value() -> None:
+    section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _NOT_ENFORCED_HEADING)
+    assert f"`RELEASE_ENFORCED_PHASE` is {ls.RELEASE_ENFORCED_PHASE}" in section
+    assert ls.RELEASE_ENFORCED_PHASE == max(ls.PHASES)
+    assert not {r.phase for r in ls.rows() if r.phase > ls.RELEASE_ENFORCED_PHASE}
+
+
+def test_the_how_to_names_commands_and_keys_that_exist() -> None:
+    import click
+
+    from nexus.cli import main
+
+    text = SENSITIVITY.read_text(encoding="utf-8")
+    catalog = main.commands["catalog"]
+    assert isinstance(catalog, click.Group)
+    opts = {o for p in catalog.commands["sensitive"].params if isinstance(p, click.Option) for o in p.opts}
+    assert {"--collection", "--path", "--owner", "--clear", "--reason"} <= opts
+    assert any("--sensitive" in p.opts for p in catalog.commands["list"].params if isinstance(p, click.Option))
+    repo = main.commands["index"].commands["repo"]
+    assert any("--sensitive-glob" in p.opts for p in repo.params if isinstance(p, click.Option))
+    for shown in (
+        "nx catalog sensitive", "nx catalog list --sensitive", "--clear --reason", "--sensitive-glob",
+        "nx config set sensitivity.mcp_output flag", "--ack-external-embedder", "nx catalog doctor",
+        "nx doctor", "nx catalog show",
+    ):
+        assert shown in text, f"the page does not show {shown!r}"
+
+
+def test_the_cached_catalog_probe_is_the_five_minutes_the_page_states() -> None:
+    """The page says the catalog key's answer, a failed probe included, is kept 5 minutes per client process."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    assert HttpCatalogClient._CAPABILITY_TTL_S == 300.0
+    text = SENSITIVITY.read_text(encoding="utf-8")
+    assert "5 minutes" in text and "_CAPABILITY_TTL_S" in text and "_version_flags" in text
+    assert hasattr(HttpCatalogClient, "_version_flags")
+
+
+def test_the_page_names_the_gates_that_exist_on_import_and_reindex() -> None:
+    from nexus import sensitive_write as sw
+
+    text = SENSITIVITY.read_text(encoding="utf-8")
+    for fn in ("gate_sensitive_import", "gate_sensitive_reindex"):
+        assert callable(getattr(sw, fn)), f"non-vacuity: {fn} exists"
+        assert fn in text, f"the page does not name {fn}"
+
+
+def test_the_doctor_row_is_described_as_current_state_only() -> None:
+    text = SENSITIVITY.read_text(encoding="utf-8")
+    assert "shows the current config value only" in text
+    assert "tells you the first one is not in use" not in text

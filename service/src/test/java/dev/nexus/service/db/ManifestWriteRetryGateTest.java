@@ -112,7 +112,9 @@ class ManifestWriteRetryGateTest {
             + " records) and an UPDATE of nexus.chunks metadata; it writes no manifest row"),
         Map.entry("DepartedWriterSpans", "nexus-pvkbv: SELECT subqueries over the manifest (which chunks a document is the"
             + " sole remaining holder of, and what span fields its rows lack) and an UPDATE of nexus.chunks metadata;"
-            + " it writes no manifest row. Its caller is the manifest writer, inside that writer's retried transaction")));
+            + " it writes no manifest row. Its caller is the manifest writer, inside that writer's retried transaction"),
+        Map.entry("ChunkSensitivity", "nexus-rfvyy.7.3: a jOOQ NOT EXISTS condition and a SELECT over the manifest joined to"
+            + " its live document (which chunks have a live sensitive owner); it writes nothing")));
 
     private static final Pattern TABLE_REF = Pattern.compile("catalog_document_chunks|CatalogDocumentChunks",
         Pattern.CASE_INSENSITIVE);

@@ -111,7 +111,7 @@ async def _run(*, coverage: bool, bundled: bool):
     tools = _Tools()
     stream = _reserved()
     boundary = CoverageBoundary(request=_request(), named_sources=_resolved_source(), primary=_primary()) if coverage else None
-    with patch.object(mcp_core, "search", tools.search), patch.object(mcp_core, "store_get_many", tools.store_get_many), \
+    with patch.object(mcp_core, "search", tools.search), patch.object(mcp_core, "_store_get_many_impl", tools.store_get_many), \
          patch.object(mcp_core, "operator_rank", tools.rank), patch.object(mcp_core, "operator_check", tools.check), \
          patch.object(mcp_core, "operator_generate", tools.generate), patch("nexus.plans.bundle.dispatch_bundle", tools.bundle):
         result = await plan_run(_match(PLAN), {}, bundle_operators=bundled, reserved_stream=stream, coverage_boundary=boundary)

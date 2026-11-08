@@ -81,7 +81,7 @@ def inject_local_t3(local_t3: T3Database, monkeypatch: pytest.MonkeyPatch):
 
 def _stored_metadata(local_t3: T3Database, stored_col_name: str, title: str) -> dict:
     stored_col = local_t3._client.get_collection(stored_col_name)
-    chunk_result = stored_col.get(include=["metadatas"])
+    chunk_result = stored_col.get(include=["metadatas"], sensitivity="include")
     matching = [m for m in chunk_result["metadatas"] if m.get("title") == title]
     assert matching, f"expected a chunk with title={title!r}"
     return matching[0]

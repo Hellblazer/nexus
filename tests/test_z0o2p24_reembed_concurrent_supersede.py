@@ -68,7 +68,7 @@ def _put_note(client, *, title: str, content: str) -> tuple[str, str]:
 
 def _physical_ids(client) -> set[str]:
     """Every chunk row in the collection, owned or not."""
-    out = client.get_collection(_COLLECTION).get(include=[], limit=300, include_non_live=True)
+    out = client.get_collection(_COLLECTION).get(include=[], limit=300, include_non_live=True, sensitivity="include")
     return set(out.get("ids") or [])
 
 
@@ -107,7 +107,7 @@ def test_a_chunk_that_loses_its_owner_mid_run_is_skipped_and_the_rest_are_rewrit
     assert sorted(upserts[1]) == sorted([c1, c3])
     assert (processed, skipped) == (2, 1)
     assert sorted(hooks.fired[-1]) == sorted([c1, c3]), "the chains fire for what was written only"
-    live = set(client.get_collection(_COLLECTION).get(include=[], limit=300).get("ids") or [])
+    live = set(client.get_collection(_COLLECTION).get(include=[], limit=300, sensitivity="include").get("ids") or [])
     assert live == {c1, c3, superseded["new"]}
     assert c2_old not in _physical_ids(client), "the superseded chunk was not resurrected ownerless"
 

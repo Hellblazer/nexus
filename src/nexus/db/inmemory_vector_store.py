@@ -35,6 +35,8 @@ import math
 import threading
 from typing import Any, Callable
 
+from nexus.sensitivity import ReadSensitivity, check_read_sensitivity
+
 __all__ = ["InMemoryVectorClient", "InMemoryCollection"]
 
 
@@ -288,11 +290,17 @@ class InMemoryCollection:
             where: dict[str, Any] | None = None,
             limit: int | None = None, offset: int = 0,
             include: list[str] | None = None,
-            include_non_live: bool = False) -> dict[str, Any]:
+            include_non_live: bool = False,
+            sensitivity: ReadSensitivity) -> dict[str, Any]:
         # include_non_live (nexus-wbfpw.10, RDR-192 Step 5 amendment): a
         # no-op here -- this in-memory test double has no manifest-ownership
         # concept to filter on, so it is always the "physical" view.
         del include_non_live
+        # sensitivity (RDR-243 Phase 2, nexus-rfvyy.7.8): required, as on the service stub, so a caller that
+        # forgets it fails here the same way. The flag lives in the catalog, which this double does not have: no
+        # chunk of it is sensitive, so ``exclude`` and ``include`` read alike (pinned by
+        # tests/db/test_vector_read_sensitivity_argument.py).
+        check_read_sensitivity(sensitivity)
         include = include if include is not None else ["documents", "metadatas"]
         with self._lock:
             if ids is not None:

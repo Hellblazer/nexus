@@ -956,7 +956,7 @@ class TestSessionCache:
         return PlanSessionCache(client=make_vector_test_client(), session_id=session)
 
     def _meta(self, cache: Any, session: str, plan_id: int) -> dict[str, Any]:
-        got = cache._col.get(ids=[f"{session}:{plan_id}"], include=["metadatas"])
+        got = cache._col.get(ids=[f"{session}:{plan_id}"], include=["metadatas"], sensitivity="include")
         return got["metadatas"][0]
 
     def test_an_upserted_row_carries_its_declared_kind(self) -> None:
