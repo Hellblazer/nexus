@@ -19,7 +19,8 @@ its target is classified:
   stale-daemon reaper and stale-run drain, the stale-substrate sweep): they signal an earlier, dead session's
   leftovers on purpose, after their own identity checks;
 * **foreign**: anything else, including ``kill(-1, ...)`` and a group no member of which is ours;
-* a probe (signal 0) and a target whose ``/proc/<pid>/stat`` is gone (it exited) are not classified; a target whose
+* a probe (signal 0), a target whose ``/proc/<pid>/stat`` is gone (it exited) and a zombie (state ``Z``: exited
+  and not yet reaped, so a signal delivers nothing) are not classified; a target whose
   environment cannot be read (another user's process) is judged by its ancestry and argv alone. Under
   ``hidepid=2`` another user's process has no readable ``stat`` and reads as unclassified.
 
@@ -162,6 +163,23 @@ def _stat(pid: int) -> tuple[int, int] | None:
         return None
 
 
+def _state(pid: int) -> str | None:
+    """The one-letter process state from ``/proc/<pid>/stat`` (``R``, ``S``, ``Z`` and so on), or ``None`` when gone."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes().decode("utf-8", "replace")
+    except OSError:
+        return None
+    fields = raw[raw.rfind(")") + 2:].split()
+    return fields[0] if fields else None
+
+
+#: States that cannot receive a signal: a zombie (exited, not yet reaped) and a dead task. A signal to one delivers
+#: nothing, so it is never counted (nexus-xzorj red fix: an orphaned zombie of a non-reaping namespace init read
+#: foreign on develop CI at 745ea0128). Judged by the state field, never by an empty command line, which a live
+#: process can have too.
+_UNSIGNALLABLE = frozenset({"Z", "X"})
+
+
 def _has_token(pid: int, token: str) -> bool:
     try:
         env = Path(f"/proc/{pid}/environ").read_bytes()
@@ -250,6 +268,8 @@ def classify(kind: str, target: int, sig: int, *, root: int, token: str, basetem
     if kind == "kill" and target == -1:
         return "foreign", 0
     if kind == "kill" and target > 0:
+        if _state(target) in _UNSIGNALLABLE:
+            return "unclassified", target
         verdict = owned(target, root=root, token=token, basetemp=basetemp)
         if verdict is None:
             return "unclassified", target
@@ -259,10 +279,10 @@ def classify(kind: str, target: int, sig: int, *, root: int, token: str, basetem
                 verdict = True
         return ("own" if verdict else "foreign"), target
     pgid = os.getpgrp() if target == 0 else abs(target)
-    leader = owned(pgid, root=root, token=token, basetemp=basetemp)
+    leader = None if _state(pgid) in _UNSIGNALLABLE else owned(pgid, root=root, token=token, basetemp=basetemp)
     if leader is not None:
         return ("own" if leader else "foreign"), pgid
-    members = _group_members(pgid)
+    members = [m for m in _group_members(pgid) if _state(m) not in _UNSIGNALLABLE]
     if not members:
         return "unclassified", 0
     for m in members:
