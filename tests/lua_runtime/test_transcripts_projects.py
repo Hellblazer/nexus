@@ -182,3 +182,14 @@ def test_a_repo_root_that_is_not_a_repository_is_refused(tmp_path: Path) -> None
     plain.mkdir()
     with pytest.raises(ValueError, match="not a git repository"):
         _dirs(projects, plain)
+
+
+def test_a_recorded_cwd_with_a_nul_byte_is_skipped_not_an_error(tmp_path: Path) -> None:
+    # os.path.realpath raises ValueError on an embedded NUL; the verb maps a
+    # ValueError to "needs a repository", so one corrupt transcript must not
+    # stand for the whole lookup (baton's critic, nexus-qo7ie.31).
+    main = _repo(tmp_path)
+    projects = tmp_path / "projects"
+    _session(projects, "corrupt", "/tmp/a\x00b")
+    _session(projects, "main-dir", main)
+    assert _dirs(projects, main) == ["main-dir"]
