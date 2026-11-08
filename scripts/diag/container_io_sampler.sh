@@ -46,7 +46,9 @@
 #
 # Every docker call is bounded (NX_IO_SAMPLER_DOCKER_TIMEOUT seconds, default 20); after COMMAND ends the
 # sampler loop gets NX_IO_SAMPLER_GRACE seconds (default 10), then is killed, and the final sample gets
-# NX_IO_SAMPLER_FINAL seconds (default 30). A bound that expires is counted in the report, so a stalled
+# NX_IO_SAMPLER_FINAL seconds (default 30). What a bound kills, it kills with everything it started (the
+# tree is frozen before it is killed, so nothing forked meanwhile escapes) and waits until none of it is
+# alive, so no docker call outlives the script. A bound that expires is counted in the report, so a stalled
 # daemon yields a report that says what is missing, not a hang. The sampler loop also ends by itself if
 # this script is killed (SIGKILL). The state directory is on /dev/shm when that is writable
 # (NX_IO_SAMPLER_STATE_BASE overrides), so sampling does not write to the disk it measures.
@@ -186,17 +188,52 @@ descendants() {
         }'
 }
 
-# Stop PID and everything below it (the descendants are listed first: once PID is gone they are orphans).
+# The pids among the arguments that are still alive (a zombie is dead: only its parent's wait is missing).
+live_among() {
+    ps -A -o pid=,stat= 2>/dev/null | awk -v want=" $* " 'index(want, " " $1 " ") && $2 !~ /^Z/ { print $1 }'
+}
+
+# Kill PID and everything below it, and return once none of it is alive (up to 3 s; past that it fails and
+# names what is left). The tree is frozen first: PID, then every descendant a listing finds, is stopped, and
+# the listing is repeated until it finds no new process. A stopped process cannot fork (a fork that a stop
+# reaches midway is undone), so the frozen set is the whole tree, and only then is it killed. Listing first
+# and signalling after let a process fork between the two: a root whose stalled docker call was killed went
+# on to the next container's call, which no listing held, and that call outlived the bound (develop
+# ebc9d82f0, shard 6). The descendants are found through PID while it is stopped, never after it is gone,
+# when they would be orphans that no listing reaches.
 kill_tree() {
-    local pid=$1 all p
-    all=$(descendants "$pid")
-    for p in $all "$pid"; do
-        kill -TERM "$p" 2>/dev/null
+    local pid=$1 frozen=" $1 " p grew pass left deadline
+    kill -STOP "$pid" 2>/dev/null
+    for ((pass = 0; pass < 100; pass++)); do
+        grew=""
+        for p in $(descendants "$pid"); do
+            [[ $frozen == *" $p "* ]] && continue
+            kill -STOP "$p" 2>/dev/null
+            frozen+="$p "
+            grew=1
+        done
+        [[ -n $grew ]] || break
     done
-    sleep 0.3
-    for p in $all "$pid"; do
-        if kill -0 "$p" 2>/dev/null; then kill -KILL "$p" 2>/dev/null; fi
+    for p in $frozen; do
+        kill -KILL "$p" 2>/dev/null
     done
+    # Quietly: when PID is this shell's child, bash prints "<pid> Killed ..." on stderr as it reaps it, ahead
+    # of the report (chas lab-m, 3 of 200 runs). Hence stderr closed while it dies, and the wait once it is dead.
+    deadline=$((SECONDS + 3))
+    # shellcheck disable=SC2086  # pids, split on purpose
+    while left=$(live_among $frozen) && [[ -n $left ]] && ((SECONDS < deadline)); do
+        sleep 0.05
+    done 2>/dev/null
+    if [[ -n $left ]]; then
+        left=$(tr '\n' ' ' <<<"$left")
+        if [[ -n $STATE ]]; then
+            echo "killed processes still alive 3s after SIGKILL: $left" >>"$STATE/timeouts" 2>/dev/null
+        else
+            echo "container_io_sampler: killed processes still alive 3s after SIGKILL: $left" >&2
+        fi
+        return 1
+    fi
+    wait "$pid" 2>/dev/null # dead (a zombie at most), so this cannot block
     return 0
 }
 
@@ -486,10 +523,11 @@ stop_sampler() {
 SAMPLER_PID=""
 PS_FILTER=() # extra docker listing arguments: --filter <expr> per -f
 
-# A signal to this script stops the sampler; the command, in the same process group, gets it too.
+# A signal to this script stops the sampler, with the docker call it may be inside (killing the loop's pid
+# alone would orphan that call); the command, in the same process group, gets the signal too.
 on_signal() {
     [[ -n $STATE ]] && touch "$STATE/stop"
-    [[ -n $SAMPLER_PID ]] && kill "$SAMPLER_PID" 2>/dev/null
+    if [[ -n $SAMPLER_PID ]] && kill -0 "$SAMPLER_PID" 2>/dev/null; then kill_tree "$SAMPLER_PID"; fi
 }
 
 usage() {
