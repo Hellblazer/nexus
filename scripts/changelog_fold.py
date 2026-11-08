@@ -178,19 +178,41 @@ def _first_added(root: Path, path: Path) -> int | None:
     return int(out[0]) if out else None
 
 
-def render(fragments: list[tuple[int | None, Fragment]]) -> str:
-    """The ``### Section`` blocks for these fragments, each block ending in a blank line."""
-    out = ""
+def split_body(body: str) -> tuple[str, dict[str, list[str]]]:
+    """Split an [Unreleased] body into its prose (before the first ``###``) and its sections'
+    non-blank lines, keyed by heading text in the order they appear."""
+    prose: list[str] = []
+    sections: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for ln in body.strip("\n").splitlines():
+        head = re.fullmatch(r"### (\S.*)", ln)
+        if head:
+            current = sections.setdefault(head.group(1), [])
+        elif current is None:
+            prose.append(ln)
+        elif ln.strip():
+            current.append(ln)
+    return "\n".join(prose).strip("\n"), sections
+
+
+def render(body: str, fragments: list[tuple[int | None, Fragment]]) -> str:
+    """The new [Unreleased] body: the existing prose, then each section with its existing lines
+    first and these fragments' bullets after them (sections in SECTIONS order, any other heading
+    already present after those, in its own order; an empty section is dropped)."""
+    prose, sections = split_body(body)
+    added: dict[str, list[str]] = {}
     for section in SECTIONS:
-        chosen = [f for f in fragments if f[1].section == section]
-        if not chosen:
-            continue
-        chosen.sort(key=lambda f: (f[0] is None, f[0] or 0, f[1].path.name))
-        out += (
-            f"### {section}\n\n"
-            + "".join(b + "\n" for _, f in chosen for b in f.bullets)
-            + "\n"
+        chosen = sorted(
+            (f for f in fragments if f[1].section == section),
+            key=lambda f: (f[0] is None, f[0] or 0, f[1].path.name),
         )
+        added[section] = [b for _, f in chosen for b in f.bullets]
+    order = [*SECTIONS, *(h for h in sections if h not in SECTIONS)]
+    out = "\n" + (prose + "\n\n" if prose else "")
+    for heading in order:
+        lines = [*sections.get(heading, []), *added.get(heading, [])]
+        if lines:
+            out += f"### {heading}\n\n" + "".join(ln + "\n" for ln in lines) + "\n"
     return out
 
 
@@ -222,12 +244,7 @@ def fold(root: Path) -> list[str]:
         cl = root / changelog
         text = cl.read_text(encoding="utf-8")
         s, e = unreleased_body(text)
-        kept = text[s:e].strip("\n")
-        kept = re.sub(r"^### .*\n?", "", kept, flags=re.MULTILINE).strip(
-            "\n"
-        )  # empty headings only remain
-        body = "\n" + (kept + "\n\n" if kept else "") + render(dated)
-        cl.write_text(text[:s] + body + text[e:].lstrip("\n"), encoding="utf-8")
+        cl.write_text(text[:s] + render(text[s:e], dated) + text[e:].lstrip("\n"), encoding="utf-8")
         for p in paths:
             p.unlink()
     return []

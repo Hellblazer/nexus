@@ -202,7 +202,23 @@ def test_a_second_fold_and_a_fold_without_readme_work(repo: Path) -> None:
     assert cf.fold(repo) == []
     text = (repo / "CHANGELOG.md").read_text()
     s, e = cf.unreleased_body(text)
-    assert "- one\n" in text[s:e] and "### Fixed\n\n- two\n" in text[s:e]
+    assert text[s:e] == "\n### Added\n\n- one\n\n### Fixed\n\n- two\n\n"
+    _frag(repo, "nexus-three.md", "### Added\n\n- three\n")  # a third fold appends inside Added
+    assert cf.fold(repo) == []
+    text = (repo / "CHANGELOG.md").read_text()
+    s, e = cf.unreleased_body(text)
+    assert text[s:e] == "\n### Added\n\n- one\n- three\n\n### Fixed\n\n- two\n\n"
+
+
+def test_fold_keeps_an_unknown_existing_heading(repo: Path) -> None:
+    (repo / "CHANGELOG.md").write_text(
+        _CL.replace("## [Unreleased]\n", "## [Unreleased]\n\n### Notes\n\n- kept note\n\n### Empty\n\n")
+    )
+    _frag(repo, "nexus-one.md", "### Added\n\n- one\n")
+    assert cf.fold(repo) == []
+    text = (repo / "CHANGELOG.md").read_text()
+    s, e = cf.unreleased_body(text)
+    assert text[s:e] == "\n### Added\n\n- one\n\n### Notes\n\n- kept note\n\n"
 
 
 def test_fold_refuses_and_writes_nothing_on_a_bad_fragment(repo: Path) -> None:

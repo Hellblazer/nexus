@@ -30,6 +30,7 @@ import pytest
 
 import nexus.db.http_vector_client as hvc
 from nexus.db.client_identity import CLIENT_VERSION_HEADER, client_identity_headers, client_version
+from tests._changelog import changelog_text
 
 
 def test_the_header_name_is_the_one_the_engine_reads() -> None:
@@ -517,7 +518,9 @@ def _scope_problems(text: str) -> list[str]:
 def test_the_documents_state_the_scope_by_mechanism_not_as_every_request() -> None:
     root = Path(__file__).resolve().parents[1]
     for rel in _DOCUMENTS:
-        assert _scope_problems((root / rel).read_text()) == [], rel
+        # CHANGELOG.md includes its unreleased fragments (nexus-3ceda.2), so a new entry is scanned too.
+        text = changelog_text(root) if rel == "CHANGELOG.md" else (root / rel).read_text()
+        assert _scope_problems(text) == [], rel
 
 
 @pytest.mark.parametrize("claim", [
