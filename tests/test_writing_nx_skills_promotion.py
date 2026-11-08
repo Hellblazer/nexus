@@ -51,6 +51,8 @@ PARTS: dict[str, tuple[str, tuple[str, ...]]] = {
             # (critic B1, 2026-11-08): the skill must say so itself.
             r"`procedure_run`",
             r"released package",
+            # R1: a repo-library script also needs the repo root enabled.
+            r"for a repo library, the repo root enabled",
             r"source stays whole",
             # A file holding both a fixed and a judgment part (critic B2).
             r"split by part",
@@ -97,11 +99,18 @@ PARTS: dict[str, tuple[str, tuple[str, ...]]] = {
         (
             r"only with an empty list",
             r"does not shrink",
-            # When the source shrinks (baton, 2026-11-08): with the target,
-            # after the list is empty and recorded, never in a later change.
-            r"same change that lands the target",
-            r"empty and recorded on the bead",
-            r"not shrink in a later change",
+            # When the source shrinks (critic B3, 2026-11-08): only once the
+            # target is LIVE, after the empty list is recorded. Live differs
+            # per target: a merged skill or hook is inert until the plugin
+            # release that carries it is installed, a script until
+            # procedure_run is released (and the repo root enabled for a repo
+            # library). Shrinking at merge leaves a pointer to an inert target.
+            r"only once the target is live",
+            r"empty list is recorded on the bead",
+            r"stays whole",
+            r"script target is live once `procedure_run` is released",
+            r"repo root is enabled",
+            r"skill or hook target is live once the plugin release that carries it is installed",
             r"script or (?:a )?hook",
         ),
     ),
