@@ -52,7 +52,12 @@ def measure(root: Path) -> dict[str, int]:
     out = subprocess.run(
         ["git", "-C", str(root), "ls-files", "-z", "--", *globs], check=True, capture_output=True
     ).stdout.decode()
-    return {p: (root / p).stat().st_size for p in sorted(out.split("\0")) if p and (root / p).is_file()}
+    # Sized with LF line ends, as git stores them, so a CRLF checkout (core.autocrlf) measures the same.
+    return {
+        p: len((root / p).read_bytes().replace(b"\r\n", b"\n"))
+        for p in sorted(out.split("\0"))
+        if p and (root / p).is_file()
+    }
 
 
 def read_ceilings(path: Path) -> dict[str, int]:
@@ -100,7 +105,10 @@ def check(root: Path) -> list[str]:
                 f"{p}: {n} bytes, {c - n} below its ceiling of {c} (more than {slack_allowed(n)} "
                 "of slack); lower it in this commit: python3 scripts/context_budgets.py update-exceptions"
             )
-    errors.extend(f"{p}: listed but not a tracked context file; remove it" for p in sorted(set(ceilings) - set(sizes)))
+    errors.extend(
+        f"{p}: listed but not a tracked context file present in this checkout; remove it"
+        for p in sorted(set(ceilings) - set(sizes))
+    )
     return errors
 
 
@@ -116,7 +124,9 @@ def update_exceptions(root: Path, allow_raise: bool) -> list[str]:
                 refusals.append(f"{p}: raise {old[p]} -> {n}")
     if refusals:
         return refusals
-    (root / CEILINGS).write_text(_HEADER + "".join(f"{p} {n}\n" for p, n in sizes.items()), encoding="utf-8")
+    (root / CEILINGS).write_text(
+        _HEADER + "".join(f"{p} {n}\n" for p, n in sizes.items()), encoding="utf-8", newline="\n"
+    )
     return []
 
 

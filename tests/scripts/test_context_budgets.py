@@ -34,6 +34,8 @@ def repo(tmp_path: Path) -> Path:
     _write(tmp_path, "conexus/skills/a/SKILL.md", 1000)
     _write(tmp_path, "conexus/agents/dev.md", 2000)
     _write(tmp_path, "sn/commands/c.md", 500)
+    _write(tmp_path, "prose-edit/agents/e.md", 300)
+    _write(tmp_path, "tool-spill/skills/t/SKILL.md", 200)
     _write(tmp_path, "conexus/hooks/notes.md", 9999)  # not a context file
     _write(tmp_path, "conexus/skills/a/run.py", 9999)  # not markdown
     _track(tmp_path)
@@ -41,22 +43,32 @@ def repo(tmp_path: Path) -> Path:
 
 
 def _track(root: Path) -> None:
-    subprocess.run(["git", "-C", str(root), "add", "--", "conexus", "sn"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "--", "conexus", "sn", "prose-edit", "tool-spill"], check=True)
 
 
 def _ceil(root: Path, text: str) -> None:
     (root / cb.CEILINGS).write_text(text)
 
 
-_EXACT = "conexus/agents/dev.md 2000\nconexus/skills/a/SKILL.md 1000\nsn/commands/c.md 500\n"
+_EXACT = (
+    "conexus/agents/dev.md 2000\nconexus/skills/a/SKILL.md 1000\nprose-edit/agents/e.md 300\n"
+    "sn/commands/c.md 500\ntool-spill/skills/t/SKILL.md 200\n"
+)
 
 
 def test_scope_is_plugin_skills_agents_commands_markdown(repo: Path) -> None:
     assert cb.measure(repo) == {
         "conexus/agents/dev.md": 2000,
         "conexus/skills/a/SKILL.md": 1000,
+        "prose-edit/agents/e.md": 300,
         "sn/commands/c.md": 500,
+        "tool-spill/skills/t/SKILL.md": 200,
     }
+
+
+def test_crlf_checkout_measures_like_lf(repo: Path) -> None:
+    (repo / "sn/commands/c.md").write_bytes(b"line\r\n" * 100)  # 600 bytes on disk, 500 as stored
+    assert cb.measure(repo)["sn/commands/c.md"] == 500
 
 
 def test_exact_ceilings_pass(repo: Path) -> None:
@@ -133,13 +145,16 @@ def test_main_exit_codes(repo: Path) -> None:
     _write(repo, "sn/commands/c.md", 501)
     assert cb.main(["--root", str(repo), "check"]) == cb.EXIT_OVER
     assert cb.main(["--root", str(repo), "update-exceptions"]) == cb.EXIT_OVER
+    assert cb.main(["--root", str(repo), "update-exceptions", "--allow-raise"]) == cb.EXIT_OK
+    assert cb.check(repo) == []
+    assert b"\r\n" not in (repo / cb.CEILINGS).read_bytes()
 
 
 @pytest.mark.lint
 def test_repo_context_files_are_within_their_ceilings() -> None:
     sizes = cb.measure(_REPO)
     # Non-vacuity: the globs must reach the skills, agents and commands trees.
-    for kind in ("conexus/skills/", "conexus/agents/", "conexus/commands/"):
+    for kind in ("conexus/skills/", "conexus/agents/", "conexus/commands/", "prose-edit/"):
         assert any(p.startswith(kind) for p in sizes), kind
     errors = cb.check(_REPO)
     assert errors == [], "\n".join(errors)
