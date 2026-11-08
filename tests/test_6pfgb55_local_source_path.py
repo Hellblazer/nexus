@@ -8,6 +8,7 @@ scope and ``_file_line_no`` missed or over-matched for such a directory.
 """
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +27,7 @@ PATHS = [
 ]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="PATHS are POSIX absolute paths; uri_for mints none for them on Windows")
 @pytest.mark.parametrize("path", PATHS)
 def test_the_minted_uri_round_trips_to_its_path(path: str) -> None:
     uri = uri_for("code__test", path)
