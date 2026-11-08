@@ -39,12 +39,20 @@ def _ids() -> tuple[int, str]:
     return fence._root, fence._token
 
 
-def _wait_pid(pidfile: Path) -> int:
+def _wait_pid(pidfile: Path, argv: list[str] = _SLEEP) -> int:
+    """The pid in *pidfile*, once that process has finished exec'ing *argv*: the writer's Popen returns before the
+    kernel has written the new image's argument area, and a classification read in that window sees an empty argv
+    and environment (develop shard 1 at 9098d1de0)."""
     deadline = time.monotonic() + 10
     while not pidfile.exists() or not pidfile.read_text():
         assert time.monotonic() < deadline, "the process never wrote its pid"
         time.sleep(0.05)
-    return int(pidfile.read_text())
+    pid = int(pidfile.read_text())
+    want = b"\0".join(a.encode() for a in argv) + b"\0"
+    while Path(f"/proc/{pid}/cmdline").read_bytes() != want:
+        assert time.monotonic() < deadline, "the process never finished its exec"
+        time.sleep(0.01)
+    return pid
 
 
 def _detached(tmp_path: Path, argv: list[str], env: dict[str, str]) -> int:
@@ -56,7 +64,7 @@ def _detached(tmp_path: Path, argv: list[str], env: dict[str, str]) -> int:
         f"open({str(pidfile)!r}, 'w').write(str(p.pid))"
     )
     subprocess.run([sys.executable, "-c", code], check=True, env=_SCRUBBED)
-    return _wait_pid(pidfile)
+    return _wait_pid(pidfile, argv)
 
 
 def _not_pid1_root() -> None:
