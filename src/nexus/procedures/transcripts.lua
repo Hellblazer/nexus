@@ -32,7 +32,9 @@
 -- already read: the page takes hours while they fit and ends at the first that does not, and
 -- the next page reads that hour to midnight once (every query asks for start for this). The
 -- agents query is not divided this way: it pairs a subagent with its parent's call within one
--- unit, so it keeps whole days and the page ends at the day's start, as before. Hour
+-- unit, so it keeps whole days and the page ends at the day's start (a day too large for a
+-- page on its own is still read by the hour, and there a parent and its subagent in different
+-- hours do not match, as before this division existed). Hour
 -- reads remain for a day the verb refuses as too large. A day holding a start this script
 -- cannot place in an hour (the verb takes any ISO offset, this reader UTC only) is never divided
 -- in hand: it is read by the hour when it is too large for a page on its own, and otherwise the
