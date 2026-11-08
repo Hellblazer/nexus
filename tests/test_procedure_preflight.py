@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The preflight procedure (RDR-240 Technical Design 8, nexus-qo7ie.32).
 
-Until the runtime of nexus-mdbds.5 and run_script of nexus-mdbds.9 land, the
-script runs here in a test-local harness shaped like RDR-242 Technical Design
-7's environment: the static check's own allowlists (the base functions;
-string without dump, its metatable's __index the reduced table; table, math,
-utf8), the two granted verbs and nothing else, loaded in mode "t" with the
-arguments as the main chunk's vararg (contract v6), the pattern of
-tests/test_procedure_research_add.py. A verb failure reaches the script as a
-Lua error, as through the dispatcher. The verbs are the real ones over a temp
-git repository. The header is read by ``header.parse`` and the static check
-passes the file with those grants, as run_script will. The run_script-level
-tests are the last section of this file, ``through the real run path``: the
-real ``run_procedure``, worker and library lookup over the same temp repo.
+Most of this file runs the script in a test-local harness (class ``_Run``)
+shaped like RDR-242 Technical Design 7's environment: the static check's own
+allowlists (the base functions; string without dump, its metatable's __index
+the reduced table; table, math, utf8), the two granted verbs and nothing else,
+loaded in mode "t" with the arguments as the main chunk's vararg (contract
+v6), the pattern of tests/test_procedure_research_add.py. A verb failure
+reaches the script as a Lua error, as through the dispatcher. The verbs are
+the real ones over a temp git repository. The header is read by
+``header.parse`` and the static check passes the file with those grants. The
+harness is the independent oracle: it shares the script's source with the real
+run but none of the runtime (worker, frames, limits, result walk).
+
+The last section, ``through the real run path``, runs the real
+``run_procedure`` (library lookup, worker, dispatcher) over the same temp
+repo. There the real result is pinned equal to the harness's for a code, a
+docs-only and an empty diff; the two front doors (the MCP tool and ``nx run``)
+are tested to return the same JSON; and the refusals with the repo root off
+are tested through all three entry points.
 
 The emitted commands are also run: in bash, in the temp repository, with the
 tools they name replaced by stubs that print their arguments, so quoting,
@@ -29,6 +35,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -660,10 +667,15 @@ def test_a_change_to_the_selector_selects_every_integration_file(
     )
 
 
-def test_ruff_is_the_version_ci_pins() -> None:
+def _ci_ruff() -> str:
+    """The ruff pin of ci.yml's lint job, ``ruff@<version>``."""
     m = re.search(r"uvx (ruff@[0-9.]+) check src/", CI.read_text(encoding="utf-8"))
     assert m is not None, "ci.yml's ruff lint job moved"
-    assert f'local RUFF = "{m.group(1)}"' in SOURCE.decode("ascii")
+    return m.group(1)
+
+
+def test_ruff_is_the_version_ci_pins() -> None:
+    assert f'local RUFF = "{_ci_ruff()}"' in SOURCE.decode("ascii")
 
 
 # ---- through the real run path (run_script, the worker, the library root) -----------
@@ -673,11 +685,10 @@ def test_ruff_is_the_version_ci_pins() -> None:
 # top's ``.nexus/procedures`` is the repo root of the library, which runs only when
 # NX_PROCEDURES_REPO_ROOT is exactly "1". The copy of preflight.lua in the temp repo is
 # untracked, so it is never part of the diff the run reads.
-
-OFF_TEXT = (
-    "preflight is in .nexus/procedures/, which is off; "
-    f"set {library.REPO_ROOT_ENV}=1 to run repo procedures (RDR-242 S5)"
-)
+#
+# The root-off tests pin RDR-242 S5's default (off unless exactly "1"). The nexus project
+# settings now export NX_PROCEDURES_REPO_ROOT=1, so every fixture sets or clears the
+# variable itself and no test depends on the ambient value.
 
 CASES: dict[str, dict[str, str | None]] = {
     "code": {"src/nexus/x.py": "x = 1\n", "tests/sub/test_x.py": "def test(): pass\n"},
@@ -690,8 +701,13 @@ CLASSES: dict[str, list[str]] = {"code": ["python"], "docs-only": ["docs"], "emp
 
 RUFF_ON_SRC = (
     "git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
-    "':(glob)src/**/*.py' | xargs -0 -r uvx ruff@0.15.18 check --force-exclude --"
+    f"':(glob)src/**/*.py' | xargs -0 -r uvx {_ci_ruff()} check --force-exclude --"
 )
+
+#: Every git a preflight run spawns, in order: the repo probe, then git.diff_names and
+#: git.diff_stat (each resolves the base, then diffs). All read-only.
+PREFLIGHT_GIT = ["rev-parse", "rev-parse", "diff", "rev-parse", "diff"]
+READ_ONLY_GIT = {"rev-parse", "merge-base", "diff", "log", "show"}
 
 
 @pytest.fixture
@@ -725,13 +741,28 @@ def workers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return started
 
 
-def _norm(value: object) -> object:
-    """JSON and the harness differ only in how an empty Lua table reads: [] or {}."""
-    if isinstance(value, dict):
-        return {k: _norm(v) for k, v in value.items()} or []
-    if isinstance(value, list):
-        return [_norm(v) for v in value]
-    return value
+@pytest.fixture
+def spawns(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """The argv of every process started through ``subprocess.Popen`` while it is installed:
+    the worker, and the git calls of the repo probe and the verbs (they run in this process
+    through ``run_bounded``)."""
+    seen: list[list[str]] = []
+
+    class Spy(subprocess.Popen):  # type: ignore[type-arg]
+        def __init__(self, args, *a, **kw):  # type: ignore[no-untyped-def]
+            seen.append([str(x) for x in args])
+            super().__init__(args, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "Popen", Spy)
+    return seen
+
+
+def _git_subcommand(argv: list[str]) -> str:
+    """The subcommand of ``git [-c k=v | -C dir]... <sub> ...``."""
+    rest = argv[1:]
+    while rest and rest[0] in ("-c", "-C"):
+        rest = rest[2:]
+    return rest[0]
 
 
 def _apply(repo: Path, case: str) -> None:
@@ -746,7 +777,7 @@ def test_the_real_run_equals_the_harness_field_for_field(
     _apply(root_on, case)
     real = run_procedure("preflight", {"base": "base"})
     assert workers == ["preflight"], "the worker did not run"
-    assert _norm(real) == _norm(_Run(root_on)())
+    assert real == _Run(root_on)()
     assert isinstance(real, dict)
     assert real["empty"] is (case == "empty")
     # The harness and the real run read the same script, so equality cannot catch a broken
@@ -756,6 +787,30 @@ def test_the_real_run_equals_the_harness_field_for_field(
     assert _class_names(real) == CLASSES[case]
     if case == "code":
         assert _commands(real)["python"][0] == RUFF_ON_SRC
+    if case == "empty":
+        # An empty list comes back from the worker as {} (src/nexus/lua_runtime/runtime.py,
+        # module docstring near line 56: "an empty list or object is {}"), and the harness
+        # reads it the same way. Pinned here until the result walk says otherwise.
+        assert real["checks"] == {}
+        assert real["classes"] == {}
+        assert real["unclassified"] == {}
+
+
+def test_the_real_run_starts_the_worker_and_runs_nothing_but_read_only_git(
+    root_on: Path, spawns: list[list[str]]
+) -> None:
+    """RDR-240 Test Plan, Preflight: the runner executes none of the commands it returns."""
+    _apply(root_on, "code")
+    spawns.clear()  # the fixture's own git add and commit are not the run's
+    out = run_procedure("preflight", {"base": "base"})
+    assert isinstance(out, dict) and out["checks"]
+    others = [a for a in spawns if a[0] != "git"]
+    assert len(others) == 1 and others[0][0] == sys.executable, others
+    git = [a for a in spawns if a[0] == "git"]
+    # The repo probe (rev-parse), then each of the two granted verbs: it resolves the
+    # base (rev-parse) and reads the diff (diff).
+    assert [_git_subcommand(a) for a in git] == PREFLIGHT_GIT, git
+    assert set(PREFLIGHT_GIT) <= READ_ONLY_GIT
 
 
 def test_both_front_doors_return_identical_json(root_on: Path) -> None:
@@ -765,7 +820,7 @@ def test_both_front_doors_return_identical_json(root_on: Path) -> None:
     cli = CliRunner().invoke(main, ["run", "preflight", "--args-file", "-"], input=json.dumps(args))
     assert cli.exit_code == 0, cli.output
     assert json.loads(str(via_mcp)) == json.loads(cli.stdout)
-    assert _norm(json.loads(cli.stdout)) == _norm(_Run(root_on)())
+    assert json.loads(cli.stdout) == _Run(root_on)()
     assert json.loads(cli.stdout)["checks"]
 
 
@@ -779,25 +834,32 @@ def test_with_the_root_off_the_run_is_refused_through_every_door(
     if value is not None:
         monkeypatch.setenv(library.REPO_ROOT_ENV, value)
     _apply(procedure_repo, "code")
-    expected = f"name: repo_root_off: {OFF_TEXT}"
+    prefix = "name: repo_root_off: "
 
     with pytest.raises(ScriptError) as refused:
         run_procedure("preflight", {"base": "base"})
     assert refused.value.kind == "name"
-    assert refused.value.detail == f"repo_root_off: {OFF_TEXT}"
+    assert refused.value.detail.startswith("repo_root_off: ")
+    assert library.REPO_ROOT_ENV in refused.value.detail
 
-    assert str(core.procedure_run(name="preflight", args={"base": "base"})) == expected
+    via_mcp = str(core.procedure_run(name="preflight", args={"base": "base"}))
+    assert via_mcp.startswith(prefix) and library.REPO_ROOT_ENV in via_mcp
 
     cli = CliRunner().invoke(main, ["run", "preflight", "--args-file", "-"], input='{"base": "base"}')
     assert cli.exit_code == 1
-    assert cli.stderr.strip() == expected
+    assert cli.stderr.strip() == via_mcp == str(refused.value)
     assert cli.stdout == ""
     assert workers == [], "a refused run started a worker"
 
 
-def test_the_runtime_this_file_depends_on_is_present() -> None:
-    """Non-vacuity: no test here skips, so a missing runtime fails this file rather than
-    emptying it (lupa is a declared dependency, pyproject.toml)."""
-    assert lua54.LuaRuntime is not None
-    assert callable(run_mod.run_script)
+def test_the_switch_is_named_as_the_settings_and_the_docs_say() -> None:
     assert library.REPO_ROOT_ENV == "NX_PROCEDURES_REPO_ROOT"
+
+
+def test_bash_is_present_so_the_shell_legs_do_not_all_skip() -> None:
+    """Max-skip guard: the stub-tool tests above skip when there is no bash, which would
+    leave quoting and the deleted-path filter untested. bash is required, so its absence
+    fails here. zsh is only an extra parametrized leg of the docs and integration selection
+    tests (the commands are written for bash; zsh adds a second reading of the quoting), so
+    a host without zsh may skip that leg."""
+    assert BASH is not None
