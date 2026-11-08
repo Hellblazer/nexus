@@ -505,14 +505,25 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         self,
         project: str,
         title: str,
+        *,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         """Exact-then-prefix title resolution.
 
         Returns ``(entry, [])`` on unique match,
         ``(None, candidates)`` on multiple prefix matches,
         ``(None, [])`` when nothing matches.
+
+        ``timeout``/``retry_read_timeout``: see :meth:`get`'s identical
+        parameters (``None``/``True`` ride the client defaults unchanged).
         """
-        data = self._get("/v1/memory/resolve", params={"project": project, "title": title})
+        data = self._get(
+            "/v1/memory/resolve",
+            params={"project": project, "title": title},
+            timeout=timeout,
+            retry_read_timeout=retry_read_timeout,
+        )
         entry = _normalize(data.get("entry")) if data.get("entry") is not None else None
         candidates = [_normalize(c) for c in (data.get("candidates") or [])]
         return entry, candidates
@@ -522,6 +533,9 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         query: str,
         project: str | None = None,
         access: str = "track",
+        *,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
     ) -> list[dict[str, Any]]:
         """FTS search. Returns rows ordered by relevance.
 
@@ -531,6 +545,9 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             access:  Access tracking policy: ``"track"`` (default) increments
                      access_count on returned rows; ``"silent"`` skips it
                      (for internal consolidation scans).
+            timeout: Per-request override, see :meth:`get`'s identical
+                     parameter (``None`` rides the client default).
+            retry_read_timeout: see :meth:`get` (default ``True``, unchanged).
 
         Raises:
             ValueError: the query has no searchable terms — e.g. every word
@@ -560,7 +577,14 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if project:
             payload["project"] = project
         resp = self._raise_degenerate_query_as_value_error(
-            lambda: self._post("/v1/memory/search", payload, mutates=False), query
+            lambda: self._post(
+                "/v1/memory/search",
+                payload,
+                mutates=False,
+                timeout=timeout,
+                retry_read_timeout=retry_read_timeout,
+            ),
+            query,
         )
         if isinstance(resp, list):
             return [_normalize(r) for r in resp]
