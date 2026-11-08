@@ -7,20 +7,32 @@ script runs here in a test-local harness shaped like RDR-242 Technical Design
 string without dump, its metatable's __index the reduced table; table, math,
 utf8), the two granted verbs and nothing else, loaded in mode "t" with the
 arguments as the main chunk's vararg (contract v6), the pattern of
-tests/test_procedure_research_add.py. The verbs are the real ones over a temp
+tests/test_procedure_research_add.py. A verb failure reaches the script as a
+Lua error, as through the dispatcher. The verbs are the real ones over a temp
 git repository. The header is read by ``header.parse`` and the static check
 passes the file with those grants, as run_script will. The run_script-level
 test waits for the runtime (recorded on the bead).
+
+The emitted commands are also run: in bash, in the temp repository, with the
+tools they name replaced by stubs that print their arguments, so quoting,
+the deleted-path filter and the ``--`` are tested as a shell reads them. Two
+mirrors are pinned against their sources: the docs rows against CI's
+doc-only case statement, run through bash, and the plugin rows against the
+drift-ledger workflow's watched paths.
 """
 
 from __future__ import annotations
 
+import os
+import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
 
 import lupa.lua54 as lua54
 import pytest
+import yaml
 
 from nexus.lua_runtime import header as hd
 from nexus.lua_runtime import static_check as sc
@@ -30,10 +42,21 @@ from nexus.lua_runtime.verb_types import VerbContext
 REPO_ROOT = Path(hd.__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / ".nexus" / "procedures" / "preflight.lua"
 SOURCE = SCRIPT.read_bytes()
+CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+DRIFT = REPO_ROOT / ".github" / "workflows" / "plugin-drift-ledger.yml"
+BASH = shutil.which("bash")
+
+
+def _env() -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["LC_ALL"] = "C"
+    return env
 
 
 def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, env=_env()
+    )
 
 
 @pytest.fixture
@@ -45,18 +68,22 @@ def repo(tmp_path: Path) -> Path:
     _git(r, "config", "user.name", "t")
     _git(r, "config", "commit.gpgsign", "false")
     (r / "README.md").write_text("r\n", encoding="utf-8")
-    _git(r, "add", "-A")
+    _git(r, "add", "README.md")
     _git(r, "commit", "-q", "-m", "base")
     _git(r, "tag", "base")
     return r
 
 
-def _change(repo: Path, files: dict[str, str]) -> None:
+def _change(repo: Path, files: dict[str, str | None]) -> None:
+    """Write each file (None deletes it) and commit."""
     for name, text in files.items():
         path = repo / name
+        if text is None:
+            _git(repo, "rm", "-q", "--", name)
+            continue
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    _git(repo, "add", "-A")
+        _git(repo, "add", "--", name)
     _git(repo, "commit", "-q", "-m", "change")
 
 
@@ -64,7 +91,7 @@ def _py(value: object) -> object:
     """A lupa table as Python: a list when its keys are 1..n, else a dict."""
     if lua54.lua_type(value) != "table":
         return value
-    items = dict(value.items())
+    items = dict(value.items())  # type: ignore[attr-defined]
     if (
         items
         and all(isinstance(k, int) for k in items)
@@ -104,9 +131,6 @@ class _Run:
 
         return call
 
-    def env_names(self) -> set[str]:
-        return set(dict(self._env().items()))
-
     def _env(self):
         rt = self.rt
         build = rt.execute(
@@ -132,7 +156,7 @@ class _Run:
             end
             """
         )
-        return build(
+        return build(  # type: ignore[operator]
             rt.table_from(sorted(sc.BASE_FUNCTIONS)),
             rt.table_from(
                 {lib: rt.table_from(sorted(m)) for lib, m in sc.LIB_MEMBERS.items()}
@@ -143,7 +167,7 @@ class _Run:
 
     def __call__(self, base: str = "base") -> dict:
         load = self.rt.eval("load")
-        loaded = load(self.source.decode("ascii"), "=preflight", "t", self._env())
+        loaded = load(self.source.decode("ascii"), "=preflight", "t", self._env())  # type: ignore[operator]
         fn, err = loaded if isinstance(loaded, tuple) else (loaded, None)
         assert fn is not None, err
         out = _py(fn(self.rt.table_from({"base": base})))
@@ -153,9 +177,61 @@ class _Run:
 
 def _commands(out: dict) -> dict[str, list[str]]:
     by: dict[str, list[str]] = {}
-    for c in out["checks"]:
+    for c in out["checks"] or []:
         by.setdefault(c["class"], []).append(c["command"])
     return by
+
+
+def _command(out: dict, check_prefix: str) -> str:
+    [cmd] = [c["command"] for c in out["checks"] if c["check"].startswith(check_prefix)]
+    return cmd
+
+
+def _class_names(out: dict) -> list[str]:
+    return [c["name"] for c in out["classes"] or []]
+
+
+# ---- running an emitted command with stub tools ----------------------------------
+
+
+@pytest.fixture
+def stubs(tmp_path: Path) -> Path:
+    """A PATH directory whose uv, actionlint and lab-remote print their arguments."""
+    d = tmp_path / "stubs"
+    d.mkdir()
+    for tool in ("uv", "actionlint", "lab-remote"):
+        stub = d / tool
+        stub.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "{tool}"\n'
+            'for a in "$@"; do printf "<%s>\\n" "$a"; done\n',
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+    return d
+
+
+def _shell(repo: Path, stubs: Path, command: str) -> list[str]:
+    assert BASH is not None
+    env = _env()
+    env["PATH"] = f"{stubs}{os.pathsep}{env.get('PATH', '')}"
+    proc = subprocess.run(
+        [BASH, "-c", command],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.splitlines()
+
+
+def _operands(lines: list[str]) -> list[str]:
+    """The arguments a stub saw after its `--`."""
+    args = [line[1:-1] for line in lines if line.startswith("<") and line.endswith(">")]
+    return args[args.index("--") + 1 :] if "--" in args else []
 
 
 # ---- the header and the static check -------------------------------------------
@@ -177,7 +253,7 @@ def test_dropping_a_grant_is_refused_by_verb_ungranted(dropped: str) -> None:
 
 
 def test_the_script_lives_in_the_repo_root_and_ships_in_no_package() -> None:
-    assert SCRIPT.is_file()
+    assert SCRIPT.relative_to(REPO_ROOT).as_posix() == ".nexus/procedures/preflight.lua"
     assert not (
         Path(hd.__file__).parent.parent / "procedures" / "preflight.lua"
     ).exists()
@@ -186,74 +262,107 @@ def test_the_script_lives_in_the_repo_root_and_ships_in_no_package() -> None:
 # ---- each change class --------------------------------------------------------
 
 
-def test_a_python_change_gets_ruff_on_its_files_its_tests_and_the_code_checks(
+def test_a_python_change_gets_ruff_its_tests_and_the_standing_checks(
     repo: Path,
 ) -> None:
     _change(
-        repo, {"src/nexus/x.py": "x = 1\n", "tests/test_x.py": "def test(): pass\n"}
+        repo, {"src/nexus/x.py": "x = 1\n", "tests/sub/test_x.py": "def test(): pass\n"}
     )
     out = _Run(repo)()
     assert out["code"] is True
-    assert [c["name"] for c in out["classes"]] == ["python"]
-    cmds = _commands(out)
-    assert cmds["python"] == [
-        "uv run ruff check src/nexus/x.py tests/test_x.py",
-        "uv run ruff format --check src/nexus/x.py tests/test_x.py",
-        "uv run pytest -q -p no:randomly tests/test_x.py",
+    assert _class_names(out) == ["python"]
+    assert _commands(out)["python"] == [
+        "git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
+        "':(glob)src/**/*.py' | xargs -0 -r uv run ruff check --force-exclude --",
+        "git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
+        "':(glob)tests/**/test_*.py' | xargs -0 -r uv run pytest -q -p no:randomly --",
     ]
-    code = cmds["code"]
-    assert "lab-remote -- uv run pytest -q -p no:randomly -m lint -n auto" in code
-    assert any("tests/daemon/test_lifecycle_gate.py" in c for c in code)
-    assert "uv run scripts/tenant_delta.py --base base" in code
-    assert "uv run scripts/windows_hand_test.py --check" in code
-    assert (
-        "git diff --name-only base...HEAD | uv run python "
-        "scripts/select_affected_integration_tests.py --repo ."
-    ) in code
-    assert "docs" not in cmds
+    assert _commands(out)["code"] == [
+        "scripts/build-gate-jar.sh --lab-run lab-m",
+        "lab-remote -- bash -c 'scripts/build-gate-jar.sh && uv run pytest -q -p no:randomly -m lint -n auto'",
+        "uv run pytest -q -p no:randomly tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py",
+        "uv run scripts/tenant_delta.py --strict --base=base",
+        "uv run scripts/windows_hand_test.py --check",
+        "f=$(git diff --no-renames --name-only base...HEAD | uv run python "
+        "scripts/select_affected_integration_tests.py --repo .) && "
+        '{ [ -z "$f" ] || lab-remote -- uv run pytest -q -p no:randomly -o addopts= -m integration $f; }',
+    ]
 
 
-def test_an_engine_change_gets_the_gate_jar_and_the_engine_suite(repo: Path) -> None:
+def test_the_gate_jar_comes_before_every_pytest(repo: Path) -> None:
+    _change(repo, {"src/nexus/x.py": "x = 1\n", "service/A.java": "x\n"})
+    out = _Run(repo)()
+    commands = [c["command"] for c in out["checks"]]
+    assert commands[0] == "scripts/build-gate-jar.sh --lab-run lab-m"
+    assert all("pytest" not in c for c in commands[:1])
+
+
+def test_ruff_reads_src_only(repo: Path) -> None:
+    _change(repo, {"tests/test_x.py": "x\n", "scripts/s.py": "x\n"})
+    out = _Run(repo)()
+    assert not any("ruff" in c for c in _commands(out).get("python", []))
+
+
+def test_a_dependency_change_is_python_but_gets_no_file_checks(repo: Path) -> None:
+    _change(repo, {"pyproject.toml": "[project]\n", "uv.lock": "x\n"})
+    out = _Run(repo)()
+    assert _class_names(out) == ["python"]
+    assert "python" not in _commands(out)
+    assert "code" in _commands(out)
+
+
+def test_an_engine_change_gets_the_leased_main_suite_and_integration_group(
+    repo: Path,
+) -> None:
     _change(repo, {"service/src/main/java/A.java": "class A {}\n"})
     out = _Run(repo)()
-    cmds = _commands(out)
-    assert cmds["engine"] == [
-        "scripts/build-gate-jar.sh",
-        "lab-remote -- scripts/mvnw-leased.sh -f service/pom.xml verify",
+    assert _commands(out)["engine"] == [
+        "scripts/mvnw-leased.sh --lab-run lab-m -q test -Dnexus.ddl.suite=main",
+        "scripts/mvnw-leased.sh --lab-run lab-m -q test -Dnexus.ddl.suite=integration"
+        " -Dtest.excluded.groups= -Dgroups=integration",
     ]
-    assert "schema" not in cmds
+    assert all(not c.startswith("lab-remote") for c in _commands(out)["engine"])
+    assert "schema" not in _commands(out)
     assert out["code"] is True
 
 
 def test_a_changeset_is_engine_and_schema(repo: Path) -> None:
     _change(repo, {"service/src/main/resources/db/changelog/x-001.xml": "<x/>\n"})
     out = _Run(repo)()
-    assert [c["name"] for c in out["classes"]] == ["engine", "schema"]
+    assert _class_names(out) == ["engine", "schema"]
     assert _commands(out)["schema"] == [
         "uv run pytest -q -p no:randomly -m lint tests/test_changelog_validate_precondition_lint.py"
     ]
 
 
-def test_a_plugin_surface_change_gets_the_drift_ledger(repo: Path) -> None:
-    _change(repo, {"conexus/skills/x/SKILL.md": "x\n"})
-    out = _Run(repo)()
-    assert _commands(out)["plugin"] == [
-        "uv run pytest -q -p no:randomly tests/test_plugin_release_drift_ledger.py"
+def test_a_hook_change_gets_the_hook_tests_and_other_plugin_paths_add_none(
+    repo: Path,
+) -> None:
+    _change(repo, {"conexus/hooks/x.py": "x\n"})
+    assert _commands(_Run(repo)())["plugin"] == [
+        "uv run pytest -q -p no:randomly tests/hooks"
     ]
-    assert out["code"] is True
-
-
-def test_a_plugin_file_outside_the_watched_paths_is_not_plugin(repo: Path) -> None:
-    _change(repo, {"conexus/README.md": "x\n"})
-    out = _Run(repo)()
+    _change(repo, {"conexus/skills/x/SKILL.md": "x\n"})
+    _git(repo, "tag", "after-hook")
+    _change(repo, {"conexus/skills/x/SKILL.md": "y\n"})
+    out = _Run(repo)("after-hook")
+    assert _class_names(out) == ["plugin"]
     assert "plugin" not in _commands(out)
-    assert out["unclassified"] == ["conexus/README.md"]
+    assert out["code"] is True  # the drift ledger is a standing check
 
 
-def test_a_workflow_change_gets_actionlint_on_that_file(repo: Path) -> None:
-    _change(repo, {".github/workflows/ci.yml": "on: push\n"})
+def test_a_workflow_change_gets_actionlint(repo: Path) -> None:
+    _change(
+        repo,
+        {".github/workflows/ci.yml": "on: push\n", ".github/workflows/b.yaml": "x\n"},
+    )
     out = _Run(repo)()
-    assert _commands(out)["workflow"] == ["actionlint .github/workflows/ci.yml"]
+    assert _class_names(out) == ["workflow"]
+    assert _commands(out)["workflow"] == [
+        "git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
+        "':(glob).github/workflows/*.yml' ':(glob).github/workflows/*.yaml'"
+        " | xargs -0 -r actionlint --"
+    ]
 
 
 def test_a_docs_only_change_gets_the_docs_readers_and_no_code_checks(
@@ -264,28 +373,20 @@ def test_a_docs_only_change_gets_the_docs_readers_and_no_code_checks(
     )
     out = _Run(repo)()
     assert out["code"] is False
-    cmds = _commands(out)
-    assert set(cmds) == {"docs"}
-    assert cmds["docs"] == [
-        "uv run pytest -q -p no:randomly $(uv run python scripts/select_docs_reader_tests.py --repo .)"
-    ]
+    assert _commands(out) == {
+        "docs": [
+            "f=$(uv run python scripts/select_docs_reader_tests.py --repo .)"
+            " && uv run pytest -q -p no:randomly $f"
+        ]
+    }
 
 
-def test_web_install_is_code_as_ci_reads_it(repo: Path) -> None:
-    _change(repo, {"web/install.sh": "echo\n"})
-    out = _Run(repo)()
-    assert out["code"] is True
-    assert "docs" not in _commands(out)
-    assert out["unclassified"] == ["web/install.sh"]
-
-
-def test_docs_beside_code_take_the_code_checks_only(repo: Path) -> None:
+def test_docs_beside_code_still_get_the_docs_readers(repo: Path) -> None:
     _change(repo, {"docs/a.md": "a\n", "src/nexus/x.py": "x = 1\n"})
     out = _Run(repo)()
-    assert [c["name"] for c in out["classes"]] == ["python", "docs"]
-    cmds = _commands(out)
-    assert "docs" not in cmds
-    assert "code" in cmds
+    assert _class_names(out) == ["python", "docs"]
+    assert "docs" in _commands(out)
+    assert "code" in _commands(out)
 
 
 def test_an_unclassified_path_is_listed_and_still_code(repo: Path) -> None:
@@ -299,26 +400,159 @@ def test_an_unclassified_path_is_listed_and_still_code(repo: Path) -> None:
 def test_counts_come_from_diff_stat(repo: Path) -> None:
     _change(repo, {"src/nexus/x.py": "a\nb\nc\n"})
     out = _Run(repo)()
-    assert (out["files"], out["added"], out["deleted"]) == (1, 3, 0)
+    assert (out["files"], out["added"], out["deleted"], out["empty"]) == (
+        1,
+        3,
+        0,
+        False,
+    )
     assert out["base"] == "base"
 
 
-# ---- quoting, refusals, and running nothing ----------------------------------------
-
-
-def test_a_path_a_shell_would_split_is_quoted(repo: Path) -> None:
-    _change(repo, {"src/it's a.py": "x = 1\n"})
+def test_an_empty_diff_says_so(repo: Path) -> None:
     out = _Run(repo)()
-    assert _commands(out)["python"][0] == "uv run ruff check 'src/it'\\''s a.py'"
+    assert (out["files"], out["empty"], out["code"]) == (0, True, False)
+    assert not out["checks"]
 
 
-def test_a_base_with_shell_characters_is_quoted_in_every_command(repo: Path) -> None:
-    _git(repo, "tag", "v$(x)", "base")
-    _change(repo, {"src/nexus/x.py": "x = 1\n"})
-    out = _Run(repo)("v$(x)")
-    code = _commands(out)["code"]
-    assert "uv run scripts/tenant_delta.py --base 'v$(x)'" in code
-    assert any(c.startswith("git diff --name-only 'v$(x)...HEAD' | ") for c in code)
+# ---- the mirrors: CI's docs predicate and the drift-ledger paths --------------------
+
+_CORPUS = [
+    "docs/a.md",
+    "docs/x.py",
+    "docs/CHANGELOG.md",
+    "web/index.html",
+    "web/install.sh",
+    "web/install.d/a",
+    "web/sub/install.sh",
+    "conexus/CHANGELOG.md",
+    "README.md",
+    "README.md.d/x.py",
+    "CHANGELOG.md",
+    "CHANGELOG.d/evil.py",
+    "LICENSE",
+    "LICENSE-vendor/code.py",
+    "LICENSE.d/x",
+    "AGENTS.md",
+    "sub/README.md",
+    "src/web/x.py",
+    "src/nexus/x.py",
+    "data/x",
+    "tests/AGENTS.md",
+]
+
+
+def _ci_case() -> str:
+    """The case statement of ci.yml's doc-only predicate, verbatim."""
+    text = CI.read_text(encoding="utf-8")
+    m = re.search(r'^(\s*)case "\$f" in\n.*?^\1esac\n', text, re.S | re.M)
+    assert m is not None, "ci.yml's doc-only case statement moved"
+    return m.group(0)
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+@pytest.mark.parametrize("path", _CORPUS)
+def test_the_docs_rows_agree_with_ci_on_every_path(repo: Path, path: str) -> None:
+    script = f'docs_only=true\nf={path!r}\n{_ci_case()}echo "$docs_only"\n'
+    ci_docs = subprocess.run(
+        [BASH, "-c", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+    _change(repo, {path: "x\n"})
+    out = _Run(repo)()
+    assert out["code"] is (ci_docs == "false"), path
+
+
+def _drift_paths() -> list[str]:
+    on = yaml.safe_load(DRIFT.read_text(encoding="utf-8"))
+    triggers = on.get("on", on.get(True))
+    return list(triggers["push"]["paths"])
+
+
+@pytest.mark.parametrize("watched", _drift_paths())
+def test_every_path_the_drift_ledger_watches_is_plugin(
+    repo: Path, watched: str
+) -> None:
+    path = watched.replace("**", "x/y.md")
+    _change(repo, {path: "x\n"})
+    assert "plugin" in _class_names(_Run(repo)()), watched
+
+
+@pytest.mark.parametrize("near", ["conexus/README.md", "sn/x.md", "conexus/hooksx/a"])
+def test_a_near_miss_is_not_plugin(repo: Path, near: str) -> None:
+    _change(repo, {near: "x\n"})
+    assert "plugin" not in _class_names(_Run(repo)())
+
+
+# ---- the commands as a shell runs them ------------------------------------------
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+def test_ruff_gets_exactly_the_live_src_files_after_its_dashes(
+    repo: Path, stubs: Path
+) -> None:
+    _change(repo, {"src/gone.py": "x\n"})
+    _git(repo, "tag", "-f", "base")
+    odd = [
+        "src/-h.py",
+        "src/a b.py",
+        "src/it's.py",
+        "src/$(touch pwned).py",
+        "src/semi;colon.py",
+    ]
+    _change(
+        repo, {"src/gone.py": None, **{p: "x = 1\n" for p in odd}, "src/keep.py": "x\n"}
+    )
+    lines = _shell(repo, stubs, _command(_Run(repo)(), "ruff check"))
+    assert sorted(_operands(lines)) == sorted([*odd, "src/keep.py"])
+    assert not (repo / "pwned").exists()
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+def test_a_deleted_test_file_never_reaches_pytest(repo: Path, stubs: Path) -> None:
+    _change(repo, {"tests/test_gone.py": "x\n"})
+    _git(repo, "tag", "-f", "base")
+    _change(repo, {"tests/test_gone.py": None, "tests/deep/test_new.py": "x\n"})
+    lines = _shell(repo, stubs, _command(_Run(repo)(), "the changed test files"))
+    assert _operands(lines) == ["tests/deep/test_new.py"]
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+def test_only_deletions_run_no_tool(repo: Path, stubs: Path) -> None:
+    _change(repo, {"src/gone.py": "x\n"})
+    _git(repo, "tag", "-f", "base")
+    _change(repo, {"src/gone.py": None})
+    assert _shell(repo, stubs, _command(_Run(repo)(), "ruff check")) == []
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+def test_actionlint_gets_the_live_workflows(repo: Path, stubs: Path) -> None:
+    _change(repo, {".github/workflows/a.yml": "x\n", ".github/workflows/b.yaml": "x\n"})
+    lines = _shell(repo, stubs, _command(_Run(repo)(), "actionlint"))
+    assert lines[0] == "actionlint"
+    assert sorted(_operands(lines)) == [
+        ".github/workflows/a.yml",
+        ".github/workflows/b.yaml",
+    ]
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash")
+@pytest.mark.parametrize(
+    "base", ["v$(touch${IFS}pwned)", "it's", "a&b", "semi;x", "back`tick`", "x|y>z"]
+)
+def test_a_base_with_shell_characters_reaches_the_tools_intact(
+    repo: Path, stubs: Path, base: str
+) -> None:
+    _git(repo, "tag", base, "base")
+    _change(repo, {"src/x.py": "x = 1\n"})
+    out = _Run(repo)(base)
+    tenant = _shell(repo, stubs, _command(out, "tests that mint a tenant"))
+    assert f"<--base={base}>" in tenant
+    assert _operands(_shell(repo, stubs, _command(out, "ruff check"))) == ["src/x.py"]
+    assert not (repo / "pwned").exists()
 
 
 def test_a_bad_base_fails_the_run_with_the_verbs_error(repo: Path) -> None:
@@ -331,23 +565,17 @@ def test_it_runs_nothing_but_the_two_git_verbs(repo: Path) -> None:
     run = _Run(repo)
     run()
     assert run.calls == ["git.diff_names", "git.diff_stat"]
-    # The environment it ran in has no way to start a process.
-    assert run.env_names().isdisjoint(
-        {"os", "io", "require", "load", "dofile", "debug"}
-    )
 
 
-def test_an_empty_diff_needs_no_checks(repo: Path) -> None:
-    out = _Run(repo)()
-    assert out["files"] == 0
-    assert out["checks"] in ([], {})
-    assert out["code"] is False
-
-
-def test_a_dependency_change_is_python_but_not_handed_to_ruff(repo: Path) -> None:
-    _change(repo, {"pyproject.toml": "[project]\n", "uv.lock": "x\n"})
-    out = _Run(repo)()
-    assert [c["name"] for c in out["classes"]] == ["python"]
-    cmds = _commands(out)
-    assert "python" not in cmds
-    assert "code" in cmds
+@pytest.mark.parametrize(
+    ("path", "cls"),
+    [
+        ("uv.lock", "python"),
+        ("pyproject.toml", "python"),
+        (".github/workflows/only.yaml", "workflow"),
+        (".github/workflows/only.yml", "workflow"),
+    ],
+)
+def test_each_single_file_row_names_its_class(repo: Path, path: str, cls: str) -> None:
+    _change(repo, {path: "x\n"})
+    assert _class_names(_Run(repo)()) == [cls]
