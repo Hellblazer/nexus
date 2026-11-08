@@ -207,7 +207,7 @@ class TestDryRunDefault:
         result = _run("--json")
 
         assert result.exit_code == 0, result.output
-        assert json.loads(result.output) == _census()
+        assert json.loads(result.stdout) == _census()
 
     def test_sample_and_batch_size_are_forwarded(self, monkeypatch):
         w = _FakeWriter([_census()])
@@ -263,7 +263,7 @@ class TestApply:
         result = _run("--apply", "--json")
 
         assert result.exit_code == 0, result.output
-        doc = json.loads(result.output)
+        doc = json.loads(result.stdout)
         assert doc["rewritten"] == 3 and doc["batches"] == 1
         assert doc["before"]["rewrite"] == 3 and doc["after"]["rewrite"] == 0
         assert (tmp_path / doc["ledger"]).is_file()

@@ -54,7 +54,7 @@ def test_dry_run_writes_nothing_and_apply_rewrites_only_the_rewrite_candidate(t2
     runner = CliRunner()
     dry = runner.invoke(main, ["catalog", "repair-note-uris", "--json"])
     assert dry.exit_code == 0, dry.output
-    report = json.loads(dry.output)
+    report = json.loads(dry.stdout)
     assert report["apply"] is False
     assert (report["stale_live"], report["rewrite"], report["merge"], report["merge_twin"],
             report["refused"], report["tombstoned"]) == (2, 1, 1, 1, 0, 1)
