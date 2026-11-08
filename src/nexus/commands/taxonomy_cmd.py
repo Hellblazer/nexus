@@ -977,23 +977,12 @@ def reset_cmd(collection: str, yes: bool) -> None:
 
 
 def _resolve_doc_titles(doc_ids: list[str]) -> list[str]:
-    """Resolve doc_ids to human-readable titles via catalog, fallback to raw ID."""
-    try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
+    """The labels the review view prints for a topic's representative documents: the chunk ids themselves.
 
-        cat = make_catalog_reader()
-        if cat is None:
-            return doc_ids
-        titles: list[str] = []
-        for doc_id in doc_ids:
-            results = cat.search(doc_id)
-            if results:
-                titles.append(results[0].get("title", doc_id))
-            else:
-                titles.append(doc_id)
-        return titles
-    except Exception:  # noqa: BLE001 - best-effort; degrades to input doc_ids
-        return doc_ids
+    The view once looked titles up with ``cat.search(doc_id)``, which no catalog reader has, so the lookup always
+    fell through to the ids (nexus-rfvyy.9 review). A title lookup added here must apply the CLI output posture
+    (``nexus.sensitive_output.CliDocumentLines``), because a flagged document's title is content."""
+    return list(doc_ids)
 
 
 def _display_topic(
