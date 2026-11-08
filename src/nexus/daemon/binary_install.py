@@ -34,6 +34,7 @@ import lzma
 import os
 import re
 import shutil
+import ssl
 import tarfile
 import tempfile
 import time
@@ -79,6 +80,7 @@ __all__ = [
     "verify_installed_binary",
     "pg_bundle_asset_name",
     "pg_bundle_dest",
+    "release_asset_api_fallback",
     "release_asset_url",
     "resolve_service_tag",
     "verify_sha256",
@@ -581,36 +583,108 @@ def _validate_tag(tag: str) -> None:
 
 _USER_AGENT = "conexus-install-binary"
 _DOWNLOAD_HINT = "Check the tag exists, the asset was published for this platform, and the network is up."
+_API_REFUSED_HINT = (
+    "GitHub's API refused the fallback (rate limit or credentials): set GITHUB_TOKEN "
+    "to a valid token, or retry later."
+)
+#: Per-socket-operation timeout for the retries, the release lookup and the REST
+#: fallback. The first attempt keeps ``_DOWNLOAD_TIMEOUT_S``; a hung host then
+#: costs about 4 minutes in all, not 3 x 120 s plus the fallback's own waits.
+_RETRY_TIMEOUT_S = 30.0
+#: Tokens the API answered 401 for in this process; later calls go anonymous.
+_rejected_api_tokens: set[str] = set()
+
+
+class _LocalWriteError(Exception):
+    """Writing *dest* failed on this machine (disk full, permissions): never retried."""
+
+
+def _write_body(resp: http.client.HTTPResponse, dest: Path) -> None:
+    """Stream *resp* to *dest*, truncating what an earlier attempt left."""
+    try:
+        out = dest.open("wb")
+    except OSError as exc:
+        raise _LocalWriteError(str(exc)) from exc
+    written = 0
+    with out:
+        for block in iter(lambda: resp.read(_HASH_BLOCK), b""):
+            try:
+                out.write(block)
+            except OSError as exc:
+                raise _LocalWriteError(str(exc)) from exc
+            written += len(block)
+    # A chunked read() returns what arrived when the peer closes early, with
+    # no error; a body shorter than its Content-Length is a transport failure
+    # to retry, not bytes for the verifier to reject.
+    declared = resp.headers.get("Content-Length")
+    if declared is not None and declared.isdigit() and written < int(declared):
+        raise http.client.IncompleteRead(b"", int(declared) - written)
 
 
 def _fetch_once(req: urllib.request.Request, dest: Path, timeout: float) -> None:
-    """One GET of *req* streamed to *dest*, truncating what an earlier attempt left."""
-    with urllib.request.urlopen(req, timeout=timeout) as resp, dest.open("wb") as out:
-        for block in iter(lambda: resp.read(_HASH_BLOCK), b""):
-            out.write(block)
+    """One GET of *req* streamed to *dest*."""
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        _write_body(resp, dest)
+
+
+def _api_token() -> str | None:
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    return token if token and token not in _rejected_api_tokens else None
+
+
+def _api_headers(url: str, accept: str) -> dict[str, str]:
+    """Headers for a REST API GET. The token is added only for a URL under
+    ``_RELEASE_API_BASE``, whatever host an API response named."""
+    headers = {"User-Agent": _USER_AGENT, "Accept": accept}
+    token = _api_token()
+    if token and url.startswith(f"{_RELEASE_API_BASE}/"):
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def _api_request(url: str, accept: str) -> urllib.request.Request:
-    """A REST API request. A token from GITHUB_TOKEN or GH_TOKEN is sent as an
-    unredirected header, so it reaches the API host and never the storage host
-    an asset download redirects to."""
-    req = urllib.request.Request(
-        url, headers={"User-Agent": _USER_AGENT, "Accept": accept}
-    )
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if token:
-        req.add_unredirected_header("Authorization", f"Bearer {token}")
+    """A REST API request whose token is an unredirected header: it reaches the
+    API host and never the storage host an asset download redirects to."""
+    headers = _api_headers(url, accept)
+    auth = headers.pop("Authorization", None)
+    req = urllib.request.Request(url, headers=headers)
+    if auth:
+        req.add_unredirected_header("Authorization", auth)
     return req
+
+
+def _api_open(url: str, accept: str, timeout: float) -> http.client.HTTPResponse:
+    """Open a REST API GET. A 401 for a token is retried once anonymously and
+    the token is not sent again in this process: a stale GITHUB_TOKEN must not
+    fail a public download that works without one."""
+    try:
+        return urllib.request.urlopen(_api_request(url, accept), timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        token = _api_token()
+        if exc.code != 401 or token is None:
+            raise
+        _rejected_api_tokens.add(token)
+        _log.warning("github_api_token_rejected_retrying_anonymously", url=url)
+        return urllib.request.urlopen(_api_request(url, accept), timeout=timeout)
+
+
+def _split_release_url(url: str) -> tuple[str, str] | None:
+    """(tag, asset name) for a URL under ``_RELEASE_DOWNLOAD_BASE``, else None."""
+    prefix = f"{_RELEASE_DOWNLOAD_BASE}/"
+    if not url.startswith(prefix):
+        return None
+    tag, _, name = url.removeprefix(prefix).partition("/")
+    if not tag or not name or "/" in name:
+        return None
+    return tag, name
 
 
 def _rest_asset_url(tag: str, name: str, url: str, timeout: float) -> str:
     """The REST asset URL for *name* in release *tag*, from one cached lookup."""
     assets = _release_assets_cache.get(tag)
     if assets is None:
-        req = _api_request(
-            f"{_RELEASE_API_BASE}/releases/tags/{tag}", "application/vnd.github+json"
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        lookup = f"{_RELEASE_API_BASE}/releases/tags/{tag}"
+        with _api_open(lookup, "application/vnd.github+json", timeout) as resp:
             data = json.load(resp)
         assets = {
             str(a["name"]): str(a["url"])
@@ -627,23 +701,55 @@ def _rest_asset_url(tag: str, name: str, url: str, timeout: float) -> str:
         ) from None
 
 
+def release_asset_api_fallback(
+    url: str, *, timeout: float = _RETRY_TIMEOUT_S
+) -> tuple[str, dict[str, str]] | None:
+    """The REST asset URL and request headers that serve the same bytes as the
+    release download URL *url*, or None when *url* is not one (nexus-h29w1).
+
+    For downloaders outside this module (the bge model). The headers carry the
+    token only for the API host; a client following the asset's redirect must
+    drop Authorization on the cross-origin hop (httpx does). Raises
+    :class:`BinaryAssetAbsentError` when the release does not list the asset;
+    transport and HTTP errors of the lookup propagate.
+    """
+    parsed = _split_release_url(url)
+    if parsed is None:
+        return None
+    api_url = _rest_asset_url(*parsed, url, timeout)
+    return api_url, _api_headers(api_url, "application/octet-stream")
+
+
+def _is_cert_failure(exc: BaseException) -> bool:
+    reason = getattr(exc, "reason", None)
+    return isinstance(exc, ssl.SSLCertVerificationError) or isinstance(
+        reason, ssl.SSLCertVerificationError
+    )
+
+
 def _download(url: str, dest: Path, *, timeout: float = _DOWNLOAD_TIMEOUT_S) -> None:
     """Download *url* to *dest* (stdlib urllib — the repo has no ``requests``).
 
-    A 404 is :class:`BinaryAssetAbsentError` at once and any other 4xx is
-    :class:`BinaryDownloadError` at once. A 5xx, timeout or connection failure
-    is retried after each delay in ``_RETRY_DELAYS_S``. When *url* is a release
+    A 404 is :class:`BinaryAssetAbsentError` at once. Any other 4xx except 429,
+    a certificate failure and a local write failure are
+    :class:`BinaryDownloadError` at once. A 429, 5xx, timeout, connection
+    failure or short body is retried after each delay in ``_RETRY_DELAYS_S``,
+    with ``_RETRY_TIMEOUT_S`` per socket operation. When *url* is a release
     download URL and every attempt failed that way, the same asset is fetched
-    once from the REST asset endpoint (nexus-h29w1). The bytes are verified by
-    the callers exactly as before, whichever path served them.
+    once from the REST asset endpoint (nexus-h29w1). The callers verify the
+    bytes exactly as before, whichever path served them.
     """
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     last: Exception | None = None
     delays: tuple[float | None, ...] = (*_RETRY_DELAYS_S, None)
     for attempt, delay in enumerate(delays, start=1):
         try:
-            _fetch_once(req, dest, timeout)
+            _fetch_once(req, dest, timeout if attempt == 1 else min(timeout, _RETRY_TIMEOUT_S))
             return
+        except _LocalWriteError as exc:
+            raise BinaryDownloadError(
+                f"failed to write {dest} while downloading {url}: {exc}"
+            ) from exc
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 raise BinaryAssetAbsentError(
@@ -651,15 +757,16 @@ def _download(url: str, dest: Path, *, timeout: float = _DOWNLOAD_TIMEOUT_S) -> 
                     "this asset. Check the tag exists and the asset was published for "
                     "this platform."
                 ) from exc
-            if exc.code < 500:
+            if exc.code < 500 and exc.code != 429:
                 raise BinaryDownloadError(
                     f"failed to download {url}: {exc}. {_DOWNLOAD_HINT}"
                 ) from exc
             last = exc
-        except (
-            OSError,
-            http.client.HTTPException,
-        ) as exc:  # network, timeout, a reset mid-body
+        except (OSError, http.client.HTTPException) as exc:  # network, timeout, short body
+            if _is_cert_failure(exc):
+                raise BinaryDownloadError(
+                    f"failed to download {url}: {exc}. The TLS certificate did not verify."
+                ) from exc
             last = exc
         _log.warning(
             "binary_download_attempt_failed", url=url, attempt=attempt, error=str(last)
@@ -667,27 +774,29 @@ def _download(url: str, dest: Path, *, timeout: float = _DOWNLOAD_TIMEOUT_S) -> 
         if delay is not None:
             time.sleep(delay)
 
-    prefix = f"{_RELEASE_DOWNLOAD_BASE}/"
-    tag, _, name = (
-        url.removeprefix(prefix).partition("/")
-        if url.startswith(prefix)
-        else ("", "", "")
-    )
-    if not tag or not name or "/" in name:
+    parsed = _split_release_url(url)
+    if parsed is None:
         raise BinaryDownloadError(
             f"failed to download {url}: {last}. {_DOWNLOAD_HINT}"
         ) from last
+    retry_timeout = min(timeout, _RETRY_TIMEOUT_S)
     try:
-        api_url = _rest_asset_url(tag, name, url, timeout)
-        _fetch_once(_api_request(api_url, "application/octet-stream"), dest, timeout)
+        api_url = _rest_asset_url(*parsed, url, retry_timeout)
+        with _api_open(api_url, "application/octet-stream", retry_timeout) as resp:
+            _write_body(resp, dest)
     except BinaryAssetAbsentError:
         raise
+    except _LocalWriteError as exc:
+        raise BinaryDownloadError(
+            f"failed to write {dest} while downloading {url}: {exc}"
+        ) from exc
     except Exception as exc:
+        refused = isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403, 429)
         raise BinaryDownloadError(
             f"failed to download {url}: {last}; the REST asset fallback failed too: "
-            f"{exc}. {_DOWNLOAD_HINT}"
+            f"{exc}. {_API_REFUSED_HINT if refused else _DOWNLOAD_HINT}"
         ) from exc
-    _log.info("binary_download_rest_fallback_used", url=url, tag=tag, asset=name)
+    _log.info("binary_download_rest_fallback_used", url=url, tag=parsed[0], asset=parsed[1])
 
 
 def install_binary(
