@@ -11,6 +11,7 @@ standard output, and shows an error as ``<kind>: <detail>`` on standard error wi
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,16 @@ def _refuse_constant(constant: str) -> object:
     """``json.loads`` accepts ``NaN`` and ``Infinity``, which are not JSON; the sandbox's
     argument check would see a float it cannot send on, so the front door says so first."""
     raise ValueError(f"{constant} is not a JSON number")
+
+
+def _all_finite(value: Any) -> bool:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(_all_finite(v) for v in value.values())
+    if isinstance(value, list):
+        return all(_all_finite(v) for v in value)
+    return True
 
 
 def _load_args(args_file: str | None, source: str | None) -> dict[str, Any]:
@@ -46,6 +57,9 @@ def _load_args(args_file: str | None, source: str | None) -> dict[str, Any]:
         args = json.loads(text, parse_constant=_refuse_constant)
     except (ValueError, RecursionError) as exc:  # RecursionError: nesting past the parser's depth
         raise click.UsageError(f"the arguments in {where} are not valid JSON: {exc}") from exc
+    if not _all_finite(args):
+        # 1e999 parses as inf without passing parse_constant.
+        raise click.UsageError(f"the arguments in {where} hold a number too large to be finite")
     if not isinstance(args, dict):
         raise click.UsageError(f"the arguments in {where} must be a JSON object, not {type(args).__name__}")
     return args
