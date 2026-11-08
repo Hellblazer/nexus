@@ -250,3 +250,25 @@ def test_resolve_main_repo_does_not_cache_a_failed_lookup(tmp_path: Path) -> Non
     with patch("nexus.repo_identity.run_bounded", side_effect=subprocess.TimeoutExpired("git", 10)):
         assert _resolve_main_repo(wt) == wt  # the fallback, for this call only
     assert _resolve_main_repo(wt).resolve() == main.resolve()
+
+
+def test_resolve_main_repo_caches_a_directory_outside_any_repo(tmp_path: Path) -> None:
+    """IMP-24 holds for a non-repo directory too: doc_indexer probes each document's parent."""
+    from nexus.bounded_subprocess import run_bounded as real_run  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+    from nexus.repo_identity import _resolve_main_repo, _resolve_main_repo_cached
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    calls = []
+
+    def counting(*args, **kwargs):
+        calls.append(args[0])
+        return real_run(*args, **kwargs)
+
+    _resolve_main_repo_cached.cache_clear()
+    env = {"GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    with patch.dict(os.environ, env), patch("nexus.repo_identity.run_bounded", side_effect=counting):
+        assert _resolve_main_repo(plain) == plain
+        assert _resolve_main_repo(plain) == plain
+        assert _resolve_main_repo(plain) == plain
+    assert len(calls) == 1

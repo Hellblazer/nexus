@@ -33,6 +33,10 @@ from nexus.bounded_subprocess import run_bounded
 _log = structlog.get_logger()
 
 
+class _Unresolved(Exception):
+    """git did not run (missing, or timed out): an answer for this call only."""
+
+
 # RDR-137 followup IMP-24 (nexus-43qgm.24): LRU-memoize the subprocess
 # call. _repo_identity_with_main intentionally invokes
 # _resolve_main_repo twice per call (once via _repo_identity for the
@@ -42,15 +46,12 @@ _log = structlog.get_logger()
 # cache is safe. Cache keyed by str(repo) (Path objects with equal
 # string form hash identically).
 #
-# Only a resolved answer is cached (nexus-mdbds.9 review): a timeout or a missing git used to
-# be cached as the fallback, so in a long-lived MCP server one transient failure named every
-# later lookup after the worktree for the life of the process.
-class _Unresolved(Exception):
-    pass
-
-
+# What git answered is cached, a directory outside any repo included (doc_indexer probes each
+# document's parent directory). A timeout or a missing git is not: it used to be cached as the
+# fallback, so in a long-lived MCP server one transient failure named every later lookup after
+# the worktree for the life of the process (nexus-mdbds.9 review).
 @lru_cache(maxsize=128)
-def _resolve_main_repo_resolved(repo_str: str) -> str:
+def _resolve_main_repo_answered(repo_str: str) -> str:
     try:
         result = run_bounded(
             ["git", "rev-parse", "--git-common-dir"],
@@ -61,7 +62,7 @@ def _resolve_main_repo_resolved(repo_str: str) -> str:
         _log.debug("git rev-parse failed, using repo path directly", error=str(exc))
         raise _Unresolved from exc
     if result.returncode != 0:
-        raise _Unresolved
+        return repo_str
     git_common = Path(result.stdout.strip())
     if not git_common.is_absolute():
         git_common = (Path(repo_str) / git_common).resolve()
@@ -70,12 +71,12 @@ def _resolve_main_repo_resolved(repo_str: str) -> str:
 
 def _resolve_main_repo_cached(repo_str: str) -> str:
     try:
-        return _resolve_main_repo_resolved(repo_str)
+        return _resolve_main_repo_answered(repo_str)
     except _Unresolved:
         return repo_str
 
 
-_resolve_main_repo_cached.cache_clear = _resolve_main_repo_resolved.cache_clear  # type: ignore[attr-defined]
+_resolve_main_repo_cached.cache_clear = _resolve_main_repo_answered.cache_clear  # type: ignore[attr-defined]
 
 
 # nexus-u8n4r: worktree/tempdir path classifier + write-time registration
