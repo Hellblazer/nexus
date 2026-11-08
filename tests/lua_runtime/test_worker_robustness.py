@@ -495,3 +495,30 @@ def test_the_worker_enforces_its_own_reply_cap() -> None:
         assert b"bad reply frame" in proc.stderr.read()
     finally:
         _stop(proc)
+
+
+def test_a_huge_finite_wall_time_keeps_the_timer_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Limits accepts any finite positive wall_time, but Event.wait raises
+    # OverflowError past threading.TIMEOUT_MAX (about 4.3e6 s on Windows), and
+    # an exception in the timer thread would silently end wall-time
+    # enforcement (confirmation review of 9012c953e).
+    raised: list[BaseException] = []
+    monkeypatch.setattr(threading, "excepthook", lambda a: raised.append(a.exc_value))
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+    )
+    try:
+        timer = supervisor._KillTimer(proc, None, 1e12, threading.Event())
+        timer.start()
+        time.sleep(0.3)
+        assert timer.is_alive(), f"the timer thread died: {raised}"
+        assert timer.cancel()
+        timer.join(5)
+        assert not timer.is_alive()
+        assert raised == []
+    finally:
+        proc.kill()
+        proc.wait()
