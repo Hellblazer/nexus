@@ -37,7 +37,12 @@ local finding = string.match(args.finding, "^%s*(.-)%s*$")
 if finding == "" then
   error("finding must not be empty", 0)
 end
-if string.find(finding, "[\r\n]") then
+-- Every character Python's str.splitlines() breaks on, which is how the gate reads a
+-- record: LF, CR, VT, FF, FS, GS, RS, and NEL, LS, PS in their UTF-8 forms.
+if string.find(finding, "[\n\r\v\f\28\29\30]")
+  or string.find(finding, "\194\133", 1, true)
+  or string.find(finding, "\226\128\168", 1, true)
+  or string.find(finding, "\226\128\169", 1, true) then
   error("finding must be one line; it holds a line break", 0)
 end
 
