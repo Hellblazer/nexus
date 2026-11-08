@@ -325,7 +325,7 @@ Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 
 ### 4. Update both changelogs
 
-- Changelog fragments first: `python3 scripts/changelog_fold.py fold` moves every `changelog/unreleased/*.md` and `conexus/changelog/unreleased/*.md` fragment under its changelog's `## [Unreleased]` (grouped by section, oldest first) and deletes the fragments; stage the deletions with `git add -- changelog/unreleased conexus/changelog/unreleased` (nexus-3ceda.2). On a release branch that cherry-picks rather than merges develop, fold only the fragments it carries.
+- Changelog fragments first: `python3 scripts/changelog_fold.py fold` moves every `changelog/unreleased/*.md` fragment under `CHANGELOG.md`'s `## [Unreleased]` (grouped by section, oldest first) and deletes the fragments; stage the deletions with `git add -- changelog/unreleased` (nexus-3ceda.2). On a release branch that cherry-picks rather than merges develop, fold only the fragments it carries.
 - `CHANGELOG.md` (root): move `## [Unreleased]` content into a new `## [X.Y.Z] - YYYY-MM-DD` section. Leave a fresh empty `## [Unreleased]` at the top.
 - `conexus/CHANGELOG.md` (plugin changelog): always update, even if no plugin changes (note: "Plugin version aligned with conexus X.Y.Z. No plugin-side changes." is acceptable).
 
@@ -335,7 +335,7 @@ Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f && /^- \*\*/{k=substr($0,1,70); if (seen[k]++) {print "DUPLICATE OPENING: " k; bad=1}; n++} END{print n+0 " bullets examined"; exit bad}' CHANGELOG.md
 ```
 
-When a pair shares an opening, keep the newest version (the one carrying the latest round's wording). `0 bullets examined` is a pass over nothing, not a clean Unreleased.
+When a pair shares an opening, keep the newest version (the one carrying the latest round's wording). `0 bullets examined` is a pass over nothing, not a clean Unreleased. Since changelog fragments (nexus-3ceda.2) develop's `## [Unreleased]` holds no bullets, so run this after `changelog_fold.py fold`, or on the release section, not on develop's tip.
 
 For `docs/wire-contract-pending.md`, the same keep-both slip duplicates ledger entries and their cited shas. Check the entry lines after the resolution:
 
@@ -1049,7 +1049,10 @@ On 7.87.1 only `CHANGELOG.md` conflicted: the ledger merged cleanly to develop's
 side, because each cherry-pick's ledger conflict was resolved to the tag's side, so
 main never changed the file. Clean is not done: delete the shipped entries and
 move the `## Awaiting the next release (pinned: ...)` heading to vX.Y.N by hand.
-Changelogs, in this order: develop's `## [Unreleased]` first, with the entries that
+Changelog fragments: a cherry-picked fragment was added and folded on main inside
+this range, so the merge does not delete develop's copy; `git rm` each
+`changelog/unreleased/` fragment that shipped in X.Y.N in this merge, or the next
+release folds it again. Changelogs, in this order: develop's `## [Unreleased]` first, with the entries that
 shipped in X.Y.N deleted from it, then main's `## [X.Y.N]` section, then the older
 sections. `conexus/PENDING_RELEASE.md`: develop's side minus the entries that
 shipped (the deferred ones and any plugin commit not picked stay pending). A

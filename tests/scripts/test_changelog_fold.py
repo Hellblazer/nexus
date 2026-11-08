@@ -117,10 +117,42 @@ def test_hand_bullet_under_unreleased_is_refused_but_prose_stays(repo: Path) -> 
 
 
 def test_missing_readme_is_refused(repo: Path) -> None:
-    (repo / "conexus/changelog/unreleased" / cf.DIR_README).unlink()
-    assert any(
-        "conexus/changelog/unreleased/README.md: missing" in e for e in cf.check(repo)
-    )
+    (repo / "changelog/unreleased" / cf.DIR_README).unlink()
+    assert any("changelog/unreleased/README.md: missing" in e for e in cf.check(repo))
+
+
+def test_star_and_indented_bullets_count_as_hand_entries(repo: Path) -> None:
+    cl = repo / "CHANGELOG.md"
+    for bullet in ("* star entry", "  - indented entry", "+ plus entry"):
+        cl.write_text(
+            _CL.replace("## [Unreleased]\n", f"## [Unreleased]\n\n{bullet}\n")
+        )
+        assert any("hand-written" in e for e in cf.check(repo)), bullet
+
+
+def test_unreleased_must_be_the_first_release_heading(repo: Path) -> None:
+    # The plugin changelog's layout: releases at the top, an old empty [Unreleased] further down.
+    buried = "# Changelog\n\n## [2.0.0] - 2026-02-01\n\n- shipped\n\n## [Unreleased]\n\n## [1.0.0] - 2026-01-01\n"
+    (repo / "CHANGELOG.md").write_text(buried)
+    assert any("first '## [' heading is not" in e for e in cf.check(repo))
+    _frag(repo, "nexus-abc.md", "### Added\n\n- x\n")
+    assert cf.fold(repo)
+    assert (repo / "CHANGELOG.md").read_text() == buried
+    assert (repo / "changelog/unreleased/nexus-abc.md").exists()
+
+
+def test_dotfiles_are_ignored_and_subdirectories_refused(repo: Path) -> None:
+    (repo / "changelog/unreleased/.DS_Store").write_bytes(b"\0\1")
+    (repo / "changelog/unreleased/.nexus-abc.md.swp").write_bytes(b"\0")
+    assert cf.check(repo) == []
+    (repo / "changelog/unreleased/nested").mkdir()
+    (repo / "changelog/unreleased/nested/nexus-abc.md").write_text("### Added\n\n- x\n")
+    assert any("nested/: a subdirectory is never folded" in e for e in cf.check(repo))
+
+
+def test_missing_changelog_is_an_error_not_a_traceback(repo: Path) -> None:
+    (repo / "CHANGELOG.md").unlink()
+    assert "CHANGELOG.md: missing" in cf.check(repo)
 
 
 def test_fold_groups_by_section_orders_by_first_commit_and_deletes(repo: Path) -> None:
@@ -128,19 +160,20 @@ def test_fold_groups_by_section_orders_by_first_commit_and_deletes(repo: Path) -
     _git(repo, "add", "--", str(old))
     _git(repo, "commit", "-q", "-m", "a", when="2026-01-01T00:00:00Z")
     newer = _frag(
-        repo, "nexus-aaa.md", "### Added\n\n- added second\n"
-    )  # sorts first by name, last by time
+        repo, "nexus-mmm.md", "### Added\n\n- added second\n"
+    )  # sorts before zzz by name
     _git(repo, "add", "--", str(newer))
     _git(repo, "commit", "-q", "-m", "b", when="2026-02-01T00:00:00Z")
+    # zzz is deleted and re-added later: it still sorts by its FIRST add, so stays ahead of mmm.
+    _git(repo, "rm", "-q", "--", str(old))
+    _git(repo, "commit", "-q", "-m", "c", when="2026-03-01T00:00:00Z")
+    _frag(repo, "nexus-zzz.md", "### Added\n\n- added first\n")
+    _git(repo, "add", "--", str(old))
+    _git(repo, "commit", "-q", "-m", "d", when="2026-04-01T00:00:00Z")
     _frag(
-        repo, "nexus-fix.md", "### Fixed\n\n- a fix\n  wrapped\n"
-    )  # untracked: sorts last in its section
-    _frag(
-        repo,
-        "nexus-plug.md",
-        "### Changed\n\n- plugin change\n",
-        "conexus/changelog/unreleased",
-    )
+        repo, "nexus-aaa.md", "### Added\n\n- untracked\n"
+    )  # no history: last despite its name
+    _frag(repo, "nexus-fix.md", "### Fixed\n\n- a fix\n  wrapped\n")
     (repo / "CHANGELOG.md").write_text(
         _CL.replace("## [Unreleased]\n", "## [Unreleased]\n\nPairs with x.\n")
     )
@@ -149,13 +182,10 @@ def test_fold_groups_by_section_orders_by_first_commit_and_deletes(repo: Path) -
     text = (repo / "CHANGELOG.md").read_text()
     s, e = cf.unreleased_body(text)
     assert text[s:e] == (
-        "\nPairs with x.\n\n### Added\n\n- added first\n- added second\n\n### Fixed\n\n- a fix\n  wrapped\n\n"
+        "\nPairs with x.\n\n### Added\n\n- added first\n- added second\n- untracked\n\n"
+        "### Fixed\n\n- a fix\n  wrapped\n\n"
     )
     assert text[e:].startswith("## [1.0.0]")
-    assert (
-        "### Changed\n\n- plugin change\n"
-        in (repo / "conexus/CHANGELOG.md").read_text()
-    )
     assert [p.name for p in (repo / "changelog/unreleased").iterdir()] == [
         cf.DIR_README
     ]

@@ -8,14 +8,17 @@
 A change adds a fragment instead of editing a changelog's top lines, so concurrent branches stop
 colliding on them:
 
-    changelog/unreleased/<bead-id>[-<slug>].md          -> CHANGELOG.md
-    conexus/changelog/unreleased/<bead-id>[-<slug>].md  -> conexus/CHANGELOG.md
+    changelog/unreleased/<bead-id>[-<slug>].md  -> CHANGELOG.md
+
+The plugin changelog (``conexus/CHANGELOG.md``) has no ``[Unreleased]`` section: its entries come
+from ``conexus/PENDING_RELEASE.md`` and are written by the release itself, so it takes no fragments.
 
 A fragment is one ``### <Section>`` line (Added, Changed, Deprecated, Removed, Fixed, Security,
 Performance or Docs) followed by one or more ``- `` bullets; a bullet may wrap onto lines indented
 by two spaces. ``fold`` groups the bullets by section in that order and, inside a section, by the
 commit that first added each fragment (oldest first; a fragment git has no history for sorts last,
-by name). Each fragment directory keeps a ``README.md``, which is not a fragment.
+by name). The directory keeps a ``README.md``, which is not a fragment; dotfiles (``.DS_Store``,
+editor swap files) are ignored and a subdirectory is refused.
 """
 
 from __future__ import annotations
@@ -37,10 +40,9 @@ SECTIONS: tuple[str, ...] = (
     "Performance",
     "Docs",
 )
-TARGETS: tuple[tuple[str, str], ...] = (
-    ("changelog/unreleased", "CHANGELOG.md"),
-    ("conexus/changelog/unreleased", "conexus/CHANGELOG.md"),
-)
+TARGETS: tuple[tuple[str, str], ...] = (("changelog/unreleased", "CHANGELOG.md"),)
+#: A hand-written entry under [Unreleased]: a ``-``, ``*`` or ``+`` list item at any indent.
+HAND_BULLET = re.compile(r"^\s*[-*+] ")
 FRAGMENT_NAME = re.compile(
     r"^[a-z][a-z0-9]*-[a-z0-9]+(?:\.[0-9]+)*(?:-[a-z0-9]+)*\.md$"
 )
@@ -101,15 +103,20 @@ def fragment_paths(root: Path, frag_dir: str) -> list[Path]:
     d = root / frag_dir
     if not d.is_dir():
         return []
-    return sorted(p for p in d.iterdir() if p.is_file() and p.name != DIR_README)
+    return sorted(
+        p
+        for p in d.iterdir()
+        if p.is_file() and p.name != DIR_README and not p.name.startswith(".")
+    )
 
 
 def unreleased_body(text: str) -> tuple[int, int]:
-    """Return the [start, end) character span of the body under ``## [Unreleased]``."""
-    start = text.find(UNRELEASED + "\n")
-    if start < 0:
-        raise SystemExit(f"no '{UNRELEASED}' heading")
-    body_start = start + len(UNRELEASED) + 1
+    """Return the [start, end) span of the body under ``## [Unreleased]``, which must be the first
+    ``## [`` heading: an old empty [Unreleased] further down the history is never the target."""
+    first = re.search(r"^## \[.*$", text, re.MULTILINE)
+    if not first or first.group(0) != UNRELEASED:
+        raise ValueError(f"the first '## [' heading is not '{UNRELEASED}'")
+    body_start = first.end() + 1
     nxt = re.search(r"^## \[", text[body_start:], re.MULTILINE)
     return body_start, body_start + nxt.start() if nxt else len(text)
 
@@ -122,12 +129,26 @@ def check(root: Path) -> list[str]:
             errors.append(
                 f"{frag_dir}/{DIR_README}: missing (it keeps the directory and says the format)"
             )
+        if d.is_dir():
+            errors.extend(
+                f"{frag_dir}/{p.name}/: a subdirectory is never folded; put fragments directly in {frag_dir}/"
+                for p in sorted(d.iterdir())
+                if p.is_dir()
+            )
         for p in fragment_paths(root, frag_dir):
             errors.extend(parse_fragment(p)[1])
-        text = (root / changelog).read_text(encoding="utf-8")
-        s, e = unreleased_body(text)
+        cl = root / changelog
+        if not cl.is_file():
+            errors.append(f"{changelog}: missing")
+            continue
+        text = cl.read_text(encoding="utf-8")
+        try:
+            s, e = unreleased_body(text)
+        except ValueError as exc:
+            errors.append(f"{changelog}: {exc}")
+            continue
         # Bullets are entries; prose such as an engine pairing line ("Pairs with ...") may stay.
-        hand = [ln for ln in text[s:e].splitlines() if ln.startswith("- ")]
+        hand = [ln for ln in text[s:e].splitlines() if HAND_BULLET.match(ln)]
         if hand:
             errors.append(
                 f"{changelog}: [Unreleased] holds {len(hand)} hand-written line(s); "
