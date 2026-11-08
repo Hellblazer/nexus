@@ -239,7 +239,7 @@ ttl_days = 1
 [sites."src/nexus/pdf_extractor.py::_enforce_extraction_quality"]
 extraction_method = 1
 
-[sites."src/nexus/pipeline_stages.py::_build_chunk_metadata"]
+[sites."src/nexus/pipeline_stages.py::_chunk_positions"]
 chunk_end_char = 1
 chunk_start_char = 1
 page_number = 1

@@ -83,7 +83,7 @@ def test_pdf_chunks_extracts_without_error_on_any_formula_count(formula_count, d
         # never a dispatch predicate; no embedder is constructed.
         chunks = _pdf_chunks(Path("/fake/t.pdf"), "x", "model-ctx", "2026-01-01T00:00:00", "test")
     assert len(chunks) > 0
-    for _id, _text, m in chunks:
+    for _id, _text, m, _p in chunks:
         assert "has_formulas" not in m
 
 

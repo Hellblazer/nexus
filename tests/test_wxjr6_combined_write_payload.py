@@ -172,6 +172,10 @@ class TestBuildCombinedWritePayload:
             ]
 
         monkeypatch.setattr(indexer_mod, "_aggregate_flush_metas", _bad_aggregate)
+        # The manifest position is the position dict's chunk_index (RDR-236 Phase 4 Step 0).
+        monkeypatch.setattr(
+            indexer_mod, "_aggregate_flush_positions",
+            lambda _fctx: [{"chunk_index": 1}, {"chunk_index": 2}])
         fctx = [_file_ctx("a.py", "1.1", 2, prefix="a")]
         ids, docs, metas = _mk_flush(fctx)
         with pytest.raises(_CombinedWritePositionZeroViolation, match="lacks position 0"):

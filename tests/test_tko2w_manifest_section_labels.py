@@ -18,10 +18,30 @@ from nexus.catalog.manifest_backfill import _fetch_chunks_by_key
 from nexus.catalog.store_hook import _retract_manifest_rows_for_chash
 from nexus.catalog.types import ManifestRow, manifest_row_wire
 from nexus.mcp.core import resolve_owner_section_types
-from nexus.mcp_infra import _manifest_chunk_rows
+from nexus.mcp_infra import _manifest_chunk_rows as _rows_from_positions
+from nexus.mcp_infra import rows_as_positioned
 
 X = "a" * 64
 Y = "b" * 64
+
+
+def _manifest_chunk_rows(pairs):
+    """The MCP row producer over ``(index, metadata)`` pairs: positions read off the metadata, as a caller
+    whose metadata is a stored row does (RDR-236 Phase 4 Step 0)."""
+    return _rows_from_positions(rows_as_positioned(pairs))
+
+
+def test_manifest_chunk_rows_read_the_positions_not_the_chunk_rows_own_keys() -> None:
+    """RDR-236 Phase 4 Step 0: the labels and spans come from the position dict. A chunk row that carries
+    none of the keys (what Step 1 writes) still yields a labelled row, and a key the row does carry loses
+    to the position dict."""
+    (row,) = _rows_from_positions([
+        (0, {"chunk_text_hash": X, "section_title": "stale"},
+         {"section_title": "Methods", "section_type": "methods", "page_number": 4,
+          "chunk_start_char": 0, "chunk_end_char": 30, "chunk_index": 2}),
+    ])
+    assert (row["section_title"], row["section_type"], row["page_number"]) == ("Methods", "methods", 4)
+    assert (row["char_start"], row["char_end"], row["chunk_index"], row["position"]) == (0, 30, 2, 2)
 
 
 # ── the producer ─────────────────────────────────────────────────────────────

@@ -41,9 +41,14 @@ __all__ = [
     "CONTENT_TYPES",
     "MAX_SAFE_TOP_LEVEL_KEYS",
     "MetadataSchemaError",
+    "POSITION_FIELDS",
+    "aligned_positions",
+    "prepared_positions",
     "REWRITE_OWNED_KEYS",
     "make_chunk_metadata",
     "normalize",
+    "position_fields",
+    "positions_of_row",
     "rewrite_delete_keys",
     "validate",
 ]
@@ -386,6 +391,88 @@ def chunk_content_type_for_collection(collection: str) -> str:
         if collection.startswith(prefix):
             return content_type
     return "prose"
+
+
+# ── Position fields (RDR-236 Phase 4 Step 0, nexus-6pfgb.65) ────────────────
+
+#: The POSITION keys of ``tables/chunk-metadata-keys.toml``: what one manifest position determines (a span in
+#: the document, a page, a section label). They belong to the ``(doc, position)`` manifest row, not to the
+#: shared chunk row; a test holds this tuple equal to the table.
+POSITION_FIELDS: tuple[str, ...] = (
+    "chunk_start_char",
+    "chunk_end_char",
+    "line_start",
+    "line_end",
+    "page_number",
+    "section_title",
+    "section_type",
+)
+
+
+def position_fields(
+    *,
+    chunk_start_char: int = 0,
+    chunk_end_char: int = 0,
+    line_start: int = 0,
+    line_end: int = 0,
+    page_number: int = 0,
+    section_title: str = "",
+    section_type: str = "",
+) -> dict[str, Any]:
+    """A chunker's position fields as their own dict, with :func:`make_chunk_metadata`'s defaults.
+
+    A chunker returns this beside its chunk row. The manifest builder
+    (``nexus.mcp_infra._manifest_chunk_rows``) reads positions from it, so it does not depend on the row
+    carrying them. Until Step 1 the row still carries them too: the chunker passes the same dict to the
+    factory as ``**positions``.
+    """
+    return {
+        "chunk_start_char": chunk_start_char,
+        "chunk_end_char": chunk_end_char,
+        "line_start": line_start,
+        "line_end": line_end,
+        "page_number": page_number,
+        "section_title": section_title,
+        "section_type": section_type,
+    }
+
+
+def positions_of_row(meta: dict[str, Any]) -> dict[str, Any]:
+    """The position fields a row-shaped dict carries, plus its ``chunk_index`` when it has one.
+
+    For a caller whose chunk metadata is a stored row (the manifest heal reads T3 rows; a legacy caller
+    hands metadatas and no positions). A producer that has its own position dict passes that instead.
+
+    STEP1-DELETE: after Step 1 a new row carries none of these keys, so a producer that relied on this
+    reading would send empty labels; Step 1 removes every call that is not reading a stored legacy row.
+    """
+    out = {k: meta[k] for k in POSITION_FIELDS if k in meta}
+    if "chunk_index" in meta:
+        out["chunk_index"] = meta["chunk_index"]
+    return out
+
+
+def prepared_positions(prepared: "list[tuple]") -> "list[dict[str, Any]]":
+    """The position dict of each ``(id, text, meta[, positions])`` tuple a document chunker returned.
+
+    The chunkers (``doc_indexer._pdf_chunks`` / ``_markdown_chunks``) return four-tuples; a tuple of
+    three (a test double, an older producer) has its positions read off its row (STEP1-DELETE).
+    """
+    return [p[3] if len(p) > 3 else positions_of_row(p[2]) for p in prepared]
+
+
+def aligned_positions(
+    metadatas: "list[dict[str, Any]]", positions: "list[dict[str, Any]] | None",
+) -> "list[dict[str, Any]]":
+    """*positions* checked against *metadatas* (same length), or read off the rows when a caller handed none.
+
+    The one place the "no positions given" leg lives, so Step 1 removes it in one edit (STEP1-DELETE).
+    """
+    if positions is None:
+        return [positions_of_row(m) for m in metadatas]
+    if len(positions) != len(metadatas):
+        raise ValueError(f"{len(positions)} position dicts for {len(metadatas)} chunk rows")
+    return positions
 
 
 def make_chunk_metadata(

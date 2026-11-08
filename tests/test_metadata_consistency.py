@@ -221,7 +221,7 @@ def test_pdf_indexer_emits_full_keyset(tmp_repo: Path) -> None:
     )
     assert prepared, "fixture PDF should produce at least one chunk"
     expected = _full_keyset_minus_optional()
-    for _, _, meta in prepared:
+    for _, _, meta, _p in prepared:
         assert "session_id" not in meta  # nexus-6pfgb.4
         missing = expected - set(meta.keys())
         assert not missing, (

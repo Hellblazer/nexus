@@ -17,12 +17,19 @@ import pytest
 
 from nexus.catalog.manifest_backfill import _fetch_chunk_by_id, _fetch_chunks_by_key
 from nexus.catalog.note_write import note_manifest_rows
-from nexus.mcp_infra import _manifest_chunk_rows
+from nexus.mcp_infra import _manifest_chunk_rows as _rows_from_positions
+from nexus.mcp_infra import rows_as_positioned
 from nexus.metadata_schema import make_chunk_metadata
 
 X = "a" * 64
 Y = "b" * 64
 _SPAN = ("line_start", "line_end", "char_start", "char_end")
+
+
+def _manifest_chunk_rows(pairs):
+    """The MCP row producer over ``(index, metadata)`` pairs: positions read off the metadata, as a caller
+    whose metadata is a stored row does (RDR-236 Phase 4 Step 0 builds the indexers' from their own dicts)."""
+    return _rows_from_positions(rows_as_positioned(pairs))
 
 
 def _span(row: dict) -> tuple:

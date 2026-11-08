@@ -70,13 +70,15 @@ class OwnerWriteRecorder:
 
     def __call__(
         self, collection_name: str, doc_id: str, content_hash: str, ids: list[str],
-        documents: list[str], metadatas: list[dict], *, force_re_embed: bool = False,
+        documents: list[str], metadatas: list[dict], *, positions: Any = None,
+        force_re_embed: bool = False,
         batch_size: int = 0, on_progress: Any = None, on_request: Any = None,
         defer_completion: bool = False,
     ) -> "DocumentWriteResult | PendingStamp":
         self.calls.append({
             "collection_name": collection_name, "doc_id": doc_id, "content_hash": content_hash,
             "ids": list(ids), "documents": list(documents), "metadatas": metadatas,
+            "positions": positions,
             "force_re_embed": force_re_embed, "batch_size": batch_size,
             "defer_completion": defer_completion,
         })
