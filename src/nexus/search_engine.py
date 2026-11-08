@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import itertools
+import os
+import re
 import math
 import contextvars
 import threading
@@ -661,11 +663,26 @@ def _local_source_path(entry: Any) -> str:
     the RAW spelling ``"file://" + path`` (``aspect_readers.uri_for``, ``doc_indexer._curator_identity``,
     the engine's ``deriveSourceUri``), so a ``#``, a ``?`` or a literal ``%25`` in a directory name is part
     of the path, not a fragment, a query or an escape. A URL parser truncated or unquoted it.
+
+    On Windows the mint is ``file://C:\\Users\\a\\x.md`` (two slashes, then the drive), and a URL-style
+    ``file:///C:/Users/a/x.md`` names the same file; both return the drive path, with the platform's separators
+    on Windows so an absolute PATH scope and ``open`` see the native spelling (nexus-rfvyy.9 item 3; the same
+    spellings ``operators.sensitive_paths._locator`` accepts). A UNC or other host form is no local path.
     """
     uri = getattr(entry, "source_uri", "") or ""
-    if not isinstance(uri, str) or not uri.startswith("file:///"):
+    if not isinstance(uri, str) or not uri.startswith("file://"):
         return ""
-    return uri[len("file://"):]
+    rest = uri[len("file://"):]
+    if m := _DRIVE_PATH.match(rest):
+        drive = rest[m.start(1):]
+        return drive.replace("/", "\\") if os.name == "nt" else drive
+    if rest.startswith("/") and not rest.startswith("//"):
+        return rest
+    return ""
+
+
+#: A drive path after ``file://``: ``C:\\...``, ``C:/...`` or ``/C:/...``; group 1 starts at the drive letter.
+_DRIVE_PATH = re.compile(r"^/?([A-Za-z]:[\\/])")
 
 
 def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
