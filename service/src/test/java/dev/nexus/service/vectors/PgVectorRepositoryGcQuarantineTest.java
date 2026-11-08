@@ -440,7 +440,7 @@ class PgVectorRepositoryGcQuarantineTest {
     /**
      * nexus-rfvyy.9 (RDR-243): the gc sample's label names a live owner in ANOTHER collection and shows the shared
      * text's first 80 characters, so the engine withholds the label (title and text_prefix null, the chash kept) when
-     * a live flagged document anywhere holds the text, on the unbounded and the bounded function alike.
+     * a live flagged document anywhere holds the text, on the unbounded, the bounded and the floored function alike.
      */
     @Test
     void gcSample_aLiveSensitiveOwnerInAnotherCollectionWithholdsTheLabel() throws Exception {
@@ -481,6 +481,24 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(bounded.sample().get(0).get("chash")).isEqualTo(bFlagged);
         assertThat(bounded.sample().get(0).get("title")).isNull();
         assertThat(bounded.sample().get(0).get("text_prefix")).isNull();
+
+        String fOrigin = originCol("s9-fsample");
+        String fFlagged = ch("gcq-s9-fflagged");
+        seedChunk(TENANT_A, fOrigin, fFlagged, "fsecret ".repeat(20), "STALE row title");
+        seedChunk(TENANT_A, ownerCol, fFlagged, "owner side 4", "owner side title");
+        seedManifest(TENANT_A, "gcq.doc.s9fflagged", fFlagged, ownerCol);
+        flagSensitive(TENANT_A, "gcq.doc.s9fflagged");
+
+        var floored = vectorRepo.quarantineOrphansFloored(TENANT_A, fOrigin, quarantineCol("s9-fsample"),
+            "2026-08-10T00:00:00Z", 20, null, 1.0, 1000, false);
+
+        assertThat(floored.refused()).isFalse();
+        assertThat(floored.sample()).hasSize(1);
+        var w = floored.sample().get(0);
+        assertThat(w.get("chash")).isEqualTo(fFlagged);
+        assertThat(w).as("a withheld row keeps only its chash: every other key is null, whatever the SQL adds")
+            .allSatisfy((k, v) -> { if (!k.equals("chash")) assertThat(v).as(k).isNull(); });
+        assertThat(floored.sample().toString()).doesNotContain("fsecret").doesNotContain("s9fflagged");
     }
 
     @Test
