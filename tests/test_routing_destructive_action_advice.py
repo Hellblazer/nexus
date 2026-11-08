@@ -197,7 +197,12 @@ NEAR_MISSES: list[tuple[str, str, str, dict]] = [
 
 
 @pytest.mark.parametrize(("row", "label", "command", "extra"), MATCHES, ids=lambda v: v if isinstance(v, str) else "")
-def test_row_matches(row: str, label: str, command: str, extra: dict) -> None:
+def test_row_matches(
+    row: str, label: str, command: str, extra: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The stash row needs a repository with more than one worktree; pin that here
+    # rather than read it from the host (a lab-remote copy is a single checkout).
+    monkeypatch.setattr(daa, "_worktree_count", lambda ctx, cwd: 2)
     assert row in _ids(command, tool_input=extra), f"{row}/{label}: {command!r} must match"
 
 
