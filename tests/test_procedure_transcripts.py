@@ -31,6 +31,7 @@ from nexus.lua_runtime import transcripts_join as tj
 from nexus.lua_runtime import verbs_transcripts as vt
 from nexus.lua_runtime.verb_types import VerbContext, VerbError
 from nexus.operators.llm_models import PRICES
+from tests.lua_runtime.test_verbs_transcripts import QUERIES as PINNED_FIELDS  # the verb's pin of each query's fields
 
 SCRIPT = Path(hd.__file__).parent.parent / "procedures" / "transcripts.lua"
 SOURCE = SCRIPT.read_bytes()
@@ -75,24 +76,68 @@ def load(path: str, size: int, *, ftype: str = "Project", kind: str = "instructi
     return {"path": path, "kind": kind, "type": ftype, "size": size, "time": "2026-11-03T10:00:03Z"}
 
 
-class Sessions:
-    """A fake transcripts.sessions: window by start, bodies only when asked, calls counted."""
+JOINED = "deferred_tools"  # the fields of the second call a tools unit makes
 
-    def __init__(self, records: list[dict], *, max_records: int | None = None) -> None:
+
+def _call_shape(c: dict, f: vt._Fields) -> dict:
+    """One fixture tool call as the real verb returns it under ``f``."""
+    keys = f.keys["tool_calls"]
+    out = {k: c[k] for k in ("name", "time", "result_time", "is_error") if k in keys}
+    if f.wants_input(c["name"]):
+        out["input"] = c["input"]
+    if "input_bytes" in keys:  # measured from the whole input, before any filter
+        out["input_bytes"] = vt._input_bytes(c["input"])
+    return out
+
+
+def shape(r: dict, f: vt._Fields) -> dict:
+    """A fixture record as the real verb returns it under ``f``: an unrequested field is dropped
+    (the four always-returned ones are in ``f.top``), a list keeps only its selected sub-keys, an
+    input rides only on a call an ``input@`` form names, and ``tool_call_count`` is the number of
+    calls before any of that (a fixture may set it above its own list, as a cut record's is)."""
+    full = {**r, "tool_call_count": r.get("tool_call_count", len(r.get("tool_calls", [])))}
+    out: dict[str, Any] = {}
+    for k, v in full.items():
+        if k not in f.top:
+            continue
+        keys = f.keys.get(k)
+        if keys is None:
+            out[k] = v
+        elif k == "tool_calls":
+            out[k] = [_call_shape(c, f) for c in v]
+        else:
+            out[k] = [{sk: sv for sk, sv in e.items() if sk in keys} for e in v]
+    return out
+
+
+class Sessions:
+    """A fake transcripts.sessions that filters as the real verb does: window by start, ``fields``
+    parsed by the real parser and applied by ``shape`` (nil is every field; assistant_text only
+    when bodies is true), calls counted. ``calls`` holds the window reads of a run, ``joins`` the
+    second ``deferred_tools`` reads a tools unit makes beside them; ``asked`` holds the ``fields``
+    of every call in order."""
+
+    def __init__(self, records: list[dict], *, max_records: int | None = None,
+                 max_join_records: int | None = None) -> None:
         self.records = records
         self.max_records = max_records
+        self.max_join_records = max_join_records  # a limit only the second (deferred_tools) read meets
         self.calls: list[tuple] = []
+        self.joins: list[tuple] = []
+        self.asked: list[str | None] = []
 
-    def __call__(self, since: str, until: str, project: str | None, bodies: bool | None) -> Any:
-        self.calls.append((since, until, project, bodies))
+    def __call__(self, since: str, until: str, project: str | None, bodies: bool | None,
+                 fields: str | None = None) -> Any:
+        (self.joins if fields == JOINED else self.calls).append((since, until, project, bodies))
+        self.asked.append(fields)
+        f = vt._parse_fields(fields, bool(bodies))  # an unknown field is a VerbArgError, as in the verb
         lo, hi = vt._bound(since, "since"), vt._bound(until, "until")
         got = sorted((r for r in self.records if lo <= vt._bound(r["start"], "start") < hi),
                      key=lambda r: r["start"])
-        if self.max_records is not None and len(got) > self.max_records:
+        limit = self.max_join_records if fields == JOINED else self.max_records
+        if limit is not None and len(got) > limit:
             return f"result-too-large: transcripts.sessions: {len(got)} records; narrow the window"
-        if not bodies:
-            got = [{k: v for k, v in r.items() if k != "assistant_text"} for r in got]
-        return got
+        return [shape(r, f) for r in got]
 
 
 class Run:
@@ -110,9 +155,9 @@ class Run:
             self.source = new
         self.rt = lua54.LuaRuntime(register_eval=False, register_builtins=False, unpack_returned_tuples=False)
 
-    def _sessions(self, since: str, until: str, project: Any, bodies: Any) -> Any:
+    def _sessions(self, since: str, until: str, project: Any, bodies: Any, fields: Any = None) -> Any:
         try:
-            out = self.verb(since, until, project, bodies)
+            out = self.verb(since, until, project, bodies, fields)
         except VerbError as exc:
             return str(exc)
         return out if isinstance(out, str) else self.rt.table_from(out, recursive=True)
@@ -130,8 +175,8 @@ class Run:
               env[lib] = t
             end
             getmetatable("").__index = env.string
-            env.transcripts = {sessions = function(a, b, p, bo)
-              local r = sessions(a, b, p, bo)
+            env.transcripts = {sessions = function(a, b, p, bo, fi)
+              local r = sessions(a, b, p, bo, fi)
               if type(r) == "string" then error(r, 0) end
               return r
             end}
@@ -172,7 +217,8 @@ def _py(x: Any) -> Any:
 
 
 def run(records: list[dict], query: str, **kw: Any) -> tuple[dict, Sessions]:
-    fake = Sessions(records, max_records=kw.pop("max_records", None))
+    fake = Sessions(records, max_records=kw.pop("max_records", None),
+                    max_join_records=kw.pop("max_join_records", None))
     out = Run(fake, patch=kw.pop("patch", None))(query=query, **kw)
     return out, fake
 
@@ -720,13 +766,18 @@ def _result(ts: str, sid: str, tid: str, text: str) -> dict:
 
 
 class RealVerb:
+    """The real verb over a fixture config dir; ``calls``, ``joins`` and ``asked`` are the fake's."""
+
     def __init__(self, monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
         self.calls: list[tuple] = []
+        self.joins: list[tuple] = []
+        self.asked: list[str | None] = []
 
-    def __call__(self, since: str, until: str, project: Any, bodies: Any) -> Any:
-        self.calls.append((since, until, project, bodies))
-        return vt.sessions(since, until, project, bodies, deadline=time.monotonic() + 60,
+    def __call__(self, since: str, until: str, project: Any, bodies: Any, fields: Any = None) -> Any:
+        (self.joins if fields == JOINED else self.calls).append((since, until, project, bodies))
+        self.asked.append(fields)
+        return vt.sessions(since, until, project, bodies, fields, deadline=time.monotonic() + 60,
                            ctx=VerbContext(repo_root=None))
 
 
@@ -795,6 +846,251 @@ def test_a_session_spanning_midnight_is_counted_once_on_its_start_day(
                                            ("2026-11-04", "2026-11-05"), ("2026-11-05", "2026-11-06")]
 
 
+# ---- the fields filter (RDR-242 A2, nexus-qo7ie.31) ---------------------------------------------
+
+QUERIES = ("agents", "tools", "skills", "memory", "violations", "loads", "procedures")
+
+
+def _everything(bodies: bool) -> str:
+    """A fields string that selects every field of a record, with bodies when asked."""
+    names = list(vt._SCALARS)
+    for lst, subs in vt._SUBS.items():
+        if lst != "assistant_text" or bodies:
+            names += [f"{lst}.{s}" for s in subs]
+    return ",".join(names)
+
+
+class Everything:
+    """A verb that answers every read in full, whatever fields the script asked for: the
+    reference a query's field set must reproduce."""
+
+    def __init__(self, verb: Callable[..., Any]) -> None:
+        self.verb = verb
+
+    def __call__(self, since: str, until: str, project: Any, bodies: Any, fields: Any = None) -> Any:
+        return self.verb(since, until, project, bodies, _everything(bool(bodies)))
+
+
+def rich_extra() -> list[dict]:
+    """What fixture_day lacks, so that every entry of a field set is read by some record: a memory
+    Write and Edit and MultiEdit, a Task that names its agent, a deferred tool that is called."""
+    return [rec("e1", f"{DAY}T13:00:00Z", turns=5, deferred=["Write", "mcp__x__never"], calls=[
+        call("Write", {"file_path": f"{MEM}/w.md"}, "13:01:00"),
+        call("MultiEdit", {"file_path": f"{MEM}/m.md"}, "13:02:00"),
+        call("Edit", {"file_path": f"{MEM}/e.md"}, "13:03:00"),
+        call("Task", {"subagent_type": "planner", "model": "haiku"}, "13:04:00", err=True),
+        call("Skill", {"skill": "x:y"}, "13:05:00")])]
+
+
+def test_every_query_asks_for_a_field_set_and_its_rows_equal_those_of_a_full_read() -> None:
+    for query in QUERIES:
+        out, fake = run(fixture_day() + rich_extra(), query, until="2026-11-04")
+        full = Run(Everything(Sessions(fixture_day() + rich_extra())))(query=query, until="2026-11-04")
+        assert out["rows"], query  # a sweep of nothing proves nothing
+        assert out["rows"] == full["rows"], query
+        assert fake.asked and all(isinstance(f, str) and f for f in fake.asked), (query, fake.asked)
+
+
+def _lua_fields(query: str) -> tuple[list[str], str | None, bool]:
+    """The fields string, the joined-read string (or None) and the bodies flag of a builder."""
+    block = TEXT.split(f"local function build_{query}()\n", 1)[1].split("\nend\n", 1)[0]
+    m = re.search(r'^\s*fields = ((?:"[^"]*"(?: \.\.\n\s*)?)+),$', block, re.M)
+    assert m, query
+    got = "".join(re.findall(r'"([^"]*)"', m.group(1))).split(",")
+    j = re.search(r'^\s*joined = "([^"]*)",$', block, re.M)
+    return got, (j.group(1) if j else None), re.search(r"bodies = (true|false)", block).group(1) == "true"
+
+
+def test_each_querys_field_set_agrees_with_the_verbs_pinned_table() -> None:
+    for query in QUERIES:
+        got, joined, bodies = _lua_fields(query)
+        assert len(got) == len(set(got)), query  # no entry twice
+        # the pin is the verb's: the keys each query returns beyond the four that always come back.
+        # tool_call_count is the one entry the script adds (admit pages by it, for every query)
+        assert set(got) == set(PINNED_FIELDS[query][0]) | {"tool_call_count"}, query
+        assert bodies == PINNED_FIELDS[query][1], query
+        assert joined == (PINNED_FIELDS["deferred_tools"][0][0] if query == "tools" else None), query
+    assert PINNED_FIELDS["deferred_tools"][0] == ["deferred_tools"] == [JOINED]
+
+
+def test_tools_reads_deferred_tools_in_a_second_call_per_unit_and_no_other_query_does() -> None:
+    for query in QUERIES:
+        _, fake = run(fixture_day(), query, since="2026-11-02", until="2026-11-04", project="p")
+        primary = [f for f in fake.asked if f != JOINED]
+        assert all("deferred_tools" not in f.split(",") for f in primary), query
+        if query != "tools":
+            assert fake.joins == [], query
+            continue
+        assert len(fake.calls) == 2
+        assert [c[:2] for c in fake.joins] == [c[:2] for c in fake.calls]  # the same windows
+        assert all(c[2:] == ("p", False) for c in fake.joins)  # the same project, no bodies
+        assert fake.asked[1::2] == [JOINED, JOINED]  # each window read, then its deferred_tools
+
+
+def test_tools_attaches_each_records_own_deferred_tools_by_session_and_agent() -> None:
+    main = rec("S", f"{DAY}T10:00:00Z", deferred=["A", "B"],
+               calls=[call("A", {}), call("B", {}), call("C", {})])
+    sub = rec("S", f"{DAY}T10:05:00Z", main=False, agent="a1", deferred=["C"],
+              calls=[call("A", {}), call("B", {}), call("C", {})])
+    none = rec("S", f"{DAY}T10:06:00Z", main=False, agent="a2", calls=[call("C", {})])
+    other = rec("T", f"{DAY}T11:00:00Z", calls=[call("A", {})])
+    out, _ = run([main, sub, none, other], "tools", until="2026-11-04")
+    rows = by(out["rows"], "session_id", "agent_id", "kind", "name")
+    assert rows[("S", None, "tool", "A")]["deferred"] is True
+    assert rows[("S", None, "tool", "B")]["deferred"] is True
+    assert "deferred" not in rows[("S", None, "tool", "C")]  # C is deferred for the agent, not the main
+    assert rows[("S", "a1", "tool", "C")]["deferred"] is True
+    assert "deferred" not in rows[("S", "a1", "tool", "A")] and "deferred" not in rows[("S", "a1", "tool", "B")]
+    assert not any(r.get("deferred") for r in out["rows"] if r["session_id"] == "T" or r.get("agent_id") == "a2")
+    summaries = {(r["session_id"], r.get("agent_id")): (r["count"], r["called"])
+                 for r in out["rows"] if r["kind"] == "deferred_summary"}
+    assert summaries == {("S", None): (2, 2), ("S", "a1"): (1, 1)}  # none for the two with nothing deferred
+
+
+def test_a_second_read_the_verb_refuses_splits_the_unit_as_a_refused_first_does() -> None:
+    records = [rec(f"s{i}", f"2026-11-03T{i % 24:02d}:{i // 24:02d}:00Z", calls=[call("Read", {})],
+                   deferred=["Read"]) for i in range(60)]
+    out, fake = run(records, "tools", since="2026-11-03", until="2026-11-04", max_join_records=40)
+    assert [c[:2] for c in fake.calls[:2]] == [("2026-11-03", "2026-11-04"), ("2026-11-03", "2026-11-03T01:00:00Z")]
+    assert [c[:2] for c in fake.joins[:2]] == [("2026-11-03", "2026-11-04"), ("2026-11-03", "2026-11-03T01:00:00Z")]
+    assert len(fake.calls) == len(fake.joins) == 1 + 24
+    whole, _ = run(records, "tools", since="2026-11-03", until="2026-11-04")
+    assert out["rows"] == whole["rows"]
+    assert len([r for r in out["rows"] if r["kind"] == "tool"]) == 60
+    assert all(r.get("deferred") for r in out["rows"] if r["kind"] == "tool")  # the split kept the join
+
+
+def test_the_units_cap_counts_verb_reads_so_a_tools_unit_costs_two() -> None:
+    out, fake = run(sparse(30, 1), "skills", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "7"})
+    assert out["next_since"] == _day(7) and len(fake.calls) == 7 and fake.joins == []
+    out, fake = run(sparse(30, 1), "tools", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "7"})
+    assert out["next_since"] == _day(4) and len(fake.calls) == len(fake.joins) == 4  # 8 reads stop it
+
+
+def test_the_tool_call_bound_counts_the_calls_a_record_had_before_the_filter() -> None:
+    def day(n: int) -> dict:
+        r = rec(f"s{n}", f"{_day(n)}T10:00:00Z", calls=[call("Skill", {"skill": "k"}, day=_day(n))],
+                loads=[load("/r/x.md", 5)])
+        r["tool_call_count"] = 20  # as a cut record's is: more than the calls it kept
+        return r
+
+    for query in QUERIES:  # loads asks for no call at all, and still pages by the calls it ran past
+        out, _ = run([day(0), day(1)], query, since=_day(0), until=_day(2), patch={"MAX_TOOL_CALLS_PER_RUN": "25"})
+        assert out["next_since"] == _day(1), query
+
+
+def test_a_record_with_no_count_is_counted_by_the_calls_it_lists() -> None:
+    def verb(since: str, until: str, project: Any, bodies: Any, fields: Any = None) -> Any:
+        return [{"session_id": f"s{since}", "main": True, "assistant_turns": 1,
+                 "tool_calls": [{"name": "Skill", "input": {"skill": "k"}, "time": f"{since}T10:00:00Z"}
+                                for _ in range(20)]}]
+
+    out = Run(verb, patch={"MAX_TOOL_CALLS_PER_RUN": "25"})(query="skills", since="2026-11-01", until="2026-11-03")
+    assert out["next_since"] == "2026-11-02"
+
+
+def _att(ts: str, sid: str, att: dict) -> dict:
+    return {"type": "attachment", "timestamp": ts, "sessionId": sid, "isSidechain": False, "attachment": att}
+
+
+def _prompt(ts: str, sid: str, text: str) -> dict:
+    return {"type": "user", "timestamp": ts, "sessionId": sid, "isSidechain": False,
+            "message": {"role": "user", "content": text}}
+
+
+def _failed(ts: str, sid: str, tid: str) -> dict:
+    return {"type": "user", "timestamp": ts, "sessionId": sid, "isSidechain": False,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid, "is_error": True, "content": "boom"}]}}
+
+
+def _use(tid: str, name: str, inp: dict) -> dict:
+    return {"type": "tool_use", "id": tid, "name": name, "input": inp}
+
+
+def _write_rich(root: Path) -> None:
+    """One main session that does something for every query, and two subagents, on disk."""
+    p = root / "projects" / "proj"
+    sid = "rich1"
+    t = lambda hms: f"{DAY}T{hms}Z"  # noqa: E731
+    calls = [
+        _use("c1", "Read", {"file_path": f"{MEM}/a.md"}),
+        _use("c2", "Write", {"file_path": f"{MEM}/b.md"}),
+        _use("c3", "Edit", {"file_path": f"{MEM}/c.md"}),
+        _use("c4", "MultiEdit", {"file_path": f"{MEM}/d.md"}),
+        _use("c5", GET, {"project": "nexus", "title": "t1"}),
+        _use("c6", SEARCH, {"project": "nexus", "query": "q"}),
+        _use("c7", "WebFetch", {"url": "u", "note": "é" * 10}),
+        _use("c8", "Bash", {"command": "nx memory curate && git stash"}),
+        _use("c9", "Skill", {"skill": "conexus:orchestration"}),
+        _use("c10", "Agent", {"subagent_type": "developer", "model": "opus"}),
+        _use("c11", "Task", {"subagent_type": "planner"}),
+        _use("c12", RUN, {"name": "gate_record"}),
+        _use("c13", PUT, {"title": "review-x", "tags": "kind:gate,bead:b"}),
+        _use("c14", "Bash", {"command": "nx run transcripts --args-file -"}),
+    ]
+    main: list[dict] = [
+        _prompt(t("10:00:00"), sid, "start"),
+        _att(t("10:00:01"), sid, {"type": "deferred_tools_record",
+                                  "entries": [{"name": "WebFetch", "defer_loading": True}]}),
+        _att(t("10:00:02"), sid, {"type": "deferred_tools_delta", "addedNames": ["mcp__x__y"]}),
+        _att(t("10:00:03"), sid, {"type": "instructions",
+                                  "files": [{"path": "/r/CLAUDE.md", "type": "Project", "content": "abc"}]}),
+        _prompt(t("10:00:04"), sid, "<command-name>/commit</command-name> go"),
+        _assistant(t("10:00:05"), sid, [{"type": "text", "text": f"said {EM} this"}], mid="t0"),
+    ]
+    for i, block in enumerate(calls):
+        main.append(_assistant(t(f"10:{i + 1:02d}:00"), sid, [block], mid=f"m{i}"))
+        if block["id"] in ("c11", "c3"):
+            main.append(_failed(t(f"10:{i + 1:02d}:30"), sid, block["id"]))
+        else:
+            main.append(_result(t(f"10:{i + 1:02d}:30"), sid, block["id"], "ok"))
+    _jsonl(p / f"{sid}.jsonl", main)
+    for agent, start in (("a1", "10:40:00"), ("a2", "10:41:00")):
+        sub = [
+            {**_prompt(t(start), sid, "go"), "agentId": agent, "isSidechain": True},
+            {**_att(t("10:40:01"), sid, {"type": "instructions", "files": [
+                {"path": f"/r/{agent}.md", "type": "Local", "content": "xy"}]}), "agentId": agent},
+            {**_assistant(t("10:40:02"), sid, [_use(f"u{agent}", "Bash", {"command": "false"})],
+                          mid=f"{agent}-m"), "agentId": agent},
+            {**_failed(t("10:40:03"), sid, f"u{agent}"), "agentId": agent},
+        ]
+        _jsonl(p / sid / "subagents" / f"agent-{agent}.jsonl", sub)
+
+
+def test_the_real_verb_accepts_every_querys_fields_and_a_filtered_read_equals_a_full_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    _write_rich(root)
+    for query in QUERIES:
+        verb = RealVerb(monkeypatch, root)
+        out = Run(verb)(query=query, until="2026-11-04")
+        full = Run(Everything(RealVerb(monkeypatch, root)))(query=query, until="2026-11-04")
+        assert out["rows"], query
+        assert out["rows"] == full["rows"], query
+        assert verb.asked and all(isinstance(f, str) and f for f in verb.asked), query
+    tools = Run(RealVerb(monkeypatch, root))(query="tools", until="2026-11-04")["rows"]
+    assert by(tools, "kind", "name")[("tool", "WebFetch")]["deferred"] is True
+    assert any(r["kind"] == "deferred_summary" and r["count"] == 2 for r in tools)
+
+
+def test_tools_size_is_the_true_input_size_though_the_input_is_not_carried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    big = "é" * 300_000  # 600,000 bytes: over the verb's 256 Ki-character cut, and never carried here
+    _jsonl(root / "projects" / "proj" / "big.jsonl", [
+        _assistant(f"{DAY}T10:00:00Z", "big", [
+            {"type": "tool_use", "id": "g", "name": "Grep", "input": {"pattern": big, "n": 5}},
+            {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": big}}])])
+    verb = RealVerb(monkeypatch, root)
+    out = Run(verb)(query="tools", until="2026-11-04")
+    sizes = {r["name"]: r["size"] for r in out["rows"] if r["kind"] == "tool"}
+    assert sizes == {"Grep": 600_000, "Bash": 600_000}  # the cut command would sum to 524,288
+    assert out["truncated_records"] == 1  # the Bash command is carried, and cut at 256 Ki characters
+
+
 # ---- day stepping, the hour split, paging ----------------------------------------------------
 
 
@@ -806,9 +1102,12 @@ def test_a_three_day_window_makes_three_verb_calls_one_utc_day_each() -> None:
     assert out["truncated_records"] == 0 and "next_since" not in out
 
 
-def test_the_project_is_passed_through() -> None:
-    _, fake = run([], "tools", until="2026-11-04", project="-Users-me-proj")
-    assert fake.calls[0][2] == "-Users-me-proj"
+def test_the_project_is_passed_through_unchanged() -> None:
+    for project in ("-Users-me-proj", "all", "repo"):  # a directory name, every project, the repo's directories
+        _, fake = run([], "tools", until="2026-11-04", project=project)
+        assert fake.calls[0][2] == project
+    _, fake = run([], "tools", until="2026-11-04")
+    assert fake.calls[0][2] is None  # absent stays absent: the verb reads nil as all
 
 
 def test_a_timestamp_window_steps_to_the_next_midnight_and_ends_at_to() -> None:
@@ -1051,10 +1350,14 @@ def test_a_year_long_sparse_window_pages_by_units_and_the_joined_pages_equal_one
 
 
 def test_a_page_stops_at_the_units_cap_and_always_takes_at_least_one_unit() -> None:
-    out, fake = run(sparse(30, 1), "tools", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "7"})
+    out, fake = run(sparse(30, 1), "skills", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "7"})
     assert out["next_since"] == _day(7) and len(fake.calls) == 7
-    out, fake = run(sparse(30, 1), "tools", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "0"})
-    assert out["next_since"] == _day(1) and len(fake.calls) == 1
+    # the cap counts verb reads (see the test of the second read): a tools unit is two of them
+    out, fake = run(sparse(30, 1), "tools", since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "7"})
+    assert out["next_since"] == _day(4) and len(fake.calls) == 4
+    for query in ("skills", "tools"):
+        out, fake = run(sparse(30, 1), query, since=_day(0), until=_day(30), patch={"MAX_UNITS_PER_RUN": "0"})
+        assert out["next_since"] == _day(1) and len(fake.calls) == 1, query
 
 
 def test_a_365_day_sparse_window_costs_well_under_the_instruction_cap() -> None:
