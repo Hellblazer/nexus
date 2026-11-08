@@ -211,6 +211,10 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // "source_uri_moved"}) -- no JSON array (not collectionReturning) and the
         // request body carries two tumbler scalars, no id list (not idListAccepting).
         neither("/merge", "handleMerge"),
+        // nexus-bivz3.24: response is a flat scalar map of class counts plus a "sample" OBJECT whose values are small
+        // example lists (capped by the request's own "sample", at most 500 each); no top-level JSON array
+        // (not collectionReturning), and the request carries apply/limit/sample scalars, no id list.
+        neither("/note_uri_repair", "handleNoteUriRepair"),
         // nexus-rfvyy.6.5 (RDR-243): the audited sensitivity route. Request carries a tumbler list, capped at
         // MAX_BATCH_DOC_IDS; the response is the update_many shape ({"updated":[1,0,...]}), a POSITIONAL list.
         both("/sensitivity", "handleSensitivity", POSITIONAL),
