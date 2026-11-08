@@ -39,6 +39,7 @@ TABLE_FILES: dict[str, str] = {
     "chunk-metadata-keys": "chunk-metadata-keys.toml",
     "llm-surfaces": "llm-surfaces.toml",
     "rdr-lifecycle": "rdr-lifecycle.toml",
+    "rdr-research-vocab": "rdr-research-vocab.toml",
     "review-rounds": "review-rounds.toml",
     "target-family-lifecycle": "target-family-lifecycle.toml",
     "target-family-obligation-states": "target-family-obligation-states.toml",

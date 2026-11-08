@@ -2551,10 +2551,6 @@ def _critique_title_to_write(project: str, t2_key: str, round_no: int) -> str:
     return f"{project}/{t2_key}-gate-critique-{today}-r{round_no}"
 
 
-_RESEARCH_CLASSIFICATIONS: Final = ("verified", "documented", "assumed")
-_RESEARCH_METHODS: Final = ("source_search", "spike", "docs_only")
-
-
 def _research_rows_for(rows: list[dict], t2_key: str) -> list[tuple[int, str]]:
     """``(seq, content)`` for every ``<id>-research-N`` row of one RDR, any
     zero-padding of the id."""
@@ -3369,7 +3365,10 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
                 if nxt is None or nxt.startswith("--"):
                     raise click.ClickException(f"rdr-research add: {tok} needs a value.")
                 val = nxt.strip().lower().replace("-", "_")
-                allowed = _RESEARCH_CLASSIFICATIONS if tok == "--classification" else _RESEARCH_METHODS
+                # One table for the CLI and the research_add procedure (RDR-240 TD7).
+                from nexus.tables.rdr_research_vocab import CLASSIFICATIONS, METHODS  # noqa: PLC0415 - deferred: only the add path needs it
+
+                allowed = CLASSIFICATIONS if tok == "--classification" else METHODS
                 if val not in allowed:
                     raise click.ClickException(
                         f"rdr-research add: {tok} must be one of {', '.join(allowed)}; got {nxt!r}."

@@ -206,3 +206,10 @@ def test_the_shipped_tables_fit_the_cap_with_room_to_spare() -> None:
     for name in TABLE_FILES:
         size = len(json.dumps(_get(name)).encode())
         assert size < VERB_RESULT_CAP_BYTES // 100, (name, size)
+
+
+def test_tables_get_serves_the_rdr_research_vocabulary() -> None:
+    # nexus-qo7ie.33: the research_add procedure reads its vocabulary here.
+    out = _get("rdr-research-vocab")
+    assert out["dimensions"]["classification"]["domain"] == ["verified", "documented", "assumed"]
+    assert out["dimensions"]["method"]["domain"] == ["source_search", "spike", "docs_only"]
