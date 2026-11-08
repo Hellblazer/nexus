@@ -40,6 +40,12 @@ SOURCE_PARAMS = frozenset(
 #: reachable from a tool argument, a CLI argument or a caller of ``run_script``.
 ALLOWED: frozenset[str] = frozenset(
     {
+        # nexus-qo7ie.31: core.py imports the runner for procedure_run, so the scan now examines it.
+        # These three MCP tools' public `source` parameter names a DATA source (items or aspects),
+        # never script source; renaming it would break their callers.
+        "nexus.mcp.core:operator_aggregate",
+        "nexus.mcp.core:operator_filter",
+        "nexus.mcp.core:operator_groupby",
         "nexus.lua_runtime.runtime:run",
         "nexus.lua_runtime.worker:_static_check",
         "nexus.lua_runtime.static_check:check",

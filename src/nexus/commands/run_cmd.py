@@ -39,14 +39,14 @@ def _all_finite(value: Any) -> bool:
     return True
 
 
-def _load_args(args_file: str | None, source: str | None) -> dict[str, Any]:
+def _load_args(args_file: str | None, dash: str | None) -> dict[str, Any]:
     """The procedure's arguments: a JSON object from ``--args-file F`` (``-`` is standard
     input), from a bare ``-``, or ``{}`` when neither is given."""
-    if source is not None and source != "-":
-        raise click.UsageError(f"unexpected argument {source!r}; the only second argument is '-' (standard input)")
-    if args_file is not None and source is not None:
+    if dash is not None and dash != "-":
+        raise click.UsageError(f"unexpected argument {dash!r}; the only second argument is '-' (standard input)")
+    if args_file is not None and dash is not None:
         raise click.UsageError("give the arguments once: --args-file F, or '-', not both")
-    where = args_file if args_file is not None else source
+    where = args_file if args_file is not None else dash
     if where is None:
         return {}
     try:
@@ -91,21 +91,21 @@ def _list() -> None:
 
 @click.command("run")
 @click.argument("name", required=False)
-@click.argument("source", required=False)
+@click.argument("dash", required=False, metavar="[-]")
 @click.option("--args-file", "args_file", default=None, metavar="F",
               help="JSON object of the procedure's arguments, read from the file F ('-' is standard input).")
 @click.option("--list", "list_", is_flag=True, help="List the library's procedures with their summaries and exit.")
-def run_cmd(name: str | None, source: str | None, args_file: str | None, list_: bool) -> None:
+def run_cmd(name: str | None, dash: str | None, args_file: str | None, list_: bool) -> None:
     """Run the library procedure NAME and print its JSON result.
 
     The arguments are a JSON object given with --args-file F, or on standard input
     with a bare '-'; none means {}. An error prints as '<kind>: <detail>' and exits 1.
     """
     if list_:
-        if name is not None or source is not None or args_file is not None:
+        if name is not None or dash is not None or args_file is not None:
             raise click.UsageError("--list takes no name and no arguments")
         _list()
         return
     if name is None:
         raise click.UsageError("missing argument NAME (or use --list)")
-    _run(name, _load_args(args_file, source))
+    _run(name, _load_args(args_file, dash))
