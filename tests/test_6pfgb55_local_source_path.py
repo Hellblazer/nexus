@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import nexus.search_engine as se
 from nexus.aspect_readers import uri_for
 from nexus.search_engine import _local_source_path
 
@@ -34,4 +35,29 @@ def test_the_minted_uri_round_trips_to_its_path(path: str) -> None:
 
 @pytest.mark.parametrize("uri", ["", "nx-note://n", "https://example.org/a.py", "file://relative/a.py", "file://"])
 def test_a_source_that_is_not_an_absolute_file_uri_is_no_local_path(uri: str) -> None:
+    assert _local_source_path(SimpleNamespace(source_uri=uri)) == ""
+
+
+# nexus-rfvyy.9 item 3: on Windows every registration mints ``"file://" + "C:\\..."`` (two slashes, then the drive),
+# which the ``file:///`` check refused, so those documents had no local path for a PATH scope or a line lookup.
+WINDOWS = [
+    ("file://C:\\Users\\a\\x.md", "C:\\Users\\a\\x.md", "C:\\Users\\a\\x.md"),
+    ("file:///C:/Users/a/x.md", "C:/Users/a/x.md", "C:\\Users\\a\\x.md"),
+    ("file://C:/Users/a/my#dir/x.md", "C:/Users/a/my#dir/x.md", "C:\\Users\\a\\my#dir\\x.md"),
+    ("file://" + "C:\\Users\\a\\what?\\x.py", "C:\\Users\\a\\what?\\x.py", "C:\\Users\\a\\what?\\x.py"),
+    ("file://d:\\100%25\\x.md", "d:\\100%25\\x.md", "d:\\100%25\\x.md"),
+]
+
+
+@pytest.mark.parametrize(("uri", "posix", "nt"), WINDOWS)
+def test_a_windows_drive_uri_is_a_local_path(uri: str, posix: str, nt: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    entry = SimpleNamespace(source_uri=uri)
+    monkeypatch.setattr(se, "os", SimpleNamespace(name="posix"))
+    assert _local_source_path(entry) == posix, "kept as written off Windows"
+    monkeypatch.setattr(se, "os", SimpleNamespace(name="nt"))
+    assert _local_source_path(entry) == nt, "native separators on Windows, so a PATH scope and open() match"
+
+
+@pytest.mark.parametrize("uri", ["file://\\\\server\\share\\x.md", "file:////server/share/x.md", "file://C:", "file://CC:/x"])
+def test_a_unc_or_malformed_drive_uri_is_no_local_path(uri: str) -> None:
     assert _local_source_path(SimpleNamespace(source_uri=uri)) == ""
