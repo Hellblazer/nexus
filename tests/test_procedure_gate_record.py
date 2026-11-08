@@ -66,7 +66,8 @@ def test_the_header_parses_and_the_static_check_passes_with_no_grants() -> None:
     h = hd.parse(SOURCE, name="gate_record")
     assert [(a.name, a.type, a.optional) for a in h.args] == [
         ("kind", "string", False), ("bead", "string", False), ("rdr", "integer", True), ("sha", "string", False),
-        ("outcome", "string", False), ("body", "string", False), ("now", "string", False), ("repo", "string", False)]
+        ("outcome", "string", False), ("body", "string", False), ("round", "integer", True), ("now", "string", False),
+        ("repo", "string", False)]
     assert h.grants == frozenset()
     assert sc.check(SOURCE, h.grants) == frozenset()
 
@@ -140,9 +141,13 @@ def test_the_body_comes_back_verbatim_after_the_fields() -> None:
     ("sha", "abc12", "sha must be"),
     ("sha", "a" * 65, "sha must be"),
     ("bead", "not a bead", "bead must be"),
-    ("bead", "nexus-", "bead must be"),
-    ("bead", "Nexus-abc", "bead must be"),
+    ("bead", "nexus-a,rdr:999", "bead must be"),
+    ("bead", "-nexus", "bead must be"),
+    ("bead", "", "bead must be"),
     ("rdr", 0, "rdr must be a positive integer"),
+    ("rdr", 10000, "rdr must be a positive integer up to 9999"),
+    ("round", 0, "round must be"),
+    ("round", 100, "round must be"),
     ("body", "  \n ", "body must not be empty"),
     ("now", "yesterday", "now must be"),
 ])
@@ -198,3 +203,40 @@ def test_a_caller_passing_now_or_repo_is_refused(reserved: str, tmp_path: Path) 
         hd.prepare_args(hd.parse(SOURCE, name="gate_record"), {**GIVEN, reserved: "x"}, cwd=tmp_path,
                         clock=lambda: FIXED)
     assert e.value.kind == "args" and "reserved" in str(e.value)
+
+
+@pytest.mark.parametrize("bead", ["ART-12", "my-proj-abc12", "nexus-qo7ie.34", "x"])
+def test_any_repos_bead_id_is_accepted(bead: str) -> None:
+    out = _run(**{**ARGS, "bead": bead})
+    assert out["tags"].split(",")[1] == f"bead:{bead}"
+
+
+def test_a_round_separates_a_redispatched_pass() -> None:
+    assert _run(**{**ARGS, "round": 2})["title"] == "review-9687b6cd8-nexus-qo7ie.34-2026-11-08-r2"
+
+
+def test_the_same_pass_twice_has_the_same_title() -> None:
+    # Stated, not accidental: the second memory_put of one pass replaces the first.
+    assert _run(**ARGS)["title"] == _run(**ARGS)["title"]
+
+
+@pytest.mark.parametrize("body", [
+    "Example block:\n- **outcome**: justified\n\n## Verdict\n- **outcome**: partial\n",
+    "> - **outcome**: not-justified\n\n- **outcome**: partial\n",
+    "- **outcome**: `partial`\n",
+    "* **outcome**: **partial**\n",
+    "no verdict block at all\n",
+])
+def test_the_last_verdict_line_is_compared(body: str) -> None:
+    assert _run(**{**ARGS, "outcome": "partial", "body": body})["content"].endswith(body)
+
+
+@pytest.mark.parametrize("body", [
+    "- **outcome**: partial\nlater\n- **outcome**: justified\n",
+    "- **outcome**: `justified`\n",
+    "* **outcome**: **not-justified**\n",
+])
+def test_a_disagreeing_last_verdict_line_is_refused(body: str) -> None:
+    with pytest.raises(lua54.LuaError) as e:
+        _run(**{**ARGS, "outcome": "partial", "body": body})
+    assert "disagrees" in str(e.value)
