@@ -24,6 +24,8 @@ import java.util.TreeSet;
 import java.util.UUID;
 
 import static dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_ROWS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOB_MOVES;
@@ -417,6 +419,67 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                 assertThatThrownBy(() -> countAs(diag, "nexus", "canary_query_ring"))
                     .as("nexus_diag must hold no SELECT on nexus.canary_query_ring (view era)")
                     .hasMessageContaining("permission denied for table canary_query_ring");
+            }
+        }
+    }
+
+    /**
+     * nexus-u5m5g.3 (RDR-193 Part A1, catalog-048): after a full production-shaped walk, nexus_svc can stage rows
+     * into {@code nexus.catalog_reconcile_runs} and {@code nexus.catalog_reconcile_rows} (the grants-nexus-svc-1 loop
+     * and its default privileges, no per-table edit; no sequence) and EXECUTE the commit function (its own GRANT), and
+     * nexus_diag holds NOTHING on either table: the landing rows hold file paths, and nexus_diag bypasses RLS.
+     *
+     * <p><b>Grant era covered: the VIEW era only</b>, for the reason {@link
+     * #catalogSensitivityChanges_svcHasDml_diagIsDenied} gives. The pin is the last block, a real nexus_diag
+     * connection refused with {@code permission denied}; the constant is asserted first and is not the pin.
+     */
+    @Test
+    void reconcileTables_svcHasDmlAndExecute_diagIsDenied() throws Exception {
+        assertThat(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)
+            .as("the reconcile landing tables are deliberately not diag-readable (nexus-u5m5g.3)")
+            .doesNotContain("catalog_reconcile_runs", "catalog_reconcile_rows");
+
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(pg.getJdbcUrl());
+            cfg.setUsername("nexus_svc");
+            cfg.setPassword("nexus_svc_pass");
+            cfg.setMaximumPoolSize(2);
+            cfg.setAutoCommit(true);
+            try (var svcDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+                TenantScope scope = new TenantScope(svcDs);
+                var repo = new CatalogRepository(scope);
+                String tenant = "reconcile-grants";
+                var row = new java.util.LinkedHashMap<String, Object>();
+                row.put("seq", 0);
+                row.put("kind", "present");
+                row.put("file_path", "/x/a.py");
+                row.put("title", "a.py");
+                assertThat(repo.reconcileStage(tenant, "1.1", "run", "partial", 1, List.of(row)))
+                    .as("nexus_svc INSERT on both tables").isEqualTo(1);
+                assertThat((Integer) scope.withTenant(tenant, ctx -> ctx.fetchCount(CATALOG_RECONCILE_ROWS)))
+                    .as("nexus_svc SELECT on the rows table").isEqualTo(1);
+                assertThat((Integer) scope.withTenant(tenant, ctx -> ctx.fetchCount(CATALOG_RECONCILE_RUNS)))
+                    .as("nexus_svc SELECT on the runs table").isEqualTo(1);
+                assertThat(repo.reconcileCommit(tenant, "1.1", "run", java.time.Duration.ofMinutes(1)))
+                    .as("nexus_svc EXECUTE on the commit function").containsKey("rows");
+                assertThat((Integer) scope.withTenant(tenant, ctx -> ctx.fetchCount(CATALOG_RECONCILE_ROWS)))
+                    .as("nexus_svc DELETE on the rows table (the commit clears them)").isZero();
+                assertThat(repo.reconcileReap(tenant, java.time.Duration.ZERO.plusMillis(1)))
+                    .as("nexus_svc EXECUTE on the reap function, which deletes the header").isEqualTo(1);
+            }
+
+            try (Connection diag = DriverManager.getConnection(
+                    pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                assertThatThrownBy(() -> countAs(diag, "nexus", "catalog_reconcile_rows"))
+                    .as("nexus_diag must hold no SELECT on nexus.catalog_reconcile_rows (view era)")
+                    .hasMessageContaining("permission denied for table catalog_reconcile_rows");
+                assertThatThrownBy(() -> countAs(diag, "nexus", "catalog_reconcile_runs"))
+                    .as("nexus_diag must hold no SELECT on nexus.catalog_reconcile_runs (view era)")
+                    .hasMessageContaining("permission denied for table catalog_reconcile_runs");
             }
         }
     }

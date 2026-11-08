@@ -10,6 +10,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_ROWS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_CONFORMANCE_REPORT;
@@ -13866,6 +13868,215 @@ public final class CatalogRepository {
             }
             insert.execute();
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // RECONCILE (RDR-193 Part A1, nexus-u5m5g.3): stage landing rows, commit them in one transaction
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** A commit failure the function raised by name ({@code run_not_found}, {@code incomplete_stage}, a named row). */
+    public static final class ReconcileCommitException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+        private final String code;
+
+        public ReconcileCommitException(String code, String message) {
+            super(message);
+            this.code = code;
+        }
+
+        /** The code after {@code reconcile_commit } in the raised message. */
+        public String code() {
+            return code;
+        }
+    }
+
+    /** The most landing rows one stage call takes (the 14 bind parameters a row binds keep a page far under the driver's limit). */
+    static final int RECONCILE_STAGE_MAX_ROWS = 1000;
+    /** The age past which a run is dropped by the reap every stage call starts with (design item 3: 24 hours). */
+    static final java.time.Duration RECONCILE_RUN_TTL = java.time.Duration.ofHours(24);
+
+    /**
+     * Stage one page of a reconcile run's landing rows (RDR-193 Part A1). Reaps stale runs of the tenant first.
+     * The first call of a run creates the header (owner, walk mode, the number of rows the client will send); a later
+     * page must carry the same walk and expected_rows. A file_path staged twice in one run is refused, naming it, and
+     * the page is rolled back whole. Every refusal is an {@link IllegalArgumentException} (the handler's 400).
+     *
+     * @return the number of rows staged by this call
+     */
+    public int reconcileStage(String tenant, String owner, String runId, String walk, int expectedRows,
+                              List<Map<String, Object>> rows) {
+        if (owner == null || owner.isBlank()) throw new IllegalArgumentException("'owner' must be non-blank");
+        if (runId == null || runId.isBlank()) throw new IllegalArgumentException("'run_id' must be non-blank");
+        if (!"complete".equals(walk) && !"partial".equals(walk)) {
+            throw new IllegalArgumentException("'walk' must be 'complete' or 'partial', got '" + walk + "'");
+        }
+        if (expectedRows < 0) throw new IllegalArgumentException("'expected_rows' must not be negative");
+        if (rows == null) throw new IllegalArgumentException("'rows' must be a list");
+        if (rows.size() > RECONCILE_STAGE_MAX_ROWS) {
+            throw new IllegalArgumentException("a stage call takes at most " + RECONCILE_STAGE_MAX_ROWS
+                + " rows, got " + rows.size());
+        }
+        // validate and normalise before any statement: a refusal here touches nothing
+        var seenPaths = new HashSet<String>();
+        var staged = new ArrayList<Object[]>(rows.size());
+        for (Map<String, Object> r : rows) {
+            String kind = s(r, "kind");
+            if (!"present".equals(kind) && !"keep".equals(kind) && !"deleted".equals(kind)) {
+                throw new IllegalArgumentException("row kind must be present, keep or deleted, got '" + kind + "'");
+            }
+            String filePath = s(r, "file_path");
+            if (filePath == null || filePath.isEmpty()) throw new IllegalArgumentException("a row needs a non-empty file_path");
+            if (!seenPaths.add(filePath)) {
+                throw new IllegalArgumentException("duplicate file_path in the run: " + filePath);
+            }
+            Integer seq = i(r, "seq");
+            if (seq == null || seq < 0) throw new IllegalArgumentException("a row needs a seq of 0 or more (file_path " + filePath + ")");
+            staged.add(new Object[] {
+                seq, kind, filePath, nne(s(r, "content_type")), nne(s(r, "title")), nne(s(r, "physical_collection")),
+                nne(s(r, "head_hash")), nd(dbl(r, "source_mtime")), nne(s(r, "content_hash")),
+                reconcileObject(r, "base_metadata", filePath), reconcileObject(r, "stamp", filePath), sensitiveFlag(r)});
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            dev.nexus.service.jooq.nexus.Routines.catalogReconcileReap(ctx.configuration(), reconcileInterval(RECONCILE_RUN_TTL));
+            ctx.insertInto(CATALOG_RECONCILE_RUNS, CATALOG_RECONCILE_RUNS.TENANT_ID, CATALOG_RECONCILE_RUNS.RUN_ID,
+                    CATALOG_RECONCILE_RUNS.OWNER_TUMBLER, CATALOG_RECONCILE_RUNS.WALK, CATALOG_RECONCILE_RUNS.EXPECTED_ROWS)
+               .values(tenant, runId, owner, walk, expectedRows)
+               .onConflict(CATALOG_RECONCILE_RUNS.TENANT_ID, CATALOG_RECONCILE_RUNS.RUN_ID).doNothing()
+               .execute();
+            var header = ctx.select(CATALOG_RECONCILE_RUNS.OWNER_TUMBLER, CATALOG_RECONCILE_RUNS.WALK,
+                                    CATALOG_RECONCILE_RUNS.EXPECTED_ROWS, CATALOG_RECONCILE_RUNS.STATE)
+                            .from(CATALOG_RECONCILE_RUNS)
+                            .where(CATALOG_RECONCILE_RUNS.TENANT_ID.eq(tenant).and(CATALOG_RECONCILE_RUNS.RUN_ID.eq(runId)))
+                            .fetchOne();
+            if (!owner.equals(header.value1())) {
+                throw new IllegalArgumentException("run " + runId + " was started for owner " + header.value1() + ", not " + owner);
+            }
+            if (!walk.equals(header.value2())) {
+                throw new IllegalArgumentException("walk '" + walk + "' does not match the run header's '" + header.value2() + "'");
+            }
+            if (expectedRows != header.value3()) {
+                throw new IllegalArgumentException("expected_rows " + expectedRows + " does not match the run header's " + header.value3());
+            }
+            if (!"staged".equals(header.value4())) {
+                throw new IllegalArgumentException("run " + runId + " is already committed; stage a new run");
+            }
+            if (staged.isEmpty()) return 0;
+            // a path staged on an earlier page of this run is a duplicate too
+            var already = ctx.select(CATALOG_RECONCILE_ROWS.FILE_PATH).from(CATALOG_RECONCILE_ROWS)
+                .where(CATALOG_RECONCILE_ROWS.TENANT_ID.eq(tenant).and(CATALOG_RECONCILE_ROWS.RUN_ID.eq(runId))
+                       .and(CATALOG_RECONCILE_ROWS.FILE_PATH.in(seenPaths)))
+                .limit(1).fetch(CATALOG_RECONCILE_ROWS.FILE_PATH);
+            if (!already.isEmpty()) {
+                throw new IllegalArgumentException("duplicate file_path in the run: " + already.get(0));
+            }
+            var insert = ctx.insertInto(CATALOG_RECONCILE_ROWS,
+                CATALOG_RECONCILE_ROWS.TENANT_ID, CATALOG_RECONCILE_ROWS.RUN_ID, CATALOG_RECONCILE_ROWS.SEQ,
+                CATALOG_RECONCILE_ROWS.KIND, CATALOG_RECONCILE_ROWS.FILE_PATH, CATALOG_RECONCILE_ROWS.CONTENT_TYPE,
+                CATALOG_RECONCILE_ROWS.TITLE, CATALOG_RECONCILE_ROWS.PHYSICAL_COLLECTION, CATALOG_RECONCILE_ROWS.HEAD_HASH,
+                CATALOG_RECONCILE_ROWS.SOURCE_MTIME, CATALOG_RECONCILE_ROWS.CONTENT_HASH,
+                CATALOG_RECONCILE_ROWS.BASE_METADATA, CATALOG_RECONCILE_ROWS.STAMP, CATALOG_RECONCILE_ROWS.SENSITIVE);
+            for (Object[] r : staged) {
+                insert = insert.values(tenant, runId, (Integer) r[0], (String) r[1], (String) r[2], (String) r[3],
+                    (String) r[4], (String) r[5], (String) r[6], (Double) r[7], (String) r[8],
+                    JSONB.valueOf((String) r[9]), JSONB.valueOf((String) r[10]), (Boolean) r[11]);
+            }
+            try {
+                return insert.execute();
+            } catch (org.jooq.exception.DataAccessException e) {
+                String state = sqlStateOf(e);
+                if (SqlConstraints.UNIQUE_VIOLATION.equals(state)) {
+                    throw new IllegalArgumentException("a row of this page repeats a seq or file_path already staged in run "
+                        + runId + " (" + SqlConstraints.violated(e) + ")", e);
+                }
+                if ("23514".equals(state)) {
+                    throw new IllegalArgumentException("a landing row was refused by its constraints ("
+                        + SqlConstraints.violated(e) + ")", e);
+                }
+                throw e;
+            }
+        });
+    }
+
+    /** A staged row's {@code base_metadata} or {@code stamp}: absent or null is the empty object; anything but an object is refused. */
+    private static String reconcileObject(Map<String, Object> row, String key, String filePath) {
+        Object v = row.get(key);
+        if (v == null) return "{}";
+        if (!(v instanceof Map<?, ?>)) {
+            throw new IllegalArgumentException("'" + key + "' must be a JSON object (file_path " + filePath + ")");
+        }
+        return jsonOrNull(v);
+    }
+
+    private static org.jooq.types.YearToSecond reconcileInterval(java.time.Duration d) {
+        return new org.jooq.types.YearToSecond(new org.jooq.types.YearToMonth(0, 0), org.jooq.types.DayToSecond.valueOf(d));
+    }
+
+    private static String sqlStateOf(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof java.sql.SQLException se && se.getSQLState() != null) return se.getSQLState();
+        }
+        return null;
+    }
+
+    /**
+     * Commit a staged reconcile run in ONE transaction (RDR-193 Part A1): {@code nexus.catalog_reconcile_commit}. A
+     * committed run returns its stored outcome and changes nothing. The call runs under {@code statement_timeout}: the
+     * job's 15-minute cap is cooperative and interrupts nothing in the database, so this bound is what stops a stuck
+     * statement. A failure the function names ({@code run_not_found}, {@code incomplete_stage}, a write that failed
+     * on one row, which names its file_path) is a {@link ReconcileCommitException}; the transaction rolls back whole.
+     *
+     * @param statementTimeout the longest the commit may run; the job asks {@code stopReason()} before calling
+     */
+    public Map<String, Object> reconcileCommit(String tenant, String owner, String runId, java.time.Duration statementTimeout) {
+        if (statementTimeout == null || statementTimeout.isZero() || statementTimeout.isNegative()) {
+            throw new IllegalArgumentException("statementTimeout must be positive");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setLocal(ctx, "statement_timeout", String.valueOf(statementTimeout.toMillis()));
+            JSONB out;
+            try {
+                out = ctx.select(dev.nexus.service.jooq.nexus.Routines.catalogReconcileCommit(owner, runId))
+                         .fetchOne(0, JSONB.class);
+            } catch (org.jooq.exception.DataAccessException e) {
+                for (Throwable t = e; t != null; t = t.getCause()) {
+                    String m = t instanceof java.sql.SQLException ? serverMessageOf(t) : null;
+                    if (m != null && m.startsWith("reconcile_commit ")) {
+                        int colon = m.indexOf(':');
+                        String code = m.substring("reconcile_commit ".length(), colon > 0 ? colon : m.length()).trim();
+                        throw new ReconcileCommitException(code, m);
+                    }
+                }
+                throw e;
+            }
+            try {
+                return MAPPER.readValue(out.data(), MAP_TYPE);
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new IllegalStateException("reconcile outcome is not JSON", e);
+            }
+        });
+    }
+
+    /** The server's own message text of a driver exception (no SQLSTATE prefix, no CONTEXT lines), else its message. */
+    private static String serverMessageOf(Throwable t) {
+        try {
+            Object sem = t.getClass().getMethod("getServerErrorMessage").invoke(t);
+            if (sem != null) {
+                Object m = sem.getClass().getMethod("getMessage").invoke(sem);
+                if (m instanceof String str) return str;
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // not a PSQLException: fall back to the plain message
+        }
+        String m = t.getMessage();
+        return m != null && m.startsWith("ERROR: ") ? m.substring("ERROR: ".length()) : m;
+    }
+
+    /** Drop the tenant's reconcile runs created longer ago than {@code interval}, committed or not; returns the runs dropped. */
+    public int reconcileReap(String tenant, java.time.Duration interval) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Integer n = dev.nexus.service.jooq.nexus.Routines.catalogReconcileReap(ctx.configuration(), reconcileInterval(interval));
+            return n == null ? 0 : n;
+        });
     }
 
     // ══════════════════════════════════════════════════════════════════════════

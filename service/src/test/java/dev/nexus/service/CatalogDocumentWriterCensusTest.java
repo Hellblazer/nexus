@@ -417,6 +417,41 @@ class CatalogDocumentWriterCensusTest {
         assertThat(offenders).as("files that UPDATE, DELETE or TRUNCATE catalog_sensitivity_changes").isEmpty();
     }
 
+    /**
+     * nexus-u5m5g.3 (RDR-193 Part A1): the reconcile commit is a writer of {@code catalog_documents} that is not Java, so
+     * the scans above cannot see it. Pinned here on the changeset's own text: it inserts documents in exactly one
+     * statement, whose {@code sensitive} column is the OR of the staged flag and a sensitive tombstoned predecessor
+     * (never a bare literal), it assigns the column nowhere else (an existing document is never flagged by the commit;
+     * {@code sensitivity_pending} hands those to the audited route), and it inserts into the audit table, in one
+     * statement, one row for each created row that was born flagged.
+     */
+    @Test
+    void theReconcileCommitInsertsDocumentsOnce_assignsNoSensitiveFlagElse_andAuditsItsFlaggedRows() throws IOException {
+        Path changeset = Path.of("src", "main", "resources", "db", "changelog", "catalog-048-reconcile.xml");
+        String xml = stripXmlSqlComments(Files.readString(changeset));
+        assertThat(xml).as("non-vacuity: the changeset text was read").contains("catalog_reconcile_commit").hasSizeGreaterThan(5000);
+
+        Pattern insertDocs = Pattern.compile(String.join("\\s+", "(?i)insert", "into", "nexus\\.catalog_documents\\b"));
+        Matcher d = insertDocs.matcher(xml);
+        int docInserts = 0;
+        while (d.find()) docInserts++;
+        assertThat(docInserts).as("the commit inserts documents in exactly one statement").isEqualTo(1);
+        assertThat(xml).as("and that statement's flag is the staged OR the inherited one, computed before it")
+            .contains("0, '', '', 0, '', '', '', NULL::timestamptz, w.row_sens");
+        assertThat(xml).as("row_sens is assigned from the staged flag and the predecessor's, and nowhere else")
+            .contains("row_sens = (w.group_sens OR w.inherited)");
+        assertThat(RAW_SET.matcher(xml).find()).as("no statement of the changeset assigns catalog_documents.sensitive").isFalse();
+
+        Matcher a = Pattern.compile(String.join("\\s+", "(?i)insert", "into", "nexus\\.catalog_sensitivity_changes\\b")).matcher(xml);
+        int auditInserts = 0;
+        while (a.find()) auditInserts++;
+        assertThat(auditInserts).as("one audit insert").isEqualTo(1);
+        assertThat(xml).as("for the created rows born flagged, register_inherit naming the predecessor else register_set")
+            .contains("WHERE w.ins AND w.created AND w.row_sens")
+            .contains("'register_inherit predecessor=' || w.pred_tumbler")
+            .contains("'register_set'");
+    }
+
     @Test
     void theAuditScanSeesAWriterOutsideTheNamedMethodAndEveryUpdateDeleteSpelling() {
         String fake = """
