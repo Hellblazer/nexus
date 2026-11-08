@@ -124,9 +124,13 @@ public final class NoteUri {
      * with no title part also pass, and {@link #isNote} / the repair's Java classification settle them.
      */
     public static Condition notInOwnCollection(Field<String> uri, Field<String> physicalCollection) {
+        // A null collection would make the concatenation null and "own" unknown, which NOT turns into unknown: the
+        // row would pass no filter and so be invisible. Read as blank, it is a row that names no collection of its
+        // own, which the repair classifies as malformed.
+        Field<String> coll = DSL.coalesce(physicalCollection, DSL.val(""));
         Condition noteScheme = startsWith(uri, DSL.val(NOTE)).or(startsWith(uri, DSL.val(LEGACY)));
-        Condition own = startsWith(uri, DSL.val(NOTE).concat(physicalCollection).concat(DSL.val("/")))
-            .or(startsWith(uri, DSL.val(LEGACY).concat(physicalCollection).concat(DSL.val("/"))));
+        Condition own = startsWith(uri, DSL.val(NOTE).concat(coll).concat(DSL.val("/")))
+            .or(startsWith(uri, DSL.val(LEGACY).concat(coll).concat(DSL.val("/"))));
         return noteScheme.and(own.not());
     }
 
