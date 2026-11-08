@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -450,12 +451,14 @@ class _Watch:
 
 def _fake_world(tmp_path: Path, *, teardown_s: float, revokes: bool, removes_lease: bool, holds_directory: bool,
                 directory_before: bool, release_lag_s: float, version: str):
-    """A fake nx-mcp that does its 'teardown' teardown_s after it starts (the kill-server is not run; this
-    stands in for the hangup), and a fake nx that reads the state it leaves. Records whether config.yml
-    was still there when the 'teardown' ran, which is the whole point of the wait."""
+    """A fake nx-mcp that does its 'teardown' teardown_s after the hangup (the kill-server is not run: the
+    fake tmux creates the returned *hangup* file, which the fake waits for), and a fake nx that reads the
+    state it leaves. Records whether config.yml was still there when the 'teardown' ran, which is the whole
+    point of the wait. Never a timer from its spawn: on a loaded host the baseline read can start after any
+    fixed delay, and the fake must not have torn down before it."""
     d = tmp_path / "world"
     d.mkdir()
-    state, saw_config, dir_out = d / "t1-state", d / "saw-config", d / "dir-out"
+    state, saw_config, dir_out, hangup = d / "t1-state", d / "saw-config", d / "dir-out", d / "hangup"
     state.write_text("live", encoding="utf-8")
     held = f"  session_id: {SID}  created_at: t\n"
     none = "No live directory entry.\n"
@@ -468,7 +471,7 @@ def _fake_world(tmp_path: Path, *, teardown_s: float, revokes: bool, removes_lea
     if directory_before and not holds_directory:
         release = (f'echo "{none.strip()}" > "{dir_out}"\n' if not release_lag_s
                    else f'( sleep {release_lag_s}; echo "{none.strip()}" > "{dir_out}" ) &\n')
-    mcp.write_text("#!/bin/sh\n" f"sleep {teardown_s}\n"
+    mcp.write_text("#!/bin/sh\n" f'while [ ! -f "{hangup}" ]; do sleep 0.05; done\n' f"sleep {teardown_s}\n"
                    f'[ -f "{cfg}/config.yml" ] && echo yes > "{saw_config}"\n'
                    + (f'echo revoked > "{state}"\n' if revokes else "")
                    + (f'rm -f "{lease}"\n' if removes_lease else "") + release, encoding="utf-8")
@@ -482,13 +485,13 @@ def _fake_world(tmp_path: Path, *, teardown_s: float, revokes: bool, removes_lea
                   f'if [ "$1" = tuple ] && [ "$2" = directory ]; then\n  if [ "$3" = rs_alpha ]; then cat "{dir_out}"; '
                   'else echo "No live directory entry."; fi\n  exit 0\nfi\nexit 2\n', encoding="utf-8")
     nx.chmod(0o755)
-    return home, cfg, lease, mcp, nx, saw_config
+    return home, cfg, lease, mcp, nx, saw_config, hangup
 
 
 def _cleanup(run, monkeypatch, tmp_path, *, teardown_s=0.5, wait_s=10.0, revokes=True, removes_lease=True,
              holds_directory=False, directory_before=True, release_lag_s=0.0, version="7.97.0",
-             publish_lease=True, settle_s=1.0):
-    home, cfg, lease, mcp, nx, saw_config = _fake_world(
+             publish_lease=True, settle_s=1.0, start_delay_s=0.0):
+    home, cfg, lease, mcp, nx, saw_config, hangup = _fake_world(
         tmp_path, teardown_s=teardown_s, revokes=revokes, removes_lease=removes_lease,
         holds_directory=holds_directory, directory_before=directory_before, release_lag_s=release_lag_s,
         version=version)
@@ -499,7 +502,13 @@ def _cleanup(run, monkeypatch, tmp_path, *, teardown_s=0.5, wait_s=10.0, revokes
         lease.write_text(json.dumps({"token": TOKEN, "expires_at": 9e12}), encoding="utf-8")
     sb.real_nx = str(nx)
     sb.before = {"rs_alpha": {"sessionId": SID}}
-    sb.tmux = lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "")
+
+    def tmux(*a, **k):
+        if a[:1] == ("kill-server",):
+            hangup.touch()  # the hangup reaches nx-mcp
+        return subprocess.CompletedProcess(a, 1, "", "")
+
+    sb.tmux = tmux
     monkeypatch.setattr(run, "LINGER_S", 0)
     monkeypatch.setattr(run, "TEARDOWN_WAIT_S", wait_s)
     monkeypatch.setattr(run, "SETTLE_S", settle_s)
@@ -508,6 +517,7 @@ def _cleanup(run, monkeypatch, tmp_path, *, teardown_s=0.5, wait_s=10.0, revokes
     sb.watch = _Watch([(proc.pid, _ps_args(proc.pid))])
     notes: list[str] = []
     try:
+        time.sleep(start_delay_s)  # a loaded host: cleanup starts late
         dirty = run.cleanup(sb, notes)
     finally:
         kill_group(proc)  # its own group: the script and its sleep, nothing else
@@ -554,6 +564,15 @@ def test_cleanup_does_not_credit_its_own_file_deletion(run, tmp_path, monkeypatc
     dirty, _, _, cfg = _cleanup(run, monkeypatch, tmp_path, removes_lease=False)
     assert dirty == [f"T1 session {SID[:8]}: nx-mcp left its lease file t1_session_lease.{SID[:8]}... behind"]
     assert not list(cfg.glob("t1_session_lease.*"))  # still deleted: the credential does not stay on disk
+
+
+def test_cleanup_judges_the_teardown_however_late_cleanup_starts(run, tmp_path, monkeypatch) -> None:
+    """The fake nx-mcp tears down on the hangup, not on a timer from its spawn: on a loaded host cleanup
+    can start after any fixed delay, and a timed fake had exited by then (no nx-mcp to wait for), revoked
+    its token (revocation not provable) and released its row (the release proves nothing): the 7.98.0
+    lab-l flake, four findings where one was expected."""
+    dirty, _, _, _ = _cleanup(run, monkeypatch, tmp_path, removes_lease=False, start_delay_s=1.5)
+    assert dirty == [f"T1 session {SID[:8]}: nx-mcp left its lease file t1_session_lease.{SID[:8]}... behind"]
 
 
 def test_cleanup_fails_a_directory_that_was_never_held(run, tmp_path, monkeypatch) -> None:
