@@ -207,6 +207,7 @@ _NOT_SENDERS: dict[str, str] = {
     "nexus/bib_enricher.py": "third party: bibliographic APIs",
     "nexus/bib_enricher_openalex.py": "third party: OpenAlex",
     "nexus/commands/catalog_cmds/backfill.py": "third-party URLs (ETag capture)",
+    "nexus/_mineru_pid.py": "MinerU server (loopback /health identity probe)",
     "nexus/commands/mineru.py": "MinerU server",
     "nexus/daemon/binary_install.py": "release download",
     "nexus/daemon/mineru_lifecycle.py": "MinerU server",
