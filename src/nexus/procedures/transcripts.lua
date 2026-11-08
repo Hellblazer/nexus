@@ -17,20 +17,24 @@
 --
 -- Result: {rows, truncated_records, since, until, next_since}. since and until are the values
 -- the run used. next_since is absent when the window is done; otherwise the next page starts
--- there (a date, or a timestamp when the page ended inside a day split into hours). Run again
+-- there (a date, or the hour a page ended at inside a day). Run again
 -- with since = next_since and the returned until, and join the pages with
 -- nexus.lua_runtime.transcripts_join.join_pages (it refuses a page whose since is not the
--- previous next_since). A page adds whole units (days, hours after a split) while its rows
+-- previous next_since). A page adds whole units (days, or hours) while its rows
 -- stay under PAGE_BYTES, its verb reads (one a unit) under MAX_UNITS_PER_RUN (every query: a
 -- year-long sparse window pages; each read decodes every transcript of its window), the tool
 -- calls it reads under MAX_TOOL_CALLS_PER_RUN
 -- (every query: the Lua instructions a page takes follow the commands it scans, about 1,300 a
 -- call at worst, so 15,000 calls stay under 20 million of the runtime's 50 million) and, for
--- keyed queries, its sessions under MAX_SESSIONS_PER_RUN. A day whose verb result is too
--- large, whose rows alone pass PAGE_BYTES, or whose tool calls alone pass
--- MAX_TOOL_CALLS_PER_RUN, is split into hours
--- (an hour is taken whole, so a page always advances); an hour that still does not fit
--- PAGE_BYTES or the verb fails with result-window: naming the hour. A transcript
+-- keyed queries, its sessions under MAX_SESSIONS_PER_RUN. A day that was read but does not
+-- fit (the page is full, or the day's rows alone pass PAGE_BYTES, or its calls alone pass
+-- MAX_TOOL_CALLS_PER_RUN) is divided by the hour each record starts in, from the records
+-- already read: the page takes hours while they fit and ends at the first that does not, and
+-- the next page reads that hour to midnight once (every query asks for start for this). Hour
+-- reads remain for a day the verb refuses as too large, and for a day holding a start this
+-- script cannot place in an hour (the verb takes any ISO offset, this reader UTC only). An hour
+-- is taken whole, so a page always advances; an hour that still does not fit PAGE_BYTES or
+-- the verb fails with result-window: naming the hour. A transcript
 -- over 1 MB after the verb's cuts fails with the verb's record-too-large: error, unchanged.
 --
 -- Fields. Each query asks the verb only for the fields it reads (the fields argument of
@@ -596,7 +600,7 @@ local function build_tools()
   return {
     keyed = false,
     bodies = false,
-    fields = "tool_call_count,tool_calls.name,tool_calls.time,tool_calls.input_bytes," ..
+    fields = "tool_call_count,start,tool_calls.name,tool_calls.time,tool_calls.input_bytes," ..
       "tool_calls.input@Bash,deferred_tools",
     each = function(rec, push)
       local t = tally("sum", rec)
@@ -645,7 +649,7 @@ local function build_memory()
   return {
     keyed = false,
     bodies = false,
-    fields = "tool_call_count,instruction_loads,tool_calls.name,tool_calls.time," ..
+    fields = "tool_call_count,start,instruction_loads,tool_calls.name,tool_calls.time," ..
       "tool_calls.input@Read,tool_calls.input@Write,tool_calls.input@Edit,tool_calls.input@MultiEdit," ..
       "tool_calls.input@*__memory_get,tool_calls.input@*__memory_search",
     each = function(rec, push)
@@ -682,7 +686,7 @@ local function build_loads()
   return {
     keyed = false,
     bodies = false,
-    fields = "tool_call_count,instruction_loads",
+    fields = "tool_call_count,start,instruction_loads",
     each = function(rec, push)
       local t = tally("max", rec)
       for _, l in ipairs(list(rec.instruction_loads)) do
@@ -823,7 +827,7 @@ local function build_skills()
   return {
     keyed = true,
     bodies = false,
-    fields = "tool_call_count,assistant_turns,slash_commands,tool_calls.name,tool_calls.input@Skill," ..
+    fields = "tool_call_count,start,assistant_turns,slash_commands,tool_calls.name,tool_calls.input@Skill," ..
       "tool_calls.input@Agent,tool_calls.input@Task",
     keys = {"scope", "kind", "name"},
     tags = {count = "sum", runs_with_skill = "sum", long_runs = "sum", long_runs_without_skill = "sum"},
@@ -916,7 +920,7 @@ local function build_violations()
   return {
     keyed = true,
     bodies = true,
-    fields = "tool_call_count,assistant_text,tool_calls.name,tool_calls.input@Bash",
+    fields = "tool_call_count,start,assistant_text,tool_calls.name,tool_calls.input@Bash",
     keys = {"rule"},
     tags = {count = "sum", main_sessions = "sum"},
     each = function(rec, add)
@@ -951,7 +955,7 @@ local function build_procedures()
   return {
     keyed = true,
     bodies = false,
-    fields = "tool_call_count,tool_calls.name,tool_calls.input@*__procedure_run," ..
+    fields = "tool_call_count,start,tool_calls.name,tool_calls.input@*__procedure_run," ..
       "tool_calls.input@*__memory_put,tool_calls.input@Bash",
     keys = {"procedure"},
     tags = {runs = "sum", hand_written = "sum"},
@@ -1130,6 +1134,30 @@ local function admit(q, page, recs, narrow)
   return "ok"
 end
 
+-- The records of a unit grouped by the hour their transcript starts in, in order: {hour, recs};
+-- nil when a record's start does not parse here (the verb takes any ISO offset, this reader only
+-- UTC) or lies before the unit, since a record put in the wrong hour would be read again by the
+-- next page. The caller then narrows by hour reads, as for a unit the verb refuses.
+local function by_hour(recs, from)
+  local groups, at = {}, {}
+  for _, rec in ipairs(recs) do
+    local t = ts_value(rec.start)
+    if t == nil or t < from then
+      return nil
+    end
+    local h = math.floor(t) // HOUR * HOUR
+    local g = at[h]
+    if g == nil then
+      g = {hour = h, recs = {}}
+      at[h] = g
+      groups[#groups + 1] = g
+    end
+    g.recs[#g.recs + 1] = rec
+  end
+  table.sort(groups, function(a, b) return a.hour < b.hour end)
+  return groups
+end
+
 local function window(q, lo, hi)
   local page = {rows = {}, bytes = 0, units = 0, calls = 0, sessions = 0, tool_calls = 0, truncated = 0}
   if q.keyed then
@@ -1155,7 +1183,34 @@ local function window(q, lo, hi)
     if recs ~= nil then
       verdict = admit(q, page, recs, stop - pos > HOUR)
     end
-    if verdict == "ok" then
+    local groups = nil
+    if verdict ~= "ok" and recs ~= nil and stop - pos > HOUR then
+      groups = by_hour(recs, pos)
+    end
+    if groups ~= nil then
+      -- The unit was read but does not fit: admit its hours from the records in hand, so the
+      -- page ends at an hour and the next page reads only the rest of the day, once. An hour is
+      -- never divided: one over the call bound is taken whole on an empty page, as an hour read is.
+      -- The page ends where what it admitted ends: at the unit's start when no hour fit.
+      for i, g in ipairs(groups) do
+        verdict = admit(q, page, g.recs, false)
+        if verdict ~= "ok" then
+          if i > 1 or verdict ~= "full" then
+            pos = math.max(pos, g.hour)
+          end
+          break
+        end
+      end
+      if verdict == "ok" then
+        pos = stop
+      elseif verdict == "full" then
+        next_since = stamp(pos)
+        break
+      else
+        fail("result-window: " .. stamp(pos) .. " to " .. stamp(math.min(stop, (pos // HOUR + 1) * HOUR))
+          .. " is too large for one verb result or one page; narrow the window or the project")
+      end
+    elseif verdict == "ok" then
       pos = stop
     elseif verdict == "full" then
       next_since = stamp(pos)
