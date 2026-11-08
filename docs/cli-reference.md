@@ -6940,6 +6940,23 @@ output — "SAME QUERIES, SAME BUCKETS, EVERY TIME" (playbook §4.5).
 
 ---
 
+## nx run
+
+```
+nx run NAME [--args-file F | -]
+nx run --list
+```
+
+Run a library procedure (RDR-240, RDR-242): a reviewed Lua script that runs in a sandboxed worker process, reads state through read-only verbs and returns a JSON value. The command calls the same runner as the MCP tool `procedure_run` and nothing else. The result is printed as JSON on standard output.
+
+`NAME` matches `[a-z][a-z0-9_]{0,63}`. The procedure's arguments are a JSON object, read from the file `F` with `--args-file F`, or from standard input with `--args-file -` or a bare `-`; with neither, they are `{}`. The names and types the procedure accepts are in its header (`string`, `integer`, `number`, `boolean`); the host fills `now` and `repo` itself and refuses a caller who passes them. An argument file that is not valid JSON, or not an object, is a usage error (exit 2).
+
+An error prints as `<kind>: <detail>` on standard error and the exit status is 1. The kinds are `args`, `header`, `static_check`, `lua` and `result` (the script or its call was refused or raised), `limit` (a resource limit ended the run), `worker`, `busy` (the client already runs its maximum of workers), `library` (the name is outside the rule, in neither root, or a repo procedure named like a shipped one; the detail begins with the reason), `unavailable` (this build has no runtime) and `repo` (git could not say where the repository is).
+
+`--list` prints one line per procedure, `NAME<TAB>SUMMARY`, with `(repo)` added for a procedure from the checkout's `.nexus/procedures/`. The procedures that ship with `nx` are always listed. A checkout's own procedures run, and are listed, only while the environment variable `NX_PROCEDURES_REPO_ROOT` is exactly `1`; otherwise `--list` says so on standard error, and `nx run NAME` for a name found only there is refused with the reason `repo_root_off`.
+
+---
+
 ## nx command-context
 
 Generates the agent-relay preamble context that the conexus skills consume (RDR-130 P2). Each subcommand mirrors a skill (`analyze-code`, `architecture`, `create-plan`, `implement`, `debug`, `deep-analysis`, `enrich-plan`, `knowledge-tidy`, `pdf-process`, `plan-audit`, and more) and prints the working-directory, project-type, git-branch, and ready-bead context blocks the agent needs. Run `nx command-context --help` for the full subcommand list. Primarily invoked by tooling, not by hand.
