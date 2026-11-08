@@ -852,8 +852,13 @@ def test_with_the_root_off_the_run_is_refused_through_every_door(
     assert workers == [], "a refused run started a worker"
 
 
-def test_the_switch_is_named_as_the_settings_and_the_docs_say() -> None:
+def test_the_nexus_project_settings_turn_on_the_switch_the_library_reads() -> None:
+    """Sam's RDR-242 S5 answer (ask baton/s5-repo-root, option a): the root is off by
+    default and the nexus repo turns it on through its project settings env. A typo in
+    either name would leave preflight off in this repo with every other test green."""
     assert library.REPO_ROOT_ENV == "NX_PROCEDURES_REPO_ROOT"
+    settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["env"][library.REPO_ROOT_ENV] == "1"
 
 
 def test_bash_is_present_so_the_shell_legs_do_not_all_skip() -> None:
