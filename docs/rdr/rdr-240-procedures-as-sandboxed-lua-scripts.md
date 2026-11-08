@@ -186,9 +186,10 @@ the header question (`nexus_rdr/240-research-4`, `-5`).
   document (`nexus_rdr/240-research-3`). This RDR is designed on the
   fallback.
 - **A2:** Transcript queries written in Lua over host-parsed records are
-  fast enough and fit in memory: a 30-day query over about 5,000 sessions
-  finishes in under a minute on the laptop, and each verb result fits the
-  worker. RDR-242's limits bound both: 60 s of wall time with verb time
+  fast enough and fit in memory: each run of a 30-day query over about 5,000
+  sessions, paged, finishes inside RDR-242's 60 s run limit on the laptop
+  (the 30-day total is recorded; Sam 2026-11-08, ask a2-time-line), and each
+  verb result fits the worker. RDR-242's limits bound both: 60 s of wall time with verb time
   counted, and about 22 MB of JSON per verb result before 64 MB of Lua memory
   is full (measured 2.8 times JSON size for session-like records;
   `nexus_rdr/240-research-4`). Verification: Phase 1 Step 1's spike, timed
@@ -627,10 +628,12 @@ over its own transcripts for the last 30 days, run through `run_procedure`
 so RDR-242's limits apply. It records:
 
 - the wall time of a 30-day `tools` query and of a 30-day `violations`
-  query (`bodies=true`), each the total of its paged runs, verb time
-  included. Pass: each total under 60 s, A2's "under a minute". RDR-242's
-  wall-time limit of 60 s applies to each run, so a total that passes keeps
-  every run inside it; the record states the margin.
+  query (`bodies=true`), each run and the total of its paged runs, verb time
+  included. Pass: every run under RDR-242's 60 s wall-time limit, with the
+  margin and each 30-day total recorded. (Until 2026-11-08 the line was each
+  total under 60 s; the re-run after the fields filter missed it at 113.6 s
+  and 105.3 s with every run under 15.4 s, and Sam made the line per run,
+  ask a2-time-line, `nexus_rdr/240-a2-spike-2026-11-08-r2`.)
 - the largest one-day `transcripts.sessions` result in the window, in JSON
   bytes, with and without bodies, and the run's peak Lua memory. Pass: the
   largest day at most half of RDR-242's verb-result bound, which its
@@ -750,8 +753,9 @@ in T2.
 
 ### Performance Expectations
 
-A2's bounds, measured in Phase 1 Step 1: a 30-day transcript query under
-60 s on the laptop across its paged runs, verb time included; the largest
+A2's bounds, measured in Phase 1 Step 1: every paged run of a 30-day
+transcript query under 60 s on the laptop, verb time included, with the
+30-day total recorded; the largest
 one-day verb result at most half of RDR-242's verb-result bound; every page
 under the 1 MB result cap.
 
@@ -870,3 +874,4 @@ keep a caller write until a write verb exists, rather than adding one here.
 | 2026-11-07 | Accepted (Sam). Round-2 Significants S1 to S6 dispositioned to nexus-qo7ie (bead comment, with their Implementation Plan steps). |
 | 2026-11-08 | Technical Design 4 amended to match the reviewed record of `transcripts.sessions` (nexus-mdbds.8, reviews `nexus/review-nexus-mdbds.8-038adb33b` and `nexus/nexus-mdbds.8-critique-038adb33b`): instruction-load type and size, assistant turns, first-turn context tokens, slash-command names, and list tails dropped and counted past 1 MB. |
 | 2026-11-08 | Technical Design 4 amended to match reviewed code (nexus-qo7ie.31; standing grant 3): RDR-242's `transcripts.sessions` takes a fifth argument, `fields` (RDR-242 Technical Design 10), the A2 remedy Sam chose on 2026-11-08. |
+| 2026-11-08 | A2's time line made per run (Sam, ask a2-time-line, option 2, 2026-11-08): every paged run of the 30-day `tools` and `violations` queries under RDR-242's 60 s limit, the 30-day totals recorded, in Assumptions, Phase 1 Step 1 and Performance Expectations. The re-run after the fields filter (`nexus_rdr/240-a2-spike-2026-11-08-r2`) passes it: slowest run 15.4 s, totals 113.6 s and 105.3 s; the speed-ups follow as their own beads, measured against the same lines. |
