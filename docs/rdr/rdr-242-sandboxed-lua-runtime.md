@@ -653,13 +653,21 @@ grant rule.
    ungranted verb by name as well, and checks its arguments (item 6).
 10. Version 1 verbs (read-only). `memory.get(project, title)`,
     `memory.list(project)`, `memory.search(query, project, limit)`,
-    `transcripts.sessions(since, until, project, bodies)`,
+    `transcripts.sessions(since, until, project, bodies, fields)`,
     `git.diff_names(base)`, `git.diff_stat(base)`, `tables.get(name)`. Each
     returns structured values, not the formatted text the MCP tools print:
     the memory verbs call the T2 store layer (`db.resolve_title`,
     `db.list_entries`, `db.search`); the other four are new client functions
     (Key Discoveries, A3). `transcripts.sessions` never returns message
-    bodies unless `bodies` is true. Read-only means no verb writes a record
+    bodies unless `bodies` is true. `fields`, a comma-separated list, narrows each
+    record to the named fields while the file is parsed (nil returns every
+    field; `session_id`, `agent_id`, `main` and `truncated` always come back);
+    `tool_calls.input@<Tool>` keeps a call's input for that tool only, and
+    `tool_calls.input_bytes` reports an input's size without carrying it. It
+    cuts the result and the memory a scan holds, not the read: every line is
+    still decoded (RDR-240 A2 remedy, Sam 2026-11-08; nexus-qo7ie.31).
+    `project` may also be `repo`: every project directory holding the sessions
+    of the repository the run started in. Read-only means no verb writes a record
     or its content. `memory.get` still counts one access (`access_count`,
     `last_accessed`) on an exact or unique-prefix hit, as MCP `memory_get`
     does, because the engine's resolve endpoint has no silent read;
@@ -1286,4 +1294,5 @@ scope change and the round 2 findings named.
 - 2026-11-07: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `55954c930`; critique `nexus_rdr/242-gate-critique-2026-11-07-r3`.
 - 2026-11-07: Accepted (Sam, "Accept, fold residuals"). Residual dispositions: S1, S2, S3, S4 and S5 carried by bead nexus-mdbds (stage 3 implementation), each with its Implementation Plan phase.
 - 2026-11-07: Technical Design 10 amended to match reviewed code (nexus-mdbds.7 review r1; standing grant 3): `memory.get` counts one access through `db.resolve_title`, the other memory verbs count none.
+- 2026-11-08: Technical Design 10 amended to match reviewed code (nexus-qo7ie.31, the verb's reviews `nexus/review-nexus-qo7ie.31-fields-r2` and the wiring's `nexus/review-nexus-qo7ie.31-fields-wiring-r1`; standing grant 3): `transcripts.sessions` takes a fifth argument, `fields`, and `project` may be `repo`.
 - 2026-11-08: Technical Design 5, 6 and the Implementation Plan's Steps 1 and 2, Finalization Gate A4 and record 33, and Cross-Cutting Versioning amended to match reviewed code (nexus-mdbds.4 review; standing grant 3): lupa pinned to 2.8 exactly; the worker's OS limits travel as argv flags; the parent-to-worker verb-result cap is 20 MiB from the measured JSON-to-Lua ratio, with a protected Lua table build (gate r3 S3); each verb runs on a helper thread the run loop stops waiting on at the deadline (gate r3 S2); the 50 MB measurement times transport only and the fit question is the cap's pass line; record 33's facts tested per platform.

@@ -327,7 +327,7 @@ schema.
 4. **Host verbs the four procedures use.** RDR-242's version 1 verbs,
    exactly (its Technical Design 10): `memory.get(project, title)`,
    `memory.list(project)`, `memory.search(query, project, limit)`,
-   `transcripts.sessions(since, until, project, bodies)`,
+   `transcripts.sessions(since, until, project, bodies, fields)`,
    `git.diff_names(base)`, `git.diff_stat(base)` and `tables.get(name)`. No
    write verb. RDR-242 builds `transcripts.sessions` as a new client
    function; this RDR states what its records carry:
@@ -869,3 +869,4 @@ keep a caller write until a write verb exists, rather than adding one here.
 | 2026-11-07 | Gate round 2 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `6bc7c1ed1`; critique `nexus_rdr/240-gate-critique-2026-11-07-r2`. |
 | 2026-11-07 | Accepted (Sam). Round-2 Significants S1 to S6 dispositioned to nexus-qo7ie (bead comment, with their Implementation Plan steps). |
 | 2026-11-08 | Technical Design 4 amended to match the reviewed record of `transcripts.sessions` (nexus-mdbds.8, reviews `nexus/review-nexus-mdbds.8-038adb33b` and `nexus/nexus-mdbds.8-critique-038adb33b`): instruction-load type and size, assistant turns, first-turn context tokens, slash-command names, and list tails dropped and counted past 1 MB. |
+| 2026-11-08 | Technical Design 4 amended to match reviewed code (nexus-qo7ie.31; standing grant 3): RDR-242's `transcripts.sessions` takes a fifth argument, `fields` (RDR-242 Technical Design 10), the A2 remedy Sam chose on 2026-11-08. |
