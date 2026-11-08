@@ -394,3 +394,20 @@ def test_calibration_fails_when_a_probe_is_refused_under_another_rule(monkeypatc
     monkeypatch.setattr(sc, "_CALIBRATION_PROBES", ((b"return load", "env"),))
     with pytest.raises(sc.ChunkFormatError):
         sc.calibrate()
+
+
+@pytest.mark.parametrize("src", [
+    b"return memory[tostring(1)]",
+    b"local x = true\nreturn memory[x and 'a' or 'b']",
+    b"return string[('re'):rep(1) .. 'p']",
+])
+def test_a_key_built_by_a_call_or_a_branch_is_ns_dynamic(src: bytes) -> None:
+    assert _rule(src) == "ns-dynamic"
+
+
+@pytest.mark.parametrize("src", [
+    b"local x = memory\nx = 1\nreturn x[1]",
+    b"local x = memory\nlocal y = x.get\nreturn y, x[1]",
+])
+def test_the_dynamic_scan_stops_where_the_namespace_register_is_reused_or_read_as_a_field(src: bytes) -> None:
+    assert _rule(src, frozenset({"memory.get"})) == "ns-value"
