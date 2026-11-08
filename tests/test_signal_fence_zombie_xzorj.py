@@ -86,9 +86,18 @@ def test_a_live_process_with_an_empty_argv_is_still_judged_by_the_rules(tmp_path
             assert time.monotonic() < deadline, "the process never showed an empty argv[0]"
             time.sleep(0.02)
         assert fence._state(pid) not in ("Z", "X")
+        assert not fence._imageless(pid), "an empty argv[0] with arguments and an environment is a program"
         root, token = _ids()
         assert fence.classify("kill", pid, signal.SIGTERM, root=root, token=token,
                               basetemp=fence._basetemp()) == ("foreign", pid)
+        # The same process read as between programs (exiting or mid-exec) is not counted: the routing classify uses.
+        real = fence._imageless
+        fence._imageless = lambda target: target == pid or real(target)
+        try:
+            assert fence.classify("kill", pid, signal.SIGKILL, root=root, token=token,
+                                  basetemp=fence._basetemp()) == ("unclassified", pid)
+        finally:
+            fence._imageless = real
     finally:
         try:
             fence._real_kill(pid, signal.SIGKILL)
@@ -125,3 +134,40 @@ def test_a_group_of_zombies_only_is_not_counted() -> None:
                               basetemp=fence._basetemp())[0] == "unclassified"
     finally:
         leader.wait()
+
+
+def _fake_proc(monkeypatch, tmp_path: Path, pid: int, *, flags: int, cmdline: bytes, environ: bytes | None) -> None:
+    """Point the fence's /proc reads for *pid* at files under *tmp_path* (a real task cannot be held mid-exit)."""
+    d = tmp_path / "proc" / str(pid)
+    d.mkdir(parents=True)
+    # Fields after the command name: state ppid pgrp session tty_nr tpgid flags ...
+    (d / "stat").write_text(f"{pid} (x) R 1 {pid} {pid} 0 -1 {flags} 0 0 0 0\n")
+    (d / "cmdline").write_bytes(cmdline)
+    if environ is not None:
+        (d / "environ").write_bytes(environ)
+    real_path = Path
+    monkeypatch.setattr(fence, "Path", lambda s: real_path(str(s).replace("/proc", str(tmp_path / "proc"), 1)))
+
+
+def test_an_exiting_task_is_between_programs(monkeypatch, tmp_path) -> None:
+    """develop shard 3 at aeaf9e4a0: kill_tree SIGKILLed an orphaned member of a test's group with an empty command
+    line, and the rules read it foreign. PF_EXITING alone settles it, whatever the reads show."""
+    _fake_proc(monkeypatch, tmp_path, 4242, flags=0x4 | 0x400040, cmdline=b"python\0x\0", environ=b"A=1\0")
+    assert fence._imageless(4242)
+
+
+def test_no_argv_and_no_environment_is_between_programs(monkeypatch, tmp_path) -> None:
+    """Memory released on the way out, or a new image whose argument area is not written yet."""
+    _fake_proc(monkeypatch, tmp_path, 4243, flags=0x400040, cmdline=b"", environ=b"")
+    assert fence._imageless(4243)
+
+
+@pytest.mark.parametrize(("cmdline", "environ"), [
+    (b"", b"PATH=/usr/bin\0"),  # an empty argv with an environment: a program, judged by the rules
+    (b"\x0060\x00", b""),  # an empty environment with arguments: a program
+    (b"", None),  # environment unreadable (another user's process): judged by the rules, never excused
+])
+def test_a_program_is_not_between_programs(monkeypatch, tmp_path, cmdline: bytes, environ: bytes | None) -> None:
+    _fake_proc(monkeypatch, tmp_path, 4244, flags=0x400040, cmdline=cmdline, environ=environ)
+    assert not fence._imageless(4244)
+

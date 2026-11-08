@@ -179,6 +179,35 @@ def _state(pid: int) -> str | None:
 #: process can have too.
 _UNSIGNALLABLE = frozenset({"Z", "X"})
 
+#: ``PF_EXITING`` in the flags field of ``/proc/<pid>/stat``: the task is inside exit and is no longer a program.
+_PF_EXITING = 0x4
+
+
+def _imageless(pid: int) -> bool:
+    """Whether *pid* is between programs: exiting (``PF_EXITING``, or its memory already released) or inside exec
+    (the new image's argument area not yet written). Either way it has no argv and no environment to judge it by,
+    and an orphan of a group whose leader was already killed has no ancestry either, so the rules would call the
+    session's own process foreign (develop shard 3 at aeaf9e4a0: kill_tree's sparing sweep SIGKILLed such a member,
+    command line empty). Not a judgement on an empty argv alone, which a live program can have: the environment must
+    read empty too, and must be readable (an unreadable one is another user's process, which stays judged by rules).
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes().decode("utf-8", "replace")
+        fields = raw[raw.rfind(")") + 2:].split()
+        if int(fields[6]) & _PF_EXITING:
+            return True
+    except (OSError, IndexError, ValueError):
+        return False
+    try:
+        return not Path(f"/proc/{pid}/cmdline").read_bytes() and not Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+
+
+def _unjudgeable(pid: int) -> bool:
+    """A target no rule can judge: a zombie or dead task, or one between programs (:func:`_imageless`)."""
+    return _state(pid) in _UNSIGNALLABLE or _imageless(pid)
+
 
 def _has_token(pid: int, token: str) -> bool:
     try:
@@ -268,7 +297,7 @@ def classify(kind: str, target: int, sig: int, *, root: int, token: str, basetem
     if kind == "kill" and target == -1:
         return "foreign", 0
     if kind == "kill" and target > 0:
-        if _state(target) in _UNSIGNALLABLE:
+        if _unjudgeable(target):
             return "unclassified", target
         verdict = owned(target, root=root, token=token, basetemp=basetemp)
         if verdict is None:
@@ -279,10 +308,10 @@ def classify(kind: str, target: int, sig: int, *, root: int, token: str, basetem
                 verdict = True
         return ("own" if verdict else "foreign"), target
     pgid = os.getpgrp() if target == 0 else abs(target)
-    leader = None if _state(pgid) in _UNSIGNALLABLE else owned(pgid, root=root, token=token, basetemp=basetemp)
+    leader = None if _unjudgeable(pgid) else owned(pgid, root=root, token=token, basetemp=basetemp)
     if leader is not None:
         return ("own" if leader else "foreign"), pgid
-    members = [m for m in _group_members(pgid) if _state(m) not in _UNSIGNALLABLE]
+    members = [m for m in _group_members(pgid) if not _unjudgeable(m)]
     if not members:
         return "unclassified", 0
     for m in members:
