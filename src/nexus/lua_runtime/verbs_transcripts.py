@@ -51,8 +51,10 @@ The record:
 file is parsed: an unselected field, above all a tool call's input, is never
 cleaned or kept, and ``bodies`` true without ``assistant_text`` collects no
 text. That cuts the result's size and the memory a scan retains; it does not
-cut the read, and it cuts the decode only of the lines ``_inert`` can vouch
-for. See ``_parse_fields`` for the grammar. ``project`` may also be
+cut the read or, by itself, the decode. The decode is cut whatever ``fields``
+says, and only for a line of 4 KB or more whose type is not ``user``,
+``assistant`` or ``attachment`` (``_inert``); those three types are always
+decoded. See ``_parse_fields`` for the grammar. ``project`` may also be
 the reserved value ``repo``: every project directory holding the sessions of
 the repository the run started in (``transcripts_projects``); a project
 directory literally named ``repo`` cannot be asked for by name.
@@ -708,21 +710,31 @@ class _Session:
 # ``agentId`` (the first of each wins). ``_inert`` reads those from the raw
 # text and returns them in place of the decoded record.
 #
-# It reads the run of flat ``"key":scalar`` members from the opening brace; its
-# members are top-level, since the run holds no brace and in a JSON string
-# every quote is escaped. The type and each wanted key must be in the run, or
-# the wanted key's quoted name must occur nowhere in the line; otherwise the
-# line is decoded. The line is taken to be what the harness wrote: well-formed
-# JSON, with no repeated top-level key and no key spelled with a ``\\u`` escape
-# past the run (neither would be seen). A line that does not end in a brace, or
-# is not UTF-8, is decoded, and drops as before.
+# The run is consumed member by member from the opening brace (``_RUN``). Its
+# string pattern bans ``"`` and ``\``, so a member is a whole ``"key":scalar``
+# and the run holds no nested value: each member in it is a member of the
+# top-level object. The first byte that does not continue the run ends it, and
+# ``_NEXT`` demands a plain-key member (or the closing brace) there, so an
+# unreadable member does not hide an escaped key right after the run. The type
+# and each wanted key must be in the run, or the wanted key's quoted name must
+# occur nowhere in the line; otherwise the line is decoded. A line must end in
+# a newline, so the torn last write of a live file is decoded (and dropped) as
+# before; a complete last line without one is decoded too.
 #
-# User and attachment lines are never skipped: measured on real transcripts,
+# What the text does not prove, and why it is assumed: the harness writes
+# ``JSON.stringify`` output, which has no repeated key, no ``\u`` escape on an
+# ASCII character of a key, and, once a torn write is excluded, no malformed
+# interior. A repeated or ``\u``-spelled key past the run, or a malformed
+# interior with a newline, would be taken as valid; so would a line nested
+# deeper than ``RecursionError`` allows, or holding an integer past the
+# interpreter's digit limit, which ``json.loads`` drops.
+#
+# User, assistant and attachment lines are never skipped: measured on real transcripts,
 # the regexes that prove a tool_result or a prompt line's shape run slower than
 # ``json.loads`` on its string content, and an attachment's stamp sits behind a
 # nested object that only a full parse can step over.
 
-_PREPARSE = True  # a test switches it off to compare
+_PREPARSE = True  # a test seam: the tests switch it off to compare
 _PREPARSE_MIN = 4096  # bytes; under it json.loads is as cheap as the scan
 _ACTING = frozenset({"user", "assistant", "attachment"})
 
@@ -738,8 +750,9 @@ def _inert(raw: bytes, s: _Session) -> dict[str, Any] | None:
 
     The result stands in for the decoded record: ``type``, and where the line
     has them as top-level strings, ``timestamp``, ``sessionId`` and
-    ``agentId``, and ``isSidechain`` when true; the ids only while ``s`` still
-    lacks one.
+    ``agentId``, and ``isSidechain`` when true. ``s`` only widens what must be
+    proven: ``isSidechain`` for a main file, and an id while ``s`` still lacks
+    one (a line that names such a key outside the run is decoded).
     """
     n = len(raw)
     if not _PREPARSE or n < _PREPARSE_MIN or raw[:1] != b"{":
@@ -753,6 +766,8 @@ def _inert(raw: bytes, s: _Session) -> dict[str, Any] | None:
     kind = _plain(found.get(b"type"))
     if kind is None or kind in _ACTING or _NEXT.match(raw, end) is None:
         return None
+    if not raw.endswith(b"\n"):
+        return None  # a torn last write, or a last line the decode reads
     if not raw[-8:].rstrip(b" \t\r\n").endswith(b"}"):
         return None  # cut short
     need = [b"timestamp"]
