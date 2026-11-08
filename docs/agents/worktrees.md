@@ -138,8 +138,8 @@ things to avoid carefully; they are impossible.
    develop sha, or cutting a release branch on it, read that sha's check-run
    conclusions. A red there is a finding to diagnose before the next push, not
    background: on 2026-09-14 (7.46.0) develop went red on a real bug (procps
-   truncates a piped `ps -o command=` to COLUMNS, so `watcher_alive` missed a
-   live watcher), two more pushes stacked on it for about three hours, and the
+   truncates a piped `ps -o command=` to COLUMNS, so a liveness check of the
+   since-deleted mailbox watcher missed a live one), two more pushes stacked on it for about three hours, and the
    release PR failed on the same test, costing a fix, a rebase, a force-push
    and a second PR CI cycle. Local suites run on macOS, whose `ps` does not
    truncate, so only Linux CI could see it. When a red reproduces only on
