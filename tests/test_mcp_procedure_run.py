@@ -7,12 +7,15 @@ comes back as its kind and detail. The shipped procedures' summaries are in its 
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 
 import pytest
+from structlog.testing import capture_logs
 
 import nexus.lua_runtime as rt
-from nexus.lua_runtime.errors import ScriptBusyError, ScriptError, ScriptLimitError, ScriptWorkerError
+from nexus.lua_runtime.errors import KINDS, ScriptBusyError, ScriptError, ScriptLimitError, ScriptWorkerError
 from nexus.lua_runtime.library import LibraryError, procedures
 from nexus.mcp import core
 
@@ -48,6 +51,15 @@ def test_the_description_lists_every_shipped_procedure_with_its_summary() -> Non
     assert len(desc) <= 2048
 
 
+def test_the_description_names_every_error_kind_run_script_raises() -> None:
+    desc = core.mcp._tool_manager._tools["procedure_run"].description
+    (listed,) = re.findall(r"\(kinds: ([^)]*)\)", desc)
+    kinds = {k.strip() for k in listed.split(",")}
+    assert set(KINDS) <= kinds, sorted(set(KINDS) - kinds)
+    assert {"limit", "worker", "busy", "unavailable", "repo"} <= kinds
+    assert "library" not in kinds  # the kind is `name`
+
+
 def test_the_result_comes_back_as_json_text(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[str, dict]] = []
 
@@ -77,7 +89,7 @@ def test_args_default_to_an_empty_object(monkeypatch: pytest.MonkeyPatch) -> Non
         (ScriptLimitError("wall_time", 60.0), "limit: wall_time (60.0) reached"),
         (ScriptWorkerError("worker ended", returncode=3), "worker: worker ended (exit 3)"),
         (ScriptBusyError("4 workers run"), "busy: 4 workers run"),
-        (LibraryError("not_found", "no procedure x"), "library: not_found: no procedure x"),
+        (LibraryError("not_found", "no procedure x"), "name: not_found: no procedure x"),
     ],
 )
 def test_an_error_comes_back_as_its_kind_and_detail(
@@ -123,3 +135,71 @@ def test_the_wire_call_goes_through_the_tool_manager(monkeypatch: pytest.MonkeyP
     result = asyncio.run(call())
     text = result[0].text if isinstance(result, (list, tuple)) else result.content[0].text
     assert json.loads(text) == {"echo": ["gate_record", {"bead": "nexus-x"}]}
+
+
+# -- the result cap: RDR-240 TD5 pages at 768 KB under RDR-242's 1 MB result cap -----
+
+
+def test_the_result_cap_leaves_room_for_a_full_page() -> None:
+    assert core._PROCEDURE_RESULT_CAP_CHARS >= 1_100_000
+
+
+def test_a_result_of_700_kb_comes_back_uncut(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = {"page": "x" * 700_000}
+    _install(monkeypatch, lambda name, args: body)
+    out = core.procedure_run(name="x")
+    assert json.loads(out) == body
+    assert "capped" not in out[-200:]
+
+
+def test_a_result_past_the_cap_ends_in_the_visible_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, lambda name, args: "x" * (core._PROCEDURE_RESULT_CAP_CHARS + 10))
+    out = core.procedure_run(name="x")
+    assert out.endswith("narrow the query, lower limit, or page with offset=...]")
+    assert "procedure_run: result capped at " in out
+
+
+# -- the wire: a failure reaches a client as isError --------------------------------
+
+
+def _wire(name: str = "x"):
+    return asyncio.run(core.mcp.call_tool("procedure_run", {"name": name, "args": {}}))
+
+
+def test_a_library_error_reaches_the_client_as_is_error_with_its_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake(name: str, args: dict) -> object:
+        raise LibraryError("not_found", "no procedure x")
+
+    _install(monkeypatch, fake)
+    result = _wire()
+    assert result.is_error is True
+    assert [c.text for c in result.content] == ["name: not_found: no procedure x"]
+
+
+def test_a_runtime_error_reaches_the_client_as_is_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake(name: str, args: dict) -> object:
+        raise ScriptLimitError("wall_time", 60.0)
+
+    _install(monkeypatch, fake)
+    result = _wire()
+    assert result.is_error is True
+    assert result.content[0].text == "limit: wall_time (60.0) reached"
+
+
+def test_an_unexpected_error_reaches_the_client_as_is_error_and_is_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake(name: str, args: dict) -> object:
+        raise ValueError("boom")
+
+    _install(monkeypatch, fake)
+    with capture_logs() as logs:
+        result = _wire()
+    assert result.is_error is True
+    assert "boom" in result.content[0].text
+    assert any(e["event"] == "mcp_procedure_run_failed" and e["log_level"] == "error" and e["error"] == "boom" for e in logs), logs
+
+
+def test_a_success_is_not_marked_as_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, lambda name, args: {"ok": True})
+    result = _wire()
+    assert not result.is_error
+    assert json.loads(result.content[0].text) == {"ok": True}

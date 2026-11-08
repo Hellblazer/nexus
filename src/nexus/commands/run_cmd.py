@@ -22,6 +22,12 @@ from nexus.lua_runtime.header import RepoProbeError
 from nexus.lua_runtime.runner import PROCEDURE_ERRORS, describe_error, run_procedure
 
 
+def _refuse_constant(constant: str) -> object:
+    """``json.loads`` accepts ``NaN`` and ``Infinity``, which are not JSON; the sandbox's
+    argument check would see a float it cannot send on, so the front door says so first."""
+    raise ValueError(f"{constant} is not a JSON number")
+
+
 def _load_args(args_file: str | None, source: str | None) -> dict[str, Any]:
     """The procedure's arguments: a JSON object from ``--args-file F`` (``-`` is standard
     input), from a bare ``-``, or ``{}`` when neither is given."""
@@ -37,8 +43,8 @@ def _load_args(args_file: str | None, source: str | None) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError) as exc:
         raise click.UsageError(f"cannot read the arguments from {where}: {exc}") from exc
     try:
-        args = json.loads(text)
-    except ValueError as exc:
+        args = json.loads(text, parse_constant=_refuse_constant)
+    except (ValueError, RecursionError) as exc:  # RecursionError: nesting past the parser's depth
         raise click.UsageError(f"the arguments in {where} are not valid JSON: {exc}") from exc
     if not isinstance(args, dict):
         raise click.UsageError(f"the arguments in {where} must be a JSON object, not {type(args).__name__}")

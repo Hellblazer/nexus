@@ -104,8 +104,9 @@ def test_the_runner_reads_no_file_and_names_no_checker() -> None:
         (ScriptLimitError("instructions", 1000000), "limit", "instructions"),
         (ScriptWorkerError("worker ended with exit 3", returncode=3), "worker", "exit 3"),
         (ScriptBusyError("4 workers run"), "busy", "4 workers"),
-        (LibraryError("shadows_shipped", "the repo procedure x shadows a shipped one"), "library", "shadows_shipped"),
-        (LibraryError("not_found", "no procedure x"), "library", "not_found"),
+        (LibraryError("shadows_shipped", "the repo procedure x shadows a shipped one"), "name", "shadows_shipped"),
+        (LibraryError("not_found", "no procedure x"), "name", "not_found"),
+        (LibraryError("unreadable", "x: PermissionError"), "name", "unreadable"),
         (runner.RunnerUnavailableError("run_script is not installed"), "unavailable", "run_script"),
         (RepoProbeError("git rev-parse did not run"), "repo", "git rev-parse"),
     ],
@@ -114,6 +115,28 @@ def test_describe_error_gives_the_kind_then_the_detail(exc: Exception, kind: str
     text = runner.describe_error(exc)
     assert text.startswith(f"{kind}: ")
     assert needle in text
+
+
+def test_a_library_error_reads_name_reason_detail() -> None:
+    assert runner.describe_error(LibraryError("not_found", "no procedure x")) == "name: not_found: no procedure x"
+
+
+def test_every_runtime_error_kind_has_a_front_door_text_of_its_own_family() -> None:
+    from nexus.lua_runtime.errors import KINDS
+
+    for kind in KINDS:
+        assert runner.describe_error(ScriptError(kind, "d")) == f"{kind}: d"
+
+
+def test_a_script_run_error_the_runner_has_no_branch_for_still_reads_as_text() -> None:
+    from nexus.lua_runtime.errors import ScriptRunError
+
+    class Odd(ScriptRunError):
+        pass
+
+    text = runner.describe_error(Odd("odd end"))
+    assert text == "Odd: odd end"
+    assert runner.describe_error(ScriptRunError("plain")) == "ScriptRunError: plain"
 
 
 def test_describe_error_does_not_swallow_an_error_it_does_not_know() -> None:
