@@ -155,8 +155,8 @@ finished tool-spill plugin out of the window because it touched
 after the tag, so the plugin landed on develop pointing at v7.86.2, a tag that
 does not contain it, and could not be installed (Sam: "wtf did the plugin just
 sit there"). A plugin-only item that waits can still ship after the client tag
-through the Plugin-only fast lane below: offer that. The anchored
-`plugin-vX.Y.Z-n` channel is retired; do not revive it. Source: memory
+through the Plugin-only fast lane below: offer that. The retired
+`plugin-vX.Y.Z-n` tags are not an option; do not revive them. Source: memory
 `feedback_release_and_develop_ci` § peer_holdouts_from_a_release_go_to_sam.
 
 ### 1. Run unit + integration suite
