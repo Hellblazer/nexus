@@ -318,6 +318,16 @@ class PciPlanAndRecallIntegrationTest {
         return (double) got.stream().filter(exact::contains).count() / k;
     }
 
+    /** Recall at k of query vector {@code q}, searched by its embedder text {@code key}, against the exact top-k. */
+    private double recallOf(PgVectorRepository repo, String key, float[] q, int k) {
+        Set<String> got = repo.searchWithTokens(TENANT, key, List.of(TARGET), k, null, false).value().stream()
+            .map(r -> (String) r.get("id")).collect(Collectors.toSet());
+        Set<String> exact = targetVectors.entrySet().stream()
+            .sorted((a, b) -> Double.compare(1 - dot(a.getValue(), q), 1 - dot(b.getValue(), q)))
+            .limit(k).map(Map.Entry::getKey).collect(Collectors.toSet());
+        return (double) got.stream().filter(exact::contains).count() / k;
+    }
+
     /** Recall per query at k. */
     private double[] recalls(PgVectorRepository repo, int k) {
         double[] r = new double[QUERIES];
@@ -1111,22 +1121,26 @@ class PciPlanAndRecallIntegrationTest {
 
     /**
      * Test 6 (gate finding S4, the small-sample red rule): three queries, one of them far from the collection, on a
-     * fresh index. The rule stands as written (three queries minimum, red on mean below 0.99 or any top-1 miss); this
-     * test records what it does here, and the answer is that the verdict is NOT stable. Three builds of this one fixture
-     * (chas lab-l, 2026-11-05): green with mean 0.9988 and min 0.9900; red with mean 0.9856 and min 0.9417; red with
-     * mean 0.9843 and min 0.9333; no top-1 miss in any. The leaf's graph is one draw per build, and with two near queries and one far one, a single weak (query, k)
-     * cell moves a three-query mean across 0.99. So the test pins the RULE (red exactly when the mean is below 0.99 or
-     * a query missed its nearest row), prints the figures, and asserts a floor on the mean that a broken index would
-     * not meet; it does not pin a colour. The first cloud {@code queries=} readings decide whether one far query turns a
-     * healthy production index red.
+     * fresh index. The rule stands as written (three queries minimum, red on mean below 0.99 or any top-1 miss), and
+     * the verdict on this fixture is NOT stable: the leaf's HNSW graph is one random draw per build (pgvector draws its
+     * levels from the server's own random state, which no session can seed), and with two near queries and one far
+     * one a single weak (query, k) cell moves a three-query mean across 0.99. Builds on chas lab-l (2026-11-05) read
+     * green at 0.9988 and red at 0.9856 and 0.9843; Service CI on 589ce8150 (2026-11-08) read red at 0.9335 with the
+     * far query at 0.7833, below the 0.95 floor this test once asserted. So the test pins what holds on every draw:
+     * the verdict is the rule applied to the canary's own figures (the rule itself is pinned case by case in
+     * PciCanaryTest), and the canary's mean is the recall an independent count gives on the same index. It pins no
+     * colour and no recall floor; a broken index reading red is test 2's. The first cloud {@code queries=} readings
+     * decide whether one far query turns a healthy production index red.
      */
     @Test
     @Order(19)
-    void canary_s4Pin_threeQueriesOneFar_freshIndex_verdictFollowsTheRule_greenAt0_9988_redAt0_9856_redAt0_9843() throws Exception {
+    void canary_s4Pin_threeQueriesOneFar_freshIndex_verdictFollowsTheRule_andItsMeanIsTheIndependentlyCountedRecall()
+        throws Exception {
         ensureTargetIndex();
         PgVectorRepository repo = canaryRepo();
         Random far = new Random(4242);
         float[] farQuery = toFloats(normalize(gauss(far)));
+        embedder.byText.put("far", farQuery);
         List<float[]> ring = List.of(queries.get(0), queries.get(1), farQuery);
 
         PciCanary.Result r = canary(repo, ring).run(canaryTarget(TARGET, targetIndex), "after_build");
@@ -1136,6 +1150,21 @@ class PciPlanAndRecallIntegrationTest {
         assertThat(r.state()).as(PciCanary.line(r)).isIn(PciCanary.State.GREEN, PciCanary.State.RED);
         boolean red = r.meanRecall() < 0.99 || r.top1Misses() > 0;
         assertThat(r.state() == PciCanary.State.RED).as("the rule, applied to " + PciCanary.line(r)).isEqualTo(red);
-        assertThat(r.meanRecall()).as("a healthy index with one far query stays near 1").isGreaterThan(0.95);
+        // The same figure, counted from the fixture's own vectors through the existing search path.
+        double sum = 0;
+        double low = 1;
+        for (int k : KS) {
+            double[] cells = {recall(repo, 0, k), recall(repo, 1, k), recallOf(repo, "far", farQuery, k)};
+            for (double c : cells) {
+                sum += c;
+                low = Math.min(low, c);
+            }
+        }
+        assertThat(r.meanRecall()).as("the canary's mean is the counted one")
+            .isCloseTo(sum / (3 * KS.length), org.assertj.core.data.Offset.offset(0.002));
+        // the min is one (query, k) cell, where a row at the k-th distance can rank either side between the
+        // server's float distance and this count's double one: one row at the smallest k
+        assertThat(r.minRecall()).as("the canary's min is the counted one")
+            .isCloseTo(low, org.assertj.core.data.Offset.offset(1.0 / KS[0]));
     }
 }
