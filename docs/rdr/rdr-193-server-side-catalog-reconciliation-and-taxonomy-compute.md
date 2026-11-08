@@ -365,8 +365,8 @@ change predicate, the register pass and its cross-owner branch, the
 housekeeping and rename code, the fence and same-as maintenance after the
 run, the engine's register and update methods line by line, the link write
 path on both sides, the job registry's constants, the engine-release gates
-and RDR-241's ratchet. The tree is the same (8ed7bc865 content at d488acfd7;
-only this file changed). Every claim Part A1 makes about today's behaviour
+and RDR-241's ratchet. The code is the same (the 8ed7bc865 tree;
+the first revision changed only this file). Every claim Part A1 makes about today's behaviour
 cites one of these findings.
 
 #### Dependency Source Verification

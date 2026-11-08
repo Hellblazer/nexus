@@ -123,9 +123,7 @@ _VERB_FAMILY = {"created": "create", "creates": "create", "create": "create",
 #: Changeset-shaped citations with no changelog file or changeSet id.
 #: Value -> reason. Enumerated from the first run (2026-09-07, 4 of 253).
 CHANGESET_ALLOWLIST: dict[str, str] = {
-    "catalog-032-reconcile": "rdr-193: design-time name; shipped as catalog-032-links-tumbler-fk",
     "fk-003-0": "rdr-164: prefix of changeSet id fk-003-0-backfill-stubs",
-    "taxonomy-008-serverside-projection-links": "rdr-193: design-time name; shipped as taxonomy-008-link-types-jsonb",
     "taxonomy-013-topics-tenant-unique": "rdr-194: design-time name; shipped as taxonomy-014-topics-tenant-unique",
     "fk-004-1": "post-mortem rdr-191: prefix of changeSet id fk-004-1-reconcile",
 }
