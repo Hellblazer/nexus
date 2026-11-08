@@ -2,13 +2,13 @@
 title: "Server-Side Catalog Reconciliation and Taxonomy Compute: Move the Index-Time Catalog Diff/Housekeeping/Linking and the Taxonomy Discover Pipeline onto the Engine as Transactional SQL and Java Jobs"
 id: RDR-193
 type: Architecture
-status: draft
+status: accepted
 resumed_date: 2026-11-03
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-08-15
-accepted_date:
+accepted_date: 2026-11-08
 related_issues: [nexus-ap8l0, nexus-ejo6k, nexus-w5xgy, nexus-7lw6a, nexus-rqsh1, nexus-1vhfj]
 related: [RDR-070, RDR-075, RDR-095, RDR-108, RDR-155, RDR-156, RDR-164, RDR-181, RDR-191, RDR-194, RDR-210, RDR-223, RDR-231, RDR-236, RDR-241, RDR-243]
 ---
@@ -1803,3 +1803,4 @@ which removes Steps 4, 8 and 10-12 from this RDR's acceptance.
   Step 0 measurement added, open questions costed with recommendations,
   terms defined.
 - 2026-11-08: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `962a93b3c`; critique `nexus_rdr/193-gate-critique-2026-11-08-r3`.
+- 2026-11-08: Accepted by Sam (Parts A and A4; Part B held). Residual dispositions: the two BLOCKS-PLANNING residuals by c8a4921eb and 6d05bc01e (fix check `nexus_rdr/193-fix-check-6d05bc01e`, after `-c8a4921eb` failed once); the three round-3 DISCOVER-AT-IMPLEMENTATION residuals and the five carried from fix check 962a93b3c by nexus-blbd3 (two of those five held with Part B).
