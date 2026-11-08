@@ -12,14 +12,15 @@ table built through the protected build.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
 
-from nexus.lua_runtime import runtime
+from nexus.lua_runtime import frames, runtime
 from nexus.lua_runtime.errors import ScriptError
 from nexus.lua_runtime.frames import VerbReplyError
-from tests.lua_runtime._runtime_support import run_lua
+from tests.lua_runtime._runtime_support import DEFAULT, run_lua
 
 # ---- grants at run time ---------------------------------------------------------------------------
 
@@ -262,3 +263,143 @@ def test_runs_do_not_share_a_lua_state() -> None:
     runtimes = {run_lua("local t = {} t.k = 1 return t.k")[0] for _ in range(5)}
     assert runtimes == {1}
     assert isinstance(first, str)
+
+
+# ---- text that crosses into Lua is valid UTF-8 (review r1 B1) -----------------------------------------
+# The parent's reply encoder (json.dumps, ensure_ascii) carries a lone surrogate in an error message,
+# frames._loads decodes it to a str that lupa cannot encode, and the failed encode used to reach the
+# script as a userdata error value: a Python exception object inside the sandbox.
+
+_SURROGATE_REPLY = (
+    b'{"t":"reply","id":1,"ok":false,"error":{"kind":"verb_error","message":"title \\ud800 gone"}}'
+)
+
+
+def _wire_surrogate_error(name: str, args: list[Any]) -> Any:
+    reply = frames._loads(_SURROGATE_REPLY)
+    raise VerbReplyError(str(reply["error"]["message"]))
+
+
+def test_a_surrogate_in_a_verb_error_message_reaches_a_protected_script_as_a_string() -> None:
+    value, _ = run_lua(
+        """
+        local ok, e = pcall(memory.get)
+        local ok2, e2 = pcall(function() return e.anything end)
+        local ok3, e3 = pcall(function() return e:upper() end)
+        return {ok, type(e), e, ok2, tostring(e2), ok3, type(e3)}
+        """,
+        "memory.get",
+        call_verb=_wire_surrogate_error,
+    )
+    assert value[:2] == [False, "string"]
+    assert value[2].startswith("title ") and value[2].endswith(" gone")
+    assert value[3:] == [True, "nil", True, "string"]
+
+
+def test_a_surrogate_in_a_verb_error_message_is_a_lua_error_string_when_unprotected() -> None:
+    with pytest.raises(ScriptError) as exc:
+        run_lua("return memory.get()", "memory.get", call_verb=_wire_surrogate_error)
+    assert exc.value.kind == "lua"
+    assert exc.value.detail.startswith("title ") and "userdata" not in exc.value.detail
+
+
+def test_the_dispatcher_returns_only_text_that_encodes() -> None:
+    d = runtime._Dispatcher(
+        grants=frozenset({"a.b"}),
+        call_verb=lambda n, a: (_ for _ in ()).throw(VerbReplyError("x \ud800 y")),
+        build=lambda v: v,
+        sample=lambda: None,
+    )
+    reply = d.dispatch("a.b", 0)
+    assert isinstance(reply, str)
+    reply.encode("utf-8")
+
+
+@pytest.mark.parametrize("protected", [True, False], ids=["pcall", "bare"])
+def test_a_scalar_string_verb_result_with_a_surrogate_is_an_error_string_not_a_host_object(
+    protected: bool,
+) -> None:
+    call = "pcall(memory.get)" if protected else "memory.get()"
+    source = (
+        f"local ok, r = {call} return {{ok, type(r)}}"
+        if protected
+        else "local r = memory.get() return {true, type(r)}"
+    )
+    if protected:
+        value, _ = run_lua(source, "memory.get", verbs={"memory.get": lambda *a: "a\ud800b"})
+        assert value == [False, "string"]
+    else:
+        with pytest.raises(ScriptError) as exc:
+            run_lua(source, "memory.get", verbs={"memory.get": lambda *a: "a\ud800b"})
+        assert exc.value.kind == "lua" and "userdata" not in exc.value.detail
+        assert "UTF-8" in exc.value.detail
+
+
+def test_a_nested_string_with_a_surrogate_in_a_verb_result_is_an_error_string() -> None:
+    value, _ = run_lua(
+        "local ok, r = pcall(memory.get) return {ok, type(r)}",
+        "memory.get",
+        verbs={"memory.get": lambda *a: {"k": ["x\ud800"]}},
+    )
+    assert value == [False, "string"]
+
+
+# ---- the arity cap (review r1 S2) ----------------------------------------------------------------------------
+
+
+def test_a_verb_call_with_a_hundred_thousand_arguments_is_refused_fast_and_never_dispatched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispatched: list[object] = []
+    real = runtime._Dispatcher.dispatch
+
+    def counting(self: Any, *a: Any) -> Any:
+        dispatched.append(a[:1])
+        return real(self, *a)
+
+    monkeypatch.setattr(runtime._Dispatcher, "dispatch", counting)
+    started = time.monotonic()
+    value, _ = run_lua(
+        """
+        local t = {}
+        for i = 1, 100000 do t[i] = i end
+        local ok, e = pcall(memory.get, table.unpack(t, 1, 100000))
+        local ok2 = pcall(memory.get, table.unpack(t, 1, 16))
+        local ok3, e3 = pcall(memory.get, table.unpack(t, 1, 17))
+        return {ok, e, ok2, ok3, e3}
+        """,
+        "memory.get",
+        verbs={"memory.get": lambda *a: 1},
+        limits=DEFAULT.with_(wall_time=30.0),
+    )
+    assert time.monotonic() - started < 3
+    assert value[0] is False and "too many arguments" in value[1] and "16" in value[1]
+    assert value[2] is True  # sixteen is allowed
+    assert value[3] is False and "too many arguments" in value[4]
+    assert len(dispatched) == 1  # only the call with sixteen reached the dispatcher
+
+
+# ---- JSON null in a verb result (documented in runtime.py) -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("result", "source", "expected"),
+    [
+        ([1, None, 3], "local r = memory.get() return {#r >= 1, r[1], tostring(r[2]), r[3]}", [True, 1, "nil", 3]),
+        ([None, None], "local r = memory.get() return {next(r) == nil}", [True]),
+        ({"a": None, "b": 1}, "local r = memory.get() return {tostring(r.a), r.b, (next(r))}", ["nil", 1, "b"]),
+        ([], "local r = memory.get() return {next(r) == nil}", [True]),
+    ],
+    ids=["hole", "all_null_array", "null_key_dropped", "empty_list"],
+)
+def test_json_null_in_a_verb_result_reaches_lua_as_documented(
+    result: Any, source: str, expected: Any
+) -> None:
+    value, _ = run_lua(source, "memory.get", verbs={"memory.get": lambda *a: result})
+    assert value == expected
+
+
+def test_a_verb_result_with_a_hole_cannot_be_returned_unchanged() -> None:
+    with pytest.raises(ScriptError) as exc:
+        run_lua("return memory.get()", "memory.get", verbs={"memory.get": lambda *a: [1, None, 3]})
+    assert exc.value.kind == "result" and "holes" in exc.value.detail
