@@ -3753,6 +3753,7 @@ def _index_pdf_file(
     no-catalog path.
     """
     from nexus.doc_indexer import _pdf_chunks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.metadata_schema import prepared_positions  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
     content_hash_hex = _file_sha256(file)
 
@@ -3809,14 +3810,15 @@ def _index_pdf_file(
     ids = [p[0] for p in prepared]
     documents = [p[1] for p in prepared]
     metadatas_raw = [p[2] for p in prepared]
+    positions_raw = prepared_positions(prepared)
 
     # Build embed_texts with context prefix BEFORE augmentation overwrites 'title'.
     # PDF title is now stored under `title` (the source_title→title
     # collapse). Read from metadatas_raw and use it in the embed prefix.
     embed_texts_pdf: list[str] = []
-    for doc, m in zip(documents, metadatas_raw):
+    for doc, m, raw_pos in zip(documents, metadatas_raw, positions_raw):
         title = m.get("title", "")
-        page_number = m.get("page_number", 0)
+        page_number = raw_pos.get("page_number", 0)
         prefix_parts: list[str] = []
         if title:
             prefix_parts.append(f"Document: {title}")
@@ -3845,15 +3847,25 @@ def _index_pdf_file(
     # Keys where empty/zero IS meaningful (TTL guard, required fields)
     _KEEP_ALWAYS = {"ttl_days", "chunk_index", "page_number"}
     metadatas: list[dict] = []
-    for m in metadatas_raw:
+    positions: list[dict] = []
+    for m, raw_pos in zip(metadatas_raw, positions_raw):
         # Drop empty raw metadata values
         cleaned = {
             k: v for k, v in m.items()
             if v not in _EMPTY_VALUES or k in _KEEP_ALWAYS
         }
+        # The manifest rows were built from this filtered row, so a chunk's zero ``chunk_start_char``
+        # reached them as "not recorded" (null) and its manifest ``char_start`` was null, not 0. RDR-236
+        # Phase 4 Step 0 keeps the manifest rows byte-identical, so the position dict is filtered by the
+        # same rule. That null is a latent defect of this path (manifest_span would take the 0 as a real
+        # start beside a recorded end); fixing it is a separate, visible change (nexus-6pfgb.65 note).
+        positions.append({
+            k: v for k, v in raw_pos.items()
+            if v not in _EMPTY_VALUES or k in _KEEP_ALWAYS
+        })
         augmented = {
             **cleaned,
-            "title": f"{file.relative_to(repo)}:page-{m.get('page_number', 0)}",
+            "title": f"{file.relative_to(repo)}:page-{raw_pos.get('page_number', 0)}",
             "tags": "pdf",
             # RECORDED, not fixed (nexus-6pfgb.8): the repo PDF path says category "prose" where
             # ``nx index pdf`` (doc_indexer, tags="pdf") says "paper". The catalog meta stamp
@@ -3903,6 +3915,7 @@ def _index_pdf_file(
             "documents": documents,
             "embeddings": embeddings,
             "metadatas": metadatas,
+            "positions": positions,
             "catalog_doc_id": catalog_doc_id,
             "collection": collection_name,
             "hooks": hooks,
@@ -3947,7 +3960,7 @@ def _index_pdf_file(
             _pending = write_oversize_file(
                 catalog_doc_id=catalog_doc_id, content_hash=content_hash_hex,
                 collection=collection_name, ids=ids, documents=documents,
-                metadatas=metadatas, force_re_embed=force_re_embed, defer_completion=True,
+                metadatas=metadatas, positions=positions, force_re_embed=force_re_embed, defer_completion=True,
             )
         else:
             # nexus-y8xjh: the engine merges chunk metadata (nexus-w94eo), and both
@@ -3999,8 +4012,11 @@ def _index_pdf_file(
             # is excluded (a second write would double-count the sweep
             # accounting) and no completion claim rides along; the stamp follows
             # the hooks.
+            # nexus-6pfgb.65: the manifest hook runs only on this old-upsert route, so only it is
+            # handed the chunkers' position dicts.
             _chain: dict = {
                 "manifest_complete": {catalog_doc_id: content_hash_hex} if catalog_doc_id else None,
+                "positions": positions,
             }
             if _via_writer:
                 from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
@@ -5263,6 +5279,24 @@ def _aggregate_flush_metas(file_contexts: list) -> list[dict]:
     return agg
 
 
+def _aggregate_flush_positions(file_contexts: list) -> list[dict]:
+    """The position dicts of a flush's chunks, parallel to :func:`_aggregate_flush_metas`, each with its
+    file-local ``chunk_index`` (RDR-236 Phase 4 Step 0, nexus-6pfgb.65).
+
+    A staged file's context carries the chunker's ``positions``; a context without them (a test double,
+    a producer that predates the split) has them read off its metadata rows (STEP1-DELETE).
+    """
+    from nexus.metadata_schema import aligned_positions  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+
+    agg: list[dict] = []
+    for _path, _c in file_contexts:
+        if not isinstance(_c, dict):
+            continue
+        for _j, _p in enumerate(aligned_positions(_c["metadatas"], _c.get("positions"))):
+            agg.append({**_p, "chunk_index": _j})
+    return agg
+
+
 def _identity_less_files(
     file_contexts: list, causes: "dict[Path, str]",
 ) -> list[dict]:
@@ -5413,11 +5447,12 @@ def _build_combined_write_payload(
         chunks_payload.append({"chash": _cid, "text": _cdoc, "metadata": _cmeta})
 
     agg_metas = _aggregate_flush_metas(file_contexts)
-    by_doc: dict[str, list[tuple[int, dict]]] = defaultdict(list)
-    for _i, _meta in enumerate(agg_metas):
+    agg_positions = _aggregate_flush_positions(file_contexts)
+    by_doc: dict[str, list[tuple[int, dict, dict]]] = defaultdict(list)
+    for _i, (_meta, _pos) in enumerate(zip(agg_metas, agg_positions)):
         _doc_id = _meta.get("doc_id", "")
         if _doc_id:
-            by_doc[_doc_id].append((_i, _meta))
+            by_doc[_doc_id].append((_i, _meta, _pos))
 
     full_docs: list[tuple[str, list[dict]]] = []
     for _doc_id, _indexed_metas in by_doc.items():

@@ -443,6 +443,8 @@ def _heal_collections(
 ) -> None:
     """The per-collection fetch + rebuild walk for documents with no manifest
     rows (split from the entry point so handle cleanup wraps it in one place)."""
+    from nexus.metadata_schema import positions_of_row  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+
     _paginated_get = paginated_get
     _manifest_chunk_rows = manifest_chunk_rows
     result = healer.result
@@ -548,7 +550,10 @@ def _heal_collections(
                 if not m.get("chunk_text_hash"):
                     m["chunk_text_hash"] = cid
                 m["chunk_index"] = k
-                indexed_metas.append((k, m))
+                # The chunk metadata here IS a stored T3 row: its labels and spans are read off it
+                # (RDR-236 Phase 4 Step 0; a row written after Step 1 carries none, and the heal then
+                # has only the chash to rebuild a position from).
+                indexed_metas.append((k, m, positions_of_row(m)))
             chunks = _manifest_chunk_rows(indexed_metas)
             if not any(c["chash"] for c in chunks):
                 healer.classify_unmatched(

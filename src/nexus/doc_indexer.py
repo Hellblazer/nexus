@@ -29,6 +29,7 @@ from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import embedding_model_row_preferred, ensure_collection_registered, index_model_for_collection
 from nexus.db import make_t3
 from nexus.embed_window import window_for_collection
+from nexus.metadata_schema import prepared_positions
 from nexus.retry import _vector_with_retry
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
@@ -1717,6 +1718,7 @@ def _write_chunks_with_owner_rows(
     documents: list[str],
     metadatas: list[dict],
     *,
+    positions: "list[dict] | None" = None,
     force_re_embed: bool = False,
     batch_size: int = 0,
     on_progress: "Callable[[int, int], None] | None" = None,
@@ -1726,7 +1728,9 @@ def _write_chunks_with_owner_rows(
     """Write one document's chunks together with their owner rows (RDR-223, nexus-z0o2p.13).
 
     *ids* are the chunks' chashes (``chunk_id == sha256(text)``, RDR-180), so the
-    manifest row of position ``i`` names ``ids[i]``. Everything goes through
+    manifest row of position ``i`` names ``ids[i]``. *positions* are the chunker's own position
+    dicts, index-aligned with *metadatas* (RDR-236 Phase 4 Step 0): the manifest rows' labels and
+    spans are built from them; ``None`` reads them off the rows (STEP1-DELETE). Everything goes through
     :class:`~nexus.catalog.multi_batch_write.MultiBatchDocumentWriter`: a document
     that fits one request is one ``write_manifest_many`` with the sweep on; a larger
     one begins the index-run fence, writes its first request with the sweep off,
@@ -1771,9 +1775,11 @@ def _write_chunks_with_owner_rows(
     )
     from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog  # noqa: PLC0415 — deferred: shared with the oversize fallbacks (nexus-z0o2p.14)
     from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
-    from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+    from nexus.metadata_schema import aligned_positions, rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
-    rows = _manifest_chunk_rows(list(enumerate(metadatas)))
+    rows = _manifest_chunk_rows([
+        (i, m, p) for i, (m, p) in enumerate(zip(metadatas, aligned_positions(metadatas, positions)))
+    ])
     for row, chash in zip(rows, ids):
         row["chash"] = chash
     chunks = [
@@ -2138,6 +2144,7 @@ def _index_document(
     ids = [p[0] for p in prepared]
     documents = [p[1] for p in prepared]
     metadatas = [p[2] for p in prepared]
+    positions = prepared_positions(prepared)
 
     # nexus-5xn3k.4 RUNFENCE C2: doc_id resolution HOISTED here — below the
     # staleness gate/`if not prepared: return 0` above (a fresh-skip must
@@ -2214,7 +2221,7 @@ def _index_document(
         # hooks below.
         pending = _write_chunks_with_owner_rows(
             collection_name, _catalog_doc_id_for_batch, content_hash,
-            ids, documents, metadatas, force_re_embed=force_re_embed,
+            ids, documents, metadatas, positions=positions, force_re_embed=force_re_embed,
             defer_completion=True,
         )
 
@@ -2409,6 +2416,7 @@ def _index_pdf_incremental(
     ids_all = [p[0] for p in prepared]
     documents_all = [p[1] for p in prepared]
     metadatas_all = [p[2] for p in prepared]
+    positions_all = prepared_positions(prepared)
 
     # Resolve catalog doc_id once (RDR-108 Phase 3: chunk metadata no longer carries it).
     # nexus-zq79 F2: register-or-lookup, not pure lookup (see _index_document for the
@@ -2495,7 +2503,8 @@ def _index_pdf_incremental(
             # follows the hooks (see _write_chunks_with_owner_rows).
             pending = _write_chunks_with_owner_rows(
                 collection_name, _catalog_doc_id_for_batch, content_hash,
-                ids_all, documents_all, metadatas_all, force_re_embed=force_re_embed,
+                ids_all, documents_all, metadatas_all, positions=positions_all,
+                force_re_embed=force_re_embed,
                 batch_size=_INCREMENTAL_BATCH_SIZE, on_progress=on_progress,
                 on_request=on_write_started, defer_completion=True,
             )
@@ -2587,8 +2596,12 @@ def _pdf_chunks(
     title_override: str = "",
     collection_name: str = "",
     sensitive: bool = False,
-) -> list[tuple[str, str, dict]]:
-    """Chunk a PDF and return (id, text, metadata) tuples.
+) -> list[tuple[str, str, dict, dict]]:
+    """Chunk a PDF and return (id, text, metadata, positions) tuples.
+
+    *positions* (RDR-236 Phase 4 Step 0, nexus-6pfgb.65) is the chunk's position fields (spans, page,
+    section labels) as a dict of their own; the manifest rows are built from it. Until Step 1 the
+    metadata still carries the same keys.
 
     *sensitive* (RDR-243 row 21, nexus-rfvyy.6.10): the extractor never resolves or contacts a
     MinerU server; see :class:`~nexus.pdf_extractor.PDFExtractor`.
@@ -2690,14 +2703,21 @@ def _pdf_chunks(
         # (the chunk rows' bib_* keys below are retired by nexus-6pfgb.27).
         extraction_stats["bib"] = bib
 
-    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+    from nexus.metadata_schema import make_chunk_metadata, position_fields  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
-    prepared: list[tuple[str, str, dict]] = []
+    prepared: list[tuple[str, str, dict, dict]] = []
     for chunk in chunks:
         # ``chunk_id`` is the per-chunk Chroma natural-id:
         # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
         chunk_text_hash_full = hashlib.sha256(chunk.text.encode()).hexdigest()
         chunk_id = _chunk_id_from_hash(chunk_text_hash_full)  # nexus-4pvho
+        positions = position_fields(
+            chunk_start_char=chunk.metadata.get("chunk_start_char", 0),
+            chunk_end_char=chunk.metadata.get("chunk_end_char", 0),
+            page_number=chunk.metadata.get("page_number", 0),
+            section_title=chunk.metadata.get("section_title", ""),
+            section_type=chunk.metadata.get("section_type", ""),
+        )
         # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
         # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id;
         # catalog manifest is authoritative.
@@ -2705,15 +2725,10 @@ def _pdf_chunks(
             content_type="pdf",
             chunk_text_hash=chunk_text_hash_full,
             content_hash=content_hash,
-            chunk_start_char=chunk.metadata.get("chunk_start_char", 0),
-            chunk_end_char=chunk.metadata.get("chunk_end_char", 0),
-            page_number=chunk.metadata.get("page_number", 0),
             indexed_at=now_iso,
             embedding_model=target_model,
             title=source_title,
             source_author=result.metadata.get("pdf_author", ""),
-            section_title=chunk.metadata.get("section_title", ""),
-            section_type=chunk.metadata.get("section_type", ""),
             tags="pdf",
             category="paper",
             bib_year=bib.get("year", 0),
@@ -2722,8 +2737,9 @@ def _pdf_chunks(
             bib_citation_count=bib.get("citation_count", 0),
             extraction_method=result.metadata.get("extraction_method", ""),
             quality_gate_overridden=bool(result.metadata.get("quality_gate_overridden", False)),
+            **positions,  # Step 0: the row still carries them; Step 1 stops passing this
         )
-        prepared.append((chunk_id, chunk.text, meta))
+        prepared.append((chunk_id, chunk.text, meta, positions))
     return prepared
 
 
@@ -2738,9 +2754,10 @@ def _markdown_chunks(
     doc_id: str = "",
     extraction_source: str = "file",
     collection_name: str = "",
-) -> list[tuple[str, str, dict]]:
-    """Chunk a Markdown file and return (id, text, metadata) tuples.
+) -> list[tuple[str, str, dict, dict]]:
+    """Chunk a Markdown file and return (id, text, metadata, positions) tuples.
 
+    *positions* is the chunk's position fields as a dict of their own; see :func:`_pdf_chunks`.
     *collection_name* decides the token window; see :func:`_pdf_chunks`.
 
     Chunks carry no git provenance (RDR-101 Phase 5c), so no subprocess runs (nexus-ru672).
@@ -2778,14 +2795,21 @@ def _markdown_chunks(
         or derive_title(md_path, body)
     )
 
-    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+    from nexus.metadata_schema import make_chunk_metadata, position_fields  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
-    prepared: list[tuple[str, str, dict]] = []
+    prepared: list[tuple[str, str, dict, dict]] = []
     for chunk in chunks:
         # ``chunk_id`` is the per-chunk Chroma natural-id:
         # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
         chunk_text_hash_full = hashlib.sha256(chunk.text.encode()).hexdigest()
         chunk_id = _chunk_id_from_hash(chunk_text_hash_full)  # nexus-4pvho
+        positions = position_fields(
+            chunk_start_char=chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
+            chunk_end_char=chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
+            page_number=chunk.metadata.get("page_number", 0),
+            section_title=chunk.metadata.get("header_path", ""),
+            section_type=chunk.metadata.get("section_type", ""),
+        )
         # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
         # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id;
         # catalog manifest is authoritative.
@@ -2793,20 +2817,16 @@ def _markdown_chunks(
             content_type="markdown",
             chunk_text_hash=chunk_text_hash_full,
             content_hash=content_hash,
-            chunk_start_char=chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
-            chunk_end_char=chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
-            page_number=chunk.metadata.get("page_number", 0),
             indexed_at=now_iso,
             embedding_model=target_model,
             title=source_title,
             source_author=_frontmatter_author(frontmatter),
-            section_title=chunk.metadata.get("header_path", ""),
-            section_type=chunk.metadata.get("section_type", ""),
             tags="markdown",
             category="prose",
             extraction_source=extraction_source,
+            **positions,  # Step 0: the row still carries them; Step 1 stops passing this
         )
-        prepared.append((chunk_id, chunk.text, meta))
+        prepared.append((chunk_id, chunk.text, meta, positions))
     return prepared
 
 
@@ -3614,6 +3634,7 @@ def index_pdf(
     ids = [p[0] for p in prepared]
     documents = [p[1] for p in prepared]
     metadatas_list = [p[2] for p in prepared]
+    positions_list = prepared_positions(prepared)
 
     # RDR-223 (nexus-z0o2p.15): the chunks and their owner rows are ONE write, and the fence
     # begins inside it (see _write_chunks_with_owner_rows). doc_id resolution stays before the
@@ -3692,8 +3713,8 @@ def index_pdf(
             # hooks below (RDR-223, D2).
             pending = _write_chunks_with_owner_rows(
                 col_name, _catalog_doc_id_for_batch, content_hash, ids, documents,
-                metadatas_list, force_re_embed=force_re_embed, on_request=_note_write_started,
-                defer_completion=True,
+                metadatas_list, positions=positions_list, force_re_embed=force_re_embed,
+                on_request=_note_write_started, defer_completion=True,
             )
 
         # Post-store hook chains (RDR-095), after the write. Both single-doc and batch chains

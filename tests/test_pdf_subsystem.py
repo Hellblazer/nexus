@@ -137,7 +137,7 @@ class TestPdfChunksMetadata:
             extractor="pymupdf",
         )
         assert result, "Expected at least one chunk from simple.pdf"
-        for chunk_id, text, meta in result:
+        for chunk_id, text, meta, _p in result:
             # RDR-101 Phase 5c (nexus-o6aa.13) dropped store_type, corpus,
             # git_meta. content_type is the canonical routing field.
             assert meta["content_type"] == "pdf"
@@ -176,7 +176,7 @@ class TestPdfChunksMetadata:
             title_override=override, extractor="pymupdf",
         )
         assert result, "Expected at least one chunk from simple.pdf"
-        for _chunk_id, _text, meta in result:
+        for _chunk_id, _text, meta, _p in result:
             assert meta["title"] == override
 
     def test_multipage_pdf_page_numbers(self, multipage_pdf: Path) -> None:
@@ -187,7 +187,7 @@ class TestPdfChunksMetadata:
             extractor="pymupdf",
         )
         assert result
-        page_numbers = {meta["page_number"] for _, _, meta in result}
+        page_numbers = {meta["page_number"] for _, _, meta, _p in result}
         assert page_numbers <= {1, 2, 3}, f"Unexpected page numbers: {page_numbers}"
         assert 0 not in page_numbers, "Page 0 should not appear when boundaries are present"
         assert len(page_numbers) > 1, (
@@ -216,7 +216,7 @@ class TestPdfChunksMetadata:
             bare, content_hash, "test-model", "2026-01-01T00:00:00", "test", extractor="pymupdf",
         )
         assert result
-        for _, _, meta in result:
+        for _, _, meta, _p in result:
             # title (was source_title): no XMP title; first heading or filename fallback
             assert isinstance(meta["title"], str)
             # source_author: the PDF has no author field

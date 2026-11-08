@@ -80,6 +80,7 @@ class HookRegistry:
         self._batch: list[Callable[..., None]] = []
         self._batch_with_catalog_doc_id: set[int] = set()
         self._batch_with_manifest_complete: set[int] = set()
+        self._batch_with_positions: set[int] = set()
         self._document: list[Callable[..., None]] = []
         self._document_with_doc_id: set[int] = set()
 
@@ -91,6 +92,7 @@ class HookRegistry:
         self._batch.clear()
         self._batch_with_catalog_doc_id.clear()
         self._batch_with_manifest_complete.clear()
+        self._batch_with_positions.clear()
         self._document.clear()
         self._document_with_doc_id.clear()
 
@@ -104,6 +106,7 @@ class HookRegistry:
         copy._batch = [h for h in self._batch if h is not fn]
         copy._batch_with_catalog_doc_id = set(self._batch_with_catalog_doc_id) - {id(fn)}
         copy._batch_with_manifest_complete = set(self._batch_with_manifest_complete) - {id(fn)}
+        copy._batch_with_positions = set(self._batch_with_positions) - {id(fn)}
         copy._document = list(self._document)
         copy._document_with_doc_id = set(self._document_with_doc_id)
         return copy
@@ -186,6 +189,10 @@ class HookRegistry:
             # registration-time classification as catalog_doc_id above.
             if "manifest_complete" in params or has_var_kw:
                 self._batch_with_manifest_complete.add(id(fn))
+            # nexus-6pfgb.65 (RDR-236 Phase 4 Step 0): hooks declaring ``positions`` receive the
+            # chunkers' position dicts, classified the same way.
+            if "positions" in params or has_var_kw:
+                self._batch_with_positions.add(id(fn))
         except (TypeError, ValueError):
             # Builtin/C-extension callable with no introspectable
             # signature. Treat as legacy shape so the dispatcher does not
@@ -225,6 +232,7 @@ class HookRegistry:
         hook_timings: dict[str, float] | None = None,
         invoke: Callable[[Callable, tuple, dict], Any] | None = None,
         skip_hooks: "set[Callable] | None" = None,
+        positions: "list[dict] | None" = None,
     ) -> None:
         """Invoke every batch hook with the recorded call shape.
 
@@ -291,6 +299,13 @@ class HookRegistry:
         while still firing every OTHER ``grain="flush"`` hook (taxonomy)
         unchanged. ``None`` (default) skips nothing — every pre-existing
         caller is behaviorally unchanged.
+
+        *positions* (nexus-6pfgb.65, RDR-236 Phase 4 Step 0) — the chunkers' position
+        dicts (the POSITION fields of each chunk, plus ``chunk_index`` when the caller
+        assigned one), index-aligned with *metadatas*. Threaded only to hooks that
+        declare the parameter (``manifest_write_batch_hook``, which builds the manifest
+        rows from them). ``None`` (default) leaves each such hook to read the metadata
+        rows, as before.
         """
         if not doc_ids:
             return
@@ -309,6 +324,8 @@ class HookRegistry:
                 if (manifest_complete is not None
                         and id(hook) in self._batch_with_manifest_complete):
                     kwargs["manifest_complete"] = manifest_complete
+                if positions is not None and id(hook) in self._batch_with_positions:
+                    kwargs["positions"] = positions
                 if invoke is not None:
                     invoke(hook, call_args, kwargs)
                 else:

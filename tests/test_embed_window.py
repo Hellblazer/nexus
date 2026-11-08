@@ -249,7 +249,7 @@ def test_markdown_chunks_use_the_collections_window_not_the_efs(tmp_path, monkey
     assert not [e for e in logs if e.get("event") == "embed_window_tokenizer_missing"], logs
     w = window_for_model("bge-base-en-v15-768")
     assert w is not None and len(out) >= 3
-    assert all(w.count(text) <= 512 for _id, text, _meta in out)
+    assert all(w.count(text) <= 512 for _id, text, _meta, _p in out)
 
 
 def test_pdf_chunks_use_the_collections_window_not_the_efs(tmp_path, monkeypatch) -> None:

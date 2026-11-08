@@ -31,6 +31,6 @@ def test_markdown_chunks_are_the_same_with_and_without_a_bom(tmp_path: Path) -> 
     bom.write_bytes(b"\xef\xbb\xbf" + _DOC.encode("utf-8"))
     got = _markdown_chunks(bom, "h", "model-ctx", "2026-01-01", "corp")
     want = _markdown_chunks(plain, "h", "model-ctx", "2026-01-01", "corp")
-    assert [(i, t) for i, t, _ in got] == [(i, t) for i, t, _ in want]
+    assert [(i, t) for i, t, *_ in got] == [(i, t) for i, t, *_ in want]
     assert not got[0][1].startswith("﻿")
     assert [m.get("chunk_start_char") for *_, m in got] == [m.get("chunk_start_char") for *_, m in want]

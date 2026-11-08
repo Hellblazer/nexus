@@ -3378,8 +3378,10 @@ class TestSectionTypeInPipeline:
         md.write_text("# Abstract\n\nThis paper presents...\n\n# References\n\n[1] Foo.\n")
         tuples = _markdown_chunks(md, "abc123", "model-ctx", "2026-01-01", "docs__test")
         assert len(tuples) >= 2
-        for _id, _text, meta in tuples:
+        for _id, _text, meta, positions in tuples:
             assert "section_type" in meta
+            # RDR-236 Phase 4 Step 0: the chunker's own position dict carries it too.
+            assert "section_type" in positions
 
     @pytest.mark.parametrize("heading,content,expected_type", [
         ("Abstract", "This paper presents results.", "abstract"),
@@ -3392,7 +3394,7 @@ class TestSectionTypeInPipeline:
         # Need abstract + another section so there are >= 2 chunks for CCE
         md.write_text(f"# Abstract\n\nContent.\n\n# {heading}\n\n{content}\n")
         tuples = _markdown_chunks(md, "abc123", "model-ctx", "2026-01-01", "docs__test")
-        typed = [m for _, _, m in tuples if m["section_type"] == expected_type]
+        typed = [m for _, _, m, _p in tuples if m["section_type"] == expected_type]
         assert typed, f"Expected at least one chunk classified as '{expected_type}'"
 
 

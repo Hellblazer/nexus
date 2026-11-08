@@ -431,6 +431,40 @@ def _rebuild_boundaries(pages: list[dict]) -> list[dict]:
     return boundaries
 
 
+#: The key under which a buffered chunk's position fields ride in the pipeline buffer row's
+#: ``metadata_json`` (nexus-6pfgb.65, RDR-236 Phase 4 Step 0). The buffer has no column for them, and
+#: the uploader takes the key out before it builds the chunk row, so it never reaches T3.
+_POSITIONS_KEY = "_positions"
+
+
+def _chunk_positions(chunk: Any) -> dict:
+    """A streaming-PDF chunk's position fields as a dict of their own (RDR-236 Phase 4 Step 0)."""
+    from nexus.metadata_schema import position_fields  # noqa: PLC0415  — circular-dep avoidance (nexus.metadata_schema)
+
+    return position_fields(
+        chunk_start_char=chunk.metadata.get("chunk_start_char", 0),
+        chunk_end_char=chunk.metadata.get("chunk_end_char", 0),
+        page_number=chunk.metadata.get("page_number", 0),
+        section_title=chunk.metadata.get("section_title", ""),
+        section_type=chunk.metadata.get("section_type", ""),
+    )
+
+
+def _split_buffered_metadata(meta: dict) -> tuple[dict, dict]:
+    """A buffered chunk's ``metadata_json`` as ``(chunk row metadata, position fields)``.
+
+    A buffer written before the split carries the positions inside the chunk row metadata (and no
+    ``_positions`` key); they are read off it then (STEP1-DELETE once no such buffer can resume).
+    """
+    from nexus.metadata_schema import positions_of_row  # noqa: PLC0415  — circular-dep avoidance (nexus.metadata_schema)
+
+    row = dict(meta)
+    positions = row.pop(_POSITIONS_KEY, None)
+    if positions is None:
+        positions = positions_of_row(row)
+    return row, positions
+
+
 def _build_chunk_metadata(
     chunk: Any,
     *,
@@ -475,15 +509,11 @@ def _build_chunk_metadata(
         content_type="pdf",
         chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
         content_hash=content_hash,
-        chunk_start_char=chunk.metadata.get("chunk_start_char", 0),
-        chunk_end_char=chunk.metadata.get("chunk_end_char", 0),
-        page_number=chunk.metadata.get("page_number", 0),
         indexed_at=now_iso,
         embedding_model=embedding_model,
-        section_title=chunk.metadata.get("section_title", ""),
-        section_type=chunk.metadata.get("section_type", ""),
         tags="pdf",
         category="paper",
+        **_chunk_positions(chunk),  # Step 0: the row still carries them; Step 1 stops passing this
     )
     # nexus-w94eo: drop the placeholder keys make_chunk_metadata's defaults
     # (title="", source_author="") would otherwise have stamped — see the
@@ -569,8 +599,10 @@ def _embed_and_write_batch(
             embedding_model=actual_model,
             now_iso=now_iso,
         )
+        # The position fields ride beside the chunk row in the buffer row; the uploader splits them
+        # out (_split_buffered_metadata) and hands them to the manifest builder.
         db.write_chunk(content_hash, chunk.chunk_index, chunk.text, chunk_id,
-                        metadata=meta, embedding=emb_bytes)
+                        metadata={**meta, _POSITIONS_KEY: _chunk_positions(chunk)}, embedding=emb_bytes)
 
     return write_count, actual_model
 
@@ -813,8 +845,8 @@ class UploaderInvariantError(RuntimeError):
 
 
 #: One batch handed to the writer and not yet flagged uploaded: (rows, ids, documents,
-#: embeddings, metadatas).
-_Held = tuple[list[dict], list[str], list[str], list[list[float]], list[dict]]
+#: embeddings, metadatas, positions).
+_Held = tuple[list[dict], list[str], list[str], list[list[float]], list[dict], list[dict]]
 
 
 def uploader_loop(
@@ -904,7 +936,7 @@ def uploader_loop(
     def _flag(batch: _Held) -> None:
         """The batch's request was sent: post-store hooks (RDR-095), then flag it uploaded."""
         nonlocal total_uploaded
-        batch_rows, ids, documents, embeddings, metadatas = batch
+        batch_rows, ids, documents, embeddings, metadatas, batch_positions = batch
         # Both single-doc and batch chains fire from every storage event; the per-doc loop
         # covers single-shape consumers on CLI ingest.
         if not dry_run:
@@ -1019,11 +1051,15 @@ def uploader_loop(
                     list(struct.unpack(f"{len(row['embedding']) // 4}f", row["embedding"]))
                     for row in batch_rows
                 ]
-                metadatas = [
-                    json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
+                split = [
+                    _split_buffered_metadata(
+                        json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
+                    )
                     for row in batch_rows
                 ]
-                batch: _Held = (batch_rows, ids, documents, embeddings, metadatas)
+                metadatas = [meta for meta, _pos in split]
+                batch_positions = [pos for _meta, pos in split]
+                batch: _Held = (batch_rows, ids, documents, embeddings, metadatas, batch_positions)
 
                 if dry_run:
                     from nexus.doc_indexer import _preview_upsert  # noqa: PLC0415 - deferred to avoid circular import at module load
@@ -1051,8 +1087,8 @@ def uploader_loop(
                     from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 - deferred: avoids a module-load-time cross-import
 
                     manifest_rows = _manifest_chunk_rows([
-                        (row["chunk_index"], {**meta, "chunk_index": row["chunk_index"]})
-                        for row, meta in zip(batch_rows, metadatas)
+                        (row["chunk_index"], meta, {**pos, "chunk_index": row["chunk_index"]})
+                        for row, meta, pos in zip(batch_rows, metadatas, batch_positions)
                     ])
                     for m_row, chash in zip(manifest_rows, ids):
                         m_row["chash"] = chash

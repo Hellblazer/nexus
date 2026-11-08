@@ -255,7 +255,7 @@ class TestQualityGateOverriddenPropagation:
                 allow_degraded_extraction=True,
             )
         assert len(prepared) == 1
-        _id, _text, meta = prepared[0]
+        _id, _text, meta, _positions = prepared[0]
         assert meta["quality_gate_overridden"] is True
 
     def test_pdf_chunks_omits_key_on_healthy_extraction(self, tmp_path: Path):
@@ -290,7 +290,7 @@ class TestQualityGateOverriddenPropagation:
                 now_iso="2026-08-06T00:00:00+00:00", corpus="default",
             )
         assert len(prepared) == 1
-        _id, _text, meta = prepared[0]
+        _id, _text, meta, _positions = prepared[0]
         assert "quality_gate_overridden" not in meta
 
     def test_streaming_enrichment_includes_override_when_true(self):
