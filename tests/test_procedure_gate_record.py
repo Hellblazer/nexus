@@ -144,6 +144,7 @@ def test_the_body_comes_back_verbatim_after_the_fields() -> None:
     ("bead", "nexus-a,rdr:999", "bead must be"),
     ("bead", "-nexus", "bead must be"),
     ("bead", "", "bead must be"),
+    ("bead", "x\u00aa", "bead must be"),
     ("rdr", 0, "rdr must be a positive integer"),
     ("rdr", 10000, "rdr must be a positive integer up to 9999"),
     ("round", 0, "round must be"),
@@ -235,6 +236,8 @@ def test_the_last_verdict_line_is_compared(body: str) -> None:
     "- **outcome**: partial\nlater\n- **outcome**: justified\n",
     "- **outcome**: `justified`\n",
     "* **outcome**: **not-justified**\n",
+    "- **outcome:** justified\n",
+    "**outcome**: justified\n",
 ])
 def test_a_disagreeing_last_verdict_line_is_refused(body: str) -> None:
     with pytest.raises(lua54.LuaError) as e:
