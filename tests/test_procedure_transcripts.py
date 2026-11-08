@@ -1029,6 +1029,7 @@ def _write_rich(root: Path) -> None:
         _use("c12", RUN, {"name": "gate_record"}),
         _use("c13", PUT, {"title": "review-x", "tags": "kind:gate,bead:b"}),
         _use("c14", "Bash", {"command": "nx run transcripts --args-file -"}),
+        _use("c15", PUT, {"title": "review-y", "tags": "kind:gate,bead:c"}),  # a gate put no run pairs
     ]
     main: list[dict] = [
         _prompt(t("10:00:00"), sid, "start"),
@@ -1057,6 +1058,11 @@ def _write_rich(root: Path) -> None:
             {**_failed(t("10:40:03"), sid, f"u{agent}"), "agentId": agent},
         ]
         _jsonl(p / sid / "subagents" / f"agent-{agent}.jsonl", sub)
+    long = [{**_prompt(t("10:50:00"), sid, "go"), "agentId": "a3", "isSidechain": True}]
+    for i in range(31):  # past the skills query's turn threshold
+        long.append({**_assistant(t(f"10:5{i // 10}:{i % 10 + 10:02d}"), sid, [{"type": "text", "text": "x"}],
+                                  mid=f"a3-m{i}"), "agentId": "a3"})
+    _jsonl(p / sid / "subagents" / "agent-a3.jsonl", long)
 
 
 def test_the_real_verb_accepts_every_querys_fields_and_a_filtered_read_equals_a_full_one(
