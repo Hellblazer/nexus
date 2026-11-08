@@ -531,27 +531,33 @@ def test_the_worker_enforces_its_own_reply_cap() -> None:
         _stop(proc)
 
 
-def test_a_huge_finite_wall_time_keeps_the_timer_alive(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_huge_finite_wall_time_keeps_the_timer_alive() -> None:
     # Limits accepts any finite positive wall_time, but Event.wait raises
     # OverflowError past threading.TIMEOUT_MAX (about 4.3e6 s on Windows), and
     # an exception in the timer thread would silently end wall-time
-    # enforcement (confirmation review of 9012c953e).
+    # enforcement (confirmation review of 9012c953e). The timer's run() is
+    # driven on a test thread that records what it raises.
     raised: list[BaseException] = []
-    monkeypatch.setattr(threading, "excepthook", lambda a: raised.append(a.exc_value))
     proc = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
         stdin=subprocess.DEVNULL,
     )
     try:
         timer = supervisor._KillTimer(proc, None, 1e12, threading.Event())
-        timer.start()
+
+        def drive() -> None:
+            try:
+                timer.run()
+            except BaseException as exc:  # noqa: BLE001 - the subject of the test
+                raised.append(exc)
+
+        runner = threading.Thread(target=drive, daemon=True)
+        runner.start()
         time.sleep(0.3)
-        assert timer.is_alive(), f"the timer thread died: {raised}"
+        assert runner.is_alive(), f"the timer's wait ended at once: {raised}"
         assert timer.cancel()
-        timer.join(5)
-        assert not timer.is_alive()
+        runner.join(5)
+        assert not runner.is_alive()
         assert raised == []
     finally:
         proc.kill()

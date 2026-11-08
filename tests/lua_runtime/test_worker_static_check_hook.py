@@ -4,10 +4,11 @@
 
 The worker calls ``static_check.check(source, grants, verbs)`` (which
 calibrates on first use) and files a refusal as an error frame of kind
-``static_check``, and a ``ChunkFormatError`` the same with ``calibrate: <msg>``. ``static_check.py`` does not exist in this
-step: the hook must tolerate its absence, and only its own absence. The
-end-to-end cases run the real worker in a child that has a stand-in
-``static_check`` module installed first.
+``static_check``, and a ``ChunkFormatError`` the same with ``calibrate: <msg>``. The hook tolerates the module's
+absence, and only its absence. The end-to-end cases run the real worker in a
+child whose ``static_check`` is the real module with ``check`` replaced, so a
+case can force a refusal or a drift while the runtime still finds the
+allowlists it imports.
 """
 
 from __future__ import annotations
@@ -116,14 +117,13 @@ def test_a_chunk_format_error_from_the_first_use_calibration_is_reported_as_cali
 _CHILD = textwrap.dedent(
     """
     import os, sys, types
+    import nexus.lua_runtime.static_check as real
+    # A stand-in that keeps the real module's constants (BASE_FUNCTIONS and
+    # LIB_MEMBERS, which the runtime imports) and exception classes, and
+    # replaces only check(), so each case can force a refusal or a drift.
     mod = types.ModuleType("nexus.lua_runtime.static_check")
-    class StaticCheckRefusal(Exception):
-        def __init__(self, rule, detail, line):
-            super().__init__(f"{rule}: {detail} (line {line})")
-    mod.StaticCheckRefusal = StaticCheckRefusal
-    class ChunkFormatError(Exception):
-        pass
-    mod.ChunkFormatError = ChunkFormatError
+    mod.__dict__.update({k: v for k, v in vars(real).items() if not k.startswith("__")})
+    StaticCheckRefusal, ChunkFormatError = real.StaticCheckRefusal, real.ChunkFormatError
     def check(source, grants, verbs):
         if __BAD__:
             raise ChunkFormatError("layout drift")
