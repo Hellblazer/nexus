@@ -12,7 +12,8 @@ A transcript holds everything its session saw, so a record carries no
 message body unless ``bodies`` is true, and then only the assistant's own
 text: never a tool result, a user prompt, thinking, or an attachment's
 content. A tool call's input (a Bash command, a ``memory_get`` title) is not
-a body and is always carried. Nothing here logs, and no error message
+a body and is carried whenever ``fields`` selects it (always, when ``fields``
+is nil); ``tool_calls.input_bytes`` reports its size without carrying it. Nothing here logs, and no error message
 carries a transcript's content.
 
 The window is half-open, ``[since, until)``, in UTC; a bare date is that
@@ -364,7 +365,11 @@ def _parse_fields(fields: str | None, bodies: bool) -> _Fields:
     keys: dict[str, frozenset[str]] = {}
     for lst in _SUBS:
         if lst in top:
-            keys[lst] = frozenset(_BARE[lst] if lst in bare else subs.get(lst, ()))
+            keys[lst] = frozenset(
+                (set(_BARE[lst]) | set(subs.get(lst, ())))
+                if lst in bare
+                else subs.get(lst, ())
+            )
     calls = keys.get("tool_calls")
     input_all = False
     if calls is not None:

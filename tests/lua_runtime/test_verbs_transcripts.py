@@ -1685,6 +1685,7 @@ def test_input_bytes_sums_top_level_string_values_of_the_raw_input(
         )
     _write(root / PROJECT / f"{SID}.jsonl", recs)
     rec = _one("tool_calls.name,tool_calls.input_bytes")
+    assert rec["truncated"] is False  # counting a long input cuts nothing
     assert [(c["name"], c["input_bytes"]) for c in rec["tool_calls"]] == [
         ("Bash", 10),
         ("mcp__nexus__memory_get", 8),
@@ -1714,6 +1715,13 @@ def test_input_bytes_is_opt_in_and_needs_no_input_or_name(root: Path) -> None:
         {"input_bytes": 10},
         {"input_bytes": 8},
     ]
+
+
+def test_a_bare_list_beside_input_bytes_keeps_input_bytes(root: Path) -> None:
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
+    call = _one("tool_calls,tool_calls.input_bytes")["tool_calls"][0]
+    assert call["input_bytes"] == 10
+    assert set(_one("tool_calls")["tool_calls"][0]) | {"input_bytes"} == set(call)
 
 
 def test_input_bytes_alone_cleans_no_input(
