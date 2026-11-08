@@ -4561,9 +4561,15 @@ with the bundle's `pg_upgrade`. The engine refuses a cluster below 17 and
 It is the scripted form of "A local cluster older than PostgreSQL 17" in
 [the migration runbook](migration-runbook.md). Linux and macOS only.
 
-**Not yet run against a real pre-17 cluster; copy the data directory first.** Nothing locks the service while
-the upgrade runs: close other `nx` sessions and Claude Code sessions with the conexus plugin, and disable an
-autostart unit (launchd, systemd), before `--apply`.
+**Not yet run against a real pre-17 cluster; copy the data directory first.** `--apply` and `--check-only`
+hold the storage service's spawn lock (`<config dir>/storage_service_spawn.lock`, the lock a supervisor takes
+in its start) for the whole run, and are refused up front when another process holds it. A concurrent
+`nx daemon service start`, or an autostart unit, then waits on the lock instead of starting a supervisor on
+the half-built cluster (the verb times out waiting for the service; a supervisor it spawned proceeds once the
+lock is freed). The lock is freed just before the command starts the service again. It does not stop a
+service that is already running (`--apply` stops it first), and it does not keep a PostgreSQL server that
+another manager (brew services, systemd) restarts from coming back: `--apply` refuses if a server still runs
+after its stop, so disable that manager first.
 The command is tested against fake PostgreSQL binaries only. Until a real run
 exists, take a copy of the data directory (`cp -a <data> <copy>`) before
 `--apply`; the dry run and `--apply` both print this reminder.
