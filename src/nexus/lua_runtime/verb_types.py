@@ -176,6 +176,12 @@ def _normalize(spec: VerbSpec, param: ParamSpec, value: object) -> object:
     if param.type == "string":
         if not isinstance(value, str):
             raise refuse()
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise VerbArgError(
+                f"{spec.name}: {param.name} is not valid UTF-8"
+            ) from None
         return value
     if param.type == "boolean":
         raise refuse()
@@ -184,6 +190,8 @@ def _normalize(spec: VerbSpec, param: ParamSpec, value: object) -> object:
     if isinstance(value, float) and not math.isfinite(value):
         raise VerbArgError(f"{spec.name}: {param.name} must be finite")
     if param.type == "number":
+        if isinstance(value, int) and not _LUA_INT_MIN <= value <= _LUA_INT_MAX:
+            raise VerbArgError(f"{spec.name}: {param.name} is outside the 64-bit range")
         return value
     # integer: a Lua integer, or a Lua float with no fraction (10/2 is 5.0)
     if isinstance(value, float):
