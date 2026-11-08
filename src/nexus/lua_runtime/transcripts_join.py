@@ -3,9 +3,10 @@
 """Join the pages of a ``transcripts`` run (RDR-240 Technical Design 5; nexus-qo7ie.31).
 
 ``procedures/transcripts.lua`` returns one page at a time: ``{rows, truncated_records,
-until, next_since}``. A caller that wants the whole window runs again with ``since`` set to
-``next_since`` and ``to`` set to the returned ``until``, until a page has no ``next_since``,
-then hands the pages here. :func:`join_pages` is the one place that knows how each query's
+since, until, next_since}``. A caller that wants the whole window runs again with ``since``
+set to ``next_since`` and ``until`` set to the returned ``until``, until a page has no
+``next_since``, then hands the pages here. Each page's ``since`` must be the previous page's
+``next_since``, so a skipped or repeated page is refused, never summed. :func:`join_pages` is the one place that knows how each query's
 rows combine, so a page that ends mid-window never changes a count.
 
 How rows combine, per query (the Lua script's header says the same; a test pins the field
@@ -137,8 +138,9 @@ def join_pages(
 
     Returns ``{rows, truncated_records, until, pages}``. Raises :class:`JoinError` for an
     unknown query, no pages, pages that name different ``until`` values, a page before the
-    last without a ``next_since``, or (unless ``allow_partial``) a last page that still has
-    one.
+    last without a ``next_since``, a page whose ``since`` is not the previous page's
+    ``next_since`` (a gap, an overlap, or no ``since`` at all), or (unless
+    ``allow_partial``) a last page that still has one.
     """
     shape = SHAPES.get(query)
     if shape is None:
@@ -151,6 +153,12 @@ def join_pages(
     for page in pages[:-1]:
         if not page.get("next_since"):
             raise JoinError("a page before the last has no next_since")
+    for i, page in enumerate(pages[1:], start=1):
+        if page.get("since") != pages[i - 1].get("next_since"):
+            raise JoinError(
+                f"page {i + 1} starts at {page.get('since')!r} but page {i} ended at "
+                f"{pages[i - 1].get('next_since')!r}"
+            )
     if pages[-1].get("next_since") and not allow_partial:
         raise JoinError(f"the window is not done: next_since {pages[-1]['next_since']!r}")
     if shape.keyed:
