@@ -1366,7 +1366,7 @@ path on the same tree. Then a delta run with one changed RDR does the same
 with `walk=partial` and the linking stage costs at most one scoped read and
 one write per generator.
 
-### Phase 1: Engine half of Parts A, A4 and B1 (engine cut 1)
+### Phase 1: Engine half of Parts A, A4 and B1 (engine cut 1; B1 held)
 
 #### Step 0: Measure the live catalog (read-only, before Step 2's tests)
 
@@ -1479,7 +1479,7 @@ conexus, whose Liquibase walk on a point-in-time fork of production is the
 pre-deploy gate) and 6.1 (the client-path gate through the edge). The
 `--candidate-migration` leg the August draft named no longer exists.
 
-### Phase 2: Client half of Parts A, A4 and B1
+### Phase 2: Client half of Parts A, A4 and B1 (B1 held)
 
 #### Step 6: Reconcile client
 
@@ -1514,9 +1514,10 @@ with a sensitive document.
 #### Step 9: Floor bump and release
 
 `REQUIRED_ENGINE_VERSION` raised to engine cut 1 in the client release that
-ships Steps 6-8 (paired release).
+ships Steps 6 and 7 (paired release). Step 8 is held with Part B and takes its
+floor bump in the release that ships Part B.
 
-### Phase 3: Part B2 engine (engine cut 2)
+### Phase 3: Part B2 engine (engine cut 2; held)
 
 #### Step 10: Clustering port
 
@@ -1540,7 +1541,7 @@ without `force`; resubmit after 404 skips committed collections; a
 `too_large` collection fails alone; RLS. Probe: peak memory and wall time
 of a 100,000 × 1024 discover on the engine, recorded.
 
-### Phase 4: Part B2 client
+### Phase 4: Part B2 client (held)
 
 #### Step 12: Discover client
 
@@ -1723,8 +1724,8 @@ which removes Steps 4, 8 and 10-12 from this RDR's acceptance.
      Part B carries the Java port and its parity risk, and its egress
      figures are an August estimate with no felt cost behind them.
    - **Answer (Sam, 2026-11-08): (b).** Parts A and A4 are accepted, each on
-     its own case; Part A4 does not depend on Part A1 (gate round 3), so the
-     two can land in either order. Part B is held.
+     its own case, and land together as planned (one changeset, engine cut 1,
+     the Step 9 release). Part B is held.
 
 ## References
 
