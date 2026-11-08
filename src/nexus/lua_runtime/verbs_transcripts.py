@@ -727,7 +727,12 @@ class _Session:
 # interior. A repeated or ``\u``-spelled key past the run, or a malformed
 # interior with a newline, would be taken as valid; so would a line nested
 # deeper than ``RecursionError`` allows, or holding an integer past the
-# interpreter's digit limit, which ``json.loads`` drops.
+# interpreter's digit limit, which ``json.loads`` drops. One of these can come
+# from the harness: a session that crashes mid-write and resumes appends its
+# next record to the torn line, and the skip keeps the torn head's type and
+# stamp where the decode drops the whole line, so that transcript's start or
+# end can move to the torn event's time. Sam accepted this residual for
+# harness-written transcripts (ask baton/q37-residual, 2026-11-08).
 #
 # User, assistant and attachment lines are never skipped: measured on real transcripts,
 # the regexes that prove a tool_result or a prompt line's shape run slower than
