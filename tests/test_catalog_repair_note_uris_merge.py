@@ -159,7 +159,7 @@ class TestDryRun:
         result = _run("--json")
 
         assert result.exit_code == 0, result.output
-        doc = json.loads(result.output)
+        doc = json.loads(result.stdout)
         assert doc["census"]["merge"] == 2
         assert doc["plan"][0]["winner"] == "1.1.2" and doc["plan"][0]["losers"] == ["1.1.1"]
         assert doc["plan"][0]["rule"] == "no row holds chunks: the twin wins by default"
