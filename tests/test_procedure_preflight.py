@@ -198,10 +198,10 @@ def _class_names(out: dict) -> list[str]:
 
 @pytest.fixture
 def stubs(tmp_path: Path) -> Path:
-    """A PATH directory whose uv, actionlint and lab-remote print their arguments."""
+    """A PATH directory whose uv, uvx, actionlint and lab-remote print their arguments."""
     d = tmp_path / "stubs"
     d.mkdir()
-    for tool in ("uv", "actionlint", "lab-remote"):
+    for tool in ("uv", "uvx", "actionlint", "lab-remote"):
         stub = d / tool
         stub.write_text(
             "#!/bin/sh\n"
@@ -279,7 +279,7 @@ def test_a_python_change_gets_ruff_its_tests_and_the_standing_checks(
     assert _class_names(out) == ["python"]
     assert _commands(out)["python"] == [
         "git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
-        "':(glob)src/**/*.py' | xargs -0 -r uv run ruff check --force-exclude --",
+        "':(glob)src/**/*.py' | xargs -0 -r uvx ruff@0.15.18 check --force-exclude --",
         "git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
         "':(glob)tests/**/test_*.py' | xargs -0 -r uv run pytest -q -p no:randomly --",
     ]
@@ -649,3 +649,9 @@ def test_a_change_to_the_selector_selects_every_integration_file(
     assert cmd.startswith(
         "f=$(uv run python scripts/select_affected_integration_tests.py --repo . --all) && "
     )
+
+
+def test_ruff_is_the_version_ci_pins() -> None:
+    m = re.search(r"uvx (ruff@[0-9.]+) check src/", CI.read_text(encoding="utf-8"))
+    assert m is not None, "ci.yml's ruff lint job moved"
+    assert f'local RUFF = "{m.group(1)}"' in SOURCE.decode("ascii")
