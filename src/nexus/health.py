@@ -4315,6 +4315,11 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
+    # nexus.catalog_reconcile_rows and nexus.catalog_reconcile_runs: RDR-193
+    # Part A1 (nexus-u5m5g.3, catalog-048-reconcile.xml), the landing tables of
+    # a catalog reconcile run; ENABLE + FORCE + tenant_isolation.
+    "nexus.catalog_reconcile_rows",
+    "nexus.catalog_reconcile_runs",
     # nexus.catalog_sensitivity_changes: RDR-243 (nexus-rfvyy.6.3,
     # catalog-047-document-sensitivity.xml), the audit record of every change
     # of catalog_documents.sensitive; ENABLE + FORCE + tenant_isolation.

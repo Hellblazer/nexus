@@ -188,7 +188,11 @@ migration_wal_bytes_per_worker = 11038000
 # (the ten-argument nexus.gc_quarantine_orphans_floored), 1 CREATE FUNCTION (the same function with a trailing p_quarantine_expires_at argument) and its GRANT EXECUTE to nexus_svc, and 1 CREATE OR REPLACE FUNCTION
 # (nexus.reaper_expire_client_quarantine, same signature, grant kept). No new table, so no runAlways grant is added.
 # Counted from the changeset's statements (4) and measured: chas lab-m, 2026-11-07, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the tree rebased onto develop f254303d5, ddl: migration=2372.
-migration_ddl_per_worker = 2372
+# 2372 -> 2386 (2026-11-08, after vectors-056 above): catalog-048-1..3 (nexus-u5m5g.3, RDR-193 Part A1, the catalog reconcile landing tables, commit and reap) add 14 DDL statements to a fresh migration:
+# 2 CREATE TABLE (catalog_reconcile_runs, catalog_reconcile_rows), ENABLE and FORCE ROW LEVEL SECURITY on each (4) and 1 CREATE POLICY each (2); 2 CREATE FUNCTION (catalog_reconcile_commit, catalog_reconcile_reap) and
+# their 2 GRANT EXECUTE to nexus_svc. That is 12 statements in the changesets; the other 2 are the runAlways grants loop's table grant for each new table (no sequence, so one each, as vectors-054 above).
+# Counted from the changeset's statements (12) plus the loop (2) and measured: chas lab-m via lab-remote, 2026-11-08, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-u5m5g.3 tree (base df09d9505), ddl: migration=2386. Commit: the nexus-u5m5g.3 commit that adds catalog-048-reconcile.xml.
+migration_ddl_per_worker = 2386
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
