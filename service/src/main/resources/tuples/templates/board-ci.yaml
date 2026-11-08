@@ -47,7 +47,7 @@ max_body_bytes: 1024
 max_live_rows: 5000
 
 doc:
-  summary: One post per state change of every CI workflow run and job on a watched repository branch, plus a best-effort wake on the branch's --done topic once a sha's push runs have all completed, written by the GitHub adapter; the board is a ping source, and the verdict is the conclusion on the kind=run row for the sha, with check runs as the fallback.
+  summary: One post per state change of every CI run and job on a watched branch, plus a best-effort wake on its --done topic once a sha's push runs all complete, from the GitHub adapter; a ping source; the verdict is the kind=run row's conclusion, check runs the fallback.
   writers:
     - the ci-board-adapter AWS Lambda in the conexus repository, on GitHub workflow_run and workflow_job webhooks, with a board-scoped token that can write only this template
   readers:
