@@ -31,6 +31,7 @@ from nexus.lua_runtime.errors import ScriptError, ScriptLimitError, ScriptWorker
 from nexus.lua_runtime.limits import Limits
 from nexus.lua_runtime.supervisor import WorkerConfig, supervise
 from tests.lua_runtime._support import (
+    named_in as _named_in,
     fake_worker,
     limits,
     ready_then,
@@ -51,7 +52,7 @@ def _run(
     config: WorkerConfig | None = None,
 ):
     return supervise(
-        start(source, *(verbs or _TABLE)),
+        start(source, *_named_in(source, verbs or _TABLE)),
         limits=limits(wall),
         verbs=verbs or _TABLE,
         config=config or WorkerConfig(),
@@ -214,6 +215,39 @@ def test_a_call_frame_whose_id_is_not_an_integer_is_a_worker_error() -> None:
         'send({"t": "ready"}); recv(); send({"t": "call", "id": [1], "verb": "fixture.echo", "args": ["x"]}); time.sleep(30)'
     )
     assert "call frame" in err.detail
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        '"verb": 5, "args": ["x"]',
+        '"verb": ["fixture.echo"], "args": ["x"]',
+        '"verb": null, "args": ["x"]',
+        '"verb": "fixture.echo", "args": "x"',
+        '"verb": "fixture.echo", "args": {"a": 1}',
+        '"verb": "fixture.echo", "args": null',
+    ],
+    ids=[
+        "verb-int",
+        "verb-list",
+        "verb-null",
+        "args-string",
+        "args-object",
+        "args-null",
+    ],
+)
+def test_a_call_frame_whose_verb_is_not_a_string_or_whose_args_is_not_a_list_is_a_worker_error(
+    fields: str,
+) -> None:
+    t0 = time.monotonic()
+    err = _worker_error(
+        'send({"t": "ready"}); recv()\n'
+        f'P = b\'{{"t":"call","id":1,{fields}}}\'\n'
+        "raw(header(len(P)) + P)\n"
+        "time.sleep(30)\n"
+    )
+    assert "malformed call frame" in err.detail
+    assert time.monotonic() - t0 < 10  # refused at once, not left to the wall limit
 
 
 def test_a_surprise_inside_the_run_loop_is_a_worker_error_not_an_escaping_exception(
@@ -495,3 +529,30 @@ def test_the_worker_enforces_its_own_reply_cap() -> None:
         assert b"bad reply frame" in proc.stderr.read()
     finally:
         _stop(proc)
+
+
+def test_a_huge_finite_wall_time_keeps_the_timer_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Limits accepts any finite positive wall_time, but Event.wait raises
+    # OverflowError past threading.TIMEOUT_MAX (about 4.3e6 s on Windows), and
+    # an exception in the timer thread would silently end wall-time
+    # enforcement (confirmation review of 9012c953e).
+    raised: list[BaseException] = []
+    monkeypatch.setattr(threading, "excepthook", lambda a: raised.append(a.exc_value))
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+    )
+    try:
+        timer = supervisor._KillTimer(proc, None, 1e12, threading.Event())
+        timer.start()
+        time.sleep(0.3)
+        assert timer.is_alive(), f"the timer thread died: {raised}"
+        assert timer.cancel()
+        timer.join(5)
+        assert not timer.is_alive()
+        assert raised == []
+    finally:
+        proc.kill()
+        proc.wait()
