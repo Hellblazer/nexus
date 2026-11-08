@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``transcripts.sessions(since, until, project, bodies)`` (RDR-242 Technical
-Design 10; the record is RDR-240 Technical Design 4's; nexus-mdbds.8).
+"""``transcripts.sessions(since, until, project, bodies, fields)`` (RDR-242
+Technical Design 10; the record is RDR-240 Technical Design 4's; nexus-mdbds.8).
 
 Reads Claude Code transcripts under ``$CLAUDE_CONFIG_DIR/projects`` (default
 ``~/.claude/projects``) and returns one record per transcript file: a main
@@ -41,8 +41,17 @@ The record:
   prompt the harness wrote (it starts with its ``<command-name>`` or
   ``<command-message>`` tag), one per prompt, main sessions only;
 - ``deferred_tools`` and ``deferred_tools_dropped`` (names past 4,096);
+- ``tool_call_count``, the tool calls in the file (after the replay dedup,
+  before any ``fields`` filter or cut);
 - ``bytes`` and ``records`` (lines) of the file; ``truncated``; and with
   ``bodies``, ``assistant_text``.
+
+``fields`` (nexus-qo7ie.31) narrows the record to the named fields, while the
+file is parsed: an unselected field, above all a tool call's input, is never
+cleaned or held. See ``_parse_fields`` for the grammar. ``project`` may also be
+the reserved value ``repo``: every project directory holding the sessions of
+the repository the run started in (``transcripts_projects``); a project
+directory literally named ``repo`` cannot be asked for by name.
 
 Every field is read defensively: a value of the wrong type is ignored, and a
 line that is not JSON is skipped, so one malformed record never fails a
@@ -76,9 +85,11 @@ from pathlib import Path
 from typing import Any
 
 from nexus.lua_runtime import verb_types
+from nexus.lua_runtime.transcripts_projects import repo_project_dirs
 from nexus.lua_runtime.verb_types import (
     JSONValue,
     ParamSpec,
+    VerbArgError,
     VerbContext,
     VerbError,
     VerbSpec,
@@ -86,6 +97,11 @@ from nexus.lua_runtime.verb_types import (
 )
 
 VERB = "transcripts.sessions"
+REPO_PROJECT = "repo"
+REPO_NEEDED = (
+    f'{VERB}: project "{REPO_PROJECT}" needs a repository '
+    "(the run started outside one)"
+)
 TOO_LARGE = "result-too-large"
 RECORD_TOO_LARGE = "record-too-large"
 RECORD_CAP_BYTES = 1024 * 1024
@@ -217,6 +233,108 @@ def _check(deadline: float) -> None:
         raise VerbTimeout(f"{VERB}: the run's time budget ran out reading transcripts")
 
 
+# ---- fields ------------------------------------------------------------------
+
+_SCALARS = (
+    "session_id", "main", "agent_id", "project", "start", "end", "models",
+    "assistant_turns", "tokens", "first_context_tokens", "tool_call_count",
+    "deferred_tools", "deferred_tools_dropped", "bytes", "records", "truncated",
+)  # fmt: skip
+_SUBS: dict[str, tuple[str, ...]] = {
+    "tool_calls": ("name", "input", "time", "result_time", "is_error"),
+    "instruction_loads": ("path", "kind", "type", "size", "time"),
+    "slash_commands": ("name", "time"),
+    "assistant_text": ("time", "text"),
+}
+_ALWAYS = ("session_id", "agent_id", "main", "truncated")
+_INPUT_AT = "input@"
+
+
+class _Fields:
+    """What a call selects. ``top`` is the record's keys; ``keys`` the sub-keys
+    each selected list keeps per element; ``input_tools`` the tools whose calls
+    keep an ``input`` when it is not kept on every call (None: every call)."""
+
+    def __init__(
+        self,
+        top: frozenset[str],
+        keys: dict[str, frozenset[str]],
+        input_tools: frozenset[str] | None,
+    ) -> None:
+        self.top = top
+        self.keys = keys
+        self.input_tools = input_tools
+
+    def wants_input(self, tool: str | None) -> bool:
+        if "input" not in self.keys.get("tool_calls", ()):
+            return False
+        return self.input_tools is None or tool in self.input_tools
+
+
+def _all_fields(bodies: bool) -> _Fields:
+    lists = {k: frozenset(v) for k, v in _SUBS.items() if bodies or k != "assistant_text"}
+    return _Fields(frozenset(_SCALARS) | frozenset(lists), lists, None)
+
+
+def _parse_fields(fields: str | None, bodies: bool) -> _Fields:
+    """The selection ``fields`` names; nil is every field, as without ``fields``.
+
+    ``fields`` is comma-separated names, whitespace around a name ignored. A
+    name is a record key, ``<list>.<sub>`` for a list's per-element key, or
+    ``tool_calls.input@<Tool>``: the input only on calls named exactly
+    ``<Tool>`` (repeatable). A bare list name keeps every sub-key, and so
+    wins over sub-keys named beside it; a plain ``tool_calls.input`` wins over
+    ``input@`` forms. ``session_id``, ``agent_id``, ``main`` and ``truncated``
+    always come back. An empty string or name, an unknown name, or
+    ``assistant_text`` without ``bodies`` is a ``VerbArgError``.
+    """
+    if fields is None:
+        return _all_fields(bodies)
+    top: set[str] = set()
+    bare: set[str] = set()
+    subs: dict[str, set[str]] = {}
+    tools: set[str] = set()
+    for raw in fields.split(","):
+        name = raw.strip()
+        if not name:
+            raise VerbArgError(f"{VERB}: fields has an empty name")
+        shown = name[:64]
+        head, dot, tail = name.partition(".")
+        if not dot:
+            if head not in _SCALARS and head not in _SUBS:
+                raise VerbArgError(f"{VERB}: unknown field {shown!r}")
+            top.add(head)
+            if head in _SUBS:
+                bare.add(head)
+        else:
+            if head not in _SUBS:
+                raise VerbArgError(f"{VERB}: unknown field {shown!r}")
+            if head == "tool_calls" and tail.startswith(_INPUT_AT):
+                tool = tail[len(_INPUT_AT) :]
+                if not tool:
+                    raise VerbArgError(f"{VERB}: field {shown!r} names no tool")
+                tools.add(tool)
+            elif tail in _SUBS[head]:
+                subs.setdefault(head, set()).add(tail)
+            else:
+                raise VerbArgError(f"{VERB}: unknown field {shown!r}")
+            top.add(head)
+    if "assistant_text" in top and not bodies:
+        raise VerbArgError(f"{VERB}: assistant_text needs bodies to be true")
+    keys: dict[str, frozenset[str]] = {}
+    for lst in _SUBS:
+        if lst not in top:
+            continue
+        keys[lst] = frozenset(_SUBS[lst] if lst in bare else subs.get(lst, ()))
+    input_tools: frozenset[str] | None = None
+    calls = keys.get("tool_calls")
+    if calls is not None and "tool_calls" not in bare:
+        if "input" not in calls and tools:
+            keys["tool_calls"] = calls | {"input"}
+            input_tools = frozenset(tools)
+    return _Fields(frozenset(top) | frozenset(_ALWAYS), keys, input_tools)
+
+
 # ---- files -----------------------------------------------------------------
 
 
@@ -243,13 +361,21 @@ def _linked(path: Path, top: Path) -> bool:
 
 
 def _files(
-    root: Path, project: str | None, deadline: float
+    root: Path, project: str | None, deadline: float, repo_root: Path | None
 ) -> Iterator[tuple[str, Path, bool]]:
     """Transcript files under ``root`` (which may itself be a link), links below it excluded."""
+    if project == REPO_PROJECT and repo_root is None:
+        raise VerbError(REPO_NEEDED)
     if not root.is_dir():
         raise VerbError(f"{VERB}: no Claude Code projects directory at {root}")
     if project is None or project == "all":
         dirs = sorted(p for p in root.iterdir() if _plain_dir(p))
+    elif project == REPO_PROJECT:
+        try:
+            names = repo_project_dirs(root, repo_root, deadline=deadline)
+        except ValueError:
+            raise VerbError(REPO_NEEDED) from None
+        dirs = sorted(d for d in (root / n for n in names) if _plain_dir(d))
     else:
         if (
             project in ("", ".", "..")
@@ -277,10 +403,39 @@ def _files(
 # ---- one transcript ----------------------------------------------------------
 
 
+_OMIT: Any = object()
+
+
+def _pick(keys: frozenset[str], **values: Any) -> dict[str, Any]:
+    """The selected ``keys`` of ``values``; a callable is called only if selected.
+
+    A callable returning ``_OMIT`` leaves its key out.
+    """
+    out: dict[str, Any] = {}
+    for k, v in values.items():
+        if k not in keys:
+            continue
+        if callable(v):
+            v = v()
+            if v is _OMIT:
+                continue
+        out[k] = v
+    return out
+
+
 class _Session:
-    def __init__(self, main: bool, bodies: bool) -> None:
+    def __init__(self, main: bool, f: _Fields) -> None:
         self.main = main
-        self.bodies = bodies
+        self.f = f
+        self.call_keys = f.keys.get("tool_calls")
+        self.load_keys = f.keys.get("instruction_loads")
+        self.command_keys = f.keys.get("slash_commands")
+        self.text_keys = f.keys.get("assistant_text")
+        self.track_results = self.call_keys is not None and bool(
+            self.call_keys & {"result_time", "is_error"}
+        )
+        self.want_deferred = bool(f.top & {"deferred_tools", "deferred_tools_dropped"})
+        self.call_count = 0
         self.start: str | None = None
         self.end: str | None = None
         self.session_id: str | None = None
@@ -348,20 +503,39 @@ class _Session:
                     if tid in self.call_ids:
                         continue  # a replayed record
                     self.call_ids.add(tid)
-                call = {
-                    "name": _text(block.get("name"), 256),
-                    "input": _clean(block.get("input"), self.cut),
-                    "time": stamp,
-                    "result_time": None,
-                    "is_error": None,
-                }
-                self.calls.append(call)
-                if isinstance(tid, str):
-                    self.pending[tid] = call
-            elif btype == "text" and self.bodies:
+                self.call_count += 1
+                if self.call_keys is not None:
+                    call = self._call(block, stamp)
+                    self.calls.append(call)
+                    if self.track_results and isinstance(tid, str):
+                        self.pending[tid] = call
+            elif btype == "text" and self.text_keys is not None:
                 body = block.get("text")
                 if isinstance(body, str):
-                    self.text.append({"time": stamp, "text": _text(body, len(body))})
+                    self.text.append(
+                        _pick(
+                            self.text_keys,
+                            time=stamp,
+                            text=lambda: _text(body, len(body)),
+                        )
+                    )
+
+    def _call(self, block: dict[str, Any], stamp: str | None) -> dict[str, Any]:
+        """One tool call with the selected keys only: an unselected input is never cleaned."""
+        keys = self.call_keys or frozenset()
+        name = _text(block.get("name"), 256)
+        return _pick(
+            keys,
+            name=name,
+            input=lambda: (
+                _clean(block.get("input"), self.cut)
+                if self.f.wants_input(name)
+                else _OMIT
+            ),
+            time=stamp,
+            result_time=None,
+            is_error=None,
+        )
 
     def _user(self, message: dict[str, Any], stamp: str | None) -> None:
         content = message.get("content")
@@ -377,8 +551,10 @@ class _Session:
                 tid = block.get("tool_use_id")
                 call = self.pending.pop(tid, None) if isinstance(tid, str) else None
                 if call is not None:
-                    call["is_error"] = block.get("is_error") is True
-                    call["result_time"] = stamp
+                    if "is_error" in call:
+                        call["is_error"] = block.get("is_error") is True
+                    if "result_time" in call:
+                        call["result_time"] = stamp
             elif (
                 first
                 and block.get("type") == "text"
@@ -395,20 +571,16 @@ class _Session:
         if not head.startswith(_COMMAND_STARTS):
             return
         m = _COMMAND.search(head)
-        if m is not None:
-            self.commands.append({"name": m.group(1), "time": stamp})
+        if m is not None and self.command_keys is not None:
+            self.commands.append(_pick(self.command_keys, name=m.group(1), time=stamp))
 
     def _attachment(self, att: dict[str, Any], stamp: str | None) -> None:
         akind = att.get("type")
-        if akind == "deferred_tools_record":
-            entries = att.get("entries")
-            for e in entries if isinstance(entries, list) else []:
-                if isinstance(e, dict) and e.get("defer_loading") is True:
-                    self._defer(e.get("name"))
-        elif akind == "deferred_tools_delta":
-            names = att.get("addedNames")
-            for n in names if isinstance(names, list) else []:
-                self._defer(n)
+        if akind in ("deferred_tools_record", "deferred_tools_delta"):
+            if self.want_deferred:
+                self._deferred(akind, att)
+        elif self.load_keys is None:
+            return
         elif akind == "instructions":
             files = att.get("files")
             for f in files if isinstance(files, list) else []:
@@ -423,6 +595,17 @@ class _Session:
                 att.get("path"), inner.get("type"), inner.get("content"), akind, stamp
             )
 
+    def _deferred(self, akind: str, att: dict[str, Any]) -> None:
+        if akind == "deferred_tools_record":
+            entries = att.get("entries")
+            for e in entries if isinstance(entries, list) else []:
+                if isinstance(e, dict) and e.get("defer_loading") is True:
+                    self._defer(e.get("name"))
+        else:
+            names = att.get("addedNames")
+            for n in names if isinstance(names, list) else []:
+                self._defer(n)
+
     def _defer(self, name: Any) -> None:
         n = _text(name, 256)
         if not n or n in self.deferred:
@@ -436,21 +619,21 @@ class _Session:
         self, path: Any, ftype: Any, content: Any, kind: str, stamp: str | None
     ) -> None:
         p = _text(path, 4096)
-        if p is None:
+        if p is None or self.load_keys is None:
             return
-        size = (
-            len(content.encode("utf-8", "surrogatepass"))
-            if isinstance(content, str)
-            else None
-        )
         self.loads.append(
-            {
-                "path": p,
-                "kind": kind,
-                "type": _text(ftype, 64),
-                "size": size,
-                "time": stamp,
-            }
+            _pick(
+                self.load_keys,
+                path=p,
+                kind=kind,
+                type=lambda: _text(ftype, 64),
+                size=lambda: (
+                    len(content.encode("utf-8", "surrogatepass"))
+                    if isinstance(content, str)
+                    else None
+                ),
+                time=stamp,
+            )
         )
 
 
@@ -460,11 +643,11 @@ def _scan(
     main: bool,
     since: datetime,
     until: datetime,
-    bodies: bool,
+    f: _Fields,
     deadline: float,
-) -> dict[str, Any] | None:
-    """The record for one transcript, or None when it starts outside the window."""
-    s = _Session(main, bodies)
+) -> tuple[str, dict[str, Any]] | None:
+    """The transcript's start and record, or None when it starts outside the window."""
+    s = _Session(main, f)
     lines = 0
     read = 0
     next_bytes = BYTES_PER_DEADLINE_CHECK
@@ -527,7 +710,7 @@ def _scan(
     agent_id = None
     if not main:
         agent_id = s.agent_id or _text(path.stem.removeprefix("agent-"), 128)
-    record: dict[str, Any] = {
+    everything: dict[str, Any] = {
         "session_id": s.session_id
         or _text(path.stem if main else _session_dir(path).name, 128),
         "main": main,
@@ -540,6 +723,7 @@ def _scan(
         "tokens": s.tokens,
         "first_context_tokens": s.first_context,
         "tool_calls": s.calls,
+        "tool_call_count": s.call_count,
         "instruction_loads": s.loads,
         "slash_commands": s.commands,
         "deferred_tools": sorted(s.deferred),
@@ -548,9 +732,10 @@ def _scan(
         "records": lines,
         "truncated": s.cut[0],
     }
-    if bodies:
-        record["assistant_text"] = s.text
-    return _fit(record)
+    if "assistant_text" in f.top:
+        everything["assistant_text"] = s.text
+    record = {k: v for k, v in everything.items() if k in f.top}
+    return s.start, _fit(record)
 
 
 def _session_dir(path: Path) -> Path:
@@ -570,14 +755,20 @@ def _fit(record: dict[str, Any]) -> dict[str, Any]:
     """
     if _size(record) <= RECORD_CAP_BYTES:
         return record
-    calls = record["tool_calls"]
+    calls = record.get("tool_calls")
     text = record.get("assistant_text")
     record["truncated"] = True
 
     def cut_to(limit: int) -> None:
-        record["tool_calls"] = [{**c, "input": _cut(c["input"], limit)} for c in calls]
+        if calls is not None:
+            record["tool_calls"] = [
+                {**c, "input": _cut(c["input"], limit)} if "input" in c else c
+                for c in calls
+            ]
         if text is not None:
-            record["assistant_text"] = [{**t, "text": t["text"][:limit]} for t in text]
+            record["assistant_text"] = [
+                {**t, "text": t["text"][:limit]} if "text" in t else t for t in text
+            ]
 
     for limit in _CUT_STEPS:
         cut_to(limit)
@@ -593,7 +784,7 @@ def _fit(record: dict[str, Any]) -> dict[str, Any]:
             over -= _size(items.pop()) + 1
             dropped += 1
         record[f"{key}_dropped"] = dropped
-        calls = record["tool_calls"]
+        calls = record.get("tool_calls")
         text = record.get("assistant_text")
         while items and _size(record) > RECORD_CAP_BYTES:  # the count's own bytes
             items.pop()
@@ -617,6 +808,7 @@ def sessions(
     until: str,
     project: str | None = None,
     bodies: bool | None = None,
+    fields: str | None = None,
     *,
     deadline: float,
     ctx: VerbContext,
@@ -624,20 +816,22 @@ def sessions(
     """One record per transcript that starts in ``[since, until)``, in start order.
 
     ``project`` is a Claude Code project directory name; nil or ``all`` means
-    every project. ``bodies`` adds the assistant's text. ``ctx`` is unused:
-    transcripts are the user's, not the repository's.
+    every project; ``repo`` means every project directory of the repository
+    the run started in (``ctx.repo_root``). ``bodies`` adds the assistant's
+    text. ``fields`` narrows each record (``_parse_fields``); it never
+    changes which records come back or their order.
     """
-    del ctx
     _check(deadline)
     lo = _bound(since, "since")
     hi = _bound(until, "until")
+    f = _parse_fields(fields, bool(bodies))
     root = _projects_root()
-    files = list(_files(root, project, deadline))
+    files = list(_files(root, project, deadline, ctx.repo_root))
     if lo >= hi:
         return []
     cap = verb_types.VERB_RESULT_CAP_BYTES
     floor = lo.timestamp()
-    out: list[dict[str, Any]] = []
+    out: list[tuple[str, dict[str, Any]]] = []
     total = 1  # "[" now; each record brings its "," or the closing "]"
     for proj, path, main in files:
         _check(deadline)
@@ -647,24 +841,24 @@ def sessions(
             continue
         if not stat.S_ISREG(st.st_mode) or st.st_mtime < floor:
             continue  # not a plain file, or last written before the window opened
-        rec = _scan(path, proj, main, lo, hi, bool(bodies), deadline)
-        if rec is None:
+        got = _scan(path, proj, main, lo, hi, f, deadline)
+        if got is None:
             continue
-        out.append(rec)
-        total += _size(rec) + 1
+        out.append(got)
+        total += _size(got[1]) + 1
         if total > cap:
             raise VerbError(
                 f"{TOO_LARGE}: {VERB}: more than {cap} bytes of records after "
                 f"{len(out)} transcripts; narrow the window or the project"
             )
     out.sort(
-        key=lambda r: (
-            (_stamp(r["start"]) or ("", lo))[1],
-            not r["main"],
-            r["agent_id"] or "",
+        key=lambda g: (
+            (_stamp(g[0]) or ("", lo))[1],
+            not g[1]["main"],
+            g[1]["agent_id"] or "",
         )
     )
-    return out
+    return [rec for _, rec in out]
 
 
 VERBS: tuple[VerbSpec, ...] = (
@@ -675,6 +869,7 @@ VERBS: tuple[VerbSpec, ...] = (
             ParamSpec("until", "string"),
             ParamSpec("project", "string", optional=True),
             ParamSpec("bodies", "boolean", optional=True),
+            ParamSpec("fields", "string", optional=True),
         ),
         sessions,
     ),
