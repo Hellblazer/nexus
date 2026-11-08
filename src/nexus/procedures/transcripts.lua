@@ -76,6 +76,11 @@
 -- of a command splits its segment (the & is a separator); $(...) nested inside double quotes is
 -- not scanned; the bodies of bash -c '...' and ssh host '...' are one quoted word and are not
 -- scanned.
+-- Counts are floors where the verb cut a record to 1 MB: a cut record loses the tails of its
+-- assistant text and tool calls, so the counts are biased low on exactly the long sessions;
+-- truncated_records says how many records were cut. And project names ONE Claude Code project
+-- directory, so a repository's linked-worktree directories are not included: a per-repo count
+-- sums the runs over each directory (RDR-238 research 4 re-derivation, 2026-11-08).
 -- Cost. cost_estimate_usd is an ESTIMATE from the price table below, USD per million tokens,
 -- from src/nexus/operators/llm_models.py PRICES (read through Context7 on 2026-10-23; a test
 -- compares them). A model not in it adds to unpriced and costs nothing. Long-prompt tiers
