@@ -46,9 +46,10 @@ ALLOWED: frozenset[str] = frozenset(
         "nexus.lua_runtime.static_check:_check",
         "nexus.lua_runtime.static_check:_dump",
         "nexus.lua_runtime.static_check:_line_at",
-        # RDR-240 Technical Design 1 (nexus-mdbds.9, not on this branch yet): reads the header
-        # lines of a library file's bytes, in the parent
+        # RDR-240 Technical Design 1 (nexus-mdbds.9): reads the header lines of a library file's
+        # bytes, in the parent; _split_lines is parse's own line splitter, called only by it
         "nexus.lua_runtime.header:parse",
+        "nexus.lua_runtime.header:_split_lines",
     }
 )
 
