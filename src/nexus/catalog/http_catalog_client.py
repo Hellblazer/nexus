@@ -2145,9 +2145,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         ``apply=False`` (the default) is a pure read: the engine returns the class counts (``stale_live``,
         ``rewrite``, ``merge`` with ``merge_twin`` and ``merge_sibling``, ``refused``, ``tombstoned``,
-        ``export_copies``, ``export_copies_target_moved``) and up to ``sample`` example rows per class under
-        ``sample``. ``apply=True`` also rewrites up to ``limit`` rewrite candidates in ONE engine transaction
-        (catalog row, aspect row and highlight row together) and adds ``rewritten`` and ``remaining``. A rewrite
+        ``export_copies``, ``export_copies_target_moved``) and up to ``sample`` example rows per class under ``sample`` (merge entries
+        carry ``chunk_count``, ``indexed_at``, ``has_aspects``, ``has_highlights`` and the twin's under ``twin_``).
+        ``apply=True`` also rewrites up to ``limit`` rewrite candidates in ONE engine transaction (catalog row, aspect
+        row and highlight row together) and adds ``rewritten``, ``remaining`` and ``ledger``: one
+        ``{table, key, [doc_id], old_uri, new_uri}`` per row changed, the caller's only undo record. A rewrite
         onto a URI a live document holds, or takes while the call runs, is a 409 (``SourceUriCollision``) with
         nothing written. Merge candidates are never touched: which row wins a merge is a design decision.
 

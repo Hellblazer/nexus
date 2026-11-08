@@ -985,7 +985,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 "sample": {"rewrite": [], "merge": [], "refused": [], "tombstoned": [], "export_target_moved": []},
             }
             if apply:
-                out.update(rewritten=0, remaining=0)
+                out.update(rewritten=0, remaining=0, ledger=[])
             self._send_json(out)
         else:
             self._send_json({"ok": True})

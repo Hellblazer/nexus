@@ -31,7 +31,7 @@ def _clear_registration_cache():
 
 
 @pytest.mark.integration
-def test_dry_run_writes_nothing_and_apply_rewrites_only_the_rewrite_candidate(t2_service_env):
+def test_dry_run_writes_nothing_and_apply_rewrites_only_the_rewrite_candidate(t2_service_env, tmp_path):
     reader = make_catalog_reader()
     writer = make_catalog_writer()
     curator = writer.register_owner("knowledge", "curator")
@@ -63,12 +63,18 @@ def test_dry_run_writes_nothing_and_apply_rewrites_only_the_rewrite_candidate(t2
     assert reader.by_source_uri(f"nx-note://{left}/alpha") is not None, "a dry run writes nothing"
     assert reader.by_source_uri(f"nx-note://{live}/alpha") is None
 
-    applied = runner.invoke(main, ["catalog", "repair-note-uris", "--apply", "--json"])
+    undo = tmp_path / "undo.jsonl"
+    applied = runner.invoke(main, ["catalog", "repair-note-uris", "--apply", "--json", "--ledger", str(undo)])
     assert applied.exit_code == 0, applied.output
     # the first write of a process logs the production-write guard's opt-in notice to stdout ahead of the JSON
     done = json.loads(applied.output[applied.output.index("{"):])
     assert done["rewritten"] == 1 and done["batches"] == 1
     assert done["after"]["rewrite"] == 0 and done["after"]["merge"] == 1 and done["after"]["tombstoned"] == 1
+    assert done["ledger"] == str(undo)
+    lines = [json.loads(line) for line in undo.read_text().splitlines()]
+    assert lines == [{"batch": 1, "table": "catalog_documents", "key": rewrite,
+                      "old_uri": f"nx-note://{left}/alpha", "new_uri": f"nx-note://{live}/alpha"}], \
+        "the ledger names the one row changed, with the URI it had and the one it has"
 
     found = reader.by_source_uri(f"nx-note://{live}/alpha")
     assert found is not None and str(found.tumbler) == rewrite, "a re-put under the note's collection finds it"

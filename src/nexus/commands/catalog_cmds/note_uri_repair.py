@@ -18,14 +18,26 @@ What it does NOT do, by design:
 * **No merge.** A row whose target URI a live document already holds (a twin), or that would rewrite onto the
   same URI as another stale row, is listed and left alone. ``POST /v1/catalog/merge`` moves neither chunks nor
   aspects nor highlights, so which row wins is a design choice that waits for Sam.
-* **No tombstoned rows.** Counted, not rewritten: only live rows can mint a duplicate.
-* **No ``nxexp://`` rows.** An export copy's inner collection names the SOURCE of the export by design, so it is
-  not stale; the census reports the copies whose *target* segment is no longer the collection they live in. No
-  mover rewrites an ``nxexp://`` value, so there is no rule to repair against.
+* **No tombstoned rows.** Counted, not rewritten: only live rows can mint a duplicate. A restore makes a stale
+  tombstone live again, so it appears in the next census as a rewrite or merge candidate.
+* **No ``nxexp://`` rows (scope, and a risk that grows).** An export copy's inner collection names the SOURCE of
+  the export by design, so it is not stale; the census reports the copies whose *target* segment is no longer the
+  collection they live in. ``NoteUri.moveTo`` skips ``nxexp://`` values, so every rename and re-home leaves its
+  copies' target segment behind and that count grows with each one; a re-import into the new collection then
+  misses the copy and mints another. Repairing it needs its own rule and is a follow-on, not part of this verb.
+
+``--apply`` keeps a LEDGER: one JSON line per row changed, in all three tables (``catalog_documents`` keyed by
+tumbler, ``document_aspects`` and ``document_highlights`` keyed by row id), with the old and the new URI. It is the
+only undo record: nothing else keeps the old value. It is written and flushed after every batch, before the next
+one starts, to ``--ledger PATH`` (default a timestamped ``nx-note-uri-repair-<UTC>.jsonl`` in the working
+directory; an existing file is appended to). A response lost to a timeout may leave a batch rewritten and
+unledgered: the next census then shows the rows as already in their own collection, and the engine log has them.
 """
 from __future__ import annotations
 
+import datetime
 import json
+import os
 from typing import Any
 
 import click
@@ -35,8 +47,9 @@ import httpx
 _COUNT_KEYS: tuple[str, ...] = (
     "stale_live", "rewrite", "merge", "merge_twin", "merge_sibling", "refused",
     "refused_file_routed_collection", "refused_malformed", "tombstoned", "export_copies",
-    "export_copies_target_moved",
+    "export_copies_target_moved"
 )
+_LEDGER_KEYS: tuple[str, ...] = ("table", "key", "old_uri", "new_uri")
 _SAMPLE_KEYS: tuple[str, ...] = ("rewrite", "merge", "refused", "tombstoned", "export_target_moved")
 
 
@@ -108,7 +121,8 @@ def _print_census(report: dict) -> None:
     for row in sample["merge"]:
         echo(
             f"  merge?   {row.get('tumbler')}  {row.get('source_uri')}  ->  {row.get('new_uri')}"
-            f"  (twin {row.get('twin')}, {row.get('reason')})"
+            f"  (twin {row.get('twin')}, {row.get('reason')}; chunks {row.get('chunk_count', '?')} vs "
+            f"{row.get('twin_chunk_count', '?')})"
         )
     for row in sample["refused"]:
         echo(f"  refused  {row.get('tumbler')}  {row.get('source_uri')}  [{row.get('reason')}]")
@@ -126,6 +140,30 @@ def _print_census(report: dict) -> None:
         )
 
 
+def _check_ledger(step: dict) -> list[dict]:
+    """The step's ledger, or a ClickException: rows were rewritten, so a response without a usable ledger is stopped on."""
+    ledger = step.get("ledger")
+    if not isinstance(ledger, list) or any(
+        not isinstance(e, dict) or any(not isinstance(e.get(k), str) for k in _LEDGER_KEYS) for e in ledger
+    ):
+        raise click.ClickException(
+            "unexpected report from the engine: apply returned rewritten rows without a usable ledger "
+            "(a list of {table, key, old_uri, new_uri}). Stopping; nothing further is written."
+        )
+    catalog_rows = sum(1 for e in ledger if e["table"] == "catalog_documents")
+    if catalog_rows != step["rewritten"]:
+        raise click.ClickException(
+            f"unexpected report from the engine: apply rewrote {step['rewritten']} catalog row(s) but the ledger "
+            f"names {catalog_rows}. Stopping; nothing further is written."
+        )
+    return ledger
+
+
+def _default_ledger_path() -> str:
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"nx-note-uri-repair-{stamp}.jsonl"
+
+
 @click.command(name="repair-note-uris")
 @click.option("--apply", is_flag=True, help="Perform the rewrite (default: dry-run census only).")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of the human-readable report.")
@@ -137,30 +175,44 @@ def _print_census(report: dict) -> None:
     "--batch-size", "batch_size", type=click.IntRange(1, 5000), default=1000, show_default=True,
     help="Rewrite candidates ONE engine transaction rewrites; --apply repeats until none are left.",
 )
-def repair_note_uris_cmd(apply: bool, as_json: bool, sample: int, batch_size: int) -> None:
+@click.option(
+    "--ledger", "ledger_path", type=click.Path(dir_okay=False, writable=True), default=None,
+    help="With --apply: where the undo ledger (one JSON line per row changed) goes. Default: "
+         "nx-note-uri-repair-<UTC timestamp>.jsonl in the working directory. An existing file is appended to.",
+)
+def repair_note_uris_cmd(apply: bool, as_json: bool, sample: int, batch_size: int, ledger_path: str | None) -> None:
     """Repair note URIs that name a collection the note no longer lives in (nexus-bivz3.24).
 
     \b
     Always prints the census first; writes only with --apply.
       rewrite candidates  no live note holds nx-note://<its collection>/<title>: the URI is rewritten, in the
                           catalog row, its aspect row and its highlight row, in one transaction
-      merge candidates    a live twin holds the target URI (or two stale rows share it): listed, NOT merged
-      refused             file-routed collection, or no title part: listed, never rewritten
-      tombstoned          counted, never rewritten
-      nxexp:// copies     census only
+      merge candidates    a live twin holds the target (or two stale rows share it): listed, NOT merged
+      refused             blank or file-routed collection, or no title part: listed, never rewritten
+      tombstoned          counted, never rewritten (a restored one shows up in the next census)
+      nxexp:// copies     census only: their target segment goes stale with every rename or re-home, and a
+                          re-import into the new collection then mints another copy; not repaired here
     A twin that appears while --apply runs is a 409 that names it: nothing is written for that batch, and the
-    row is a merge candidate on the next census. Run the dry run first, and a census against a cloud tenant only
-    with the operator's go.
+    row is a merge candidate on the next census. A chain (a stale row's target held by another stale row) takes
+    more than one pass; --apply repeats until none are left or a batch makes no progress.
+
+    \b
+    --apply writes a LEDGER (--ledger PATH): every row changed, in all three tables, with its old and new URI.
+    It is the only undo record. Run the dry run first, and a census against a cloud tenant only with the
+    operator's go.
 
     \b
     Examples:
       nx catalog repair-note-uris                # census
       nx catalog repair-note-uris --json         # census as JSON
-      nx catalog repair-note-uris --apply        # rewrite every rewrite candidate
+      nx catalog repair-note-uris --apply        # rewrite every rewrite candidate, ledger in the working directory
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
+    if ledger_path is not None and not apply:
+        raise click.UsageError("--ledger only applies with --apply.")
     writer = _cat_cmd._get_catalog_writer()
+    ledger_fh = None
     try:
         before = _call(writer, {"apply": False, "limit": batch_size, "sample": sample})
         if not apply:
@@ -176,48 +228,83 @@ def repair_note_uris_cmd(apply: bool, as_json: bool, sample: int, batch_size: in
         rewritten = 0
         batches = 0
         stalled = False
+        capped = False
         after = before
+        path: str | None = None
         if before["rewrite"] == 0:
             if not as_json:
                 click.echo("Nothing to rewrite.")
         else:
+            path = ledger_path or _default_ledger_path()
+            try:
+                ledger_fh = open(path, "a", encoding="utf-8")  # noqa: SIM115 — closed in the finally below
+            except OSError as exc:
+                raise click.ClickException(f"cannot open the ledger {path!r} ({exc}). Nothing was written.") from exc
+            if not as_json:
+                click.echo(f"Ledger: {path}")
+            # A chain (stale A's target held by stale B) needs a pass after B has moved, so the loop re-censuses
+            # and goes round again while rewrite candidates remain; the cap keeps a rewrite that never settles
+            # from looping.
+            cap = -(-before["rewrite"] // batch_size) + 2
             while True:
-                try:
-                    step = _call(writer, {"apply": True, "limit": batch_size, "sample": 0})
-                except httpx.HTTPStatusError as exc:
-                    if exc.response is not None and exc.response.status_code == 409:
+                while True:
+                    if batches >= cap:
+                        capped = True
+                        break
+                    try:
+                        step = _call(writer, {"apply": True, "limit": batch_size, "sample": 0})
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response is not None and exc.response.status_code == 409:
+                            raise click.ClickException(
+                                f"{_refusal_text(exc)}\n{rewritten} note URI(s) were rewritten before it (ledger: "
+                                f"{path}); that batch wrote nothing. Run the census again: the row is a merge "
+                                "candidate now."
+                            ) from exc
+                        raise
+                    done = step.get("rewritten")
+                    if isinstance(done, bool) or not isinstance(done, int) or not isinstance(step.get("remaining"), int):
                         raise click.ClickException(
-                            f"{_refusal_text(exc)}\n{rewritten} note URI(s) were rewritten before it; that batch "
-                            "wrote nothing. Run the census again: the row is a merge candidate now."
-                        ) from exc
-                    raise
-                done = step.get("rewritten")
-                if isinstance(done, bool) or not isinstance(done, int) or not isinstance(step.get("remaining"), int):
-                    raise click.ClickException(
-                        f"unexpected report from the engine: apply returned rewritten={done!r}, "
-                        f"remaining={step.get('remaining')!r}."
-                    )
-                rewritten += done
-                batches += 1
-                if step["remaining"] == 0:
+                            f"unexpected report from the engine: apply returned rewritten={done!r}, "
+                            f"remaining={step.get('remaining')!r}."
+                        )
+                    batches += 1
+                    rewritten += done
+                    if done:
+                        for entry in _check_ledger(step):
+                            ledger_fh.write(json.dumps({"batch": batches, **entry}) + "\n")
+                        ledger_fh.flush()
+                        os.fsync(ledger_fh.fileno())
+                    if step["remaining"] == 0:
+                        break
+                    if done == 0:
+                        stalled = True
+                        break
+                after = _call(writer, {"apply": False, "limit": batch_size, "sample": sample})
+                if stalled or capped or after["rewrite"] == 0:
                     break
-                if done == 0:
-                    stalled = True
-                    break
-            after = _call(writer, {"apply": False, "limit": batch_size, "sample": sample})
     finally:
+        if ledger_fh is not None:
+            ledger_fh.close()
         writer.close()
 
     if as_json:
-        click.echo(json.dumps({"before": before, "rewritten": rewritten, "batches": batches, "after": after}, indent=2))
+        click.echo(json.dumps(
+            {"before": before, "rewritten": rewritten, "batches": batches, "ledger": path, "after": after}, indent=2))
     else:
-        click.echo(f"Rewrote {rewritten} note URI(s) in {batches} batch(es).")
+        click.echo(f"Rewrote {rewritten} note URI(s) in {batches} batch(es)." + (f" Ledger: {path}" if path and rewritten else ""))
         if batches:
             click.echo("Census after:")
             _print_census(after)
     if stalled:
         click.echo(
             "The last batch made no progress while rewrite candidates remain: stopping. Run the census again.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    if capped:
+        click.echo(
+            f"Stopped after {batches} batches (the cap) with rewrite candidates still listed: something keeps "
+            "producing them. Run the census again and read the samples.",
             err=True,
         )
         raise click.exceptions.Exit(1)
