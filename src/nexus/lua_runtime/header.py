@@ -236,7 +236,8 @@ def probe_repo(cwd: Path) -> RepoProbe | None:
         if any(phrase in err for phrase in _NO_WORK_TREE):
             return None
         raise RepoProbeError(f"git rev-parse exited {r.returncode}: {err[:200]}")
-    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    # split("\n"), not splitlines(): a path may hold U+2028 or U+001C.
+    lines = [ln for ln in r.stdout.split("\n") if ln.strip()]
     if len(lines) != 2:
         # Inside a .git directory or a bare repository there is no work tree.
         return None
@@ -263,7 +264,8 @@ def repo_name(cwd: Path) -> str | None:
 
 
 def _args_error(why: str) -> ScriptError:
-    return ScriptError("args", why)
+    # A caller's name can hold a lone surrogate; the error goes out as UTF-8 JSON.
+    return ScriptError("args", why.encode("utf-8", "backslashreplace").decode("utf-8"))
 
 
 def _check_type(spec: ArgSpec, value: object) -> JSONValue:

@@ -390,3 +390,30 @@ def test_run_script_can_probe_once_and_reuse_it() -> None:
 
     got = hd.prepare_args(_hdr("repo:string"), {}, cwd=Path("/x/top/sub"), clock=lambda: FIXED, repo_probe=once)
     assert got == {"repo": "top"} and calls == [Path("/x/top/sub")]
+
+
+def test_the_probe_reads_git_untranslated() -> None:
+    env = hd._git_env()
+    assert env["LC_ALL"] == "C" and env["LANGUAGE"] == "C"
+
+
+def test_a_localized_git_refusal_would_read_as_a_probe_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Why the C locale matters: only git's English words mean "no work tree".
+    def german(*a: object, **k: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(a, 128, "", "fatal: kein Git-Repository")
+
+    monkeypatch.setattr(bs, "run_bounded", german)
+    with pytest.raises(hd.RepoProbeError):
+        hd.probe_repo(Path.cwd())
+
+
+@needs_git
+def test_a_repo_whose_path_holds_a_line_separator_is_found(ceiling: Path) -> None:
+    repo = _git_repo(ceiling / "a\u2028b")
+    probe = hd.probe_repo(repo)
+    assert probe is not None and probe.name == "a\u2028b"
+
+
+def test_an_unknown_name_that_is_not_utf8_still_gives_a_utf8_error() -> None:
+    msg = _args_refusal("a:integer", {"a": 1, "\ud800": 2})
+    msg.encode("utf-8")
