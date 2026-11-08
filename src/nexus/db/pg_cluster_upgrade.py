@@ -283,7 +283,7 @@ def build_plan(config_dir: Path, old_bin: Path, *, require_no_old_dir: bool = Tr
         )
 
     try:
-        new_bins = discover_pg_binaries()
+        new_bins = discover_pg_binaries(config_dir)  # the bundle beside the cluster, not the process's default dir
         if not new_bins.bin_dir.is_absolute():  # review r2: a relative NEXUS_PG_BIN would break once cwd moves
             new_bins = type(new_bins).from_dir(_absolute(new_bins.bin_dir))
     except PgBinaryNotFoundError as exc:

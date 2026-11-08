@@ -392,13 +392,15 @@ def _install_hint() -> str:
 _NO_HOST_FALLBACK = True
 
 
-def discover_pg_binaries() -> PgBinaries:
+def discover_pg_binaries(config_dir: Path | None = None) -> PgBinaries:
     """Locate the PostgreSQL binaries nexus provides. NEVER a host install.
 
     Search order, and it is exhaustive:
 
     1. ``NEXUS_PG_BIN`` env var override (carve-out #1).
-    2. The extracted ship-alongside PG bundle under the config dir.
+    2. The extracted ship-alongside PG bundle under the config dir: *config_dir* when given (a command
+       acting on a cluster in an explicit ``--config-dir``), else the process's own
+       (:func:`nexus.config.nexus_config_dir`).
 
     There is no third leg. Host PostgreSQL is never used, never probed, and
     never falls through — see :data:`_NO_HOST_FALLBACK`.
@@ -435,7 +437,7 @@ def discover_pg_binaries() -> PgBinaries:
     from nexus.config import nexus_config_dir  # local import to avoid circular  # noqa: PLC0415 — deferred import — heavy/optional dep loaded only when provisioning runs
     from nexus.db.pg_bundle import extracted_bin_dir  # noqa: PLC0415 — deferred import — heavy/optional dep loaded only when provisioning runs
 
-    bundle_bin = extracted_bin_dir(nexus_config_dir())
+    bundle_bin = extracted_bin_dir(config_dir if config_dir is not None else nexus_config_dir())
     if bundle_bin is not None:
         bins = PgBinaries.from_dir(bundle_bin)
         if bins.all_present():
