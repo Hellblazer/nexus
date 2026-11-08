@@ -463,26 +463,55 @@ class ClusterUpgrade:
             )
         if state != _PG_CTL_NOT_RUNNING:
             raise PgUpgradeRefused(f"`{old_ctl} -D {p.pgdata} status` exited {state}: cannot tell whether a server runs there")
-        try:
-            workdir = _short_tempdir()
-        except OSError as exc:
-            raise PgUpgradeRefused(f"could not make a temporary directory under {SHORT_TMP_ROOT} ({exc.strerror})") from None
-        try:
-            new_data = workdir / "data"
+        with _interrupts_raise():
             try:
-                self._initdb(new_data, workdir)
-                self.say("initdb: a temporary cluster was made; running pg_upgrade --check against it")
-                self._step("pg_upgrade --check", self._upgrade_argv(p.pgdata, new_data, check=True),
-                           timeout=_PG_UPGRADE_TIMEOUT_S, cwd=workdir, secret=True)
-            except _StepFailed as exc:
-                raise PgUpgradeFailed(
-                    f"{exc}\n{p.pgdata} was not modified (pg_upgrade --check starts and stops the old server on it, "
-                    f"and changes nothing). If it reports an encoding or locale mismatch, the old "
-                    f"cluster was made with other options; see {_RUNBOOK}."
-                ) from None
-        finally:
-            shutil.rmtree(workdir, ignore_errors=True)
+                workdir = _short_tempdir()
+            except OSError as exc:
+                raise PgUpgradeRefused(f"could not make a temporary directory under {SHORT_TMP_ROOT} ({exc.strerror})") from None
+            try:
+                new_data = workdir / "data"
+                try:
+                    self._initdb(new_data, workdir)
+                    self.say("initdb: a temporary cluster was made; running pg_upgrade --check against it")
+                    self._step("pg_upgrade --check", self._upgrade_argv(p.pgdata, new_data, check=True),
+                               timeout=_PG_UPGRADE_TIMEOUT_S, cwd=workdir, secret=True)
+                except _StepFailed as exc:
+                    left = self._stop_check_server()
+                    raise PgUpgradeFailed(
+                        f"{exc}\n{p.pgdata} was not modified (pg_upgrade --check starts and stops the old server on it, "
+                        f"and changes nothing). If it reports an encoding or locale mismatch, the old "
+                        f"cluster was made with other options; see {_RUNBOOK}." + (f"\n{left}" if left else "")
+                    ) from None
+                except BaseException as exc:  # an interrupt, or a bug: pg_upgrade --check may have left the old server up
+                    left = self._stop_check_server()
+                    if left:
+                        self.say(left)
+                    if isinstance(exc, Exception):
+                        raise
+                    self.say(f"interrupted ({exc}). {p.pgdata} was not modified; the temporary directory is removed.")
+                    raise
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
         self.say(f"pg_upgrade --check passed. The temporary cluster is removed and {p.pgdata} was not modified.")
+
+    def _stop_check_server(self) -> str | None:
+        """After a ``--check-only`` that did not finish cleanly: stop the old server ``pg_upgrade --check`` started.
+
+        ``--check-only`` refuses to begin while a server runs on the data directory, so a server running now is
+        the one the check started and an interrupt or a failure left behind. Stopped with the OLD ``pg_ctl``,
+        ``fast`` and bounded; signals are ignored meanwhile. Returns a warning naming the command to run when it
+        cannot be confirmed down, else None.
+        """
+        p = self.plan
+        old_ctl = p.old_bin / "pg_ctl"
+        with _interrupts_held():
+            with contextlib.suppress(Exception):
+                self._stop_server(old_ctl, p.pgdata, mode="fast")
+            if self._is_down(old_ctl, p.pgdata):
+                return None
+        return (f"WARNING: a server may still be running on {p.pgdata} (pg_upgrade --check started it and it could "
+                f"not be confirmed stopped): stop it with `{old_ctl} -D {p.pgdata} -m fast stop`. "
+                f"It is still running, or `pg_ctl status` could not say.")
 
     def apply(self) -> None:
         p = self.plan
