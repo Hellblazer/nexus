@@ -6723,14 +6723,12 @@ FROM scope s
         });
     }
 
-    /** The sample keys that label a chunk: the owner's title, tumbler and path, and the chunk's text prefix. */
-    private static final List<String> SAMPLE_LABEL_KEYS = List.of("title", "doc_id", "source_path", "text_prefix");
-
     /**
      * The gc quarantine sample with the label of every chunk a live sensitive document holds, in any collection, set
      * to null (nexus-rfvyy.9): {@code gc_quarantine_orphans*} (vectors-040) build the label in SQL from the same
      * cross-collection owner {@link ChunkOwnerLabel} names, so the engine withholds it here, after the call and in the
-     * same transaction, as the Java label does in its own statement. The chash stays.
+     * same transaction, as the Java label does in its own statement. A withheld row keeps its chash and every other
+     * key is null, so a label key a later changeset adds to the SQL is withheld too (fail closed).
      */
     static List<Map<String, Object>> withholdSensitiveLabels(DSLContext ctx, String tenant,
                                                             List<Map<String, Object>> sample) {
@@ -6744,10 +6742,8 @@ FROM scope s
         List<Map<String, Object>> out = new ArrayList<>(sample.size());
         for (Map<String, Object> m : sample) {
             if (m.get("chash") instanceof String c && hit.contains(c)) {
-                Map<String, Object> w = new LinkedHashMap<>(m);
-                for (String k : SAMPLE_LABEL_KEYS) {
-                    if (w.containsKey(k)) w.put(k, null);
-                }
+                Map<String, Object> w = new LinkedHashMap<>();
+                for (String k : m.keySet()) w.put(k, k.equals("chash") ? c : null);
                 out.add(w);
             } else {
                 out.add(m);
