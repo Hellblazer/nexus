@@ -155,7 +155,7 @@ def test_list_shows_every_shipped_procedure_with_its_summary(monkeypatch: pytest
     assert result.exit_code == 0, result.output
     for p in library.procedures(cwd=None):
         assert p.name in result.stdout and p.summary in result.stdout
-    assert "research_add" in result.stdout and "gate_record" in result.stdout
+    assert "research_add" in result.stdout and "transcripts" in result.stdout
 
 
 def test_list_does_not_run_anything(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -43,7 +43,7 @@ def test_the_tool_is_a_sync_read_only_tool() -> None:
 def test_the_description_lists_every_shipped_procedure_with_its_summary() -> None:
     desc = core.mcp._tool_manager._tools["procedure_run"].description
     shipped = [p for p in procedures(cwd=None) if p.root == "shipped"]
-    assert {p.name for p in shipped} >= {"research_add", "gate_record"}
+    assert {p.name for p in shipped} >= {"research_add", "transcripts"}
     for p in shipped:
         assert f"- {p.name}: {p.summary}" in desc, p.name
     assert "nx run --list" in desc  # what runs from a checkout's own .nexus/procedures is listed there
