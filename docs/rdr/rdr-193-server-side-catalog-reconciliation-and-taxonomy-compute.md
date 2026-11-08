@@ -1348,7 +1348,11 @@ answer (`ChunkKeysSweepJobs`).
 
 ### Prerequisites
 
-- [ ] Sam's answers to the open questions (Finalization Gate).
+- [x] Sam's answers to the open questions (Finalization Gate), 2026-11-08:
+  landing tables; cross-repository path links dropped unless Step 0 shows
+  reliance; Parts A and A4 accepted, Part B held.
+- Part B is held at accept (open question 3). Steps 4, 8 and 10-12 are
+  outside this acceptance and wait for a later trigger.
 - [x] Changeset ids checked free: `catalog-048`, `taxonomy-022`.
 
 ### Minimum Viable Validation
@@ -1453,6 +1457,8 @@ its fields; `same-as` grouping and the anchor match today on a fixture with
 
 #### Step 4: Taxonomy SQL and labeler routes
 
+Held at accept (Part B, open question 3).
+
 `taxonomy-022-serverside-projection-links.xml` and the two labeler routes.
 Tests: projection equals today's `project_against` result on a seeded
 fixture, sensitive chunks included as today; cross-links count and rows;
@@ -1499,6 +1505,8 @@ it does not, record the same change in RDR-241's census entry (T2
 
 #### Step 8: Taxonomy client for B1
 
+Held at accept (Part B, open question 3).
+
 Projection, cross-links and relabel switched to the Step 4 routes, with
 the client deletions listed under Part B1. Test: relabel still skips topics
 with a sensitive document.
@@ -1512,12 +1520,16 @@ ships Steps 6-8 (paired release).
 
 #### Step 10: Clustering port
 
+Held at accept (Part B, open question 3).
+
 Java HDBSCAN, k-means and `VectorMath`. Gate: the parity fixture (ARI ≥
 0.90, capped 16 clusters with the largest 40, uncapped [359, 23]);
 `_merge_labels` and `compute_split` reproduced on seeded fixtures. The
 phase stops here if the gate fails.
 
 #### Step 11: Discover service, routes and engine cut 2
+
+Held at accept (Part B, open question 3).
 
 `TaxonomyDiscoverService`, the `discoverJobs` instance and routes, then
 engine cut 2 with the same gates as Step 5. Tests: seeded chunks give
@@ -1531,6 +1543,8 @@ of a 100,000 × 1024 discover on the engine, recorded.
 ### Phase 4: Part B2 client
 
 #### Step 12: Discover client
+
+Held at accept (Part B, open question 3).
 
 Submit, poll, summary, deletions. Contract test: `nx taxonomy discover`
 against `ensure_engine` makes zero `/vectors/get`, `/get-embeddings` and
@@ -1661,8 +1675,8 @@ The Minimum Viable Validation is in scope and runs at the end of Phase 2
 
 The document is long because it carries two parts and three gaps that share
 one mechanism, and because parity needs its rules written out. Open
-question 3 asks whether Sam wants Part B held back, which would remove
-Steps 4, 8 and 10-12 from this RDR's acceptance.
+question 3 asked whether Sam wants Part B held back; he did (2026-11-08),
+which removes Steps 4, 8 and 10-12 from this RDR's acceptance.
 
 ### Open questions for Sam
 
@@ -1684,6 +1698,9 @@ Steps 4, 8 and 10-12 from this RDR's acceptance.
      removes the most machinery, on one condition: a Step 2 spike pushes a
      20,000-row body through the edge from a slow link. If that fails,
      (a).
+   - **Answer (Sam, 2026-11-08): (a), landing tables, as designed.** Gate
+     round 3 found that (b) loses the stored outcome a resubmit after a lost
+     job reads, so the Step 2 spike is not run.
 2. **Cross-repository path links.**
    - (a) Drop them: paths resolve by the file's identity, then inside the
      source's owner (as designed). Cost: links today made by accident of
@@ -1694,6 +1711,9 @@ Steps 4, 8 and 10-12 from this RDR's acceptance.
    - Recommendation: (a), unless Step 0's count 3 shows cross-repository
      links in numbers someone relies on; then (b) with the
      exactly-one-repository rule.
+   - **Answer (Sam, 2026-11-08): the recommendation.** Drop them unless
+     Step 0's count 3 shows reliance; then (b) with the
+     exactly-one-repository rule.
 3. **Scope at accept.**
    - (a) Accept Parts A, A4 and B together.
    - (b) Accept Parts A and A4 now, and hold Part B (taxonomy) for a later
@@ -1702,6 +1722,9 @@ Steps 4, 8 and 10-12 from this RDR's acceptance.
      Part A4 fixes a live correctness defect, and Part A is its carrier.
      Part B carries the Java port and its parity risk, and its egress
      figures are an August estimate with no felt cost behind them.
+   - **Answer (Sam, 2026-11-08): (b).** Parts A and A4 are accepted, each on
+     its own case; Part A4 does not depend on Part A1 (gate round 3), so the
+     two can land in either order. Part B is held.
 
 ## References
 
