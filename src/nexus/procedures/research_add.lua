@@ -31,22 +31,33 @@ check("method", args.method)
 if args.rdr < 1 then
   error("rdr must be a positive integer; got " .. args.rdr, 0)
 end
-if args.finding == "" then
+-- Trimmed as `nx rdr` trims it; one line, because the record is read line by line and a
+-- line such as "acknowledged: true" inside a finding would read as the record's own field.
+local finding = string.match(args.finding, "^%s*(.-)%s*$")
+if finding == "" then
   error("finding must not be empty", 0)
+end
+if string.find(finding, "[\r\n]") then
+  error("finding must be one line; it holds a line break", 0)
 end
 
 -- Titles carry the id padded to three digits ("097-research-9"); any zero padding
--- of the same number is the same RDR.
+-- of the same number is the same RDR, as the gate reads it. A title may carry a
+-- ": <summary>" suffix after the sequence number ("204-research-16: the bullet").
 local key = string.format("%03d", args.rdr)
 local project = args.repo .. "_rdr"
-local pattern = "^0*" .. string.format("%d", args.rdr) .. "%-research%-(%d+)$"
+local pattern = "^0*" .. string.format("%d", args.rdr) .. "%-research%-(%d+)"
 
 local highest = 0
 for _, entry in ipairs(memory.list(project)) do
-  local seq = string.match(entry.title or "", pattern)
+  local title = entry.title or ""
+  local seq = string.match(title, pattern .. "$") or string.match(title, pattern .. ":")
   if seq ~= nil then
     local n = math.tointeger(tonumber(seq))
-    if n ~= nil and n > highest then
+    if n == nil or n >= math.maxinteger then
+      error("research title " .. title .. " has a sequence number out of range", 0)
+    end
+    if n > highest then
       highest = n
     end
   end
@@ -57,7 +68,7 @@ local content = "rdr_id: " .. key .. "\n"
   .. "seq: " .. string.format("%d", seq) .. "\n"
   .. "classification: " .. args.classification .. "\n"
   .. "verification_method: " .. args.method .. "\n"
-  .. "finding: " .. args.finding .. "\n"
+  .. "finding: " .. finding .. "\n"
 
 return {
   project = project,

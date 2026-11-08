@@ -33,6 +33,10 @@ def test_nx_rdr_keeps_no_copy_of_the_vocabulary() -> None:
             values = {e.value for e in node.elts if isinstance(e, ast.Constant)}
             assert not (values >= set(CLASSIFICATIONS)), f"line {node.lineno} copies the classifications"
             assert not (values >= set(METHODS)), f"line {node.lineno} copies the methods"
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            # A string that spells the whole set (a usage hint) is a copy too.
+            assert not all(v in node.value for v in CLASSIFICATIONS), f"line {node.lineno} spells the classifications"
+            assert not all(v in node.value for v in METHODS), f"line {node.lineno} spells the methods"
 
 
 @pytest.mark.parametrize("flag,value", [("--classification", "guessed"), ("--method", "intuition")])
