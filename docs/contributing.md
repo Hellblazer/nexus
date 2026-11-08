@@ -121,6 +121,7 @@ test host (on chas, through `lab-run`), not on a busy laptop.
 - **Logging**: `structlog` — never `print()` in library code
 - **TDD**: write tests before implementation
 - **Package manager**: `uv` (not pip directly)
+- **File size and folder shape**: a source file (`src/nexus/**/*.py`, `service/src/main/**/*.java`) warns over 800 lines and fails over 1,500; a test file fails over 1,000; a `src/nexus` directory holds at most 40 modules, and `x.py` does not sit beside an `x_*.py` family. Files already past a cap are listed in `scripts/file-size-exceptions.txt` and `scripts/folder-shape-exceptions.txt` with ceilings that only fall. Before adding to a file over its cap, move the area you touch into its own module first. Lower a ceiling in the commit that shrinks the file: `python3 scripts/file_size_ratchet.py update-exceptions` (it refuses a raise or a new entry without `--allow-raise`). The lint bucket runs `tests/scripts/test_file_size_ratchet.py` (nexus-3ceda.1)
 
 ## Project Structure
 

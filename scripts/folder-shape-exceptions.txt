@@ -1,0 +1,17 @@
+# Folder-shape exceptions (scripts/file_size_ratchet.py, nexus-3ceda.1).
+#   dir <path> <ceiling>   a src/nexus directory allowed more than 40 direct modules, up to <ceiling>
+#   family <path/x>        a module x.py allowed beside its x_*.py family
+# Entries only shrink; adding or raising one needs `update-exceptions --allow-raise`.
+dir src/nexus 131
+dir src/nexus/commands 44
+dir src/nexus/plans 43
+family src/nexus/aspect_worker
+family src/nexus/bib_enricher
+family src/nexus/context
+family src/nexus/doc/resolvers
+family src/nexus/indexer
+family src/nexus/lua_runtime/verbs
+family src/nexus/plans/continuation
+family src/nexus/plans/evidence
+family src/nexus/plans/match
+family src/nexus/session
