@@ -7,11 +7,13 @@
 -- UTC day per verb call, paged under the run's 1 MB result cap.
 --
 -- Arguments. query is one of the seven names. since is required and must be before until.
--- until defaults to the reserved now (a Lua keyword, so read as args["until"]). project is a
--- Claude Code project directory name, default all. Window: [since, until) in UTC. A bare date
--- is that day at 00:00 UTC; a timestamp is YYYY-MM-DDTHH:MM:SS with an optional Z; nothing
--- else is read. A session belongs to the window that holds its first record, so one spanning
--- midnight is counted once, on its start day.
+-- until defaults to the reserved now (a Lua keyword, so read as args["until"]). project is all
+-- (the default, and what an absent project means), repo (every project directory of the
+-- repository the run started in, its linked worktrees included) or one Claude Code project
+-- directory name; the script passes it to the verb unchanged. Window: [since, until) in UTC. A
+-- bare date is that day at 00:00 UTC; a timestamp is YYYY-MM-DDTHH:MM:SS with an optional Z;
+-- nothing else is read. A session belongs to the window that holds its first record, so one
+-- spanning midnight is counted once, on its start day.
 --
 -- Result: {rows, truncated_records, since, until, next_since}. since and until are the values
 -- the run used. next_since is absent when the window is done; otherwise the next page starts
@@ -19,15 +21,29 @@
 -- with since = next_since and the returned until, and join the pages with
 -- nexus.lua_runtime.transcripts_join.join_pages (it refuses a page whose since is not the
 -- previous next_since). A page adds whole units (days, hours after a split) while its rows
--- stay under PAGE_BYTES, its verb calls under MAX_UNITS_PER_RUN (every query: a year-long
--- sparse window pages), the tool calls it reads under MAX_TOOL_CALLS_PER_RUN (every query: the
--- Lua instructions a page takes follow the commands it scans, about 1,300 a call at worst, so
--- 15,000 calls stay under 20 million of the runtime's 50 million) and, for keyed queries, its
--- sessions under MAX_SESSIONS_PER_RUN. A day whose verb result is too large, whose rows alone
--- pass PAGE_BYTES, or whose tool calls alone pass MAX_TOOL_CALLS_PER_RUN, is split into hours
+-- stay under PAGE_BYTES, its verb reads under MAX_UNITS_PER_RUN (every query: a year-long
+-- sparse window pages; each read decodes every transcript of its window again, so a tools unit,
+-- which makes two reads, counts two), the tool calls it reads under MAX_TOOL_CALLS_PER_RUN
+-- (every query: the Lua instructions a page takes follow the commands it scans, about 1,300 a
+-- call at worst, so 15,000 calls stay under 20 million of the runtime's 50 million) and, for
+-- keyed queries, its sessions under MAX_SESSIONS_PER_RUN. A day whose verb result is too
+-- large, whose rows alone pass PAGE_BYTES, or whose tool calls alone pass
+-- MAX_TOOL_CALLS_PER_RUN, is split into hours
 -- (an hour is taken whole, so a page always advances); an hour that still does not fit
 -- PAGE_BYTES or the verb fails with result-window: naming the hour. A transcript
 -- over 1 MB after the verb's cuts fails with the verb's record-too-large: error, unchanged.
+--
+-- Fields. Each query asks the verb only for the fields it reads (the fields argument of
+-- transcripts.sessions): the verb then never keeps the rest, which cuts the size of its result
+-- and the memory a page holds. A tool call's input rides only on the calls whose tool the query
+-- reads (input@Bash, input@*__memory_get), so a query that reads no input of a tool never sees
+-- it. Every query also asks for tool_call_count, the calls a record had before the filter, which
+-- the page bound counts. tools asks for the deferred tools of a session in a second read of the
+-- same window, so that no one verb result holds both them and the calls (on the busiest of 30
+-- days the verb's author measured 10.8 MB, 2 MB of it deferred names), and joins them to its
+-- records by session and agent; a window either read finds too large is split, as one read is.
+-- tools measures a call's input size from the verb's input_bytes (the size before any cut), so
+-- the input itself is not carried.
 --
 -- Rows. Size is estimated as twice the UTF-8 bytes of the strings plus 16 bytes a field (the
 -- sandbox has no JSON encoder). Per-session queries return rows that pages concatenate; a
@@ -78,9 +94,9 @@
 -- scanned.
 -- Counts are floors where the verb cut a record to 1 MB: a cut record loses the tails of its
 -- assistant text and tool calls, so the counts are biased low on exactly the long sessions;
--- truncated_records says how many records were cut. And project names ONE Claude Code project
--- directory, so a repository's linked-worktree directories are not included: a per-repo count
--- sums the runs over each directory (RDR-238 research 4 re-derivation, 2026-11-08).
+-- truncated_records says how many records were cut. Project repo finds a repository's project
+-- directories by the working directory each session recorded, and fails when the run started
+-- outside a repository; a project directory literally named repo cannot be asked for by name.
 -- Cost. cost_estimate_usd is an ESTIMATE from the price table below, USD per million tokens,
 -- from src/nexus/operators/llm_models.py PRICES (read through Context7 on 2026-10-23; a test
 -- compares them). A model not in it adds to unpriced and costs nothing. Long-prompt tiers
@@ -567,16 +583,6 @@ local function nx_verbs(segs)
   return found
 end
 
-local function input_bytes(inp)
-  local n = 0
-  for _, v in pairs(inp) do
-    if type(v) == "string" then
-      n = n + #v
-    end
-  end
-  return n
-end
-
 local function mcp_server(name)
   return name:match("^mcp__(.-)__")
 end
@@ -591,6 +597,9 @@ local function build_tools()
   return {
     keyed = false,
     bodies = false,
+    fields = "tool_call_count,tool_calls.name,tool_calls.time,tool_calls.input_bytes," ..
+      "tool_calls.input@Bash",
+    joined = "deferred_tools",
     each = function(rec, push)
       local t = tally("sum", rec)
       local deferred, called, ncalled = {}, {}, 0
@@ -607,7 +616,8 @@ local function build_tools()
         if server ~= nil or isdef then
           extra = {server = server, deferred = isdef or nil}
         end
-        t.hit("t\31" .. name, "tool", name, c.time, input_bytes(inp), extra)
+        local size = type(c.input_bytes) == "number" and c.input_bytes or 0
+        t.hit("t\31" .. name, "tool", name, c.time, size, extra)
         if isdef and not called[name] then
           called[name] = true
           ncalled = ncalled + 1
@@ -637,6 +647,9 @@ local function build_memory()
   return {
     keyed = false,
     bodies = false,
+    fields = "tool_call_count,instruction_loads,tool_calls.name,tool_calls.time," ..
+      "tool_calls.input@Read,tool_calls.input@Write,tool_calls.input@Edit,tool_calls.input@MultiEdit," ..
+      "tool_calls.input@*__memory_get,tool_calls.input@*__memory_search",
     each = function(rec, push)
       local t = tally("max", rec)
       for _, c in ipairs(list(rec.tool_calls)) do
@@ -671,6 +684,7 @@ local function build_loads()
   return {
     keyed = false,
     bodies = false,
+    fields = "tool_call_count,instruction_loads",
     each = function(rec, push)
       local t = tally("max", rec)
       for _, l in ipairs(list(rec.instruction_loads)) do
@@ -726,6 +740,8 @@ local function build_agents()
   return {
     keyed = true,
     bodies = false,
+    fields = "tool_call_count,start,models,tokens,first_context_tokens,assistant_turns," ..
+      "tool_calls.name,tool_calls.time,tool_calls.is_error,tool_calls.input@Agent,tool_calls.input@Task",
     keys = {"kind", "agent_type", "model"},
     tags = {dispatches = "sum", runs = "sum", turns = "sum", errors = "sum", context = "mean",
             max_context = "max", cost_estimate_usd = "sum", unpriced = "sum"},
@@ -809,6 +825,8 @@ local function build_skills()
   return {
     keyed = true,
     bodies = false,
+    fields = "tool_call_count,assistant_turns,slash_commands,tool_calls.name,tool_calls.input@Skill," ..
+      "tool_calls.input@Agent,tool_calls.input@Task",
     keys = {"scope", "kind", "name"},
     tags = {count = "sum", runs_with_skill = "sum", long_runs = "sum", long_runs_without_skill = "sum"},
     each = function(rec, add)
@@ -900,6 +918,7 @@ local function build_violations()
   return {
     keyed = true,
     bodies = true,
+    fields = "tool_call_count,assistant_text,tool_calls.name,tool_calls.input@Bash",
     keys = {"rule"},
     tags = {count = "sum", main_sessions = "sum"},
     each = function(rec, add)
@@ -934,6 +953,8 @@ local function build_procedures()
   return {
     keyed = true,
     bodies = false,
+    fields = "tool_call_count,tool_calls.name,tool_calls.input@*__procedure_run," ..
+      "tool_calls.input@*__memory_put,tool_calls.input@Bash",
     keys = {"procedure"},
     tags = {runs = "sum", hand_written = "sum"},
     each = function(rec, add)
@@ -1032,9 +1053,11 @@ local function reduce(q, recs)
   return rows
 end
 
--- The records of [a, b), or nil when the verb says the result is too large.
-local function fetch(q, a, b)
-  local ok, res = pcall(transcripts.sessions, stamp(a), stamp(b), args.project, q.bodies)
+-- One verb read of [a, b), counted against the page's reads: the records, or nil when the verb
+-- says the result is too large.
+local function read(page, a, b, bodies, fields)
+  page.calls = page.calls + 1
+  local ok, res = pcall(transcripts.sessions, stamp(a), stamp(b), args.project, bodies, fields)
   if ok then
     return list(res)
   end
@@ -1042,6 +1065,33 @@ local function fetch(q, a, b)
     return nil
   end
   error(res, 0)
+end
+
+-- A record's identity across the two reads of one window: a main record has no agent.
+local function identity(rec)
+  return tostring(rec.main == true) .. "\31" .. tostring(rec.session_id) .. "\31" .. tostring(rec.agent_id)
+end
+
+-- The records of [a, b) with the fields the query asks for, or nil when the verb says either of
+-- its reads is too large. A query with a joined field reads it in a second pass over the same
+-- window (no bodies) and sets it on the record with the same session and agent.
+local function fetch(q, page, a, b)
+  local recs = read(page, a, b, q.bodies, q.fields)
+  if recs == nil or q.joined == nil then
+    return recs
+  end
+  local extra = read(page, a, b, false, q.joined)
+  if extra == nil then
+    return nil
+  end
+  local values = {}
+  for _, e in ipairs(extra) do
+    values[identity(e)] = e[q.joined]
+  end
+  for _, rec in ipairs(recs) do
+    rec[q.joined] = values[identity(rec)]
+  end
+  return recs
 end
 
 -- Add the unit's rows to the page: ok, full (the page stops before this unit), or split (the
@@ -1052,7 +1102,11 @@ end
 local function admit(q, page, recs, narrow)
   local calls = 0
   for _, rec in ipairs(recs) do
-    calls = calls + #list(rec.tool_calls)
+    local n = rec.tool_call_count
+    if type(n) ~= "number" then
+      n = #list(rec.tool_calls)
+    end
+    calls = calls + n
   end
   if calls > 0 and page.units > 0 and page.tool_calls + calls > MAX_TOOL_CALLS_PER_RUN then
     return "full"
@@ -1119,8 +1173,7 @@ local function window(q, lo, hi)
       split_end = nil
       stop = math.min(hi, (pos // DAY + 1) * DAY)
     end
-    page.calls = page.calls + 1
-    local recs = fetch(q, pos, stop)
+    local recs = fetch(q, page, pos, stop)
     local verdict = "split"
     if recs ~= nil then
       verdict = admit(q, page, recs, stop - pos > HOUR)
