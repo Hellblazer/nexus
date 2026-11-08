@@ -21,10 +21,9 @@
 -- with since = next_since and the returned until, and join the pages with
 -- nexus.lua_runtime.transcripts_join.join_pages (it refuses a page whose since is not the
 -- previous next_since). A page adds whole units (days, hours after a split) while its rows
--- stay under PAGE_BYTES, starts no unit once its verb reads reach MAX_UNITS_PER_RUN (every
--- query: a year-long sparse window pages; each read decodes every transcript of its window
--- again, so a tools unit, which makes two reads, counts two, and a page can end one read over),
--- the tool calls it reads under MAX_TOOL_CALLS_PER_RUN
+-- stay under PAGE_BYTES, its verb reads (one a unit) under MAX_UNITS_PER_RUN (every query: a
+-- year-long sparse window pages; each read decodes every transcript of its window), the tool
+-- calls it reads under MAX_TOOL_CALLS_PER_RUN
 -- (every query: the Lua instructions a page takes follow the commands it scans, about 1,300 a
 -- call at worst, so 15,000 calls stay under 20 million of the runtime's 50 million) and, for
 -- keyed queries, its sessions under MAX_SESSIONS_PER_RUN. A day whose verb result is too
@@ -39,10 +38,9 @@
 -- and the memory a page holds. A tool call's input rides only on the calls whose tool the query
 -- reads (input@Bash, input@*__memory_get), so a query that reads no input of a tool never sees
 -- it. Every query also asks for tool_call_count, the calls a record had before the filter, which
--- the page bound counts. tools asks for the deferred tools of a session in a second read of the
--- same window, so that no one verb result holds both them and the calls (on the busiest of 30
--- days the verb's author measured 10.8 MB, 2 MB of it deferred names), and joins them to its
--- records by session and agent; a window either read finds too large is split, as one read is.
+-- the page bound counts. Each unit is one read: the filter does not cut the read, every line is
+-- still decoded, so a second read of a window doubles its time (tools, reading deferred_tools
+-- apart, took 80 s over 30 days against 39 s in one read, whose busiest day was 10.3 MB).
 -- tools measures a call's input size from the verb's input_bytes (the size before any cut), so
 -- the input itself is not carried.
 --
@@ -599,8 +597,7 @@ local function build_tools()
     keyed = false,
     bodies = false,
     fields = "tool_call_count,tool_calls.name,tool_calls.time,tool_calls.input_bytes," ..
-      "tool_calls.input@Bash",
-    joined = "deferred_tools",
+      "tool_calls.input@Bash,deferred_tools",
     each = function(rec, push)
       local t = tally("sum", rec)
       local deferred, called, ncalled = {}, {}, 0
@@ -1068,31 +1065,10 @@ local function read(page, a, b, bodies, fields)
   error(res, 0)
 end
 
--- A record's identity across the two reads of one window: a main record has no agent.
-local function identity(rec)
-  return tostring(rec.main == true) .. "\31" .. tostring(rec.session_id) .. "\31" .. tostring(rec.agent_id)
-end
-
--- The records of [a, b) with the fields the query asks for, or nil when the verb says either of
--- its reads is too large. A query with a joined field reads it in a second pass over the same
--- window (no bodies) and sets it on the record with the same session and agent.
+-- The records of [a, b) with the fields the query asks for, or nil when the verb says the read
+-- is too large.
 local function fetch(q, page, a, b)
-  local recs = read(page, a, b, q.bodies, q.fields)
-  if recs == nil or q.joined == nil then
-    return recs
-  end
-  local extra = read(page, a, b, false, q.joined)
-  if extra == nil then
-    return nil
-  end
-  local values = {}
-  for _, e in ipairs(extra) do
-    values[identity(e)] = e[q.joined]
-  end
-  for _, rec in ipairs(recs) do
-    rec[q.joined] = values[identity(rec)]
-  end
-  return recs
+  return read(page, a, b, q.bodies, q.fields)
 end
 
 -- Add the unit's rows to the page: ok, full (the page stops before this unit), or split (the
