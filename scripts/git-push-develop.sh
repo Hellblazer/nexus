@@ -103,6 +103,11 @@
 #                    on stderr asks the session to batch (Sam, 2026-10-21). A
 #                    hint, never a refusal; stdout keeps its PUSH_OK contract.
 #
+# After PUSH_OK, two PUSH_WAIT lines on stderr name the ways to be woken when the
+# push's CI completes (nexus-1d6pz.11.4): the tuple_subscribe call for a session
+# with the channel, and `nx ci wait <tip>` to run as a background command for a
+# session without it.
+#
 # Push lock (nexus-agctp). Rule 7 (check `gh run list` before pushing) is a
 # poll: the gap between looking and pushing is where two sessions collide,
 # and a careful session that keeps checking yields indefinitely to a

@@ -2971,20 +2971,23 @@ CI results read from the CI board, without polling GitHub.
 ### nx ci wait
 
 ```
-nx ci wait <sha> [--timeout MIN] [--repo nexus] [--branch develop] [--gh-repo OWNER/NAME]
+nx ci wait <sha> [--timeout MIN] [--fresh] [--repo nexus] [--branch develop] [--gh-repo OWNER/NAME]
 ```
 
-Waits until the CI runs for `<sha>` (a full sha, or a prefix of at least 7 hex digits) have all completed, then prints one line: the sha, the outcome, each run's workflow and conclusion, and the run URL. It parks on `board/ci/<repo>-<branch>--done` (the CI board's wake topic; tuple reads under the engine's 25 s park cap). A row already on the topic counts; when a rerun gave the sha more than one row, the newest is used. Run it as a background command after a push: its exit is the wake, which is how a session launched without the Claude Code channel learns its CI result (`scripts/git-push-develop.sh` prints the command after `PUSH_OK`, on stderr, beside the `tuple_subscribe` call for a session with the channel).
+Waits until the CI runs for `<sha>` (a full sha, or a prefix of at least 7 hex digits) have all completed, then prints one line: the sha, the outcome, each run's workflow and conclusion, and the run URL. It parks on `board/ci/<repo>-<branch>--done` (the CI board's wake topic; tuple reads under the engine's 25 s park cap). A row already on the topic counts; when a rerun gave the sha more than one row, the newest is used. `--fresh` counts only a row that arrives after the wait starts: use it for a wait on a rerun, while the earlier attempt's row is still on the topic (rows stay a day). Run it as a background command after a push: its exit is the wake, which is how a session launched without the Claude Code channel learns its CI result (`scripts/git-push-develop.sh` prints the command after `PUSH_OK`, on stderr, beside the `tuple_subscribe` call for a session with the channel).
 
-The outcome reduces GitHub's own run conclusions with no policy of ours: failure if any run is `failure`, `timed_out`, `startup_failure` or `action_required`; else cancelled if any is `cancelled` or `stale`; else success (`success`, `neutral` and `skipped` count as success). Required checks and flake judgment stay with the reader. A row written before the board carried conclusions (its runs are `[run_id, attempt]` pairs) gets them from one `gh api` read per run, after the row arrives.
+The outcome reduces GitHub's own run conclusions with no policy of ours: failure if any run is `failure`, `timed_out`, `startup_failure` or `action_required`; else cancelled if any is `cancelled` or `stale`; else success (`success`, `neutral` and `skipped` count as success). Required checks and flake judgment stay with the reader. When the row carries the board's own `outcome` and it disagrees with that reduction, both are printed and the exit is 4. A row written before the board carried conclusions (its runs are `[run_id, attempt]` pairs) gets them from one `gh api` read per run attempt, after the row arrives.
+
+The board wake is best effort: a run set the adapter could not fold posts no row. So when no row has come by `--timeout` (default 60 minutes, at most a day) and the sha is a full one, it reads the sha's push runs from GitHub once: if every run has finished it prints their outcome, marked as read from GitHub, with the usual exit code; otherwise it exits 2 saying how many are still running. A board read that fails is retried every 5 seconds until the deadline.
 
 | Exit | Meaning |
 |---|---|
 | 0 | every run succeeded |
 | 1 | a run failed |
-| 2 | no row for the sha before `--timeout` (default 60 minutes) |
+| 2 | no row for the sha before `--timeout`, and GitHub does not show every run finished |
 | 3 | runs were cancelled or stale and none failed |
-| 4 | a conclusion could not be read, or is one this table does not know |
+| 4 | a conclusion could not be read, is one this table does not know, or disagrees with the board's outcome |
+| 5 | the wait could not run: not a sha, or no tuple store or board read until the deadline |
 
 ## nx collection
 
