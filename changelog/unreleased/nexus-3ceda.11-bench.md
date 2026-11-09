@@ -1,0 +1,3 @@
+### Added
+
+- **The retrieval bench records what it measured on and refuses to compare across it** (nexus-3ceda.11). Every `scripts/bench/runner.py` report carries a manifest: the git sha, whether the tree was dirty, the host class (a lab-run grant's size, or `unmanaged` with the core count; never a host name), the CPU model, the engine build (`release X.Y.Z` or `unstamped`) and the Python version. `--compare OLD NEW` refuses two reports measured on different hosts, CPUs or engines. `--pairs N` times two paths as paired, alternating runs (ABBA order; a failing path fails the run), and reports medians of each arm and of the per-pair differences, keeping every sample and counting outliers rather than dropping them. `docs/benchmarking.md` describes both.

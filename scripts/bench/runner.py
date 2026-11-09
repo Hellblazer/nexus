@@ -12,6 +12,13 @@ Usage::
     uv run python scripts/bench/runner.py bench/queries/spike_5q.yaml
     uv run python scripts/bench/runner.py path/to/q.yaml --out report.json
     uv run python scripts/bench/runner.py q.yaml --paths A          # subset
+    uv run python scripts/bench/runner.py q.yaml --paths A,C --pairs 5   # paired A/B timing
+    uv run python scripts/bench/runner.py --compare old.json new.json   # refuses across manifests
+
+Every report carries a ``manifest`` (``bench.manifest``: git sha, host class, engine build), and
+``--compare`` refuses two reports measured on different hosts or engines (nexus-3ceda.11).
+``--pairs N`` times exactly two paths on each query in N alternating pairs and reports medians
+with every sample kept (``bench.paired``).
 
 The report shape is intentionally stable so that diffing two reports
 (``git diff baselines/2026-04-28.json baselines/2026-04-29.json``)
@@ -19,7 +26,7 @@ shows real regressions instead of timestamp churn.
 
 Out of scope:
 
-  * Warmup runs / repeats — single-call latency is the metric.
+  * Warmup runs — a sweep's single-call latency is its metric; for an A/B, ``--pairs``.
   * Confidence intervals — N=5..30 is the operational scale.
   * Statistical significance testing — that's bench/analyze.py work,
     not this scaffold.
@@ -40,13 +47,16 @@ if str(_BENCH_PARENT) not in _sys.path:
 import argparse
 import datetime as _dt
 import json
+import statistics
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 import yaml
 
+from bench.manifest import ManifestMismatch, build_manifest, comparable
 from bench.metrics import dedupe_by_doc, grade_for_path, multi_hop_precision, ndcg_at_k
+from bench.paired import Clock, run_paired, summarize
 from bench.schema import GOLDEN_REQUIRED_FIELDS, Query, load_golden_set, load_queries
 
 PathHandler = Callable[[Query], dict[str, Any]]
@@ -208,6 +218,62 @@ def run_bench(
     }
 
 
+def run_paired_bench(
+    queries: list[Query], *, handlers: dict[str, PathHandler], pairs: int, clock: Clock = time.perf_counter,
+) -> dict[str, Any]:
+    """Time two paths on each query in *pairs* alternating pairs (``bench.paired``).
+
+    A failed retrieval fails the A/B instead of entering as a sample: a fast failure would read
+    as a fast path. The live handlers report a failure as a row whose ``error`` is set, not by
+    raising (``bench.paths``), so a run that returns one (even with an empty error) raises here, naming the path, the
+    query and the error; a handler that raises propagates as it is.
+    """
+    if len(handlers) != 2:
+        raise ValueError(f"a paired A/B takes exactly two paths, got {list(handlers)}")
+    (label_a, fn_a), (label_b, fn_b) = handlers.items()
+
+    def arm(label: str, fn: PathHandler, q: Query) -> Callable[[], object]:
+        def run() -> None:
+            row = fn(q)
+            # ``is not None``: path A's error is nx's stderr, which can be empty on a failure.
+            if isinstance(row, dict) and row.get("error") is not None:
+                raise RuntimeError(f"path {label} failed on query {q.qid}: {row['error'] or '(no error text)'}")
+        return run
+
+    per_query = {
+        q.qid: summarize(run_paired(arm(label_a, fn_a, q), arm(label_b, fn_b, q), pairs, clock=clock))
+        for q in queries
+    }
+    diffs = [s["median_paired_diff_s"] for s in per_query.values()]
+    return {
+        "a": label_a,
+        "b": label_b,
+        "pairs": pairs,
+        "queries": len(queries),
+        "median_of_query_paired_diffs_s": statistics.median(diffs) if diffs else None,
+        "b_faster_queries": sum(1 for d in diffs if d < 0),
+        "per_query": per_query,
+    }
+
+
+def compare_reports(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """Per-path change from *old* to *new*, refusing two reports measured on different hosts
+    or engines (:func:`bench.manifest.comparable` raises :class:`ManifestMismatch`)."""
+    comparable(old, new)
+    for name, report in (("first", old), ("second", new)):
+        if "by_path" not in report:
+            raise ManifestMismatch(f"the {name} report is not a sweep report (a --pairs report has no by_path)")
+    out: dict[str, Any] = {"old_sha": old["manifest"].get("git_sha"), "new_sha": new["manifest"].get("git_sha"),
+                           "paths": {}}
+    for label in sorted(set(old.get("by_path", {})) & set(new.get("by_path", {}))):
+        o, n = old["by_path"][label], new["by_path"][label]
+        out["paths"][label] = {
+            key: {"old": o.get(key), "new": n.get(key)}
+            for key in ("mean_ndcg_at_3", "mean_ndcg_at_3_scored", "mean_elapsed_s", "errors")
+        }
+    return out
+
+
 def write_report(report: dict[str, Any], out: Path) -> None:
     """Write the report as stable, sorted, indent=2 JSON."""
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -246,8 +312,14 @@ def main(argv: list[str] | None = None) -> int:
                     "B (nx_answer plan-routed), C (nx_answer force_dynamic).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("queries_yaml", type=Path,
-                        help="YAML file of queries to bench.")
+    parser.add_argument("queries_yaml", type=Path, nargs="?",
+                        help="YAML file of queries to bench (not with --compare).")
+    parser.add_argument("--pairs", type=int, default=None,
+                        help="Time exactly two --paths on each query in this many alternating "
+                             "pairs (an even number, so each path leads half of them) and "
+                             "report medians, instead of a sweep.")
+    parser.add_argument("--compare", type=Path, nargs=2, metavar=("OLD", "NEW"),
+                        help="Compare two reports; refuses two measured on different hosts or engines.")
     parser.add_argument("--corpus", default="rdr__nexus-571b8edd",
                         help="Path-A corpus filter and Path-C explicit scope.")
     parser.add_argument("--scope-b", default="rdr",
@@ -259,24 +331,56 @@ def main(argv: list[str] | None = None) -> int:
                         help="Comma-separated subset of A,B,C to run.")
     args = parser.parse_args(argv)
 
+    if args.compare:
+        if args.queries_yaml is not None or args.pairs is not None:
+            parser.error("--compare takes two reports and nothing else")
+        old, new = (json.loads(p.read_text(encoding="utf-8")) for p in args.compare)
+        try:
+            diff = compare_reports(old, new)
+        except ManifestMismatch as exc:
+            print(f"refused: {exc}", file=_sys.stderr)
+            return 2
+        print(json.dumps(diff, indent=2, sort_keys=True))
+        return 0
+    if args.queries_yaml is None:
+        parser.error("a queries YAML is required unless --compare is given")
+
     queries = load_query_file(args.queries_yaml)
 
-    selected = {p.strip() for p in args.paths.split(",") if p.strip()}
+    order = [p.strip() for p in args.paths.split(",") if p.strip()]
+    selected = set(order)
     if not selected.issubset(set(DEFAULT_PATHS)):
         bad = sorted(selected - set(DEFAULT_PATHS))
         raise SystemExit(f"Unknown path label(s): {bad}; valid={list(DEFAULT_PATHS)}")
+    if args.pairs is not None:
+        if args.pairs < 2 or args.pairs % 2:
+            parser.error(f"--pairs takes an even number of at least 2, got {args.pairs}")
+        if len(selected) != 2:
+            parser.error(f"--pairs needs exactly two --paths, got {sorted(selected)}")
 
     full = _live_handlers(args.corpus, args.scope_b)
-    handlers = {label: full[label] for label in DEFAULT_PATHS if label in selected}
+    # The order given: with --pairs the first path is arm A.
+    handlers = {label: full[label] for label in dict.fromkeys(order)}
 
-    out_path = args.out or (
-        Path(__file__).resolve().parent / "baselines"
-        / f"{_dt.date.today().isoformat()}.json"
-    )
+    # A paired report gets its own default name, so it never replaces the day's sweep baseline.
+    stem = _dt.date.today().isoformat() + (f"-pairs-{'-'.join(handlers)}" if args.pairs is not None else "")
+    out_path = args.out or (Path(__file__).resolve().parent / "baselines" / f"{stem}.json")
 
+    manifest = build_manifest(Path(__file__).resolve().parents[2])
     print(f"=== bench: {len(queries)} queries × {len(handlers)} path(s) ===")
-    print(f"corpus={args.corpus!r}  scope_b={args.scope_b!r}")
+    print(f"corpus={args.corpus!r}  scope_b={args.scope_b!r}  host={manifest['host_class']!r}  "
+          f"engine={manifest['engine_build']!r}")
+    if args.pairs is not None:
+        paired = run_paired_bench(queries, handlers=handlers, pairs=args.pairs)
+        paired["manifest"] = manifest
+        write_report(paired, out_path)
+        print(f"\nPaired {paired['a']} vs {paired['b']}, {args.pairs} pairs per query: median of the "
+              f"per-query paired differences {paired['median_of_query_paired_diffs_s']:+.3f}s "
+              f"({paired['b']} faster on {paired['b_faster_queries']}/{paired['queries']} queries)")
+        print(f"\nReport: {out_path}")
+        return 0
     report = run_bench(queries, handlers=handlers)
+    report["manifest"] = manifest
     write_report(report, out_path)
 
     print("\n=== Summary ===")

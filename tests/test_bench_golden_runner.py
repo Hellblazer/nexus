@@ -138,6 +138,8 @@ class TestMainRunsTheGoldenSet:
     ) -> None:
         monkeypatch.setattr(runner, "_live_handlers", lambda corpus, scope_b: {
             "A": _ideal_handler, "B": _wrong_handler, "C": _ideal_handler})
+        # The manifest probes the engine; this test asks nothing of one (nexus-3ceda.11).
+        monkeypatch.setattr(runner, "build_manifest", lambda root: {"host_class": "h", "engine_build": "e"})
         out = tmp_path / "report.json"
         assert runner.main([str(GOLDEN), "--out", str(out), "--paths", "A,B"]) == 0
         report = json.loads(out.read_text(encoding="utf-8"))
