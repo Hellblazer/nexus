@@ -719,7 +719,7 @@ def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days
         lines += mc.section("--agents", lambda: mc.agents_section(claude_config_dir() / "agent-memory"))
     if do_cold:
         def _cold_lines() -> list[str]:
-            from nexus import memory_curate_cold as cold  # noqa: PLC0415 — deferred: only --cold pays for it
+            from nexus.memory_curate import cold  # noqa: PLC0415 — deferred: only --cold pays for it
 
             return cold.cold_lines(days, now, cwd, repo, memory_dir(cwd), mc.repo_toplevel(cwd), t2_handle)
 

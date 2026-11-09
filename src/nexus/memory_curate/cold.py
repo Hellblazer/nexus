@@ -13,15 +13,25 @@ Use, per kind (Sam's K6 decision, nexus-qo7ie.5; the report header prints these)
   ``file_write`` row or an mtime inside the window. A ``MEMORY.md`` index line counts as used
   when its linked file is read, so the files are what is judged.
 - T2 namespace (the repository's projects, ``<repo>`` and ``<repo>_*``): a ``memory_get`` of
-  one of its titles, or a ``memory_search`` naming it; a write is a row timestamp in the window.
+  one of its titles, a ``memory_search`` naming it (one naming no project credits every project), or a
+  row whose ``last_accessed`` is in the window (the engine stamps it on every get and search, which
+  is the only trace of a Bash ``nx memory`` read); a write is a row timestamp in the window.
 - MCP tool of the ``nexus`` and ``nexus-catalog`` servers: a call. The registry is the servers'
   own (``_tool_manager.list_tools()``), diffed with the called names, so a tool never called is
   listed. Keyed by ``(server, short name)``: ``search`` exists on both servers.
 - CLI verb: ``nx <verb>`` for a command, ``nx <group> <verb>`` for a group's child, found in
   Bash command text by RDR-240's tools query. The list is the click tree of ``nexus.cli:main``.
-- injected context: a tracked nested ``CLAUDE.md`` or ``AGENTS.md`` (not the repository root's)
-  is used when a ``nested_memory`` load names it (a ``CLAUDE.md`` symlinked to ``AGENTS.md`` is
-  one file).
+- injected context: a tracked nested ``CLAUDE.md`` (not the repository root's) is used when a
+  ``nested_memory`` or ``instructions`` load names it, by its path or a path ending in it (a session
+  in another worktree); a ``CLAUDE.md`` symlinked to ``AGENTS.md`` is one file. Not judged, and
+  printed so: a nested ``AGENTS.md`` with no ``CLAUDE.md`` (Claude Code loads only ``CLAUDE.md`` on
+  demand), fixtures under ``tests/``, files symlinked to the root instruction file (always loaded);
+  ``.claude/rules/*.md`` is not covered.
+
+Hooks and subprocesses never appear as model tool calls, so a tool or verb the plugin's hooks run
+(:func:`hook_invoked`: the ``mcp_tool`` entries of ``hooks.json``, the string-literal ``nx`` argvs of
+the hook scripts) is printed as invoked by a hook, not as cold, and both sections end with a limits
+line naming what a transcript count cannot see.
 
 K6 exclusions: always-loaded items are not judged and carry no "never used" claim: the index
 files as a whole, the root ``CLAUDE.md`` and ``AGENTS.md`` and every file an ``instructions``
@@ -31,12 +41,14 @@ calls). The report prints this and how many ``instructions`` files it saw.
 Counts come from RDR-240's ``memory``, ``tools`` and ``loads`` queries through the shared page
 loop (:func:`query_pages`, which ``--files`` uses too), over this repository's sessions only, in
 the window ``--files`` uses. When the runtime is absent, a query fails, no session of the
-repository started in the window, or the memory directory cannot be matched, the affected kinds
+repository started in the window, a tools or memory query returns no rows for sessions that did
+start, or the memory directory or a path cannot be matched, the affected kinds
 print ``not available: <reason>``, never a cold list: an empty count lists every store.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -180,21 +192,35 @@ def open_window(days: int, now: datetime, cwd: Path) -> tuple[mc.ReadWindow, int
 class _Queries:
     """Each transcripts query at most once per report; a failure is kept as its reason."""
 
-    def __init__(self, window: mc.ReadWindow) -> None:
+    #: What a query that returned no rows at all would have to mean, for the queries where a started session
+    #: nearly always leaves a row; with sessions in the window, no rows is a failed read, not an idle store.
+    _QUIET = {"tools": "calls", "memory": "memory reads, writes or T2 calls"}
+
+    def __init__(self, window: mc.ReadWindow, sessions: int) -> None:
         self.window = window
+        self.sessions = sessions
         self.cut: dict[str, int] = {}
         self._done: dict[str, list[dict[str, Any]] | str] = {}
 
     def rows(self, query: str) -> list[dict[str, Any]] | str:
         if query not in self._done:
-            got = query_pages(query, self.window.since, self.window.until, mc.MAX_READ_PAGES)
-            if isinstance(got, str):
-                self._done[query] = got
-            else:
-                self._done[query] = got[0]
-                if got[1]:
-                    self.cut[query] = got[1]
+            self._done[query] = self._fetch(query)
         return self._done[query]
+
+    def _fetch(self, query: str) -> list[dict[str, Any]] | str:
+        try:
+            got = query_pages(query, self.window.since, self.window.until, mc.MAX_READ_PAGES)
+        except Exception as exc:  # noqa: BLE001 — one failure is kept as the reason of every kind that shares the query
+            return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        if isinstance(got, str):
+            return got
+        rows, truncated = got
+        if truncated:
+            self.cut[query] = truncated
+        if not rows and query in self._QUIET:
+            n = self.sessions
+            return f"the {query} query returned no {self._QUIET[query]} for {n} session{'' if n == 1 else 's'}"
+        return rows
 
 
 def _used(rows: list[dict[str, Any]], kinds: frozenset[str] | str) -> dict[str, str]:
@@ -260,19 +286,29 @@ def _t2(q: _Queries, repo: str, open_db: Callable[[], AbstractContextManager[Any
     for name, stamp in _used(rows, "t2_get").items():
         project = name.split("/", 1)[0]
         used[project] = _later(used.get(project), stamp)
-    for project, stamp in _used(rows, "t2_search").items():
+    searched = _used(rows, "t2_search")
+    for project, stamp in searched.items():
         used[project] = _later(used.get(project), stamp)
+    all_search = "(all)" in searched  # a memory_search naming no project reached every project
     cold: list[ColdRow] = []
     for project in projects:
         written: str | None = None
         for r in data[project]:
             if r.get("timestamp"):
                 written = _later(written, r["timestamp"])
-        if project in used or _in_window(written, since):
+            if _in_window(r.get("last_accessed"), since):  # the engine stamps it on every get and search, Bash ones too
+                used[project] = _later(used.get(project), r["last_accessed"])
+        if all_search or project in used or _in_window(written, since):
             continue
         n = len(data[project])
         cold.append(ColdRow(project, _show(written, "none"), _NEVER, f"{n} row{'' if n == 1 else 's'}", repo))
-    return _listing(label, cold, len(projects), f" (projects {repo} and {repo}_*)")
+    out = _listing(label, cold, len(projects), f" (projects {repo} and {repo}_*)")
+    if all_search:
+        out.append("  (a memory_search naming no project counts as a use of every project)")
+    out.append("  limits: Bash `nx memory` reads are attributed to a project only through last_accessed (the engine "
+               "stamps it on every get and search); the repo's own namespace reads as written after the first run, "
+               "since the stored report lands there")
+    return out
 
 
 # ── MCP tools ────────────────────────────────────────────────────────────────────────
@@ -311,7 +347,7 @@ def mcp_registry() -> dict[tuple[str, str], tuple[int, bool]]:
     return out
 
 
-def _tools(q: _Queries) -> list[str]:
+def _tools(q: _Queries, hooks: HookScan) -> list[str]:
     label = "MCP tools"
     rows = q.rows("tools")
     if isinstance(rows, str):
@@ -322,11 +358,15 @@ def _tools(q: _Queries) -> list[str]:
         key = nexus_tool(name)
         if key is not None:
             called[key] = _later(called.get(key), stamp)
-    cold = [(key, info) for key, info in registry.items() if key not in called]
-    cold.sort(key=lambda kv: (-kv[1][0], kv[0]))
-    out = [ColdRow(f"{s}/{t}", "n/a", _NEVER, f"~{tokens} tokens{', always loaded' if always else ''}", s)
-           for (s, t), (tokens, always) in cold]
-    return _listing(label, out, len(registry), " registered")
+    idle = [(key, info) for key, info in registry.items() if key not in called]
+    idle.sort(key=lambda kv: (-kv[1][0], kv[0]))
+
+    def row(key: tuple[str, str], info: tuple[int, bool], use: str) -> ColdRow:
+        return ColdRow(f"{key[0]}/{key[1]}", "n/a", use, f"~{info[0]} tokens{', always loaded' if info[1] else ''}", key[0])
+
+    cold = [row(k, i, _NEVER) for k, i in idle if k not in hooks.tools]
+    hooked = [row(k, i, _HOOK_USE) for k, i in idle if k in hooks.tools]
+    return _with_hooks(label, cold, hooked, len(registry), " registered", hooks)
 
 
 # ── CLI verbs ────────────────────────────────────────────────────────────────────────
@@ -364,25 +404,116 @@ def cli_units() -> list[Unit]:
     return units
 
 
-def _verbs(q: _Queries) -> list[str]:
+def _verbs(q: _Queries, hooks: HookScan) -> list[str]:
     label = "CLI verbs"
     rows = q.rows("tools")
     if isinstance(rows, str):
         return _unavailable(label, rows)
     units = cli_units()
-    by_verb: dict[str, str] = {}
-    by_pair: dict[tuple[str, str], str] = {}
+    by_verb: set[str] = set()
+    by_pair: set[tuple[str, str]] = set()
     for r in rows:
         name = r.get("name")
         if r.get("kind") != "nx" or not isinstance(name, str) or not name.startswith("nx "):
             continue
-        verb = name[3:]
-        by_verb[verb] = _later(by_verb.get(verb), r.get("last_use"))
+        by_verb.add(name[3:])
         if isinstance(r.get("sub"), str):
-            by_pair[(verb, r["sub"])] = _later(by_pair.get((verb, r["sub"])), r.get("last_use"))
-    cold = [ColdRow(u.name, "n/a", _NEVER, "n/a", "n/a") for u in units
-            if (u.verb, u.sub) not in by_pair and (u.sub is not None or u.verb not in by_verb)]
-    return _listing(label, cold, len(units))
+            by_pair.add((name[3:], r["sub"]))
+    idle = [u for u in units if (u.verb, u.sub) not in by_pair and (u.sub is not None or u.verb not in by_verb)]
+
+    def by_hook(u: Unit) -> bool:
+        return (u.verb, u.sub) in hooks.verbs if u.sub is not None else any(v == u.verb for v, _ in hooks.verbs)
+
+    cold = [ColdRow(u.name, "n/a", _NEVER, "n/a", "n/a") for u in idle if not by_hook(u)]
+    hooked = [ColdRow(u.name, "n/a", _HOOK_USE, "n/a", "n/a") for u in idle if by_hook(u)]
+    return _with_hooks(label, cold, hooked, len(units), "", hooks)
+
+
+# ── hooks ────────────────────────────────────────────────────────────────────────────
+
+_HOOK_USE = "invoked by a hook"
+_BARE = re.compile(r"^[a-z][a-z0-9_-]*$")  # the tools query's VERB rule
+_RUN_NX = re.compile(r"_run_nx\(\s*\[([^\]]*)\]")
+_NX_LIST = re.compile(r"\[\s*[\"']nx[\"']\s*,([^\]]*)\]")
+_STR = re.compile(r"^[\"']([^\"']+)[\"']$")
+
+
+class HookScan(NamedTuple):
+    """What the plugin's hooks run, which no transcript shows as a model tool call."""
+
+    tools: set[tuple[str, str]]  # (server, short name) of every mcp_tool entry of hooks.json
+    verbs: set[tuple[str, str | None]]  # (verb, sub) of every nx argv found in the hook scripts
+    note: str
+
+
+def _argv_verb(body: str) -> tuple[str, str | None] | None:
+    """The leading string-literal words of an argv list body: verb, then a sub that is a bare word."""
+    words: list[str] = []
+    for item in body.split(","):
+        m = _STR.match(item.strip())
+        if m is None or len(words) == 2:
+            break
+        words.append(m.group(1))
+    if not words or not _BARE.match(words[0]):
+        return None
+    return words[0], (words[1] if len(words) > 1 and _BARE.match(words[1]) else None)
+
+
+def hook_invoked(hooks_dir: Path | None) -> HookScan:
+    """The MCP tools and ``nx`` verbs the plugin's hooks run (nexus-qo7ie.19 review r1).
+
+    Tools: every ``mcp_tool`` entry of ``hooks.json``. Verbs: the string-literal argv of a ``_run_nx([...])``
+    call or a ``["nx", ...]`` list in a hook script (``**/*.py``), and the words after ``nx_launch.py`` in a
+    ``command`` entry. An argv built from variables, a shell string or a call through another helper is not seen.
+    """
+    if hooks_dir is None or not (hooks_dir / "hooks.json").is_file():
+        return HookScan(set(), set(), f"no hook directory with a hooks.json at {hooks_dir}")
+    tools: set[tuple[str, str]] = set()
+    verbs: set[tuple[str, str | None]] = set()
+    try:
+        data = json.loads((hooks_dir / "hooks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return HookScan(set(), set(), f"hooks.json could not be read: {type(exc).__name__}")
+    for groups in (data.get("hooks") or {}).values():
+        for group in groups if isinstance(groups, list) else []:
+            for h in group.get("hooks") or []:
+                if h.get("type") == "mcp_tool" and isinstance(h.get("server"), str) and isinstance(h.get("tool"), str):
+                    key = nexus_tool(f"mcp__{h['server'].replace(':', '_')}__{h['tool']}")
+                    if key is not None:
+                        tools.add(key)
+                args = h.get("args")
+                if isinstance(args, list) and "nx_launch.py" in args:
+                    tail = args[args.index("nx_launch.py") + 1:]
+                    found = _argv_verb(",".join(json.dumps(a) for a in tail if isinstance(a, str)))
+                    if found:
+                        verbs.add(found)
+    scripts = sorted(p for p in hooks_dir.rglob("*.py") if p.is_file())
+    for path in scripts:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for rx in (_RUN_NX, _NX_LIST):
+            for m in rx.finditer(text):
+                found = _argv_verb(m.group(1))
+                if found:
+                    verbs.add(found)
+    note = (f"{len(tools)} mcp_tool entr{'y' if len(tools) == 1 else 'ies'} in hooks.json and {len(verbs)} nx argv"
+            f"{'' if len(verbs) == 1 else 's'} in {len(scripts)} hook script{'' if len(scripts) == 1 else 's'} "
+            "(string-literal argvs only)")
+    return HookScan(tools, verbs, note)
+
+
+def _with_hooks(label: str, cold: list[ColdRow], hooked: list[ColdRow], total: int, what: str, hooks: HookScan) -> list[str]:
+    head = f"{label}: {len(cold)} cold of {total}{what}" + (f" ({len(hooked)} invoked by a hook)" if hooked else "")
+    out = [head, *(r.line() for r in cold)]
+    if hooked:
+        out.append(f"  invoked by a hook, not seen in transcripts: {len(hooked)}")
+        out += [f"  {r.line()}" for r in hooked]
+    out.append("  limits: not seen are calls by hooks and subprocesses (the hook scripts are scanned: "
+               f"{hooks.note}), terminal and CI use, bash -c and ssh bodies (the Lua scanner skips them), a group "
+               "option before the sub verb, and other repositories' sessions")
+    return out
 
 
 # ── injected context ─────────────────────────────────────────────────────────────────
@@ -400,35 +531,59 @@ def _tracked_nested(root: Path) -> list[str] | str:
     return sorted(p for p in names if len(PurePosixPath(p).parts) > 1 and PurePosixPath(p).name in _NESTED_NAMES)
 
 
+def _loaded_by(aliases: list[str], loaded: dict[str, str], root: Path) -> bool:
+    """A load names one of *aliases*: the checkout's own path, or any path ending in it (another worktree's)."""
+    return any(p == str(root / a) or p.endswith("/" + a) for a in aliases for p in loaded)
+
+
 def _injected(q: _Queries, root: Path) -> list[str]:
     label = "injected context"
+    if os.name == "nt":
+        return _unavailable(label, "the loads query matches '/'-separated paths only, and Windows paths use '\\'")
     rows = q.rows("loads")
     if isinstance(rows, str):
         return _unavailable(label, rows)
     tracked = _tracked_nested(root)
     if isinstance(tracked, str):
         return _unavailable(label, tracked)
-    loaded = _used(rows, "nested_memory")
+    instructions = _used(rows, "instructions")
+    loaded = {**_used(rows, "nested_memory"), **instructions}  # an instructions load of a nested file is a load too
+    always = {(root / n).resolve() for n in ("CLAUDE.md", "AGENTS.md")}
     groups: dict[Path, list[str]] = {}
     for rel in tracked:
         groups.setdefault((root / rel).resolve(), []).append(rel)
     cold: list[tuple[int, ColdRow]] = []
+    judged, fixtures, lone, linked = 0, [], [], []
     for target, aliases in sorted(groups.items(), key=lambda kv: kv[1]):
-        if any(p == str(root / a) or p.endswith("/" + a) for a in aliases for p in loaded):
-            continue
-        real = [a for a in aliases if not (root / a).is_symlink()]
-        store = (real or aliases)[0]
-        others = [a for a in aliases if a != store]
-        try:
-            size = target.stat().st_size
-        except OSError:
-            size = -1
-        tokens = f"~{size // 4} tokens" if size >= 0 else "n/a"
-        cold.append((size, ColdRow(store + (f" (also {', '.join(others)})" if others else ""),
-                                   "n/a", _NEVER, tokens, "n/a")))
+        if any("tests" in PurePosixPath(a).parts[:-1] for a in aliases):
+            fixtures += aliases
+        elif target in always:
+            linked += aliases
+        elif not any(PurePosixPath(a).name == "CLAUDE.md" for a in aliases):
+            lone += aliases  # Claude Code nested-loads CLAUDE.md only
+        else:
+            judged += 1
+            if not _loaded_by(aliases, loaded, root):
+                real = [a for a in aliases if not (root / a).is_symlink()]
+                store = (real or aliases)[0]
+                others = [a for a in aliases if a != store]
+                try:
+                    size = target.stat().st_size
+                except OSError:
+                    size = -1
+                cold.append((size, ColdRow(store + (f" (also {', '.join(others)})" if others else ""), "n/a", _NEVER,
+                                           f"~{size // 4} tokens" if size >= 0 else "n/a", "n/a")))
     cold.sort(key=lambda t: (-t[0], t[1].store))
-    n = len({r["name"] for r in rows if r.get("kind") == "instructions" and isinstance(r.get("name"), str)})
-    out = _listing(label, [r for _, r in cold], len(groups), " (nested CLAUDE.md and AGENTS.md, one file when linked)")
+    out = _listing(label, [r for _, r in cold], judged, " (nested CLAUDE.md and AGENTS.md, one file when linked)")
+    if lone:
+        out.append(f"  not judged: no CLAUDE.md, Claude Code loads only CLAUDE.md on demand: {', '.join(sorted(lone))}")
+    if fixtures:
+        out.append(f"  not judged: fixtures under tests/: {len(fixtures)} file{'' if len(fixtures) == 1 else 's'}")
+    if linked:
+        out.append(f"  not judged: {', '.join(sorted(linked))} symlinked to the root instruction file, which is always "
+                   "loaded (excluded, K6)")
+    out.append("  (on-demand .claude/rules/*.md files are not covered by this section)")
+    n = len(instructions)
     out.append(f"  ({n} file{'' if n == 1 else 's'} loaded by an `instructions` attachment in the window: "
                "excluded (K6), no 'never used' claim)")
     return out
@@ -446,23 +601,26 @@ def _guarded(label: str, body: Callable[[], list[str]]) -> list[str]:
 
 def cold_lines(
     days: int, now: datetime, cwd: Path, repo: str, directory: Path | None, root: Path,
-    open_db: Callable[[], AbstractContextManager[Any]],
+    open_db: Callable[[], AbstractContextManager[Any]], hooks_dir: Path | None = None,
 ) -> list[str]:
     """The ``--cold`` body: the rules, the window, then one block per kind (see the module docstring).
 
     *open_db* is a context manager yielding a ``T2Database`` (``get_projects_with_prefix``, ``get_all``).
+    *hooks_dir* is the plugin's hook directory (default ``<root>/conexus/hooks``): the tools and verbs its hooks
+    run are printed as invoked by a hook, not as cold.
     """
     opened = open_window(days, now, cwd)
     if isinstance(opened, mc.ReadsUnavailable):
         return [f"window: {opened.window.describe()}", *_rules(),
                 *(ln for label in LABELS for ln in _unavailable(label, opened.reason))]
     window, sessions = opened
-    q = _Queries(window)
+    q = _Queries(window, sessions)
+    hooks = hook_invoked(hooks_dir if hooks_dir is not None else root / "conexus" / "hooks")
     blocks = [
         _guarded("memory files", lambda: _files(q, directory, repo)),
         _guarded("T2 namespaces", lambda: _t2(q, repo, open_db)),
-        _guarded("MCP tools", lambda: _tools(q)),
-        _guarded("CLI verbs", lambda: _verbs(q)),
+        _guarded("MCP tools", lambda: _tools(q, hooks)),
+        _guarded("CLI verbs", lambda: _verbs(q, hooks)),
         _guarded("injected context", lambda: _injected(q, root)),
     ]
     cuts = [f"{query} query: {n} records were cut, so these counts are floors and stores used in a cut record may "
