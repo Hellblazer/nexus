@@ -700,7 +700,12 @@ def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days
     lines = [f"Curation report {now:%Y-%m-%d} (repo: {repo}, window: {days} days)", ""]
 
     if do_files:
-        lines += mc.section("--files", lambda: mc.files_section(memory_dir(cwd)))
+        def _files_lines() -> list[str]:
+            directory = memory_dir(cwd)
+            reads = mc.load_reads(mc.read_window(days, now)) if directory is not None else None
+            return mc.files_section(directory, reads)
+
+        lines += mc.section("--files", _files_lines)
     if do_t2:
         def _t2_lines() -> list[str]:
             root = mc.repo_toplevel(cwd)

@@ -18,7 +18,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,10 +26,12 @@ import click
 import pytest
 from click.testing import CliRunner
 
+import nexus.lua_runtime as lua_runtime
 from nexus import memory_curate as mc
 from nexus._hook_runtime import memory_dir as md
 from nexus._hook_runtime import memory_scan as ms
 from nexus.cli import main
+from nexus.lua_runtime import runner
 from nexus.commands import command_context
 from nexus.db.t2 import T2Database
 from tests._child_encoding import PYTHON_CHILD_ENCODING
@@ -573,7 +575,7 @@ def test_files_section_text_reports_planted_and_says_none_for_clean(tmp_path: Pa
     out = "\n".join(mc.files_section(_planted_dir(tmp_path)))
     for needle in ("stray.md", "huge.md", "gone.md", "old_one", "unread files: not available"):
         assert needle in out, needle
-    assert "RDR-240" in out  # the reason the read counts are absent
+    assert "unread files: not available (no read counts were given)" in out  # the reason they are absent
     # The rendered listings themselves, line by line: the needles above are also
     # satisfied by the unindexed listing, so they cannot see a blanked listing.
     lines = out.splitlines()
@@ -1263,3 +1265,164 @@ def test_an_empty_git_dir_is_asked_of_git(tmp_path: Path) -> None:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     assert md.primary_checkout_root(repo, env) == repo
     assert md.primary_checkout_root(repo, {**env, "GIT_DIR": ""}) is None
+
+
+# ── nexus-qo7ie.18 (RDR-238 P3 S2b): --files read counts from RDR-240's memory query ──────
+#
+# These go through the real run path (run_procedure -> run_script -> the transcripts
+# procedure in its worker) over fixture transcripts under CLAUDE_CONFIG_DIR, in a fixture git
+# repository: project "repo" finds a project directory by the cwd its transcripts record.
+
+_NOW = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
+
+
+def _assistant(ts: str, sid: str, cwd: Path, blocks: list, mid: str) -> dict:
+    return {"type": "assistant", "timestamp": ts, "sessionId": sid, "isSidechain": False, "cwd": str(cwd),
+            "message": {"id": mid, "model": "claude-opus-4-8", "role": "assistant", "content": blocks,
+                        "usage": {"input_tokens": 1, "output_tokens": 1}}}
+
+
+def _session(path: Path, sid: str, cwd: Path, start: str, calls: list[tuple[str, dict]]) -> None:
+    """One main-session transcript: a prompt at *start*, then one tool call a second."""
+    t0 = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    lines: list[dict] = [{"type": "user", "timestamp": start, "sessionId": sid, "cwd": str(cwd),
+                          "message": {"role": "user", "content": "go"}}]
+    for i, (name, inp) in enumerate(calls, start=1):
+        ts = (t0 + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        lines.append(_assistant(ts, sid, cwd, [{"type": "tool_use", "id": f"t{i}", "name": name, "input": inp}], f"m{i}"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+
+
+@pytest.fixture
+def read_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+    repo = _make_repo(tmp_path, "readrepo")
+    config = tmp_path / "cfg"
+    mem = _memdir(config, repo)
+    (mem / "MEMORY.md").write_text("- [Read](read_me.md) - x\n- [Never](never.md) - y\n")
+    (mem / "read_me.md").write_text(_fm("Read", "read in the window"))
+    (mem / "never.md").write_text(_fm("Never", "not read in the window"))
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    monkeypatch.setenv("NX_NO_TELEMETRY", "1")
+    return {"repo": repo, "config": config, "mem": mem, "project": mem.parent}
+
+
+def test_the_window_is_capped_at_the_transcript_span_and_says_so() -> None:
+    w = mc.read_window(60, _NOW)
+    assert (w.requested, w.covered) == (60, mc.RETENTION_DAYS)
+    assert w.since == "2026-10-10T12:00:00Z" and w.until == "2026-11-09T12:00:00Z"
+    assert w.describe() == "covered 2026-10-10T12:00:00Z .. 2026-11-09T12:00:00Z (requested 60 days, capped at 30)"
+    short = mc.read_window(7, _NOW)
+    assert short.covered == 7 and short.describe() == "covered 2026-11-02T12:00:00Z .. 2026-11-09T12:00:00Z (7 days)"
+
+
+def test_a_file_read_in_the_window_is_not_listed_and_an_unread_one_is(read_world: dict[str, Path]) -> None:
+    mem, repo = read_world["mem"], read_world["repo"]
+    _session(read_world["project"] / "s1.jsonl", "s1", repo, "2026-11-08T10:00:00Z", [
+        ("Read", {"file_path": str(mem / "read_me.md")}),
+        ("mcp__plugin_conexus_nexus__memory_get", {"project": "nexus", "title": "push-train"}),
+        ("mcp__plugin_conexus_nexus__memory_get", {"project": "nexus", "title": "push-train"}),
+        ("mcp__plugin_conexus_nexus__memory_search", {"project": "nexus", "query": "x"}),
+    ])
+    reads = mc.load_reads(mc.read_window(30, _NOW))
+    assert isinstance(reads, mc.ReadCounts), reads
+    lines = mc.files_section(mem, reads)
+    head = lines.index("unread in the window: 1 of 2 files (index files excluded)")
+    assert lines[head + 1] == "  - never.md"
+    assert "read_me.md" not in "\n".join(lines[head:head + 3])
+    assert "read counts: covered 2026-10-10T12:00:00Z .. 2026-11-09T12:00:00Z (30 days)" in lines
+    t2 = lines.index("T2 reads per title (memory_get): 1")
+    assert lines[t2 + 1] == "  - nexus/push-train (2)"
+    s = lines.index("T2 searches per project (memory_search): 1")
+    assert lines[s + 1] == "  - nexus (1)"
+
+
+def test_no_reads_at_all_lists_every_file_and_says_none_for_t2(read_world: dict[str, Path]) -> None:
+    # A transcript in the repo's project that reads nothing: the window ran and found no reads.
+    _session(read_world["project"] / "s1.jsonl", "s1", read_world["repo"], "2026-11-08T10:00:00Z",
+             [("Bash", {"command": "ls"})])
+    reads = mc.load_reads(mc.read_window(30, _NOW))
+    assert isinstance(reads, mc.ReadCounts), reads
+    lines = mc.files_section(read_world["mem"], reads)
+    head = lines.index("unread in the window: 2 of 2 files (index files excluded)")
+    assert lines[head + 1:head + 3] == ["  - never.md", "  - read_me.md"]
+    assert "T2 reads per title (memory_get): none" in lines
+
+
+def test_a_read_outside_the_window_does_not_count(read_world: dict[str, Path]) -> None:
+    _session(read_world["project"] / "old.jsonl", "old", read_world["repo"], "2026-09-01T10:00:00Z",
+             [("Read", {"file_path": str(read_world["mem"] / "read_me.md")})])
+    _session(read_world["project"] / "s1.jsonl", "s1", read_world["repo"], "2026-11-08T10:00:00Z",
+             [("Bash", {"command": "ls"})])
+    lines = mc.files_section(read_world["mem"], mc.load_reads(mc.read_window(30, _NOW)))
+    assert "unread in the window: 2 of 2 files (index files excluded)" in lines
+
+
+def test_without_the_runtime_the_rows_say_not_available(read_world: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delattr(lua_runtime, "run_script")
+    reads = mc.load_reads(mc.read_window(30, _NOW))
+    assert isinstance(reads, mc.ReadsUnavailable) and reads.reason.startswith("unavailable: "), reads
+    lines = mc.files_section(read_world["mem"], reads)
+    assert any(ln.startswith("unread files: not available: unavailable: ") for ln in lines), lines
+    assert any(ln.startswith("T2 read counts: not available: unavailable: ") for ln in lines), lines
+    assert not any(ln.startswith("unread in the window") for ln in lines)  # never "every file unread"
+
+
+def test_with_no_transcripts_for_the_repo_the_rows_say_not_available(read_world: dict[str, Path]) -> None:
+    # No transcript records the repo as its cwd, so the verb finds no project directory: the
+    # window could not be read, which is not the same as "nothing was read".
+    reads = mc.load_reads(mc.read_window(30, _NOW))
+    assert isinstance(reads, mc.ReadsUnavailable), reads
+    assert reads.reason == "no transcripts of this repository in the window"
+    lines = mc.files_section(read_world["mem"], reads)
+    assert "unread files: not available: no transcripts of this repository in the window" in lines
+    assert not any(ln.startswith("unread in the window") for ln in lines)
+
+
+def test_the_command_caps_days_prints_the_span_and_exits_0_without_the_runtime(
+    read_world: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(lua_runtime, "run_script")
+
+    def no_store():
+        raise RuntimeError("no store in this test")
+
+    with patch("nexus.commands.memory.t2_handle", side_effect=no_store):
+        res = CliRunner().invoke(main, ["memory", "curate", "--files", "--days", "60"])
+    assert res.exit_code == 0, res.output
+    assert "(requested 60 days, capped at 30)" in res.output
+    assert "unread files: not available: unavailable: " in res.output
+    assert "report not stored: not available" in res.output
+
+
+def test_pages_are_joined_and_the_count_equals_one_pass_over_the_fixture(
+    read_world: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over 768 KB of rows across three days forces more than one page (RDR-240 TD5's page
+    bound); the joined counts must equal what the fixture planted, file by file."""
+    mem, repo, project = read_world["mem"], read_world["repo"], read_world["project"]
+    names = [f"note_{i:02d}.md" for i in range(25)]
+    for n in names:
+        (mem / n).write_text(_fm(n, "planted"))
+    planted: dict[str, int] = {}
+    for day in ("2026-11-05", "2026-11-06", "2026-11-07"):
+        for k in range(30):
+            calls = [("Read", {"file_path": str(mem / n)}) for n in names]
+            _session(project / f"{day}-{k}.jsonl", f"{day}-{k}", repo, f"{day}T{k % 24:02d}:00:00Z", calls)
+            for n in names:
+                planted[n] = planted.get(n, 0) + 1
+    seen: list[dict] = []
+    real = runner.run_procedure
+
+    def spy(name: str, args: dict) -> object:
+        seen.append(dict(args))
+        return real(name, args)
+
+    monkeypatch.setattr(runner, "run_procedure", spy)
+    reads = mc.load_reads(mc.read_window(30, _NOW))
+    assert isinstance(reads, mc.ReadCounts), reads
+    assert len(seen) >= 2, "the fixture did not force a second page"
+    assert seen[1]["since"] != seen[0]["since"] and seen[1]["until"] == seen[0]["until"]
+    assert mc.file_read_counts(reads, mem) == {**{n: planted[n] for n in names}}
+    assert "unread in the window: 2 of 27 files (index files excluded)" in mc.files_section(mem, reads)
