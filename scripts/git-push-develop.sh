@@ -108,8 +108,9 @@
 # push's CI completes (nexus-1d6pz.11.4): the tuple_subscribe call for a session
 # with the channel, and `nx ci wait <tip>` to run as a background command for a
 # session without it. The channel line names the tip because the board's notice
-# for a --done row names the sha it reports (nexus-1d6pz.11.3), so a session can
-# tell its own wake from a peer's.
+# for a --done row carries the sha it reports in its meta (nexus-1d6pz.11.3). A
+# notice for another sha is not to be ignored on that alone: in a push window the
+# beads close on the window tip's result, which is often a peer's sha.
 #
 # Push lock (nexus-agctp). Rule 7 (check `gh run list` before pushing) is a
 # poll: the gap between looking and pushing is where two sessions collide,
@@ -846,7 +847,7 @@ echo "PUSH_OK n=${#range[@]} tip=$tip"
 # stderr (stdout keeps its PUSH_OK contract). A session with the channel subscribes
 # to the --done topic; one without runs nx ci wait as a background command, whose
 # exit is the wake and whose one line is the result.
-echo "PUSH_WAIT channel: tuple_subscribe(\"board/ci/nexus-${branch}--done\"); your wake names sha=\"$tip\", a peer's another sha" >&2
+echo "PUSH_WAIT channel: tuple_subscribe(\"board/ci/nexus-${branch}--done\"); a wake for this push carries sha=\"$tip\"" >&2
 echo "PUSH_WAIT no channel: run as a background command: nx ci wait $tip --branch $branch" >&2
 
 # nexus-cvtxu: the batching hint (see NX_PUSH_BATCH_MINUTES above). The stamp lives
