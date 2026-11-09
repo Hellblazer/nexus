@@ -3684,6 +3684,16 @@ running its own hooks, which on v4.34.x approved every Bash command
 Only that marketplace's `nx` counts. The row reads "none installed" on a box
 without the plugin or without a registry.
 
+**Process footprint row (nexus-3ceda.3).** "Process footprint" lists each
+running supervised daemon (the storage service supervisor and the aspect
+workers) with its own resident memory, peak, CPU seconds and threads, read from
+the `footprint` the daemon writes into its lease on each heartbeat (sampled at
+most every 30 s; a sample older than 5 minutes shows its age). It warns when one
+is past `NX_FOOTPRINT_WARN_MB` (default 1024). It measures the Python
+supervisor process, not the Java engine it runs. Memory reads on Linux and
+macOS; on Windows only CPU and threads. With no supervised daemon running the
+row passes and says so. The console's health panel shows the same row.
+
 **Config directory access row (Windows only, nexus-f9bgu.50).** "Config
 directory access (non-elevated)" fails when the config directory's access list has
 no entry for the current user (the shape an elevated first run leaves, which

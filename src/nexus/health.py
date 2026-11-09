@@ -799,6 +799,17 @@ def _format_bytes(n: int) -> str:
     return f"{n} B"
 
 
+def _check_process_footprint() -> list[HealthResult]:
+    """Each running supervised daemon's own memory (nexus-3ceda.3); see
+    :func:`nexus.daemon.footprint.doctor_rows`."""
+    try:
+        from nexus.daemon.footprint import doctor_rows  # noqa: PLC0415 — deferred to avoid circular import
+
+        return doctor_rows()
+    except Exception as exc:  # noqa: BLE001 — a doctor row must not crash the sweep
+        return [HealthResult(label="Process footprint", ok=False, warn=True, detail=f"could not read: {exc}")]
+
+
 def _check_process_skew() -> list[HealthResult]:
     """nexus-4xgfy: the disk can be upgraded while every running process
     still executes the old code from memory — three live incidents
@@ -13008,6 +13019,7 @@ def run_health_checks(
     results.extend(_check_cli_version())
     results.extend(_check_generation_layout())
     results.extend(_check_process_skew())
+    results.extend(_check_process_footprint())
     results.extend(_check_plugin_name())
     results.extend(_check_worktree_developer_agent())
     results.extend(_check_credential_persistence())
