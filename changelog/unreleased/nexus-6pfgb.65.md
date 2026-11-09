@@ -1,4 +1,0 @@
-### Changed
-
-- **Chunk rows carry only the chunk keys.** Client write paths stop sending a document's title, tags, content type, file hash, bibliographic fields and line spans on each T3 chunk row; those live on the catalog document and its chunk manifest, and readers take them from there (RDR-236 Phase 4 Step 1, nexus-6pfgb.65).
-- **A note's expiry reads its own catalog entry.** `nx store expire` and the `expires in Nd` display take `ttl_days` and `put_at` from the note's catalog entry; a chunk row's TTL, shared by every note with the same text, is read only for an older note whose entry holds neither, and only from a row that note wrote. Before upgrading, `nx catalog backfill-meta --list-ttl-first-sign` (dry run; `--list-ttl-first-sign-only` skips the stamping plan) lists the notes whose expiry this changes, with whether each has already lapsed (nexus-6pfgb.65).

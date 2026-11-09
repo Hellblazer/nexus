@@ -43,26 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v7.99.0)
+## Awaiting the next release (pinned: v8.0.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `conexus/skills/mailbox/SKILL.md`
-  nexus-1d6pz.11.2: a board notice now prints an exact read (`tuple_rd` with `from_created_at`/`from_id`, and `through_*` for a batch) that returns the announced posts, in place of `since=`.
-- `conexus/hooks/scripts/stop_wake_guard.py`
-  nexus-1d6pz.11.5: a closing develop-CI wait is allowed when the session's channel status record shows a live, fresh, unstalled waiter, the initialize handshake, the conexus channel flag and a `board/ci/*--done` subscription (other clauses are still read); a live waiter with the subscription but no flag blocks naming `nx ci wait <sha>`, and every CI-wait block offers it.
-- `conexus/skills/orchestration/SKILL.md`
-  nexus-3ceda.2: a per-change changelog fragment is not a shared file; the agent that made the change writes it.
-- `conexus/skills/rdr-research/SKILL.md`
-  nexus-qo7ie.33: `add` builds the record with the `research_add` procedure (`procedure_run`), reads the title back, and writes all four returned fields with `memory_put`; no longer the bare-argument CLI add. Needs a package with `procedure_run` (7.99.0 or later). The bare-argument refusal follows in a later package release.
-- `conexus/skills/rdr-fix-checklist/SKILL.md`
-  nexus-qo7ie.33: the pre-edit research entry is recorded through the rdr-research skill's `add`, not the bare-argument CLI.
-- `conexus/skills/rdr-gate-checklist/SKILL.md`
-  nexus-qo7ie.33: a vacuous Layer 2 is filled through the rdr-research skill's `add`, not the bare-argument CLI.
-- `conexus/agents/code-review-expert.md` (nexus-qo7ie.34): the gate-record write-back names `procedure_run("gate_record", ...)` and the `memory_put` of its four fields unchanged; a writer no longer composes `kind:gate` tags (RDR-240 TD6).
-- `conexus/agents/developer.md` (nexus-qo7ie.34): the gate-record write-back names `procedure_run("gate_record", ...)` and the `memory_put` of its four fields unchanged; a writer no longer composes `kind:gate` tags (RDR-240 TD6).
-- `conexus/agents/substantive-critic.md` (nexus-qo7ie.34): the gate-record write-back names `procedure_run("gate_record", ...)` and the `memory_put` of its four fields unchanged; a writer no longer composes `kind:gate` tags (RDR-240 TD6).
-- `conexus/skills/orchestration/reference.md` (nexus-qo7ie.34): the gate-record write-back names `procedure_run("gate_record", ...)` and the `memory_put` of its four fields unchanged; a writer no longer composes `kind:gate` tags (RDR-240 TD6).
-- `conexus/skills/substantive-critique/SKILL.md` (nexus-qo7ie.34): the gate-record write-back names `procedure_run("gate_record", ...)` and the `memory_put` of its four fields unchanged; a writer no longer composes `kind:gate` tags (RDR-240 TD6).
 
 ## Deferred to the next client release
