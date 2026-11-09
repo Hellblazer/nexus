@@ -79,7 +79,9 @@ from typing import Any
 import structlog
 
 from nexus.catalog.indexed_meta import SOURCE_FORMAT_KEY, backfill_tags_category, catalog_source_format, is_unset
-from nexus.catalog.note_ttl import PUT_SKEW, parse_iso, note_ttl_days, row_may_give_tags, row_written_by
+from nexus.catalog.note_ttl import (
+    PUT_SKEW, held_by_first_sign_alone, parse_iso, note_ttl_days, row_may_give_tags, row_written_by,
+)
 from nexus.catalog.store_hook import NOTE_META_KEYS, split_note_tags
 from nexus.db import request_gate
 from nexus.ttl import MAX_TTL_DAYS
@@ -444,6 +446,11 @@ class Report:
                                     # write, so a resume never skips a document whose keys were withheld (review r2 S1)
     cut_batch: int = 0              # the batch a second interrupt cut (0: none); its writes may have landed
     started_after: str = ""         # the --start-after tumbler this run skipped up to
+    # nexus-6pfgb.65 (RDR-236 Phase 4 Step 1): the notes the TTL sweep's guard held by the first sign of
+    # note_ttl.catalog_ttl_stale alone until Step 1, listed by a dry run for Sam to read. Read-only.
+    ttl_first_sign_checked: bool = False    # a dry run looked; an apply run does not
+    ttl_first_sign_notes: list[dict[str, Any]] = field(default_factory=list)
+    ttl_first_sign_unread: int = 0          # keyed notes whose manifest or rows could not be read: unknown, not "none"
 
     def stats(self, kind: str, key: str) -> KeyStats:
         return self.keys.setdefault(f"{kind}.{key}", KeyStats())
@@ -460,6 +467,11 @@ class Report:
         }
         if self.started_after:
             out["started_after"] = self.started_after
+        if self.ttl_first_sign_checked:  # absent from an apply run, so its JSON is what it always was
+            out["ttl_first_sign_only"] = {
+                "count": len(self.ttl_first_sign_notes), "unread": self.ttl_first_sign_unread,
+                "notes": self.ttl_first_sign_notes,
+            }
         if self.interrupted:  # absent from a finished run, so its JSON is what it always was
             out.update(
                 interrupted=True, batches_done=self.batches_done, batches_total=self.batches_total,
@@ -729,6 +741,62 @@ def _fetch_rows(t3: Any, wants: dict[str, list[str]]) -> tuple[dict[str, dict[st
     return rows, errors
 
 
+FIRST_SIGN_REASON = "first sign only"
+
+
+def _list_first_sign(reader: Any, t3: Any, notes: list[Any], report: Report) -> None:
+    """Add to *report* the keyed notes ``note_ttl.catalog_ttl_stale`` held by its first sign alone until
+    RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): the row's TTL differs from the catalog's while the row's
+    ``indexed_at`` is not later than ``put_at`` plus the skew (a pre-``.18`` import's permanent row, or a note
+    whose owner changed its TTL with a new-client re-put: two shapes the rows cannot tell apart). Step 1 stops
+    holding them, so Sam reads this list first. A dry run only. Read-only: it writes nothing, stamps nothing
+    and changes no expiry decision.
+
+    Only a note with a readable ``put_at`` can be on the list (the rule's threshold is ``put_at`` plus the
+    skew); such a note is complete for :func:`plan_note`, so the batch has not read its rows. They are read
+    here, by the note's manifest chashes as the sweep's guard does (one manifest read for the batch, one
+    store-get per collection). A read that fails counts the note in ``ttl_first_sign_unread`` and never
+    fails the run: its absence from the list is then unknown, not a finding."""
+    report.ttl_first_sign_checked = True
+    keyed = [e for e in notes if parse_iso(_meta(e).get("put_at")) is not None]
+    if not keyed:
+        return
+    try:
+        manifests = reader.get_manifests([str(e.tumbler) for e in keyed]) or {}
+    except Exception as exc:  # noqa: BLE001 — the list only informs; its loss is counted, the run goes on
+        _log.warning("meta_backfill_ttl_listing_manifest_read_failed", documents=len(keyed), error=str(exc))
+        report.ttl_first_sign_unread += len(keyed)
+        return
+    by_note: dict[str, dict[str, list[str]]] = {}
+    wants: dict[str, list[str]] = {}
+    for e in keyed:
+        colls: dict[str, list[str]] = {}
+        for m in manifests.get(str(e.tumbler), []):
+            colls.setdefault(getattr(m, "collection", None) or e.physical_collection, []).append(m.chash)
+        by_note[str(e.tumbler)] = colls
+        for c, hs in colls.items():
+            wants.setdefault(c, []).extend(hs)
+    fetched, errors = _fetch_rows(t3, wants)
+    for e in keyed:
+        colls = by_note[str(e.tumbler)]
+        if any(c in errors for c in colls):
+            report.ttl_first_sign_unread += 1
+            continue
+        rows = [r for c, hs in colls.items() for h in hs if (r := fetched.get(c, {}).get(h)) is not None]
+        held = held_by_first_sign_alone(
+            _meta(e), rows, owner_tumbler=e.tumbler, owner_title=getattr(e, "title", "") or "",
+        )
+        if not held:
+            continue
+        meta = _meta(e)
+        report.ttl_first_sign_notes.append({
+            "tumbler": str(e.tumbler), "title": getattr(e, "title", "") or "", "collection": e.physical_collection,
+            "catalog_ttl_days": meta.get("ttl_days"), "put_at": meta.get("put_at"),
+            "row_ttl_days": held[0].get("ttl_days"), "row_indexed_at": held[0].get("indexed_at"),
+            "rows": len(held), "reason": FIRST_SIGN_REASON,
+        })
+
+
 def _run_batch(
     reader: Any, t3: Any, writer: Any | None, entries: list[Any], live: dict[str, Any], apply: bool, report: Report,
     pause: Callable[[], None], *, pause_after_write: bool = True,
@@ -737,6 +805,8 @@ def _run_batch(
     docs = [e for e in entries if getattr(e, "content_type", "") != "knowledge"]
     report.documents_examined += len(entries)
     report.documents_notes += len(notes)
+    if not apply:
+        _list_first_sign(reader, t3, notes, report)
 
     needs_rows_docs = [e for e in docs if doc_row_keys_wanted(e)]
     needs_rows_notes = [e for e in notes if put_at_is_open(_meta(e))]

@@ -26,7 +26,8 @@ Four things to keep apart:
 - The entry's keys can be stale. Only the put path of a client that has nexus-6pfgb.5 writes them, so a
   re-put by an older client, or by a writer that bypasses it (the ``.nxexp`` import), leaves a note that
   looks lapsed after its owner made it permanent. :func:`catalog_ttl_stale` reads the note's own chunk
-  rows for that (nexus-6pfgb.30); the sweep does not retire a note it flags.
+  rows for that (nexus-6pfgb.30); the sweep does not retire a note it flags. Since RDR-236 Phase 4
+  Step 1 a row counts only when its ``indexed_at`` is later than ``put_at`` plus :data:`PUT_SKEW`.
 
 Pure functions, no I/O; the caller passes ``now``.
 """
@@ -186,17 +187,62 @@ def catalog_ttl_stale(
       number of days), or
     - the row's ``indexed_at`` is more than *skew* after the catalog's clock (:func:`clock_start`).
 
-    A row with no readable ``indexed_at`` only has the first sign to give. *rows* is the iterable of the
-    chunk rows' metadata dicts.
+    *rows* is the iterable of the chunk rows' metadata dicts.
+
+    RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): after Step 1 no client writes ``indexed_at`` or ``ttl_days`` to
+    a row, so a row that still carries them was written by an older client or before Step 1, and its
+    ``indexed_at`` is that write's client clock; ``put_at`` is the client clock the catalog write stamped.
+    A row's sign counts only when its ``indexed_at`` is later than ``put_at`` plus *skew*, the one threshold
+    at every site: a row whose ``indexed_at`` is not later than that, or that has none, is ignored whatever
+    its TTL, and whatever the engine's ``last_written_at`` says (the engine bumps it on every chunk write,
+    the identical-text re-write of a TTL-only re-put included, so it cannot tell a stale row from a fresh
+    one; it is not read). So a new-client TTL change, whose merge leaves the single-owner row's old
+    ``ttl_days`` and old ``indexed_at`` in place, is not held, and an older client's re-put, which stamps
+    ``indexed_at`` now, is. An entry with no readable ``put_at`` is never treated as newer than its rows:
+    a row's TTL that differs from the entry's counts, and the entry's own *indexed_at* stands in as the
+    clock of the second sign, as before.
     """
     days = note_ttl_days(meta)
-    start = parse_iso(clock_start(meta, indexed_at))
+    put_at = parse_iso(meta.get("put_at")) if isinstance(meta, dict) else None
+    start = put_at if put_at is not None else parse_iso(clock_start(meta, indexed_at))
     for row in rows or ():
         if not row_names_note(owner_tumbler, row, owner_title=owner_title):
             continue
+        stamped = parse_iso(row.get("indexed_at"))
+        if put_at is not None:
+            if stamped is not None and stamped - put_at > skew:
+                return True
+            continue
         if note_ttl_days(row) != days:
             return True
-        stamped = parse_iso(row.get("indexed_at"))
         if stamped is not None and start is not None and stamped - start > skew:
             return True
     return False
+
+
+def held_by_first_sign_alone(
+    meta: Any, rows: Any, *, owner_tumbler: Any, owner_title: str, skew: timedelta = PUT_SKEW,
+) -> list[dict]:
+    """The rows that hold this note by the first sign of the pre-Step-1 :func:`catalog_ttl_stale` alone
+    (nexus-6pfgb.65): a row that names the note, carries an ``indexed_at``, whose TTL is not the catalog's,
+    and whose ``indexed_at`` is NOT later than ``put_at`` plus *skew*. These are a pre-``.18`` import's
+    permanent row, or a note whose owner changed its TTL with a new-client re-put: two shapes the rows
+    cannot tell apart. Since Step 1 :func:`catalog_ttl_stale` ignores them; the backfill's dry run lists
+    them so Sam can read the list. Empty for an entry with no readable ``put_at`` (nothing there changed
+    with Step 1) and for a row with no readable ``indexed_at`` (a row no client wrote TTL facts to).
+    Pure; it decides nothing about expiry."""
+    put_at = parse_iso(meta.get("put_at")) if isinstance(meta, dict) else None
+    if put_at is None:
+        return []
+    days = note_ttl_days(meta)
+    rows = list(rows or ())
+    if catalog_ttl_stale(meta, "", rows, owner_tumbler=owner_tumbler, owner_title=owner_title, skew=skew):
+        return []   # held by the second sign too: a note the indexed_at sign still catches is not this list's
+    out: list[dict] = []
+    for row in rows:
+        if not row_names_note(owner_tumbler, row, owner_title=owner_title):
+            continue
+        stamped = parse_iso(row.get("indexed_at"))
+        if stamped is not None and note_ttl_days(row) != days:
+            out.append(row)
+    return out

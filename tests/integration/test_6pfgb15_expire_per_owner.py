@@ -25,12 +25,14 @@ import pytest
 from nexus.aspect_readers import uri_for
 from nexus.catalog import note_ttl
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+from nexus.catalog.store_hook import imported_note_meta
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, _post
 from nexus.mcp.core import store_put
 from tests._catalog_fixture_ops import ActiveCatalog, documents_by_title
-from tests._chunk_seed import seed_chunks_direct
+from tests._chunk_seed import _lit, _pg_state, _psql_superuser, ambient_tenant, seed_chunks_direct
 from tests._legacy_note_rows import stamp_legacy_note_rows
+from tests._reapable_age import age_chunks_past_grace
 
 pytestmark = pytest.mark.integration
 
@@ -51,7 +53,10 @@ class _World:
         self.subject = subject
         self.collection: str | None = None
 
-    def put(self, title: str, body: str, *, ttl: str | None = None) -> None:
+    def put(self, title: str, body: str, *, ttl: str | None = None, legacy_row: bool = True) -> None:
+        """Put the note through the current client. *legacy_row* stamps on its chunk row the facts a
+        pre-Step-1 client wrote with it (an old client's put); False leaves the row as the current client
+        and the engine's merge leave it (a new-client re-put over a row an earlier put keyed)."""
         kwargs = {"ttl": ttl} if ttl else {}
         with patch("nexus.mcp.core._get_t3", return_value=self.client):
             store_put(content=body, collection=self.subject, title=title, **kwargs)
@@ -60,6 +65,8 @@ class _World:
         # note's chunk row (RDR-236 Phase 4 Step 1: a current client writes the CHUNK keys only).
         entry = self._entry(title)
         assert entry is not None
+        if not legacy_row:
+            return
         stamp_legacy_note_rows(
             self.client, self.collection, [_chash(body)], catalog_doc_id=str(entry.tumbler), title=title,
             ttl_days=int(ttl[:-1]) if ttl else None)
@@ -386,3 +393,89 @@ def test_a_lapsed_note_whose_rows_cannot_be_read_is_not_retired(t2_service_env):
 
     assert w.live("unread") and w.chunk_served(body)
     assert [t for t, _ in report.failures] and report.notes_tombstoned == 0
+
+
+# ── nexus-6pfgb.65 (RDR-236 Phase 4 Step 1b): the guard reads the row's indexed_at against put_at ─────────
+
+
+def _last_written_at(collection: str, body: str):
+    """The engine's own ``nexus.chunks.last_written_at`` of the note's chunk, by substrate SQL: no client read
+    returns it."""
+    out =_psql_superuser(
+        _pg_state(),
+        "SELECT extract(epoch FROM last_written_at) FROM nexus.chunks "
+        f"WHERE tenant_id = {_lit(ambient_tenant())} AND collection = {_lit(collection)} "
+        f"AND chash = decode({_lit(_chash(body))}, 'hex')")
+    return float(out)
+
+
+def test_pin1_a_new_client_ttl_change_on_a_single_owner_note_with_a_legacy_keyed_row_expires_on_time(t2_service_env):
+    """Pin 1. An older client put the note permanent (its row: no TTL, stamp, title, indexed_at a month ago).
+    The current client re-puts it with a 1 day TTL two days ago: the catalog says 1 day from then, and the
+    engine's merge leaves the row's old keys in place. The row's TTL differs from the catalog's, but its
+    indexed_at is not later than put_at, so the note is not held and is retired when it lapses."""
+    w = _World(t2_service_env, "6pfgb65-ttlchange")
+    body = "6pfgb65 text of a note an older client put permanent and the current client then gave a ttl"
+    w.put("ttl-change", body)
+    w.age_row(body, ttl_days=None, days=30)
+    w.put("ttl-change", body, ttl="1d", legacy_row=False)
+    w.age_note("ttl-change", 2)      # put_at two days ago
+    w.age_row(body, ttl_days=None, days=30)   # age_note moved the row's clock with it; put it back to the old put's
+    entry = w._entry("ttl-change")
+    row = w.client._note_rows(w.collection, [_chash(body)])[_chash(body)]
+    assert entry is not None and entry.meta.get("ttl_days") == 1, "control: the catalog says 1 day, lapsed"
+    assert not row.get("ttl_days") and note_ttl.row_names_note(entry.tumbler, row, owner_title="ttl-change"), (
+        "control: the row is the old permanent put and names the note")
+
+    report = w.client.expire_report()
+
+    assert not w.live("ttl-change") and not w.chunk_present(body), "expired on time"
+    assert (report.notes_tombstoned, report.catalog_ttl_stale, report.failures) == (1, (), ())
+
+
+def test_pin2_an_import_that_makes_a_note_permanent_is_not_retired(t2_service_env):
+    """Pin 2. The note was imported: its entry says permanent (put_at stamped, ttl_days 0, what the import
+    writes on a note entry with no note keys) while the exported chunk row still says 1 day, stamped long
+    ago. The catalog is the authority; the sweep does not retire the note."""
+    w = _World(t2_service_env, "6pfgb65-import")
+    w.put("import-seed", "6pfgb65 import seed, only to register the collection")
+    body = "6pfgb65 text of a note an import made permanent over a row that says one day"
+    cat = ActiveCatalog()
+    owner = cat.register_owner("6pfgb65-import-owner", "curator")
+    stamped = imported_note_meta({"doc_id": _chash(body)}, put_at=_days_ago(400))
+    tumbler = cat.register(
+        owner, "imported", content_type="knowledge", physical_collection=w.collection,
+        source_uri=uri_for(w.collection, "imported"), meta={"doc_id": _chash(body), **stamped})
+    seed_chunks_direct(
+        w.collection, ids=[_chash(body)], documents=[body], embed=True,
+        metadatas=[{"ttl_days": 1, "indexed_at": _days_ago(500), "chunk_text_hash": _chash(body),
+                    "catalog_doc_id": str(tumbler), "title": "imported"}])
+    cat.append_manifest_chunks(str(tumbler), [{"chash": _chash(body), "position": 0}], collection=w.collection)
+    cat.resync_chunk_count_cache(str(tumbler))
+
+    report = w.client.expire_report()
+
+    assert len(documents_by_title("imported")) == 1 and w.chunk_served(body)
+    assert (report.notes_tombstoned, report.catalog_ttl_stale, report.failures) == (0, (), ())
+
+
+def test_pin4_a_re_put_of_unchanged_text_bumps_last_written_at_and_the_rule_does_not_read_it(t2_service_env):
+    """Pin 4 (RF-18). The engine bumps ``last_written_at`` on the identical-text write of a TTL-only re-put, so
+    a stale row and a fresh one carry the same engine clock; the guard reads the row's indexed_at and nothing
+    else, and the bumped clock holds nothing."""
+    w = _World(t2_service_env, "6pfgb65-lwa")
+    body = "6pfgb65 text re-put with only its ttl changed"
+    w.put("lwa", body)
+    w.age_row(body, ttl_days=None, days=30)
+    age_chunks_past_grace(w.collection)
+    before = _last_written_at(w.collection, body)
+
+    w.put("lwa", body, ttl="1d", legacy_row=False)   # identical text, TTL only
+    after = _last_written_at(w.collection, body)
+
+    assert after > before + 86400, "RF-18: the engine bumped last_written_at on the identical-text re-write"
+    w.age_note("lwa", 2)
+    w.age_row(body, ttl_days=None, days=30)
+    report = w.client.expire_report()
+    assert not w.live("lwa") and (report.notes_tombstoned, report.catalog_ttl_stale) == (1, ()), (
+        "the bumped last_written_at (now) is later than put_at and held nothing")

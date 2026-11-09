@@ -7092,7 +7092,11 @@ class HttpVectorClient:
         retired its own chunk rows are read (:meth:`_note_rows`; those stamped with the note's tumbler
         or carrying its title, :func:`~nexus.catalog.note_ttl.row_names_note`); one whose TTL is not
         the catalog's, or whose ``indexed_at`` is later than the catalog's clock by more than five minutes, records a put the catalog missed, and the note is NOT retired:
-        it is reported in ``catalog_ttl_stale``. Rows that cannot be read fail closed: the note stays and
+        it is reported in ``catalog_ttl_stale``. Since RDR-236 Phase 4 Step 1 (nexus-6pfgb.65) a row counts
+        only when its ``indexed_at`` is later than the catalog's ``put_at`` plus five minutes
+        (:func:`~nexus.catalog.note_ttl.catalog_ttl_stale`): current clients write no ``indexed_at`` or
+        ``ttl_days`` to a row, so a note's TTL is the catalog's, and the row scan above sees only rows an
+        older client wrote. Rows that cannot be read fail closed: the note stays and
         is reported in ``failures``. A row another note wrote last says nothing about this note, so a
         permanent re-put by an older client that a co-owner of the same text then overwrote is not seen.
 

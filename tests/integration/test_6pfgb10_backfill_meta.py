@@ -239,3 +239,39 @@ def test_backfill_meta_journey(t2_service_env):
     assert sum(k["stamped"] for k in second["keys"].values()) == 0
     assert second["documents_to_stamp"] == 0 and second["documents_written"] == 0
     assert c.status == STORED
+
+
+def test_backfill_meta_dry_run_lists_the_notes_held_by_the_first_sign_of_catalog_ttl_stale_alone(t2_service_env):
+    """nexus-6pfgb.65 (RDR-236 Phase 4 Step 1b), against legacy-keyed rows on the real engine. Three notes put
+    with a 1 day TTL by the current client, whose rows an older client's put then keyed
+    (``tests/_legacy_note_rows.py``): A's row is permanent and stamped a month before the catalog's put_at (held
+    by the first sign alone: listed); B's row is permanent and stamped after it (caught by the indexed_at sign:
+    not listed); C's row says 1 day (the TTLs match: not listed)."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    notes = t3_collection_name("6pfgb65list", t3=client)
+    reader = make_catalog_reader()
+    assert reader is not None
+    month_ago = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+    hour_on = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    now = datetime.now(UTC).isoformat()
+    want = {"A": dict(ttl_days=None, indexed_at=month_ago), "B": dict(ttl_days=None, indexed_at=hour_on),
+            "C": dict(ttl_days=1, indexed_at=now)}
+    tumblers: dict[str, str] = {}
+    for title, row in want.items():
+        out = put_note(content=f"6pfgb65 list note {title} body", collection=notes, title=title, ttl_days=1)
+        assert out.status == STORED, out.reason
+        entry = reader.by_source_uri(uri_for(notes, title))
+        assert entry is not None and entry.meta.get("ttl_days") == 1 and entry.meta.get("put_at"), "control: keyed"
+        tumblers[title] = str(entry.tumbler)
+        stamp_legacy_note_rows(client, notes, out.chunk_ids, catalog_doc_id=tumblers[title], title=title, **row)
+
+    report = _run()
+
+    section = report["ttl_first_sign_only"]
+    assert [n["tumbler"] for n in section["notes"]] == [tumblers["A"]], section
+    assert section["count"] == 1 and section["unread"] == 0
+    only = section["notes"][0]
+    assert only["title"] == "A" and only["catalog_ttl_days"] == 1 and only["row_ttl_days"] is None
+    assert only["row_indexed_at"] == month_ago and only["reason"] == "first sign only"
+    assert report["documents_to_stamp"] == 0, "read-only: the listing stamps nothing"
+    assert reader.by_source_uri(uri_for(notes, "A")).meta.get("ttl_days") == 1, "and changes no entry"

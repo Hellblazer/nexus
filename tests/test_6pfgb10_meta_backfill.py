@@ -16,6 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.catalog import meta_backfill as mb
+from nexus.catalog import note_ttl
 from nexus.catalog.meta_backfill import PRESENT, SHARED, STAMPED
 from nexus.cli import main
 from nexus.commands.enrich import _chunk_bib, _chunk_idless_bib, _idless_fill
@@ -475,6 +476,145 @@ def test_the_command_exits_non_zero_when_a_write_is_not_counted(monkeypatch):
     w.update_many = lambda payloads: [0] * len(payloads)  # type: ignore[method-assign]
     result, _ = _invoke(monkeypatch, w, "--apply")
     assert result.exit_code == 1
+
+
+# ── nexus-6pfgb.65 (RDR-236 Phase 4 Step 1b): notes held by catalog_ttl_stale's first sign alone ────
+#
+# RDR-236 Step 1 stops ``catalog_ttl_stale`` holding a note whose row TTL differs from the catalog's while the
+# row's ``indexed_at`` is not later than ``put_at`` plus the skew (a pre-.18 import's permanent row, or a note
+# whose owner changed its TTL with a new-client re-put: two shapes the rows cannot tell apart). The dry run
+# counts and lists them so Sam reads the list before Step 1 lands. Read-only: it stamps nothing and changes no
+# expiry decision.
+
+EARLIER = "2026-09-01T12:00:00+00:00"      # a legacy row's clock, a month before the catalog's put_at
+
+
+def _ttl_world():
+    """Three keyed notes, each with one legacy-keyed row (the shape an older client left):
+    A  row permanent, row indexed_at before put_at   -> held by the first sign alone
+    B  row permanent, row indexed_at an hour after   -> caught by the indexed_at sign
+    C  row TTL equal to the catalog's, in step       -> not held"""
+    w = _World()
+    keyed = {"ttl_days": 1, "put_at": PUT, "tags": [], "category": "", "source_agent": ""}
+    notes = [
+        _entry(dict(keyed), title="a-note", tumbler="1.1.1"),
+        _entry(dict(keyed), title="b-note", tumbler="1.1.2"),
+        _entry(dict(keyed), title="c-note", tumbler="1.1.3"),
+    ]
+    w.entries = notes
+    w.manifests = {str(e.tumbler): [_Manifest(f"n{i}")] for i, e in enumerate(notes, 1)}
+    w.owners = {f"n{i}": [str(e.tumbler)] for i, e in enumerate(notes, 1)}
+    coll = notes[0].physical_collection
+    w.rows[(coll, "n1")] = {"catalog_doc_id": "1.1.1", "title": "a-note", "indexed_at": EARLIER}
+    w.rows[(coll, "n2")] = {"catalog_doc_id": "1.1.2", "title": "b-note", "indexed_at": MUCH_LATER}
+    w.rows[(coll, "n3")] = {"catalog_doc_id": "1.1.3", "title": "c-note", "indexed_at": LATER, "ttl_days": 1}
+    return w
+
+
+def test_the_dry_run_lists_the_note_held_by_the_first_sign_alone_and_no_other():
+    w = _ttl_world()
+
+    report = mb.backfill_meta(w, w, None, apply=False)
+
+    assert [n["tumbler"] for n in report.ttl_first_sign_notes] == ["1.1.1"], (
+        "A (row TTL differs, row older than put_at) is listed; B (caught by the indexed_at sign) and C (TTLs match) are not")
+    only = report.ttl_first_sign_notes[0]
+    assert only == {
+        "tumbler": "1.1.1", "title": "a-note", "collection": w.entries[0].physical_collection,
+        "catalog_ttl_days": 1, "put_at": PUT, "row_ttl_days": None, "row_indexed_at": EARLIER, "rows": 1,
+        "reason": "first sign only",
+    }
+    assert w.updates == [], "read-only"
+    assert report.documents_to_stamp == 0 and report.documents_complete == 3, "the listing changes no count of the run"
+
+
+def test_the_note_held_by_the_first_sign_alone_is_not_held_by_the_expiry_guard_since_step_1():
+    """The listing names what Step 1 releases: the guard that sweeps expiry ignores it, and still holds B."""
+    w = _ttl_world()
+    by ={str(e.tumbler): e for e in w.entries}
+
+    def stale(tumbler, chash):
+        e = by[tumbler]
+        return note_ttl.catalog_ttl_stale(
+            e.meta, e.indexed_at, [w.rows[(e.physical_collection, chash)]], owner_tumbler=e.tumbler, owner_title=e.title)
+
+    assert (stale("1.1.1", "n1"), stale("1.1.2", "n2"), stale("1.1.3", "n3")) == (False, True, False)
+
+
+def test_a_note_with_one_row_held_by_the_first_sign_and_another_by_the_indexed_at_sign_is_not_listed():
+    w = _ttl_world()
+    w.manifests["1.1.1"] = [_Manifest("n1"), _Manifest("n1b")]
+    w.rows[(w.entries[0].physical_collection, "n1b")] = {
+        "catalog_doc_id": "1.1.1", "title": "a-note", "indexed_at": MUCH_LATER}
+
+    report = mb.backfill_meta(w, w, None, apply=False)
+
+    assert report.ttl_first_sign_notes == []
+
+
+def test_a_row_without_ttl_facts_and_an_entry_without_put_at_are_not_listed():
+    w = _ttl_world()
+    coll = w.entries[0].physical_collection
+    w.rows[(coll, "n1")] = {"catalog_doc_id": "1.1.1", "title": "a-note"}   # what a current client leaves
+    nokey = _entry({"ttl_days": 1}, title="d-note", tumbler="1.1.4")        # no put_at: nothing there changed
+    w.entries.append(nokey)
+    w.manifests["1.1.4"] = [_Manifest("n4")]
+    w.owners["n4"] = ["1.1.4"]
+    w.rows[(coll, "n4")] = {"catalog_doc_id": "1.1.4", "title": "d-note", "indexed_at": EARLIER}
+
+    report = mb.backfill_meta(w, w, None, apply=False)
+
+    assert [n["tumbler"] for n in report.ttl_first_sign_notes if n["tumbler"] in ("1.1.1", "1.1.4")] == []
+
+
+def test_an_apply_run_lists_nothing_and_reads_no_row_for_it():
+    w = _ttl_world()
+    reads: list[str] = []
+    real = w.chunk_rows
+    w.chunk_rows = lambda collection, chashes, **kw: reads.extend(chashes) or real(collection, chashes, **kw)  # type: ignore[method-assign]
+
+    report = mb.backfill_meta(w, w, w, apply=True)
+
+    assert report.ttl_first_sign_notes == [] and reads == [] and w.updates == []
+    assert "ttl_first_sign_only" not in report.as_dict()
+
+
+def test_a_failed_row_read_for_the_listing_is_counted_and_never_fails_the_run():
+    w = _ttl_world()
+    w.fail_rows_for = {w.entries[0].physical_collection}
+
+    report = mb.backfill_meta(w, w, None, apply=False)
+
+    assert report.ttl_first_sign_notes == [] and report.ttl_first_sign_unread == 3
+    assert report.lookups_failed == 0 and report.documents_complete == 3
+
+
+def test_the_command_counts_the_list_in_the_summary_and_prints_it_only_under_the_flag(monkeypatch):
+    plain, _ = _invoke(monkeypatch, _ttl_world())
+    assert plain.exit_code == 0, plain.output
+    assert "1 note(s) held today by catalog_ttl_stale's first sign alone" in plain.output
+    assert "--list-ttl-first-sign" in plain.output
+    assert "a-note" not in plain.output, "the rows print only under the flag"
+
+    listed, _ = _invoke(monkeypatch, _ttl_world(), "--list-ttl-first-sign")
+    assert listed.exit_code == 0, listed.output
+    assert "1.1.1" in listed.output and "a-note" in listed.output and "first sign only" in listed.output
+    assert "b-note" not in listed.output and "c-note" not in listed.output
+
+
+def test_the_json_report_carries_the_count_and_the_rows_without_the_flag(monkeypatch):
+    result, _ = _invoke(monkeypatch, _ttl_world(), "--json")
+    assert result.exit_code == 0, result.output
+    section = json.loads(result.stdout)["ttl_first_sign_only"]
+    assert section["count"] == 1 and section["unread"] == 0
+    assert [n["tumbler"] for n in section["notes"]] == ["1.1.1"]
+    assert section["notes"][0]["reason"] == "first sign only"
+
+
+def test_an_apply_command_prints_no_list_and_the_json_has_no_section(monkeypatch):
+    result, _ = _invoke(monkeypatch, _ttl_world(), "--apply", "--json")
+    assert result.exit_code == 0, result.output
+    assert "ttl_first_sign_only" not in json.loads(result.stdout)
 
 
 # ── nexus-6pfgb.28: the id-less bib of `nx enrich bib --backfill-catalog` ──────────────────────────
