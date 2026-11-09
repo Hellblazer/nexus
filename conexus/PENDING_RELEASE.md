@@ -50,6 +50,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/mailbox/SKILL.md`
   nexus-1d6pz.11.2: a board notice now prints an exact read (`tuple_rd` with `from_created_at`/`from_id`, and `through_*` for a batch) that returns the announced posts, in place of `since=`.
 - `conexus/hooks/scripts/stop_wake_guard.py`
-  nexus-1d6pz.11.5: a closing CI wait is allowed when the session's channel status record shows a live waiter, the conexus channel flag and a `board/ci/*--done` subscription; a subscription without the flag blocks naming `nx ci wait <sha>`, and every CI-wait block offers it.
+  nexus-1d6pz.11.5: a closing develop-CI wait is allowed when the session's channel status record shows a live, fresh, unstalled waiter, the initialize handshake, the conexus channel flag and a `board/ci/*--done` subscription (other clauses are still read); a live waiter with the subscription but no flag blocks naming `nx ci wait <sha>`, and every CI-wait block offers it.
 
 ## Deferred to the next client release
