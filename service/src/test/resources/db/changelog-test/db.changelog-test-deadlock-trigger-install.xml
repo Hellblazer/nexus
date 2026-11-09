@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-u5m5g.3 (RDR-193 Step 2 review r2): a BEFORE UPDATE trigger on nexus.catalog_documents that raises a real
+    deadlock SQLSTATE (40P01) when the row with file_path ${file_path} is tombstoned, so a test can drive the reconcile
+    commit's transient-error path. Sam's rule (nexus-zrcj7): no SQL strings in Java, tests included. Run through
+    PgContainerHelper#installDeadlockOnTrash, which admits only a plain file name for ${file_path}; removed by
+    db.changelog-test-deadlock-trigger-remove.xml. runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="deadlock-trigger-install" author="nexus-u5m5g.3" runAlways="true">
+        <sql splitStatements="false">
+CREATE OR REPLACE FUNCTION nexus.rc048_test_deadlock() RETURNS trigger LANGUAGE plpgsql AS $t$
+BEGIN
+    IF NEW.file_path = '${file_path}' AND NEW.deleted_at IS NOT NULL THEN
+        RAISE EXCEPTION 'deadlock detected (test trigger)' USING ERRCODE = '40P01';
+    END IF;
+    RETURN NEW;
+END
+$t$
+        </sql>
+        <sql>DROP TRIGGER IF EXISTS rc048_test_deadlock ON nexus.catalog_documents</sql>
+        <sql>CREATE TRIGGER rc048_test_deadlock BEFORE UPDATE ON nexus.catalog_documents FOR EACH ROW EXECUTE FUNCTION nexus.rc048_test_deadlock()</sql>
+    </changeSet>
+</databaseChangeLog>

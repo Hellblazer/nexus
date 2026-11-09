@@ -14071,8 +14071,10 @@ public final class CatalogRepository {
      * @param statementTimeout the longest the commit may run; the job asks {@code stopReason()} before calling
      */
     public Map<String, Object> reconcileCommit(String tenant, String owner, String runId, java.time.Duration statementTimeout) {
-        if (statementTimeout == null || statementTimeout.isZero() || statementTimeout.isNegative()) {
-            throw new IllegalArgumentException("statementTimeout must be positive");
+        if (statementTimeout == null || statementTimeout.isZero() || statementTimeout.isNegative()
+            || statementTimeout.toMillis() > Integer.MAX_VALUE) {
+            // set_config takes statement_timeout as int milliseconds: a longer value would fail on every commit.
+            throw new IllegalArgumentException("statementTimeout must be positive and at most " + Integer.MAX_VALUE + " ms");
         }
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", String.valueOf(statementTimeout.toMillis()));

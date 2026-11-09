@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-u5m5g.3: removes what db.changelog-test-deadlock-trigger-install.xml installs. Run through
+    PgContainerHelper#removeDeadlockOnTrash. runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="deadlock-trigger-remove" author="nexus-u5m5g.3" runAlways="true">
+        <sql>DROP TRIGGER IF EXISTS rc048_test_deadlock ON nexus.catalog_documents</sql>
+        <sql>DROP FUNCTION IF EXISTS nexus.rc048_test_deadlock()</sql>
+    </changeSet>
+</databaseChangeLog>

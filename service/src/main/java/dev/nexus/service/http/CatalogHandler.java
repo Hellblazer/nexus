@@ -3251,7 +3251,10 @@ public final class CatalogHandler implements HttpHandler {
         try {
             return new EngineJobs.Outcome(200, repo.reconcileCommit(tenant, owner, runId, reconcileStatementTimeout));
         } catch (CatalogRepository.ReconcileCommitException e) {
-            return reconcileFailure(422, e.code(), e.getMessage());
+            // A transient database error (deadlock, serialization failure, lock not available) is retryable, so it is
+            // a 503 like the registry's own busy answer, not the 422 of a commit that will fail the same way again.
+            int status = TRANSIENT_DB_ERROR.equals(e.code()) ? 503 : 422;
+            return reconcileFailure(status, e.code(), e.getMessage());
         } catch (org.jooq.exception.DataAccessException e) {
             if ("57014".equals(sqlStateOf(e))) {
                 return reconcileFailure(500, "commit_timeout", "the commit ran past its statement timeout of "
@@ -3261,6 +3264,9 @@ public final class CatalogHandler implements HttpHandler {
             throw e;
         }
     }
+
+    /** The commit's code for a deadlock, serialization failure or lock not available: retryable, never a file's fault. */
+    static final String TRANSIENT_DB_ERROR = "transient_db_error";
 
     private static EngineJobs.Outcome reconcileFailure(int status, String reason, String error) {
         Map<String, Object> body = new LinkedHashMap<>();

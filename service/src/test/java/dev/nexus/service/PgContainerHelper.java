@@ -1587,6 +1587,29 @@ public final class PgContainerHelper {
                 "table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "mode", mode.keyword));
     }
 
+    /** A plain file name: the only {@code file_path} the deadlock trigger's changelog accepts (it is inlined in SQL). */
+    private static final java.util.regex.Pattern PLAIN_FILE_NAME = java.util.regex.Pattern.compile("[A-Za-z0-9_.-]{1,64}");
+
+    /**
+     * Installs a BEFORE UPDATE trigger on {@code nexus.catalog_documents} that raises SQLSTATE 40P01 (deadlock detected)
+     * when the row with {@code filePath} is tombstoned (nexus-u5m5g.3), through
+     * {@code db.changelog-test-deadlock-trigger-install.xml}. {@code filePath} must be a plain file name. Pair with
+     * {@link #removeDeadlockOnTrash} in a {@code finally}.
+     */
+    public static void installDeadlockOnTrash(Connection su, String filePath) throws Exception {
+        if (filePath == null || !PLAIN_FILE_NAME.matcher(filePath).matches()) {
+            throw new IllegalArgumentException("file path must be a plain file name: " + filePath);
+        }
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-deadlock-trigger-install.xml",
+            "databasechangelog_test_deadlock_trigger", Map.of("file_path", filePath));
+    }
+
+    /** Removes what {@link #installDeadlockOnTrash} installed, through {@code db.changelog-test-deadlock-trigger-remove.xml}. */
+    public static void removeDeadlockOnTrash(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-deadlock-trigger-remove.xml",
+            "databasechangelog_test_deadlock_trigger_remove", Map.of());
+    }
+
     /** {@code CREATE EXTENSION plpgsql_check} (nexus-cbo4a batch 11), through {@code db.changelog-test-extension-plpgsql-check.xml}. */
     public static void createPlpgsqlCheckExtension(Connection su) throws Exception {
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-extension-plpgsql-check.xml",
