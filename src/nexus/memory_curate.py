@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The report behind ``nx memory curate`` (RDR-238 Technical Design 4, nexus-qo7ie.17).
 
-Three sections that need no transcripts: ``--files``, ``--t2`` and ``--agents``. Each section
+Three sections, ``--files``, ``--t2`` and ``--agents``; only the ``--files`` read counts read
+transcripts (nexus-qo7ie.18). Each section
 function returns its body lines; :func:`build_report` adds the headings and never lets one
 section stop another. The report only lists. Nothing here deletes, quarantines, rewrites or
 restores a file or a row; retiring anything is a person's decision.
@@ -10,7 +11,10 @@ restores a file or a row; retiring anything is a person's decision.
 shares its parser with the SessionStart hook: unindexed files, files over 8 KB, index entries
 naming a missing file, and declared ``replaces`` targets that still exist. Sam's decision S-7
 (2026-11-03) gives it NO heuristic that infers a file replaced without saying so; it lists
-likely near-duplicates for review instead, by the measure on :func:`near_duplicates`.
+likely near-duplicates for review instead, by the measure on :func:`near_duplicates`. Its read
+counts (nexus-qo7ie.18, Technical Design 4 and 5) come from RDR-240's ``memory`` query through
+``run_procedure`` (:func:`load_reads`): unread files over the window, T2 reads per title and per
+project, or ``not available`` with the reason, never an empty list in place of an error.
 
 ``--t2`` lists live T2 rows that a later row names as replaced, skipping audit records (the
 AUDIT_TAGS table, tags and title backstop), rows tagged ``superseded`` and titles that are only a
@@ -28,9 +32,10 @@ rolled-up row is ever reaped, so old reports sit quarantined. That is accepted (
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -101,9 +106,6 @@ def names_a_repo(text: str) -> bool:
     return False
 
 
-NOT_AVAILABLE_READS = "unread files: not available (needs RDR-240's memory query; planned in nexus-qo7ie.18)"
-
-
 def _tokens(text: str) -> set[str]:
     return {t for t in _TOKEN.findall(text.lower()) if len(t) >= 2 and t not in _STOPWORDS}
 
@@ -140,7 +142,174 @@ def near_duplicates(
     return out
 
 
-def files_section(directory: Path | None) -> list[str]:
+#: How far back transcripts reach: Claude Code keeps them about 30 days (inferred from file
+#: dates, RDR-238 research 9). A read-count window is capped here and the report says so.
+RETENTION_DAYS = 30
+#: Pages a read-count window may take before the loop stops. Each page advances at least an
+#: hour, so a 30-day window needs at most 720; this only stops a procedure that never ends.
+MAX_READ_PAGES = 1000
+#: Memory-query kinds that count as a read of a memory file: a Read of it, and its loading
+#: into a subagent's instructions. A Write or an Edit is not a read.
+_FILE_READ_KINDS = frozenset({"file_read", "loaded"})
+
+
+@dataclass(frozen=True)
+class ReadWindow:
+    """The UTC window a read count covers: ``[since, until)``, both ``YYYY-MM-DDTHH:MM:SSZ``."""
+
+    since: str
+    until: str
+    requested: int
+    covered: int
+
+    def describe(self) -> str:
+        span = (f"requested {self.requested} days, capped at {self.covered}"
+                if self.covered < self.requested else f"{self.covered} days")
+        return f"covered {self.since} .. {self.until} ({span})"
+
+
+def read_window(days: int, now: datetime) -> ReadWindow:
+    """*days* back from *now*, capped at :data:`RETENTION_DAYS`."""
+    covered = min(days, RETENTION_DAYS)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return ReadWindow((now - timedelta(days=covered)).strftime(fmt), now.strftime(fmt), days, covered)
+
+
+@dataclass(frozen=True)
+class ReadCounts:
+    """The joined rows of RDR-240's ``memory`` query over one window."""
+
+    window: ReadWindow
+    rows: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class ReadsUnavailable:
+    """Why a window's read counts could not be read; the report says so instead of listing."""
+
+    window: ReadWindow
+    reason: str
+
+
+def _transcripts_in_window(window: ReadWindow, cwd: Path) -> bool:
+    """Whether any transcript of this repository's Claude Code project directories was written
+    in the window (its file time at or after ``since``). Directory listing only, no parsing:
+    the projects come from the runtime's own ``repo_project_dirs``, the rule project ``repo``
+    uses, so the two agree on what "this repository's transcripts" means."""
+    import time  # noqa: PLC0415 — deferred with the runtime helpers
+
+    from nexus.lua_runtime.transcripts_projects import repo_project_dirs  # noqa: PLC0415 — deferred: only a read count pays
+
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    if not root.is_dir():
+        return False
+    try:
+        names = repo_project_dirs(root, cwd, deadline=time.monotonic() + 30)
+    except Exception:  # noqa: BLE001 — any failure here means "cannot show there are transcripts"
+        return False
+    since = datetime.strptime(window.since, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    for name in names:
+        for f in (root / name).rglob("*.jsonl"):
+            try:
+                if f.stat().st_mtime >= since:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def load_reads(window: ReadWindow, cwd: Path | None = None) -> ReadCounts | ReadsUnavailable:
+    """RDR-240's ``memory`` query over *window* for this repository (project ``repo``: the
+    main checkout and its worktrees), every page joined; or the reason it could not be read.
+
+    Never an empty result in place of an error: an empty count would list every file as
+    unread. So a window with no rows is accepted only when this repository has a transcript
+    written in it; with none, the counts are unavailable (no transcripts), not zero.
+    Called from Python only (RDR-238 Technical Design 5), so ``nx memory curate`` adds no Lua.
+    """
+    from nexus.lua_runtime import runner  # noqa: PLC0415 — deferred: only a read count pays for the runtime
+    from nexus.lua_runtime.transcripts_join import JoinError, join_pages  # noqa: PLC0415 — deferred with it
+
+    since, pages = window.since, []
+    try:
+        while True:
+            page = runner.run_procedure(
+                "transcripts", {"query": "memory", "since": since, "until": window.until, "project": "repo"},
+            )
+            if not isinstance(page, dict):
+                return ReadsUnavailable(window, f"result: the memory query returned {type(page).__name__}, not a page")
+            pages.append(page)
+            nxt = page.get("next_since")
+            if not nxt:
+                break
+            if len(pages) >= MAX_READ_PAGES:
+                return ReadsUnavailable(window, f"result: the memory query did not finish in {MAX_READ_PAGES} pages")
+            since = nxt
+        joined = join_pages("memory", pages)
+    except runner.PROCEDURE_ERRORS as exc:
+        return ReadsUnavailable(window, runner.describe_error(exc) or type(exc).__name__)
+    except JoinError as exc:
+        return ReadsUnavailable(window, f"join: {exc}")
+    rows = list(joined["rows"])
+    if not rows and not _transcripts_in_window(window, cwd or Path.cwd()):
+        return ReadsUnavailable(window, "no transcripts of this repository in the window")
+    return ReadCounts(window, rows)
+
+
+def _same_file(name: str, directory: Path) -> str | None:
+    """The file name in *directory* that the read path *name* names, or None."""
+    path = Path(name)
+    if not path.is_absolute():
+        return None
+    try:
+        same = path.parent.resolve() == directory.resolve()
+    except OSError:
+        return None
+    return path.name if same else None
+
+
+def file_read_counts(reads: ReadCounts, directory: Path) -> dict[str, int]:
+    """Reads per memory file in *directory* over the window, summed over sessions."""
+    counts: dict[str, int] = {}
+    for row in reads.rows:
+        if row.get("kind") in _FILE_READ_KINDS and isinstance(row.get("name"), str):
+            name = _same_file(row["name"], directory)
+            if name is not None:
+                counts[name] = counts.get(name, 0) + int(row.get("count") or 0)
+    return counts
+
+
+def _summed(reads: ReadCounts, kind: str) -> list[str]:
+    totals: dict[str, int] = {}
+    for row in reads.rows:
+        if row.get("kind") == kind and isinstance(row.get("name"), str):
+            totals[row["name"]] = totals.get(row["name"], 0) + int(row.get("count") or 0)
+    return [f"{name} ({n})" for name, n in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def read_lines(directory: Path, files: list[str], reads: ReadCounts | ReadsUnavailable | None) -> list[str]:
+    """The ``--files`` read-count rows: unread files over the window, then T2 reads per title
+    (``memory_get``) and searches per project (``memory_search``; a search names no title)."""
+    if reads is None:
+        return ["unread files: not available (no read counts were given)"]
+    if isinstance(reads, ReadsUnavailable):
+        return [f"read counts: {reads.window.describe()}",
+                f"unread files: not available: {reads.reason}", f"T2 read counts: not available: {reads.reason}"]
+    counts = file_read_counts(reads, directory)
+    candidates = sorted(f for f in files if f not in INDEX_FILES)
+    unread = [f for f in candidates if counts.get(f, 0) == 0]
+    lines = [f"read counts: {reads.window.describe()}"]
+    if unread:
+        lines.append(f"unread in the window: {len(unread)} of {len(candidates)} files (index files excluded)")
+        lines += [f"  - {f}" for f in unread]
+    else:
+        lines.append("unread in the window: none")
+    lines += _listing("T2 reads per title (memory_get)", _summed(reads, "t2_get"))
+    lines += _listing("T2 searches per project (memory_search)", _summed(reads, "t2_search"))
+    return lines
+
+
+def files_section(directory: Path | None, reads: ReadCounts | ReadsUnavailable | None = None) -> list[str]:
     if directory is None:
         return ["not available: no memory directory found for this repository"]
     result = scan(directory)
@@ -163,7 +332,7 @@ def files_section(directory: Path | None) -> list[str]:
         [f"{a} ~ {b} ({score})" for a, b, score in pairs],
         key="near-duplicates",
     )
-    lines.append(NOT_AVAILABLE_READS)
+    lines += read_lines(directory, list(result.files), reads)
     return lines
 
 

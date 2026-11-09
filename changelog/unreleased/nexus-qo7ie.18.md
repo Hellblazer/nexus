@@ -1,0 +1,3 @@
+### Added
+
+- **`nx memory curate --files` lists the memory files no session read in the window, and T2 reads per title and per project** (nexus-qo7ie.18, RDR-238 Phase 3 Step 2). The counts come from RDR-240's `transcripts` procedure, query `memory`, over the repository's own sessions, every page joined. `--days` is capped at the 30 days Claude Code keeps transcripts, and the report prints the span it covered. Without the procedure runtime, with a failed query, or with no transcript of the repository in the window, the rows say `not available` and why, never an empty list, and the command still exits 0.
