@@ -62,6 +62,7 @@ from nexus._hook_runtime.memory_scan import INDEX_FILES, scan
 
 LABELS = ("memory files", "T2 namespaces", "MCP tools", "CLI verbs", "injected context")
 _NEVER = "none in the window"
+_MCP_NAME = re.compile(r"^mcp__(?P<server>.+?)__(?P<tool>.+)$", re.DOTALL)
 _SERVER_CORE = re.compile(r"(^|_)nexus$")
 _SERVER_CATALOG = re.compile(r"(^|_)nexus[-_]catalog$")
 _NESTED_NAMES = frozenset({"CLAUDE.md", "AGENTS.md"})
@@ -321,13 +322,13 @@ def nexus_tool(name: str) -> tuple[str, str] | None:
     ``mcp__plugin_conexus_nexus-catalog__<t>`` and ``mcp__nexus_catalog__<t>`` are ``("nexus-catalog", t)``.
     Another server's tool is None: it is not a nexus tool and is never counted as an unknown one.
     """
-    parts = name.split("__", 2)
-    if len(parts) != 3 or parts[0] != "mcp" or not parts[2]:
+    m = _MCP_NAME.match(name)  # a tool name, not a collection name: no "__" split here (the parse census counts those)
+    if m is None:
         return None
-    if _SERVER_CORE.search(parts[1]):
-        return ("nexus", parts[2])
-    if _SERVER_CATALOG.search(parts[1]):
-        return ("nexus-catalog", parts[2])
+    if _SERVER_CORE.search(m["server"]):
+        return ("nexus", m["tool"])
+    if _SERVER_CATALOG.search(m["server"]):
+        return ("nexus-catalog", m["tool"])
     return None
 
 
