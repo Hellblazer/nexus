@@ -48,6 +48,17 @@ MAX_NAME_CHARS = 80
 _REMEDY = "run `nx memory curate --files`"
 
 
+def _listdir(directory: Path) -> list[str]:
+    """The directory's entries. A module seam, so a test can make listing fail on a platform where
+    a mode bit cannot (Windows, root) without patching ``os`` for the whole process."""
+    return os.listdir(directory)
+
+
+def _getcwd() -> str:
+    """The process's working directory; a seam for the same reason (Windows cannot remove a cwd)."""
+    return os.getcwd()
+
+
 def _shown(name: str) -> str:
     """A file name safe to put in model context: printable, one line, bounded."""
     clean = "".join(c if c.isprintable() else "?" for c in name)
@@ -102,7 +113,7 @@ def check(cwd: Path, *, env: Mapping[str, str] | None = None, home: Path | None 
         if directory is None:
             return None
         try:
-            if ONDEMAND_INDEX not in os.listdir(directory):
+            if ONDEMAND_INDEX not in _listdir(directory):
                 return None
             # Read both indexes first: one that cannot be read would scan as "nothing indexed".
             (directory / ONDEMAND_INDEX).read_bytes()
@@ -139,8 +150,8 @@ def curation_line(payload: dict | None) -> str | None:
     """:func:`check` for the payload's ``cwd`` (a string), else the process's working directory."""
     try:
         cwd = payload.get("cwd") if isinstance(payload, dict) else None
-        return check(Path(cwd) if isinstance(cwd, str) and cwd else Path(os.getcwd()))
-    except Exception as exc:  # noqa: BLE001 — a deleted cwd raises in os.getcwd(); still never fails a session
+        return check(Path(cwd) if isinstance(cwd, str) and cwd else Path(_getcwd()))
+    except Exception as exc:  # noqa: BLE001 — a deleted cwd raises in _getcwd(); still never fails a session
         _emit("warning", "memory_curation_check_failed", error=f"{type(exc).__name__}: {exc}")
         return None
 

@@ -210,14 +210,26 @@ def test_no_memory_directory_prints_nothing(tmp_path: Path) -> None:
     assert _check(repo, {"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")}, tmp_path) is None
 
 
-@pytest.mark.skipif(sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
-                    reason="chmod 000 does not stop root or Windows from listing a directory")
+#: chmod 000 stops a listing or a read only on POSIX, and not for root.
+_MODE_BITS_BITE = sys.platform != "win32" and not (hasattr(os, "geteuid") and os.geteuid() == 0)
+
+
 def test_an_unreadable_directory_is_silent_and_exits_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real mode bits where they bite; elsewhere (Windows, root) the listing seam raises the same
+    PermissionError, so the case runs on every platform the Windows set covers."""
     repo = _repo(tmp_path)
     d, env = _clean_memdir(tmp_path, repo)
     (d / "stray.md").write_text("x\n", encoding="utf-8")
     logged: list[str] = []
     monkeypatch.setattr(mcc, "_emit", lambda _level, event, **_fields: logged.append(event))
+    if not _MODE_BITS_BITE:
+        def denied(_directory: Path) -> list[str]:
+            raise PermissionError(13, "Access is denied", str(_directory))
+
+        monkeypatch.setattr(mcc, "_listdir", denied)
+        assert _check(repo, env, tmp_path) is None
+        assert logged == ["memory_curation_check_unreadable"], "silent, and logged to hook.log"
+        return
     d.chmod(0)
     try:
         assert _check(repo, env, tmp_path) is None
@@ -247,15 +259,22 @@ def test_an_exception_inside_the_check_is_silent(tmp_path: Path, monkeypatch: py
     assert logged == ["memory_curation_check_failed"]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot remove a process's working directory")
 def test_a_deleted_working_directory_is_silent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """No payload cwd and a working directory that no longer exists: os.getcwd() raises."""
-    doomed = tmp_path / "doomed"
-    doomed.mkdir()
-    monkeypatch.chdir(doomed)  # restored at teardown
-    doomed.rmdir()
-    with pytest.raises(FileNotFoundError):
-        os.getcwd()
+    """No payload cwd and a working directory that no longer exists. A real removed directory
+    where the platform allows it; Windows cannot remove a process's working directory, so there
+    the cwd seam raises what os.getcwd() raises."""
+    if sys.platform == "win32":
+        def gone() -> str:
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+
+        monkeypatch.setattr(mcc, "_getcwd", gone)
+    else:
+        doomed = tmp_path / "doomed"
+        doomed.mkdir()
+        monkeypatch.chdir(doomed)  # restored at teardown
+        doomed.rmdir()
+        with pytest.raises(FileNotFoundError):
+            os.getcwd()
     assert mcc.curation_line({}) is None
     assert mcc.with_curation_line("GUIDANCE", {}) == "GUIDANCE"
 
@@ -273,20 +292,23 @@ def test_a_directory_that_has_not_opted_in_is_not_read(tmp_path: Path, monkeypat
     assert _check(repo, env, tmp_path) is None
 
 
-@pytest.mark.skipif(sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
-                    reason="chmod 000 does not stop root or Windows from reading a file")
 def test_an_unreadable_index_is_silent_not_all_unindexed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An index that is there but cannot be read: a directory in its place, which no platform can
+    read as a file (IsADirectoryError on POSIX, PermissionError on Windows), and as root too."""
     repo = _repo(tmp_path)
     d, env = _clean_memdir(tmp_path, repo)
     logged: list[str] = []
     monkeypatch.setattr(mcc, "_emit", lambda _level, event, **_fields: logged.append(event))
     for name in ("MEMORY.md", "MEMORY-ondemand.md"):
         logged.clear()
-        (d / name).chmod(0)
+        saved = (d / name).read_bytes()
+        (d / name).unlink()
+        (d / name).mkdir()
         try:
             assert _check(repo, env, tmp_path) is None, name
         finally:
-            (d / name).chmod(0o644)
+            (d / name).rmdir()
+            (d / name).write_bytes(saved)
         assert logged == ["memory_curation_check_unreadable"], name
 
 
