@@ -120,19 +120,23 @@ things to avoid carefully; they are impossible.
    `gh run watch` and never a polling loop: several concurrent watch loops on
    one token tripped GitHub's secondary rate limit on 2026-09-26 and every
    Actions call 403'd (T2 `nexus/github-api-usage-research-2026-09-26`). The
-   conexus-hosted adapter still posts one tuple per run and job state change
-   to `board/ci/nexus-develop`; subscribe once per session with
-   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")` for
-   pings instead of polling. A `kind=run` row is the adapter's run-level post,
+   conexus-hosted adapter also posts one tuple per run and job state change
+   to `board/ci/nexus-develop`; subscribe to it
+   (`mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`)
+   only if you want those per-run pings: the wake for your own push is the
+   `--done` topic below, and the Stop hook counts only a `--done`
+   subscription. A `kind=run` row is the adapter's run-level post,
    carrying the sha, the run, its state and its conclusion; its `conclusion`
    for your sha is the verdict to read (Sam, 2026-11-08, ask qo36-conflicts).
    The single `gh api` call above is the fallback. Nothing in this repo folds
    the job-level posts into a verdict, so do not read one as a verdict.
 
-   To watch your own develop push, subscribe after pushing and read the
-   conclusion on your sha's `kind=run` row; one `gh api` read of its check
-   runs is the fallback. Never arm a Monitor or loop that polls check runs
-   per push (Sam, 2026-11-08, ask qo36-conflicts).
+   To watch your own develop push, take the wake described under "The wake
+   for your own push" below (the `--done` topic with the channel, `nx ci wait`
+   without it); its row carries the same GitHub conclusions a `kind=run` row
+   does, one per run. One `gh api` read of the sha's check runs is the
+   fallback. Never arm a Monitor or loop that polls check runs per push (Sam,
+   2026-11-08, ask qo36-conflicts).
 
    To be woken when a develop sha's push runs have all completed, subscribe to
    `board/ci/nexus-develop--done`
@@ -164,10 +168,12 @@ things to avoid carefully; they are impossible.
    Monitor or a poll per push:
    - With the conexus channel: subscribe once per session to
      `board/ci/nexus-develop--done`. Each notice for it carries the row's sha
-     in its meta (`sha`, or `shas` aligned with `tuple_ids` on a batch;
+     in its meta when the row names one (`sha`, or `shas` aligned with `tuple_ids` on a batch;
      nexus-1d6pz.11.3), and its text prints the exact `tuple_rd` read that
      returns the announced row (nexus-1d6pz.11.2). The row's `outcome` dim is
-     the verdict, its `runs` the per-workflow conclusions. A notice for another
+     the reduced result of GitHub's conclusions and its `runs` the
+     per-workflow ones; required checks and flake judgment stay yours, and a
+     docs-only tip's green says nothing about code (push-train rule 4). A notice for another
      sha is not to be ignored on that alone: in a push window the beads close
      on the window tip's result, which is often a peer's sha.
    - Without the channel: run `nx ci wait <sha> --branch develop` as a
@@ -175,13 +181,15 @@ things to avoid carefully; they are impossible.
      line is the result: 0 success, 1 failure, 3 cancelled or stale, 2 timeout,
      4 a conclusion it could not read (including a capped row whose missing
      runs GitHub could not supply), 5 the wait could not run. At the deadline
-     it reads the sha's push runs from GitHub once, so a dropped wake still
+     it reads the sha's push runs from GitHub once (a full sha only, and never
+     with `--fresh`), so a dropped wake still
      reports finished runs. For a rerun of the same sha, add `--fresh`, which
      counts only a row that arrives after the wait starts.
-   The Stop hook's wake guard counts a live channel waiter with a
-   `board/ci/*--done` subscription as an armed wake for a develop-CI wait, and
-   without the channel it blocks the turn naming `nx ci wait <sha>`
-   (nexus-1d6pz.11.5).
+
+   The Stop hook's wake guard counts a fresh, live channel waiter with a
+   `board/ci/*--done` subscription and the channel flag as an armed wake for a
+   develop-CI wait; any other CI wait at turn end is blocked with a message
+   naming `nx ci wait <sha>` (nexus-1d6pz.11.5).
 
    Treat the develop run as part of the push. Before stacking more work on a
    develop sha, or cutting a release branch on it, read that sha's check-run
