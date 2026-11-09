@@ -247,11 +247,15 @@ def test_an_exception_inside_the_check_is_silent(tmp_path: Path, monkeypatch: py
     assert logged == ["memory_curation_check_failed"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot remove a process's working directory")
 def test_a_deleted_working_directory_is_silent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def gone() -> str:
-        raise FileNotFoundError("cwd deleted")
-
-    monkeypatch.setattr(mcc.os, "getcwd", gone)
+    """No payload cwd and a working directory that no longer exists: os.getcwd() raises."""
+    doomed = tmp_path / "doomed"
+    doomed.mkdir()
+    monkeypatch.chdir(doomed)  # restored at teardown
+    doomed.rmdir()
+    with pytest.raises(FileNotFoundError):
+        os.getcwd()
     assert mcc.curation_line({}) is None
     assert mcc.with_curation_line("GUIDANCE", {}) == "GUIDANCE"
 
