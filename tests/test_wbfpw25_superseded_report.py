@@ -233,15 +233,20 @@ def test_a_failed_sweep_is_reported_not_left_to_the_log(t2_service_env):
 
     # The line says the replaced chunk stays and is hidden from search. Check the state it describes
     # on the real engine (the writer ran the write with the sweep off): the old chunk is physically
-    # there, the normal reader no longer returns it, and the census files it as superseded
+    # there, the normal reader no longer returns it, and the census files it among the manifest-less
     # (code review S-2; it is the state the doctor's --visible-outside-manifest check probes).
+    # RDR-236 Phase 4 Step 1: a chunk row carries no ``catalog_doc_id``, the census's forward attribution,
+    # and the note's catalog entry now names the new text, so the old chunk reads ``no-owner`` where a
+    # pre-Step-1 row read ``superseded``. The RDR accepts that (only ``legacy-unmanifested`` and
+    # ``unclassified`` gate the reaper), and ``no-owner`` is a reapable bucket.
     v1_chash = _chash(v1)
     collection = client.get_or_create_collection(col)
     assert collection.get(ids=[v1_chash], include_non_live=True, sensitivity="include")["ids"] == [v1_chash], (
         "control: the replaced chunk was not removed")
     assert collection.get(ids=[v1_chash], sensitivity="include")["ids"] == [], "hidden: the normal reader does not return it"
-    assert v1_chash in client.manifest_less_census(col, limit=300)["chashes"]["superseded"], (
-        "and the census classes it superseded")
+    census = client.manifest_less_census(col, limit=300)["chashes"]
+    assert v1_chash in census["no-owner"], "and the census files it as no-owner"
+    assert v1_chash not in census["legacy-unmanifested"] + census["unclassified"], "never in a bucket that gates the reaper"
 
 
 def test_cli_store_put_reports_a_failed_sweep_too(t2_service_env, tmp_path):

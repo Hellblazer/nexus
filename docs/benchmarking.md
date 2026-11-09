@@ -18,6 +18,41 @@ design.
 uv run python scripts/bench/runner.py bench/queries/spike_5q.yaml
 ```
 
+### Comparing numbers (nexus-3ceda.11)
+
+A latency is a number on one machine against one engine, so the runner records both and
+refuses to compare across them:
+
+- **Every report carries a `manifest`** (`scripts/bench/manifest.py`): the checkout's git sha
+  and whether its tracked files were dirty, the host class, the CPU model, the engine build,
+  the Python version and the time. The host class is the lab-run grant's size (`lab-run
+  8c/16384M linux-x86_64` for lab-m), or `unmanaged <cores>c <os>-<arch>` outside a grant; the
+  CPU model tells apart two grants of one size on different hosts. A host name is never
+  recorded, since baselines are committed. The engine build is `release X.Y.Z` from the
+  engine's `/version`, or `unstamped`. Outside a git checkout (`lab-remote --no-git`) the sha
+  is `unknown`.
+- **`--compare OLD NEW` refuses two reports whose host class, CPU model or engine build
+  differ**, a report with no manifest, and a `--pairs` report. The git sha may differ; it is
+  usually what is being compared, and it is the Python checkout's, not the engine's.
+- **What the keys cannot see:** every engine without a release stamp reads `unstamped`, so two
+  different local builds (or no engine answering) compare as equal. For an A/B against a local
+  engine, put both arms in one `--pairs` run, where they meet the same engine by construction.
+- **`--pairs N` times an A/B as paired, alternating runs** (`scripts/bench/paired.py`). With
+  exactly two `--paths` (the first named is arm A) and an even N, each query runs N pairs in
+  ABBA order (A B, B A, A B, ...), so each arm leads half the pairs and drift during a pair
+  moves both of its samples. A path that fails (an error row or an exception) fails the run
+  instead of entering as a fast sample. The summary is the median of each arm and the median
+  of the per-pair differences; every sample is kept in the report, and outliers past the 1.5
+  IQR fences are counted, not dropped (not computed below four samples).
+
+```
+uv run python scripts/bench/runner.py bench/queries/spike_5q.yaml --paths A,C --pairs 5
+uv run python scripts/bench/runner.py --compare scripts/bench/baselines/old.json scripts/bench/baselines/new.json
+```
+
+Run timing on a lab-run grant (`lab-remote -c lab-m -- ...`) rather than the laptop when the
+numbers are to be kept: a grant's size is fixed, a laptop's load is not.
+
 ## Operator quality proxy (RDR-196 .p2a)
 
 `scripts/bench/operator_proxy.py` + `scripts/bench/operator_proxy_metrics.py`

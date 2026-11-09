@@ -29,6 +29,7 @@ from nexus.plans.request_coverage import (
     log_fields,
     structured_extract,
 )
+from tests._changelog import changelog_text
 
 GOLDEN = Path(__file__).resolve().parents[1] / "bench" / "queries" / "golden_v1.yaml"
 
@@ -608,7 +609,7 @@ def test_nx_answer_makes_the_structured_call_unless_the_setting_is_off(monkeypat
 
 
 def test_the_in_sample_limit_is_stated_in_the_module_docstring_and_the_changelog() -> None:
-    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
+    changelog = changelog_text()
     entry = next(line for line in changelog.splitlines() if "derives a `RequestCoverage` before plan matching" in line)
     for where, text in (("module docstring", rc.__doc__ or ""), ("CHANGELOG entry", entry)):
         assert "in-sample" in text.lower() and "24 golden" in text, f"the {where} must say the patterns were written with the 24 golden requests in view"

@@ -180,7 +180,9 @@ def _flush_ctx(doc_id: str = "1.1", chash: str = "a" * 64) -> list:
         {
             "ids": [chash],
             "documents": ["doc1"],
-            "metadatas": [{"chunk_text_hash": chash, "content_hash": "c" * 64}],
+            "metadatas": [{"chunk_text_hash": chash}],
+            "positions": [{"line_start": 1}],
+            "content_hash": "c" * 64,
             "catalog_doc_id": doc_id,
         },
     )]
@@ -550,7 +552,9 @@ def test_run_index_batch_flush_shared_chash_is_not_copied_into_an_ownerless_upse
             {
                 "ids": [shared_chash],
                 "documents": ["shared"],
-                "metadatas": [{"chunk_text_hash": shared_chash, "content_hash": "c" * 64}],
+                "metadatas": [{"chunk_text_hash": shared_chash}],
+                "positions": [{"line_start": 1}],
+                "content_hash": "c" * 64,
                 "catalog_doc_id": "1.1",
             },
         ),
@@ -559,7 +563,9 @@ def test_run_index_batch_flush_shared_chash_is_not_copied_into_an_ownerless_upse
             {
                 "ids": [shared_chash],
                 "documents": ["shared"],
-                "metadatas": [{"chunk_text_hash": shared_chash, "content_hash": "d" * 64}],
+                "metadatas": [{"chunk_text_hash": shared_chash}],
+                "positions": [{"line_start": 1}],
+                "content_hash": "d" * 64,
                 "catalog_doc_id": "",
             },
         ),
@@ -673,7 +679,7 @@ def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch)
     db, col = _make_doc_indexer_db()
 
     def fake_chunk_fn(file_path, content_hash, target_model, now_iso, corpus):
-        return [("id1", "chunk text", {"embedding_model": target_model})]
+        return [("id1", "chunk text", {"embedding_model": target_model}, {})]
 
     mock_hooks = MagicMock()
 
@@ -711,7 +717,7 @@ def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
     db, col = _make_doc_indexer_db()
 
     def fake_chunk_fn(file_path, content_hash, target_model, now_iso, corpus):
-        return [("id1", "chunk text", {"embedding_model": target_model})]
+        return [("id1", "chunk text", {"embedding_model": target_model}, {})]
 
     mock_hooks = MagicMock()
 
@@ -763,7 +769,7 @@ def test_index_document_service_mode_t3_none_no_credentials_error(tmp_path, monk
     mock_hooks = MagicMock()
 
     def fake_chunk_fn(file_path, content_hash, target_model, now_iso, corpus):
-        return [("id1", "chunk text", {"embedding_model": target_model})]
+        return [("id1", "chunk text", {"embedding_model": target_model}, {})]
 
     with patch("nexus.mcp_infra.get_t3", mock_get_t3), \
          patch("nexus.doc_indexer.make_t3", mock_make_t3), \
@@ -821,8 +827,8 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
     col.get.return_value = {"ids": [], "metadatas": []}
 
     prepared = [
-        ("id1", "chunk text 1", {"embedding_model": "model-ctx"}),
-        ("id2", "chunk text 2", {"embedding_model": "model-ctx"}),
+        ("id1", "chunk text 1", {"embedding_model": "model-ctx"}, {}),
+        ("id2", "chunk text 2", {"embedding_model": "model-ctx"}, {}),
     ]
 
     mock_hooks = MagicMock()

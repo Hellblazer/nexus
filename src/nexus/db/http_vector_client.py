@@ -6516,9 +6516,10 @@ class HttpVectorClient:
         id was actually stale) ALSO logs a WARNING — ``update_chunks_missing_
         reported`` — from THIS method, unconditionally, regardless of what
         the caller does with the return value. Every call site gets the
-        anomaly signal for free: the four callers left are the two streaming
-        post-passes in ``pipeline_stages.py``, ``indexer.py``'s metadata pass and
-        ``T3Database``'s own, and none of them acts on the return value.
+        anomaly signal for free: the one production caller left is the collection rewrite verb
+        (``db/t3.py``'s ``_rewrite_collection_metadata``), which does not act on the return value
+        (the streaming post-passes and the repo indexer's metadata pass that were callers are gone,
+        RDR-236 Phase 4 Step 1).
         (``doc_indexer._upsert_skip_reembed``, the one caller that used to
         re-route a stale positive through a full upsert and log
         ``update_chunks_missing_rerouted``, was removed at RDR-223: every
@@ -6773,7 +6774,14 @@ class HttpVectorClient:
         )
 
     def find_ids_by_title(self, collection: str, title: str) -> list[str]:
-        """Return all chunk IDs whose title metadata exactly matches *title*.
+        """Return all chunk IDs whose title matches *title*: the catalog's answer, in effect.
+
+        RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): a chunk row carries no ``title`` any more (the title is
+        the catalog document's), so the ``where={"title": ...}`` read below is answered by the engine
+        from the catalog document title (``/v1/vectors/get`` route (c), nexus-u9dc5, engine 0.1.171, at or
+        below ``REQUIRED_ENGINE_VERSION``), not from the row; a row written before Step 1 that still holds
+        a title answers the same query until the Step 3 sweep. The catalog lookup after a miss
+        (:meth:`_catalog_chashes_for_title`) covers a title the engine cannot place.
 
         nexus-umvh2: was missing entirely, crashing ``nx store delete
         --title`` and the MCP ``store_get`` title-fallback with
@@ -7082,9 +7090,15 @@ class HttpVectorClient:
         that bypasses the catalog hook (the ``.nxexp`` import), rewrites the chunk row and leaves the keys
         as they were, so a note its owner made permanent could look lapsed. Before a lapsed note is
         retired its own chunk rows are read (:meth:`_note_rows`; those stamped with the note's tumbler
-        or carrying its title, :func:`~nexus.catalog.note_ttl.row_names_note`); one whose TTL is not
-        the catalog's, or whose ``indexed_at`` is later than the catalog's clock by more than five minutes, records a put the catalog missed, and the note is NOT retired:
-        it is reported in ``catalog_ttl_stale``. Rows that cannot be read fail closed: the note stays and
+        or carrying its title, :func:`~nexus.catalog.note_ttl.row_names_note`); one whose ``indexed_at``
+        is later than the catalog's ``put_at`` plus five minutes records a put the catalog missed, and the
+        note is NOT retired: it is reported in ``catalog_ttl_stale``
+        (:func:`~nexus.catalog.note_ttl.catalog_ttl_stale`). Since RDR-236 Phase 4 Step 1 (nexus-6pfgb.65)
+        that is the only sign: a row's TTL that differs from the catalog's, with an ``indexed_at`` that is
+        not later than that, or none, holds nothing, because current clients write no ``indexed_at`` or
+        ``ttl_days`` to a row and a note's TTL is the catalog's. (An entry with no readable ``put_at`` keeps
+        the earlier rule: a differing row TTL counts, and the entry's own ``indexed_at`` is the clock.) Rows
+        that cannot be read fail closed: the note stays and
         is reported in ``failures``. A row another note wrote last says nothing about this note, so a
         permanent re-put by an older client that a co-owner of the same text then overwrote is not seen.
 

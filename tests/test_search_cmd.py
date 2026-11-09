@@ -719,15 +719,39 @@ def test_parse_where_numeric_coercion_int() -> None:
     assert isinstance(result["bib_year"], int)
 
 
-def test_parse_where_mixed_operators_uses_and() -> None:
-    assert _parse_where(("bib_year>=2020", "bib_year<=2024")) == {
-        "$and": [{"bib_year": {"$gte": 2020}}, {"bib_year": {"$lte": 2024}}],
+def test_parse_where_a_range_on_one_field_is_refused_naming_both_clauses() -> None:
+    """The engine holds one condition per field and refuses $and (nexus-3ceda.11), so
+    the range has no form it accepts: say so, with a way round it."""
+    with pytest.raises(BadParameter, match="range on one field is not supported yet") as info:
+        _parse_where(("bib_year>=2020", "bib_year<=2024"))
+    text = str(info.value)
+    assert "bib_year>=2020" in text and "bib_year<=2024" in text
+    assert "one bound" in text
+
+
+@pytest.mark.parametrize("pairs", [
+    ("bib_year=2020", "bib_year!=2021"),
+    ("language!=en", "language!=de"),
+    ("bib_year>=2020", "bib_year!=2021"),
+])
+def test_parse_where_two_conditions_on_one_field_that_are_not_a_range_say_so(pairs) -> None:
+    """Refused (the engine takes one condition per field), without calling it a range."""
+    with pytest.raises(BadParameter, match="one condition per field") as info:
+        _parse_where(pairs)
+    assert "range" not in str(info.value)
+
+
+def test_parse_where_equality_plus_operator_merges_into_one_dict() -> None:
+    """Never $and: the engine refuses it, and a two-clause filter with an operator
+    used to fail every collection with an HTTP 400 (nexus-3ceda.11)."""
+    assert _parse_where(("corpus=knowledge", "bib_year>=2020")) == {
+        "corpus": "knowledge", "bib_year": {"$gte": 2020},
     }
 
 
-def test_parse_where_equality_plus_operator_uses_and() -> None:
-    assert _parse_where(("corpus=knowledge", "bib_year>=2020")) == {
-        "$and": [{"corpus": "knowledge"}, {"bib_year": {"$gte": 2020}}],
+def test_parse_where_two_operators_on_distinct_fields_merge() -> None:
+    assert _parse_where(("bib_year>=2020", "page_count<5")) == {
+        "bib_year": {"$gte": 2020}, "page_count": {"$lt": 5},
     }
 
 

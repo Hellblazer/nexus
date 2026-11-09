@@ -23,7 +23,8 @@ delivered, nexus-konsk) and every changed path is one of:
   b. under ``tests/`` or ``docs/``, except the release machinery that gates
      this lane (:data:`HARNESS_EXACT`, :data:`HARNESS_PREFIXES`): the battery,
      the lockstep wrapper and tests, the skew harness, the delivery proof;
-  c. ``CHANGELOG.md`` or ``conexus/PENDING_RELEASE.md``;
+  c. ``CHANGELOG.md``, a root changelog fragment under ``changelog/unreleased/`` (nexus-3ceda.2), or
+     ``conexus/PENDING_RELEASE.md``;
   d. a version surface whose CONTENT change is the version and nothing
      else: ``pyproject.toml`` (the ``[project]`` version line),
      ``mcpb/pyproject.toml`` (that line and the ``conexus>=`` pin),
@@ -81,7 +82,7 @@ FAIL_LINE = "PLUGIN-ONLY ELIGIBILITY FAILED"
 UNVERIFIED_LINE = "PLUGIN-ONLY ELIGIBILITY UNVERIFIED"
 
 #: Prefixes whose content never reaches the nx code under test.
-FREE_PREFIXES: tuple[str, ...] = ("tests/", "docs/")
+FREE_PREFIXES: tuple[str, ...] = ("tests/", "docs/", "changelog/unreleased/")
 #: Exact paths released alongside a plugin-only cut.
 FREE_EXACT: tuple[str, ...] = ("CHANGELOG.md", "conexus/PENDING_RELEASE.md")
 #: The machinery that gates this lane. It lives under ``tests/`` but is not free:

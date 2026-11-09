@@ -47,17 +47,15 @@ def _file_ctx(
     condition TestMixedIdentityBatch exercises)."""
     ids = [f"{prefix}{i:02d}" + "a" * 62 for i in range(n_chunks)]
     docs = [f"text-{prefix}{i}" for i in range(n_chunks)]
-    # chunk_text_hash mirrors production reality (RDR-180: the chash IS
-    # the id) — _manifest_chunk_rows reads this field, not "content_hash"
-    # (a document-level field, distinct from the per-chunk chash).
-    metas = [
-        {"content_hash": content_hash, "chunk_text_hash": _cid}
-        for _cid in ids
-    ]
+    # chunk_text_hash mirrors production reality (RDR-180: the chash IS the id). The file's content hash is
+    # the context's, not a chunk row's (RDR-236 Phase 4 Step 1), and so are the position dicts.
+    metas = [{"chunk_text_hash": _cid} for _cid in ids]
     return path, {
         "ids": ids,
         "documents": docs,
         "metadatas": metas,
+        "positions": [{"line_start": i + 1} for i in range(n_chunks)],
+        "content_hash": content_hash,
         "catalog_doc_id": doc_id,
     }
 
@@ -109,8 +107,8 @@ class TestBuildCombinedWritePayload:
         # one flush — design memo §1.1: transmitted ONCE.
         shared_id = "d" * 64
         fctx = [
-            ("a.py", {"ids": [shared_id], "documents": ["shared"], "metadatas": [{"content_hash": "h1" * 32}], "catalog_doc_id": "1.1"}),
-            ("b.py", {"ids": [shared_id], "documents": ["shared-again"], "metadatas": [{"content_hash": "h2" * 32}], "catalog_doc_id": "1.2"}),
+            ("a.py", {"ids": [shared_id], "documents": ["shared"], "metadatas": [{}], "positions": [{}], "content_hash": "h1" * 32, "catalog_doc_id": "1.1"}),
+            ("b.py", {"ids": [shared_id], "documents": ["shared-again"], "metadatas": [{}], "positions": [{}], "content_hash": "h2" * 32, "catalog_doc_id": "1.2"}),
         ]
         ids, docs, metas = _mk_flush(fctx)
         chunks, _full_docs, _complete, _oi = _build_combined_write_payload(ids, docs, metas, fctx)
@@ -133,7 +131,7 @@ class TestBuildCombinedWritePayload:
         # return values, chunks_payload/full_docs are both empty. The
         # caller (_batch_flush) writes orphan_ids nowhere (nexus-z0o2p.20).
         fctx = [
-            ("a.py", {"ids": ["e" * 64], "documents": ["x"], "metadatas": [{"content_hash": "h" * 64}], "catalog_doc_id": ""}),
+            ("a.py", {"ids": ["e" * 64], "documents": ["x"], "metadatas": [{}], "positions": [{}], "content_hash": "h" * 64, "catalog_doc_id": ""}),
         ]
         ids, docs, metas = _mk_flush(fctx)
         chunks, full_docs, complete, orphan_ids = (
@@ -172,6 +170,10 @@ class TestBuildCombinedWritePayload:
             ]
 
         monkeypatch.setattr(indexer_mod, "_aggregate_flush_metas", _bad_aggregate)
+        # The manifest position is the position dict's chunk_index (RDR-236 Phase 4 Step 0).
+        monkeypatch.setattr(
+            indexer_mod, "_aggregate_flush_positions",
+            lambda _fctx: [{"chunk_index": 1}, {"chunk_index": 2}])
         fctx = [_file_ctx("a.py", "1.1", 2, prefix="a")]
         ids, docs, metas = _mk_flush(fctx)
         with pytest.raises(_CombinedWritePositionZeroViolation, match="lacks position 0"):
@@ -267,8 +269,8 @@ class TestMixedIdentityBatch:
         # NOT an orphan.
         shared_id = "f" * 64
         fctx = [
-            ("has_id.py", {"ids": [shared_id], "documents": ["shared"], "metadatas": [{"content_hash": "h1" * 32, "chunk_text_hash": shared_id}], "catalog_doc_id": "1.1"}),
-            ("no_id.py", {"ids": [shared_id], "documents": ["shared"], "metadatas": [{"content_hash": "h2" * 32, "chunk_text_hash": shared_id}], "catalog_doc_id": ""}),
+            ("has_id.py", {"ids": [shared_id], "documents": ["shared"], "metadatas": [{"chunk_text_hash": shared_id}], "positions": [{}], "content_hash": "h1" * 32, "catalog_doc_id": "1.1"}),
+            ("no_id.py", {"ids": [shared_id], "documents": ["shared"], "metadatas": [{"chunk_text_hash": shared_id}], "positions": [{}], "content_hash": "h2" * 32, "catalog_doc_id": ""}),
         ]
         ids, docs, metas = _mk_flush(fctx)
         chunks, full_docs, complete, orphan_ids = (

@@ -78,7 +78,7 @@ def test_enrich_skips_already_enriched(mock_bib: MagicMock, mock_t3_factory: Mag
 def test_enrich_updates_metadata(
     mock_bib: MagicMock, mock_t3_factory: MagicMock, mock_retry: MagicMock
 ) -> None:
-    """Successful enrichment calls col.update with merged metadata."""
+    """Successful enrichment writes the catalog document and no chunk row (RDR-236 Phase 4 Step 1)."""
     bib_result = {
         "year": 2024,
         "venue": "SIGMOD",
@@ -101,8 +101,6 @@ def test_enrich_updates_metadata(
             {"title": "Paper A", "chunk_index": 0},
             {"title": "Paper A", "chunk_index": 1},
         ]},
-        # Third call: col.update
-        None,
     ]
     # make_t3() returns the service-backed HttpVectorClient
     # unconditionally in production since RDR-155 P4a.2.
@@ -119,13 +117,14 @@ def test_enrich_updates_metadata(
             patch("nexus.commands.enrich._catalog_enrich_hook", return_value=True) as hook:
         result = runner.invoke(enrich, ["bib", "knowledge__test", "--delay", "0", "--source", "s2"])
     assert result.exit_code == 0
-    assert "enriched 2 chunks across 1 documents" in result.output
+    assert "enriched 1 documents" in result.output
     # The catalog row written is the document's own, by tumbler: no title or path lookup.
     assert hook.call_args.kwargs["tumblers"] == ["1.1.1"]
     assert hook.call_args.kwargs["title"] == "Paper A"
-    updated = mock_retry.call_args_list[-1]
-    assert updated.kwargs["ids"] == ["c1", "c2"]
-    assert all(m["bib_year"] == 2024 for m in updated.kwargs["metadatas"])
+    assert hook.call_args.kwargs["bib_meta"]["year"] == 2024
+    # No chunk row is written: the bibliography is the document's fact (the old write echoed the whole row).
+    mock_col.update.assert_not_called()
+    assert all("update" not in str(c) for c in mock_retry.call_args_list), mock_retry.call_args_list
 
 
 @patch("nexus.db.make_t3")
@@ -232,11 +231,8 @@ def test_enrich_source_openalex_routes_to_openalex_backend(
     assert "Backend: openalex" in result.output
     assert "bib_openalex_id" in result.output
     mock_oa.assert_called_once_with("Paper Z")
-    # Confirm the chunk update wrote bib_openalex_id, not the S2 ID.
-    update_call = mock_col.update.call_args
-    metas = update_call.kwargs["metadatas"]
-    assert metas[0]["bib_openalex_id"] == "W12345"
-    assert "bib_semantic_scholar_id" not in metas[0]
+    # The backend's own id goes to the catalog document, never to a chunk row.
+    mock_col.update.assert_not_called()
 
 
 @patch("nexus.db.make_t3")
@@ -756,8 +752,6 @@ def test_enrich_looks_up_by_catalog_title_when_chunk_title_is_a_fragment(
     ]
     mock_retry.side_effect = [
         {"ids": ["c1", "c2"], "metadatas": chunk_meta},   # paginated scan
-        {"ids": ["c1", "c2"], "metadatas": chunk_meta},   # re-fetch before update
-        None,                                             # col.update
     ]
     mock_col = MagicMock()
     mock_db = MagicMock(spec=HttpVectorClient)
@@ -772,13 +766,13 @@ def test_enrich_looks_up_by_catalog_title_when_chunk_title_is_a_fragment(
     assert result.exit_code == 0, result.output
     mock_bib.assert_called_once_with(full)
     assert hook.call_args.kwargs["title"] == full
-    assert "enriched 2 chunks across 1 documents" in result.output
+    assert "enriched 1 documents" in result.output
 
 
-def test_enrich_writes_chunk_rows_only_where_one_document_holds_them() -> None:
-    """nexus-6pfgb.21: ``c1`` is held by two documents, ``c2`` and ``c3`` by one each. Each
-    document is looked up under its own catalog title and its catalog row is written by tumbler;
-    the chunk row both documents hold is not rewritten with either one's bib."""
+def test_enrich_writes_the_catalog_and_never_a_chunk_row() -> None:
+    """nexus-6pfgb.21, RDR-236 Phase 4 Step 1: ``c1`` is held by two documents, ``c2`` and ``c3`` by one
+    each. Each document is looked up under its own catalog title and its catalog row is written by
+    tumbler; no chunk row is written, the shared one or a sole-owner one."""
     chunk = {"c1": {"title": "B"}, "c2": {"title": "A"}, "c3": {"title": "B"}}
     owners = {"c1": ["1.1.1", "1.1.2"], "c2": ["1.1.1"], "c3": ["1.1.2"]}
     entries = {
@@ -821,12 +815,7 @@ def test_enrich_writes_chunk_rows_only_where_one_document_holds_them() -> None:
 
     assert result.exit_code == 0, result.output
     assert [c.args for c in backend.call_args_list] == [("A",), ("B",)]
-    written = {
-        cid: m["bib_semantic_scholar_id"]
-        for call in col.update.call_args_list
-        for cid, m in zip(call.kwargs["ids"], call.kwargs["metadatas"])
-    }
-    assert written == {"c2": "ssA", "c3": "ssB"}, "the chunk both documents hold stays as it was"
+    col.update.assert_not_called()
     assert [(c.kwargs["title"], c.kwargs["tumblers"]) for c in hook.call_args_list] == [
         ("A", ["1.1.1"]), ("B", ["1.1.2"]),
     ]

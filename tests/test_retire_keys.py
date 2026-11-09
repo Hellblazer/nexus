@@ -1504,6 +1504,15 @@ class TestNoAutomaticTrigger:
         "service/src/test/java/dev/nexus/service/db/ChunksWriterLastWrittenAtScanTest.java",
         "service/src/test/java/dev/nexus/service/EgressGuardCensus.java",
     }
+    #: Tables that list repository paths with a count beside each (the file-size, context-budget and scrub ratchets,
+    #: nexus-3ceda.1/.12/.7): one names tests/test_retire_keys.py as a path, which calls nothing. Each is checked to
+    #: hold only such entries, so no caller can hide in one.
+    PATH_LISTINGS = {
+        "scripts/file-size-exceptions.txt",
+        "scripts/folder-shape-exceptions.txt",
+        "tests/fixtures/context-budgets.txt",
+        "tests/fixtures/scrub-allowlist.txt",
+    }
     NAMES = ("chunk_keys_sweep", "chunk_keys_dry_run", "chunk_keys_add_constraints", "chunk_keys_validate_constraints",
              "/v1/admin/chunk-keys", "admin/chunk-keys", "retire-keys", "retire_keys")
     #: Not scanned: version control, environments and build output, and prose (docs, the site, any *.md) that only
@@ -1532,6 +1541,8 @@ class TestNoAutomaticTrigger:
                 except (OSError, UnicodeDecodeError):
                     continue
                 rel = path.relative_to(root).as_posix()
+                if rel in self.PATH_LISTINGS:
+                    continue
                 top = rel.split("/", 1)[0]
                 scanned[top] = scanned.get(top, 0) + 1
                 hits = {n for n in self.NAMES if n in text}
@@ -1549,6 +1560,23 @@ class TestNoAutomaticTrigger:
             f"a file other than the verb, the engine and their tests names the routes: {sorted(set(seen) - self.NAMING_ALLOWED)}"
         assert {"src/nexus/db/http_vector_client.py", "src/nexus/commands/t3_cmds/retire_keys.py"} <= set(seen), \
             "the scan cannot see the files that define the routes' client: it is not looking where it says"
+
+    def test_the_path_listings_hold_only_path_entries(self) -> None:
+        import re  # noqa: PLC0415
+
+        entry = re.compile(r"^(?:(?:dir|family|user) )?[A-Za-z0-9._/@+-]+(?: \d+)?$")
+        root = Path(__file__).resolve().parent.parent
+        checked = 0
+        for rel in sorted(self.PATH_LISTINGS):
+            path = root / rel
+            if not path.is_file():
+                continue
+            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    assert entry.match(line), f"{rel}:{n} is not a path entry, so the exemption does not hold: {line!r}"
+                    checked += 1
+        assert checked > 0, "no path listing was read"
 
     def test_the_engines_main_sources_name_the_classes_only_where_they_are_built_and_bound(self) -> None:
         root = Path(__file__).resolve().parent.parent / "service" / "src" / "main" / "java"

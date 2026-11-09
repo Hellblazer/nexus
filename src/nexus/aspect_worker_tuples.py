@@ -42,6 +42,7 @@ from typing import Any
 import httpx
 import structlog
 
+from nexus import clock as nxclock
 from nexus.collection_errors import SupersededCollectionWriteError
 from nexus.db.t2.records import QueueRow
 
@@ -182,7 +183,7 @@ class ClaimRenewer:
             thread.join(timeout=5.0)
 
     def _run(self) -> None:
-        while not self._stop.wait(self._interval_s):
+        while not nxclock.wait(self._clock, self._stop, self._interval_s):
             if self._clock() - self._t0 >= self._deadline_s:
                 self.stopped_at_deadline = True
                 _log.warning(

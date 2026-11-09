@@ -321,9 +321,9 @@ def _split_note_t3() -> _FakeT3:
 
 def test_a_note_written_as_several_pieces_exports_its_whole_text_in_position_order(fake_catalog, tmp_path):
     """nexus-6pfgb.36: a note put_note split into pieces exports as one record holding every piece,
-    joined in manifest position order whatever order the manifest arrives in, with the keyless note's
-    keys taken from its own piece's row and never from a piece another note restamped. Every piece of
-    the collection is read in one request."""
+    joined in manifest position order whatever order the manifest arrives in. The keyless note's keys
+    come from no piece's row (nexus-6pfgb.65), its own piece's included. Every piece of the collection
+    is read in one request."""
     url, state = fake_catalog
     state.manifests["1.9.1"] = [
         {"chash": CH_P2, "position": 2}, {"chash": CH_A, "position": 0}, {"chash": CH_P1, "position": 1},
@@ -334,7 +334,8 @@ def test_a_note_written_as_several_pieces_exports_its_whole_text_in_position_ord
     _header, records = read_bundle(tmp_path / "b.jsonl")
     doc = {r["title"]: r for r in records if r["record"] == "knowledge_doc"}["title-a"]
     assert doc["content"] == "first piece, second piece, third piece"
-    assert (doc["tags"], doc["category"], doc["ttl_days"]) == (["own-tags"], "own-cat", 9)
+    assert (doc["tags"], doc["category"], doc["ttl_days"]) == ([], "", None)
+    assert (KNOW, "title-a") in summary.note_keys_unrecovered_notes
     assert summary.docs_exported == 3
     assert summary.notes_incomplete == 0
     assert len(t3.chunk_rows_requests) == 1, t3.chunk_rows_requests
@@ -361,13 +362,15 @@ def test_a_note_missing_a_piece_is_counted_and_never_exported_truncated(fake_cat
     assert summary.ghosts_skipped == 1  # ghost-note only
 
 
-def test_a_split_note_whose_first_piece_another_note_restamped_takes_its_keys_from_its_own_piece(
+def test_a_split_keyed_note_takes_its_keys_from_the_catalog_whatever_its_pieces_rows_hold(
     fake_catalog, tmp_path,
 ):
     """nexus-6pfgb.36: a note sharing its opening piece with another note can find that piece's row
-    restamped by the other; the keys come from the first piece that is the note's own write."""
+    restamped by the other, and the pieces' rows differ among themselves; a note whose entry holds its
+    keys exports those, and no piece's row reaches the record (nexus-6pfgb.65)."""
     url, state = fake_catalog
     state.manifests["1.9.1"] = [{"chash": CH_A, "position": 0}, {"chash": CH_P1, "position": 1}]
+    state.docs[0]["metadata"] = {"tags": "cat-tags", "category": "cat-cat", "ttl_days": 4}
     t3 = _split_note_t3()
     t3.rows[CH_A] = {**t3.rows[CH_A], "tags": "other", "catalog_doc_id": "1.7.7", "title": "someone-else"}
     t3.rows[CH_P1] = {**t3.rows[CH_P1], "tags": "own-tags", "category": "own-cat", "ttl_days": 9,
@@ -377,7 +380,7 @@ def test_a_split_note_whose_first_piece_another_note_restamped_takes_its_keys_fr
     _header, records = read_bundle(tmp_path / "b.jsonl")
     doc = {r["title"]: r for r in records if r["record"] == "knowledge_doc"}["title-a"]
     assert doc["content"] == "first piece, second piece, "
-    assert (doc["tags"], doc["category"], doc["ttl_days"]) == (["own-tags"], "own-cat", 9)
+    assert (doc["tags"], doc["category"], doc["ttl_days"]) == (["cat-tags"], "cat-cat", 4)
     assert (KNOW, "title-a") not in summary.note_keys_unrecovered_notes
 
 
@@ -932,6 +935,56 @@ def _export_docs(url: str, t3: Any, tmp_path) -> tuple["ExportSummary", dict[str
     return summary, {r["title"]: r for r in records if r["record"] == "knowledge_doc"}
 
 
+@pytest.mark.parametrize(
+    "row_shape",
+    [
+        {"catalog_doc_id": "1.9.1", "title": "note-a"},
+        {},
+        {"catalog_doc_id": "1.9.1"},
+        {"catalog_doc_id": "1.4.4", "title": "note-a"},
+        {"catalog_doc_id": "1.9.1", "title": "note-a", "ttl_days": 0},
+        {"catalog_doc_id": "1.9.1", "title": "note-b"},
+        {"ttl_days": None},
+    ],
+    ids=["rows-own-stamp-and-title", "row-unstamped", "stamp-without-title", "other-boxs-stamp-own-title",
+         "own-stamp-ttl-zero", "renamed-note-own-stamp-old-title", "unstamped-tags-and-category-only"],
+)
+def test_a_keyless_note_exports_only_what_the_catalog_holds(fake_catalog, tmp_path, row_shape):
+    """nexus-6pfgb.65 (RDR-236 Phase 4 Step 1): the export's row path is gone. A note whose catalog
+    entry holds no note key exports no tags, category or ttl_days, whatever its chunk row says and
+    whoever wrote it (its own stamp and title, no stamp, a stale stamp), sole owner or not; the row's
+    values it does not carry are counted, and no owner lookup is made. A permanent note never comes back
+    expiring. The keyed twin is ``test_a_keyed_note_exports_its_catalog_keys_whatever_its_row_holds``."""
+    url, state = fake_catalog
+    t3 = _FakeT3()
+    _shared_pair(state, t3, a_meta={}, b_meta={})
+    state.manifests = {"1.9.1": [{"chash": CH_S, "position": 0}]}      # A is the chunk's only owner
+    t3.rows[CH_S].update(row_shape)
+    summary, docs = _export_docs(url, t3, tmp_path)
+
+    a = docs["note-a"]
+    assert a["content"] == "shared text"
+    assert (a["tags"], a["category"], a["ttl_days"]) == ([], "", None)
+    assert summary.note_keys_unrecovered_notes == [(KNOW, "note-a")]
+    assert state.docs_for_chashes_requests == []
+
+
+def test_a_keyed_note_exports_its_catalog_keys_whatever_its_row_holds(fake_catalog, tmp_path):
+    """The twin of the keyless pin: with the catalog holding the keys, the row (here another note's,
+    with other values) never reaches the record, and nothing is counted."""
+    url, state = fake_catalog
+    t3 = _FakeT3()
+    _shared_pair(state, t3, a_meta={"tags": "alpha,one", "category": "design", "ttl_days": 7}, b_meta={})
+    state.manifests = {"1.9.1": [{"chash": CH_S, "position": 0}]}
+    t3.rows[CH_S].update({"catalog_doc_id": "1.9.2", "title": "note-b"})
+    summary, docs = _export_docs(url, t3, tmp_path)
+
+    a = docs["note-a"]
+    assert (a["tags"], a["category"], a["ttl_days"]) == (["alpha", "one"], "design", 7)
+    assert summary.note_keys_unrecovered == 0
+    assert state.docs_for_chashes_requests == []
+
+
 def test_two_notes_sharing_a_chunk_each_export_their_own_tags_category_and_ttl(fake_catalog, tmp_path):
     url, state = fake_catalog
     t3 = _FakeT3()
@@ -1033,39 +1086,6 @@ def test_a_legacy_note_on_a_shared_chunk_is_not_given_the_last_writers_values(fa
     assert summary.note_keys_unrecovered == 1
 
 
-def test_a_legacy_note_alone_on_an_unstamped_row_takes_its_tags_and_category_but_not_its_ttl(
-    fake_catalog, tmp_path,
-):
-    """A is the chunk's only live owner and the row names no writer (Sam, nexus-6pfgb.35 option B):
-    A takes the row's tags and category, since a wrong tag is cosmetic, but not its ttl_days, since a
-    TTL a departed co-owner left on the row would make a permanent note expire after import. Losing
-    the TTL counts the note."""
-    url, state = fake_catalog
-    t3 = _FakeT3()
-    _shared_pair(state, t3, a_meta={}, b_meta={})
-    state.manifests = {"1.9.1": [{"chash": CH_S, "position": 0}]}      # B's manifest is gone
-    summary, docs = _export_docs(url, t3, tmp_path)
-
-    a = docs["note-a"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == (["beta"], "finding", None)
-    assert "note-b" not in docs, "B has no manifest left: a ghost, not an owner"
-    assert summary.note_keys_unrecovered_notes == [(KNOW, "note-a")]
-
-
-def test_a_legacy_note_alone_on_an_unstamped_row_with_no_ttl_is_fully_recovered(fake_catalog, tmp_path):
-    """The census shape (nexus-6pfgb.35: all 8 such notes on the live tenant): sole owner, no writer
-    stamp, tags and category only. Nothing is dropped, so nothing is counted."""
-    url, state = fake_catalog
-    t3 = _FakeT3()
-    _shared_pair(state, t3, a_meta={}, b_meta={})
-    state.manifests = {"1.9.1": [{"chash": CH_S, "position": 0}]}
-    t3.rows[CH_S]["ttl_days"] = None
-    summary, docs = _export_docs(url, t3, tmp_path)
-
-    assert (docs["note-a"]["tags"], docs["note-a"]["category"]) == (["beta"], "finding")
-    assert summary.note_keys_unrecovered == 0
-
-
 def test_a_note_with_no_keys_of_its_own_never_takes_a_departed_co_owners_keys(fake_catalog, tmp_path):
     """A written before nexus-6pfgb.5, or with every key unset before nexus-6pfgb.15 added ``put_at``
     (so its entry holds no note key), is now the chunk's only owner,
@@ -1083,9 +1103,9 @@ def test_a_note_with_no_keys_of_its_own_never_takes_a_departed_co_owners_keys(fa
     assert summary.note_keys_unrecovered == 1
 
 
-def test_a_note_with_no_keys_that_is_the_rows_last_writer_takes_the_rows_values(fake_catalog, tmp_path):
-    """The row's stamp and title are A's: its values are A's, shared chunk or not. B, which has none of
-    its own either, is not the writer and gets none."""
+def test_two_keyless_notes_sharing_a_chunk_the_last_one_wrote_get_none_of_its_values(fake_catalog, tmp_path):
+    """The row's stamp and title are A's, and B has none of its own either: neither exports the row's
+    values (nexus-6pfgb.65). Both are counted, since the row held values the records do not carry."""
     url, state = fake_catalog
     t3 = _FakeT3()
     _shared_pair(state, t3, a_meta={}, b_meta={})
@@ -1093,36 +1113,9 @@ def test_a_note_with_no_keys_that_is_the_rows_last_writer_takes_the_rows_values(
     summary, docs = _export_docs(url, t3, tmp_path)
 
     a, b = docs["note-a"], docs["note-b"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == (["beta"], "finding", 30)
+    assert (a["tags"], a["category"], a["ttl_days"]) == ([], "", None)
     assert (b["tags"], b["category"], b["ttl_days"]) == ([], "", None)
-    assert summary.note_keys_unrecovered == 1
-
-
-@pytest.mark.parametrize(
-    "row_writer",
-    [{"catalog_doc_id": "1.9.1"}, {"catalog_doc_id": "1.9.1", "title": "note-b"},
-     {"catalog_doc_id": "1.4.4", "title": "note-a"}],
-    ids=["stamp-without-title", "renamed-note-own-stamp-old-title", "nxexp-import-other-boxs-stamp-own-title"],
-)
-def test_a_row_is_a_keyless_notes_own_only_when_both_its_stamp_and_its_title_are(
-    fake_catalog, tmp_path, row_writer,
-):
-    """An ``.nxexp`` import keeps the SOURCE box's ``catalog_doc_id`` on the rows it writes while the
-    destination mints its own tumblers, so a stale stamp can equal A's tumbler: the export reads a row
-    as A's own write, and takes its ``ttl_days``, only through ``note_ttl.row_written_by`` (stamp AND
-    title), never on one of them alone. A sole owner still takes such a row's tags and category, since
-    neither its stamp nor its title is another note's for sure (Sam, nexus-6pfgb.35 option B, middle
-    reading); the dropped TTL counts the note."""
-    url, state = fake_catalog
-    t3 = _FakeT3()
-    _shared_pair(state, t3, a_meta={}, b_meta={})
-    state.manifests = {"1.9.1": [{"chash": CH_S, "position": 0}]}
-    t3.rows[CH_S].update(row_writer)
-    summary, docs = _export_docs(url, t3, tmp_path)
-
-    a = docs["note-a"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == (["beta"], "finding", None)
-    assert summary.note_keys_unrecovered == 1
+    assert summary.note_keys_unrecovered == 2
 
 
 @pytest.mark.parametrize(
@@ -1140,104 +1133,29 @@ def test_a_row_is_a_keyless_notes_own_only_when_both_its_stamp_and_its_title_are
          "other-stamp-untitled", "other-stamp-other-title", "not-a-row"],
 )
 def test_row_may_give_tags_refuses_only_a_row_another_note_wrote(row, allowed):
-    """nexus-6pfgb.35 option B, the middle reading: the one importable rule (note_ttl) the export uses
-    and the nexus-6pfgb.10 backfill is specified to reuse (RDR-236)."""
+    """nexus-6pfgb.35 option B, the middle reading: the one importable rule (note_ttl) the nexus-6pfgb.10
+    backfill and the note display reuse (RDR-236). The recovery export no longer calls it
+    (nexus-6pfgb.65), so the rule is pinned here on its own."""
     assert row_may_give_tags("1.9.1", row, owner_title="note-a") is allowed
 
 
-def test_a_legacy_row_with_ttl_zero_exports_as_permanent(fake_catalog, tmp_path):
-    url, state = fake_catalog
-    t3 = _FakeT3()
-    _shared_pair(state, t3, a_meta={}, b_meta={})
-    state.manifests = {"1.9.1": [{"chash": CH_S, "position": 0}]}
-    t3.rows[CH_S].update({"ttl_days": 0, "catalog_doc_id": "1.9.1", "title": "note-a"})
-    _summary, docs = _export_docs(url, t3, tmp_path)
-    assert docs["note-a"]["tags"] == ["beta"], "the row is A's own write"
-    assert docs["note-a"]["ttl_days"] is None
-
-
-def test_the_export_asks_who_owns_a_chunk_only_for_a_keyless_note_on_an_unstamped_row(fake_catalog, tmp_path):
-    """Sole ownership decides tags and category only where nothing better exists: a keyed note, or a
-    keyless note whose row is stamped, makes no owner lookup at all."""
-    url, state = fake_catalog
-    t3 = _FakeT3()
-    _shared_pair(state, t3, a_meta={"tags": "alpha"}, b_meta={"tags": "beta"})
-    _export_docs(url, t3, tmp_path)
-    assert state.docs_for_chashes_requests == []
-
-    t3.rows[CH_S].update({"catalog_doc_id": "1.9.2", "title": "note-b"})
-    state.docs[0]["metadata"] = {}
-    _export_docs(url, t3, tmp_path)
-    assert state.docs_for_chashes_requests == []
-
-    del t3.rows[CH_S]["catalog_doc_id"]
-    _export_docs(url, t3, tmp_path)
-    assert state.docs_for_chashes_requests == [[CH_S]]
-
-
-def test_a_split_keyless_note_with_an_own_written_piece_makes_no_owner_lookup(fake_catalog, tmp_path):
-    """A piece that is the note's own write answers for all three keys, so no other piece's ownership
-    is asked about, even an unstamped one."""
-    url, state = fake_catalog
-    t3 = _FakeT3()
-    _shared_pair(state, t3, a_meta={}, b_meta={})
-    CH_T = "f" * 64
-    state.manifests["1.9.1"] = [{"chash": CH_S, "position": 0}, {"chash": CH_T, "position": 1}]
-    t3.rows[CH_S].update({"catalog_doc_id": "1.9.1", "title": "note-a"})
-    t3.rows[CH_T] = {"id": CH_T, "content": " and more", "tags": "other", "category": "", "ttl_days": None}
-    _summary, docs = _export_docs(url, t3, tmp_path)
-
-    assert docs["note-a"]["tags"] == ["beta"]
-    assert state.docs_for_chashes_requests == []
-
-
-def test_a_failed_owner_lookup_withholds_tags_and_never_the_backup(fake_catalog, tmp_path, monkeypatch):
-    """The lookup only adds cosmetic keys: when it fails the export goes on, and the notes whose tags it
-    withheld are counted and named."""
-    url, state = fake_catalog
-    t3 = _FakeT3()
-    _shared_pair(state, t3, a_meta={}, b_meta={})
-    state.manifests = {"1.9.1": [{"chash": CH_S, "position": 0}]}
-    t3.rows[CH_S]["ttl_days"] = None
-    monkeypatch.setattr(HttpCatalogClient, "docs_for_chashes",
-                        lambda self, chashes: (_ for _ in ()).throw(RuntimeError("catalog 503")))
-    summary, docs = _export_docs(url, t3, tmp_path)
-
-    assert (docs["note-a"]["tags"], docs["note-a"]["category"]) == ([], "")
-    assert summary.note_keys_unrecovered_notes == [(KNOW, "note-a")]
-
-
-def test_an_owner_in_another_collection_does_not_count_against_sole_ownership(fake_catalog, tmp_path):
-    """The owner lookup is catalog-wide; the same text in another collection is a different T3 row, so
-    an owner the catalog walk places there is not a co-owner of this one."""
-    url, state = fake_catalog
-    t3 = _FakeT3()
-    _shared_pair(state, t3, a_meta={}, b_meta={})
-    state.docs[1]["physical_collection"] = CODE  # note-b holds the same chash, in another collection
-    t3.rows[CH_S]["ttl_days"] = None
-    summary, docs = _export_docs(url, t3, tmp_path)
-
-    assert (docs["note-a"]["tags"], docs["note-a"]["category"]) == (["beta"], "finding")
-    assert (KNOW, "note-a") not in summary.note_keys_unrecovered_notes
-    assert state.docs_for_chashes_requests == [[CH_S]]
-
-
-def test_a_split_legacy_note_takes_tags_from_its_first_unstamped_sole_owned_piece(fake_catalog, tmp_path):
-    """Pieces are judged in position order: a first piece another note still shares gives nothing, the
-    next piece that A alone holds and no writer stamped gives tags and category."""
+def test_a_split_keyless_note_exports_none_of_its_pieces_row_values(fake_catalog, tmp_path):
+    """Whichever piece carries a value (here the second, which no other note shares and no writer
+    stamped, and the first, the note's own write), the record carries none; the note is counted once."""
     url, state = fake_catalog
     t3 = _FakeT3()
     _shared_pair(state, t3, a_meta={}, b_meta={"tags": "beta"})
     CH_T = "f" * 64
     state.manifests["1.9.1"] = [{"chash": CH_S, "position": 0}, {"chash": CH_T, "position": 1}]
-    t3.rows[CH_S].update({"ttl_days": None})
-    t3.rows[CH_T] = {"id": CH_T, "content": " and more", "tags": "own", "category": "mine", "ttl_days": None}
+    t3.rows[CH_S].update({"ttl_days": None, "catalog_doc_id": "1.9.1", "title": "note-a"})
+    t3.rows[CH_T] = {"id": CH_T, "content": " and more", "tags": "own", "category": "mine", "ttl_days": 5}
     summary, docs = _export_docs(url, t3, tmp_path)
 
     a = docs["note-a"]
     assert a["content"] == "shared text and more"
-    assert (a["tags"], a["category"], a["ttl_days"]) == (["own"], "mine", None)
-    assert (KNOW, "note-a") not in summary.note_keys_unrecovered_notes
+    assert (a["tags"], a["category"], a["ttl_days"]) == ([], "", None)
+    assert summary.note_keys_unrecovered_notes == [(KNOW, "note-a")]
+    assert state.docs_for_chashes_requests == []
 
 
 def test_each_notes_own_values_round_trip_through_the_import(fake_catalog, tmp_path, note_writer):
@@ -1452,14 +1370,14 @@ def test_an_export_splits_a_legacy_string_in_catalog_meta_into_the_array(fake_ca
     assert docs["note-b"]["tags"] == []
 
 
-def test_a_keyless_note_takes_its_rows_comma_string_as_an_array(fake_catalog, tmp_path):
-    """The fallback from a chunk row (legacy notes carry no tags in catalog meta): the row keeps a
-    comma string, the record carries the array."""
+def test_a_notes_catalog_comma_string_exports_as_an_array(fake_catalog, tmp_path):
+    """A catalog entry whose ``tags`` is still the legacy comma string exports the array; the row's
+    tags (here a different string) are not read."""
     url, state = fake_catalog
     t3 = _FakeT3()
-    _shared_pair(state, t3, a_meta={}, b_meta={})
+    _shared_pair(state, t3, a_meta={"tags": "beta, gamma"}, b_meta={})
     state.manifests = {"1.9.1": [{"chash": CH_S, "position": 0}]}
-    t3.rows[CH_S].update({"tags": "beta, gamma", "catalog_doc_id": "1.9.1", "title": "note-a"})
+    t3.rows[CH_S].update({"tags": "row-tag", "catalog_doc_id": "1.9.1", "title": "note-a"})
     _summary, docs = _export_docs(url, t3, tmp_path)
     assert docs["note-a"]["tags"] == ["beta", "gamma"]
 

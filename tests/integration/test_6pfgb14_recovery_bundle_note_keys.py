@@ -15,14 +15,29 @@ import pytest
 from nexus.aspect_readers import uri_for
 from nexus.catalog import store_hook
 from nexus.catalog.factory import make_catalog_reader
-from nexus.catalog.note_write import STORED, put_note
+from nexus.catalog.note_write import STORED, put_note as _put_note
 from nexus.catalog.store_hook import NOTE_META_KEYS
 from nexus.catalog.recovery_bundle import export_bundle, import_bundle, read_bundle
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._legacy_note_rows import stamp_legacy_note_rows
 from nexus.mcp.core import store_put
 
 pytestmark = pytest.mark.integration
+
+
+def put_note(**kw):
+    """``put_note`` as a client before RDR-236 Phase 4 Step 1 wrote it: it also stamped the note's own facts
+    (writer tumbler, title, tags, category, TTL, agent) on its chunk rows. This file covers the recovery
+    bundle's rules for those legacy rows, so the rows are given them; a current client writes the CHUNK keys
+    only."""
+    result = _put_note(**kw)
+    if result.status == STORED:
+        stamp_legacy_note_rows(
+            HttpVectorClient(), kw["collection"], result.chunk_ids, catalog_doc_id=result.catalog_doc_id,
+            title=kw["title"], tags=kw.get("tags", ""), category=kw.get("category", ""),
+            ttl_days=kw.get("ttl_days"), source_agent=kw.get("source_agent", ""))
+    return result
 
 
 def test_two_notes_sharing_a_chunk_export_and_import_their_own_keys(t2_service_env, tmp_path):
@@ -111,8 +126,8 @@ def test_a_note_stored_with_no_keys_never_exports_a_departed_co_owners_keys(
                  ttl_days=7, source_agent="agent-b")
     assert b.status == STORED, b.reason
     row = client.get_by_id(collection, a.chunk_ids[0], sensitivity="include")
-    # The engine returns the last writer's catalog_doc_id and title in the row's metadata: the pair
-    # note_ttl.row_written_by reads, the signal the export gates on (nexus-6pfgb.34).
+    # The engine returns the last writer's catalog_doc_id and title in the row's metadata, and B's
+    # values: the row says B wrote it, and the export reads none of it for A (nexus-6pfgb.65).
     assert row["catalog_doc_id"] == b.catalog_doc_id and row["title"] == "keyed-B" and row["ttl_days"] == 7
     moved = put_note(content=body + " (moved)", collection=collection, title="keyed-B", tags="beta",
                      category="finding", ttl_days=7, source_agent="agent-b")
@@ -138,11 +153,12 @@ def _put_keyless(**kw):
         return put_note(**kw)
 
 
-def test_a_keyless_note_that_wrote_its_own_row_exports_the_rows_values(t2_service_env, tmp_path):
+def test_a_keyless_note_that_wrote_its_own_row_exports_none_of_the_rows_values(t2_service_env, tmp_path):
     """B (keys) then A, a pre-catalog-keys put with tags, category and a TTL of its own, store the same
     text. A's entry holds no note key; the row is A's write (A's stamp, A's title) and holds A's values,
-    so the export carries them through ``row_written_by``'s accept branch (nexus-6pfgb.34). B is not
-    the row's writer and keeps its own catalog keys."""
+    and the export still carries none of them: it has no row path (RDR-236 Phase 4 Step 1,
+    nexus-6pfgb.65), and counts A as a note whose row held values the record lacks. B is not the row's
+    writer and keeps its own catalog keys."""
     client = HttpVectorClient(tenant=t2_service_env)
     collection = t3_collection_name("6pfgb14-lastwriter", t3=client)
     body = "6pfgb14 body written last by a note whose keys are only on the row"
@@ -160,10 +176,10 @@ def test_a_keyless_note_that_wrote_its_own_row_exports_the_rows_values(t2_servic
     summary, docs = _exported(client, tmp_path, collection)
 
     assert (docs["legacy-A"]["tags"], docs["legacy-A"]["category"], docs["legacy-A"]["ttl_days"]) == (
-        ["alpha"], "design", 30)
+        [], "", None)
     assert (docs["keyed-B"]["tags"], docs["keyed-B"]["category"], docs["keyed-B"]["ttl_days"]) == (
         ["beta"], "finding", 7)
-    assert summary.note_keys_unrecovered == 0
+    assert summary.note_keys_unrecovered_notes == [(collection, "legacy-A")]
 
 
 def test_a_rejected_keyless_note_re_put_with_its_values_exports_them(t2_service_env, tmp_path):

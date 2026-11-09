@@ -65,6 +65,7 @@
 #     --skip-lock <reason>        NX_PUSH_SKIP_LOCK
 #     --batch-minutes <n>         NX_PUSH_BATCH_MINUTES
 #     --tenant-check <0|1>        NX_PUSH_TENANT_CHECK (0 skips the tenant hint)
+#     --skip-scrub <reason>       NX_PUSH_SKIP_SCRUB (push past the scrub gate, on the record)
 #   A bad flag exits 64 with PUSH_REFUSED_USAGE before anything is fetched.
 #
 #   A vouched MERGE commit also vouches for everything it merges in (the
@@ -102,6 +103,11 @@
 #                    previous push was inside the window, a PUSH_BATCH_HINT line
 #                    on stderr asks the session to batch (Sam, 2026-10-21). A
 #                    hint, never a refusal; stdout keeps its PUSH_OK contract.
+#
+# After PUSH_OK, two PUSH_WAIT lines on stderr name the ways to be woken when the
+# push's CI completes (nexus-1d6pz.11.4): the tuple_subscribe call for a session
+# with the channel, and `nx ci wait <tip>` to run as a background command for a
+# session without it.
 #
 # Push lock (nexus-agctp). Rule 7 (check `gh run list` before pushing) is a
 # poll: the gap between looking and pushing is where two sessions collide,
@@ -203,6 +209,11 @@
 #                               only a dev-checkout/venv `nx` is on PATH;
 #                               the installed generation was not found, and
 #                               NX_PUSH_SKIP_LOCK is unset
+#  12  PUSH_REFUSED_SCRUB       the tip's tree or an outbound commit message
+#                               carries a personal home path, tailnet hostname,
+#                               chat link or session trailer, or the allowlist
+#                               widens the remote's (scripts/scrub_check.py
+#                               check --rev <tip> --base <remote branch>)
 #  64  PUSH_REFUSED_USAGE       a flag is unknown, lacks its value, or flags that
 #                               cannot combine were combined; nothing was fetched
 #  11  PUSH_LOCK_RELEASE_FAILED a claim was taken (nx tuple in succeeded)
@@ -315,7 +326,7 @@ trap _release_push_lock EXIT
 # assignment. Parsed before the first remote call: a typo costs nothing.
 _usage_refuse() {
   echo "PUSH_REFUSED_USAGE $*"
-  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range[=<digest>] --skip-scope-audit --skip-lock --batch-minutes --tenant-check (see the header of $0)."
+  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range[=<digest>] --skip-scope-audit --skip-lock --batch-minutes --tenant-check --skip-scrub (see the header of $0)."
   exit 64
 }
 _vouch_args=()
@@ -352,7 +363,7 @@ while [[ $# -gt 0 ]]; do
       continue
       ;;
     --source | --remote | --branch | --allowed-paths | --allowed-paths-from \
-      | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check) ;;
+      | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check | --skip-scrub) ;;
     *) _usage_refuse "unknown flag $_name" ;;
     esac
     if (( _has_val )); then
@@ -370,6 +381,7 @@ while [[ $# -gt 0 ]]; do
     --branch) NX_PUSH_BRANCH="$_val"; _echo_flags+=("$_name" "$_val") ;;
     --skip-lock) NX_PUSH_SKIP_LOCK="$_val"; _echo_flags+=("$_name" "$_val") ;;
     --skip-scope-audit) NX_PUSH_SKIP_SCOPE_AUDIT="$_val" ;;
+    --skip-scrub) NX_PUSH_SKIP_SCRUB="$_val"; _echo_flags+=("$_name" "$_val") ;;
     --batch-minutes) NX_PUSH_BATCH_MINUTES="$_val" ;;
     --tenant-check)
       [[ "$_val" == "0" || "$_val" == "1" ]] || _usage_refuse "--tenant-check takes 0 or 1, got '$_val'"
@@ -676,6 +688,35 @@ elif { (( _range_allowlist )) || read -r -a _allowed_paths <<< "$(printf '%s' "$
   exit 7
 fi
 
+# ── Scrub gate (nexus-3ceda.7) ───────────────────────────────────────────
+# Sam ruled the repo stays scrubbed (ask nexus-scrubbed, 2026-11-09): no
+# personal home path, tailnet hostname, chat link or session trailer in a
+# committed file beyond what tests/fixtures/scrub-allowlist.txt grandfathers.
+# The check reads the TIP's files and allowlist (--rev), not the working
+# tree, so a dirty checkout neither hides nor invents a hit; with --base it
+# also scans the outbound commit messages and refuses an allowlist that
+# widens the remote branch's. CI's lint bucket and docs lane run the file
+# check; this catches it before the push, and sub-second, so it runs before
+# the tenant hint. A checkout without the script (an older branch) or a host
+# without python3 skips it with a PUSH_SCRUB_SKIPPED line on stderr.
+# --skip-scrub '<reason>' (env NX_PUSH_SKIP_SCRUB) pushes past it, on the record.
+_scrub_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "${NX_PUSH_SKIP_SCRUB:-}" ]]; then
+  echo "PUSH_SCRUB_SKIPPED reason=${NX_PUSH_SKIP_SCRUB}" >&2
+elif [[ -z "$_scrub_root" || ! -f "$_scrub_root/scripts/scrub_check.py" ]]; then
+  echo "PUSH_SCRUB_SKIPPED reason=no scripts/scrub_check.py in this checkout" >&2
+elif ! command -v python3 >/dev/null 2>&1; then
+  echo "PUSH_SCRUB_SKIPPED reason=no python3 on PATH" >&2
+elif ! _scrub_out="$(python3 "$_scrub_root/scripts/scrub_check.py" --root "$_scrub_root" check \
+      --rev "$tip" --base "refs/remotes/$remote/$branch" 2>&1)"; then
+  printf '%s\n' "$_scrub_out"
+  echo "PUSH_REFUSED_SCRUB the tip $tip's tree, its outbound commit messages or its allowlist carry a personal path,"
+  echo "hostname, chat link or session trailer (see above). Use a placeholder (/Users/you/..., ~, <host>); a"
+  echo "legitimate one: python3 scripts/scrub_check.py update-exceptions --allow-raise, then push with"
+  echo "--skip-scrub '<reason>'."
+  exit 12
+fi
+
 # ── Tenant ceiling hint (nexus-g37hn) ───────────────────────────────────
 # Develop went red twice on 2026-10-21/22 on pytest-gate's storage-touch fan-in
 # because a pushed test minted a tenant over tests/storage_touch_ceiling.toml
@@ -798,6 +839,13 @@ fi
 
 git push -q "$remote" "$tip:refs/heads/$branch"
 echo "PUSH_OK n=${#range[@]} tip=$tip"
+
+# nexus-1d6pz.11.4: the two ways to be woken when this push's CI completes, on
+# stderr (stdout keeps its PUSH_OK contract). A session with the channel subscribes
+# to the --done topic; one without runs nx ci wait as a background command, whose
+# exit is the wake and whose one line is the result.
+echo "PUSH_WAIT channel: tuple_subscribe(\"board/ci/nexus-${branch}--done\")" >&2
+echo "PUSH_WAIT no channel: run as a background command: nx ci wait $tip --branch $branch" >&2
 
 # nexus-cvtxu: the batching hint (see NX_PUSH_BATCH_MINUTES above). The stamp lives
 # in this worktree's own git dir, and a session works in one worktree, so the gap

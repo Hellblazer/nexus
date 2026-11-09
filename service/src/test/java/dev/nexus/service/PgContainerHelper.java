@@ -1587,6 +1587,29 @@ public final class PgContainerHelper {
                 "table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "mode", mode.keyword));
     }
 
+    /** A plain file name: the only {@code file_path} the deadlock trigger's changelog accepts (it is inlined in SQL). */
+    private static final java.util.regex.Pattern PLAIN_FILE_NAME = java.util.regex.Pattern.compile("[A-Za-z0-9_.-]{1,64}");
+
+    /**
+     * Installs a BEFORE UPDATE trigger on {@code nexus.catalog_documents} that raises SQLSTATE 40P01 (deadlock detected)
+     * when the row with {@code filePath} is tombstoned (nexus-u5m5g.3), through
+     * {@code db.changelog-test-deadlock-trigger-install.xml}. {@code filePath} must be a plain file name. Pair with
+     * {@link #removeDeadlockOnTrash} in a {@code finally}.
+     */
+    public static void installDeadlockOnTrash(Connection su, String filePath) throws Exception {
+        if (filePath == null || !PLAIN_FILE_NAME.matcher(filePath).matches()) {
+            throw new IllegalArgumentException("file path must be a plain file name: " + filePath);
+        }
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-deadlock-trigger-install.xml",
+            "databasechangelog_test_deadlock_trigger", Map.of("file_path", filePath));
+    }
+
+    /** Removes what {@link #installDeadlockOnTrash} installed, through {@code db.changelog-test-deadlock-trigger-remove.xml}. */
+    public static void removeDeadlockOnTrash(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-deadlock-trigger-remove.xml",
+            "databasechangelog_test_deadlock_trigger_remove", Map.of());
+    }
+
     /** {@code CREATE EXTENSION plpgsql_check} (nexus-cbo4a batch 11), through {@code db.changelog-test-extension-plpgsql-check.xml}. */
     public static void createPlpgsqlCheckExtension(Connection su) throws Exception {
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-extension-plpgsql-check.xml",
@@ -2887,6 +2910,30 @@ public final class PgContainerHelper {
         ctx.select(DSL.function(DSL.name("nexus_test", "lock_table"), SQLDataType.BOOLEAN,
                 DSL.val(ctx.render(table)), DSL.val(mode.name().replace('_', ' '))))
             .fetch();
+    }
+
+    /**
+     * How many OTHER backends of this database are blocked on a lock right now ({@code pg_stat_activity.wait_event_type
+     * = 'Lock'}), read through typed DSL on {@code ctx}'s connection (nexus-u5m5g.3). A test that holds a lock and needs
+     * N sessions queued behind it waits on this. The wait itself is counted, not a backend's query text: the activity
+     * view's text can lag a backend that is already waiting and still show its previous statement.
+     */
+    public static int backendsBlockedOnLocks(DSLContext ctx) {
+        return ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")),
+            DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")
+                .and(DSL.field(DSL.name("pid"), Integer.class).ne(DSL.function("pg_backend_pid", Integer.class)))
+                .and(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class))));
+    }
+
+    /** The other backends of this database as a table (pid, state, wait event, the start of the query), for a failure message. */
+    public static String backendActivity(DSLContext ctx) {
+        return ctx.select(DSL.field(DSL.name("pid"), Integer.class), DSL.field(DSL.name("state"), String.class),
+                DSL.field(DSL.name("wait_event_type"), String.class), DSL.field(DSL.name("wait_event"), String.class),
+                DSL.left(DSL.field(DSL.name("query"), String.class), 90).as("query"))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+            .where(DSL.field(DSL.name("pid"), Integer.class).ne(DSL.function("pg_backend_pid", Integer.class))
+                .and(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class))))
+            .fetch().format();
     }
 
     /**

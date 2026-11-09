@@ -121,3 +121,58 @@ def test_full_success_delete_logs_no_partial_warning():
     assert result == 2
     warnings = [l for l in logs if l.get("log_level") == "warning"]
     assert not any("partial" in l["event"] for l in warnings)
+
+
+# ── RDR-236 Phase 4 Step 1: a chunk row carries no content_hash, so the selector is the manifest's chashes ──
+
+
+class _SelectorCol:
+    """Answers each ``where`` it is asked with the ids that match it, and records the wheres."""
+
+    def __init__(self, by_chash: dict[str, str], by_content_hash: dict[str, list[str]] | None = None):
+        self._by_chash = by_chash
+        self._by_content_hash = by_content_hash or {}
+        self.wheres: list[dict] = []
+        self.delete_calls: list[list[str]] = []
+
+    def get_all_metadata(self, where: dict | None = None, *, include_non_live: bool = False) -> dict:
+        assert include_non_live, "an orphan has no live owner: the physical scan is the point"
+        self.wheres.append(where)
+        (key, cond), = where.items()
+        if key == "chunk_text_hash":
+            return {"ids": [self._by_chash[c] for c in cond["$in"] if c in self._by_chash]}
+        return {"ids": list(self._by_content_hash.get(cond, []))}
+
+    def delete(self, ids: list[str]) -> int:
+        self.delete_calls.append(list(ids))
+        return len(ids)
+
+
+def _manifest_of(*chashes: str):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    reader = MagicMock()
+    reader.get_manifest.return_value = [SimpleNamespace(chash=c) for c in chashes]
+    return reader
+
+
+def test_a_documents_orphans_are_found_by_its_manifests_chashes_not_a_row_key():
+    """A row written since Step 1 has no ``content_hash``: the content-hash lookup is blind to it."""
+    from unittest.mock import patch
+
+    col = _SelectorCol(by_chash={"c1": "id-1", "c2": "id-2"})
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=_manifest_of("c1", "c2")):
+        result = _force_t3_orphan_cleanup(_FakeT3(col), "code__test__m__v1", "hashX", doc_id="1.1.5")
+    assert result == 2 and col.delete_calls == [["id-1", "id-2"]]
+    assert all("content_hash" not in w for w in col.wheres), col.wheres
+
+
+def test_a_document_with_no_manifest_falls_back_to_the_content_hash_lookup():
+    from unittest.mock import patch
+
+    col = _SelectorCol(by_chash={}, by_content_hash={"hashY": ["legacy-1"]})
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=_manifest_of()):
+        result = _force_t3_orphan_cleanup(_FakeT3(col), "code__test__m__v1", "hashY", doc_id="1.1.5")
+    assert result == 1 and col.delete_calls == [["legacy-1"]]
+    assert col.wheres == [{"content_hash": "hashY"}]

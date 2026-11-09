@@ -2183,7 +2183,7 @@ def note_display(
     elif held and not note_ttl.row_may_give_tags(
         getattr(held[0], "tumbler", ""), row, owner_title=getattr(held[0], "title", "") or "",
     ):
-        tags = ""  # a row another note wrote is not this note's, as in the recovery-bundle export
+        tags = ""  # a row another note wrote is not this note's
     else:
         tags = row_tags
 

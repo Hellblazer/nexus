@@ -157,13 +157,16 @@ def write_oversize_file(
     ids: list[str],
     documents: list[str],
     metadatas: list[dict],
+    positions: "list[dict] | None" = None,
     force_re_embed: bool = False,
     defer_completion: bool = False,
 ):
     """Write one oversize file's chunks and owner rows through the combined writer.
 
     *ids*, *documents* and *metadatas* are the file's chunks, index-aligned, in file order; the
-    manifest position of a chunk is its index. Returns the writer's
+    manifest position of a chunk is its index. *positions* are the chunker's own position dicts,
+    index-aligned too (RDR-236 Phase 4 Step 0): the manifest rows' labels and spans come from them,
+    not from the chunk rows; ``None`` reads whatever position keys the rows still hold (a legacy row; every indexer passes the dicts). Returns the writer's
     :class:`~nexus.catalog.multi_batch_write.DocumentWriteResult`, or ``None`` when the engine
     refused the completion stamp: the chunks landed with their owner rows, the document stays
     ``indexing``, and the refusal is already in the record-level collector the run summary reads,
@@ -178,9 +181,13 @@ def write_oversize_file(
     from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog  # noqa: PLC0415 — deferred: rare oversize path
     from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
     from nexus.mcp_infra import _manifest_chunk_rows, get_catalog_writer  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
-    from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+    from nexus.metadata_schema import aligned_positions, rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
-    rows = _manifest_chunk_rows([(i, {**m, "chunk_index": i}) for i, m in enumerate(metadatas)])
+    # The manifest position of a chunk is its index in the file: the position dict carries it as chunk_index.
+    rows = _manifest_chunk_rows([
+        (i, m, {**p, "chunk_index": i})
+        for i, (m, p) in enumerate(zip(metadatas, aligned_positions(metadatas, positions)))
+    ])
     # First occurrence wins for a chash repeated at several positions, as the old upsert
     # (first-wins in-batch dedup) and the ChunkBatcher's chunks_payload do: the stored chunk keeps
     # the first occurrence's metadata (its line span), and every position still gets its own row.

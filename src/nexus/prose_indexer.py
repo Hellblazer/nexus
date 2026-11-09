@@ -163,6 +163,8 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     ids: list[str] = []
     documents: list[str] = []
     metadatas: list[dict] = []
+    # nexus-6pfgb.65 (RDR-236 Phase 4 Step 0): each chunk's position fields, apart from the chunk row.
+    positions: list[dict] = []
     embed_texts: list[str] = []
 
     if ext in (".md", ".markdown"):
@@ -176,35 +178,30 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             _log.debug("skipped file with no chunks", path=str(file_path))
             _fence_fail_and_raise("no chunks produced from markdown content")
 
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+        from nexus.metadata_schema import make_chunk_metadata, position_fields  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
         for chunk in chunks:
-            title = f"{file_path.relative_to(ctx.repo_path)}:chunk-{chunk.chunk_index}"
             # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
             # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
             chunk_text_hash_full = _hl.sha256(chunk.text.encode()).hexdigest()
             chunk_chroma_id = _chunk_id_from_hash(chunk_text_hash_full)  # nexus-4pvho
-            # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
-            # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id;
-            # catalog manifest is authoritative.
+            chunk_positions = position_fields(
+                chunk_start_char=chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
+                chunk_end_char=chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
+                section_title=chunk.metadata.get("header_path", ""),
+                section_type=chunk.metadata.get("section_type", ""),
+            )
+            # The chunk row carries the CHUNK keys only (RDR-236 Phase 4 Step 1); the positions go to the
+            # manifest row.
             metadata = make_chunk_metadata(
                 content_type="markdown",
                 chunk_text_hash=chunk_text_hash_full,
-                content_hash=content_hash,
-                chunk_start_char=chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
-                chunk_end_char=chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
-                indexed_at=ctx.now_iso,
                 embedding_model=ctx.embedding_model,
-                title=title,
-                section_title=chunk.metadata.get("header_path", ""),
-                section_type=chunk.metadata.get("section_type", ""),
-                tags="markdown",
-                category="prose",
-                frecency_score=float(ctx.score),
             )
             ids.append(chunk_chroma_id)
             documents.append(chunk.text)
             metadatas.append(metadata)
+            positions.append(chunk_positions)
             # Embed-only prefix: helps Voyage AI locate the right context without
             # polluting stored text.  Use header_path from chunk metadata (the raw
             # field, not the stored section_title which is the same string).
@@ -236,10 +233,9 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         _headings = _extract_headings(content)
         _heading_offsets = [h[0] for h in _headings]
 
-        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+        from nexus.metadata_schema import make_chunk_metadata, position_fields  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
         for ls, le, text in raw_chunks:
-            title = f"{file_path.relative_to(ctx.repo_path)}:{ls}-{le}"
             # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
             # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
             chunk_text_hash_full = _hl.sha256(text.encode()).hexdigest()
@@ -255,29 +251,23 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 if _h_idx >= 0:
                     section_title = _headings[_h_idx][1]
                     section_type = classify_section_type([section_title])
-            # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
-            # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id —
-            # catalog manifest is authoritative.
-            metadata = make_chunk_metadata(
-                content_type="prose",
-                chunk_text_hash=chunk_text_hash_full,
-                content_hash=content_hash,
+            chunk_positions = position_fields(
                 chunk_start_char=chunk_start_char,
                 chunk_end_char=chunk_end_char,
                 line_start=ls,
                 line_end=le,
-                indexed_at=ctx.now_iso,
-                embedding_model=ctx.embedding_model,
-                title=title,
                 section_title=section_title,
                 section_type=section_type,
-                tags=ext.lstrip("."),
-                category="prose",
-                frecency_score=float(ctx.score),
+            )
+            metadata = make_chunk_metadata(
+                content_type="prose",
+                chunk_text_hash=chunk_text_hash_full,
+                embedding_model=ctx.embedding_model,
             )
             ids.append(chunk_chroma_id)
             documents.append(text)
             metadatas.append(metadata)
+            positions.append(chunk_positions)
 
     if not documents:
         _fence_fail_and_raise("no documents produced")
@@ -289,13 +279,13 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
 
     # Filter empty documents before embedding (Voyage AI rejects empty strings).
     valid = [
-        (i, d, m, et)
-        for i, d, m, et in zip(ids, documents, metadatas, embed_texts)
+        (i, d, m, et, pos)
+        for i, d, m, et, pos in zip(ids, documents, metadatas, embed_texts, positions)
         if d and d.strip()
     ]
     if not valid:
         _fence_fail_and_raise("all chunks empty after whitespace filtering")
-    ids, documents, metadatas, embed_texts = map(list, zip(*valid))
+    ids, documents, metadatas, embed_texts, positions = map(list, zip(*valid))
 
     # Embed: local mode uses embed_fn; service mode embeds server-side.
     with _stage("embed"):
@@ -340,7 +330,11 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             "documents": documents,
             "embeddings": embeddings,
             "metadatas": metadatas,
+            "positions": positions,
             "catalog_doc_id": catalog_doc_id,
+            # The file's content hash, read by the flush's fence and completion stamp (a chunk row
+            # carries none since RDR-236 Phase 4 Step 1).
+            "content_hash": content_hash,
             "collection": ctx.corpus,
             "hooks": ctx.hooks,
         },
@@ -389,7 +383,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
         with _stage("upload"):
             _pending = write_oversize_file(
                 catalog_doc_id=catalog_doc_id, content_hash=content_hash, collection=ctx.corpus,
-                ids=ids, documents=documents, metadatas=metadatas,
+                ids=ids, documents=documents, metadatas=metadatas, positions=positions,
                 force_re_embed=ctx.force_re_embed, defer_completion=True,
             )
     else:
@@ -435,7 +429,12 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             # written, so the manifest hook is excluded (a second write would
             # double-count the sweep accounting) and no completion claim rides
             # along; the stamp follows the hooks.
-            _chain: dict = {"manifest_complete": {catalog_doc_id: content_hash} if catalog_doc_id else None}
+            # nexus-6pfgb.65: the manifest hook runs only on this old-upsert route, so only it is
+            # handed the chunkers' position dicts.
+            _chain: dict = {
+                "manifest_complete": {catalog_doc_id: content_hash} if catalog_doc_id else None,
+                "positions": positions,
+            }
             if _via_writer:
                 from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
                 _chain = {"skip_hooks": {manifest_write_batch_hook}}

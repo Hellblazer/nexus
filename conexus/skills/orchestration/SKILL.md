@@ -216,7 +216,7 @@ dispatch below.
   decision. It is the signal the change was too big, not a reason to
   parallelize harder.
 - Parallel arcs: multiple dev arcs may run concurrently ONLY on disjoint file sets, declared in each brief ("touch ONLY: `<files>`"; name what siblings own). One file = one arc, never two writers.
-- Shared files (PENDING_RELEASE.md, CHANGELOG, registration files): the ORCHESTRATOR edits them at commit time; agents never touch them.
+- Shared files (PENDING_RELEASE.md, CHANGELOG, registration files): the ORCHESTRATOR edits them at commit time; agents never touch them. A per-change changelog fragment (one new file per bead, where the project uses them) is not a shared file: the agent that made the change writes it.
 - Parallel halves of one feature (e.g. engine + client): the wire contract is LOCKED verbatim in the design-of-record BEFORE dispatch; both briefs cite it; reviewers verify contract compatibility across the halves.
 - Design gate first: when a plan marks an item DESIGN DECISION FIRST, the orchestrator locks the design-of-record in T1 before any code dispatch; deviations from a plan's recommendation need the human's nod, named fallbacks do not.
 - Review at every seam: each arc gets the stacked dual review independently; cross-arc integration points get named in reviewer briefs.

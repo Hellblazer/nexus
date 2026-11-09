@@ -83,12 +83,13 @@ def export_cmd(output: Path) -> None:
         click.echo(
             f"  note keys not recovered: {summary.note_keys_unrecovered} note(s) whose own tags, "
             "category and ttl_days are not in the catalog (stored by nx 7.87.0 or earlier, or "
-            "brought in by an .nxexp import) and whose chunk row cannot be shown to be their own "
-            "write; they export with some or all of those empty (ttl_days permanent; tags and "
-            "category are still taken when the note is the chunk's only owner and no note stamped "
-            "the row). To keep a note's values, re-put it with its tags, category and TTL using a "
-            "current client, then export again; take the values from your own records, since the "
-            "chunk row may hold another note's:"
+            "brought in by an .nxexp import) while a chunk row still holds a value; the export "
+            "never reads a note's keys off a chunk row, so they export with those empty (ttl_days "
+            "permanent). To keep a note's values, run `nx catalog backfill-meta --apply` before exporting "
+            "(it is operator-run; the upgrade does not run it, and it fills a note's keys from its own "
+            "chunk rows only where it can attribute a row to the note), or re-put it with its tags, "
+            "category and TTL using a current client; then export again. Take the values from "
+            "your own records, since the chunk row may hold another note's:"
         )
         notes = summary.note_keys_unrecovered_notes
         for collection, title in notes[:_UNRECOVERED_TITLES_SHOWN]:

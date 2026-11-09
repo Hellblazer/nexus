@@ -20,7 +20,8 @@ encodes a semantic something actually depended on.
 Semantics sources: T3Database pins ``hnsw:space=cosine`` at collection
 creation (chroma's default is L2 — the exact trap the plan critique
 named); the where-grammar subset is what the T1/plan-cache/test consumers
-actually use (``$eq`` implicit + explicit, ``$in``, ``$and``); upsert is
+actually use (``$eq`` implicit + explicit, ``$in``, fields ANDed in one dict;
+``$and`` is refused, as the engine refuses it, nexus-3ceda.11); upsert is
 last-write-wins by id. Embeddings are passed EXPLICITLY in core contracts
 so store semantics are tested independently of any embedding function; a
 deterministic toy EF covers the EF-attached surface.
@@ -290,11 +291,68 @@ class TestGetSemantics:
         got = col.get(where={"kind": {"$in": ["y", "z"]}}, sensitivity="include")
         assert sorted(got["ids"]) == ["b", "d"]
 
-    def test_where_and(self, substrate) -> None:
+    def test_where_fields_of_one_dict_are_anded(self, substrate) -> None:
         col = _make(substrate)
         _seed(col)
-        got = col.get(where={"$and": [{"kind": "x"}, {"rank": 3}]}, sensitivity="include")
+        got = col.get(where={"kind": "x", "rank": 3}, sensitivity="include")
         assert got["ids"] == ["c"]
+
+    _REFUSED_SHAPES = [
+        {"$and": [{"kind": "x"}, {"rank": 3}]},
+        {"$or": [{"kind": "x"}, {"rank": 3}]},
+        {"rank": {"$gte": 1, "$lte": 3}},
+        # Behind a field every row fails: a per-row check would never reach it.
+        {"kind": "nomatch", "$and": [{"rank": 3}]},
+        {"kind": "nomatch", "rank": {"$gt": 1, "$lt": 3}},
+        {"kind": "nomatch", "rank": {"$bogus": 1}},
+        {"kind": {"$in": "xyz"}},
+        {"kind": {"$nin": "x"}},
+        {"kind": {"$eq": ["x"]}},
+        {"kind": ["x"]},
+        {"rank": {"$gt": False}},
+        {"rank": {"$gt": float("nan")}},
+        {"rank": {"$lt": float("inf")}},
+    ]
+    _REFUSED_IDS = ["and", "or", "two-operators", "and-behind-a-failed-field",
+                    "two-operators-behind-a-failed-field", "unknown-operator-behind-a-failed-field",
+                    "in-a-string", "nin-a-string", "eq-a-list", "implicit-eq-a-list", "range-a-bool",
+                    "range-nan", "range-inf"]
+
+    @pytest.mark.parametrize("where", _REFUSED_SHAPES, ids=_REFUSED_IDS)
+    @pytest.mark.parametrize("seeded", [True, False], ids=["seeded", "empty"])
+    @pytest.mark.parametrize("call", ["get", "query", "delete"])
+    def test_what_the_engine_refuses_is_refused_before_any_row_is_read(
+        self, substrate, where, seeded, call,
+    ) -> None:
+        """The engine's search path answers these with an HTTP 400 (nexus-3ceda.11),
+        whatever the rows, and its get path too, except for a list ``$eq`` operand,
+        which it matches as text; a store that accepted them, even only when no row reached the bad
+        key, would let a unit test pass on a filter production refuses."""
+        col = _make(substrate)
+        if seeded:
+            _seed(col)
+        with pytest.raises(ValueError):
+            if call == "get":
+                col.get(where=where, sensitivity="include")
+            elif call == "query":
+                col.query(query_embeddings=[_E1], n_results=2, where=where)
+            else:
+                col.delete(where=where)
+
+    def test_a_range_operand_compares_only_with_a_value_of_its_own_kind(self, substrate) -> None:
+        """A string operand against a stored number, or a number against a stored
+        string, matches nothing (the engine's search path), and does not raise."""
+        col = _make(substrate)
+        _seed(col)
+        assert col.get(where={"rank": {"$gt": "a"}}, sensitivity="include")["ids"] == []
+        assert col.get(where={"kind": {"$gt": 0}}, sensitivity="include")["ids"] == []
+
+    def test_where_nin_keeps_rows_missing_the_field(self, substrate) -> None:
+        col = _make(substrate)
+        _seed(col)
+        col.add(ids=["e"], embeddings=[_E2], documents=["doc e"], metadatas=[{"rank": 5}])
+        got = set(col.get(where={"kind": {"$nin": ["x"]}}, sensitivity="include")["ids"])
+        assert got == {"b", "d", "e"}
 
     def test_where_no_match_is_empty_not_error(self, substrate) -> None:
         col = _make(substrate)

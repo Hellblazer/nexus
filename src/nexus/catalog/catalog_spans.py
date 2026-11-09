@@ -664,7 +664,7 @@ def resolve_span_text_for_entry(
                 "doc_id": doc_id,
             }
             result = col.get(
-                where={"$and": [{k: v} for k, v in where_filter.items()]},
+                where=where_filter,  # one dict: the engine ANDs its fields and refuses $and
                 include=["documents"],
                 limit=1, sensitivity="include",
             )

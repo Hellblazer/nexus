@@ -80,11 +80,22 @@ def inject_local_t3(local_t3: T3Database, monkeypatch: pytest.MonkeyPatch):
 
 
 def _stored_metadata(local_t3: T3Database, stored_col_name: str, title: str) -> dict:
+    """The note's attribution as it is stated now: on its catalog entry's ``meta`` (RDR-236 Phase 4 Step 1: a
+    chunk row carries no ``source_agent`` or ``title``, and the stored row is asserted to be the CHUNK keys only)."""
+    from nexus.catalog.factory import make_catalog_reader
+
     stored_col = local_t3._client.get_collection(stored_col_name)
     chunk_result = stored_col.get(include=["metadatas"], sensitivity="include")
-    matching = [m for m in chunk_result["metadatas"] if m.get("title") == title]
-    assert matching, f"expected a chunk with title={title!r}"
-    return matching[0]
+    assert chunk_result["metadatas"], "non-vacuity: the note's chunk is in the collection"
+    for row in chunk_result["metadatas"]:
+        assert set(row) <= {"chunk_text_hash", "embedding_model"}, row
+    reader = make_catalog_reader()
+    try:
+        matching = [e for e in reader.list_by_collection(stored_col_name) if e.title == title]
+    finally:
+        reader.close()
+    assert matching, f"expected a catalog entry with title={title!r}"
+    return dict(matching[0].meta or {})
 
 
 def _store(
@@ -115,10 +126,10 @@ def _run_store_put(local_t3: T3Database, **kwargs) -> str:
         return _store(**kwargs)
 
 
-# ── Explicit agent/session land in T3 chunk metadata ────────────────────────
+# ── Explicit agent/session land in the note's catalog meta, never the chunk row ──
 
 
-def test_explicit_agent_lands_in_chunk_metadata(
+def test_explicit_agent_lands_in_the_catalog_meta(
     inject_local_t3: T3Database, catalog_env: Path,
 ) -> None:
     local_t3 = inject_local_t3
@@ -145,7 +156,7 @@ def test_explicit_session_is_accepted_and_not_stamped_on_the_chunk(
     assert "Stored" in result, result
     stored_col_name = result.split("->")[-1].strip()
     meta = _stored_metadata(local_t3, stored_col_name, "attrib-explicit-session")
-    # nexus-6pfgb.4: the argument is still accepted (wire shape); no chunk row carries it.
+    # nexus-6pfgb.4: the argument is still accepted (wire shape); nothing carries it.
     assert "session_id" not in meta
 
 

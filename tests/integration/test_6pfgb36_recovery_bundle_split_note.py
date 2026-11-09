@@ -20,6 +20,7 @@ from nexus.catalog.recovery_bundle import export_bundle, import_bundle, read_bun
 from nexus.catalog.store_hook import NOTE_META_KEYS
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._legacy_note_rows import stamp_legacy_note_rows
 
 pytestmark = pytest.mark.integration
 
@@ -42,7 +43,14 @@ def _put_keyless(**kw):
                                "source_agent": "", "put_at": ""})
 
     with patch.object(store_hook, "catalog_store_hook_tracked", _hook):
-        return put_note(**kw)
+        result = put_note(**kw)
+    # A pre-Step-1 client also stamped the note's own facts on its chunk rows (RDR-236 Phase 4 Step 1: a
+    # current client writes the CHUNK keys only); the export must leave those row values behind.
+    stamp_legacy_note_rows(
+        HttpVectorClient(), kw["collection"], result.chunk_ids, catalog_doc_id=result.catalog_doc_id,
+        title=kw["title"], tags=kw.get("tags", ""), category=kw.get("category", ""),
+        ttl_days=kw.get("ttl_days"), source_agent=kw.get("source_agent", ""))
+    return result
 
 
 def _stored_text(reader, client, collection: str, title: str) -> tuple[str, int]:
@@ -85,9 +93,11 @@ def test_a_split_note_exports_its_whole_text_and_round_trips_through_import(t2_s
     assert docs["split-keyless"]["content"] == keyless_body
     assert (docs["split-keyed"]["tags"], docs["split-keyed"]["category"],
             docs["split-keyed"]["ttl_days"]) == (["alpha"], "design", 7)
-    # The keyless note wrote its own first piece, so the first piece's row values are its own.
+    # The keyless note wrote its own pieces and its rows hold its values, but the export has no row path
+    # (RDR-236 Phase 4 Step 1, nexus-6pfgb.65): it carries none and counts the note as one that lost some.
     assert (docs["split-keyless"]["tags"], docs["split-keyless"]["category"],
-            docs["split-keyless"]["ttl_days"]) == (["beta"], "finding", 30)
+            docs["split-keyless"]["ttl_days"]) == ([], "", None)
+    assert summary.note_keys_unrecovered_notes == [(collection, "split-keyless")]
     assert summary.notes_incomplete == 0
 
     imported = import_bundle(reader, reader, client, bundle)

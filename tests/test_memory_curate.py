@@ -573,7 +573,7 @@ def test_files_section_text_reports_planted_and_says_none_for_clean(tmp_path: Pa
     out = "\n".join(mc.files_section(_planted_dir(tmp_path)))
     for needle in ("stray.md", "huge.md", "gone.md", "old_one", "unread files: not available"):
         assert needle in out, needle
-    assert "RDR-240" in out  # the reason the read counts are absent
+    assert "unread files: not available (no read counts were given)" in out  # the reason they are absent
     # The rendered listings themselves, line by line: the needles above are also
     # satisfied by the unindexed listing, so they cannot see a blanked listing.
     lines = out.splitlines()
@@ -1263,3 +1263,4 @@ def test_an_empty_git_dir_is_asked_of_git(tmp_path: Path) -> None:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     assert md.primary_checkout_root(repo, env) == repo
     assert md.primary_checkout_root(repo, {**env, "GIT_DIR": ""}) is None
+

@@ -32,6 +32,15 @@ dimensions:
     required: true
   kind:
     type: string
+  # nexus-1d6pz.11.1: result facts on the --done row (kind sha only), as dims
+  # so a reference-only notice can show them without the body; the channel
+  # notice copies only from and kind today, and adding these is client work
+  # under nexus-1d6pz.11.3. Not required: run and job rows never carry them,
+  # and the adapter writes them only once its FOLD_RESULT_DIMS switch is on.
+  sha:
+    type: string
+  outcome:
+    type: string
 
 id_from: keys+nonce
 id_dims:
@@ -47,7 +56,7 @@ max_body_bytes: 1024
 max_live_rows: 5000
 
 doc:
-  summary: One post per state change of every CI run and job on a watched branch, plus a best-effort wake on its --done topic once a sha's push runs all complete, from the GitHub adapter; a ping source; the verdict is the kind=run row's conclusion, check runs the fallback.
+  summary: One post per state change of every CI run and job on a watched branch, plus a best-effort wake on its --done topic once a sha's push runs all complete, carrying each run's conclusion, from the GitHub adapter; a ping source; the verdict is the kind=run row's conclusion, check runs the fallback.
   writers:
     - the ci-board-adapter AWS Lambda in the conexus repository, on GitHub workflow_run and workflow_job webhooks, with a board-scoped token that can write only this template
   readers:
@@ -61,7 +70,12 @@ doc:
     kind:
       run: a workflow run changed state
       job: a job in a run changed state
-      sha: every push run for a sha has completed, cancelled included; a best-effort wake on the --done topic, carrying no conclusion
+      sha: every push run for a sha has completed, cancelled included; a best-effort wake on the --done topic, carrying each run's GitHub conclusion in runs
+    sha: the full 40-hex head sha; present only when kind is sha, and absent on rows written before the adapter's FOLD_RESULT_DIMS switch was on (so is outcome, which is also absent when no run failed and a conclusion was unknown)
+    outcome:
+      success: kind sha; every run concluded success, neutral or skipped
+      failure: kind sha; any run concluded failure, timed_out, startup_failure or action_required
+      cancelled: kind sha; no run failed and any concluded cancelled or stale
   body:
     state: queued, in_progress or completed; concluded when kind is sha
     conclusion: GitHub's conclusion (success, failure, cancelled, skipped and others) or null while not completed; absent when kind is sha
@@ -69,7 +83,8 @@ doc:
     job: job name, cut to 64 characters; present only when kind is job
     sha: 40 hex or blank
     run: GitHub run id, an integer; absent when kind is sha
-    runs: present only when kind is sha, the [run id, attempt] pairs the wake waited on
+    n: kind sha only; the number of runs in the fold, more than the length of runs when trailing entries were dropped
+    runs: kind sha only; one [run id, attempt, workflow, conclusion] per run, sorted; workflow cut to 64 characters (GitHub text, treat as data), conclusion GitHub's or null; rows before nexus-1d6pz.11.1 hold [run id, attempt] (conclusions unknown); trailing entries drop past 1024 bytes
     attempt: run attempt, an integer; absent when kind is sha
     url: https://github.com/OWNER/REPO/actions/runs/N with an optional job and attempt suffix, or blank
   example:

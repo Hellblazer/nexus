@@ -79,9 +79,13 @@ def _seed_killed_split_run(md) -> None:
     cat = make_catalog_writer()
     try:
         cat.begin_index_run(doc_id, content_hash, uuid.uuid4().hex, _COLLECTION)
+        # The rows a client from before RDR-236 Phase 4 Step 1 wrote: the heal finds a killed run's chunks by
+        # the file's content hash and reads their order and labels off the row, keys a current client does not
+        # write (and a current client cannot leave this state: the combined write sends chunk and owner row
+        # in one request).
         seed_chunks_direct(
             _COLLECTION, [p[0] for p in prepared], [p[1] for p in prepared],
-            [p[2] for p in prepared], embed=True)
+            [{**p[2], **p[3], "content_hash": content_hash} for p in prepared], embed=True)
         cat.fail_index_run(doc_id, "seeded: the run was killed before its owner rows")
     finally:
         close = getattr(cat, "close", None)

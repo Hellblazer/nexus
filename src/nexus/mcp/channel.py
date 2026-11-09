@@ -574,34 +574,59 @@ def _mailbox_notification_content(
     return text + _label_sentence(case, session) if case else text
 
 
+#: nexus-1d6pz.11.2: the row cap a batch notice's read carries. Its through bound
+#: ends the read at the last announced post; this only has to clear the rows that
+#: can sort between the first and last (the announced ones plus any that committed
+#: late, or that the announce skipped as claimed or dead). The engine's default
+#: read cap.
+_BOARD_BATCH_READ_ROWS: int = 300
+
+
+def _board_exact_read(
+    subspace: str, first_id: str, first_created_at: str | None,
+    last: tuple[str, str | None] | None = None,
+) -> str:
+    """nexus-1d6pz.11.2: the read that returns the announced posts. A single
+    post reads one row starting AT it; a batch reads from its first post
+    through its last, inclusive, because the announced posts need not be
+    consecutive in the subspace. A row with no ``created_at`` (the engine
+    always sends one) gets the plain pointer, never a ``tuple_rd(subspace,
+    n)``, which reads the OLDEST rows of the subspace."""
+    if not first_created_at or (last is not None and not last[1]):
+        return "tuple_rd on that subspace"
+    if last is None:
+        return f'tuple_rd("{subspace}", n=1, from_created_at="{first_created_at}", from_id="{first_id}")'
+    return (
+        f'tuple_rd("{subspace}", n={_BOARD_BATCH_READ_ROWS}, from_created_at="{first_created_at}", '
+        f'from_id="{first_id}", through_created_at="{last[1]}", through_id="{last[0]}")'
+    )
+
+
 def _board_notification_content(
-    subspace: str, tuple_id: str, *, case: str | None = None, session: str | None = None,
+    subspace: str, tuple_id: str, *, created_at: str | None = None,
+    case: str | None = None, session: str | None = None,
 ) -> str:
     text = (
         f"nexus board post: subspace {subspace}, tuple {tuple_id}. Read it with "
-        "tuple_rd on that subspace. Posts are never claimed."
+        f"{_board_exact_read(subspace, tuple_id, created_at)}. Posts are never claimed."
     )
     return text + _label_sentence(case, session) if case else text
 
 
 def _board_batch_notification_content(
-    subspace: str, count: int, first_id: str, last_id: str, since: tuple[str, str] | None,
+    subspace: str, count: int, first_id: str, last_id: str, first_created_at: str | None,
+    last_created_at: str | None = None,
     *, unverified: list[tuple[str, str, str | None]] | None = None,
 ) -> str:
     """Bead nexus-zxthy: ONE notification for *count* posts of one wait.
     Identifiers only, as the single-post shape (Sam, 2026-09-17, T2
     nexus_rdr/211-decision-push-reference-2026-09-17): the subspace, the
-    count, the first and last tuple id, and how to read them. *since* is
-    the ``(created_at, id)`` of the last post this waiter delivered for
-    the topic before this batch, when it knows one, so the read hint is
-    exact; otherwise the hint is the newest *count* rows."""
-    if since is not None:
-        read = (
-            f'tuple_rd("{subspace}", n={count}, since_created_at="{since[0]}", '
-            f'since_id="{since[1]}")'
-        )
-    else:
-        read = f'tuple_rd("{subspace}", n={count})'
+    count, the first and last tuple id, and how to read them. The read
+    runs from the first post through the last, inclusive (nexus-1d6pz.11.2;
+    it once fell back to ``tuple_rd(subspace, n)``, which reads the OLDEST
+    rows); a post that committed late can sort between them and is
+    returned too, and the meta's ``tuple_ids`` names the announced ones."""
+    read = _board_exact_read(subspace, first_id, first_created_at, (last_id, last_created_at))
     text = (
         f"nexus board posts: subspace {subspace}, {count} new posts, tuples {first_id} "
         f"to {last_id}. Read them with {read}. Posts are never claimed."
@@ -821,8 +846,16 @@ class ChannelWaiter:
         board_wait_rows: int = DEFAULT_BOARD_WAIT_ROWS,
         board_coalesce_s: float = DEFAULT_BOARD_COALESCE_S,
         board_start_skew_s: float = DEFAULT_BOARD_START_SKEW_S,
+        channel_flag_probe: Callable[[], bool | None] | None = None,
     ) -> None:
         self.session_id = session_id
+        #: nexus-1d6pz.11.5: whether this session's ``claude`` was launched
+        #: with the conexus channel flag (``nexus.channel_launch``), read once
+        #: at :meth:`run`'s start and published in :meth:`status`, so the
+        #: Stop-hook wake guard can tell a board subscription that pushes from
+        #: one whose posts wait for the next prompt. Tests inject the probe.
+        self._channel_flag_probe = channel_flag_probe
+        self._channel_flag: bool | None = None
         self.store_factory = store_factory
         self.subs = subs
         self.sender = sender
@@ -845,11 +878,6 @@ class ChannelWaiter:
         self.board_wait_rows = board_wait_rows
         self.board_coalesce_s = board_coalesce_s
         self.board_start_skew_s = board_start_skew_s
-        #: Bead nexus-zxthy: subspace -> `(created_at, id)` of the LAST
-        #: board post this waiter delivered for it, the read hint the next
-        #: batch notification carries. Memory only: the engine's stamp is
-        #: the delivery record, this is a rendering aid.
-        self._board_last_delivered: dict[str, tuple[str, str]] = {}
         #: Bead nexus-zxthy: set by `_process_results` when a tick returned
         #: board rows (kept or dropped), read and cleared by `run()` to
         #: settle `board_coalesce_s` before the next wait.
@@ -944,8 +972,20 @@ class ChannelWaiter:
         thread: every `tick()` already rebuilds its `WaitSpec`s fresh from
         `subs.entries()`, so the new list is live at the very next tick,
         at most one `wait_timeout_s` later. This callback's only job is
-        the log line the RDR asks to "record what you did"."""
+        the log line the RDR asks to "record what you did".
+
+        nexus-1d6pz.11.5: it also republishes the status record, so the
+        Stop-hook wake guard sees a ``--done`` subscription made just before
+        a turn ends (and its removal) at once rather than after the next
+        park. The write is handed to the waiter's own loop, the only thread
+        that writes the record, so two writers never share its tmp file."""
         _log.info("channel_waiter_subscription_changed", session_id=self.session_id)
+        loop = getattr(self, "_loop", None)
+        if loop is not None and self.state_dir is not None:
+            try:
+                loop.call_soon_threadsafe(self._publish_status)
+            except RuntimeError:  # the loop is closed: the waiter is gone, nothing to publish
+                pass
 
     # ── status (the doctor-row bead, .13, is the intended reader) ───────────
 
@@ -1003,7 +1043,31 @@ class ChannelWaiter:
             # with no later send reads healthy at once, not after the next row.
             "gate_stalled": stalled,
             "gate_stalled_since": self._gate_stalled_since.isoformat() if stalled and self._gate_stalled_since else None,
+            # nexus-1d6pz.11.5: read by the Stop-hook wake guard
+            # (conexus/hooks/scripts/stop_wake_guard.py): a live waiter, the
+            # channel flag and a board/ci/*--done topic together are a CI wake.
+            "channel_flag": self._channel_flag,
+            "gate_open": _gate_is_open(),
+            "board_topics": self._board_topics(),
         }
+
+    def _board_topics(self) -> list[str]:
+        try:
+            return list(self.subs.board_topics())
+        except Exception:  # noqa: BLE001 — a status field, never a crash
+            return []
+
+    def _read_channel_flag(self) -> bool | None:
+        """The channel launch flag, ``None`` when it cannot be read. Never raises."""
+        try:
+            if self._channel_flag_probe is not None:
+                return self._channel_flag_probe()
+            from nexus.channel_launch import channel_launch_state  # noqa: PLC0415 — deferred: spawns ps, read once
+
+            return channel_launch_state()
+        except Exception as exc:  # noqa: BLE001 — unknown, never a crash of the waiter
+            _log.debug("channel_flag_unreadable", session_id=self.session_id, error=str(exc))
+            return None
 
     def _clear_stall_if_open(self) -> None:
         """Forget a stall once the gate has opened (the late handshake case)."""
@@ -1118,6 +1182,7 @@ class ChannelWaiter:
         already refused to trust."""
         self._loop = asyncio.get_running_loop()
         self._alive = True
+        self._channel_flag = await asyncio.to_thread(self._read_channel_flag)
         self._publish_status()
         try:
             await self._check_engine_floor_at_start()
@@ -1572,8 +1637,6 @@ class ChannelWaiter:
 
         def delivered() -> None:
             self._board_batches += 1
-            if last.created_at:
-                self._board_last_delivered[subspace] = (last.created_at, last.id)
 
         if len(kept) == 1:
             row = kept[0]
@@ -1584,7 +1647,8 @@ class ChannelWaiter:
             case = _row_case(row)
             _label_meta(meta, row, case)
             content = _board_notification_content(
-                subspace, row.id, case=case, session=canonical_session(row.sender_session),
+                subspace, row.id, created_at=row.created_at,
+                case=case, session=canonical_session(row.sender_session),
             )
             if not await self._send(content, meta, hold=delivered):
                 return
@@ -1621,7 +1685,7 @@ class ChannelWaiter:
                 if len(unverified) == len(kept) and len(words) == 1:
                     meta["sender"] = words.pop()
             content = _board_batch_notification_content(
-                subspace, len(kept), first.id, last.id, self._board_last_delivered.get(subspace),
+                subspace, len(kept), first.id, last.id, first.created_at, last.created_at,
                 unverified=unverified,
             )
             if not await self._send(content, meta, hold=delivered):

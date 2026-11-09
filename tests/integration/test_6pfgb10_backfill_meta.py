@@ -42,6 +42,7 @@ from nexus.commands.enrich import enrich
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
 from tests._chunk_seed import seed_chunks_direct
+from tests._legacy_note_rows import stamp_legacy_note_rows
 
 pytestmark = pytest.mark.integration
 
@@ -92,18 +93,26 @@ def test_backfill_meta_journey(t2_service_env):
     assert reader is not None
 
     # ── notes ──
-    _keyless_put(content="6pfgb10 note A body", collection=notes, title="A", tags="x,y", category="design",
-                 ttl_days=7, source_agent="agent-a")
+    # RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): a current client's put writes the CHUNK keys only, so the rows
+    # these notes' stamps are read from are stamped the way a pre-Step-1 client wrote them (tests/_legacy_note_rows.py).
+    def legacy_row(put, title, **row):
+        entry = reader.by_source_uri(uri_for(notes, title))
+        stamp_legacy_note_rows(client, notes, put.chunk_ids, catalog_doc_id=str(entry.tumbler), title=title, **row)
+
+    a_put = _keyless_put(content="6pfgb10 note A body", collection=notes, title="A", tags="x,y", category="design",
+                         ttl_days=7, source_agent="agent-a")
+    legacy_row(a_put, "A", tags="x,y", category="design", ttl_days=7, source_agent="agent-a")
     _keyless_put(content="6pfgb10 shared body", collection=notes, title="B1", tags="b1", category="one")
-    _keyless_put(content="6pfgb10 shared body", collection=notes, title="B2", tags="b2", category="two", ttl_days=3)
+    b2_put = _keyless_put(content="6pfgb10 shared body", collection=notes, title="B2", tags="b2", category="two", ttl_days=3)
+    legacy_row(b2_put, "B2", tags="b2", category="two", ttl_days=3)  # one shared row, last written by B2
     c = _keyless_put(content="6pfgb10 note C body", collection=notes, title="C", tags="stale", category="stale")
+    legacy_row(c, "C", tags="stale", category="stale")
     d = _keyless_put(content="6pfgb10 note D body", collection=notes, title="D", tags="legacy", category="finding", ttl_days=30)
     writer = make_catalog_writer()
     writer.update(reader.by_source_uri(uri_for(notes, "C")).tumbler, meta={"category": "curated"})
     # D's row as a pre-stamp client left it: it names nobody (row_written_by refuses it), so only sole
     # ownership lets it give tags, and the row's ttl_days 30 must never reach the entry.
-    seed_chunks_direct(notes, ids=[d.chunk_ids[0]], documents=["6pfgb10 note D body"], embed=True,
-                       metadatas=[{"catalog_doc_id": "", "title": ""}])
+    stamp_legacy_note_rows(client, notes, d.chunk_ids, catalog_doc_id="", title="", tags="legacy", category="finding", ttl_days=30)
 
     # ── indexed documents ──
     def paper(cat, owner, title, *, author="", meta=None):
@@ -230,3 +239,46 @@ def test_backfill_meta_journey(t2_service_env):
     assert sum(k["stamped"] for k in second["keys"].values()) == 0
     assert second["documents_to_stamp"] == 0 and second["documents_written"] == 0
     assert c.status == STORED
+
+
+def test_backfill_meta_dry_run_lists_the_notes_held_by_the_first_sign_of_catalog_ttl_stale_alone(t2_service_env):
+    """nexus-6pfgb.65 (RDR-236 Phase 4 Step 1b), against legacy-keyed rows on the real engine. Three notes put
+    with a 1 day TTL by the current client, whose rows an older client's put then keyed
+    (``tests/_legacy_note_rows.py``): A's row is permanent and stamped a month before the catalog's put_at (held
+    by the first sign alone: listed); B's row is permanent and stamped after it (caught by the indexed_at sign:
+    not listed); C's row says 1 day (the TTLs match: not listed)."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    notes = t3_collection_name("6pfgb65list", t3=client)
+    reader = make_catalog_reader()
+    assert reader is not None
+    month_ago = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+    hour_on = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    now = datetime.now(UTC).isoformat()
+    want = {"A": dict(ttl_days=None, indexed_at=month_ago), "B": dict(ttl_days=None, indexed_at=hour_on),
+            "C": dict(ttl_days=1, indexed_at=now)}
+    tumblers: dict[str, str] = {}
+    for title, row in want.items():
+        out = put_note(content=f"6pfgb65 list note {title} body", collection=notes, title=title, ttl_days=1)
+        assert out.status == STORED, out.reason
+        entry = reader.by_source_uri(uri_for(notes, title))
+        assert entry is not None and entry.meta.get("ttl_days") == 1 and entry.meta.get("put_at"), "control: keyed"
+        tumblers[title] = str(entry.tumbler)
+        stamp_legacy_note_rows(client, notes, out.chunk_ids, catalog_doc_id=tumblers[title], title=title, **row)
+
+    assert "ttl_first_sign_only" not in _run(), "a plain dry run lists nothing and reads no row for it"
+
+    report = _run("--list-ttl-first-sign")
+
+    section = report["ttl_first_sign_only"]
+    assert [n["tumbler"] for n in section["notes"]] == [tumblers["A"]], section
+    assert section["count"] == 1 and section["unread"] == 0
+    only = section["notes"][0]
+    assert only["title"] == "A" and only["catalog_ttl_days"] == 1 and only["row_ttl_days"] is None
+    assert only["row_indexed_at"] == month_ago and only["reason"] == "first sign only"
+    assert only["lapsed_now"] is False and only["expires_at"], "put a moment ago with a 1 day TTL: not lapsed"
+
+    only_report = _run("--list-ttl-first-sign-only")
+    assert [n["tumbler"] for n in only_report["ttl_first_sign_only"]["notes"]] == [tumblers["A"]]
+    assert only_report["list_only"] is True and only_report["documents_to_stamp"] == 0
+    assert report["documents_to_stamp"] == 0, "read-only: the listing stamps nothing"
+    assert reader.by_source_uri(uri_for(notes, "A")).meta.get("ttl_days") == 1, "and changes no entry"

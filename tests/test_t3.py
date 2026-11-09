@@ -215,36 +215,17 @@ def _check_store_put_bare_id_shape(mock_col, doc_id):
 
 
 def _check_store_put_full_metadata(mock_col, doc_id):
+    """RDR-236 Phase 4 Step 1: the facade writes the chunk, and the chunk row is the CHUNK keys only. The
+    title, tags, category and agent it is handed are the note's catalog entry's (the MCP and CLI put paths
+    write it through ``nexus.catalog.note_write``)."""
     meta = mock_col.upsert.call_args.kwargs["metadatas"][0]
-    assert meta["title"] == "sec.md"
-    assert meta["tags"] == "security,audit"
-    assert meta["category"] == "security"
-    # nexus-6pfgb.4: session_id has no reader; the writer is gone.
-    assert "session_id" not in meta
-    assert meta["source_agent"] == "codebase-deep-analyzer"
-    # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): omitted ttl_days
-    # now defaults to None (permanent), not 0 — T3Database.put's own
-    # default changed; make_chunk_metadata's own default stays 0 for
-    # non-put() callers, but put() always forwards its own default.
-    assert meta["ttl_days"] is None
-    # expires_at removed; expiry derived from indexed_at + ttl_days
-    assert "expires_at" not in meta
-    assert meta["indexed_at"]  # ISO timestamp
-    # RDR-101 Phase 5c (nexus-o6aa.13) dropped store_type from the schema;
-    # content_type is the canonical routing field. ``knowledge__`` →
-    # ``prose`` per _STORE_TYPE_TO_CONTENT_TYPE in db/t3.py.
-    assert meta["content_type"] == "prose"
-    assert "store_type" not in meta
-    assert meta["embedding_model"] == "voyage-context-3"
+    assert meta == {"chunk_text_hash": doc_id, "embedding_model": "voyage-context-3"}
 
 
 def _check_store_put_ttl_metadata(mock_col, doc_id):
+    # The TTL is the catalog entry's (``ttl_days`` and ``put_at`` on its meta); no chunk row carries one.
     meta = mock_col.upsert.call_args.kwargs["metadatas"][0]
-    assert meta["ttl_days"] == 30
-    # expires_at no longer stored; verify the inputs to is_expired() are present
-    assert "expires_at" not in meta
-    assert meta["indexed_at"]
-    assert datetime.fromisoformat(meta["indexed_at"]) <= datetime.now(UTC)
+    assert set(meta) == {"chunk_text_hash", "embedding_model"}
 
 
 # nexus-test-cleanup P3a folded 3 independent call-shape checks (bare id,
@@ -311,14 +292,14 @@ def test_store_put_ttl_days_omitted_is_permanent(mock_db):
     db, mock_col, _ = mock_db
     db.put(collection="knowledge__security", content="permanent by omission")
     meta = mock_col.upsert.call_args.kwargs["metadatas"][0]
-    assert meta["ttl_days"] is None
+    assert "ttl_days" not in meta  # RDR-236 Phase 4 Step 1: a permanent note's row carries no TTL
 
 
 def test_store_put_ttl_days_none_explicit_is_permanent(mock_db):
     db, mock_col, _ = mock_db
     db.put(collection="knowledge__security", content="permanent explicit", ttl_days=None)
     meta = mock_col.upsert.call_args.kwargs["metadatas"][0]
-    assert meta["ttl_days"] is None
+    assert "ttl_days" not in meta
 
 
 # ── AC4: expire ─────────────────────────────────────────────────────────────
@@ -724,18 +705,17 @@ def test_put_then_delete_by_title_cross_collapses_shared_content():
     # Same id by RDR-108 D1.
     assert id_alpha == id_beta
 
-    # Title metadata is replaced by the second put; the first title is
-    # no longer queryable through the title index.
+    # One row serves both titles' puts, and it carries no title (the title is the catalog document's).
     assert db.find_ids_by_title(collection, "alpha.md") == []
-    assert db.find_ids_by_title(collection, "beta.md") == [id_beta]
+    assert db.find_ids_by_title(collection, "beta.md") == []
 
     # The shared row resolves; its content carries the latest write.
     row = db.get_by_id(collection, id_beta, sensitivity="include")
     assert row is not None
     assert row["content"] == shared_content
 
-    # Delete via the still-resolvable title removes the shared row.
-    ids_to_delete = db.find_ids_by_title(collection, "beta.md")
+    # Delete by the shared id removes the shared row.
+    ids_to_delete = [id_beta]
     assert len(ids_to_delete) == 1
     db.batch_delete(collection, ids_to_delete)
 
@@ -910,16 +890,13 @@ def test_upsert_chunks_calls_col_upsert(mock_db, monkeypatch):
     db.upsert_chunks(
         collection="code__myrepo", ids=["id-1", "id-2"],
         documents=["chunk one", "chunk two"],
-        metadatas=[{"title": "f.py:1-10"}, {"title": "f.py:11-20"}],
+        metadatas=[{"chunk_text_hash": "id-1", "title": "f.py:1-10"}, {"chunk_text_hash": "id-2", "title": "f.py:11-20"}],
     )
-    # Metadata is funnelled through the canonical schema (nexus-40t),
-    # which injects ``content_type`` from the collection prefix.
+    # Metadata is funnelled through the canonical schema (nexus-40t): the CHUNK keys survive, anything else
+    # (a title, a content type) is dropped (RDR-236 Phase 4 Step 1).
     mock_col.upsert.assert_called_once_with(
         ids=["id-1", "id-2"], documents=["chunk one", "chunk two"],
-        metadatas=[
-            {"title": "f.py:1-10", "content_type": "code"},
-            {"title": "f.py:11-20", "content_type": "code"},
-        ],
+        metadatas=[{"chunk_text_hash": "id-1"}, {"chunk_text_hash": "id-2"}],
     )
 
 
@@ -935,56 +912,33 @@ def test_upsert_chunks_force_re_embed_is_local_noop(mock_db, monkeypatch):
     db.upsert_chunks(
         collection="code__myrepo", ids=["id-1"],
         documents=["chunk one"],
-        metadatas=[{"title": "f.py:1-10"}],
+        metadatas=[{"chunk_text_hash": "id-1"}],
         force_re_embed=True,
     )
     mock_col.upsert.assert_called_once_with(
         ids=["id-1"], documents=["chunk one"],
-        metadatas=[{"title": "f.py:1-10", "content_type": "code"}],
+        metadatas=[{"chunk_text_hash": "id-1"}],
     )
 
 
-def test_upsert_chunks_passes_all_metadata_fields(mock_db, monkeypatch):
-    """Canonical schema fields (nexus-40t) survive the normalize pass;
-    ``indexed_at`` is now in ALLOWED_TOP_LEVEL (replaces dropped
-    ``expires_at``); ``content_type`` is injected from the collection
-    prefix. RDR-102 Phase B drops ``source_path`` — it is normalized
-    out and must not appear in the written record."""
-    import nexus.mcp_infra as mi
-    monkeypatch.setattr(
-        mi, "get_collection_row",
-        lambda name: {"content_type": "code"} if name == "code__myrepo" else None,
-    )
+def test_upsert_chunks_passes_only_the_chunk_keys(mock_db, monkeypatch):
+    """The CHUNK keys survive the normalize pass (RDR-236 Phase 4 Step 1); every document, position and legacy
+    key (the rich dict below carries each kind) is dropped from the written record."""
     db, mock_col, _ = mock_db
     rich_meta = {
+        "chunk_text_hash": "abc123", "embedding_model": "m",
         "title": "f.py:1-5", "tags": "py", "category": "code", "session_id": "",
         "source_agent": "nexus-indexer",
         "indexed_at": "2026-01-01T00:00:00+00:00", "ttl_days": 0,
         "line_start": 1, "line_end": 5, "frecency_score": 0.42,
+        "source_path": "f.py", "store_type": "code", "corpus": "c", "git_meta": "{}",
     }
     db.upsert_chunks(
         collection="code__myrepo", ids=["abc123"],
         documents=["def foo(): pass"], metadatas=[rich_meta],
     )
     written = mock_col.upsert.call_args.kwargs["metadatas"][0]
-    assert written["title"] == "f.py:1-5"
-    assert written["tags"] == "py"
-    assert written["category"] == "code"
-    assert written["source_agent"] == "nexus-indexer"
-    assert written["content_type"] == "code"  # injected
-    assert written["ttl_days"] == 0
-    assert written["indexed_at"] == "2026-01-01T00:00:00+00:00"
-    assert "expires_at" not in written
-    # RDR-102 Phase B dropped source_path; RDR-101 Phase 5c dropped
-    # store_type, corpus, git_meta. ``content_type`` is the canonical
-    # routing field; the legacy duplicates are normalized out.
-    assert "source_path" not in written
-    assert "store_type" not in written
-    assert "corpus" not in written
-    assert "git_meta" not in written
-    assert written["line_start"] == 1
-    assert written["line_end"] == 5
-    assert written["frecency_score"] == 0.42
+    assert written == {"chunk_text_hash": "abc123", "embedding_model": "m"}
 
 
 @pytest.mark.t2_tenant
@@ -1232,17 +1186,17 @@ def test_upsert_chunks_with_embeddings_stores(mock_db):
     # RDR-102 Phase B: source_path is dropped by normalize. Use page_number
     # as the schema-stable distinguishing field.
     metas = [
-        {"page_number": 1},
-        {"page_number": 2},
+        {"chunk_text_hash": "chunk-1"},
+        {"chunk_text_hash": "chunk-2"},
     ]
     db.upsert_chunks_with_embeddings(
         collection_name="docs__corpus", ids=ids, documents=docs,
         embeddings=embeddings, metadatas=metas,
     )
-    # docs__ collections route to the prose content_type by default.
+    # No content type is stamped on the row any more (RDR-236 Phase 4 Step 1).
     expected_metas = [
-        {"page_number": 1, "content_type": "prose"},
-        {"page_number": 2, "content_type": "prose"},
+        {"chunk_text_hash": "chunk-1"},
+        {"chunk_text_hash": "chunk-2"},
     ]
     mock_col.upsert.assert_called_once_with(
         ids=ids, documents=docs, embeddings=embeddings, metadatas=expected_metas,
@@ -1261,12 +1215,12 @@ def test_upsert_chunks_with_embeddings_force_re_embed_is_local_noop(mock_db):
     embeddings = [[0.1, 0.2, 0.3]]
     ids = ["chunk-1"]
     docs = ["first chunk text"]
-    metas = [{"page_number": 1}]
+    metas = [{"chunk_text_hash": "chunk-1"}]
     db.upsert_chunks_with_embeddings(
         collection_name="docs__corpus", ids=ids, documents=docs,
         embeddings=embeddings, metadatas=metas, force_re_embed=True,
     )
-    expected_metas = [{"page_number": 1, "content_type": "prose"}]
+    expected_metas = [{"chunk_text_hash": "chunk-1"}]
     mock_col.upsert.assert_called_once_with(
         ids=ids, documents=docs, embeddings=embeddings, metadatas=expected_metas,
     )
@@ -1344,14 +1298,14 @@ def test_update_chunks_calls_col_update_without_documents(mock_db, monkeypatch):
     db, mock_col, _ = mock_db
     # RDR-102 Phase B: source_path is dropped by normalize. frecency_score
     # is schema-stable and round-trips through the canonical pass.
-    metas = [{"frecency_score": 0.9}] * 2
+    metas = [{"embedding_model": "m2"}] * 2
     db.update_chunks(collection="code__myrepo", ids=["id-1", "id-2"], metadatas=metas)
     # update_chunks funnels through canonical metadata (nexus-40t) but writes
     # only the keys the caller sent: an update is partial and the store
     # merges it, so an injected content_type (inferred from the collection
     # name) would overwrite the stored one. nexus-w94eo: a docs__ collection
     # infers "prose" and overwrote a PDF chunk's "pdf".
-    normalised = [{"frecency_score": 0.9}] * 2
+    normalised = [{"embedding_model": "m2"}] * 2
     mock_col.update.assert_called_once_with(
         ids=["id-1", "id-2"], metadatas=normalised,
     )
@@ -1396,7 +1350,7 @@ def test_search_returns_closest_document_first(local_t3: T3Database):
     # nexus-oe2i: exact == 3 (3 docs seeded; n_results=3). >= 3 would
     # silently pass if the seed accidentally double-inserted.
     assert len(results) == 3
-    assert results[0]["title"] == "python-web"
+    assert "Django" in results[0]["content"]  # the closest document is the Python web one (no row carries a title)
 
 
 def test_search_unrelated_query_produces_higher_distance(local_t3: T3Database):
@@ -1444,15 +1398,14 @@ def test_list_store_returns_entries_with_metadata_and_multiple(local_t3: T3Datab
     assert len(entries) == 1
     entry = entries[0]
     assert "id" in entry
-    assert entry["title"] == "ls-doc.md"
-    assert entry["tags"] == "alpha,beta"
-    assert entry["ttl_days"] == 30
+    # RDR-236 Phase 4 Step 1: the row carries no title, tags or TTL; those are the catalog entry's.
+    assert not {"title", "tags", "ttl_days"} & set(entry)
 
     for i in range(3):
         local_t3.put(collection="knowledge__multi_ls", content=f"content {i}", title=f"doc-{i}.md")
     entries = local_t3.list_store("knowledge__multi_ls")
     assert len(entries) == 3
-    assert {e["title"] for e in entries} == {"doc-0.md", "doc-1.md", "doc-2.md"}
+    assert len({e["id"] for e in entries}) == 3
 
 
 def test_list_store_nonexistent_collection_returns_empty(local_t3: T3Database):
@@ -1587,15 +1540,11 @@ def test_existing_ids_pagination_respects_300_cap(local_t3: T3Database):
 
 @pytest.mark.t2_tenant
 def test_partial_update_keeps_a_key_sent_at_its_empty_default() -> None:
-    """nexus-w94eo: normalize() drops extraction_method="" and
-    quality_gate_overridden=False, but a caller sending them on a partial
+    """nexus-w94eo: a caller sending a CHUNK key at its empty default on a partial
     update means to overwrite the stored value, and the engine stores them
     as sent. The test facade must too."""
     from nexus.db.t3 import _normalize_partial
 
-    got = _normalize_partial(
-        {"extraction_method": "", "quality_gate_overridden": False},
-        "docs__foo",
-    )
-    assert got == {"extraction_method": "", "quality_gate_overridden": False}
+    got = _normalize_partial({"embedding_model": ""}, "docs__foo")
+    assert got == {"embedding_model": ""}
     assert "content_type" not in got

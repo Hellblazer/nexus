@@ -152,8 +152,9 @@ def test_a_refused_stamp_is_recorded_and_propagates_without_marking_the_run_fail
     chash = hashlib.sha256(text.encode()).hexdigest()
 
     def chunks(file_path, content_hash, target_model, now_iso, corpus):
-        return [(chash, text, {"content_hash": content_hash, "embedding_model": target_model,
-                               "chunk_text_hash": chash, "content_type": "prose"})]
+        # RDR-236 Phase 4 Step 1: a document chunker returns (id, text, row, positions): the row holds the
+        # chunk keys only, and the position keys travel beside it.
+        return [(chash, text, {"embedding_model": target_model, "chunk_text_hash": chash}, {})]
 
     cat = _Cat(complete_refused=[{"doc_id": DOC_ID, "referenced": 1, "missing": 1, "chunk_count": 1}],
                complete_refused_count=1)

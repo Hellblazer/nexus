@@ -563,3 +563,27 @@ def test_a_mixed_push_of_a_page_and_an_installer_is_code(tmp_path: Path) -> None
     proc, outputs = _run_in(repo, script)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert outputs.get("code") == "true"
+
+
+@pytest.mark.parametrize(
+    ("relpath", "code"),
+    [
+        (
+            "changelog/unreleased/nexus-abc.md",
+            "false",
+        ),  # a fragment is prose (nexus-3ceda.2)
+        ("changelog/unreleased/nested/nexus-abc.md", "true"),  # one level deep only
+        ("changelog/unreleased/run.py", "true"),
+        ("changelog/unreleased/x.md/y.sh", "true"),
+        ("changelog/other.md", "true"),
+        ("conexus/changelog/unreleased/nexus-abc.md", "true"),  # conexus/** stays code
+    ],
+)
+def test_changelog_fragment_arms(tmp_path: Path, relpath: str, code: str) -> None:
+    repo = _init_repo(tmp_path)
+    before = _commit(repo, {"seed.txt": "x"}, "seed")
+    _commit(repo, {relpath: "### Added\n\n- x\n"}, "fragment")
+    script = _render(_gate_script(), _values("push", before_sha=before))
+    proc, outputs = _run_in(repo, script)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert outputs.get("code") == code, relpath

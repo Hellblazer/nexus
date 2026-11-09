@@ -5140,8 +5140,8 @@ def query(
     where: Annotated[str, Field(
         description=(
             "Metadata filter, KEY=VALUE comma-separated (e.g. \"tags=arch\"). "
-            "Comparison operators and $and/$or are supported only when no catalog "
-            "param is set; combined with one, `where` is equality-only."
+            "Comparison operators (one condition per field) are supported only when "
+            "no catalog param is set; combined with one, `where` is equality-only."
         ),
     )] = "",
     limit: Annotated[int, Field(description="Maximum documents to return.")] = 10,
@@ -5180,7 +5180,7 @@ def query(
       HttpVectorClient-backed T3 (every local and cloud install since
       RDR-155 P4b); it errors rather than falling back without one.
     - With a catalog param set, `where` is equality-only; without one,
-      comparison operators and $and/$or are supported.
+      comparison operators are supported, one condition per field.
     - Ranking differs by path: the plain corpus path boosts by frecency and
       bibliographic quality; the catalog-param path ranks by raw vector
       distance only.
@@ -8989,6 +8989,19 @@ def tuple_rd(
     since_id: Annotated[str, Field(
         description="The id (64 hex characters) of that same row; never a made-up value. See since_created_at.",
     )] = "",
+    from_created_at: Annotated[str, Field(
+        description="The created_at of a row to start AT: it is returned first, then the rows after it. "
+                    "Pair with from_id; not with since. A board notice prints this read for its posts.",
+    )] = "",
+    from_id: Annotated[str, Field(
+        description="The id of that same row (64 hex characters). See from_created_at.",
+    )] = "",
+    through_created_at: Annotated[str, Field(
+        description="With from_*: the created_at of the row to stop AT, inclusive. Pair with through_id.",
+    )] = "",
+    through_id: Annotated[str, Field(
+        description="The id of that same row (64 hex characters). See through_created_at.",
+    )] = "",
     timeout_s: Annotated[int, Field(
         description="Seconds to park when nothing matches immediately; 0 (default) never blocks. "
                     "At most 25 by default (the engine's NX_TUPLE_TIMEOUT_CAP_SECONDS); a longer value is refused, not clamped.",
@@ -9008,8 +9021,42 @@ def tuple_rd(
     before this client's clock; the claimant and `lease_until` are the
     stale holder's) or `dead`.
     `since_created_at` and `since_id` come from a returned row, together.
+    `from_created_at` and `from_id` name one row to start at, inclusive, and
+    `through_created_at` and `through_id` one row to stop at, inclusive; with
+    no `since` and no `from`, the read starts at the OLDEST row, not the newest.
     """
+    # nexus-1d6pz.11.2: the inclusive from/through read a board notice prints.
     try:
+        if bool(through_created_at) != bool(through_id):
+            from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+            raise SchemaViolationError(
+                "through_created_at and through_id come as a pair, both from one row (its created_at and its id)"
+            )
+        if through_created_at and not from_created_at:
+            from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+            raise SchemaViolationError("through_created_at/through_id bound a from_created_at/from_id read")
+        if bool(from_created_at) != bool(from_id):
+            from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+            raise SchemaViolationError(
+                "from_created_at and from_id come as a pair, both from one row (its created_at and its id)"
+            )
+        if from_created_at and (since_created_at or since_id):
+            from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+            raise SchemaViolationError(
+                "pass from_created_at/from_id (start at a row) or since_created_at/since_id "
+                "(resume after a row), not both"
+            )
+        if from_created_at:
+            if timeout_s:
+                from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+                raise SchemaViolationError("from_created_at reads what is there; it does not park (timeout_s=0)")
+            from nexus.db.t2.http_tuple_store import check_from_read  # noqa: PLC0415 — rare/branch-local path
+            start = (from_created_at, from_id)
+            through = (through_created_at, through_id) if through_created_at else None
+            check_from_read(n, start, through)  # refused before any storage is opened
+            with _t2_ctx() as db:
+                rows = db.tuples.rd_from(subspace, keys_pattern, n=n, start=start, through=through)
+            return [_tuple_row_to_dict(r) for r in rows]
         if bool(since_created_at) != bool(since_id):
             # bead nexus-o9gt2: one half used to be silently ignored, reading from the start.
             from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
@@ -9742,7 +9789,15 @@ def collection_info(name: str) -> str:
                     if posture.withheld(i):
                         lines.append(f"  - {posture.stub(i)}")
                         continue
-                    title = (e.get("title") or "untitled")[:60]
+                    # The title is the OWNING document's own, from the catalog (RDR-236 Phase 4 Step 1: a
+                    # chunk row carries none); the row's is the fallback only for a chunk with no live
+                    # owner, as in store_list.
+                    _shown = _store_hook.note_display(
+                        None if owner_map is None else owner_map.get(e.get("id", ""), []),
+                        row=e, row_title=e.get("title") or "", row_tags="", row_ttl_days=None,
+                        row_indexed_at="",
+                    )
+                    title = (_shown.title or "untitled")[:60]
                     lines.append(f"  - {title}" + (f"  {_SENSITIVE_BADGE}" if posture.flagged(i) else ""))
                 if note := posture.note_line():
                     lines.append(note)

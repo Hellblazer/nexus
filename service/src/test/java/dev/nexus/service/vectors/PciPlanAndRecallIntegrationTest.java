@@ -299,22 +299,26 @@ class PciPlanAndRecallIntegrationTest {
 
     // -- helpers ---------------------------------------------------------------------------------------------
 
-    /** The exact top-k of the target for query {@code i}: cosine distance is 1 - dot on unit vectors. */
-    private Set<String> exactTopK(int i, int k) {
-        float[] q = queries.get(i);
-        return targetVectors.entrySet().stream()
-            .sorted((a, b) -> Double.compare(1 - dot(a.getValue(), q), 1 - dot(b.getValue(), q)))
-            .limit(k).map(Map.Entry::getKey).collect(Collectors.toSet());
-    }
-
     private List<Map<String, Object>> search(PgVectorRepository repo, String collection, int i, int k) {
         return repo.searchWithTokens(TENANT, "q" + i, List.of(collection), k, null, false).value();
     }
 
     private double recall(PgVectorRepository repo, int i, int k) {
-        Set<String> got = search(repo, TARGET, i, k).stream().map(r -> (String) r.get("id"))
-            .collect(Collectors.toSet());
-        Set<String> exact = exactTopK(i, k);
+        return recallOf(repo, "q" + i, queries.get(i), k);
+    }
+
+    /**
+     * Recall at k of query vector {@code q}, searched by its embedder text {@code key} through the serving path,
+     * against the exact top-k counted here in double precision. The serving path takes the nexus-bq06h empty-page
+     * repair and the canary's statement does not: an HNSW walk that returned no row would read 0 to the canary and
+     * near 1 here, a loud failure, not a flake.
+     */
+    private double recallOf(PgVectorRepository repo, String key, float[] q, int k) {
+        Set<String> got = repo.searchWithTokens(TENANT, key, List.of(TARGET), k, null, false).value().stream()
+            .map(r -> (String) r.get("id")).collect(Collectors.toSet());
+        Set<String> exact = targetVectors.entrySet().stream()
+            .sorted((a, b) -> Double.compare(1 - dot(a.getValue(), q), 1 - dot(b.getValue(), q)))
+            .limit(k).map(Map.Entry::getKey).collect(Collectors.toSet());  // cosine distance is 1 - dot on unit vectors
         return (double) got.stream().filter(exact::contains).count() / k;
     }
 
@@ -939,6 +943,16 @@ class PciPlanAndRecallIntegrationTest {
         }
     }
 
+    private String pgvectorVersion() {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).select(DSL.field(DSL.name("extversion"), String.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_extension")))
+                .where(DSL.field(DSL.name("extname"), String.class).eq("vector")).fetchOne(0, String.class);
+        } catch (java.sql.SQLException e) {
+            return "unknown (" + e.getClass().getSimpleName() + ")";
+        }
+    }
+
     // -- 14+. the recall canary (RDR-230 P1.3, nexus-4lnn1.1.4) -------------------------------------------------
 
     private PciCanary.Target canaryTarget(String collection, String index) {
@@ -1111,22 +1125,29 @@ class PciPlanAndRecallIntegrationTest {
 
     /**
      * Test 6 (gate finding S4, the small-sample red rule): three queries, one of them far from the collection, on a
-     * fresh index. The rule stands as written (three queries minimum, red on mean below 0.99 or any top-1 miss); this
-     * test records what it does here, and the answer is that the verdict is NOT stable. Three builds of this one fixture
-     * (chas lab-l, 2026-11-05): green with mean 0.9988 and min 0.9900; red with mean 0.9856 and min 0.9417; red with
-     * mean 0.9843 and min 0.9333; no top-1 miss in any. The leaf's graph is one draw per build, and with two near queries and one far one, a single weak (query, k)
-     * cell moves a three-query mean across 0.99. So the test pins the RULE (red exactly when the mean is below 0.99 or
-     * a query missed its nearest row), prints the figures, and asserts a floor on the mean that a broken index would
-     * not meet; it does not pin a colour. The first cloud {@code queries=} readings decide whether one far query turns a
-     * healthy production index red.
+     * fresh index. The rule stands as written (three queries minimum, red on mean below 0.99 or any top-1 miss), and
+     * the verdict on this fixture is NOT stable: the leaf's HNSW graph is one random draw per build (pgvector draws its
+     * levels from the server's own random state, which no session can seed), and with two near queries and one far
+     * one a single weak (query, k) cell moves a three-query mean across 0.99. Builds on chas lab-l (2026-11-05) read
+     * green at 0.9988 and red at 0.9856 and 0.9843; Service CI on 589ce8150 (2026-11-08) read red at 0.9335 with the
+     * far query at 0.7833, below the 0.95 floor this test once asserted. So the test pins what holds on every draw:
+     * the verdict is the rule applied to the canary's own figures (the rule itself is pinned case by case in
+     * PciCanaryTest), and the canary's mean and min are the ones a second count gives on the same index (its own
+     * exact top-k and arithmetic; the HNSW retrieval is the same engine path). It pins no colour and no recall floor.
+     * Canary sensitivity is test 2's and near-query index health is tests 1 and 5's; no test pins far-query recall,
+     * which is a draw on this fixture. The canary's line prints first and every assert names it; every cell and the
+     * pgvector version print before the counted-figure asserts, so a red in CI carries its own evidence. The first
+     * cloud {@code queries=} readings decide whether one far query turns a healthy production index red.
      */
     @Test
     @Order(19)
-    void canary_s4Pin_threeQueriesOneFar_freshIndex_verdictFollowsTheRule_greenAt0_9988_redAt0_9856_redAt0_9843() throws Exception {
+    void canary_s4Pin_threeQueriesOneFar_freshIndex_verdictFollowsTheRule_andItsMeanIsTheIndependentlyCountedRecall()
+        throws Exception {
         ensureTargetIndex();
         PgVectorRepository repo = canaryRepo();
         Random far = new Random(4242);
         float[] farQuery = toFloats(normalize(gauss(far)));
+        embedder.byText.put("far", farQuery);
         List<float[]> ring = List.of(queries.get(0), queries.get(1), farQuery);
 
         PciCanary.Result r = canary(repo, ring).run(canaryTarget(TARGET, targetIndex), "after_build");
@@ -1136,6 +1157,26 @@ class PciPlanAndRecallIntegrationTest {
         assertThat(r.state()).as(PciCanary.line(r)).isIn(PciCanary.State.GREEN, PciCanary.State.RED);
         boolean red = r.meanRecall() < 0.99 || r.top1Misses() > 0;
         assertThat(r.state() == PciCanary.State.RED).as("the rule, applied to " + PciCanary.line(r)).isEqualTo(red);
-        assertThat(r.meanRecall()).as("a healthy index with one far query stays near 1").isGreaterThan(0.95);
+        // The same figures, counted from the fixture's own vectors through the existing search path.
+        double sum = 0;
+        double low = 1;
+        StringBuilder cells = new StringBuilder();
+        for (int k : KS) {
+            double[] row = {recall(repo, 0, k), recall(repo, 1, k), recallOf(repo, "far", farQuery, k)};
+            cells.append(" k").append(k).append('=').append(Arrays.toString(row));
+            for (double c : row) {
+                sum += c;
+                low = Math.min(low, c);
+            }
+        }
+        System.out.println("PCI-CANARY S4 cells" + cells + " pgvector=" + pgvectorVersion());
+        // A row at the k-th distance can rank either side between the server's float distance and this count's
+        // double one, in any of the 15 cells; the mean admits two such rows at the smallest k (2/40/15 = 0.0033).
+        assertThat(r.meanRecall()).as("the canary's mean is the counted one")
+            .isCloseTo(sum / (3 * KS.length), org.assertj.core.data.Offset.offset(0.004));
+        // the min is one (query, k) cell, where a row at the k-th distance can rank either side between the
+        // server's float distance and this count's double one: one row at the smallest k
+        assertThat(r.minRecall()).as("the canary's min is the counted one")
+            .isCloseTo(low, org.assertj.core.data.Offset.offset(1.0 / KS[0]));
     }
 }

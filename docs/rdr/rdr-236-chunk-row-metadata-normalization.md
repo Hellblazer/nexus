@@ -1703,10 +1703,16 @@ writer and the repo PDF dict's legacy keys go, the overlay writers through
 `update-metadata` stop sending document keys (the extraction post-pass's
 title and provenance, the frecency-only reindex's score; both now write
 the catalog), and `find_ids_by_title` reads the catalog first (.27, whose
-floor text is updated). Note TTL: `row_written_by` and the
-export's row path are deleted, not replaced, because every keyless note
-with row values is now filled (`put_at` included, from the stamped row or
-as the sole-owner stamp) and the residue has been accepted at the dry run;
+floor text is updated). Note TTL: the export's row path is deleted, not
+replaced: a keyless note's bundle entry carries only what the catalog
+holds, and the export names and counts any note whose rows held a value
+it leaves out, pointing at `nx catalog backfill-meta --apply` (an
+operator-run verb; the upgrade ladder does not run it) as the way to
+recover those values first. `row_written_by` stays: the operator-run
+backfill's fill-from-stamped-row path, the display fallback and the
+legacy keyless expire path still read it on installs whose rows have not
+been swept. On nexus and gate-xr789 the keyless residue was accepted at
+the dry run;
 `catalog_ttl_stale` stays until enforcement (old clients exist until
 then). Its rule for a frozen row reads the row's `indexed_at`, not
 `last_written_at`: the engine bumps `last_written_at` on every chunk

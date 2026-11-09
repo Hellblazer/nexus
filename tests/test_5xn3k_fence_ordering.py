@@ -175,8 +175,8 @@ def _chunks(file_path, content_hash, target_model, now_iso, corpus):
     return [(
         f"{content_hash[:16]}_0",
         "chunk text",
-        {"content_hash": content_hash, "embedding_model": target_model,
-         "chunk_text_hash": "a" * 64, "content_type": "prose"},
+        {"embedding_model": target_model, "chunk_text_hash": "a" * 64},
+        {"line_start": 1},
     )]
 
 
@@ -348,11 +348,11 @@ _INCR_DOC_ID = "1.5.99"
 
 
 def _incr_prepared(n: int, content_hash: str = CONTENT_HASH,
-                   target_model: str = TARGET_MODEL) -> list[tuple[str, str, dict]]:
+                   target_model: str = TARGET_MODEL) -> list[tuple[str, str, dict, dict]]:
     return [
         (f"{i:064x}", f"chunk {i} text",
-         {"content_hash": content_hash, "embedding_model": target_model,
-          "chunk_text_hash": f"{i:064x}", "content_type": "pdf"})
+         {"embedding_model": target_model, "chunk_text_hash": f"{i:064x}"},
+         {"page_number": 1})
         for i in range(n)
     ]
 
@@ -468,9 +468,7 @@ def _run_pipeline(db, seq: list, fence: _RecordingFenceWriter, *, pages: int = 2
     )
     hooks = _RecordingHooks(seq)
     with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
-            patch("nexus.catalog.factory.make_catalog_writer", return_value=fence), \
-            patch("nexus.pipeline_stages._own_manifest_rows",
-                  return_value=[ManifestRow(position=0, chash="c0")]):
+            patch("nexus.catalog.factory.make_catalog_writer", return_value=fence):
         ME.return_value.extract.side_effect = _fx(pages, result)
         MC.return_value.chunk.return_value = fake_chunks
         total = pipeline_index_pdf(

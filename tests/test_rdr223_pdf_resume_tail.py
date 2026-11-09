@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-223 (nexus-z0o2p.11): the streaming PDF run that finds every chunk already sent.
 
-A run whose last request landed and whose completion stamp did not (a post-pass that failed, a kill
+A run whose last request landed and whose completion stamp did not (a stamp that failed, a kill
 between the last request and the stamp) leaves a buffer with every chunk flagged uploaded. The
 retry has nothing to send, only the stamp. Two rules:
 
@@ -67,39 +67,36 @@ def _extract(pdf_path, *, extractor="mineru", on_page=None, allow_degraded=False
                   "table_regions": [], "format": "markdown"})
 
 
-def _t3(*, update_side_effect):
+def _t3():
     col = MagicMock()
-    col.get.return_value = {"ids": ["abc123_0"], "metadatas": [
-        {"page_number": 1, "chunk_type": "text", "content_hash": _H}]}
+    col.get.return_value = {"ids": ["abc123_0"], "metadatas": [{"chunk_text_hash": "abc123_0"}]}
     t3 = create_autospec(T3Database, instance=True)
     t3.get_or_create_collection.return_value = col
-    t3.update_chunks.side_effect = update_side_effect
     return t3
 
 
 def _run(db, t3, path="/tail.pdf"):
-    # nexus-ahm18: the post-pass reads the document's own manifest; the writer double sends none. The
-    # patch is a spy: a run that selected by content_hash instead (doc_id not passed through) fails
-    # the assertion below instead of passing for the wrong reason.
-    manifest_reads: list[tuple[str, str]] = []
-
-    def _own_rows(doc_id, collection):
-        manifest_reads.append((doc_id, collection))
-        return [ManifestRow(position=0, chash="abc123_0")]
-
-    with patch(_P_EXT) as ME, patch(_P_CHK) as MC, patch("nexus.pipeline_stages._own_manifest_rows", side_effect=_own_rows):
+    with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
         ME.return_value.extract.side_effect = _extract
         MC.return_value.chunk.return_value = [TextChunk(text="chunk 0 text", chunk_index=0,
                                                         metadata={"page_number": 1})]
         n = pipeline_index_pdf(Path(path), _H, "docs__test", t3, db=db,
                                embed_fn=lambda t, m: ([[0.1] * 4 for _ in t], m), corpus="test")
-    assert manifest_reads and all(d and c == "docs__test" for d, c in manifest_reads), manifest_reads
     return n
 
 
-def _leave_a_finished_upload(db, writer) -> None:
-    """Run 1: every chunk is sent and flagged, the post-pass fails, so nothing is stamped."""
-    _run(db, _t3(update_side_effect=Exception("quota exceeded")))
+def _leave_a_finished_upload(db, writer, monkeypatch) -> None:
+    """Run 1: every chunk is sent and flagged, the completion stamp fails, so nothing is stamped (RDR-236 Phase 4
+    Step 1 retired the post-pass this used to fail instead)."""
+    real_complete = writer.complete
+
+    def _fail_stamp(self):
+        raise RuntimeError("stamp transport down")
+
+    monkeypatch.setattr(writer, "complete", _fail_stamp)
+    with pytest.raises(RuntimeError, match="stamp transport down"):
+        _run(db, _t3())
+    monkeypatch.setattr(writer, "complete", real_complete)
     assert len(writer.instances) == 1 and writer.instances[0].finished
     assert ("complete",) not in writer.events, "non-vacuity: run 1 stamped nothing"
 
@@ -127,10 +124,10 @@ def stamp(monkeypatch):
 
 
 @pytest.mark.t2_tenant
-def test_a_finished_upload_under_its_own_fence_is_stamped_without_a_writer(db, writer, fence, stamp) -> None:
-    _leave_a_finished_upload(db, writer)
+def test_a_finished_upload_under_its_own_fence_is_stamped_without_a_writer(db, writer, fence, stamp, monkeypatch) -> None:
+    _leave_a_finished_upload(db, writer, monkeypatch)
 
-    n = _run(db, _t3(update_side_effect=[None, None]))
+    n = _run(db, _t3())
 
     assert n == 1
     assert len(writer.instances) == 1, "the retry had nothing to send and made no writer"
@@ -145,14 +142,14 @@ def test_a_finished_upload_under_its_own_fence_is_stamped_without_a_writer(db, w
     ids=["indexed-since", "another-run-in-flight", "failed", "no-fence"],
 )
 def test_a_finished_upload_whose_fence_is_not_its_own_is_discarded_and_rerun(
-    db, writer, fence, stamp, state, fence_hash,
+    db, writer, fence, stamp, state, fence_hash, monkeypatch,
 ) -> None:
     """The buffer's chunks are gone (flagged), so nothing proves the manifest is theirs: the
     document runs again through one writer, from scratch, and stamps through it."""
-    _leave_a_finished_upload(db, writer)
+    _leave_a_finished_upload(db, writer, monkeypatch)
     fence.set(state, fence_hash)
 
-    n = _run(db, _t3(update_side_effect=[None, None]))
+    n = _run(db, _t3())
 
     assert n == 1
     assert len(writer.instances) == 2, "a second writer sent the document again"

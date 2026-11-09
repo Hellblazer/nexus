@@ -335,7 +335,7 @@ public final class NexusService {
     /**
      * RDR-193 Step 1 (nexus-u5m5g.2): the catalog reconcile jobs, scoped to tenant plus owner (tenant-keyed: a job
      * holds its tenant's staged rows; {@code EngineJobs.reconcile} is the evictor the tenant reset route runs). Built
-     * before the routes; the catalog handler takes it in Step 2.
+     * before the routes; the catalog handler runs the reconcile commit on it (Step 2, Part C).
      */
     private final dev.nexus.service.http.EngineJobs<Void> reconcileJobs =
         dev.nexus.service.http.EngineJobs.reconcile(System::currentTimeMillis);
@@ -805,7 +805,7 @@ public final class NexusService {
             ? new dev.nexus.service.db.CombinedWriteService(tenantScope, catalogRepo, docEmbedderRouter)
             : null;
         var catalogCtx = server.createContext("/v1/catalog",
-                new CatalogHandler(catalogRepo, combinedWriteService));
+                new CatalogHandler(catalogRepo, combinedWriteService, reconcileJobs));
         catalogCtx.getFilters().addAll(authFilter);
 
         // /v1/tenants/* + /v1/service-tokens/* — token lifecycle admin (bead nexus-gmiaf.32.3).

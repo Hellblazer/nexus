@@ -1012,8 +1012,9 @@ class TestManifestNeverOutrunsConfirmedChunks:
         def _chunks(file_path, content_hash, target_model, now_iso, corpus):
             return [(
                 "chunk-0", "chunk text",
-                {"content_hash": content_hash, "embedding_model": target_model,
-                 "chunk_text_hash": "a" * 64, "content_type": "prose"},
+                # RDR-236 Phase 4 Step 1: (id, text, row, positions); the row holds the chunk keys only.
+                {"embedding_model": target_model, "chunk_text_hash": "a" * 64},
+                {},
             )]
 
         def _embed(texts, model):

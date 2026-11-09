@@ -38,6 +38,13 @@ def scope(monkeypatch):
         "shared_a": t3.put(collection=ALPHA, content="Shared title, alpha side.", title="shared"),
         "shared_b": t3.put(collection=BETA, content="Shared title, beta side.", title="shared"),
     }
+    # RDR-236 Phase 4 Step 1: a current put writes the chunk keys only, so the title a title lookup reads off the
+    # row is not there. The subject here is the read scope over notes found by their row title, which only an
+    # older client wrote: stamp the title the way it did.
+    for col_name, key, title in [
+        (ALPHA, "a", "alpha-note"), (BETA, "b", "beta-note"), (ALPHA, "shared_a", "shared"), (BETA, "shared_b", "shared"),
+    ]:
+        t3.get_or_create_collection(col_name, strict=False).update(ids=[ids[key]], metadatas=[{"title": title}])
     monkeypatch.setattr(core, "_get_collection_names", lambda: [ALPHA, BETA, CODE])
     monkeypatch.setattr(
         "nexus.mcp_infra.get_collection_row",

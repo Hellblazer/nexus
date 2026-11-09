@@ -118,11 +118,15 @@ def _tracking_db():
         return cols[name]
     def cap(collection_name, ids, documents, embeddings, metadatas, *, force_re_embed=False, delete_keys=None):
         ups.setdefault(collection_name, []).extend(metadatas)
+        # RDR-236 Phase 4 Step 1: a chunk row carries no title, so a test that asks which file's chunks
+        # landed where reads the chunk TEXT, kept beside the metadata here.
+        db.texts.setdefault(collection_name, []).extend(documents)
     db = MagicMock()
     db.get_or_create_collection.side_effect = goc
     db.get_collection.side_effect = goc
     db.get_collection.side_effect = goc
     db.upsert_chunks_with_embeddings.side_effect = cap
+    db.texts = {}
     return db, ups, cols
 
 
@@ -388,92 +392,8 @@ def test_run_index_reindexes_when_embedding_model_changed(tmp_path):
 
 # ── _run_index_frecency_only ────────────────────────────────────────────────
 
-def test_frecency_only_updates_frecency_score(tmp_path):
-    """nexus-afudo (2026-08-05): pinned to the doc_id-keyed path via an
-    explicit ``_build_frecency_doc_id_map`` patch. Pre-fix this relied
-    on the (now-deleted) legacy source_path where-filter firing when
-    the catalog reader is None — the exact dead-code class nexus-afudo
-    closed; a MagicMock ``col.get`` that ignores ``where=`` made that
-    false confidence indistinguishable from a real pass. See
-    ``test_frecency_only_skips_unmapped_files_source_path_fallback_
-    deleted_as_dead_code`` for the doc_id-less case, which now skips
-    instead of querying.
-    """
-    from nexus.indexer import _run_index_frecency_only
-    repo = tmp_path / "repo"; repo.mkdir()
-    src = repo / "main.py"; src.write_text("x = 1\n")
-    old = {"frecency_score": 0.1, "title": "main.py:1-1"}
-    col = MagicMock(); col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
-    db = MagicMock(); db.get_or_create_collection.return_value = col
-    db.get_collection.return_value = col
-    with patch(
-        "nexus.indexer._build_frecency_doc_id_map",
-        return_value={src: "1.1.1"},
-    ), \
-         patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
-         patch("nexus.config.get_credential", return_value="fake-key"), \
-         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
-         patch("nexus.catalog.factory.make_catalog_writer", return_value=MagicMock()), \
-         patch("nexus.db.make_t3", return_value=db), \
-         patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
-        # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
-        # service mode through get_http_vector_client() directly
-        # (bypassing make_t3()) — patched above too so these tests keep
-        # exercising their own db mock under the ambient service
-        # default instead of a real (unreachable) HTTP client.
-        _run_index_frecency_only(repo, _reg())
-    kw = db.update_chunks.call_args_list[0].kwargs
-    assert kw["ids"] == ["c1"]
-    # nexus-vhyar: the write carries only the key this pass owns; echoing
-    # the read-back row (title included) re-asserted stale values.
-    assert kw["metadatas"] == [{"frecency_score": 0.75}]
-    where = col.get.call_args.kwargs["where"]
-    assert where == {"doc_id": "1.1.1"}
 
 
-def test_frecency_only_uses_doc_id_when_catalog_has_entry(tmp_path):
-    """nexus-f4z9: when the catalog has the file registered under
-    the repo owner, the chunk lookup keys on doc_id (post-prune
-    safe) instead of source_path. WITH TEETH: a regression that drops
-    the doc_id branch fails the where-filter assertion.
-    """
-    from nexus.indexer import _run_index_frecency_only
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    src = repo / "main.py"
-    src.write_text("x = 1\n")
-    old = {"frecency_score": 0.1, "source_path": str(src), "title": "main.py:1-1"}
-    col = MagicMock()
-    col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
-    db = MagicMock()
-    db.get_or_create_collection.return_value = col
-    db.get_collection.return_value = col
-    db.get_collection.return_value = col
-
-    # Mock the catalog map so the file resolves to a known doc_id. The
-    # reader is pinned to None (nexus-i711w seam) so the manifest-based
-    # chunk resolution is skipped and the legacy where-filter — this
-    # test's subject — is what fires.
-    with patch(
-        "nexus.indexer._build_frecency_doc_id_map",
-        return_value={src: "1.1.1"},
-    ), \
-         patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
-         patch("nexus.config.get_credential", return_value="fake-key"), \
-         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
-         patch("nexus.catalog.factory.make_catalog_writer", return_value=MagicMock()), \
-         patch("nexus.db.make_t3", return_value=db), \
-         patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
-        # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
-        # service mode through get_http_vector_client() directly
-        # (bypassing make_t3()) — patched above too so these tests keep
-        # exercising their own db mock under the ambient service
-        # default instead of a real (unreachable) HTTP client.
-        _run_index_frecency_only(repo, _reg())
-    where = col.get.call_args.kwargs["where"]
-    assert where == {"doc_id": "1.1.1"}, (
-        f"expected doc_id-keyed lookup, got {where!r}"
-    )
 
 
 def test_frecency_only_skips_unmapped_files_source_path_fallback_deleted_as_dead_code(
@@ -548,25 +468,6 @@ def test_frecency_only_skips_unindexed_files(tmp_path):
     db.update_chunks.assert_not_called()
 
 
-def test_frecency_only_raises_credentials_missing(tmp_path, monkeypatch):
-    from nexus.indexer import _run_index_frecency_only
-    repo = tmp_path / "repo"; repo.mkdir()
-    monkeypatch.setenv("NX_LOCAL", "0")
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
-    # nexus-sghyo (2026-08-06): non-service mode must be forced explicitly
-    # now (ambient default is service mode, which routes to the real
-    # HttpVectorClient instead of raising for a missing Voyage credential
-    # — the client does not embed at all).
-    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
-    # Reader None (nexus-i711w seam): the rdr_collection fallback at
-    # _run_index_frecency_only:1716 resolves _repo_collection_or_legacy
-    # BEFORE the credential check; keep it on the no-catalog synth path.
-    with patch("nexus.catalog.factory.make_catalog_reader", return_value=None):
-        with pytest.raises(CredentialsMissingError): _run_index_frecency_only(repo, _reg())
-
-
-# ── Debug logging ────────────────────────────────────────────────────────────
 
 def test_run_index_logs_skipped_binary_files(tmp_path):
     from nexus.indexer import _run_index
@@ -619,23 +520,17 @@ def test_run_index_excludes_rdr_paths_from_docs(tmp_path):
     # nexus-5ut2a: _run_index re-routes the non-conformant fake registry
     # name (code__repo/docs__repo) through the conformant synth, so key by
     # content-type prefix rather than the literal legacy name.
-    docs_paths = [
-        m.get("title", "")
-        for k, v in ups.items() if k.startswith("docs__") for m in v
-    ]
-    rdr_paths_out = [
-        m.get("title", "")
-        for k, v in ups.items() if k.startswith("rdr__") for m in v
-    ]
+    docs_paths = [t for k, v in db.texts.items() if k.startswith("docs__") for t in v]
+    rdr_paths_out = [t for k, v in db.texts.items() if k.startswith("rdr__") for t in v]
     assert docs_paths, "no docs collection received chunks"
     assert rdr_paths_out, "no rdr collection received chunks"
-    # RDR-102 D2: source_path is gone; title carries
-    # "{relpath}:chunk-{i}" per prose_indexer.py:96.
-    assert any("README.md" in p for p in docs_paths) and not any(
-        "ADR-001" in p for p in docs_paths
+    # The chunk TEXT says which file a chunk came from (a chunk row carries no title since RDR-236
+    # Phase 4 Step 1).
+    assert any("Project description" in p for p in docs_paths) and not any(
+        "Architecture decision" in p for p in docs_paths
     )
-    assert any("ADR-001.md" in p for p in rdr_paths_out) and not any(
-        "README.md" in p for p in rdr_paths_out
+    assert any("Architecture decision" in p for p in rdr_paths_out) and not any(
+        "Project description" in p for p in rdr_paths_out
     )
 
 
@@ -873,12 +768,11 @@ def test_run_index_mixed_repo(tmp_path):
     # "{relpath}:chunk-{i}" per code_indexer.py:393 / prose_indexer.py:96.
     # nexus-5ut2a: key by content-type prefix — _run_index re-routes the
     # non-conformant fake name (code__repo) through the conformant synth.
-    code_ups = [m for k, v in ups.items() if k.startswith("code__") for m in v]
-    docs_ups = [m for k, v in ups.items() if k.startswith("docs__") for m in v]
-    assert any("main.py" in m.get("title", "") for m in code_ups)
-    dp = {m.get("title", "") for m in docs_ups}
-    assert any("README.md" in p for p in dp) and any("notes.rst" in p for p in dp)
-    assert not any("data.txt" in p for p in dp), ".txt files should be SKIP"
+    code_ups = [t for k, v in db.texts.items() if k.startswith("code__") for t in v]
+    docs_ups = [t for k, v in db.texts.items() if k.startswith("docs__") for t in v]
+    assert any("hello" in t for t in code_ups)
+    assert any("A simple project" in t for t in docs_ups) and any("Some notes about" in t for t in docs_ups)
+    assert not any("Should be skipped" in t for t in docs_ups), ".txt files should be SKIP"
 
 
 # ── Prune helpers ────────────────────────────────────────────────────────────
@@ -2009,9 +1903,8 @@ def _run_pdf(tmp_path, cache=None, n=1):
     from nexus.indexer import _index_pdf_file
     repo = tmp_path / "repo"; repo.mkdir(); f = repo / "paper.pdf"; f.write_bytes(b"%PDF-1.4 fake content")
     db, col = _mock_db()
-    prep = [(f"id{i}", f"Page {i}", {"source_title":"T","page_number":i,"source_path":str(f),
-             "corpus":"docs__repo","embedding_model":"voyage-context-3","store_type":"prose",
-             "source_agent":"nexus-indexer"}) for i in range(1, n+1)]
+    prep = [(f"id{i}", f"Page {i}", {"chunk_text_hash": f"id{i}", "embedding_model": "voyage-context-3"},
+             {"page_number": i}) for i in range(1, n+1)]
     # Reader None (nexus-i711w seam): _index_pdf_file is the ONE wrapper
     # that installs DEFAULT post-store hooks when hooks=None
     # (indexer.py:2179), and the catalog store hook resolves the factory at
@@ -2473,42 +2366,6 @@ def test_paginated_get_on_page_defaults_to_none_safely():
 # tested the client-side fetch-diff-copy-delete prune/quarantine fallback,
 # retired: the manifest-chunk FK makes the completeness apparatus it proved
 # correct unreachable by construction.
-def test_frecency_update_paginates(tmp_path):
-    """nexus-afudo (2026-08-05): pinned to the doc_id-keyed path (a
-    real ``_build_frecency_doc_id_map`` patch) so this pagination
-    behavior is exercised through code that can still fire in
-    production — the legacy source_path where-filter this test used
-    to route through is deleted dead code (see
-    ``test_frecency_only_skips_unmapped_files_source_path_fallback_
-    deleted_as_dead_code``).
-    """
-    from nexus.indexer import _run_index_frecency_only
-    repo = tmp_path / "repo"; repo.mkdir(); src = repo / "big.py"; src.write_text("# g\n")
-    p1 = {"ids": [f"c-{i}" for i in range(300)], "metadatas": [{"frecency_score":0.0}]*300}
-    p2 = {"ids": [f"c-{i}" for i in range(300,310)], "metadatas": [{"frecency_score":0.0}]*10}
-    cc = MagicMock(); cc.get.side_effect = [p1, p2]
-    dc = MagicMock(); dc.get.return_value = {"ids":[],"metadatas":[]}
-    db = MagicMock(); db.get_or_create_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
-    db.get_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
-    with patch(
-        "nexus.indexer._build_frecency_doc_id_map",
-        return_value={src: "1.1.1"},
-    ), \
-         patch("nexus.frecency.batch_frecency", return_value={src: 0.9}), \
-         patch("nexus.config.get_credential", return_value="fake-key"), \
-         patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
-         patch("nexus.db.make_t3", return_value=db), \
-         patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
-        # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
-        # service mode through get_http_vector_client() directly
-        # (bypassing make_t3()) — patched above too so this test keeps
-        # exercising its own db mock under the ambient service default.
-        _run_index_frecency_only(repo, _reg())
-    ids = set()
-    for c in db.update_chunks.call_args_list: ids.update(c.kwargs.get("ids") or c.args[0])
-    assert len(ids) == 310
-    where = cc.get.call_args_list[0].kwargs["where"]
-    assert where == {"doc_id": "1.1.1"}
 
 
 def test_prune_misclassified_paginates(tmp_path):
@@ -2668,7 +2525,6 @@ def test_code_indexer_chunk_text_hash(tmp_path):
     assert len(m) == 2
     assert m[0]["chunk_text_hash"] == hashlib.sha256(b"x = 1").hexdigest()
     assert m[1]["chunk_text_hash"] == hashlib.sha256(b"y = 2").hexdigest()
-    assert m[0]["chunk_text_hash"] != m[0]["content_hash"]  # chunk vs file
     assert m[0]["chunk_text_hash"] != m[1]["chunk_text_hash"]  # distinct chunks
 
 def _cap_prose(tmp_path, content, ext):
@@ -2689,39 +2545,37 @@ def _upload_kwargs(db):
     return db.upsert_chunks_with_embeddings.call_args.kwargs
 
 
-def _assert_names_dropped_owned_keys(kw):
-    """nexus-w94eo: the engine merges metadata, so a full-rewrite upload names
-    the writer-owned keys its rows dropped, or a --force reindex cannot clear
-    a stale one (quality_gate_overridden, extraction_source, ...)."""
-    from nexus.metadata_schema import REWRITE_OWNED_KEYS
-    dk = kw.get("delete_keys")
-    assert dk, "full-rewrite fallback upload must send delete_keys"
-    assert set(dk) <= REWRITE_OWNED_KEYS and "content_type" not in dk
-    assert any(k not in m for m in kw["metadatas"] for k in dk)
+def _assert_sends_chunk_keys_and_no_delete_keys(kw):
+    """RDR-236 Phase 4 Step 1: the rows an indexer uploads are the CHUNK keys, both always present, so a
+    full-rewrite upload has no key to name in ``delete_keys`` (the retired keys a stored row still holds are
+    the Step 3 sweep's, not one document's re-index)."""
+    assert not kw.get("delete_keys"), kw.get("delete_keys")
+    assert kw["metadatas"], "non-vacuity: the upload carried rows"
+    assert all(set(m) == {"chunk_text_hash", "embedding_model"} for m in kw["metadatas"]), kw["metadatas"]
 
 
-def test_prose_fallback_upload_sends_delete_keys(tmp_path):
+def test_prose_fallback_upload_sends_chunk_keys_only(tmp_path):
     from nexus.indexer import _index_prose_file
     repo = tmp_path / "repo"; repo.mkdir(); f = repo / "notes.txt"; f.write_text("Line one\nLine two\n")
     db, col = _mock_db()
     _index_prose_file(f, repo, "docs__repo", "voyage-context-3",
                       col, db, "fake-key", now_iso="2026-01-01T00:00:00", score=1.0)
-    _assert_names_dropped_owned_keys(_upload_kwargs(db))
+    _assert_sends_chunk_keys_and_no_delete_keys(_upload_kwargs(db))
 
 
-def test_code_fallback_upload_sends_delete_keys(tmp_path):
+def test_code_fallback_upload_sends_chunk_keys_only(tmp_path):
     from nexus.indexer import _index_code_file
     repo = tmp_path / "repo"; repo.mkdir(); (repo / "main.py").write_text("x = 1\ny = 2\n")
     db, col = _mock_db(); ch = [_chunk()]
     with patch("nexus.chunker.chunk_file", return_value=ch):
         _index_code_file(repo/"main.py", repo, "code__repo", "voyage-code-3",
                          col, db, _voyage(len(ch)), now_iso="2026-01-01T00:00:00", score=1.0)
-    _assert_names_dropped_owned_keys(_upload_kwargs(db))
+    _assert_sends_chunk_keys_and_no_delete_keys(_upload_kwargs(db))
 
 def test_prose_indexer_markdown_metadata(tmp_path):
     m, _ = _cap_prose(tmp_path, "# Abstract\n\nContent.\n\n# Methods\n\nMore.\n", ".md")
     assert m
-    for x in m: assert "chunk_text_hash" in x and "section_type" in x
+    for x in m: assert set(x) == {"chunk_text_hash", "embedding_model"}  # the section label is the manifest row's
 
 def test_prose_indexer_non_markdown_metadata(tmp_path):
     m, docs = _cap_prose(tmp_path, "Line one\nLine two\n", ".txt")
@@ -2729,7 +2583,7 @@ def test_prose_indexer_non_markdown_metadata(tmp_path):
     for doc, x in zip(docs, m):
         h = x["chunk_text_hash"]; assert len(h) == 64
         assert h == hashlib.sha256(doc.encode()).hexdigest()
-        assert x.get("section_type") == ""
+        assert set(x) == {"chunk_text_hash", "embedding_model"}
 
 
 # ── nexus-27u7: lazy collection creation ─────────────────────────────────

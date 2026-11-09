@@ -768,7 +768,9 @@ class TestSharedChashTakesTheIdentityFilesMetadata:
         return path, {
             "ids": [chash],
             "documents": ["shared text"],
-            "metadatas": [{"chunk_text_hash": chash, "content_hash": "c" * 64, "source_path": source}],
+            "metadatas": [{"chunk_text_hash": chash, "source_path": source}],
+            "positions": [{}],
+            "content_hash": "c" * 64,
             "catalog_doc_id": doc_id,
         }
 

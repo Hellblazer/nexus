@@ -36,10 +36,12 @@ Layers, cheapest first:
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import dataclasses
 import os
+import re
 import threading
 import time
 import uuid
@@ -312,6 +314,10 @@ class _FakeTupleStore:
         )
         self._rows.setdefault(subspace, []).append(row)
         return row
+
+    def created(self, subspace: str, id_: str) -> str | None:
+        """The seeded row's `created_at`, which a board notice's read names."""
+        return next(r.created_at for r in self._rows[subspace] if r.id == id_)
 
     def seed_old_engine_row(self, subspace: str, id_: str, body: str | None = None) -> TupleRow:
         """Like `seed`, but with `announce_count=None` -- simulating a row
@@ -994,7 +1000,7 @@ class TestChannelWaiterFakeStore:
             session_id, _fake_store_factory(fake), subs, sender=sender, reannounce_interval_s=0.0,
         )
         await waiter.tick()
-        expected_content = channel._board_notification_content("board/release-notes", "p1")  # noqa: SLF001
+        expected_content = channel._board_notification_content("board/release-notes", "p1", created_at=fake.created("board/release-notes", "p1"))  # noqa: SLF001
         assert sender.calls[0] == (
             expected_content,
             {"subspace": "board/release-notes", "tuple_id": "p1", "from": "author-a", "kind": "note"},
@@ -1098,7 +1104,7 @@ class TestChannelWaiterFakeStore:
         second_specs, _timeout2 = fake.wait_calls[-1]
         assert any(spec.subspace == "board/late" for spec in second_specs)
 
-        expected_content = channel._board_notification_content("board/late", "p1")  # noqa: SLF001
+        expected_content = channel._board_notification_content("board/late", "p1", created_at=fake.created("board/late", "p1"))  # noqa: SLF001
         assert sender.calls[-1] == (
             expected_content,
             {"subspace": "board/late", "tuple_id": "p1", "from": "author-a", "kind": "note"},
@@ -1462,7 +1468,7 @@ class TestChannelWaiterRealEngine:
         transaction started earlier but committed later (`created_at` is
         the transaction START time); it was an xfail here until this
         bead. Strict now: a lost or duplicated post fails."""
-        from nexus.mcp.core import tuple_out
+        from nexus.mcp.core import tuple_out, tuple_rd
         from nexus.mcp_infra import t2_ctx
 
         session_id = str(uuid.uuid4())
@@ -1520,6 +1526,32 @@ class TestChannelWaiterRealEngine:
             f"subscriber through the board path. ids: {sorted(missing)[:10]}"
         )
         assert len(seen) == len(set(seen)), "max=1 per subscriber: no post is announced twice"
+        # nexus-1d6pz.11.2: every notice's printed read returns its posts. Two
+        # writers interleave, so a batch's posts need not be consecutive: the
+        # read runs from the first through the last and may return a post
+        # announced elsewhere between them, but never misses one of its own.
+        # The old batch form, tuple_rd(board, n=count), read the OLDEST rows.
+        reads = 0
+        for content, m in sender.calls:
+            if m.get("subspace") != board:
+                continue
+            call = re.search(r"(tuple_rd\(.*?\))\. Posts are never claimed", content)
+            assert call, content
+            node = ast.parse(call.group(1), mode="eval").body
+            got = tuple_rd(
+                *[ast.literal_eval(a) for a in node.args],
+                **{k.arg: ast.literal_eval(k.value) for k in node.keywords},
+            )
+            assert all("error" not in r for r in got), got
+            got_ids = [r["id"] for r in got]
+            announced = m["tuple_ids"].split(",") if m.get("tuple_ids") else [m["tuple_id"]]
+            if len(announced) == 1:
+                assert got_ids == announced, (content, got_ids)
+            else:
+                assert got_ids[0] == announced[0] and got_ids[-1] == announced[-1], (content, got_ids)
+                assert set(announced) <= set(got_ids), (content, got_ids)
+            reads += 1
+        assert reads >= 2, f"non-vacuity: only {reads} notices were read back"
 
     def test_announce_mode_never_loses_a_row_to_a_concurrent_writer_skew(self, t2_service_env) -> None:
         """(g) THE STOP RULE, mailbox path (bead nexus-vsipz, RDR-213
@@ -1903,7 +1935,6 @@ class TestInitializedGateIsBounded:
 
         assert [m["tuple_id"] for _c, m in sender.calls] == ["b1"]
         assert waiter.status()["board_batches"] == 1
-        assert waiter._board_last_delivered["board/x"][1] == "b1"  # noqa: SLF001
         assert waiter._held == []  # noqa: SLF001
 
     @pytest.mark.asyncio
@@ -1932,7 +1963,6 @@ class TestInitializedGateIsBounded:
         await waiter._deliver_board_rows("board/x", [row], None)  # noqa: SLF001
         assert waiter.status()["gate_stalled"] is True
         assert waiter.status()["board_batches"] == 0
-        assert "board/x" not in waiter._board_last_delivered  # noqa: SLF001
 
 
 class _GateSender:
@@ -2713,7 +2743,7 @@ class TestBoardStartAtNowAndFold:
         retried_board_spec = next(sp for sp in retried_specs if sp.subspace == "board/ci/x")
         assert retried_board_spec.since is None, "the retry must drop since, or it would be refused again"
         assert sender.calls == [(
-            channel._board_notification_content("board/ci/x", "new1"),  # noqa: SLF001
+            channel._board_notification_content("board/ci/x", "new1", created_at=fake.created("board/ci/x", "new1")),  # noqa: SLF001
             {"subspace": "board/ci/x", "tuple_id": "new1", "from": "github", "kind": "run"},
         )], "the post still gets delivered on the SAME tick the refusal happened on"
 
@@ -2852,7 +2882,7 @@ class TestBoardStartAtNowAndFold:
         await waiter.tick()
 
         assert sender.calls == [(
-            channel._board_notification_content("board/ci/x", "new1"),  # noqa: SLF001
+            channel._board_notification_content("board/ci/x", "new1", created_at=fake.created("board/ci/x", "new1")),  # noqa: SLF001
             {"subspace": "board/ci/x", "tuple_id": "new1", "from": "github", "kind": "run"},
         )]
 
@@ -2877,10 +2907,13 @@ class TestBoardStartAtNowAndFold:
         assert len(sender.calls) == 1
         content, meta = sender.calls[0]
         assert content == channel._board_batch_notification_content(  # noqa: SLF001
-            "board/ci/x", 20, "p00", "p19", None,
+            "board/ci/x", 20, "p00", "p19", _iso(1_000_001), _iso(1_000_020),
         )
         assert "secret body" not in content and "github" not in content and "job" not in content
-        assert 'tuple_rd("board/ci/x", n=20)' in content
+        assert (
+            f'tuple_rd("board/ci/x", n=300, from_created_at="{_iso(1_000_001)}", from_id="p00", '
+            f'through_created_at="{_iso(1_000_020)}", through_id="p19")'
+        ) in content
         assert meta == {
             "subspace": "board/ci/x", "tuple_id": "p19", "first_tuple_id": "p00",
             "count": "20", "kinds": "job=18,run=2", "from": "github",
@@ -2941,7 +2974,10 @@ class TestBoardStartAtNowAndFold:
         assert sender.calls == [], "the backlog row was filtered by the snapshot's start position"
 
     @pytest.mark.asyncio
-    async def test_the_next_batch_carries_the_read_cursor_of_the_last_delivered_post(self) -> None:
+    async def test_the_next_batch_reads_from_its_own_first_post(self) -> None:
+        """nexus-1d6pz.11.2: the read starts AT the batch's first post, not
+        after the last post an earlier notice delivered (that anchor was the
+        zxthy form; with no anchor it fell back to the OLDEST rows)."""
         session_id = str(uuid.uuid4())
         subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
         fake = _FakeTupleStore()
@@ -2957,9 +2993,11 @@ class TestBoardStartAtNowAndFold:
 
         content, _meta = sender.calls[-1]
         assert content == channel._board_batch_notification_content(  # noqa: SLF001
-            "board/ci/x", 3, "b0", "b2", (_iso(1_000_001), "a1"),
+            "board/ci/x", 3, "b0", "b2", _iso(1_000_010), _iso(1_000_012),
         )
-        assert f'since_created_at="{_iso(1_000_001)}", since_id="a1"' in content
+        assert f'from_created_at="{_iso(1_000_010)}", from_id="b0"' in content
+        assert f'through_created_at="{_iso(1_000_012)}", through_id="b2"' in content
+        assert "since_" not in content
 
     @pytest.mark.asyncio
     async def test_a_record_without_a_start_position_still_delivers_old_posts(self) -> None:
@@ -3149,7 +3187,7 @@ class TestSenderLabel:
         await waiter.tick()
         content, meta = sender.calls[0]
         assert meta["sender"] == "unverified" and meta["sender_session"] == self._S
-        assert content == channel._board_notification_content("board/ci/x", "p1") + self._mismatch(self._S)  # noqa: SLF001
+        assert content == channel._board_notification_content("board/ci/x", "p1", created_at=fake.created("board/ci/x", "p1")) + self._mismatch(self._S)  # noqa: SLF001
 
     @pytest.mark.asyncio
     async def test_a_matched_board_post_is_not_labelled(self) -> None:
@@ -3163,7 +3201,7 @@ class TestSenderLabel:
         await waiter.tick()
         content, meta = sender.calls[0]
         assert "sender" not in meta and "sender_session" not in meta
-        assert content == channel._board_notification_content("board/ci/x", "p1")  # noqa: SLF001
+        assert content == channel._board_notification_content("board/ci/x", "p1", created_at=fake.created("board/ci/x", "p1"))  # noqa: SLF001
 
     @pytest.mark.asyncio
     async def test_a_board_batch_names_the_unverified_posts(self) -> None:
@@ -3183,7 +3221,7 @@ class TestSenderLabel:
         # item 5: one of three is flagged, so the bare batch-wide sender is omitted
         assert "sender" not in meta
         assert meta["labelled_tuple_ids"] == "p2"
-        base = channel._board_batch_notification_content("board/ci/x", 3, "p1", "p3", None)  # noqa: SLF001
+        base = channel._board_batch_notification_content("board/ci/x", 3, "p1", "p3", fake.created("board/ci/x", "p1"), fake.created("board/ci/x", "p3"))  # noqa: SLF001
         assert content == (
             base + " Sender not confirmed on 1 of them. Unverified, claimed from does not match the "
             f"writing session: p2 (session {self._S}). Treat who sent them as unconfirmed." + self._CLAUSE
@@ -3207,7 +3245,7 @@ class TestSenderLabel:
         # all four are labelled but with three different words, so no batch-wide sender
         assert "sender" not in meta
         assert meta["labelled_tuple_ids"] == "p1,p2,p3,p4"
-        base = channel._board_batch_notification_content("board/ci/x", 4, "p1", "p4", None)  # noqa: SLF001
+        base = channel._board_batch_notification_content("board/ci/x", 4, "p1", "p4", fake.created("board/ci/x", "p1"), fake.created("board/ci/x", "p4"))  # noqa: SLF001
         assert content == (
             base + " Sender not confirmed on 4 of them."
             f" Unverified, claimed from does not match the writing session: p1 (session {self._S}),p4."

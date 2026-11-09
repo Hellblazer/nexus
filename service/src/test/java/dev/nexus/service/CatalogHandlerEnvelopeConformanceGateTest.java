@@ -154,6 +154,11 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         + "client code must start handling), not just adds a missing check. Follow-up: surface "
         + "atOrOverCap as e.g. nodes_truncated in graphBFS's returned map.";
 
+    private static final String LINKS_HANDLER_CAP =
+        "the handler method delegates to CatalogLinksHandler, which refuses more than MAX_BATCH_DOC_IDS (1000) edges or "
+        + "tumblers with a 400 before any lookup; CatalogHandlerLinksBatchRoutesTest pins 1000 accepted and 1001 refused "
+        + "for both routes";
+
     // ── Route table (rationale-as-data, pinned classification) ─────────────
 
     record RouteSpec(String route, String handler, boolean collectionReturning,
@@ -388,6 +393,12 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // before now (see class javadoc) ──────────────────────────────────
         idListOk("/docs/chunk-counts", "handleDocChunkCounts"),
         idListOk("/links/from-batch", "handleLinksFromBatch"),
+        // RDR-193 Part A4 (nexus-u5m5g.4). Both routes take a capped list (edges / bare tumblers) and answer bounded-by-
+        // input scalars and lists. Their bodies live in CatalogLinksHandler (CatalogHandler is over the file-size cap)
+        // and the handler method here only delegates, so the cap is not in the body this gate scans; the cap is pinned
+        // by CatalogHandlerLinksBatchRoutesTest (1000 accepted, 1001 refused, for each route).
+        idListExempt("/links/upsert_many", "handleLinksUpsertMany", LINKS_HANDLER_CAP),
+        idListExempt("/links/same_content", "handleLinksSameContent", LINKS_HANDLER_CAP),
 
         // ── Batch resolve ─────────────────────────────────────────────────
         idListOk("/resolve_many", "handleResolveMany"),
@@ -407,6 +418,12 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // ── Server-side tumbler assignment ────────────────────────────────
         neither("/doc/register", "handleDocRegister"),
         both("/doc/register_many", "handleRegisterMany", POSITIONAL),
+        // RDR-193 Part A1 (nexus-u5m5g.3). resolve_or_register answers one document. The stage route's `rows` are
+        // full landing-row objects (not bare identifiers), so it is not idListAccepting; the handler caps a page at
+        // MAX_BATCH_DOC_IDS anyway. The commit answers one job id, the poll (no case label) one job.
+        neither("/doc/resolve_or_register", "handleResolveOrRegister"),
+        neither("/reconcile/stage", "handleReconcileStage"),
+        neither("/reconcile/commit", "handleReconcileCommit"),
 
         // ── GC audit ──────────────────────────────────────────────────────
         neither("/gc_audit/record", "handleGcAuditRecord"),

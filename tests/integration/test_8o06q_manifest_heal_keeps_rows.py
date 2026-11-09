@@ -86,19 +86,22 @@ class _Doc:
     ``rows`` maps chunk name -> manifest position for the rows A's manifest holds (none for a
     manifest-less document); ``chunk_count`` is A's own count. Every chunk named in ``chunks``
     carries A's file hash unless listed in ``other_hash`` (a chunk another document wrote last).
+    ``a_collection`` is the physical collection A is registered in (default: the collection the chunks
+    are seeded in); a name that does not exist makes A a document the heal marks as lost (nexus-v9xwj).
     """
 
     def __init__(
         self, tag: str, chunks: list[str], rows: dict[str, int], chunk_count: int,
-        other_hash: tuple[str, ...] = (),
+        other_hash: tuple[str, ...] = (), a_collection: str | None = None,
     ) -> None:
         self.collection = f"docs__{tag}__bge-base-en-v15-768__v1"
+        self.a_collection = a_collection or self.collection
         self.h_a, self.h_b = _chash(f"{tag}-file-a"), _chash(f"{tag}-file-b")
         self.ch = {n: _chash(f"{tag}-{n}") for n in chunks}
         with HttpCatalogClient() as cat:
             owner = cat.register_owner(f"{tag}-owner", "repo", repo_hash=f"{tag}-hash")
             self.a = str(cat.register(
-                owner, "Doc A", content_type="pdf", physical_collection=self.collection,
+                owner, "Doc A", content_type="pdf", physical_collection=self.a_collection,
                 chunk_count=chunk_count, meta={"content_hash": self.h_a},
             ))
             self.b = str(cat.register(
@@ -447,12 +450,18 @@ def test_reconcile_names_the_real_route_and_dry_run_changes_nothing(
 # -- manifest-less documents the heal cannot rebuild (nexus-v9xwj) ---------------------------------
 
 
+def _gone(tag: str) -> str:
+    """A physical collection name no collection has: a document registered there is lost for a reason the
+    heal can state (its collection is absent from the service's listing), whatever its chunks carry."""
+    return f"docs__{tag}-gone__bge-base-en-v15-768__v1"
+
+
 def _fence_complete_over_no_rows(d: "_Doc", chunk_count: int) -> None:
     """Leave A fenced ``complete`` at its file hash with no manifest rows and ``chunk_count``
     chunks owed: the state a document is in when its rows were lost after a run finished. The
     engine will not complete a fence over rows short of ``chunk_count``, so the fence is
     completed at zero and the count put back."""
-    d.writer.begin_index_run(d.a, d.h_a, f"run-{d.a}", d.collection)
+    d.writer.begin_index_run(d.a, d.h_a, f"run-{d.a}", d.a_collection)
     d.writer.complete_index_run(d.a, d.h_a, 0)
     d.writer.update(d.a, chunk_count=chunk_count)
     assert _state(d.reader, d.a) == "complete"
@@ -460,12 +469,28 @@ def _fence_complete_over_no_rows(d: "_Doc", chunk_count: int) -> None:
     assert d.entry().chunk_count == chunk_count
 
 
+def test_a_manifestless_document_with_no_chunk_under_its_hash_is_reported_not_marked() -> None:
+    """RDR-236 Phase 4 Step 1: A holds no manifest rows and says it owes 2 chunks; T3 has one chunk,
+    stamped by another document (B) as the later writer, and none carrying A's hash. A chunk row written
+    since Step 1 carries no content hash at all, so the miss does not say A's chunks are gone: the heal
+    books A LOST, says why it did not mark it, and leaves its fence alone."""
+    d = _Doc("v9xwj-nohash", ["s"], {}, 2, other_hash=("s",))
+    _fence_complete_over_no_rows(d, 2)
+
+    result = _heal(d.reader, [d.entry()])
+
+    assert [str(e.tumbler) for e in result.lost] == [d.a]
+    assert _state(d.reader, d.a) == "complete"
+    assert result.reindex == []
+    assert "RDR-236" in result.lost_unmarked_why[d.a], result.lost_unmarked_why
+    assert d.reader.get_manifest(d.a) == [], "nothing written into the document"
+
+
 def test_a_lost_manifestless_document_is_marked_for_re_index() -> None:
-    """A holds no manifest rows and says it owes 2 chunks; T3 has one chunk, stamped by another
-    document (B) as the later writer, and none carrying A's hash. The heal finds nothing to
-    rebuild A from and books it LOST. It also fails A's fence, so a document that is not indexed
+    """A holds no manifest rows, says it owes 2 chunks and is registered in a collection the service
+    does not list: the heal books it LOST. It also fails A's fence, so a document that is not indexed
     does not read 'complete'. The old heal only reported it."""
-    d = _Doc("v9xwj-lost", ["s"], {}, 2, other_hash=("s",))
+    d = _Doc("v9xwj-lost", ["s"], {}, 2, other_hash=("s",), a_collection=_gone("v9xwj-lost"))
     _fence_complete_over_no_rows(d, 2)
 
     result = _heal(d.reader, [d.entry()])
@@ -559,8 +584,8 @@ def test_a_never_chunked_document_is_not_marked() -> None:
 
 
 def test_a_lost_document_whose_fence_is_indexing_is_skipped() -> None:
-    d = _Doc("v9xwj-busy", ["s"], {}, 2, other_hash=("s",))
-    d.writer.begin_index_run(d.a, d.h_a, "run-v9xwj-busy", d.collection)
+    d = _Doc("v9xwj-busy", ["s"], {}, 2, other_hash=("s",), a_collection=_gone("v9xwj-busy"))
+    d.writer.begin_index_run(d.a, d.h_a, "run-v9xwj-busy", d.a_collection)
 
     result = _heal(d.reader, [d.entry()])
 
@@ -586,10 +611,10 @@ def _first_manifest_read_sees_no_rows(d: "_Doc", monkeypatch) -> None:
 
 
 def test_a_lost_document_that_a_run_gave_rows_since_the_snapshot_is_not_failed_as_lost(monkeypatch) -> None:
-    """The snapshot says no rows (and no chunk of A's hash is in T3, so A is LOST); a run landed
+    """The snapshot says no rows (and A's collection is not listed, so A is LOST); a run landed
     the rows before the heal reached the document. It is judged as a document with rows (here:
     rows equal to its count, so not gapped, so untouched) and the report says why."""
-    d = _Doc("v9xwj-landed", ["s", "p"], {}, 2, other_hash=("s", "p"))
+    d = _Doc("v9xwj-landed", ["s", "p"], {}, 2, other_hash=("s", "p"), a_collection=_gone("v9xwj-landed"))
     _fence_complete_over_no_rows(d, 2)
     snapshot = d.entry()
     d.writer.write_manifest(
@@ -608,7 +633,7 @@ def test_a_lost_document_that_a_run_gave_rows_since_the_snapshot_is_not_failed_a
 def test_a_lost_document_that_a_run_re_indexed_as_empty_since_the_snapshot_says_why() -> None:
     """The snapshot owes 2 chunks; a run moved ``chunk_count`` to 0 before the heal reached the
     document: it owes nothing, is not marked, and the report says so."""
-    d = _Doc("v9xwj-emptied", ["s"], {}, 2, other_hash=("s",))
+    d = _Doc("v9xwj-emptied", ["s"], {}, 2, other_hash=("s",), a_collection=_gone("v9xwj-emptied"))
     _fence_complete_over_no_rows(d, 2)
     snapshot = d.entry()
     d.writer.update(d.a, chunk_count=0)
@@ -621,7 +646,7 @@ def test_a_lost_document_that_a_run_re_indexed_as_empty_since_the_snapshot_says_
 
 
 def test_dry_run_reports_a_lost_document_as_to_be_marked_and_fails_no_fence() -> None:
-    d = _Doc("v9xwj-dry", ["s"], {}, 2, other_hash=("s",))
+    d = _Doc("v9xwj-dry", ["s"], {}, 2, other_hash=("s",), a_collection=_gone("v9xwj-dry"))
     _fence_complete_over_no_rows(d, 2)
 
     dry = _heal(d.reader, [d.entry()], dry_run=True)
@@ -636,7 +661,7 @@ def test_dry_run_reports_a_lost_document_as_to_be_marked_and_fails_no_fence() ->
 def test_reconcile_lists_a_lost_document_and_says_it_was_marked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    d = _Doc("v9xwj-cli", ["s"], {}, 2, other_hash=("s",))
+    d = _Doc("v9xwj-cli", ["s"], {}, 2, other_hash=("s",), a_collection=_gone("v9xwj-cli"))
     _fence_complete_over_no_rows(d, 2)
     monkeypatch.setenv("HOME", str(tmp_path))
     runner = CliRunner()
@@ -661,8 +686,8 @@ def test_reconcile_says_why_a_lost_document_was_not_marked(
 ) -> None:
     """A lost document the heal stands down on (an index run holds its fence) is listed LOST with
     the reason, not a bare ``LOST``."""
-    d = _Doc("v9xwj-cli-busy", ["s"], {}, 2, other_hash=("s",))
-    d.writer.begin_index_run(d.a, d.h_a, "run-v9xwj-cli-busy", d.collection)
+    d = _Doc("v9xwj-cli-busy", ["s"], {}, 2, other_hash=("s",), a_collection=_gone("v9xwj-cli-busy"))
+    d.writer.begin_index_run(d.a, d.h_a, "run-v9xwj-cli-busy", d.a_collection)
     monkeypatch.setenv("HOME", str(tmp_path))
 
     with patch("nexus.config.get_credential", side_effect=fake_credentials()):

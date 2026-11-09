@@ -146,7 +146,9 @@ def render_row(subspace: str, row: TupleRow) -> str:
         return channel._mailbox_notification_content(  # noqa: SLF001 — see above
             subspace, row.id, subspace.removeprefix("mailbox/"), case=case, session=session,
         )
-    return channel._board_notification_content(subspace, row.id, case=case, session=session)  # noqa: SLF001 — see above
+    return channel._board_notification_content(  # noqa: SLF001 — see above
+        subspace, row.id, created_at=row.created_at, case=case, session=session,
+    )
 
 
 def _process(

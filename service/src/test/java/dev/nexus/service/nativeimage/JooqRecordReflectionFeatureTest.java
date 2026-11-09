@@ -300,7 +300,13 @@ class JooqRecordReflectionFeatureTest {
     // 128 -> 129: nexus-4lnn1.1.2 (RDR-230 P1.2a), vectors-054-canary-query-ring.xml added the table
     // nexus.canary_query_ring (CanaryQueryRingRecord) and nexus.canary_query_ring_upsert, which RETURNS integer
     // (a scalar, no Record type), +1.
-    private static final int EXPECTED_RECORD_TYPES = 129;
+    // 129 -> 131: nexus-u5m5g.3 (RDR-193 Part A1), catalog-048-reconcile.xml added the tables nexus.catalog_reconcile_runs
+    // (CatalogReconcileRunsRecord) and nexus.catalog_reconcile_rows (CatalogReconcileRowsRecord); the commit function
+    // returns jsonb and the reap returns integer (scalars, no Record type), +2.
+    // 131 -> 132: nexus-u5m5g.4 (RDR-193 Step 3), catalog-048-5 added nexus.catalog_links_upsert_many, a RETURNS TABLE
+    // function (CatalogLinksUpsertManyRecord); catalog_link_endpoint returns text and catalog_link_same_content jsonb
+    // (scalars, no Record type), +1.
+    private static final int EXPECTED_RECORD_TYPES = 132;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

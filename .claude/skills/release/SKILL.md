@@ -325,6 +325,7 @@ Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 
 ### 4. Update both changelogs
 
+- Changelog fragments first: `python3 scripts/changelog_fold.py fold` moves every `changelog/unreleased/*.md` fragment under `CHANGELOG.md`'s `## [Unreleased]` (grouped by section, oldest first) and deletes the fragments; stage the deletions with `git add -- changelog/unreleased` (nexus-3ceda.2). On a release branch that cherry-picks rather than merges develop, fold only the fragments it carries.
 - `CHANGELOG.md` (root): move `## [Unreleased]` content into a new `## [X.Y.Z] - YYYY-MM-DD` section. Leave a fresh empty `## [Unreleased]` at the top.
 - `conexus/CHANGELOG.md` (plugin changelog): always update, even if no plugin changes (note: "Plugin version aligned with conexus X.Y.Z. No plugin-side changes." is acceptable).
 
@@ -334,7 +335,7 @@ Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f && /^- \*\*/{k=substr($0,1,70); if (seen[k]++) {print "DUPLICATE OPENING: " k; bad=1}; n++} END{print n+0 " bullets examined"; exit bad}' CHANGELOG.md
 ```
 
-When a pair shares an opening, keep the newest version (the one carrying the latest round's wording). `0 bullets examined` is a pass over nothing, not a clean Unreleased.
+When a pair shares an opening, keep the newest version (the one carrying the latest round's wording). `0 bullets examined` is a pass over nothing, not a clean Unreleased. Since changelog fragments (nexus-3ceda.2) develop's `## [Unreleased]` holds no bullets, so run this after `changelog_fold.py fold`, or on the release section, not on develop's tip.
 
 For `docs/wire-contract-pending.md`, the same keep-both slip duplicates ledger entries and their cited shas. Check the entry lines after the resolution:
 
@@ -853,6 +854,13 @@ generations of 7.69.0 minutes after 7.70.0 published (2026-10-04): read
 `nx --version`, never the "built generation" line. Before handing Sam the
 command:
 
+- Before `--ask-ready`, post the upgrade hold on the board and message every
+  live peer: hold, stop ALL background shells and agents with TaskStop
+  (finished agents' included, not only foreground runs), then reply READY.
+  The releaser cannot stop a peer's shells, and `--ask-ready` types only to an
+  idle session, so a session pinned at `shell` is never asked and is skipped
+  after `--wait` (kimi_nexus_edb, 2026-10-26).
+
 - Read the dry run's `-n` values against ListAgents. A restart keeps each
   session's CURRENT name (Sam, 2026-10-31); before the script dropped the launch
   `-n`, every `/rename`d session would have come back as `nexus_7ff`.
@@ -965,6 +973,14 @@ git add CHANGELOG.md conexus/PENDING_RELEASE.md
 git cherry-pick --continue
 ```
 
+A picked commit may carry a root changelog fragment (`changelog/unreleased/`,
+nexus-3ceda.2). When the base tag predates fragments (`git cat-file -e
+vX.Y.Z:scripts/changelog_fold.py` fails), its eligibility script does not free that
+path: pick with `git cherry-pick -n -x <sha>`, `git rm` the fragment, commit, and
+write its bullet into the vX.Y.N section by hand at Step 4. When the tag has the
+script, Step 4's `changelog_fold.py fold` runs on the branch as written. Either
+way the back-merge into develop deletes the shipped fragments (below).
+
 A conflict in a plugin file means the pick depends on a commit you skipped:
 `git cherry-pick --abort`, and defer that entry and every entry that builds on
 it to the next normal release. A commit that also touches `src/` or `service/`
@@ -1048,7 +1064,10 @@ On 7.87.1 only `CHANGELOG.md` conflicted: the ledger merged cleanly to develop's
 side, because each cherry-pick's ledger conflict was resolved to the tag's side, so
 main never changed the file. Clean is not done: delete the shipped entries and
 move the `## Awaiting the next release (pinned: ...)` heading to vX.Y.N by hand.
-Changelogs, in this order: develop's `## [Unreleased]` first, with the entries that
+Changelog fragments: a cherry-picked fragment was added and folded on main inside
+this range, so the merge does not delete develop's copy; `git rm` each
+`changelog/unreleased/` fragment that shipped in X.Y.N in this merge, or the next
+release folds it again. Changelogs, in this order: develop's `## [Unreleased]` first, with the entries that
 shipped in X.Y.N deleted from it, then main's `## [X.Y.N]` section, then the older
 sections. `conexus/PENDING_RELEASE.md`: develop's side minus the entries that
 shipped (the deferred ones and any plugin commit not picked stay pending). A

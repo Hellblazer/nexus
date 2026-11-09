@@ -243,7 +243,7 @@ def _fold(text: str, platform: str | None = None) -> str:
     """*text* case-folded on Windows, unchanged elsewhere.
 
     NTFS paths compare case-insensitively, so a process whose argv spells a
-    generation in another case (``C:\\Users\\Sam`` against ``c:\\users\\sam``,
+    generation in another case (``C:\\Users\\RUNNER`` against ``c:\\users\\runner``,
     both of which an installer, a shell and a task definition produce) still runs
     from it. This is ``os.path.normcase``'s folding; its separator swap is not
     wanted here, because :func:`_boundary_text` has already spelt the paths with

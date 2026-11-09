@@ -79,15 +79,20 @@ def parse_where(
     Supported operators: ``=``, ``>=``, ``<=``, ``>``, ``<``, ``!=``.
     Known numeric fields are auto-coerced to int/float.
 
-    Multiple pairs are ANDed via ``$and`` when operator nesting is present,
-    or merged into a flat dict for simple equality filters.
+    Multiple pairs on distinct keys merge into one flat dict: every key in it
+    must hold, and the engine ANDs the fields of one dict. It refuses a
+    ``$and`` key outright, so this never returns one (nexus-3ceda.11: a
+    two-clause filter with an operator, ``content_type=pdf,bib_year>=2020``,
+    used to become ``$and`` and failed every collection with an HTTP 400).
     Returns ``None`` when *pairs* is empty.
 
-    Raises ``ValueError`` on invalid format, empty values, or a repeated
-    equality key (``k=a`` + ``k=b``) — no record can equal two different
-    values, so this is never a legitimate AND; scope "any of several
-    exact values" as two queries unioned client-side (single-key ``$in``
-    support tracked as nexus-4gzc8).
+    Raises ``ValueError`` on invalid format, empty values, or a repeated key.
+    A repeated equality key (``k=a`` + ``k=b``) is never a legitimate AND: no
+    record can equal two different values, so scope "any of several exact
+    values" as two queries unioned client-side (single-key ``$in`` support
+    tracked as nexus-4gzc8). A repeated key with an operator (a range on one
+    field, ``bib_year>=2020`` + ``bib_year<=2024``, or ``k!=a`` + ``k!=b``) has
+    no engine form yet: the engine holds one condition per field.
     """
     if not pairs:
         return None
@@ -120,43 +125,61 @@ def parse_where(
             parts.append({key: {chroma_op: value}})
     if not parts:
         return None
-    if len(parts) == 1:
-        return parts[0]
-    if all(not isinstance(v, dict) for p in parts for v in p.values()):
-        # nexus-1oguj review / nexus-4gzc8: a naive dict.update() here
-        # silently overwrites on a repeated equality key — `--where k=a
-        # --where k=b` used to land on k=b with zero signal that k=a was
-        # ever requested (e.g. scoping extraction_method=mineru AND
-        # extraction_method=pymupdf, which is not an AND
-        # at all — no chunk can equal both). ChromaDB's equality filter
-        # has no single-key OR/$in at this layer yet (tracked as
-        # nexus-4gzc8); today the correct way to scope "any of several
-        # exact values for one key" is two separate queries unioned
-        # client-side. Fail loud instead of silently keeping the last
-        # value.
-        merged: dict = {}
-        for p in parts:
-            for key, value in p.items():
-                if key in merged and merged[key] != value:
-                    raise ValueError(
-                        f"duplicate --where key {key!r} with different "
-                        f"values: {merged[key]!r} and {value!r}. "
-                        "A single equality filter can only match one "
-                        "value per key — this is not an AND (no record "
-                        "can equal both). To scope 'any of several exact "
-                        f"values for {key!r}', run two queries (one per "
-                        "value) and union the results client-side; "
-                        "single-key $in support is tracked as nexus-4gzc8."
-                    )
-                if key in merged:
-                    raise ValueError(
-                        f"duplicate --where key {key!r} repeated with "
-                        f"the same value {value!r} — remove the "
-                        "redundant --where clause."
-                    )
+    # nexus-1oguj review / nexus-4gzc8: a naive dict.update() here silently
+    # overwrites on a repeated key — `--where k=a --where k=b` used to land on
+    # k=b with zero signal that k=a was ever requested. Fail loud instead.
+    merged: dict = {}
+    for p in parts:
+        for key, value in p.items():
+            if key not in merged:
                 merged[key] = value
-        return merged
-    return {"$and": parts}
+                continue
+            if isinstance(value, dict) or isinstance(merged[key], dict):
+                both = f"{_clause_text(key, merged[key])} and {_clause_text(key, value)}"
+                if _is_range(value) and _is_range(merged[key]):
+                    raise ValueError(
+                        f"--where has two conditions on {key!r} ({both}): a range on "
+                        "one field is not supported yet, because the engine takes one "
+                        "condition per field. Filter on one bound and drop the results "
+                        "outside the other yourself."
+                    )
+                raise ValueError(
+                    f"--where has two conditions on {key!r} ({both}): the engine "
+                    "takes one condition per field. Keep the one that narrows the "
+                    "results most and drop the rest yourself."
+                )
+            if merged[key] != value:
+                raise ValueError(
+                    f"duplicate --where key {key!r} with different "
+                    f"values: {merged[key]!r} and {value!r}. "
+                    "A single equality filter can only match one "
+                    "value per key — this is not an AND (no record "
+                    "can equal both). To scope 'any of several exact "
+                    f"values for {key!r}', run two queries (one per "
+                    "value) and union the results client-side; "
+                    "single-key $in support is tracked as nexus-4gzc8."
+                )
+            raise ValueError(
+                f"duplicate --where key {key!r} repeated with "
+                f"the same value {value!r} — remove the "
+                "redundant --where clause."
+            )
+    return merged
+
+
+_OP_TEXT: dict[str, str] = {op: text for text, op in _OP_MAP.items() if op is not None}
+
+
+def _is_range(value: object) -> bool:
+    return isinstance(value, dict) and set(value) <= _RANGE_OPS
+
+
+def _clause_text(key: str, value: object) -> str:
+    """``bib_year>=2020`` for ``{"$gte": 2020}``: the clause as the user typed it."""
+    if isinstance(value, dict):
+        ((op, operand),) = value.items()
+        return f"{key}{_OP_TEXT.get(op, op)}{operand}"
+    return f"{key}={value}"
 
 
 def parse_where_str(where_str: str) -> dict | None:

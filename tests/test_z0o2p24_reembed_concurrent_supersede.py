@@ -42,6 +42,9 @@ class _RecordingHooks:
     def fire_store_chains(self, ids, collection, documents, **_kwargs) -> None:
         self.fired.append(list(ids))
 
+    def without_batch(self, fn):
+        return self  # a re-embed drops the manifest hook from the registry it fires (RDR-236 Phase 4 Step 1)
+
 
 def _put_note(client, *, title: str, content: str) -> tuple[str, str]:
     """Write one note through the real combined write; returns ``(tumbler, chash)``."""

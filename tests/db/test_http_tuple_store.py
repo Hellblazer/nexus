@@ -72,6 +72,7 @@ from nexus.db.t2.http_tuple_store import (
     _raise_typed,
 )
 from nexus.db.t2.records import Announce, ParkStats, TupleRow, WaitResult, WaitSpec
+from tests._settle import settle
 
 
 @pytest.fixture(autouse=True)
@@ -403,12 +404,16 @@ class TestRelease:
             nonce=_uniq("nonce"),
         )
         _row, claim_id = store.in_(f"mailbox/{addr}", {"to": addr}, claimant="holder", lease_s=30)
+        waiter = _uniq("waiter")  # per-claimant park counts are JVM-global: a run-unique claimant
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(
-                store.in_, f"mailbox/{addr}", {"to": addr}, claimant="waiter", lease_s=30, timeout_s=8,
+                store.in_, f"mailbox/{addr}", {"to": addr}, claimant=waiter, lease_s=30, timeout_s=8,
             )
-            time.sleep(1.0)  # let the background call reach its actual park
+            settle(
+                lambda: store.park_stats().per_claimant.get(waiter, 0) < 1 and f"{waiter} not parked",
+                what="the background in_'s park",
+            )
             store.release(claim_id, "holder")
             result = future.result(timeout=10)
         assert result is not None, "release must signal the parked in after commit"
@@ -656,10 +661,12 @@ class TestParkCapExceeded:
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             futures = [pool.submit(_park, 8) for _ in range(4)]
-            # Give the 4 background calls time to reach the actual park
-            # (past their own non-blocking first probe) before this thread
-            # issues the 5th.
-            time.sleep(2.0)
+            # The 4 background calls must reach the actual park (past their
+            # own non-blocking first probe) before this thread issues the 5th.
+            settle(
+                lambda: (n := store.park_stats().per_claimant.get(claimant, 0)) < 4 and {"parked": n},
+                what="the four background parks",
+            )
 
             with pytest.raises(ParkCapExceededError) as exc_info:
                 store.in_(subspace, pattern, claimant=claimant, lease_s=30, timeout_s=8)
@@ -1262,6 +1269,8 @@ class TestWait:
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(store.wait, specs, 8)
+            # A dwell, not a settle: wait() parks with no claimant, and the only
+            # gauge is engine-wide, so other xdist workers' parks move it.
             time.sleep(1.0)  # let the background call reach its actual park
             store.out(
                 f"mailbox/{addr_b}", {"to": addr_b}, {"from": "sender"}, "arrived",
@@ -1419,6 +1428,8 @@ class TestParkStats:
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(store.rd, f"mailbox/{addr}", {"to": addr}, timeout_s=6)
+            # A dwell, not a settle: rd() parks with no claimant, and the only
+            # gauge is engine-wide, so other xdist workers' parks move it.
             time.sleep(1.5)  # let the background call reach its actual park
             during = store.park_stats().global_in_use
             assert during > before, (

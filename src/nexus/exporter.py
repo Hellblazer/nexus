@@ -284,30 +284,49 @@ def _owners_apply(db: object) -> bool:
     return is_service_backed(db)
 
 
-def _import_chunk_metadata(meta: dict, *, shared: bool) -> dict:
-    """The metadata an import sends for one chunk row (nexus-6pfgb.18, RDR-236 R2 on import).
+def _import_chunk_metadata(meta: dict) -> dict:
+    """The metadata an import sends for one chunk row: the CHUNK keys of the export record, nothing else
+    (nexus-6pfgb.18, RDR-236 R2 on import; RDR-236 Phase 4 Step 1, nexus-6pfgb.65).
 
     An export record carries the row as it stood: the document keys its LAST writer stamped (title,
     tags, category, bib_*, ttl_days, indexed_at, content_hash, ...) and the position keys of the
-    position that writer held. Merged onto the target row they restamp what every other document
-    owning that chunk reads back. A document's own keys belong to the catalog entry the import
-    registers and to its manifest row, so the payload keeps only:
-
-    * the CHUNK keys of the key table (``chunk_text_hash``, ``embedding_model``): the chash or the
-      embedding model determines them, so every owner agrees;
-    * the POSITION keys (spans, page, section), only for a row no other live document owns here
-      (*shared* false): the engine's label stage reads them off the written row to fill the
-      document's manifest row, and nothing else holds them yet. A shared row keeps the position keys
-      its owners wrote.
-
-    Everything else (DOCUMENT, LEGACY, ROW and keys outside the table) is left out; the writer merges
-    metadata, so a key left out is a key the target row keeps. The table is the key list; none is
-    kept here.
+    position that writer held. Merged onto the target row they restamp what every other document owning
+    that chunk reads back. A document's own keys belong to the catalog entry the import registers, and a
+    chunk's position (spans, page, section) belongs to the document's manifest row
+    (:func:`_import_manifest_positions`), so the chunk payload keeps only the CHUNK keys of the key table
+    (``chunk_text_hash``, ``embedding_model``): the chash or the embedding model determines them, so
+    every owner agrees. Everything else (DOCUMENT, POSITION, LEGACY, ROW and keys outside the table) is
+    left out; the writer merges metadata, so a key left out is a key the target row keeps. The table is
+    the key list; none is kept here.
     """
     keep = _key_table.keys_of("CHUNK")
-    if not shared:
-        keep = keep | _key_table.keys_of("POSITION")
     return {k: v for k, v in (meta or {}).items() if k in keep}
+
+
+def _import_manifest_positions(meta: dict, *, shared: bool) -> dict:
+    """The span and label keys an import puts on one MANIFEST row, from the export record's row metadata.
+
+    A record written before Phase 4 Step 1 carries the position keys of the position its last writer held;
+    they are this document's own only for a chunk no other live document owns here (*shared* false), so a
+    shared chunk sends none and its manifest row stays legacy (a reader falls back, as before). A record
+    that carries no position key at all (written since Step 1) also sends none: sending labels would
+    mark the row's empty labels authoritative. The keys are named as the manifest row names them
+    (``mcp_infra._manifest_chunk_rows``), and the engine's label stage no longer has to read them off the
+    written chunk row, which carries no position key.
+    """
+    if shared:
+        return {}
+    from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred to avoid import cycle
+    from nexus.metadata_schema import positions_of_row  # noqa: PLC0415 — deferred to avoid import cycle
+
+    positions = positions_of_row(meta or {})
+    positions.pop("chunk_index", None)
+    if not positions:
+        return {}
+    (row,) = _manifest_chunk_rows([(0, {}, positions)])
+    return {k: row[k] for k in (
+        "line_start", "line_end", "char_start", "char_end", "section_title", "section_type", "page_number",
+    ) if k in row}
 
 
 def _entry_fence(entry: Any) -> tuple[str, str]:
@@ -1327,13 +1346,18 @@ class _OwnerImport:
         # enforcement.
         already = self._existing_ids([r.rec_id for recs in recs_by_doc.values() for r in recs])
         shared = self._shared_chashes(recs_by_doc)
+        # A document's own span and labels ride on its manifest rows (RDR-236 Phase 4 Step 1): the chunk
+        # payload below carries the CHUNK keys only. rows_by_doc[doc] and recs_by_doc[doc] are parallel.
+        for doc, rows in rows_by_doc.items():
+            for row, r in zip(rows, recs_by_doc[doc], strict=True):
+                row.update(_import_manifest_positions(r.meta, shared=r.rec_id in shared))
         chunks: dict[str, dict] = {}
         for recs in recs_by_doc.values():
             for r in recs:
                 if r.rec_id not in already and r.rec_id not in chunks:
                     chunks[r.rec_id] = {
                         "chash": r.rec_id, "text": r.doc, "embedding": r.emb,
-                        "metadata": _import_chunk_metadata(r.meta, shared=r.rec_id in shared),
+                        "metadata": _import_chunk_metadata(r.meta),
                     }
         result = writer.write_page(rows_by_doc, chunks)
         self.vector_mismatches += result.vector_mismatches

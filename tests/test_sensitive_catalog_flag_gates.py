@@ -801,6 +801,9 @@ class _NullHooks:
     def fire_store_chains(self, *a, **k) -> None:
         return None
 
+    def without_batch(self, fn):
+        return self  # a re-embed drops the manifest hook from the registry it fires (RDR-236 Phase 4 Step 1)
+
 
 # --------------------------------------------------------------------------- #
 # Notes: nx store put, MCP store_put, nx memory promote and the recovery import all write through put_note.

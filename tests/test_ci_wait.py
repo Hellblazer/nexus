@@ -1,0 +1,524 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""nexus-1d6pz.11.4: ``nx ci wait <sha>``, a wake for a session launched
+without the channel: the outcome reduction, the row parsing, the wait (a row
+already there and the newer of two rerun rows, a row after several parks, a
+timeout) and the CLI's line and exit code.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+from click.testing import CliRunner
+
+from nexus import ci_wait
+from nexus.commands import ci_cmd
+from nexus.commands.ci_cmd import ci_group
+from nexus.db.t2.records import TupleRow
+
+SHA = "a0dc17ec284ffce6d4ff5264a626b7ef8e1a293a"
+OTHER = "261600dab59f41455dd633b7d1e2a1ff7a4880de"
+
+
+def _row(body: object, tid: str = "t1", dims: dict[str, str] | None = None) -> TupleRow:
+    return TupleRow(
+        id=tid, subspace="board/ci/x--done", template="board/ci/<topic>", keys={}, dims=dims or {},
+        body=body if isinstance(body, str) else json.dumps(body), claim_state=None, claimant=None, lease_until=None, attempts=0,
+        consumed_at=None, consumed_by=None, expires_at=None, created_at="2026-11-08T12:00:00Z",
+    )
+
+
+class TestReduction:
+    @pytest.mark.parametrize(("conclusions", "outcome"), [
+        (["success"], "success"),
+        (["success", "neutral", "skipped"], "success"),
+        (["success", "failure"], "failure"),
+        (["cancelled", "timed_out"], "failure"),
+        (["startup_failure"], "failure"),
+        (["action_required", "success"], "failure"),
+        (["success", "cancelled"], "cancelled"),
+        (["stale"], "cancelled"),
+        (["success", None], None),
+        ([None, "failure"], "failure"),
+        (["success", "something_new"], None),
+    ])
+    def test_reduce(self, conclusions, outcome) -> None:
+        assert ci_wait.reduce_outcome(conclusions) == outcome
+
+    @pytest.mark.parametrize(("outcome", "code"), [
+        ("success", 0), ("failure", 1), ("cancelled", 3), (None, 4),
+    ])
+    def test_exit_codes(self, outcome, code) -> None:
+        assert ci_wait.wait_exit_code(outcome) == code
+
+
+class TestParse:
+    def test_a_pre_11_1_row_has_unknown_conclusions(self) -> None:
+        done = ci_wait.parse_done_row(_row(
+            {"state": "concluded", "sha": SHA, "runs": [[42, 1], [43, 2]], "url": "u"},
+        ))
+        assert done is not None
+        assert [(r.run_id, r.attempt, r.workflow, r.conclusion) for r in done.runs] == [
+            (42, 1, None, None), (43, 2, None, None),
+        ]
+
+    def test_an_11_1_row_carries_workflow_and_conclusion(self) -> None:
+        done = ci_wait.parse_done_row(_row(
+            {"state": "concluded", "sha": SHA, "runs": [[42, 1, "CI", "success"]], "url": "u"},
+        ))
+        assert done is not None and done.runs[0].workflow == "CI" and done.runs[0].conclusion == "success"
+
+    @pytest.mark.parametrize("body", [
+        "not json", {"runs": []}, {"sha": SHA, "runs": [[1]]}, {"sha": SHA, "runs": [[None, 1]]},
+        {"sha": SHA, "runs": [["x", 1]]}, {"sha": SHA, "runs": 5}, {"sha": SHA, "runs": [[1, None]]},
+        {"sha": SHA, "runs": [[True, 1]]}, '{"sha": "%s", "runs": [[1e999, 1]]}' % SHA,
+    ])
+    def test_a_body_that_is_not_a_done_body_is_none(self, body) -> None:
+        assert ci_wait.parse_done_row(_row(body)) is None
+
+    def test_fill_reads_only_the_unknown_runs(self) -> None:
+        done = ci_wait.parse_done_row(_row(
+            {"sha": SHA, "runs": [[42, 1, "CI", "success"], [43, 1]], "url": "u"},
+        ))
+        assert done is not None
+        asked: list[int] = []
+
+        def fetch(repo: str, run_id: int, attempt: int) -> tuple[str | None, str | None]:
+            asked.append(run_id)
+            assert attempt == 1
+            assert repo == "Hellblazer/nexus"
+            return "Service CI", "failure"
+
+        filled = ci_wait.fill_conclusions(done, "Hellblazer/nexus", fetch)
+        assert asked == [43]
+        line, code = ci_wait.summarize(filled)
+        assert code == 1
+        assert line == f"{SHA[:12]} failure: CI success (run 42), Service CI failure (run 43) u"
+
+
+# ── the wait, over an in-memory reader with a virtual clock ─────────────────
+#
+# The reader keeps the engine's read contract for what find_done_row uses:
+# rows in (created_at, id) order, `since` exclusive, and a park that returns
+# as soon as a row past the cursor is visible, else after timeout_s. Rows
+# become visible at a virtual time, so a wait over several parks runs with no
+# sleep (tests/AGENTS.md: fixed clocks). The park itself is the engine's and
+# is covered against the real engine in tests/test_mcp_tuple_tools.py and
+# tests/test_tuple_wait.py; this keeps the four cases off the tenant ceiling.
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _Board:
+    def __init__(self, clock: _Clock) -> None:
+        self.clock = clock
+        self.rows: list[tuple[float, TupleRow]] = []
+        self.parks: list[int] = []
+
+    def post(
+        self, sha: str, runs: list[list[object]], *, at: float = 0.0, url: str = "https://example/run",
+        dims: dict[str, str] | None = None, body: object = None,
+    ) -> str:
+        seq = len(self.rows) + 1
+        tid = f"{seq:064x}"
+        row = _row(body if body is not None else {"state": "concluded", "sha": sha, "runs": runs, "url": url},
+                   tid, dims)
+        row = TupleRow(**{**{f: getattr(row, f) for f in row.__dataclass_fields__},
+                          "created_at": f"2026-11-08T12:00:{seq:02d}Z"})
+        self.rows.append((at, row))
+        return tid
+
+    def _visible(self, since: tuple[str, str] | None) -> list[TupleRow]:
+        out = [r for at, r in self.rows if at <= self.clock.now]
+        if since is not None:
+            out = [r for r in out if (r.created_at, r.id) > since]
+        return out
+
+    def rd(self, subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0):
+        assert subspace == "board/ci/nexus-develop--done"
+        rows = self._visible(since)
+        if not rows and timeout_s:
+            self.parks.append(timeout_s)
+            due = [at for at, r in self.rows if at > self.clock.now]
+            if due and min(due) <= self.clock.now + timeout_s:
+                self.clock.now = min(due)
+            else:
+                self.clock.now += timeout_s
+            rows = self._visible(since)
+        return rows[:n]
+
+
+class TestFindDoneRow:
+    def _setup(self) -> tuple[_Clock, _Board]:
+        clock = _Clock()
+        return clock, _Board(clock)
+
+    def test_a_row_already_there_returns_without_a_park_and_a_rerun_row_wins(self) -> None:
+        clock, board = self._setup()
+        board.post(OTHER, [[1, 1, "CI", "failure"]])
+        board.post(SHA, [[10, 1, "CI", "failure"]], url="https://example/attempt1")
+        board.post(SHA, [[10, 2, "CI", "success"]], url="https://example/attempt2")
+        row = ci_wait.find_done_row(board, ci_wait.done_subspace("nexus", "develop"), SHA[:10],
+                                    timeout_s=60, clock=clock)
+        assert row is not None and board.parks == []
+        assert ci_wait.summarize(row) == (f"{SHA[:12]} success: CI success (run 10 attempt 2) https://example/attempt2", 0)
+
+    def test_a_row_that_arrives_after_several_parks_ends_the_wait(self) -> None:
+        clock, board = self._setup()
+        board.post(OTHER, [[1, 1, "CI", "success"]])
+        board.post(OTHER, [[2, 1, "CI", "success"]], at=30)  # a peer's sha arrives first
+        board.post(SHA, [[20, 1, "CI", "success"], [21, 1, "Service CI", "cancelled"]], at=80)
+        row = ci_wait.find_done_row(board, ci_wait.done_subspace("nexus", "develop"), SHA,
+                                    timeout_s=600, clock=clock)
+        assert row is not None and clock.now == 80
+        assert len(board.parks) >= 3, board.parks
+        assert ci_wait.summarize(row) == (
+            f"{SHA[:12]} cancelled: CI success (run 20), Service CI cancelled (run 21) https://example/run", 3,
+        )
+
+    def test_no_row_before_the_timeout_is_none(self) -> None:
+        clock, board = self._setup()
+        board.post(OTHER, [[1, 1, "CI", "success"]])
+        board.post(SHA, [[1, 1, "CI", "success"]], at=200)
+        assert ci_wait.find_done_row(board, ci_wait.done_subspace("nexus", "develop"), SHA,
+                                     timeout_s=60, clock=clock) is None
+        assert 60 <= clock.now <= 60 + ci_wait.PARK_CAP_S
+        assert all(p <= ci_wait.PARK_CAP_S for p in board.parks)
+
+
+    def test_fresh_ignores_the_earlier_attempt_already_on_the_topic(self) -> None:
+        """A wait started on a rerun: attempt 1's failed row is still there."""
+        clock, board = self._setup()
+        board.post(SHA, [[10, 1, "CI", "failure"]], url="https://example/attempt1")
+        board.post(SHA, [[10, 2, "CI", "success"]], at=80, url="https://example/attempt2")
+        sub = ci_wait.done_subspace("nexus", "develop")
+        stale = ci_wait.find_done_row(board, sub, SHA, timeout_s=600, clock=_Clock())
+        assert stale is not None and stale.url == "https://example/attempt1"  # the default takes it
+        row = ci_wait.find_done_row(board, sub, SHA, timeout_s=600, fresh=True, clock=clock)
+        assert row is not None and row.url == "https://example/attempt2" and clock.now == 80
+
+    def test_a_malformed_row_for_any_sha_is_skipped(self) -> None:
+        clock, board = self._setup()
+        board.post(OTHER, [], body={"sha": OTHER, "runs": [["x", 1]]})
+        board.post(SHA, [], body={"sha": SHA, "runs": 5})
+        board.post(SHA, [[10, 1, "CI", "success"]], at=40)
+        row = ci_wait.find_done_row(board, ci_wait.done_subspace("nexus", "develop"), SHA,
+                                    timeout_s=600, clock=clock)
+        assert row is not None and row.runs[0].run_id == 10
+
+    def test_a_read_that_fails_is_retried_and_a_board_down_to_the_deadline_is_unreadable(self) -> None:
+        clock, board = self._setup()
+        board.post(SHA, [[10, 1, "CI", "success"]])
+        fails = {"left": 2}
+        real_rd = board.rd
+
+        def flaky(*a, **k):
+            if fails["left"]:
+                fails["left"] -= 1
+                raise ConnectionError("engine restarting")
+            return real_rd(*a, **k)
+
+        board.rd = flaky  # type: ignore[method-assign]
+
+        def sleep(seconds: float) -> None:
+            clock.now += seconds
+
+        sub = ci_wait.done_subspace("nexus", "develop")
+        row = ci_wait.find_done_row(board, sub, SHA, timeout_s=60, clock=clock, sleep=sleep)
+        assert row is not None and clock.now == 10  # two retries of 5 s
+
+        down = _Board(clock)
+        down.rd = lambda *a, **k: (_ for _ in ()).throw(ConnectionError("down"))  # type: ignore[method-assign]
+        with pytest.raises(ci_wait.BoardUnreadableError, match="down"):
+            ci_wait.find_done_row(down, sub, SHA, timeout_s=30, clock=clock, sleep=sleep)
+
+        refused = _Board(clock)
+        refused.rd = lambda *a, **k: (_ for _ in ()).throw(ValueError("schema"))  # type: ignore[method-assign]
+        before = clock.now
+        with pytest.raises(ci_wait.BoardUnreadableError, match="schema"):
+            ci_wait.find_done_row(refused, sub, SHA, timeout_s=3600, clock=clock, sleep=sleep)
+        assert clock.now == before, "a non-transient error is reported at once, not retried"
+
+    def test_a_page_with_no_created_at_cannot_spin(self) -> None:
+        clock, board = self._setup()
+        board.post(OTHER, [[1, 1, "CI", "success"]])
+        row = board.rows[0][1]
+        board.rows[0] = (0.0, TupleRow(**{**{f: getattr(row, f) for f in row.__dataclass_fields__},
+                                          "created_at": None}))
+        board.rd = lambda *a, **k: [board.rows[0][1]]  # type: ignore[method-assign]
+        with pytest.raises(ci_wait.BoardUnreadableError, match="cannot advance"):
+            ci_wait.find_done_row(board, ci_wait.done_subspace("nexus", "develop"), SHA,
+                                  timeout_s=60, clock=clock)
+
+    def test_an_outcome_dim_that_disagrees_with_the_conclusions_exits_4(self) -> None:
+        board = _Board(_Clock())
+        board.post(SHA, [[10, 1, "CI", "failure"]], dims={"outcome": "success"})
+        row = ci_wait.find_done_row(board, ci_wait.done_subspace("nexus", "develop"), SHA,
+                                    timeout_s=1, clock=board.clock)
+        assert row is not None
+        line, code = ci_wait.summarize(row)
+        assert code == 4 and "outcome mismatch: the board says success" in line
+
+
+class TestCli:
+    def test_a_found_row_prints_one_line_and_exits_on_its_outcome(self, monkeypatch) -> None:
+        clock = _Clock()
+        board = _Board(clock)
+        board.post(SHA, [[10, 1, "CI", "failure"]])
+        monkeypatch.setattr(ci_cmd, "_store", lambda: board)
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "1"])
+        assert result.exit_code == 1, result.output
+        assert result.stdout.strip().splitlines()[-1] == f"{SHA[:12]} failure: CI failure (run 10) https://example/run"
+
+    def test_a_pre_11_1_row_reads_its_conclusions_once(self, monkeypatch) -> None:
+        board = _Board(_Clock())
+        board.post(SHA, [[30, 1], [31, 2]])
+        monkeypatch.setattr(ci_cmd, "_store", lambda: board)
+        asked: list[tuple[str, int]] = []
+
+        def fake_gh(gh_repo: str, run_id: int, attempt: int) -> tuple[str | None, str | None]:
+            asked.append((gh_repo, run_id, attempt))
+            return ("CI" if run_id == 30 else "Service CI"), "success"
+
+        monkeypatch.setattr(ci_wait, "gh_run_conclusion", fake_gh)
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "1"])
+        assert result.exit_code == 0, result.output
+        assert asked == [("Hellblazer/nexus", 30, 1), ("Hellblazer/nexus", 31, 2)]
+
+    def test_an_unreadable_conclusion_exits_4(self, monkeypatch) -> None:
+        board = _Board(_Clock())
+        board.post(SHA, [[30, 1]])
+        monkeypatch.setattr(ci_cmd, "_store", lambda: board)
+        monkeypatch.setattr(ci_wait, "gh_run_conclusion", lambda repo, run_id, attempt: (None, None))
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "1"])
+        assert result.exit_code == 4, result.output
+        assert "unknown" in result.stdout
+
+
+    def test_no_store_exits_5_not_1(self, monkeypatch) -> None:
+        def boom():
+            raise RuntimeError("no engine configured")
+
+        monkeypatch.setattr(ci_cmd, "_store", boom)
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "1"])
+        assert result.exit_code == 5, result.output
+        assert "unusable: no tuple store" in result.stdout
+
+    @pytest.mark.parametrize(("runs", "code", "needle"), [
+        (None, 2, "GitHub could not be read"),
+        ([], 2, "GitHub lists no push runs"),
+        ([ci_wait.Run(1, 1, "CI", "success"), ci_wait.Run(2, 1, "Service CI", None)], 2, "1 of 2 runs still running"),
+        ([ci_wait.Run(1, 1, "CI", "success"), ci_wait.Run(2, 1, "Service CI", "failure")], 1,
+         "the wake was dropped; read from GitHub"),
+    ])
+    def test_at_the_deadline_github_is_read_once(self, monkeypatch, runs, code, needle) -> None:
+        board = _Board(_Clock())
+        monkeypatch.setattr(ci_cmd, "_store", lambda: board)
+        asked: list[str] = []
+
+        def fake_runs(gh_repo: str, sha: str, branch: str):
+            asked.append(sha)
+            assert branch == "develop"
+            return runs
+
+        monkeypatch.setattr(ci_wait, "gh_push_runs", fake_runs)
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "0"])
+        assert result.exit_code == code, result.output
+        assert asked == [SHA]
+        assert result.stdout.strip().splitlines()[-1].startswith(f"{SHA[:12]} ")
+        assert needle in result.stdout
+
+    def test_a_prefix_times_out_without_reading_github(self, monkeypatch) -> None:
+        board = _Board(_Clock())
+        monkeypatch.setattr(ci_cmd, "_store", lambda: board)
+        monkeypatch.setattr(ci_wait, "gh_push_runs", lambda *a: pytest.fail("read GitHub for a prefix"))
+        result = CliRunner().invoke(ci_group, ["wait", SHA[:10], "--timeout", "0"])
+        assert result.exit_code == 2 and "give the full sha" in result.stdout
+
+
+    def test_a_fresh_wait_never_reads_github_at_the_deadline(self, monkeypatch) -> None:
+        board = _Board(_Clock())
+        board.post(SHA, [[10, 1, "CI", "failure"]])
+        monkeypatch.setattr(ci_cmd, "_store", lambda: board)
+        monkeypatch.setattr(ci_wait, "gh_push_runs", lambda *a: pytest.fail("read GitHub under --fresh"))
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "0", "--fresh"])
+        assert result.exit_code == 2 and "no new row" in result.stdout
+
+    def test_a_timeout_that_is_not_a_number_exits_5(self) -> None:
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "nan"])
+        assert result.exit_code == 5, result.output
+
+
+def test_a_sha_that_is_not_hex_exits_5_not_the_timeout_code() -> None:
+    result = CliRunner().invoke(ci_group, ["wait", "develop"])
+    assert result.exit_code == 5 and "7 to 40 hex digits" in result.output
+
+
+# ── a capped row: the adapter's 1024-byte cap drops trailing runs (body n) ───
+#
+# bob, conexus 051060d build_wake_tuple: ``n`` is the count of every run in the
+# fold, ``runs`` is a prefix of that list sorted by (run_id, attempt), and the
+# cap drops whole trailing entries, so what is missing is the highest run ids.
+
+
+def _capped(runs: list[list[object]], n: int) -> ci_wait.DoneRow:
+    done = ci_wait.parse_done_row(_row({"sha": SHA, "runs": runs, "url": "u", "n": n}))
+    assert done is not None
+    return done
+
+
+class TestCappedRow:
+    def test_n_is_read_and_a_missing_n_is_uncapped(self) -> None:
+        assert _capped([[1, 1, "CI", "success"]], 3).total == 3
+        done = ci_wait.parse_done_row(_row({"sha": SHA, "runs": [[1, 1, "CI", "success"]], "url": "u"}))
+        assert done is not None and done.total is None
+
+    @pytest.mark.parametrize("n", [True, 2.5, 3.0, "3"])
+    def test_an_n_that_is_not_an_int_is_malformed(self, n) -> None:
+        # One listed run, so each value would pass the count check on its own:
+        # only the type checks refuse these.
+        assert ci_wait.parse_done_row(_row({"sha": SHA, "runs": [[1, 1, "CI", "success"]], "url": "u", "n": n})) is None
+
+    def test_an_n_below_the_runs_listed_or_below_one_is_malformed(self) -> None:
+        two = [[1, 1, "CI", "success"], [2, 1, "CI", "success"]]
+        assert ci_wait.parse_done_row(_row({"sha": SHA, "runs": two, "url": "u", "n": 1})) is None
+        # The fold always holds the triggering run: n=0 with no runs listed is not a fold.
+        assert ci_wait.parse_done_row(_row({"sha": SHA, "runs": [], "url": "u", "n": 0})) is None
+
+    def test_an_explicit_null_n_reads_as_a_row_from_before_n(self) -> None:
+        done = ci_wait.parse_done_row(_row({"sha": SHA, "runs": [[1, 1, "CI", "success"]], "url": "u", "n": None}))
+        assert done is not None and done.total is None and not done.capped
+
+    def test_a_capped_row_with_no_listed_failure_is_unknown_not_success(self) -> None:
+        line, code = ci_wait.summarize(_capped([[1, 1, "CI", "success"], [2, 1, "Docs", "success"]], 3))
+        assert code == ci_wait.EXIT_UNKNOWN
+        assert "2 of 3 runs listed" in line and line.startswith(f"{SHA[:12]} unknown:")
+
+    def test_a_listed_failure_settles_a_capped_row_without_github(self) -> None:
+        done = _capped([[1, 1, "CI", "failure"], [2, 1, "Docs", "success"]], 4)
+        same = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop",
+                                     fetch=lambda *a: pytest.fail("read GitHub with a failure listed"))
+        assert same is done
+        line, code = ci_wait.summarize(same)
+        assert code == ci_wait.EXIT_FAILURE and "2 of 4 runs listed" in line
+
+    def test_an_uncapped_row_never_reads_github(self) -> None:
+        done = _capped([[1, 1, "CI", "success"]], 1)
+        assert ci_wait.complete_runs(done, "Hellblazer/nexus", "develop",
+                                     fetch=lambda *a: pytest.fail("read GitHub for a whole row")) is done
+
+    def test_the_dropped_runs_come_from_github_and_a_dropped_failure_fails(self) -> None:
+        done = _capped([[10, 1, "CI", "success"], [11, 1, "Docs", "success"]], 4)
+        asked: list[tuple[str, str, str]] = []
+
+        def fetch(gh_repo: str, sha: str, branch: str) -> list[ci_wait.Run]:
+            asked.append((gh_repo, sha, branch))
+            return [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Docs", "success"),
+                    ci_wait.Run(12, 1, "Service CI", "failure"), ci_wait.Run(13, 1, "Windows", "success")]
+
+        full = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop", fetch=fetch)
+        assert asked == [("Hellblazer/nexus", SHA, "develop")]
+        assert [r.run_id for r in full.runs] == [10, 11, 12, 13]
+        line, code = ci_wait.summarize(full)
+        assert code == ci_wait.EXIT_FAILURE
+        assert "Service CI failure (run 12)" in line and "runs listed" not in line
+
+    @pytest.mark.parametrize("github", [
+        None,  # GitHub unreadable, or the list may be cut short
+        [ci_wait.Run(10, 1, "CI", "success")],  # GitHub lists none of the dropped runs
+        [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(12, 1, "Service CI", "success"),
+         ci_wait.Run(13, 1, "Docs", "success"), ci_wait.Run(14, 1, "More", "success")],  # more than n
+    ])
+    def test_github_that_cannot_supply_exactly_the_dropped_runs_leaves_it_unknown(self, github) -> None:
+        done = _capped([[10, 1, "CI", "success"]], 3)
+        full = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop", fetch=lambda *a: github)
+        line, code = ci_wait.summarize(full)
+        assert code == ci_wait.EXIT_UNKNOWN and "1 of 3 runs listed" in line
+
+    def test_a_dropped_run_github_still_shows_running_is_unknown(self) -> None:
+        done = _capped([[10, 1, "CI", "success"]], 2)
+        full = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop",
+                                     fetch=lambda *a: [ci_wait.Run(10, 1, "CI", "success"),
+                                                       ci_wait.Run(11, 1, "Service CI", None)])
+        assert ci_wait.summarize(full)[1] == ci_wait.EXIT_UNKNOWN
+
+    def test_the_command_completes_a_capped_row(self, monkeypatch) -> None:
+        board = _Board(_Clock())
+        board.post(SHA, [], body={"sha": SHA, "runs": [[10, 1, "CI", "success"]], "url": "u", "n": 2})
+        monkeypatch.setattr(ci_cmd, "_store", lambda: board)
+        asked: list[tuple[str, str, str]] = []
+
+        def fake_runs(gh: str, sha: str, branch: str) -> list[ci_wait.Run]:
+            asked.append((gh, sha, branch))
+            return [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Service CI", "failure")]
+
+        monkeypatch.setattr(ci_wait, "gh_push_runs", fake_runs)
+        result = CliRunner().invoke(
+            ci_group, ["wait", SHA[:10], "--timeout", "1", "--gh-repo", "o/r", "--branch", "develop"],
+        )
+        assert result.exit_code == 1, result.output
+        # The row's full sha, not the prefix asked for; --gh-repo and --branch as given.
+        assert asked == [("o/r", SHA, "develop")]
+        assert "Service CI failure (run 11)" in result.stdout.strip().splitlines()[-1]
+
+    # Each n makes the count alone agree (listed + GitHub runs above the top
+    # == n), so only the identity checks refuse.
+    @pytest.mark.parametrize(("n", "github", "why"), [
+        (2, [ci_wait.Run(10, 2, "CI", "success"), ci_wait.Run(11, 1, "Svc", "success")],
+         "a listed run was rerun after the row: GitHub shows attempt 2"),
+        (2, [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 2, "Svc", "success")],
+         "a dropped run on attempt 2 may hide the fold's failed attempt 1"),
+        (3, [ci_wait.Run(20, 1, "CI", "success"), ci_wait.Run(21, 1, "Svc", "success")],
+         "the listed run is not in GitHub's list at all"),
+        (2, [ci_wait.Run(9, 1, "Other", "success"), ci_wait.Run(11, 1, "Svc", "success")],
+         "GitHub has a run below the top that the row does not list"),
+        (3, [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Svc", "success"),
+             ci_wait.Run(11, 1, "Svc", "success")], "GitHub lists one run id twice"),
+    ])
+    def test_github_runs_that_are_not_the_fold_by_identity_leave_it_unknown(self, n, github, why) -> None:
+        done = _capped([[10, 1, "CI", "success"]], n)
+        full = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop", fetch=lambda *a: github)
+        assert full is done, why
+        assert ci_wait.summarize(full)[1] == ci_wait.EXIT_UNKNOWN, why
+
+    def test_an_extra_run_cannot_stand_in_for_a_missing_attempt(self) -> None:
+        """Count alone matched here: 2 listed + 3 above the top = n. GitHub's 11
+        is at attempt 2, so the fold's attempt is not what GitHub shows."""
+        done = _capped([[10, 1, "CI", "success"], [11, 1, "Svc", "success"]], 5)
+        github = [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 2, "Svc", "success"),
+                  ci_wait.Run(12, 1, "A", "success"), ci_wait.Run(13, 1, "B", "success"),
+                  ci_wait.Run(14, 1, "C", "success")]
+        full = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop", fetch=lambda *a: github)
+        assert ci_wait.summarize(full)[1] == ci_wait.EXIT_UNKNOWN
+
+    def test_a_capped_row_that_github_cannot_confirm_says_so(self) -> None:
+        line, code = ci_wait.summarize(_capped([[10, 1, "CI", "success"]], 2))
+        assert code == ci_wait.EXIT_UNKNOWN and line.endswith("(1 of 2 runs listed; GitHub did not confirm the rest)")
+
+    def test_a_listed_run_missing_from_github_with_the_count_matching_is_unknown(self) -> None:
+        # Two GitHub runs above the top make 1 + 2 = n, but the listed run 10 is
+        # not among them: the ids check refuses, not the count.
+        done = _capped([[10, 1, "CI", "success"]], 2)
+        github = [ci_wait.Run(11, 1, "A", "success"), ci_wait.Run(12, 1, "B", "success")]
+        assert ci_wait.complete_runs(done, "o/r", "develop", fetch=lambda *a: github) is done
+
+    def test_a_run_created_after_the_fold_makes_it_unknown_not_wrong(self) -> None:
+        # bob: a later listing is a superset of the fold, extra runs above it.
+        done = _capped([[10, 1, "CI", "success"]], 2)
+        github = [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Svc", "failure"),
+                  ci_wait.Run(12, 1, "Late", "success")]
+        full = ci_wait.complete_runs(done, "o/r", "develop", fetch=lambda *a: github)
+        assert full is done and ci_wait.summarize(full)[1] == ci_wait.EXIT_UNKNOWN
+
+    def test_a_capped_row_that_lists_no_runs_takes_github_s_first_attempts(self) -> None:
+        done = ci_wait.parse_done_row(_row({"sha": SHA, "runs": [], "url": "u", "n": 2}))
+        assert done is not None and done.capped
+        github = [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Svc", "success")]
+        full = ci_wait.complete_runs(done, "o/r", "develop", fetch=lambda *a: github)
+        assert [r.run_id for r in full.runs] == [10, 11] and ci_wait.summarize(full)[1] == ci_wait.EXIT_SUCCESS

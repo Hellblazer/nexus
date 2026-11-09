@@ -354,7 +354,7 @@ def test_an_unreadable_catalog_makes_the_collection_not_checked_never_clean(worl
         ({"title": ""}, False, True),
         ({"title": ""}, True, False),
         ({"title": "T"}, False, False),
-        ({}, False, True),
+        ({}, False, False),  # no document key: a row written since RDR-236 Phase 4 Step 1, no evidence
         ({"title": "", "extraction_method": "mineru"}, False, True),  # the row's method is the last writer's
     ],
 )

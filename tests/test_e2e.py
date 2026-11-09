@@ -48,7 +48,9 @@ def test_t3_put_and_search(local_t3: T3Database) -> None:
     results = local_t3.search(f"secret token {uid}", ["knowledge__test"], sensitivity="include")
     assert len(results) == 1
     assert uid in results[0]["content"]
-    assert results[0]["title"] == "secret.md"
+    # RDR-236 Phase 4 Step 1: the title is the note's catalog entry's (this facade has no catalog), so the
+    # chunk row it wrote carries none.
+    assert "title" not in results[0]
 
 
 def test_t3_put_multiple_and_ranking(local_t3: T3Database) -> None:
@@ -60,13 +62,15 @@ def test_t3_put_multiple_and_ranking(local_t3: T3Database) -> None:
 
     results = local_t3.search(f"Python programming {uid}", ["knowledge__rank"], n_results=3, sensitivity="include")
     assert len(results) == 3
-    # programming doc should rank ahead of cooking
-    titles = [r["title"] for r in results]
-    assert titles.index("b.md") < titles.index("c.md")
+    # programming doc should rank ahead of cooking (the rows carry no title since RDR-236 Phase 4 Step 1:
+    # read the order from the content)
+    texts = [r["content"] for r in results]
+    assert texts.index(f"Python programming language {uid}") < texts.index(f"Unrelated topic about cooking {uid}")
 
 
 def test_t3_search_returns_metadata(local_t3: T3Database) -> None:
-    """Metadata fields are preserved and returned with search results."""
+    """The chunk keys are returned with search results; the note's own tags and category are not on its row
+    (RDR-236 Phase 4 Step 1: they are the catalog entry's, and this facade has no catalog)."""
     uid = _uid()
     local_t3.put(
         collection="knowledge__meta",
@@ -76,8 +80,8 @@ def test_t3_search_returns_metadata(local_t3: T3Database) -> None:
         category="testing",
     )
     results = local_t3.search(uid, ["knowledge__meta"], sensitivity="include")
-    assert results[0]["tags"] == "tag1,tag2"
-    assert results[0]["category"] == "testing"
+    assert results[0]["chunk_text_hash"] and results[0]["embedding_model"]
+    assert "tags" not in results[0] and "category" not in results[0]
 
 
 def test_t3_expire_removes_expired_entries(local_t3: T3Database) -> None:
@@ -117,7 +121,7 @@ def test_t3_expire_removes_expired_entries(local_t3: T3Database) -> None:
 
     # Permanent entry still searchable
     results = local_t3.search(f"permanent content {uid}", ["knowledge__expire"], sensitivity="include")
-    assert any("perm.md" == r["title"] for r in results)
+    assert any(r["content"] == f"permanent content {uid}" for r in results)
 
 
 def test_t3_list_collections(local_t3: T3Database) -> None:

@@ -62,6 +62,10 @@ def _run_dry_run(runner: CliRunner, pdf: Path) -> tuple[object, dict]:
 
     def _fake_index_pdf(path, **kwargs):
         captured.update(kwargs)
+        # RDR-236 Phase 4 Step 1: the dry run's summary (pages, title, author) is the run's own, so the
+        # command asks for ``return_metadata`` and gets the dict the real call returns.
+        if kwargs.get("return_metadata"):
+            return {"chunks": PDF_RESULT_CHUNKS, "pages": [1, 2], "title": "", "author": ""}
         return PDF_RESULT_CHUNKS
 
     # The command wraps ``doc_indexer.index_pdf`` in a function-local closure
@@ -90,6 +94,7 @@ def test_dry_run_does_not_load_the_local_onnx_model(
     assert result.exit_code == 0, result.output
     assert boom.call_count == 0
     assert "no cloud write" in result.output
+    assert "Chunks: 3" in result.output and "Pages: 1–2" in result.output  # the summary is the run's own
 
 
 def test_dry_run_embed_fn_returns_empty_placeholders(

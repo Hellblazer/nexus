@@ -181,11 +181,10 @@ def _run_pdf(tmp_path, monkeypatch, *, doc_id=_DOC, batcher="reject", db=None, h
         text = f"Page {i} of the oversize units pdf."
         h = hashlib.sha256(text.encode()).hexdigest()
         meta = make_chunk_metadata(
-            content_type="pdf", chunk_text_hash=h, content_hash=ch, chunk_start_char=i * 10,
-            chunk_end_char=i * 10 + len(text), page_number=i + 1, indexed_at=_NOW,
-            embedding_model=_MODEL, title="Big", tags="pdf", category="paper")
-        prepared.append((h, text, meta))
-    monkeypatch.setattr(di, "_pdf_chunks", lambda *a, **k: [(i, t, dict(m)) for i, t, m in prepared])
+            content_type="pdf", chunk_text_hash=h,
+            embedding_model=_MODEL, )
+        prepared.append((h, text, meta, {"page_number": i + 1}))
+    monkeypatch.setattr(di, "_pdf_chunks", lambda *a, **k: [(i, t, dict(m), dict(pos)) for i, t, m, pos in prepared])
     # RDR-237: the repo indexer records the extraction on the catalog document with one /update
     # request. These tests are about the upload route, not that record (its own tests are
     # tests/test_rdr237_repo_indexer_records.py), so it is stubbed out here.
@@ -242,12 +241,11 @@ def test_every_fallback_writes_through_the_writer_and_never_touches_the_db(
     rows = [r for _, b in data for r in b["rows"]]
     assert [r["position"] for r in rows] == list(range(n))
     assert [r["chunk_index"] for r in rows] == list(range(n))    # position, as on the batcher path
-    # Every request asks for the metadata merge (the old upsert's semantics), naming the keys this
-    # writer owns and dropped, and never the enrichment keys.
+    # Every request asks for the metadata merge (the old upsert's semantics). The rows are the CHUNK keys,
+    # both always present, so there is no dropped key to name (RDR-236 Phase 4 Step 1).
     keys = [b["metadata_delete_keys"] for _, b in data]
     assert all(b["metadata_merge"] is True for _, b in data)
-    assert keys[0] and all(k == keys[0] for k in keys)
-    assert not any(k.startswith("bib_") for k in keys[0])
+    assert all(not k for k in keys), keys
     assert fired == [n]                                          # the file's hooks fire once
     assert manifest_hook_calls == []                             # and the manifest hook is skipped
 

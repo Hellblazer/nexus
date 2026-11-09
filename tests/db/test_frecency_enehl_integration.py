@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Live-service integration test: frecency metadata update via Java service (nexus-enehl).
+"""Live-service integration test: the frecency-only reindex (nexus-enehl; RDR-236 Phase 4 Step 1).
 
 Proves that _run_index_frecency_only in service mode:
-  A) Does NOT skip — it executes the real frecency-update logic.
-  B) Routes the frecency_score update through the service's /v1/vectors/update-metadata
-     endpoint (not daemon-Chroma).
-  C) The updated frecency_score is visible via a subsequent service store-get
-     (proves no split-brain: update lands in service Chroma, not daemon).
-  D) A subsequent search on the collection returns the chunk (frecency restored).
+  A) Writes each document's score to its catalog document, once.
+  B) Writes no chunk row and opens no handle on the daemon store: the row's frecency_score is
+     read back through the service and is still what it was seeded with.
+  C) The chunk is still retrievable by search afterwards.
 
 Prerequisite:
   - service/target/nexus-service-1.0-SNAPSHOT.jar must exist (build first).
@@ -374,6 +372,7 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     #     somewhere other than the catalog for this scenario, so the
     #     map is supplied directly)
     make_t3_called = []
+    catalog_writes: list[dict] = []
 
     def sentinel_make_t3():
         make_t3_called.append("CALLED")
@@ -388,9 +387,14 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
         patch("nexus.catalog.factory.make_catalog_reader", return_value=None),
         patch("nexus.indexer._build_frecency_doc_id_map",
               return_value={test_file: "1.1.1"}),
+        # RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): the score goes to the catalog document and no chunk row.
+        patch("nexus.indexer._write_frecency_meta",
+              side_effect=lambda scores, at, **k: catalog_writes.append(dict(scores))),
     ):
         from nexus.indexer import _run_index_frecency_only
         _run_index_frecency_only(tmp_path, fake_registry)
+
+    assert catalog_writes == [{"1.1.1": expected_score}], catalog_writes
 
     # Verify make_t3() was NOT called
     assert not make_t3_called, (
@@ -414,16 +418,12 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     meta = metas[idx] if idx < len(metas) else {}
     actual_score = meta.get("frecency_score")
 
-    assert actual_score == pytest.approx(expected_score, abs=1e-6), (
-        f"frecency_score in service Chroma must be {expected_score} after update, "
-        f"got {actual_score}. This proves the update went through the service endpoint "
-        "and is visible to service-mode search."
+    assert actual_score == pytest.approx(0.0, abs=1e-6), (
+        f"the frecency-only reindex must leave the chunk row alone (RDR-236 Phase 4 Step 1); "
+        f"frecency_score on the row is {actual_score}, seeded 0.0"
     )
 
-    # Metadata preservation: source_path must survive even though _run_index_frecency_only
-    # sends {**existing_meta, "frecency_score": score} — this asserts the seeded source_path
-    # field is present after the frecency update.  A regression to sending only
-    # {"frecency_score": X} would drop source_path and this would catch it.
+    # The row is untouched: the seeded source_path is still there.
     expected_source = str(tmp_path / "test_file.py")
     actual_source = meta.get("source_path")
     assert actual_source == expected_source, (

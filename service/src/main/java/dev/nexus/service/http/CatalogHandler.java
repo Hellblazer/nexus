@@ -90,6 +90,12 @@ import java.util.*;
  *   POST  /v1/catalog/import/link        ETL import link
  *   POST  /v1/catalog/import/chunk       ETL import chunk
  *   POST  /v1/catalog/import/collection  ETL import collection
+ *   POST  /v1/catalog/doc/resolve_or_register  resolve a document by (owner, source_uri) or register it (RDR-193, nexus-u5m5g.3)
+ *   POST  /v1/catalog/links/upsert_many  batch link upsert (RDR-193, nexus-u5m5g.4; CatalogLinksHandler)
+ *   POST  /v1/catalog/links/same_content same-as linker (RDR-193, nexus-u5m5g.4; CatalogLinksHandler)
+ *   POST  /v1/catalog/reconcile/stage    stage one page (at most 1000) of a reconcile run's landing rows (RDR-193)
+ *   POST  /v1/catalog/reconcile/commit   commit a staged run as a background job: 202 {job_id}, 409 / 503 (RDR-193)
+ *   GET   /v1/catalog/reconcile/{job_id} the commit job: running, succeeded with the outcome, or failed with the error (RDR-193)
  * </pre>
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (enforced by
@@ -119,6 +125,19 @@ public final class CatalogHandler implements HttpHandler {
 
     private final CatalogRepository repo;
     private final dev.nexus.service.db.CombinedWriteService combinedWriteService;
+    /** RDR-193 Part C (nexus-u5m5g.3): the reconcile commit jobs; null answers the commit and poll routes 503. */
+    private final EngineJobs<Void> reconcileJobs;
+    /** RDR-193 Part A4 (nexus-u5m5g.4): the link batch routes and the combined list read. */
+    private final CatalogLinksHandler linkRoutes;
+    /** The statement timeout a reconcile commit runs under: the reconcile instance's maximum runtime, never more. */
+    private final java.time.Duration reconcileStatementTimeout;
+
+    /**
+     * The statement timeout production runs a reconcile commit under: the reconcile registry's per-job cap, because
+     * that cap interrupts nothing inside the database (the job only asks {@code stopReason()} before its statement),
+     * so the database must stop a stuck statement at the same bound.
+     */
+    static final java.time.Duration RECONCILE_STATEMENT_TIMEOUT = EngineJobs.RECONCILE.maxRuntime();
 
     public CatalogHandler(CatalogRepository repo) {
         this(repo, null);
@@ -133,8 +152,42 @@ public final class CatalogHandler implements HttpHandler {
      */
     public CatalogHandler(CatalogRepository repo,
                            dev.nexus.service.db.CombinedWriteService combinedWriteService) {
+        this(repo, combinedWriteService, null);
+    }
+
+    /**
+     * RDR-193 Part C (nexus-u5m5g.3): {@code reconcileJobs} is the registry the reconcile commit runs its jobs on
+     * ({@code NexusService} passes its tenant-evicted instance); null answers the commit and poll routes 503.
+     */
+    public CatalogHandler(CatalogRepository repo,
+                           dev.nexus.service.db.CombinedWriteService combinedWriteService,
+                           EngineJobs<Void> reconcileJobs) {
+        this(repo, combinedWriteService, reconcileJobs, RECONCILE_STATEMENT_TIMEOUT);
+    }
+
+    /**
+     * As above with the commit's statement timeout given (a test shortens it; it never exceeds the job cap in
+     * service). {@code statement_timeout} is a 32-bit count of milliseconds, so a timeout that is not positive or does
+     * not fit is refused here, not on the first commit.
+     */
+    CatalogHandler(CatalogRepository repo,
+                   dev.nexus.service.db.CombinedWriteService combinedWriteService,
+                   EngineJobs<Void> reconcileJobs, java.time.Duration reconcileStatementTimeout) {
+        if (reconcileStatementTimeout == null || reconcileStatementTimeout.isZero() || reconcileStatementTimeout.isNegative()
+                || reconcileStatementTimeout.compareTo(java.time.Duration.ofMillis(Integer.MAX_VALUE)) > 0) {
+            throw new IllegalArgumentException("the reconcile statement timeout must be positive and at most "
+                + Integer.MAX_VALUE + " ms (the range of statement_timeout), got " + reconcileStatementTimeout);
+        }
         this.repo = repo;
+        this.linkRoutes = new CatalogLinksHandler(new dev.nexus.service.db.CatalogLinksRepository(repo));
         this.combinedWriteService = combinedWriteService;
+        this.reconcileJobs = reconcileJobs;
+        this.reconcileStatementTimeout = reconcileStatementTimeout;
+    }
+
+    /** The statement timeout this handler's reconcile commit runs under. */
+    java.time.Duration reconcileStatementTimeout() {
+        return reconcileStatementTimeout;
     }
 
     @Override
@@ -268,6 +321,8 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Scoring hot-path batch endpoints (nexus-qnp5s) ───────────
                 case "/docs/chunk-counts"     -> handleDocChunkCounts(exchange, tenant, method);
                 case "/links/from-batch"      -> handleLinksFromBatch(exchange, tenant, method);
+                case "/links/upsert_many"     -> handleLinksUpsertMany(exchange, tenant, method);
+                case "/links/same_content"    -> handleLinksSameContent(exchange, tenant, method);
 
                 // ── Batch resolve endpoints (nexus-7lm3q) ────────────────────
                 case "/resolve_many"          -> handleResolveMany(exchange, tenant, method);
@@ -281,6 +336,12 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Server-side tumbler assignment ────────────────────────────
                 case "/doc/register"          -> handleDocRegister(exchange, tenant, method);
                 case "/doc/register_many"     -> handleRegisterMany(exchange, tenant, method);
+                case "/doc/resolve_or_register" -> handleResolveOrRegister(exchange, tenant, method);
+
+                // ── Reconcile (RDR-193 Part C, nexus-u5m5g.3) ─────────────────
+                // The poll, GET /reconcile/{job_id}, carries its id in the path: it is the default branch below.
+                case "/reconcile/stage"       -> handleReconcileStage(exchange, tenant, method);
+                case "/reconcile/commit"      -> handleReconcileCommit(exchange, tenant, method);
 
                 // ── Migration count verification (RDR-159 P-1a) ───────────────
                 // ── GC audit (nexus-jqvzk) ────────────────────────────────────
@@ -289,7 +350,13 @@ public final class CatalogHandler implements HttpHandler {
 
                 case "/verify/relation-counts" -> handleRelationCounts(exchange, tenant, method);
 
-                default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found: " + op + "\"}");
+                default -> {
+                    if (op.startsWith(RECONCILE_POLL_PREFIX)) {
+                        handleReconcilePoll(exchange, tenant, method, op.substring(RECONCILE_POLL_PREFIX.length()));
+                    } else {
+                        HttpUtil.send(exchange, 404, "{\"error\":\"not found: " + op + "\"}");
+                    }
+                }
             }
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
@@ -424,12 +491,20 @@ public final class CatalogHandler implements HttpHandler {
      * return immediately without ever reaching the DB.
      */
     private boolean rejectIfBadOwnerPrefix(HttpExchange exchange, String value) throws IOException {
+        return rejectIfBadOwnerPrefix(exchange, value, "tumbler_prefix");
+    }
+
+    /**
+     * {@link #rejectIfBadOwnerPrefix(HttpExchange, String)} for a route that names the owner under another key
+     * ({@code owner} on the reconcile routes), so the 400 names the field the caller actually sent.
+     */
+    private boolean rejectIfBadOwnerPrefix(HttpExchange exchange, String value, String field) throws IOException {
         // Blank/absent is the auto-mint path (server allocates a conforming
         // "1.N" prefix itself) — only a genuinely present value is checked.
         if (value == null || value.isBlank() || TumblerGrammar.isOwnerPrefix(value)) {
             return false;
         }
-        sendTumblerGrammarViolation(exchange, "tumbler_prefix", value);
+        sendTumblerGrammarViolation(exchange, field, value);
         return true;
     }
 
@@ -532,10 +607,14 @@ public final class CatalogHandler implements HttpHandler {
         String owner        = queryParam(exchange, "owner");
         String filePath      = queryParam(exchange, "file_path");
         String sourceUri     = queryParam(exchange, "source_uri");
+        List<String> contentTypes = CatalogLinksHandler.queryParamAll(exchange, "content_type");
+        String sourceUriPrefix    = queryParam(exchange, "source_uri_prefix");
 
         List<Map<String, Object>> docs;
         if (collection != null && !collection.isBlank()) {
             docs = repo.documentsByCollection(tenant, collection, filterLimit, offset);
+        } else if (CatalogLinksHandler.wantsCombinedList(owner, contentTypes, sourceUriPrefix)) {
+            docs = linkRoutes.list(tenant, owner, contentTypes, sourceUriPrefix, filterLimit, offset);   // RDR-193 Part A4
         } else if (contentType != null && !contentType.isBlank()) {
             docs = repo.documentsByContentType(tenant, contentType, filterLimit, offset);
         } else if (corpus != null && !corpus.isBlank()) {
@@ -3054,6 +3133,203 @@ public final class CatalogHandler implements HttpHandler {
             Map.of("tumblers", tumblers, "created", created)));
     }
 
+    /**
+     * POST /v1/catalog/doc/resolve_or_register (RDR-193 Part A1) — resolve a document by {@code (owner, source_uri)}
+     * or register it, in one request.
+     *
+     * <p>Body: {@code {owner_name | curator, source_uri | file_path, title, year?, title_fallback?, source_mtime?,
+     * content_type?, physical_collection?}}. Response: {@code {tumbler, created}}, or {@code {tumbler,
+     * foreign_owner: true}} for a source_uri another owner holds (not adopted, not written). The rules are on
+     * {@link CatalogRepository#resolveOrRegister}.
+     */
+    private void handleResolveOrRegister(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var outcome = repo.resolveOrRegister(tenant, readBody(exchange));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("tumbler", outcome.tumbler());
+        if (outcome.foreignOwner()) {
+            out.put("foreign_owner", true);
+        } else {
+            out.put("created", outcome.created());
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // RECONCILE (RDR-193 Part C, nexus-u5m5g.3): stage landing rows, commit as a job, poll the job
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** The path prefix of the poll route, {@code GET /v1/catalog/reconcile/{job_id}}. */
+    private static final String RECONCILE_POLL_PREFIX = "/reconcile/";
+
+    private static String stringOrNull(Object v) {
+        return v instanceof String s ? s : null;
+    }
+
+    /**
+     * POST /v1/catalog/reconcile/stage — one page of a run's landing rows.
+     *
+     * <p>Body: {@code {owner, run_id, walk, expected_rows, rows[<=1000]}}; {@code walk} and {@code expected_rows}
+     * must match the run header on every later page. Response: {@code {staged}}. A duplicate {@code file_path} is a 400
+     * naming it. Stale runs of the tenant are reaped first.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleReconcileStage(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        // the owner names the address the commit mints documents under: grammar first, before any row is read
+        if (rejectIfBadOwnerPrefix(exchange, stringOrNull(body.get("owner")), "owner")) return;
+        if (!(body.get("rows") instanceof List<?> raw)) {
+            throw new IllegalArgumentException("'rows' must be a list");
+        }
+        if (raw.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many rows (max " + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        List<Map<String, Object>> rows = new ArrayList<>(raw.size());
+        for (Object o : raw) {
+            if (!(o instanceof Map<?, ?> m)) throw new IllegalArgumentException("every row must be an object");
+            rows.add((Map<String, Object>) m);
+        }
+        // an int, not a long narrowed to one: 4294967297 would wrap to 1 and pass the header's count check
+        if (!(body.get("expected_rows") instanceof Integer expected)) {
+            throw new IllegalArgumentException("'expected_rows' must be a whole number in the range of a 32-bit integer");
+        }
+        int staged;
+        try {
+            staged = repo.reconcileStage(tenant, stringOrNull(body.get("owner")), stringOrNull(body.get("run_id")),
+                stringOrNull(body.get("walk")), expected, rows);
+        } catch (CatalogRepository.ReconcileRunBusyException busy) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("error", busy.getMessage());
+            err.put("reason", "commit_in_progress");
+            HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(err)); return;
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("staged", staged)));
+    }
+
+    /**
+     * POST /v1/catalog/reconcile/commit — commit a staged run as a background job.
+     *
+     * <p>Body: {@code {owner, run_id}}. 202 {@code {job_id}}. The job is scoped to the tenant and the owner, with the
+     * run id as its fingerprint: the same run while its commit runs is handed the running job; another run of the
+     * owner is a 409 naming it; a full registry is a 503. The job asks {@code stopReason()} before the commit
+     * statement, and the statement runs under a timeout no longer than the registry's job cap, because that cap
+     * interrupts nothing inside the database.
+     */
+    private void handleReconcileCommit(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String owner = stringOrNull(body.get("owner"));
+        String runId = stringOrNull(body.get("run_id"));
+        if (owner == null || owner.isBlank()) throw new IllegalArgumentException("'owner' must be non-blank");
+        if (runId == null || runId.isBlank()) throw new IllegalArgumentException("'run_id' must be non-blank");
+        // before the registry check and before any job: the commit lazily creates the owner row named by this string
+        if (rejectIfBadOwnerPrefix(exchange, owner, "owner")) return;
+        if (reconcileJobs == null) {
+            HttpUtil.send(exchange, 503, "{\"error\":\"the reconcile job registry is not available\"}"); return;
+        }
+        EngineJobs.Started<Void> started;
+        try {
+            started = reconcileJobs.start(tenant, owner, runId,
+                (job, stage) -> runReconcileCommit(tenant, owner, runId, job, stage));
+        } catch (EngineJobs.Conflict c) {
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("error", c.getMessage());
+            err.put("job_id", c.jobId());
+            HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(err)); return;
+        } catch (EngineJobs.Busy b) {
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            HttpUtil.send(exchange, 503, "{\"error\":" + MAPPER.writeValueAsString(b.getMessage()) + "}"); return;
+        }
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        HttpUtil.send(exchange, 202, MAPPER.writeValueAsString(Map.of("job_id", started.job().id())));
+    }
+
+    /**
+     * The work of one commit job. A failure the commit names (the function's {@code run_not_found},
+     * {@code incomplete_stage}, a row's own file_path) or the statement timeout ends the job failed with that text;
+     * anything else is the registry's generic failure, which never carries a message.
+     */
+    private EngineJobs.Outcome runReconcileCommit(String tenant, String owner, String runId,
+                                                  EngineJobs.Job<Void> job, java.util.function.Consumer<String> stage) {
+        stage.accept("committing");
+        String stop = job.stopReason();
+        if (stop != null) {
+            return reconcileFailure(500, "job_stopped", "the commit did not start: the job was stopped (" + stop
+                + "); the run is still staged, so submit the commit again");
+        }
+        try {
+            return new EngineJobs.Outcome(200, repo.reconcileCommit(tenant, owner, runId, reconcileStatementTimeout));
+        } catch (CatalogRepository.ReconcileCommitException e) {
+            // A transient database error (deadlock, serialization failure, lock not available) is retryable, so it is
+            // a 503 like the registry's own busy answer, not the 422 of a commit that will fail the same way again.
+            int status = TRANSIENT_DB_ERROR.equals(e.code()) ? 503 : 422;
+            return reconcileFailure(status, e.code(), e.getMessage());
+        } catch (org.jooq.exception.DataAccessException e) {
+            if ("57014".equals(sqlStateOf(e))) {
+                return reconcileFailure(500, "commit_timeout", "the commit ran past its statement timeout of "
+                    + reconcileStatementTimeout.toSeconds() + " s and was cancelled; nothing was written and the run is "
+                    + "still staged, so submit the commit again");
+            }
+            throw e;
+        }
+    }
+
+    /** The commit's code for a deadlock, serialization failure or lock not available: retryable, never a file's fault. */
+    static final String TRANSIENT_DB_ERROR = "transient_db_error";
+
+    private static EngineJobs.Outcome reconcileFailure(int status, String reason, String error) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("error", error);
+        body.put("reason", reason);
+        return new EngineJobs.Outcome(status, body);
+    }
+
+    private static String sqlStateOf(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof java.sql.SQLException se && se.getSQLState() != null) return se.getSQLState();
+        }
+        return null;
+    }
+
+    /**
+     * GET /v1/catalog/reconcile/{job_id} — {@code {status: running}}, or {@code {status: succeeded, outcome}}, or
+     * {@code {status: failed, error, reason}}. 404 for an id the engine does not hold (never started, expired, lost
+     * with a restart) and for another tenant's id alike: the poll looks the id up for the caller's tenant only.
+     */
+    private void handleReconcilePoll(HttpExchange exchange, String tenant, String method, String jobId)
+            throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        if (reconcileJobs == null) {
+            HttpUtil.send(exchange, 503, "{\"error\":\"the reconcile job registry is not available\"}"); return;
+        }
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        EngineJobs.Job<Void> job = jobId.isEmpty() || jobId.indexOf('/') >= 0 ? null : reconcileJobs.find(jobId, tenant);
+        if (job == null) {
+            HttpUtil.send(exchange, 404, "{\"error\":\"no such reconcile job\"}"); return;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("job_id", job.id());
+        switch (job.state()) {
+            case RUNNING -> {
+                out.put("status", "running");
+                out.put("stage", job.stage());
+            }
+            case DONE -> {
+                out.put("status", "succeeded");
+                out.put("outcome", job.outcome().body());
+            }
+            case FAILED -> {
+                Map<String, Object> failure = job.outcome().body();
+                out.put("status", "failed");
+                out.put("error", failure.get("error"));
+                out.put("reason", failure.get("reason"));
+            }
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // OWNERS — extra endpoints (nexus-qnp5s)
     // ══════════════════════════════════════════════════════════════════════════
@@ -3261,6 +3537,16 @@ public final class CatalogHandler implements HttpHandler {
         }
         var links = repo.linksFromBatch(tenant, tumblers);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(links));
+    }
+
+    /** POST /v1/catalog/links/upsert_many (RDR-193 Part A4, nexus-u5m5g.4): the body is {@link CatalogLinksHandler#upsertMany}. */
+    private void handleLinksUpsertMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        linkRoutes.upsertMany(exchange, tenant, method);
+    }
+
+    /** POST /v1/catalog/links/same_content (RDR-193 Part A4, nexus-u5m5g.4): the body is {@link CatalogLinksHandler#sameContent}. */
+    private void handleLinksSameContent(HttpExchange exchange, String tenant, String method) throws IOException {
+        linkRoutes.sameContent(exchange, tenant, method);
     }
 
     /**

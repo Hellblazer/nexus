@@ -552,6 +552,50 @@ def _body_to_census(body: dict[str, Any]) -> SubspaceCensus:
     )
 
 
+#: The page :meth:`HttpTupleStore.rd_from` reads while it walks to its start and end rows.
+_FROM_PAGE: int = 100
+
+
+def _parse_row_time(value: str) -> datetime:
+    """A row's ``created_at`` as an aware datetime (the engine writes ``Z``)."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
+
+
+def _check_from_cursor(row: tuple[str, str], field: str) -> None:
+    """A ``from``/``through`` pair is one row's own ``created_at`` and ``id``."""
+    created_at, tuple_id = row
+    if not _TUPLE_ID_HEX.fullmatch(tuple_id or ""):
+        raise SchemaViolationError(
+            f"field '{field}_id': {tuple_id!r} is not a tuple id; it must be the 64-hex-character "
+            f"'id' of a row, paired with that row's 'created_at' as {field}_created_at"
+        )
+    if not _CURSOR_TIMESTAMP.fullmatch(created_at or ""):
+        raise SchemaViolationError(
+            f"field '{field}_created_at': {created_at!r} is not a timestamp with a UTC offset "
+            f"(e.g. 2026-10-21T00:00:00Z); it must be the 'created_at' of the row named by {field}_id"
+        )
+
+
+def check_from_read(n: int, start: tuple[str, str], through: tuple[str, str] | None) -> None:
+    """Refuse a malformed :meth:`HttpTupleStore.rd_from` read before anything
+    is sent: *n* below 1, a pair that is not one row's ``created_at`` and
+    ``id``, or a *through* row ordered before *start*."""
+    if n < 1:
+        raise SchemaViolationError(f"field 'n': {n} must be at least 1")
+    _check_from_cursor(start, "from")
+    if through is not None:
+        _check_from_cursor(through, "through")
+        if (_parse_row_time(through[0]), through[1].lower()) < (_parse_row_time(start[0]), start[1].lower()):
+            raise SchemaViolationError("the 'through' row is ordered before the 'from' row")
+
+
+def _not_in(row: tuple[str, str], subspace: str) -> str:
+    return (
+        f"tuple {row[1]} created {row[0]} is not in {subspace} "
+        "(expired, consumed, or not a row of this subspace); read with since_created_at/since_id instead"
+    )
+
+
 def _since_payload(since: tuple[str, str] | None) -> dict[str, str] | None:
     """``since`` on the wire is ``{"created_at": ..., "id": ...}``
     (``TupleHandler.readCursor``); the client-facing shape is the plain
@@ -963,6 +1007,66 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         rows, limit = self._rd_request(subspace, keys_pattern, n, since, timeout_s, "desc")
         assert limit is not None  # _require_order_echo raised otherwise
         return NewestRead(rows=rows, limit=limit)
+
+    def rd_from(
+        self,
+        subspace: str,
+        keys_pattern: dict[str, str] | None = None,
+        *,
+        n: int = 1,
+        start: tuple[str, str],
+        through: tuple[str, str] | None = None,
+    ) -> list[TupleRow]:
+        """The row *start* names (its own ``(created_at, id)``) and the rows
+        after it, oldest first, at most *n*; with *through*, they stop at that
+        row, inclusive, and more than *n* rows up to it is an error, not a short
+        read (nexus-1d6pz.11.2). A board notice announces posts that
+        need not be consecutive in the subspace (a row that committed late, or
+        a claimed or dead row the announce skipped, can sort between them), so
+        its read is bounded by its first and last posts, not by a count.
+
+        The engine's cursor is exclusive and it has no read by id, so this
+        starts the cursor at ``(start created_at, the smallest id)`` and drops
+        any row ordered before *start*. Raises :class:`LookupError` when
+        *start* or *through* is not in the subspace (expired, consumed, or not
+        a row of it): never a silent start at the next row."""
+        check_from_read(n, start, through)
+        target = (_parse_row_time(start[0]), start[1].lower())
+        end = (_parse_row_time(through[0]), through[1].lower()) if through is not None else None
+        cursor: tuple[str, str] = (start[0], "0" * 64)
+        out: list[TupleRow] = []
+        reached_end = False
+        while len(out) < n and not reached_end:
+            page = self.rd(subspace, keys_pattern, n=_FROM_PAGE, since=cursor)
+            if not page:
+                break
+            for row in page:
+                if not row.created_at:
+                    continue  # cannot be ordered against start; the engine always sends it
+                key = (_parse_row_time(row.created_at), row.id.lower())
+                if key < target:
+                    continue
+                if not out and key != target:
+                    raise LookupError(_not_in(start, subspace))
+                if end is not None and key > end:
+                    raise LookupError(_not_in(through, subspace))  # type: ignore[arg-type]
+                out.append(row)
+                if end is not None and key == end:
+                    reached_end = True
+                    break
+                if len(out) == n:
+                    break
+            cursor = (page[-1].created_at or cursor[0], page[-1].id)
+        if not out:
+            raise LookupError(_not_in(start, subspace))
+        if end is not None and not reached_end:
+            if len(out) < n:
+                raise LookupError(_not_in(through, subspace))  # type: ignore[arg-type]
+            raise SchemaViolationError(
+                f"more than n={n} rows lie from the 'from' row to the 'through' row in {subspace}; "
+                "raise n, or read on with since_created_at/since_id from the last row returned"
+            )
+        return out
 
     def _rd_request(
         self,

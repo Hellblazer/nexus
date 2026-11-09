@@ -42,8 +42,6 @@ from nexus.sensitivity import ReadSensitivity, check_read_sensitivity
 from nexus.ttl import refuse_ttl_over_cap
 from nexus.metadata_schema import (
     ALLOWED_TOP_LEVEL,
-    CONTENT_TYPES,
-    REWRITE_OWNED_KEYS,
     normalize,
     validate,
 )
@@ -51,83 +49,23 @@ from nexus.metadata_schema import (
 _log = structlog.get_logger(__name__)
 
 
-# Legacy store_type values accepted on input (nexus-40t). All map to a
-# :data:`nexus.metadata_schema.CONTENT_TYPES` value so the canonical
-# schema stays compact.
-_STORE_TYPE_TO_CONTENT_TYPE: dict[str, str] = {
-    "code": "code",
-    "pdf": "pdf",
-    "markdown": "markdown",
-    "prose": "prose",
-    "knowledge": "prose",
-    "rdr": "prose",
-    "docs": "prose",
-}
-
-
-def _infer_content_type(metadata: dict, collection_name: str) -> str:
-    """Pick a canonical ``content_type`` for a record (nexus-40t).
-
-    Priority:
-      1. Explicit ``content_type`` in the payload.
-      2. Legacy ``store_type`` → mapped via
-         :data:`_STORE_TYPE_TO_CONTENT_TYPE`.
-      3. Collection prefix (``code__`` → ``code``; anything else → ``prose``).
-    """
-    content_type = metadata.get("content_type")
-    if content_type in CONTENT_TYPES:
-        return content_type  # type: ignore[return-value]
-
-    store_type = metadata.get("store_type")
-    if store_type in _STORE_TYPE_TO_CONTENT_TYPE:
-        return _STORE_TYPE_TO_CONTENT_TYPE[store_type]
-
-    # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): this runs on
-    # EVERY write (_normalize_for_write) -- including a collection's
-    # FIRST-EVER chunk, which structurally has no catalog row yet. Reads
-    # the row directly (never nexus.corpus's name-parsing primitives);
-    # this function's own documented contract is already "anything but a
-    # definite code match -> prose" (see docstring), so a missing row
-    # falls through to the SAME "prose" default every other non-code case
-    # already used, not a guess.
-    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
-    row = get_collection_row(collection_name)
-    if row is not None and row.get("content_type") == "code":
-        return "code"
-    return "prose"
-
-
 def _normalize_for_write(metadata: dict, collection_name: str) -> dict:
-    """Normalise *metadata* before any T3 upsert/update (nexus-40t)."""
-    content_type = _infer_content_type(metadata, collection_name)
-    return normalize(metadata, content_type=content_type)
+    """Normalise *metadata* before any T3 upsert/update: the CHUNK keys only (RDR-236 Phase 4 Step 1).
 
+    The content type this used to infer per write (from the payload, a legacy ``store_type`` or the
+    collection's catalog row) was stamped on the row; a row no longer carries it, so nothing is
+    inferred and no catalog read is made.
+    """
+    return normalize(metadata)
 
 
 def _normalize_partial(metadata: dict, collection_name: str) -> dict:
-    """Normalise a PARTIAL update without injecting defaults (nexus-w94eo).
+    """Normalise a PARTIAL update: keep the CHUNK keys the caller sent, exactly as sent (nexus-w94eo).
 
-    Keeps a normalised key only when the caller sent it, dropping the
-    defaults ``normalize`` fills in for keys the caller left out, which a
-    merging store would otherwise write over the stored values.
-    A legacy ``store_type`` sent alone resolves to a ``content_type`` equal to
-    that default and is therefore dropped; no live writer sends it
-    (RDR-101 Phase 5c retired the key). A schema key the caller sent at its
-    empty default is kept, as the engine keeps it.
+    A key the caller sent at its empty default is kept (the engine stores what it is sent); a key the
+    caller left out is not added, so a merging store never writes a default over a stored value.
     """
-    content_type = _infer_content_type(metadata, collection_name)
-    out = normalize(metadata, content_type=content_type)
-    # normalize() adds no key the caller did not send except content_type,
-    # so keeping only sent keys drops exactly the injected defaults.
-    kept = {k: v for k, v in out.items() if k in metadata}
-    # normalize() drops a sparse key sent at its empty default
-    # (extraction_method="", quality_gate_overridden=False). A caller that
-    # sends one on a partial update means to overwrite the stored value, and
-    # the engine stores it as sent, so keep it here too.
-    for k, v in metadata.items():
-        if k not in kept and k in ALLOWED_TOP_LEVEL:
-            kept[k] = v
-    return kept
+    return {k: v for k, v in metadata.items() if k in ALLOWED_TOP_LEVEL}
 
 # nexus-o6aa.9.16: collection prefixes whose writes bypass the canonical
 # chunk schema. These are programmatically-populated collections that
@@ -215,16 +153,14 @@ def _rewrite_collection_metadata(
             total += 1
             current = dict(meta or {})
             canonical = _normalize_for_write(current, collection_name)
-            # Keys the rewrite may remove: ones it owns, and cargo outside the
-            # schema. Never bib_* (nx enrich bib writes them after indexing,
-            # and a concurrent enrichment would be erased) or content_type.
+            # Every key the canonical form drops is removed (since RDR-236 Phase 4 Step 1 the canonical row
+            # is the CHUNK keys, so a document or position key a pre-Step-1 row still carries goes), except
+            # bib_* (nx enrich bib writes them after indexing, and a concurrent enrichment would be erased)
+            # and content_type. Their removal is the Step 3 sweep's, which owns the preconditions for it.
             gone = current.keys() - canonical.keys()
-            drop = tuple(sorted(
-                k for k in gone
-                if k in REWRITE_OWNED_KEYS or k not in ALLOWED_TOP_LEVEL
-            ))
-            kept_foreign = gone - set(drop)
-            if canonical == {k: v for k, v in current.items() if k not in kept_foreign}:
+            exempt = {k for k in gone if k == "content_type" or k.startswith("bib_")}
+            drop = tuple(sorted(gone - exempt))
+            if canonical == {k: v for k, v in current.items() if k not in exempt}:
                 skipped += 1
                 continue
             updated += 1
@@ -841,9 +777,14 @@ class T3Database:
         no ``--ttl`` concept and is out of scope here) is still read as
         permanent by :func:`nexus.metadata_schema.is_expired`, now with an
         explicit warning logged on that read path — see that function's
-        own docstring. Expiry is computed Python-side via
+        own docstring. Expiry of a row an older client wrote is computed Python-side via
         :func:`nexus.metadata_schema.is_expired` from
         ``indexed_at + ttl_days``; no separate ``expires_at`` field.
+
+        RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): the validated *ttl_days* is NOT written to the chunk row,
+        which carries the CHUNK keys only. A note's TTL is its catalog entry's (``ttl_days`` and ``put_at``
+        on its ``meta``), written by the caller's note writer; this facade has no catalog, so a TTL passed
+        here is checked and then dropped, and :meth:`expire` finds no row to judge by it.
 
         Note (RDR-108 D1 / nexus-kmb6; width per RDR-180): The document ID
         is the content-derived natural ID — the FULL
@@ -892,7 +833,6 @@ class T3Database:
         # this collection collapses to one T3 record by design.
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         doc_id = content_hash
-        now_iso = datetime.now(UTC).isoformat()
 
         # nexus-sghyo: client-side CCE embedding (via a client-constructed
         # voyageai.Client) is retired — the client no longer embeds via
@@ -906,27 +846,17 @@ class T3Database:
 
         content_type = chunk_content_type_for_collection(collection)
 
-        # RDR-101 Phase 5c dropped store_type, corpus, git_meta. Title
-        # kept (find_ids_by_title is load-bearing for nx store delete
-        # --title and MCP store_get title-fallback). RDR-108 Phase 3
-        # dropped chunk_index, chunk_count, doc_id; catalog manifest is
-        # authoritative.
+        # The chunk row is the CHUNK keys only (RDR-236 Phase 4 Step 1): *title*, *tags*, *category*,
+        # *ttl_days* and *source_agent* are the document's own facts and belong to its catalog entry, not
+        # to this shared row. This facade writes only the chunk; the entry is the caller's (the MCP and
+        # CLI put paths write it through ``nexus.catalog.note_write``).
         metadata = make_chunk_metadata(
             content_type=content_type,
             chunk_text_hash=content_hash,
-            content_hash=content_hash,
-            chunk_start_char=0,
-            chunk_end_char=len(content),
-            indexed_at=now_iso,
             embedding_model=(
                 embedding_model_for_collection_name(collection)
                 or index_model_for_collection(collection)
             ),
-            title=title,
-            tags=tags,
-            category=category,
-            ttl_days=ttl_days,
-            source_agent=source_agent,
         )
 
         # ``put`` is the operator / MCP single-document write path. The
@@ -1764,6 +1694,10 @@ class T3Database:
 
     def find_ids_by_title(self, collection: str, title: str) -> list[str]:
         """Return all document IDs whose title metadata exactly matches *title*.
+
+        The test-only facade reads the stored row. The production client
+        (``HttpVectorClient.find_ids_by_title``) answers from the catalog since RDR-236 Phase 4 Step 1,
+        when chunk rows stopped carrying a title.
 
         Uses paginated ``col.get()`` to avoid the ChromaDB Cloud 300-record
         truncation limit.

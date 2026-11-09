@@ -457,13 +457,16 @@ class TestChashSpan:
             limit=5, include=["documents", "metadatas"], sensitivity="include",
         )
         assert result["ids"]
+        file_hashes = {d.index_content_hash for d in code_docs if d.index_content_hash}
         for chunk_id, doc_text, meta in zip(
             result["ids"], result["documents"], result["metadatas"],
         ):
-            assert "chunk_text_hash" in meta and "content_hash" in meta
+            # RDR-236 Phase 4 Step 1: the file's hash is the DOCUMENT's (its catalog entry's
+            # ``index_content_hash``); the chunk row carries the chunk hash and no file hash.
+            assert "chunk_text_hash" in meta and "content_hash" not in meta
             expected = hashlib.sha256(doc_text.encode()).hexdigest()
             assert meta["chunk_text_hash"] == expected
-            assert meta["chunk_text_hash"] != meta["content_hash"]
+            assert file_hashes and meta["chunk_text_hash"] not in file_hashes
             # RDR-180 (nexus-jxizy.3): chunk natural ID is the FULL digest.
             assert chunk_id == expected
 

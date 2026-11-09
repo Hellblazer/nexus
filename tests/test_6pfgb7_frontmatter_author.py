@@ -43,11 +43,11 @@ def test_no_usable_frontmatter_gives_the_stem_and_no_author(tmp_path, text) -> N
     ("Jane Q. Writer", "Jane Q. Writer"),
     ("", ""),
 ])
-def test_the_chunk_rows_source_author_is_the_string_the_catalog_gets(tmp_path, author_yaml, expected) -> None:
-    """Review S3: the row writer once stored ``str(frontmatter.get("author"))``, so a list author
-    became the repr ``"['Ann Lee', 'Bo Chen']"`` and an empty key ``"None"``, while the catalog got
-    ``"Ann Lee, Bo Chen"`` / ``""``. Both now come from :func:`_frontmatter_author`."""
-    from nexus.doc_indexer import _markdown_chunks
+def test_the_catalog_gets_the_author_string_and_the_chunk_row_none(tmp_path, author_yaml, expected) -> None:
+    """Review S3: a list author once became the repr ``"['Ann Lee', 'Bo Chen']"`` and an empty key ``"None"`` on
+    the chunk row, while the catalog got ``"Ann Lee, Bo Chen"`` / ``""``. The catalog's string is
+    :func:`_frontmatter_author`'s; since RDR-236 Phase 4 Step 1 the chunk row carries no author at all."""
+    from nexus.doc_indexer import _markdown_chunks, _parse_md_frontmatter
 
     md = tmp_path / "doc.md"
     md.write_text(f"---\ntitle: T\nauthor: {author_yaml}\n---\n\n# Hello\n\nSome content here for chunking.\n")
@@ -55,4 +55,5 @@ def test_the_chunk_rows_source_author_is_the_string_the_catalog_gets(tmp_path, a
     rows = _markdown_chunks(md, "abc123", "model-ctx", "2026-01-01", "corp")
 
     assert rows
-    assert rows[0][2].get("source_author", "") == expected
+    assert "source_author" not in rows[0][2]
+    assert _parse_md_frontmatter(md)[2] == expected

@@ -10,6 +10,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_ROWS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_CONFORMANCE_REPORT;
@@ -373,6 +375,9 @@ public final class CatalogRepository {
             return t;
         });
     }
+
+    /** The scope this repository runs in, for the sibling repositories split out of it (CatalogLinksRepository). */
+    TenantScope tenantScope() { return tenantScope; }
 
     /**
      * Test-only (nexus-tyxnh): observe whether a purge-trash VACUUM sweep is
@@ -13869,11 +13874,434 @@ public final class CatalogRepository {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // RECONCILE (RDR-193 Part A1, nexus-u5m5g.3): stage landing rows, commit them in one transaction
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** A commit failure the function raised by name ({@code run_not_found}, {@code incomplete_stage}, a named row). */
+    public static final class ReconcileCommitException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+        private final String code;
+
+        public ReconcileCommitException(String code, String message) {
+            super(message);
+            this.code = code;
+        }
+
+        /** The code after {@code reconcile_commit } in the raised message. */
+        public String code() {
+            return code;
+        }
+    }
+
+    /**
+     * A stage page for a run whose commit holds the run header (it has started and is not finished): refused without
+     * waiting, because the commit's closing DELETE would drop a row it never read. The handler's 409.
+     */
+    public static final class ReconcileRunBusyException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        public ReconcileRunBusyException(String message) {
+            super(message);
+        }
+    }
+
+    /** The most landing rows one stage call takes (the 14 bind parameters a row binds keep a page far under the driver's limit). */
+    static final int RECONCILE_STAGE_MAX_ROWS = 1000;
+    /** The age past which a run is dropped by the reap every stage call starts with (design item 3: 24 hours). */
+    static final java.time.Duration RECONCILE_RUN_TTL = java.time.Duration.ofHours(24);
+
+    /**
+     * Stage one page of a reconcile run's landing rows (RDR-193 Part A1). Reaps stale runs of the tenant first.
+     * The first call of a run creates the header (owner, walk mode, the number of rows the client will send); a later
+     * page must carry the same walk and expected_rows. A file_path staged twice in one run is refused, naming it, and
+     * the page is rolled back whole. Every refusal is an {@link IllegalArgumentException} (the handler's 400).
+     *
+     * @return the number of rows staged by this call
+     */
+    public int reconcileStage(String tenant, String owner, String runId, String walk, int expectedRows,
+                              List<Map<String, Object>> rows) {
+        if (owner == null || owner.isBlank()) throw new IllegalArgumentException("'owner' must be non-blank");
+        if (runId == null || runId.isBlank()) throw new IllegalArgumentException("'run_id' must be non-blank");
+        if (!"complete".equals(walk) && !"partial".equals(walk)) {
+            throw new IllegalArgumentException("'walk' must be 'complete' or 'partial', got '" + walk + "'");
+        }
+        if (expectedRows < 0) throw new IllegalArgumentException("'expected_rows' must not be negative");
+        if (rows == null) throw new IllegalArgumentException("'rows' must be a list");
+        if (rows.size() > RECONCILE_STAGE_MAX_ROWS) {
+            throw new IllegalArgumentException("a stage call takes at most " + RECONCILE_STAGE_MAX_ROWS
+                + " rows, got " + rows.size());
+        }
+        // validate and normalise before any statement: a refusal here touches nothing
+        var seenPaths = new HashSet<String>();
+        var staged = new ArrayList<Object[]>(rows.size());
+        for (Map<String, Object> r : rows) {
+            String kind = reconcileString(r, "kind", "?");
+            if (!"present".equals(kind) && !"keep".equals(kind) && !"deleted".equals(kind)) {
+                throw new IllegalArgumentException("row kind must be present, keep or deleted, got '" + kind + "'");
+            }
+            String filePath = reconcileString(r, "file_path", "?");
+            if (filePath.isEmpty()) throw new IllegalArgumentException("a row needs a non-empty file_path");
+            if (!seenPaths.add(filePath)) {
+                throw new IllegalArgumentException("duplicate file_path in the run: " + filePath);
+            }
+            Object seqRaw = r.get("seq");
+            if (!(seqRaw instanceof Integer seq) || seq < 0) {
+                throw new IllegalArgumentException("a row needs a 'seq' that is a whole number of 0 or more in the range of a 32-bit integer (file_path " + filePath + ")");
+            }
+            Object mtimeRaw = r.get("source_mtime");
+            if (mtimeRaw != null && !(mtimeRaw instanceof Number)) {
+                throw new IllegalArgumentException("'source_mtime' must be a number (file_path " + filePath + ")");
+            }
+            staged.add(new Object[] {
+                seq, kind, filePath, reconcileString(r, "content_type", filePath), reconcileString(r, "title", filePath),
+                reconcileString(r, "physical_collection", filePath), reconcileString(r, "head_hash", filePath),
+                mtimeRaw == null ? 0.0 : ((Number) mtimeRaw).doubleValue(), reconcileString(r, "content_hash", filePath),
+                reconcileObject(r, "base_metadata", filePath), reconcileObject(r, "stamp", filePath), sensitiveFlag(r)});
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            dev.nexus.service.jooq.nexus.Routines.catalogReconcileReap(ctx.configuration(), reconcileInterval(RECONCILE_RUN_TTL));
+            ctx.insertInto(CATALOG_RECONCILE_RUNS, CATALOG_RECONCILE_RUNS.TENANT_ID, CATALOG_RECONCILE_RUNS.RUN_ID,
+                    CATALOG_RECONCILE_RUNS.OWNER_TUMBLER, CATALOG_RECONCILE_RUNS.WALK, CATALOG_RECONCILE_RUNS.EXPECTED_ROWS)
+               .values(tenant, runId, owner, walk, expectedRows)
+               .onConflict(CATALOG_RECONCILE_RUNS.TENANT_ID, CATALOG_RECONCILE_RUNS.RUN_ID).doNothing()
+               .execute();
+            // FOR SHARE NOWAIT on the header, held to the end of this page's transaction: the commit's first statement
+            // takes the same row FOR UPDATE, so a page cannot land while a commit has the run (it would be deleted
+            // by the commit's closing DELETE without having been read), and a commit waits for a page in flight
+            var headerQuery = ctx.select(CATALOG_RECONCILE_RUNS.OWNER_TUMBLER, CATALOG_RECONCILE_RUNS.WALK,
+                                         CATALOG_RECONCILE_RUNS.EXPECTED_ROWS, CATALOG_RECONCILE_RUNS.STATE)
+                                 .from(CATALOG_RECONCILE_RUNS)
+                                 .where(CATALOG_RECONCILE_RUNS.TENANT_ID.eq(tenant).and(CATALOG_RECONCILE_RUNS.RUN_ID.eq(runId)))
+                                 .forShare().noWait();
+            org.jooq.Record4<String, String, Integer, String> header;
+            try {
+                header = headerQuery.fetchOne();
+            } catch (org.jooq.exception.DataAccessException e) {
+                if ("55P03".equals(sqlStateOf(e))) {
+                    throw new ReconcileRunBusyException("run " + runId + " has a commit in progress, so this page was not "
+                        + "staged; wait for the commit's outcome, then stage a new run");
+                }
+                throw e;
+            }
+            if (!owner.equals(header.value1())) {
+                throw new IllegalArgumentException("run " + runId + " was started for owner " + header.value1() + ", not " + owner);
+            }
+            if (!walk.equals(header.value2())) {
+                throw new IllegalArgumentException("walk '" + walk + "' does not match the run header's '" + header.value2() + "'");
+            }
+            if (expectedRows != header.value3()) {
+                throw new IllegalArgumentException("expected_rows " + expectedRows + " does not match the run header's " + header.value3());
+            }
+            if (!"staged".equals(header.value4())) {
+                throw new IllegalArgumentException("run " + runId + " is already committed; stage a new run");
+            }
+            if (staged.isEmpty()) return 0;
+            // a path staged on an earlier page of this run is a duplicate too
+            var already = ctx.select(CATALOG_RECONCILE_ROWS.FILE_PATH).from(CATALOG_RECONCILE_ROWS)
+                .where(CATALOG_RECONCILE_ROWS.TENANT_ID.eq(tenant).and(CATALOG_RECONCILE_ROWS.RUN_ID.eq(runId))
+                       .and(CATALOG_RECONCILE_ROWS.FILE_PATH.in(seenPaths)))
+                .limit(1).fetch(CATALOG_RECONCILE_ROWS.FILE_PATH);
+            if (!already.isEmpty()) {
+                throw new IllegalArgumentException("duplicate file_path in the run: " + already.get(0));
+            }
+            var insert = ctx.insertInto(CATALOG_RECONCILE_ROWS,
+                CATALOG_RECONCILE_ROWS.TENANT_ID, CATALOG_RECONCILE_ROWS.RUN_ID, CATALOG_RECONCILE_ROWS.SEQ,
+                CATALOG_RECONCILE_ROWS.KIND, CATALOG_RECONCILE_ROWS.FILE_PATH, CATALOG_RECONCILE_ROWS.CONTENT_TYPE,
+                CATALOG_RECONCILE_ROWS.TITLE, CATALOG_RECONCILE_ROWS.PHYSICAL_COLLECTION, CATALOG_RECONCILE_ROWS.HEAD_HASH,
+                CATALOG_RECONCILE_ROWS.SOURCE_MTIME, CATALOG_RECONCILE_ROWS.CONTENT_HASH,
+                CATALOG_RECONCILE_ROWS.BASE_METADATA, CATALOG_RECONCILE_ROWS.STAMP, CATALOG_RECONCILE_ROWS.SENSITIVE);
+            for (Object[] r : staged) {
+                insert = insert.values(tenant, runId, (Integer) r[0], (String) r[1], (String) r[2], (String) r[3],
+                    (String) r[4], (String) r[5], (String) r[6], (Double) r[7], (String) r[8],
+                    JSONB.valueOf((String) r[9]), JSONB.valueOf((String) r[10]), (Boolean) r[11]);
+            }
+            try {
+                return insert.execute();
+            } catch (org.jooq.exception.DataAccessException e) {
+                String state = sqlStateOf(e);
+                if (SqlConstraints.UNIQUE_VIOLATION.equals(state)) {
+                    throw new IllegalArgumentException("a row of this page repeats a seq or file_path already staged in run "
+                        + runId + " (" + SqlConstraints.violated(e) + ")", e);
+                }
+                if ("23514".equals(state)) {
+                    throw new IllegalArgumentException("a landing row was refused by its constraints ("
+                        + SqlConstraints.violated(e) + ")", e);
+                }
+                throw e;
+            }
+        });
+    }
+
+    /**
+     * A staged row's string field: absent or null is the empty string, a string is itself, anything else is refused
+     * naming the field and the file ({@code s} would read a number as absent and stage an empty value silently).
+     */
+    private static String reconcileString(Map<String, Object> row, String key, String filePath) {
+        Object v = row.get(key);
+        if (v == null) return "";
+        if (v instanceof String sv) return sv;
+        throw new IllegalArgumentException("'" + key + "' must be a string (file_path " + filePath + ")");
+    }
+
+    /** A staged row's {@code base_metadata} or {@code stamp}: absent or null is the empty object; anything but an object is refused. */
+    private static String reconcileObject(Map<String, Object> row, String key, String filePath) {
+        Object v = row.get(key);
+        if (v == null) return "{}";
+        if (!(v instanceof Map<?, ?>)) {
+            throw new IllegalArgumentException("'" + key + "' must be a JSON object (file_path " + filePath + ")");
+        }
+        return jsonOrNull(v);
+    }
+
+    private static org.jooq.types.YearToSecond reconcileInterval(java.time.Duration d) {
+        return new org.jooq.types.YearToSecond(new org.jooq.types.YearToMonth(0, 0), org.jooq.types.DayToSecond.valueOf(d));
+    }
+
+    private static String sqlStateOf(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof java.sql.SQLException se && se.getSQLState() != null) return se.getSQLState();
+        }
+        return null;
+    }
+
+    /**
+     * Commit a staged reconcile run in ONE transaction (RDR-193 Part A1): {@code nexus.catalog_reconcile_commit}. A
+     * committed run returns its stored outcome and changes nothing. The call runs under {@code statement_timeout}: the
+     * job's 15-minute cap is cooperative and interrupts nothing in the database, so this bound is what stops a stuck
+     * statement. A failure the function names ({@code run_not_found}, {@code incomplete_stage}, a write that failed
+     * on one row, which names its file_path) is a {@link ReconcileCommitException}; the transaction rolls back whole.
+     *
+     * @param statementTimeout the longest the commit may run; the job asks {@code stopReason()} before calling
+     */
+    public Map<String, Object> reconcileCommit(String tenant, String owner, String runId, java.time.Duration statementTimeout) {
+        if (statementTimeout == null || statementTimeout.isZero() || statementTimeout.isNegative()
+            || statementTimeout.toMillis() > Integer.MAX_VALUE) {
+            // set_config takes statement_timeout as int milliseconds: a longer value would fail on every commit.
+            throw new IllegalArgumentException("statementTimeout must be positive and at most " + Integer.MAX_VALUE + " ms");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setLocal(ctx, "statement_timeout", String.valueOf(statementTimeout.toMillis()));
+            JSONB out;
+            try {
+                out = ctx.select(dev.nexus.service.jooq.nexus.Routines.catalogReconcileCommit(owner, runId))
+                         .fetchOne(0, JSONB.class);
+            } catch (org.jooq.exception.DataAccessException e) {
+                for (Throwable t = e; t != null; t = t.getCause()) {
+                    String m = t instanceof java.sql.SQLException ? serverMessageOf(t) : null;
+                    if (m != null && m.startsWith("reconcile_commit ")) {
+                        int colon = m.indexOf(':');
+                        String code = m.substring("reconcile_commit ".length(), colon > 0 ? colon : m.length()).trim();
+                        throw new ReconcileCommitException(code, m);
+                    }
+                }
+                throw e;
+            }
+            try {
+                return MAPPER.readValue(out.data(), MAP_TYPE);
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new IllegalStateException("reconcile outcome is not JSON", e);
+            }
+        });
+    }
+
+    /** The server's own message text of a driver exception (no SQLSTATE prefix, no CONTEXT lines), else its message. */
+    static String serverMessageOf(Throwable t) {
+        try {
+            Object sem = t.getClass().getMethod("getServerErrorMessage").invoke(t);
+            if (sem != null) {
+                Object m = sem.getClass().getMethod("getMessage").invoke(sem);
+                if (m instanceof String str) return str;
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // not a PSQLException: fall back to the plain message
+        }
+        String m = t.getMessage();
+        return m != null && m.startsWith("ERROR: ") ? m.substring("ERROR: ".length()) : m;
+    }
+
+    /** Drop the tenant's reconcile runs created longer ago than {@code interval}, committed or not; returns the runs dropped. */
+    public int reconcileReap(String tenant, java.time.Duration interval) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Integer n = dev.nexus.service.jooq.nexus.Routines.catalogReconcileReap(ctx.configuration(), reconcileInterval(interval));
+            return n == null ? 0 : n;
+        });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // RESOLVE OR REGISTER (RDR-193 Part A1 route table, nexus-u5m5g.3)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * What {@link #resolveOrRegister} answers: the document's tumbler, whether this call minted it, and whether it
+     * belongs to another owner (then it was neither adopted nor written, and {@code created} is false).
+     */
+    public record ResolveOutcome(String tumbler, boolean created, boolean foreignOwner) { }
+
+    /**
+     * Resolve a document by {@code (owner, source_uri)} or register it (RDR-193): the one call that replaces the
+     * client's lookup-then-register of {@code _register_or_lookup_doc_id}, {@code _catalog_markdown_hook} and
+     * {@code store_hook}. The owner is a curator, named, and created when absent.
+     *
+     * <ol>
+     *   <li>A live document holding the source_uri (the file_path's derived one when none is sent) under another
+     *       owner is returned as {@code foreignOwner} and left alone.</li>
+     *   <li>One under this owner is returned, its empty title and its zero year filled from the request (never an
+     *       existing value overwritten).</li>
+     *   <li>With {@code title_fallback} and no source_uri match, a GHOST of this owner with exactly that title
+     *       (live, no chunks) is the document: it takes the source_uri, so the next call matches in step 2.</li>
+     *   <li>Otherwise the document is registered ({@link #registerDocumentWithOutcome}).</li>
+     * </ol>
+     *
+     * <p>The ephemeral-worktree guard stays on the client. Request: {@code owner_name} or {@code curator},
+     * {@code source_uri} or an absolute {@code file_path}, {@code title}, and optionally {@code year},
+     * {@code title_fallback}, {@code source_mtime}, {@code content_type}, {@code physical_collection}. A value of the
+     * wrong type is refused, never read as absent.
+     */
+    public ResolveOutcome resolveOrRegister(String tenant, Map<String, Object> req) {
+        if (TenantConstants.isWildcard(tenant)) {
+            throw new IllegalArgumentException("tenant '*' is a reserved sentinel and cannot own catalog entries");
+        }
+        String ownerName = optString(req, "owner_name");
+        if (ownerName == null || ownerName.isBlank()) ownerName = optString(req, "curator");
+        if (ownerName == null || ownerName.isBlank()) {
+            throw new IllegalArgumentException("'owner_name' (or 'curator') required");
+        }
+        final String title = nne(optString(req, "title"));
+        final Integer year = optInt(req, "year");
+        final boolean titleFallback = Boolean.TRUE.equals(optBool(req, "title_fallback"));
+        final Double sourceMtime = optDouble(req, "source_mtime");
+        final String contentType = optString(req, "content_type");
+        final String physicalCollection = optString(req, "physical_collection");
+        final String filePath = nne(optString(req, "file_path"));
+        // curator owners have no repo_root: a relative file_path has no identity of its own
+        final String key = deriveSourceUri(nne(optString(req, "source_uri")), filePath, "");
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException(
+                "a 'source_uri', or an absolute 'file_path' to derive one from, is required: it is the document's identity");
+        }
+        // Step 6 implements the flag (born flagged, audited, inherited); until then a request that carries it is refused
+        // rather than answered as if it had been honoured
+        if (req.get("sensitive") != null) {
+            throw new IllegalArgumentException("'sensitive' is not supported by resolve_or_register yet "
+                + "(RDR-193 Step 6): register the document, then raise the flag through the audited route");
+        }
+        final String ownerPrefix = curatorOwnerPrefix(tenant, ownerName);
+        final String ownerDot = ownerPrefix + ".";
+
+        ResolveOutcome found = UniqueRaceRetry.run("resolveOrRegister", DOCUMENT_NON_ARBITRATED, () ->
+        tenantScope.withTenant(tenant, ctx -> {
+            var hit = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.YEAR)
+                         .from(CATALOG_DOCUMENTS)
+                         .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.SOURCE_URI.eq(key))
+                                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                         .fetchOne();
+            if (hit != null) {
+                if (!hit.value1().startsWith(ownerDot)) return new ResolveOutcome(hit.value1(), false, true);
+                backfillTitleAndYear(ctx, tenant, hit.value1(), hit.value2(), hit.value3(), title, year, null);
+                return new ResolveOutcome(hit.value1(), false, false);
+            }
+            if (titleFallback && !title.isEmpty()) {
+                // store_hook._find_ghost_by_title filters content_type="knowledge": the request's type, when it gives one
+                var ghosts = documentsByTitleQuery(ctx, title, ownerPrefix, contentType, 0).fetch();
+                if (!ghosts.isEmpty()) {
+                    var ghost = ghosts.get(0);
+                    backfillTitleAndYear(ctx, tenant, ghost.get(CATALOG_DOCUMENTS.TUMBLER), ghost.get(CATALOG_DOCUMENTS.TITLE),
+                        ghost.get(CATALOG_DOCUMENTS.YEAR), title, year, key);
+                    return new ResolveOutcome(ghost.get(CATALOG_DOCUMENTS.TUMBLER), false, false);
+                }
+            }
+            return null;
+        }));
+        if (found != null) return found;
+
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("title", title);
+        if (year != null) fields.put("year", year);
+        fields.put("source_uri", key);
+        if (!filePath.isEmpty()) fields.put("file_path", filePath);
+        fields.put("owner_type", "curator");
+        fields.put("owner_name", ownerName);
+        if (sourceMtime != null) fields.put("source_mtime", sourceMtime);
+        if (contentType != null) fields.put("content_type", contentType);
+        if (physicalCollection != null) fields.put("physical_collection", physicalCollection);
+        RegisterOutcome minted = registerDocumentWithOutcome(tenant, ownerPrefix, fields);
+        // a concurrent registration of the same source_uri under another owner wins the unique index: the answer is theirs
+        return new ResolveOutcome(minted.tumbler(), minted.created(), !minted.tumbler().startsWith(ownerDot));
+    }
+
+    /** The tumbler prefix of the tenant's curator owner of this name; the owner is registered when none exists. */
+    private String curatorOwnerPrefix(String tenant, String name) {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            String prefix = tenantScope.withTenant(tenant, ctx -> ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX)
+                .from(CATALOG_OWNERS)
+                .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.NAME.eq(name))
+                       .and(CATALOG_OWNERS.OWNER_TYPE.eq("curator")))
+                .fetchOne(CATALOG_OWNERS.TUMBLER_PREFIX));
+            if (prefix != null) return prefix;
+            upsertOwner(tenant, Map.of("name", name, "owner_type", "curator"));
+        }
+        throw new IllegalStateException("curator owner '" + name + "' was registered but cannot be read back");
+    }
+
+    /**
+     * Fill an empty title and a zero year of {@code tumbler} from the request (COALESCE on empty: a value already
+     * there is kept), and stamp {@code sourceUri} on it when given (the ghost leg). One statement, and none when
+     * there is nothing to write.
+     */
+    private static void backfillTitleAndYear(DSLContext ctx, String tenant, String tumbler, String storedTitle,
+                                             Integer storedYear, String title, Integer year, String sourceUri) {
+        boolean fillTitle = !title.isEmpty() && (storedTitle == null || storedTitle.isEmpty());
+        boolean fillYear = year != null && year > 0 && (storedYear == null || storedYear == 0);
+        if (!fillTitle && !fillYear && sourceUri == null) return;
+        Map<Field<?>, Object> sets = new LinkedHashMap<>();
+        if (fillTitle) {
+            sets.put(CATALOG_DOCUMENTS.TITLE, DSL.coalesce(DSL.nullif(CATALOG_DOCUMENTS.TITLE, ""), DSL.val(title)));
+        }
+        if (fillYear) {
+            sets.put(CATALOG_DOCUMENTS.YEAR, DSL.coalesce(DSL.nullif(CATALOG_DOCUMENTS.YEAR, 0), DSL.val(year)));
+        }
+        if (sourceUri != null) sets.put(CATALOG_DOCUMENTS.SOURCE_URI, sourceUri);
+        ctx.update(CATALOG_DOCUMENTS).set(sets)
+           .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                  .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute();
+    }
+
+    /** An optional string field: absent or null is null, a non-string is refused. */
+    private static String optString(Map<String, Object> m, String k) {
+        Object v = m.get(k);
+        if (v == null) return null;
+        if (v instanceof String sv) return sv;
+        throw new IllegalArgumentException("'" + k + "' must be a string");
+    }
+
+    /** An optional whole-number field: absent or null is null, anything but an integral number is refused. */
+    private static Integer optInt(Map<String, Object> m, String k) {
+        Object v = m.get(k);
+        if (v == null) return null;
+        if (v instanceof Integer || v instanceof Long || v instanceof Short || v instanceof Byte) return ((Number) v).intValue();
+        throw new IllegalArgumentException("'" + k + "' must be a whole number");
+    }
+
+    private static Double optDouble(Map<String, Object> m, String k) {
+        Object v = m.get(k);
+        if (v == null) return null;
+        if (v instanceof Number n) return n.doubleValue();
+        throw new IllegalArgumentException("'" + k + "' must be a number");
+    }
+
+    private static Boolean optBool(Map<String, Object> m, String k) {
+        Object v = m.get(k);
+        if (v == null) return null;
+        if (v instanceof Boolean b) return b;
+        throw new IllegalArgumentException("'" + k + "' must be true or false");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // HELPERS
     // ══════════════════════════════════════════════════════════════════════════
 
     @SuppressWarnings("unchecked")
-    private static SelectField<?>[] documentFields() {
+    static SelectField<?>[] documentFields() {
         return new SelectField<?>[]{
             CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
             CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
@@ -13893,7 +14321,7 @@ public final class CatalogRepository {
     }
 
     /** Convert a jOOQ Record.intoMap() to a strongly-typed doc map. */
-    private static Map<String, Object> docRowFromRecord(Map<String, Object> raw) {
+    static Map<String, Object> docRowFromRecord(Map<String, Object> raw) {
         Map<String, Object> m = new LinkedHashMap<>();
         // Column names in intoMap() are the unqualified column names
         m.put("tumbler",             raw.getOrDefault("tumbler", null));

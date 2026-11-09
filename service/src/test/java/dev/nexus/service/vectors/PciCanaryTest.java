@@ -175,6 +175,26 @@ class PciCanaryTest {
     }
 
     @Test
+    void aMeanAboveTheBarButBelowOne_isGreen() {
+        // One row past the k-th distance in the k=120 page only: recall 119/120 there, 1.0 at every other k.
+        Script script = new Script((q, k) -> {
+            List<Hit> page = new ArrayList<>(exactPage(k));
+            if (k == 120) {
+                page.set(k - 1, new Hit("far-" + k, 0.001 * k + 0.5));
+            }
+            return page;
+        });
+
+        Result r = canary(3, script).run(TARGET, "daily");
+
+        double expected = (4 + 119d / 120) / 5;
+        assertThat(r.meanRecall()).isCloseTo(expected, org.assertj.core.data.Offset.offset(1e-12));
+        assertThat(r.meanRecall()).as("between the bar and 1").isGreaterThan(0.99).isLessThan(1.0);
+        assertThat(r.top1Misses()).isZero();
+        assertThat(r.state()).as("a mean of %s is at or above the 0.99 bar", r.meanRecall()).isEqualTo(State.GREEN);
+    }
+
+    @Test
     void aTop1Miss_isRedEvenWhenTheMeanIsAbove099() {
         // Every page has the exact top-k except the nearest row, replaced by a row at the k-th distance (a tie, so
         // recall stays 1.0), but the NEAREST row is absent and nothing is as near.

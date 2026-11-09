@@ -3177,6 +3177,7 @@ def manifest_write_batch_hook(
     *,
     catalog_doc_id: str = "",
     manifest_complete: dict[str, str] | None = None,
+    positions: list[dict] | None = None,
 ) -> None:
     """Registered batch hook (nexus-572g OBS-3): UPSERT document_chunks
     manifest rows after every T3 upsert so the catalog manifest stays
@@ -3192,12 +3193,22 @@ def manifest_write_batch_hook(
     leave orphan rows at higher positions; the per-document hook
     (fired once at the tail of every indexing call) is responsible for
     final cleanup and can call ``write_manifest`` to replace.
-    Best-effort: any failure is logged at debug level and never
-    propagates to the caller.
+    Best-effort: any failure is logged (a position list that does not line up
+    with the rows at warning, and counted as an identity drop; the rest at debug
+    level) and never propagates to the caller.
 
-    Reads ``metadatas`` (``chunk_text_hash``, ``line_start``,
-    ``line_end``, ``chunk_start_char``, ``chunk_end_char``); ignores
-    ``contents`` and ``embeddings``.
+    Reads ``metadatas`` for the chash (``chunk_text_hash``) and *positions* for
+    the labels and spans (``line_start``, ``line_end``, ``chunk_start_char``,
+    ``chunk_end_char``, ``page_number``, ``section_title``, ``section_type``,
+    and ``chunk_index`` when the caller assigned one); ignores ``contents`` and
+    ``embeddings``.
+
+    *positions* (RDR-236 Phase 4 Step 0, nexus-6pfgb.65) is the chunkers' own
+    position dicts, index-aligned with *metadatas*. A caller that hands none gets
+    them read off the metadata rows (``aligned_positions``): a caller whose rows
+    are stored rows, or one outside the indexers. A row written since RDR-236
+    Phase 4 Step 1 carries no position key, so such a caller sends its
+    documents' manifest rows with no label keys (see ``_manifest_chunk_rows``).
 
     *catalog_doc_id* (RDR-108 Phase 3) — the catalog ``Document.tumbler``
     string for the batch's document. Phase 3 retired ``doc_id`` from
@@ -3229,11 +3240,27 @@ def manifest_write_batch_hook(
         return
     from collections import defaultdict  # noqa: PLC0415 — stdlib collections deferred to function scope
 
-    by_doc: dict[str, list[tuple[int, dict]]] = defaultdict(list)
+    from nexus.metadata_schema import aligned_positions  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+
+    try:
+        positions = aligned_positions(metadatas, positions)
+    except ValueError:  # the documented contract: the hook never propagates
+        # A caller handed a position list that is not index-aligned with its rows. The chunks are in T3
+        # and no manifest row can be built for them: the same outcome, and the same run-summary entry,
+        # as a batch with no document identity.
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        _record_manifest_identity_drop(collection, len(metadatas))
+        structlog.get_logger().warning(
+            "manifest_write_hook_positions_misaligned",
+            collection=collection, batch_size=len(metadatas), positions=len(positions or []),
+            exc_info=True,
+        )
+        return
+    by_doc: dict[str, list[tuple[int, dict, dict]]] = defaultdict(list)
     for i, meta in enumerate(metadatas):
         doc_id = catalog_doc_id or meta.get("doc_id", "")
         if doc_id:
-            by_doc[doc_id].append((i, meta))
+            by_doc[doc_id].append((i, meta, positions[i]))
     if not by_doc:
         # GH #1397 / nexus-94fxl: this was a zero-log return — chunks landed
         # in T3 but the manifest was never written, leaving the document's
@@ -3272,7 +3299,7 @@ def manifest_write_batch_hook(
         for _doc_id in sorted(by_doc):
             _record_manifest_write_failure(
                 _doc_id,
-                [m.get("chunk_text_hash", "") for _, m in by_doc[_doc_id]],
+                [m.get("chunk_text_hash", "") for _, m, _p in by_doc[_doc_id]],
             )
         return
     if _gate is None:
@@ -3287,7 +3314,7 @@ def manifest_write_batch_hook(
         for _doc_id in sorted(by_doc):
             _record_manifest_write_failure(
                 _doc_id,
-                [m.get("chunk_text_hash", "") for _, m in by_doc[_doc_id]],
+                [m.get("chunk_text_hash", "") for _, m, _p in by_doc[_doc_id]],
             )
         return
     # (The local-mode read-handle cleanup that lived here — a lint-dodging
@@ -3311,34 +3338,51 @@ def manifest_write_batch_hook(
             _close()
 
 
-def _manifest_chunk_rows(indexed_metas) -> list[dict]:
+_LABEL_KEYS: tuple[str, ...] = ("section_title", "section_type", "page_number")
+
+
+def _manifest_chunk_rows(indexed) -> list[dict]:
+    """Manifest rows from ``(index, chunk_metadata, positions)`` triples.
+
+    *chunk_metadata* is the chunk row (it supplies the chash); *positions* is the chunker's own position
+    dict (the POSITION fields, plus ``chunk_index`` when the caller assigned one). The labels and spans
+    are read from *positions* only, never from the chunk row. A caller whose chunk metadata IS a stored
+    row builds its triples with :func:`nexus.metadata_schema.positions_of_row`.
+
+    A position dict that carries no label key at all (a stored row written since RDR-236 Phase 4 Step 1,
+    which holds no position keys) yields a row with NO label keys, so the engine leaves it legacy
+    (``labels_written`` false) and a reader falls back; it must never be sent as an authoritative empty
+    label, which would overwrite the document's real one with ``""``.
+    """
     from nexus.catalog.types import manifest_span  # noqa: PLC0415 — deferred to avoid circular import (catalog)
 
-    return [
-        {
+    rows: list[dict] = []
+    for i, m, p in indexed:
+        row = {
             "chash": m.get("chunk_text_hash", ""),
-            "position": int(m.get("chunk_index", i)),
-            "chunk_index": m.get("chunk_index"),
+            "position": int(p.get("chunk_index", i)),
+            "chunk_index": p.get("chunk_index"),
             # nexus-qe78r: a real 0 (the first chunk's char start) travels as 0; only a span the
             # producer did not record (the factory's 0 default) goes as null. See manifest_span.
             **manifest_span(
-                m.get("line_start"), m.get("line_end"),
-                m.get("chunk_start_char"), m.get("chunk_end_char"),
+                p.get("line_start"), p.get("line_end"),
+                p.get("chunk_start_char"), p.get("chunk_end_char"),
             ),
+        }
+        if any(k in p for k in _LABEL_KEYS):
             # nexus-tko2w (RDR-108): position-derived labels belong to the (doc, position)
-            # manifest row, not to the shared T3 chunk row. The three keys are ALWAYS sent:
+            # manifest row, not to the shared T3 chunk row. The three keys are sent TOGETHER:
             # their presence is what marks the row's labels as this document's own answer
             # (the engine's labels_written), and a chunk with no heading sends "" ("none
             # here"), which readers then take as authoritative instead of falling back to the
             # chunk row's (another document's) label. A client that predates the columns sends
             # no key and its rows stay legacy. Page 0 is the chunkers' "not paged" default and
             # travels as null.
-            "section_title": m.get("section_title") or "",
-            "section_type": m.get("section_type") or "",
-            "page_number": m.get("page_number") or None,
-        }
-        for i, m in indexed_metas
-    ]
+            row["section_title"] = p.get("section_title") or ""
+            row["section_type"] = p.get("section_type") or ""
+            row["page_number"] = p.get("page_number") or None
+        rows.append(row)
+    return rows
 
 
 def _apply_combined_write_response(
@@ -3982,6 +4026,16 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
             "_manifest_write_loop: 'collection' is required and must be "
             "non-blank (RDR-191) — every manifest write below requires it"
         )
+    # RDR-236 Phase 4 Step 0 (nexus-6pfgb.65): *by_doc* items are ``(index, chunk_metadata, positions)``
+    # triples (the hook builds them so). An ``(index, row)`` pair is a caller whose chunk metadata is a
+    # stored row (the manifest heal): its positions are read off it, and a row written since Step 1 holds none,
+    # so its manifest row goes out with no label keys (``_manifest_chunk_rows``).
+    from nexus.metadata_schema import positions_of_row  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+
+    by_doc = {
+        d: [t if len(t) == 3 else (t[0], t[1], positions_of_row(t[1])) for t in items]
+        for d, items in by_doc.items()
+    }
     # nexus-u2kwq: multi-doc batches (the flush-grain aggregate path) go
     # through ONE write_many POST when the writer supports it; a 404
     # (engine < v0.1.24) or missing capability falls back to the per-doc

@@ -338,6 +338,10 @@ jobs:
               web/install.*) docs_only=false ;;
               web/*) ;;
               conexus/CHANGELOG.md) ;;
+              # Changelog fragments (nexus-3ceda.2): prose like CHANGELOG.md, one
+              # level deep only, so a nested path still reads as code.
+              changelog/unreleased/*/*) docs_only=false ;;
+              changelog/unreleased/*.md) ;;
               */*) docs_only=false ;;
               README.md) ;;
               CHANGELOG*) ;;
@@ -1269,6 +1273,12 @@ jobs:
           # lint leg's checkout).
           fetch-depth: 0
 
+      - name: Scrub gate (a docs-only commit skips the lint bucket that also runs it)
+        # nexus-3ceda.7: no personal home path, tailnet hostname, chat link or
+        # session trailer beyond tests/fixtures/scrub-allowlist.txt. Stdlib
+        # only, so it runs before uv; well under a second.
+        run: python3 scripts/scrub_check.py check
+
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: "3.12"
@@ -1324,6 +1334,11 @@ jobs:
 
       - name: Install project + dev deps
         run: uv sync --group dev
+
+      - name: Changelog fragments are well formed (nexus-3ceda.2)
+        # A fragment-only or CHANGELOG-only push takes this lane, not the lint
+        # bucket, so the fragment check runs here too.
+        run: python3 scripts/changelog_fold.py check
 
       - name: Run the docs-reading tests
         # The selector exits 1 below its own floor, which fails this step

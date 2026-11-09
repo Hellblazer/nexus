@@ -122,6 +122,17 @@ class TestHappyPath:
         assert proc.stdout.strip() == f"PUSH_OK n=2 tip={b}"
         assert _remote_tip(origin) == b
 
+    def test_a_push_prints_both_ci_waits_on_stderr(self, repos) -> None:
+        """nexus-1d6pz.11.4: the channel subscribe and the background `nx ci wait`
+        for the pushed tip, on stderr; stdout keeps its one PUSH_OK line."""
+        _origin, work = repos
+        a = _commit(work, "a")
+        proc = _run(work, a)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == f"PUSH_OK n=1 tip={a}"
+        assert 'PUSH_WAIT channel: tuple_subscribe("board/ci/nexus-develop--done")' in proc.stderr
+        assert f"PUSH_WAIT no channel: run as a background command: nx ci wait {a} --branch develop" in proc.stderr
+
     def test_pushes_develop_from_a_detached_worktree(self, repos, tmp_path) -> None:
         origin, work = repos
         a = _commit(work, "a")

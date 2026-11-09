@@ -207,15 +207,40 @@ def _index(repo: Path, registry: RepoRegistry, t3: T3Database, **kw) -> None:
         index_repository(repo, registry, **kw)
 
 
-def _get_sources(t3: T3Database, col_name: str) -> set[str]:
-    """RDR-102 D2: source_path was removed from the chunk schema. The
-    chunk's ``title`` is constructed as ``"{file.relative_to(repo)}:
-    chunk-{i}"`` for code (code_indexer.py:393) and prose
-    (prose_indexer.py:96), so it still carries the filename — sufficient
-    for the ``any(filename in p for p in sources)`` membership pattern
-    these tests use to verify file-to-collection routing."""
+def _known_file_texts() -> dict[str, str]:
+    """Every file this module can index, by relative path (the corpus copied from the repo, the prose files and
+    the RDR files); the PDF is binary and is identified by its own text where a test needs it."""
+    texts = {rel: (_NEXUS_ROOT / rel).read_text(encoding="utf-8") for rel in _CORPUS_FILES}
+    texts.update(_PROSE_FILES)
+    texts.update(_RDR_FILES)
+    return texts
+
+
+def _chunk_texts(t3: T3Database, col_name: str) -> list[str]:
     col = t3.get_or_create_collection(col_name)
-    return {m.get("title", "") for m in col.get(include=["metadatas"], sensitivity="include")["metadatas"]}
+    return list(col.get(include=["documents"], sensitivity="include")["documents"])
+
+
+def _sources_of(texts: list[str]) -> set[str]:
+    """The files whose text the chunks *texts* carry.
+
+    RDR-236 Phase 4 Step 1: a chunk row carries no ``title`` (it was ``"{relpath}:chunk-{i}"``), so which file
+    a chunk came from is read from its text: a file is present when one of its lines that no other known
+    file has (20 characters or more) appears in some chunk."""
+    known = _known_file_texts()
+    lines = {rel: {ln.strip() for ln in t.splitlines() if len(ln.strip()) >= 20} for rel, t in known.items()}
+    present: set[str] = set()
+    for rel, own in lines.items():
+        others = set().union(*(v for r, v in lines.items() if r != rel))
+        unique = own - others
+        if any(ln in text for ln in unique for text in texts):
+            present.add(rel)
+    return present
+
+
+def _get_sources(t3: T3Database, col_name: str) -> set[str]:
+    """The relative paths of the known files indexed into *col_name* (see :func:`_sources_of`)."""
+    return _sources_of(_chunk_texts(t3, col_name))
 
 
 # ── Basic indexer pipeline ────────────────────────────────────────────────────
@@ -331,7 +356,7 @@ def test_phase_5c_index_drops_corpus_store_type_git_meta(
     ]
 
     leaks: dict[str, list[str]] = {}
-    titles_seen = 0
+    non_chunk_keys: set[str] = set()
     total_chunks = 0
     dropped_keys = ("corpus", "store_type", "git_meta")
     for col_name in my_cols:
@@ -344,8 +369,7 @@ def test_phase_5c_index_drops_corpus_store_type_git_meta(
                     leaks.setdefault(f"{col_name}:{k}", []).append(
                         m.get("doc_id", "<no-doc-id>")
                     )
-            if m.get("title"):
-                titles_seen += 1
+            non_chunk_keys |= set(m) - {"chunk_text_hash", "embedding_model"}
 
     assert total_chunks > 0, "expected at least one chunk in fresh index"
     assert not leaks, (
@@ -353,10 +377,8 @@ def test_phase_5c_index_drops_corpus_store_type_git_meta(
         f"regression). Indexed {total_chunks} chunks; keys present in: "
         f"{sorted(leaks)}."
     )
-    assert titles_seen > 0, (
-        "Phase 5c kept title in the schema (audit / find_ids_by_title); "
-        "at least one indexed chunk must carry one."
-    )
+    # RDR-236 Phase 4 Step 1: a chunk row is the CHUNK keys and nothing else (the title is the catalog's).
+    assert not non_chunk_keys, f"chunk rows carry keys beyond the CHUNK keys: {sorted(non_chunk_keys)}"
 
 
 def test_greenfield_index_writes_no_deprecated_keys(
@@ -572,22 +594,16 @@ def test_smart_index_rdr_routing(
 
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
-    docs_col = local_t3.get_or_create_collection(info["docs_collection"])
-    docs_sections = {
-        m.get("section_title", "")
-        for m in docs_col.get(include=["metadatas"], sensitivity="include")["metadatas"]
-    }
-    assert not any("ADR-001" in s for s in docs_sections), (
-        f"ADR-001 must not appear in docs__ section_titles: {docs_sections}"
+    # RDR-236 Phase 4 Step 1: the section label is the manifest row's, not a chunk row's, so the routing is
+    # shown by the chunk TEXT: ADR-001's decision text is in the rdr collection and not in docs__.
+    docs_texts = _chunk_texts(local_t3, info["docs_collection"])
+    assert not any("three storage tiers" in t for t in docs_texts), (
+        "ADR-001 must not appear in the docs__ collection"
     )
 
-    rdr_col = local_t3.get_or_create_collection(rdr_col_name)
-    rdr_metas = rdr_col.get(include=["metadatas"], sensitivity="include")["metadatas"]
-    assert rdr_metas, f"expected ADR-001 chunks in {rdr_col_name}; got none"
-    rdr_sections = {m.get("section_title", "") for m in rdr_metas}
-    assert any("ADR-001" in s for s in rdr_sections), (
-        f"ADR-001 H1 must surface as section_title in rdr__: {rdr_sections}"
-    )
+    rdr_texts = _chunk_texts(local_t3, rdr_col_name)
+    assert rdr_texts, f"expected ADR-001 chunks in {rdr_col_name}; got none"
+    assert any("three storage tiers" in t for t in rdr_texts), "ADR-001's text must be in the rdr__ collection"
 
 
 @pytest.mark.parametrize("query,corpus_key,expected_file", [
@@ -613,9 +629,8 @@ def test_smart_index_search(
     info = rich_registry.get(rich_repo)
     results = local_t3.search(query, [info[corpus_key]], n_results=5, sensitivity="include")
     assert len(results) > 0
-    # RDR-102 D2: search results no longer carry source_path (filtered
-    # by normalize() at write time). Title carries "{relpath}:chunk-{i}".
-    sources = [r.get("title", "") for r in results]
+    # RDR-236 Phase 4 Step 1: no title on the row; the file is read from the hit's text.
+    sources = _sources_of([r["content"] for r in results])
     assert any(expected_file in p for p in sources), f"{expected_file} not in: {sources}"
 
 
@@ -779,9 +794,8 @@ def test_index_then_search(
     col = registry.get(mini_repo)["collection"]
     results = local_t3.search(query, [col], n_results=5, sensitivity="include")
     assert len(results) > 0
-    # RDR-102 D2: source_path is gone; title carries the filename via
-    # the "{relpath}:chunk-{i}" pattern (code_indexer.py:393).
-    sources = [r.get("title", "") for r in results]
+    # RDR-236 Phase 4 Step 1: no title on the row; the file is read from the hit's text.
+    sources = _sources_of([r["content"] for r in results])
     assert any(expected_file in p for p in sources), f"{expected_file} not in: {sources}"
 
 
@@ -871,20 +885,20 @@ def test_cli_index_frecency_only(
 def test_index_repository_pdf_routing(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
-    """Verify PDF chunks land in docs__ collection. Phase 5c dropped
-    ``store_type`` from chunk metadata; ``content_type=='pdf'`` is the
-    canonical replacement (always set by ``make_chunk_metadata``).
+    """Verify PDF chunks land in docs__ collection. RDR-236 Phase 4 Step 1: the content type is the catalog
+    document's, so the PDF's chunks are recognised by their text.
     """
     _index(rich_repo, rich_registry, local_t3)
     docs_col = rich_registry.get(rich_repo)["docs_collection"]
     results = local_t3.search("Hello World test document PDF ingest", [docs_col], n_results=5, sensitivity="include")
-    pdf_results = [r for r in results if r.get("content_type") == "pdf"]
-    assert pdf_results, f"No PDF chunks; content_types: {[r.get('content_type') for r in results]}"
-    assert isinstance(pdf_results[0]["title"], str)
+    pdf_results = [r for r in results if "Hello World" in r["content"]]
+    assert pdf_results, f"No PDF chunks: {[r['content'][:40] for r in results]}"
+    assert "content_type" not in pdf_results[0] and "title" not in pdf_results[0]
 
 
+@pytest.mark.parametrize("row_shape", ["legacy-keyed", "current-keyed"])
 def test_reindex_self_heals_missing_manifest(
-    rich_repo: Path, local_t3: T3Database, tmp_path: Path,
+    rich_repo: Path, local_t3: T3Database, tmp_path: Path, row_shape: str,
 ) -> None:
     """nexus-c21fk (GH #1397 field find): the staleness check keys on T3
     chunk state only, so a doc whose chunks exist in T3 but whose
@@ -893,7 +907,13 @@ def test_reindex_self_heals_missing_manifest(
     blind to it, and the documented advice ('re-index repairs it')
     structurally wrong. The exact bead repro: index, delete a doc's
     manifest rows + zero its chunk_count, re-index. The self-heal pass
-    must rebuild the manifest from T3 WITHOUT re-embedding."""
+    must rebuild the manifest from T3 WITHOUT re-embedding.
+
+    RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): the heal finds a document's chunks by the file's ``content_hash``
+    on the row, a key only a pre-Step-1 client wrote. ``legacy-keyed`` is the stuck population of the field
+    report (every chunk row carries that key and an inline ``doc_id``); ``current-keyed`` is the rows a
+    current client writes (chunk keys only), which the heal cannot find, so the repair is the re-index of the
+    now-stale file: same chunk hashes, same manifest, the T3 chunk set unchanged."""
     # nexus-i711w: no Catalog.init — the hook writes to the active (engine)
     # catalog in service mode. PORT-VERIFY: the second settling pass can
     # trip the nexus-7vuw rename's mode-split 404 fallback (module header).
@@ -1005,16 +1025,30 @@ def test_reindex_self_heals_missing_manifest(
     # passed vacuously before the stamp).
     info = reg.get(rich_repo)
     docs_col = local_t3.get_or_create_collection(info["docs_collection"])
-    got = docs_col.get(include=["metadatas"], sensitivity="include")
+    got = docs_col.get(include=["metadatas", "documents"], sensitivity="include")
     readme_ids = [
-        cid for cid, m in zip(got["ids"], got["metadatas"])
-        if "README.md" in (m or {}).get("title", "")
+        cid for cid, doc in zip(got["ids"], got["documents"])
+        if "Nexus is a semantic search and knowledge management system" in doc
     ]
     assert readme_ids
-    docs_col.update(
-        ids=readme_ids,
-        metadatas=[{"doc_id": str(tumbler)} for _ in readme_ids],
-    )
+    if row_shape == "legacy-keyed":
+        # RDR-236 Phase 4 Step 1: the heal finds a document's chunks by the file's content hash on the row, a key
+        # only a pre-Step-1 client wrote, on EVERY chunk of the document (not just the one the inline doc_id
+        # below is stamped on); the stuck population is exactly such rows.
+        entry = active_reader().resolve(tumbler)
+        file_hash = (entry.meta or {}).get("content_hash") or entry.index_content_hash
+        assert file_hash
+        document_chunks = [r.chash for r in manifest_before]
+        assert set(readme_ids) <= set(document_chunks)
+        docs_col.update(
+            ids=document_chunks,
+            metadatas=[{"content_hash": file_hash} for _ in document_chunks],
+        )
+        docs_col.update(ids=readme_ids, metadatas=[{"doc_id": str(tumbler)} for _ in readme_ids])
+    else:
+        # The rows a current client writes hold the chunk keys only; stamp the inline doc_id on none of them.
+        stored = docs_col.get(ids=readme_ids, include=["metadatas"], sensitivity="include")["metadatas"]
+        assert not any({"content_hash", "doc_id"} & set(m) for m in stored), stored
 
     # Snapshot T3 so we can prove the heal never re-embedded anything.
     ids_before = sorted(docs_col.get(sensitivity="include")["ids"])

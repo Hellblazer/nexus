@@ -155,7 +155,7 @@ Read it there; do not recount by hand.
 
 A line reading `Layer 2 VACUOUS` means the RDR has no research records, so
 the audit examined nothing and did not pass. Either record findings
-(`nx rdr preamble rdr-research -- add <id> --classification ... --method ...`)
+(the `rdr-research` skill's `add`: the `research_add` procedure, read back, `memory_put`)
 or write `research: none (<why>)` into the gate record so the vacuity is a
 decision on record, then continue.
 

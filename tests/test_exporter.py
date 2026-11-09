@@ -171,14 +171,15 @@ class TestRoundTrip:
         assert restored.count() == 5
 
     def test_round_trip_preserves_metadata(self, populated_db: T3Database, tmp_path: Path):
-        """RDR-102 D2: source_path is dropped by normalize() at the
-        canonical write boundary, so the import path strips it. Verify
-        round-trip via ``title`` (which is in ALLOWED_TOP_LEVEL and
-        unaffected). The fixture seeds ``title="File N"`` per chunk."""
+        """RDR-236 Phase 4 Step 1: an import writes the CHUNK keys of each record and nothing else, so the
+        fixture's ``source_path`` / ``title`` / ``indexed_at`` (document keys) do not come back on the restored
+        rows."""
         _export_import(populated_db, "code__test", tmp_path, target="code__meta_check")
         col = populated_db._client_for("code__meta_check").get_collection("code__meta_check")
-        titles = {m.get("title", "") for m in col.get(include=["metadatas"], sensitivity="include")["metadatas"]}
-        assert "File 0" in titles and "File 4" in titles
+        metas = col.get(include=["metadatas"], sensitivity="include")["metadatas"]
+        assert len(metas) == 5
+        assert all(set(m) <= {"chunk_text_hash", "embedding_model"} for m in metas), [sorted(m) for m in metas]
+        # (The fixture's rows carry none of the CHUNK keys, so the restored rows hold none.)
 
     def test_round_trip_preserves_embeddings(self, populated_db: T3Database, tmp_path: Path):
         # nexus GH #1370 D1: non-conformant (non-32-char) source ids like

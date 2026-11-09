@@ -3640,7 +3640,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # `embed_unavailable` instead of doing that discarded work quietly.
         click.echo(f"Indexing {path}…")
         try:
-            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction, dry_run=True, **sens_kw)
+            # return_metadata: the summary below (pages, title, author) is what the run itself resolved. A
+            # chunk row carries none of them since RDR-236 Phase 4 Step 1, and a dry run registers nothing,
+            # so there is no catalog document to read them from either.
+            dry_meta = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction, dry_run=True, return_metadata=True, **sens_kw)
         except (ImportError, RuntimeError, ExtractionQualityError, *MINERU_RUN_STOPPING, UnextractableContentError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
@@ -3648,6 +3651,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # sees a raw Python traceback instead of an actionable message.
             raise click.ClickException(str(e)) from e
 
+        n = dry_meta["chunks"]  # type: ignore[index]
         if n == 0:
             click.echo("No chunks produced (file may already be indexed or extraction failed).")
             return
@@ -3673,13 +3677,12 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         col = local_t3.get_or_create_collection(col_name)
         result = col.get(include=["documents", "metadatas"], sensitivity="include")
         docs: list[str] = result.get("documents") or []
-        metas: list[dict] = result.get("metadatas") or []
 
         # Summary line
-        pages = sorted({int(m.get("page_number", 0)) for m in metas if m})
+        pages = dry_meta.get("pages", [])  # type: ignore[union-attr]
         page_range = f"{pages[0]}–{pages[-1]}" if len(pages) > 1 else str(pages[0]) if pages else "?"
-        title = metas[0].get("title", "") if metas else ""
-        author = metas[0].get("source_author", "") if metas else ""
+        title = dry_meta.get("title", "")  # type: ignore[union-attr]
+        author = dry_meta.get("author", "")  # type: ignore[union-attr]
         summary_parts = [f"Chunks: {n}", f"Pages: {page_range}"]
         if title:
             summary_parts.append(f'Title: "{title}"')
@@ -3688,11 +3691,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo(f"\n  {'  '.join(summary_parts)}\n")
 
         # Per-chunk preview
-        for i, (doc, meta) in enumerate(zip(docs, metas), start=1):
-            page = meta.get("page_number", "?") if meta else "?"
+        for i, doc in enumerate(docs, start=1):
             preview = doc[:80].replace("\n", " ") if doc else ""
             ellipsis = "…" if doc and len(doc) > 80 else ""
-            click.echo(f"  [{i}] p.{page}  {preview}{ellipsis}")
+            click.echo(f"  [{i}]  {preview}{ellipsis}")
 
         click.echo("\n(no cloud write)")
         return

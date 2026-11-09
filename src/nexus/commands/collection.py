@@ -1713,6 +1713,7 @@ def _upsert_reembed_batch(
     Any other failure propagates. A refusal the re-read cannot explain (every chash still
     reads live) is retried a bounded number of times, then raised.
     """
+    from nexus.metadata_schema import normalize  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.engine_reasons import OWNERLESS_CHUNK_WRITE_REASON  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -1721,7 +1722,10 @@ def _upsert_reembed_batch(
         if not ids:
             return [], [], [], dropped
         try:
-            db.upsert_chunks(col_name, ids, docs, metadatas=metas, force_re_embed=True)
+            # RDR-236 Phase 4 Step 1: the stored row of a pre-Step-1 chunk still carries document and
+            # position keys; what is SENT is the CHUNK keys only (the stored ones are the Step 3 sweep's).
+            sent = [normalize(m) if isinstance(m, dict) else m for m in metas]
+            db.upsert_chunks(col_name, ids, docs, metadatas=sent, force_re_embed=True)
             return ids, docs, metas, dropped
         except VectorServiceError as exc:
             if exc.reason != OWNERLESS_CHUNK_WRITE_REASON or attempt == _REEMBED_OWNER_RETRIES:
@@ -1893,13 +1897,20 @@ def _reembed_collection(
             # invariant 'every CLI T3 write also fires the chain'
             # (test_every_cli_t3_write_function_fires_store_chains)
             # holds. Re-embed preserves doc_id / chash / manifest
-            # position, so the chain's hooks (taxonomy_assign,
-            # manifest_write; the chash dual-write hook was retired by
-            # RDR-187/nexus-piwya.4) re-touch existing rows idempotently.
+            # position, so the chain's hooks (taxonomy_assign; the chash
+            # dual-write hook was retired by RDR-187/nexus-piwya.4)
+            # re-touch existing rows idempotently. The manifest hook is NOT
+            # one of them (RDR-236 Phase 4 Step 1): a re-embed changes no
+            # manifest, and the hook would rebuild one from these stored
+            # rows, numbering positions by this page's local index and
+            # reading labels off keys a row written since Step 1 does not
+            # carry. The import drops it the same way.
             if hooks is None:
                 from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
                 hooks = HookRegistry()
                 install_default_hooks(hooks)
+            from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred to avoid import cycle
+            hooks = hooks.without_batch(manifest_write_batch_hook)
 
             if v_ids:  # every chunk of the page may have lost its owner
                 hooks.fire_store_chains(

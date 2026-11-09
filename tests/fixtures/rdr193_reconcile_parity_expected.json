@@ -1,0 +1,3689 @@
+{
+ "documents": {
+  "alias_update::M:alias_update/alias.txt#0": {
+   "alias_of": "M:alias_update/target.txt#0",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "alias_update/alias.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "ec67c876832da018e3db543c609ab0f8434544520ccb15a957673fcbd8ffe126",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000039,
+   "source_uri": "file://@ROOT/alias_update/alias.txt",
+   "title": "alias.txt",
+   "year": 0
+  },
+  "alias_update::M:alias_update/target.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "alias_update/target.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "69f9319456b285314408ce23bd68f4dcd7265b2c779bcb35ada13d3c5a786171",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000039,
+   "source_uri": "file://@ROOT/alias_update/target.txt",
+   "title": "target.txt",
+   "year": 0
+  },
+  "ch_content::M:ch_content/doc.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ch_content/doc.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "40df05c413b71278b2d79fe4f244215f5d4aa51ab465cafbd1371b971584f02b",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000055,
+   "source_uri": "file://@ROOT/ch_content/doc.txt",
+   "title": "doc.txt",
+   "year": 0
+  },
+  "ch_fence::M:ch_fence/changed.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ch_fence/changed.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "8e00a75ada1203d7653331e46e19d518b8c24e75de898b3b12f8c5d548fb2415",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000058,
+   "source_uri": "file://@ROOT/ch_fence/changed.txt",
+   "title": "changed.txt",
+   "year": 0
+  },
+  "ch_fence::M:ch_fence/new.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ch_fence/new.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "a7ada829dc8af5fcbb251db4d83d177eb41cbe8382a11fa46f5513fa64bea10f",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000057,
+   "source_uri": "file://@ROOT/ch_fence/new.txt",
+   "title": "new.txt",
+   "year": 0
+  },
+  "ch_head::M:ch_head/doc.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ch_head/doc.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": "moved",
+   "metadata": {
+    "category": "prose",
+    "content_hash": "52297a111510e8eff25a350a81bf0b1885110f2a48aa1c5dcbe9afecc9f7b43a",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000054,
+   "source_uri": "file://@ROOT/ch_head/doc.txt",
+   "title": "doc.txt",
+   "year": 0
+  },
+  "ch_rdr::M:ch_rdr/edit.md#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "rdr",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ch_rdr/edit.md",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "a17888cebf246cc5324b0ded2386c0097267f8897a470fefb0e726d84c5d5220",
+    "rdr_frontmatter_id": "RDR-201",
+    "source_format": "markdown",
+    "tags": [
+     "markdown"
+    ]
+   },
+   "physical_collection": "rdr__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000056,
+   "source_uri": "file://@ROOT/ch_rdr/edit.md",
+   "title": "edit.md",
+   "year": 0
+  },
+  "del_dup::M:del_dup/dup.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "del_dup/dup.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "6529f65d55fac293ecfef6194a5bac1cca2975471b3d4ce527edecc282ec3c91",
+    "miss_count": 1,
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000075,
+   "source_uri": "file://@ROOT/del_dup/dup.txt",
+   "title": "dup.txt",
+   "year": 0
+  },
+  "del_dup::M:del_dup/dup.txt#1": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "del_dup/dup.txt",
+   "head_hash": "",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "miss_count": 1
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 0,
+   "source_uri": "file://@ROOT/del_dup/alt/dup.txt",
+   "title": "del dup twin",
+   "year": 0
+  },
+  "fence::M:fence/complete.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "fence/complete.txt",
+   "head_hash": "h1",
+   "index_content_hash": "446020aacfe60da993d0d7cd1ae772c576804614fb57e575a50380662f8201b9",
+   "index_run_id": "<set>",
+   "index_started_at": "<set>",
+   "index_state": "complete",
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "446020aacfe60da993d0d7cd1ae772c576804614fb57e575a50380662f8201b9",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000061,
+   "source_uri": "file://@ROOT/fence/complete.txt",
+   "title": "complete.txt",
+   "year": 0
+  },
+  "fence::M:fence/failed.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "fence/failed.txt",
+   "head_hash": "h1",
+   "index_content_hash": "8071585162f9d5af0ded6d35a62607c1a712adbd35fc20d77a661528bfc6b673",
+   "index_run_id": "<set>",
+   "index_started_at": "<set>",
+   "index_state": "failed",
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "8071585162f9d5af0ded6d35a62607c1a712adbd35fc20d77a661528bfc6b673",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000060,
+   "source_uri": "file://@ROOT/fence/failed.txt",
+   "title": "failed.txt",
+   "year": 0
+  },
+  "fence::M:fence/indexing.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "fence/indexing.txt",
+   "head_hash": "h1",
+   "index_content_hash": "fafa2d1ac83d5ee4914d856ea65e91d0db631e4a20214be3d2f964f231a14735",
+   "index_run_id": "<set>",
+   "index_started_at": "<set>",
+   "index_state": "indexing",
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "fafa2d1ac83d5ee4914d856ea65e91d0db631e4a20214be3d2f964f231a14735",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000059,
+   "source_uri": "file://@ROOT/fence/indexing.txt",
+   "title": "indexing.txt",
+   "year": 0
+  },
+  "fill::M:fill/f01.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "fill/f01.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "55d6687746aba14d8a91cbf1fc750cbfbd8860acc23097ccb24052fe49d0851b",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000000,
+   "source_uri": "file://@ROOT/fill/f01.py",
+   "title": "f01.py",
+   "year": 0
+  },
+  "fill::M:fill/f02.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "fill/f02.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "6f494a9dafed5ad26d4b106a6c3c06876614f5e2356c3762924f3e2bdf4e06d3",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000001,
+   "source_uri": "file://@ROOT/fill/f02.py",
+   "title": "f02.py",
+   "year": 0
+  },
+  "fill::M:fill/f03.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "fill/f03.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "0de8f0c7daa649e9e77c289b0157db4d1407b20f41ace75a6fce3640a3773058",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000002,
+   "source_uri": "file://@ROOT/fill/f03.py",
+   "title": "f03.py",
+   "year": 0
+  },
+  "fill::M:fill/f04.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "fill/f04.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "216868ae60bb060c59cb9197ddfda46fa8bfc248fc0ab7057ffb094cf65b66cb",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000003,
+   "source_uri": "file://@ROOT/fill/f04.py",
+   "title": "f04.py",
+   "year": 0
+  },
+  "fill::M:fill/f05.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "fill/f05.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "5c2adf77db3d587d07d4c80b5774eae17b13355fea29f3928af5102af2935647",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000004,
+   "source_uri": "file://@ROOT/fill/f05.py",
+   "title": "f05.py",
+   "year": 0
+  },
+  "fill::M:fill/f06.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "fill/f06.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "116a963a2737025dbb6d5ff3e4479e625cab90322096c9a242ef3f7039b17fc5",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000005,
+   "source_uri": "file://@ROOT/fill/f06.py",
+   "title": "f06.py",
+   "year": 0
+  },
+  "fill::M:fill/f07.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "fill/f07.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "a823ffeefc3a55e6d838c7e96e58a548f07c88747fa8149e89bd1b897aa02acd",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000006,
+   "source_uri": "file://@ROOT/fill/f07.py",
+   "title": "f07.py",
+   "year": 0
+  },
+  "fill::M:fill/f08.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "fill/f08.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "ede9459ff8933d5bf75fc4807b353975ab6e9fd7fa5fde47d3b3b927d13c6061",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000007,
+   "source_uri": "file://@ROOT/fill/f08.py",
+   "title": "f08.py",
+   "year": 0
+  },
+  "id_deleted_foreign::X:id_deleted_foreign/held.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "id_deleted_foreign/held.txt",
+   "head_hash": "",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": null,
+   "physical_collection": "",
+   "sensitive": false,
+   "source_mtime": 0,
+   "source_uri": "file://@ROOT-elsewhere/held.txt",
+   "title": "held elsewhere",
+   "year": 0
+  },
+  "id_duplicate::M:id_duplicate/dup.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "id_duplicate/dup.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "3465cd1e18d1afce75b88f43d25fc0e4af9b6f7ed8358ad1e3c15d5546016b74",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000066,
+   "source_uri": "file://@ROOT/id_duplicate/dup.txt",
+   "title": "dup.txt",
+   "year": 0
+  },
+  "id_duplicate::M:id_duplicate/dup.txt#1": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "id_duplicate/dup.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": "moved",
+   "metadata": {
+    "category": "prose",
+    "content_hash": "3465cd1e18d1afce75b88f43d25fc0e4af9b6f7ed8358ad1e3c15d5546016b74",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000066,
+   "source_uri": "file://@ROOT/id_duplicate/alt/dup.txt",
+   "title": "dup twin",
+   "year": 0
+  },
+  "id_foreign::X:id_foreign/x.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "id_foreign/x.txt",
+   "head_hash": "",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": null,
+   "physical_collection": "docs__rdr193foreign",
+   "sensitive": false,
+   "source_mtime": 0,
+   "source_uri": "file://@ROOT/id_foreign/x.txt",
+   "title": "foreign holder",
+   "year": 0
+  },
+  "id_legacy::M:id_legacy/changed.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "id_legacy/changed.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "0678a26d7d5f7dcdb4f7c9a489e52a5bd5a04ce3b39e359b4d2bf59fee42d46e",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000065,
+   "source_uri": "",
+   "title": "changed.txt",
+   "year": 0
+  },
+  "id_legacy::M:id_legacy/unchanged.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "id_legacy/unchanged.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "83637dcecafc0279201e9ecb918c644943fcce6918a38866f37e951669fcee69",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000064,
+   "source_uri": "",
+   "title": "unchanged.txt",
+   "year": 0
+  },
+  "id_same_owner::M:id_same_owner/old-name.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "id_same_owner/old-name.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "ada3f2d68f0b828f0aad2e4070467064072141cb037e880a50ef6d890dcba724",
+    "miss_count": 1,
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000063,
+   "source_uri": "file://@ROOT/id_same_owner/x.txt",
+   "title": "x.txt",
+   "year": 0
+  },
+  "misc::M:misc/del.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "misc/del.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "ffdba971557d3c6ed40f3dc60f0fa7fac79986d506f9ac86a256635ffe59180c",
+    "miss_count": 1,
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000069,
+   "source_uri": "file://@ROOT/misc/del.txt",
+   "title": "del.txt",
+   "year": 0
+  },
+  "misc::M:misc/keep.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "misc/keep.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "92425870746052dab3f2785dc6546e1c085b616df9d631610fd04f669fe6ad73",
+    "miss_count": 0,
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000070,
+   "source_uri": "file://@ROOT/misc/keep.txt",
+   "title": "keep.txt",
+   "year": 0
+  },
+  "misc::M:misc/miss.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "misc/miss.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "68f23fe83180e50692e6e333a26df4abf63b67c31ec22a7ea850ba9947054a66",
+    "miss_count": 1,
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000068,
+   "source_uri": "file://@ROOT/misc/miss.txt",
+   "title": "miss.txt",
+   "year": 0
+  },
+  "misc::M:misc/plain_new.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "misc/plain_new.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "4246d2e11f9ddb864b5f8a592ff682bff0d3890bba57f29d801c6b6be88ea379",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000074,
+   "source_uri": "file://@ROOT/misc/plain_new.txt",
+   "title": "plain_new.txt",
+   "year": 0
+  },
+  "misc::M:misc/reset_miss.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "misc/reset_miss.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "cfe5c63f7b0baac6a70050271dffead0d4cd84f73c05ce482bcb3f0f667e2da9",
+    "miss_count": 0,
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000071,
+   "source_uri": "file://@ROOT/misc/reset_miss.txt",
+   "title": "reset_miss.txt",
+   "year": 0
+  },
+  "misc::M:misc/sens_existing.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "misc/sens_existing.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "48b4c3d2608baa49830c17c903096cd3b93c290362ef4f1bdd43370ab1becdd4",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": true,
+   "source_mtime": 1700000072,
+   "source_uri": "file://@ROOT/misc/sens_existing.txt",
+   "title": "sens_existing.txt",
+   "year": 0
+  },
+  "misc::M:misc/sens_new.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "misc/sens_new.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "c7d97dfe11f6da8c307690148fe13813ea3232baeb8cf85cca566854a3245c49",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": true,
+   "source_mtime": 1800000073,
+   "source_uri": "file://@ROOT/misc/sens_new.txt",
+   "title": "sens_new.txt",
+   "year": 0
+  },
+  "ren_alias::M:ren_alias/a.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_alias/a.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "797878bbfc210bf2e9e540ce15b0b88993c92798d431a263b909f4ac20079469",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000035,
+   "source_uri": "file://@ROOT/ren_alias/a.txt",
+   "title": "a.txt",
+   "year": 0
+  },
+  "ren_alias::M:ren_alias/a2.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_alias/a2.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "797878bbfc210bf2e9e540ce15b0b88993c92798d431a263b909f4ac20079469",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000036,
+   "source_uri": "file://@ROOT/ren_alias/a2.txt",
+   "title": "a2.txt",
+   "year": 0
+  },
+  "ren_alias::M:ren_alias/alias.txt#0": {
+   "alias_of": "M:ren_alias/target.txt#0",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_alias/alias.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "32dec1a88b3e31fa8e1b18fd674d1cad5828f794eef4ef35152574def5be98d5",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000037,
+   "source_uri": "file://@ROOT/ren_alias/alias.txt",
+   "title": "alias.txt",
+   "year": 0
+  },
+  "ren_alias::M:ren_alias/target.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_alias/target.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "40c43ad071d7dc6f7d6cafa25ac37d563236e838eab3fde8f0645a8acd3f16dd",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000038,
+   "source_uri": "file://@ROOT/ren_alias/target.txt",
+   "title": "target.txt",
+   "year": 0
+  },
+  "ren_and_deleted::M:ren_and_deleted/a.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_and_deleted/a.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "59476f1f1f7ce505704fc91f40b98d4b99724aea95fe712f94f64f326e4e3012",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000032,
+   "source_uri": "file://@ROOT/ren_and_deleted/a.txt",
+   "title": "a.txt",
+   "year": 0
+  },
+  "ren_and_deleted::M:ren_and_deleted/b.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_and_deleted/b.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "59476f1f1f7ce505704fc91f40b98d4b99724aea95fe712f94f64f326e4e3012",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000033,
+   "source_uri": "file://@ROOT/ren_and_deleted/b.txt",
+   "title": "b.txt",
+   "year": 0
+  },
+  "ren_and_deleted::M:ren_and_deleted/other.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_and_deleted/other.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "71a422ca10e30132de5f17eaa57f35517034629ec2e0576b52125b8f8cca3ccf",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000034,
+   "source_uri": "file://@ROOT/ren_and_deleted/other.txt",
+   "title": "other.txt",
+   "year": 0
+  },
+  "ren_link_between::M:ren_link_between/a.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_link_between/a.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "1f49911f92257cab2c664f511056df5780f04da62716d75af1dc7ab6fe64d791",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000018,
+   "source_uri": "file://@ROOT/ren_link_between/a.txt",
+   "title": "a.txt",
+   "year": 0
+  },
+  "ren_link_between::M:ren_link_between/a2.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_link_between/a2.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "1f49911f92257cab2c664f511056df5780f04da62716d75af1dc7ab6fe64d791",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000020,
+   "source_uri": "file://@ROOT/ren_link_between/a2.txt",
+   "title": "a2.txt",
+   "year": 0
+  },
+  "ren_link_between::M:ren_link_between/b.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_link_between/b.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "1d6b234f77aa254e97ea63aeadd8cae1332aa3ff3d55b4fe8e0fdbac2314d7af",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000019,
+   "source_uri": "file://@ROOT/ren_link_between/b.txt",
+   "title": "b.txt",
+   "year": 0
+  },
+  "ren_link_between::M:ren_link_between/b2.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_link_between/b2.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "1d6b234f77aa254e97ea63aeadd8cae1332aa3ff3d55b4fe8e0fdbac2314d7af",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000021,
+   "source_uri": "file://@ROOT/ren_link_between/b2.txt",
+   "title": "b2.txt",
+   "year": 0
+  },
+  "ren_link_swept::M:ren_link_swept/a.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_link_swept/a.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "a7b33220038055ed2f6d9905e2d9b5d092d7b09b033ca061ed98137818b7772a",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000024,
+   "source_uri": "file://@ROOT/ren_link_swept/a.txt",
+   "title": "a.txt",
+   "year": 0
+  },
+  "ren_link_swept::M:ren_link_swept/a2.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_link_swept/a2.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "a7b33220038055ed2f6d9905e2d9b5d092d7b09b033ca061ed98137818b7772a",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000025,
+   "source_uri": "file://@ROOT/ren_link_swept/a2.txt",
+   "title": "a2.txt",
+   "year": 0
+  },
+  "ren_link_swept::M:ren_link_swept/s.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_link_swept/s.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "85df4ea2f4703ef1ba6bcd0d4b750f045d4d469815b467940e3f3ae146574388",
+    "miss_count": 1,
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000026,
+   "source_uri": "file://@ROOT/ren_link_swept/s.txt",
+   "title": "s.txt",
+   "year": 0
+  },
+  "ren_link_tombstoned::M:ren_link_tombstoned/a.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_link_tombstoned/a.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "cb0609bfb9a9b6343f1d142df76ff436f247f09f707a2f509525bdaa7ddaab3a",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000027,
+   "source_uri": "file://@ROOT/ren_link_tombstoned/a.txt",
+   "title": "a.txt",
+   "year": 0
+  },
+  "ren_link_tombstoned::M:ren_link_tombstoned/a2.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_link_tombstoned/a2.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "cb0609bfb9a9b6343f1d142df76ff436f247f09f707a2f509525bdaa7ddaab3a",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000028,
+   "source_uri": "file://@ROOT/ren_link_tombstoned/a2.txt",
+   "title": "a2.txt",
+   "year": 0
+  },
+  "ren_link_tombstoned::M:ren_link_tombstoned/t.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_link_tombstoned/t.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "02b2b8bf54e884248d1773897692d254235e56bf13ab4e05c14e38ac508feef7",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000029,
+   "source_uri": "file://@ROOT/ren_link_tombstoned/t.txt",
+   "title": "t.txt",
+   "year": 0
+  },
+  "ren_non_evid::M:ren_non_evid/a.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_non_evid/a.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "5f846b07907e8842e1298f764be8072748a4bf4ef3ef4e3d64aac5eb9daf263f",
+    "non_evidentiary": true,
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000030,
+   "source_uri": "file://@ROOT/ren_non_evid/a.txt",
+   "title": "a.txt",
+   "year": 0
+  },
+  "ren_non_evid::M:ren_non_evid/a2.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_non_evid/a2.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "5f846b07907e8842e1298f764be8072748a4bf4ef3ef4e3d64aac5eb9daf263f",
+    "non_evidentiary": true,
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000031,
+   "source_uri": "file://@ROOT/ren_non_evid/a2.txt",
+   "title": "a2.txt",
+   "year": 0
+  },
+  "ren_onto_earlier::M:ren_onto_earlier/a.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_onto_earlier/a.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "65f853b2df169105191f361493b63ae21dfce6909740f057c3e38c12c41896c3",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000013,
+   "source_uri": "file://@ROOT/ren_onto_earlier/a.txt",
+   "title": "a.txt",
+   "year": 0
+  },
+  "ren_onto_earlier::M:ren_onto_earlier/b.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_onto_earlier/b.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "65f853b2df169105191f361493b63ae21dfce6909740f057c3e38c12c41896c3",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000014,
+   "source_uri": "file://@ROOT/ren_onto_earlier/b.txt",
+   "title": "b.txt",
+   "year": 0
+  },
+  "ren_self_link::M:ren_self_link/a.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_self_link/a.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "3ba49ad97b8fd00938a09bf10318895808edf72773561325ffdfa84aaed76675",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000022,
+   "source_uri": "file://@ROOT/ren_self_link/a.txt",
+   "title": "a.txt",
+   "year": 0
+  },
+  "ren_self_link::M:ren_self_link/b.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_self_link/b.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "3ba49ad97b8fd00938a09bf10318895808edf72773561325ffdfa84aaed76675",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000023,
+   "source_uri": "file://@ROOT/ren_self_link/b.txt",
+   "title": "b.txt",
+   "year": 0
+  },
+  "ren_shared_hash::M:ren_shared_hash/gone.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_shared_hash/gone.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "1667b811d1c1c997611bc48c1677827fd8f4be34c546f34bdc23ecbc2aa03058",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000010,
+   "source_uri": "file://@ROOT/ren_shared_hash/gone.txt",
+   "title": "gone.txt",
+   "year": 0
+  },
+  "ren_shared_hash::M:ren_shared_hash/p1.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_shared_hash/p1.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "1667b811d1c1c997611bc48c1677827fd8f4be34c546f34bdc23ecbc2aa03058",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000008,
+   "source_uri": "file://@ROOT/ren_shared_hash/p1.txt",
+   "title": "p1.txt",
+   "year": 0
+  },
+  "ren_shared_hash::M:ren_shared_hash/p2.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_shared_hash/p2.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "1667b811d1c1c997611bc48c1677827fd8f4be34c546f34bdc23ecbc2aa03058",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000009,
+   "source_uri": "file://@ROOT/ren_shared_hash/p2.txt",
+   "title": "p2.txt",
+   "year": 0
+  },
+  "ren_single::M:ren_single/a.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_single/a.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "a827bdebed1d3edb534bb6a4ece4bde5bd3c983cd0b3ed51be435985eb234382",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000011,
+   "source_uri": "file://@ROOT/ren_single/a.txt",
+   "title": "a.txt",
+   "year": 0
+  },
+  "ren_single::M:ren_single/b.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_single/b.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "a827bdebed1d3edb534bb6a4ece4bde5bd3c983cd0b3ed51be435985eb234382",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000012,
+   "source_uri": "file://@ROOT/ren_single/b.txt",
+   "title": "b.txt",
+   "year": 0
+  },
+  "ren_two_onto_one::M:ren_two_onto_one/m1.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_two_onto_one/m1.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "b874e2a0b0273b7ffb37d40c5c1c23d82c18e3adbc0dafd6371cfdc25f67bb3c",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000015,
+   "source_uri": "file://@ROOT/ren_two_onto_one/m1.txt",
+   "title": "m1.txt",
+   "year": 0
+  },
+  "ren_two_onto_one::M:ren_two_onto_one/m2.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "ren_two_onto_one/m2.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "b874e2a0b0273b7ffb37d40c5c1c23d82c18e3adbc0dafd6371cfdc25f67bb3c",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000016,
+   "source_uri": "file://@ROOT/ren_two_onto_one/m2.txt",
+   "title": "m2.txt",
+   "year": 0
+  },
+  "ren_two_onto_one::M:ren_two_onto_one/t.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "ren_two_onto_one/t.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "b874e2a0b0273b7ffb37d40c5c1c23d82c18e3adbc0dafd6371cfdc25f67bb3c",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000017,
+   "source_uri": "file://@ROOT/ren_two_onto_one/t.txt",
+   "title": "t.txt",
+   "year": 0
+  },
+  "stamp_cat::M:stamp_cat/cat_absent.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_cat/cat_absent.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "2cfe6b74e7ee235c82050fd7ddca7450bf58307241d9844a38207d3e3c1e766c",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000050,
+   "source_uri": "file://@ROOT/stamp_cat/cat_absent.txt",
+   "title": "cat_absent.txt",
+   "year": 0
+  },
+  "stamp_cat::M:stamp_cat/cat_set.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_cat/cat_set.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "curated",
+    "content_hash": "a57708c79707dd5aa263e24848ab12dafac926735493f2487c0151af6bc183e5",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000051,
+   "source_uri": "file://@ROOT/stamp_cat/cat_set.txt",
+   "title": "cat_set.txt",
+   "year": 0
+  },
+  "stamp_empty_hash::M:stamp_empty_hash/existing.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_empty_hash/existing.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "00f23ff105e48126c325aca42339ff1718f44e982e8cd597bd6b0a2b543a59cb",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 0,
+   "source_uri": "file://@ROOT/stamp_empty_hash/existing.txt",
+   "title": "existing.txt",
+   "year": 0
+  },
+  "stamp_empty_hash::M:stamp_empty_hash/new.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_empty_hash/new.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 0,
+   "source_uri": "file://@ROOT/stamp_empty_hash/new.txt",
+   "title": "new.txt",
+   "year": 0
+  },
+  "stamp_rdr::M:stamp_rdr/id_change.md#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "rdr",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_rdr/id_change.md",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "0b758c3b4f42dffa6ee47458e31002c89743b8355e90cf520f03b5a7d4b3845e",
+    "rdr_frontmatter_id": "RDR-102",
+    "source_format": "markdown",
+    "tags": [
+     "markdown"
+    ]
+   },
+   "physical_collection": "rdr__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000041,
+   "source_uri": "file://@ROOT/stamp_rdr/id_change.md",
+   "title": "id_change.md",
+   "year": 0
+  },
+  "stamp_rdr::M:stamp_rdr/null_existing.md#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "rdr",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_rdr/null_existing.md",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "bdeec4b41eb815080d7ec947bab339487d0c3cdb5001ac59a88f08ad6551aa37",
+    "rdr_frontmatter_id": "",
+    "source_format": "markdown",
+    "tags": [
+     "markdown"
+    ]
+   },
+   "physical_collection": "rdr__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000042,
+   "source_uri": "file://@ROOT/stamp_rdr/null_existing.md",
+   "title": "null_existing.md",
+   "year": 0
+  },
+  "stamp_rdr::M:stamp_rdr/null_new.md#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "rdr",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_rdr/null_new.md",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "5201f17616b2e9ac8b5fbcaebea8bc3a169ab1b8d2fe9bbca6be4af6c05dc5e8",
+    "rdr_frontmatter_id": "",
+    "source_format": "markdown",
+    "tags": [
+     "markdown"
+    ]
+   },
+   "physical_collection": "rdr__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1800000043,
+   "source_uri": "file://@ROOT/stamp_rdr/null_new.md",
+   "title": "null_new.md",
+   "year": 0
+  },
+  "stamp_sf::M:stamp_sf/doc.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_sf/doc.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "cd20e8fe769785f74a6c24ad965e3546ce55f3d17b46a494773a402a8f594578",
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000044,
+   "source_uri": "file://@ROOT/stamp_sf/doc.txt",
+   "title": "doc.txt",
+   "year": 0
+  },
+  "stamp_tags::M:stamp_tags/absent.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_tags/absent.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "115ad33cb34d9abd87f90447729475661087717c0107be38a64e7d560a853a6e",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000045,
+   "source_uri": "file://@ROOT/stamp_tags/absent.py",
+   "title": "absent.py",
+   "year": 0
+  },
+  "stamp_tags::M:stamp_tags/empty_list.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_tags/empty_list.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "eaec12496b98a9b14c0f148b911b7c8afddeb1555d4931e6e7c32f44b33dc4c5",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000048,
+   "source_uri": "file://@ROOT/stamp_tags/empty_list.py",
+   "title": "empty_list.py",
+   "year": 0
+  },
+  "stamp_tags::M:stamp_tags/empty_str.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_tags/empty_str.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "91d2b2bb0a3707eba8e07be04a71c1ccc10f0a7382705236c51322dfa79eca0e",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000047,
+   "source_uri": "file://@ROOT/stamp_tags/empty_str.py",
+   "title": "empty_str.py",
+   "year": 0
+  },
+  "stamp_tags::M:stamp_tags/null.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_tags/null.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "085f2f6dc1494573781d732e41fce0155cedbb876c58fbc8e25ff697176dee5d",
+    "source_format": "code",
+    "tags": [
+     "py"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000046,
+   "source_uri": "file://@ROOT/stamp_tags/null.py",
+   "title": "null.py",
+   "year": 0
+  },
+  "stamp_tags::M:stamp_tags/set.py#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "code",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "stamp_tags/set.py",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "code",
+    "content_hash": "be70577588d56c02ba48b9c26f97c42800e4825718ab8a15066625d28904b216",
+    "source_format": "code",
+    "tags": [
+     "curated"
+    ]
+   },
+   "physical_collection": "code__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000049,
+   "source_uri": "file://@ROOT/stamp_tags/set.py",
+   "title": "set.py",
+   "year": 0
+  }
+ },
+ "links": {
+  "fill::M:fill/f05.py#0 -> M:ren_two_onto_one/m2.txt#0 [relates]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": ""
+  },
+  "fill::M:fill/f05.py#0 -> M:ren_two_onto_one/t.txt#0 [relates]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_alias::M:ren_alias/a.txt#0 -> M:ren_alias/alias.txt#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_alias::M:ren_alias/a2.txt#0 -> M:ren_alias/target.txt#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_and_deleted::M:ren_and_deleted/a.txt#0 -> M:ren_and_deleted/other.txt#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "2-5",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_and_deleted::M:ren_and_deleted/b.txt#0 -> M:ren_and_deleted/other.txt#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "2-5",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_link_between::M:ren_link_between/a.txt#0 -> M:ren_link_between/b.txt#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "1-3",
+   "metadata": {
+    "note": "the link's metadata is not carried"
+   },
+   "to_span": "4-9"
+  },
+  "ren_link_between::M:ren_link_between/a2.txt#0 -> M:ren_link_between/b2.txt#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "1-3",
+   "metadata": null,
+   "to_span": "4-9"
+  },
+  "ren_link_swept::M:ren_link_swept/a.txt#0 -> M:ren_link_swept/s.txt#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_link_tombstoned::M:ren_link_tombstoned/a.txt#0 -> M:ren_link_tombstoned/t.txt#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_onto_earlier::M:ren_onto_earlier/a.txt#0 -> M:fill/f03.py#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "1-2",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_onto_earlier::M:ren_onto_earlier/b.txt#0 -> M:fill/f03.py#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "1-2",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_self_link::M:ren_self_link/a.txt#0 -> M:ren_self_link/b.txt#0 [relates]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_shared_hash::M:ren_shared_hash/gone.txt#0 -> M:fill/f02.py#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": "7-8"
+  },
+  "ren_shared_hash::M:ren_shared_hash/p1.txt#0 -> M:fill/f02.py#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": "7-8"
+  },
+  "ren_two_onto_one::M:ren_two_onto_one/m1.txt#0 -> M:fill/f04.py#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_two_onto_one::M:ren_two_onto_one/m1.txt#0 -> M:ren_two_onto_one/m2.txt#0 [relates]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": ""
+  },
+  "ren_two_onto_one::M:ren_two_onto_one/t.txt#0 -> M:fill/f04.py#0 [cites]": {
+   "created_at": "<set>",
+   "created_by": "parity",
+   "from_span": "",
+   "metadata": null,
+   "to_span": ""
+  }
+ },
+ "minted": {
+  "alias_update::M:alias_update/alias.txt#0": {
+   "tumbler": "M.31"
+  },
+  "alias_update::M:alias_update/target.txt#0": {
+   "tumbler": "M.32"
+  },
+  "ch_content::M:ch_content/doc.txt#0": {
+   "tumbler": "M.45"
+  },
+  "ch_fence::M:ch_fence/changed.txt#0": {
+   "tumbler": "M.47"
+  },
+  "ch_fence::M:ch_fence/new.txt#0": {
+   "tumbler": "M.74"
+  },
+  "ch_head::M:ch_head/doc.txt#0": {
+   "tumbler": "M.44"
+  },
+  "ch_rdr::M:ch_rdr/edit.md#0": {
+   "tumbler": "M.46"
+  },
+  "del_dup::M:del_dup/dup.txt#0": {
+   "tumbler": "M.60"
+  },
+  "del_dup::M:del_dup/dup.txt#1": {
+   "tumbler": "M.62"
+  },
+  "fence::M:fence/complete.txt#0": {
+   "tumbler": "M.50"
+  },
+  "fence::M:fence/failed.txt#0": {
+   "tumbler": "M.49"
+  },
+  "fence::M:fence/indexing.txt#0": {
+   "tumbler": "M.48"
+  },
+  "fill::M:fill/f01.py#0": {
+   "tumbler": "M.1"
+  },
+  "fill::M:fill/f02.py#0": {
+   "tumbler": "M.2"
+  },
+  "fill::M:fill/f03.py#0": {
+   "tumbler": "M.3"
+  },
+  "fill::M:fill/f04.py#0": {
+   "tumbler": "M.4"
+  },
+  "fill::M:fill/f05.py#0": {
+   "tumbler": "M.5"
+  },
+  "fill::M:fill/f06.py#0": {
+   "tumbler": "M.6"
+  },
+  "fill::M:fill/f07.py#0": {
+   "tumbler": "M.7"
+  },
+  "fill::M:fill/f08.py#0": {
+   "tumbler": "M.8"
+  },
+  "id_deleted_foreign::X:id_deleted_foreign/held.txt#0": {
+   "tumbler": "X.2"
+  },
+  "id_duplicate::M:id_duplicate/dup.txt#0": {
+   "tumbler": "M.54"
+  },
+  "id_duplicate::M:id_duplicate/dup.txt#1": {
+   "tumbler": "M.61"
+  },
+  "id_foreign::X:id_foreign/x.txt#0": {
+   "tumbler": "X.1"
+  },
+  "id_legacy::M:id_legacy/changed.txt#0": {
+   "tumbler": "M.53"
+  },
+  "id_legacy::M:id_legacy/unchanged.txt#0": {
+   "tumbler": "M.52"
+  },
+  "id_same_owner::M:id_same_owner/old-name.txt#0": {
+   "tumbler": "M.51"
+  },
+  "misc::M:misc/del.txt#0": {
+   "tumbler": "M.56"
+  },
+  "misc::M:misc/keep.txt#0": {
+   "tumbler": "M.57"
+  },
+  "misc::M:misc/miss.txt#0": {
+   "tumbler": "M.55"
+  },
+  "misc::M:misc/plain_new.txt#0": {
+   "tumbler": "M.76"
+  },
+  "misc::M:misc/reset_miss.txt#0": {
+   "tumbler": "M.58"
+  },
+  "misc::M:misc/sens_existing.txt#0": {
+   "tumbler": "M.59"
+  },
+  "misc::M:misc/sens_new.txt#0": {
+   "tumbler": "M.75"
+  },
+  "ren_alias::M:ren_alias/a.txt#0": {
+   "tumbler": "M.28"
+  },
+  "ren_alias::M:ren_alias/a2.txt#0": {
+   "tumbler": "M.71"
+  },
+  "ren_alias::M:ren_alias/alias.txt#0": {
+   "tumbler": "M.29"
+  },
+  "ren_alias::M:ren_alias/target.txt#0": {
+   "tumbler": "M.30"
+  },
+  "ren_and_deleted::M:ren_and_deleted/a.txt#0": {
+   "tumbler": "M.26"
+  },
+  "ren_and_deleted::M:ren_and_deleted/b.txt#0": {
+   "tumbler": "M.70"
+  },
+  "ren_and_deleted::M:ren_and_deleted/other.txt#0": {
+   "tumbler": "M.27"
+  },
+  "ren_link_between::M:ren_link_between/a.txt#0": {
+   "tumbler": "M.17"
+  },
+  "ren_link_between::M:ren_link_between/a2.txt#0": {
+   "tumbler": "M.65"
+  },
+  "ren_link_between::M:ren_link_between/b.txt#0": {
+   "tumbler": "M.18"
+  },
+  "ren_link_between::M:ren_link_between/b2.txt#0": {
+   "tumbler": "M.66"
+  },
+  "ren_link_swept::M:ren_link_swept/a.txt#0": {
+   "tumbler": "M.21"
+  },
+  "ren_link_swept::M:ren_link_swept/a2.txt#0": {
+   "tumbler": "M.67"
+  },
+  "ren_link_swept::M:ren_link_swept/s.txt#0": {
+   "tumbler": "M.22"
+  },
+  "ren_link_tombstoned::M:ren_link_tombstoned/a.txt#0": {
+   "tumbler": "M.23"
+  },
+  "ren_link_tombstoned::M:ren_link_tombstoned/a2.txt#0": {
+   "tumbler": "M.68"
+  },
+  "ren_link_tombstoned::M:ren_link_tombstoned/t.txt#0": {
+   "tumbler": "M.24"
+  },
+  "ren_non_evid::M:ren_non_evid/a.txt#0": {
+   "tumbler": "M.25"
+  },
+  "ren_non_evid::M:ren_non_evid/a2.txt#0": {
+   "tumbler": "M.69"
+  },
+  "ren_onto_earlier::M:ren_onto_earlier/a.txt#0": {
+   "tumbler": "M.13"
+  },
+  "ren_onto_earlier::M:ren_onto_earlier/b.txt#0": {
+   "tumbler": "M.14"
+  },
+  "ren_self_link::M:ren_self_link/a.txt#0": {
+   "tumbler": "M.19"
+  },
+  "ren_self_link::M:ren_self_link/b.txt#0": {
+   "tumbler": "M.20"
+  },
+  "ren_shared_hash::M:ren_shared_hash/gone.txt#0": {
+   "tumbler": "M.11"
+  },
+  "ren_shared_hash::M:ren_shared_hash/p1.txt#0": {
+   "tumbler": "M.9"
+  },
+  "ren_shared_hash::M:ren_shared_hash/p2.txt#0": {
+   "tumbler": "M.10"
+  },
+  "ren_single::M:ren_single/a.txt#0": {
+   "tumbler": "M.12"
+  },
+  "ren_single::M:ren_single/b.txt#0": {
+   "tumbler": "M.63"
+  },
+  "ren_two_onto_one::M:ren_two_onto_one/m1.txt#0": {
+   "tumbler": "M.15"
+  },
+  "ren_two_onto_one::M:ren_two_onto_one/m2.txt#0": {
+   "tumbler": "M.16"
+  },
+  "ren_two_onto_one::M:ren_two_onto_one/t.txt#0": {
+   "tumbler": "M.64"
+  },
+  "stamp_cat::M:stamp_cat/cat_absent.txt#0": {
+   "tumbler": "M.41"
+  },
+  "stamp_cat::M:stamp_cat/cat_set.txt#0": {
+   "tumbler": "M.42"
+  },
+  "stamp_empty_hash::M:stamp_empty_hash/existing.txt#0": {
+   "tumbler": "M.43"
+  },
+  "stamp_empty_hash::M:stamp_empty_hash/new.txt#0": {
+   "tumbler": "M.73"
+  },
+  "stamp_rdr::M:stamp_rdr/id_change.md#0": {
+   "tumbler": "M.33"
+  },
+  "stamp_rdr::M:stamp_rdr/null_existing.md#0": {
+   "tumbler": "M.34"
+  },
+  "stamp_rdr::M:stamp_rdr/null_new.md#0": {
+   "tumbler": "M.72"
+  },
+  "stamp_sf::M:stamp_sf/doc.txt#0": {
+   "tumbler": "M.35"
+  },
+  "stamp_tags::M:stamp_tags/absent.py#0": {
+   "tumbler": "M.36"
+  },
+  "stamp_tags::M:stamp_tags/empty_list.py#0": {
+   "tumbler": "M.39"
+  },
+  "stamp_tags::M:stamp_tags/empty_str.py#0": {
+   "tumbler": "M.38"
+  },
+  "stamp_tags::M:stamp_tags/null.py#0": {
+   "tumbler": "M.37"
+  },
+  "stamp_tags::M:stamp_tags/set.py#0": {
+   "tumbler": "M.40"
+  }
+ },
+ "owners": {
+  "(owners)::M": {
+   "deactivated_at": null,
+   "head_hash": null,
+   "next_seq": 76,
+   "owner_type": "repo",
+   "repo_root": "@ROOT"
+  },
+  "(owners)::X": {
+   "deactivated_at": null,
+   "head_hash": null,
+   "next_seq": 2,
+   "owner_type": "curator",
+   "repo_root": ""
+  }
+ },
+ "sensitivity": {
+  "misc::M:misc/sens_existing.txt#0 | --sensitive write: nx index repo --sensitive-glob": {
+   "actor": "tenant",
+   "changed_at": "<set>",
+   "new": true,
+   "old": false
+  },
+  "misc::M:misc/sens_new.txt#0 | register_set": {
+   "actor": "engine",
+   "changed_at": "<set>",
+   "new": true,
+   "old": false
+  }
+ },
+ "structures": {
+  "alias_update::file_to_doc_id alias_update/alias.txt": {
+   "value": "M:alias_update/alias.txt#0"
+  },
+  "alias_update::file_to_doc_id alias_update/target.txt": {
+   "value": "M:alias_update/target.txt#0"
+  },
+  "alias_update::needs_fence M:alias_update/alias.txt#0": {
+   "value": [
+    "69f9319456b285314408ce23bd68f4dcd7265b2c779bcb35ada13d3c5a786171",
+    "docs__rdr193parity"
+   ]
+  },
+  "ch_content::file_to_doc_id ch_content/doc.txt": {
+   "value": "M:ch_content/doc.txt#0"
+  },
+  "ch_content::needs_fence M:ch_content/doc.txt#0": {
+   "value": [
+    "40df05c413b71278b2d79fe4f244215f5d4aa51ab465cafbd1371b971584f02b",
+    "docs__rdr193parity"
+   ]
+  },
+  "ch_fence::file_to_doc_id ch_fence/changed.txt": {
+   "value": "M:ch_fence/changed.txt#0"
+  },
+  "ch_fence::file_to_doc_id ch_fence/new.txt": {
+   "value": "M:ch_fence/new.txt#0"
+  },
+  "ch_fence::needs_fence M:ch_fence/changed.txt#0": {
+   "value": [
+    "8e00a75ada1203d7653331e46e19d518b8c24e75de898b3b12f8c5d548fb2415",
+    "docs__rdr193parity"
+   ]
+  },
+  "ch_fence::needs_fence M:ch_fence/new.txt#0": {
+   "value": [
+    "a7ada829dc8af5fcbb251db4d83d177eb41cbe8382a11fa46f5513fa64bea10f",
+    "docs__rdr193parity"
+   ]
+  },
+  "ch_fence::new_tumblers M:ch_fence/new.txt#0": {
+   "value": true
+  },
+  "ch_fence::rdr_dependency_seed M:ch_fence/new.txt#0": {
+   "value": true
+  },
+  "ch_head::file_to_doc_id ch_head/doc.txt": {
+   "value": "M:ch_head/doc.txt#0"
+  },
+  "ch_rdr::file_to_doc_id ch_rdr/edit.md": {
+   "value": "M:ch_rdr/edit.md#0"
+  },
+  "ch_rdr::needs_fence M:ch_rdr/edit.md#0": {
+   "value": [
+    "a17888cebf246cc5324b0ded2386c0097267f8897a470fefb0e726d84c5d5220",
+    "rdr__rdr193parity"
+   ]
+  },
+  "ch_rdr::rdr_dependency_seed M:ch_rdr/edit.md#0": {
+   "value": true
+  },
+  "fence::complete_doc_hashes M:fence/complete.txt#0": {
+   "value": "446020aacfe60da993d0d7cd1ae772c576804614fb57e575a50380662f8201b9"
+  },
+  "fence::file_to_doc_id fence/complete.txt": {
+   "value": "M:fence/complete.txt#0"
+  },
+  "fence::file_to_doc_id fence/failed.txt": {
+   "value": "M:fence/failed.txt#0"
+  },
+  "fence::file_to_doc_id fence/indexing.txt": {
+   "value": "M:fence/indexing.txt#0"
+  },
+  "fence::stale_fence_doc_ids M:fence/failed.txt#0": {
+   "value": true
+  },
+  "fence::stale_fence_doc_ids M:fence/indexing.txt#0": {
+   "value": true
+  },
+  "fill::file_to_doc_id fill/f01.py": {
+   "value": "M:fill/f01.py#0"
+  },
+  "fill::file_to_doc_id fill/f02.py": {
+   "value": "M:fill/f02.py#0"
+  },
+  "fill::file_to_doc_id fill/f03.py": {
+   "value": "M:fill/f03.py#0"
+  },
+  "fill::file_to_doc_id fill/f04.py": {
+   "value": "M:fill/f04.py#0"
+  },
+  "fill::file_to_doc_id fill/f05.py": {
+   "value": "M:fill/f05.py#0"
+  },
+  "fill::file_to_doc_id fill/f06.py": {
+   "value": "M:fill/f06.py#0"
+  },
+  "fill::file_to_doc_id fill/f07.py": {
+   "value": "M:fill/f07.py#0"
+  },
+  "fill::file_to_doc_id fill/f08.py": {
+   "value": "M:fill/f08.py#0"
+  },
+  "id_duplicate::file_to_doc_id id_duplicate/dup.txt": {
+   "value": "M:id_duplicate/dup.txt#1"
+  },
+  "id_duplicate::needs_fence M:id_duplicate/dup.txt#1": {
+   "value": [
+    "3465cd1e18d1afce75b88f43d25fc0e4af9b6f7ed8358ad1e3c15d5546016b74",
+    "docs__rdr193parity"
+   ]
+  },
+  "id_foreign::file_to_doc_id id_foreign/x.txt": {
+   "value": "X:id_foreign/x.txt#0"
+  },
+  "id_legacy::file_to_doc_id id_legacy/changed.txt": {
+   "value": "M:id_legacy/changed.txt#0"
+  },
+  "id_legacy::file_to_doc_id id_legacy/unchanged.txt": {
+   "value": "M:id_legacy/unchanged.txt#0"
+  },
+  "id_legacy::needs_fence M:id_legacy/changed.txt#0": {
+   "value": [
+    "0678a26d7d5f7dcdb4f7c9a489e52a5bd5a04ce3b39e359b4d2bf59fee42d46e",
+    "docs__rdr193parity"
+   ]
+  },
+  "id_same_owner::file_to_doc_id id_same_owner/x.txt": {
+   "value": "M:id_same_owner/old-name.txt#0"
+  },
+  "misc::file_to_doc_id misc/plain_new.txt": {
+   "value": "M:misc/plain_new.txt#0"
+  },
+  "misc::file_to_doc_id misc/reset_miss.txt": {
+   "value": "M:misc/reset_miss.txt#0"
+  },
+  "misc::file_to_doc_id misc/sens_existing.txt": {
+   "value": "M:misc/sens_existing.txt#0"
+  },
+  "misc::file_to_doc_id misc/sens_new.txt": {
+   "value": "M:misc/sens_new.txt#0"
+  },
+  "misc::needs_fence M:misc/plain_new.txt#0": {
+   "value": [
+    "4246d2e11f9ddb864b5f8a592ff682bff0d3890bba57f29d801c6b6be88ea379",
+    "docs__rdr193parity"
+   ]
+  },
+  "misc::needs_fence M:misc/sens_new.txt#0": {
+   "value": [
+    "c7d97dfe11f6da8c307690148fe13813ea3232baeb8cf85cca566854a3245c49",
+    "docs__rdr193parity"
+   ]
+  },
+  "misc::new_tumblers M:misc/plain_new.txt#0": {
+   "value": true
+  },
+  "misc::new_tumblers M:misc/sens_new.txt#0": {
+   "value": true
+  },
+  "misc::rdr_dependency_seed M:misc/plain_new.txt#0": {
+   "value": true
+  },
+  "misc::rdr_dependency_seed M:misc/sens_new.txt#0": {
+   "value": true
+  },
+  "misc::sensitive_confirmed misc/sens_existing.txt": {
+   "value": true
+  },
+  "misc::sensitive_confirmed misc/sens_new.txt": {
+   "value": true
+  },
+  "ren_alias::file_to_doc_id ren_alias/a2.txt": {
+   "value": "M:ren_alias/a2.txt#0"
+  },
+  "ren_alias::file_to_doc_id ren_alias/alias.txt": {
+   "value": "M:ren_alias/alias.txt#0"
+  },
+  "ren_alias::file_to_doc_id ren_alias/target.txt": {
+   "value": "M:ren_alias/target.txt#0"
+  },
+  "ren_alias::needs_fence M:ren_alias/a2.txt#0": {
+   "value": [
+    "797878bbfc210bf2e9e540ce15b0b88993c92798d431a263b909f4ac20079469",
+    "docs__rdr193parity"
+   ]
+  },
+  "ren_alias::new_tumblers M:ren_alias/a2.txt#0": {
+   "value": true
+  },
+  "ren_alias::rdr_dependency_seed M:ren_alias/a2.txt#0": {
+   "value": true
+  },
+  "ren_and_deleted::file_to_doc_id ren_and_deleted/b.txt": {
+   "value": "M:ren_and_deleted/b.txt#0"
+  },
+  "ren_and_deleted::file_to_doc_id ren_and_deleted/other.txt": {
+   "value": "M:ren_and_deleted/other.txt#0"
+  },
+  "ren_and_deleted::needs_fence M:ren_and_deleted/b.txt#0": {
+   "value": [
+    "59476f1f1f7ce505704fc91f40b98d4b99724aea95fe712f94f64f326e4e3012",
+    "docs__rdr193parity"
+   ]
+  },
+  "ren_and_deleted::new_tumblers M:ren_and_deleted/b.txt#0": {
+   "value": true
+  },
+  "ren_and_deleted::rdr_dependency_seed M:ren_and_deleted/b.txt#0": {
+   "value": true
+  },
+  "ren_link_between::file_to_doc_id ren_link_between/a2.txt": {
+   "value": "M:ren_link_between/a2.txt#0"
+  },
+  "ren_link_between::file_to_doc_id ren_link_between/b2.txt": {
+   "value": "M:ren_link_between/b2.txt#0"
+  },
+  "ren_link_between::needs_fence M:ren_link_between/a2.txt#0": {
+   "value": [
+    "1f49911f92257cab2c664f511056df5780f04da62716d75af1dc7ab6fe64d791",
+    "docs__rdr193parity"
+   ]
+  },
+  "ren_link_between::needs_fence M:ren_link_between/b2.txt#0": {
+   "value": [
+    "1d6b234f77aa254e97ea63aeadd8cae1332aa3ff3d55b4fe8e0fdbac2314d7af",
+    "docs__rdr193parity"
+   ]
+  },
+  "ren_link_between::new_tumblers M:ren_link_between/a2.txt#0": {
+   "value": true
+  },
+  "ren_link_between::new_tumblers M:ren_link_between/b2.txt#0": {
+   "value": true
+  },
+  "ren_link_between::rdr_dependency_seed M:ren_link_between/a2.txt#0": {
+   "value": true
+  },
+  "ren_link_between::rdr_dependency_seed M:ren_link_between/b2.txt#0": {
+   "value": true
+  },
+  "ren_link_swept::file_to_doc_id ren_link_swept/a2.txt": {
+   "value": "M:ren_link_swept/a2.txt#0"
+  },
+  "ren_link_swept::needs_fence M:ren_link_swept/a2.txt#0": {
+   "value": [
+    "a7b33220038055ed2f6d9905e2d9b5d092d7b09b033ca061ed98137818b7772a",
+    "docs__rdr193parity"
+   ]
+  },
+  "ren_link_swept::new_tumblers M:ren_link_swept/a2.txt#0": {
+   "value": true
+  },
+  "ren_link_swept::rdr_dependency_seed M:ren_link_swept/a2.txt#0": {
+   "value": true
+  },
+  "ren_link_tombstoned::file_to_doc_id ren_link_tombstoned/a2.txt": {
+   "value": "M:ren_link_tombstoned/a2.txt#0"
+  },
+  "ren_link_tombstoned::needs_fence M:ren_link_tombstoned/a2.txt#0": {
+   "value": [
+    "cb0609bfb9a9b6343f1d142df76ff436f247f09f707a2f509525bdaa7ddaab3a",
+    "docs__rdr193parity"
+   ]
+  },
+  "ren_link_tombstoned::new_tumblers M:ren_link_tombstoned/a2.txt#0": {
+   "value": true
+  },
+  "ren_link_tombstoned::rdr_dependency_seed M:ren_link_tombstoned/a2.txt#0": {
+   "value": true
+  },
+  "ren_non_evid::file_to_doc_id ren_non_evid/a2.txt": {
+   "value": "M:ren_non_evid/a2.txt#0"
+  },
+  "ren_non_evid::needs_fence M:ren_non_evid/a2.txt#0": {
+   "value": [
+    "5f846b07907e8842e1298f764be8072748a4bf4ef3ef4e3d64aac5eb9daf263f",
+    "docs__rdr193parity"
+   ]
+  },
+  "ren_non_evid::new_tumblers M:ren_non_evid/a2.txt#0": {
+   "value": true
+  },
+  "ren_non_evid::rdr_dependency_seed M:ren_non_evid/a2.txt#0": {
+   "value": true
+  },
+  "ren_onto_earlier::file_to_doc_id ren_onto_earlier/b.txt": {
+   "value": "M:ren_onto_earlier/b.txt#0"
+  },
+  "ren_self_link::file_to_doc_id ren_self_link/b.txt": {
+   "value": "M:ren_self_link/b.txt#0"
+  },
+  "ren_shared_hash::file_to_doc_id ren_shared_hash/p1.txt": {
+   "value": "M:ren_shared_hash/p1.txt#0"
+  },
+  "ren_shared_hash::file_to_doc_id ren_shared_hash/p2.txt": {
+   "value": "M:ren_shared_hash/p2.txt#0"
+  },
+  "ren_single::file_to_doc_id ren_single/b.txt": {
+   "value": "M:ren_single/b.txt#0"
+  },
+  "ren_single::needs_fence M:ren_single/b.txt#0": {
+   "value": [
+    "a827bdebed1d3edb534bb6a4ece4bde5bd3c983cd0b3ed51be435985eb234382",
+    "docs__rdr193parity"
+   ]
+  },
+  "ren_single::new_tumblers M:ren_single/b.txt#0": {
+   "value": true
+  },
+  "ren_single::rdr_dependency_seed M:ren_single/b.txt#0": {
+   "value": true
+  },
+  "ren_two_onto_one::file_to_doc_id ren_two_onto_one/t.txt": {
+   "value": "M:ren_two_onto_one/t.txt#0"
+  },
+  "ren_two_onto_one::needs_fence M:ren_two_onto_one/t.txt#0": {
+   "value": [
+    "b874e2a0b0273b7ffb37d40c5c1c23d82c18e3adbc0dafd6371cfdc25f67bb3c",
+    "docs__rdr193parity"
+   ]
+  },
+  "ren_two_onto_one::new_tumblers M:ren_two_onto_one/t.txt#0": {
+   "value": true
+  },
+  "ren_two_onto_one::rdr_dependency_seed M:ren_two_onto_one/t.txt#0": {
+   "value": true
+  },
+  "stamp_cat::file_to_doc_id stamp_cat/cat_absent.txt": {
+   "value": "M:stamp_cat/cat_absent.txt#0"
+  },
+  "stamp_cat::file_to_doc_id stamp_cat/cat_set.txt": {
+   "value": "M:stamp_cat/cat_set.txt#0"
+  },
+  "stamp_empty_hash::file_to_doc_id stamp_empty_hash/existing.txt": {
+   "value": "M:stamp_empty_hash/existing.txt#0"
+  },
+  "stamp_empty_hash::file_to_doc_id stamp_empty_hash/new.txt": {
+   "value": "M:stamp_empty_hash/new.txt#0"
+  },
+  "stamp_empty_hash::needs_fence M:stamp_empty_hash/new.txt#0": {
+   "value": [
+    "",
+    "docs__rdr193parity"
+   ]
+  },
+  "stamp_empty_hash::new_tumblers M:stamp_empty_hash/new.txt#0": {
+   "value": true
+  },
+  "stamp_empty_hash::rdr_dependency_seed M:stamp_empty_hash/new.txt#0": {
+   "value": true
+  },
+  "stamp_rdr::file_to_doc_id stamp_rdr/id_change.md": {
+   "value": "M:stamp_rdr/id_change.md#0"
+  },
+  "stamp_rdr::file_to_doc_id stamp_rdr/null_existing.md": {
+   "value": "M:stamp_rdr/null_existing.md#0"
+  },
+  "stamp_rdr::file_to_doc_id stamp_rdr/null_new.md": {
+   "value": "M:stamp_rdr/null_new.md#0"
+  },
+  "stamp_rdr::needs_fence M:stamp_rdr/id_change.md#0": {
+   "value": [
+    "0b758c3b4f42dffa6ee47458e31002c89743b8355e90cf520f03b5a7d4b3845e",
+    "rdr__rdr193parity"
+   ]
+  },
+  "stamp_rdr::needs_fence M:stamp_rdr/null_existing.md#0": {
+   "value": [
+    "bdeec4b41eb815080d7ec947bab339487d0c3cdb5001ac59a88f08ad6551aa37",
+    "rdr__rdr193parity"
+   ]
+  },
+  "stamp_rdr::needs_fence M:stamp_rdr/null_new.md#0": {
+   "value": [
+    "5201f17616b2e9ac8b5fbcaebea8bc3a169ab1b8d2fe9bbca6be4af6c05dc5e8",
+    "rdr__rdr193parity"
+   ]
+  },
+  "stamp_rdr::new_tumblers M:stamp_rdr/null_new.md#0": {
+   "value": true
+  },
+  "stamp_rdr::rdr_dependency_seed M:stamp_rdr/id_change.md#0": {
+   "value": true
+  },
+  "stamp_rdr::rdr_dependency_seed M:stamp_rdr/null_existing.md#0": {
+   "value": true
+  },
+  "stamp_rdr::rdr_dependency_seed M:stamp_rdr/null_new.md#0": {
+   "value": true
+  },
+  "stamp_sf::file_to_doc_id stamp_sf/doc.txt": {
+   "value": "M:stamp_sf/doc.txt#0"
+  },
+  "stamp_tags::file_to_doc_id stamp_tags/absent.py": {
+   "value": "M:stamp_tags/absent.py#0"
+  },
+  "stamp_tags::file_to_doc_id stamp_tags/empty_list.py": {
+   "value": "M:stamp_tags/empty_list.py#0"
+  },
+  "stamp_tags::file_to_doc_id stamp_tags/empty_str.py": {
+   "value": "M:stamp_tags/empty_str.py#0"
+  },
+  "stamp_tags::file_to_doc_id stamp_tags/null.py": {
+   "value": "M:stamp_tags/null.py#0"
+  },
+  "stamp_tags::file_to_doc_id stamp_tags/set.py": {
+   "value": "M:stamp_tags/set.py#0"
+  }
+ }
+}

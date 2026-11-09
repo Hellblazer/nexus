@@ -466,19 +466,13 @@ Locked format decisions (design of record: T2
   note written before the catalog kept these keys, or stored with none of
   them before every put wrote `put_at` (nexus-6pfgb.15; an entry holding
   `put_at` answers for its note, so its unset keys export empty and are not
-  counted), takes the chunk row's values only when the row is that note's
-  own write, by the expiry sweep's rule (`note_ttl.row_written_by`): the
-  row's `catalog_doc_id` is the note's tumbler and its `title` the note's
-  title. A row with no stamp is nobody's for `ttl_days`, even when the note
-  is the only owner left, since a departed co-owner's values stay on the
-  row (nexus-6pfgb.34). For `tags` and `category` alone, a note that is the
-  chunk's sole live owner in its collection takes them from any row whose
-  stamp and title do not both name another note (nexus-6pfgb.35). For
-  `ttl_days`, an untitled note never matches, and a note brought in
-  by an `.nxexp` import does not unless the destination minted the source
-  box's tumbler for it (its rows keep the source's stamp). Otherwise it
-  exports with them empty and the export summary counts it when the row
-  held a value (`note keys not recovered`). Import restarts a note's TTL
+  counted), exports with all three empty: the export never reads a
+  note's keys off a chunk row (RDR-236 Phase 4 Step 1, nexus-6pfgb.65),
+  because the row is the last writer's, a departed co-owner's values stay
+  on it, and a current client no longer writes a note's own facts to its
+  rows. `nx catalog backfill-meta` fills the keys of such a note first,
+  where it can attribute a row to it. The export summary counts a note
+  whose row still held a value (`note keys not recovered`). Import restarts a note's TTL
   clock: the expiry is `ttl_days` from the import, not from the original
   store. Importing the same bundle again restarts it again. A note already
   past its expiry but not yet reaped is exported (expiry cannot be judged

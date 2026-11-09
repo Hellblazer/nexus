@@ -61,6 +61,7 @@ from tests.test_rdr232_primary_evidence import (
 )
 from tests.test_rdr232_question_sources import INCIDENT_BINDINGS, PLAIN_QUESTION, _run, _sources
 from tests.test_rdr232_request_coverage import G06, GOLDEN
+from tests._changelog import changelog_text
 
 REPO = Path(__file__).resolve().parents[1]
 G09 = next(q["text"] for q in yaml.safe_load(GOLDEN.read_text(encoding="utf-8"))["queries"] if q["qid"].startswith("G09"))
@@ -208,7 +209,7 @@ def test_the_host_limit_and_the_remedy_are_stated_where_users_read_them(tmp_path
     tools = asyncio.run(core.mcp.list_tools())
     (answer,) = [t for t in tools if t.name == "nx_answer"]
     bindings = answer.input_schema["properties"]["bindings"]["description"]
-    changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    changelog = changelog_text(REPO)
     cli = (REPO / "docs" / "cli-reference.md").read_text(encoding="utf-8")
     entry = changelog[changelog.index("qualified by the session's project"):]
     entry = entry[: entry.index("\n- **")]

@@ -78,6 +78,20 @@ class TupleShapeValidatorTest {
         }
     }
 
+    /** nexus-1d6pz.11.1: the --done row's result dims are declared; an undeclared dim still fails. */
+    @Test
+    void ciBoardDoneRowCarriesShaAndOutcomeDims() {
+        TemplateSchema ci = template("board/ci/<topic>");
+        assertDoesNotThrow(() -> TupleShapeValidator.validateOut(ci, Map.of("topic", "t--done"),
+                Map.of("from", "github", "kind", "sha",
+                        "sha", "0000000000000000000000000000000000000000", "outcome", "failure"),
+                "{}", "n1", false));
+        var ex = assertThrows(SchemaViolationException.class, () ->
+                TupleShapeValidator.validateOut(ci, Map.of("topic", "t--done"),
+                        Map.of("from", "github", "kind", "sha", "verdict", "red"), "{}", "n1", false));
+        assertEquals("verdict", ex.field());
+    }
+
     // ── shape refusals ───────────────────────────────────────────────────
 
     @Test

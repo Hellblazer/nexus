@@ -1070,3 +1070,29 @@ def test_develop_ref_option_selects_the_reference(repo: Path) -> None:
     r = _run(repo, "--base", "v7.86.3", "--develop-ref", "elsewhere")
     assert r.returncode == 1, r.stdout + r.stderr
     assert engine[:10] in r.stdout
+
+
+# ---- nexus-3ceda.2: changelog fragments ----------------------------------------
+
+
+def test_a_changelog_fragment_is_free(repo: Path) -> None:
+    """Mutation (drop changelog/unreleased/ from FREE_PREFIXES): a fragment riding with a
+    plugin change reads INELIGIBLE."""
+    _commit(
+        repo,
+        {
+            "conexus/skills/a.md": "ok\n",
+            "changelog/unreleased/nexus-abc.md": "### Added\n\n- x\n",
+        },
+    )
+    r = _check(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("path", ["changelog/other.md", "changelog/tool.py"])
+def test_only_the_fragment_directory_is_free(repo: Path, path: str) -> None:
+    """Mutation (free all of changelog/)."""
+    _commit(repo, {path: "changed\n"})
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"INELIGIBLE: {path} [A]" in r.stdout

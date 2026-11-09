@@ -52,9 +52,7 @@ last row and, once the count matched, hide the gap for good.
 
 * A document with NO manifest rows that the pass cannot rebuild and whose ``chunk_count``
   is above zero (nexus-v9xwj) is ``ManifestHealResult.lost``, and is marked the same way
-  (also in ``reindex``, with 0 rows): T3 holds no chunk under its content hash (a chunk it
-  shares with a document that wrote it last carries the other document's hash, so that
-  document reads lost here too), or no content hash or collection is recorded, or its
+  (also in ``reindex``, with 0 rows): no content hash or collection is recorded, or its
   collection does not exist (not in the service's live listing: a collection whose every
   document is trashed reads absent). A file-walking staleness path already re-indexes an
   empty manifest when none of the document's T3 chunks carries a ``doc_id`` metadata key
@@ -64,7 +62,11 @@ last row and, once the count matched, hide the gap for good.
   alone) and ``nx t3 gc`` read. A pre-Phase-3 chunk that still carries ``doc_id`` puts the
   document in the staleness cache by that key, and then the mark is what makes the run
   re-index it.
-  It is NOT marked when the evidence may be transient: a T3 fetch that failed, or a service
+  It is NOT marked when no chunk row carries its content hash (RDR-236 Phase 4 Step 1,
+  nexus-6pfgb.65): a chunk row written since carries none, and a document with no manifest has no
+  chunk hash to look for its chunks by, so the miss is no evidence that they are gone. The fetch is
+  the legacy rows' selector, kept only for the documents that still have such rows.
+  It is NOT marked either when the evidence may be transient: a T3 fetch that failed, or a service
   that could not be asked whether the collection exists (the collection listing failed:
   ``HttpVectorClient.get_collection`` lists strictly and raises ``CollectionNotFoundError``
   with the ``VectorServiceError`` as ``__cause__``; a collection that is truly absent raises
@@ -443,6 +445,8 @@ def _heal_collections(
 ) -> None:
     """The per-collection fetch + rebuild walk for documents with no manifest
     rows (split from the entry point so handle cleanup wraps it in one place)."""
+    from nexus.metadata_schema import positions_of_row  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+
     _paginated_get = paginated_get
     _manifest_chunk_rows = manifest_chunk_rows
     result = healer.result
@@ -537,8 +541,17 @@ def _heal_collections(
         for entry, content_hash in pairs:
             ids, metas = rows_by_hash.get(content_hash, ([], []))
             if not ids:
+                # RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): a chunk row written since carries no
+                # ``content_hash``, so this lookup finds only legacy rows. Finding none is no evidence the
+                # document's chunks are gone, and a document with no manifest has no chash to look for them
+                # by: it is reported, and its fence is left alone.
                 healer.classify_unmatched(
-                    entry, mark_why="T3 holds no chunk carrying its content hash")
+                    entry,
+                    left_why=(
+                        "no chunk row carries its content hash, and a chunk row written since RDR-236 "
+                        "Phase 4 Step 1 carries none, so the heal cannot tell whether its chunks are gone; "
+                        "re-index the source"
+                    ))
                 continue
             tumbler = str(entry.tumbler)
             ordered = sorted(zip(ids, metas), key=_order_key)
@@ -548,7 +561,10 @@ def _heal_collections(
                 if not m.get("chunk_text_hash"):
                     m["chunk_text_hash"] = cid
                 m["chunk_index"] = k
-                indexed_metas.append((k, m))
+                # The chunk metadata here IS a stored T3 row: its labels and spans are read off it
+                # (RDR-236 Phase 4 Step 0; a row written after Step 1 carries none, and the heal then
+                # has only the chash to rebuild a position from).
+                indexed_metas.append((k, m, positions_of_row(m)))
             chunks = _manifest_chunk_rows(indexed_metas)
             if not any(c["chash"] for c in chunks):
                 healer.classify_unmatched(

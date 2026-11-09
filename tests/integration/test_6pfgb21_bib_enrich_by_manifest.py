@@ -285,12 +285,11 @@ def test_enrich_writes_a_documents_bib_only_on_chunks_no_other_document_holds() 
     a, b = w.entry(w.a), w.entry(w.b)
     assert a.bib_semantic_scholar_id == "ssA" and a.bib_authors == "Dana", result.output
     assert b.bib_semantic_scholar_id == "ssB" and b.bib_authors == "Eve", result.output
-    assert w.chunk_meta("c2")["bib_semantic_scholar_id"] == "ssA"
-    assert w.chunk_meta("c3")["bib_semantic_scholar_id"] == "ssB"
-    assert not w.chunk_meta("c1").get("bib_semantic_scholar_id"), (
-        "a chunk two documents hold carries neither document's bib"
-    )
-    assert "enriched 2 chunks across 2 documents" in result.output, result.output
+    # RDR-236 Phase 4 Step 1: the bibliography is the document's alone; no chunk row is written, the
+    # shared one or a sole-owner one.
+    for chunk in ("c1", "c2", "c3"):
+        assert not w.chunk_meta(chunk).get("bib_semantic_scholar_id"), chunk
+    assert "enriched 2 documents" in result.output, result.output
 
 
 def _paper_world(tag: str, holders: int):
