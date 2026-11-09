@@ -424,19 +424,23 @@ local TRIPWIRES = {
     when = function(names)
       return any_of(names, FENCE_GATE_FILES)
     end,
-    step = step("the vw594 fence coverage gate (an edit to an anchored line reds it; repoint the anchor)",
+    step = step("the vw594 fence coverage gate (an edit to an anchored line reds it; repoint the anchor,"
+      .. " and keep the mutation deleting the same stamp)",
       gated(PYTEST .. " tests/test_vw594_fence_coverage_gate.py"), false),
   },
   {
     -- R7 (service substrate): the wire-ledger check scans COMMITS, so it runs
     -- after the commit; a lint bucket run on the uncommitted tree stays green and
-    -- CI goes red (2026-09-16, 33ac72e02). Both halves in one diff is the
-    -- source's trigger; the script decides per commit.
+    -- CI goes red (2026-09-16, 33ac72e02). Any service/ change runs it: the
+    -- script's own pairing counts a src/nexus/ client module or a tests/ file
+    -- holding a raw /manifest or /import envelope, the second has no src/nexus/
+    -- path, and the script decides per commit and is cheap.
     when = function(names)
-      return any(names, "^service/") and any(names, "^src/nexus/")
+      return any(names, "^service/")
     end,
     step = step("the wire-contract pairing check: run it after the commit, before the push (it scans commits;"
-      .. " a commit touching service/ and src/nexus/ together needs a docs/wire-contract-pending.md Unshipped"
+      .. " a commit touching service/ and a client half, src/nexus/ or a test with a raw /manifest or /import"
+      .. " envelope, needs a docs/wire-contract-pending.md Unshipped"
       .. " bullet in the exact `-- engine tag `<tag>` -- [additive]` shape)",
       "uv run python scripts/check_wire_contract_pairing.py", false),
   },

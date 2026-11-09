@@ -124,12 +124,16 @@ def test_r5_the_full_suite_is_the_last_check(repo: Path) -> None:
     ("paths", "fires"),
     [
         (["service/A.java", "src/nexus/x.py"], True),
-        (["service/A.java"], False),
+        # The script's own pairing also counts a tests/ file holding a raw
+        # /manifest or /import envelope, which has no src/nexus/ path, and it
+        # decides per commit: so any service/ change runs it (loss check r1 L2).
+        (["service/A.java"], True),
+        (["service/A.java", "tests/test_x.py"], True),
         (["src/nexus/x.py"], False),
-        (["service/A.java", "tests/test_x.py"], False),
+        (["tests/test_x.py"], False),
     ],
 )
-def test_r7_the_wire_pairing_check_needs_both_halves(
+def test_r7_the_wire_pairing_check_runs_for_any_service_change(
     repo: Path, paths: list[str], fires: bool
 ) -> None:
     rows = _fires(repo, paths, "the wire-contract pairing check")
