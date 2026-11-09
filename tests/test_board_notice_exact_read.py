@@ -235,6 +235,11 @@ class TestTupleRdInclusiveStart:
             through_created_at=c["created_at"], through_id="0" * 63 + "1",
         )
         assert len(missing) == 1 and "not in" in missing[0].get("error", ""), missing
+        short = tuple_rd(
+            subspace, n=2, from_created_at=a["created_at"], from_id=a["id"],
+            through_created_at=c["created_at"], through_id=c["id"],
+        )
+        assert len(short) == 1 and "more than n=2 rows" in short[0].get("error", ""), short
 
 
 class TestNoticeText:
