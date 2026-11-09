@@ -47,4 +47,7 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/skills/mailbox/SKILL.md`
+  nexus-1d6pz.11.2: a board notice now prints an exact read (`tuple_rd` with `from_created_at`/`from_id`, and `through_*` for a batch) that returns the announced posts, in place of `since=`.
+
 ## Deferred to the next client release
