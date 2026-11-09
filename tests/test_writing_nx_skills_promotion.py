@@ -22,6 +22,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
 SKILL_PATH = REPO_ROOT / "conexus" / "skills" / "writing-nx-skills" / "SKILL.md"
+#: The recipe lives in a file the skill loads on demand, keeping SKILL.md inside its context budget
+#: (tests/scripts/test_context_budgets.py); SKILL.md keeps a pointer section under the same heading.
+PROMOTION_PATH = SKILL_PATH.with_name("promotion.md")
 
 SECTION_HEADING = "## Promoting a Memory File"
 
@@ -195,7 +198,7 @@ def _without(text: str, heading: str) -> str:
 
 
 def test_skill_carries_all_five_promotion_parts() -> None:
-    text = SKILL_PATH.read_text(encoding="utf-8")
+    text = PROMOTION_PATH.read_text(encoding="utf-8")
     assert text.count(f"\n{SECTION_HEADING}\n") == 1, (
         f"{SKILL_PATH.relative_to(REPO_ROOT)} needs exactly one {SECTION_HEADING!r} section"
     )
@@ -204,14 +207,14 @@ def test_skill_carries_all_five_promotion_parts() -> None:
 
 @pytest.mark.parametrize("part", list(PARTS))
 def test_checker_flags_a_draft_without_each_part(part: str) -> None:
-    text = SKILL_PATH.read_text(encoding="utf-8")
+    text = PROMOTION_PATH.read_text(encoding="utf-8")
     draft = _without(text, PARTS[part][0])
     assert missing_parts(draft) == [part]
 
 
 def test_checker_flags_a_part_with_an_empty_body() -> None:
     """A heading alone is not the part."""
-    text = SKILL_PATH.read_text(encoding="utf-8")
+    text = PROMOTION_PATH.read_text(encoding="utf-8")
     heading = PARTS["loss check"][0]
     draft = re.sub(
         rf"(?ms)^{re.escape(heading)}\n.*?(?=^### |^## |\Z)", f"{heading}\n\n", text, count=1
@@ -220,7 +223,7 @@ def test_checker_flags_a_part_with_an_empty_body() -> None:
 
 
 def test_checker_flags_a_target_table_without_the_hook_row() -> None:
-    text = SKILL_PATH.read_text(encoding="utf-8")
+    text = PROMOTION_PATH.read_text(encoding="utf-8")
     draft = "\n".join(
         line for line in text.splitlines()
         if not (line.startswith("|") and "bright line" in line.lower())
@@ -230,7 +233,7 @@ def test_checker_flags_a_target_table_without_the_hook_row() -> None:
 
 def test_checker_flags_swapped_targets_in_the_table() -> None:
     """Skill and Hook trade places: every name is still in the column."""
-    text = SKILL_PATH.read_text(encoding="utf-8")
+    text = PROMOTION_PATH.read_text(encoding="utf-8")
     draft = (
         text.replace("| Skill |", "| @@ |")
         .replace("| Hook |", "| Skill |")
@@ -241,14 +244,14 @@ def test_checker_flags_swapped_targets_in_the_table() -> None:
 
 
 def test_checker_survives_a_short_table_row() -> None:
-    text = SKILL_PATH.read_text(encoding="utf-8")
+    text = PROMOTION_PATH.read_text(encoding="utf-8")
     draft = text.replace("| --- | --- | --- | --- |", "| --- | --- | --- | --- |\n| x |", 1)
     assert draft != text
     assert missing_parts(draft) == []
 
 
 def test_checker_flags_parts_out_of_order() -> None:
-    text = SKILL_PATH.read_text(encoding="utf-8")
+    text = PROMOTION_PATH.read_text(encoding="utf-8")
     section = _section(text)
     assert section is not None
     subs = _subsections(section)
@@ -273,7 +276,7 @@ def _pattern_cases() -> list[tuple[str, str]]:
 def test_every_pinned_phrase_is_load_bearing(part: str, pattern: str) -> None:
     """Delete one pinned phrase from its part: the checker names that part.
     A phrase the checker would not miss is not pinned."""
-    text = SKILL_PATH.read_text(encoding="utf-8")
+    text = PROMOTION_PATH.read_text(encoding="utf-8")
     section = _section(text)
     assert section is not None
     heading = PARTS[part][0]
@@ -285,7 +288,7 @@ def test_every_pinned_phrase_is_load_bearing(part: str, pattern: str) -> None:
 
 
 def test_checker_flags_a_skill_without_the_section() -> None:
-    text = SKILL_PATH.read_text(encoding="utf-8")
+    text = PROMOTION_PATH.read_text(encoding="utf-8")
     assert missing_parts(text.replace(SECTION_HEADING, "## Something Else")) == list(PARTS)
 
 
@@ -295,12 +298,13 @@ def _frontmatter_description(text: str) -> str:
     return m.group(1)
 
 
-def test_description_and_activation_name_promotion() -> None:
-    """An agent promoting a memory file must be able to find this skill: the
-    description is what the Skill tool lists, the activation section is what
-    the skill says of itself (critic N4)."""
+def test_description_names_promotion_and_skill_points_at_the_recipe() -> None:
+    """An agent promoting a memory file must be able to find this skill (the description is what
+    the Skill tool lists, critic N4) and, from it, the recipe file it loads on demand."""
     text = SKILL_PATH.read_text(encoding="utf-8")
     assert re.search(r"memory file", _frontmatter_description(text), re.I)
-    m = re.search(r"(?ms)^## When This Skill Activates\n(.*?)(?=^## )", text)
-    assert m, "no 'When This Skill Activates' section"
-    assert re.search(r"memory file", m.group(1), re.I)
+    section = _section(text)
+    assert section is not None, "SKILL.md lost its Promoting a Memory File pointer section"
+    assert "promotion.md" in section
+    assert PROMOTION_PATH.is_file()
+    assert missing_parts(text) == list(PARTS), "the recipe belongs in promotion.md, not SKILL.md"
