@@ -160,21 +160,26 @@ def test_mcp_store_put_writes_catalog_doc_id_into_t3_chunk_metadata(
     expected_doc_id = str(rows[0].tumbler)
 
     stored_col = local_t3._client.get_collection(stored_col_name)
-    chunk_result = stored_col.get(include=["metadatas"], sensitivity="include")
-    matching_metas = [
-        m for m in chunk_result["metadatas"]
-        if m.get("title") == "mcp-finding-doc-id"
-    ]
-    assert matching_metas, "expected a chunk with title='mcp-finding-doc-id'"
+    # RDR-236 Phase 4 Step 1: the chunk row is found by its content hash (it carries no title any more)
+    # and holds the CHUNK keys only; the title and tags are the catalog entry's.
+    import hashlib
+
+    chash = hashlib.sha256(
+        b"# MCP finding: nexus-mcp-doc-id\n\nSubagents need catalog backref.",
+    ).hexdigest()
+    chunk_result = stored_col.get(ids=[chash], include=["metadatas"], sensitivity="include")
+    matching_metas = chunk_result["metadatas"]
+    assert matching_metas, "expected the stored chunk, found by its content hash"
 
     # RDR-108 Phase 3: MCP-stored chunks no longer carry ``doc_id`` —
     # the catalog manifest is authoritative. The Document's existence
     # in the catalog (asserted above) is the contract Phase 3 locks in.
     for m in matching_metas:
-        assert "doc_id" not in m, (
-            f"Phase 3: MCP-stored chunk metadata must not carry doc_id; "
-            f"got {m!r}"
+        assert set(m) <= {"chunk_text_hash", "embedding_model"}, (
+            f"MCP-stored chunk metadata must carry the chunk keys only; got {m!r}"
         )
+    assert rows[0].title == "mcp-finding-doc-id"
+    assert (rows[0].meta or {}).get("tags") == ["rdr-101", "mcp", "test"]
     assert expected_doc_id, "expected catalog tumbler for the mcp-stored doc"
 
 
@@ -425,11 +430,15 @@ def test_mcp_store_put_doc_id_absent_when_catalog_uninitialized(
 
     stored_col_name = result.split("->")[-1].strip()
     stored_col = local_t3._client.get_collection(stored_col_name)
-    chunk_result = stored_col.get(include=["metadatas"], sensitivity="include")
+    # RDR-236 Phase 4 Step 1: the row has no title to find it by; read it by its content hash.
+    import hashlib
+
+    chash = hashlib.sha256(b"# MCP finding without catalog\n\nNo-catalog path test.").hexdigest()
+    chunk_result = stored_col.get(ids=[chash], include=["metadatas"], sensitivity="include")
+    assert chunk_result["metadatas"], "non-vacuity: the stored chunk was found"
 
     for m in chunk_result["metadatas"]:
-        if m.get("title") == "mcp-finding-no-catalog":
-            assert "doc_id" not in m, (
-                "doc_id must be dropped (normalize Step 4c) when no catalog "
-                "entry exists; saw doc_id=%r" % m.get("doc_id")
-            )
+        assert "doc_id" not in m, (
+            "doc_id must be dropped (normalize Step 4c) when no catalog "
+            "entry exists; saw doc_id=%r" % m.get("doc_id")
+        )

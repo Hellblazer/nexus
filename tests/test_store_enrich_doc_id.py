@@ -155,11 +155,13 @@ def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
         f"expected at least one chunk in {stored_col_name}"
     )
 
-    matching_metas = [
-        m for m in chunk_result["metadatas"]
-        if m.get("title") == "finding-doc-id-pin"
-    ]
-    assert matching_metas, "expected a chunk with title='finding-doc-id-pin'"
+    # RDR-236 Phase 4 Step 1: the row carries no title to find it by; it is the chunk of the content stored,
+    # and holds the CHUNK keys only. The title and tags are the catalog entry's.
+    import hashlib
+
+    chash = hashlib.sha256(_finding_content.encode()).hexdigest()
+    matching_metas = stored_col.get(ids=[chash], include=["metadatas"], sensitivity="include")["metadatas"]
+    assert matching_metas, "expected the stored chunk, found by its content hash"
 
     # RDR-108 Phase 3: chunks no longer carry ``doc_id``. The catalog
     # entry's existence (asserted above) is the contract Phase 3 locks
@@ -169,6 +171,9 @@ def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
             f"Phase 3: chunk for finding-doc-id-pin must not carry doc_id; "
             f"got {m!r}"
         )
+        assert set(m) <= {"chunk_text_hash", "embedding_model"}, m
+    assert rows[0].title == "finding-doc-id-pin"
+    assert (rows[0].meta or {}).get("tags") == ["rdr-101", "test"]
     assert expected_doc_id, "expected catalog tumbler for the stored doc"
 
 
@@ -217,12 +222,17 @@ def test_store_put_doc_id_absent_when_catalog_uninitialized(
     chunk_result = stored_col.get(include=["metadatas"], sensitivity="include")
     assert chunk_result["ids"]
 
-    for m in chunk_result["metadatas"]:
-        if m.get("title") == "finding-no-catalog":
-            assert "doc_id" not in m, (
-                "doc_id must be dropped (normalize Step 4c) when no catalog "
-                "entry exists; saw doc_id=%r" % m.get("doc_id")
-            )
+    # RDR-236 Phase 4 Step 1: the row has no title to find it by; read it by its content hash.
+    import hashlib
+
+    chash = hashlib.sha256(_finding_content.encode()).hexdigest()
+    ours = stored_col.get(ids=[chash], include=["metadatas"], sensitivity="include")["metadatas"]
+    assert ours, "non-vacuity: the stored chunk was found"
+    for m in ours:
+        assert "doc_id" not in m, (
+            "doc_id must be dropped (normalize Step 4c) when no catalog "
+            "entry exists; saw doc_id=%r" % m.get("doc_id")
+        )
 
 
 def test_enrich_preserves_doc_id_round_trip(
@@ -283,7 +293,7 @@ def test_enrich_preserves_doc_id_round_trip(
     with patch("nexus.db.make_t3", return_value=local_t3), \
          held({"chunk-1": "Round-Trip Test Title"}), \
          patch("nexus.commands.enrich._resolve_bib_for_title", side_effect=fake_resolve), \
-         patch("nexus.commands.enrich._catalog_enrich_hook"):
+         patch("nexus.commands.enrich._catalog_enrich_hook", return_value=True) as hook:
         runner = CliRunner()
         result = runner.invoke(enrich, [
             "bib", coll_name,
@@ -293,13 +303,15 @@ def test_enrich_preserves_doc_id_round_trip(
 
     assert result.exit_code == 0, f"enrich bib failed: {result.output}"
 
-    # Re-read the chunk and verify doc_id survived the col.update merge.
+    # RDR-236 Phase 4 Step 1: the bibliography is the document's own fact, written to its catalog entry
+    # (the hook); enrich writes no chunk row, so the row keeps its doc_id and gains no bib key.
+    assert hook.call_args.kwargs["bib_meta"]["year"] == 2024, (
+        f"enrich should have handed the catalog bib_year=2024; got {hook.call_args!r}"
+    )
     after = col.get(ids=["chunk-1"], include=["metadatas"], sensitivity="include")
     assert after["ids"] == ["chunk-1"]
     after_meta = after["metadatas"][0]
-    assert after_meta.get("bib_year") == 2024, (
-        f"enrich should have written bib_year=2024; got {after_meta.get('bib_year')!r}"
-    )
+    assert "bib_year" not in after_meta, f"enrich must not write a chunk row; got {after_meta!r}"
     assert after_meta.get("doc_id") == "1.42.7", (
         f"doc_id must round-trip through enrich; got {after_meta.get('doc_id')!r}"
     )

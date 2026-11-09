@@ -382,7 +382,7 @@ def test_the_markdown_section_count_reads_the_position_dicts(tmp_path, monkeypat
             patch("nexus.catalog.factory.make_catalog_writer", return_value=rec), \
             patch("nexus.doc_indexer._catalog_markdown_hook"), patch("nexus.doc_indexer._check_document_fork", return_value=[]):
         got = di.index_markdown(
-            f, "pin65", _T3(), collection_name="docs__pin65__voyage-context-3__v1",
+            f, "pin65", _T3(), collection_name="docs__pin65__model-ctx__v1",
             embed_fn=lambda texts, model: ([[] for _ in texts], model), force=True, return_metadata=True,
             hooks=HookRegistry(),
         )
@@ -417,7 +417,7 @@ def test_the_batch_manifest_hook_sends_no_labels_for_stored_rows_without_positio
     rec = _install(monkeypatch)
     metas = [{"chunk_text_hash": c * 64, "embedding_model": "m"} for c in "ab"]
     mi.manifest_write_batch_hook(
-        [m["chunk_text_hash"] for m in metas], "docs__pin65__voyage-context-3__v1", ["x", "y"], None, metas,
+        [m["chunk_text_hash"] for m in metas], "docs__pin65__model-ctx__v1", ["x", "y"], None, metas,
         catalog_doc_id=_DOC)  # positions=None: a caller whose rows are stored rows
     sent = list(rec.rows)
     assert len(sent) == 2, "non-vacuity: the hook wrote the document's rows"

@@ -659,12 +659,15 @@ def test_the_exported_vector_replaces_a_stored_one_including_a_chash_another_doc
     assert (kept.get("title"), kept.get("tags"), kept.get("line_start")) == ("x-title", "xtag", 5), kept
     assert "ttl_days" not in kept, kept
     # A row nobody else owns gets no document key either (the catalog entry the import registers holds
-    # them) but keeps its own position key.
+    # them). RDR-236 Phase 4 Step 1: nor a position key: its span (line_start) is the document's, on
+    # document Y's manifest row for it.
     rows = client.get_collection(dst).get(ids=[lone, fresh], include=["metadatas"], sensitivity="include")["metadatas"]
     assert len(rows) == 2, "the unshared rows were not examined"
     for m in rows:
-        assert not {"title", "tags", "ttl_days"} & set(m), m
-        assert m.get("line_start") == 99, m
+        assert not {"title", "tags", "ttl_days", "line_start"} & set(m), m
+    doc_y = reader.by_source_uri(uri_y)
+    spans = {r.chash: r.line_start for r in reader.get_manifest(str(doc_y.tumbler))}
+    assert spans[lone] == 99 and spans[fresh] == 99, spans
 
 
 def test_the_cli_says_how_many_stored_vectors_the_file_replaced(t2_service_env, tmp_path):
