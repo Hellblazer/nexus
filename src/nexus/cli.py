@@ -69,6 +69,7 @@ from nexus.commands.t3 import t3 as t3_group
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.commands.tenant_cmd import tenant
 from nexus.commands.tuple_cmd import tuple_group
+from nexus.commands.ci_cmd import ci_group
 from nexus.commands.tier_status import tier_status_cmd
 from nexus.commands.agents_cmd import agents_group
 from nexus.commands.answer_runs import answer_runs_cmd
@@ -307,6 +308,7 @@ def _reraise_config_error(exc: BaseException) -> None:
 
 main.add_command(ask_group, name="ask")
 main.add_command(catalog)
+main.add_command(ci_group, name="ci")
 main.add_command(collection)
 main.add_command(command_context, name="command-context")
 main.add_command(console)

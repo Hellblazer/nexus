@@ -2964,6 +2964,28 @@ ever — not unlimited.
 
 ---
 
+## nx ci
+
+CI results read from the CI board, without polling GitHub.
+
+### nx ci wait
+
+```
+nx ci wait <sha> [--timeout MIN] [--repo nexus] [--branch develop] [--gh-repo OWNER/NAME]
+```
+
+Waits until the CI runs for `<sha>` (a full sha, or a prefix of at least 7 hex digits) have all completed, then prints one line: the sha, the outcome, each run's workflow and conclusion, and the run URL. It parks on `board/ci/<repo>-<branch>--done` (the CI board's wake topic; tuple reads under the engine's 25 s park cap). A row already on the topic counts; when a rerun gave the sha more than one row, the newest is used. Run it as a background command after a push: its exit is the wake, which is how a session launched without the Claude Code channel learns its CI result (`scripts/git-push-develop.sh` prints the command after `PUSH_OK`, on stderr, beside the `tuple_subscribe` call for a session with the channel).
+
+The outcome reduces GitHub's own run conclusions with no policy of ours: failure if any run is `failure`, `timed_out`, `startup_failure` or `action_required`; else cancelled if any is `cancelled` or `stale`; else success (`success`, `neutral` and `skipped` count as success). Required checks and flake judgment stay with the reader. A row written before the board carried conclusions (its runs are `[run_id, attempt]` pairs) gets them from one `gh api` read per run, after the row arrives.
+
+| Exit | Meaning |
+|---|---|
+| 0 | every run succeeded |
+| 1 | a run failed |
+| 2 | no row for the sha before `--timeout` (default 60 minutes) |
+| 3 | runs were cancelled or stale and none failed |
+| 4 | a conclusion could not be read, or is one this table does not know |
+
 ## nx collection
 
 Manage T3 collections (local or cloud).

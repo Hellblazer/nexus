@@ -799,6 +799,13 @@ fi
 git push -q "$remote" "$tip:refs/heads/$branch"
 echo "PUSH_OK n=${#range[@]} tip=$tip"
 
+# nexus-1d6pz.11.4: the two ways to be woken when this push's CI completes, on
+# stderr (stdout keeps its PUSH_OK contract). A session with the channel subscribes
+# to the --done topic; one without runs nx ci wait as a background command, whose
+# exit is the wake and whose one line is the result.
+echo "PUSH_WAIT channel: tuple_subscribe(\"board/ci/nexus-${branch}--done\")" >&2
+echo "PUSH_WAIT no channel: run as a background command: nx ci wait $tip --branch $branch" >&2
+
 # nexus-cvtxu: the batching hint (see NX_PUSH_BATCH_MINUTES above). The stamp lives
 # in this worktree's own git dir, and a session works in one worktree, so the gap
 # is this session's. Best effort: nothing here can fail the push that just landed.
