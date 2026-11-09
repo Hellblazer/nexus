@@ -1542,6 +1542,14 @@
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
+          "from_created_at": {
+            "default": "",
+            "type": "string"
+          },
+          "from_id": {
+            "default": "",
+            "type": "string"
+          },
           "keys_pattern": {
             "anyOf": [
               {
@@ -1569,6 +1577,14 @@
             "type": "string"
           },
           "subspace": {
+            "type": "string"
+          },
+          "through_created_at": {
+            "default": "",
+            "type": "string"
+          },
+          "through_id": {
+            "default": "",
             "type": "string"
           },
           "timeout_s": {
