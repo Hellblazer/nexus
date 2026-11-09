@@ -43,25 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v7.98.0)
+## Awaiting the next release (pinned: v7.99.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `conexus/hooks/scripts/routing/destructive_action_advice.py`
-  nexus-qo7ie.36: new table-driven PreToolUse hook, ADVISE mode only (never denies): eight destructive-action shapes (pattern kills, bulk or output-hiding branch deletes, stash with more than one worktree, background job piped to tail/head/grep, whole-disk scans, glob deletes under a shared temp root, hand-run hook verbs, editing a script a live shell runs), each row naming its rule and the safe alternative.
-- `conexus/hooks/hooks.json`
-  nexus-qo7ie.36: registers `destructive_action_advice.py` on `Bash|Edit|Write|MultiEdit` (PreToolUse, 5 s).
-- `conexus/hooks/scripts/routing/registry.yaml`
-  nexus-qo7ie.36: the `destructive_action_advice` rule entry.
-- `conexus/hooks/scripts/routing/README.md`
-  nexus-qo7ie.36: the cap table counts the third Bash hook and states that new destructive-action shapes get a table row, not a hook.
-- `conexus/skills/orchestration/SKILL.md`
-  nexus-qo7ie.36: the shared-host clauses every developer, test or debugger brief carries (delete scope, no pattern kills, hook verbs only in pytest or a scratch HOME, exact scan roots), a "Destroys" item in the implementer checklist, a deleting-consumer addition to Consumers, a disturbed-run rule under the VERIFY convention, and a Destroys suspect for first-pass reviewers.
-- `conexus/skills/peer-messaging/SKILL.md`
-  nexus-qo7ie.36: "Sharing One Machine" names what an action destroys before it touches shared state.
-- `conexus/skills/nexus/SKILL.md`
-  nexus-qo7ie.36: run long nx commands with full output to a log and filter when reading.
-- `conexus/skills/mailbox/SKILL.md`
-  nexus-qo7ie.36: read the session marker's contents before assuming a `/clear` stopped the watcher.
 
 ## Deferred to the next client release
