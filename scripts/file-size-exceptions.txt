@@ -112,7 +112,7 @@ src/nexus/mcp_infra.py 4869
 src/nexus/operators/dispatch.py 2048
 src/nexus/pdf_extractor.py 3993
 src/nexus/pdf_stack.py 1651
-src/nexus/pipeline_stages.py 3262
+src/nexus/pipeline_stages.py 2868
 src/nexus/plans/coverage_ledger.py 2132
 src/nexus/plans/primary_evidence.py 1980
 src/nexus/plans/request_coverage.py 1699
@@ -158,7 +158,7 @@ tests/hooks/test_rdr_verb.py 1157
 tests/hooks/test_stop_wake_guard.py 1298
 tests/hooks/test_version_lockstep_action.py 1893
 tests/hooks/test_version_lockstep_hook.py 1391
-tests/integration/test_rdr223_pdf_journey.py 1727
+tests/integration/test_rdr223_pdf_journey.py 1608
 tests/lua_runtime/test_verbs_transcripts.py 2762
 tests/lua_runtime/test_worker_process.py 1133
 tests/mcp/test_setup_tools.py 1588
@@ -236,7 +236,7 @@ tests/test_operator_dispatch.py 6017
 tests/test_operator_model_tiers.py 1359
 tests/test_pg_bundle_windows.py 1442
 tests/test_pipefail_early_exit_consumer_lint.py 1382
-tests/test_pipeline_stages.py 2316
+tests/test_pipeline_stages.py 1950
 tests/test_plan_answer_kind.py 1109
 tests/test_plan_bundle.py 1265
 tests/test_plan_match.py 1373
