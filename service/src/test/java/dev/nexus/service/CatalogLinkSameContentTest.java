@@ -227,6 +227,29 @@ class CatalogLinkSameContentTest extends CatalogReconcileTestBase {
         assertThat(linkCreatedAt(t, "1.13.2", "1.13.1").toInstant()).as("the merge path never touches created_at").isEqualTo(old.toInstant());
     }
 
+    /**
+     * nexus-u5m5g.5: a member that is an alias of a canonical that is tombstoned (or gone) names no live document, so the
+     * linker writes nothing for it; the 048-4 link write wrote the link to the alias row, outside the lock pass (which
+     * skips such a member). A live member of the same group still links, so the run is not a no-op.
+     */
+    @Test
+    void aMemberThatIsAnAliasOfADeadCanonical_isNotLinked_aLiveMemberIs() {
+        String t = newTenant();
+        pdf(t, "1.14.1", "K");   // the anchor
+        pdf(t, "1.14.2", "K");   // a live member
+        pdf(t, "1.14.3", "K");   // a member that is an alias of 1.14.9, tombstoned
+        pdf(t, "1.14.4", "K");   // a member that is an alias of a row that does not exist
+        pdf(t, "1.14.9", "Z");
+        setDoc(t, "1.14.3", CATALOG_DOCUMENTS.ALIAS_OF, "1.14.9");
+        setDoc(t, "1.14.4", CATALOG_DOCUMENTS.ALIAS_OF, "1.14.777");
+        tombstone(t, "1.14.9", false);
+
+        Map<String, Object> res = run(t, false, "1.14.1");
+
+        assertThat(res.get("created")).as("only the live member").isEqualTo(1);
+        assertThat(links(t)).containsExactly(dedup("1.14.2", "1.14.1"));
+    }
+
     // ── the lock pass ───────────────────────────────────────────────────
 
     @Test

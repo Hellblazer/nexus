@@ -119,9 +119,10 @@ public final class CatalogHandler implements HttpHandler {
     /**
      * Upper bound on doc_ids accepted by the batch endpoints
      * ({@code /manifest/get_many}, {@code /resolve_many}). Well under
-     * PostgreSQL's 32767-parameter Bind-message hard limit. nexus-7lm3q review.
+     * PostgreSQL's 32767-parameter Bind-message hard limit. nexus-7lm3q review. Package-private: {@code CatalogLinksHandler}
+     * (the batch link routes) takes the same bound from here.
      */
-    private static final int MAX_BATCH_DOC_IDS = 1000;
+    static final int MAX_BATCH_DOC_IDS = 1000;
 
     private final CatalogRepository repo;
     private final dev.nexus.service.db.CombinedWriteService combinedWriteService;
@@ -3138,8 +3139,9 @@ public final class CatalogHandler implements HttpHandler {
      * or register it, in one request.
      *
      * <p>Body: {@code {owner_name | curator, source_uri | file_path, title, year?, title_fallback?, source_mtime?,
-     * content_type?, physical_collection?}}. Response: {@code {tumbler, created}}, or {@code {tumbler,
-     * foreign_owner: true}} for a source_uri another owner holds (not adopted, not written). The rules are on
+     * content_type?, physical_collection?, sensitive?}}. {@code sensitive} is a boolean (a non-boolean is a 400): a new
+     * row is born flagged and audited, a row that is found keeps its sensitivity. Response: {@code {tumbler, created}},
+     * or {@code {tumbler, foreign_owner: true}} for a source_uri another owner holds (not adopted, not written). The rules are on
      * {@link CatalogRepository#resolveOrRegister}.
      */
     private void handleResolveOrRegister(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -3263,7 +3265,8 @@ public final class CatalogHandler implements HttpHandler {
             return new EngineJobs.Outcome(200, repo.reconcileCommit(tenant, owner, runId, reconcileStatementTimeout));
         } catch (CatalogRepository.ReconcileCommitException e) {
             // A transient database error (deadlock, serialization failure, lock not available) is retryable, so it is
-            // a 503 like the registry's own busy answer, not the 422 of a commit that will fail the same way again.
+            // a 503 like the registry's own busy answer, not the 422 of a commit that will fail the same way again; the poll
+            // carries it as http_status.
             int status = TRANSIENT_DB_ERROR.equals(e.code()) ? 503 : 422;
             return reconcileFailure(status, e.code(), e.getMessage());
         } catch (org.jooq.exception.DataAccessException e) {
@@ -3294,8 +3297,12 @@ public final class CatalogHandler implements HttpHandler {
     }
 
     /**
-     * GET /v1/catalog/reconcile/{job_id} — {@code {status: running}}, or {@code {status: succeeded, outcome}}, or
-     * {@code {status: failed, error, reason}}. 404 for an id the engine does not hold (never started, expired, lost
+     * GET /v1/catalog/reconcile/{job_id} — {@code {status: running}}, or {@code {status: succeeded, outcome,
+     * http_status}}, or {@code {status: failed, error, reason, http_status}}. The poll itself answers 200 whatever the
+     * job's end; {@code http_status} is the status the commit ended with, the chunk-keys poll's field of the same name:
+     * 503 with reason {@code transient_db_error} for a deadlock, serialization failure or lock wait that ran out (nothing
+     * was written, the run is still staged, the caller may submit the commit again), 422 for a failure the commit names,
+     * 500 for a stopped or timed-out job. 404 for an id the engine does not hold (never started, expired, lost
      * with a restart) and for another tenant's id alike: the poll looks the id up for the caller's tenant only.
      */
     private void handleReconcilePoll(HttpExchange exchange, String tenant, String method, String jobId)
@@ -3319,12 +3326,14 @@ public final class CatalogHandler implements HttpHandler {
             case DONE -> {
                 out.put("status", "succeeded");
                 out.put("outcome", job.outcome().body());
+                out.put("http_status", job.outcome().httpStatus());
             }
             case FAILED -> {
                 Map<String, Object> failure = job.outcome().body();
                 out.put("status", "failed");
                 out.put("error", failure.get("error"));
                 out.put("reason", failure.get("reason"));
+                out.put("http_status", job.outcome().httpStatus());
             }
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));

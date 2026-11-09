@@ -198,7 +198,9 @@ migration_wal_bytes_per_worker = 11038000
 # Counted from the changesets' statements (6) and measured: chas lab-m via lab-remote, 2026-11-09, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-u5m5g.4 tree (stacked on 43fd276d9), ddl: migration=2394.
 # 2394 -> 2396 (2026-11-09, nexus-u5m5g.4 review r1 fix round): catalog-048-5 also adds nexus.catalog_link_lock_endpoints, the lock pass the batch upsert and the same-content linker share: 1 CREATE FUNCTION and its GRANT EXECUTE to nexus_svc, no table.
 # Counted from the changeset's statements (2) and measured: chas lab-m via lab-remote, 2026-11-09, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-u5m5g.4 tree (r1 fix round, gate jar rebuilt), ddl: migration=2396.
-migration_ddl_per_worker = 2396
+# 2396 -> 2397 (2026-11-09, nexus-u5m5g.5, RDR-193 Phase 1 gate seam fix): catalog-048-7 is a CREATE OR REPLACE of nexus.catalog_link_write (an alias of a dead canonical answers dangling): 1 CREATE FUNCTION statement, no new grant (the 048-4 grant stands), no table.
+# Counted from the changeset's statements (1) and measured: chas lab-m via lab-remote, 2026-11-09, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-u5m5g.5 tree (gate jar rebuilt), ddl: migration=2397.
+migration_ddl_per_worker = 2397
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

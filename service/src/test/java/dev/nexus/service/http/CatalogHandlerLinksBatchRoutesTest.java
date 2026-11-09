@@ -51,9 +51,6 @@ class CatalogHandlerLinksBatchRoutesTest {
     CatalogRepository repo;
     CatalogHandler handler;
     com.zaxxer.hikari.HikariDataSource svcDs;
-    /** A second pool whose sessions give up on a lock after half a second, and the handler over it. */
-    com.zaxxer.hikari.HikariDataSource shortLockDs;
-    CatalogHandler shortLockHandler;
     int tenantSeq = 0;
 
     @BeforeAll
@@ -75,21 +72,10 @@ class CatalogHandlerLinksBatchRoutesTest {
         tenantScope = new TenantScope(svcDs);
         repo = new CatalogRepository(tenantScope);
         handler = new CatalogHandler(repo);
-
-        var shortCfg = new com.zaxxer.hikari.HikariConfig();
-        shortCfg.setJdbcUrl(pg.getJdbcUrl());
-        shortCfg.setUsername(SVC_ROLE);
-        shortCfg.setPassword(SVC_PASS);
-        shortCfg.setMaximumPoolSize(2);
-        shortCfg.setAutoCommit(true);
-        shortCfg.addDataSourceProperty("options", "-c lock_timeout=500");
-        shortLockDs = new com.zaxxer.hikari.HikariDataSource(shortCfg);
-        shortLockHandler = new CatalogHandler(new CatalogRepository(new TenantScope(shortLockDs)));
     }
 
     @AfterAll
     void stopAll() {
-        if (shortLockDs != null) shortLockDs.close();
         if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
     }
@@ -217,15 +203,37 @@ class CatalogHandlerLinksBatchRoutesTest {
             .forUpdate().fetch();
     }
 
+    /**
+     * POSTs {@code path} while {@code su} holds a row, on a worker thread with a deadline: a link call with no
+     * {@code lock_timeout} would wait for the holder for ever, and the holder is released only after this returns, so the
+     * deadline turns that hang into a failure (and rolls the holder back, so the worker ends). The pool sets no
+     * lock_timeout of its own: the bound is the repository's.
+     */
+    private Resp callWhileHeld(Connection su, String t, String path, String body) throws Exception {
+        var worker = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            var fut = worker.submit(() -> call(t, "POST", path, body));
+            try {
+                return fut.get(60, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (java.util.concurrent.TimeoutException e) {
+                su.rollback();
+                fut.cancel(true);
+                throw new AssertionError("the link call is still waiting on the held row after 60 s: no lock_timeout bounds it", e);
+            }
+        } finally {
+            worker.shutdownNow();
+        }
+    }
+
     @Test
     void upsertMany_aLockWaitThatRunsOut_is503TransientDbError_nothingIsWritten_andTheRetryWrites() throws Exception {
         String t = tenantWithDocs();
         String body = MAPPER.writeValueAsString(Map.of("edges", List.of(edge("1.1.1", "1.1.2", "cites"))));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
-            holdRow(su, t, "1.1.2");   // a merge holds the target; the batch's FOR KEY SHARE waits 500 ms and gives up (55P03)
+            holdRow(su, t, "1.1.2");   // a merge holds the target; the batch's FOR KEY SHARE waits the production lock_timeout and gives up (55P03)
 
-            Resp r = callOn(shortLockHandler, t, "POST", "/v1/catalog/links/upsert_many", body);
+            Resp r = callWhileHeld(su, t, "/v1/catalog/links/upsert_many", body);
 
             assertThat(r.status).as(r.body).isEqualTo(503);
             assertThat(r.json().get("reason").asText()).isEqualTo("transient_db_error");
@@ -234,7 +242,7 @@ class CatalogHandlerLinksBatchRoutesTest {
         }
         assertThat(linkCount(t)).as("the failed call wrote nothing").isZero();
 
-        Resp retry = callOn(shortLockHandler, t, "POST", "/v1/catalog/links/upsert_many", body);
+        Resp retry = call(t, "POST", "/v1/catalog/links/upsert_many", body);
         assertThat(retry.status).as(retry.body).isEqualTo(200);
         assertThat(retry.json().get("created").asInt()).isEqualTo(1);
     }
@@ -251,7 +259,7 @@ class CatalogHandlerLinksBatchRoutesTest {
             su.setAutoCommit(false);
             holdRow(su, t, "1.1.3");
 
-            Resp r = callOn(shortLockHandler, t, "POST", "/v1/catalog/links/same_content", body);
+            Resp r = callWhileHeld(su, t, "/v1/catalog/links/same_content", body);
 
             assertThat(r.status).as(r.body).isEqualTo(503);
             assertThat(r.json().get("reason").asText()).isEqualTo("transient_db_error");
@@ -259,7 +267,7 @@ class CatalogHandlerLinksBatchRoutesTest {
         }
         assertThat(linkCount(t)).as("the failed call wrote nothing").isZero();
 
-        Resp retry = callOn(shortLockHandler, t, "POST", "/v1/catalog/links/same_content", body);
+        Resp retry = call(t, "POST", "/v1/catalog/links/same_content", body);
         assertThat(retry.status).as(retry.body).isEqualTo(200);
         assertThat(retry.json().toString()).isEqualTo("{\"created\":1,\"retracted\":0}");
     }

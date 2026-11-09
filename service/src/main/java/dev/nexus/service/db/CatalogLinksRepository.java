@@ -31,13 +31,23 @@ public final class CatalogLinksRepository {
     /** SQLSTATE the functions raise for a malformed request ({@code invalid_parameter_value}). */
     private static final String INVALID_PARAMETER = "22023";
 
+    /**
+     * The longest a link call waits for a row lock another transaction holds (a merge, a reconcile commit), in
+     * milliseconds, set transaction-locally on both link calls. Without it the wait is unbounded: the pool connection and
+     * the caller are held until the holder ends. Ending it as SQLSTATE 55P03 gives the caller the retryable 503
+     * {@code transient_db_error}. 5 s is the bound the engine's other short writers use for a held row (the taxonomy
+     * assign transaction, the PCI size pass, the chunk constraint run); the first wait that runs out ends the call, so a call is held about this long at most
+     * by a lock, within the edge's 30 s time-to-first-byte budget.
+     */
+    static final int LINK_LOCK_TIMEOUT_MS = 5_000;
+
     /** SQLSTATEs of a deadlock, a serialization failure (the lock pass's 'unstable') and a lock wait that ran out. */
     private static final java.util.Set<String> TRANSIENT_STATES = java.util.Set.of("40P01", "40001", "55P03");
 
     /**
      * A link call ended on a transient database error (deadlock, serialization failure, lock not available): nothing was
-     * written and the same call is safe to submit again. The route answers it 503 {@code transient_db_error}, as the
-     * reconcile commit's poll does, never the 500 of an unknown failure.
+     * written and the same call is safe to submit again. The route answers it 503 {@code transient_db_error}, never the 500
+     * of an unknown failure; a failed reconcile commit reports the same reason, with {@code http_status} 503, in its poll.
      */
     public static final class TransientDbException extends RuntimeException {
         private final String sqlState;
@@ -98,6 +108,7 @@ public final class CatalogLinksRepository {
             throw new IllegalArgumentException("'edges' is not JSON: " + e.getMessage(), e);
         }
         return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setLocal(ctx, "lock_timeout", Integer.toString(LINK_LOCK_TIMEOUT_MS));
             var up = CATALOG_LINKS_UPSERT_MANY.call(JSONB.valueOf(json));
             Record r;
             try {
@@ -142,6 +153,7 @@ public final class CatalogLinksRepository {
         }
         String[] arr = tumblers.toArray(new String[0]);
         return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setLocal(ctx, "lock_timeout", Integer.toString(LINK_LOCK_TIMEOUT_MS));
             JSONB out;
             try {
                 out = dev.nexus.service.jooq.nexus.Routines.catalogLinkSameContent(ctx.configuration(), arr, prune);

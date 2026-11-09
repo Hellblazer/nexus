@@ -28,16 +28,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code catalog_reconcile_reap(interval)}, and (catalog-048-4, fix round r1) the one link write
  * {@code catalog_link_write(...)} the commit's rename move calls. A walk: migrate to just before the changeset,
  * assert the objects are absent, apply, check columns, keys, forced row-level security, the tenant policy, the
- * function signatures and the grants, roll the six changesets back, reapply. catalog-048-5 and -6 (nexus-u5m5g.4,
+ * function signatures and the grants, roll the seven changesets back, reapply. catalog-048-5 and -6 (nexus-u5m5g.4,
  * RDR-193 Step 3) add {@code catalog_link_endpoint}, {@code catalog_link_lock_endpoints}, {@code catalog_links_upsert_many} and
- * {@code catalog_link_same_content}.
+ * {@code catalog_link_same_content}; catalog-048-7 (nexus-u5m5g.5) replaces {@code catalog_link_write}, and its rollback
+ * restores the catalog-048-4 body (the function stays, with its grant).
  */
 class Catalog048ReconcileSchemaLiquibaseTest {
 
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     /** The last changeset of the changelog before catalog-048 (the tail it is placed after). */
     private static final String PRIOR_CHANGESET_ID = "vectors-056-2";
-    private static final String LAST_TARGET_CHANGESET_ID = "catalog-048-6";
+    private static final String LAST_TARGET_CHANGESET_ID = "catalog-048-7";
 
     @Test
     void addsTheTablesAndFunctions_rollsBackAndReapplies() throws Exception {
@@ -127,6 +128,22 @@ class Catalog048ReconcileSchemaLiquibaseTest {
                     .containsExactly("v", false, "plpgsql", "jsonb");
                 assertThat(execGranted(ctx, "nexus.catalog_link_same_content(text[], boolean)"))
                     .as("nexus_svc may execute the same-content linker").isTrue();
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                Database database = DatabaseFactory.getInstance()
+                    .findCorrectDatabaseImplementation(new JdbcConnection(su));
+                try (Liquibase liquibase = new Liquibase(
+                        MASTER_CHANGELOG, new ClassLoaderResourceAccessor(), database)) {
+                    liquibase.rollback(1, new Contexts(), new LabelExpression());
+                }
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_write"))
+                    .as("rolling back catalog-048-7 restores the 048-4 function, it does not drop it")
+                    .containsExactly("catalog_link_write");
+                assertThat(execGranted(ctx, "nexus.catalog_link_write(text, text, text, text, text, text, boolean)"))
+                    .as("and the grant stands").isTrue();
             }
             try (Connection su = dedicated.createConnection("")) {
                 Database database = DatabaseFactory.getInstance()
