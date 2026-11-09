@@ -104,6 +104,8 @@ The `nx_answer` MCP tool handles full catalog-aware plan execution.
 nx index repo <path>                 # index repo (classifies into code + docs collections)
 ```
 
+Run a long `nx` command with its full output going to a log file (`nx ... > run.log 2>&1`) and filter when you read the log, never at launch: `| tail`, `| grep` or `-q` on the command suppresses the progress and error lines the command is there to show, and makes a silent walk look hung, so a duplicate gets stacked on it (feedback_destructive_action_guards).
+
 ## Collection Naming
 
 RDR-103 conformant shape: `<content_type>__<owner>__<embedding_model>__v<n>`. Examples: `code__nexus-1-1__voyage-code-3__v1`, `docs__nexus-1-1__voyage-context-3__v1`, `knowledge__art-1-1__voyage-context-3__v1`. The short legacy form (`knowledge__topic`) is accepted at the `--collection` boundary and auto-promoted by `t3_collection_name`. Pre-existing legacy 2-segment collections remain readable. Always `__` as the segment separator (the RDR-103 name grammar refuses colons).

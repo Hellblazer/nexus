@@ -94,7 +94,7 @@ class DriftFinding:
 #: a fresh resolution would put on that cap, and on the transitive stack under
 #: it. ``mcp`` (nexus-sgmyl): 2.x marks ``Server.middleware`` provisional and
 #: the servers reach ``_lowlevel_server``, so a minor can change what they use.
-SHAPE_SENSITIVE: frozenset[str] = frozenset({"mineru", "mcp"})
+SHAPE_SENSITIVE: frozenset[str] = frozenset({"mineru", "mcp", "lupa"})
 
 #: Shape-sensitive versions already gated and REFUSED, keyed (name, version)
 #: -> the record. A fresh resolution landing on one of these is known

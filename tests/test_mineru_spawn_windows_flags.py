@@ -132,7 +132,7 @@ def test_the_server_outlives_the_desktop_extensions_job(tmp_path: Path, mode: st
         [sys.executable, "-c", _PARENT, str(repo / "mcpb" / "src" / "bootstrap.py"), str(pid_file), mode],
         check=True, timeout=60,
     )
-    pid = int(pid_file.read_text())
+    pid = int(pid_file.read_text(encoding="utf-8"))
     try:
         time.sleep(2)  # the job closes when the parent's last handle does
         assert pid_alive(pid) is survives

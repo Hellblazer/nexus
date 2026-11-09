@@ -8,10 +8,12 @@ scope and ``_file_line_no`` missed or over-matched for such a directory.
 """
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
 
+import nexus.search_engine as se
 from nexus.aspect_readers import uri_for
 from nexus.search_engine import _local_source_path
 
@@ -25,6 +27,7 @@ PATHS = [
 ]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="PATHS are POSIX absolute paths; uri_for mints none for them on Windows")
 @pytest.mark.parametrize("path", PATHS)
 def test_the_minted_uri_round_trips_to_its_path(path: str) -> None:
     uri = uri_for("code__test", path)
@@ -35,3 +38,44 @@ def test_the_minted_uri_round_trips_to_its_path(path: str) -> None:
 @pytest.mark.parametrize("uri", ["", "nx-note://n", "https://example.org/a.py", "file://relative/a.py", "file://"])
 def test_a_source_that_is_not_an_absolute_file_uri_is_no_local_path(uri: str) -> None:
     assert _local_source_path(SimpleNamespace(source_uri=uri)) == ""
+
+
+# nexus-rfvyy.9 item 3: on Windows every registration mints ``"file://" + "C:\\..."`` (two slashes, then the drive),
+# which the ``file:///`` check refused, so those documents had no local path for a PATH scope or a line lookup.
+# (uri, off Windows, on Windows). Off Windows every reading is the pre-rfvyy.9 one: ``file:///C:/...`` is a POSIX path
+# under a directory named ``C:``, and ``file://C:...`` is no absolute path. On Windows the drive letter is upper case,
+# as Path.resolve() spells it.
+WINDOWS = [
+    ("file://C:\\Users\\a\\x.md", "", "C:\\Users\\a\\x.md"),
+    ("file:///C:/Users/a/x.md", "/C:/Users/a/x.md", "C:\\Users\\a\\x.md"),
+    ("file://C:/Users/a/my#dir/x.md", "", "C:\\Users\\a\\my#dir\\x.md"),
+    ("file://" + "C:\\Users\\a\\what?\\x.py", "", "C:\\Users\\a\\what?\\x.py"),
+    ("file://d:\\100%25\\x.md", "", "D:\\100%25\\x.md"),
+]
+
+
+@pytest.mark.parametrize(("uri", "posix", "nt"), WINDOWS)
+def test_a_windows_drive_uri_is_a_local_path(uri: str, posix: str, nt: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    entry = SimpleNamespace(source_uri=uri)
+    monkeypatch.setattr(se, "os", SimpleNamespace(name="posix"))
+    assert _local_source_path(entry) == posix, "the pre-rfvyy.9 reading off Windows"
+    monkeypatch.setattr(se, "os", SimpleNamespace(name="nt"))
+    assert _local_source_path(entry) == nt, "native separators on Windows, so a PATH scope and open() match"
+
+
+@pytest.mark.parametrize("name", ["posix", "nt"])
+@pytest.mark.parametrize("uri", ["file://\\\\server\\share\\x.md", "file://C:", "file://CC:/x"])
+def test_a_unc_or_malformed_drive_uri_is_no_local_path(uri: str, name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(se, "os", SimpleNamespace(name=name))
+    assert _local_source_path(SimpleNamespace(source_uri=uri)) == ""
+
+
+@pytest.mark.parametrize(("uri", "path"), [("file:////srv/x.md", "//srv/x.md"), ("file:///c:/x.md", "/c:/x.md")])
+def test_posix_spellings_read_as_before(uri: str, path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(se, "os", SimpleNamespace(name="posix"))
+    assert _local_source_path(SimpleNamespace(source_uri=uri)) == path, "the pre-rfvyy.9 reading, unchanged off Windows"
+
+
+def test_a_unc_uri_is_no_local_path_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(se, "os", SimpleNamespace(name="nt"))
+    assert _local_source_path(SimpleNamespace(source_uri="file:////srv/share/x.md")) == ""

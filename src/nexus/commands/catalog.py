@@ -12,7 +12,7 @@ import httpx
 
 import structlog
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from nexus.aspect_readers import NOTE_URI_SCHEME
 from nexus.catalog.tombstones import (
@@ -304,6 +304,7 @@ def catalog() -> None:
 # acyclic. Keep import order and register order aligned as families accumulate.
 from nexus.commands.catalog_cmds import owners as _owners_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import backfill as _backfill_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import note_uri_repair as _note_uri_repair_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import links as _links_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import collections as _collections_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import migration as _migration_cmds  # noqa: E402 — must follow the `catalog` group definition above
@@ -325,6 +326,7 @@ from nexus.commands.catalog_cmds import sensitivity as _sensitivity_cmds  # noqa
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
+_note_uri_repair_cmds.register(catalog)
 _links_cmds.register(catalog)
 _collections_cmds.register(catalog)
 _migration_cmds.register(catalog)
@@ -1092,9 +1094,15 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     entry = cat.resolve(t)
     if entry is None:
         raise click.ClickException(f"Not found: {tumbler_or_title}")
+    from nexus.sensitive_output import CliDocumentLines, entries_flagged  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    # nexus-rfvyy.9 item 2: a flagged document's title is content (the stub under Claude Code, a badge in a terminal).
+    lines = CliDocumentLines()
+    flagged = str(entry.tumbler) in entries_flagged([entry], cat=cat)
+    quoted = f"'{entry.title}' ({t})"
     if not yes:
         click.confirm(
-            f"Delete '{entry.title}' ({t})? Links will be preserved.",
+            f"Delete {CliDocumentLines().label(t, flagged, quoted)}? Links will be preserved.",
             abort=True,
         )
 
@@ -1103,7 +1111,7 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     deleted = writer.delete_document(t)
     if deleted:
         click.echo(
-            f"Deleted: {t} ({entry.title}). Links preserved. "
+            f"Deleted: {lines.label(t, flagged, f'{t} ({entry.title})')}. Links preserved. "
             "Content stops appearing in search once the engine's tombstone "
             "read-filter is deployed (nexus-3ck2g). Undo with "
             f"'nx catalog restore {t}' until 'nx catalog purge-trash' "
@@ -1113,6 +1121,8 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
             "until the window passes; after that, recovery means "
             "re-indexing."
         )
+        for line in lines.notes():
+            click.echo(line)
     else:
         click.echo(f"Not found: {t}")
 
@@ -1254,12 +1264,24 @@ def reconcile_cmd(dry_run: bool) -> None:
         f"{len(result.lost)} with chunks LOST (real gap), "
         f"{len(result.never_chunked)} never-chunked (expected: nothing to rebuild)."
     )
+    from nexus.sensitive_output import CliDocumentLines, entries_flagged  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    # nexus-rfvyy.9 item 2: a flagged document's path and title are content (the stub under Claude Code).
+    shown_entries = (
+        [p.entry for p in result.reindex[:20]] + list(result.lost[:20]) + list(result.never_chunked[:5])
+    )
+    flagged = entries_flagged(shown_entries, cat=cat) if shown_entries else set()
+    lines = CliDocumentLines()
+
+    def _named(entry: Any) -> str:
+        return lines.label(str(entry.tumbler), str(entry.tumbler) in flagged, entry.file_path or entry.title)
+
     if result.reindex:
         for part in result.reindex[:20]:
             click.echo(
                 f"    REINDEX {part.entry.tumbler}  {part.manifest_rows} of "
                 f"{part.chunk_count} rows ({mark} for re-index)  "
-                f"{part.entry.file_path or part.entry.title}"
+                f"{_named(part.entry)}"
             )
         if len(result.reindex) > 20:
             click.echo(f"    ... and {len(result.reindex) - 20} more to re-index")
@@ -1283,14 +1305,16 @@ def reconcile_cmd(dry_run: bool) -> None:
             else:
                 left = result.lost_unmarked_why.get(str(entry.tumbler))
                 note = f" (not marked: {left})" if left else ""
-            click.echo(f"    LOST {entry.tumbler}{note}  {entry.file_path or entry.title}")
+            click.echo(f"    LOST {entry.tumbler}{note}  {_named(entry)}")
         if len(result.lost) > 20:
             click.echo(f"    ... and {len(result.lost) - 20} more")
     if result.never_chunked:
         for entry in result.never_chunked[:5]:
-            click.echo(f"    (empty) {entry.tumbler}  {entry.file_path or entry.title}")
+            click.echo(f"    (empty) {entry.tumbler}  {_named(entry)}")
         if len(result.never_chunked) > 5:
             click.echo(f"    ... and {len(result.never_chunked) - 5} more never-chunked")
+    for line in lines.notes():
+        click.echo(line)
 
 
 # ── Backfill helpers ──────────────────────────────────────────────────────────

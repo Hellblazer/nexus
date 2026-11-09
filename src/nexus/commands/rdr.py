@@ -2551,10 +2551,6 @@ def _critique_title_to_write(project: str, t2_key: str, round_no: int) -> str:
     return f"{project}/{t2_key}-gate-critique-{today}-r{round_no}"
 
 
-_RESEARCH_CLASSIFICATIONS: Final = ("verified", "documented", "assumed")
-_RESEARCH_METHODS: Final = ("source_search", "spike", "docs_only")
-
-
 def _research_rows_for(rows: list[dict], t2_key: str) -> list[tuple[int, str]]:
     """``(seq, content)`` for every ``<id>-research-N`` row of one RDR, any
     zero-padding of the id."""
@@ -2577,11 +2573,13 @@ def _layer2_census_lines(rows: list[dict], t2_key: str) -> list[str]:
     (nexus-5r0ho item 8)."""
     research = _research_rows_for(rows, t2_key)
     if not research:
+        from nexus.tables.rdr_research_vocab import CLASSIFICATIONS, METHODS  # noqa: PLC0415 - deferred: only this branch needs it
+
         return [
             "**Layer 2 VACUOUS**: no research records exist for this RDR, so the assumption "
             "audit has nothing to examine and cannot pass. Record findings first "
-            f"(`nx rdr preamble rdr-research -- add {t2_key} --classification <verified|documented|assumed> "
-            "--method <source_search|spike|docs_only> <finding>`), or write "
+            f"(`nx rdr preamble rdr-research -- add {t2_key} --classification <{'|'.join(CLASSIFICATIONS)}> "
+            f"--method <{'|'.join(METHODS)}> <finding>`), or write "
             "`research: none (<why>)` in the gate record so the vacuity is a decision on record.",
             "",
         ]
@@ -3275,7 +3273,9 @@ def _rdr_research_next_seq(entries: list[dict], t2_key: str) -> int:
         int(m.group(2))
         for entry in entries
         if (m := _RDR_RESEARCH_TITLE_RE.match(entry.get("title", "") if isinstance(entry, dict) else ""))
-        and m.group(1) == t2_key
+        # Any zero padding of the id is the same RDR, as the gate reads it
+        # (_research_rows_for) and the research_add procedure counts it.
+        and int(m.group(1)) == int(t2_key)
     ]
     return max(seqs) + 1 if seqs else 1
 
@@ -3369,7 +3369,10 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
                 if nxt is None or nxt.startswith("--"):
                     raise click.ClickException(f"rdr-research add: {tok} needs a value.")
                 val = nxt.strip().lower().replace("-", "_")
-                allowed = _RESEARCH_CLASSIFICATIONS if tok == "--classification" else _RESEARCH_METHODS
+                # One table for the CLI and the research_add procedure (RDR-240 TD7).
+                from nexus.tables.rdr_research_vocab import CLASSIFICATIONS, METHODS  # noqa: PLC0415 - deferred: only the add path needs it
+
+                allowed = CLASSIFICATIONS if tok == "--classification" else METHODS
                 if val not in allowed:
                     raise click.ClickException(
                         f"rdr-research add: {tok} must be one of {', '.join(allowed)}; got {nxt!r}."
@@ -3385,6 +3388,10 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
         finding_text = " ".join(rest).strip()
         if not finding_text:
             raise click.ClickException("rdr-research add: the finding text is empty.")
+        if len(finding_text.splitlines()) > 1:
+            # The record is read line by line (splitlines): a token holding a line break
+            # would plant its own fields, such as "acknowledged: true" (nexus-qo7ie.33).
+            raise click.ClickException("rdr-research add: the finding must be one line; it holds a line break.")
         title = _rdr_research_add(t2_key, finding_text, repo_name, classification=classification, method=method)
         print(f"Recorded T2 research finding: `{repo_name}_rdr/{title}`")
         return

@@ -17,6 +17,24 @@ router = APIRouter(tags=["health"])
 from nexus import config as _config
 
 
+def _mineru_card(config_dir: Path) -> dict[str, Any]:
+    """The MinerU card: running by the pid file's server, as ``nx mineru status`` judges it."""
+    mineru_pid_path = config_dir / "mineru.pid"
+    if not mineru_pid_path.exists():
+        return {"running": False}
+    try:
+        info = json.loads(mineru_pid_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"running": False}
+    from nexus._mineru_pid import recorded_server_alive  # noqa: PLC0415 — deferred, as the config import above
+
+    # nexus-f9bgu.25: a missing pid (0) used to signal our own process group and report running;
+    # nexus-dyfsw: a pid from another PID namespace is judged by its server, not by the pid.
+    if isinstance(info, dict) and recorded_server_alive(info):
+        return {"running": True, "port": info.get("port"), "pid": info["pid"]}
+    return {"running": False, "stale_pid": True}
+
+
 def _collect_health_data() -> dict[str, Any]:
     """Collect all health card data synchronously (pgHero pattern)."""
     data: dict[str, Any] = {}
@@ -62,23 +80,7 @@ def _collect_health_data() -> dict[str, Any]:
     # MinerU status
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    mineru_pid_path = nexus_config_dir() / "mineru.pid"
-    if mineru_pid_path.exists():
-        try:
-            info = json.loads(mineru_pid_path.read_text(encoding="utf-8"))
-            pid = info.get("pid", 0)
-            from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred, as the config import above
-
-            # nexus-f9bgu.25: pid_alive, not os.kill(pid, 0). A missing pid
-            # (0) used to signal our own process group and report running.
-            if isinstance(pid, int) and pid_alive(pid):
-                data["mineru"] = {"running": True, "port": info.get("port"), "pid": pid}
-            else:
-                data["mineru"] = {"running": False, "stale_pid": True}
-        except (json.JSONDecodeError, OSError):
-            data["mineru"] = {"running": False}
-    else:
-        data["mineru"] = {"running": False}
+    data["mineru"] = _mineru_card(nexus_config_dir())
 
     # Catalog status
     # nexus-k0luu: age_seconds is the mtime of the LOCAL .catalog.db cache. On a

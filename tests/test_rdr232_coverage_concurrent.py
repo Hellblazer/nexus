@@ -12,12 +12,17 @@ the ledger and the call log are in plan order whatever order the calls finish in
 The timing model is the canary at 1/100 scale: a call takes ``BASE_S + PER_ANCHOR_S * anchors`` (0.15 s + 7 ms per
 anchor here; 15 s + 0.7 s per anchor in the canary, so 10-15 anchors answer in about 20-25 s and 65 anchors need 60.5 s,
 past the 60 s timeout), and a call longer than its ``timeout`` argument is cut the way the dispatcher cuts it.
-Real ``asyncio.sleep`` is used; every bound below is a lower bound of the model or a generous multiple of it.
+Every async test runs on a virtual clock (:func:`_virtual_time`): ``asyncio.sleep``, ``wait_for`` and the deadline
+arithmetic are real code, but time moves only when the event loop has nothing to do, so a loaded runner cannot shift
+a wave past a window. Develop shard 6 on a0dc17ec2 (run 9190) read three timeouts where four calls were planned: on
+real time the first wave ran late and the second was skipped for the deadline.
 """
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
+import selectors
 import time
 from typing import Any
 from unittest.mock import patch
@@ -62,6 +67,80 @@ BASE_S = 0.15
 PER_ANCHOR_S = 0.007
 SCALE = 100  # one second here is one hundred in the canary
 CALL_TIMEOUT_S = 0.6  # ASSESSMENT_CALL_TIMEOUT_S (60 s) at 1/100
+
+
+class _IdleAdvancingSelector(selectors.DefaultSelector):
+    """Reports ready I/O at once; when there is none, jumps the loop's clock to the next timer instead of waiting for
+    it. While an executor thread is pending it waits for real (the thread's result wakes it) and the clock stands
+    still, so time spent in threads, like time spent on a busy CPU, is never charged to the code under test."""
+
+    loop: _VirtualTimeLoop
+
+    def select(self, timeout: float | None = None) -> list:
+        ready = super().select(0)
+        if ready or timeout == 0:
+            return ready
+        if self.loop.pending_threads or timeout is None:
+            return super().select(timeout if timeout is None else min(timeout, 0.05))
+        self.loop.now += timeout
+        return []
+
+
+class _VirtualTimeLoop(asyncio.SelectorEventLoop):
+    def __init__(self) -> None:
+        selector = _IdleAdvancingSelector()
+        super().__init__(selector)
+        selector.loop = self
+        self.now = 1000.0
+        self.pending_threads = 0
+
+    def time(self) -> float:
+        return self.now
+
+    def run_in_executor(self, executor: Any, func: Any, *args: Any) -> asyncio.Future:
+        fut = super().run_in_executor(executor, func, *args)
+        self.pending_threads += 1
+
+        def done(_f: asyncio.Future) -> None:
+            self.pending_threads -= 1
+
+        fut.add_done_callback(done)
+        return fut
+
+
+def _virtual_time(test):
+    """Run an async test on a :class:`_VirtualTimeLoop`, with ``time.monotonic`` (read by the runner's deadline and the
+    stage's latency) reading the same clock."""
+    @functools.wraps(test)
+    def run(*args: Any, **kwargs: Any) -> None:
+        loop = _VirtualTimeLoop()
+        real = time.monotonic
+        time.monotonic = loop.time
+        try:
+            loop.run_until_complete(test(*args, **kwargs))
+        finally:
+            time.monotonic = real
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_default_executor())
+            loop.close()
+    return run
+
+
+@_virtual_time
+async def test_the_virtual_clock_moves_on_sleeps_and_never_on_work() -> None:
+    """The property every timing bound in this file rests on: blocking work, on the loop or in a thread, takes no
+    time; a sleep takes exactly its length."""
+    t0 = time.monotonic()
+    time.sleep(0.05)  # a busy event loop
+    timer = asyncio.ensure_future(asyncio.sleep(1.0))  # a pending timer the clock could jump to while the thread runs
+    await asyncio.to_thread(time.sleep, 0.05)  # a slow thread
+    assert time.monotonic() == t0
+    timer.cancel()
+    await asyncio.sleep(0.3)
+    assert time.monotonic() == pytest.approx(t0 + 0.3, abs=1e-9)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(asyncio.sleep(5), timeout=0.1)
+    assert time.monotonic() == pytest.approx(t0 + 0.4, abs=1e-9)
 
 
 def _latency(anchors: int) -> float:
@@ -138,7 +217,7 @@ async def _timed(d: Dispatcher, boundary: CoverageBoundary, **kw: Any) -> tuple[
 # ── the timing model: before and after ──────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_the_canary_before_serial_one_pack_per_stream_runs_the_sum_and_the_graph_call_times_out() -> None:
     """The measured shape, reproduced with the new knobs set to the old behaviour (one call at a time, no split):
     four calls in a row, the 65-anchor one cut at the timeout, the stage the sum of its calls."""
@@ -153,7 +232,7 @@ async def test_the_canary_before_serial_one_pack_per_stream_runs_the_sum_and_the
     _log.info("rdr232_canary_model_before", scaled_s=round(elapsed * SCALE), floor_s=round(floor * SCALE), measured_live_s=118)
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_the_canary_after_runs_in_about_two_call_times_and_the_graph_pack_is_split() -> None:
     d = Canary(modelled)
     serial_floor = _latency(12) + _latency(12) + CALL_TIMEOUT_S + _latency(10)
@@ -171,7 +250,7 @@ async def test_the_canary_after_runs_in_about_two_call_times_and_the_graph_pack_
     _log.info("rdr232_canary_model_after", scaled_s=round(elapsed * SCALE), serial_floor_s=round(serial_floor * SCALE))
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_n_slow_calls_finish_in_about_one_call_time_not_n() -> None:
     """Four equal slow calls (two streams, two facet groups) at concurrency 4: one call's time. Failing before: they
     ran one after the other and took four."""
@@ -184,7 +263,7 @@ async def test_n_slow_calls_finish_in_about_one_call_time_not_n() -> None:
     report = _cov(result).ledger.assessment
     assert report.calls == 4 and report.streams == ("vector", "graph")
     assert d.max_in_flight == 4
-    assert delay <= report.latency_ms / 1000 < 3 * delay, f"4 calls of {delay} s took {report.latency_ms} ms (serial: {4 * delay} s)"
+    assert delay - 0.001 <= report.latency_ms / 1000 < 3 * delay, f"4 calls of {delay} s took {report.latency_ms} ms (serial: {4 * delay} s)"
     assert elapsed < 4 * delay
 
 
@@ -193,7 +272,7 @@ async def _slow(args: dict, delay: float) -> dict:
     return _reply(args["items"], args["check_instruction"])
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_concurrency_is_bounded_by_the_boundary_setting() -> None:
     d = Canary(lambda args: _slow(args, 0.05), vector=3, graph=3, other=0)
     boundary = CoverageBoundary(request=_request(4), max_facets_per_call=1, max_concurrent_calls=2, call_timeout_s=5.0)
@@ -207,7 +286,7 @@ async def test_concurrency_is_bounded_by_the_boundary_setting() -> None:
     [("anthropic", "2", 2), ("anthropic", "1", 1), ("anthropic", "8", MAX_CONCURRENT_ASSESSMENT_CALLS),
      ("openai_compat", "3", 3), ("cli", "1", MAX_CONCURRENT_ASSESSMENT_CALLS)],
 )
-@pytest.mark.asyncio
+@_virtual_time
 async def test_the_concurrency_bound_reads_the_configured_gate_on_an_api_backend(
     monkeypatch: pytest.MonkeyPatch, backend: str, gate: str, expect: int,
 ) -> None:
@@ -229,7 +308,7 @@ def test_the_default_bound_matches_the_dispatchers_default_gate() -> None:
     assert CoverageBoundary(request=None).max_concurrent_calls == MAX_CONCURRENT_ASSESSMENT_CALLS
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_a_call_that_raises_cancellation_cancels_the_calls_still_running() -> None:
     """A ``CancelledError`` that is not our own ``wait_for``'s (a cancelled caller, a check that cancels itself) leaves
     the stage by cancelling its siblings. Failing before: ``gather`` re-raised it and left the other calls running."""
@@ -260,7 +339,7 @@ async def test_a_call_that_raises_cancellation_cancels_the_calls_still_running()
 # ── the stage never exceeds its share ───────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_a_check_that_ignores_its_timeout_is_cut_at_the_stage_share() -> None:
     """The stage may use 0.4 of the deadline left (here 3.0 s, so 1.2 s). A check that sleeps 5 s whatever it is told
     is cut from outside at the stage end, and the calls that never started are skipped, not queued past it. The
@@ -288,7 +367,7 @@ async def test_a_check_that_ignores_its_timeout_is_cut_at_the_stage_share() -> N
     assert [f.state for f in cov.ledger.findings] == ["unassessed"]
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_queued_calls_draw_their_timeout_from_what_is_left_of_the_stage_when_they_start() -> None:
     """Six calls, two at a time, 0.3 s each, a 0.4 s stage: the first wave completes, the second starts at 0.3 s with
     0.1 s left and is cut at the stage end, the third wave is skipped for the deadline."""
@@ -303,9 +382,8 @@ async def test_queued_calls_draw_their_timeout_from_what_is_left_of_the_stage_wh
     started = time.monotonic()
     result = await _run(d, boundary, deadline=started + 1.0)
     report = _cov(result).ledger.assessment
-    assert max(seen) <= 0.4 + 1e-3, "no call is given more than the stage allowance"
-    assert seen[2] < 0.15 and seen[3] < 0.15, "the second wave drew what was left, not the call cap"
-    assert report.latency_ms <= 700, "the third wave would end at 900 ms"
+    assert seen == pytest.approx([0.4, 0.4, 0.1, 0.1], abs=1e-6), "the first wave drew the stage allowance, the second what was left"
+    assert 399 <= report.latency_ms <= 400, "the stage ends at its share (latency_ms truncates); the third wave would end at 900 ms"
     assert report.outcome == "partial_failure"
     assert report.calls == 4 < 6, "the third wave had no time left and was skipped, not started"
     assert report.raised_calls == 2, "the second wave was cut at the stage end"
@@ -335,7 +413,7 @@ def _summary(cov: CoverageResult) -> dict[str, Any]:
     )
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_a_raised_call_leaves_only_its_own_facets_unassessed_and_the_others_still_count() -> None:
     """Three facets, two per call: the vector call over f3 raises. Failing before: the first raise stopped the pass,
     so f1/f2 were never read on the graph stream and f3 was not the only unassessed facet."""
@@ -356,7 +434,7 @@ async def test_a_raised_call_leaves_only_its_own_facets_unassessed_and_the_other
     assert cov.ledger.assessment.outcome == "partial_failure", "five calls were read, one raised"
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_a_malformed_reply_does_not_stop_the_other_calls_either() -> None:
     def vector(items: str, instruction: str):  # noqa: ARG001
         return {"ok": True}  # not the check shape
@@ -370,7 +448,7 @@ async def test_a_malformed_reply_does_not_stop_the_other_calls_either() -> None:
     assert cause["unusable_reply"] == 3 and cause["stopped_after_failure"] == 0
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_another_stream_that_supports_covers_the_facet_a_failed_stream_could_not() -> None:
     d = Canary(_by_stream(vector=lambda i, s: RuntimeError("down"), graph=lambda i, s: _reply(i, s), other=lambda i, s: _reply(i, s)),
                vector=3, graph=3, other=0)
@@ -390,7 +468,7 @@ def test_stopped_after_failure_is_kept_in_the_enumeration_but_no_assessment_emit
 # ── deterministic order whatever the completion order ───────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_the_ledger_and_the_call_log_are_in_plan_order_whatever_order_the_calls_finish_in() -> None:
     """Earlier calls are the slower ones, so they finish last. The call log, the reply classes by stream and the
     unassessed counts are the plan's order and the same as when the calls finish in plan order."""
@@ -435,7 +513,7 @@ def test_a_stream_is_split_into_the_fewest_balanced_packs_within_the_cap() -> No
     assert flat == list(range(65)), "order kept, nothing dropped or repeated"
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_no_call_reads_more_than_the_pack_cap_and_every_anchor_is_read_once_per_group() -> None:
     """The canary's 65-anchor graph stream is four calls of 16-17, not one over the timeout. Failing before: one call
     carried all 65."""
@@ -455,7 +533,7 @@ async def test_no_call_reads_more_than_the_pack_cap_and_every_anchor_is_read_onc
     assert len(d.gr) > MAX_ANCHORS_PER_ASSESSMENT_CALL, "non-vacuity: the stream really is over the cap"
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_a_failed_pack_loses_its_own_anchors_not_the_stream() -> None:
     """The second graph pack raises; the fourth supports f1. f1 is covered by that evidence. With no supporting pack
     f1 is unassessed (a pack of the stream was never read) and the cause is the raised call."""
@@ -501,7 +579,7 @@ async def _direct_view(first_dispatcher: Dispatcher, check, **kw: Any) -> Bounda
     )
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_a_spent_usd_allowance_starts_no_call() -> None:
     called = 0
 
@@ -542,7 +620,7 @@ async def _count_starts(
     return started, cov, peak
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_calls_in_flight_and_the_starting_call_are_counted_against_the_usd_allowance_at_the_mean_known_cost() -> None:
     """2.5 left, 1.0 a call: the first two start (2.5 less 1.0 and less 2.0 for those in flight and itself), the
     third would spend what is not there beside them (2.5 less 3.0) and is held until one ends, so a wave never
@@ -553,7 +631,7 @@ async def test_calls_in_flight_and_the_starting_call_are_counted_against_the_usd
     assert started == 8 == cov.ledger.assessment.calls  # 2 evidence streams x 4 facets
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_the_first_wave_has_no_estimate_so_a_conservative_prior_bounds_it() -> None:
     """No call has reported a cost yet, so the mean is unknown. Failing before: every call of the first wave started
     whenever the allowance was above zero (four calls against an allowance for two). The prior is
@@ -567,7 +645,7 @@ async def test_the_first_wave_has_no_estimate_so_a_conservative_prior_bounds_it(
     assert started == 8 == cov.ledger.assessment.calls  # 2 evidence streams x 4 facets
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_a_small_allowance_still_starts_one_call_as_the_serial_loop_did() -> None:
     """Nothing in flight and a positive allowance: the call starts even when one call may cost more than what is left
     (the budget is soft; one call past it is the accepted overshoot). Without this a small ``budget_usd`` would
@@ -610,7 +688,7 @@ async def _metered(
     return started, cov, peak
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_calls_held_on_the_prior_alone_run_once_the_first_reports_a_cost_that_fits() -> None:
     """The probe (nexus-jypmj.22). 0.03 USD left, 0.004 a call, seven planned calls. Failing before: every call decided
     while the first was in flight was skipped against the 0.02 prior (0.03 less 0.04 is under zero) and never looked at
@@ -622,7 +700,7 @@ async def test_calls_held_on_the_prior_alone_run_once_the_first_reports_a_cost_t
     assert started == a.calls == 7 and a.skipped_budget_calls == 7 and a.outcome == "partial_failure"
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_a_call_that_does_not_fit_beside_those_in_flight_is_held_again_not_skipped_for_good() -> None:
     """0.012 left, 0.004 a call: the first runs and the rest are held. With 0.004 measured, 0.008 is left: one call
     starts, the next would not fit beside it (0.008 less 0.008 is zero but 0.004 is in flight too) and is HELD, not
@@ -637,7 +715,7 @@ async def test_a_call_that_does_not_fit_beside_those_in_flight_is_held_again_not
     assert _summary(cov)["coverage"]["unassessed_by_cause"]["budget_skip"] > 0
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_a_call_that_cannot_fit_even_alone_is_skipped_on_the_measured_cost() -> None:
     """0.005 left, 0.004 a call: the first runs (nothing measured, nothing in flight) and spends 0.004; 0.001 is left,
     which a 0.004 call cannot fit even alone, so every other call is skipped. One call, not two: the old rule started
@@ -648,7 +726,7 @@ async def test_a_call_that_cannot_fit_even_alone_is_skipped_on_the_measured_cost
     assert "cannot cover" in a.detail, "no allowance is claimed spent when the cost says a call does not fit"
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_a_budget_too_small_for_one_measured_call_still_skips_the_rest() -> None:
     """0.0015 left (the live row 898's allowance), 0.004 a call: the first call runs, spends past the allowance, and
     the held calls find none left."""
@@ -658,7 +736,7 @@ async def test_a_budget_too_small_for_one_measured_call_still_skips_the_rest() -
     assert "was spent" in a.detail
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_calls_held_on_the_prior_run_one_at_a_time_when_no_call_ever_reports_a_cost() -> None:
     """The first call ends without a reported cost (the runner's view of a cut call: neither the estimate nor the
     remaining allowance moves). The allowance is still above zero, so a held call starts when none is in flight, as
@@ -671,7 +749,7 @@ async def test_calls_held_on_the_prior_run_one_at_a_time_when_no_call_ever_repor
     assert a.outcome == "ok" and "USD" not in a.detail
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_an_expired_deadline_still_skips_a_held_call_for_the_deadline() -> None:
     """The deadline path is unchanged: the held calls wake after the first call, find no time left for a call, and
     are skipped for the deadline (the first started with time, then the clock ran out)."""
@@ -696,7 +774,7 @@ async def test_an_expired_deadline_still_skips_a_held_call_for_the_deadline() ->
     assert _summary(cov)["coverage"]["unassessed_by_cause"]["deadline_skip"] == 7
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_the_cost_estimate_averages_assessment_calls_only_not_the_plans_own_check_steps() -> None:
     """The runner's estimate was the mean of every ``operator_check`` record with a cost, so a plan's own ``check``
     step (a different prompt, here 1.0 USD) inflated what an assessment call was assumed to cost. 1.012 USD is left
@@ -737,7 +815,7 @@ async def test_the_cost_estimate_averages_assessment_calls_only_not_the_plans_ow
 # ── the runner: accounting and the terminal step's elapsed ──────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_assessment_time_is_not_charged_to_the_terminal_step() -> None:
     """Failing before: the terminal step's ``elapsed_ms`` started before the boundary, so a 0.4 s assessment showed as
     0.4 s of generation in ``nx_answer_steps``. The assessment calls carry their own time."""
@@ -754,7 +832,7 @@ async def test_assessment_time_is_not_charged_to_the_terminal_step() -> None:
     assert _cov(result).ledger.assessment.latency_ms >= 380, "the run summary's assessment_latency_ms still has it"
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_assessment_time_is_not_charged_to_a_bundled_terminal_step_either() -> None:
     plan = {"steps": [
         PLAN["steps"][0], PLAN["steps"][1], PLAN["steps"][2],
@@ -782,7 +860,7 @@ async def test_assessment_time_is_not_charged_to_a_bundled_terminal_step_either(
     assert bundle_records and all(r.elapsed_ms < 200 for r in bundle_records), [(r.operator, r.elapsed_ms) for r in bundle_records]
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_concurrent_calls_keep_their_own_usage_and_step_index() -> None:
     """Each concurrent call reads the ambient usage sink of its own task: its StepRecord carries its own cost, and the
     step indices are distinct and numbered past the plan."""
@@ -808,7 +886,7 @@ async def test_concurrent_calls_keep_their_own_usage_and_step_index() -> None:
     assert len(set(indices)) == 3 and min(indices) >= len(PLAN["steps"])
 
 
-@pytest.mark.asyncio
+@_virtual_time
 async def test_step_records_are_in_step_index_order_whatever_order_the_calls_finish_in() -> None:
     """The first assessment calls are the slowest, so they finish last and are recorded last. The result lists the
     records by step index, so the envelope's step order is the same on every run."""

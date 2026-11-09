@@ -354,10 +354,15 @@ def spawn_server_process(port: int, *, platform: str | None = None) -> subproces
     except Exception:  # noqa: BLE001 — an unknown version must not block a spawn
         _mineru_version = None
 
+    from nexus.daemon.service_registry import pid_ns_field  # noqa: PLC0415 — deferred: the lease records use the same field
+
     _write_pid_file(_pid_file_path(), {
         "pid": proc.pid,
         "port": port,
         "started_at": datetime.now(timezone.utc).isoformat(),
+        # nexus-dyfsw: the PID namespace this pid was minted in, as the leases record it. A reader in
+        # another namespace sharing this config dir cannot judge the pid and judges the server instead.
+        **pid_ns_field(),
         "output_root": str(output_root),
         "mineru_version": _mineru_version,
         # The interpreter the server was launched under: on Windows the one launched with -m

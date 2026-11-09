@@ -186,6 +186,22 @@ class ManifestQualifyingHitsPlanTest {
             .doesNotContain("Sort").doesNotContain("Aggregate");
     }
 
+    /**
+     * The shape the planner takes for a selective text gate on an analyzed table (nexus-h7kw2): the cap is still a LIMIT
+     * on top and nothing sorts or aggregates, but the two sides are joined by a hash over sequential scans of the
+     * manifest and of the chunk rows, so the first row waits for the whole collection to be read.
+     */
+    private void assertHashJoinOverSeqScans(String what, String plan) {
+        assertThat(plan).as("%s: the cap is a LIMIT at the top of the plan\n%s", what, plan).startsWith("Limit");
+        assertThat(plan).as("%s: nothing sorts or aggregates\n%s", what, plan)
+            .doesNotContain("Sort").doesNotContain("Aggregate");
+        assertThat(plan).as("%s: a hash join\n%s", what, plan).contains("Hash Join");
+        assertThat(plan).as("%s: the manifest is read sequentially\n%s", what, plan)
+            .contains("Seq Scan on catalog_document_chunks");
+        assertThat(plan).as("%s: the chunk rows are read sequentially\n%s", what, plan)
+            .containsPattern("Seq Scan on chunks_");
+    }
+
     /** The texts the gated plans are made for: a whole word, and a typo that only the trigram arm of the gate can match. */
     private static final String[] GATES = {"qp chunk 7", "chunck"};
 
@@ -194,8 +210,14 @@ class ManifestQualifyingHitsPlanTest {
      * be the streaming index plan. The gated count on an ANALYZED table is not: with a selective gate (the planner
      * estimates 598 of 40,000 chunk rows pass it) it plans a Hash Join over a sequential scan of the chunk rows and of
      * the manifest, which reads the collection before it returns a row. That is the critic's S1 of nexus-zk7rw round 1
-     * (the gated count's cost was never planned or measured), found by this test; it is recorded as open work, and what is
-     * held for that shape is only that the cap is still a LIMIT on top and nothing sorts or aggregates.
+     * (the gated count's cost was never planned or measured), found by this test. nexus-h7kw2 measured it at 220,000
+     * chunks (the Hash Join reads the whole manifest and the chunk rows, 0.5 s on lab-m; there the planner takes it from
+     * a cap of 41 to 82, and below that a nested loop with a sequential scan of the chunk rows) and pinned the shape:
+     * {@link #assertHashJoinOverSeqScans}. On this 40,000-chunk
+     * fixture the analyzed gated plan was that one at every cap, label and gate probed once by hand (11 to 1,000); the
+     * test asserts caps 11 and 22. The pin is the 40,000-chunk fixture's shape, not the production-scale one: at 220,000
+     * chunks and a cap of about 11 the planner takes a nested loop instead. A planner that learns to stream the gated count turns it red, and the pin is then to be replaced
+     * by {@link #assertStreamingIndexPlan}, not loosened.
      */
     private void assertAllShapes(String state, boolean gatedStreams) {
         for (String label : new String[] {"rare-x", "body"}) {
@@ -207,10 +229,7 @@ class ManifestQualifyingHitsPlanTest {
                     if (gatedStreams) {
                         assertStreamingIndexPlan(what, gated);
                     } else {
-                        assertThat(gated).as("%s: the cap is a LIMIT at the top of the plan\n%s", what, gated)
-                            .startsWith("Limit");
-                        assertThat(gated).as("%s: nothing sorts or aggregates\n%s", what, gated)
-                            .doesNotContain("Sort").doesNotContain("Aggregate");
+                        assertHashJoinOverSeqScans(what, gated);
                     }
                 }
             }
@@ -220,8 +239,9 @@ class ManifestQualifyingHitsPlanTest {
     @Test
     void theCountPlanIsAStreamingIndexPlan_onAnUnanalyzedTableAndAnAnalyzedOne_withAndWithoutATextGate()
             throws Exception {
-        // 11 is a page of 10 plus one; 22 is the bound the distinct count reads for it.
+        // 11 is a page of 10 plus one; 22 is the bound the distinct count widens to when its first read holds repeats.
         String unanalyzedPlan = plan("rare-x", 11);
+        String unanalyzedGatedPlan = plan("rare-x", 11, GATES[0], false);
         assertAllShapes("unanalyzed", true);
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.analyzeTable(su, CHUNKS);
@@ -234,6 +254,22 @@ class ManifestQualifyingHitsPlanTest {
         assertThat(plan("rare-x", 11)).as("the analyzed plan is not the unanalyzed one").isNotEqualTo(unanalyzedPlan);
 
         // Controls: the pins are not inert, and each fails for ITS reason.
+        // The Hash Join pin (nexus-h7kw2) is the analyzed gated plan; the streaming plan of the same gate on the
+        // unanalyzed table must fail it, and each of its three parts fails alone when the plan is cut to lack it.
+        String analyzedGated = plan("rare-x", 11, GATES[0], false);
+        assertHashJoinOverSeqScans("analyzed gated control", analyzedGated);
+        assertThatThrownBy(() -> assertHashJoinOverSeqScans("a streaming plan", unanalyzedGatedPlan))
+            .isInstanceOf(AssertionError.class).hasMessageContaining("a streaming plan: a hash join");
+        assertThatThrownBy(() -> assertHashJoinOverSeqScans("no manifest seq scan",
+            analyzedGated.replace("Seq Scan on catalog_document_chunks", "Index Scan on catalog_document_chunks")))
+            .isInstanceOf(AssertionError.class)
+            .hasMessageContaining("no manifest seq scan: the manifest is read sequentially");
+        assertThatThrownBy(() -> assertHashJoinOverSeqScans("no chunk seq scan",
+            analyzedGated.replaceAll("Seq Scan on chunks_", "Index Scan on chunks_")))
+            .isInstanceOf(AssertionError.class)
+            .hasMessageContaining("no chunk seq scan: the chunk rows are read sequentially");
+        assertThatThrownBy(() -> assertHashJoinOverSeqScans("with a sort", analyzedGated.replaceFirst("Limit", "Limit\n  ->  Sort")))
+            .isInstanceOf(AssertionError.class).hasMessageContaining("with a sort: nothing sorts or aggregates");
         assertThatThrownBy(() -> assertStreamingIndexPlan("index scans off", plan("rare-x", 11, null, true)))
             .isInstanceOf(AssertionError.class)
             .hasMessageContaining("index scans off: the manifest is read through an index");

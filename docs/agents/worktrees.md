@@ -122,10 +122,56 @@ things to avoid carefully; they are impossible.
    Actions call 403'd (T2 `nexus/github-api-usage-research-2026-09-26`). The
    conexus-hosted adapter still posts one tuple per run and job state change
    to `board/ci/nexus-develop`; subscribe once per session with
-   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")` if
-   you want pings instead of polling. Nothing in this repo folds those posts
-   into a verdict any more, so read the `conclusion` of the check runs, not
-   the board.
+   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")` for
+   pings instead of polling. A `kind=run` row is the adapter's run-level post,
+   carrying the sha, the run, its state and its conclusion; its `conclusion`
+   for your sha is the verdict to read (Sam, 2026-11-08, ask qo36-conflicts).
+   The single `gh api` call above is the fallback. Nothing in this repo folds
+   the job-level posts into a verdict, so do not read one as a verdict.
+
+   To watch your own develop push, subscribe after pushing and read the
+   conclusion on your sha's `kind=run` row; one `gh api` read of its check
+   runs is the fallback. Never arm a Monitor or loop that polls check runs
+   per push (Sam, 2026-11-08, ask qo36-conflicts).
+
+   To be woken when a develop sha's push runs have all completed, subscribe to
+   `board/ci/nexus-develop--done`
+   (`mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop--done")`;
+   the CI board adapter's default branches are develop and main, so `board/ci/nexus-main--done`
+   is the other topic). It
+   posts one `kind=sha` row per completed run set of a sha, after the last push
+   run for it completes, with body `{state: concluded, sha, runs, url}`; `runs`
+   lists the `[run, attempt]` pairs it waited on. The row carries no
+   conclusion, and completed includes cancelled: a sha whose only run was
+   cancelled by the next push gets a wake too. Read the `kind=run` rows or the
+   check runs for the verdict, and a cancelled run per the rule below. The
+   wake is best-effort: the adapter drops it without retry on a GitHub or
+   engine error, at its 8 s deadline, or when two runs finish together beyond
+   its one re-read, so a missing wake is not a signal; if it has not come when
+   you expect the run to be done, read the check runs once. A redelivered
+   webhook for the same run set posts nothing new; a rerun (a new attempt)
+   posts a new row (conexus-5wjs, nexus-1d6pz.2; the per-push wake is being
+   reworked under nexus-1d6pz.11).
+
+   Treat the develop run as part of the push. Before stacking more work on a
+   develop sha, or cutting a release branch on it, read that sha's check-run
+   conclusions. A red there is a finding to diagnose before the next push, not
+   background: on 2026-09-14 (7.46.0) develop went red on a real bug (procps
+   truncates a piped `ps -o command=` to COLUMNS, so a liveness check of the
+   since-deleted mailbox watcher missed a live one), two more pushes stacked on it for about three hours, and the
+   release PR failed on the same test, costing a fix, a rebase, a force-push
+   and a second PR CI cycle. Local suites run on macOS, whose `ps` does not
+   truncate, so only Linux CI could see it. When a red reproduces only on
+   Linux, reproduce the mechanism in a container (a `python:3.12` image has
+   procps) rather than guess. When the red looks environmental, read the
+   failed log; do not grep it. A grep tuned to the failure keeps the failure
+   and throws away the environment: on 2026-09-19 two fixture tests passed
+   locally and failed on the runner, and the runner's `git --version` (2.55.0
+   against 2.53.0 here) sat in the same log above the failure. Page the
+   section around the failure and look for version, config and runner lines
+   before forming a hypothesis. A cancelled or superseded run is never read as
+   red; read the run that replaced it. (Source: memory
+   `feedback_release_and_develop_ci` § check_develop_ci_after_push.)
 
 8. **Push unchanged**, in two steps, from INSIDE the worktree.
    Step 1: `scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range <sha>...`
@@ -153,11 +199,47 @@ things to avoid carefully; they are impossible.
    expiry; `--skip-lock '<reason>'` is the named escape when the
    tuple space is unreachable.
 
+   **A rebased or cherry-picked branch that cites its own commits in docs**
+   (wire-ledger lines AND the shas inside entry bodies) has every cited sha
+   re-mapped to its landed commit before the push. Map by subject, then
+   confirm with `git range-diff -s old~1..old new~1..new` (expect `=`). On
+   2026-10-02 the RDR-192 restore-verb landing fixed the two leading
+   citations and missed three shas inside entry bodies that still named
+   pre-rebase commits; develop went red at 83f270537. Locally
+   `tests/test_docs_reference_rot.py::test_cited_commit_shas_resolve` PASSED,
+   because stale remote-tracking refs (hellmini and qwent `qr-r*` branches from
+   agents' remote runs) still made the old shas reachable. A local pass is
+   unproven while other remotes' refs exist: check each cited sha with
+   `git branch -r --contains <sha>`, limited to `origin/` lines.
+
+   **A rebase that conflicts in `CHANGELOG.md` or
+   `docs/wire-contract-pending.md` never keeps both sides**: an edited bullet
+   appears in both, and concatenation ships both (three landings on
+   2026-10-01, four rebases on 2026-10-30). Keep one copy, then check by
+   bullet opening and ledger entry with the commands in the release skill's
+   Step 4 (`.claude/skills/release/SKILL.md`).
+
+   **Never cite another repository's commit sha in a doc.** The same test
+   requires every sha-shaped token in `docs/` to resolve on develop, so a
+   foreign sha (RDR-236, 2026-10-26: the conexus head in an RDR finding) turns
+   develop red and blocks a peer's push. Keep it in the T2 research record and
+   cite the repository by date in the doc.
+   (Source: memory `feedback_release_and_develop_ci`
+   § rebase_stales_ledger_sha_citations.)
+
    **Batch develop pushes** (Sam, 2026-10-21, nexus-cvtxu): develop CI runs
-   one run at a time, so each push waits for the one before it. Hold green
-   commits and push them together, alone only for a develop red or a peer
-   who is waiting. A push within 30 minutes of the worktree's last one
-   prints `PUSH_BATCH_HINT` on stderr.
+   two runs at a time, by run-number parity, each slot keeping only its
+   newest push waiting (`.github/workflows/ci.yml` concurrency, 2026-10-23),
+   so a third push waits. Hold green commits and push them together, alone
+   only for a develop red or a peer who is waiting. A push within 30 minutes
+   of the worktree's last one prints `PUSH_BATCH_HINT` on stderr. Push rate,
+   not run length, sets push-to-verdict: on 2026-10-21 runs were down to p50
+   15 minutes, yet the per-push measure was p50 25 / p90 41 over 62 pushes
+   because pushes queued behind each other, about 12 of them one session's.
+   A peer's "push freely, I rebase" clears file overlap only, never CI: on
+   2026-10-09, under the old cancel-in-progress rule, two sessions agreed that
+   and cancelled three of each other's develop runs in one evening. (Source:
+   memory `feedback_release_and_develop_ci` § batch_develop_pushes.)
 
 9. **Whoever pushes to `develop` fast-forwards the primary in the same
    breath.** `cd` to the primary and `git merge --ff-only origin/develop`.

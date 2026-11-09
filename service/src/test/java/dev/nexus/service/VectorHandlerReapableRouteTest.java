@@ -369,6 +369,59 @@ class VectorHandlerReapableRouteTest {
         assertThat(lb.title()).isEqualTo("doc b-live");
     }
 
+    /**
+     * nexus-rfvyy.9 (RDR-243): a reapable chunk's label is withheld, every field null, when a LIVE sensitive document in
+     * any collection holds the same text, even when a non-sensitive live owner is the one the label would name; the
+     * owner can be the flagged document and the text prefix is its text. A tombstoned sensitive owner withholds
+     * nothing, and a chunk whose live owners are all unflagged keeps its label.
+     */
+    @Test
+    void aLiveSensitiveOwnerInAnyCollectionWithholdsTheWholeLabel_reapableAndDescribe() throws Exception {
+        String col = "knowledge__reaproute-sens__minilm-l6-v2-384__v1";
+        String other = "knowledge__reaproute-sens-owner__minilm-l6-v2-384__v1";
+        register(TENANT_A, col);
+        register(TENANT_A, other);
+        Duration old = Duration.ofDays(40);
+        String flagged = chunk(TENANT_A, col, "flagged-owner", old, Map.of());
+        chunk(TENANT_A, other, "flagged-owner", Duration.ofDays(1), Map.of());
+        doc(TENANT_A, "a-plain", other, false, null);    // sorts first, so it is the owner the label would name
+        doc(TENANT_A, "z-flagged", other, false, null);
+        manifest(TENANT_A, "a-plain", other, flagged);
+        manifest(TENANT_A, "z-flagged", other, flagged);
+        String tombFlag = chunk(TENANT_A, col, "tomb-flagged", old, Map.of());
+        chunk(TENANT_A, other, "tomb-flagged", Duration.ofDays(1), Map.of());
+        doc(TENANT_A, "b-plain", other, false, null);
+        doc(TENANT_A, "c-flagged-dead", other, true, null);
+        manifest(TENANT_A, "b-plain", other, tombFlag);
+        manifest(TENANT_A, "c-flagged-dead", other, tombFlag);
+        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SENSITIVE, true)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)
+                .and(CATALOG_DOCUMENTS.TUMBLER.in("z-flagged", "c-flagged-dead"))).execute());
+
+        Map<String, Object> body = reapable(TOKEN_A, col, Map.of());
+
+        Map<String, Object> f = item(body, flagged);
+        assertThat(f.get("title")).as("withheld: a live flagged document holds this text").isNull();
+        assertThat(f.get("catalog_doc_id")).isNull();
+        assertThat(f.get("text_prefix")).as("the prefix is the flagged document's text").isNull();
+        Map<String, Object> t = item(body, tombFlag);
+        assertThat(t.get("catalog_doc_id")).as("a tombstoned flagged owner withholds nothing").isEqualTo("b-plain");
+        assertThat(t.get("text_prefix")).isEqualTo("tomb-flagged text");
+
+        var rows = repo.reapableChunks(TENANT_A, col, null, null, 10, 0);
+        var rf = rows.stream().filter(r -> flagged.equals(r.chash())).findFirst().get();
+        assertThat(rf.title()).isNull();
+        assertThat(rf.textPrefix()).isNull();
+
+        var labels = new ReaperRepository(new TenantScope(svcDs)).describe(TENANT_A, col, List.of(flagged, tombFlag));
+        var lf = labels.stream().filter(l -> flagged.equals(l.chash())).findFirst().get();
+        assertThat(lf.title()).as("describe feeds gc_audit refusal rows: withheld too").isNull();
+        assertThat(lf.sourcePath()).isNull();
+        assertThat(lf.textPrefix()).isNull();
+        var lt = labels.stream().filter(l -> tombFlag.equals(l.chash())).findFirst().get();
+        assertThat(lt.title()).isEqualTo("doc b-plain");
+    }
+
     @Test
     void theListingIsAscendingByChash() throws Exception {
         seedS1a(TENANT_A);

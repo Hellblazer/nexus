@@ -15,6 +15,7 @@ from __future__ import annotations
 import http.server
 import json
 import threading
+import uuid
 
 import pytest
 from click.testing import CliRunner
@@ -76,7 +77,9 @@ class _Engine:
                 if outer.mode == "gate_busy":
                     return self._send(503, {"error": "sweep_gate_busy"}, {"Retry-After": "1"})
                 expired = 3 if outer.mode == "expired_rows" else 0
-                echo = {"Idempotency-Key": key} if key and outer.mode != "strip_response" else {}
+                # The engine reads the key as a canonical UUID; echoing the parsed form, not the raw header,
+                # keeps request text out of a response header (CodeQL py/http-response-splitting).
+                echo = {"Idempotency-Key": str(uuid.UUID(key))} if key and outer.mode != "strip_response" else {}
                 if key and outer.mode != "ledger_empty":
                     outer.ledger[key] = {"state": "committed", "response_status": 200, "response": {"expired": expired}}
                 self._send(200, {"expired": expired, "refused": None, "more": False,

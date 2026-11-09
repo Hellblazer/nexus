@@ -47,19 +47,19 @@ scope" signal moved off this primitive entirely, to a flat lease file
 election flock, no re-key protocol, and no `ServiceRegistry` involvement — T1 is no
 longer one of this module's tiers.
 
-## The two flocks (do NOT conflate) — HISTORICAL as of sub-stage B
+## The two flocks (do NOT conflate)
 
-The **spawn-lock** was the RDR-128 single-writer guarantee: exactly one daemon opens
-the SQLite WAL, and it WAS T2/T3's election. Both spawn paths are gone (T3 at RDR-155
-P4b, T2 at nexus-i711w Stage 2 sub-stage B), so no surviving tier has a spawn-lock.
+The **spawn lock** (`<tier>_spawn.lock`) serialises supervisor starts. Today only the storage-service
+supervisor's `start()` takes it (`SPAWN_LOCK_TIERS` in `service_registry.py`); the RDR-128 SQLite-era
+spawn locks of T2/T3 are gone (T3 at RDR-155 P4b, T2 at nexus-i711w Stage 2 sub-stage B). A supervisor holds it
+only while `_start_locked` runs, so a running service holds nothing. `ServiceRegistry.try_hold_spawn_lock()`
+hands the same file to a caller that must keep every start out for a while (`nx daemon service pg-upgrade`);
+it refuses a tier outside `SPAWN_LOCK_TIERS`, because holding a lock no supervisor takes excludes nothing.
+Heartbeats, publishes and `stop` never take it.
 
-What remains for every tier is the primitive's **per-scope election flock**
-(`<tier>_elect.<scope>.lock`, taken briefly inside publish/heartbeat), which serializes
-the generation read-increment-write so the fencing token is monotonic. It never
-replaced the spawn-lock; it now has nothing to be distinguished from.
-
-Kept as heritage because the distinction explains why the primitive's flock is scoped
-the way it is — do not re-derive a spawn-lock from it.
+The primitive's **per-scope election flock** (`<tier>_elect.<scope>.lock`, taken briefly inside
+publish/heartbeat) is the other one: it serializes the generation read-increment-write so the fencing token is
+monotonic. It is not the spawn lock and a holder of one never blocks the other.
 
 ## Adding a lifecycle fix (the checklist)
 

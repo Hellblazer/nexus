@@ -99,6 +99,15 @@ _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: int = 0x00002000
 #: ``SetInformationJobObject``.
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: int = 9
 
+#: ``JOB_OBJECT_LIMIT_PROCESS_TIME``: ``PerProcessUserTimeLimit`` (100 ns
+#: ticks of user-mode time) ends a process that spends more of it.
+_JOB_OBJECT_LIMIT_PROCESS_TIME: int = 0x00000002
+#: ``JOB_OBJECT_LIMIT_PROCESS_MEMORY``: ``ProcessMemoryLimit`` bytes of
+#: committed memory per process; an allocation past it fails.
+_JOB_OBJECT_LIMIT_PROCESS_MEMORY: int = 0x00000100
+#: ``JobObjectBasicAccountingInformation`` for ``QueryInformationJobObject``.
+_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION: int = 1
+
 #: Process access rights ``AssignProcessToJobObject`` needs from
 #: ``OpenProcess``: it must be able to both query and (as the job's
 #: eventual kill) terminate the target.
@@ -122,6 +131,22 @@ class _IoCounters(ctypes.Structure):
         ("ReadTransferCount", ctypes.c_uint64),
         ("WriteTransferCount", ctypes.c_uint64),
         ("OtherTransferCount", ctypes.c_uint64),
+    )
+
+
+class _JobObjectBasicAccountingInformation(ctypes.Structure):
+    """``JOBOBJECT_BASIC_ACCOUNTING_INFORMATION``; read for
+    ``TotalTerminatedProcesses`` (processes the OS ended for exceeding a limit)."""
+
+    _fields_ = (
+        ("TotalUserTime", ctypes.c_int64),
+        ("TotalKernelTime", ctypes.c_int64),
+        ("ThisPeriodTotalUserTime", ctypes.c_int64),
+        ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+        ("TotalPageFaultCount", wintypes.DWORD),
+        ("TotalProcesses", wintypes.DWORD),
+        ("ActiveProcesses", wintypes.DWORD),
+        ("TotalTerminatedProcesses", wintypes.DWORD),
     )
 
 
@@ -172,6 +197,14 @@ def _load_kernel32() -> Any | None:
         wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
     ]
     dll.SetInformationJobObject.restype = wintypes.BOOL
+    dll.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    dll.QueryInformationJobObject.restype = wintypes.BOOL
     dll.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     dll.OpenProcess.restype = wintypes.HANDLE
     dll.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
@@ -200,10 +233,19 @@ def _last_error() -> int | None:
     return fn() if fn is not None else None
 
 
-def create_job() -> int | None:
+def create_job(
+    *,
+    per_process_user_time_100ns: int | None = None,
+    process_memory_limit: int | None = None,
+) -> int | None:
     """Create a job object configured to kill every assigned process when
     its last handle closes. Returns the handle as a plain ``int``, or
     ``None`` off Windows or on any API failure (never raises).
+
+    ``per_process_user_time_100ns`` and ``process_memory_limit`` (RDR-242,
+    nexus-mdbds.4) add the OS CPU and memory bounds of a sandbox worker: the
+    OS ends a member that spends more user-mode time than the first, and
+    fails an allocation past the second.
 
     The returned handle is a real Windows kernel resource: callers own it
     and must eventually pass it to :func:`close_job` exactly once, or it
@@ -218,7 +260,16 @@ def create_job() -> int | None:
             _log.debug("win_job_create_failed", error=_last_error())
             return None
         info = _JobObjectExtendedLimitInformation()
-        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if per_process_user_time_100ns is not None:
+            flags |= _JOB_OBJECT_LIMIT_PROCESS_TIME
+            info.BasicLimitInformation.PerProcessUserTimeLimit = int(
+                per_process_user_time_100ns
+            )
+        if process_memory_limit is not None:
+            flags |= _JOB_OBJECT_LIMIT_PROCESS_MEMORY
+            info.ProcessMemoryLimit = int(process_memory_limit)
+        info.BasicLimitInformation.LimitFlags = flags
         # ctypes.pointer(), not the lighter ctypes.byref(): the latter
         # produces a call-only reference object that a real WinDLL call
         # accepts but a Python test double cannot introspect. A pointer is
@@ -249,6 +300,30 @@ def create_job() -> int | None:
             except (OSError, ctypes.ArgumentError):
                 pass
         return None
+
+
+def terminated_by_limit(job: int | None) -> bool:
+    """True when the OS ended a process of *job* for exceeding a job limit
+    (``TotalTerminatedProcesses`` > 0). ``False`` off Windows, for a falsy
+    *job*, or on any failure (never raises)."""
+    if not IS_WINDOWS or _kernel32 is None or not job:
+        return False
+    try:
+        info = _JobObjectBasicAccountingInformation()
+        ok = _kernel32.QueryInformationJobObject(
+            job,
+            _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            ctypes.pointer(info),
+            ctypes.sizeof(info),
+            None,
+        )
+        if not ok:
+            _log.debug("win_job_query_failed", error=_last_error())
+            return False
+        return int(info.TotalTerminatedProcesses) > 0
+    except (OSError, ctypes.ArgumentError) as exc:
+        _log.debug("win_job_query_exception", exc_class=type(exc).__name__)
+        return False
 
 
 def assign_process(job: int | None, pid: int) -> bool:
@@ -366,4 +441,5 @@ __all__ = [
     "close_job",
     "create_job",
     "send_ctrl_break",
+    "terminated_by_limit",
 ]

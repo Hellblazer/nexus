@@ -177,7 +177,10 @@ def test_back_merge_and_cherry_pick_mechanics_are_given() -> None:
     assert any("checkout --ours" in c for c in commands)
     assert "git cherry-pick --continue" in commands
     assert "git cherry-pick --abort" in flat and "depends on a commit you skipped" in flat
-    assert "not trivially clean" in flat
+    # The lane's back-merge has conflicts (Step 11b assumes it does not). Step 11b now
+    # says "conflict-free" instead of "trivially clean", because a clean merge is not
+    # a correct one (nexus-qo7ie.36, feedback_release_and_develop_ci).
+    assert "not conflict-free in this lane" in flat
     assert "develop's `## [Unreleased]` first" in flat
     assert "deleted from it" in flat
 

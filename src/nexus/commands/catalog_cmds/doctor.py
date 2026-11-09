@@ -33,6 +33,7 @@ import os
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import click
 import structlog
@@ -297,12 +298,21 @@ def doctor_cmd(
             overall_pass = False
     if store_put_integrity:
         report = _run_store_put_integrity()
+        from nexus.sensitive_output import CliDocumentLines, withhold_flagged_rows  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+        # nexus-rfvyy.9 item 2: a flagged document's title is content (the stub under Claude Code, a badge in a
+        # terminal), in the text report and the JSON one.
+        integrity_lines = CliDocumentLines()
         if as_json:
-            json_payload["store_put_integrity"] = report
+            json_payload["store_put_integrity"] = withhold_flagged_rows(
+                report, integrity_lines, keep=("chunk_count", "manifest_count", "verified_by", "reason"),
+            )
         else:
             if _printed_anything:
                 click.echo("")
-            _print_store_put_integrity_text(report)
+            _print_store_put_integrity_text(report, integrity_lines)
+            for line in integrity_lines.notes():
+                click.echo(line)
             _printed_anything = True
         if not report["pass"]:
             overall_pass = False
@@ -1282,6 +1292,16 @@ def _run_store_put_integrity() -> dict:
     except Exception as exc:  # noqa: BLE001 — T3 unavailable: ghost detection degrades loudly, never a silent all-clean
         t3_error = str(exc)
 
+    from nexus.sensitive_output import entries_flagged  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    # nexus-rfvyy.9 item 2: the flag of each row, a merged duplicate (alias_of) following its canonical, read once;
+    # an alias whose canonical cannot be read counts flagged (fail closed).
+    flagged = entries_flagged(docs, cat=cat)
+
+    def _flag(entry: Any) -> dict:
+        # Only on a flagged row, so an unflagged row's shape is unchanged.
+        return {"sensitive": True} if str(entry.tumbler) in flagged else {}
+
     drift: list[dict] = []
     ghosts: list[dict] = []
     check_errors: list[dict] = []
@@ -1297,6 +1317,7 @@ def _run_store_put_integrity() -> dict:
             drift.append({
                 "tumbler": tumbler,
                 "title": e.title,
+                **_flag(e),
                 "chunk_count": e.chunk_count,
                 "manifest_count": manifest_count,
             })
@@ -1312,13 +1333,13 @@ def _run_store_put_integrity() -> dict:
             chash = (e.meta or {}).get("doc_id", "")
             if t3_db is None:
                 unverifiable.append({
-                    "tumbler": tumbler, "title": e.title,
+                    "tumbler": tumbler, "title": e.title, **_flag(e),
                     "reason": f"T3 unavailable: {t3_error}",
                 })
                 continue
             if not e.physical_collection:
                 # No collection to look in — nothing can be in T3.
-                ghosts.append({"tumbler": tumbler, "title": e.title, "verified_by": "no_collection"})
+                ghosts.append({"tumbler": tumbler, "title": e.title, **_flag(e), "verified_by": "no_collection"})
                 continue
             # ONE LOOKUP, SHARED WITH `nx catalog verify` (nexus-1uekf). The
             # two instruments called the same 226 rows "legitimate by
@@ -1333,13 +1354,13 @@ def _run_store_put_integrity() -> dict:
                 )
             except Exception as exc:  # noqa: BLE001 — transient per-doc lookup failure: unverifiable, never a false "GONE" verdict
                 unverifiable.append({
-                    "tumbler": tumbler, "title": e.title,
+                    "tumbler": tumbler, "title": e.title, **_flag(e),
                     "reason": f"chunk lookup failed: {exc}",
                 })
                 continue
             if not chunk_present:
                 ghosts.append({
-                    "tumbler": tumbler, "title": e.title, "verified_by": verified_by,
+                    "tumbler": tumbler, "title": e.title, **_flag(e), "verified_by": verified_by,
                 })
 
     report = {
@@ -1355,7 +1376,11 @@ def _run_store_put_integrity() -> dict:
     return report
 
 
-def _print_store_put_integrity_text(report: dict) -> None:
+def _print_store_put_integrity_text(report: dict, lines: Any) -> None:
+    def _named(row: dict) -> str:
+        # nexus-rfvyy.9 item 2: a flagged document's title is the stub (Claude Code) or carries a badge (terminal).
+        return lines.label(str(row.get("tumbler", "")), row.get("sensitive") is True, repr(row.get("title")))
+
     if report.get("error"):
         click.echo(f"store-put-integrity: ERROR - {report['error']}")
         return
@@ -1375,7 +1400,7 @@ def _print_store_put_integrity_text(report: dict) -> None:
         )
         for d in report["drift"][:20]:
             click.echo(
-                f"    {d['tumbler']}  {d['title']!r}  "
+                f"    {d['tumbler']}  {_named(d)}  "
                 f"chunk_count={d['chunk_count']} "
                 f"manifest={d['manifest_count']}"
             )
@@ -1391,7 +1416,7 @@ def _print_store_put_integrity_text(report: dict) -> None:
             f"from the titles below:"
         )
         for g in report["ghosts"][:50]:
-            click.echo(f"    {g['tumbler']}  {g['title']!r}")
+            click.echo(f"    {g['tumbler']}  {_named(g)}")
     if report.get("unverifiable"):
         click.echo(
             f"  WARNING: unverifiable ghost candidates "
@@ -1401,7 +1426,7 @@ def _print_store_put_integrity_text(report: dict) -> None:
         )
         for u in report["unverifiable"][:50]:
             click.echo(
-                f"    {u['tumbler']}  {u['title']!r}  ({u['reason']})"
+                f"    {u['tumbler']}  {_named(u)}  ({u['reason']})"
             )
     if report.get("check_errors"):
         click.echo(

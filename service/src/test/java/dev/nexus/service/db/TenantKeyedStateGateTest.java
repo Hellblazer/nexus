@@ -450,6 +450,7 @@ public class TenantKeyedStateGateTest {
         private static final String REAPER = "ChunkReaper";
         private static final String DATA_SWEEP = "NexusService.dataSweepFailuresByTenant";
         private static final String CHUNK_KEYS_JOBS = "ChunkKeysSweepJobs";
+        private static final String RECONCILE_JOBS = "EngineJobs.reconcile";
 
         private static final String HANDLE =
             "a TenantScope handle: it holds the DataSource wrapper only, the tenant is a per-call argument";
@@ -519,18 +520,22 @@ public class TenantKeyedStateGateTest {
             keyed.put("NexusService.dataSweepFailuresByTenant", DATA_SWEEP);
             keyed.put("TupleWaitRegistry.WaitKey.tenant", TUPLE_WAITS);   // the key of groups
             keyed.put("TokenCache.Entry.tenantId", TOKEN_CACHE);   // the value of map
-            keyed.put("ChunkKeysSweepJobs.jobs", CHUNK_KEYS_JOBS);   // the background retire-keys dry runs (nexus-v75nw)
-            keyed.put("ChunkKeysSweepJobs.Job.tenant", CHUNK_KEYS_JOBS);   // the value of jobs
-            keyed.put("ChunkKeysSweepJobs.Job.callerTenant", CHUNK_KEYS_JOBS);   // the value of jobs
-            keyed.put("ChunkKeysSweepJobs.Job.outcome", CHUNK_KEYS_JOBS);   // the value of jobs: the tenant's counts
+            keyed.put("ChunkKeysSweepJobs.Job.callerTenant", CHUNK_KEYS_JOBS);   // the starter of a sweep job (nexus-v75nw)
             keyed.put("ChunkKeysSweepJobs.Outcome.body", CHUNK_KEYS_JOBS);   // the counts, held by the job's outcome
+            // The shared job registry (RDR-193 Step 1). One field, one evictor name: each instance is evicted by its
+            // own evictor (the chunk-keys instance through ChunkKeysSweepJobs.evictTenant, the reconcile instance as
+            // EngineJobs.reconcile), and both reach these fields through EngineJobs.evictWhere.
+            keyed.put("EngineJobs.jobs", RECONCILE_JOBS);   // the jobs of one instance
+            keyed.put("EngineJobs.Job.tenant", RECONCILE_JOBS);   // the value of jobs
+            keyed.put("EngineJobs.Job.outcome", RECONCILE_JOBS);   // the value of jobs: the tenant's result
+            keyed.put("EngineJobs.Outcome.body", RECONCILE_JOBS);   // the result, held by the job's outcome
 
             // Not keyed: each with the reason it holds nothing a reset must clear.
-            notKeyed.put("ChunkKeysSweepJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
-                + "job that holds it is evicted under ChunkKeysSweepJobs.jobs");
+            notKeyed.put("EngineJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
+                + "job that holds it is evicted under EngineJobs.jobs");
             notKeyed.put("NexusService.chunkKeysSweepForTests", TEST_HOOK);
             notKeyed.put("NexusService.chunkKeysCredentialLiveForTests", TEST_HOOK);
-            notKeyed.put("ChunkKeysSweepJobs.maxRuntime", "the wall-clock cap a job is started with (a configured duration, "
+            notKeyed.put("EngineJobs.maxRuntime", "the wall-clock cap a job is started with (a configured duration, "
                 + "settable by a test): no tenant's data");
             for (String f : List.of("NexusService.tenantScope", "TaxonomyCentroidRepository.tenantScope",
                 "PgVectorRepository.tenantScope", "ReaperRepository.tenantScope", "WhoamiHandler.tenantScope",
@@ -564,6 +569,9 @@ public class TenantKeyedStateGateTest {
                 notKeyed.put(f, "a component of one sweep call's result record, built for that request and dropped "
                     + "with its response; nothing keeps it between requests");
             }
+            notKeyed.put("CatalogRepository.Rewritten.ledger", "a component of one stale-note repair batch's result, "
+                + "the ledger of the rows that call changed, built for that request and returned in its response "
+                + "(nexus-bivz3.24); nothing keeps it between requests");
             notKeyed.put("ChunkConstraintAdmin.TenantProbe.tenant", "a component of one table-wide probe row (the "
                 + "tenant name beside its counts), built for that request and dropped with its response");
             for (String f : List.of("ChunkKeyPlan.allowed", "ChunkKeyPlan.rowKeys", "ChunkKeyPlan.bypassPrefixes",
@@ -727,6 +735,7 @@ public class TenantKeyedStateGateTest {
                 "OwnerlessWriteActivity.REFUSED",
                 "OwnerlessWriteActivity.WOULD_REFUSE",
                 "PgVectorRepository.EXACT_FALLBACKS",
+                "PgVectorRepository.QUALIFYING_WIDENS",
                 "PgVectorRepository.ROUTED_EXACT",
                 "PgVectorRepository.ROUTED_HNSW",
                 "PgVectorRepository.SHORT_PAGE_COUNT_DEADLINES",
@@ -748,12 +757,13 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, COUNTER);
             }
-            // TEST_HOOK (22)
+            // TEST_HOOK (23)
             for (String f : List.of(
                 "CatalogRepository.afterChunkUpsertHookForTests",
                 "CatalogRepository.afterMoveCompletedHookForTests",
                 "CatalogRepository.afterMovePreconditionHookForTests",
                 "CatalogRepository.beforeReadHookForTests",
+                "CatalogRepository.noteUriRepairHookForTests",
                 "ReembedJobRepository.lockRetryHookForTests",
                 "ReembedRunner.phaseHookForTests",
                 "NexusService.reembedServedModelsForTests",

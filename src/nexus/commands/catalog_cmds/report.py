@@ -165,10 +165,18 @@ def orphans_cmd(no_links: bool) -> None:
         click.echo("No orphan entries (all documents have at least one link).")
         return
 
+    from nexus.sensitive_output import CliDocumentLines, flagged_tumblers  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    # nexus-rfvyy.9 item 2: a flagged document's title and path are content (the stub under Claude Code). The engine
+    # row carries no flag, so it is read for the page; an unreadable catalog withholds every row.
+    flagged = flagged_tumblers((r[0] for r in rows), cat=cat)
+    lines = CliDocumentLines()
     click.echo(f"Orphan entries ({len(rows)} with no links):")
     for tumbler, title, content_type, file_path in sorted(rows, key=lambda r: (r[2], r[0])):
         loc = f"  [{file_path}]" if file_path else ""
-        click.echo(f"  {tumbler:<12} {content_type:<10} {title}{loc}")
+        click.echo(f"  {tumbler:<12} {content_type:<10} {lines.label(str(tumbler), str(tumbler) in flagged, f'{title}{loc}')}")
+    for line in lines.notes():
+        click.echo(line)
 
 
 @click.command("session-summary")

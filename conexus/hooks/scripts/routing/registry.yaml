@@ -74,3 +74,23 @@ rules:
     # all-or-nothing run_hook(fail_closed=...) wrapper stays False here,
     # exactly like subagent_git_write_requires_orchestrator's split above.
     fail_closed: false
+  destructive_action_advice:
+    hook_script: destructive_action_advice.py
+    matcher: Bash|Edit|Write|MultiEdit
+    mode: warn
+    rationale: >-
+      ONE table-driven hook for the machine-checkable bright lines of the
+      destructive-action guard rules (nexus-qo7ie.36): pattern kills (pkill,
+      killall, kill fed by pgrep/ps), bulk or output-hiding git branch
+      deletes, git stash while more than one worktree exists, a background
+      job piped into tail/head/grep/wc/tee, whole-disk recursive scans, glob
+      or mtime deletes under a shared temp root, hand-run hook verbs without a
+      scratch HOME and NEXUS_CONFIG_DIR, and an edit of a shell script a live
+      shell is executing. ADVISE mode: it never denies, it returns the rule and
+      the safe alternative as additionalContext. The mode is the MODE constant
+      in the script (one line to flip to deny, with the usual escape); each
+      row of its ROWS table names its rule source. Reports each firing to
+      routing_events as outcome advise_<row id>.
+    escape_token: "# routing-allow: (deny mode only; advise mode has nothing to escape)"
+    # Advice only: a crash must never block or even slow a call.
+    fail_closed: false

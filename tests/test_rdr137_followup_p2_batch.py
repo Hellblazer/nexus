@@ -7,6 +7,7 @@ P2 batch — small focused improvements: UX, perf, defense-in-depth.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -229,3 +230,45 @@ class TestImp27ListSiblingCollectionsHandlesConformantNames:
             "code__myrepo-1-1__stub-code-1024__v1", t3,
         )
         assert siblings == ["docs__myrepo-1-1__stub-code-1024__v1"]
+
+
+def test_resolve_main_repo_does_not_cache_a_failed_lookup(tmp_path: Path) -> None:
+    """nexus-mdbds.9 review: a transient git failure must not name later lookups after the
+    worktree for the life of the process."""
+    from nexus.repo_identity import _resolve_main_repo, _resolve_main_repo_cached
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="t",
+               GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+    main = tmp_path / "mainrepo"
+    main.mkdir()
+    for argv in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "i"],
+                 ["worktree", "add", "-q", str(tmp_path / "wt"), "-b", "side"]):
+        subprocess.run(["git", *argv], cwd=main, env=env, check=True, capture_output=True, timeout=60)
+    wt = tmp_path / "wt"
+    _resolve_main_repo_cached.cache_clear()
+    with patch("nexus.repo_identity.run_bounded", side_effect=subprocess.TimeoutExpired("git", 10)):
+        assert _resolve_main_repo(wt) == wt  # the fallback, for this call only
+    assert _resolve_main_repo(wt).resolve() == main.resolve()
+
+
+def test_resolve_main_repo_caches_a_directory_outside_any_repo(tmp_path: Path) -> None:
+    """IMP-24 holds for a non-repo directory too: doc_indexer probes each document's parent."""
+    from nexus.bounded_subprocess import run_bounded as real_run  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+    from nexus.repo_identity import _resolve_main_repo, _resolve_main_repo_cached
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    calls = []
+
+    def counting(*args, **kwargs):
+        calls.append(args[0])
+        return real_run(*args, **kwargs)
+
+    _resolve_main_repo_cached.cache_clear()
+    env = {"GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    with patch.dict(os.environ, env), patch("nexus.repo_identity.run_bounded", side_effect=counting):
+        assert _resolve_main_repo(plain) == plain
+        assert _resolve_main_repo(plain) == plain
+        assert _resolve_main_repo(plain) == plain
+    assert len(calls) == 1

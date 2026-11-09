@@ -2,7 +2,8 @@
 title: "First-Class Document Sensitivity: Route, Stamp and Exempt Sensitive Documents from Every LLM and External Surface"
 id: RDR-243
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-08
 priority: medium
 author: Sam
 reviewed-by: self
@@ -823,9 +824,10 @@ does not depend on callers telling the truth.
 
 ### Prerequisites
 
-- [ ] A1, A3 and A5 verified before the phase that depends on each (A1
+- [x] A1, A3 and A5 verified before the phase that depends on each (A1
   before phase 1 closes; A3 and A5 before phase 2 starts). A7 is refuted
-  and no longer a prerequisite (Technical Design item 6).
+  and no longer a prerequisite (Technical Design item 6). Verified:
+  A1 nexus-rfvyy.6.1, A3 nexus-rfvyy.7.1, A5 nexus-rfvyy.7.2.
 - [x] Sam's answers to Q1 to Q8: all as recommended (2026-11-03).
 
 ### Minimum Viable Validation

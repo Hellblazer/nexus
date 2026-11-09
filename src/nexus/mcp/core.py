@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-46 registered tools + 13 demoted (plain functions, no @mcp.tool();
+47 registered tools + 13 demoted (plain functions, no @mcp.tool();
 the ten operator_* functions were demoted at nexus-ivi4s). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
@@ -67,6 +67,12 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistr
 from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
 from nexus.mcp._server_version import server_version as _server_version
 from nexus.mcp._tool_failure import fail as _fail
+from nexus.lua_runtime import library as _procedure_library
+from nexus.lua_runtime.runner import (
+    PROCEDURE_ERRORS as _PROCEDURE_ERRORS,
+    describe_error as _describe_procedure_error,
+    run_procedure as _run_procedure,
+)
 from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
 from nexus.plans.evidence import EvidenceRequest
 from nexus.mcp_infra import (
@@ -8737,6 +8743,62 @@ def plan_delete(
         return f"Deleted plan id={plan_id}: {label[:80]}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("plan_delete", e)
+
+
+# ── Procedure library (RDR-240 Technical Design 3, bead nexus-qo7ie.31) ──────
+# ``procedure_run`` calls ``run_procedure`` and nothing else: the lookup, the header, the
+# argument check, the static check and the limits all run inside RDR-242's ``run_script``
+# (tests/test_procedure_front_doors_lint.py pins the body). The description lists the
+# SHIPPED procedures, read once from the packaged root when this module is imported: a
+# listing that also read the server's own repo root would run ``git`` at import, and a repo
+# procedure is listed by ``nx run --list`` instead. Flip that here if the listing should
+# follow the repo root (``procedures(cwd=Path.cwd())``).
+
+#: The cap on a ``procedure_run`` result, in characters. RDR-240 TD5 pages a result at 768 KB
+#: under RDR-242's 1 MB result cap, and JSON text of that is longer than 768 K characters; the
+#: default 250,000-character cap of ``_cap_text_result`` would cut every full page.
+_PROCEDURE_RESULT_CAP_CHARS = 1_100_000
+
+
+def _procedure_run_description() -> str:
+    head = (
+        "Run a library procedure: a reviewed Lua script that reads state through read-only "
+        "verbs and returns a JSON value. It builds a record or an answer; the write, if "
+        "there is one, stays with the caller (`memory_put` and the other tools).\n\n"
+        "Use it when a procedure below covers the task, instead of improvising the steps.\n\n"
+        "Returns the procedure's JSON result as text, or an error as `<kind>: <detail>` "
+        "(kinds: args, header, name, static_check, lua, result, limit, worker, busy, "
+        "unavailable, repo).\n\n"
+        "Constraints: `args` holds exactly the arguments the procedure's header declares; "
+        "`now` and `repo` are filled by the host and are refused if passed. A checkout's own "
+        "`.nexus/procedures` run only when the server starts with NX_PROCEDURES_REPO_ROOT=1; "
+        "`nx run --list` shows what runs there.\n\n"
+        "Shipped procedures:"
+    )
+    try:
+        shipped = _procedure_library.procedures(cwd=None)
+    except OSError:
+        return head + "\n(the shipped procedures could not be read; run `nx run --list`)"
+    return head + "".join(f"\n- {p.name}: {p.summary}" for p in shipped)
+
+
+@mcp.tool(
+    title="Run Library Procedure",
+    description=_procedure_run_description(),
+    annotations={"readOnlyHint": True},
+    structured_output=False,
+)
+def procedure_run(
+    name: Annotated[str, Field(description="Procedure name, `[a-z][a-z0-9_]{0,63}`, as listed in this tool's description or by `nx run --list`.")],
+    args: Annotated[dict[str, Any], Field(description="The procedure's arguments by name, typed as its header declares (`string`, `integer`, `number`, `boolean`).")] = {},  # noqa: B006 — never mutated; pydantic copies a default
+) -> str:
+    try:
+        result = _run_procedure(name, args)
+        return _cap_text_result(json.dumps(result, ensure_ascii=False), "procedure_run", _PROCEDURE_RESULT_CAP_CHARS)
+    except _PROCEDURE_ERRORS as e:
+        return _fail(_describe_procedure_error(e))
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _fail(_mcp_tool_error("procedure_run", e))
 
 
 

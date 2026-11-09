@@ -81,6 +81,7 @@ llama-index-core==0.14.25
 llama-index-instrumentation==0.6.0
 llama-index-workflows==2.26.1
 loguru==0.7.3
+lupa==2.8
 lxml==6.1.3
 magika==1.0.3
 mammoth==1.13.0

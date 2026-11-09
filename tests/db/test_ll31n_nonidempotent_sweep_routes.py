@@ -110,6 +110,18 @@ class TestCatalogClientSweeps:
             client.ghost_sweep(dry_run=False)
         _assert_idempotent_false(m)
 
+    def test_repair_stale_note_uris_live(self, client: HttpCatalogClient) -> None:
+        """nexus-bivz3.24: a blind resend after a lost response would report the post-rewrite census."""
+        with patch.object(client, "_post", return_value={}) as m:
+            client.repair_stale_note_uris(apply=True)
+        _assert_idempotent_false(m)
+
+    def test_repair_stale_note_uris_dry_run_keeps_the_retry(self, client: HttpCatalogClient) -> None:
+        with patch.object(client, "_post", return_value={}) as m:
+            client.repair_stale_note_uris()
+        m.assert_called_once()
+        assert m.call_args.kwargs.get("idempotent") is True
+
     def test_ghost_sweep_dry_run_keeps_the_retry(self, client: HttpCatalogClient) -> None:
         """A dry run is a pure read on the engine, so it stays retryable."""
         with patch.object(client, "_post", return_value={}) as m:

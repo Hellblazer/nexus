@@ -145,6 +145,14 @@ class NoteUriRouteGateTest {
         exempt(CAT, "requireCollectionUrisFree", Cls.MOVE, "the rename and re-home pre-check on stored URIs, over the shared moveUriCollisions; takes no caller URI (nexus-ql5m5)"),
         exempt(CAT, "noteUriColumn", Cls.MOVE, "maps a collection-scoped table to its source_uri column for the re-home rewrite (nexus-ql5m5)"),
         exempt(CAT, "moveTarget", Cls.MOVE, "picks the collection update's move: a field map setting physical_collection without a non-null source_uri (nexus-bivz3.3)"),
+        // nexus-bivz3.24: the stale-note repair reads stored URIs and rewrites them by collection; no caller URI enters.
+        exempt(CAT, "liveStaleNoteRows", Cls.MOVE, "the repair's live read: note rows whose stored URI does not open with their own collection (nexus-bivz3.24)"),
+        exempt(CAT, "tombstonedStaleNoteRows", Cls.MOVE, "the repair's tombstoned read, counted and never rewritten (nexus-bivz3.24)"),
+        exempt(CAT, "liveExportRows", Cls.MOVE, "the repair's census-only read of nxexp:// rows (nexus-bivz3.24)"),
+        exempt(CAT, "docDetails", Cls.MOVE, "the repair's merge entries: reads a live document's stored URI beside its chunk count and satellites, for the pair-choosing rule and the merge ledger; no caller URI enters (nexus-bivz3.24)"),
+        exempt(CAT, "liveUriHolders", Cls.MOVE, "the repair's twin lookup on STORED target URIs it built from stored rows (nexus-bivz3.24)"),
+        exempt(CAT, "rewriteStaleNotes", Cls.MOVE, "the repair's one-transaction rewrite of the catalog, aspect and highlight URIs of stale notes; the new value is built from the row's own collection (nexus-bivz3.24)"),
+        exempt(CAT, "asMap", Cls.MOVE, "renders one census row of the repair, keyed source_uri; returns the stored value (nexus-bivz3.24)"),
         exempt(CAT, "refuseCollectionMoveCollisions", Cls.MOVE, "the collection update's pre-check on stored URIs; a caller's own source_uri is canonicalized in buildUpdateDocumentQuery (nexus-bivz3.3)"),
         // ── VECTORS ───────────────────────────────────────────────────────
         exempt(PGV, "enrichSearchRows", Cls.VECTORS, "include_source_uri: attaches the stored URI to each search row"),

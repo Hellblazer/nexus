@@ -1773,10 +1773,19 @@ class TestBranch0RefreshTask:
         monkeypatch.setenv("NX_T1_SESSION", first_token)
         mint_calls_before_loop = len(_MINT_CALLS)
 
+        # Wait on the CONDITION (two refresh ticks), not a fixed sleep: a loaded CI
+        # runner missed the old 0.23 s window at a 0.05 s cadence ("assert 2 >= 1 + 2",
+        # develop c18022537, shard 6). The 5 s bound only caps a loop that never ticks.
         async def _run() -> None:
             task = asyncio.create_task(_t1_session_refresh_loop(session_id, 0.05))
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 5.0
             try:
-                await asyncio.sleep(0.23)
+                while len(_MINT_CALLS) < mint_calls_before_loop + 2:
+                    assert not task.done(), "the refresh loop exited instead of ticking"
+                    if loop.time() >= deadline:
+                        break
+                    await asyncio.sleep(0.01)
             finally:
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
@@ -1784,8 +1793,9 @@ class TestBranch0RefreshTask:
 
         asyncio.run(_run())
 
-        # At least a couple of refresh ticks fired in ~0.23s at a 0.05s cadence.
-        assert len(_MINT_CALLS) >= mint_calls_before_loop + 2
+        assert len(_MINT_CALLS) >= mint_calls_before_loop + 2, (
+            f"the refresh loop ticked {len(_MINT_CALLS) - mint_calls_before_loop} times in 5 s at a 0.05 s cadence"
+        )
         refreshed_token = read_t1_session_lease(session_id, config_dir)
         assert refreshed_token is not None
         assert refreshed_token != first_token, (

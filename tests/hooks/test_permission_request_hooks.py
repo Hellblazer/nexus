@@ -258,6 +258,21 @@ class TestDestructiveToolsRequireManualApproval:
         assert _run_nx_hook(tool_name, hook_event_name="PreToolUse") == ""
         assert _run_nx_hook(tool_name, hook_event_name="PermissionRequest") == ""
 
+    def test_procedure_run_is_auto_approved_on_both_events(self) -> None:
+        """nexus-qo7ie.31: Sam chose auto-approval (threads/marlowe ask procedure-run-autoapprove,
+        2026-11-08): the sandboxed, read-only procedure runner skips the prompt."""
+        import json as _json
+
+        from nexus.hooks import auto_approve
+
+        tool_name = "mcp__plugin_conexus_nexus__procedure_run"
+        assert tool_name not in _MANUAL_APPROVAL_REQUIRED
+        assert tool_name in auto_approve._ALLOWED_TOOLS
+        assert _parse_decision(_run_nx_hook(tool_name)) == "allow"
+        assert _parse_decision(_run_nx_hook(tool_name, hook_event_name="PermissionRequest")) == "allow"
+        pre = _json.loads(_run_nx_hook(tool_name, hook_event_name="PreToolUse"))["hookSpecificOutput"]
+        assert pre["permissionDecision"] == "allow"
+
     def test_exempted_tools_are_still_actually_registered(self) -> None:
         """A name in _MANUAL_APPROVAL_REQUIRED that no longer exists on any
         server would silently stop exempting anything real — catch a rename

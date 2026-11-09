@@ -1673,6 +1673,45 @@ For each candidate, parses the path component out of the stored `chroma://<colle
 | `--apply` | Perform the rewrite (default: dry-run report only) |
 | `--json` | Emit JSON instead of the human-readable report |
 
+### nx catalog repair-note-uris
+
+```
+nx catalog repair-note-uris [--apply] [--merge] [--json] [--sample N] [--batch-size N] [--ledger PATH]
+```
+
+Repairs note `source_uri` values that name a collection the note no longer lives in (nexus-bivz3.24, RDR-231 critique Issue 7). A note moved by a re-home, a collection update or a rename before RDR-231 step 4 keeps `nx-note://X/t` on a row living in `Y`; the `chroma://` to `nx-note://` backfill changed only the scheme, so the row is still stale and a re-put under `Y` mints a duplicate. The census and the rewrite run in the engine (`POST /v1/catalog/note_uri_repair`, one tenant, one SQL census), and the verb needs an engine that has the route (an older one answers with a named refusal). Dry run by default; the census is always printed.
+
+Classes of live note row whose URI collection differs from `physical_collection`:
+
+- **rewrite candidates**: no other live row holds `nx-note://<physical collection>/<title>`, and no other stale row rewrites onto it. `--apply` rewrites the catalog row, its `document_aspects` row and its `document_highlights` row in ONE transaction, each by its own value (a legacy `chroma://` spelling comes out as `nx-note://`). A twin that appears while it runs is a 409 naming the holder, with nothing written for that batch.
+- **merge candidates**: a live twin holds the target in either spelling (`twin`), or two stale rows would rewrite onto one URI (`sibling`). Listed by the plain verb and merged only by `--merge` (below): `POST /v1/catalog/merge` moves neither chunks, aspects nor highlights, so the row that holds the chunks survives. Each entry carries what a choosing rule reads: `chunk_count`, `indexed_at`, `has_aspects`, `has_highlights`, and the twin's under a `twin_` prefix.
+- **refused**: a row whose physical collection is blank or file-routed (`rdr__`, `docs__`, `code__`), or whose URI has no title part. Reported, never rewritten.
+- **tombstoned**: stale rows with `deleted_at` set. Counted, never rewritten: only live rows can mint a duplicate. A restore makes one live again, so a restored stale tombstone appears in the next census as a rewrite or merge candidate.
+- **`nxexp://` export copies**: census only, by scope. The inner collection of `nxexp://<target>/<note uri>` names the export's source by design, so it is not stale; the census counts the copies whose `<target>` is no longer the collection they live in. That count grows with every rename and re-home, because the move paths skip `nxexp://` values (`NoteUri.moveTo`); a re-import into the new collection then misses the copy and mints another. Repairing it needs its own rule and is a follow-on.
+
+`--apply` runs the census, rewrites in batches of `--batch-size` until no rewrite candidate is left, then prints the census again. A chain (a stale row whose target is held by another stale row) needs a second pass once the first has moved, so it re-censuses and goes round again while candidates remain, up to `ceil(rewrite candidates / batch size) + 10` batches (the slack covers chains up to ten deep). It stops with exit 1 if a batch rewrites nothing while candidates remain, at that cap, and on a 409.
+
+**The ledger is the only undo record.** `--apply` writes one JSON line per row changed, in all three tables (`catalog_documents` keyed by tumbler, `document_aspects` and `document_highlights` by row id, with `doc_id`), each with `old_uri` and `new_uri` and its `batch`, flushed to disk after every batch before the next is asked for. Default file: `nx-note-uri-repair-<UTC timestamp>.jsonl` in the working directory; an existing file is appended to, and a new one is created owner-only (it names every rewritten note's title). A response lost to a timeout can leave one batch rewritten with no ledger lines: the engine keeps no other record of the old URIs, so that batch cannot be undone from the ledger; the timeout message says so. A later census shows its rows as already in their own collection, so re-running is safe. If the engine returns a batch whose ledger is unusable, the batch has still committed: the raw report is saved beside the ledger as `<ledger>.rejected` and the run stops.
+
+**The merge pass (`--merge`).** Sam's ruling (RDR-231 Decision 6): chunks decide, because `POST /v1/catalog/merge` moves no chunks, aspects or highlights. "Holds chunks" is `catalog_documents.chunk_count`, the column `nx catalog merge` reads for its bivz3.27 refusal; it is not a manifest recount (`nx catalog verify` recounts). For a stale row S and the live twin W holding its target, W wins by default; S wins only if S holds chunks and W holds none, or both hold chunks and S's `indexed_at` is strictly newer (a missing one is the oldest); ties go to W. Stale rows that would rewrite onto one URI are ranked by the same key, a tie going to the lowest tumbler; the others merge into the winner. A twin shared by two stale rows is one group.
+
+- W wins: `merge(S -> W)`, one request. W keeps its URI; S's becomes `''` and S leaves the census for good.
+- S wins: S's stale losers are merged into it first, the twin W is merged last, then S alone is rewritten at once. The window is real: between W's merge and the rewrite S holds its old URI and nothing holds the new one, so a re-put under the new collection inside it mints a third row. With W merged last it is one request long, and a refused or failed earlier merge leaves W in place (it keeps the URI) and S unrewritten. A run that stops inside the window (the rewrite refused, or the connection dropped) is finished by `nx catalog repair-note-uris --apply`, which rewrites S, now a plain rewrite candidate.
+- The census can be a round old, so the pass reads both rows' `chunk_count` again just before each merge and refuses, without a call, a pair whose loser holds chunks while the winner holds none.
+- The loser's aspects and highlights stay behind the alias; nothing moves them, and no aspect read follows `alias_of`. So do its chunks and meta (tags, ttl): when both rows hold chunks, the loser's chunks stay under its tumbler and its tags and ttl are not carried to the winner.
+- A refused merge (self, not found, already aliased, cycle) is reported for that pair and the run goes on; a pair is tried once. Any other engine error, or a request that got no answer (timeout, refused or dropped connection: it may have been applied), stops the run with the ledger written. There is no `--force`. `--sample` and `--batch-size` do not apply with `--merge`.
+- `--merge` is a dry run (each group's winner and why). `--merge --apply` merges in rounds of up to 500 listed pairs, prints the census first and after, and writes the ledger. Plain rewrite candidates are left to `--apply` alone.
+- The ledger (`--ledger PATH`, owner-only) has, per pair, a `merge-intent` line written before the request (the loser's URI before, the only copy a lost response would take), then a `merge` line (`winner`, `loser`, `loser_uri_before`, `loser_uri_after`, `rule`, `outcome`, `detail`, `links_remapped`, `rewrite_needed`), then for a stale winner a `rewrite-intent` line, `rewrite` lines (the rows changed, as for `--apply`) and a `rewrite-result` line saying whether the rewrite followed. The rewrite counts as followed only when the engine's ledger names the winner's row; a response that names another row or cannot be read (the request may have committed) is kept raw in the `rewrite-result` line and stops the run. A merge is undone by restoring the loser's URI and clearing its `alias_of`; the ledger records the links remapped as counts only.
+
+| Flag | Description |
+|------|-------------|
+| `--apply` | Perform the rewrite (default: dry-run census only) |
+| `--json` | Emit JSON: the engine's report, or with `--apply` `{before, rewritten, batches, ledger, after}` |
+| `--sample N` | Example rows listed per class (0 to 500, default 20). The counts are never capped |
+| `--batch-size N` | Rewrite candidates one engine transaction rewrites (1 to 5000, default 1000) |
+| `--merge` | The merge pass above (dry run by default; `--merge --apply` performs it) |
+| `--ledger PATH` | With `--apply`: the undo ledger file (default a timestamped `.jsonl` in the working directory) |
+
 ### nx catalog backfill-etags
 
 ```
@@ -4561,9 +4600,23 @@ with the bundle's `pg_upgrade`. The engine refuses a cluster below 17 and
 It is the scripted form of "A local cluster older than PostgreSQL 17" in
 [the migration runbook](migration-runbook.md). Linux and macOS only.
 
-**Not yet run against a real pre-17 cluster; copy the data directory first.** Nothing locks the service while
-the upgrade runs: close other `nx` sessions and Claude Code sessions with the conexus plugin, and disable an
-autostart unit (launchd, systemd), before `--apply`.
+**Run once against a real pre-17 cluster on Linux, not yet with the service start; copy the data directory first.** `--apply` and `--check-only`
+hold the storage service's spawn lock (`<config dir>/storage_service_spawn.lock`, the lock a supervisor takes
+in its start) for the whole run, and are refused up front when another process holds it. A concurrent
+`nx daemon service start` then waits on the lock instead of starting a supervisor on the half-built cluster:
+the verb times out waiting for the service, and the supervisor it spawned stays blocked on the lock and
+proceeds (or exits, if another one has started meanwhile) once the lock is freed. Each concurrent start leaves
+one such blocked supervisor. That the verb waits is tested; how an autostart unit (launchd, systemd) behaves
+while the lock is held, including its own start timeout and restart limits, is not, so stop the unit before
+`--apply`. The lock is freed just before the command starts the service again.
+
+`--apply` refuses while the storage service or the old PostgreSQL server is running, and stops neither: it
+finds the service the way `nx daemon service stop` does (a live lease, then the process table) and the
+server with the old `pg_ctl status`. The message names `nx daemon service stop --config-dir <dir>` and, for
+a server, `<old pg_ctl> -D <data> -m fast stop`; run them, stop the server's service manager (brew services,
+systemd) so it does not restart, and run the command again. Nothing is changed by a refusal. `nx daemon
+service stop` leaves a PostgreSQL server that nx started running by default, so a running server is the
+usual second refusal. The lock does not keep a server that another manager restarts from coming back.
 The command is tested against fake PostgreSQL binaries only. Until a real run
 exists, take a copy of the data directory (`cp -a <data> <copy>`) before
 `--apply`; the dry run and `--apply` both print this reminder.
@@ -4579,8 +4632,10 @@ Without a mode flag the command changes nothing: it validates the cluster and
 `initdb` into a temporary directory (never the real data directory) with the
 options nx creates its own clusters with, runs `pg_upgrade --check` against the
 real cluster (it starts and stops the old server on it and does not modify it),
-and removes the temporary directory; the old server must not be running. `--apply` stops the service, stops the old server with the old
-`pg_ctl` and checks it is down, moves the data directory to `<data>.old`, runs
+and removes the temporary directory; the old server must not be running. If the check fails or is interrupted,
+`--check-only` stops the old server only when `pg_upgrade --check` started it (`pg_ctl status` found no server
+running when it began; a stale pid file from a crash does not count); a server someone else started meanwhile is left running and the output says so. `--apply`
+checks with the old `pg_ctl` that no server runs, moves the data directory to `<data>.old`, runs
 `initdb` (`--auth=trust` for the upgrade; the next service start converts it to
 `scram-sha-256`), `pg_upgrade --check` and `pg_upgrade`, starts the service, then
 runs `update_extensions.sql` (it looks in its work directory and under
@@ -5386,8 +5441,12 @@ Start a persistent `mineru-api` FastAPI process for PDF extraction. Stores PID f
 ### nx mineru stop
 
 ```
-nx mineru stop
+nx mineru stop [--force]
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--force` | Clear the PID file even when the server cannot be stopped from here (it runs in another PID namespace that shares the config directory, or its process could not be identified). Nothing is signalled for such a server |
 
 Stop the running MinerU server: SIGTERM, then SIGKILL after 10s, sent to
 the PID file's whole process group — MinerU's multiprocessing workers and
@@ -5401,6 +5460,23 @@ line cannot be read at all — a `ps` timeout reads the same as a vanished
 process — `stop` signals nothing and keeps the PID file rather than risk
 orphaning a server that is still ours; re-run `nx mineru stop`, or signal
 the group yourself.
+
+The PID file records the PID namespace it was written from (`pid_ns`, Linux),
+as the service leases do (nexus-dyfsw). A file from another namespace that
+shares the config directory (a container sharing `HOME`) names a PID that
+means nothing here, so it is never signalled and is judged by its server: a
+`/health` body that carries the MinerU counters (`processing_tasks` and
+`queued_tasks`), or a `started_at` under 120 s old (the server may still be
+loading models). Such a server that is up makes `stop` exit 1 and keep the
+file, and `nx mineru start` report it running instead of starting a second
+one; `nx mineru stop --force` clears the record. A file from this namespace, or
+one with no `pid_ns`, is judged by PID alone, whatever answers on its port.
+
+A foreign server counts as alive only when its recorded port is reachable from
+the reader at `127.0.0.1`, as in a shared network namespace. A container on the
+default Docker bridge network is not covered: its port is not reachable from the
+host, so the file it wrote is alive for 120 s after `started_at` and stale after
+that, and `nx mineru start` can then start a second server.
 
 ### nx mineru status
 
@@ -6861,6 +6937,25 @@ never a fabricated zero. `--json` keeps every key present regardless;
 only the value's shape (number/dict vs. string) changes on failure. The
 text form is one line per figure, diffable against a previous run's
 output — "SAME QUERIES, SAME BUCKETS, EVERY TIME" (playbook §4.5).
+
+---
+
+## nx run
+
+```
+nx run NAME [--args-file F | -]
+nx run --list
+```
+
+Run a library procedure (RDR-240, RDR-242): a reviewed Lua script that runs in a sandboxed worker process, reads state through read-only verbs and returns a JSON value. The command calls the same runner as the MCP tool `procedure_run` and nothing else. The result is printed as JSON on standard output.
+
+`NAME` matches `[a-z][a-z0-9_]{0,63}`. The procedure's arguments are a JSON object, read from the file `F` with `--args-file F`, or from standard input with `--args-file -` or a bare `-`; with neither, they are `{}`. The names and types the procedure accepts are in its header (`string`, `integer`, `number`, `boolean`); the host fills `now` and `repo` itself and refuses a caller who passes them. An argument file that is not valid JSON, or not an object, is a usage error (exit 2).
+
+An error prints as `<kind>: <detail>` on standard error and the exit status is 1. The kinds are `args`, `header`, `static_check`, `lua` and `result` (the script or its call was refused or raised), `name` (the name is outside the rule or is a Windows device name, is in neither root, resolves outside its root or its repository, is a repo procedure named like a shipped one, is in the repo root while that is off, or could not be read; the detail begins with the reason: `invalid_name`, `not_found`, `outside_root`, `shadows_shipped`, `repo_root_off` or `unreadable`), `limit` (a resource limit ended the run), `worker`, `busy` (the client already runs its maximum of workers), `unavailable` (this build has no runtime) and `repo` (git could not say where the repository is). An error of a kind not listed prints as `<ErrorClass>: <message>`.
+
+`--list` prints one line per procedure, `NAME<TAB>SUMMARY`, with `(repo)` added for a procedure from the checkout's `.nexus/procedures/`. The procedures that ship with `nx` are always listed. A checkout's own procedures run, and are listed, only while the environment variable `NX_PROCEDURES_REPO_ROOT` is exactly `1`; otherwise `--list` says so on standard error, and `nx run NAME` for a name found only there is refused with the reason `repo_root_off`.
+
+**The `transcripts` procedure.** `nx run transcripts` (arguments `{"query", "since", "until", "project"}`) reads Claude Code transcripts. Its `project` is ONE Claude Code project directory name under `~/.claude/projects`, or `all`. A repository's linked-worktree sessions sit in their own directories (`-Users-me-git-nexus-wt-<name>` beside `-Users-me-git-nexus`), so a per-repository count runs the procedure for each directory and sums them: measured 2026-11-08, 98 of the nexus repository's 178 main sessions in a two-week window were in the primary checkout's directory. Counts are floors where a record was cut to 1 MB (`truncated_records`). A result is paged: run again with `since` set to `next_since` and the returned `until` until `next_since` is absent.
 
 ---
 

@@ -876,11 +876,18 @@ def _registered_mineru_outside_generation(
     if current is None:
         return None
     try:
-        from nexus._mineru_pid import is_process_alive, read_pid_file  # noqa: PLC0415 — deferred, avoids an import cycle
+        from nexus._mineru_pid import (  # noqa: PLC0415 — deferred, avoids an import cycle
+            is_process_alive,
+            pid_file_from_other_namespace,
+            read_pid_file,
+        )
     except Exception:  # noqa: BLE001 — pid-file helpers unavailable: nothing to judge
         return None
     info = read_pid_file()
     if not info:
+        return None
+    if pid_file_from_other_namespace(info):
+        # Its pid names nothing here, and this row feeds an automatic SIGTERM (nexus-dyfsw).
         return None
     pid = info.get("pid")
     python = info.get("python")

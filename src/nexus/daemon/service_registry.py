@@ -260,6 +260,56 @@ class ElectionBusyError(ServiceRegistryError):
     """
 
 
+class SpawnLockBusyError(ServiceRegistryError):
+    """Raised by :meth:`ServiceRegistry.try_hold_spawn_lock` when another process holds the tier's spawn lock
+    (a supervisor mid-start, or another holder such as ``nx daemon service pg-upgrade``)."""
+
+
+#: The tiers whose supervisor takes ``<tier>_spawn.lock`` in its ``start()``. Holding another tier's lock would
+#: exclude nothing, so :meth:`ServiceRegistry.try_hold_spawn_lock` refuses it. A tier that gains a spawn lock is
+#: added here in the same change.
+SPAWN_LOCK_TIERS: frozenset[str] = frozenset({"storage_service"})
+
+
+def spawn_lock_filename(tier: str) -> str:
+    """The spawn-lock file's name inside the registry directory: ``<tier>_spawn.lock``.
+
+    One definition for the lock a supervisor takes in its ``start()`` and the lock :meth:`ServiceRegistry.try_hold_spawn_lock`
+    hands to anyone who must keep every start out for a while.
+    """
+    return f"{tier}_spawn.lock"
+
+
+class SpawnLockHold:
+    """A held spawn lock. :meth:`release` is idempotent; the kernel frees it too when the holder dies."""
+
+    def __init__(self, fd: int, path: Path) -> None:
+        self._fd: int | None = fd
+        self.path = path
+
+    @property
+    def held(self) -> bool:
+        return self._fd is not None
+
+    def release(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        try:
+            _locking.unlock_fd(fd)
+        except OSError:
+            pass
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    def __enter__(self) -> "SpawnLockHold":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
+
+
 class ServiceIdentityError(ServiceRegistryError):
     """The service identity could not be derived (RDR-224 Gap 3, nexus-f9bgu.16).
 
@@ -697,6 +747,42 @@ class ServiceRegistry:
 
     # -- publish / heartbeat / discover / relinquish ------------------------
 
+    def spawn_lock_path(self) -> Path:
+        """The tier's spawn-lock file (``<dir>/<tier>_spawn.lock``), the one its supervisor's ``start()`` takes."""
+        return self._dir / spawn_lock_filename(self._tier)
+
+    def try_hold_spawn_lock(self) -> SpawnLockHold:
+        """Take the tier's spawn lock WITHOUT waiting and keep it until :meth:`SpawnLockHold.release`.
+
+        While it is held no supervisor of this tier gets past the lock in its ``start()``: a start waits (the
+        supervisor blocks; ``nx daemon service start`` times out waiting for its lease). It does not stop a service
+        that is already running, and it is not the election flock: heartbeats, publishes and ``stop`` never take it,
+        so a holder may call ``nx daemon service stop`` as a child, but must release before a child ``start``
+        (a supervisor started while the holder still holds it would wait on the holder).
+
+        Raises :class:`SpawnLockBusyError` when someone else holds it, and :class:`ServiceRegistryError` for a tier
+        outside :data:`SPAWN_LOCK_TIERS` (its supervisor takes no spawn lock, so a hold would exclude nothing).
+        """
+        if self._tier not in SPAWN_LOCK_TIERS:
+            raise ServiceRegistryError(
+                f"the {self._tier} tier has no spawn lock to hold (only {', '.join(sorted(SPAWN_LOCK_TIERS))} do)"
+            )
+        self._ensure_dir()
+        path = self.spawn_lock_path()
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            _locking.lock_fd(fd, blocking=False)
+        except BlockingIOError:
+            os.close(fd)
+            raise SpawnLockBusyError(
+                f"the {self._tier} spawn lock {path} is held by another process (a service start in progress, "
+                "or another upgrade)"
+            ) from None
+        except BaseException:
+            os.close(fd)
+            raise
+        return SpawnLockHold(fd, path)
+
     def election(self, scope_key: str) -> contextlib.AbstractContextManager[None]:
         """PUBLIC spawn-guard election for *scope_key* (nexus-1qdb9).
 
@@ -739,7 +825,7 @@ class ServiceRegistry:
                 ttl=self._ttl,
                 endpoint=dict(endpoint),
                 version=version,
-                payload={**_pid_ns_field(), **(payload or {})},
+                payload={**pid_ns_field(), **(payload or {})},
             )
             self._write_record_atomic(record)
             return record
@@ -2115,10 +2201,15 @@ def own_pid_namespace() -> str | None:
         return None
 
 
-def _pid_ns_field() -> dict[str, str]:
-    """``{"pid_ns": <id>}`` for a lease payload where the id can be read, else nothing (nexus-dyfsw)."""
+def pid_ns_field() -> dict[str, str]:
+    """``{"pid_ns": <id>}`` for a record's payload where the id can be read, else nothing (nexus-dyfsw).
+
+    A lease payload and the MinerU pid file both stamp their publisher with it, and
+    :func:`payload_from_other_pid_namespace` reads it back.
+    """
     ns = own_pid_namespace()
     return {"pid_ns": ns} if ns else {}
+
 
 
 def lease_holder_invisible(
@@ -2155,7 +2246,16 @@ def lease_from_other_pid_namespace(record: LeaseRecord) -> bool:
     lease through a shared directory), is other: its pids mean nothing here. A Linux reader that
     cannot read its own namespace keeps the old rule.
     """
-    theirs = record.payload.get("pid_ns")
+    return payload_from_other_pid_namespace(record.payload)
+
+
+def payload_from_other_pid_namespace(payload: Mapping[str, Any]) -> bool:
+    """:func:`lease_from_other_pid_namespace` for any record that carries a ``pid_ns`` field.
+
+    The MinerU pid file is such a record (nexus-dyfsw site 3); it reads the same rule rather than
+    keeping a copy of it.
+    """
+    theirs = payload.get("pid_ns")
     if not theirs:
         return False
     ours = own_pid_namespace()

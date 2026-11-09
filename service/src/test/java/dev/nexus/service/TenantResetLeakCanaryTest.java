@@ -189,6 +189,8 @@ class TenantResetLeakCanaryTest {
         "ChunkKeysSweepJobs", "its jobs are filled by a background dry run of the key-retirement sweep (the "
             + "sweep route's async field), which needs a registered root or tenant credential and a vector backend; "
             + "ChunkKeysSweepJobsTest and TenantKeyedEvictorsTest cover its evictor",
+        "EngineJobs.reconcile", "its jobs are filled by the catalog reconcile commit route, which RDR-193 Step 2 "
+            + "adds; until then no route starts one. EngineJobsTest and TenantKeyedEvictorsTest cover its evictor",
         "ChunkReaper", "its timeout streaks and resume cursors are filled by a reaper pass over a T3 collection, "
             + "which needs a vector backend this engine does not have; TenantKeyedEvictorsTest covers its evictor",
         "OwnerlessLogLimiter", "its states are filled by an ownerless-chunk log line the reaper emits, so it needs "

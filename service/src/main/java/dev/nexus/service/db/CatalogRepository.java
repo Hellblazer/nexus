@@ -3184,7 +3184,7 @@ public final class CatalogRepository {
             ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CORPUS,
                        CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH,
-                       CATALOG_DOCUMENTS.DELETED_AT)
+                       CATALOG_DOCUMENTS.DELETED_AT, CATALOG_DOCUMENTS.SENSITIVE, CATALOG_DOCUMENTS.ALIAS_OF)
                .from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
                // TUMBLER breaks ties: a batch delete stamps every row with one
@@ -3205,6 +3205,14 @@ public final class CatalogRepository {
                    m.put("content_type", r.get(CATALOG_DOCUMENTS.CONTENT_TYPE));
                    m.put("file_path", r.get(CATALOG_DOCUMENTS.FILE_PATH));
                    m.put("deleted_at", r.get(CATALOG_DOCUMENTS.DELETED_AT));
+                   // nexus-rfvyy.9 item 2: a tombstone keeps its flag, and no live-only read (/show, /resolve_many)
+                   // returns a tombstone, so the trash listing is where a client learns it (nx catalog trash
+                   // withholds a flagged one's title).
+                   m.put("sensitive", Boolean.TRUE.equals(r.get(CATALOG_DOCUMENTS.SENSITIVE)));
+                   // A merged duplicate's own flag is unset while its canonical holds the content; the client follows
+                   // alias_of to the canonical's flag (its canonical is usually live, so a live read answers).
+                   String aliasOf = r.get(CATALOG_DOCUMENTS.ALIAS_OF);
+                   m.put("alias_of", aliasOf == null || aliasOf.isEmpty() ? null : aliasOf);
                    return m;
                })
         );
@@ -4083,6 +4091,473 @@ public final class CatalogRepository {
             result.put("links_dropped", linkCounts.dropped());
             return result;
         });
+    }
+
+    // ── RDR-231 follow-on (nexus-bivz3.24): repair of note URIs naming a collection the note left ──
+
+    /**
+     * Test-only: called with {@code "locked"} (the candidate rows are locked, before the holder re-check) and
+     * {@code "checked"} (after it, before the UPDATE). Static, so a test that goes through the HTTP service, which owns
+     * its own repository instance, reaches it too. Null (a no-op) in production.
+     */
+    private static volatile java.util.function.Consumer<String> noteUriRepairHookForTests;
+
+    /** Test-only: install (or clear with {@code null}) the {@link #noteUriRepairHookForTests} hook. */
+    public static void setNoteUriRepairHookForTests(java.util.function.Consumer<String> hook) {
+        noteUriRepairHookForTests = hook;
+    }
+
+    /** One stale note row as the repair classifies it. {@code twin} and {@code reason} are set on merge candidates. */
+    private record StaleNote(String tumbler, String uri, String collection, String newUri, String reason, String twin) {
+        Map<String, Object> asMap() {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("tumbler", tumbler);
+            m.put("collection", collection);
+            m.put("source_uri", uri);
+            if (newUri != null) m.put("new_uri", newUri);
+            if (twin != null) m.put("twin", twin);
+            if (reason != null) m.put("reason", reason);
+            return m;
+        }
+    }
+
+    /**
+     * RDR-231 follow-on (nexus-bivz3.24; the repair half of gate critique Issue 7). A note moved by re-home, a
+     * collection update or a rename before RDR-231 step 4 keeps a URI naming the collection it left
+     * ({@code nx-note://X/t} on a row living in Y). A re-put under Y misses it and mints a duplicate. This is the census
+     * of those rows and, with {@code apply}, the repair of the ones that are safe to repair.
+     *
+     * <p><b>Classes</b> (live rows, one tenant). A NOTE row is one {@link NoteUri#isNote} calls a note, in either
+     * spelling. It is <i>stale</i> when its URI's collection segment is not its {@code physical_collection}.
+     * <ul>
+     *   <li><b>rewrite</b> ({@code rewrite}): no other live row holds {@code nx-note://<physical>/<title>}, and no other
+     *       stale row rewrites onto it. {@code apply} rewrites these.</li>
+     *   <li><b>merge</b> ({@code merge}): a live row already holds the target URI in either spelling ({@code twin}), or
+     *       two stale rows would rewrite onto one URI ({@code sibling}). Which row wins a merge is a design choice
+     *       ({@code POST /v1/catalog/merge} moves neither chunks nor aspects nor highlights); the census lists them and
+     *       nothing here merges. Each sampled entry carries what a choosing rule reads of the row and of its twin:
+     *       {@code chunk_count}, {@code indexed_at}, {@code has_aspects}, {@code has_highlights} (the twin's under a
+     *       {@code twin_} prefix).</li>
+     *   <li><b>refused</b> ({@code refused}): the row's physical collection is blank or file-routed ({@code docs__},
+     *       {@code code__}, {@code rdr__}), where a note URI would read as residue, or the URI has no title part. Reported,
+     *       never rewritten.</li>
+     *   <li><b>tombstoned</b> ({@code tombstoned}): stale rows with {@code deleted_at} set. Counted, never rewritten:
+     *       catalog-016 constrains only live rows, so a tombstone cannot cause a duplicate. A restore makes the row live
+     *       again, so a restored stale tombstone appears in the next census as a rewrite or merge candidate.</li>
+     *   <li><b>export copies</b> ({@code export_copies}): live {@code nxexp://<target>/<note uri>} rows. Their inner
+     *       collection names the SOURCE of the export by design, so a difference from {@code physical_collection} is not
+     *       staleness. {@code export_copies_target_moved} counts the ones whose <i>target</i> segment is no longer the
+     *       collection they live in. NOT repaired here, by scope: {@link NoteUri#moveTo} skips {@code nxexp://} values, so
+     *       every rename and re-home leaves its copies' target segment behind and this count grows with each. The risk is
+     *       a re-import into the new collection, which looks the copy up by its old qualified identity, misses it and
+     *       mints another. A repair needs its own rule (rewrite the target segment, with a collision check) and is a
+     *       follow-on.</li>
+     * </ul>
+     *
+     * <p><b>Apply</b> rewrites up to {@code limit} rewrite candidates, in tumbler order, in ONE transaction: the
+     * document rows are locked (tumbler order, as {@link #mergeDocuments} does), re-read, and the target URIs re-checked
+     * against the live holders (the {@code chroma://} spelling of a target counts as a holder); the catalog row, its
+     * {@code document_aspects} and {@code document_highlights} rows (by {@code doc_id}: the column is NOT NULL under a
+     * composite foreign key to the catalog row, so a satellite without a document cannot exist, hygiene-001-1 and
+     * {@code DocumentMoveTest#noDocLessSatelliteRowCanExist_theRdrsPathArmMatchesNothing}) are then rewritten together, each by its own value (an aspect row's URI is derived from its
+     * source path, not from the catalog row's). A holder found at the re-check, or one that commits before the UPDATE and
+     * trips {@code ux_catalog_documents_live_source_uri}, throws {@link SourceUriCollision} (409) with nothing written.
+     * A twin that appeared since an earlier census is simply a merge candidate now. A chain (stale A's target held by
+     * stale B) takes a second call: B's move frees A's target, and the next census lists A as a rewrite candidate.
+     * The response carries {@code ledger}: one entry per row changed, in all three tables ({@code table}, {@code key}
+     * (the tumbler, or the satellite row's id), {@code doc_id} for satellites, {@code old_uri}, {@code new_uri}), bounded
+     * by the batch. It is the only undo record: nothing else keeps the old value.
+     *
+     * @param sample how many example rows to list per class (the counts are never capped)
+     * @return the counts and samples described above, plus {@code rewritten}, {@code remaining} and {@code ledger} when {@code apply}
+     */
+    public Map<String, Object> repairStaleNoteUris(String tenant, boolean apply, int limit, int sample) {
+        return repairStaleNoteUris(tenant, apply, limit, sample, null);
+    }
+
+    /**
+     * As {@link #repairStaleNoteUris(String, boolean, int, int)}, with {@code only}: when non-null, {@code apply}
+     * rewrites just the rewrite candidates whose tumbler is in it ({@code remaining} is then relative to those). The
+     * census counts and samples are the tenant's either way. An empty collection rewrites nothing; null rewrites every
+     * candidate. A named tumbler that is not a rewrite candidate (a merge candidate, a tombstone, no row) is ignored,
+     * never an error. The merge pass uses it to rewrite exactly the stale row that just won a merge, so the window in
+     * which that row holds its stale URI with no twin stays short.
+     */
+    public Map<String, Object> repairStaleNoteUris(String tenant, boolean apply, int limit, int sample,
+                                                   java.util.Collection<String> only) {
+        if (limit < 1) throw new IllegalArgumentException("limit must be at least 1");
+        if (sample < 0) throw new IllegalArgumentException("sample must not be negative");
+        return tenantScope.withTenant(tenant, ctx -> {
+            List<StaleNote> rewrite = new ArrayList<>();
+            List<StaleNote> merge = new ArrayList<>();
+            List<StaleNote> refused = new ArrayList<>();
+            classifyStaleNotes(ctx, tenant, liveStaleNoteRows(ctx, tenant), rewrite, merge, refused);
+            List<StaleNote> tombstoned = new ArrayList<>();
+            for (var row : tombstonedStaleNoteRows(ctx, tenant)) {
+                if (NoteUri.isNote(row.value2())) {
+                    tombstoned.add(new StaleNote(row.value1(), row.value2(), row.value3(), null, null, null));
+                }
+            }
+            int exportCopies = 0;
+            List<StaleNote> exportMoved = new ArrayList<>();
+            for (var row : liveExportRows(ctx, tenant)) {
+                String uri = row.value2();
+                int slash = uri.indexOf('/', "nxexp://".length());
+                if (slash < 0 || !NoteUri.isNote(uri.substring(slash + 1))) continue;
+                exportCopies++;
+                String target = uri.substring("nxexp://".length(), slash);
+                if (!target.equals(row.value3())) {
+                    exportMoved.add(new StaleNote(row.value1(), uri, row.value3(), null, "target_moved", null));
+                }
+            }
+            tombstoned.sort(Comparator.comparing(StaleNote::tumbler));
+            exportMoved.sort(Comparator.comparing(StaleNote::tumbler));
+
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("apply", apply);
+            out.put("stale_live", rewrite.size() + merge.size() + refused.size());
+            out.put("rewrite", rewrite.size());
+            out.put("merge", merge.size());
+            out.put("merge_twin", (int) merge.stream().filter(m -> "twin".equals(m.reason())).count());
+            out.put("merge_sibling", (int) merge.stream().filter(m -> "sibling".equals(m.reason())).count());
+            out.put("refused", refused.size());
+            out.put("refused_file_routed_collection",
+                (int) refused.stream().filter(m -> "file_routed_collection".equals(m.reason())).count());
+            out.put("refused_malformed", (int) refused.stream().filter(m -> "malformed".equals(m.reason())).count());
+            out.put("tombstoned", tombstoned.size());
+            out.put("export_copies", exportCopies);
+            out.put("export_copies_target_moved", exportMoved.size());
+            Map<String, Object> samples = new LinkedHashMap<>();
+            samples.put("rewrite", sampleOf(rewrite, sample));
+            List<StaleNote> mergeShown = merge.stream().limit(sample).toList();
+            Set<String> shownIds = new java.util.TreeSet<>();
+            for (StaleNote m : mergeShown) {
+                shownIds.add(m.tumbler());
+                if (m.twin() != null) shownIds.add(m.twin());
+            }
+            Map<String, Map<String, Object>> details = docDetails(ctx, tenant, shownIds);
+            samples.put("merge", mergeShown.stream().map(m -> mergeEntry(m, details)).toList());
+            samples.put("refused", sampleOf(refused, sample));
+            samples.put("tombstoned", sampleOf(tombstoned, sample));
+            samples.put("export_target_moved", sampleOf(exportMoved, sample));
+            out.put("sample", samples);
+
+            if (apply) {
+                java.util.Set<String> named = only == null ? null : new java.util.HashSet<>(only);
+                List<StaleNote> selected = named == null ? rewrite
+                    : rewrite.stream().filter(c -> named.contains(c.tumbler())).toList();
+                Rewritten done = rewriteStaleNotes(ctx, tenant, selected.subList(0, Math.min(limit, selected.size())));
+                out.put("rewritten", done.rows());
+                out.put("remaining", selected.size() - done.rows());
+                out.put("ledger", done.ledger());
+            }
+            return out;
+        });
+    }
+
+    /** The catalog rows rewritten by one batch and the ledger of every row changed, in all three tables. */
+    private record Rewritten(int rows, List<Map<String, Object>> ledger) {}
+
+    private static Map<String, Object> ledgerEntry(String table, String key, String docId, String oldUri, String newUri) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("table", table);
+        m.put("key", key);
+        if (docId != null) m.put("doc_id", docId);
+        m.put("old_uri", oldUri);
+        m.put("new_uri", newUri);
+        return m;
+    }
+
+    /** A merge entry: the row, its twin, and what the pair-choosing rule reads of each (chunks, freshness, satellites). */
+    private static Map<String, Object> mergeEntry(StaleNote n, Map<String, Map<String, Object>> details) {
+        Map<String, Object> m = n.asMap();
+        Map<String, Object> own = details.get(n.tumbler());
+        if (own != null) m.putAll(own);
+        Map<String, Object> other = n.twin() == null ? null : details.get(n.twin());
+        if (other != null) other.forEach((k, v) -> m.put("twin_" + k, v));
+        return m;
+    }
+
+    /** chunk_count, indexed_at, source_uri, has_aspects and has_highlights of live documents; one query each, over {@code tumblers}. */
+    private static Map<String, Map<String, Object>> docDetails(DSLContext ctx, String tenant, java.util.Collection<String> tumblers) {
+        Map<String, Map<String, Object>> out = new HashMap<>();
+        if (tumblers.isEmpty()) return out;
+        for (var d : ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.CHUNK_COUNT, CATALOG_DOCUMENTS.INDEXED_AT,
+                    CATALOG_DOCUMENTS.SOURCE_URI)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENTS.TUMBLER.in(tumblers))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetch()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("chunk_count", d.value2());
+            m.put("indexed_at", d.value3() == null ? null : d.value3().toString());
+            m.put("source_uri", d.value4());   // the twin's under twin_: its actual spelling, for the merge pass's ledger
+            m.put("has_aspects", false);
+            m.put("has_highlights", false);
+            out.put(d.value1(), m);
+        }
+        for (String id : ctx.selectDistinct(DOCUMENT_ASPECTS.DOC_ID).from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.in(tumblers)))
+                .fetch(DOCUMENT_ASPECTS.DOC_ID)) {
+            if (out.containsKey(id)) out.get(id).put("has_aspects", true);
+        }
+        for (String id : ctx.selectDistinct(DOCUMENT_HIGHLIGHTS.DOC_ID).from(DOCUMENT_HIGHLIGHTS)
+                .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.in(tumblers)))
+                .fetch(DOCUMENT_HIGHLIGHTS.DOC_ID)) {
+            if (out.containsKey(id)) out.get(id).put("has_highlights", true);
+        }
+        return out;
+    }
+
+    private static List<Map<String, Object>> sampleOf(List<StaleNote> rows, int sample) {
+        return rows.stream().limit(sample).map(StaleNote::asMap).toList();
+    }
+
+    /** Live rows in a note spelling whose URI does not open with their own collection (a superset of the stale notes). */
+    private static List<org.jooq.Record3<String, String, String>> liveStaleNoteRows(DSLContext ctx, String tenant) {
+        return ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+            .from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                   .and(NoteUri.notInOwnCollection(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)))
+            .fetch();
+    }
+
+    /** The tombstoned counterpart of {@link #liveStaleNoteRows}; named in TombstoneFilterGateTest. */
+    private static List<org.jooq.Record3<String, String, String>> tombstonedStaleNoteRows(DSLContext ctx, String tenant) {
+        // TOMBSTONE-EXEMPT (nexus-bivz3.24): counting the TOMBSTONED stale rows is the contract.
+        return ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+            .from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
+                   .and(NoteUri.notInOwnCollection(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)))
+            .fetch();
+    }
+
+    private static List<org.jooq.Record3<String, String, String>> liveExportRows(DSLContext ctx, String tenant) {
+        return ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+            .from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                   .and(NoteUri.startsWith(CATALOG_DOCUMENTS.SOURCE_URI, DSL.val("nxexp://"))))
+            .fetch();
+    }
+
+    /**
+     * Live holders of {@code uris} (stored {@code nx-note://} spellings): URI -> (tumbler, collection). A row that still
+     * holds the legacy {@code chroma://} spelling of a target is a holder too: the live-uri index sees two different
+     * strings and would let the rewrite mint the duplicate, so it is looked up here and keyed by the stored spelling.
+     * One query per 250 URIs.
+     */
+    private static Map<String, String[]> liveUriHolders(DSLContext ctx, String tenant, java.util.Collection<String> uris) {
+        Map<String, String[]> out = new HashMap<>();
+        List<String> all = new ArrayList<>();
+        for (String u : uris) {
+            all.add(u);
+            if (u.startsWith(NoteUri.NOTE)) all.add(NoteUri.LEGACY + u.substring(NoteUri.NOTE.length()));
+        }
+        for (int i = 0; i < all.size(); i += 500) {
+            for (var h : ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                    .from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                           .and(CATALOG_DOCUMENTS.SOURCE_URI.in(all.subList(i, Math.min(i + 500, all.size()))))
+                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                    .fetch()) {
+                String key = NoteUri.canonical(h.value1());
+                String[] holder = {h.value2(), h.value3()};
+                // Both spellings held at once (a pair the backfill guard would have refused): report the lower tumbler.
+                out.merge(key, holder, (x, y) -> x[0].compareTo(y[0]) <= 0 ? x : y);
+            }
+        }
+        return out;
+    }
+
+    /** Splits the live pre-filter rows into the rewrite, merge and refused classes (each sorted by tumbler). */
+    private static void classifyStaleNotes(DSLContext ctx, String tenant, List<org.jooq.Record3<String, String, String>> rows,
+                                           List<StaleNote> rewrite, List<StaleNote> merge, List<StaleNote> refused) {
+        List<StaleNote> candidates = new ArrayList<>();
+        for (var r : rows) {
+            String tumbler = r.value1();
+            String uri = r.value2();
+            String coll = r.value3();
+            if (!NoteUri.isNote(uri)) continue;           // file-routed residue: never a note
+            String scheme = uri.startsWith(NoteUri.NOTE) ? NoteUri.NOTE : NoteUri.LEGACY;
+            String x = NoteUri.collectionOf(uri);
+            boolean hasTitleSlash = uri.indexOf('/', scheme.length()) >= 0;
+            if (x == null || x.isEmpty() || coll.isBlank() || !hasTitleSlash) {
+                refused.add(new StaleNote(tumbler, uri, coll, null, "malformed", null));
+            } else if (NoteUri.isFileRoutedCollection(coll)) {
+                refused.add(new StaleNote(tumbler, uri, coll, null, "file_routed_collection", null));
+            } else {
+                candidates.add(new StaleNote(tumbler, uri, coll,
+                    NoteUri.NOTE + coll + uri.substring(scheme.length() + x.length()), null, null));
+            }
+        }
+        Map<String, String[]> holders = liveUriHolders(ctx, tenant,
+            candidates.stream().map(StaleNote::newUri).collect(java.util.stream.Collectors.toSet()));
+        Map<String, List<StaleNote>> byTarget = new HashMap<>();
+        for (StaleNote c : candidates) {
+            String[] holder = holders.get(c.newUri());
+            if (holder != null && !holder[0].equals(c.tumbler())) {
+                merge.add(new StaleNote(c.tumbler(), c.uri(), c.collection(), c.newUri(), "twin", holder[0]));
+            } else {
+                byTarget.computeIfAbsent(c.newUri(), k -> new ArrayList<>()).add(c);
+            }
+        }
+        for (List<StaleNote> group : byTarget.values()) {
+            if (group.size() == 1) {
+                rewrite.add(group.get(0));
+                continue;
+            }
+            group.sort(Comparator.comparing(StaleNote::tumbler));
+            for (StaleNote c : group) {
+                String other = group.stream().map(StaleNote::tumbler).filter(t -> !t.equals(c.tumbler())).findFirst().orElse(null);
+                merge.add(new StaleNote(c.tumbler(), c.uri(), c.collection(), c.newUri(), "sibling", other));
+            }
+        }
+        Comparator<StaleNote> byTumbler = Comparator.comparing(StaleNote::tumbler);
+        rewrite.sort(byTumbler);
+        merge.sort(byTumbler);
+        refused.sort(byTumbler);
+    }
+
+    private static void noteUriRepairStage(String stage) {
+        var hook = noteUriRepairHookForTests;
+        if (hook != null) hook.accept(stage);
+    }
+
+    /**
+     * The write half of {@link #repairStaleNoteUris}: lock, re-read, re-check, then rewrite the catalog, aspect and
+     * highlight rows of {@code chosen} in the caller's transaction. Returns how many catalog rows were rewritten and the
+     * ledger of every row changed (table, key, old and new URI), which is the caller's only undo record.
+     */
+    private static Rewritten rewriteStaleNotes(DSLContext ctx, String tenant, List<StaleNote> chosen) {
+        if (chosen.isEmpty()) return new Rewritten(0, List.of());
+        lockDocumentRowsSorted(ctx, tenant, true, chosen.stream().map(StaleNote::tumbler).toArray(String[]::new));
+        noteUriRepairStage("locked");
+        // Re-read under the lock: a row that moved or died since the census is left to the next pass.
+        record Fresh(String uri, String collection) {}
+        Map<String, Fresh> fresh = new HashMap<>();
+        for (var r : ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENTS.TUMBLER.in(chosen.stream().map(StaleNote::tumbler).toList()))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetch()) {
+            fresh.put(r.value1(), new Fresh(r.value2(), r.value3()));
+        }
+        List<StaleNote> rows = new ArrayList<>();
+        for (StaleNote c : chosen) {
+            var f = fresh.get(c.tumbler());
+            if (f != null && c.uri().equals(f.uri()) && c.collection().equals(f.collection())) rows.add(c);
+        }
+        if (rows.isEmpty()) return new Rewritten(0, List.of());
+        Map<String, String[]> holders = liveUriHolders(ctx, tenant, rows.stream().map(StaleNote::newUri).toList());
+        for (StaleNote c : rows) {
+            String[] holder = holders.get(c.newUri());
+            if (holder != null && !holder[0].equals(c.tumbler())) {
+                throw new SourceUriCollision("repairing the stale note URI of " + c.tumbler(), c.newUri(), holder[0], holder[1]);
+            }
+        }
+        noteUriRepairStage("checked");
+
+        org.jooq.Row3<String, String, String>[] docRows = rows.stream()
+            .map(c -> DSL.row(c.tumbler(), c.uri(), c.newUri())).toArray(org.jooq.Row3[]::new);
+        var docVals = DSL.values(docRows).asTable("v", "tumbler", "old_uri", "new_uri");
+        int updated;
+        // A JDBC savepoint, so a refusal by the live-uri index leaves the transaction usable long enough to NAME the
+        // row that took the URI: RLS hides the index's own detail line (the key value) from the service role.
+        java.sql.Connection conn = ctx.configuration().connectionProvider().acquire();
+        try {
+            java.sql.Savepoint sp = conn.setSavepoint();
+            try {
+                updated = ctx.update(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.SOURCE_URI, docVals.field("new_uri", String.class))
+                    .from(docVals)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(docVals.field("tumbler", String.class)))
+                           .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(docVals.field("old_uri", String.class)))
+                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                    .execute();
+            } catch (org.jooq.exception.IntegrityConstraintViolationException e) {
+                // A live row took a target URI between the check above and this UPDATE.
+                if (!String.valueOf(e.getMessage()).contains(DOCUMENTS_LIVE_SOURCE_URI)) throw e;
+                conn.rollback(sp);
+                Map<String, String[]> late = liveUriHolders(ctx, tenant, rows.stream().map(StaleNote::newUri).toList());
+                for (StaleNote c : rows) {
+                    String[] holder = late.get(c.newUri());
+                    if (holder != null && !holder[0].equals(c.tumbler())) {
+                        throw new SourceUriCollision("repairing the stale note URI of " + c.tumbler(), c.newUri(),
+                            holder[0], holder[1]);
+                    }
+                }
+                throw e;     // the index refused and no holder is visible: not ours to explain
+            }
+        } catch (java.sql.SQLException se) {
+            throw new IllegalStateException("stale note URI repair: savepoint failed", se);
+        } finally {
+            ctx.configuration().connectionProvider().release(conn);
+        }
+        if (updated != rows.size()) {
+            throw new IllegalStateException("stale note URI repair rewrote " + updated + " of " + rows.size()
+                + " locked catalog rows; rolled back");
+        }
+        noteUriRepairStage("catalog_updated");
+
+        List<Map<String, Object>> ledger = new ArrayList<>();
+        for (StaleNote c : rows) ledger.add(ledgerEntry("catalog_documents", c.tumbler(), null, c.uri(), c.newUri()));
+        Map<String, StaleNote> byDoc = new HashMap<>();
+        for (StaleNote c : rows) byDoc.put(c.tumbler(), c);
+        List<String> docIds = new ArrayList<>(byDoc.keySet());
+        // A satellite belongs to a document by doc_id alone (see the repairStaleNoteUris javadoc: no satellite can lack
+        // one), and its URI is rewritten by its own value, which for a knowledge note is derived from its source path.
+        List<org.jooq.Row2<Long, String>> aspectRows = new ArrayList<>();
+        for (var a : ctx.select(DOCUMENT_ASPECTS.ID, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.in(docIds)))
+                .fetch()) {
+            retargetSatellite(byDoc.get(a.value2()), a.value3()).ifPresent(u -> {
+                aspectRows.add(DSL.row(a.value1(), u));
+                ledger.add(ledgerEntry("document_aspects", Long.toString(a.value1()), a.value2(), a.value3(), u));
+            });
+        }
+        if (!aspectRows.isEmpty()) {
+            var v = DSL.values(aspectRows.toArray(new org.jooq.Row2[0])).asTable("v", "id", "new_uri");
+            ctx.update(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.SOURCE_URI, v.field("new_uri", String.class))
+                .from(v)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.ID.eq(v.field("id", Long.class))))
+                .execute();
+        }
+        List<org.jooq.Row2<Long, String>> highlightRows = new ArrayList<>();
+        for (var h : ctx.select(DOCUMENT_HIGHLIGHTS.ID, DOCUMENT_HIGHLIGHTS.DOC_ID, DOCUMENT_HIGHLIGHTS.SOURCE_URI)
+                .from(DOCUMENT_HIGHLIGHTS)
+                .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.in(docIds)))
+                .fetch()) {
+            retargetSatellite(byDoc.get(h.value2()), h.value3()).ifPresent(u -> {
+                highlightRows.add(DSL.row(h.value1(), u));
+                ledger.add(ledgerEntry("document_highlights", Long.toString(h.value1()), h.value2(), h.value3(), u));
+            });
+        }
+        if (!highlightRows.isEmpty()) {
+            var v = DSL.values(highlightRows.toArray(new org.jooq.Row2[0])).asTable("v", "id", "new_uri");
+            ctx.update(DOCUMENT_HIGHLIGHTS)
+                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, v.field("new_uri", String.class))
+                .from(v)
+                .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.ID.eq(v.field("id", Long.class))))
+                .execute();
+        }
+        noteUriRepairStage("written");
+        return new Rewritten(updated, ledger);
+    }
+
+    /** A satellite row's own new URI: its value with the collection the note left replaced by the one it lives in. */
+    private static java.util.Optional<String> retargetSatellite(StaleNote doc, String satelliteUri) {
+        if (doc == null || satelliteUri == null) return java.util.Optional.empty();
+        String from = NoteUri.collectionOf(doc.uri());
+        String moved = NoteUri.retarget(satelliteUri, from, doc.collection());
+        return moved.equals(satelliteUri) ? java.util.Optional.empty() : java.util.Optional.of(moved);
     }
 
     /** Per-merge link-rewrite outcome: see {@link #remapLinksForMerge}. */

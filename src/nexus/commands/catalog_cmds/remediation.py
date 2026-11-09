@@ -381,11 +381,23 @@ def remediate_paths_cmd(
         return
 
     # Show first ~20 transitions for visibility.
+    from nexus.sensitive_output import CliDocumentLines, entries_flagged  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    # nexus-rfvyy.9 item 2: a flagged document's file name and paths are content (the stub under Claude Code).
+    flagged = entries_flagged([t[0] for t in transitions[:20]], cat=cat)
+    lines = CliDocumentLines()
     click.echo("\nSample (first 20):")
     for entry, why, note, chosen, basename in transitions[:20]:
         old = entry.file_path or "(empty)"
         new = str(chosen) if chosen else f"<{note}>"
-        click.echo(f"  [{why:8s}] {entry.tumbler}  {basename}\n    {old}\n  → {new}")
+        tumbler = str(entry.tumbler)
+        if tumbler in flagged and lines.withholding():
+            click.echo(f"  [{why:8s}] {lines.label(tumbler, True, '')}")
+        else:
+            badge = lines.label(tumbler, tumbler in flagged, "").strip()
+            click.echo(f"  [{why:8s}] {entry.tumbler}  {basename}{('  ' + badge) if badge else ''}\n    {old}\n  → {new}")
+    for line in lines.notes():
+        click.echo(line)
 
     if dry_run:
         click.echo("\n(dry-run — no catalog writes performed.)")
@@ -572,12 +584,19 @@ def prune_stale_cmd(
     )
 
     if n_stale:
+        from nexus.sensitive_output import CliDocumentLines, entries_flagged  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+        # nexus-rfvyy.9 item 2: a flagged document's path is content (the stub under Claude Code).
+        flagged = entries_flagged(stale[:20], cat=cat)
+        lines = CliDocumentLines()
         click.echo("\nSample (first 20):")
         for entry in stale[:20]:
             click.echo(
                 f"  {entry.tumbler}  [{entry.physical_collection or '-'}]  "
-                f"{entry.file_path}"
+                f"{lines.label(str(entry.tumbler), str(entry.tumbler) in flagged, str(entry.file_path))}"
             )
+        for line in lines.notes():
+            click.echo(line)
 
     if not will_delete:
         if dry_run:

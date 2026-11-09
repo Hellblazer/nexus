@@ -61,6 +61,7 @@ def test_all_command_modules_registered():
         "tuple_cmd": "tuple",
         "tier_status": "tier-status",
         "answer_runs": "answer-runs",
+        "run_cmd": "run",
     }
 
     missing = []

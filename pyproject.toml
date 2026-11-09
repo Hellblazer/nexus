@@ -12,7 +12,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.98.0"
+version = "7.99.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -71,6 +71,17 @@ dependencies = [
     # locked 0.14.21; the existing <0.15 cap already sat at that minor's
     # next, so only the floor moved.
     "llama-index-core>=0.14.21,<0.15",
+    # RDR-242 Phase 1 Step 1 (nexus-mdbds.3): the sandboxed Lua 5.4 runtime
+    # (lupa.lua54), run in a bare `python -I` worker. Wheels for every
+    # platform the resolve gates compile (Linux x86_64/aarch64, Windows x64,
+    # macOS arm64; cp312 and cp313). Pinned to the exact patch like mineru:
+    # RDR-242 A4 (the bundled Lua 5.4 patch release) and the static check's
+    # bytecode reader hold for lupa 2.8 only, and the limit and escape suites
+    # are gated on it. A cap at the next major let a fresh install resolve a
+    # lupa no test had seen; tests/test_dependency_bounds_lint.py holds cap and
+    # lock together. Bump deliberately: the lock and the cap together, on a
+    # green run of the lua_runtime suites (calibrate included).
+    "lupa>=2.8,<2.8.1",
     "markdown-it-py>=4.0.0,<5",
     "msgpack>=1.0,<2",
     "numpy>=1.24,<3",

@@ -974,6 +974,20 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 "dormant_names": ["knowledge__dormant-1__voyage-context-3__v1"],
                 "dry_run": dry_run,
             })
+        elif op == "/note_uri_repair":
+            # nexus-bivz3.24: mirrors CatalogHandler.handleNoteUriRepair -- {apply, limit, sample} in; the
+            # census counts and a "sample" object of lists out, plus rewritten/remaining when apply is true.
+            apply = body.get("apply", False)
+            out = {
+                "apply": apply, "stale_live": 0, "rewrite": 0, "merge": 0, "merge_twin": 0, "merge_sibling": 0,
+                "refused": 0, "refused_file_routed_collection": 0, "refused_malformed": 0, "tombstoned": 0,
+                "export_copies": 0, "export_copies_target_moved": 0,
+                "sample": {"rewrite": [], "merge": [], "refused": [], "tombstoned": [], "export_target_moved": []},
+            }
+            if apply:
+                # "tumblers" restricts what apply rewrites (an empty list: none); the fake rewrites nothing either way.
+                out.update(rewritten=0, remaining=0, ledger=[])
+            self._send_json(out)
         else:
             self._send_json({"ok": True})
 

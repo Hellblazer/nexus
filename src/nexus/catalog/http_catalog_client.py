@@ -2011,8 +2011,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         :meth:`restore_document`: lets a caller see what is restorable
         before calling it. Each entry carries ``tumbler``, ``title``,
         ``physical_collection``, ``corpus``, ``content_type``, ``file_path``
-        (an empty string when the document has none) and ``deleted_at``, returned
-        verbatim from the engine (this method does not reshape it).
+        (an empty string when the document has none) and ``deleted_at``, and, from
+        an engine that carries nexus-rfvyy.9, ``sensitive`` (the tombstone's own
+        flag) and ``alias_of`` (its canonical, or None), returned verbatim from the
+        engine (this method does not reshape it).
 
         A pre-nexus-dkymw engine has no matching route and answers 404 —
         propagated raw, same discipline as :meth:`restore_document`.
@@ -2138,6 +2140,47 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             {"older_than_days": older_than_days, "dry_run": dry_run},
             idempotent=False,
         ) or {}
+
+    def repair_stale_note_uris(
+        self,
+        *,
+        apply: bool = False,
+        limit: int = 1000,
+        sample: int = 20,
+        tumblers: list[str] | None = None,
+    ) -> dict:
+        """POST /v1/catalog/note_uri_repair — census, and with ``apply`` the rewrite, of NOTE rows whose
+        ``source_uri`` names a collection the note no longer lives in (nexus-bivz3.24, RDR-231 critique Issue 7).
+
+        ``apply=False`` (the default) is a pure read: the engine returns the class counts (``stale_live``,
+        ``rewrite``, ``merge`` with ``merge_twin`` and ``merge_sibling``, ``refused``, ``tombstoned``,
+        ``export_copies``, ``export_copies_target_moved``) and up to ``sample`` example rows per class under ``sample`` (merge entries
+        carry ``chunk_count``, ``indexed_at``, ``has_aspects``, ``has_highlights`` and the twin's under ``twin_``).
+        ``apply=True`` also rewrites up to ``limit`` rewrite candidates in ONE engine transaction (catalog row, aspect
+        row and highlight row together) and adds ``rewritten``, ``remaining`` and ``ledger``: one
+        ``{table, key, [doc_id], old_uri, new_uri}`` per row changed, the caller's only undo record. A rewrite
+        onto a URI a live document holds, or takes while the call runs, is a 409 (``SourceUriCollision``) with
+        nothing written. Merge candidates are never touched: which row wins a merge is a design decision.
+
+        An engine without the route answers 404; this method does not swallow it, so the CLI verb can tell "engine
+        too old" from "engine answered" (the ``ghost_sweep`` shape).
+        """
+        # idempotent=not apply: a dry run is a pure read and keeps the retry. A live call makes one attempt: a
+        # blind resend after a read timeout would report the post-rewrite census as the outcome of this call.
+        body: dict = {"apply": apply, "limit": limit, "sample": sample}
+        if tumblers is not None:
+            # ``apply`` then rewrites only these rewrite candidates (an empty list: none); the census stays the tenant's.
+            body["tumblers"] = list(tumblers)
+        return (
+            self._post(
+                "/note_uri_repair",
+                body,
+                idempotent=not apply,
+                mutates=apply,
+                timeout=300.0,
+            )
+            or {}
+        )
 
     def ghost_sweep(self, *, dry_run: bool = True) -> dict:
         """POST /v1/catalog/ghost-sweep — the operator-facing caller for the

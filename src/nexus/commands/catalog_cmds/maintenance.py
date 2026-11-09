@@ -84,10 +84,12 @@ def gc_cmd(dry_run: bool, confirm: bool) -> None:
             break
         offset += 200
 
-    orphans: list[tuple[str, str, str]] = []
-    for entry in all_docs:
-        if int(entry.meta.get("miss_count", 0)) >= 2:
-            orphans.append((str(entry.tumbler), entry.title or "", entry.file_path or ""))
+    from nexus.sensitive_output import CliDocumentLines, entries_flagged  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    orphan_entries = [e for e in all_docs if int(e.meta.get("miss_count", 0)) >= 2]
+    orphans: list[tuple[str, str, str]] = [
+        (str(e.tumbler), e.title or "", e.file_path or "") for e in orphan_entries
+    ]
 
     if not orphans:
         click.echo("No orphan entries found.")
@@ -97,11 +99,16 @@ def gc_cmd(dry_run: bool, confirm: bool) -> None:
         f"Found {len(orphans)} orphan "
         f"{'entry' if len(orphans) == 1 else 'entries'} (miss_count >= 2):"
     )
+    # nexus-rfvyy.9 item 2: a flagged document's title and path are content (the stub under Claude Code).
+    flagged = entries_flagged(orphan_entries[:20], cat=cat)
+    lines = CliDocumentLines()
     for tumbler_str, title, file_path in orphans[:20]:
         loc = f" ({file_path})" if file_path else ""
-        click.echo(f"  {tumbler_str}: {title}{loc}")
+        click.echo(f"  {lines.label(tumbler_str, tumbler_str in flagged, f'{tumbler_str}: {title}{loc}')}")
     if len(orphans) > 20:
         click.echo(f"  ... ({len(orphans) - 20} more)")
+    for line in lines.notes():
+        click.echo(line)
 
     if not will_delete:
         click.echo(

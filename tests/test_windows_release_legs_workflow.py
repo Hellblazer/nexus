@@ -751,10 +751,15 @@ WINDOWS_TEST_SET = (
     # The installer-rebuild rollback on real junctions, the uv receipt lookup and the PDF
     # stack's per-platform wording: 18 of these failed on native Windows while nothing ran them.
     "tests/test_install_source.py", "tests/test_pdf_stack.py", "tests/test_installer_rebuild.py",
+    # The MinerU CLI (8 reds on native Windows that nothing ran) and the server spawn's Job Object test.
+    "tests/test_mineru_cmd.py", "tests/test_mineru_spawn_windows_flags.py",
     "tests/test_context.py::TestSubagentHookInjection", "tests/test_context.py::TestSessionHookInjection",
 )
 #: Windows-set test files that are deliberately not workflow triggers (the loop that reads this).
-RIDES_ALONG = ("tests/test_install_source.py", "tests/test_pdf_stack.py", "tests/test_installer_rebuild.py")
+RIDES_ALONG = (
+    "tests/test_install_source.py", "tests/test_pdf_stack.py", "tests/test_installer_rebuild.py",
+    "tests/test_mineru_cmd.py", "tests/test_mineru_spawn_windows_flags.py",
+)
 #: The Phase 4 code that only a native Windows run exercises, and the helper its tests import.
 PHASE4_WINDOWS_PATHS = (
     "mcpb/src/bootstrap.py", "conexus/hooks/**", "tests/_hook_wiring.py",
@@ -832,6 +837,7 @@ REAL_KERNEL_PATTERNS = (
     "test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale",
     # RDR-228 Phase 3: the PowerShell installer, whose cases skip where there is no pwsh.
     "test_help_states_the_autostart_default_and_installs_nothing",
+    "test_the_server_outlives_the_desktop_extensions_job",
 )
 
 

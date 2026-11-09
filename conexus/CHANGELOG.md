@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.99.0] - 2026-11-08
+
+Plugin version aligned with conexus 7.99.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- `conexus/hooks/scripts/routing/destructive_action_advice.py` (nexus-qo7ie.36): new table-driven PreToolUse hook, advise mode only (never denies): eight destructive-action shapes, each row naming its rule and the safe alternative.
+- `conexus/hooks/hooks.json` (nexus-qo7ie.36): registers `destructive_action_advice.py` on `Bash|Edit|Write|MultiEdit` (PreToolUse, 5 s).
+- `conexus/hooks/scripts/routing/registry.yaml` (nexus-qo7ie.36): the `destructive_action_advice` rule entry.
+- `conexus/hooks/scripts/routing/README.md` (nexus-qo7ie.36): the cap table counts the third Bash hook; new destructive-action shapes get a table row, not a hook.
+- `conexus/skills/orchestration/SKILL.md` (nexus-qo7ie.36): the shared-host clauses every developer, test or debugger brief carries, and a "Destroys" item in the implementer checklist.
+- `conexus/skills/peer-messaging/SKILL.md` (nexus-qo7ie.36): "Sharing One Machine" names what an action destroys before it touches shared state.
+- `conexus/skills/nexus/SKILL.md` (nexus-qo7ie.36): run long nx commands with full output to a log and filter when reading.
+- `conexus/skills/mailbox/SKILL.md` (nexus-qo7ie.36): read the session marker's contents before assuming a `/clear` stopped the watcher.
+
 ## [7.98.0] - 2026-11-07
 
 Plugin version aligned with conexus 7.98.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).

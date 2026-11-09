@@ -25,6 +25,8 @@ git log --oneline <last-engine-tag>..HEAD -- service/   # what engine changed si
 
 Cut a fresh engine when `service/` has accumulated **cloud-relevant** work: pooler/RLS, pgvector, catalog conformance (RDR-168), aspect queue (RDR-163), batch endpoints, embedder. Don't let it pile up — a large unvalidated engine delta means any "cloud test" result is testing a stale binary, and any PyPI release pinning that tag ships behind.
 
+**Size every open engine bead before recommending a cut.** A cut is about two hours of wall clock and three premium native builds. List `bd ready` plus the in-progress engine beads, size each in minutes, fold everything under a few hours into the cut, and say the sizing out loud; only a bead that genuinely needs design or measurement waits. v0.1.97 was cut for one bead while a twenty-line sibling was already filed and rode a second cut (Sam, 2026-09-03: "wtf did we do that for when we know we had more to do?"). Source: memory `feedback_release_and_develop_ci` § engine_cut_discipline.
+
 ### 2. Verify the engine is green on the exact commit you'll tag
 
 The version is **tag-stamped** — there is NO manifest to bump (`release.properties` `release_version` is blank in source, stamped at native-build time from the tag; the Maven pom stays `1.0-SNAPSHOT`).
@@ -39,6 +41,12 @@ scripts/mvnw-leased.sh -q test
 ```
 
 The Java CI (`service-ci.yml`) is a required check on `main`, but nothing gates a push to `develop` on it, and a develop run can be cancelled or time out — so verify it actually passed on this tree rather than assuming.
+
+When the cut changes the cut or release machinery itself (the engine release workflow, the promote and floor scripts, the rehearsal harness), rehearse the whole flow end to end in isolation first, as the `release` skill's Step 0c paragraph describes; build the missing rehearsal when you find the gap, do not file it.
+
+Engine work is tested on develop before any cut: `scripts/mvnw-leased.sh test`, the Python substrate tests, and the local-service gate (`tests/e2e/local-service-gate.sh`) against a dev jar.
+
+**Measure throughput before cutting a change to the thread model, admission, pool sizes, batch shape or planner GUCs.** Correctness gates do not measure it: v0.1.99 capped the shared ONNX session at two threads on a sixteen-core box, passed every suite, both reviewers and both rehearsal legs, and stalled the client shakedown for thirty minutes (Sam, 2026-09-04: "not testing this, which apparently was about 1/2 hour, cost us 8"). The A/B is one dev jar, two scratch installs, the old behaviour forced through its env override, and `nx index rdr` on thirty files; compare the elapsed times and record them on the bead. A reviewer's "unmeasured" on such a change is a red. A gate-latency shift that coincides with such a change is that change until proven otherwise; "inside bound" is not "not caused by us". Source: memory `feedback_release_and_develop_ci` § engine_cut_discipline.
 
 ### 3b. Client-release preconditions — a DEPLOY gate, NOT a tag gate
 
@@ -158,14 +166,18 @@ bead. A session driving the release for the one Sam told holds the same go, quot
 the same way. The go covers the release it names, not the next one; an instruction
 that names no release is not a go.
 
+**A shipped defect found during cut prep re-cuts.** The bar is "already shipped", not "this cut introduces it". After v0.1.110 was tagged (2026-09-09), deploy prep surfaced two defects already live in v0.1.109; recommending to ship around them as "not regressions this cut introduces" was wrong (Sam: "introduces is not the bar ... it is ALREADY SHIPPED"). Hold the tag, or the deploy if the tag is out, fix both on develop, and cut a successor. Source: memory `feedback_release_and_develop_ci` § engine_cut_discipline.
+
 ```bash
 git tag -a engine-service-vX.Y.Z -m "engine-service X.Y.Z" <commit>   # <commit> must be on origin
 git push origin engine-service-vX.Y.Z
 ```
 
-Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 3 native binaries for the supported targets (`linux-amd64`, `linux-arm64`, `mac-arm64`), each also as `nexus-service-<arch>.txz` (the asset `nx init` downloads), plus their PG bundles, and publishes the GitHub release. The release is created as a DRAFT and promoted by the final `promote-release` job only after both matrices succeed and `scripts/promote_engine_release.sh` finds all 30 assets (nexus-cl14i; 36 with the Windows legs on); until then no consumer can resolve the tag, `check_engine_release_floor.py` reads it as unpublished, and a failed leg on any platform (mac-arm64 is the slowest) holds the whole release as a draft: rerun the failed jobs and promote runs again. (Intel macOS / `mac-amd64` is NOT a supported target — not built.) Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs about 35 to 65 min (v0.1.118 took 36, a single measurement)).
+Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 3 native binaries for the supported targets (`linux-amd64`, `linux-arm64`, `mac-arm64`), each also as `nexus-service-<arch>.txz` (the asset `nx init` downloads), plus their PG bundles, and publishes the GitHub release. The release is created as a DRAFT and promoted by the final `promote-release` job only after both matrices succeed and `scripts/promote_engine_release.sh` finds all 30 assets (nexus-cl14i; 36 with the Windows legs on); until then no consumer can resolve the tag, `check_engine_release_floor.py` reads it as unpublished, and a failed leg on any platform (mac-arm64 is the slowest) holds the whole release as a draft: rerun the failed jobs and promote runs again. (Intel macOS / `mac-amd64` is NOT a supported target — not built.) Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs about 35 to 65 min (v0.1.118 took 36, a single measurement)). A run that sits at `waiting` is a deployment-environment approval, a person's click, never runner backlog (v0.1.59 sat for hours, 2026-07-31): find the pending environment and tell Sam (`.claude/rules/ci-and-runners.md` § GitHub Actions traps).
 
 **With `NX_WINDOWS_RELEASE_LEGS` on and the `win-release` runner offline, every engine tag stays a draft until the Windows jobs time out** (nexus-f9bgu.28, code review m8). `promote-release` requires both Windows jobs to have succeeded while the switch is on (P0.4), the jobs queue with nothing to run them, and GitHub cancels a queued job after 24 hours; Linux and mac assets are attached all the while, so the release looks broken and is not. A hotfix cut during that window waits too. Recovery: Sam brings the runner back and runs `gh run rerun <run-id> --failed` (the Windows jobs run, `promote-release` follows). If the cut must ship WITHOUT Windows, Sam sets the variable to off first and then reruns the failed jobs: `vars` is read per job when it is scheduled, so `promote-release` then expects the 30 assets. Flipping the variable mid-run can make the jobs disagree with each other; every disagreement ends in a draft, never in a wrong publish.
+
+**A burned tag means the local battery has a shape gap** (same rule as the `release` skill's Step 10). Do not move the tag yourself (`docs/contributing.md` § Tag-retraction policy: an admin decision); cut the next version, and before that reproduce the failed job's exact commands locally and fix everything that shape surfaces, not only the visible line. v0.1.101, v0.1.102 and v0.1.103 burned in one afternoon on three build-only defects of one class (a smoke run from a wheel where a guard is inert, a native build with Docker present); each cut fixed the visible line and hit the next step of the same job. Then add the shape as a rehearsal leg (nexus-xihsm) instead of filing it.
 
 ### 5. POST-PUBLISH gate: `--acquire` (the leg that drives the PUBLISHED bytes)
 

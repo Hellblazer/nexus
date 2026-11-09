@@ -715,9 +715,16 @@ directory aside, and `nx init` provisions a new PostgreSQL 17 cluster.
 `nx daemon service pg-upgrade --old-bin <bin dir>` does all of this for you: with no
 other flag it prints the plan and changes nothing, `--check-only` runs
 `pg_upgrade --check` against the real cluster with a temporary new one, and `--apply`
-upgrades with a rollback on any failure (see `docs/cli-reference.md`). The command is
-not yet run against a real pre-17 cluster; copy the data directory first. The manual
-steps below are the same procedure, and the way to recover by hand.
+upgrades with a rollback on any failure (see `docs/cli-reference.md`). The command was
+run once against a real pre-17 cluster on Linux, not yet with the service start; copy the data directory first. `--apply` and
+`--check-only` hold the storage service's spawn lock for the whole run, so a concurrent
+`nx daemon service start` waits instead of starting on the half-built cluster. `--apply`
+refuses while the storage service or the old PostgreSQL server is running and stops neither:
+run `nx daemon service stop` (and the old server's `pg_ctl stop`, and stop its brew services
+or systemd unit) first. How an autostart unit behaves while the lock is held is not tested;
+stop it before `--apply`. The manual steps below are the same procedure, and the way to
+recover by hand; they take no lock, so close other `nx` sessions and disable an autostart
+unit before running them.
 
 Save the block as a script and run it with `bash <file>`; do not paste it into
 a shell. Steps 2 to 4 end the script with `exit 1` when they fail (step 2

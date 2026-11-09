@@ -2916,6 +2916,11 @@ jobs:
     # release-time backstop.
     name: install constraints resolve gate (nexus-imhgf)
     runs-on: ubuntu-latest
+    # Read-only token (CodeQL actions/missing-workflow-permissions). pull-requests: read is what
+    # dorny/paths-filter needs to list a PR's changed files through the API.
+    permissions:
+      contents: read
+      pull-requests: read
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5

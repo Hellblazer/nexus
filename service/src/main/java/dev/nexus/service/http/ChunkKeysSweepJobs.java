@@ -3,16 +3,8 @@
 package dev.nexus.service.http;
 
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
@@ -42,6 +34,10 @@ import java.util.function.LongSupplier;
  * <p><b>Tenant state.</b> A job holds its tenant's counts, so the registry is tenant-keyed state: {@link
  * #evictTenant} is the evictor the tenant reset route runs. The threads are daemon threads and {@link #shutdown}
  * ends them with the engine.
+ *
+ * <p><b>Shared registry.</b> The pool, the table, the scope rule, retention and eviction live in {@link EngineJobs}
+ * (RDR-193 Step 1); this class keeps what is the sweep's own: the dry-run or apply kind, cancel for an apply, an
+ * apply's progress, and the starter check that decides who may join or poll a job.
  */
 public final class ChunkKeysSweepJobs {
 
@@ -150,45 +146,28 @@ public final class ChunkKeysSweepJobs {
         }
     }
 
-    /** One job. The mutable fields are written by the worker thread and read by the polling request. */
+
+    /**
+     * One job: the shared registry's job plus what is the sweep's own (its kind, its starter, an apply's cancel and
+     * progress). The mutable fields are written by the worker thread and read by the polling request.
+     */
     public static final class Job {
-        private final String id;
-        private final String tenant;
+        private final EngineJobs.Job<Job> core;
         private final String callerTenant;
         private final boolean root;
-        private final String fingerprint;
         private final Kind kind;
-        private final long startedMs;
-        /** When a worker thread took the job up, or -1 while it is queued: the wall-clock cap runs from here. */
-        private volatile long runStartedMs = -1;
-        private final LongSupplier clockMs;
-        private volatile long maxRuntimeMs;
         /** Set by {@link #requestCancel}: the apply stops at its next batch boundary. */
         private volatile boolean cancelRequested;
-        /** Set by {@link #stopFor}: a stop the work found for itself (a revoked credential); the first one stays. */
-        private volatile String stopCause;
         /** The apply's progress so far, written by its worker and read by a poll; -1 remaining means not known yet. */
         private volatile int batches;
         private volatile long rowsSwept;
         private volatile long remaining = -1;
-        /** Set by the tenant reset while the job runs: it stays (the tenant keeps its one running job) but is unseen. */
-        private volatile boolean evicted;
-        private volatile String stage = "queued";
-        private volatile State state = State.RUNNING;
-        private volatile Outcome outcome;
-        private volatile long finishedMs;
 
-        private Job(String id, String tenant, String callerTenant, boolean root, String fingerprint, Kind kind,
-                    LongSupplier clockMs, long maxRuntimeMs) {
-            this.id = id;
-            this.tenant = tenant;
+        private Job(EngineJobs.Job<Job> core, String callerTenant, boolean root, Kind kind) {
+            this.core = core;
             this.callerTenant = callerTenant;
             this.root = root;
-            this.fingerprint = fingerprint;
             this.kind = kind;
-            this.clockMs = clockMs;
-            this.maxRuntimeMs = maxRuntimeMs;
-            this.startedMs = clockMs.getAsLong();
         }
 
         public Kind kind() {
@@ -200,7 +179,7 @@ public final class ChunkKeysSweepJobs {
          * writes nothing and has no batch to stop at, and for a job that has ended.
          */
         public boolean requestCancel() {
-            if (kind != Kind.APPLY || state != State.RUNNING) {
+            if (kind != Kind.APPLY || core.state() != EngineJobs.State.RUNNING) {
                 return false;
             }
             cancelRequested = true;
@@ -217,9 +196,7 @@ public final class ChunkKeysSweepJobs {
          * already asked is reported first by {@link #stopReason()}.
          */
         public void stopFor(String reason) {
-            if (stopCause == null) {
-                stopCause = reason;
-            }
+            core.stopFor(reason);
         }
 
         /**
@@ -229,18 +206,13 @@ public final class ChunkKeysSweepJobs {
          * that waits in the queue has not started its cap clock).
          */
         public String stopReason() {
-            if (evicted) {
+            if (core.evicted()) {
                 return "evicted";
             }
             if (cancelRequested) {
                 return "cancelled";
             }
-            String cause = stopCause;
-            if (cause != null) {
-                return cause;
-            }
-            long run = runStartedMs;
-            return run >= 0 && clockMs.getAsLong() - run >= maxRuntimeMs ? "wall_clock_cap" : null;
+            return core.stopReason();
         }
 
         /** The worker's publication of an apply's progress: batches run, rows swept (both over the whole job) and rows left. */
@@ -264,30 +236,31 @@ public final class ChunkKeysSweepJobs {
         }
 
         public String id() {
-            return id;
+            return core.id();
         }
 
         /** The tenant the job counts (a dry run) or sweeps (an apply). */
         public String tenant() {
-            return tenant;
+            return core.tenant();
         }
 
         public State state() {
-            return state;
+            return State.valueOf(core.state().name());
         }
 
         /** True once the tenant reset dropped this job: its outcome belongs to no tenant any more and is not recorded. */
         public boolean evicted() {
-            return evicted;
+            return core.evicted();
         }
 
         public String stage() {
-            return stage;
+            return core.stage();
         }
 
         /** The status and body the synchronous call would have answered; null while the job runs. */
         public Outcome outcome() {
-            return outcome;
+            EngineJobs.Outcome o = core.outcome();
+            return o == null ? null : new Outcome(o.httpStatus(), o.body());
         }
 
         /** Whether {@code callerTenant}, a root credential or not, is the one that started this job. */
@@ -297,16 +270,11 @@ public final class ChunkKeysSweepJobs {
 
         /** Milliseconds from the start to now, or to the end of a finished job. */
         public long elapsedMs(long nowMs) {
-            return (state == State.RUNNING ? nowMs : finishedMs) - startedMs;
+            return core.elapsedMs(nowMs);
         }
     }
 
-    private final LongSupplier clockMs;
-    private final Duration retention;
-    private final int maxRetained;
-    private volatile Duration maxRuntime;
-    private final ThreadPoolExecutor pool;
-    private final Map<String, Job> jobs = new LinkedHashMap<>();
+    private final EngineJobs<Job> jobs;
 
     public ChunkKeysSweepJobs() {
         this(System::currentTimeMillis, RETENTION, MAX_RETAINED, MAX_RUNNING, QUEUE);
@@ -318,30 +286,18 @@ public final class ChunkKeysSweepJobs {
 
     ChunkKeysSweepJobs(LongSupplier clockMs, Duration retention, int maxRetained, int running, int queue,
                        Duration maxRuntime) {
-        this.clockMs = clockMs;
-        this.retention = retention;
-        this.maxRetained = maxRetained;
-        this.maxRuntime = maxRuntime;
-        AtomicInteger n = new AtomicInteger();
-        this.pool = new ThreadPoolExecutor(running, running, 0L, TimeUnit.MILLISECONDS,
-            new ArrayBlockingQueue<>(queue), r -> {
-                Thread t = new Thread(r, "chunk-keys-sweep-job-" + n.incrementAndGet());
-                t.setDaemon(true);
-                return t;
-            });
+        this.jobs = new EngineJobs<>("chunk-keys-sweep-job-", clockMs,
+            new EngineJobs.Bounds(running, queue, maxRetained, retention, maxRuntime), ChunkKeysSweepJobs::failed);
     }
 
     /** Test seam (nexus-v75nw): the wall-clock cap of the jobs started from now on and of those held now, running or queued. */
-    public synchronized void maxRuntimeForTests(Duration maxRuntime) {
-        this.maxRuntime = maxRuntime;
-        for (Job j : jobs.values()) {
-            j.maxRuntimeMs = maxRuntime.toMillis();
-        }
+    public void maxRuntimeForTests(Duration maxRuntime) {
+        jobs.maxRuntimeForTests(maxRuntime);
     }
 
     /** The clock in use, so a status answer's {@code elapsed_ms} reads the same one the jobs were stamped with. */
     public long nowMs() {
-        return clockMs.getAsLong();
+        return jobs.nowMs();
     }
 
     /**
@@ -352,77 +308,59 @@ public final class ChunkKeysSweepJobs {
      * @throws Conflict a different request of this tenant is running
      * @throws Busy     every thread and queue place is taken
      */
-    public synchronized Started start(String tenant, String callerTenant, boolean root, String fingerprint, Work work) {
+    public Started start(String tenant, String callerTenant, boolean root, String fingerprint, Work work) {
         return start(tenant, callerTenant, root, Kind.DRY_RUN, fingerprint, (job, stage) -> work.run(stage));
     }
 
     /**
-     * As above for a job of {@code kind}, the work told its job. Only a RUNNING job is joined; a finished one is never
-     * handed to a new start, which always runs (a rerun after a refusal or a sweep must count again, not replay the
-     * outcome). Any other running job of the tenant, dry run or apply, is a {@link Conflict}.
+     * As above for a job of {@code kind}, the work told its job. The scope is the tenant: one running job per tenant,
+     * dry run or apply. Only a RUNNING job of the same kind and request, started by this caller, is joined; a finished
+     * one is never handed to a new start, which always runs (a rerun after a refusal or a sweep must count again, not
+     * replay the outcome). Any other running job of the tenant is a {@link Conflict}.
      */
-    public synchronized Started start(String tenant, String callerTenant, boolean root, Kind kind, String fingerprint,
-                                      JobWork work) {
-        evictExpired();
-        for (Job j : jobs.values()) {
-            if (!j.tenant.equals(tenant) || j.state != State.RUNNING) {
-                continue;
-            }
-            if (!j.evicted && j.kind == kind && j.fingerprint.equals(fingerprint) && j.startedBy(callerTenant, root)) {
-                return new Started(j, false);
-            }
-            throw new Conflict(j.id, j.kind);
-        }
-        Job job = new Job(UUID.randomUUID().toString(), tenant, callerTenant, root, fingerprint, kind, clockMs,
-            maxRuntime.toMillis());
+    public Started start(String tenant, String callerTenant, boolean root, Kind kind, String fingerprint,
+                         JobWork work) {
         try {
-            pool.execute(() -> run(job, work));
-        } catch (RejectedExecutionException e) {
+            EngineJobs.Started<Job> s = jobs.start(tenant, null, kind.wire() + '\u0000' + fingerprint,
+                j -> j.data().startedBy(callerTenant, root),
+                core -> new Job(core, callerTenant, root, kind),
+                (core, stage) -> {
+                    Outcome o = work.run(core.data(), stage);
+                    return new EngineJobs.Outcome(o.httpStatus(), o.body());
+                });
+            return new Started(s.job().data(), s.created());
+        } catch (EngineJobs.Conflict c) {
+            throw new Conflict(c.jobId(), ((Job) c.running().data()).kind);
+        } catch (EngineJobs.Busy b) {
             throw new Busy();
         }
-        jobs.put(job.id, job);
-        trim();
-        return new Started(job, true);
     }
 
-    private void run(Job job, JobWork work) {
-        Outcome outcome;
-        State end;
-        job.runStartedMs = clockMs.getAsLong();
-        try {
-            outcome = work.run(job, s -> job.stage = s);
-            end = outcome.httpStatus() == 200 ? State.DONE : State.FAILED;
-        } catch (Throwable t) {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("tenant", job.tenant);
-            boolean apply = job.kind == Kind.APPLY;
-            body.put("error", "the " + (apply ? "apply" : "dry run") + " failed: " + t.getClass().getSimpleName());
-            body.put("reason", "sweep_failed");
-            body.put("dry_run", !apply);
-            if (apply) {
-                body.put("rows_swept", job.rowsSwept);
-                body.put("rows_changed", job.rowsSwept > 0);
-            }
-            outcome = new Outcome(500, body);
-            end = State.FAILED;
+    /** A throwing work's outcome: a 500 naming the class, never the message, and what an apply swept before it. */
+    private static EngineJobs.Outcome failed(EngineJobs.Job<Job> core, Throwable t) {
+        Job job = core.data();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("tenant", core.tenant());
+        boolean apply = job.kind == Kind.APPLY;
+        body.put("error", "the " + (apply ? "apply" : "dry run") + " failed: " + t.getClass().getSimpleName());
+        body.put("reason", "sweep_failed");
+        body.put("dry_run", !apply);
+        if (apply) {
+            body.put("rows_swept", job.rowsSwept);
+            body.put("rows_changed", job.rowsSwept > 0);
         }
-        job.outcome = outcome;
-        job.finishedMs = clockMs.getAsLong();
-        job.stage = end == State.DONE ? "done" : "failed";
-        job.state = end;   // last: a poll that reads a terminal state finds the outcome already in place
+        return new EngineJobs.Outcome(500, body);
     }
 
     /** The job with this id, or null when the engine holds none (never started, expired, evicted, or another process). */
-    public synchronized Job find(String id) {
-        evictExpired();
-        Job j = jobs.get(id);
-        return j == null || j.evicted ? null : j;
+    public Job find(String id) {
+        EngineJobs.Job<Job> j = jobs.findAnyTenant(id);
+        return j == null ? null : j.data();
     }
 
     /** Whether the tenant reset hid {@code id} while it ran (the worker then writes no outcome row). */
-    public synchronized boolean evicted(String id) {
-        Job j = jobs.get(id);
-        return j != null && j.evicted;
+    public boolean evicted(String id) {
+        return jobs.evicted(id);
     }
 
     /**
@@ -432,55 +370,17 @@ public final class ChunkKeysSweepJobs {
      * in the table marked {@link Job#evicted}: no poll finds it, a start does not
      * join it, and its worker writes no outcome row into the reset tenant. Returns how many jobs this dropped or hid.
      */
-    public synchronized int evictTenant(String tenant) {
-        int n = 0;
-        for (Job j : new ArrayList<>(jobs.values())) {
-            if (!j.tenant.equals(tenant) && !j.callerTenant.equals(tenant)) {
-                continue;
-            }
-            if (j.state == State.RUNNING) {
-                if (!j.evicted) {
-                    j.evicted = true;
-                    n++;
-                }
-            } else {
-                jobs.remove(j.id);
-                n++;
-            }
-        }
-        return n;
+    public int evictTenant(String tenant) {
+        return jobs.evictWhere(j -> j.tenant().equals(tenant) || j.data().callerTenant.equals(tenant));
     }
 
     /** Jobs held now. */
-    public synchronized int size() {
+    public int size() {
         return jobs.size();
     }
 
     /** Stops accepting work and interrupts what runs; the engine's shutdown. */
     public void shutdown() {
-        pool.shutdownNow();
-    }
-
-    private void evictExpired() {
-        long cutoff = clockMs.getAsLong() - retention.toMillis();
-        jobs.values().removeIf(j -> j.state != State.RUNNING && (j.evicted || j.finishedMs < cutoff));
-    }
-
-    private void trim() {
-        if (jobs.size() <= maxRetained) {
-            return;
-        }
-        List<String> finished = new ArrayList<>();
-        for (Map.Entry<String, Job> e : jobs.entrySet()) {
-            if (e.getValue().state != State.RUNNING) {
-                finished.add(e.getKey());
-            }
-        }
-        for (String id : finished) {
-            if (jobs.size() <= maxRetained) {
-                break;
-            }
-            jobs.remove(id);
-        }
+        jobs.shutdown();
     }
 }

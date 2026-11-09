@@ -170,14 +170,37 @@ def trash_cmd(limit: int) -> None:
         click.echo("Trash is empty.")
         return
 
+    from nexus.sensitive_output import CliDocumentLines  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    # nexus-rfvyy.9 item 2: a flagged document's title is content (the stub under Claude Code, a badge in a terminal).
+    # No live-only read returns a tombstone, so the flag comes from the trash row itself; an engine that predates the
+    # row's "sensitive" key leaves it unknown, and unknown withholds under Claude Code (and prints plainly in a terminal).
+    lines = CliDocumentLines()
+
+    def _is_flagged(d: dict) -> bool:
+        return d["sensitive"] is True if "sensitive" in d else lines.withholding()
+
+    flagged = {str(d.get("tumbler", "")) for d in docs if _is_flagged(d)}
+    # A merged duplicate's own flag is unset while its canonical holds the content: follow alias_of to the canonical's
+    # flag (a canonical the live catalog does not return, or an unreadable catalog, counts flagged).
+    aliased = {str(d.get("tumbler", "")): str(d["alias_of"]) for d in docs
+               if d.get("alias_of") and str(d.get("tumbler", "")) not in flagged}
+    if aliased:
+        from nexus.sensitive_output import flagged_tumblers  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+        canon_flagged = flagged_tumblers(set(aliased.values()), cat=cat)
+        flagged |= {t for t, canon in aliased.items() if canon in canon_flagged}
     click.echo(f"{len(docs)} tombstoned document(s):")
     click.echo(f"  {'TUMBLER':<16} {'DELETED_AT':<26} TITLE")
     for d in docs:
+        t = str(d.get("tumbler", ""))
         click.echo(
-            f"  {str(d.get('tumbler', '')):<16} "
+            f"  {t:<16} "
             f"{str(d.get('deleted_at') or ''):<26} "
-            f"{d.get('title', '')}"
+            f"{lines.label(t, t in flagged, str(d.get('title', '')))}"
         )
+    for line in lines.notes():
+        click.echo(line)
 
 
 @click.command("restore")

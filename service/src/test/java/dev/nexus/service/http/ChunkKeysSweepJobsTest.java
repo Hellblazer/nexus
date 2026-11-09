@@ -270,9 +270,11 @@ class ChunkKeysSweepJobsTest {
     @Test
     void aCancelIsAcceptedByARunningApplyOnly_andTheWorkSeesItAtItsNextBoundary() throws Exception {
         CountDownLatch atBoundary = new CountDownLatch(1);
+        CountDownLatch started = new CountDownLatch(1);
         java.util.concurrent.atomic.AtomicReference<String> seen = new java.util.concurrent.atomic.AtomicReference<>();
         Started apply = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", (job, stage) -> {
             assertThat(job.stopReason()).as("nothing asked yet").isNull();
+            started.countDown();
             atBoundary.await(20, TimeUnit.SECONDS);
             seen.set(job.stopReason());
             return ok("t");
@@ -284,6 +286,9 @@ class ChunkKeysSweepJobsTest {
 
         assertThat(dry.job().requestCancel()).as("a dry run has no batch to stop at").isFalse();
         assertThat(dry.job().cancelRequested()).isFalse();
+        // The work asserts that nothing was asked before it started; cancelling before the worker thread got there
+        // failed that assertion inside the job (state FAILED, never DONE) and timed the await out under load.
+        assertThat(started.await(20, TimeUnit.SECONDS)).as("the apply's work has started").isTrue();
         assertThat(apply.job().requestCancel()).isTrue();
         assertThat(apply.job().stopReason()).isEqualTo("cancelled");
         atBoundary.countDown();

@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import signal
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -27,10 +30,34 @@ def pid_file(tmp_path, monkeypatch) -> Path:
     return d / "mineru.pid"
 
 
+@contextlib.contextmanager
+def _no_group_signal():
+    """POSIX: os.killpg is faked as well, so a regression that signals around stop_server_group fails
+    loudly instead of reaching a real process group. Windows has no os.killpg to fake."""
+    if not hasattr(os, "killpg"):
+        yield
+        return
+    with patch_in(("nexus.commands.mineru", "nexus.util.process_group"), "os.killpg") as killpg:
+        yield
+    killpg.assert_not_called()
+
+
+@contextlib.contextmanager
+def _liveness(**kw):
+    """Fake process liveness where the command asks for it. ``start`` and ``stop`` read
+    ``nexus.commands.mineru._is_process_alive``; ``status`` and ``start``'s already-running check
+    read it through ``nexus._mineru_pid.recorded_server_alive`` (nexus-dyfsw site 3). Faking
+    ``os.kill`` covered both on POSIX only: on Windows ``pid_alive`` asks the kernel by handle, so
+    an unfaked check read the recorded pid as dead there."""
+    with patch("nexus.commands.mineru._is_process_alive", **kw) as fake, \
+         patch("nexus._mineru_pid.is_process_alive", new=fake):
+        yield fake
+
+
 def _write_pid(pid_file: Path, pid: int = 12345, port: int = 8010) -> None:
     pid_file.write_text(json.dumps({
         "pid": pid, "port": port, "started_at": "2026-04-02T12:00:00+00:00",
-    }))
+    }), encoding="utf-8")
 
 
 def _mock_start_success(pid=42, port=8010):
@@ -57,10 +84,17 @@ class TestMineruStart:
         with patches[0] as mock_popen, patches[1], patches[2], patches[3], patches[4]:
             result = runner.invoke(main, ["mineru", "start"])
         assert result.exit_code == 0
-        data = json.loads(pid_file.read_text())
+        data = json.loads(pid_file.read_text(encoding="utf-8"))
         assert data["pid"] == 42 and data["port"] == 8010
         kw = mock_popen.call_args.kwargs
-        assert kw.get("start_new_session") is True
+        # nexus-dmhxw: POSIX starts a new session; Windows takes the storage supervisor's flags instead
+        # (its own process group, a hidden console), since start_new_session means nothing there.
+        if sys.platform == "win32":
+            from nexus.util import win_job
+
+            assert kw.get("creationflags", 0) & win_job.CREATE_NEW_PROCESS_GROUP and "start_new_session" not in kw
+        else:
+            assert kw.get("start_new_session") is True
         env = kw.get("env", {})
         for key in ("MINERU_PROCESSING_WINDOW_SIZE",
                      "MINERU_VIRTUAL_VRAM_SIZE", "MINERU_API_OUTPUT_ROOT",
@@ -73,6 +107,7 @@ class TestMineruStart:
     def test_start_already_running(self, runner, pid_file):
         _write_pid(pid_file)
         with patch_in(("nexus.commands.mineru", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill"), \
+             _liveness(return_value=True), \
              patch_in(("nexus.commands.mineru", "nexus._mineru_spawn"), "subprocess.Popen") as mock_popen:
             result = runner.invoke(main, ["mineru", "start"])
         assert result.exit_code == 0 and "already running" in result.output.lower()
@@ -121,7 +156,7 @@ class TestMineruStart:
              patch("nexus.config.set_config_value"):
             result = runner.invoke(main, ["mineru", "start", "--port", "9000"])
         assert result.exit_code == 0
-        data = json.loads(pid_file.read_text())
+        data = json.loads(pid_file.read_text(encoding="utf-8"))
         assert data["port"] == 9000
         call_args = mock_popen.call_args[0][0]
         assert "--port" in call_args and call_args[call_args.index("--port") + 1] == "9000"
@@ -142,6 +177,7 @@ class TestMineruStop:
                     raise OSError("No such process")
         return side_effect, signals
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX; Windows stops the one pid")
     def test_stop_sends_sigterm_to_process_group(self, runner, pid_file):
         """``nx mineru stop`` must SIGTERM the whole process group so
         MinerU's multiprocessing workers' resource_tracker gets a
@@ -162,7 +198,7 @@ class TestMineruStop:
 
         with patch_in(("nexus.commands.mineru", "nexus.util.process_group"), "os.killpg", side_effect=_fake_killpg), \
              patch_in(("nexus.commands.mineru", "nexus.util.process_group"), "os.getpgid", lambda pid: pid), \
-             patch("nexus.commands.mineru._is_process_alive", side_effect=_alive), \
+             _liveness(side_effect=_alive), \
              patch("nexus.upgrade_finish.process_command",
                    return_value="python3 mineru-api --host 127.0.0.1"), \
              patch_time("nexus.commands.mineru", "sleep"):
@@ -171,14 +207,29 @@ class TestMineruStop:
         assert (12345, signal.SIGTERM) in killpg_calls
         assert (12345, signal.SIGKILL) not in killpg_calls
 
+    def test_stop_of_a_live_mineru_server_removes_the_pid_file(self, runner, pid_file):
+        """The clean stop on every platform: an alive mineru-api is handed to stop_server_group, and once
+        it reports the server gone the pid file is removed (the Windows twin of the process-group test)."""
+        _write_pid(pid_file, pid=12345)
+        alive = [True, False, False, False]
+        with _no_group_signal(), \
+             patch("nexus._mineru_spawn.stop_server_group", return_value="exited") as stop, \
+             _liveness(side_effect=lambda pid: alive.pop(0) if alive else False), \
+             patch("nexus.upgrade_finish.process_command", return_value="python3 mineru-api --host 127.0.0.1"), \
+             patch_time("nexus.commands.mineru", "sleep"):
+            result = runner.invoke(main, ["mineru", "stop"])
+        assert result.exit_code == 0, result.output
+        assert stop.call_args[0][0] == 12345
+        assert not pid_file.exists()
+
     def test_stop_refuses_recycled_pid(self, runner, pid_file):
         """nexus-5yrob: the pid file outlived its server and the OS reused
         the pid. The stop verb signals a whole process group, so an alive
         pid that is no longer a mineru-api gets no signal at all; the stale
         pid file is removed instead."""
         _write_pid(pid_file, pid=12345)
-        with patch_in(("nexus.commands.mineru", "nexus.util.process_group"), "os.killpg") as killpg, \
-             patch("nexus.commands.mineru._is_process_alive", return_value=True), \
+        with _no_group_signal(), patch("nexus._mineru_spawn.stop_server_group") as killpg, \
+             _liveness(return_value=True), \
              patch("nexus.upgrade_finish.process_command",
                    return_value="/usr/bin/vim unrelated.txt"):
             result = runner.invoke(main, ["mineru", "stop"])
@@ -191,8 +242,8 @@ class TestMineruStop:
         """An empty command read is inconclusive (ps timeout and vanished
         process look alike), so the verb neither signals nor deletes."""
         _write_pid(pid_file, pid=12345)
-        with patch_in(("nexus.commands.mineru", "nexus.util.process_group"), "os.killpg") as killpg, \
-             patch("nexus.commands.mineru._is_process_alive", return_value=True), \
+        with _no_group_signal(), patch("nexus._mineru_spawn.stop_server_group") as killpg, \
+             _liveness(return_value=True), \
              patch("nexus.upgrade_finish.process_command", return_value=""):
             result = runner.invoke(main, ["mineru", "stop"])
         assert result.exit_code == 0, result.output
@@ -206,8 +257,7 @@ class TestMineruStop:
 
     def test_stop_stale_pid(self, runner, pid_file):
         _write_pid(pid_file, pid=99999)
-        with patch(
-            "nexus.commands.mineru._is_process_alive", return_value=False,
+        with _liveness(return_value=False,
         ):
             result = runner.invoke(main, ["mineru", "stop"])
         assert result.exit_code == 0 and not pid_file.exists()
@@ -252,6 +302,7 @@ class TestMineruStatus:
             if status_code == 200:
                 resp.json.return_value = dict(_REAL_HEALTH_PAYLOAD)
             with patch_in(("nexus.commands.mineru", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill"), \
+             _liveness(return_value=True), \
                  patch("nexus.commands.mineru.httpx.get", return_value=resp):
                 result = runner.invoke(main, ["mineru", "status"])
         # an unhealthy server exits non-zero (nexus-x3m8e): a script asking
@@ -270,6 +321,7 @@ class TestMineruStatus:
         resp = MagicMock(); resp.status_code = 200
         resp.json.return_value = dict(_REAL_HEALTH_PAYLOAD)
         with patch_in(("nexus.commands.mineru", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill"), \
+             _liveness(return_value=True), \
              patch("nexus.commands.mineru.httpx.get", return_value=resp):
             result = runner.invoke(main, ["mineru", "status"])
         assert result.exit_code == 0
@@ -288,6 +340,7 @@ class TestMineruStatus:
         resp = MagicMock(); resp.status_code = 200
         resp.json.return_value = {"status": "healthy"}
         with patch_in(("nexus.commands.mineru", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill"), \
+             _liveness(return_value=True), \
              patch("nexus.commands.mineru.httpx.get", return_value=resp):
             result = runner.invoke(main, ["mineru", "status"])
         assert result.exit_code == 0

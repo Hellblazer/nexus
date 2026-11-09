@@ -527,7 +527,7 @@ grant rule.
    and the limits of item 11 (lowered by the caller's `limits`, never
    raised), and runs it in a worker process (item 6). Source is never a
    parameter of any run path.
-5. Runtime. `lupa.lua54` (PUC Lua 5.4) through `lupa>=2.8,<3`. LuaJIT is
+5. Runtime. `lupa.lua54` (PUC Lua 5.4) through `lupa>=2.8,<2.8.1`, the exact release the calibration and limit suites were run on (nexus-mdbds.4). LuaJIT is
    never loaded: its count hook skips compiled code and `lupa` cannot cap
    its memory (Key Discoveries). Every run runs in its own worker process
    (item 6). The worker holds one script `LuaRuntime`, discarded with the
@@ -545,7 +545,10 @@ grant rule.
    Lua has that user's reach, less what the start below removes. The
    contract:
    - Start. `subprocess.Popen([sys.executable, "-I", "-m",
-     "nexus.lua_runtime.worker"])`, never `fork` or `multiprocessing`
+     "nexus.lua_runtime.worker", ...])`, the OS limit values following the
+     module name as flags (`--cpu-soft`, `--cpu-hard`, `--as-bytes`,
+     `--reply-cap`), since the worker sets its limits before it reads anything
+     and its environment is empty; never `fork` or `multiprocessing`
      (inferred, not read: a fork of the threaded MCP server copies its
      state and its held locks). `-I` ignores `PYTHON*` variables and the
      user site. The environment is empty, with only `SYSTEMROOT` added on
@@ -561,8 +564,14 @@ grant rule.
      at most 64 KB per verb-call frame (a verb name and plain arguments) and
      at most 1 MB plus 64 KB for its one result, error or limit frame (the
      result bound of item 11, plus room for the frame's own fields); the
-     parent sends at most 64 MB (a verb result; the same bound as `max_memory`,
-     since a larger value cannot be held in Lua). A frame over its cap, a
+     parent sends at most `VERB_RESULT_CAP_BYTES`, 20 MiB, plus room for the
+     frame (a verb result). The cap is set from the measured JSON-to-Lua
+     memory ratio of a verb result, not from `max_memory`: 0.75 x 64 MiB / 2.3,
+     where 2.3 is the largest ratio among the verbs that can return megabytes
+     (`nexus_rdr/242-research-36`; RDR-240's A2 re-measures it on real
+     records). The worker builds the Lua table on a protected path, so a
+     result that does not fit is `ScriptLimitError("memory")`, never an abort
+     (`nexus_rdr/242-research-37`). A frame over its cap, a
      frame that is not valid JSON of the expected form, or a 10,001st verb
      call in one run ends the run with `ScriptWorkerError`. The parent checks
      every verb call before it runs it: the verb is granted, and each
@@ -571,7 +580,7 @@ grant rule.
      (hard), as `RLIMIT_CPU` on Linux and macOS and a per-process time limit
      of the job on Windows. Memory: 1 GiB, as `RLIMIT_AS` on Linux and a
      per-process memory limit of the job on Windows, above the 64 MB
-     `max_memory` so that Python, `lupa` and one 64 MB frame fit. On macOS
+     `max_memory` so that Python, `lupa` and one 20 MiB frame fit. On macOS
      `setrlimit(RLIMIT_AS)` raises `ValueError` (`nexus_rdr/242-research-32`),
      so the worker sets it in a `try`, and `max_memory` is the only memory
      bound there. Any other failure to set a limit ends the run with
@@ -581,9 +590,12 @@ grant rule.
      independent of the parent's run loop, so it fires while the parent is
      inside a verb. Verb time counts toward wall time: each verb call gets
      the remaining budget as its timeout (the HTTP timeout of a T2 read, the
-     `timeout` of a git subprocess). When the timer kills the worker during
-     a verb, the parent abandons the verb and discards its result; version
-     1's verbs only read, so nothing is left half done.
+     `timeout` of a git subprocess). Each verb runs on a helper thread the
+     run loop stops waiting on at the deadline, so a run returns at its limit
+     even when a verb ignores its timeout; the parent then kills the worker
+     and discards the verb's result. Version 1's verbs only read, so nothing
+     is left half done. A worker that dies during a verb ends the run at
+     once.
    - Parent death. On Linux and macOS a worker that is running Lua is ended
      by its CPU limit, and a worker waiting on the pipe reads end of file and
      exits, so nothing more is needed (`nexus_rdr/242-research-32`: SIGXCPU
@@ -641,13 +653,26 @@ grant rule.
    ungranted verb by name as well, and checks its arguments (item 6).
 10. Version 1 verbs (read-only). `memory.get(project, title)`,
     `memory.list(project)`, `memory.search(query, project, limit)`,
-    `transcripts.sessions(since, until, project, bodies)`,
+    `transcripts.sessions(since, until, project, bodies, fields)`,
     `git.diff_names(base)`, `git.diff_stat(base)`, `tables.get(name)`. Each
     returns structured values, not the formatted text the MCP tools print:
     the memory verbs call the T2 store layer (`db.resolve_title`,
     `db.list_entries`, `db.search`); the other four are new client functions
     (Key Discoveries, A3). `transcripts.sessions` never returns message
-    bodies unless `bodies` is true. A write verb, when one ships, is a
+    bodies unless `bodies` is true. `fields`, a comma-separated list, narrows each
+    record to the named fields while the file is parsed (nil returns every
+    field; `session_id`, `agent_id`, `main` and `truncated` always come back);
+    `tool_calls.input@<Tool>` keeps a call's input for that tool only, and
+    `tool_calls.input_bytes` reports an input's size without carrying it. It
+    cuts the result and the memory a scan holds, not the read: every line is
+    still decoded (RDR-240 A2 remedy, Sam 2026-11-08; nexus-qo7ie.31).
+    `project` may also be `repo`: every project directory holding the sessions
+    of the repository the run started in. Read-only means no verb writes a record
+    or its content. `memory.get` still counts one access (`access_count`,
+    `last_accessed`) on an exact or unique-prefix hit, as MCP `memory_get`
+    does, because the engine's resolve endpoint has no silent read;
+    `memory.search` reads with `access="silent"` and `memory.list` counts
+    nothing (nexus-mdbds.7 review r1). A write verb, when one ships, is a
     separate entry in the verb table, granted only when declared and covered
     by an approval (item 1); none ships before that document.
 11. Limits. Defaults, each lowered by the caller and never raised:
@@ -925,7 +950,7 @@ The threat model names who might try what, and what stops them.
 
 #### Step 1: Dependency
 
-Add `lupa>=2.8,<3`; install on macOS arm64, Linux x86_64 (chas) and native
+Add `lupa` (pinned `>=2.8,<2.8.1` in Step 2); install on macOS arm64, Linux x86_64 (chas) and native
 Windows (qwent), and on each run a one-line script through a bare child
 process (`python -I -c` that imports `lupa.lua54` and evaluates one
 expression). The worker is built in Step 2.
@@ -944,12 +969,15 @@ fixture.
 The same step measures the worker's cost on each of the three platforms:
 the median of 20 worker starts (from the spawn to the worker's first ready
 frame, `lupa` imported), and the round trip of a 1 MB and a 50 MB verb
-result (the parent encodes it, the worker decodes it into a Lua table). The
-pass line: a start of at most 500 ms; a 1 MB round trip of at most 100 ms;
-a 50 MB round trip of at most 5 s. The step also records whether the 50 MB
-table fits under the 64 MB `max_memory`, because RDR-240's 30-day
-transcript query depends on that answer. A missed line comes back to this
-RDR before Step 3 starts.
+result (the parent encodes it, the worker decodes it into a Lua table; the
+50 MB line runs with the caps lifted, so it times transport and decoding
+only). The pass line: a start of at most 500 ms; a 1 MB round trip of at
+most 100 ms; a 50 MB round trip of at most 5 s. The fit question is answered
+by the verb-result cap of Technical Design 6: pass line a cap of at least
+8 MiB from the measured ratio; consequence of a miss, RDR-240's queries move
+to one-hour windows. A missed line comes back to this RDR before Step 3
+starts. Measured on all three platforms, every line passed
+(`nexus_rdr/242-research-36`).
 
 #### Step 3: Runtime, loading, results and limits
 
@@ -1106,9 +1134,9 @@ documented, 6 assumed. Record 23 says A2's overrun is not measured; record
 29 measured it, and the RDR follows 29.
 
 Verified: A3, by a code read of each verb's nearest client call. A4, for
-`lupa` 2.8 only: the calibration passed there, no other release in
-`>=2.8,<3` was checked, and the calibration test in the suite is what fails
-on a change.
+`lupa` 2.8 only: the calibration passed there, and the dependency is pinned
+to that release (`>=2.8,<2.8.1`); the calibration test in the suite is what
+fails on a change.
 
 Open, not resolved:
 
@@ -1120,9 +1148,13 @@ Open, not resolved:
   fired). The in-process hook cannot hold wall time; the worker's kill timer
   does, and it is not built. Phase 1 Step 2 builds it and its tests. The
   instruction and memory limits hold for Lua 5.4 by spike.
-- The worker facts of record 33 (Linux `RLIMIT_AS`, the Windows job and its
-  limits, `SYSTEMROOT`, end of file on parent death): assumed, not probed.
-  Phase 1 Step 2 tests each one on its platform.
+- The worker facts of record 33, tested in Phase 1 Step 2 (nexus-mdbds.4):
+  Linux `RLIMIT_AS` verified (on WSL2); the Windows job's memory limit and
+  kill-on-close verified, its per-process time limit enforced several
+  seconds late, so the kill timer always ends a runaway first; `SYSTEMROOT`
+  refuted as stated: Python starts without it, and only Winsock needs it
+  (the worker keeps it); end of file on parent death verified on Linux and
+  macOS.
 
 A5, A6 and A7 no longer apply (`nexus_rdr/242-research-30`). They were
 premises of the hardware-key approval layer, and this RDR no longer builds
@@ -1164,7 +1196,9 @@ write verbs, tuple-space verbs (the aura stage of nexus-mdbds), and
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: `lupa>=2.8,<3`, raised deliberately. The calibration test
+- **Versioning**: `lupa>=2.8,<2.8.1`, raised deliberately with the lock and
+  a green run of the Lua suites; the dependency-drift check refuses any other
+  resolve. The calibration test
   and the escape suite fail on a bytecode layout change or a new global. The
   check re-runs before every run, so a stricter checker refuses a script an
   older one passed. The bundled Lua 5.4 patch release is not recorded (A4).
@@ -1259,3 +1293,7 @@ scope change and the round 2 findings named.
   check in the worker. Technical Design renumbered 1 to 13.
 - 2026-11-07: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `55954c930`; critique `nexus_rdr/242-gate-critique-2026-11-07-r3`.
 - 2026-11-07: Accepted (Sam, "Accept, fold residuals"). Residual dispositions: S1, S2, S3, S4 and S5 carried by bead nexus-mdbds (stage 3 implementation), each with its Implementation Plan phase.
+- 2026-11-07: Technical Design 10 amended to match reviewed code (nexus-mdbds.7 review r1; standing grant 3): `memory.get` counts one access through `db.resolve_title`, the other memory verbs count none.
+- 2026-11-08: Technical Design 10 amended to match reviewed code (nexus-qo7ie.31, the verb's reviews `nexus/review-nexus-qo7ie.31-fields-r2` and the wiring's `nexus/review-nexus-qo7ie.31-fields-wiring-r1`; standing grant 3): `transcripts.sessions` takes a fifth argument, `fields`, and `project` may be `repo`.
+- 2026-11-08: Technical Design 5, 6 and the Implementation Plan's Steps 1 and 2, Finalization Gate A4 and record 33, and Cross-Cutting Versioning amended to match reviewed code (nexus-mdbds.4 review; standing grant 3): lupa pinned to 2.8 exactly; the worker's OS limits travel as argv flags; the parent-to-worker verb-result cap is 20 MiB from the measured JSON-to-Lua ratio, with a protected Lua table build (gate r3 S3); each verb runs on a helper thread the run loop stops waiting on at the deadline (gate r3 S2); the 50 MB measurement times transport only and the fit question is the cap's pass line; record 33's facts tested per platform.
+- 2026-11-08: Open Question S5 resolved (Sam, ask baton/s5-repo-root, option a, "Off; nexus repo on"; standing grant 3, recorded after review of nexus-qo7ie.32 `nexus/critique-nexus-qo7ie.32-run-script-r2`): the repo root `.nexus/procedures` stays off by default (on only when `NX_PROCEDURES_REPO_ROOT` is exactly `1`), and the nexus repo turns it on in its project `.claude/settings.json` env. The cloned-repo residual in Technical Design 2 and the threat model stands for any repo that turns the root on.

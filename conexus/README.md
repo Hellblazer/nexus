@@ -53,8 +53,8 @@ story.
 - **40 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
-- **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
-- **Two bundled MCP servers** — `nexus` (44 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
+- **Permission auto-approval** — safe commands and the nexus MCP tools skip the confirmation prompt, except `daemon_uninstall`, `setup` and `setup_status`
+- **Two bundled MCP servers** — `nexus` (45 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
 
 ### Pick your entry point
 
@@ -338,6 +338,7 @@ names each handler by its program and verb.
 | `SessionStart` (matcher `compact`) | `hooks/scripts/compact_checkpoint.py inject` | A separate group from the seven-verb one above. Emits this session's checkpoint as `additionalContext` (capped near 8 KB, recent commits cut first, the board entry last), an intro that states the checkpoint's age and trigger, and a line naming the full file; past ten minutes the intro adds that the checkpoint may predate this compaction and the state may have changed, or, when the payload carries `precomputed: true`, that the payload marked the summary precomputed (prepared while the session was idle, after the checkpoint was taken). Each verb logs one INFO `probe` line to `hook.log` (verb, payload keys by name, outcome, and the values of `hook_event_name`, `source`, `trigger` and `precomputed` when they are a string or a bool; no other value) so what a client's payload carries is visible. Nothing when none exists for this session id, its own `written:` stamp (not the file's mtime) is missing or older than the two-day prune window, the file is a stub, or `<session>.injected` holds that stamp (it was already injected; inject records the stamp there and never rewrites the checkpoint, since inject may run before post (it did in the live runs measured)). Reads one file and writes the sidecar: no network, no `nx` call. Its 35 s timeout is the cold-start allowance every SessionStart entry carries plus its own work |
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` | Deny index-writing / working-tree-destroying git verbs from subagents in the shared tree (RDR-184 Gap-4); a single ssh command to a host named in `NX_REMOTE_TEST_HOSTS` (comma-separated ssh host aliases; unset or empty exempts none) is exempt, since its git runs there (nexus-yc7fs) |
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/credential_print_guard.py` | Deny commands that would reveal a Claude credential: a keychain read, a `.credentials.json` read, naming a protected token variable, or reading another process's environment (RDR-219 Gap 2, no escape) |
+| `PreToolUse` (`Bash`, `Edit`, `Write`, `MultiEdit`) | `hooks/scripts/routing/destructive_action_advice.py` | Advise (never deny) before an action that destroys shared state: a pattern kill, a bulk or output-hiding `git branch -D`, `git stash` with more than one worktree, a background job piped into `tail`/`head`/`grep`, a whole-disk recursive scan, a glob delete under a shared temp root, a hand-run hook verb without a scratch HOME, an edit of a shell script a live shell is running (nexus-qo7ie.36). One table-driven hook; the mode is a one-line constant |
 | `SubagentStart` | `hook_subagent_start` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
 | `SubagentStop` (matcher `.+`) | `hooks/scripts/nx_hook_shim.py subagent-stop-t1-nudge` | When a named agent stops and its own transcript shows no successful T1 put (an MCP `scratch` call with `action=put`, or a Bash `nx scratch put`), return `additionalContext` that gives the agent one more turn with a one-sentence request to write its findings to T1. A warning, not a veto: no `decision` key. Silent on the stop that follows its own nudge (`stop_hook_active`), when the transcript is missing or unparseable, and for harness-internal stops with no `agent_type`, which the `.+` matcher never spawns it for (nexus-mtheb.3) |
 | `Stop` | `hooks/scripts/stop_wake_guard.py` | Continue a turn once when its closing text promises work that nothing will wake: a CI or run wait, a promise to check or do something later, or a timed step, while `background_tasks` and `session_crons` are both empty and `stop_hook_active` is false. Clauses where Sam is the actor, a peer, mailbox, notification or restart is the wake, or that report past tense are dropped first. Returns `hookSpecificOutput.additionalContext` once, which continues the turn without the "Stop hook error" notice a `decision: block` shows (the text quotes the sentence and says to arm a Monitor, a background Bash until-loop, ScheduleWakeup or CronCreate, or to say who the wake is); logs every decision to `hook.log`; fails open. Only the last 600 characters are read, and a message whose last sentence addresses Sam, or waits on an approval, is allowed whole. A missing or non-list `background_tasks`/`session_crons` allows the stop. `NX_STOP_WAKE_GUARD=0` turns it off; set it in the environment of any scripted `claude -p` run that loads this plugin (a run with `--setting-sources ""` loads no plugin and needs nothing), because a one-shot run's final message would otherwise become the continuation (nexus-4cgop) |
@@ -410,11 +411,11 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 
 | Server | Purpose | Tools |
 |--------|---------|-------|
-| `nexus` | Retrieval + storage (core) | 44 tools — see below |
+| `nexus` | Retrieval + storage (core) | 45 tools — see below |
 | `nexus-catalog` | Catalog access (RDR-062) | `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` |
 | `sequential-thinking` | Compaction-resilient reasoning chains | `sequentialthinking` |
 
-### `nexus` MCP tool catalog (44 tools)
+### `nexus` MCP tool catalog (45 tools)
 
 | Category | Tools |
 |----------|-------|
@@ -424,6 +425,7 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 | Scratch (T1) | `scratch`, `scratch_manage` |
 | Collections | `collection_list` |
 | Plans (RDR-078) | `plan_save`, `plan_search`, `plan_delete`, `traverse` |
+| Procedures (RDR-240) | `procedure_run` |
 | Tuple space (RDR-205/206/211/213) | `tuple_out`, `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_renew`, `tuple_release`, `tuple_registry`, `tuple_list`, `tuple_stats`, `tuple_subscribe`, `tuple_unsubscribe`, `tuple_subscriptions`, `mailbox_send` |
 | Operators (RDR-079/088/093) | none on the MCP surface (nexus-ivi4s): `summarize`, `extract`, `rank`, `compare`, `generate`, `filter`, `groupby`, `aggregate`, `check`, `verify` run as plan steps inside `nx_answer` |
 | Orchestration (RDR-080) | `nx_answer`, `nx_answer_report`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit` |
@@ -437,7 +439,7 @@ via `plan_run`, and falls through to an inline planner on miss.  See
 
 ### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
 
-The nexus core server exposes 44 MCP tools and the nexus-catalog server exposes 10 catalog tools, 54 tools an agent calls. Some functions are Python-only, not tools, including the 10 operators that `nx_answer` plans run. The core server also registers 2 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus core server exposes 45 MCP tools and the nexus-catalog server exposes 10 catalog tools, 55 tools an agent calls. Some functions are Python-only, not tools, including the 10 operators that `nx_answer` plans run. The core server also registers 2 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 

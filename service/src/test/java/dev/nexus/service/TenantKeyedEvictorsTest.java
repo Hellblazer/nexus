@@ -190,7 +190,7 @@ class TenantKeyedEvictorsTest {
         assertThat(limiter.evictTenant("mint-x")).isEqualTo(2);
     }
 
-    // ── ChunkKeysSweepJobs.jobs ──────────────────────────────────────────────────────────────────
+    // ── ChunkKeysSweepJobs (EngineJobs.jobs of the chunk-keys instance) ───────────────────────────
 
     @Test
     void chunkKeysSweepJobs_evictTenant_dropsXsJobsAndTheirCountsOnly() throws Exception {
@@ -209,6 +209,36 @@ class TenantKeyedEvictorsTest {
 
             assertThat(jobs.find(x.job().id())).as("X's job and its counts are gone").isNull();
             assertThat(jobs.find(y.job().id())).as("Y's job is intact").isNotNull();
+        } finally {
+            jobs.shutdown();
+        }
+    }
+
+    // ── EngineJobs.reconcile (EngineJobs.jobs of the reconcile instance) ──────────────────────────
+
+    @Test
+    void reconcileJobs_evictTenant_dropsXsJobsOfEveryOwnerAndNoOneElses() throws Exception {
+        var jobs = dev.nexus.service.http.EngineJobs.reconcile(System::currentTimeMillis);
+        try {
+            var x1 = jobs.start("rec-x", "1.1", "fp",
+                (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", "rec-x")));
+            var x2 = jobs.start("rec-x", "1.2", "fp",
+                (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", "rec-x")));
+            var y = jobs.start("rec-y", "1.1", "fp",
+                (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", "rec-y")));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            while (x1.job().state() == dev.nexus.service.http.EngineJobs.State.RUNNING
+                    || x2.job().state() == dev.nexus.service.http.EngineJobs.State.RUNNING
+                    || y.job().state() == dev.nexus.service.http.EngineJobs.State.RUNNING) {
+                assertThat(System.nanoTime()).as("the jobs end").isLessThan(deadline);
+                Thread.sleep(5);
+            }
+
+            assertThat(jobs.evictTenant("rec-x")).as("both of X's owners' jobs").isEqualTo(2);
+
+            assertThat(jobs.find(x1.job().id(), "rec-x")).isNull();
+            assertThat(jobs.find(x2.job().id(), "rec-x")).isNull();
+            assertThat(jobs.find(y.job().id(), "rec-y")).as("Y's job is intact").isNotNull();
         } finally {
             jobs.shutdown();
         }
