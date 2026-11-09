@@ -63,8 +63,8 @@ import java.util.TreeSet;
  *       count alone on those two routes.</li>
  *   <li>Writers inside the engine are not seen: {@code ReembedRunner.moveDocsCombined} and the {@code gc} restore
  *       SQL copy stored metadata verbatim and never pass a handler. A PDF pipeline row staged before an upgrade is
- *       replayed through {@code upsert-chunks} with the metadata it was staged with, so it is seen late, when it is
- *       replayed, and counted as the replaying client.</li>
+ *       uploaded later by a client, through {@code upsert-chunks}; it is seen only then, and only if that client
+ *       sends the staged keys.</li>
  *   <li>The test tree seeds legacy-keyed rows through these routes on purpose (dozens of test files): an engine
  *       booted by a test counts them, and only a production engine's counters mean anything.</li>
  * </ol>
@@ -183,7 +183,7 @@ public final class ChunkKeyAllowlistCheck {
             // One line per route, tenant, collection, key set and client per window: a second writer or a second
             // key set in the same collection is not the first one's suppressed repeat. The delimiter is stripped
             // from client text so a tenant-keyed eviction (which matches |tenant|) reads only the tenant field.
-            String limiterKey = route + "|" + tenant + "|" + collection + "|" + signature(offending.keySet())
+            String limiterKey = route + "|" + tenant + "|" + OwnerlessLogText.quoted(collection, FIELD_MAX) + "|" + signature(offending.keySet())
                 + "|" + ua.replace('|', '/') + "|" + version.replace('|', '/');
             long suppressed = limiter.tryAcquire(limiterKey);
             if (suppressed < 0) {

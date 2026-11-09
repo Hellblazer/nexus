@@ -25,7 +25,8 @@ import java.util.concurrent.atomic.LongAdder;
  * sees the whole engine's status, so a key name, a {@code User-Agent} or a client version, all supplied by one
  * tenant's client, would be shown to every other tenant. That detail is in the {@code chunk_metadata_key_would_refuse}
  * log line instead, which is rate limited per route, tenant, collection, key set and client, so it names every
- * distinct writer.
+ * distinct writer while the limiter has room. Past its 10,000 keys, new writers share one overflow line, so the log
+ * is a sample, not a proof that no writer was missed.
  *
  * <p>JVM-wide, never keyed by tenant, and reset only by tests; a tenant reset does not touch it. Step 2a is log mode
  * only, so nothing counts a refusal here; Step 2c adds that field when it adds the 422.

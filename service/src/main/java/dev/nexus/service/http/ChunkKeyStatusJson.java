@@ -18,7 +18,8 @@ import dev.nexus.service.vectors.ChunkKeyAllowlistActivity;
  * client-supplied text. That is deliberate: {@code GET /v1/status} has no tenant scope, so any caller sees the whole
  * engine's status, and a key name, {@code User-Agent} or client version would show one tenant's strings to every
  * other tenant. The per-key and per-client detail is in the {@code chunk_metadata_key_would_refuse} log line, which
- * is rate limited per route, tenant, collection, key set and client and so names every distinct writer.
+ * is rate limited per route, tenant, collection, key set and client and so names every distinct writer while the
+ * limiter has room (past its 10,000 keys new writers share one overflow line: the log is a sample).
  */
 final class ChunkKeyStatusJson {
 
