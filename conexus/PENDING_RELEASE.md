@@ -48,7 +48,9 @@ it is until moved back deliberately.
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/skills/writing-nx-skills/SKILL.md`
-  nexus-qo7ie.35: a "Promoting a Memory File" section (RDR-240 Technical Design 9) and a "When This Skill Activates" section; the description now names promoting a memory file. Its script target needs `procedure_run`, which shipped in conexus 8.0.0.
+  nexus-qo7ie.35: a "Promoting a Memory File" pointer section (RDR-240 Technical Design 9); the description now names promoting a memory file, and the section points at promotion.md. Its script target needs `procedure_run`, which shipped in conexus 8.0.0.
+- `conexus/skills/writing-nx-skills/promotion.md`
+  nexus-qo7ie.35: new; the promotion recipe the skill loads on demand (moved out of SKILL.md to fit its context budget).
 - `conexus/skills/orchestration/reference.md`
   nexus-qo7ie.35: the Skill Routing line for `/conexus:writing-nx-skills` says it also covers promoting a memory file.
 
