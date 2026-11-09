@@ -523,6 +523,10 @@ Central configuration: `src/nexus/logging_setup.py` — `configure_logging(mode,
 | `~/.config/nexus/logs/mcp.log` | MCP servers (via `logging_setup`) | `%(asctime)s %(name)s %(levelname)s %(message)s` |
 | `~/.config/nexus/logs/console.log` | Console server (via `logging_setup`) | Same as above |
 
+### Slow MCP tool calls
+
+`NX_MCP_SLOW_CALL_S=<seconds>` (unset: off) makes both MCP servers sample a `tools/call` that runs longer than that. A watchdog thread wakes at the deadline, samples every thread's stack every 0.1 s until the call ends, and writes one `mcp_tool_call_slow` event to `mcp.log`: the tool, its wall time, the process CPU over the slow stretch (`cpu_ratio`, with `state` `waiting` below 0.5 and `computing` above), and the nexus functions the samples landed in most (`hot`, each as `<nexus frame> <- <innermost frame>` with a count). Only stacks that pass through nexus code are counted, so idle workers do not appear. The first slow call of a tool in a process logs at WARNING, later ones at INFO. Set it in the MCP servers' environment and restart them; `mcp_sdk_patch_applied patch=slow_call_watchdog` in `mcp.log` confirms it is on. Unset, nothing is installed.
+
 ### Suppressed Loggers
 
 `httpx`, `httpcore`, `chromadb.telemetry`, `opentelemetry` — forced to WARNING in all modes.

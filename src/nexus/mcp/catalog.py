@@ -32,6 +32,9 @@ mcp = MCPServer("nexus-catalog", version=_server_version())
 from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call_log  # noqa: E402 — needs the constructed server
 
 _TOOL_CALL_LOG_STATUS: str = _install_tool_call_log(mcp)
+from nexus.mcp._slow_call_watchdog import install_slow_call_watchdog as _install_slow_call_watchdog  # noqa: E402
+
+_SLOW_CALL_STATUS: str = _install_slow_call_watchdog(mcp)
 
 _BULK_DELETE_CONFIRM_THRESHOLD = 10
 
@@ -1046,7 +1049,7 @@ def main():
 
     report_sdk_patches(
         log,
-        {**_SDK_PATCH_RESULTS, "tool_call_log": _TOOL_CALL_LOG_STATUS},
+        {**_SDK_PATCH_RESULTS, "tool_call_log": _TOOL_CALL_LOG_STATUS, "slow_call_watchdog": _SLOW_CALL_STATUS},
         server="nx-mcp-catalog",
         pid=os.getpid(),
     )

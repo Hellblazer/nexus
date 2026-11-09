@@ -2883,6 +2883,10 @@ mcp = MCPServer("nexus", version=_server_version(), lifespan=_t1_lifespan)
 from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call_log  # noqa: E402 — needs the constructed server
 
 _SDK_PATCH_RESULTS["tool_call_log"] = _install_tool_call_log(mcp)
+# nexus-3ceda.3: opt-in stack sampling of a slow tools/call (NX_MCP_SLOW_CALL_S); "off" when unset.
+from nexus.mcp._slow_call_watchdog import install_slow_call_watchdog as _install_slow_call_watchdog  # noqa: E402
+
+_SDK_PATCH_RESULTS["slow_call_watchdog"] = _install_slow_call_watchdog(mcp)
 
 # RDR-215: register any ported hook_<name> tool-tier tools -- see
 # nexus/mcp/hooks.py for the registration table (HOOK_TOOLS).
