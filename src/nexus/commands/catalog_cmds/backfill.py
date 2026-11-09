@@ -349,12 +349,18 @@ def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
 )
 @click.option(
     "--list-ttl-first-sign", "list_first_sign", is_flag=True,
-    help="Dry run: print the notes the TTL sweep's guard held by the first sign of catalog_ttl_stale alone "
-         "(the summary always counts them; --json always carries them).",
+    help="Dry run only: also list the notes whose expiry RDR-236 Step 1 changes (the TTL sweep's guard held them "
+         "by the first sign of catalog_ttl_stale alone), with whether each has already lapsed. Reads the "
+         "manifests and chunk rows (text included) of every note with a TTL: see LOAD below. Refused with --apply.",
+)
+@click.option(
+    "--list-ttl-first-sign-only", "list_only", is_flag=True,
+    help="Dry run only: --list-ttl-first-sign without the stamping plan (no owner lookups, no document rows, "
+         "no per-key counts). Refused with --apply.",
 )
 def backfill_meta_cmd(
     apply: bool, as_json: bool, batch_size: int, pause_ms: int, max_rps: float | None,
-    stop_after_failed_rounds: int, start_after: str, list_first_sign: bool,
+    stop_after_failed_rounds: int, start_after: str, list_first_sign: bool, list_only: bool,
 ) -> None:
     """Stamp the new catalog meta keys of pre-existing documents from their chunk rows (nexus-6pfgb.10).
 
@@ -373,20 +379,31 @@ def backfill_meta_cmd(
 
     LOAD ON A SHARED SERVICE. Every pass, dry run or apply, lists the whole catalog and reads the chunk rows
     of most documents again: the keys are filled only where absent, so a dry run and the apply that follows
-    each cost the full read. A round of ``--batch-size`` documents sends about seven requests (a manifest
-    page, an owner page, a store-get per collection and 300 chunks, then the write). ``--max-rps`` is the
+    each cost the full read. A round of ``--batch-size`` documents sends one manifest request, one owner
+    request, ceil(chunks/300) store-get requests per collection it touches (chunk text included) and one
+    write; the count depends on the chunks the round touches, not on a fixed number. ``--max-rps`` is the
     guard: it holds EVERY request to that rate, retries and fallbacks included; ``--pause-ms`` only spaces
     the rounds. For a cloud catalog start with ``--max-rps 2``. Keep the catalog's other writers (indexers,
     hooks, ``nx store put``) quiet for the whole of every pass, not only the apply: the write merges a
     key into ``meta`` and overwrites one a writer set after the listing was taken.
 
-    A DRY RUN ALSO CHECKS THE KEYED NOTES (nexus-6pfgb.65, RDR-236 Phase 4 Step 1). It reads the chunk rows of
-    every note with a ``put_at`` (the apply pass needs none of them: such a note is complete) and counts, in
-    the summary and under ``ttl_first_sign_only`` in ``--json``, the notes ``note_ttl.catalog_ttl_stale``
-    held by its first sign alone: the row's TTL differs from the catalog's while the row's ``indexed_at`` is
-    not later than ``put_at`` plus five minutes (a pre-.18 import's permanent row, or a note whose owner
-    changed its TTL with a new-client re-put). Step 1 stops holding them; the catalog's TTL is the authority.
-    ``--list-ttl-first-sign`` prints them. Read-only: it stamps nothing and changes no expiry decision.
+    THE FIRST-SIGN LISTING (nexus-6pfgb.65, RDR-236 Phase 4 Step 1) runs only under ``--list-ttl-first-sign``
+    (or ``--list-ttl-first-sign-only``), on a dry run; both are refused with ``--apply``. It lists, in the
+    summary and under ``ttl_first_sign_only`` in ``--json``, the notes whose expiry Step 1 changes: a note with
+    a catalog TTL that ``note_ttl.catalog_ttl_stale`` held by its first sign alone, because a row's TTL differs
+    from the catalog's while the row's ``indexed_at`` is not later than ``put_at`` plus five minutes (a pre-.18
+    import's permanent row, or a note whose owner changed its TTL with a new-client re-put), or because the
+    row has no ``indexed_at`` at all (reason ``first sign, no indexed_at``). Each says when it expires and
+    whether it has already lapsed: a lapsed one is what the first sweep after Step 1 ships would retire. Step
+    1 stops holding them; the catalog's TTL is the authority. Read-only: it stamps nothing and changes no
+    expiry decision.
+
+    LISTING LOAD. The listing reads what the stamping plan does not: for every note with a ``put_at`` and a
+    catalog TTL, its manifest (one request per ``--batch-size`` documents) and its chunk rows
+    (ceil(chunks/300) store-get requests per collection a round touches, chunk text included), on top of the
+    pass's own reads. ``--list-ttl-first-sign-only`` makes only those reads, after the catalog listing: no
+    owner lookups, no document rows, no per-key counts. When any keyed note could not be read the list is
+    incomplete and the command exits 1.
 
     One progress line per round (about 300 lines for a long run) goes to stderr, so ``--json`` on stdout is
     unchanged: requests sent, the rate since the start and over the last 10 rounds, failed lookups and
@@ -395,9 +412,12 @@ def backfill_meta_cmd(
     second signal aborts the round at once: its counts are lost and its write may already have landed.
     ``--stop-after-failed-rounds`` stops the same way after that many failing rounds in a row.
 
-    Exit codes: 0 finished; 1 a write failed (even when also interrupted) or the run stopped on failed
-    rounds; 130 stopped by Ctrl-C; 143 stopped by SIGTERM; 2 a usage error.
+    Exit codes: 0 finished; 1 a write failed (even when also interrupted), the run stopped on failed rounds,
+    or the first-sign listing could not read every keyed note; 130 stopped by Ctrl-C; 143 stopped by SIGTERM;
+    2 a usage error.
     """
+    if apply and (list_first_sign or list_only):
+        raise click.UsageError("--list-ttl-first-sign and --list-ttl-first-sign-only are dry-run options: they cannot be combined with --apply.")
     import signal  # noqa: PLC0415 — command-local
 
     from nexus.catalog.meta_backfill import (  # noqa: PLC0415 — command-local
@@ -417,7 +437,7 @@ def backfill_meta_cmd(
                 reader, make_t3(), writer, apply=apply, batch=batch_size, pause_ms=pause_ms,
                 progress=lambda p: click.echo(p.line(), err=True), should_stop=stop,
                 requests=lambda: gate.count, stop_after_failed_rounds=stop_after_failed_rounds,
-                start_after=start_after,
+                start_after=start_after, list_first_sign=list_first_sign, list_only=list_only,
             )
     except (VacuousRunError, ResumePointError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -429,15 +449,21 @@ def backfill_meta_cmd(
         click.echo(json.dumps(report.as_dict(), indent=2, default=str))
     else:
         verb = "Stamped" if apply else "Would stamp"
-        click.echo(
-            f"Examined {report.documents_examined} documents ({report.documents_notes} notes): "
-            f"{report.documents_complete} complete, {report.documents_all_shared} with only shared chunks, "
-            f"{verb.lower()} {report.documents_to_stamp}."
-        )
-        click.echo(
-            f"  note.* keys cover the {report.documents_notes} note(s); "
-            f"doc.* keys cover the {report.documents_examined - report.documents_notes} non-note document(s)."
-        )
+        if report.list_only:
+            click.echo(
+                f"Examined {report.documents_examined} documents ({report.documents_notes} notes); "
+                "listing only, no stamping plan was made."
+            )
+        else:
+            click.echo(
+                f"Examined {report.documents_examined} documents ({report.documents_notes} notes): "
+                f"{report.documents_complete} complete, {report.documents_all_shared} with only shared chunks, "
+                f"{verb.lower()} {report.documents_to_stamp}."
+            )
+            click.echo(
+                f"  note.* keys cover the {report.documents_notes} note(s); "
+                f"doc.* keys cover the {report.documents_examined - report.documents_notes} non-note document(s)."
+            )
         for name, st in sorted(report.keys.items()):
             why = f" ({', '.join(f'{r} {n}' for r, n in sorted(st.residue.items()))})" if st.residue else ""
             click.echo(
@@ -452,29 +478,38 @@ def backfill_meta_cmd(
             held = report.ttl_first_sign_notes
             click.echo(
                 f"  {len(held)} note(s) held today by catalog_ttl_stale's first sign alone (the row's TTL differs from the "
-                "catalog's while the row's indexed_at is not later than put_at plus five minutes: a pre-.18 import's "
-                "permanent row, or a note whose owner changed its TTL with a new-client re-put). RDR-236 Step 1 stops "
-                "holding them; the catalog's TTL is the authority."
-                + ("" if list_first_sign or not held else " List them with --list-ttl-first-sign, or read --json.")
+                "catalog's while the row's indexed_at is not later than put_at plus five minutes, or the row has no "
+                "indexed_at: a pre-.18 import's permanent row, or a note whose owner changed its TTL with a new-client "
+                "re-put). RDR-236 Step 1 stops holding them; the catalog's TTL is the authority."
             )
+            for n in held:
+                click.echo(
+                    f"    {n['tumbler']}  {n['title']!r}  {n['collection']}: catalog ttl_days {n['catalog_ttl_days']} "
+                    f"put_at {n['put_at']}; row ttl_days {n['row_ttl_days']} indexed_at {n['row_indexed_at']} "
+                    f"({n['rows']} row(s)); {n['reason']}; expires {n['expires_at']}, "
+                    f"{'lapsed already' if n['lapsed_now'] else 'not lapsed yet'}"
+                )
             if report.ttl_first_sign_unread:
-                click.echo(f"  {report.ttl_first_sign_unread} keyed note(s) could not be checked (manifest or row read failed).")
-            if list_first_sign:
-                for n in held:
-                    click.echo(
-                        f"    {n['tumbler']}  {n['title']!r}  {n['collection']}: catalog ttl_days {n['catalog_ttl_days']} "
-                        f"put_at {n['put_at']}; row ttl_days {n['row_ttl_days']} indexed_at {n['row_indexed_at']} "
-                        f"({n['rows']} row(s)); {n['reason']}"
-                    )
+                click.echo(
+                    f"  {report.ttl_first_sign_unread} keyed note(s) could not be read (manifest or row read failed): "
+                    "the list is incomplete."
+                )
         if apply:
             click.echo(f"{verb} {report.documents_written}/{report.documents_to_stamp} documents.")
+        elif report.list_only:
+            click.echo("Listing only: nothing written.")
         else:
             click.echo("Dry run: nothing written. Re-run with --apply.")
+    if as_json and report.ttl_first_sign_unread:
+        click.echo(
+            f"{report.ttl_first_sign_unread} keyed note(s) could not be read (manifest or row read failed): "
+            "the ttl_first_sign_only list is incomplete.", err=True,
+        )
     if start_after and not report.batches_total:
         click.echo(f"Nothing after {start_after}: it is the last document of the listing, so an earlier pass reached the end.", err=True)
     if report.interrupted:
         resume = ["nx catalog backfill-meta"] + (["--apply"] if apply else []) + (["--json"] if as_json else []) + (
-            ["--list-ttl-first-sign"] if list_first_sign else []) + [
+            ["--list-ttl-first-sign-only"] if list_only else ["--list-ttl-first-sign"] if list_first_sign else []) + [
             f"--batch-size {batch_size}", f"--pause-ms {pause_ms}",
             *([f"--max-rps {max_rps:g}"] if max_rps is not None else []),
             f"--stop-after-failed-rounds {stop_after_failed_rounds}",
@@ -503,10 +538,10 @@ def backfill_meta_cmd(
         click.echo("Resume with: " + " ".join(resume), err=True)
         if report.writes_failed:
             click.echo(f"{report.writes_failed} writes failed in the finished batches: exit 1, which outranks the interrupt's.", err=True)
-        if report.writes_failed or report.stop_reason == STOP_FAILED_ROUNDS:
+        if report.writes_failed or report.ttl_first_sign_unread or report.stop_reason == STOP_FAILED_ROUNDS:
             raise click.exceptions.Exit(1)    # a failure outranks the interrupt: 130 must not hide it
         raise click.exceptions.Exit(128 + int(stop.signum or signal.SIGINT))
-    if report.writes_failed:
+    if report.writes_failed or report.ttl_first_sign_unread:
         raise click.exceptions.Exit(1)
 
 
