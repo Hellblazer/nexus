@@ -11,7 +11,7 @@ service/src/main/java/dev/nexus/service/db/SchemaMigrator.java 1630
 service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java 3428
 service/src/main/java/dev/nexus/service/db/TelemetryRepository.java 3163
 service/src/main/java/dev/nexus/service/db/TupleRepository.java 3764
-service/src/main/java/dev/nexus/service/http/CatalogHandler.java 3874
+service/src/main/java/dev/nexus/service/http/CatalogHandler.java 4152
 service/src/main/java/dev/nexus/service/http/ChunkKeysAdminHandler.java 1625
 service/src/main/java/dev/nexus/service/http/TelemetryHandler.java 1830
 service/src/main/java/dev/nexus/service/http/VectorHandler.java 3365
@@ -54,6 +54,7 @@ service/src/test/java/dev/nexus/service/db/ReembedJobRepositoryTest.java 1124
 service/src/test/java/dev/nexus/service/db/RequestLedgerTest.java 1104
 service/src/test/java/dev/nexus/service/db/TenantKeyedStateGateTest.java 1166
 service/src/test/java/dev/nexus/service/db/TombstoneFilterGateTest.java 1288
+service/src/test/java/dev/nexus/service/http/CatalogHandlerReconcileRoutesTest.java 1132
 service/src/test/java/dev/nexus/service/reembed/ReembedCutoverTest.java 1281
 service/src/test/java/dev/nexus/service/tuples/TemplateRegistryTest.java 1131
 service/src/test/java/dev/nexus/service/vectors/CceEmbedderParallelTest.java 1283
@@ -98,6 +99,7 @@ src/nexus/db/pg_provision.py 3861
 src/nexus/db/t1.py 2047
 src/nexus/db/t2/http_taxonomy_store.py 3006
 src/nexus/db/t2/http_telemetry_store.py 2329
+src/nexus/db/t2/http_tuple_store.py 1614
 src/nexus/db/t3.py 2072
 src/nexus/doc_indexer.py 4776
 src/nexus/exporter.py 2308
@@ -153,6 +155,7 @@ tests/hooks/test_mailbox_drain_hook.py 3270
 tests/hooks/test_nx_setup.py 2980
 tests/hooks/test_nx_setup_credentials_page.py 2159
 tests/hooks/test_rdr_verb.py 1157
+tests/hooks/test_stop_wake_guard.py 1298
 tests/hooks/test_version_lockstep_action.py 1893
 tests/hooks/test_version_lockstep_hook.py 1391
 tests/integration/test_rdr223_pdf_journey.py 1727
