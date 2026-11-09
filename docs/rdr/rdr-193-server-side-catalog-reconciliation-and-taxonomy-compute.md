@@ -871,6 +871,9 @@ set P is the `file_path` of every `present` and `keep` row.
   link_type)` is absent, copying `created_by`, `from_span` and `to_span`
   but not the link's metadata; then trash the old row. Several missing rows
   may rename onto one target, and a rename does not wait for a second miss.
+  A link whose endpoint is an alias of a tombstoned, missing or cyclic
+  canonical is skipped, where the old client path aborted the whole
+  housekeeping step on it.
 - Every other missing row gets `miss_count + 1`, or is trashed with
   `nexus.document_trash` at 2.
 - Links move before the trash, so the `catalog-032` cascade, which fires
@@ -918,9 +921,9 @@ Routes (`CatalogHandler` and `CatalogRepository`):
 | Route | Body | Returns |
 | --- | --- | --- |
 | `POST /v1/catalog/reconcile/stage` | `{owner, run_id, walk, expected_rows, rows[≤1000]}` (`walk` and `expected_rows` must match the header on later pages) | `{staged}`; 400 naming a duplicate `file_path` |
-| `POST /v1/catalog/reconcile/commit` | `{owner, run_id}` | `202 {job_id}`; the same `{owner, run_id}` while its commit runs gets the running job; `409 {job_id}` when another run of the owner is committing; `503` when the registry is full |
+| `POST /v1/catalog/reconcile/commit` | `{owner, run_id}` | `202 {job_id}`; the same `{owner, run_id}` while its commit runs gets the running job; `409 {job_id}` when another run of the owner is committing (the 409 holds within one engine; across engines a second run of the owner waits on the per-owner advisory lock up to the statement timeout, then ends `commit_timeout`); `503` when the registry is full |
 | `GET /v1/catalog/reconcile/{job_id}` | none | `{status: running}`, or `{status: succeeded, outcome, http_status}` (below), or `{status: failed, error, reason, http_status}`; the poll itself answers 200, `http_status` is the status the commit ended with (the chunk-keys poll's field of that name); a deadlock, serialization failure or lock wait that ran out reads `{status: failed, reason: transient_db_error, http_status: 503}`, nothing written, the run still staged; 404 for an unknown id |
-| `POST /v1/catalog/doc/resolve_or_register` | `{owner_name or curator, source_uri or file_path, title, year?, title_fallback?, sensitive?}` | `{tumbler, created}` or `{tumbler, foreign_owner: true}`; title and year backfilled with `COALESCE` on empty; ghost-only title match when `title_fallback`; `sensitive` (boolean, a non-boolean is a 400 naming the field) applies only when the call registers a new row, which is born flagged and audited `register_set` by the same write the reconcile commit uses for a row it inserts flagged; a row the call finds keeps its sensitivity, whatever the request says |
+| `POST /v1/catalog/doc/resolve_or_register` | `{owner_name or curator, source_uri or file_path, title, year?, title_fallback?, sensitive?}` | `{tumbler, created}` or `{tumbler, foreign_owner: true}`; title and year backfilled with `COALESCE` on empty; ghost-only title match when `title_fallback`; `sensitive` (boolean, a non-boolean is a 400 naming the field) applies only when the call registers a new row, which is born flagged and audited by the same write the reconcile commit uses for a row it inserts flagged (reason `register_set`, actor `engine`), and a new row inherits the flag from a flagged tombstoned predecessor as `POST /v1/catalog/doc/register` does (`register_inherit`); a row the call finds keeps its sensitivity, whatever the request says |
 
 The outcome carries:
 
@@ -982,9 +985,11 @@ stage calls, one commit, and polls.
   `source_mtime` (`chunk_count` is already folded into `write_manifest_many`
   through `EX_DOC_CHUNKS`); `store_hook.py` the same, its born-flagged
   registration (`register(sensitive=True)`, RDR-243) riding the route's
-  `sensitive` field: a new row is born flagged and audited, a found row is
-  never raised or lowered by the request (Sam, ask rdr193-resolve-sensitive,
-  option 1).
+  `sensitive` field: a new row is born flagged and audited (`register_set`,
+  actor `engine`, the reconcile insert's reason; `register_inherit` when a
+  flagged tombstoned predecessor passes the flag on, as `POST /register`
+  does), a found row is never raised or lowered by the request (Sam, ask
+  rdr193-resolve-sensitive, option 1).
 - No fallback to the old path.
 
 #### Part A4: index-time linking (Gap 4, changeset `catalog-048-reconcile.xml`)
@@ -1012,9 +1017,11 @@ stage calls, one commit, and polls.
      An endpoint that is not live after resolution, including an alias
      whose canonical is tombstoned or gone, a cycle and a chain past 16
      hops, is returned in `unresolved` as `dangling` and not written; the
-     rest of the batch still writes. Each entry is `{index, side, reason}`
-     and names the first failing side of the edge. A call whose endpoints
-     do not settle in 8 lock rounds, and a deadlock, serialization failure
+     rest of the batch still writes. A tombstoned or missing canonical
+     matches `POST /link`; a cycle fails that call (500) and a chain past 16
+     hops is re-seeded there, so those two are safer here than on the route.
+     Each entry is `{index, side, reason}` and names the first failing side
+     of the edge. A call whose endpoints do not settle in 8 lock rounds, and a deadlock, serialization failure
      or lock timeout, answers 503 `transient_db_error` on the route itself
      (the lock wait is bounded by a 5 s `lock_timeout` set on the call). A
      failed reconcile commit reports the same reason in its poll as

@@ -52,8 +52,9 @@ class CatalogReconcileCommitSeamsTest extends CatalogReconcileTestBase {
 
     /**
      * nexus-u5m5g.5 (catalog-048-7): an endpoint whose alias walk ends on a row that is tombstoned, missing, or still an
-     * alias (a cycle) is dangling, as POST /link answers it; the 048-4 body wrote the link to the alias row. A control
-     * (an alias of a live canonical) still writes to the canonical.
+     * alias (a cycle) is dangling and nothing is written; the 048-4 body wrote the link to the alias row. The dead and
+     * missing canonical cases match POST /link; a cycle fails that call (500) and a chain past 16 hops is re-seeded there,
+     * so those two are safer here than on the route. A control (an alias of a live canonical) still writes to the canonical.
      */
     @Test
     void theLinkWriteHelper_anAliasWhoseCanonicalIsDeadGoneOrCyclic_isDangling_andWritesNothing() {
@@ -202,6 +203,25 @@ class CatalogReconcileCommitSeamsTest extends CatalogReconcileTestBase {
         assertThat(lower.created()).isFalse();
         assertThat(sensitiveOf(t, flagged.tumbler())).as("nor lowers one").isTrue();
         assertThat(audit(t)).as("only the birth is audited").hasSize(1);
+    }
+
+    @Test
+    void registerDocumentWithOutcome_bornOnly_onALiveRow_neitherRaisesItNorWritesAnAudit() {
+        String t = newTenant();
+        var plain = repo.resolveOrRegister(t, resolveReq("nx-note://c1/lostrace", null));
+        String prefix = plain.tumbler().substring(0, plain.tumbler().lastIndexOf('.'));
+        Map<String, Object> fields = resolveReq("nx-note://c1/lostrace", true);
+        fields.put("owner_type", "curator");
+
+        var out = repo.registerDocumentWithOutcome(t, prefix, fields, true);
+
+        assertThat(out.created()).isFalse();
+        assertThat(out.tumbler()).isEqualTo(plain.tumbler());
+        assertThat(sensitiveOf(t, plain.tumbler())).as("a row that appears under a resolve is not raised").isFalse();
+        assertThat(audit(t)).as("and writes no audit row").isEmpty();
+
+        repo.registerDocumentWithOutcome(t, prefix, fields, false);
+        assertThat(sensitiveOf(t, plain.tumbler())).as("control: without the born-only argument the same call raises").isTrue();
     }
 
     @Test

@@ -66,8 +66,10 @@
 
     catalog-048-7  (nexus-u5m5g.5, the Phase 1 gate seam fix) CREATE OR REPLACE of nexus.catalog_link_write: an endpoint
                    whose alias walk ends on a row that is tombstoned, missing or still an alias answers 'dangling' and
-                   writes nothing (the 048-4 body wrote the link to the alias row; POST /link and catalog_link_endpoint
-                   answer dangling). The rollback restores the 048-4 body. 048-1 to -6 are on develop and are not edited.
+                   writes nothing (the 048-4 body wrote the link to the alias row). A tombstoned or missing canonical is
+                   dangling on POST /link too; a cycle fails that call (500) and a chain past 16 hops is re-seeded
+                   there, so those two are safer here than on the route. The rollback restores the 048-4 body. 048-1 to -6 are on
+                   develop and are not edited.
 
     Placed after vectors-056-gc-quarantine-expires-at.xml (the tail when this landed) and before the grants-nexus-svc.xml
     runAlways block (the established late-append convention): the grants loop gives nexus_svc DML on both tables. The
@@ -1418,7 +1420,7 @@ GRANT EXECUTE ON FUNCTION nexus.catalog_link_same_content(text[], boolean) TO ne
     </changeSet>
 
     <changeSet id="catalog-048-7" author="nexus-u5m5g.5">
-        <comment>nexus.catalog_link_write(p_from, p_to, p_link_type, p_from_span, p_to_span, p_created_by, p_if_absent) RETURNS text (RDR-193 Phase 1 gate seam fix, nexus-u5m5g.5): CREATE OR REPLACE of the catalog-048-4 function so that an endpoint whose alias walk ends on a row that is tombstoned, missing or still an alias answers 'dangling' and writes nothing, as POST /link does, where the 048-4 body wrote the link to the alias row. The signature and the grant are unchanged. A function definition; no data effect at migration time. The rollback restores the catalog-048-4 body.</comment>
+        <comment>nexus.catalog_link_write(p_from, p_to, p_link_type, p_from_span, p_to_span, p_created_by, p_if_absent) RETURNS text (RDR-193 Phase 1 gate seam fix, nexus-u5m5g.5): CREATE OR REPLACE of the catalog-048-4 function so that an endpoint whose alias walk ends on a row that is tombstoned, missing or still an alias answers 'dangling' and writes nothing, where the 048-4 body wrote the link to the alias row. A tombstoned or missing canonical is dangling on POST /link too; a cycle fails that call (500) and a chain past 16 hops is re-seeded there, so those two are safer here than on the route. The signature and the grant are unchanged. A function definition; no data effect at migration time. The rollback restores the catalog-048-4 body.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.catalog_link_write(
     p_from text, p_to text, p_link_type text, p_from_span text, p_to_span text, p_created_by text,
@@ -1478,8 +1480,9 @@ BEGIN
 
     -- both resolved endpoints must be live documents of this tenant, and canonical: the walk above also ends on a row
     -- that is still an alias (its canonical is tombstoned or gone, the chain is a cycle, or it is longer than 16 hops).
-    -- Such an endpoint names no live document, and the Java link write (resolveAndLockLinkEndpoints, after its
-    -- re-seed under lock) reports it dangling, so it is 'dangling' here and no link is written to the alias row.
+    -- Such an endpoint names no live document, so it is 'dangling' here and no link is written to the alias row. A
+    -- tombstoned or missing canonical matches POST /link (resolveAndLockLinkEndpoints reports it dangling); a cycle
+    -- fails that call (500) and a chain past 16 hops is re-seeded there, so those two are safer here than on the route.
     IF NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d
                     WHERE d.tenant_id = v_tenant AND d.tumbler = v_res[1] AND d.deleted_at IS NULL
                       AND coalesce(d.alias_of, '') = '')

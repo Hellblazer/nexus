@@ -1122,6 +1122,11 @@ public final class CatalogRepository {
      * {@code created} contract (nexus-vfef0).
      */
     public RegisterOutcome registerDocumentWithOutcome(String tenant, String ownerPrefix, Map<String, Object> fields) {
+        return registerDocumentWithOutcome(tenant, ownerPrefix, fields, false);
+    }
+
+    /** As above; {@code bornOnly} (set by resolve_or_register alone, never by a request body) makes the flag one that only a NEW row takes. */
+    public RegisterOutcome registerDocumentWithOutcome(String tenant, String ownerPrefix, Map<String, Object> fields, boolean bornOnly) {
         if (TenantConstants.isWildcard(tenant)) {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
@@ -1131,8 +1136,7 @@ public final class CatalogRepository {
         // other fields, so the flag is raised on the matched row explicitly (raiseSensitivity), and a request
         // that carries no flag, or false, never lowers it.
         final boolean requestedSensitive = sensitiveFlag(fields);
-        // resolve_or_register (RDR-193): a flag that only a NEW row takes, so a row that appears under the call (a lost race) is not raised
-        final boolean raiseOnMatch = requestedSensitive && !bool(fields, "sensitive_born_only", false);
+        final boolean raiseOnMatch = requestedSensitive && !bornOnly;   // resolve_or_register: only a NEW row takes the flag
         return UniqueRaceRetry.run("registerDocument", OWNER_NON_ARBITRATED, () ->
         tenantScope.withTenant(tenant, ctx -> {
             // Ensure owner row exists. Resolve-first (nexus-0ehwe arbiter class): the
@@ -14224,8 +14228,8 @@ public final class CatalogRepository {
         if (sourceMtime != null) fields.put("source_mtime", sourceMtime);
         if (contentType != null) fields.put("content_type", contentType);
         if (physicalCollection != null) fields.put("physical_collection", physicalCollection);
-        if (sensitive) { fields.put("sensitive", true); fields.put("sensitive_born_only", true); }   // born flagged and audited (register_set) by the register
-        RegisterOutcome minted = registerDocumentWithOutcome(tenant, ownerPrefix, fields);
+        if (sensitive) fields.put("sensitive", true);   // born flagged and audited (register_set) by the register
+        RegisterOutcome minted = registerDocumentWithOutcome(tenant, ownerPrefix, fields, sensitive);
         // a concurrent registration of the same source_uri under another owner wins the unique index: the answer is theirs
         return new ResolveOutcome(minted.tumbler(), minted.created(), !minted.tumbler().startsWith(ownerDot));
     }
