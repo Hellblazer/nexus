@@ -54,7 +54,7 @@ import static org.assertj.core.api.Assertions.fail;
  * these gaps. A child, because the factory can be set once per JVM.
  *
  * <p>The offline switch itself is witnessed too (nexus-4lqi7): the {@code startup-offline} child runs
- * {@code Main.goOfflineAtStartup()}, the one method {@code Main.main} calls first, and then builds a DJL tokenizer
+ * {@code Main.goOfflineAtStartup()}, the step {@code Main.main} calls, and then builds a DJL tokenizer
  * directly, so the switch's effect at process start is what the check sees and not the second application in
  * {@code LocalTokenizers.build}.
  */
