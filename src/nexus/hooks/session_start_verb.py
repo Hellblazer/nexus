@@ -42,7 +42,6 @@ from __future__ import annotations
 
 from nexus import hooks
 from nexus._hook_runtime._io import HookResult, configure_hook_logging
-from nexus.hooks.memory_curation_check import curation_line
 
 
 def run(payload: dict | None) -> HookResult:
@@ -69,9 +68,16 @@ def run(payload: dict | None) -> HookResult:
         src = payload.get("source")
         source = src if isinstance(src, str) and src else None
     output = hooks.session_start(claude_session_id=session_id, source=source)
-    # RDR-238 Phase 3 Step 1 (nexus-qo7ie.16): the memory curation check rides this verb, so it
-    # costs no hooks.json entry and no process. At most one line, and nothing when clean.
-    line = curation_line(payload)
-    if line:
-        output = f"{output}\n\n{line}" if output else line
-    return HookResult(stdout=output)
+    return HookResult(stdout=with_curation(output, payload))
+
+
+def with_curation(output: str | None, payload: dict | None) -> str | None:
+    """RDR-238 Phase 3 Step 1 (nexus-qo7ie.16): the memory curation line rides this verb, so it
+    costs no hooks.json entry and no process. At most one line, nothing when clean, and nothing
+    it does (an import failure included) can cost the guidance above it."""
+    try:
+        from nexus.hooks.memory_curation_check import with_curation_line  # noqa: PLC0415 -- guarded so a broken check never costs the guidance
+
+        return with_curation_line(output, payload)
+    except Exception:  # noqa: BLE001 -- see the docstring
+        return output

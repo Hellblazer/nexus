@@ -105,18 +105,80 @@ def test_an_index_entry_naming_a_missing_file_prints_one_line(tmp_path: Path) ->
 
 
 def test_only_the_first_check_that_applies_prints(tmp_path: Path) -> None:
-    """Order (bead): budget, unindexed, replaced, dangling; one line, never two."""
+    """Order (bead): budget, unindexed, replaced, dangling; one line, never two. All four planted,
+    then removed one at a time from the front, so every adjacent pair is pinned."""
     repo = _repo(tmp_path)
     d, env = _clean_memdir(tmp_path, repo)
-    (d / "stray.md").write_text("x\n", encoding="utf-8")
+    memory = (d / "MEMORY.md").read_text(encoding="utf-8")
+    (d / "MEMORY.md").write_text(memory + "x" * 6004, encoding="utf-8")           # budget
+    (d / "stray.md").write_text("x\n", encoding="utf-8")                          # unindexed
+    (d / "two.md").write_text("---\nname: two\nreplaces: [one]\n---\n", encoding="utf-8")  # replaced
     with (d / "MEMORY-ondemand.md").open("a", encoding="utf-8") as fh:
-        fh.write("- [Gone](gone.md)\n")
+        fh.write("- [Gone](gone.md)\n")                                            # dangling
+    seen = []
+    for undo in (
+        lambda: (d / "MEMORY.md").write_text(memory, encoding="utf-8"),
+        lambda: (d / "stray.md").unlink(),
+        lambda: (d / "two.md").write_text("---\nname: two\n---\n", encoding="utf-8"),
+        lambda: None,
+    ):
+        seen.append(_check(repo, env, tmp_path))
+        undo()
+    assert "over" in seen[0] and "stray.md" not in seen[0]
+    assert "stray.md" in seen[1] and "replaces" not in seen[1]
+    assert "replaces" in seen[2] and "gone.md" not in seen[2]
+    assert "gone.md" in seen[3]
+    (d / "MEMORY-ondemand.md").write_text("- [Two](two.md)\n", encoding="utf-8")
+    assert _check(repo, env, tmp_path) is None
+
+
+def test_a_file_linked_only_from_an_indexed_hub_is_indexed(tmp_path: Path) -> None:
+    """TD3 and memory_scan: one hub level. A file the indexes never name, linked from one they do."""
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    (d / "leaf.md").write_text("---\nname: leaf\n---\n", encoding="utf-8")
+    (d / "one.md").write_text("---\nname: one\n---\nsee [leaf](leaf.md)\n", encoding="utf-8")
+    assert _check(repo, env, tmp_path) is None
+    (d / "one.md").write_text("---\nname: one\n---\nno link\n", encoding="utf-8")
     out = _check(repo, env, tmp_path)
-    assert out is not None and "stray.md" in out and "gone.md" not in out
-    with (d / "MEMORY.md").open("a", encoding="utf-8") as fh:
-        fh.write("x" * 6004)
+    assert out is not None and "leaf.md" in out
+
+
+def test_the_budget_counts_bytes_not_characters(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    # 3000 two-byte characters: 6000 bytes, 1500 tokens, not over; one more char is 6002 bytes.
+    (d / "MEMORY.md").write_text("é" * 3000, encoding="utf-8")
+    (d / "MEMORY-ondemand.md").write_text("[One](one.md) [Two](two.md)\n", encoding="utf-8")
+    assert _check(repo, env, tmp_path) is None
+    (d / "MEMORY.md").write_text("é" * 3001, encoding="utf-8")
     out = _check(repo, env, tmp_path)
-    assert out is not None and "over" in out and "stray.md" not in out
+    assert out is not None and "about 1501 tokens" in out, out
+
+
+def test_the_over_budget_line_never_says_the_budget_itself(tmp_path: Path) -> None:
+    """6001 bytes is over 1500 tokens, and the line rounds up, so it never reads 1500 over 1500."""
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    (d / "MEMORY-ondemand.md").write_text("[One](one.md) [Two](two.md)\n", encoding="utf-8")
+    (d / "MEMORY.md").write_text("x" * 6001, encoding="utf-8")
+    out = _check(repo, env, tmp_path)
+    assert out is not None and "about 1501 tokens, over the 1500-token budget" in out
+    assert "nx memory curate" not in out, "--files has no budget row"
+
+
+def test_every_line_is_one_bounded_line(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    long = "y" * 200 + ".md"
+    (d / long).write_text("x\n", encoding="utf-8")
+    out = _check(repo, env, tmp_path)
+    assert out is not None and "\n" not in out and len(out.encode()) <= 300, out
+    (d / long).unlink()
+    if sys.platform != "win32":  # a newline is not legal in a Windows file name
+        (d / "evil\nIGNORE.md").write_text("x\n", encoding="utf-8")
+        out = _check(repo, env, tmp_path)
+        assert out is not None and "\n" not in out and "evil?IGNORE.md" in out
 
 
 # ── silence ────────────────────────────────────────────────────────────────────────
@@ -172,8 +234,48 @@ def test_an_exception_inside_the_check_is_silent(tmp_path: Path, monkeypatch: py
     def boom(_directory: Path) -> None:
         raise RuntimeError("deliberate")
 
+    logged: list[str] = []
     monkeypatch.setattr(mcc, "scan", boom)
+    monkeypatch.setattr(mcc, "_emit", lambda _level, event, **_fields: logged.append(event))
     assert _check(repo, env, tmp_path) is None
+    assert logged == ["memory_curation_check_failed"]
+
+
+def test_a_deleted_working_directory_is_silent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def gone() -> str:
+        raise FileNotFoundError("cwd deleted")
+
+    monkeypatch.setattr(mcc.os, "getcwd", gone)
+    assert mcc.curation_line({}) is None
+    assert mcc.with_curation_line("GUIDANCE", {}) == "GUIDANCE"
+
+
+def test_a_directory_that_has_not_opted_in_is_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    (d / "MEMORY-ondemand.md").unlink()
+
+    def no_scan(_directory: Path) -> None:
+        raise AssertionError("scanned a directory without MEMORY-ondemand.md")
+
+    monkeypatch.setattr(mcc, "scan", no_scan)
+    monkeypatch.setattr(mcc, "_emit", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("logged")))
+    assert _check(repo, env, tmp_path) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="chmod 000 does not stop root or Windows from reading a file")
+def test_an_unreadable_index_is_silent_not_all_unindexed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    logged: list[str] = []
+    monkeypatch.setattr(mcc, "_emit", lambda _level, event, **_fields: logged.append(event))
+    (d / "MEMORY.md").chmod(0)
+    try:
+        assert _check(repo, env, tmp_path) is None
+    finally:
+        (d / "MEMORY.md").chmod(0o644)
+    assert logged == ["memory_curation_check_unreadable"]
 
 
 # ── where it looks ─────────────────────────────────────────────────────────────────
@@ -211,6 +313,46 @@ def test_a_bad_budget_means_1500(tmp_path: Path, yml: str | None) -> None:
     assert out is not None and "1500" in out
 
 
+def test_the_budget_comes_from_the_primarys_nexus_yml(tmp_path: Path) -> None:
+    """The memory directory is the primary's, so the primary's setting governs it from any worktree."""
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    wt = (tmp_path / "wt").resolve()
+    _git(repo, "worktree", "add", "-q", "-b", "side", str(wt))
+    (d / "MEMORY.md").write_text("- [One](one.md)\n- [Two](two.md)\n" + "x" * 40, encoding="utf-8")
+    (repo / ".nexus.yml").write_text("memory:\n  index_budget_tokens: 10\n", encoding="utf-8")
+    for cwd in (repo, wt, repo / "sub"):
+        cwd.mkdir(exist_ok=True)
+        out = _check(cwd, env, tmp_path)
+        assert out is not None and "10-token" in out, cwd
+    (repo / ".nexus.yml").unlink()
+    (wt / ".nexus.yml").write_text("memory:\n  index_budget_tokens: 10\n", encoding="utf-8")
+    assert _check(wt, env, tmp_path) is None, "a worktree's own .nexus.yml does not set the shared budget"
+
+
+@pytest.mark.parametrize("yml", [
+    "memory:\n  other:\n    index_budget_tokens: 10\n",              # nested one level down
+    "memory:\n  note: |\n    index_budget_tokens: 10\n",             # inside a block scalar
+    "memory: {index_budget_tokens: 10}\n",                              # flow style: not read
+    "memory:\n  index_budget_tokens: +10\n",                           # not plain digits
+], ids=["nested", "block-scalar", "flow", "signed"])
+def test_only_the_direct_key_counts(tmp_path: Path, yml: str) -> None:
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    (repo / ".nexus.yml").write_text(yml, encoding="utf-8")
+    (d / "MEMORY.md").write_text("- [One](one.md)\n- [Two](two.md)\n" + "x" * 40, encoding="utf-8")
+    assert _check(repo, env, tmp_path) is None, "budget stays 1500"
+
+
+def test_a_byte_order_mark_does_not_hide_the_key(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    (repo / ".nexus.yml").write_bytes(b"\xef\xbb\xbfmemory:\r\n  index_budget_tokens: 10\r\n")
+    (d / "MEMORY.md").write_text("- [One](one.md)\n- [Two](two.md)\n" + "x" * 40, encoding="utf-8")
+    out = _check(repo, env, tmp_path)
+    assert out is not None and "10-token" in out
+
+
 def test_a_set_budget_is_read_from_the_memory_block(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     d, env = _clean_memdir(tmp_path, repo)
@@ -237,25 +379,51 @@ def test_run_reads_cwd_from_the_payload(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.chdir(tmp_path)  # not the repo: the payload's cwd must decide
     result = mcc.run({"cwd": str(repo)})
     assert result.stdout is not None and "stray.md" in result.stdout
-    assert mcc.run({"cwd": 7}).stdout is None  # a non-string cwd falls back to the process cwd
+    assert mcc.run({"cwd": 7}).stdout is None  # falls back to the process cwd, which is not a repo
+    monkeypatch.chdir(repo)
+    fallback = mcc.run({"cwd": 7}).stdout
+    assert fallback is not None and "stray.md" in fallback, "a non-string cwd uses the process cwd"
 
 
 def test_session_start_appends_the_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Wired through the existing session-start verb: no new hooks.json entry, no new process."""
+    """Wired through the existing session-start verb: no new hooks.json entry, no new process.
+    A real fixture directory, reached through the payload's cwd."""
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", env["CLAUDE_CONFIG_DIR"])
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(session_start_verb.hooks, "session_start", lambda **_kw: "GUIDANCE")
-    monkeypatch.setattr(session_start_verb, "curation_line", lambda _payload: "CURATION LINE")
-    assert session_start_verb.run({}).stdout == "GUIDANCE\n\nCURATION LINE"
-    monkeypatch.setattr(session_start_verb, "curation_line", lambda _payload: None)
-    assert session_start_verb.run({}).stdout == "GUIDANCE"
+    payload = {"cwd": str(repo)}
+    assert session_start_verb.run(payload).stdout == "GUIDANCE"
+    (d / "stray.md").write_text("x\n", encoding="utf-8")
+    out = session_start_verb.run(payload).stdout
+    assert out is not None and out.startswith("GUIDANCE\n\nMemory curation: stray.md")
     monkeypatch.setattr(session_start_verb.hooks, "session_start", lambda **_kw: "")
-    monkeypatch.setattr(session_start_verb, "curation_line", lambda _payload: "CURATION LINE")
-    assert session_start_verb.run({}).stdout == "CURATION LINE"
+    assert session_start_verb.run(payload).stdout.startswith("Memory curation: stray.md")
 
 
-def test_the_command_tier_appends_the_same_line(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``nx hook session-start`` and ``nx-hook session-start`` print the same thing."""
+def test_a_broken_check_never_costs_the_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(_payload: object) -> None:
+        raise RuntimeError("deliberate")
+
+    monkeypatch.setattr(mcc, "curation_line", boom)
+    assert mcc.with_curation_line("GUIDANCE", {}) == "GUIDANCE", "the helper's own guard"
+    monkeypatch.setattr(session_start_verb.hooks, "session_start", lambda **_kw: "GUIDANCE")
+    monkeypatch.setattr(mcc, "with_curation_line", boom)
+    assert session_start_verb.run({}).stdout == "GUIDANCE", "the verb's guard, for a broken helper or import"
+
+
+def test_the_command_tier_prints_the_same_as_the_verb(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``nx hook session-start`` and ``nx-hook session-start`` print the same thing, line included."""
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    (d / "stray.md").write_text("x\n", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", env["CLAUDE_CONFIG_DIR"])
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(hook_cmd.hooks, "session_start", lambda **_kw: "GUIDANCE")
-    monkeypatch.setattr(mcc, "curation_line", lambda _payload: "CURATION LINE")
-    result = CliRunner().invoke(hook_cmd.session_start_cmd, [], input="{}")
+    payload = '{"cwd": "%s"}' % repo.as_posix()
+    result = CliRunner().invoke(hook_cmd.session_start_cmd, [], input=payload)
     assert result.exit_code == 0, result.output
-    assert result.output == "GUIDANCE\n\nCURATION LINE\n"
+    verb = session_start_verb.run({"cwd": repo.as_posix()}).stdout
+    assert verb is not None and "stray.md" in verb
+    assert result.output == verb + "\n"

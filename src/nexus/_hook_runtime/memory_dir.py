@@ -230,13 +230,28 @@ def memory_dir(
     home: Path | None = None,
 ) -> Path | None:
     """The auto-memory directory for the repository containing *cwd*, or None. See the module docstring."""
+    return locate(cwd, env=env, home=home)[0]
+
+
+def locate(
+    cwd: Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> tuple[Path | None, Path | None]:
+    """``(memory directory, primary checkout root)``, each None when not found; one primary lookup.
+
+    For a caller that needs both, so a git fallback (``GIT_DIR`` set, an unrecognised layout) is
+    paid once: the SessionStart curation verb reads the primary's ``.nexus.yml`` (nexus-qo7ie.16).
+    """
+    primary: Path | None = None
     try:
         start = Path.cwd() if cwd is None else Path(cwd)
         h = home if home is not None else Path.home()
         config = claude_config_dir(env, h)
         primary = primary_checkout_root(start, env)
         if primary is None:
-            return None
+            return None, None
         sources = [
             start / ".claude" / "settings.local.json",
             start / ".claude" / "settings.json",
@@ -247,8 +262,8 @@ def memory_dir(
         for settings in sources:
             custom = _custom_from(settings, h)
             if custom is not None:
-                return custom
+                return custom, primary
         default = config / "projects" / mangle_path(primary) / "memory"
-        return default if default.is_dir() else None
+        return (default if default.is_dir() else None), primary
     except Exception:  # noqa: BLE001 — a hook-importable helper never raises; the caller stays silent
-        return None
+        return None, primary
