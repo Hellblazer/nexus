@@ -21,7 +21,12 @@ THE RULE. Exit 0 and print nothing (allow the stop) when any of these holds:
 - either of those two fields is ABSENT or not a list. Unknown is not "nothing armed": a Claude Code
   build that does not send them would otherwise have this guard fire while a subagent or Monitor is
   running. Both fields were present on the build below, so this branch is a guard for older builds;
-- the closing text (``last_assistant_message``) is empty or not text.
+- the closing text (``last_assistant_message``) is empty or not text;
+- the clause that would block is a CI wait and the session's nexus MCP server records a CI wake
+  (nexus-1d6pz.11.5; :func:`ci_wake_state`): its channel waiter alive and fresh, the conexus
+  channel flag on the ``claude`` launch, and a ``board/ci/*--done`` topic subscribed. With the
+  subscription but no flag the block names ``nx ci wait <sha>``, the background command that wakes
+  a session without the channel.
 
 Otherwise only the TAIL of the text is read (the last ``_TAIL_CHARS`` characters, from a sentence
 boundary): the end of a turn is where a promise lives, and a status line near the top must not
@@ -583,7 +588,55 @@ class Decision(NamedTuple):
     detail: str  # extra log fields
 
 
-def decide(payload: object, env: dict[str, str]) -> Decision:
+# ---------------------------------------------------------------------------
+# A CI wake the MCP server armed (nexus-1d6pz.11.5)
+# ---------------------------------------------------------------------------
+#
+# A session subscribed to a CI board's --done topic, with the channel loaded, is woken when its
+# runs complete: a CI wait at the end of a turn is covered, though nothing shows in
+# background_tasks. The guard learns that from the record the session's nexus MCP server writes
+# for `nx doctor` (`<config>/tuple-watch/channel-status.d/<session id>`, nexus.mcp.channel
+# write_channel_status, rewritten at every park of at most 25 s), never from the model's words:
+# the waiter alive and fresh, the claude launch flag present (channel_flag, read by
+# nexus.channel_launch), and a board/ci/*--done topic subscribed. A subscription without the flag
+# is not a wake (its posts wait for the next prompt), and the block then names `nx ci wait <sha>`,
+# the background command that is. A running `nx ci wait` is a background task, armed already.
+
+CI_WAKE_ARMED = "armed"
+CI_WAKE_NO_CHANNEL = "subscribed-no-channel"
+CI_WAKE_NONE = "none"
+CLASS_CI_WAIT_NO_CHANNEL = "ci-wait-no-channel"
+#: A status record older than this is a waiter that stopped, or a server that is gone.
+CI_WAKE_FRESH_S = 120.0
+_SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_CI_DONE_TOPIC = re.compile(r"board/ci/[^/]+--done")
+
+
+def ci_wake_state(session_id: object, env: dict[str, str], *, now: float | None = None) -> str:
+    """CI_WAKE_ARMED, CI_WAKE_NO_CHANNEL (a --done subscription whose posts are not pushed) or
+    CI_WAKE_NONE. Any doubt (no record, unreadable, stale, waiter not alive) is CI_WAKE_NONE."""
+    if not isinstance(session_id, str) or not _SAFE_SESSION_ID.fullmatch(session_id):
+        return CI_WAKE_NONE
+    path = os.path.join(_config_dir(env), "tuple-watch", "channel-status.d", session_id)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            status = json.load(handle)
+        age = (time.time() if now is None else now) - os.path.getmtime(path)
+    except (OSError, ValueError):
+        return CI_WAKE_NONE
+    if not isinstance(status, dict):
+        return CI_WAKE_NONE
+    topics = status.get("board_topics")
+    if not isinstance(topics, list) or not any(isinstance(t, str) and _CI_DONE_TOPIC.fullmatch(t) for t in topics):
+        return CI_WAKE_NONE
+    if status.get("channel_flag") is not True:
+        return CI_WAKE_NO_CHANNEL
+    if status.get("alive") is not True or status.get("gate_stalled") is True or age > CI_WAKE_FRESH_S:
+        return CI_WAKE_NONE
+    return CI_WAKE_ARMED
+
+
+def decide(payload: object, env: dict[str, str], *, now: float | None = None) -> Decision:
     if env.get(KILL_SWITCH_ENV, "").strip() == "0":
         return Decision(False, "kill-switch", "", "")
     if not isinstance(payload, dict):
@@ -602,6 +655,12 @@ def decide(payload: object, env: dict[str, str]) -> Decision:
         return Decision(False, "no-text", "", "")
     verdict = evaluate_text(text)
     detail = f"sam_dropped={verdict.sam_dropped} peer_dropped={verdict.peer_dropped} past_dropped={verdict.past_dropped}"
+    if verdict.block and verdict.cls == CLASS_CI_WAIT:
+        wake = ci_wake_state(payload.get("session_id"), env, now=now)
+        if wake == CI_WAKE_ARMED:
+            return Decision(False, "ci-wake-armed", "", detail)
+        if wake == CI_WAKE_NO_CHANNEL:
+            return Decision(True, CLASS_CI_WAIT_NO_CHANNEL, verdict.clause, detail)
     if verdict.block:
         return Decision(True, verdict.cls, verdict.clause, detail)
     if verdict.final_sam:
@@ -613,6 +672,16 @@ def block_reason(cls: str, clause: str) -> str:
     quoted = " ".join(clause.split())
     if len(quoted) > _REASON_CLAUSE_CAP:
         quoted = quoted[: _REASON_CLAUSE_CAP - 3] + "..."
+    if cls == CLASS_CI_WAIT_NO_CHANNEL:
+        quoted_ = " ".join(clause.split())
+        if len(quoted_) > _REASON_CLAUSE_CAP:
+            quoted_ = quoted_[: _REASON_CLAUSE_CAP - 3] + "..."
+        return (
+            f'Stop-hook wake guard: your last message closes on a CI wait ("{quoted_}"). This session is subscribed to '
+            "a CI board's --done topic, but it was not launched with the conexus channel, so that post will not wake "
+            "it. Run `nx ci wait <sha>` as a background command now (its exit is the wake and its line is the result), "
+            "then end the turn."
+        )
     what = {
         CLASS_CI_WAIT: "a CI or run wait",
         CLASS_PROMISE: "a promise to check or do something later",
@@ -625,7 +694,10 @@ def block_reason(cls: str, clause: str) -> str:
     return (
         f'Stop-hook wake guard: your last message closes on {what} ("{quoted}"), and nothing is armed to wake this '
         "session: no background task, Monitor or scheduled wakeup is running. Arm the wake now, then end the turn: "
-        "a Monitor or a background Bash until-loop for a run or CI, ScheduleWakeup or CronCreate for a timed step. "
+        + ("`nx ci wait <sha>` as a background command for a develop push's CI, a Monitor or a background Bash "
+           "until-loop for another run, " if cls == CLASS_CI_WAIT else
+           "a Monitor or a background Bash until-loop for a run or CI, ")
+        + "ScheduleWakeup or CronCreate for a timed step. "
         f"{do_now}If the wake is someone else (the user, a peer, a notification), say "
         "plainly in one sentence who it is, then end the turn."
     )
@@ -636,10 +708,11 @@ def block_reason(cls: str, clause: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _config_dir() -> str:
+def _config_dir(env: dict[str, str] | None = None) -> str:
     # Mirrors _endpoint_resolve.default_config_dir (tests/hooks/test_stop_wake_guard.py compares the two);
     # inlined so this per-turn hook does not import a sibling module.
-    configured = os.environ.get("NEXUS_CONFIG_DIR") or os.environ.get("NX_CONFIG_DIR")
+    env = os.environ if env is None else env
+    configured = env.get("NEXUS_CONFIG_DIR") or env.get("NX_CONFIG_DIR")
     if configured:
         return configured
     return os.path.join(os.path.expanduser("~"), ".config", "nexus")

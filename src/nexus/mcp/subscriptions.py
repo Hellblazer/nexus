@@ -506,6 +506,12 @@ class SubscriptionSet:
             f"{subspace!r} is not a board topic or the session's own leased name; refused"
         )
 
+    def board_topics(self) -> list[str]:
+        """The subscribed board subspaces, sorted (nexus-1d6pz.11.5: the
+        channel status record carries them, so the Stop-hook wake guard can
+        see a covering ``board/ci/*--done`` subscription)."""
+        return sorted(self._board)
+
     def _subscribe_board(self, topic: str) -> None:
         if topic in self._board:
             return  # idempotent

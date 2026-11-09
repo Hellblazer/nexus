@@ -19,6 +19,7 @@ The contract these tests pin:
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.util
 import json
 import os
@@ -30,6 +31,8 @@ from pathlib import Path
 
 import pytest
 
+from nexus.mcp import channel
+from nexus.mcp.subscriptions import SubscriptionSet
 from tests._platform import scrubbed_env
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -988,3 +991,102 @@ def test_replay_false_block_rate_on_non_true_rows_is_small() -> None:
     non_true = [r for r in _rows() if r["label"] != "TRUE"]
     false_blocks = [r["id"] for r in non_true if _blocked(r)]
     assert len(false_blocks) <= 2, false_blocks
+
+
+# --- a CI wake the MCP server armed (nexus-1d6pz.11.5) ---------------------------------------------
+#
+# The guard reads the record the session's nexus MCP server writes
+# (<config>/tuple-watch/channel-status.d/<session id>, nexus.mcp.channel.write_channel_status). A
+# CI wait at the end of a turn is covered when the waiter is alive and fresh, the channel flag is
+# present and a board/ci/*--done topic is subscribed; with the subscription but no flag it blocks
+# naming `nx ci wait`.
+
+_SID = "11111111-2222-3333-4444-555555555555"
+_CI_WAIT_TEXT = "Pushed. I'll read the CI result once the runs finish."
+
+
+def _status(tmp_path: Path, **fields: object) -> Path:
+    record = {
+        "alive": True, "gate_stalled": False, "channel_flag": True,
+        "board_topics": ["board/ci/nexus-develop--done"], **fields,
+    }
+    path = tmp_path / "tuple-watch" / "channel-status.d" / _SID
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
+class TestCiWakeArmed:
+    def _decide(self, tmp_path: Path, text: str = _CI_WAIT_TEXT, **extra: object):
+        return swg.decide(_payload(text, **extra), {"NEXUS_CONFIG_DIR": str(tmp_path)})
+
+    def test_the_text_blocks_as_a_ci_wait_with_nothing_armed(self, tmp_path: Path) -> None:
+        decision = self._decide(tmp_path)
+        assert decision.block and decision.reason == swg.CLASS_CI_WAIT, decision
+        reason = swg.block_reason(decision.reason, decision.clause)
+        assert "`nx ci wait <sha>` as a background command" in reason
+
+    def test_channel_and_a_done_subscription_cover_a_ci_wait(self, tmp_path: Path) -> None:
+        _status(tmp_path)
+        decision = self._decide(tmp_path)
+        assert not decision.block and decision.reason == "ci-wake-armed", decision
+
+    def test_a_subscription_without_the_channel_blocks_and_names_nx_ci_wait(self, tmp_path: Path) -> None:
+        _status(tmp_path, channel_flag=False)
+        decision = self._decide(tmp_path)
+        assert decision.block and decision.reason == swg.CLASS_CI_WAIT_NO_CHANNEL, decision
+        reason = swg.block_reason(decision.reason, decision.clause)
+        assert "not launched with the conexus channel" in reason and "`nx ci wait <sha>`" in reason
+
+    @pytest.mark.parametrize("fields", [
+        {"alive": False}, {"gate_stalled": True}, {"board_topics": ["board/ci/nexus-develop"]},
+        {"board_topics": []}, {"channel_flag": None, "board_topics": []},
+    ])
+    def test_a_record_that_proves_no_wake_still_blocks(self, tmp_path: Path, fields: dict) -> None:
+        _status(tmp_path, **fields)
+        assert self._decide(tmp_path).block
+
+    def test_a_stale_record_is_no_wake(self, tmp_path: Path) -> None:
+        path = _status(tmp_path)
+        old = time.time() - swg.CI_WAKE_FRESH_S - 60
+        os.utime(path, (old, old))
+        assert self._decide(tmp_path).block
+
+    def test_a_record_for_another_session_is_not_read(self, tmp_path: Path) -> None:
+        _status(tmp_path)
+        assert swg.decide(_payload(_CI_WAIT_TEXT, session_id="99999999-2222-3333-4444-555555555555"),
+                          {"NEXUS_CONFIG_DIR": str(tmp_path)}).block
+        assert swg.ci_wake_state("../../etc", {"NEXUS_CONFIG_DIR": str(tmp_path)}) == swg.CI_WAKE_NONE
+
+    def test_a_ci_subscription_does_not_cover_a_timed_promise(self, tmp_path: Path) -> None:
+        _status(tmp_path)
+        decision = self._decide(tmp_path, "I'll check the dashboard again at 14:30.")
+        assert decision.block and decision.reason != swg.CLASS_CI_WAIT, decision
+
+    def test_a_running_nx_ci_wait_is_a_background_task(self, tmp_path: Path) -> None:
+        task = {"id": "b1", "type": "shell", "status": "running", "command": "nx ci wait abc1234"}
+        decision = self._decide(tmp_path, background_tasks=[task])
+        assert not decision.block and decision.reason == "armed", decision
+
+    def test_end_to_end_the_script_allows_and_logs_the_armed_wake(self, tmp_path: Path) -> None:
+        _status(tmp_path)
+        proc = _run(_payload(_CI_WAIT_TEXT), tmp_path)
+        assert proc.returncode == 0 and proc.stdout == "", proc
+        assert "allow reason=ci-wake-armed" in _log(tmp_path)
+
+
+def test_the_waiter_status_record_carries_what_the_guard_reads(tmp_path: Path) -> None:
+    """The writer half: a running ChannelWaiter publishes channel_flag and board_topics."""
+    subs = SubscriptionSet(session_id=_SID)
+    subs._board["board/ci/nexus-develop--done"] = None  # noqa: SLF001 -- a subscription without the store
+    waiter = channel.ChannelWaiter(
+        _SID, lambda: None, subs, state_dir=tmp_path, channel_flag_probe=lambda: True,
+        engine_version_probe=lambda: None,
+    )
+    waiter._channel_flag = asyncio.run(asyncio.to_thread(waiter._read_channel_flag))  # noqa: SLF001
+    waiter._alive = True  # noqa: SLF001
+    waiter._publish_status()  # noqa: SLF001
+    assert swg.ci_wake_state(_SID, {"NEXUS_CONFIG_DIR": str(tmp_path)}) == swg.CI_WAKE_ARMED
+    record = channel.read_channel_status(tmp_path, _SID)
+    assert record is not None and record["channel_flag"] is True
+    assert record["board_topics"] == ["board/ci/nexus-develop--done"]
