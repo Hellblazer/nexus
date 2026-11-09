@@ -447,7 +447,7 @@ schema.
    `src/nexus/commands/rdr.py` lines 2554-2555), and both move to the
    table, which `nx rdr` then reads too. Reads the RDR's existing
    research titles with `memory.list`, takes the next sequence number, and
-   returns `{project, title, content}` for `<repo>_rdr/<id>-research-<seq>`
+   returns `{project, title, content, tags}` for `<repo>_rdr/<id>-research-<seq>`
    in the record format the gate
    preamble reads; the caller writes it with `memory_put`, whose content is a
    string and never passes through a shell. The `rdr-research` skill's
