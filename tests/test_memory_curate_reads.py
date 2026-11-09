@@ -11,7 +11,6 @@ a pager that does not advance, the page cap) use a stub procedure. No test mints
 from __future__ import annotations
 
 import json
-import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -91,13 +90,21 @@ def test_a_session_start_follows_the_verb_rule(tmp_path: Path) -> None:
     f = tmp_path / "s.jsonl"
     f.write_text("\n".join([
         "not json",
+        json.dumps([1, 2]),  # JSON, not an object
         json.dumps({"type": "summary"}),  # no timestamp
+        json.dumps({"timestamp": 1730000000}),  # not a string
+        json.dumps({"timestamp": "2026-11-01T00:00:00Z" + " " * 60}),  # over 64 characters
+        json.dumps({"timestamp": "yesterday"}),  # not an ISO time
         json.dumps({"timestamp": "2026-11-01T00:00:00Z", "isSidechain": True}),  # a replayed sidechain
         json.dumps({"timestamp": "2026-11-02T03:04:05Z", "type": "user"}),
     ]) + "\n")
     assert mc._session_start(f) == datetime(2026, 11, 2, 3, 4, 5, tzinfo=UTC)
     (tmp_path / "none.jsonl").write_text(json.dumps({"type": "summary"}) + "\n")
     assert mc._session_start(tmp_path / "none.jsonl") is None
+    naive = tmp_path / "naive.jsonl"
+    naive.write_text(json.dumps({"timestamp": "2026-11-02T03:04:05"}) + "\n")  # no offset: read as UTC
+    assert mc._session_start(naive) == datetime(2026, 11, 2, 3, 4, 5, tzinfo=UTC)
+    assert mc._session_start(tmp_path / "missing.jsonl") is None  # unreadable: no start, never an error
 
 
 # ── the real run path ────────────────────────────────────────────────────────────────
@@ -321,13 +328,28 @@ def test_a_pager_that_never_finishes_stops_at_the_page_cap(world, stubbed, monke
         t = datetime.strptime(a["since"], "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=1)
         return {"rows": [], "since": a["since"], "until": a["until"], "next_since": t.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
-    calls = stubbed(step)
+    def bounded(a: dict) -> dict:
+        # Fails instead of hanging if the cap stops working (a loop with no cap never ends).
+        assert len(calls) <= 50, "the page cap did not stop the loop"
+        return step(a)
+
+    calls = stubbed(bounded)
     reads = mc.load_reads(30, _NOW, world["mem"])
     assert isinstance(reads, mc.ReadsUnavailable) and "did not finish in 3 pages" in reads.reason
     assert len(calls) == 3
 
 
-@pytest.mark.skipif(os.name != "nt", reason="the Windows refusal is checked where os.name is nt")
-def test_on_windows_the_counts_are_not_available(world: dict[str, Path]) -> None:
+def test_on_windows_the_counts_are_not_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Checked on every platform: the refusal looks at os.name before any path, and no CI leg
+    runs this file on Windows."""
+    monkeypatch.setattr(mc.os, "name", "nt")
+    reason = mc._unmatchable(Path("/x/memory"))
+    assert reason is not None and "Windows paths" in reason
+    monkeypatch.setattr(mc.os, "name", "posix")
+    assert mc._unmatchable(Path("/x/memory")) is None
+
+
+def test_cut_records_from_the_procedure_reach_the_report(world, stubbed) -> None:
+    stubbed(lambda a: {"rows": [], "since": a["since"], "until": a["until"], "truncated_records": 2})
     reads = mc.load_reads(30, _NOW, world["mem"])
-    assert isinstance(reads, mc.ReadsUnavailable) and "Windows paths" in reads.reason
+    assert isinstance(reads, mc.ReadCounts) and reads.truncated_records == 2
