@@ -235,9 +235,9 @@ class TestOneRequest:
         assert res.completed is False
         assert _manifest(doc) == [(0, _chash(pieces[0]))]
 
-    def test_chunk_metadata_matches_what_put_stamped(self, vec, real_cat):
-        """A note reads back as one written the old way: title, tags, category, agent and the
-        catalog_doc_id cross-reference are on the chunk."""
+    def test_the_chunk_row_carries_the_chunk_keys_only(self, vec, real_cat):
+        """RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): the title, tags, category, agent, TTL and the
+        catalog_doc_id cross-reference are the note's catalog entry's, not the shared chunk row's."""
         pieces = _pieces("meta", 1)
         doc = _register("z0o2p12-meta", pieces)
         write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, title="z0o2p12-meta",
@@ -245,10 +245,9 @@ class TestOneRequest:
                    ttl_days=30, cat=real_cat)
         got = vec.get_collection(_COLLECTION).get(ids=[_chash(pieces[0])], include=["metadatas"], sensitivity="include")
         meta = got["metadatas"][0]
-        assert meta["title"] == "z0o2p12-meta" and meta["tags"] == "a,b" and meta["category"] == "cat"
-        assert meta["source_agent"] == "agent-x" and meta["ttl_days"] == 30
-        assert meta["catalog_doc_id"] == doc
-        assert meta["embedding_model"] == "bge-base-en-v15-768"
+        assert meta["chunk_text_hash"] == _chash(pieces[0]) and meta["embedding_model"] == "bge-base-en-v15-768"
+        for retired in ("title", "tags", "category", "source_agent", "ttl_days", "catalog_doc_id", "indexed_at"):
+            assert retired not in meta, retired
 
     def test_identical_pieces_collapse_to_one_chunk_with_two_owner_rows(self, vec, real_cat):
         """A note whose text repeats has the same chash at two positions: one chunk, two owner
@@ -686,34 +685,33 @@ class TestChunkMetadata:
         got = vec.get_collection(collection).get(ids=[chash], include=["metadatas"], sensitivity="include")
         return got["metadatas"][0]
 
-    def test_content_type_and_indexed_at_reach_the_engine_and_session_id_does_not(self, vec, real_cat):
+    def test_no_content_type_indexed_at_agent_or_session_reaches_the_row(self, vec, real_cat):
+        """RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): the row is the chunk keys only (session_id went with
+        nexus-6pfgb.4; content_type, indexed_at and source_agent are the catalog entry's)."""
         pieces = _pieces("meta-full", 1)
         doc = _register("z0o2p12-meta-full", pieces)
         write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
                    source_agent="agent-x", cat=real_cat)
         meta = self._meta(vec, _chash(pieces[0]))
-        assert "session_id" not in meta  # nexus-6pfgb.4: no reader, no writer
-        assert meta["content_type"] == "prose"
-        assert meta["indexed_at"][:2] == "20", meta["indexed_at"]
-        assert meta["source_agent"] == "agent-x"
+        assert set(meta) == {"chunk_text_hash", "embedding_model"}, meta
 
-    def test_content_type_follows_the_collection_prefix_as_put_did(self, vec, real_cat):
+    def test_the_row_of_a_non_knowledge_prefix_carries_the_chunk_keys_only_too(self, vec, real_cat):
         rdr = "rdr__z0o2p12-rdr__bge-base-en-v15-768__v1"
         pieces = _pieces("meta-rdr", 1)
         doc = _register("z0o2p12-meta-rdr", pieces, collection=rdr)
         write_note(catalog_doc_id=doc, collection=rdr, pieces=pieces, cat=real_cat)
-        assert self._meta(vec, _chash(pieces[0]), rdr)["content_type"] == "markdown"
+        assert set(self._meta(vec, _chash(pieces[0]), rdr)) == {"chunk_text_hash", "embedding_model"}
 
-    def test_a_same_text_reput_refreshes_the_metadata_without_re_embedding(self, vec, real_cat):
-        """Existing chash, no vector: the chunk is not re-embedded and its metadata is refreshed."""
+    def test_a_same_text_reput_does_not_re_embed_and_leaves_the_row_the_chunk_keys_only(self, vec, real_cat):
+        """Existing chash, no vector: the chunk is not re-embedded; the note's tags, TTL and category go to
+        its catalog entry, not to the shared row."""
         pieces = _pieces("meta-refresh", 1)
         doc = _register("z0o2p12-meta-refresh", pieces)
         write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="old", ttl_days=5,
                    cat=real_cat)
         res = write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="new,tags",
                          ttl_days=30, category="cat2", cat=real_cat)
-        meta = self._meta(vec, _chash(pieces[0]))
-        assert (meta["tags"], meta["ttl_days"], meta["category"]) == ("new,tags", 30, "cat2")
+        assert set(self._meta(vec, _chash(pieces[0]))) == {"chunk_text_hash", "embedding_model"}
         assert res.embed_embedded == 0 and res.embed_skipped == 1
 
 
@@ -730,7 +728,7 @@ class TestChunkMetadata:
 
         write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="new", cat=real_cat)
         meta = self._meta(vec, chash)
-        assert meta["tags"] == "new", "the key the note sets is refreshed"
+        assert "tags" not in meta, "the note's tags are its catalog entry's (RDR-236 Phase 4 Step 1)"
         assert (meta["bib_year"], meta["bib_venue"]) == (2024, "VLDB"), "a key another writer set is kept"
 
         # nexus-jz86a (same state, one more reader): a document-level label another writer left on the
@@ -751,21 +749,20 @@ class TestChunkMetadata:
         assert resolve_owner_section_types_with_basis([chash], [True], [_COLLECTION], ["references"]) == (
             [""], ["agreed"]), "the note's own answer is no label, not the row's"
 
-    def test_a_permanent_reput_of_a_ttld_note_drops_its_ttl(self, vec, real_cat):
-        """nexus-z0o2p.34 (critique 5b): the merge keeps a stored key the incoming metadata omits. A
-        re-put that makes a TTL'd note PERMANENT sends no ``ttl_days``, so under a bare merge the old
-        TTL would survive and the note would still expire (data loss). The note's own keys must
-        therefore be overwritten by a re-put, absent ones included."""
+    def test_a_ttld_note_and_its_permanent_reput_leave_no_ttl_on_the_row(self, vec, real_cat):
+        """nexus-z0o2p.34 (critique 5b) guarded a TTL that survived a permanent re-put on the shared row
+        through the engine's merge (data loss: the note would still expire). Since RDR-236 Phase 4 Step 1
+        (nexus-6pfgb.65) the row never carries a note's TTL, so there is nothing to survive: the TTL is the
+        catalog entry's (``ttl_days`` and ``put_at``), rewritten by every put."""
         pieces = _pieces("meta-ttl", 1)
         doc = _register("z0o2p34-meta-ttl", pieces)
         chash = _chash(pieces[0])
         write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, ttl_days=5, cat=real_cat)
-        assert self._meta(vec, chash)["ttl_days"] == 5, "control: the TTL is stored"
+        assert "ttl_days" not in self._meta(vec, chash), "the TTL is not on the row"
 
         write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, cat=real_cat)    # permanent
         meta = self._meta(vec, chash)
-        assert meta.get("ttl_days") in (None, 0), f"the permanent re-put must drop the stored TTL: {meta}"
-        assert meta.get("expires_at") in (None, ""), "and any expiry derived from it"
+        assert "ttl_days" not in meta and "expires_at" not in meta, meta
 
     def test_the_request_asks_the_engine_to_merge(self, vec, real_cat):
         seen: list[dict] = []
@@ -1213,9 +1210,10 @@ class TestSettlingFromEveryAttempt:
             write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
                        cat=_Recording(real_cat, before=odd))
 
-    def test_a_manifest_that_already_matches_is_resent_so_new_metadata_is_applied(self, vec, real_cat):
+    def test_a_manifest_that_already_matches_is_resent_so_the_request_is_applied(self, vec, real_cat):
         """The request died in flight before it committed; the manifest equals the note only because
-        the content is unchanged. Changed tags, ttl and category must still be applied."""
+        the content is unchanged. The request must still be resent (the note's tags, ttl and category are
+        its catalog entry's since RDR-236 Phase 4 Step 1; the row carries the chunk keys only)."""
         pieces = _pieces("resend", 1)
         doc = _register("z0o2p12-resend", pieces)
         write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="old", ttl_days=5,
@@ -1225,8 +1223,7 @@ class TestSettlingFromEveryAttempt:
                          ttl_days=30, category="c2", cat=cat)
         assert res.recovered is True and cat.calls.count("write_manifest_many") == 2
         got = vec.get_collection(_COLLECTION).get(ids=[_chash(pieces[0])], include=["metadatas"], sensitivity="include")
-        meta = got["metadatas"][0]
-        assert (meta["tags"], meta["ttl_days"], meta["category"]) == ("new", 30, "c2")
+        assert set(got["metadatas"][0]) == {"chunk_text_hash", "embedding_model"}
 
     def test_a_resend_that_fails_is_unknown(self, vec, real_cat):
         pieces = _pieces("resend-fails", 1)
@@ -1414,10 +1411,10 @@ class TestRefusedStamp:
 
 
 class TestContentTypeMap:
-    """The map lives in ``metadata_schema``. The real-engine test
-    ``TestChunkMetadata.test_content_type_follows_the_collection_prefix_as_put_did`` is the pin that a
-    note written through ``write_note`` reads back with the prefix's content type; the tests here
-    catch the two ways that could silently stop being true."""
+    """The map lives in ``metadata_schema``. Since RDR-236 Phase 4 Step 1 (nexus-6pfgb.65) a note's chunk
+    row carries no ``content_type`` (the catalog entry's), so ``write_note`` sends the chunk keys only
+    whatever the helper answers; the helper's map itself is still pinned below, and the lint at the end of
+    the class keeps it to one copy."""
 
     @pytest.mark.parametrize("collection,expected", [
         ("code__x__bge-base-en-v15-768__v1", "code"),
@@ -1444,18 +1441,17 @@ class TestContentTypeMap:
                 return {"failed_doc_ids": [], "chunks_written": 1, **_OK_DROPS}
 
         write_note(catalog_doc_id=_DOC, pieces=["content type"], cat=Capturing(), **kw)
-        return [c["metadata"]["content_type"] for c in sent[0]]
+        return [set(c["metadata"]) for c in sent[0]]
 
-    def test_write_note_takes_the_content_type_from_the_helper(self, monkeypatch):
-        """Drives write_note itself with a helper that answers 'pdf', a valid type no prefix in the
-        map yields: a write_note that stopped calling the helper (and used a table of its own)
-        would send the prefix's real type instead."""
+    def test_write_note_sends_no_content_type_whatever_the_helper_answers(self, monkeypatch):
+        """Drives write_note itself with a helper that answers 'pdf': the chunk metadata is the chunk
+        keys only, so the answer reaches no row."""
         got = self._sent_chunks(monkeypatch, collection="rdr__x__bge-base-en-v15-768__v1")
-        assert got == ["pdf"]
+        assert got == [{"chunk_text_hash", "embedding_model"}]
 
-    def test_an_explicit_content_type_wins_over_the_helper(self, monkeypatch):
+    def test_an_explicit_content_type_reaches_no_row_either(self, monkeypatch):
         got = self._sent_chunks(monkeypatch, collection=_COLLECTION, content_type="code")
-        assert got == ["code"]
+        assert got == [{"chunk_text_hash", "embedding_model"}]
 
     @pytest.mark.lint
     def test_there_is_one_copy_of_the_map(self):

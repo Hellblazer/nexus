@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from nexus.catalog import note_ttl
+from nexus.catalog.store_hook import imported_note_meta
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.http_vector_client import ExpireIncompleteError, HttpVectorClient
 from nexus.metadata_schema import is_expired
@@ -681,20 +682,23 @@ def test_the_rows_of_a_large_note_are_read_in_pages(monkeypatch):
     assert [len(b) for b in w.row_reads] == [300, 300, 50]
 
 
+_LATER = _ago(0.5)  # an older client's re-put: stamped after the catalog's put_at (2 days ago) plus the skew
+
+
 @pytest.mark.parametrize(("row", "stale"), [
-    ({"catalog_doc_id": "1.1.1", "title": "N"}, True),                                 # permanent row, catalog 1d
-    ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": 3}, True),                  # another TTL
-    ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": 1}, False),                 # agrees, no clock
+    ({"catalog_doc_id": "1.1.1", "title": "N", "indexed_at": _LATER}, True),                  # permanent row, catalog 1d
+    ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": 3, "indexed_at": _LATER}, True),   # another TTL
+    ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": 1}, False),                        # agrees, no clock
     ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": 1, "indexed_at": "junk"}, False),
-    ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": float("inf")}, True),       # garbage reads permanent
-    ({"catalog_doc_id": "1.1.9", "title": "other"}, False),                            # not this note's row
-    ({"title": "N"}, True),                                                            # title alone names the note
+    ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": float("inf"), "indexed_at": _LATER}, True),  # garbage reads permanent
+    ({"catalog_doc_id": "1.1.9", "title": "other", "indexed_at": _LATER}, False),             # not this note's row
+    ({"title": "N", "indexed_at": _LATER}, True),                                             # title alone names the note
     # nexus-6pfgb.30 round 2: an older client's untitled or other-title put of the same text stamps the
     # row with the note's own tumbler under a different title; the guard can only refuse, so it counts
-    ({"catalog_doc_id": "1.1.1", "title": ""}, True),                                  # untitled put, stamped
-    ({"catalog_doc_id": "1.1.1", "title": "B"}, True),                                 # put under another title
-    ({"catalog_doc_id": "1.1.1"}, True),                                               # stamped, no title key
-    ({"catalog_doc_id": "1.1.9", "title": ""}, False),                                 # someone else's untitled row
+    ({"catalog_doc_id": "1.1.1", "title": "", "indexed_at": _LATER}, True),                   # untitled put, stamped
+    ({"catalog_doc_id": "1.1.1", "title": "B", "indexed_at": _LATER}, True),                  # put under another title
+    ({"catalog_doc_id": "1.1.1", "indexed_at": _LATER}, True),                                # stamped, no title key
+    ({"catalog_doc_id": "1.1.9", "title": "", "indexed_at": _LATER}, False),                  # someone else's untitled row
 ])
 def test_catalog_ttl_stale_rule(row, stale):
     meta = {"ttl_days": 1, "put_at": _ago(2)}
@@ -703,8 +707,8 @@ def test_catalog_ttl_stale_rule(row, stale):
 
 
 @pytest.mark.parametrize(("row", "stale"), [
-    ({"catalog_doc_id": "1.1.1", "title": ""}, True),     # the owner's own stamp, untitled row
-    ({"catalog_doc_id": "1.1.1", "title": "B"}, True),    # the owner's stamp under a title the owner never had
+    ({"catalog_doc_id": "1.1.1", "title": "", "indexed_at": _LATER}, True),     # the owner's own stamp, untitled row
+    ({"catalog_doc_id": "1.1.1", "title": "B", "indexed_at": _LATER}, True),    # the owner's stamp under a title the owner never had
     ({"catalog_doc_id": "1.1.9", "title": ""}, False),    # another note's untitled row
     ({"title": ""}, False),                               # no stamp, no title to match: nobody's
 ])
@@ -771,3 +775,117 @@ def test_a_garbage_row_ttl_does_not_abort_the_sweep_before_the_catalog_pass(monk
 
     assert cat.tombstoned == ["1.1.1"] and (report.notes_tombstoned, report.failures) == (1, ())
     assert report.row_ttl_unattributed == 0
+
+
+# ── nexus-6pfgb.65 (RDR-236 Phase 4 Step 1b): the guard reads the row's indexed_at against put_at ─────
+#
+# After Step 1 no client writes ``indexed_at`` or ``ttl_days`` to a row, so a row that carries them was
+# written by an older client or before Step 1. A row's TTL sign counts only when its ``indexed_at`` is later
+# than the catalog's ``put_at`` plus PUT_SKEW; a row not later is ignored whatever its TTL (or the engine's
+# ``last_written_at``, which every chunk write bumps and the rule never reads).
+
+
+def test_pin1_a_new_client_ttl_change_on_a_single_owner_note_with_a_legacy_keyed_row_expires_on_time(monkeypatch):
+    """The owner re-put the note with a TTL of 1 day two days ago, with a client that writes the catalog and
+    no row keys. The merge left the row as the old put wrote it: permanent, stamped 30 days ago. The row's
+    TTL differs from the catalog's, but its indexed_at is not later than put_at, so it holds nothing."""
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(ttl=None, indexed_at=_ago(30))})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == ["1.1.1"] and w.deleted == [["c1"]]
+    assert (report.notes_tombstoned, report.catalog_ttl_stale, report.failures) == (1, (), ())
+    assert w.row_reads == [["c1"]], "control: the guard did read the note's rows"
+
+
+def test_pin1_the_same_for_a_row_that_carries_another_ttl_days(monkeypatch):
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(ttl=30, indexed_at=_ago(5))})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == ["1.1.1"] and (report.notes_tombstoned, report.catalog_ttl_stale) == (1, ())
+
+
+def test_pin1_a_row_with_no_ttl_facts_at_all_holds_nothing(monkeypatch):
+    """What a current client leaves (CHUNK keys only) plus the owner's stamp: no ttl_days, no indexed_at."""
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1"]})
+    row = {"catalog_doc_id": "1.1.1", "title": "note-1.1.1"}
+    w = _World(monkeypatch, cat, {"c1": row})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == ["1.1.1"] and report.catalog_ttl_stale == ()
+
+
+def test_pin2_an_import_that_makes_a_note_permanent_is_not_retired_through_the_catalog(monkeypatch):
+    """The .nxexp import writes no row keys and stamps put_at now with ttl_days 0 on a note entry that has no
+    note keys. The export's row still says ttl 1, stamped long before; the catalog is the authority and
+    says permanent, so the sweep neither retires the note nor holds it, and does not read its rows."""
+    stamped = imported_note_meta({"doc_id": "c1"}, put_at=_ago(400))
+    assert stamped == {"put_at": _ago(400), "ttl_days": 0}, "control: what the import stamps"
+    cat = _FakeCatalog([_entry("1.1.1", meta={"doc_id": "c1", **stamped})], {"1.1.1": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(ttl=1, indexed_at=_ago(500))})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == [] and cat.manifests["1.1.1"] == ["c1"] and w.deleted == []
+    assert (report.notes_tombstoned, report.catalog_ttl_stale, report.failures) == (0, (), ())
+
+
+def test_pin2_an_entry_that_holds_a_note_key_keeps_every_key_through_an_import():
+    assert imported_note_meta({"ttl_days": 7, "put_at": _ago(1)}, put_at=_ago(0)) == {}
+    assert imported_note_meta({"put_at": _ago(1)}, put_at=_ago(0)) == {}
+
+
+def test_pin3_an_old_client_re_put_is_still_caught_whatever_its_ttl(monkeypatch):
+    """An old client re-put stamps indexed_at now: later than put_at plus PUT_SKEW, so the row counts."""
+    for ttl in (None, 1, 30):
+        cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1"]})
+        w = _World(monkeypatch, cat, {"c1": _older_client_row(ttl=ttl, indexed_at=_ago(0.5))})
+
+        report = w.sweep()
+
+        assert cat.tombstoned == [] and w.deleted == [], ttl
+        assert report.catalog_ttl_stale == (("1.1.1", "note-1.1.1"),), ttl
+
+
+def test_pin4_the_engine_clock_is_not_read_so_a_bumped_last_written_at_holds_nothing():
+    """RF-18: the engine bumps last_written_at on every chunk write, an identical-text re-write of a TTL-only
+    re-put included. A stale row and a fresh one then carry the same engine clock, so the rule reads the
+    row's indexed_at and nothing else: a last_written_at of now beside an old indexed_at is not a put."""
+    meta = {"ttl_days": 1, "put_at": _ago(2)}
+    row = {"catalog_doc_id": "1.1.1", "title": "N", "indexed_at": _ago(30), "last_written_at": _ago(0),
+           "ttl_days": None}
+    assert not note_ttl.catalog_ttl_stale(meta, _ago(0), [row], owner_tumbler="1.1.1", owner_title="N")
+    assert note_ttl.catalog_ttl_stale(
+        meta, _ago(0), [{**row, "indexed_at": _ago(0.5)}], owner_tumbler="1.1.1", owner_title="N"), (
+        "control: the same row with a later indexed_at is a put")
+
+
+@pytest.mark.parametrize(("row", "stale"), [
+    ({"catalog_doc_id": "1.1.1", "title": "N", "indexed_at": _ago(30)}, False),                    # old, permanent row
+    ({"catalog_doc_id": "1.1.1", "title": "N", "indexed_at": _ago(30), "ttl_days": 5}, False),     # old, another TTL
+    ({"catalog_doc_id": "1.1.1", "title": "N", "indexed_at": _ago(0.5)}, True),                    # an older client's put
+    ({"catalog_doc_id": "1.1.1", "title": "N", "indexed_at": _ago(0.5), "ttl_days": 1}, True),     # same TTL, later put
+    ({"catalog_doc_id": "1.1.1", "title": "N"}, False),                                            # no indexed_at: new-shaped
+    ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": 5}, False),                             # a TTL with no clock
+    ({"catalog_doc_id": "1.1.1", "title": "N", "indexed_at": "junk", "ttl_days": 5}, False),
+    ({"catalog_doc_id": "1.1.9", "title": "other", "indexed_at": _ago(0.5)}, False),               # not this note's row
+])
+def test_the_row_counts_only_when_its_indexed_at_is_later_than_put_at_plus_the_skew(row, stale):
+    meta = {"ttl_days": 1, "put_at": _ago(2)}
+    assert note_ttl.catalog_ttl_stale(meta, _ago(0), [row], owner_tumbler="1.1.1", owner_title="N") is stale
+
+
+@pytest.mark.parametrize(("row", "stale"), [
+    ({"title": "N", "ttl_days": 5}, True),                         # no put_at: the entry is not newer than the row
+    ({"title": "N"}, True),
+    ({"title": "N", "ttl_days": 1}, False),                        # agrees, no clock to compare
+    ({"title": "N", "ttl_days": 1, "indexed_at": _ago(0.001)}, True),    # later than the entry's fallback clock
+    ({"title": "N", "ttl_days": 1, "indexed_at": _ago(2)}, False),       # not later than it
+])
+def test_an_entry_with_no_put_at_is_never_treated_as_newer_than_its_rows(row, stale):
+    meta = {"ttl_days": 1}
+    assert note_ttl.catalog_ttl_stale(meta, _ago(2), [row], owner_tumbler="1.1.1", owner_title="N") is stale

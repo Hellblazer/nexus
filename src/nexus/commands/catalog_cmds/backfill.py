@@ -347,9 +347,14 @@ def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
     help="Resume: skip the listing up to and including this tumbler (the interrupt message prints the exact "
          "command). The listing is in the catalog's own order, so the skip is by position, not by comparing tumblers.",
 )
+@click.option(
+    "--list-ttl-first-sign", "list_first_sign", is_flag=True,
+    help="Dry run: print the notes the TTL sweep's guard held by the first sign of catalog_ttl_stale alone "
+         "(the summary always counts them; --json always carries them).",
+)
 def backfill_meta_cmd(
     apply: bool, as_json: bool, batch_size: int, pause_ms: int, max_rps: float | None,
-    stop_after_failed_rounds: int, start_after: str,
+    stop_after_failed_rounds: int, start_after: str, list_first_sign: bool,
 ) -> None:
     """Stamp the new catalog meta keys of pre-existing documents from their chunk rows (nexus-6pfgb.10).
 
@@ -374,6 +379,14 @@ def backfill_meta_cmd(
     the rounds. For a cloud catalog start with ``--max-rps 2``. Keep the catalog's other writers (indexers,
     hooks, ``nx store put``) quiet for the whole of every pass, not only the apply: the write merges a
     key into ``meta`` and overwrites one a writer set after the listing was taken.
+
+    A DRY RUN ALSO CHECKS THE KEYED NOTES (nexus-6pfgb.65, RDR-236 Phase 4 Step 1). It reads the chunk rows of
+    every note with a ``put_at`` (the apply pass needs none of them: such a note is complete) and counts, in
+    the summary and under ``ttl_first_sign_only`` in ``--json``, the notes ``note_ttl.catalog_ttl_stale``
+    held by its first sign alone: the row's TTL differs from the catalog's while the row's ``indexed_at`` is
+    not later than ``put_at`` plus five minutes (a pre-.18 import's permanent row, or a note whose owner
+    changed its TTL with a new-client re-put). Step 1 stops holding them; the catalog's TTL is the authority.
+    ``--list-ttl-first-sign`` prints them. Read-only: it stamps nothing and changes no expiry decision.
 
     One progress line per round (about 300 lines for a long run) goes to stderr, so ``--json`` on stdout is
     unchanged: requests sent, the rate since the start and over the last 10 rounds, failed lookups and
@@ -435,6 +448,24 @@ def backfill_meta_cmd(
             click.echo(f"  {report.tags_legacy_strings_left} legacy tags strings left for the array rung (nexus-6pfgb.38).")
         if report.lookups_failed:
             click.echo(f"  {report.lookups_failed} documents had an owner or row lookup fail; their row-sourced keys were withheld.")
+        if report.ttl_first_sign_checked:
+            held = report.ttl_first_sign_notes
+            click.echo(
+                f"  {len(held)} note(s) held today by catalog_ttl_stale's first sign alone (the row's TTL differs from the "
+                "catalog's while the row's indexed_at is not later than put_at plus five minutes: a pre-.18 import's "
+                "permanent row, or a note whose owner changed its TTL with a new-client re-put). RDR-236 Step 1 stops "
+                "holding them; the catalog's TTL is the authority."
+                + ("" if list_first_sign or not held else " List them with --list-ttl-first-sign, or read --json.")
+            )
+            if report.ttl_first_sign_unread:
+                click.echo(f"  {report.ttl_first_sign_unread} keyed note(s) could not be checked (manifest or row read failed).")
+            if list_first_sign:
+                for n in held:
+                    click.echo(
+                        f"    {n['tumbler']}  {n['title']!r}  {n['collection']}: catalog ttl_days {n['catalog_ttl_days']} "
+                        f"put_at {n['put_at']}; row ttl_days {n['row_ttl_days']} indexed_at {n['row_indexed_at']} "
+                        f"({n['rows']} row(s)); {n['reason']}"
+                    )
         if apply:
             click.echo(f"{verb} {report.documents_written}/{report.documents_to_stamp} documents.")
         else:
@@ -442,7 +473,8 @@ def backfill_meta_cmd(
     if start_after and not report.batches_total:
         click.echo(f"Nothing after {start_after}: it is the last document of the listing, so an earlier pass reached the end.", err=True)
     if report.interrupted:
-        resume = ["nx catalog backfill-meta"] + (["--apply"] if apply else []) + (["--json"] if as_json else []) + [
+        resume = ["nx catalog backfill-meta"] + (["--apply"] if apply else []) + (["--json"] if as_json else []) + (
+            ["--list-ttl-first-sign"] if list_first_sign else []) + [
             f"--batch-size {batch_size}", f"--pause-ms {pause_ms}",
             *([f"--max-rps {max_rps:g}"] if max_rps is not None else []),
             f"--stop-after-failed-rounds {stop_after_failed_rounds}",

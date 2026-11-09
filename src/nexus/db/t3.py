@@ -777,9 +777,14 @@ class T3Database:
         no ``--ttl`` concept and is out of scope here) is still read as
         permanent by :func:`nexus.metadata_schema.is_expired`, now with an
         explicit warning logged on that read path — see that function's
-        own docstring. Expiry is computed Python-side via
+        own docstring. Expiry of a row an older client wrote is computed Python-side via
         :func:`nexus.metadata_schema.is_expired` from
         ``indexed_at + ttl_days``; no separate ``expires_at`` field.
+
+        RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): the validated *ttl_days* is NOT written to the chunk row,
+        which carries the CHUNK keys only. A note's TTL is its catalog entry's (``ttl_days`` and ``put_at``
+        on its ``meta``), written by the caller's note writer; this facade has no catalog, so a TTL passed
+        here is checked and then dropped, and :meth:`expire` finds no row to judge by it.
 
         Note (RDR-108 D1 / nexus-kmb6; width per RDR-180): The document ID
         is the content-derived natural ID — the FULL
