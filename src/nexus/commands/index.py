@@ -1983,14 +1983,14 @@ def index_repo_cmd(
         _catalog_hook_failed = (stats or {}).get("catalog_hook_failed", 0)
         if _catalog_hook_failed:
             click.echo(
-                "Warning: the catalog reconcile commit failed (RDR-193): no document of this run was registered or "
-                "removed, and no chunk of it was written. See the catalog_hook_failed log line above.",
+                "Warning: the catalog reconcile step failed (RDR-193), so no chunk of this run was written. If the "
+                "failure came before the commit, nothing was registered or removed. See the catalog_hook_failed log "
+                "line above.",
                 err=True,
             )
             _run_failure = _run_failure or click.ClickException(
-                "the catalog reconcile commit failed, so this run registered and removed nothing in the catalog "
-                "(nexus-u5m5g.7). The --since-head base was not advanced. Re-run 'nx index repo' once the catalog "
-                "service is healthy."
+                "the catalog reconcile step failed, so this run wrote no chunks (nexus-u5m5g.7). The --since-head "
+                "base was not advanced. Re-run 'nx index repo' once the catalog service is healthy."
             )
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)

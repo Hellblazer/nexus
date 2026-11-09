@@ -203,31 +203,70 @@ def test_a_stage_answered_409_commit_in_progress_raises_a_catalog_reconcile_erro
     assert script.count("POST", STAGE) == 1
 
 
-def test_the_commit_submit_rides_out_a_gateway_502_through_the_transport(client, script, monkeypatch) -> None:
-    """r1 fix 8: the submit is idempotent (the engine answers the running job, or the stored outcome, for one
-    ``{owner, run_id}``), so the transport's own ladder carries it over a gateway 502 that single-shot sending would
-    have raised."""
+def _shared_hold_must_stay_untouched(monkeypatch) -> list:
+    """Turn the transport's gateway ladder back ON and record every write to the shared gateway hold, so a case can
+    prove the commit submit never reaches either (r2: two stacked ladders turned a full registry into a machine-wide
+    hold of minutes)."""
+    from nexus.db import gateway_hold
+
+    writes: list = []
     monkeypatch.setattr(_refreshable_client, "_GATEWAY_RETRY_SLEEPS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(gateway_hold, "record_503", lambda sleep_s, **kw: writes.append(sleep_s) or 0.0)
+    return writes
+
+
+def test_a_gateway_502_on_the_submit_is_resubmitted_by_the_client_ladder_alone(client, script, monkeypatch) -> None:
+    """The submit is sent once by the transport; the client ladder resubmits a 502 (safe: one ``{owner, run_id}``
+    answers the running job or the stored outcome)."""
+    writes = _shared_hold_must_stay_untouched(monkeypatch)
     script.on("POST", COMMIT, (502, {"error": "bad gateway"}), (202, {"job_id": "j1"}))
     script.on("GET", _poll("j1"), _succeeded())
     assert client.reconcile_commit("1.9", "run-1") == OUTCOME
-    assert script.count("POST", COMMIT) == 2, "the 502 and the resend"
+    assert script.count("POST", COMMIT) == 2, "the 502 and one client resubmit"
     assert script.bodies("POST", COMMIT)[0] == script.bodies("POST", COMMIT)[1]
+    assert writes == []
 
 
-def test_the_transport_ladder_and_the_resubmit_ladder_multiply_but_stay_bounded(client, script, monkeypatch) -> None:
-    """r1 fix 8: a registry that stays full is sent at most four submits (the first and three resubmits) times four
-    transport sends each. Counted, so a change that lets one ladder feed the other without a cap turns this red."""
-    from nexus.db import gateway_hold
-
-    monkeypatch.setattr(_refreshable_client, "_GATEWAY_RETRY_SLEEPS", (0.0, 0.0, 0.0))
-    monkeypatch.setattr(gateway_hold, "record_503", lambda sleep_s, **kw: 0.0)  # no shared hold held for real
-    monkeypatch.setattr(gateway_hold, "wait_before_attempt", lambda **kw: 0.0)
+def test_a_registry_that_stays_full_costs_four_posts_and_never_writes_the_shared_hold(client, script, monkeypatch) -> None:
+    """One ladder: the first submit and three resubmits, each sent once. Before r2 the transport resent each submit
+    up to four times (16 POSTs) and wrote the shared gateway hold on every 503."""
+    writes = _shared_hold_must_stay_untouched(monkeypatch)
     script.on("POST", COMMIT, (503, {"error": "the registry is full"}))
     with pytest.raises(CatalogReconcileError) as info:
         client.reconcile_commit("1.9", "run-1")
-    assert info.value.reason == "registry_busy"
-    assert script.count("POST", COMMIT) == 4 * 4
+    assert info.value.reason == "registry_busy" and info.value.http_status == 503
+    assert script.count("POST", COMMIT) == 4
+    assert writes == []
+
+
+def test_a_gateway_504_that_persists_raises_commit_unreachable_after_the_budget(client, script, monkeypatch) -> None:
+    writes = _shared_hold_must_stay_untouched(monkeypatch)
+    script.on("POST", COMMIT, (504, {"error": "gateway timeout"}))
+    with pytest.raises(CatalogReconcileError) as info:
+        client.reconcile_commit("1.9", "run-1")
+    assert info.value.reason == "commit_unreachable" and info.value.http_status == 504
+    assert script.count("POST", COMMIT) == 4
+    assert writes == []
+
+
+def test_a_submit_answered_400_is_not_resubmitted(client, script) -> None:
+    script.on("POST", COMMIT, (400, {"error": "bad run"}))
+    with pytest.raises(Exception) as info:
+        client.reconcile_commit("1.9", "run-1")
+    assert not (isinstance(info.value, CatalogReconcileError) and info.value.reason in {"registry_busy", "commit_unreachable"})
+    assert script.count("POST", COMMIT) == 1
+
+
+def test_a_409_whose_named_job_poll_errors_raises_commit_conflict_not_the_raw_error(client, script) -> None:
+    """r2 N1: the other job's poll result is discarded, so any error from it (here a 500) is still this run's
+    ``commit_conflict``, never a raw HTTP error that the hook's catch-all would hide."""
+    script.on("POST", COMMIT, (409, {"error": "owner is committing", "job_id": "other"}))
+    script.on("GET", _poll("other"), (500, {"error": "boom"}))
+    with pytest.raises(CatalogReconcileError) as info:
+        client.reconcile_commit("1.9", "run-1")
+    assert info.value.reason == "commit_conflict" and info.value.job_id == "other"
+    assert "could not be polled" in str(info.value)
+    assert script.count("POST", COMMIT) == 1
 
 
 def test_a_404_poll_logs_engine_job_lost_and_resubmits_once(client, script) -> None:

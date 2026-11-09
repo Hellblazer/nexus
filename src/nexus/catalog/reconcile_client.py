@@ -52,6 +52,8 @@ class ResolveOutcome:
 #: Seconds waited before each resubmit of a reconcile commit the engine could not take (a full job registry, or a
 #: transient database error): the schedule's length is the resubmit cap (three), the shared job contract's.
 _RECONCILE_RESUBMIT_BACKOFF_S: tuple[float, ...] = (2.0, 5.0, 10.0)
+# Submit answers the client ladder resubmits (with transport errors); every other status raises.
+_RECONCILE_RESUBMIT_STATUSES: frozenset[int] = frozenset({502, 503, 504})
 #: Seconds between two polls of a running commit job, growing to the cap below.
 _RECONCILE_POLL_INTERVAL_S: float = 0.25
 _RECONCILE_POLL_INTERVAL_CAP_S: float = 2.0
@@ -128,34 +130,40 @@ class ReconcileClient:
         - any other ``failed``: raised with the engine's reason and message. Nothing is resubmitted and the caller
           must not go on as if the run were committed.
 
-        The submit goes through the transport's own retry (it is idempotent: for one ``{owner, run_id}`` the engine
-        answers the job already running, or the stored outcome of a run it already committed), which rides out a
-        gateway 502/503/504 and one connection reset. The resubmit ladder above is separate and counts only what the
-        transport gave up on, so the two multiply but stay bounded: at most four submits (the first and three
-        resubmits), each sent at most four times by the transport, with the ladder's own 2+5+10 s between submits.
+        The submit is sent ONCE by the transport (``idempotent=False``) and every retry is this ladder's: a gateway
+        502/503/504 or a transport error (a reset or timeout, where the engine may or may not have taken the submit)
+        is resubmitted under the same three-resubmit budget as the registry-full 503. The resubmit is safe because for
+        one ``{owner, run_id}`` the engine answers the job already running, or the stored outcome of a run it already
+        committed. One ladder, so a full registry costs at most four POSTs and the ladder's own 2+5+10 s, and never
+        writes the shared gateway hold that would hold every other nexus client on the machine.
         """
         body = {"owner": str(owner), "run_id": run_id}
         resubmits = 0
         lost_once = False
         while True:
             try:
-                job = self._post("/reconcile/commit", body)
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
+                job = self._post("/reconcile/commit", body, idempotent=False)
+            except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                 if status == 409:
                     self._conflict(owner, run_id, _error_body(exc.response), exc)
-                if status == 503:
-                    if resubmits >= len(_RECONCILE_RESUBMIT_BACKOFF_S):
+                if status is not None and status not in _RECONCILE_RESUBMIT_STATUSES:
+                    raise
+                if resubmits >= len(_RECONCILE_RESUBMIT_BACKOFF_S):
+                    if status == 503:
                         raise CatalogReconcileError(
                             "registry_busy", str(_error_body(exc.response).get("error") or "the job registry is full"),
                             http_status=503,
                         ) from exc
-                    _log.warning("catalog_reconcile_commit_busy_resubmit", owner=str(owner), run_id=run_id,
-                                 resubmit=resubmits + 1)
-                    time.sleep(_RECONCILE_RESUBMIT_BACKOFF_S[resubmits])
-                    resubmits += 1
-                    continue
-                raise
+                    raise CatalogReconcileError(
+                        "commit_unreachable",
+                        f"the commit submit for run {run_id} failed {resubmits + 1} times: {exc}", http_status=status,
+                    ) from exc
+                _log.warning("catalog_reconcile_commit_busy_resubmit", owner=str(owner), run_id=run_id,
+                             resubmit=resubmits + 1, http_status=status, error=type(exc).__name__)
+                time.sleep(_RECONCILE_RESUBMIT_BACKOFF_S[resubmits])
+                resubmits += 1
+                continue
             job_id = str((job or {}).get("job_id") or "")
             if not job_id:
                 raise CatalogReconcileError("no_job", f"the engine accepted the commit without a job id: {job!r}")
@@ -188,6 +196,8 @@ class ReconcileClient:
                 outcome_of_other = "was lost by the engine"
             except CatalogReconcileError as err:
                 outcome_of_other = f"failed ({err.reason})"
+            except Exception as err:  # noqa: BLE001 - the other job's poll result is discarded; any error is a conflict
+                outcome_of_other = f"could not be polled ({type(err).__name__})"
         raise CatalogReconcileError(
             "commit_conflict",
             f"another run of owner {owner} was committing (job {other or 'unnamed'}, which {outcome_of_other}), so run "
