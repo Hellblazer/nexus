@@ -12,14 +12,23 @@ landed in most.
 
 **Zero cost when off.** Unset (or not a positive number), nothing is installed:
 no middleware entry, no thread. On, a call that finishes under the threshold
-costs a dict insert and delete under a lock; the thread sleeps until the oldest
-running call's deadline and samples only while some call is past it.
+costs a dict insert and delete under a lock and one wakeup of the watchdog
+thread, which sleeps until the oldest running call's deadline and samples only
+while some call is past it. A call that ran past the threshold without being
+sampled is still logged, with ``state`` ``unsampled``.
 
 **What a sample counts.** The tool body runs on an anyio worker thread (a sync
 tool) or on the event loop (an async one), and the middleware cannot tell
 which, so every thread but the watchdog's own is sampled and only stacks that
-pass through nexus code are counted: an idle worker or the loop's own select
-carries none. Each counted stack contributes its innermost nexus frame and its
+pass through the nexus package's own files are counted: an idle worker carries
+none, and a loop parked in ``select`` is skipped though ``main()`` sits at its
+base. Other nexus background threads (a subscription waiter, say) are counted
+too, so a hot frame there is a neighbour of the slow call, not the call.
+
+**Scope.** Every ``tools/call`` on both servers, which includes ``nx_answer``
+and the tool-tier hooks. Command-tier hooks (``nx-hook``) are short-lived
+processes and are not watched. The summary is its own event beside the call's
+``mcp_tool_call`` line, matched by ``pid`` and tool. Each counted stack contributes its innermost nexus frame and its
 innermost frame overall, so a call blocked in ``httpx`` reads as
 ``search (nexus/mcp/core.py:123) <- _recv (ssl.py:…)``. Concurrent slow calls
 share the samples taken while they overlap. Logged at WARNING the first time a
@@ -43,8 +52,11 @@ THRESHOLD_ENV: str = "NX_MCP_SLOW_CALL_S"
 SAMPLE_INTERVAL_S: float = 0.1
 #: Most hot frames one event lists.
 TOP_FRAMES: int = 8
-#: A stack counts when one of its frames' files lies under this package.
-_PKG_MARK = os.sep + "nexus" + os.sep
+#: A stack counts when one of its frames' files lies inside the nexus package itself,
+#: matched on the package's own directory: a "/nexus/" substring would match every
+#: frame of the default install under ~/.local/share/nexus/tools/, third-party ones included.
+_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
+_SELF = os.path.abspath(__file__)
 
 Stacks = Mapping[int, Any]
 
@@ -55,30 +67,37 @@ def threshold_from_env(env: Mapping[str, str] | None = None) -> float | None:
         value = float(raw)
     except ValueError:
         return None
-    return value if value > 0 else None
+    return value if 0 < value < 1e9 else None
 
 
-def _where(frame: Any) -> str:
+def _where(frame: Any, pkg_dir: str) -> str:
     code = frame.f_code
     path = code.co_filename
-    i = path.rfind(_PKG_MARK)
-    short = path[i + 1:] if i >= 0 else os.path.basename(path)
+    parent = os.path.dirname(pkg_dir.rstrip(os.sep)) + os.sep
+    short = path[len(parent):] if path.startswith(pkg_dir) else os.path.basename(path)
     return f"{code.co_name} ({short}:{frame.f_lineno})"
 
 
-def _stack_keys(frame: Any) -> str | None:
+def _stack_keys(frame: Any, pkg_dir: str = _PKG_DIR) -> str | None:
     """The key one thread's stack contributes, or None when no frame is nexus code."""
     innermost = frame
+    # An idle event loop parked in select carries the server's own main() at its
+    # base: that is not where a call's time went.
+    if os.path.basename(innermost.f_code.co_filename) == "selectors.py":
+        return None
     ours = None
     f = frame
     while f is not None:
-        if _PKG_MARK in f.f_code.co_filename and not f.f_code.co_filename.endswith("_slow_call_watchdog.py"):
+        path = f.f_code.co_filename
+        if path.startswith(pkg_dir) and path != _SELF:
             ours = f
             break
         f = f.f_back
     if ours is None:
         return None
-    return _where(ours) if ours is innermost else f"{_where(ours)} <- {_where(innermost)}"
+    if ours is innermost:
+        return _where(ours, pkg_dir)
+    return f"{_where(ours, pkg_dir)} <- {_where(innermost, pkg_dir)}"
 
 
 class _Call:
@@ -117,7 +136,9 @@ class SlowCallWatchdog:
         frames: Callable[[], Stacks] = sys._current_frames,  # noqa: SLF001 -- the stdlib's only way to read another thread's stack
         log: Any = None,
         start_thread: bool = True,
+        pkg_dir: str = _PKG_DIR,
     ) -> None:
+        self._pkg_dir = pkg_dir
         self.threshold_s = threshold_s
         self._interval_s = interval_s
         self._clock = clock
@@ -139,8 +160,13 @@ class SlowCallWatchdog:
             token = self._next_id
             self._calls[token] = _Call(tool, now, now + self.threshold_s)
             if self._start_thread and self._thread is None:
-                self._thread = threading.Thread(target=self._run, name="nx-slow-call-watchdog", daemon=True)
-                self._thread.start()
+                thread = threading.Thread(target=self._run, name="nx-slow-call-watchdog", daemon=True)
+                try:
+                    thread.start()
+                except Exception:
+                    self._calls.pop(token, None)  # no thread: forget the call, retry the start next time
+                    raise
+                self._thread = thread
             self._cond.notify()
         return token
 
@@ -149,8 +175,17 @@ class SlowCallWatchdog:
         now = self._clock()
         with self._cond:
             call = self._calls.pop(token, None)
-        if call is None or not call.slow:
-            return None
+            if call is None:
+                return None
+            # Read under the lock: a sample in flight updates counts under it too.
+            hot = [f"{n}x {k}" for k, n in call.counts.most_common(TOP_FRAMES)]
+            samples = call.samples
+        if not call.slow:
+            if now - call.started < self.threshold_s:
+                return None
+            # Past the threshold but never sampled (the thread did not get the GIL
+            # in time, or the call ended between ticks): still say it was slow.
+            call.slow_at, call.cpu_at_slow = now, self._cpu()
         cpu = max(0.0, self._cpu() - call.cpu_at_slow)
         slow_wall = max(now - call.slow_at, 1e-9)
         ratio = round(cpu / slow_wall, 2)
@@ -158,11 +193,11 @@ class SlowCallWatchdog:
             "tool": call.tool,
             "wall_s": round(now - call.started, 3),
             "slow_after_s": self.threshold_s,
-            "samples": call.samples,
+            "samples": samples,
             "cpu_s": round(cpu, 3),
             "cpu_ratio": ratio,
-            "state": "computing" if ratio >= 0.5 else "waiting",
-            "hot": [f"{n}x {k}" for k, n in call.counts.most_common(TOP_FRAMES)],
+            "state": ("unsampled" if samples == 0 else "computing" if ratio >= 0.5 else "waiting"),
+            "hot": hot,
             "pid": os.getpid(),
         }
         self._emit(summary)
@@ -196,7 +231,7 @@ class SlowCallWatchdog:
         for ident, frame in self._frames().items():
             if ident == me:
                 continue
-            key = _stack_keys(frame)
+            key = _stack_keys(frame, self._pkg_dir)
             if key is not None:
                 keys.append(key)
         with self._cond:
@@ -229,7 +264,7 @@ def install_slow_call_watchdog(server: object, env: Mapping[str, str] | None = N
     is set. Returns a short status for the caller to log; never raises."""
     threshold = threshold_from_env(env)
     if threshold is None:
-        return "off"
+        return "off"  # the servers report nothing for "off"
     try:
         middleware = server.middleware  # type: ignore[attr-defined]
         if any(getattr(m, "_nx_slow_call_watchdog", False) for m in middleware):
@@ -257,7 +292,7 @@ def install_slow_call_watchdog(server: object, env: Mapping[str, str] | None = N
         _watched._nx_slow_call_watchdog = True  # type: ignore[attr-defined]
         _watched.watchdog = watchdog  # type: ignore[attr-defined]
         middleware.append(_watched)
-        return f"applied (threshold {threshold:g}s)"
+        return "applied"
     except Exception as exc:  # noqa: BLE001 -- an unverifiable SDK shape must not kill startup
         return f"unavailable: {type(exc).__name__}: {exc}"
 

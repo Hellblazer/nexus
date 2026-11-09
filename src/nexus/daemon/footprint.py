@@ -44,7 +44,11 @@ _MIB = 1024 * 1024
 def warn_mb(env: Mapping[str, str] | None = None) -> int:
     """The warn threshold: ``NX_FOOTPRINT_WARN_MB`` when it is a positive integer, else the default."""
     raw = ((os.environ if env is None else env).get(WARN_ENV) or "").strip()
-    return int(raw) if raw.isdigit() and int(raw) > 0 else DEFAULT_WARN_MB
+    # isascii: str.isdigit() is true for "²", which int() refuses; a gauge built from a
+    # bad value must not stop the daemon that builds it.
+    if raw.isascii() and raw.isdigit() and len(raw) < 10 and int(raw) > 0:
+        return int(raw)
+    return DEFAULT_WARN_MB
 
 
 def _linux() -> dict[str, float | None]:
@@ -69,8 +73,10 @@ def _macos() -> dict[str, float | None]:
     buf = (ctypes.c_uint64 * 32)()
     if lib.proc_pid_rusage(os.getpid(), 0, ctypes.byref(buf)) != 0:
         return {}
-    # buf[0:2] hold the uuid; resident_size is the eighth u64 after it.
-    return {"rss_mb": buf[2 + 6] / _MIB, "idle_wakeups": float(buf[2 + 2])}
+    # buf[0:2] hold the uuid; resident_size is the seventh u64 after it and
+    # phys_footprint the eighth. phys_footprint counts compressed pages too, which
+    # resident_size drops under memory pressure; it is what Activity Monitor shows.
+    return {"rss_mb": max(buf[2 + 6], buf[2 + 7]) / _MIB, "idle_wakeups": float(buf[2 + 2])}
 
 
 def _peak_from_resource() -> float | None:
@@ -107,7 +113,7 @@ def sample(*, now: Callable[[], float] = time.time) -> dict[str, Any]:
         "rss_mb": _round(found.get("rss_mb")),
         "peak_rss_mb": _round(found.get("peak_rss_mb")),
         "cpu_s": round(t.user + t.system, 2),
-        "threads": int(threads) if threads is not None else threading.active_count(),
+        "threads": int(threads) if threads is not None else threading.active_count(),  # OS threads on Linux, Python threads elsewhere
         "sampled_at": round(now(), 3),
     }
     wakeups = found.get("idle_wakeups")
@@ -202,7 +208,7 @@ STALE_SAMPLE_S: float = 300.0
 
 def _describe(fp: Mapping[str, Any] | None, now: float) -> str:
     if fp is None:
-        return "no footprint reported (a daemon started before this release)"
+        return "no footprint reported yet (a daemon from an earlier release, or one before its first heartbeat)"
     rss, peak = fp.get("rss_mb"), fp.get("peak_rss_mb")
     head = f"{rss:.0f} MB" if isinstance(rss, (int, float)) else "memory unknown"
     parts = []
@@ -237,7 +243,8 @@ def doctor_rows(
     limit = warn_mb(env)
     over = [r for r in rows if isinstance((r["footprint"] or {}).get("rss_mb"), (int, float))
             and r["footprint"]["rss_mb"] > limit]
-    detail = "; ".join(f"{r['tier']}[{r['scope']}] {_describe(r['footprint'], stamp)}" for r in rows)
+    detail = "Python supervisors (not the Java engine): " + "; ".join(
+        f"{r['tier']}[{r['scope']}] {_describe(r['footprint'], stamp)}" for r in rows)
     if over:
         names = ", ".join(f"{r['tier']}[{r['scope']}]" for r in over)
         return [HealthResult(

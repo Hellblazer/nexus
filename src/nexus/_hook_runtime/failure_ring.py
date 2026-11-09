@@ -95,9 +95,10 @@ _SCRUBS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\b((?:authorization|proxy-authorization)[\"']?\s*[:=]\s*[\"']?)"
                 r"((?:bearer|basic|token|digest)\s+)?[^\s\"']+"),
      rf"\1\2{_MASK}"),
-    # A PEM private key, whole.
-    (re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]{0,20000}?-----END [A-Z ]{0,40}PRIVATE KEY-----"),
-     f"-----BEGIN PRIVATE KEY-----{_MASK}-----END PRIVATE KEY-----"),
+    # camelCase credential keys in serialized text ("sessionKey": "...", privateKey=...),
+    # case-sensitive so a plain word ending in "key" is not one.
+    (re.compile(r"(?<![A-Za-z0-9_])(\"?[a-z][A-Za-z0-9]{0,64}?(?:Key|Token|Secret|Password|Passwd|Credential)s?\"?)"
+                r"(\s*[:=]\s*)(\"[^\"\n]{0,512}\"|'[^'\n]{0,512}'|[^\s\"',;&|)}]+)"), rf"\1\2{_MASK}"),
     # A Cookie or Set-Cookie header: every pair on the line.
     (re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)[^\r\n]{1,4096}"), rf"\1{_MASK}"),
     (re.compile(r"(?i)\b(bearer|basic)\s+(?=[A-Za-z]{0,64}[0-9._~+/=-])[A-Za-z0-9._~+/=-]{6,}"), rf"\1 {_MASK}"),
@@ -128,11 +129,40 @@ def ring_dir(env: Mapping[str, str] | None = None) -> Path:
     return (Path(base) if base else Path.home() / ".config" / "nexus") / "hook-failures"
 
 
+_PEM_BEGIN = "-----BEGIN "
+_PEM_KEY = "PRIVATE KEY-----"
+_PEM_END = "-----END "
+
+
+def _mask_pem(text: str) -> str:
+    """Every PEM private key block masked whole. A plain scan, not a regex: a lazy
+    span between BEGIN and END backtracks quadratically on BEGIN markers with no END."""
+    if _PEM_KEY not in text:
+        return text
+    out, i = [], 0
+    while (b := text.find(_PEM_BEGIN, i)) >= 0:
+        head_end = text.find(_PEM_KEY, b, b + 80)
+        if head_end < 0:
+            out.append(text[i:b + len(_PEM_BEGIN)])
+            i = b + len(_PEM_BEGIN)
+            continue
+        e = text.find(_PEM_END, head_end)
+        tail = text.find(_PEM_KEY, e) if e >= 0 else -1
+        if tail < 0:
+            out.append(text[i:b] + f"-----BEGIN PRIVATE KEY-----{_MASK} (no END line)")
+            return "".join(out)
+        out.append(text[i:b] + f"-----BEGIN PRIVATE KEY-----{_MASK}-----END PRIVATE KEY-----")
+        i = tail + len(_PEM_KEY)
+    out.append(text[i:])
+    return "".join(out)
+
+
 def scrub(text: str) -> str:
-    """*text* with credentials masked: the ring's own patterns, then
+    """*text* with credentials masked: PEM keys, the ring's own patterns, then
     :func:`nexus.redact.redact_credentials`."""
     from nexus.redact import redact_credentials  # noqa: PLC0415 -- crash path only
 
+    text = _mask_pem(text)
     for pattern, repl in _SCRUBS:
         text = pattern.sub(repl, text)
     return redact_credentials(text)
@@ -193,6 +223,43 @@ def _cut(value: Any, cap: int) -> Any:
         value = list(value)
         head = [_cut(v, cap) for v in value[:_LIST_KEEP]]
         return head + ([f"...[cut {len(value) - _LIST_KEEP} items]"] if len(value) > _LIST_KEEP else [])
+    return value
+
+
+#: Characters the pre-scrub cut keeps across a whole payload (keys and values),
+#: so the scrub's cost is bounded however the payload is shaped.
+_WALK_BUDGET_CHARS = 256 * 1024
+_MAX_DEPTH = 32
+
+
+def _precut(value: Any, budget: list[int], depth: int = 0) -> Any:
+    """*value* cut before scrubbing: strings to :data:`_PRECUT_CHARS`, keys to 256
+    characters, containers to :data:`_LIST_KEEP` items, nesting to 32, and the
+    whole walk to :data:`_WALK_BUDGET_CHARS`."""
+    if budget[0] <= 0 or depth > _MAX_DEPTH:
+        return "...[cut: over the size budget]"
+    if isinstance(value, str):
+        kept = value[:min(_PRECUT_CHARS, budget[0])]
+        budget[0] -= len(kept)
+        return kept + (f"...[cut {len(value) - len(kept)} chars]" if len(kept) < len(value) else "")
+    if isinstance(value, Mapping):
+        out: dict[Any, Any] = {}
+        for n, (k, v) in enumerate(value.items()):
+            if n >= _LIST_KEEP or budget[0] <= 0:
+                out["...[cut]"] = f"{len(value) - n} keys"
+                break
+            key = str(k)[:256]
+            budget[0] -= len(key)
+            out[key] = _precut(v, budget, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        items: list[Any] = []
+        for n, v in enumerate(value):
+            if n >= _LIST_KEEP or budget[0] <= 0:
+                items.append(f"...[cut {len(value) - n} items]")
+                break
+            items.append(_precut(v, budget, depth + 1))
+        return items
     return value
 
 
@@ -314,7 +381,7 @@ def record(
             # Cut before scrubbing, so the scrub's cost is bounded by the entry
             # cap, not by the payload: a crash on a 50 MB tool response must
             # not turn the hook's crash handler into a hang.
-            "payload": _redact(precut := _cut(payload, _PRECUT_CHARS)),
+            "payload": _redact(precut := _precut(payload, [_WALK_BUDGET_CHARS])),
             "env": _env_subset(env),
         }
         try:
@@ -385,10 +452,12 @@ def _recorded_context(entry: Mapping[str, Any]) -> Generator[None]:
                 os.environ[k] = v
 
 
-def replay(path: Path, *, module_roots: Sequence[str] = REPLAY_MODULE_ROOTS) -> Any:
+def replay(path: Path, *, module_roots: Sequence[str] = REPLAY_MODULE_ROOTS, recorded_env: bool = False) -> Any:
     """Run the recorded hook's ``run(payload)`` again, OUTSIDE the never-fail boundary,
-    with the recorded environment subset and working directory, so the crash it
-    recorded raises here with its traceback. Returns the verb's
+    so the crash it recorded raises here with its traceback. With *recorded_env*,
+    also under the recorded environment subset (less anything naming a path, dir,
+    host or interpreter) and working directory: only for an entry you recorded
+    yourself, since a handed-over entry's flags and directory steer what runs. Returns the verb's
     :class:`~nexus._hook_runtime._io.HookResult` if it no longer crashes.
 
     Refuses a module outside *module_roots* (the hook verbs). This runs the verb
@@ -404,6 +473,8 @@ def replay(path: Path, *, module_roots: Sequence[str] = REPLAY_MODULE_ROOTS) -> 
     if not module.startswith(tuple(module_roots)):
         raise ReplayRefused(f"{path} names module {module!r}, which is not a hook verb; replay refuses it")
     payload = entry["payload"]
+    if not recorded_env:
+        return importlib.import_module(module).run(payload if isinstance(payload, dict) else None)
     with _recorded_context(entry):
         return importlib.import_module(module).run(payload if isinstance(payload, dict) else None)
 

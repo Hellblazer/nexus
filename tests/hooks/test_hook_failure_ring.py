@@ -319,8 +319,10 @@ def test_replay_applies_the_recorded_env_and_cwd(tmp_path: Path, monkeypatch: py
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("NX_PROBE_MODE", raising=False)
     with pytest.raises(RuntimeError, match=r"env strict cwd .*work"):
-        failure_ring.replay(path, module_roots=("env_verb",))
+        failure_ring.replay(path, module_roots=("env_verb",), recorded_env=True)
     assert "NX_PROBE_MODE" not in os.environ and Path.cwd() == tmp_path
+    with pytest.raises(RuntimeError, match=r"env - cwd "):
+        failure_ring.replay(path, module_roots=("env_verb",))  # by default the recorded env is not applied
 
 
 def test_replay_never_applies_an_env_that_steers_code_or_config(
@@ -339,7 +341,7 @@ def test_replay_never_applies_an_env_that_steers_code_or_config(
     entry = tmp_path / "hookfail-handed.json"
     entry.write_text(json.dumps({"format": 1, "hook": "x", "module": "env_guard_verb", "payload": {}, "env": hostile}),
                      encoding="utf-8")
-    seen = eval(failure_ring.replay(entry, module_roots=("env_guard_verb",)).stdout)  # noqa: S307 -- our own repr
+    seen = eval(failure_ring.replay(entry, module_roots=("env_guard_verb",), recorded_env=True).stdout)  # noqa: S307 -- our own repr
     assert seen["NX_MODE"] == "strict"
     for key in ("PATH", "PYTHONPATH", "VIRTUAL_ENV", "NEXUS_CONFIG_DIR", "NX_SERVICE_HOST", "NX_DB_PASS"):
         assert seen[key] != hostile[key], key
@@ -392,3 +394,40 @@ def test_failures_says_so_when_the_ring_is_empty(tmp_path: Path, monkeypatch: py
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     out = CliRunner().invoke(hook_group, ["failures"])
     assert out.exit_code == 0 and "No saved hook failures" in out.output
+
+
+@pytest.mark.parametrize("text", [
+    "-----BEGIN RSA PRIVATE KEY-----\n" * 30_000,
+    "-----BEGIN " * 50_000,
+])
+def test_pem_masking_is_linear(text: str) -> None:
+    started = time.perf_counter()
+    out = failure_ring.scrub(text)
+    assert time.perf_counter() - started < 2.0
+    assert "[redacted]" in out or "PRIVATE KEY" not in text
+
+
+def test_a_key_left_open_is_still_masked() -> None:
+    out = failure_ring.scrub("before -----BEGIN PRIVATE KEY-----\nMIIEsecretbody\n")
+    assert "MIIEsecretbody" not in out and out.startswith("before ")
+
+
+@pytest.mark.parametrize(("text", "secret"), [
+    ('{"sessionKey":"abc123xyz","user":"u"}', "abc123xyz"),
+    ("privateKey=zzzz9999 rest", "zzzz9999"),
+    ('{"accessToken": "tok tok tok"}', "tok tok tok"),
+])
+def test_camel_case_credential_keys_in_text_are_masked(text: str, secret: str) -> None:
+    assert secret not in failure_ring.scrub(text)
+
+
+@pytest.mark.parametrize("payload", [
+    {"word " * 1_200_000: 1},
+    {f"k{i}" + "x" * 1_000_000: i for i in range(20)},
+    {"lists": [["y" * 15_000] * 190 for _ in range(10)]},
+], ids=["one-huge-key", "many-long-keys", "nested-lists"])
+def test_the_pre_scrub_cut_bounds_any_payload_shape(tmp_path: Path, payload: dict) -> None:
+    started = time.perf_counter()
+    path = _rec(tmp_path, payload)
+    assert time.perf_counter() - started < 1.5, "the crash handler walked the whole payload"
+    assert path is not None and path.stat().st_size <= failure_ring.MAX_ENTRY_BYTES

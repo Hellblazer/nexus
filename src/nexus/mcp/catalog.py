@@ -1049,7 +1049,9 @@ def main():
 
     report_sdk_patches(
         log,
-        {**_SDK_PATCH_RESULTS, "tool_call_log": _TOOL_CALL_LOG_STATUS, "slow_call_watchdog": _SLOW_CALL_STATUS},
+        {**{k: v for k, v in _SDK_PATCH_RESULTS.items() if k != "slow_call_watchdog"},
+         "tool_call_log": _TOOL_CALL_LOG_STATUS,
+         **({} if _SLOW_CALL_STATUS == "off" else {"slow_call_watchdog": _SLOW_CALL_STATUS})},
         server="nx-mcp-catalog",
         pid=os.getpid(),
     )

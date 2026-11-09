@@ -2886,7 +2886,8 @@ _SDK_PATCH_RESULTS["tool_call_log"] = _install_tool_call_log(mcp)
 # nexus-3ceda.3: opt-in stack sampling of a slow tools/call (NX_MCP_SLOW_CALL_S); "off" when unset.
 from nexus.mcp._slow_call_watchdog import install_slow_call_watchdog as _install_slow_call_watchdog  # noqa: E402
 
-_SDK_PATCH_RESULTS["slow_call_watchdog"] = _install_slow_call_watchdog(mcp)
+if (_slow_status := _install_slow_call_watchdog(mcp)) != "off":  # off reports nothing, not "not applied"
+    _SDK_PATCH_RESULTS["slow_call_watchdog"] = _slow_status
 
 # RDR-215: register any ported hook_<name> tool-tier tools -- see
 # nexus/mcp/hooks.py for the registration table (HOOK_TOOLS).

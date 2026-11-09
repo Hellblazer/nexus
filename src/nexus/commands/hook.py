@@ -410,7 +410,10 @@ def failures_cmd(as_json: bool) -> None:
 
 @hook_group.command("replay")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=str))
-def replay_cmd(path: str) -> None:
+@click.option("--recorded-env", is_flag=True, default=False,
+              help="Also apply the entry's recorded environment flags and working directory. "
+                   "Only for an entry you recorded yourself.")
+def replay_cmd(path: str, recorded_env: bool) -> None:
     """Run a saved hook failure's verb on its saved input, outside the never-fail
     boundary, so the crash raises with its traceback. The verb runs for real,
     side effects included."""
@@ -422,13 +425,14 @@ def replay_cmd(path: str) -> None:
         entry = failure_ring.load(Path(path))
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Replaying {entry['hook']} ({entry.get('module')}) recorded {entry.get('recorded_at')}, "
-               "with its recorded environment subset and working directory.", err=True)
+    click.echo(f"Replaying {entry['hook']} ({entry.get('module')}) recorded {entry.get('recorded_at')}"
+               + (", with its recorded environment flags and working directory." if recorded_env else "."),
+               err=True)
     if entry.get("truncated"):
         click.echo("Warning: this entry was cut to fit the ring; a crash that depended on the cut part "
                    "may not come back.", err=True)
     try:
-        result = failure_ring.replay(Path(path))
+        result = failure_ring.replay(Path(path), recorded_env=recorded_env)
     except failure_ring.ReplayRefused as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo("No crash this time; the verb returned:", err=True)

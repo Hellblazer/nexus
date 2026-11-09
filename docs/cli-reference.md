@@ -3215,14 +3215,14 @@ running pre-swap code.
 
 ```
 nx hook failures [--json]
-nx hook replay PATH
+nx hook replay [--recorded-env] PATH
 ```
 
 A hook never fails the session: when a hook verb crashes, the crash is swallowed and the event proceeds. The input that caused it is saved to a bounded local ring under `~/.config/nexus/hook-failures/` (at most 50 entries and 2 MiB, one entry at most 128 KiB, oldest dropped first), and the swallowed-crash line on the hook's stderr names the saved file. `NX_HOOK_FAILURE_RING=0` turns the capture off.
 
 What is kept: the payload as the hook received it, so prompts, command lines and file text are stored as they were, apart from credentials. Those are masked: `Authorization`, `Bearer` and `Basic` values, `NAME_TOKEN=...`-style assignments, quoted JSON keys and `--password value` flags whose name carries a credential word (a quoted value is masked whole), PEM private keys, `Cookie` headers, URL userinfo, `curl -u user:pass`, and well-known token prefixes (`sk-`, `ghp_`, `xox*-`, `AKIA`, `pa-` and others); a string or structure under a credential-named key (`token`, `privateKey`, `api-key` and the like, matched as whole words, so `author` is not one) is dropped, while a boolean or number there is kept. Not masked: a short flag with the value attached (`mysql -pSecret`) or after it (`sshpass -p value`), a credential stated in prose, and secrets carried in a URL's path or query (a webhook path, a signed URL's signature). The environment is cut to `NX_`, `NEXUS_` and `CLAUDE_` variables whose names carry no credential word (`KEY`, `TOKEN`, `SECRET`, `PASS`, `PWD`, `AUTH`, `URL`, `DSN` and others). Long strings and lists are cut to fit, and the entry says `truncated`. On POSIX the files are readable only by you (0600 in a 0700 directory); on Windows the profile's permissions decide.
 
-`failures` lists the saved entries, newest first. `replay` runs the recorded verb's `run(payload)` on the saved input outside the never-fail boundary, with the recorded environment subset (less any variable naming a path, directory, host, port, service or interpreter, since an entry may be a file someone handed you) and working directory, so the crash raises with its traceback. It refuses an entry whose module is not a hook verb (`nexus.hooks.*`, `nexus._hook_runtime.*`). It runs the verb for real, side effects included, and the input is the masked one, so a crash that depended on a masked or cut value may not come back; it warns when the entry was cut.
+`failures` lists the saved entries, newest first. `replay` runs the recorded verb's `run(payload)` on the saved input outside the never-fail boundary, so the crash raises with its traceback. `--recorded-env` also applies the recorded environment flags (less any variable naming a path, directory, host, port, service or interpreter) and the working directory; use it only for an entry you recorded yourself, since an entry handed to you can steer what runs through them. It refuses an entry whose module is not a hook verb (`nexus.hooks.*`, `nexus._hook_runtime.*`). It runs the verb for real, side effects included, and the input is the masked one, so a crash that depended on a masked or cut value may not come back; it warns when the entry was cut.
 
 ## nx init
 
@@ -3687,7 +3687,7 @@ without the plugin or without a registry.
 **Process footprint row (nexus-3ceda.3).** "Process footprint" lists each
 running supervised daemon (the storage service supervisor and the aspect
 workers) with its own resident memory, peak, CPU seconds and threads, read from
-the `footprint` the daemon writes into its lease on each heartbeat (sampled at
+the `footprint` the daemon writes into its lease on each heartbeat (on macOS memory is the physical footprint, compressed pages included; threads are OS threads on Linux and Python threads elsewhere; sampled at
 most every 30 s; a sample older than 5 minutes shows its age). It warns when one
 is past `NX_FOOTPRINT_WARN_MB` (default 1024). It measures the Python
 supervisor process, not the Java engine it runs. Memory reads on Linux and

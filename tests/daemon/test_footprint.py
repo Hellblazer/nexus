@@ -3,6 +3,7 @@
 daemons carry it in their lease and ``nx doctor`` reads it back (nexus-3ceda.3)."""
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from nexus import health
 from nexus.daemon import footprint
 from nexus.daemon.footprint import FootprintGauge, doctor_rows, lease_footprints, sample, warn_mb
 from nexus.daemon.service_registry import ServiceRegistry, ServiceSupervisor
@@ -38,7 +40,7 @@ def test_resident_memory_follows_an_allocation() -> None:
 def test_the_threshold_reads_a_positive_integer_or_falls_back() -> None:
     assert warn_mb({}) == footprint.DEFAULT_WARN_MB
     assert warn_mb({footprint.WARN_ENV: "256"}) == 256
-    for bad in ("0", "-5", "lots", " "):
+    for bad in ("0", "-5", "lots", " ", "\u00b2", "9" * 5000):
         assert warn_mb({footprint.WARN_ENV: bad}) == footprint.DEFAULT_WARN_MB
 
 
@@ -164,3 +166,22 @@ def test_a_stale_lease_is_not_listed(tmp_path: Path) -> None:
     sup.heartbeat_tick()
     assert [r["scope"] for r in lease_footprints(tmp_path, now=rec.heartbeat_epoch + 1.0)] == ["gone"]
     assert lease_footprints(tmp_path, now=rec.heartbeat_epoch + 10_000.0) == []
+
+
+def test_the_doctor_check_wraps_doctor_rows_and_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    (row,) = health._check_process_footprint()
+    assert row.label == "Process footprint" and row.ok
+
+    def broken(*_: object, **__: object) -> list:
+        raise RuntimeError("leases unreadable")
+
+    monkeypatch.setattr(footprint, "doctor_rows", broken)
+    (row,) = health._check_process_footprint()
+    assert not row.ok and row.warn and "leases unreadable" in row.detail
+
+
+def test_run_health_checks_includes_the_row() -> None:
+    assert "_check_process_footprint()" in inspect.getsource(health.run_health_checks)
