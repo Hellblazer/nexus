@@ -675,8 +675,9 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
 @click.option("--agents", "do_agents", is_flag=True, default=False,
               help="Reviewer memory section: index length, entries with no repo, concurrent-write damage.")
 @click.option("--cold", "do_cold", is_flag=True, default=False,
-              help="Cold-state section: memory files, T2 namespaces, MCP tools, CLI verbs and nested CLAUDE.md/AGENTS.md "
-                   "with no write and no use in --days (reads every transcript of the window three times).")
+              help="Cold-state section: memory files, T2 namespaces, MCP tools, CLI verbs, nested CLAUDE.md/AGENTS.md "
+                   "and tuple subspaces (plus templates with no verified writer and no subspace) with no write and "
+                   "no use in --days (reads every transcript of the window three times).")
 @click.option("--days", type=click.IntRange(min=1), default=30, show_default=True,
               help="Window for the transcript-backed rows (--files read counts, --cold).")
 def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days: int) -> None:
