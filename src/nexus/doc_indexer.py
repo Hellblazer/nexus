@@ -1709,7 +1709,7 @@ def _write_chunks_with_owner_rows(
     *ids* are the chunks' chashes (``chunk_id == sha256(text)``, RDR-180), so the
     manifest row of position ``i`` names ``ids[i]``. *positions* are the chunker's own position
     dicts, index-aligned with *metadatas* (RDR-236 Phase 4 Step 0): the manifest rows' labels and
-    spans are built from them; ``None`` reads them off the rows (STEP1-DELETE). Everything goes through
+    spans are built from them; ``None`` reads whatever position keys the rows still hold (a legacy row; every indexer passes the dicts). Everything goes through
     :class:`~nexus.catalog.multi_batch_write.MultiBatchDocumentWriter`: a document
     that fits one request is one ``write_manifest_many`` with the sweep on; a larger
     one begins the index-run fence, writes its first request with the sweep off,
@@ -1932,6 +1932,7 @@ def _index_document(
     source_uri: str = "",
     doc_just_created: bool = False,
     pending_stamp: "list[_DeferredOwnerWrite] | None" = None,
+    content_type: str = "prose",
 ) -> int | list[dict]:
     """Shared indexing pipeline: credential check, staleness, then one write of the chunks with their owner rows.
 
@@ -1972,7 +1973,9 @@ def _index_document(
     and could mint a fork Document when the resolved path differs from
     the registered one (nexus-y8qtj, reproduced inside its own fix).
     *source_uri* is forwarded only when this function must register
-    fresh (``doc_id`` empty).
+    fresh (``doc_id`` empty), and so is *content_type*, the catalog content type of the
+    document being indexed (a chunk row carries none since RDR-236 Phase 4 Step 1, so the
+    caller says it; ``index_markdown`` passes ``"markdown"``).
 
     *pending_stamp* (RDR-223, nexus-z0o2p.34): without it the completion stamp is sent here, last,
     after the post-store hooks. With a list the stamp is NOT sent: the write is appended to it and
@@ -2151,7 +2154,7 @@ def _index_document(
     if not _catalog_doc_id_for_batch:
         _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
             file_path, corpus,
-            content_type="prose",
+            content_type=content_type,
             physical_collection=collection_name,
             source_uri=source_uri,
         )
@@ -4292,6 +4295,7 @@ def index_markdown(
         source_uri=source_uri,
         doc_just_created=_doc_just_created,
         pending_stamp=_stamps,
+        content_type="markdown",
     )
 
     def _stamp_last() -> None:

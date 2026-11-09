@@ -237,6 +237,12 @@ def test_the_streaming_pipeline_tail_writes_no_chunk_row_and_leaves_the_title_to
 
     hook.assert_called_once()
     assert hook.call_args.kwargs["title"] == "The Real Title" and hook.call_args.kwargs["author"] == "An Author"
+    # The extraction method (and the quality-gate override and source) ride to the document in the hook's
+    # extraction record; no chunk row carries them. Dropping the kwarg loses them silently.
+    from nexus.pipeline_stages import extraction_record
+
+    sent = hook.call_args.kwargs["extraction"]
+    assert sent == extraction_record(extraction.metadata) and sent["extraction_method"] == "mineru", sent
     assert (stats["title"], stats["author"]) == ("The Real Title", "An Author")
     t3.update_chunks.assert_not_called()
 
@@ -258,7 +264,13 @@ def test_the_streaming_stub_row_is_chunk_keys_only() -> None:
 # ── the collection rewrite verb ──────────────────────────────────────────────
 
 
-def test_the_rewrite_verb_strips_every_non_chunk_key_with_no_exemption() -> None:
+_REWRITE_EXEMPT = {"bib_year", "bib_venue", "content_type"}
+
+
+def test_the_rewrite_verb_strips_every_non_chunk_key_but_the_bib_and_content_type_exemption() -> None:
+    """The verb never removes ``bib_*`` (``nx enrich bib`` writes them after indexing and a concurrent
+    enrichment would be erased) or ``content_type``; their removal is the Step 3 sweep's, which owns the
+    preconditions. Every other key outside the CHUNK keys goes."""
     from nexus.db.t3 import _rewrite_collection_metadata
 
     legacy = {
@@ -266,17 +278,19 @@ def test_the_rewrite_verb_strips_every_non_chunk_key_with_no_exemption() -> None
         "content_type": "pdf", "page_number": 3, "tags": "x", "doc_id": "1.1.1", "made_up_cargo": 1,
     }
     clean = {"chunk_text_hash": "b" * 64, "embedding_model": "m"}
+    exempt_only = clean | {"bib_year": 1999, "content_type": "pdf"}
     col = MagicMock()
-    col.get.return_value = {"ids": ["a", "b"], "metadatas": [legacy, clean]}
+    col.get.return_value = {"ids": ["a", "b", "c"], "metadatas": [legacy, clean, exempt_only]}
     t3_db = MagicMock()
     t3_db.get_or_create_collection.return_value = col
 
     updated, skipped, total = _rewrite_collection_metadata(t3_db, _COLL)
 
-    assert (updated, skipped, total) == (1, 1, 2)
+    assert (updated, skipped, total) == (1, 2, 3), "a row whose only extras are exempt needs no write"
     ((_coll, ids, metas), kw) = t3_db.update_chunks.call_args
     assert ids == ["a"] and metas == [{"chunk_text_hash": "a" * 64, "embedding_model": "m"}]
-    assert set(kw["delete_keys"]) == set(legacy) - _CHUNK, "bib_* and content_type are no longer exempt"
+    assert set(kw["delete_keys"]) == set(legacy) - _CHUNK - _REWRITE_EXEMPT
+    assert not _REWRITE_EXEMPT & set(kw["delete_keys"])
 
 
 # ── the readers that moved off the chunk row ─────────────────────────────────
@@ -443,6 +457,31 @@ def test_a_reembed_does_not_rebuild_a_manifest_from_the_stored_rows() -> None:
     assert manifest_calls == [], "a re-embed changes no manifest: the manifest hook must not rebuild one"
 
 
+def test_a_reembed_sends_the_chunk_keys_of_a_legacy_keyed_stored_row_and_nothing_else() -> None:
+    """The stored row of a pre-Step-1 chunk still carries document and position keys; the re-embed hands it back
+    to ``upsert_chunks``, so what it SENDS is held to the CHUNK keys (the stored keys are the Step 3 sweep's)."""
+    from nexus.commands.collection import _reembed_collection
+    from nexus.hook_registry import HookRegistry
+
+    model = "bge-base-en-v15-768"
+    coll = f"knowledge__reembed65b__{model}__v1"
+    stored = {k: f"v-{k}" for k in sorted(_NOT_CHUNK_KEYS)} | {"made_up_cargo": 1, "source_path": "/x/a.md"}
+    stored |= {"chunk_text_hash": "a" * 64, "embedding_model": "old-model"}
+    col = MagicMock()
+    page = {"ids": ["a" * 64], "documents": ["ta"], "metadatas": [stored]}
+    col.count.return_value = 1
+    col.get.side_effect = lambda ids=None, limit=None, offset=0, include=None, **kw: (
+        page if ids is None and offset == 0 else {"ids": [], "documents": [], "metadatas": []})
+    db = MagicMock()
+    db.get_collection.return_value = col
+
+    processed, _skipped = _reembed_collection(db, coll, model, dry_run=False, hooks=HookRegistry())
+    assert processed == 1 and db.upsert_chunks.call_count == 1, "non-vacuity: the batch was upserted"
+    sent = db.upsert_chunks.call_args.kwargs["metadatas"]
+    assert len(_NOT_CHUNK_KEYS) >= 30, "the key table examined too little to mean anything"
+    assert sent == [{"chunk_text_hash": "a" * 64, "embedding_model": model}], sent
+
+
 def test_the_flush_claims_a_document_complete_by_the_contexts_content_hash_not_a_row() -> None:
     """A chunk row carries no ``content_hash`` since Step 1, so the completion claim the flush rides to the engine
     reads the file's hash from the staged context. A context without one claims nothing."""
@@ -461,3 +500,77 @@ def test_the_flush_claims_a_document_complete_by_the_contexts_content_hash_not_a
     _chunks, full_docs, complete, _orphans = _build_combined_write_payload(ids, docs, metas, fctx)
     assert sorted(d for d, _ in full_docs) == ["1.1", "1.2"], "non-vacuity: both documents are written"
     assert complete == {"1.1": "f" * 64}
+
+
+def _flush_contexts(file_hash: str = "f" * 64):
+    """Staged repo-index contexts as the flush closures see them: the file's hash is the context's, and the chunk
+    rows carry CHUNK keys only (RDR-236 Phase 4 Step 1), so a row read of ``content_hash`` finds nothing."""
+    def ctx(doc: str, with_chunks: bool, content_hash: str):
+        return {
+            "catalog_doc_id": doc, "content_hash": content_hash, "ids": ["a" * 64] if with_chunks else [],
+            "metadatas": [{"chunk_text_hash": "a" * 64, "embedding_model": "m"}] if with_chunks else [],
+            "documents": ["t"] if with_chunks else [],
+        }
+    return [
+        ("a.py", ctx("1.1", True, file_hash)),
+        ("b.py", ctx("1.2", False, file_hash)),   # no chunks: claims nothing
+        ("c.py", ctx("", True, file_hash)),       # no catalog identity: claims nothing
+        ("d.py", ctx("1.4", True, "")),           # no file hash staged: claims nothing
+    ]
+
+
+def test_the_flush_fence_begin_pairs_read_the_contexts_content_hash_not_a_chunk_row() -> None:
+    from nexus.indexer import _flush_begin_pairs
+
+    assert _flush_begin_pairs(_flush_contexts()) == [("1.1", "f" * 64)]
+
+
+def test_the_flush_completion_claims_read_the_contexts_content_hash_not_a_chunk_row() -> None:
+    from nexus.indexer import _flush_manifest_complete
+
+    assert _flush_manifest_complete(_flush_contexts()) == {"1.1": "f" * 64}
+
+
+def test_the_flush_closures_take_both_reads_from_the_helpers() -> None:
+    """The two closures in ``_run_index`` call the helpers; a closure that read a row again would not."""
+    import nexus.indexer as ix
+
+    src = inspect.getsource(ix._run_index)
+    assert "_flush_begin_pairs(_file_contexts)" in src and "_flush_manifest_complete(_file_contexts)" in src
+    assert '_c.get("content_hash", "") if' not in src
+
+
+def test_the_document_indexers_fallback_registration_passes_the_content_type_it_was_given(tmp_path) -> None:
+    """A chunk row no longer carries ``content_type``, so ``_index_document`` takes it from its caller; the
+    fallback registration (used only when the caller's pre-flight one returned nothing) must not call a markdown
+    document prose."""
+    from nexus.doc_indexer import _index_document
+    from nexus.errors import CatalogIdentityMissingError
+
+    f = tmp_path / "doc.md"
+    f.write_text("hello fence")
+    seen: list[dict] = []
+
+    def _register(path, corpus, **kw):
+        seen.append(kw)
+        return ""  # no identity: the write is refused after the registration this test observes
+
+    chunk_row = ("c" * 64, "hello", {"chunk_text_hash": "c" * 64, "embedding_model": "m"}, {"line_start": 1})
+    for given, expect in (("markdown", "markdown"), (None, "prose")):
+        seen.clear()
+        extra = {} if given is None else {"content_type": given}
+        with patch("nexus.doc_indexer._register_or_lookup_doc_id", side_effect=_register), \
+                patch("nexus.doc_indexer._doc_id_for_path", return_value=""), \
+                patch("nexus.doc_indexer._register_before_read"), \
+                patch("nexus.doc_indexer._target_model", return_value=("m", True)), \
+                pytest.raises(CatalogIdentityMissingError):
+            _index_document(
+                f, "corp", lambda *a, **k: [chunk_row], MagicMock(), collection_name=_COLL,
+                embed_fn=lambda texts, model: ([[0.1] * 4] * len(texts), model), force=True, **extra)
+        assert [kw["content_type"] for kw in seen] == [expect], seen
+
+
+def test_index_markdown_names_its_content_type_to_the_document_indexer() -> None:
+    import nexus.doc_indexer as di
+
+    assert 'content_type="markdown",\n    )' in inspect.getsource(di.index_markdown)

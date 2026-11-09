@@ -1713,6 +1713,7 @@ def _upsert_reembed_batch(
     Any other failure propagates. A refusal the re-read cannot explain (every chash still
     reads live) is retried a bounded number of times, then raised.
     """
+    from nexus.metadata_schema import normalize  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.engine_reasons import OWNERLESS_CHUNK_WRITE_REASON  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -1721,7 +1722,10 @@ def _upsert_reembed_batch(
         if not ids:
             return [], [], [], dropped
         try:
-            db.upsert_chunks(col_name, ids, docs, metadatas=metas, force_re_embed=True)
+            # RDR-236 Phase 4 Step 1: the stored row of a pre-Step-1 chunk still carries document and
+            # position keys; what is SENT is the CHUNK keys only (the stored ones are the Step 3 sweep's).
+            sent = [normalize(m) if isinstance(m, dict) else m for m in metas]
+            db.upsert_chunks(col_name, ids, docs, metadatas=sent, force_re_embed=True)
             return ids, docs, metas, dropped
         except VectorServiceError as exc:
             if exc.reason != OWNERLESS_CHUNK_WRITE_REASON or attempt == _REEMBED_OWNER_RETRIES:

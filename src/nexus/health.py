@@ -11965,18 +11965,18 @@ _PDF_STUB_NO_URI = "content_hash "
 def _is_pdf_stub_metadata(meta: dict, *, document_has_method: bool) -> bool:
     """True when a PDF chunk row is the streaming uploader's placeholder of before RDR-236 Phase 4 Step 1
     (no title) AND the document that owns it records no ``extraction_method`` in its catalog ``meta`` --
-    the post-pass that filled both in never landed for that document.
+    the extraction enrichment that filled both in never landed for that document.
 
     Both halves are needed. A PDF whose extractor returned no title has an empty title but a recorded
     method, and is healthy. *document_has_method* is the OWNING document's own catalog fact
     (nexus-6pfgb.16, RDR-236 Phase 2): the chunk row's ``extraction_method`` is the last writer's, so a
-    clean re-index of document B left the row saying "extracted" over a document A whose post-pass never
+    clean re-index of document B left the row saying "extracted" over a document A whose enrichment never
     landed. A document indexed before nexus-6pfgb.6 has no method in its meta until
     ``nx catalog backfill-meta`` (nexus-6pfgb.10) or its next index run, and is named here until then
     when its row title is empty.
 
     The placeholder is a LEGACY row shape. Since Step 1 no chunk row carries a title (or any document
-    key), the streaming upload writes no placeholder and there is no post-pass to fail, so a row with no
+    key), the streaming upload writes no placeholder and there is no enrichment to fail, so a row with no
     ``title`` says nothing about the document: only a row that still carries some document, position or
     legacy key (the old stub carried several) and lacks a title is the placeholder. Without that condition
     every method-less PDF indexed after Step 1 would read as an unfinished upload.
@@ -12134,14 +12134,14 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
 
 
 def _check_pdf_stub_metadata() -> list[HealthResult]:
-    """Count PDF chunks whose post-pass metadata never landed
+    """Count PDF chunks whose extraction metadata never landed
     (nexus-rte90, indexing-brittleness P0.6; the defect is nexus-w94eo).
 
-    The streaming PDF uploader writes ``title=''`` and no
-    ``extraction_method``; ``_enrich_metadata_from_extraction`` fills both
-    in after the upload. A late upsert-chunks retry that commits after the
-    post-pass, or a run that dies before it, leaves the placeholder in
-    place, and a reader keyed on chunk title then skips those chunks without
+    Before RDR-236 Phase 4 Step 1 the streaming PDF uploader wrote ``title=''`` and no
+    ``extraction_method``, and an enrichment pass filled both in after the upload (the pass is gone, and
+    so is the placeholder: a row written since carries no document key). A late upsert-chunks retry that
+    committed after the enrichment, or a run that died before it, left the placeholder in
+    place on the legacy rows this check still names, and a reader keyed on chunk title then skips those chunks without
     saying so (``nx enrich bib`` is not one since nexus-6pfgb.21: it selects
     chunks through the catalog document's manifest). Measured 2026-09-24: 111 chunks in 2
     documents, both of which this check names.
@@ -12239,7 +12239,7 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             parts.append(
                 f"{total} PDF chunk(s) in {len(documents)} document(s) still carry "
                 "the upload placeholder metadata (empty title, no "
-                "extraction_method): the post-pass never landed, or a late "
+                "extraction_method): the extraction enrichment never landed, or a late "
                 "write overwrote it (nexus-w94eo). Readers keyed on the chunk "
                 f"title skip them. {listing}{more}."
             )

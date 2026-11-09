@@ -153,11 +153,14 @@ def _rewrite_collection_metadata(
             total += 1
             current = dict(meta or {})
             canonical = _normalize_for_write(current, collection_name)
-            # Every key the canonical form drops is removed: since RDR-236 Phase 4 Step 1 the canonical
-            # row is the CHUNK keys, so a document or position key a pre-Step-1 row still carries goes
-            # (bib_* and content_type included: no key is exempt).
-            drop = tuple(sorted(current.keys() - canonical.keys()))
-            if canonical == current:
+            # Every key the canonical form drops is removed (since RDR-236 Phase 4 Step 1 the canonical row
+            # is the CHUNK keys, so a document or position key a pre-Step-1 row still carries goes), except
+            # bib_* (nx enrich bib writes them after indexing, and a concurrent enrichment would be erased)
+            # and content_type. Their removal is the Step 3 sweep's, which owns the preconditions for it.
+            gone = current.keys() - canonical.keys()
+            exempt = {k for k in gone if k == "content_type" or k.startswith("bib_")}
+            drop = tuple(sorted(gone - exempt))
+            if canonical == {k: v for k, v in current.items() if k not in exempt}:
                 skipped += 1
                 continue
             updated += 1

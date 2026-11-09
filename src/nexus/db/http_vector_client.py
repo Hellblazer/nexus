@@ -6516,9 +6516,10 @@ class HttpVectorClient:
         id was actually stale) ALSO logs a WARNING — ``update_chunks_missing_
         reported`` — from THIS method, unconditionally, regardless of what
         the caller does with the return value. Every call site gets the
-        anomaly signal for free: the four callers left are the two streaming
-        post-passes in ``pipeline_stages.py``, ``indexer.py``'s metadata pass and
-        ``T3Database``'s own, and none of them acts on the return value.
+        anomaly signal for free: the one production caller left is the collection rewrite verb
+        (``db/t3.py``'s ``_rewrite_collection_metadata``), which does not act on the return value
+        (the streaming post-passes and the repo indexer's metadata pass that were callers are gone,
+        RDR-236 Phase 4 Step 1).
         (``doc_indexer._upsert_skip_reembed``, the one caller that used to
         re-route a stale positive through a full upsert and log
         ``update_chunks_missing_rerouted``, was removed at RDR-223: every

@@ -67,6 +67,21 @@ def test_allowed_top_level_is_the_tables_chunk_rows():
     assert not ALLOWED_TOP_LEVEL & (ckm.keys_of("DOCUMENT") | ckm.keys_of("POSITION") | ckm.keys_of("LEGACY"))
 
 
+def test_the_on_row_column_agrees_with_the_write_allowlist():
+    """``on_row`` says where a key stands against ``ALLOWED_TOP_LEVEL``: ``allowed`` is exactly the allowlist (the
+    metadata-key rows), and no live client writer sends a key past it, so no row is ``unvalidated`` and every
+    DOCUMENT, POSITION and LEGACY metadata key is ``stored`` (on old rows only) or ``absent`` (never on a row)."""
+    allowed = {r.key for r in ckm.rows() if r.kind == "metadata-key" and r.on_row == "allowed"}
+    assert allowed == ALLOWED_TOP_LEVEL, (
+        f"on_row = allowed only in the table: {sorted(allowed - ALLOWED_TOP_LEVEL)}; "
+        f"in ALLOWED_TOP_LEVEL only: {sorted(ALLOWED_TOP_LEVEL - allowed)}")
+    assert [r.key for r in ckm.rows() if r.on_row == "unvalidated"] == []
+    non_chunk = [r for r in ckm.rows() if r.kind == "metadata-key" and r.cls in ("DOCUMENT", "POSITION", "LEGACY")]
+    assert len(non_chunk) >= 40, "the table examined too little to mean anything"
+    assert {r.on_row for r in non_chunk} <= {"stored", "absent"}, sorted(
+        (r.key, r.on_row) for r in non_chunk if r.on_row not in ("stored", "absent"))
+
+
 def test_make_chunk_metadata_output_equals_the_tables_chunk_rows():
     out = make_chunk_metadata(content_type="pdf", chunk_text_hash="a" * 64, embedding_model="bge-base-en-v1.5")
     assert frozenset(out) == ckm.keys_of("CHUNK")
@@ -90,16 +105,6 @@ def test_normalize_strips_the_legacy_keys_when_it_is_called(key: str):
     assert key in {r.key for r in ckm.rows() if r.cls == "LEGACY"}
     out = normalize({key: "x", "title": "t"}, content_type="prose")
     assert key not in out
-
-
-def test_unvalidated_document_keys_are_not_in_the_write_allowlist():
-    """Inconsistency 1: the table records the keys that bypass ALLOWED_TOP_LEVEL
-    instead of widening the list Phase 4 shrinks."""
-    unvalidated = {r.key for r in ckm.rows() if r.on_row == "unvalidated"}
-    assert unvalidated == {
-        "bib_openalex_id", "bib_doi", "catalog_doc_id", "chunk_type", "doc_id",
-    }
-    assert not unvalidated & ALLOWED_TOP_LEVEL
 
 
 def test_bypass_prefixes_equal_the_write_path_exemption():

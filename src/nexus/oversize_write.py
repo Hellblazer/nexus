@@ -166,7 +166,7 @@ def write_oversize_file(
     *ids*, *documents* and *metadatas* are the file's chunks, index-aligned, in file order; the
     manifest position of a chunk is its index. *positions* are the chunker's own position dicts,
     index-aligned too (RDR-236 Phase 4 Step 0): the manifest rows' labels and spans come from them,
-    not from the chunk rows; ``None`` reads them off the rows (STEP1-DELETE). Returns the writer's
+    not from the chunk rows; ``None`` reads whatever position keys the rows still hold (a legacy row; every indexer passes the dicts). Returns the writer's
     :class:`~nexus.catalog.multi_batch_write.DocumentWriteResult`, or ``None`` when the engine
     refused the completion stamp: the chunks landed with their owner rows, the document stays
     ``indexing``, and the refusal is already in the record-level collector the run summary reads,
