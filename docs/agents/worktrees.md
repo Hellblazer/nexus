@@ -156,8 +156,32 @@ things to avoid carefully; they are impossible.
    its one re-read, so a missing wake is not a signal; if it has not come when
    you expect the run to be done, read the check runs once. A redelivered
    webhook for the same run set posts nothing new; a rerun (a new attempt)
-   posts a new row (conexus-5wjs, nexus-1d6pz.2; the per-push wake is being
-   reworked under nexus-1d6pz.11).
+   posts a new row (conexus-5wjs, nexus-1d6pz.2).
+
+   The wake for your own push, end to end (nexus-1d6pz.11). After `PUSH_OK`,
+   `scripts/git-push-develop.sh` prints two `PUSH_WAIT` lines on stderr, one
+   per way to be woken; pick by how the session was launched, and never arm a
+   Monitor or a poll per push:
+   - With the conexus channel: subscribe once per session to
+     `board/ci/nexus-develop--done`. Each notice for it carries the row's sha
+     in its meta (`sha`, or `shas` aligned with `tuple_ids` on a batch;
+     nexus-1d6pz.11.3), and its text prints the exact `tuple_rd` read that
+     returns the announced row (nexus-1d6pz.11.2). The row's `outcome` dim is
+     the verdict, its `runs` the per-workflow conclusions. A notice for another
+     sha is not to be ignored on that alone: in a push window the beads close
+     on the window tip's result, which is often a peer's sha.
+   - Without the channel: run `nx ci wait <sha> --branch develop` as a
+     background command (nexus-1d6pz.11.4). Its exit is the wake and its one
+     line is the result: 0 success, 1 failure, 3 cancelled or stale, 2 timeout,
+     4 a conclusion it could not read (including a capped row whose missing
+     runs GitHub could not supply), 5 the wait could not run. At the deadline
+     it reads the sha's push runs from GitHub once, so a dropped wake still
+     reports finished runs. For a rerun of the same sha, add `--fresh`, which
+     counts only a row that arrives after the wait starts.
+   The Stop hook's wake guard counts a live channel waiter with a
+   `board/ci/*--done` subscription as an armed wake for a develop-CI wait, and
+   without the channel it blocks the turn naming `nx ci wait <sha>`
+   (nexus-1d6pz.11.5).
 
    Treat the develop run as part of the push. Before stacking more work on a
    develop sha, or cutting a release branch on it, read that sha's check-run
