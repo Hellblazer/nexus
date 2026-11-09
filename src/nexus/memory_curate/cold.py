@@ -30,8 +30,9 @@ Use, per kind (Sam's K6 decision, nexus-qo7ie.5; the report header prints these)
 
 Hooks and subprocesses never appear as model tool calls, so a tool or verb the plugin's hooks run
 (:func:`hook_invoked`: the ``mcp_tool`` entries of ``hooks.json``, the string-literal ``nx`` argvs of
-the hook scripts) is printed as invoked by a hook, not as cold, and both sections end with a limits
-line naming what a transcript count cannot see.
+the plugin's hook scripts and of ``src/nexus/hooks``) is printed as invoked by a hook, and a verb a slash
+command expands (a ``!`nx ...``` line of ``conexus/commands/*.md``) as run by a slash command, not as cold;
+both sections end with a limits line naming what is scanned and what a transcript count cannot see.
 
 K6 exclusions: always-loaded items are not judged and carry no "never used" claim: the index
 files as a whole, the root ``CLAUDE.md`` and ``AGENTS.md`` and every file an ``instructions``
@@ -195,7 +196,7 @@ class _Queries:
 
     #: What a query that returned no rows at all would have to mean, for the queries where a started session
     #: nearly always leaves a row; with sessions in the window, no rows is a failed read, not an idle store.
-    _QUIET = {"tools": "calls", "memory": "memory reads, writes or T2 calls"}
+    _QUIET = {"tools": "calls", "memory": "memory reads, writes or T2 calls", "loads": "instruction loads"}
 
     def __init__(self, window: mc.ReadWindow, sessions: int) -> None:
         self.window = window
@@ -422,96 +423,130 @@ def _verbs(q: _Queries, hooks: HookScan) -> list[str]:
             by_pair.add((name[3:], r["sub"]))
     idle = [u for u in units if (u.verb, u.sub) not in by_pair and (u.sub is not None or u.verb not in by_verb)]
 
-    def by_hook(u: Unit) -> bool:
-        return (u.verb, u.sub) in hooks.verbs if u.sub is not None else any(v == u.verb for v, _ in hooks.verbs)
+    def named_in(u: Unit, found: set[tuple[str, str | None]]) -> bool:
+        return (u.verb, u.sub) in found if u.sub is not None else any(v == u.verb for v, _ in found)
 
-    cold = [ColdRow(u.name, "n/a", _NEVER, "n/a", "n/a") for u in idle if not by_hook(u)]
-    hooked = [ColdRow(u.name, "n/a", _HOOK_USE, "n/a", "n/a") for u in idle if by_hook(u)]
-    return _with_hooks(label, cold, hooked, len(units), "", hooks)
+    cold = [ColdRow(u.name, "n/a", _NEVER, "n/a", "n/a") for u in idle
+            if not named_in(u, hooks.verbs) and not named_in(u, hooks.slash)]
+    hooked = [ColdRow(u.name, "n/a", _HOOK_USE, "n/a", "n/a") for u in idle if named_in(u, hooks.verbs)]
+    slashed = [ColdRow(u.name, "n/a", _SLASH_USE, "n/a", "n/a") for u in idle
+               if named_in(u, hooks.slash) and not named_in(u, hooks.verbs)]
+    return _with_hooks(label, cold, hooked, len(units), "", hooks, slashed)
 
 
-# ── hooks ────────────────────────────────────────────────────────────────────────────
+# ── hooks and slash commands ─────────────────────────────────────────────────────────
 
 _HOOK_USE = "invoked by a hook"
+_SLASH_USE = "run by a slash command"
 _BARE = re.compile(r"^[a-z][a-z0-9_-]*$")  # the tools query's VERB rule
 _RUN_NX = re.compile(r"_run_nx\(\s*\[([^\]]*)\]")
 _NX_LIST = re.compile(r"\[\s*[\"']nx[\"']\s*,([^\]]*)\]")
+_NX_ARGV_FOR = re.compile(r"\bnx_argv_for\(\s*[\w.]+\s*,([^)]*)\)")
+_NX_ARGV = re.compile(r"\bnx_argv\(([^)]*)\)")
+_SLASH_LINE = re.compile(r"^!`nx\s+([^`]*)`", re.MULTILINE)
 _STR = re.compile(r"^[\"']([^\"']+)[\"']$")
 
 
 class HookScan(NamedTuple):
-    """What the plugin's hooks run, which no transcript shows as a model tool call."""
+    """What the plugin runs outside a model's tool calls: hooks, their scripts and slash commands."""
 
     tools: set[tuple[str, str]]  # (server, short name) of every mcp_tool entry of hooks.json
     verbs: set[tuple[str, str | None]]  # (verb, sub) of every nx argv found in the hook scripts
+    slash: set[tuple[str, str | None]]  # (verb, sub) of every !`nx ...` line of the slash commands
     note: str
 
 
+def _verb_of(words: list[str]) -> tuple[str, str | None] | None:
+    """A verb and, when the next word is a bare word too, a sub, from the leading words of an argv."""
+    if not words or not _BARE.match(words[0]):
+        return None
+    return words[0], (words[1] if len(words) > 1 and _BARE.match(words[1]) else None)
+
+
 def _argv_verb(body: str) -> tuple[str, str | None] | None:
-    """The leading string-literal words of an argv list body: verb, then a sub that is a bare word."""
+    """The leading string-literal words of an argv list body (``"memory", "get", row_id``)."""
     words: list[str] = []
     for item in body.split(","):
         m = _STR.match(item.strip())
         if m is None or len(words) == 2:
             break
         words.append(m.group(1))
-    if not words or not _BARE.match(words[0]):
-        return None
-    return words[0], (words[1] if len(words) > 1 and _BARE.match(words[1]) else None)
+    return _verb_of(words)
 
 
-def hook_invoked(hooks_dir: Path | None) -> HookScan:
-    """The MCP tools and ``nx`` verbs the plugin's hooks run (nexus-qo7ie.19 review r1).
+def hook_invoked(hooks_dir: Path | None, *, src_hooks_dir: Path | None = None,
+                 commands_dir: Path | None = None) -> HookScan:
+    """The MCP tools and ``nx`` verbs the plugin runs outside a model's tool calls.
 
-    Tools: every ``mcp_tool`` entry of ``hooks.json``. Verbs: the string-literal argv of a ``_run_nx([...])``
-    call or a ``["nx", ...]`` list in a hook script (``**/*.py``), and the words after ``nx_launch.py`` in a
-    ``command`` entry. An argv built from variables, a shell string or a call through another helper is not seen.
+    Tools: every ``mcp_tool`` entry of ``<hooks_dir>/hooks.json``. Hook verbs: the string-literal argv of a
+    ``_run_nx([...])`` call or a ``["nx", ...]`` list in the plugin's hook scripts (``<hooks_dir>/**/*.py``), and of
+    an ``nx_argv("a", "b")`` or ``nx_argv_for(nx, "a", "b")`` call in *src_hooks_dir* (``src/nexus/hooks``).
+    Slash-command verbs: each ``!`nx a b ...`` line of the ``*.md`` files in *commands_dir*. (``nx_launch.py``
+    runs ``nx-hook`` and ``nx-mcp``, not nx verbs, and is not read.) An argv built from variables, a shell string or
+    a call through another helper is not seen; a missing directory contributes nothing.
     """
-    if hooks_dir is None or not (hooks_dir / "hooks.json").is_file():
-        return HookScan(set(), set(), f"no hook directory with a hooks.json at {hooks_dir}")
     tools: set[tuple[str, str]] = set()
     verbs: set[tuple[str, str | None]] = set()
-    try:
-        data = json.loads((hooks_dir / "hooks.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return HookScan(set(), set(), f"hooks.json could not be read: {type(exc).__name__}")
-    for groups in (data.get("hooks") or {}).values():
-        for group in groups if isinstance(groups, list) else []:
-            for h in group.get("hooks") or []:
-                if h.get("type") == "mcp_tool" and isinstance(h.get("server"), str) and isinstance(h.get("tool"), str):
-                    key = nexus_tool(f"mcp__{h['server'].replace(':', '_')}__{h['tool']}")
-                    if key is not None:
-                        tools.add(key)
-                args = h.get("args")
-                if isinstance(args, list) and "nx_launch.py" in args:
-                    tail = args[args.index("nx_launch.py") + 1:]
-                    found = _argv_verb(",".join(json.dumps(a) for a in tail if isinstance(a, str)))
-                    if found:
-                        verbs.add(found)
-    scripts = sorted(p for p in hooks_dir.rglob("*.py") if p.is_file())
-    for path in scripts:
+    slash: set[tuple[str, str | None]] = set()
+    problems: list[str] = []
+    manifest = hooks_dir / "hooks.json" if hooks_dir is not None else None
+    if manifest is None or not manifest.is_file():
+        problems.append(f"no hook directory with a hooks.json at {hooks_dir}")
+    else:
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            data = {}
+            problems.append(f"hooks.json could not be read: {type(exc).__name__}")
+        for groups in (data.get("hooks") or {}).values():
+            for group in groups if isinstance(groups, list) else []:
+                for h in group.get("hooks") or []:
+                    if h.get("type") == "mcp_tool" and isinstance(h.get("server"), str) and isinstance(h.get("tool"), str):
+                        key = nexus_tool(f"mcp__{h['server'].replace(':', '_')}__{h['tool']}")
+                        if key is not None:
+                            tools.add(key)
+
+    def texts(root: Path | None, pattern: str) -> list[str]:
+        out: list[str] = []
+        for path in sorted(root.rglob(pattern)) if root is not None and root.is_dir() else []:
+            try:
+                out.append(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+        return out
+
+    plugin_scripts = texts(hooks_dir, "*.py")
+    src_scripts = texts(src_hooks_dir, "*.py")
+    for text in plugin_scripts:
         for rx in (_RUN_NX, _NX_LIST):
-            for m in rx.finditer(text):
-                found = _argv_verb(m.group(1))
-                if found:
-                    verbs.add(found)
-    note = (f"{len(tools)} mcp_tool entr{'y' if len(tools) == 1 else 'ies'} in hooks.json and {len(verbs)} nx argv"
-            f"{'' if len(verbs) == 1 else 's'} in {len(scripts)} hook script{'' if len(scripts) == 1 else 's'} "
-            "(string-literal argvs only)")
-    return HookScan(tools, verbs, note)
+            verbs.update(v for m in rx.finditer(text) if (v := _argv_verb(m.group(1))))
+    for text in src_scripts:
+        for rx in (_NX_ARGV_FOR, _NX_ARGV):
+            verbs.update(v for m in rx.finditer(text) if (v := _argv_verb(m.group(1))))
+    commands = texts(commands_dir, "*.md")
+    for text in commands:
+        slash.update(v for m in _SLASH_LINE.finditer(text) if (v := _verb_of(m.group(1).split())))
+    note = (f"{len(tools)} mcp_tool entr{'y' if len(tools) == 1 else 'ies'} in hooks.json; {len(verbs)} CLI command line"
+            f"{'' if len(verbs) == 1 else 's'} in {len(plugin_scripts)} plugin hook script(s) and "
+            f"{len(src_scripts)} file(s) of the harness hooks (string-literal argvs only); {len(slash)} CLI verb"
+            f"{'' if len(slash) == 1 else 's'} in {len(commands)} slash command(s), so slash-command expansions are covered")
+    if problems:
+        note = "; ".join(problems) + "; " + note
+    return HookScan(tools, verbs, slash, note)
 
 
-def _with_hooks(label: str, cold: list[ColdRow], hooked: list[ColdRow], total: int, what: str, hooks: HookScan) -> list[str]:
-    head = f"{label}: {len(cold)} cold of {total}{what}" + (f" ({len(hooked)} invoked by a hook)" if hooked else "")
-    out = [head, *(r.line() for r in cold)]
-    if hooked:
-        out.append(f"  invoked by a hook, not seen in transcripts: {len(hooked)}")
-        out += [f"  {r.line()}" for r in hooked]
-    out.append("  limits: not seen are calls by hooks and subprocesses (the hook scripts are scanned: "
+def _with_hooks(label: str, cold: list[ColdRow], hooked: list[ColdRow], total: int, what: str, hooks: HookScan,
+                slashed: list[ColdRow] | None = None) -> list[str]:
+    slashed = slashed or []
+    parts = ([f"{len(hooked)} invoked by a hook"] if hooked else []) + (
+        [f"{len(slashed)} run by a slash command"] if slashed else [])
+    out = [f"{label}: {len(cold)} cold of {total}{what}" + (f" ({', '.join(parts)})" if parts else ""),
+           *(r.line() for r in cold)]
+    for use, rows in ((_HOOK_USE, hooked), (_SLASH_USE, slashed)):
+        if rows:
+            out.append(f"  {use}, not seen in transcripts: {len(rows)}")
+            out += [f"  {r.line()}" for r in rows]
+    out.append("  limits: not seen are calls by hooks and subprocesses and runs by slash commands (scanned: "
                f"{hooks.note}), terminal and CI use, bash -c and ssh bodies (the Lua scanner skips them), a group "
                "option before the sub verb, and other repositories' sessions")
     return out
@@ -530,6 +565,13 @@ def _tracked_nested(root: Path) -> list[str] | str:
         return f"git ls-files failed in {root}"
     names = [p for p in proc.stdout.split("\0") if p]
     return sorted(p for p in names if len(PurePosixPath(p).parts) > 1 and PurePosixPath(p).name in _NESTED_NAMES)
+
+
+def _is_fixture(rel: str) -> bool:
+    """A tracked instruction file that is test data, not a rule: below ``tests/`` (``tests/CLAUDE.md`` itself is a real
+    nested file), or under a ``fixtures`` or ``e2e`` directory."""
+    dirs = PurePosixPath(rel).parts[:-1]
+    return ("tests" in dirs and dirs.index("tests") < len(dirs) - 1) or "fixtures" in dirs or "e2e" in dirs
 
 
 def _loaded_by(aliases: list[str], loaded: dict[str, str], root: Path) -> bool:
@@ -556,7 +598,7 @@ def _injected(q: _Queries, root: Path) -> list[str]:
     cold: list[tuple[int, ColdRow]] = []
     judged, fixtures, lone, linked = 0, [], [], []
     for target, aliases in sorted(groups.items(), key=lambda kv: kv[1]):
-        if any("tests" in PurePosixPath(a).parts[:-1] for a in aliases):
+        if any(_is_fixture(a) for a in aliases):
             fixtures += aliases
         elif target in always:
             linked += aliases
@@ -579,11 +621,12 @@ def _injected(q: _Queries, root: Path) -> list[str]:
     if lone:
         out.append(f"  not judged: no CLAUDE.md, Claude Code loads only CLAUDE.md on demand: {', '.join(sorted(lone))}")
     if fixtures:
-        out.append(f"  not judged: fixtures under tests/: {len(fixtures)} file{'' if len(fixtures) == 1 else 's'}")
+        out.append("  not judged: fixtures (below tests/ or under a fixtures or e2e directory): "
+                   f"{len(fixtures)} file{'' if len(fixtures) == 1 else 's'}")
     if linked:
         out.append(f"  not judged: {', '.join(sorted(linked))} symlinked to the root instruction file, which is always "
                    "loaded (excluded, K6)")
-    out.append("  (on-demand .claude/rules/*.md files are not covered by this section)")
+    out.append("  (on-demand rule files under the repository's .claude directory are not covered by this section)")
     n = len(instructions)
     out.append(f"  ({n} file{'' if n == 1 else 's'} loaded by an `instructions` attachment in the window: "
                "excluded (K6), no 'never used' claim)")
@@ -603,12 +646,15 @@ def _guarded(label: str, body: Callable[[], list[str]]) -> list[str]:
 def cold_lines(
     days: int, now: datetime, cwd: Path, repo: str, directory: Path | None, root: Path,
     open_db: Callable[[], AbstractContextManager[Any]], hooks_dir: Path | None = None,
+    src_hooks_dir: Path | None = None, commands_dir: Path | None = None,
 ) -> list[str]:
     """The ``--cold`` body: the rules, the window, then one block per kind (see the module docstring).
 
     *open_db* is a context manager yielding a ``T2Database`` (``get_projects_with_prefix``, ``get_all``).
-    *hooks_dir* is the plugin's hook directory (default ``<root>/conexus/hooks``): the tools and verbs its hooks
-    run are printed as invoked by a hook, not as cold.
+    *hooks_dir* is the plugin's hook directory (default ``<root>/conexus/hooks``), *src_hooks_dir* the harness hooks'
+    Python (default ``<root>/src/nexus/hooks``) and *commands_dir* the plugin's slash commands (default
+    ``<root>/conexus/commands``): the tools and verbs they run are printed as invoked by a hook or run by a slash
+    command, not as cold (:func:`hook_invoked`).
     """
     opened = open_window(days, now, cwd)
     if isinstance(opened, mc.ReadsUnavailable):
@@ -616,7 +662,10 @@ def cold_lines(
                 *(ln for label in LABELS for ln in _unavailable(label, opened.reason))]
     window, sessions = opened
     q = _Queries(window, sessions)
-    hooks = hook_invoked(hooks_dir if hooks_dir is not None else root / "conexus" / "hooks")
+    hooks = hook_invoked(
+        hooks_dir if hooks_dir is not None else root / "conexus" / "hooks",
+        src_hooks_dir=src_hooks_dir if src_hooks_dir is not None else root / "src" / "nexus" / "hooks",
+        commands_dir=commands_dir if commands_dir is not None else root / "conexus" / "commands")
     blocks = [
         _guarded("memory files", lambda: _files(q, directory, repo)),
         _guarded("T2 namespaces", lambda: _t2(q, repo, open_db)),

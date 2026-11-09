@@ -39,6 +39,7 @@ STAMP = "2026-11-08T10:00:01Z"
 #: A quiet window that is not an empty one: a T2 read of another project and one Bash call.
 MEM: dict = {"rows": [{"kind": "t2_get", "name": "elsewhere/x", "count": 1, "last_use": STAMP}]}
 TOOLS: dict = {"rows": [{"kind": "tool", "name": "Bash", "count": 1, "last_use": STAMP}]}
+LOADS: dict = {"rows": [{"kind": "instructions", "name": "/x/CLAUDE.md", "count": 1, "last_use": STAMP}]}
 
 
 def _rows(lines: list[str], label: str) -> list[str]:
@@ -65,10 +66,19 @@ def _block(lines: list[str], label: str) -> list[str]:
     return out
 
 
-def _hooked(lines: list[str], label: str) -> list[str]:
-    """The stores a section prints as invoked by a hook, not seen in transcripts."""
-    block = _block(lines, label)
-    return [ln.strip()[2:].split(" | ")[0] for ln in block if ln.startswith("    - ")]
+def _hooked(lines: list[str], label: str, kind: str = "hook") -> list[str]:
+    """The stores a section prints as invoked by a hook ("hook") or run by a slash command ("slash"),
+    not seen in transcripts."""
+    out: list[str] = []
+    current = ""
+    for ln in _block(lines, label):
+        if ln.startswith("  invoked by a hook, not seen in transcripts:"):
+            current = "hook"
+        elif ln.startswith("  run by a slash command, not seen in transcripts:"):
+            current = "slash"
+        elif ln.startswith("    - ") and current == kind:
+            out.append(ln.strip()[2:].split(" | ")[0])
+    return out
 
 
 def _head(lines: list[str], label: str) -> str:
@@ -131,15 +141,19 @@ def _plant(tmp: Path) -> dict[str, Path]:
     (repo / "docs" / "CLAUDE.md").symlink_to("AGENTS.md")
     (repo / "sub").mkdir()
     (repo / "sub" / "CLAUDE.md").write_text("x" * 400)
-    for d in ("other", "viaitx", "lone", "linked", "tests/fx"):
+    for d in ("other", "viaitx", "lone", "linked", "tests/fx", "docs/e2e"):
         (repo / d).mkdir(parents=True)
     (repo / "other" / "CLAUDE.md").write_text("loaded from another worktree\n")
     (repo / "viaitx" / "CLAUDE.md").write_text("loaded as an instructions attachment\n")
     (repo / "lone" / "AGENTS.md").write_text("no CLAUDE.md beside it\n")
     (repo / "linked" / "CLAUDE.md").symlink_to("../AGENTS.md")  # the root file: always loaded
     (repo / "tests" / "fx" / "CLAUDE.md").write_text("a fixture\n")
+    (repo / "docs" / "e2e" / "CLAUDE.md").write_text("an e2e fixture\n")
+    (repo / "tests" / "AGENTS.md").write_text("tests/ is a real instruction directory\n")
+    (repo / "tests" / "CLAUDE.md").symlink_to("AGENTS.md")
     _git(repo, "add", "AGENTS.md", "CLAUDE.md", "docs/AGENTS.md", "docs/CLAUDE.md", "sub/CLAUDE.md", "other/CLAUDE.md",
-         "viaitx/CLAUDE.md", "lone/AGENTS.md", "linked/CLAUDE.md", "tests/fx/CLAUDE.md")
+         "viaitx/CLAUDE.md", "lone/AGENTS.md", "linked/CLAUDE.md", "tests/fx/CLAUDE.md", "docs/e2e/CLAUDE.md",
+         "tests/AGENTS.md", "tests/CLAUDE.md")
     _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "files")
     project = mem.parent
     _session(project / "s0.jsonl", "s0", repo, "2026-10-20T10:00:00Z", [("Bash", {"command": "ls"})])
@@ -172,7 +186,16 @@ def _plant(tmp: Path) -> dict[str, Path]:
     (hooks / "scripts" / "h.py").write_text(
         'state = _run_nx(["memory", "rollup", entry_id, "--project", P], cwd, 5)\n'
         'ok = run_cmd(["nx", "doctor"], timeout=9)\nnote = "nx search appears in prose only"\n')
-    return {"repo": repo, "config": config, "mem": mem, "hooks": hooks}
+    (tmp / "srchooks").mkdir()
+    (tmp / "srchooks" / "self_gc.py").write_text(
+        'argv = nx_argv_for(nx, "self", "gc")\ndef nx_argv(*args: str):\n    return args\n')
+    (tmp / "srchooks" / "sub.py").write_text(
+        'a = nx_argv("catalog", "links-for-file", "--for-model", fp)\nb = nx_argv("--version")\n')
+    (tmp / "commands").mkdir()
+    (tmp / "commands" / "debug.md").write_text(
+        "# debug\n\n!`nx command-context debug`\n\nprose: nx search appears here only\n!`ls -l`\n")
+    return {"repo": repo, "config": config, "mem": mem, "hooks": hooks, "srchooks": tmp / "srchooks",
+            "commands": tmp / "commands"}
 
 
 _PROJECTS = {
@@ -197,7 +220,8 @@ def planted(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict]:
         mp.setenv("CLAUDE_CONFIG_DIR", str(w["config"]))
         mp.setenv("NX_NO_TELEMETRY", "1")
         w["lines"] = cold.cold_lines(
-            30, _NOW, w["repo"], "coldrepo", w["mem"], w["repo"], _t2(_PROJECTS), hooks_dir=w["hooks"])
+            30, _NOW, w["repo"], "coldrepo", w["mem"], w["repo"], _t2(_PROJECTS), hooks_dir=w["hooks"],
+            src_hooks_dir=w["srchooks"], commands_dir=w["commands"])
         yield w
 
 
@@ -247,29 +271,36 @@ def test_cli_verbs_list_every_leaf_never_used(planted: dict) -> None:
     lines = planted["lines"]
     leaves = {u.name for u in cold.cli_units()}
     hooked = {"nx doctor", "nx memory rollup"}  # the planted hook script runs both as subprocesses
-    assert set(_stores(lines, "CLI verbs")) == leaves - {"nx search", "nx memory curate"} - hooked
-    assert set(_hooked(lines, "CLI verbs")) == hooked and "nx memory list" in _stores(lines, "CLI verbs")
-    assert _head(lines, "CLI verbs") == f"CLI verbs: {len(leaves) - 4} cold of {len(leaves)} (2 invoked by a hook)"
+    hooked |= {"nx self gc", "nx catalog links-for-file"}  # src/nexus/hooks argvs
+    slashed = {"nx command-context debug"}  # a !`nx ...` line of a slash command
+    assert set(_stores(lines, "CLI verbs")) == leaves - {"nx search", "nx memory curate"} - hooked - slashed
+    assert set(_hooked(lines, "CLI verbs")) == hooked and set(_hooked(lines, "CLI verbs", "slash")) == slashed
+    assert "nx memory list" in _stores(lines, "CLI verbs")
+    assert _head(lines, "CLI verbs") == (
+        f"CLI verbs: {len(leaves) - 7} cold of {len(leaves)} (4 invoked by a hook, 1 run by a slash command)")
+    assert "run by a slash command, not seen in transcripts: 1" in "\n".join(_block(lines, "CLI verbs"))
     for label in ("MCP tools", "CLI verbs"):  # the limits a transcript count has, printed under both
         limits = " ".join(_block(lines, label))
         for needle in ("calls by hooks and subprocesses", "terminal and CI use", "bash -c and ssh bodies",
-                       "a group option before the sub verb", "other repositories' sessions"):
+                       "a group option before the sub verb", "other repositories' sessions",
+                       "slash-command expansions", "the harness hooks"):
             assert needle in limits, (label, needle)
 
 
 def test_injected_context_lists_the_nested_instruction_file_never_loaded(planted: dict) -> None:
     lines = planted["lines"]
-    assert _stores(lines, "injected context") == ["sub/CLAUDE.md"]  # other/ was loaded from another worktree's path,
+    assert _stores(lines, "injected context") == ["sub/CLAUDE.md", "tests/AGENTS.md (also tests/CLAUDE.md)"]  # other/ was loaded from another worktree's path,
     # viaitx/ only through an `instructions` attachment, linked/ is the root file: none of them listed
     row = _rows(lines, "injected context")[0]
     assert "~100 tokens" in row and "last use none in the window" in row
     # docs/AGENTS.md was loaded (its CLAUDE.md link names the same file) and the root pair is not nested.
-    assert _head(lines, "injected context").startswith("injected context: 1 cold of 4")
+    assert _head(lines, "injected context").startswith("injected context: 2 cold of 5")
     block = "\n".join(_block(lines, "injected context"))
     assert "not judged: no CLAUDE.md, Claude Code loads only CLAUDE.md on demand: lone/AGENTS.md" in block
-    assert "not judged: fixtures under tests/: 1 file" in block
+    assert "not judged: fixtures (below tests/ or under a fixtures or e2e directory): 2 files" in block
+    assert "tests/CLAUDE.md" not in block.split("not judged: fixtures")[1].split("\n")[0]  # tests/CLAUDE.md itself is judged
     assert "linked/CLAUDE.md" in block and "symlinked to the root instruction file" in block
-    assert ".claude/rules/*.md" in block and "not covered" in block
+    assert "on-demand rule files under the repository's .claude directory are not covered" in block
 
 
 # ── K6 ───────────────────────────────────────────────────────────────────────────────
@@ -402,7 +433,7 @@ def stubbed(world: dict[str, Path], monkeypatch: pytest.MonkeyPatch):  # noqa: F
 
 
 def test_a_failed_tools_query_blanks_only_the_tool_rows(world: dict[str, Path], stubbed) -> None:  # noqa: F811
-    calls = stubbed({"memory": MEM, "loads": EMPTY, "tools": ["not", "a", "page"]})
+    calls = stubbed({"memory": MEM, "loads": LOADS, "tools": ["not", "a", "page"]})
     lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
     reason = "not available: result: the tools query returned list, not a page"
     assert _head(lines, "MCP tools") == f"MCP tools: {reason}"
@@ -425,7 +456,7 @@ def test_a_failed_memory_query_blanks_the_file_and_t2_rows_and_a_failed_loads_qu
 
 def test_cut_records_say_the_cold_lists_may_hold_a_used_store(world: dict[str, Path], stubbed) -> None:  # noqa: F811
     cut = {**MEM, "truncated_records": 2}
-    stubbed({"memory": cut, "loads": EMPTY, "tools": TOOLS})
+    stubbed({"memory": cut, "loads": LOADS, "tools": TOOLS})
     lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
     assert any("records were cut" in ln and "may be listed although they were used" in ln for ln in lines)
 
@@ -433,7 +464,7 @@ def test_cut_records_say_the_cold_lists_may_hold_a_used_store(world: dict[str, P
 def test_a_memory_directory_the_query_cannot_see_blanks_only_the_file_rows(
     world: dict[str, Path], stubbed, tmp_path: Path,  # noqa: F811
 ) -> None:
-    stubbed({"memory": MEM, "loads": EMPTY, "tools": TOOLS})
+    stubbed({"memory": MEM, "loads": LOADS, "tools": TOOLS})
     notes = tmp_path / "notes"
     notes.mkdir()
     (notes / "a.md").write_text(_fm("A", "x"))
@@ -443,7 +474,7 @@ def test_a_memory_directory_the_query_cannot_see_blanks_only_the_file_rows(
 
 
 def test_a_t2_that_cannot_be_read_blanks_only_the_t2_rows(world: dict[str, Path], stubbed) -> None:  # noqa: F811
-    stubbed({"memory": MEM, "loads": EMPTY, "tools": TOOLS})
+    stubbed({"memory": MEM, "loads": LOADS, "tools": TOOLS})
 
     @contextlib.contextmanager
     def broken() -> Iterator[None]:
@@ -460,19 +491,19 @@ def test_a_t2_that_cannot_be_read_blanks_only_the_t2_rows(world: dict[str, Path]
 
 def test_a_memory_file_used_only_through_a_subagent_load_is_not_cold(world: dict[str, Path], stubbed) -> None:  # noqa: F811
     load = {"kind": "loaded", "name": str(world["mem"] / "read_me.md"), "count": 1, "last_use": STAMP}
-    stubbed({"memory": {"rows": [*MEM["rows"], load]}, "loads": EMPTY, "tools": TOOLS})
+    stubbed({"memory": {"rows": [*MEM["rows"], load]}, "loads": LOADS, "tools": TOOLS})
     lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
     assert _stores(lines, "memory files") == ["never.md"]
 
 
 def test_no_memory_directory_is_not_available_with_its_reason(world: dict[str, Path], stubbed) -> None:  # noqa: F811
-    stubbed({"memory": MEM, "loads": EMPTY, "tools": TOOLS})
+    stubbed({"memory": MEM, "loads": LOADS, "tools": TOOLS})
     lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", None, world["repo"], _t2(_PROJECTS))
     assert _head(lines, "memory files") == "memory files: not available: no memory directory found for this repository"
 
 
 def test_a_failed_git_listing_is_not_available_never_zero_cold(world: dict[str, Path], stubbed, tmp_path: Path) -> None:  # noqa: F811
-    stubbed({"memory": MEM, "loads": EMPTY, "tools": TOOLS})
+    stubbed({"memory": MEM, "loads": LOADS, "tools": TOOLS})
     plain = tmp_path / "not-a-checkout"
     plain.mkdir()
     lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], plain, _t2(_PROJECTS))
@@ -490,12 +521,13 @@ def test_a_query_that_succeeds_with_no_rows_for_started_sessions_is_not_availabl
     assert _head(lines, "CLI verbs") == "CLI verbs: " + quiet.format("tools", "calls")
     for label in ("memory files", "T2 namespaces"):
         assert _head(lines, label) == f"{label}: " + quiet.format("memory", "memory reads, writes or T2 calls")
+    assert _head(lines, "injected context") == "injected context: " + quiet.format("loads", "instruction loads")
     assert _no_rows(lines)
 
 
 def test_a_memory_search_naming_no_project_counts_as_a_use_of_every_project(world: dict[str, Path], stubbed) -> None:  # noqa: F811
     stubbed({"memory": {"rows": [{"kind": "t2_search", "name": "(all)", "count": 1, "last_use": STAMP}]},
-             "loads": EMPTY, "tools": TOOLS})
+             "loads": LOADS, "tools": TOOLS})
     lines = cold.cold_lines(30, _NOW, world["repo"], "coldrepo", world["mem"], world["repo"], _t2(_PROJECTS))
     assert _head(lines, "T2 namespaces").startswith("T2 namespaces: 0 cold of 8 ")
     assert "a memory_search naming no project counts as a use of every project" in " ".join(_block(lines, "T2 namespaces"))
@@ -504,14 +536,14 @@ def test_a_memory_search_naming_no_project_counts_as_a_use_of_every_project(worl
 def test_the_injected_kind_is_refused_on_windows_like_the_file_kind(
     world: dict[str, Path], stubbed, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
 ) -> None:
-    stubbed({"memory": MEM, "loads": EMPTY, "tools": TOOLS})
+    stubbed({"memory": MEM, "loads": LOADS, "tools": TOOLS})
     setattr_in(monkeypatch, cold, "os.name", "nt")  # this module's os only (tests/_module_seam.py)
     lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
     assert "Windows paths" in _head(lines, "injected context") and "not available" in _head(lines, "injected context")
 
 
 def test_one_failed_query_is_run_once_and_blanks_both_kinds_that_share_it(world: dict[str, Path], stubbed) -> None:  # noqa: F811
-    calls = stubbed({"memory": MEM, "loads": EMPTY, "tools": RuntimeError("boom")})
+    calls = stubbed({"memory": MEM, "loads": LOADS, "tools": RuntimeError("boom")})
     lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
     assert _head(lines, "MCP tools") == "MCP tools: not available: RuntimeError: boom"
     assert _head(lines, "CLI verbs") == "CLI verbs: not available: RuntimeError: boom"
@@ -525,7 +557,9 @@ def test_the_hook_scan_reads_mcp_tool_entries_and_nx_argvs_from_the_scripts(tmp_
         {"type": "mcp_tool", "server": "plugin:conexus:nexus", "tool": "hook_subagent_start"},
         {"type": "mcp_tool", "server": "plugin:conexus:nexus-catalog", "tool": "show"},
         {"type": "mcp_tool", "server": "plugin:other:thing", "tool": "x"},
-        {"type": "command", "command": "uv", "args": ["run", "nx_launch.py", "nx-hook", "preflight"]}]}]}}))
+        # nx_launch.py runs nx-hook and nx-mcp, not nx verbs: never read as one
+        {"type": "command", "command": "uv",
+         "args": ["run", "${CLAUDE_PLUGIN_ROOT}/launch/nx_launch.py", "nx-hook", "preflight"]}]}]}}))
     (hooks / "scripts" / "routing" / "a.py").write_text(
         'x = _run_nx(["command-context", "continuation"], cwd, 1)\n'
         'y = _run_nx(["memory", "get", row_id, "--project", P], cwd, 1)\n'
@@ -534,9 +568,39 @@ def test_the_hook_scan_reads_mcp_tool_entries_and_nx_argvs_from_the_scripts(tmp_
     scan = cold.hook_invoked(hooks)
     assert scan.tools == {("nexus", "hook_subagent_start"), ("nexus-catalog", "show")}
     assert scan.verbs == {("command-context", "continuation"), ("memory", "get"), ("self", "install"),
-                          ("upgrade", None), ("nx-hook", "preflight")}
+                          ("upgrade", None)}
     none = cold.hook_invoked(tmp_path / "missing")
     assert none.tools == set() and none.verbs == set() and none.note.startswith("no hook directory")
+
+
+def test_the_scan_reads_src_hook_argvs_and_slash_command_lines(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "self_gc.py").write_text('argv = nx_argv_for(nx, "self", "gc")\ndef nx_argv(*args: str):\n    pass\n')
+    (src / "sub.py").write_text('x = nx_argv("catalog", "links-for-file", "--for-model", fp)\ny = nx_argv("--version")\n'
+                                'z = nx_argv(variable)\nw = nx_argv_for(nx, "upgrade", "--auto")\n')
+    cmds = tmp_path / "cmds"
+    cmds.mkdir()
+    (cmds / "a.md").write_text("# a\n\n!`nx command-context debug`\n!`nx rdr preamble rdr-audit`\n"
+                               "nx search is prose\n!`ls -l`\n!`nx --version`\n")
+    (cmds / "b.md").write_text("```\n!`nx tuple stats --json`\n```\n")
+    hooks = tmp_path / "h"
+    hooks.mkdir()
+    (hooks / "hooks.json").write_text(json.dumps({"hooks": {}}))
+    scan = cold.hook_invoked(hooks, src_hooks_dir=src, commands_dir=cmds)
+    assert scan.verbs == {("self", "gc"), ("catalog", "links-for-file"), ("upgrade", None)}
+    assert scan.slash == {("command-context", "debug"), ("rdr", "preamble"), ("tuple", "stats")}
+    assert "slash-command expansions" in scan.note and "the harness hooks" in scan.note
+    gone = cold.hook_invoked(hooks, src_hooks_dir=tmp_path / "nope", commands_dir=tmp_path / "nope2")
+    assert gone.verbs == set() and gone.slash == set()  # a missing root is no hit and no error
+
+
+def test_only_files_deeper_than_tests_or_under_fixtures_or_e2e_are_fixtures() -> None:
+    fixture = cold._is_fixture
+    assert not fixture("tests/CLAUDE.md") and not fixture("tests/AGENTS.md") and not fixture("docs/CLAUDE.md")
+    assert fixture("tests/fx/CLAUDE.md") and fixture("tests/a/b/AGENTS.md")
+    assert fixture("docs/e2e/CLAUDE.md") and fixture("src/fixtures/x/CLAUDE.md") and fixture("tests/e2e/CLAUDE.md")
+    assert not fixture("src/nexus/mcp/CLAUDE.md")
 
 
 # ── the docs match the code ──────────────────────────────────────────────────────────
@@ -548,7 +612,8 @@ def test_the_docs_describe_cold() -> None:
     section = ref.split("**`curate` flags:**", 1)[1].split("**`promote` flags:**", 1)[0]
     bullet = next(ln for ln in section.splitlines() if ln.startswith("- `--cold`"))
     for needle in ("MCP tool", "CLI verb", "nested", "K6", "not available", "Tuple subspaces", "invoked by a hook",
-                   "last_accessed", ".claude/rules", "once per section", "no CLAUDE.md"):
+                   "last_accessed", ".claude/rules", "once per section", "no CLAUDE.md", "run by a slash command",
+                   "src/nexus/hooks", "`tests/CLAUDE.md` itself is judged", "tools, memory or loads query"):
         assert needle in bullet, needle
     assert "three times" not in section
     assert "until Step 3" not in section and "RDR-240's tools, loads" not in section
