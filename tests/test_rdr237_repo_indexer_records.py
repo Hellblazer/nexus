@@ -24,16 +24,24 @@ DEGRADED = {"mineru-no-formula": [3], "pymupdf-text": [12]}
 
 
 class _Writer:
-    """Records ``update`` calls; ``fail`` makes them raise."""
+    """Records ``update`` calls; ``fail`` makes them raise.
 
-    def __init__(self, fail: bool = False, current_author: str = "") -> None:
+    Like the production writer (``factory._ServiceCatalogWriter``), it admits only the write ops: any other
+    attribute, ``resolve`` included, raises ``AttributeError``, so code that reads through the writer fails here
+    as it does live instead of passing against a fake."""
+
+    def __init__(self, fail: bool = False) -> None:
         self.updates: list[tuple[str, dict]] = []
         self.closed = False
         self._fail = fail
-        self._author = current_author
 
-    def resolve(self, tumbler, **_kw):
-        return type("Doc", (), {"author": self._author})()
+    def __getattr__(self, name: str):
+        from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS  # noqa: PLC0415 — test-local import
+        from nexus.catalog.factory import _SERVICE_ONLY_WRITE_OPS  # noqa: PLC0415 — test-local import
+
+        if name not in CATALOG_WRITE_OPS and name not in _SERVICE_ONLY_WRITE_OPS:
+            raise AttributeError(f"catalog writer has no read op {name!r}")
+        raise AttributeError(name)
 
     def update(self, tumbler, **fields) -> None:
         if self._fail:
@@ -60,7 +68,22 @@ def _chunks_filling(method: str, pages: dict, author: str = ""):
     return fake
 
 
-def _index(tmp_path: Path, method: str, pages: dict, *, doc_id: str = "1.1.7", writer=None, author: str = ""):
+class _Reader:
+    """The catalog reader the author fill reads the current author through; records whether it was closed."""
+
+    def __init__(self, current_author: str = "") -> None:
+        self._author = current_author
+        self.closed = False
+
+    def resolve(self, tumbler, **_kw):
+        return type("Doc", (), {"author": self._author})()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _index(tmp_path: Path, method: str, pages: dict, *, doc_id: str = "1.1.7", writer=None, author: str = "",
+           reader=None):
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     pdf = repo / "paper.pdf"
@@ -73,7 +96,7 @@ def _index(tmp_path: Path, method: str, pages: dict, *, doc_id: str = "1.1.7", w
     writer = writer if writer is not None else _Writer()
     with patch("nexus.doc_indexer._pdf_chunks", side_effect=_chunks_filling(method, pages, author)), \
             patch("nexus.doc_indexer._fence_begin"), \
-            patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
+            patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
         count = _index_pdf_file(
             pdf, repo, "docs__repo", "voyage-context-3", col, db, "fake-key",
@@ -105,16 +128,33 @@ def test_a_clean_re_extract_through_the_repo_indexer_writes_an_empty_map(tmp_pat
 def test_the_extractions_author_reaches_the_catalog_document_where_it_has_none(tmp_path) -> None:
     """No chunk row carries the author since RDR-236 Phase 4 Step 1, so the repo indexer sends the extraction's
     author to the document (fill-only, as the streaming and single-request routes do through the hook)."""
-    _count, writer, _pdf = _index(tmp_path, "mineru", {}, author="A. Author")
+    reader = _Reader(current_author="")
+    _count, writer, _pdf = _index(tmp_path, "mineru", {}, author="A. Author", reader=reader)
     ((tumbler, fields),) = writer.updates
     assert tumbler == "1.1.7" and fields["author"] == "A. Author", fields
     assert "meta" in fields, "the extraction record still lands in the same write"
+    assert reader.closed, "the reader opened for the current author is closed"
 
 
 def test_a_curated_author_is_not_replaced_by_the_extractions(tmp_path) -> None:
-    _count, writer, _pdf = _index(tmp_path, "mineru", {}, writer=_Writer(current_author="Curated"), author="A. Author")
+    _count, writer, _pdf = _index(tmp_path, "mineru", {}, author="A. Author", reader=_Reader(current_author="Curated"))
     ((_t, fields),) = writer.updates
     assert "author" not in fields, fields
+
+
+def test_an_unreadable_current_author_leaves_the_author_alone(tmp_path) -> None:
+    """No reader (the catalog cannot be read): the author is not sent, and the extraction record still lands."""
+    _count, writer, _pdf = _index(tmp_path, "mineru", {}, author="A. Author", reader=None)
+    ((_t, fields),) = writer.updates
+    assert "author" not in fields and "meta" in fields, fields
+
+
+def test_the_production_catalog_writer_has_no_resolve() -> None:
+    """The premise of the reader above: the service writer admits write ops only, so a read through it raises."""
+    from nexus.catalog.factory import _ServiceCatalogWriter  # noqa: PLC0415 — test-local import
+
+    with pytest.raises(AttributeError):
+        _ServiceCatalogWriter(MagicMock()).resolve("1.1.7")
 
 
 def test_a_file_with_no_catalog_document_logs_that_nothing_was_recorded(tmp_path) -> None:

@@ -8,7 +8,7 @@ trip wire; only the chunker is the journey's fake (one chunk per page line, so e
 
 * both routes of ``index_pdf`` that extract per document (the streaming pipeline and the all-at-once
   path) leave ``extraction_method: pymupdf`` and the page map (``pymupdf-text`` and ``unextracted``) on the
-  catalog document, and the chunks carry ``pymupdf``;
+  catalog document, and no chunk row carries a method (RDR-236 Phase 4 Step 1);
 * ``nx store get`` and the MCP ``store_get`` print ``Extractor:  pymupdf`` and a ``Degraded:`` line for
   the page with no text layer only (the text-layer pages are the extractor's normal output);
 * a ``pymupdf`` rerun over the kept buffer of a MinerU run that tripped its breaker starts clean
@@ -104,10 +104,12 @@ def _meta(path: Path, marker: str) -> dict:
     return dict(entry.meta)
 
 
-def _chunk_method(line: str) -> str:
+def _chunk_carries_a_method(line: str) -> bool:
+    """Whether the chunk row stores an ``extraction_method``. Since RDR-236 Phase 4 Step 1 it never should:
+    the method is the catalog document's (``meta["extraction_method"]``), and a chunk row holds the chunk keys."""
     entry = hvc.HttpVectorClient().get_by_id(_COLLECTION, _sha(line), sensitivity="include")
     assert entry is not None
-    return entry.get("extraction_method", "")
+    return "extraction_method" in entry
 
 
 _BOTH = pytest.mark.parametrize("streaming", ["always", "never"], ids=["streaming", "all-at-once"])
@@ -126,7 +128,7 @@ def test_a_pymupdf_document_records_its_method_and_page_map_on_the_catalog_and_i
     meta = _meta(path, marker)
     assert meta["extraction_method"] == "pymupdf"
     assert meta["extraction_pages"] == {"pymupdf-text": [1, 3], "unextracted": [2]}
-    assert {_chunk_method(x) for x in (l1, l3)} == {"pymupdf"}
+    assert not any(_chunk_carries_a_method(x) for x in (l1, l3)), "RDR-236 Phase 4 Step 1: the chunk rows hold no method"
     assert hidden_stack == [], "no install attempted, MinerU never probed or started"
 
 
@@ -208,5 +210,5 @@ def test_a_pymupdf_rerun_over_a_tripped_mineru_run_starts_clean_and_records_pymu
     meta = _meta(path, marker)
     assert meta["extraction_method"] == "pymupdf"
     assert meta["extraction_pages"] == {"pymupdf-text": [1, 2, 3, 5], "unextracted": [4]}
-    assert {_chunk_method(x) for x in expected} == {"pymupdf"}
+    assert not any(_chunk_carries_a_method(x) for x in expected), "RDR-236 Phase 4 Step 1: the chunk rows hold no method"
     assert hidden_stack == []

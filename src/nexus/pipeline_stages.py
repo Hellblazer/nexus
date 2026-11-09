@@ -1181,10 +1181,23 @@ def record_pdf_extraction_on_document(
             return
         fields: dict[str, Any] = {"meta": meta}
         if author:
+            # The current author comes from a catalog READER: the writer admits write ops only and has no resolve.
+            current = None
+            reader = None
             try:
-                current = getattr(writer.resolve(doc_id), "author", None)
+                from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+                reader = make_catalog_reader()
+                if reader is not None:
+                    current = getattr(reader.resolve(doc_id), "author", None)
             except Exception:  # noqa: BLE001 - unreadable: leave the author as it is
                 current = None
+            finally:
+                if reader is not None:
+                    try:
+                        reader.close()
+                    except Exception:  # noqa: BLE001 - a failed close never blocks the extraction record
+                        _log.warning("catalog_pdf_author_reader_close_failed", doc_id=doc_id, exc_info=True)
             if current is not None and not str(current).strip():
                 fields["author"] = author
         writer.update(doc_id, **fields)

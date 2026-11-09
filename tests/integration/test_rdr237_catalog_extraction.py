@@ -7,8 +7,8 @@ fake extractor settles each page on a rung the way the ladder does, puts it in t
 (``page_method``) and reports the document's ``extraction_method`` / ``extraction_pages``.
 
 * the streaming path (``streaming="always"``) and the all-at-once path (``streaming="never"``), the hook's
-  two callers, each leave the map on the catalog document's ``meta``, and the chunks carry
-  ``mineru+degraded``;
+  two callers, each leave the map and ``mineru+degraded`` on the catalog document's ``meta``, and no
+  chunk row carries a method (RDR-236 Phase 4 Step 1);
 * ``nx store get`` and the MCP ``store_get`` print the degraded pages from a real catalog document;
 * a document re-extracted clean after a degraded extraction has an EMPTY map (the service merges ``meta``
   key by key and never removes one; the hook overwrites the key whole);
@@ -92,10 +92,12 @@ def _meta(path, marker) -> dict:
     return dict(entry.meta)
 
 
-def _chunk_method(line: str) -> str:
+def _chunk_carries_a_method(line: str) -> bool:
+    """Whether the chunk row stores an ``extraction_method``. Since RDR-236 Phase 4 Step 1 it never should:
+    the method is the catalog document's (``meta["extraction_method"]``), and a chunk row holds the chunk keys."""
     entry = hvc.HttpVectorClient().get_by_id(_COLLECTION, _sha(line), sensitivity="include")
     assert entry is not None
-    return entry.get("extraction_method", "")
+    return "extraction_method" in entry
 
 
 _BOTH = pytest.mark.parametrize("streaming", ["always", "never"], ids=["streaming", "all-at-once"])
@@ -104,7 +106,7 @@ _MAP = {"mineru-no-formula": [2], "pymupdf-text": [4]}
 
 
 @_BOTH
-def test_a_degraded_document_carries_its_map_on_the_catalog_and_its_chunks_the_method(
+def test_a_degraded_document_carries_its_map_and_method_on_the_catalog_and_none_on_its_chunks(
     tmp_path, ladder, streaming,
 ) -> None:
     marker = f"tr1rj3-degraded-{streaming}"
@@ -117,7 +119,7 @@ def test_a_degraded_document_carries_its_map_on_the_catalog_and_its_chunks_the_m
     meta = _meta(path, marker)
     assert meta["extraction_pages"] == _MAP
     assert meta["extraction_method"] == "mineru+degraded"
-    assert {_chunk_method(x) for x in lines} == {"mineru+degraded"}
+    assert not any(_chunk_carries_a_method(x) for x in lines), "RDR-236 Phase 4 Step 1: the chunk rows hold no method"
 
 
 @_BOTH
@@ -190,7 +192,7 @@ def test_a_resumed_run_records_the_pages_the_buffer_holds(tmp_path, ladder, monk
     meta = _meta(path, marker)
     assert meta["extraction_pages"] == {"pymupdf-text": [2]}, "the buffer's page 2 is in the record"
     assert meta["extraction_method"] == "mineru+degraded"
-    assert {_chunk_method(x) for x in lines} == {"mineru+degraded"}
+    assert not any(_chunk_carries_a_method(x) for x in lines), "RDR-236 Phase 4 Step 1: the chunk rows hold no method"
 
 
 def _index_reporting(path, marker, *, streaming, force=False) -> list[dict]:
