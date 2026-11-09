@@ -60,33 +60,59 @@ REPLAY_MODULE_ROOTS: tuple[str, ...] = ("nexus.hooks.", "nexus._hook_runtime.")
 _PREFIX = "hookfail-"
 _SUFFIX = ".json"
 _TMP_SUFFIX = ".json.tmp"
-_CREDENTIAL_WORDS = ("token", "password", "passwd", "pass", "pwd", "secret", "authorization", "auth",
-                     "api_key", "apikey", "cookie", "credential", "private_key", "dsn")
+#: Key tokens (a key split at ``_``, ``-``, ``.`` and camelCase) that mark a credential
+#: value. Whole tokens, so ``author``, ``passed`` and ``compass`` are not credentials.
+_CREDENTIAL_TOKENS = frozenset({"token", "password", "passwd", "pass", "pwd", "secret", "secrets",
+                                "authorization", "auth", "apikey", "cookie", "cookies", "credential",
+                                "credentials", "dsn", "jwt", "bearer", "key", "passphrase", "signature"})
+_KEY_SPLIT = re.compile(r"[_\-.\s]+|(?<=[a-z0-9])(?=[A-Z])")
 _ENV_PREFIXES = ("NX_", "NEXUS_", "CLAUDE_")
-_ENV_NAMES = frozenset({"VIRTUAL_ENV", "PYTHONPATH"})
+#: Words in a variable's name that keep it out of a replay even when it was recorded:
+#: a replayed entry is a file someone may hand you, and these steer where code,
+#: config or a connection comes from.
+_ENV_NO_REPLAY_WORDS = ("PATH", "DIR", "HOME", "ROOT", "BIN", "CMD", "EXE", "PROG", "PLUGIN", "HOST",
+                        "PORT", "ENDPOINT", "SERVICE", "PYTHON", "SHELL", "EDITOR", "HOOK")
 _ENV_CREDENTIAL_WORDS = ("KEY", "TOKEN", "SECRET", "PASS", "PWD", "AUTH", "CREDENTIAL", "COOKIE",
                          "DSN", "URL", "CONN", "PRIVATE", "SALT")
 _LIST_KEEP = 200
 _PRECUT_CHARS = 16 * 1024
 _MASK = "[redacted]"
+_TMP_STALE_S = 60.0
 
 # Repeats are bounded: an unbounded name class backtracks quadratically on a
 # long run of word characters, and this runs inside a hook's crash handler.
-_NAME = r"(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]{0,64}?(?:token|secret|passw(?:or)?d|pass|pwd|api[_-]?key|credential|auth|cookie|dsn)[A-Za-z0-9_.-]{0,64}"
+# A short credential word must stand as its own token (``auth`` in ``AUTH_TOKEN``, not in
+# ``author``; ``pass`` in ``DB_PASS``, not in ``compass`` or ``passed``).
+# The long words may be glued on (PGPASSWORD, GITHUBTOKEN); the short ones only as
+# their own token.
+_NAME = (r"(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]{0,64}?"
+         r"(?:passw(?:or)?d|passphrase|secret|credentials?|api[_-]?key|token(?![a-z])"
+         r"|(?<![a-z])(?:pass|pwd|key|auth|cookie|dsn|jwt)(?![a-z]))"
+         r"[A-Za-z0-9_.-]{0,64}")
 _SCRUBS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Authorization: Bearer <tok>, Authorization: Basic <tok>, a bare "Bearer <tok>".
-    (re.compile(r"(?i)\b((?:authorization|proxy-authorization)\s*[:=]\s*)((?:bearer|basic|token|digest)\s+)?\S+"),
+    # Authorization: Bearer <tok>, Authorization: Basic <tok>, and a bare "Bearer <tok>"
+    # whose token has a digit or a symbol, so "the basic structure" stays prose.
+    (re.compile(r"(?i)\b((?:authorization|proxy-authorization)[\"']?\s*[:=]\s*[\"']?)"
+                r"((?:bearer|basic|token|digest)\s+)?[^\s\"']+"),
      rf"\1\2{_MASK}"),
-    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{6,}"), rf"\1 {_MASK}"),
-    # NAME=value, NAME: value, "name": "value", --name=value, with a credential word in NAME.
-    (re.compile(rf"(?i)({_NAME})([\"']?\s*[:=]\s*[\"']?)([^\s\"',;&|)]+)"), rf"\1\2{_MASK}"),
+    # A PEM private key, whole.
+    (re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]{0,20000}?-----END [A-Z ]{0,40}PRIVATE KEY-----"),
+     f"-----BEGIN PRIVATE KEY-----{_MASK}-----END PRIVATE KEY-----"),
+    # A Cookie or Set-Cookie header: every pair on the line.
+    (re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)[^\r\n]{1,4096}"), rf"\1{_MASK}"),
+    (re.compile(r"(?i)\b(bearer|basic)\s+(?=[A-Za-z]{0,64}[0-9._~+/=-])[A-Za-z0-9._~+/=-]{6,}"), rf"\1 {_MASK}"),
+    # NAME=value, NAME: value, "name": "value", --name=value, --password value, with a
+    # credential word in NAME; a quoted value is masked whole, spaces included.
+    (re.compile(rf"(?i)({_NAME})([\"']?\s*[:=]\s*|\s+(?=[\"']))(\"[^\"\n]{{0,512}}\"|'[^'\n]{{0,512}}'|[^\s\"',;&|)]+)"),
+     rf"\1\2{_MASK}"),
+    (re.compile(r"(?<!\S)(--(?:password|passwd|pass|token|secret|api-key))(\s+)([^\s-]\S*)"), rf"\1\2{_MASK}"),
     # URL userinfo: scheme://user:pw@host
     (re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,15}://[^/\s:@]{1,256}):[^@\s/]{1,256}@"), rf"\1:{_MASK}@"),
     # curl -u user:pass / --user user:pass
     (re.compile(r"(?<!\S)(-u|--user)(\s+|=)([^\s:]+):\S+"), rf"\1\2\3:{_MASK}"),
     # Well-known token shapes.
     (re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}"
-                r"|xox[abposr]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})"), _MASK),
+                r"|xox[abposr]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|pa-[A-Za-z0-9_-]{20,})"), _MASK),
 )
 
 
@@ -113,15 +139,23 @@ def scrub(text: str) -> str:
 
 
 def _credential_key(key: str) -> bool:
-    k = key.lower().replace("-", "_")
-    return any(word in k for word in _CREDENTIAL_WORDS)
+    tokens = [t.lower() for t in _KEY_SPLIT.split(key[:256]) if t]
+    joined = "".join(tokens)
+    return any(t in _CREDENTIAL_TOKENS for t in tokens) or joined in ("apikey", "privatekey", "accesskey")
+
+
+def _plain_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (bool, int, float))
 
 
 def _redact(value: Any) -> Any:
     if isinstance(value, str):
         return scrub(value)
     if isinstance(value, Mapping):
-        return {scrub(str(k)): _MASK if _credential_key(str(k)) else _redact(v) for k, v in value.items()}
+        # A credential-named key masks a string or a structure whole; a bool, number or
+        # None under it is kept, so a replay still gets the type the verb expects.
+        return {scrub(str(k)): (_MASK if _credential_key(str(k)) and not _plain_scalar(v) else _redact(v))
+                for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_redact(v) for v in value]
     if value is None or isinstance(value, (bool, int, float)):
@@ -129,15 +163,16 @@ def _redact(value: Any) -> Any:
     return scrub(repr(value))
 
 
+def _env_recordable(name: str) -> bool:
+    return name.startswith(_ENV_PREFIXES) and not any(w in name.upper() for w in _ENV_CREDENTIAL_WORDS)
+
+
+def _env_replayable(name: str) -> bool:
+    return _env_recordable(name) and not any(w in name.upper() for w in _ENV_NO_REPLAY_WORDS)
+
+
 def _env_subset(env: Mapping[str, str]) -> dict[str, str]:
-    keep = {}
-    for name, value in env.items():
-        if not (name.startswith(_ENV_PREFIXES) or name in _ENV_NAMES):
-            continue
-        if any(word in name.upper() for word in _ENV_CREDENTIAL_WORDS):
-            continue
-        keep[name] = scrub(value)
-    return dict(sorted(keep.items()))
+    return dict(sorted((name, scrub(value)) for name, value in env.items() if _env_recordable(name)))
 
 
 def _encode(entry: Mapping[str, Any]) -> bytes:
@@ -149,7 +184,11 @@ def _cut(value: Any, cap: int) -> Any:
     if isinstance(value, str) and len(value) > cap:
         return value[:cap] + f"...[cut {len(value) - cap} chars]"
     if isinstance(value, Mapping):
-        return {k: _cut(v, cap) for k, v in value.items()}
+        items = list(value.items())
+        out = {k: _cut(v, cap) for k, v in items[:_LIST_KEEP]}
+        if len(items) > _LIST_KEEP:
+            out["...[cut]"] = f"{len(items) - _LIST_KEEP} keys"
+        return out
     if isinstance(value, (list, tuple)):
         value = list(value)
         head = [_cut(v, cap) for v in value[:_LIST_KEEP]]
@@ -192,8 +231,13 @@ def prune(directory: Path, *, max_entries: int | None = None, max_bytes: int | N
     max_entries = MAX_ENTRIES if max_entries is None else max_entries
     max_bytes = MAX_TOTAL_BYTES if max_bytes is None else max_bytes
     try:
+        import time  # noqa: PLC0415 -- crash and CLI paths only
+
+        cutoff = time.time() - _TMP_STALE_S
         for p in directory.iterdir():
-            if p.name.startswith(_PREFIX) and p.name.endswith(_TMP_SUFFIX):
+            # Only a temp file old enough to be abandoned: a fresh one is another
+            # process's write in flight.
+            if p.name.startswith(_PREFIX) and p.name.endswith(_TMP_SUFFIX) and p.stat().st_mtime < cutoff:
                 p.unlink(missing_ok=True)
     except OSError:
         pass
@@ -263,8 +307,10 @@ def record(
             "platform": sys.platform,
             "cwd": scrub(os.getcwd()),
             "error_type": type(exc).__name__,
-            "error": scrub(str(exc)),
-            "traceback": scrub("".join(traceback.format_exception(type(exc), exc, exc.__traceback__))),
+            # Cut before scrubbing, like the payload: an exception message can embed a whole tool response.
+            "error": scrub(_cut(str(exc), _PRECUT_CHARS)),
+            "traceback": scrub(_cut("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                                    _PRECUT_CHARS)),
             # Cut before scrubbing, so the scrub's cost is bounded by the entry
             # cap, not by the payload: a crash on a 50 MB tool response must
             # not turn the hook's crash handler into a hang.
@@ -316,7 +362,10 @@ class ReplayRefused(ValueError):
 def _recorded_context(entry: Mapping[str, Any]) -> Generator[None]:
     """The recorded environment subset and working directory, for the length of a replay."""
     raw = entry.get("env")
-    env: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    # Only what record() itself would keep, and nothing that steers where code,
+    # config or a connection comes from (PATH, PYTHONPATH, a config dir, a host).
+    env: dict[str, Any] = ({k: v for k, v in raw.items() if isinstance(k, str) and _env_replayable(k)}
+                           if isinstance(raw, dict) else {})
     saved = {k: os.environ.get(k) for k in env}
     cwd = os.getcwd()
     try:

@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,17 @@ def test_a_recorded_entry_is_redacted_and_private(tmp_path: Path) -> None:
     ('{"password": "hunter22hunter"}', "hunter22hunter"),
     ("--db-password=letmein99 --verbose", "letmein99"),
     ("key AKIAABCDEFGHIJKLMNOP in text", "AKIAABCDEFGHIJKLMNOP"),
+    ('--password="my pass phrase" --user x', "pass phrase"),
+    ("DB_PASSWORD='a b c' ./run", "b c"),
+    ('mysqldump --password "s3cret value" db', "s3cret value"),
+    ("app --token abcdefghijk --verbose", "abcdefghijk"),
+    ('Authorization: "Bearer abcDEF123456xyz"', "abcDEF123456xyz"),
+    ("authorization = 'Bearer abcDEF123456'", "abcDEF123456"),
+    ("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAabc\n-----END RSA PRIVATE KEY-----", "MIIEpAIBAAKCAQEAabc"),
+    ("Cookie: a=1; session=secretcookie2", "secretcookie2"),
+    ("STRIPE_KEY=sk_live_abcdef ./deploy", "sk_live_abcdef"),
+    ("nx config set voyage_api_key pa-abcdefghijklmnopqrstuv", "pa-abcdefghijklmnopqrstuv"),
+    ('MY_SECRET="correct horse battery staple"', "horse battery"),
 ])
 def test_credentials_in_free_text_are_masked(text: str, secret: str) -> None:
     out = failure_ring.scrub(text)
@@ -94,9 +106,48 @@ def test_credentials_in_free_text_are_masked(text: str, secret: str) -> None:
     assert "[redacted]" in out
 
 
-def test_plain_command_text_survives_the_scrub() -> None:
-    text = "git log --oneline -5 && uv run pytest tests/test_x.py -k session_id"
+@pytest.mark.parametrize("text", [
+    "git log --oneline -5 && uv run pytest tests/test_x.py -k session_id",
+    "the basic structure of the design is documented",
+    "author=Bob passed=yes compass=north max_tokens=100",
+])
+def test_plain_text_survives_the_scrub(text: str) -> None:
     assert failure_ring.scrub(text) == text
+
+
+@pytest.mark.parametrize("text", ["x" * 400_000, "token" * 80_000, "a:b@" * 100_000, "http://" * 50_000,
+                                  ("p" * 63 + "=") * 5000, "bearer " * 60_000])
+def test_the_scrub_is_linear_on_hostile_text(text: str) -> None:
+    started = time.perf_counter()
+    failure_ring.scrub(text)
+    assert time.perf_counter() - started < 2.0, "the scrub backtracks: a hang inside a crash handler"
+
+
+def test_a_huge_exception_message_and_a_wide_dict_record_quickly(tmp_path: Path) -> None:
+    wide = {f"k{i}": "v" for i in range(300_000)}
+    exc = RuntimeError("word " * 6_000_000)
+    started = time.perf_counter()
+    path = failure_ring.record("probe", wide, exc, module="nexus.hooks.probe", env={}, directory=tmp_path)
+    assert time.perf_counter() - started < 1.5, "the crash handler scrubbed what it should have cut first"
+    assert path is not None and path.stat().st_size <= failure_ring.MAX_ENTRY_BYTES
+    entry = failure_ring.load(path)
+    assert entry["truncated"] is True and "[cut " in entry["error"]
+
+
+@pytest.mark.parametrize(("key", "secret"), [
+    ("privateKey", True), ("bearer", True), ("jwt", True), ("access_key", True), ("sessionKey", True),
+    ("Authorization", True), ("api-key", True), ("author", False), ("passed", False), ("compass", False),
+    ("session_id", False), ("max_tokens", False), ("tool_input", False),
+])
+def test_credential_keys_are_matched_by_whole_token(key: str, secret: bool) -> None:
+    assert failure_ring._credential_key(key) is secret
+
+
+def test_a_scalar_under_a_credential_key_keeps_its_type(tmp_path: Path) -> None:
+    path = _rec(tmp_path, {"use_token": True, "token": "abc", "password": None, "auth": {"user": "u"}})
+    assert path is not None
+    assert failure_ring.load(path)["payload"] == {"use_token": True, "token": "[redacted]", "password": None,
+                                                  "auth": "[redacted]"}
 
 
 def test_the_switch_turns_capture_off(tmp_path: Path) -> None:
@@ -169,11 +220,15 @@ def test_a_failed_write_leaves_no_temp_file(tmp_path: Path, monkeypatch: pytest.
     assert list(tmp_path.iterdir()) == []
 
 
-def test_prune_sweeps_a_leftover_temp_file(tmp_path: Path) -> None:
+def test_prune_sweeps_an_abandoned_temp_file_but_not_a_write_in_flight(tmp_path: Path) -> None:
     stale = tmp_path / "hookfail-20260101T000000000000-1-probe.json.tmp"
+    fresh = tmp_path / "hookfail-20260101T000000000001-2-probe.json.tmp"
     stale.write_text("partial", encoding="utf-8")
+    fresh.write_text("in flight", encoding="utf-8")
+    old = stale.stat().st_mtime - 3600
+    os.utime(stale, (old, old))
     failure_ring.prune(tmp_path)
-    assert not stale.exists()
+    assert not stale.exists() and fresh.exists()
 
 
 def test_load_refuses_what_is_not_an_entry(tmp_path: Path) -> None:
@@ -266,6 +321,28 @@ def test_replay_applies_the_recorded_env_and_cwd(tmp_path: Path, monkeypatch: py
     with pytest.raises(RuntimeError, match=r"env strict cwd .*work"):
         failure_ring.replay(path, module_roots=("env_verb",))
     assert "NX_PROBE_MODE" not in os.environ and Path.cwd() == tmp_path
+
+
+def test_replay_never_applies_an_env_that_steers_code_or_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "env_guard_verb.py").write_text(
+        "import os\n"
+        "from nexus._hook_runtime._io import HookResult\n"
+        "def run(payload):\n"
+        "    keys = ('PATH', 'PYTHONPATH', 'VIRTUAL_ENV', 'NEXUS_CONFIG_DIR', 'NX_SERVICE_HOST', 'NX_DB_PASS', 'NX_MODE')\n"
+        "    return HookResult(stdout=repr({k: os.environ.get(k) for k in keys}))\n",
+        encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    hostile = {"PATH": "/evil/bin", "PYTHONPATH": "/evil", "VIRTUAL_ENV": "/evil", "NEXUS_CONFIG_DIR": "/evil",
+               "NX_SERVICE_HOST": "evil.example", "NX_DB_PASS": "x", "NX_MODE": "strict"}
+    entry = tmp_path / "hookfail-handed.json"
+    entry.write_text(json.dumps({"format": 1, "hook": "x", "module": "env_guard_verb", "payload": {}, "env": hostile}),
+                     encoding="utf-8")
+    seen = eval(failure_ring.replay(entry, module_roots=("env_guard_verb",)).stdout)  # noqa: S307 -- our own repr
+    assert seen["NX_MODE"] == "strict"
+    for key in ("PATH", "PYTHONPATH", "VIRTUAL_ENV", "NEXUS_CONFIG_DIR", "NX_SERVICE_HOST", "NX_DB_PASS"):
+        assert seen[key] != hostile[key], key
 
 
 def test_replay_of_a_verb_that_no_longer_crashes_prints_its_answer(tmp_path: Path) -> None:
