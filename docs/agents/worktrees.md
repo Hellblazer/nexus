@@ -188,8 +188,9 @@ things to avoid carefully; they are impossible.
 
    The Stop hook's wake guard counts a fresh, live channel waiter with a
    `board/ci/*--done` subscription and the channel flag as an armed wake for a
-   develop-CI wait; any other CI wait at turn end is blocked with a message
-   naming `nx ci wait <sha>` (nexus-1d6pz.11.5).
+   develop-CI wait, and a running background command such as `nx ci wait`
+   counts as armed too; with nothing armed, a turn that ends on a CI wait is
+   blocked with a message naming `nx ci wait <sha>` (nexus-1d6pz.11.5).
 
    Treat the develop run as part of the push. Before stacking more work on a
    develop sha, or cutting a release branch on it, read that sha's check-run
