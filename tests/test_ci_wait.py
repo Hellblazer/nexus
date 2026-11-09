@@ -452,10 +452,19 @@ class TestCappedRow:
         board = _Board(_Clock())
         board.post(SHA, [], body={"sha": SHA, "runs": [[10, 1, "CI", "success"]], "url": "u", "n": 2})
         monkeypatch.setattr(ci_cmd, "_store", lambda: board)
-        monkeypatch.setattr(ci_wait, "gh_push_runs", lambda gh, sha, branch: [
-            ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Service CI", "failure")])
-        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "1"])
+        asked: list[tuple[str, str, str]] = []
+
+        def fake_runs(gh: str, sha: str, branch: str) -> list[ci_wait.Run]:
+            asked.append((gh, sha, branch))
+            return [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Service CI", "failure")]
+
+        monkeypatch.setattr(ci_wait, "gh_push_runs", fake_runs)
+        result = CliRunner().invoke(
+            ci_group, ["wait", SHA[:10], "--timeout", "1", "--gh-repo", "o/r", "--branch", "develop"],
+        )
         assert result.exit_code == 1, result.output
+        # The row's full sha, not the prefix asked for; --gh-repo and --branch as given.
+        assert asked == [("o/r", SHA, "develop")]
         assert "Service CI failure (run 11)" in result.stdout.strip().splitlines()[-1]
 
     # Each n makes the count alone agree (listed + GitHub runs above the top
@@ -491,3 +500,25 @@ class TestCappedRow:
     def test_a_capped_row_that_github_cannot_confirm_says_so(self) -> None:
         line, code = ci_wait.summarize(_capped([[10, 1, "CI", "success"]], 2))
         assert code == ci_wait.EXIT_UNKNOWN and line.endswith("(1 of 2 runs listed; GitHub did not confirm the rest)")
+
+    def test_a_listed_run_missing_from_github_with_the_count_matching_is_unknown(self) -> None:
+        # Two GitHub runs above the top make 1 + 2 = n, but the listed run 10 is
+        # not among them: the ids check refuses, not the count.
+        done = _capped([[10, 1, "CI", "success"]], 2)
+        github = [ci_wait.Run(11, 1, "A", "success"), ci_wait.Run(12, 1, "B", "success")]
+        assert ci_wait.complete_runs(done, "o/r", "develop", fetch=lambda *a: github) is done
+
+    def test_a_run_created_after_the_fold_makes_it_unknown_not_wrong(self) -> None:
+        # bob: a later listing is a superset of the fold, extra runs above it.
+        done = _capped([[10, 1, "CI", "success"]], 2)
+        github = [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Svc", "failure"),
+                  ci_wait.Run(12, 1, "Late", "success")]
+        full = ci_wait.complete_runs(done, "o/r", "develop", fetch=lambda *a: github)
+        assert full is done and ci_wait.summarize(full)[1] == ci_wait.EXIT_UNKNOWN
+
+    def test_a_capped_row_that_lists_no_runs_takes_github_s_first_attempts(self) -> None:
+        done = ci_wait.parse_done_row(_row({"sha": SHA, "runs": [], "url": "u", "n": 2}))
+        assert done is not None and done.capped
+        github = [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Svc", "success")]
+        full = ci_wait.complete_runs(done, "o/r", "develop", fetch=lambda *a: github)
+        assert [r.run_id for r in full.runs] == [10, 11] and ci_wait.summarize(full)[1] == ci_wait.EXIT_SUCCESS

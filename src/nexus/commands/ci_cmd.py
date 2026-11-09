@@ -47,7 +47,8 @@ def ci_wait_cmd(
     the newest is used. Meant to run as a background command, so its exit
     wakes the session that pushed. The board wake is best effort, so at the
     deadline a full SHA is looked up on GitHub once: finished runs are
-    reported as usual, unfinished ones as a timeout.
+    reported as usual, unfinished ones as a timeout. A row the board capped
+    at its size limit is completed from the same GitHub listing, once.
 
     Exit 0 when every run succeeded (neutral and skipped count), 1 on any
     failure (failure, timed_out, startup_failure, action_required), 3 when

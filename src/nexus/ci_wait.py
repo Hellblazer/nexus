@@ -15,8 +15,9 @@ a row written before it has ``[run_id, attempt]``, conclusion unknown, and
 for those runs this reads each run's conclusion from GitHub once, after the
 row arrives. The body's ``n`` counts every run in the fold; the adapter's
 1024-byte cap drops trailing entries, so when ``n`` is more than the runs
-listed and none of them failed, the dropped runs are read from GitHub once,
-and the result is unknown if they cannot be.
+listed and none of them failed, the sha's push runs are read from GitHub
+once and used only when they are the fold by identity (:func:`complete_runs`);
+otherwise the result is unknown.
 
 Outcome, the reduction the adapter's ``outcome`` dim states (bob, .11.1):
 failure if any run is failure, timed_out, startup_failure or
@@ -183,10 +184,10 @@ def gh_run_conclusion(gh_repo: str, run_id: int, attempt: int) -> tuple[str | No
 def gh_push_runs(gh_repo: str, sha: str, branch: str) -> list[Run] | None:
     """The push runs GitHub lists for *sha* (a full sha) on *branch*, each
     with its conclusion or None while it runs; None when GitHub cannot be read
-    or the list may be cut short. Read at most once per wait: at the deadline,
-    to tell a dropped board wake from CI still running, or for a capped row
-    (:func:`complete_runs`). The branch filter keeps out the
-    same sha's runs elsewhere (main after a promotion, a release tag)."""
+    or the list may be cut short. Read at most once per wait: at the
+    deadline, to tell a dropped board wake from CI still running, or for a
+    capped row (:func:`complete_runs`). The branch filter keeps out the same
+    sha's runs elsewhere (main after a promotion, a release tag)."""
     got = _gh_json(
         f"repos/{gh_repo}/actions/runs?head_sha={sha}&event=push&branch={quote(branch, safe='')}&per_page=100",
         "[.total_count, [.workflow_runs[] | [.id, .run_attempt, .name, .conclusion, .head_branch]]]",
@@ -238,6 +239,14 @@ def complete_runs(
     on its first attempt (a later attempt cannot be told from a rerun since
     the fold). Anything else leaves the row capped, which :func:`summarize`
     reports as unknown: a capped row whose dropped run was rerun stays exit 4.
+
+    Why the listing can stand for the fold (bob, conexus 051060d): "A --done
+    fold's members are the runs in GitHub's actions/runs?head_sha=<sha>&event=push
+    listing, at fold time, whose head_branch equals the branch and
+    head_repository equals the repo. The triggering run is added if the listing
+    lagged it. No workflow or other event filter applies." A later listing is
+    therefore a superset of the fold, and a run created after it has a higher
+    id: it makes more than ``total`` runs, never a wrong one.
     """
     if not row.capped or any(r.conclusion in FAILURE_CONCLUSIONS for r in row.runs):
         return row
