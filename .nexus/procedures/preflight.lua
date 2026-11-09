@@ -145,6 +145,18 @@ local CLASSES = {
     end,
   },
   {
+    -- A Lua procedure, shipped or the repo's own. Every procedure's tests run:
+    -- they are fast, and a procedure's tests are named for it, not found by it.
+    name = "procedure",
+    patterns = {"^src/nexus/procedures/[^/]+%.lua$", "^%.nexus/procedures/[^/]+%.lua$"},
+    checks = function()
+      return {
+        step("the procedure tests",
+          "uv run pytest -q -p no:randomly tests/test_procedure_*.py tests/test_shipped_procedures_lint.py", false),
+      }
+    end,
+  },
+  {
     -- CI's doc-only predicate, arm by arm: a path with a directory outside
     -- docs/ and web/ is code there, and so is web/install.*.
     name = "docs",

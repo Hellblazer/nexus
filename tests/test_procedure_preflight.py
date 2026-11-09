@@ -423,6 +423,20 @@ def test_an_unclassified_path_is_listed_and_still_code(repo: Path) -> None:
     assert set(_commands(out)) == {"code"}
 
 
+def test_a_procedure_change_runs_the_procedure_tests(repo: Path) -> None:
+    """A shipped or repo Lua procedure is its own class, not unclassified: a
+    change to one runs every procedure's tests (gate_record.lua was
+    unclassified, so preflight never named its tests; nexus-qo7ie.34)."""
+    _change(repo, {"src/nexus/procedures/x.lua": "return 1\n", ".nexus/procedures/y.lua": "return 2\n"})
+    out = _Run(repo)()
+    assert out["unclassified"] == {}
+    assert _class_names(out) == ["procedure"]
+    assert out["code"] is True
+    assert _commands(out)["procedure"] == [
+        "uv run pytest -q -p no:randomly tests/test_procedure_*.py tests/test_shipped_procedures_lint.py"
+    ]
+
+
 def test_counts_come_from_diff_stat(repo: Path) -> None:
     _change(repo, {"src/nexus/x.py": "a\nb\nc\n"})
     out = _Run(repo)()
