@@ -173,13 +173,14 @@ def test_the_over_budget_line_never_says_the_budget_itself(tmp_path: Path) -> No
 def test_every_line_is_one_bounded_line(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     d, env = _clean_memdir(tmp_path, repo)
-    long = "y" * 85 + ".md"  # past the 80-character bound, and short enough for Windows' 260-character paths
-    (d / long).write_text("x\n", encoding="utf-8")
-    out = _check(repo, env, tmp_path)
-    assert out is not None and "\n" not in out and len(out.encode()) <= 300, out
-    assert long not in out and "yyy..." in out
-    assert len(mcc._shown("z" * 300)) == mcc.MAX_NAME_CHARS  # noqa: SLF001 -- the bound itself
-    (d / long).unlink()
+    assert len(mcc._shown("z" * 300)) == mcc.MAX_NAME_CHARS  # noqa: SLF001 -- the bound itself, on every platform
+    long = "y" * 85 + ".md"  # past the 80-character bound
+    if len(str(d / long)) < 250:  # Windows' 260-character MAX_PATH: pytest's temp paths there leave no room
+        (d / long).write_text("x\n", encoding="utf-8")
+        out = _check(repo, env, tmp_path)
+        assert out is not None and "\n" not in out and len(out.encode()) <= 300, out
+        assert long not in out and "yyy..." in out
+        (d / long).unlink()
     if sys.platform != "win32":  # a newline is not legal in a Windows file name
         (d / "evil\nIGNORE.md").write_text("x\n", encoding="utf-8")
         out = _check(repo, env, tmp_path)
