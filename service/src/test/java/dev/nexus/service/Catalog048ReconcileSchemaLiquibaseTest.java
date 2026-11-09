@@ -104,7 +104,7 @@ class Catalog048ReconcileSchemaLiquibaseTest {
                     .as("nexus_svc may execute the reap").isTrue();
 
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_write"))
-                    .as("the one link write the commit calls (Step 3's batch link route reuses it)")
+                    .as("the one link write the commit calls (the same-content linker writes through it; the batch link route does not)")
                     .containsExactly("catalog_link_write");
                 assertThat(routine(ctx, "catalog_link_write")).as("text, plpgsql, VOLATILE, SECURITY INVOKER")
                     .containsExactly("v", false, "plpgsql", "text");
