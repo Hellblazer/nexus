@@ -576,6 +576,19 @@ def _check_from_cursor(row: tuple[str, str], field: str) -> None:
         )
 
 
+def check_from_read(n: int, start: tuple[str, str], through: tuple[str, str] | None) -> None:
+    """Refuse a malformed :meth:`HttpTupleStore.rd_from` read before anything
+    is sent: *n* below 1, a pair that is not one row's ``created_at`` and
+    ``id``, or a *through* row ordered before *start*."""
+    if n < 1:
+        raise SchemaViolationError(f"field 'n': {n} must be at least 1")
+    _check_from_cursor(start, "from")
+    if through is not None:
+        _check_from_cursor(through, "through")
+        if (_parse_row_time(through[0]), through[1].lower()) < (_parse_row_time(start[0]), start[1].lower()):
+            raise SchemaViolationError("the 'through' row is ordered before the 'from' row")
+
+
 def _not_in(row: tuple[str, str], subspace: str) -> str:
     return (
         f"tuple {row[1]} created {row[0]} is not in {subspace} "
@@ -1017,15 +1030,9 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         any row ordered before *start*. Raises :class:`LookupError` when
         *start* or *through* is not in the subspace (expired, consumed, or not
         a row of it): never a silent start at the next row."""
-        if n < 1:
-            raise SchemaViolationError(f"field 'n': {n} must be at least 1")
-        _check_from_cursor(start, "from")
-        if through is not None:
-            _check_from_cursor(through, "through")
+        check_from_read(n, start, through)
         target = (_parse_row_time(start[0]), start[1].lower())
         end = (_parse_row_time(through[0]), through[1].lower()) if through is not None else None
-        if end is not None and end < target:
-            raise SchemaViolationError("the 'through' row is ordered before the 'from' row")
         cursor: tuple[str, str] = (start[0], "0" * 64)
         out: list[TupleRow] = []
         reached_end = False

@@ -36,10 +36,12 @@ Layers, cheapest first:
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import dataclasses
 import os
+import re
 import threading
 import time
 import uuid
@@ -1466,7 +1468,7 @@ class TestChannelWaiterRealEngine:
         transaction started earlier but committed later (`created_at` is
         the transaction START time); it was an xfail here until this
         bead. Strict now: a lost or duplicated post fails."""
-        from nexus.mcp.core import tuple_out
+        from nexus.mcp.core import tuple_out, tuple_rd
         from nexus.mcp_infra import t2_ctx
 
         session_id = str(uuid.uuid4())
@@ -1524,6 +1526,32 @@ class TestChannelWaiterRealEngine:
             f"subscriber through the board path. ids: {sorted(missing)[:10]}"
         )
         assert len(seen) == len(set(seen)), "max=1 per subscriber: no post is announced twice"
+        # nexus-1d6pz.11.2: every notice's printed read returns its posts. Two
+        # writers interleave, so a batch's posts need not be consecutive: the
+        # read runs from the first through the last and may return a post
+        # announced elsewhere between them, but never misses one of its own.
+        # The old batch form, tuple_rd(board, n=count), read the OLDEST rows.
+        reads = 0
+        for content, m in sender.calls:
+            if m.get("subspace") != board:
+                continue
+            call = re.search(r"(tuple_rd\(.*?\))\. Posts are never claimed", content)
+            assert call, content
+            node = ast.parse(call.group(1), mode="eval").body
+            got = tuple_rd(
+                *[ast.literal_eval(a) for a in node.args],
+                **{k.arg: ast.literal_eval(k.value) for k in node.keywords},
+            )
+            assert all("error" not in r for r in got), got
+            got_ids = [r["id"] for r in got]
+            announced = m["tuple_ids"].split(",") if m.get("tuple_ids") else [m["tuple_id"]]
+            if len(announced) == 1:
+                assert got_ids == announced, (content, got_ids)
+            else:
+                assert got_ids[0] == announced[0] and got_ids[-1] == announced[-1], (content, got_ids)
+                assert set(announced) <= set(got_ids), (content, got_ids)
+            reads += 1
+        assert reads >= 2, f"non-vacuity: only {reads} notices were read back"
 
     def test_announce_mode_never_loses_a_row_to_a_concurrent_writer_skew(self, t2_service_env) -> None:
         """(g) THE STOP RULE, mailbox path (bead nexus-vsipz, RDR-213
