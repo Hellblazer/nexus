@@ -40,6 +40,7 @@ def test_all_command_modules_registered():
     # several add_command() calls (all of which must be present).
     _MODULE_TO_CLI = {
         "agents_cmd": "agents",
+        "ci_cmd": "ci",
         "command_context": "command-context",
         "config_cmd": "config",
         "context_cmd": "context",
