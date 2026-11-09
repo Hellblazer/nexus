@@ -25,12 +25,15 @@ class MainTrustAnchorsWiringTest {
         int requested = src.indexOf(check);
         int print = src.indexOf("TrustAnchors.print(System.out);");
         int returns = src.indexOf("return;", print);
-        int goOffline = src.indexOf("LocalTokenizers.goOffline();");
+        int goOffline = src.indexOf("        goOfflineAtStartup();");
 
         assertThat(requested).as("Main checks for the mode").isPositive();
         assertThat(src.indexOf(check, requested + 1)).as("once").isNegative();
         assertThat(print).as("and prints the anchors when asked").isGreaterThan(requested);
         assertThat(returns).as("then returns").isGreaterThan(print).isLessThan(goOffline);
         assertThat(goOffline).as("before the first boot step").isGreaterThan(requested);
+        // nexus-4lqi7: the step is one method that the egress witness child also calls, and it is the real switch.
+        assertThat(src).as("the startup step is the real switch").contains(
+            "static void goOfflineAtStartup() {\n        LocalTokenizers.goOffline();\n    }");
     }
 }
