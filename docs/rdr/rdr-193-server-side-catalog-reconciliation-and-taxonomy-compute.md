@@ -992,15 +992,24 @@ stage calls, one commit, and polls.
      `source_uri` equals the URI derived from the named owner's `repo_root`
      and the path, whichever owner registered it. That finds the same file
      under a stale owner of the same repository, and can never find another
-     repository's file, whose URI has another root. Failing that, it
+     repository's file, whose URI has another root: the derived URI must lie
+     inside the normalised root (the reconcile commit's containment rule), so
+     an absolute path elsewhere, a `..` path that leaves the root, or an
+     absolute path under an owner with no root is `no_path`. Failing that, it
      resolves to the named owner's live row with that `file_path` (several:
      the one `documentsByOwner` lists last). For the file-path linkers the
      named owner is the source document's owner. No match is returned in
      `unresolved` as `no_path`.
    - A tumbler endpoint follows `alias_of` to its canonical, and both rows
      are locked in sorted order, the `resolveAndLockLinkEndpoints` contract.
-     An endpoint that is not live after resolution is returned in
-     `unresolved` as `dangling` and not written.
+     An endpoint that is not live after resolution, including an alias
+     whose canonical is tombstoned or gone, a cycle and a chain past 16
+     hops, is returned in `unresolved` as `dangling` and not written; the
+     rest of the batch still writes. Each entry is `{index, side, reason}`
+     and names the first failing side of the edge. A call whose endpoints
+     do not settle in 8 lock rounds, and a deadlock, serialization failure
+     or lock timeout, answers 503 `transient_db_error`, as the reconcile
+     poll does.
    - The insert is `ON CONFLICT DO NOTHING` on `(tenant_id, from_tumbler,
      to_tumbler, link_type)` of the resolved pair, so an existing link
      keeps its fields. Self-links are not refused; `upsertLink` accepts
@@ -1043,14 +1052,19 @@ stage calls, one commit, and polls.
      endpoints have a settled key and the keys differ (a key is unsettled
      when `index_content_hash` and the metadata hash are both set and
      disagree); a link with `co_discovered_by` is kept. The members of
-     retracted links are then linked again. The retraction uses whatever
-     `unlink` does today (inferred, not read: whether that is a soft or a
-     hard delete is checked at Step 3). Today's refusal on an empty fetch
+     retracted links are then linked again. The retraction is what
+     `unlink` does today, a hard delete of the one row (checked at Step 3:
+     `deleteLink` runs a plain DELETE). Today's refusal on an empty fetch
      (link_generator.py:972-980) becomes: refuse when candidate links exist
-     and no live `pdf` or `paper` document does.
+     and no live `pdf` or `paper` document does, answered as
+     `{created: 0, retracted: 0, refused: "empty_fetch"}` with nothing
+     written. The members and anchors are locked as in item 1 before any
+     link is written.
    - Routes: `POST /v1/catalog/links/upsert_many {edges}` (at most 1000
-     edges per call) and `POST /v1/catalog/links/same_content {tumblers,
-     prune}` returning `{created, retracted}`.
+     edges per call; a malformed edge is a 400 naming its index and fails
+     the batch) and `POST /v1/catalog/links/same_content {tumblers,
+     prune}` (at most 1000 tumblers per call) returning `{created,
+     retracted}`.
 4. **Client:**
    - The file-path linkers keep their regex scans of new files and send
      path edges through one `links_upsert_many` call per generator (paged
