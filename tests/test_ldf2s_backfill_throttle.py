@@ -836,3 +836,19 @@ def test_the_help_names_the_guard_and_the_runbook_note():
                    "re-reads", "Exit codes:"):
         assert needle in text or needle.replace("re-reads", "reads the chunk rows of most documents again") in text, needle
     assert "a few requests per round" not in text and "2.5 requests/s" not in text
+
+
+def test_the_cli_reports_a_failed_owner_listing_in_the_text_and_the_json(monkeypatch):
+    def _down(include_deactivated=False):
+        raise RuntimeError("owners route down")
+
+    w = _catalog()
+    w.list_owners = _down
+    result, _ = _invoke(monkeypatch, w)
+    assert result.exit_code == 0, result.output
+    assert "listing FAILED, so the rule was off" in result.stdout
+    w = _catalog()
+    w.list_owners = _down
+    result, _ = _invoke(monkeypatch, w, "--json")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["repo_listing_failed"] is True

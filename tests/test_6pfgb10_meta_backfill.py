@@ -872,3 +872,21 @@ def test_repo_prose_collections_keeps_docs_and_rdr_rows_with_their_owner_column(
 
     assert mb.repo_prose_collections(_R()) == {OWN_DOCS: "1-87", OWN_RDR: "1-87"}
     assert mb.repo_prose_collections(object()) == {}
+
+
+def test_a_failed_owner_listing_turns_the_rule_off_for_the_run_and_the_report_says_so():
+    w = _World()
+    w.entries = [_repo_doc({}, "prose", "Ghidra/a.sinc", tumbler="1.87.5"), _indexed({}, "code", "src/a.py", tumbler="1.4.6")]
+
+    def _down(include_deactivated=False):
+        raise RuntimeError("owners route down")
+
+    w.list_owners = _down
+    rep = mb.backfill_meta(w, w, w, apply=True)
+    stamped = {u["tumbler"]: u["meta"].get("tags") for u in w.updates}
+    assert stamped.get("1.4.6") == ["py"], "the run goes on and the other derived keys still stamp"
+    assert stamped.get("1.87.5") is None, "the rule is off: no repo-collection tag without the owner listing"
+    assert rep.repo_listing_failed and rep.repo_owners == 0
+    assert rep.as_dict()["repo_listing_failed"] is True
+    clean = mb.backfill_meta(_World(entries=[_indexed({}, "code", "src/b.py", tumbler="1.4.7")]), _World(), None, apply=False)
+    assert "repo_listing_failed" not in clean.as_dict(), "a clean run's JSON carries no failure key"
