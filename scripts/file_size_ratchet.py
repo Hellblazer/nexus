@@ -261,14 +261,19 @@ def check(root: Path) -> Findings:
                 )
     for d in sorted(dir_ceilings):
         if counts.get(d, 0) <= DIR_MODULE_CAP:
-            notes.append(f"{d}/: within the module cap: remove its exception")
+            # Like a stale file entry: left in place it would let the directory regrow past the cap.
+            errors.append(
+                f"{d}/: within the module cap; remove its exception (update-exceptions)"
+            )
     for f in families:
         if f not in fam_allowed:
             errors.append(
                 f"{f}.py sits beside {f}_*.py; make {f.rsplit('/', 1)[1]} a package {_RAISE_HINT}"
             )
     for f in sorted(fam_allowed - set(families)):
-        notes.append(f"family {f}: no longer a family: remove its exception")
+        errors.append(
+            f"family {f}: no longer a family; remove its exception (update-exceptions)"
+        )
     return Findings(errors, warnings, notes)
 
 

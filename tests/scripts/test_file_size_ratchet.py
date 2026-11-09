@@ -242,15 +242,17 @@ def test_listed_directory_growth_warns_and_unlisted_fails(repo: Path) -> None:
     assert any("below its ceiling of 6" in n for n in fsr.check(repo).notes)
 
 
-def test_dissolved_family_and_dir_are_noted(repo: Path) -> None:
+def test_dissolved_family_and_dir_fail_until_removed(repo: Path) -> None:
     _write(repo, "src/nexus/a.py", 1)
     _track(repo)
     (repo / fsr.SHAPE_EXCEPTIONS).write_text(
         "dir src/nexus 9\nfamily src/nexus/session\n"
     )
-    notes = "\n".join(fsr.check(repo).notes)
-    assert "src/nexus/: within the module cap" in notes
-    assert "family src/nexus/session: no longer a family" in notes
+    errors = "\n".join(fsr.check(repo).errors)
+    assert "src/nexus/: within the module cap" in errors
+    assert "family src/nexus/session: no longer a family" in errors
+    assert fsr.update_exceptions(repo, allow_raise=False) == []
+    assert fsr.check(repo).errors == [], "update-exceptions removes both"
 
 
 def test_update_refuses_family_and_dir_raise_and_writes_no_shape_file(
