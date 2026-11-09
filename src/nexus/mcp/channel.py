@@ -606,11 +606,16 @@ def _board_exact_read(
 #: sha a notice repeats: exactly 40 lowercase hex digits, as the conexus adapter writes it.
 _CI_DONE_TOPIC = re.compile(r"board/ci/[^/]+--done")
 _SHA40 = re.compile(r"[0-9a-f]{40}")
+#: A --done body is at most 1024 bytes (the board-ci template); a larger one is not parsed on
+#: the event loop, and its notice names no sha.
+_CI_DONE_BODY_MAX = 4096
 
 
 def _ci_done_sha(subspace: str, row: TupleRow) -> str | None:
-    """nexus-1d6pz.11.3: the commit a ``board/ci/*--done`` row reports, so its notice can
-    name it and a session that pushed can tell its own wake from a peer's without a read.
+    """nexus-1d6pz.11.3: the commit a ``board/ci/*--done`` row reports, carried in the
+    notice's meta (``sha``; ``shas`` on a batch) so a session can tell which push a wake is
+    for without a read. Meta only, never the notice text: the text stays built from
+    identifiers the server controls (T2 nexus_rdr/211-decision-push-reference-2026-09-17).
     The row's ``sha`` dim when it is set (the adapter writes it once engine v0.1.184 carries
     the board-ci template, nexus-1d6pz.11.1), else the body's ``sha``. Notices are otherwise
     reference-only because a body is unattested, so nothing of it passes but a value that is
@@ -620,8 +625,11 @@ def _ci_done_sha(subspace: str, row: TupleRow) -> str | None:
     dim = row.dims.get("sha") if isinstance(row.dims, dict) else None
     if isinstance(dim, str) and _SHA40.fullmatch(dim):
         return dim
+    raw = row.body
+    if not isinstance(raw, str) or len(raw) > _CI_DONE_BODY_MAX:
+        return None
     try:
-        body = json.loads(row.body or "")
+        body = json.loads(raw)
     except (ValueError, RecursionError):
         return None
     sha = body.get("sha") if isinstance(body, dict) else None
@@ -630,11 +638,10 @@ def _ci_done_sha(subspace: str, row: TupleRow) -> str | None:
 
 def _board_notification_content(
     subspace: str, tuple_id: str, *, created_at: str | None = None,
-    case: str | None = None, session: str | None = None, sha: str | None = None,
+    case: str | None = None, session: str | None = None,
 ) -> str:
-    about = f" for sha {sha}" if sha else ""
     text = (
-        f"nexus board post: subspace {subspace}, tuple {tuple_id}{about}. Read it with "
+        f"nexus board post: subspace {subspace}, tuple {tuple_id}. Read it with "
         f"{_board_exact_read(subspace, tuple_id, created_at)}. Posts are never claimed."
     )
     return text + _label_sentence(case, session) if case else text
@@ -644,7 +651,6 @@ def _board_batch_notification_content(
     subspace: str, count: int, first_id: str, last_id: str, first_created_at: str | None,
     last_created_at: str | None = None,
     *, unverified: list[tuple[str, str, str | None]] | None = None,
-    shas: list[str] | None = None,
 ) -> str:
     """Bead nexus-zxthy: ONE notification for *count* posts of one wait.
     Identifiers only, as the single-post shape (Sam, 2026-09-17, T2
@@ -655,10 +661,9 @@ def _board_batch_notification_content(
     rows); a post that committed late can sort between them and is
     returned too, and the meta's ``tuple_ids`` names the announced ones."""
     read = _board_exact_read(subspace, first_id, first_created_at, (last_id, last_created_at))
-    about = f" for shas {', '.join(sha[:12] for sha in shas)}" if shas else ""
     text = (
         f"nexus board posts: subspace {subspace}, {count} new posts, tuples {first_id} "
-        f"to {last_id}{about}. Read them with {read}. Posts are never claimed."
+        f"to {last_id}. Read them with {read}. Posts are never claimed."
     )
     if unverified:
         text += f" Sender not confirmed on {len(unverified)} of them."
@@ -1680,7 +1685,7 @@ class ChannelWaiter:
             _label_meta(meta, row, case)
             content = _board_notification_content(
                 subspace, row.id, created_at=row.created_at,
-                case=case, session=canonical_session(row.sender_session), sha=sha,
+                case=case, session=canonical_session(row.sender_session),
             )
             if not await self._send(content, meta, hold=delivered):
                 return
@@ -1722,7 +1727,7 @@ class ChannelWaiter:
                     meta["sender"] = words.pop()
             content = _board_batch_notification_content(
                 subspace, len(kept), first.id, last.id, first.created_at, last.created_at,
-                unverified=unverified, shas=[sha for sha in row_shas if sha],
+                unverified=unverified,
             )
             if not await self._send(content, meta, hold=delivered):
                 return

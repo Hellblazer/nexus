@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-1d6pz.11.3: a CI board notice names the sha its row is for, so a session that pushed
-can tell its own wake from a peer's without a read.
+"""nexus-1d6pz.11.3: a CI board notice carries the sha its row is for in its meta, so a session
+can tell which push a wake is for without a read.
 
 Option (a) of the bead, built on what the board carries today: the conexus adapter
 (nexus-1d6pz.11.1, live 2026-11-09) writes the sha in the row body, and its ``sha`` dim stays
@@ -10,6 +10,7 @@ nothing else of it reaches the notice. Tenant-free: the waiter's delivery is dri
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import uuid
 
@@ -17,6 +18,7 @@ import pytest
 
 from nexus.db.t2.records import TupleRow
 from nexus.mcp import channel
+from tests.hooks.test_stop_wake_guard import _load as _load_guard
 from tests.test_mcp_channel import _FakeSender, _FakeTupleStore, _fake_store_factory, _subs
 
 DONE = "board/ci/nexus-develop--done"
@@ -49,7 +51,8 @@ async def _deliver(subspace: str, rows: list[TupleRow]) -> list[tuple[str, dict[
 async def test_a_single_ci_done_notice_names_its_sha() -> None:
     [(content, meta)] = await _deliver(DONE, [_row("t1", _done(SHA_A))])
     assert meta["sha"] == SHA_A
-    assert f"for sha {SHA_A}" in content
+    # meta only: the text stays server-built identifiers (2026-09-17 reference-only decision)
+    assert SHA_A not in content
 
 
 @pytest.mark.asyncio
@@ -68,7 +71,7 @@ async def test_a_batch_names_each_post_s_sha_in_tuple_id_order() -> None:
     [(content, meta)] = await _deliver(DONE, rows)
     assert meta["tuple_ids"] == "t1,t2,t3"
     assert meta["shas"] == f"{SHA_A},-,{SHA_B}"  # "-": no sha this notice can vouch for
-    assert f"shas {SHA_A[:12]}, {SHA_B[:12]}" in content
+    assert SHA_A[:12] not in content and SHA_B[:12] not in content
 
 
 @pytest.mark.asyncio
@@ -89,7 +92,7 @@ async def test_the_dim_wins_over_the_body_once_the_adapter_writes_it() -> None:
 async def test_a_body_sha_that_is_not_exactly_40_lowercase_hex_is_left_out(sha) -> None:
     [(content, meta)] = await _deliver(DONE, [_row("t1", _done(sha))])  # type: ignore[arg-type]
     assert "sha" not in meta
-    assert "for sha" not in content and "injected" not in content
+    assert "injected" not in content
 
 
 @pytest.mark.asyncio
@@ -102,4 +105,27 @@ async def test_a_bad_dim_falls_back_to_the_body() -> None:
 @pytest.mark.parametrize("subspace", ["board/ci/nexus-develop", "board/releases", "board/ci/nexus-develop--done/x"])
 async def test_only_a_ci_done_topic_gets_a_sha(subspace: str) -> None:
     [(content, meta)] = await _deliver(subspace, [_row("t1", _done(SHA_A))])
-    assert "sha" not in meta and "for sha" not in content
+    assert "sha" not in meta and SHA_A not in content
+
+
+@pytest.mark.asyncio
+async def test_a_nested_topic_is_not_a_ci_done_topic() -> None:
+    [(_c, meta)] = await _deliver("board/ci/a/b--done", [_row("t1", _done(SHA_A))])
+    assert "sha" not in meta
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_or_non_string_body_gives_no_sha() -> None:
+    big = json.dumps({**_done(SHA_A), "pad": "x" * 5000})
+    [(_c, meta)] = await _deliver(DONE, [_row("t1", big)])
+    assert "sha" not in meta
+    assert channel._ci_done_sha(DONE, dataclasses.replace(_row("t2", "{}"), body=5)) is None  # noqa: SLF001
+
+
+def test_the_channel_and_the_stop_hook_guard_agree_on_the_ci_done_topic() -> None:
+    """The guard (nexus-1d6pz.11.5) allows a closing CI wait on a board/ci/*--done subscription;
+    both patterns must name the same topics or one drifts silently."""
+    guard = _load_guard()
+    for topic in ["board/ci/nexus-develop--done", "board/ci/a--done", "board/ci/a/b--done", "board/ci/--done",
+                  "board/ci/a--done/", "board/ci/a--donex", "board/releases"]:
+        assert bool(channel._CI_DONE_TOPIC.fullmatch(topic)) == bool(guard._CI_DONE_TOPIC.fullmatch(topic)), topic  # noqa: SLF001
