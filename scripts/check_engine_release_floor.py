@@ -533,7 +533,7 @@ def check_sensitivity_exclude_floor_vs_pin() -> int:
 def check_resolve_sensitive_floor_vs_pin() -> int:
     """A release must pin an engine whose ``resolve_or_register`` accepts ``sensitive`` (RDR-193 Step 6, nexus-u5m5g.7).
 
-    The client sends ``"sensitive": true`` on a sensitive titled ``nx store put`` and a sensitive curator register;
+    The client sends ``"sensitive": true`` on a sensitive titled store put and a sensitive curator register;
     engine v0.1.184 and older answer that request 400, so every such write would fail. Same shape and the same callers
     as :func:`check_note_uri_floor_vs_pin`: the floor leads the pin on develop and only the release-gated modes compare
     them. Returns ``0`` (unset floor, or pin >= floor) or ``1``.
