@@ -76,15 +76,18 @@ def threshold_from_env(env: Mapping[str, str] | None = None) -> float | None:
 def _where(frame: Any, pkg_dir: str) -> str:
     code = frame.f_code
     path = code.co_filename
-    parent = os.path.dirname(pkg_dir.rstrip(os.sep)) + os.sep
-    short = path[len(parent):] if path.startswith(pkg_dir) else os.path.basename(path)
-    return f"{code.co_name} ({short}:{frame.f_lineno})"
+    if path.startswith(pkg_dir):
+        base = pkg_dir.rstrip("/\\")
+        short = path[max(base.rfind("/"), base.rfind("\\")) + 1:]
+    else:
+        short = os.path.basename(path)
+    return f"{code.co_name} ({short.replace(os.sep, '/')}:{frame.f_lineno})"
 
 
 def _in_event_loop(frame: Any) -> bool:
     f, depth = frame, 0
     while f is not None and depth < 64:
-        if f.f_code.co_filename.endswith(os.path.join("asyncio", "base_events.py")):
+        if f.f_code.co_filename.replace("\\", "/").endswith("asyncio/base_events.py"):
             return True
         f, depth = f.f_back, depth + 1
     return False

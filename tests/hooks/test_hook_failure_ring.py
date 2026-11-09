@@ -117,7 +117,8 @@ def test_plain_text_survives_the_scrub(text: str) -> None:
 
 
 @pytest.mark.parametrize("text", ["x" * 400_000, "token" * 80_000, "a:b@" * 100_000, "http://" * 50_000,
-                                  ("p" * 63 + "=") * 5000, "bearer " * 60_000])
+                                  ("p" * 63 + "=") * 5000, "bearer " * 60_000],
+                         ids=["word", "token-run", "userinfo-run", "scheme-run", "name-run", "bearer-run"])
 def test_the_scrub_is_linear_on_hostile_text(text: str) -> None:
     started = time.perf_counter()
     failure_ring.scrub(text)
@@ -400,7 +401,7 @@ def test_failures_says_so_when_the_ring_is_empty(tmp_path: Path, monkeypatch: py
 @pytest.mark.parametrize("text", [
     "-----BEGIN RSA PRIVATE KEY-----\n" * 30_000,
     "x -----BEGIN EC PRIVATE KEY----- y " * 30_000,
-])
+], ids=["begin-lines", "begin-no-end"])
 def test_pem_masking_is_linear(text: str) -> None:
     started = time.perf_counter()
     out = failure_ring.scrub(text)
