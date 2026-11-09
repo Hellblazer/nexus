@@ -55,9 +55,7 @@ cut the read. It cuts the decode of a line of 4 KB or more only where no
 selected field reads the line (``_inert``): a line whose type is not ``user``,
 ``assistant`` or ``attachment``, whatever ``fields`` says; an ``attachment``
 while ``instruction_loads``, ``deferred_tools`` and ``deferred_tools_dropped``
-are all unselected; a ``user`` line while no ``tool_calls.result_time`` or
-``tool_calls.is_error`` is selected and no slash command is (``slash_commands``
-in a main file); never an ``assistant`` line. See ``_parse_fields`` for the
+are all unselected; never a ``user`` or an ``assistant`` line. See ``_parse_fields`` for the
 grammar. ``project`` may also be
 the reserved value ``repo``: every project directory holding the sessions of
 the repository the run started in (``transcripts_projects``); a project
@@ -503,20 +501,13 @@ class _Session:
             self.call_keys & {"result_time", "is_error"}
         )
         self.want_deferred = bool(f.top & {"deferred_tools", "deferred_tools_dropped"})
-        # The user and attachment lines no selected field reads (``_inert``
-        # may stand in for them): an attachment is read only for its
-        # instruction files and deferred tools; a user line only for a result
-        # to pair with a call, or, in a main file, a slash command.
-        self.inert_kinds = frozenset(
-            kind
-            for kind, unread in (
-                ("attachment", self.load_keys is None and not self.want_deferred),
-                (
-                    "user",
-                    not self.track_results and (self.command_keys is None or not main),
-                ),
-            )
-            if unread
+        # The acting lines no selected field reads (``_inert`` may stand in for
+        # them): an attachment is read only for its instruction files and
+        # deferred tools. A user line is always decoded.
+        self.inert_kinds = (
+            frozenset({"attachment"})
+            if self.load_keys is None and not self.want_deferred
+            else frozenset()
         )
         self.call_count = 0
         self.start: str | None = None
@@ -749,26 +740,26 @@ class _Session:
 # interpreter's digit limit, which ``json.loads`` drops. One of these can come
 # from the harness: a session that crashes mid-write and resumes appends its
 # next record to the torn line, and the skip keeps the torn head's type and
-# stamp (for a user or attachment line, the stamp the resumed record leaves in
-# the tail) where the decode drops the whole line, so that transcript's start
-# or end can move to the torn event's time. Sam accepted this residual for
-# harness-written transcripts (ask baton/q37-residual, 2026-11-08).
+# stamp where the decode drops the whole line, so that transcript's start or
+# end can move to the torn event's time. For an attachment line the type, stamp
+# and ids come from the resumed record's tail, and the torn record is lost
+# either way. Sam accepted this residual for harness-written transcripts (ask
+# baton/q37-residual, 2026-11-08).
 #
-# An assistant line is never skipped. A user or attachment line is skipped only
+# An assistant or user line is never skipped. An attachment line is skipped only
 # while no selected field reads it (``_Session.inert_kinds``), and its type or
-# stamp then often follows the nested ``message`` or ``attachment`` object, out
-# of the opening run's reach. ``_tail`` reads the members after the last nested
-# value: text of nothing but ``,"key":scalar`` members from the last ``}`` or
-# ``]`` to the closing brace. In well-formed JSON those are members of the
-# top-level object (a string there has no ``"`` or ``\``, so each ``,"`` is a
-# member boundary), the same trust the run has; the line is decoded when a key
-# is in both the run and the tail. What it cannot reach is a stamp before a
-# nested value that ends the line: Claude Code writes ``rendered`` (an array)
-# after an attachment's stamp, and ``toolUseResult`` (an object) after a tool
-# result's, so those lines are decoded. Finding where the message or attachment
-# object ends by an anchor in its own text (``},"uuid":"``) would reach them,
-# and would assume no nested object is ever followed by such a key: that is not
-# proven here, and the regexes that walk the object itself ran slower than
+# stamp then often follows the nested ``attachment`` object, out of the opening
+# run's reach. ``_tail`` reads the members after the last nested value: text of
+# nothing but ``,"key":scalar`` members from the last ``}`` or ``]`` to the
+# closing brace. In well-formed JSON those are members of the top-level object
+# (a string there has no ``"`` or ``\``, so each ``,"`` is a member boundary),
+# the same trust the run has; the line is decoded when a key is in both the run
+# and the tail. What it cannot reach is a stamp before a nested value that ends
+# the line: Claude Code writes ``rendered`` (an array) after an attachment's
+# stamp, so those lines are decoded. Finding where the attachment object ends
+# by an anchor in its own text (``},"uuid":"``) would reach them, and would
+# assume no nested object is ever followed by such a key: that is not proven
+# here, and the regexes that walk the object itself ran slower than
 # ``json.loads`` on its string content.
 
 _PREPARSE = True  # a test seam: the tests switch it off to compare
@@ -792,8 +783,8 @@ def _inert(raw: bytes, s: _Session) -> dict[str, Any] | None:
     proven: ``isSidechain`` for a main file, and an id while ``s`` still lacks
     one (a line that names such a key outside what is read is decoded).
 
-    A flat line is read from its opening run. A user or attachment line that
-    ``s.inert_kinds`` names has its type or stamp after the nested message or
+    A flat line is read from its opening run. An attachment line that
+    ``s.inert_kinds`` names may have its type or stamp after the nested
     attachment object, so the members after the last nested value (``_tail``)
     are read too.
     """
@@ -874,9 +865,11 @@ def _tail(raw: bytes, start: int, want: list[bytes]) -> dict[bytes, bytes] | Non
     top-level object: a string there is quote-delimited with no escape, so a
     ``,"`` is a member boundary and never string content, and the closer before
     the run ends a nested value. A closer inside a string of the tail leaves a
-    remainder that does not start with a comma and a quote, and the line is
-    decoded. None when that does not hold, when a key of ``want`` is not in
-    the text, or when a key repeats.
+    remainder that does not match, and the line is decoded. A closer inside a
+    nested string cannot be followed by ``,"KEY":``: the quote after the comma
+    would close that string, and a bare ``KEY"`` after it is not well-formed
+    JSON. None when that does not hold, when a key of ``want`` is not in the
+    text, or when a key repeats.
     """
     stop = len(raw) - 8 + len(raw[-8:].rstrip(b" \t\r\n")) - 1  # the closing brace
     at = max(raw.rfind(b"}", start, stop), raw.rfind(b"]", start, stop))

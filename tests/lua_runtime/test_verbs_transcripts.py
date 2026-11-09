@@ -2373,12 +2373,12 @@ def test_an_inert_line_is_not_decoded(
     assert _stamped(decoded, _t(20))
     assert any("u-decoy" in t for t in decoded)
     assert any(DECOY in t and "api-request-blob" in t for t in decoded)
-    # assistant lines are always decoded, and so is a user or attachment line
-    # whose stamp sits before a nested value (a rendered array, a toolUseResult
-    # object); the tools selection reads no other user or attachment line
-    for sec in (10, 11, 12, 13, 14):
+    # assistant and user lines are always decoded, and so is an attachment line
+    # whose stamp sits before a nested value (a rendered array); the tools
+    # selection reads no other attachment line
+    for sec in (1, 2, 3, 4, 10, 11, 12, 13, 14, 15):
         assert _stamped(decoded, _t(sec)), sec
-    for sec in (1, 2, 3, 4, 5, 6, 7, 8, 9, 15):
+    for sec in (5, 6, 7, 8, 9):
         assert not _stamped(decoded, _t(sec)), sec
 
 
@@ -2419,9 +2419,7 @@ def test_a_skip_that_loses_the_stamp_is_caught_by_the_comparison(
 
     def lossy(raw, s):
         rec = real(raw, s)
-        if (
-            rec is not None and rec["type"] != "user"
-        ):  # a skipped line without its stamp
+        if rec is not None:  # a skipped line without its stamp
             rec.pop("timestamp", None)
         return rec
 

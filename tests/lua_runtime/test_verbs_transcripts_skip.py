@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""transcripts.sessions: the user and attachment lines no selected field reads
-are not decoded, and the records are unchanged (nexus-qo7ie.39, after
-nexus-qo7ie.37). The helpers and the skip-on/off comparison are the verb tests'."""
+"""transcripts.sessions: the attachment lines no selected field reads are not
+decoded, and the records are unchanged (nexus-qo7ie.39, after nexus-qo7ie.37).
+User and assistant lines are always decoded. The helpers and the skip-on/off
+comparison are the verb tests'."""
 
 from __future__ import annotations
 
@@ -30,13 +31,13 @@ from tests.lua_runtime.test_verbs_transcripts import (  # noqa: F401  (fixtures)
     root,
 )
 
-# ---- attachment and user lines no selected field reads -------------------------
+# ---- attachment lines no selected field reads ----------------------------------
 #
-# Their stamp and ids follow the nested attachment or message object, so they
-# are read from the members after the last nested value (the flat tail), which
-# the text proves are top-level. A line the selection reads (an attachment
-# while instruction_loads or deferred_tools is selected; a user line while a
-# result or a command is tracked) is decoded as before.
+# Their stamp and ids follow the nested attachment object, so they are read from
+# the members after the last nested value (the flat tail), which the text
+# proves are top-level. A line the selection reads (an attachment while
+# instruction_loads or deferred_tools is selected) is decoded as before, and a
+# user or assistant line is decoded whatever is selected.
 
 SID_L, SID_M, SID_N, SID_O = (f"{c * 8}-2222-3333-4444-555555555555" for c in "lmno")
 DECOY_HI = "2026-11-03T23:59:00.000Z"
@@ -213,7 +214,7 @@ def _q39_root(root: Path, pad: int) -> None:
 
 
 @pytest.mark.parametrize(("pad", "floor"), [(0, 0), (BIG, None)])
-def test_skipping_attachment_and_user_lines_changes_no_record(
+def test_skipping_attachment_lines_changes_no_record(
     root: Path, monkeypatch: pytest.MonkeyPatch, pad: int, floor
 ) -> None:
     _q39_root(root, pad)
@@ -246,26 +247,29 @@ def test_skipping_attachment_and_user_lines_changes_no_record(
     assert (SID_N, "AGN") in full and (SID_O, "AGT") in full
 
 
-def test_at_the_real_floor_the_attachment_and_user_lines_nobody_reads_are_not_decoded(
+def test_at_the_real_floor_the_attachment_lines_nobody_reads_are_not_decoded(
     root: Path, monkeypatch: pytest.MonkeyPatch, decoded: list[str]
 ) -> None:
     _q39_root(root, BIG)
     tools = ",".join(QUERIES["tools"][0])
     _ask(monkeypatch, True, tools, None, None)
-    # skipped: attachments whose stamp and ids are in the flat tail, user lines
-    # with the same shape (a prompt, a tool result with a flat tail, a subagent's)
+    # skipped: attachments whose stamp and ids are in the flat tail
     for hour, sec in [(19, 0), (19, 5), (19, 8), (19, 17), (19, 18), (19, 19)]:
         assert not _stamped(decoded, _h(hour, sec)), (hour, sec)
-    for hour, sec in [(19, 1), (19, 12), (19, 14), (20, 0), (21, 0), (21, 2), (21, 3)]:
+    for hour, sec in [(20, 0), (21, 0)]:
         assert not _stamped(decoded, _h(hour, sec)), (hour, sec)
     assert not _stamped(decoded, _h(22, 1))  # an agentId in the tail
-    # decoded: the assistant, a } in the tail, a stamp in head and tail, a stamp
-    # before a nested array or object, an escaped id, a value past the bound, an
-    # attachment with no top-level type, none with a flat tail, a bad line and a
-    # torn one, a whole last line with no newline, a nested agentId
+    # decoded: the assistant and every user line (a prompt, a command, a tool
+    # result with or without an object after the stamp, a subagent's), a } in
+    # the tail, a stamp in head and tail, a stamp before a nested array, an
+    # escaped id, a value past the bound, an attachment with no top-level type,
+    # none with a flat tail, a bad line and a torn one, a whole last line with no
+    # newline, a nested agentId
+    for hour, sec in [(19, 1), (19, 12), (19, 13), (19, 14), (21, 2), (21, 3)]:
+        assert _stamped(decoded, _h(hour, sec)), (hour, sec)
     for hour, sec in [(19, 2), (19, 4), (19, 7), (19, 9), (19, 10), (19, 11)]:
         assert _stamped(decoded, _h(hour, sec)), (hour, sec)
-    for hour, sec in [(19, 13), (19, 15), (19, 16), (19, 40), (19, 41), (20, 9)]:
+    for hour, sec in [(19, 15), (19, 16), (19, 40), (19, 41), (20, 9)]:
         assert _stamped(decoded, _h(hour, sec)), (hour, sec)
     assert _stamped(decoded, _h(22, 0))
     assert any(DECOY_HI in d for d in decoded)  # the nested-decoy line
@@ -282,6 +286,9 @@ def test_at_the_real_floor_the_attachment_and_user_lines_nobody_reads_are_not_de
         ("tool_calls.name,tool_calls.result_time,start", [(19, 1), (19, 14)]),
         ("tool_calls.name,tool_calls.is_error,start", [(19, 1), (19, 14)]),
         ("slash_commands,start", [(19, 1), (19, 12), (19, 14)]),
+        # no field reads a user line, and it is decoded all the same
+        ("tool_calls.name,start", [(19, 1), (19, 12), (19, 14), (21, 2)]),
+        ("start,end", [(19, 1), (19, 12), (19, 14), (21, 2)]),
     ],
 )
 def test_a_line_a_selected_field_reads_is_decoded(
@@ -297,15 +304,6 @@ def test_a_line_a_selected_field_reads_is_decoded(
         assert _stamped(decoded, _h(hour, sec)), (fields, hour, sec)
 
 
-def test_a_subagent_is_not_asked_for_commands_so_its_prompts_are_skipped(
-    root: Path, monkeypatch: pytest.MonkeyPatch, decoded: list[str]
-) -> None:
-    _q39_root(root, BIG)
-    _ask(monkeypatch, True, "slash_commands,start", None, None)
-    assert not _stamped(decoded, _h(21, 2))  # a subagent's prompt
-    assert _stamped(decoded, _h(19, 12))  # a main session's
-
-
 def test_a_skip_that_loses_what_the_tail_carries_is_caught_by_the_comparison(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -318,7 +316,7 @@ def test_a_skip_that_loses_what_the_tail_carries_is_caught_by_the_comparison(
 
         def lossy(raw, s, lose=lose):
             rec = real(raw, s)
-            if rec is not None and rec["type"] in ("attachment", "user"):
+            if rec is not None:
                 rec.pop(lose, None)
             return rec
 
@@ -326,3 +324,62 @@ def test_a_skip_that_loses_what_the_tail_carries_is_caught_by_the_comparison(
         assert _ask(monkeypatch, True, fields) != want, lose
     monkeypatch.setattr(vt, "_inert", real)
     assert _ask(monkeypatch, True, fields) == want
+
+
+def test_an_assistant_line_over_the_floor_with_a_full_opening_run_is_decoded(
+    root: Path, monkeypatch: pytest.MonkeyPatch, decoded: list[str]
+) -> None:
+    """The kind check comes before the tail: type, stamp, session and sidechain
+    in the opening run leave nothing to look up, so only the kind keeps an
+    assistant line from standing in as a skipped one."""
+    sid = f"{'p' * 8}-2222-3333-4444-555555555555"
+    asst = _c(
+        ("type", "assistant"),
+        ("timestamp", _h(23, 1)),
+        ("sessionId", sid),
+        ("isSidechain", False),
+        (
+            "message",
+            _asst_msg(
+                "p1",
+                [
+                    _tool_use("p1", "Bash", {"command": "ls"}),
+                    {"type": "text", "text": "x" * BIG},
+                ],
+            ),
+        ),
+        ("uuid", "u-p1"),
+    )
+    assert len(asst) >= vt._PREPARSE_MIN
+    _write_bytes(root / PROJECT / f"{sid}.jsonl", [asst.encode()])
+    [rec] = _ask(monkeypatch, True, "session_id,tool_calls.name", None, None)
+    assert rec["tool_calls"] == [{"name": "Bash"}]
+    assert _stamped(decoded, _h(23, 1))
+
+
+def test_a_crash_resumed_attachment_line_keeps_the_resumed_records_values(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The accepted residual of nexus-qo7ie.37 (ask baton/q37-residual), for an
+    attachment head: a session that crashes mid-write and resumes appends its
+    next record to the torn line. The decode drops the glued line. The skip finds
+    the resumed record's type, stamp and ids in the tail and keeps a stand-in
+    with them, so the transcript starts at the resumed record's stamp and takes
+    its session id. The torn record is lost either way."""
+    torn = '{"parentUuid":null,"isSidechain":false,"attachment":{"type":"hook_success","pad":"xx'
+    resumed = _att(23, 5, "RESUMED-ID", {"type": "hook_success", "pad": "y"})
+    glued = (torn + resumed).encode()
+    after = _line(
+        "assistant",
+        _h(23, 30),
+        "AFTER-ID",
+        _asst_msg("g1", [_tool_use("g1", "Bash", {"command": "ls"})]),
+    ).encode()
+    sid = f"{'g' * 8}-2222-3333-4444-555555555555"
+    _write_bytes(root / PROJECT / f"{sid}.jsonl", [glued, after])
+    fields = "session_id,start,end"
+    [dropped] = _ask(monkeypatch, False, fields, None, 0)
+    assert (dropped["session_id"], dropped["start"]) == ("AFTER-ID", _h(23, 30))
+    [kept] = _ask(monkeypatch, True, fields, None, 0)
+    assert (kept["session_id"], kept["start"]) == ("RESUMED-ID", _h(23, 5))
+    assert kept["end"] == dropped["end"] == _h(23, 30)
