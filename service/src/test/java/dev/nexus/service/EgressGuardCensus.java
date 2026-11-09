@@ -34,10 +34,18 @@ import java.util.stream.Stream;
  * Non-vacuity: {@link #scan} reports the sites it found, and the caller asserts the count is at least the
  * number the allowlist names.
  *
+ * <p>JDBC pools (nexus-4lqi7): {@code new HikariConfig}, {@code setJdbcUrl} and {@code new HikariDataSource} are
+ * constructs like the rest, pinned to exact counts (Main builds two pools). {@link #jdbcUrlProblems} then reads
+ * each {@code setJdbcUrl} argument: it must be a plain variable declared in the same file from the
+ * {@code NX_DB_URL} lookup ({@code requireEnv} or {@code System.getenv}) or from {@code url()} on an
+ * {@code AdminConnection} (the {@code NX_DB_ADMIN_URL} resolution). This catches a new pool and a pool handed a
+ * literal or another source; it does not catch a bad value of the right variable, which is the operator's
+ * to set.
+ *
  * <p>Not checked, by this class or by any other test in the repository:
  * <ul>
- *   <li>JDBC beyond {@code DriverManager}: the Hikari pools and the roughly dozen {@code ds.getConnection()}
- *       call sites, and that any URL comes from {@code NX_DB_URL};</li>
+ *   <li>the roughly dozen {@code ds.getConnection()} call sites on those pools, and any DataSource built
+ *       another way (a {@code DataSource} handed in, or a driver-specific class);</li>
  *   <li>any dependency's code, such as {@code java.net.http}, raw sockets or DNS used inside a library;</li>
  *   <li>the GraalVM native image the engine ships as (the witnesses run on a JVM);</li>
  *   <li>DJL's Rust tokenizers library, whose network I/O is JNI that no Java-level check sees;</li>
@@ -114,6 +122,13 @@ final class EgressGuardCensus {
         // A string literal that begins with http:// or https://. The Voyage host pin below reads the three Voyage
         // classes' literals; this puts every other one on the allowlist too.
         m.put("http(s) URL literal", Pattern.compile("\"\\s*https?://"));
+        // nexus-4lqi7: the JDBC pools. A pool opens connections to whatever URL it is given, so each construction
+        // site is pinned like any other outbound construct, and jdbcUrlProblems reads where the URL comes from.
+        m.put("new HikariConfig(", Pattern.compile(
+            "\\bnew\\s+(?:com\\s*\\.\\s*zaxxer\\s*\\.\\s*hikari\\s*\\.\\s*)?HikariConfig\\s*\\("));
+        m.put("setJdbcUrl(", Pattern.compile("\\bsetJdbcUrl\\s*\\("));
+        m.put("new HikariDataSource(", Pattern.compile(
+            "\\bnew\\s+(?:com\\s*\\.\\s*zaxxer\\s*\\.\\s*hikari\\s*\\.\\s*)?HikariDataSource\\s*\\("));
         return java.util.Collections.unmodifiableMap(m);
     }
 
@@ -132,6 +147,9 @@ final class EgressGuardCensus {
     /** What each Voyage class shows: exactly one client builder and exactly one URL constant. */
     private static final Map<String, Integer> VOYAGE_SITES =
         Map.of("HttpClient.newBuilder", 1, "http(s) URL literal", 1);
+
+    private static final Map<String, Integer> POOL_SITES =
+        Map.of("new HikariConfig(", 2, "setJdbcUrl(", 2, "new HikariDataSource(", 2);
 
     private static final Map<String, Integer> JDBC_SITE = Map.of("DriverManager.getConnection", 1);
 
@@ -161,6 +179,10 @@ final class EgressGuardCensus {
             "JDBC to the engine's own database (NX_DB_URL): the one-engine-per-database lock connection, outside the pool."));
         m.put("dev/nexus/service/db/BackendReaper.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_URL): the stale-backend reaper."));
+        m.put("dev/nexus/service/Main.java", Allow.pinned(POOL_SITES,
+            "The engine's two Hikari pools (nexus-4lqi7): the application pool, whose URL is NX_DB_URL, and the"
+                + " migration pool, whose URL is AdminConnection.url() (NX_DB_ADMIN_URL, else NX_DB_URL)."
+                + " The URL-source rule in this scan reads both setJdbcUrl arguments."));
         m.put("dev/nexus/service/vectors/EgressProxy.java", Allow.pinned(
             Map.of("ProxySelector.of/setDefault/getDefault", 1, "http(s) URL literal", 1),
             "The operator's egress proxy selector for the Voyage clients, read from NX_HTTPS_PROXY / HTTPS_PROXY. "
@@ -246,6 +268,7 @@ final class EgressGuardCensus {
                 files++;
                 String rel = root.relativize(file).toString().replace('\\', '/');
                 String src = stripComments(Files.readString(file));
+                problems.addAll(jdbcUrlProblems(rel, src));
                 for (Map.Entry<String, Pattern> c : CONSTRUCTS.entrySet()) {
                     Matcher m = c.getValue().matcher(src);
                     while (m.find()) {
@@ -308,6 +331,78 @@ final class EgressGuardCensus {
             problems.addAll(voyageHostProblems(voyage, stripComments(Files.readString(file))));
         }
         return new Report(files, sites, allowlistSites, sitesByFile, byConstruct, problems);
+    }
+
+    // ---- the JDBC pool URL source (nexus-4lqi7) ----------------------------------------------------
+
+    private static final Pattern SET_JDBC_URL_CALL = Pattern.compile("\\bsetJdbcUrl\\s*\\(");
+    private static final Pattern SET_JDBC_URL_VARIABLE = Pattern.compile("\\bsetJdbcUrl\\s*\\(\\s*(\\w+)\\s*\\)");
+    private static final Pattern NX_DB_URL_LOOKUP = Pattern.compile(
+        "(?:\\brequireEnv|\\bSystem\\s*\\.\\s*getenv)\\s*\\(\\s*\"NX_DB_URL\"\\s*\\)");
+    private static final Pattern ADMIN_URL_CALL = Pattern.compile("(\\w+)\\s*\\.\\s*url\\s*\\(\\s*\\)");
+    private static final Pattern ADMIN_CONNECTION_VARIABLE = Pattern.compile("\\bAdminConnection\\s+(\\w+)\\b");
+
+    /** How many {@code setJdbcUrl} calls {@link #jdbcUrlProblems} examines under {@code root}: its non-vacuity count. */
+    static int jdbcUrlSites(Path root) throws IOException {
+        int n = 0;
+        try (Stream<Path> walk = Files.walk(root)) {
+            for (Path file : (Iterable<Path>) walk.filter(f -> f.toString().endsWith(".java"))::iterator) {
+                Matcher m = SET_JDBC_URL_CALL.matcher(stripComments(Files.readString(file)));
+                while (m.find()) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    /**
+     * Where each {@code setJdbcUrl} argument in one file comes from. The argument must be a plain variable, and
+     * every {@code String <name> = ...;} declaration of it in the file must read the {@code NX_DB_URL} lookup or
+     * call {@code url()} on a variable declared with the type {@code AdminConnection}. A file with no such
+     * declaration fails: the rule has nothing to read. Textual, like the rest of this class.
+     */
+    static List<String> jdbcUrlProblems(String rel, String strippedSource) {
+        List<String> problems = new ArrayList<>();
+        int calls = 0;
+        Matcher call = SET_JDBC_URL_CALL.matcher(strippedSource);
+        while (call.find()) {
+            calls++;
+        }
+        List<String> variables = new ArrayList<>();
+        Matcher plain = SET_JDBC_URL_VARIABLE.matcher(strippedSource);
+        while (plain.find()) {
+            variables.add(plain.group(1));
+        }
+        if (variables.size() < calls) {
+            problems.add(rel + " calls setJdbcUrl " + (calls - variables.size()) + " time(s) with an argument that is not "
+                + "a plain variable: a pool URL must come from the NX_DB_URL lookup or an AdminConnection, named by a variable");
+        }
+        Set<String> adminReceivers = new java.util.HashSet<>();
+        Matcher admin = ADMIN_CONNECTION_VARIABLE.matcher(strippedSource);
+        while (admin.find()) {
+            adminReceivers.add(admin.group(1));
+        }
+        for (String name : new java.util.TreeSet<>(variables)) {
+            Pattern declaration = Pattern.compile("\\bString\\s+" + Pattern.quote(name) + "\\s*=\\s*([^;]+);");
+            Matcher d = declaration.matcher(strippedSource);
+            int found = 0;
+            while (d.find()) {
+                found++;
+                String rhs = d.group(1);
+                Matcher url = ADMIN_URL_CALL.matcher(rhs);
+                boolean fromAdmin = url.matches() && adminReceivers.contains(url.group(1));
+                if (!fromAdmin && !NX_DB_URL_LOOKUP.matcher(rhs).matches()) {
+                    problems.add(rel + " gives setJdbcUrl the variable " + name + " = " + rhs.strip()
+                        + ", which is neither the NX_DB_URL lookup nor url() on an AdminConnection");
+                }
+            }
+            if (found == 0) {
+                problems.add(rel + " gives setJdbcUrl the variable " + name + ", which has no declaration "
+                    + "`String " + name + " = ...;` in the file: its source cannot be read");
+            }
+        }
+        return problems;
     }
 
     private static final Pattern URL_CONSTANT = Pattern.compile(
