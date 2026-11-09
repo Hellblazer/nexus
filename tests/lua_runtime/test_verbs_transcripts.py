@@ -2373,9 +2373,13 @@ def test_an_inert_line_is_not_decoded(
     assert _stamped(decoded, _t(20))
     assert any("u-decoy" in t for t in decoded)
     assert any(DECOY in t and "api-request-blob" in t for t in decoded)
-    # assistant, user and attachment lines are always decoded
-    for sec in (1, 5, 9, 12, 13, 14, 15):
+    # assistant lines are always decoded, and so is a user or attachment line
+    # whose stamp sits before a nested value (a rendered array, a toolUseResult
+    # object); the tools selection reads no other user or attachment line
+    for sec in (10, 11, 12, 13, 14):
         assert _stamped(decoded, _t(sec)), sec
+    for sec in (1, 2, 3, 4, 5, 6, 7, 8, 9, 15):
+        assert not _stamped(decoded, _t(sec)), sec
 
 
 def test_an_inert_line_is_decoded_when_the_text_does_not_vouch_for_a_wanted_key(

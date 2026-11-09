@@ -1,0 +1,3 @@
+### Changed
+
+- **`transcripts.sessions` skips decoding attachment and user lines no selected field reads** (nexus-qo7ie.39, follow-up to nexus-qo7ie.37). An attachment line is skipped while `instruction_loads`, `deferred_tools` and `deferred_tools_dropped` are all unselected, and a user line while no `tool_calls.result_time`, `tool_calls.is_error` or (in a main file) `slash_commands` is selected, when the text after the last nested value proves the line's type, stamp and ids are top-level. Records are unchanged; a line whose stamp sits before a nested array or object (Claude Code writes `rendered` and `toolUseResult` there) is still decoded.
