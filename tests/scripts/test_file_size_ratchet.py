@@ -101,7 +101,9 @@ def test_slack_and_stale_entries_are_noted(repo: Path) -> None:
     f = fsr.check(repo)
     assert f.errors == []
     joined = "\n".join(f.notes)
-    assert "big.py" not in joined, "headroom within tolerance is the seeded norm, not a finding"
+    assert "big.py" not in joined, (
+        "headroom within tolerance is the seeded norm, not a finding"
+    )
     assert "small.py: now within its cap" in joined
     assert "gone.py: listed with ceiling 40 but not a tracked" in joined
 
@@ -142,7 +144,9 @@ def test_update_lowers_and_drops_without_flag(repo: Path) -> None:
     assert fsr.check(repo).notes == []
     (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 30\n")  # past two slacks
     assert fsr.update_exceptions(repo, allow_raise=False) == []
-    assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 21}, "18 + 3"
+    assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 21}, (
+        "18 + 3"
+    )
 
 
 def test_update_refuses_raise_and_new_entries_without_flag(repo: Path) -> None:
@@ -214,7 +218,9 @@ def test_slack_past_tolerance_fails(repo: Path) -> None:
     _write(repo, "src/nexus/big.py", 16)
     _track(repo)
     (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 22\n")
-    assert fsr.check(repo).errors == [], "two slacks of SLACK_MIN (6 lines) are tolerated"
+    assert fsr.check(repo).errors == [], (
+        "two slacks of SLACK_MIN (6 lines) are tolerated"
+    )
     (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 23\n")
     assert any("lower it in this commit" in e for e in fsr.check(repo).errors)
 
@@ -317,7 +323,9 @@ def test_seeded_ceilings_carry_headroom_so_a_small_growth_passes(repo: Path) -> 
     assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 23}
     _write(repo, "src/nexus/big.py", 23)  # an ordinary edit
     assert fsr.check(repo).errors == []
-    assert fsr.update_exceptions(repo, allow_raise=False) == [], "an accepted entry is no raise"
+    assert fsr.update_exceptions(repo, allow_raise=False) == [], (
+        "an accepted entry is no raise"
+    )
     assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 23}
     _write(repo, "src/nexus/big.py", 24)
     assert any("over its ceiling of 23" in e for e in fsr.check(repo).errors)

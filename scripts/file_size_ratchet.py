@@ -303,7 +303,10 @@ def update_exceptions(root: Path, allow_raise: bool) -> list[str]:
 
     # An entry check accepts stays as it is (no churn on a shared file); a new, raised or too-slack
     # one is rewritten at the file's size plus its headroom.
-    new = {p: old[p] if p in old and accepted(n, old[p]) else ceiling_for(n) for p, n in over.items()}
+    new = {
+        p: old[p] if p in old and accepted(n, old[p]) else ceiling_for(n)
+        for p, n in over.items()
+    }
     body = "".join(f"{p} {n}\n" for p, n in sorted(new.items()))
     (root / SIZE_EXCEPTIONS).write_text(_SIZE_HEADER + body)
     shape = "".join(f"dir {d} {n}\n" for d, n in sorted(new_dirs.items()))
