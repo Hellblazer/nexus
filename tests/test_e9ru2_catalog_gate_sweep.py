@@ -77,6 +77,15 @@ class _FakeHttpCatalogClient:
         self.registered.append(fields)
         return "1.1.42"
 
+    def resolve_or_register(self, owner_name, **fields):
+        """RDR-193 Step 6 (nexus-u5m5g.7): the markdown hook and the preflight register a curator document through
+        this one request on a fresh box (it carries title, year, source_mtime, content_type, collection; the
+        chunk count and the stamp follow in an update)."""
+        from nexus.catalog.http_catalog_client import ResolveOutcome
+
+        self.registered.append({"owner_name": owner_name, **fields})
+        return ResolveOutcome("1.1.42", True, False)
+
     def update(self, tumbler, **fields):
         self.updated.append({"tumbler": tumbler, **fields})
 
@@ -138,8 +147,9 @@ def test_markdown_hook_fresh_box_service_mode_registers(
     assert reg["title"] == "Sweep Note"
     assert reg["content_type"] == "prose"
     assert reg["physical_collection"] == _COLLECTION
-    assert reg["chunk_count"] == 3
     assert reg["year"] == 2026
+    (upd,) = client.updated  # the route registers no chunk count: it follows in one update of the minted row
+    assert upd["tumbler"] == "1.1.42" and upd["chunk_count"] == 3
 
 
 @pytest.mark.t2_tenant
@@ -171,7 +181,9 @@ def test_register_or_lookup_fresh_box_no_local_catalog_created(
     (client,) = fake_client.instances
     (reg,) = client.registered
     assert reg["title"] == "Preflight"
-    assert reg["chunk_count"] == 0, "preflight registers with chunk_count=0"
+    assert reg["content_type"] == "prose" and reg["physical_collection"] == _COLLECTION
+    # the engine registers a pre-flight row with chunk_count 0; the stamp follows in one advisory update
+    assert all("chunk_count" not in u for u in client.updated)
 
 
 # test_register_or_lookup_sqlite_mode_still_auto_inits REMOVED (nexus-i711w

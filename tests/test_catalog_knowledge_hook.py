@@ -521,10 +521,12 @@ class TestStorePutHook:
         reader.find.return_value = []
 
         writer = MagicMock()
-        writer.register_owner.return_value = Tumbler.parse("1.1")
-        # nexus-vfef0: the hook now calls writer.register(..., with_created=True)
-        # and unpacks (tumbler, created).
-        writer.register.return_value = (Tumbler.parse("1.1.1"), True)
+        # RDR-193 Step 6 (nexus-u5m5g.7): a titled put registers through ONE
+        # ``resolve_or_register`` (the engine owns the "knowledge" curator owner, the source_uri
+        # lookup and the ghost fallback); ``created`` is the wire signal nexus-vfef0 introduced.
+        from nexus.catalog.http_catalog_client import ResolveOutcome
+
+        writer.resolve_or_register.return_value = ResolveOutcome("1.1.1", True, False)
 
         monkeypatch.setattr(
             "nexus.catalog.factory.make_catalog_reader", lambda *a, **k: reader
@@ -539,8 +541,10 @@ class TestStorePutHook:
 
         # Writes went through the factory writer, NOT a bare Catalog. A
         # reversion to `cat = Catalog(...)` would leave these mocks uncalled.
-        writer.register_owner.assert_called_once_with("knowledge", "curator")
-        writer.register.assert_called_once()
+        writer.resolve_or_register.assert_called_once()
+        assert writer.resolve_or_register.call_args.args[0] == "knowledge"
+        writer.register.assert_not_called()
+        writer.update.assert_called_once()  # the created row's meta stamp
         assert result == "1.1.1"
         writer.close.assert_called_once()  # hot-path handle closed in finally
 

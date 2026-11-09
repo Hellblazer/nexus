@@ -141,21 +141,28 @@ def test_the_next_index_run_fills_the_id_onto_an_unstamped_registration(
 def test_a_changed_header_restamps_and_an_unchanged_one_is_not_rewritten(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Rewritten for RDR-193 Step 6 (nexus-u5m5g.7): the write spy (update / update_many) is replaced by the commit's own
+    # per-row action, since the commit is now the only writer of the hook's documents.
+    from nexus.catalog import reconcile_run  # noqa: PLC0415 — deliberate function-scoped import
+
     files = _write_repo(tmp_path)
     _hook(tmp_path, files)
     cat = ActiveCatalog()
-    writes: list[tuple[str, int]] = []
-    real_make = factory.make_catalog_writer
-    with monkeypatch.context() as m:
-        m.setattr(factory, "make_catalog_writer", lambda *a, **k: _RecordingWriter(real_make(*a, **k), writes))
-        _hook(tmp_path, files)  # unchanged content and HEAD
-    assert writes == [], "a stamped, unchanged RDR is not rewritten on a warm run"
+    runs: list[dict[str, str]] = []
+    real = reconcile_run.stage_and_commit
+
+    def capture(*a, **kw):  # noqa: ANN002, ANN003
+        out = real(*a, **kw)
+        runs.append({r["file_path"]: r["action"] for r in out["rows"]})
+        return out
+
+    monkeypatch.setattr(reconcile_run, "stage_and_commit", capture)
+    _hook(tmp_path, files)  # unchanged content and HEAD
+    assert set(runs[-1].values()) == {"unchanged"}, "a stamped, unchanged RDR is not rewritten on a warm run"
     # the id changes in the file
     (tmp_path / MAIN).write_text("---\ntitle: main\nid: RDR-299\n---\n# moved\n", encoding="utf-8")
-    with monkeypatch.context() as m:
-        m.setattr(factory, "make_catalog_writer", lambda *a, **k: _RecordingWriter(real_make(*a, **k), writes))
-        _hook(tmp_path, files)
-    assert writes, "the changed file is written"
+    _hook(tmp_path, files)
+    assert runs[-1][MAIN] == "updated", "the changed file is written"
     assert _entry(cat, MAIN).meta[KEY] == "RDR-299"
 
 

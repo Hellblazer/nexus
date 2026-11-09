@@ -107,6 +107,24 @@ class _FakeHttpCatalogClient:
             return "1.1.42", True
         return "1.1.42"
 
+    def resolve_or_register(
+        self, owner_name, *, source_uri="", file_path="", title="", year=None, title_fallback=False,
+        source_mtime=None, content_type=None, physical_collection=None, sensitive=False,
+    ):
+        """RDR-193 Step 6 (nexus-u5m5g.7): a titled put resolves or registers through this one request. The engine
+        owns the curator owner (created on a fresh box), the source_uri lookup and the ghost fallback; a hit on
+        the source_uri (this fake's ``by_source_uri``) is a found row, a miss mints."""
+        from nexus.catalog.http_catalog_client import ResolveOutcome
+
+        hit = self.by_source_uri(source_uri)
+        if hit is not None:
+            return ResolveOutcome(str(hit.tumbler), False, False)
+        self.owners.append((owner_name, "curator"))
+        self.registered.append(
+            {"owner": f"owner:{owner_name}", "title": title, "content_type": content_type,
+             "physical_collection": physical_collection, "meta": {}, "source_uri": source_uri})
+        return ResolveOutcome("1.1.42", True, False)
+
     def update(self, tumbler, *, physical_collection=None, meta=None, source_uri=None):
         # source_uri (nexus-bb6n2 round 2): the chash-dedup branch now
         # stamps it defensively too (mirrors the pre-existing ghost-
@@ -156,7 +174,10 @@ def test_fresh_box_service_mode_registers(fake_client):
     assert reg["title"] == "fresh-box-note"
     assert reg["content_type"] == "knowledge"
     assert reg["physical_collection"] == _COLLECTION
-    assert {k: v for k, v in reg["meta"].items() if k != "put_at"} == {"doc_id": _DOC_ID}  # put_at: nexus-6pfgb.15
+    # RDR-193 Step 6: the route registers no meta; the stamp follows in one update of the minted row
+    (stamp,) = client.updated
+    assert stamp["tumbler"] == "1.1.42"
+    assert {k: v for k, v in stamp["meta"].items() if k != "put_at"} == {"doc_id": _DOC_ID}  # put_at: nexus-6pfgb.15
     # nexus-sdp0u: the synthesized identity — same nx-note:// convention as
     # aspect_readers.uri_for — must reach the wire so the engine's
     # upsert-on-source_uri identity can match a later re-put.

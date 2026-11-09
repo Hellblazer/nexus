@@ -9,7 +9,7 @@ which three mutations left green:
 
 * the run's stats carry ``pdf_stack_held`` (the CLI's exit 69 reads it),
 * no PDF is registered in the catalog or handed to the PDF indexer,
-* the catalog's orphan housekeeping still sees the held PDF as present
+* the catalog's the reconcile commit still sees the held PDF as present (a keep row)
   (``keep=``), so two refused runs cannot age its row toward deletion,
 * the ``--since-head`` base is not advanced past the commit that brought the PDF.
 
@@ -100,7 +100,9 @@ class _Run:
 
     def __init__(self) -> None:
         self.registered: list[Path] = []
-        self.housekeeping_keep: list[Path] | None = None
+        self.keep_paths: list[Path] | None = None  # nexus-u5m5g.7: staged as ``keep`` rows (was housekeeping_keep)
+        self.walk: str | None = None
+        self.deleted_relpaths: list[str] | None = None
         self.hook_calls = 0
 
 
@@ -109,7 +111,9 @@ def _doubles(run: _Run, db):
     def _catalog_hook(**kw):
         run.hook_calls += 1
         run.registered = [p for p, _t, _c in kw["indexed_files"]]
-        run.housekeeping_keep = kw.get("housekeeping_keep")
+        run.keep_paths = kw.get("keep_paths")
+        run.walk = kw.get("walk")
+        run.deleted_relpaths = kw.get("deleted_relpaths")
         return {p: f"1.1.{i}" for i, (p, _t, _c) in enumerate(kw["indexed_files"], 1)}
 
     patches = {
@@ -159,7 +163,7 @@ def test_run_index_under_refuse_holds_the_pdf_and_still_indexes_code(repo, monke
     mocks["_index_pdf_file"].assert_not_called()
     assert run.registered == [repo / "ok.py"], "the PDF must not be offered to the catalog hook"
     assert mocks["_index_code_file"].call_count == 1, "code is indexed past a held PDF"
-    assert run.housekeeping_keep == [repo / "paper.pdf"], "orphan housekeeping must still see the held PDF as present"
+    assert run.keep_paths == [repo / "paper.pdf"], "the reconcile commit must still see the held PDF as present (a keep row)"
     assert any("NOT indexed" in p and pdf_stack.INSTALL_COMMAND in p for p in phases)
     assert pdf_stack.skipped_count() == 1
     assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK) == 1
@@ -178,7 +182,7 @@ def test_run_index_with_the_stack_present_indexes_the_pdf_and_holds_nothing(repo
     assert stats["pdf_stack_held"] == 0
     assert mocks["_index_pdf_file"].call_count == 1
     assert repo / "paper.pdf" in run.registered
-    assert run.housekeeping_keep == []
+    assert run.keep_paths == []
 
 
 def test_run_index_unwinds_for_a_rerun_after_an_install_and_registers_nothing(repo, monkeypatch) -> None:
@@ -212,6 +216,44 @@ def test_the_since_head_base_does_not_advance_past_a_held_pdf(repo, monkeypatch)
     monkeypatch.setattr(idx, "_run_index", lambda *a, **kw: {"pdf_stack_held": 0, "files_changed": 1})
     idx.index_repository(repo, _reg(), since_head=True)
     assert advanced == ["HEAD1"], "control: a clean run advances the base"
+
+
+def test_a_delta_run_stages_a_partial_walk_with_its_deletions_and_a_full_run_a_complete_one(repo, monkeypatch) -> None:
+    """RDR-193 Step 6 (nexus-u5m5g.7): ``skip_housekeeping=delta_changed is not None`` became ``walk``. A
+    ``--since-head`` run (a delta walk) must reach the reconcile as ``partial``, so the commit counts, sweeps and renames
+    nothing, and hands it the paths the VCS reported gone as ``deleted_relpaths``; a full run is ``complete``. This
+    replaces ``test_index_since_head.test_catalog_hook_skip_housekeeping_flag``, which called the deleted
+    ``_maybe_run_housekeeping`` seam; the engine half of the same hazard (a partial commit touches no unvisited row) is
+    ``tests/test_catalog_hook_reconcile_contract.py::test_a_partial_walk_touches_no_row_it_did_not_visit``."""
+    import subprocess
+
+    from nexus import indexer as idx
+
+    def vcs(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    _commit_all(repo)
+    base = vcs("rev-parse", "HEAD")
+    (repo / "ok.py").write_text("x = 2\n")
+    (repo / "paper.pdf").unlink()
+    vcs("add", "-A")
+    vcs("commit", "-q", "-m", "change and delete")
+
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("present", ""))
+    monkeypatch.setattr(idx, "_get_owner_head_hash", lambda repo_: base)
+    delta = _Run()
+    with _doubles(delta, _db()):
+        idx._run_index(repo, _reg(), since_head=True)
+    assert delta.hook_calls == 1
+    assert delta.walk == "partial", "a delta walk must never reach the commit as a complete one (the mass-delete class)"
+    assert delta.deleted_relpaths == ["paper.pdf"]
+    assert delta.registered == [repo / "ok.py"]
+
+    full = _Run()
+    with _doubles(full, _db()):
+        idx._run_index(repo, _reg())
+    assert full.walk == "complete"
+    assert full.deleted_relpaths == []
 
 
 def _index_repo_cli(repo, monkeypatch):
@@ -478,7 +520,7 @@ def test_a_late_hold_merges_with_the_early_one_and_the_refusal_prints_once(repo,
     assert sum("NOT indexed" in p for p in phases) == 1, phases
     err = capsys.readouterr().err
     assert sum(line.startswith("nx: ") for line in err.splitlines()) == 1, err
-    assert run.housekeeping_keep == [early], "the early-held PDF stays visible to orphan housekeeping"
+    assert run.keep_paths == [early], "the early-held PDF stays visible to the reconcile commit (a keep row)"
 
 
 def test_a_pdf_removed_mid_run_does_not_abort_the_late_recheck(repo, monkeypatch) -> None:
@@ -583,7 +625,7 @@ def test_run_index_over_a_bad_mineru_limit_holds_the_pdf_and_still_indexes_code(
     mocks["_index_pdf_file"].assert_not_called()
     assert run.registered == [repo / "ok.py"], "no catalog row for the held PDF"
     assert mocks["_index_code_file"].call_count == 1, "code is indexed past the held PDF"
-    assert run.housekeeping_keep == [repo / "paper.pdf"], "orphan housekeeping still sees the held PDF as present"
+    assert run.keep_paths == [repo / "paper.pdf"], "the reconcile commit still sees the held PDF as present (a keep row)"
     assert any(_BOUNDS in p and "NOT indexed" in p for p in phases), phases
     assert pdf_stack.skipped_count() == 1
     # nexus-tr1rj.26: the record carries WHY it holds the PDF, so nx doctor does not blame the stack.
@@ -657,7 +699,7 @@ def test_an_early_and_a_late_bounds_hold_are_counted_together(repo, bad_bounds) 
     mocks["_index_pdf_file"].assert_not_called()
     assert pdf_stack.skipped_count() == 2
     assert sum("NOT indexed" in p for p in phases) == 1, phases
-    assert run.housekeeping_keep == [early], "the early-held PDF stays visible to orphan housekeeping"
+    assert run.keep_paths == [early], "the early-held PDF stays visible to the reconcile commit (a keep row)"
 
 
 def test_the_since_head_base_does_not_advance_past_a_pdf_held_for_the_mineru_limit(repo, monkeypatch) -> None:

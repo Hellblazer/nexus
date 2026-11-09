@@ -7,7 +7,7 @@ the batch flush wrote those chunks anyway, through the legacy upsert, and
 
 * Stage 1: WHY a file ends up with no document. ``_catalog_hook`` reports a
   cause per unregistered file through its ``unregistered`` out-parameter; each
-  shape the bead named (main checkout, worktree, warm re-run, register failure,
+  shape the bead named (main checkout, worktree, warm re-run, register refusal,
   catalog hook failure) is driven against the real engine catalog.
 * Stage 1: the flush event names the files, their chunk counts and causes.
 * Stage 2: the flush writes no chunk of an identity-less file.
@@ -49,7 +49,7 @@ def _hook(repo: Path, files: list[Path], *, head: str = "h1", repo_hash: str = "
     result = _catalog_hook(
         repo=repo, repo_name=repo.name, repo_hash=repo_hash, head_hash=head,
         indexed_files=[(f, content_type, collection) for f in files],
-        skip_housekeeping=True, unregistered=unregistered,
+        walk="partial", unregistered=unregistered,
     )
     return result, unregistered
 
@@ -117,6 +117,13 @@ class TestUnregisteredCauses:
     def test_a_register_failure_names_the_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """A file whose row the engine refuses has no document and is named ``register_refused``.
+
+        Rewritten for RDR-193 Step 6 (nexus-u5m5g.7): the client-side per-file ``register`` fallback (a ``register_many``
+        that raised, then one ``register`` that refused ``bad.py``) is gone, so a file is registered or refused by the
+        commit. A refusal (an outcome row with ``action: refused`` and no tumbler, the engine's containment rule) is
+        injected by editing the commit's outcome on the way back. The same mapping, without the engine, is
+        ``tests/test_catalog_hook_reconcile_contract.py::test_a_refused_row_has_no_id_and_is_named_with_the_engines_reason``."""
         import nexus.catalog.factory as factory
 
         real_writer = factory.make_catalog_writer
@@ -131,19 +138,18 @@ class TestUnregisteredCauses:
             def __getattr__(self, name):
                 return getattr(self._target, name)
 
-            def register_many(self, owner, docs, **kw):
-                raise RuntimeError("batch endpoint down")
-
-            def register(self, owner, title, **kw):
-                if title == "bad.py":
-                    raise RuntimeError("register refused")
-                return self._target.register(owner, title, **kw)
+            def reconcile_commit(self, owner, run_id):
+                outcome = self._target.reconcile_commit(owner, run_id)
+                for row in outcome["rows"]:
+                    if row["file_path"] == "bad.py":
+                        row.update(action="refused", tumbler=None, reason="derived source_uri lies outside the owner repo_root")
+                return outcome
 
         monkeypatch.setattr(factory, "make_catalog_writer", lambda **kw: _Proxy(real_writer(**kw)))
         ids, unregistered = _hook(repo, [good, bad], repo_hash="z0o2p2003")
         assert good in ids
         assert bad not in ids
-        assert unregistered == {bad: "register_failed"}
+        assert unregistered == {bad: "register_refused"}
 
     def test_a_catalog_hook_failure_names_every_unresolved_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

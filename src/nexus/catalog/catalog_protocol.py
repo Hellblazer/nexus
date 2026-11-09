@@ -113,21 +113,20 @@ class CatalogReader(Protocol):
         # steady state), and ``find_by_file_path`` returns only the first.
         # Promoted onto the caller-facing contract because writers now
         # depend on it — ``dt._stamp_dt_uri_on_entry`` refuses an ambiguous
-        # path rather than stamping a guess, and ``indexer.
-        # _delete_docs_for_paths`` reports the row it deliberately leaves
-        # live. A method three production call sites need is part of the
-        # surface, not a client-only extra.
+        # path rather than stamping a guess (the delta run's deletion that
+        # left a foreign owner's row live is now the reconcile commit's
+        # ``deleted_skipped_foreign_owner``). A method production call sites
+        # need is part of the surface, not a client-only extra.
         ...
 
     def find_all_by_file_paths(self, file_paths) -> object:  # nexus-1vc0n
         # The batched twin of find_all_by_file_path: N paths in, every live
         # document per path out, in one round trip per page. Caller-facing
-        # via indexer._catalog_hook's batched register_many registrar (the
-        # ONE writer nexus-yzij1 left out, because a per-mint
-        # announce_cross_owner_mint call there would turn one round trip
-        # into N+1) — a method a production call site needs is part of the
-        # surface, not a client-only extra, same reasoning as
-        # find_all_by_file_path's own entry above.
+        # (``doc_indexer`` and the MCP catalog tools read it); the repo
+        # hook's per-page conflict lookup it was added for retired with the
+        # client-side register_many (RDR-193 Step 6) — a method a production
+        # call site needs is part of the surface, not a client-only extra,
+        # same reasoning as find_all_by_file_path's own entry above.
         ...
 
     def get_collection(self, name) -> object:  # canonical

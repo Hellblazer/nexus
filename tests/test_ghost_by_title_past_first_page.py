@@ -3,8 +3,8 @@
 ghost wherever it ranks in the full-text matches (nexus-3bafq sibling,
 critic finding relayed by nexus-bf).
 
-``_find_ghost_by_title`` filtered ``reader.find(title)``, which returns the
-engine's default 50 rows. On a real tenant a same-titled ghost past row 50
+The ghost lookup (``_find_ghost_by_title`` then, the engine's ``resolve_or_register`` with ``title_fallback`` since RDR-193
+Step 6) once filtered ``reader.find(title)``, which returns the engine's default 50 rows. On a real tenant a same-titled ghost past row 50
 went unmatched and ``register()`` minted a duplicate document.
 """
 from __future__ import annotations

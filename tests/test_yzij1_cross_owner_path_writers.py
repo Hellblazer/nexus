@@ -8,9 +8,10 @@ CALLERS do with the answer, which is where the damage was:
 * ``dt._stamp_dt_uri_on_entry`` WRITES identity onto the row it picks. Taking
   the first of several is how one ``nx dt index`` run stamped the wrong
   document (nexus-z0lu4). It must refuse when the weak key is ambiguous.
-* ``indexer._delete_docs_for_paths`` decides a tombstone. Its owner-scoped miss
-  is correct — a file leaving this repo is no reason to delete another owner's
-  document — but it was indistinguishable from "no such document anywhere".
+* the explicit deletion of ``indexer._catalog_hook`` (a ``deleted`` row of the engine's reconcile commit; it was
+  ``_delete_docs_for_paths`` before RDR-193 Step 6) decides a tombstone. Its owner-scoped miss is correct — a file
+  leaving this repo is no reason to delete another owner's document — but it was indistinguishable from "no such
+  document anywhere". The commit now names such a path in its outcome and the hook logs it.
 * ``catalog_cmds.report.session_summary_cmd`` reports to a HUMAN, and reported
   one row's RDR links as though they were the path's.
 * ``catalog.path_ambiguity.announce_cross_owner_mint`` is the shared
@@ -281,72 +282,50 @@ class _LogRecorder:
         return [kw for name, kw in self.events if name == event]
 
 
+def _hook_with_outcome(monkeypatch, tmp_path: Path, outcome: dict, deleted_relpaths: list[str]) -> _LogRecorder:
+    """Drive ``_catalog_hook`` with a writer whose commit answers *outcome*, and return what it logged."""
+    reader = SimpleNamespace(owner_for_repo=lambda h: "5.0", close=lambda: None)
+    writer = SimpleNamespace(
+        reconcile_stage=lambda *a, **k: 0, reconcile_commit=lambda owner, run_id: outcome, close=lambda: None,
+    )
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: reader)
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda *a, **k: writer)
+    rec = _LogRecorder()
+    monkeypatch.setattr(indexer_mod, "_log", rec)
+    indexer_mod._catalog_hook(
+        repo=tmp_path, repo_name="r", repo_hash="abcd1234", head_hash="h", indexed_files=[],
+        walk="partial", deleted_relpaths=deleted_relpaths,
+    )
+    return rec
+
+
 class TestDeleteAnnouncesTheForeignOwnerSkip:
-    def test_a_row_under_another_owner_is_left_live_and_logged(
-        self, monkeypatch,
-    ) -> None:
+    """Rewritten for RDR-193 Step 6 (nexus-u5m5g.7): ``_delete_docs_for_paths`` (an owner-scoped lookup, then a
+    widening probe ``find_all_by_file_path`` for the miss) is deleted; the engine's commit does the owner-scoped
+    tombstone and reports a path whose live row another owner holds as ``deleted_skipped_foreign_owner``. The two tests
+    below pin that the hook turns that report into the same ``since_head_delete_skipped_foreign_owner`` event. The engine
+    behaviour (the row left live, the path reported) is
+    ``tests/integration/test_rdr193_reconcile_parity.py`` (``deleted_skipped_foreign_owner`` is asserted in
+    ``test_the_commit_leaves_what_the_client_path_leaves``)."""
+
+    def test_a_row_under_another_owner_is_left_live_and_logged(self, monkeypatch, tmp_path: Path) -> None:
         """PRE-FIX: a bare ``continue``. The row stayed live — correctly — and
         nothing said so, which is why the 19-document population went unnoticed.
-        """
-        deleted: list[str] = []
-
-        reader = SimpleNamespace(
-            owner_for_repo=lambda h: "5.0",
-            by_file_path=lambda owner, rel: None,       # owner-scoped blindness
-            find_all_by_file_path=lambda rel: [_entry("6.1")],
-            close=lambda: None,
-        )
-        writer = SimpleNamespace(
-            delete_document=lambda t: deleted.append(str(t)), close=lambda: None,
-        )
-
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader", lambda *a, **k: reader,
-        )
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_writer", lambda *a, **k: writer,
-        )
-        monkeypatch.setattr(
-            "nexus.repo_identity._repo_identity", lambda repo: ("name", "hash"),
-        )
-
-        rec = _LogRecorder()
-        monkeypatch.setattr(indexer_mod, "_log", rec)
-        indexer_mod._delete_docs_for_paths(Path("/repo"), ["a/gone.md"])
-
-        assert deleted == [], (
-            "widening the DELETE would be worse than the silence: this run owns "
-            "neither the other owner's row nor the decision to remove it"
-        )
+        Covers the former ``test_a_row_under_another_owner_is_left_live_and_logged``."""
+        outcome = {"rows": [], "trashed": [], "renamed": [], "swept": [], "duplicate_path": [], "sensitivity_pending": [],
+                   "deleted_skipped_foreign_owner": [{"file_path": "a/gone.md", "tumbler": "6.1"}]}
+        rec = _hook_with_outcome(monkeypatch, tmp_path, outcome, ["a/gone.md"])
         skipped = rec.of("since_head_delete_skipped_foreign_owner")
         assert len(skipped) == 1, f"recorded={rec.events}"
-        assert skipped[0]["candidates"] == ["6.1"]
+        assert skipped[0]["tumbler"] == "6.1"
         assert skipped[0]["file_path"] == "a/gone.md"
 
-    def test_no_row_anywhere_stays_quiet(self, monkeypatch) -> None:
-        reader = SimpleNamespace(
-            owner_for_repo=lambda h: "5.0",
-            by_file_path=lambda owner, rel: None,
-            find_all_by_file_path=lambda rel: [],
-            close=lambda: None,
-        )
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader", lambda *a, **k: reader,
-        )
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_writer",
-            lambda *a, **k: SimpleNamespace(
-                delete_document=lambda t: None, close=lambda: None,
-            ),
-        )
-        monkeypatch.setattr(
-            "nexus.repo_identity._repo_identity", lambda repo: ("name", "hash"),
-        )
-
-        rec = _LogRecorder()
-        monkeypatch.setattr(indexer_mod, "_log", rec)
-        indexer_mod._delete_docs_for_paths(Path("/repo"), ["a/gone.md"])
-
+    def test_no_row_anywhere_stays_quiet(self, monkeypatch, tmp_path: Path) -> None:
+        """Covers the former ``test_no_row_anywhere_stays_quiet``: a path with no live row anywhere is trashed
+        (or nothing) by the commit and reported as nothing."""
+        outcome = {"rows": [], "trashed": [], "renamed": [], "swept": [], "duplicate_path": [], "sensitivity_pending": [],
+                   "deleted_skipped_foreign_owner": []}
+        rec = _hook_with_outcome(monkeypatch, tmp_path, outcome, ["a/gone.md"])
         assert rec.of("since_head_delete_skipped_foreign_owner") == []
 
 
@@ -410,42 +389,11 @@ class TestSessionSummaryShowsEveryDocumentForAPath:
         # With a choice to explain, the line says WHICH document it came from.
         assert "1.2" in result.output, result.output
 
-    def test_a_failing_probe_is_not_reported_as_a_failed_delete(
-        self, monkeypatch,
-    ) -> None:
-        """The widening lookup attempts no delete, so its failure must not be
-        filed under ``since_head_delete_doc_failed`` — that event means a
-        tombstone was tried and did not land."""
-        def boom(rel):
-            raise RuntimeError("catalog unreachable")
-
-        reader = SimpleNamespace(
-            owner_for_repo=lambda h: "5.0",
-            by_file_path=lambda owner, rel: None,
-            find_all_by_file_path=boom,
-            close=lambda: None,
-        )
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader", lambda *a, **k: reader,
-        )
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_writer",
-            lambda *a, **k: SimpleNamespace(
-                delete_document=lambda t: None, close=lambda: None,
-            ),
-        )
-        monkeypatch.setattr(
-            "nexus.repo_identity._repo_identity", lambda repo: ("name", "hash"),
-        )
-        rec = _LogRecorder()
-        monkeypatch.setattr(indexer_mod, "_log", rec)
-
-        indexer_mod._delete_docs_for_paths(Path("/repo"), ["a/gone.md"])
-
-        assert rec.of("since_head_delete_doc_failed") == [], (
-            f"no delete was attempted; recorded={rec.events}"
-        )
-        assert len(rec.of("since_head_delete_foreign_owner_probe_failed")) == 1
+    # ``test_a_failing_probe_is_not_reported_as_a_failed_delete`` was deleted (RDR-193 Step 6, nexus-u5m5g.7): it
+    # pinned that the widening ``find_all_by_file_path`` probe of ``_delete_docs_for_paths`` was filed apart from a
+    # failed delete. There is no client probe and no client delete any more; the commit's one outcome carries the
+    # foreign-owner report, and a commit that fails is ``tests/test_catalog_hook_reconcile_contract.py::
+    # test_a_failed_commit_leaves_every_file_without_an_id_and_names_it_unregistered``.
 
 
 # ── the announce CALL SITES, not just the helper ────────────────────────────
@@ -491,8 +439,13 @@ class TestTheMintSitesActuallyCallIt:
             curator_owner_tumbler_by_name=lambda name: "4.4",
             close=lambda: None,
         )
+        # RDR-193 Step 6 (nexus-u5m5g.7): the curator mint is ONE resolve_or_register request; the announcement
+        # still follows it and reads the request's own ``created`` signal.
         writer = SimpleNamespace(
-            register=lambda **kw: (registered.append(kw["file_path"]), "7.1")[1],
+            resolve_or_register=lambda *a, **kw: (
+                registered.append(kw["file_path"]),
+                SimpleNamespace(tumbler="7.1", created=True, foreign_owner=False))[1],
+            update=lambda *a, **kw: None,
             close=lambda: None,
         )
         monkeypatch.setattr(
@@ -530,9 +483,7 @@ class TestTheMintSitesActuallyCallIt:
             "the announced path must be the one actually registered — "
             "announcing a different path would report on the wrong file"
         )
-        # writer.register's fake returns a bare tumbler (no with_created
-        # support), so the defensive "no tuple -> created=True" fallback
-        # must have kicked in.
+        # the request's ``created`` signal is what the announcement reads
         assert announced[0][1]["created"] is True
 
     def test_every_mint_site_is_wired(self) -> None:
@@ -545,6 +496,9 @@ class TestTheMintSitesActuallyCallIt:
         it can see register()'s own ``created`` signal). Asserting POSITION
         is what makes this more than a grep for the strings somewhere in
         the file.
+
+        RDR-193 Step 6 (nexus-u5m5g.7): ``indexer._catalog_hook`` no longer registers anything and has left the list
+        below; the paragraph that follows records why the list once needed a special case for it.
 
         Every site shares one call shape (``find_cross_owner_conflict(`` +
         ``.register(``) EXCEPT ``indexer._catalog_hook``, which carries TWO
@@ -581,12 +535,11 @@ class TestTheMintSitesActuallyCallIt:
             (di, "_register_or_lookup_doc_id", "find_cross_owner_conflict(", ".register("),
             (di, "_catalog_markdown_hook", "find_cross_owner_conflict(", ".register("),
             (cat_cmd, "_backfill_per_file_from_t3", "find_cross_owner_conflict(", ".register("),
-            # nexus-1vc0n: the batched register_many() fast path -- proves
-            # the batched site itself announces, not just its fallback.
-            (indexer_mod, "_catalog_hook", "find_all_by_file_paths(", "register_many("),
-            # the per-file register() fallback below it, on register_many()
-            # failure -- same shape every other site above uses.
-            (indexer_mod, "_catalog_hook", "find_cross_owner_conflict(", ".register("),
+            # RDR-193 Step 6 (nexus-u5m5g.7): ``indexer._catalog_hook`` is no longer a mint site. It registers no
+            # document itself (the engine's reconcile commit does, in one set operation, and reports a path another
+            # owner holds as a ``foreign_owner`` row: ``tests/test_catalog_hook_reconcile_contract.py::
+            # test_a_path_another_owner_holds_resolves_to_that_row_and_is_reported_not_called_new``). Its two entries
+            # (the batched ``register_many`` and the per-file fallback) were removed with the code they pinned.
         ]
         missing = []
         for mod, fname, conflict_marker, register_marker in sites:
@@ -656,7 +609,7 @@ class TestTheMintSitesActuallyCallIt:
             (di, "_register_or_lookup_doc_id", 1),
             (di, "_catalog_markdown_hook", 1),
             (cat_cmd, "_backfill_per_file_from_t3", 1),
-            (indexer_mod, "_catalog_hook", 2),
+            # RDR-193 Step 6: ``indexer._catalog_hook`` left this list with its two mint sites (see the sibling test).
         ]
         missing = []
         for mod, fname, expected in sites:

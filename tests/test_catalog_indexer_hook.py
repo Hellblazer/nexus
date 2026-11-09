@@ -1,4 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+"""``indexer._catalog_hook`` against the real engine.
+
+RDR-193 Step 6 (nexus-u5m5g.7): the hook stages one landing row per file, commits the run as one engine job and
+rebuilds what its callers read from the outcome. What this module no longer carries, and what covers it now:
+
+* the nexus-dst5h / nexus-xedhp / nexus-9dvqy batching tests that counted ``by_owner``, ``update``, ``update_many``,
+  ``register_many`` and ``register`` calls, drove ``update_many`` paging at the page boundary, and made
+  ``register_many`` / ``update_many`` / ``by_owner`` fail to prove the per-file fallbacks (``TestCatalogHookBatchedServiceMode``
+  and the counting and fallback cases of ``TestCatalogHookBatchedLookups`` and ``TestCatalogHookOwnerListFailure``):
+  the client diff and its fallbacks are deleted. Their contract is now counted on the wire by
+  ``tests/test_catalog_hook_reconcile_contract.py`` (one commit per run, ``ceil(N/page)`` stage requests, no single
+  update/register/delete/link request on a warm run or a head bump, a failed commit registers nothing and has no
+  fallback) and the HTTP client's job contract by ``tests/catalog/test_http_catalog_client_reconcile.py``.
+* ``_run_housekeeping`` (deleted): ``TestRunHousekeeping`` keeps every case, driven through ``_catalog_hook`` with
+  ``walk="complete"`` and compared on catalog state; the same state machine, row for row against the old path, is
+  ``tests/integration/test_rdr193_reconcile_parity.py``, and the engine's own is
+  ``service/src/test/java/dev/nexus/service/CatalogReconcileCommitBehaviourTest.java``.
+* ``skip_housekeeping=True`` is ``walk="partial"``.
+* the cross-owner announcements of nexus-1vc0n: see ``TestCatalogHookReconciledIsNotNew``.
+"""
 
 from __future__ import annotations
 
@@ -385,24 +405,12 @@ def _spy_factories(monkeypatch) -> tuple[list["_SpyProxy"], list["_SpyProxy"]]:
     return readers, writers
 
 
-def _update_calls(spy: "_SpyProxy") -> int:
-    """Count update operations regardless of which batching shape ran.
-
-    nexus-aqbrk: ``update_many`` is service-mode-only BY DESIGN (nexus-xedhp
-    — it is in _SERVICE_ONLY_WRITE_OPS, and the indexer picks it via a
-    ``callable(getattr(writer, "update_many", None))`` capability check). So
-    the same one logical update is ``update`` on the SQLite writer and
-    ``update_many`` on the service writer. Asserting the method NAME pins the
-    substrate; asserting that exactly one update happened pins the contract.
-    """
-    return spy.calls.get("update", 0) + spy.calls.get("update_many", 0)
-
-
 @pytest.mark.t2_tenant
 class TestCatalogHookBatchedLookups:
-    """nexus-dst5h: the pre-index sweep must not do per-file catalog
-    round-trips — one owner-scoped list + local join, and no writes for
-    unchanged files on a warm re-run."""
+    """nexus-dst5h: the pre-index sweep must not do per-file catalog round-trips, and a warm re-run writes nothing for
+    unchanged files. After RDR-193 Step 6 (nexus-u5m5g.7) the hook asks the engine to reconcile the run, so the request
+    counts are pinned on the wire by ``tests/test_catalog_hook_reconcile_contract.py``; what stays here is the
+    observable catalog state a re-run leaves, and that the hook issues no owner list and no per-file lookup of its own."""
 
     def _index(self, tmp_path, files, head_hash="aaa"):
         from nexus.indexer import _catalog_hook
@@ -413,7 +421,9 @@ class TestCatalogHookBatchedLookups:
             indexed_files=[(f, "code", "code__nexus") for f in files],
         )
 
-    def test_no_per_file_lookups_single_owner_list(self, tmp_path, monkeypatch):
+    def test_the_hook_issues_no_owner_list_and_no_per_file_lookup(self, tmp_path, monkeypatch):
+        # was: test_no_per_file_lookups_single_owner_list (which counted 2 owner lists, the hook's join and
+        # housekeeping's fresh fetch; both moved into the engine's commit, so the count is now 0)
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         files = []
@@ -423,42 +433,33 @@ class TestCatalogHookBatchedLookups:
             files.append(f)
 
         readers, _ = _spy_factories(monkeypatch)
-        self._index(tmp_path, files)
+        result = self._index(tmp_path, files)
 
         reader = readers[0]
         assert reader.calls.get("by_file_path", 0) == 0
-        # Exactly 2: one hook-level join fetch + housekeeping's fresh fetch.
-        assert reader.calls.get("by_owner", 0) == 2
-
-    def test_warm_rerun_issues_zero_updates(self, tmp_path, monkeypatch):
-        catalog_dir, cat = _make_catalog(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-        f = tmp_path / "a.py"
-        f.write_text("stable")
-
-        self._index(tmp_path, [f], head_hash="same")
-        _, writers = _spy_factories(monkeypatch)
-        self._index(tmp_path, [f], head_hash="same")
-
-        writer = writers[0]
-        assert writer.calls.get("update", 0) == 0
-        assert writer.calls.get("register", 0) == 0
+        assert reader.calls.get("by_owner", 0) == 0
+        assert set(result) == set(files)
 
     def test_changed_head_hash_still_updates(self, tmp_path, monkeypatch):
+        # was: counted one update request; the count is the contract test's (a head bump is one commit and no single
+        # write), what is pinned here is the row the commit left
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         f = tmp_path / "a.py"
         f.write_text("v1")
 
         self._index(tmp_path, [f], head_hash="aaa")
-        _, writers = _spy_factories(monkeypatch)
+        owner = cat.owner_for_repo("571b8edd")
+        tumbler = cat.by_file_path(owner, "a.py").tumbler
         self._index(tmp_path, [f], head_hash="bbb")
 
-        assert _update_calls(writers[0]) == 1
-        owner = cat.owner_for_repo("571b8edd")
-        assert cat.by_file_path(owner, "a.py").head_hash == "bbb"
+        entry = cat.by_file_path(owner, "a.py")
+        assert entry.head_hash == "bbb" and entry.tumbler == tumbler
 
     def test_changed_content_still_updates(self, tmp_path, monkeypatch):
+        # was: counted one update request; now the row's content hash is what shows the update happened
+        import hashlib
+
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         f = tmp_path / "a.py"
@@ -466,126 +467,37 @@ class TestCatalogHookBatchedLookups:
 
         self._index(tmp_path, [f], head_hash="same")
         f.write_text("v2 changed")
-        _, writers = _spy_factories(monkeypatch)
         self._index(tmp_path, [f], head_hash="same")
 
-        assert _update_calls(writers[0]) == 1
+        owner = cat.owner_for_repo("571b8edd")
+        assert cat.by_file_path(owner, "a.py").meta["content_hash"] == hashlib.sha256(b"v2 changed").hexdigest()
 
     def test_new_file_still_registers_alongside_warm_files(self, tmp_path, monkeypatch):
+        # was: asserted one register_many and zero register/update requests; the request counts moved to the
+        # contract test, the outcome stays
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         old = tmp_path / "old.py"
         old.write_text("old")
 
-        self._index(tmp_path, [old], head_hash="same")
+        first = self._index(tmp_path, [old], head_hash="same")
         new = tmp_path / "new.py"
         new.write_text("new")
-        _, writers = _spy_factories(monkeypatch)
         result = self._index(tmp_path, [old, new], head_hash="same")
 
-        # nexus-9dvqy: the NEW file is registered via the batched register_many
-        # (one page), NOT the per-file register(); the warm file takes no write.
-        assert writers[0].calls.get("register_many", 0) == 1
-        assert writers[0].calls.get("register", 0) == 0
-        assert writers[0].calls.get("update", 0) == 0
         assert set(result) == {old, new}
+        assert result[old] == first[old], "the warm file keeps its id"
         owner = cat.owner_for_repo("571b8edd")
         assert cat.by_file_path(owner, "new.py") is not None
 
 
-    def test_multiple_new_files_registered_in_one_batch(self, tmp_path, monkeypatch):
-        # nexus-9dvqy: N new files on a fresh index => ONE register_many call,
-        # every file mapped to a doc_id.
-        catalog_dir, cat = _make_catalog(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-        files = []
-        for i in range(4):
-            f = tmp_path / f"n{i}.py"
-            f.write_text(f"code {i}")
-            files.append(f)
-
-        _, writers = _spy_factories(monkeypatch)
-        result = self._index(tmp_path, files)
-
-        assert writers[0].calls.get("register_many", 0) == 1
-        assert writers[0].calls.get("register", 0) == 0
-        assert set(result) == set(files)
-
-    def test_register_many_failure_falls_back_per_file(self, tmp_path, monkeypatch):
-        # nexus-9dvqy: if register_many raises unrecoverably, the hook falls
-        # back to per-file register() with ghost-class isolation — every file
-        # is still registered.
-        catalog_dir, cat = _make_catalog(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        class _BatchFailsProxy(_SpyProxy):
-            def register_many(self, *a, **kw):
-                self.calls["register_many"] = self.calls.get("register_many", 0) + 1
-                raise RuntimeError("batch endpoint down")
-
-        import nexus.catalog.factory as factory
-        real_writer = factory.make_catalog_writer
-        writers: list = []
-
-        def spy_writer(**kw):
-            spy = _BatchFailsProxy(real_writer(**kw))
-            writers.append(spy)
-            return spy
-
-        monkeypatch.setattr(factory, "make_catalog_writer", spy_writer)
-        # reader stays real
-        files = [tmp_path / "a.py", tmp_path / "b.py"]
-        for f in files:
-            f.write_text(f.name)
-
-        result = self._index(tmp_path, files)
-
-        assert writers[0].calls.get("register_many", 0) == 1
-        assert writers[0].calls.get("register", 0) == 2  # per-file fallback
-        assert set(result) == set(files)
-
-
 class TestCatalogHookOwnerListFailure:
-    """nexus-dst5h review Critical: a failing owner-list fetch must not
-    silently no-op the whole hook — it falls back to per-file lookups."""
+    """nexus-dst5h review Critical: a failing owner-list fetch must not silently no-op the work that reads it.
 
-    @pytest.mark.t2_tenant
-    def test_by_owner_failure_falls_back_per_file(self, tmp_path, monkeypatch):
-        from nexus.indexer import _catalog_hook
-
-        catalog_dir, cat = _make_catalog(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-        f = tmp_path / "a.py"
-        f.write_text("code")
-
-        class _FailingOwnerList(_SpyProxy):
-            def by_owner(self, *a, **kw):
-                raise ConnectionError("service unreachable")
-
-        # Failing variant: housekeeping's by_owner also fails; the hook
-        # must still register the file via the per-file fallback.
-        #
-        # nexus-aqbrk: the spy must wrap the LIVE reader captured BEFORE the
-        # patch, not the ActiveCatalog facade. The facade resolves each read
-        # through make_catalog_reader — the very function being patched — so
-        # wrapping it builds a spy whose target resolves back through the spy
-        # (RecursionError at commands/catalog.py:165).
-        import nexus.catalog.factory as factory
-        live_reader = active_reader()
-        monkeypatch.setattr(
-            factory, "make_catalog_reader",
-            lambda **kw: _FailingOwnerList(live_reader),
-        )
-
-        result = _catalog_hook(
-            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
-            head_hash="aaa",
-            indexed_files=[(f, "code", "code__nexus")],
-        )
-
-        assert set(result) == {f}
-        owner = cat.owner_for_repo("571b8edd")
-        assert cat.by_file_path(owner, "a.py") is not None
+    The hook no longer reads the owner list at all (RDR-193 Step 6): the join against the catalog is the engine's, so
+    the old ``test_by_owner_failure_falls_back_per_file`` (a failing ``by_owner`` degrades the hook to per-file lookups)
+    has no subject. ``tests/test_catalog_hook_reconcile_contract.py::test_a_failed_commit_leaves_every_file_without_an_id_and_names_it_unregistered``
+    pins what replaced the fallback: a failed commit is loud and leaves no file with an id, never a per-file path."""
 
     def test_frecency_by_owner_failure_returns_empty_map(self, tmp_path, monkeypatch):
         from nexus.indexer import _build_frecency_doc_id_map
@@ -639,260 +551,6 @@ class TestFrecencyDocIdMapBatched:
         assert set(mapping) == set(files)  # unknown file absent from map
 
 
-class TestCatalogHookBatchedServiceMode:
-    """nexus-dst5h critic Critical: pin the batching + changed-predicate
-    contract against the REAL HttpCatalogClient, with entries passing
-    through ``_to_entry``'s JSON None→\"\"/0/{} coercion — the boundary the
-    warm-run tax actually lives on. The HTTP transport is mocked
-    (httpx.MockTransport); the client, URL routing, and JSON round-trip
-    are real."""
-
-    class _StubWriter:
-        """Write-side stub with the surface _catalog_hook touches."""
-
-        def __init__(self, *, update_many_raises: bool = False, reconcile_tumbler: str = "1.10.41"):
-            self.register_calls: list[dict] = []
-            self.update_calls: list[dict] = []
-            self.update_many_calls: list[list[dict]] = []
-            self._update_many_raises = update_many_raises
-            # nexus-r1tnx round 4: parametrized so a test can choose a
-            # SAME-owner tumbler (e.g. "1.1.55", under this fixture's own
-            # owner "1.1") instead of the default "1.10.41", which belongs
-            # to a DIFFERENT owner ("1.10") -- the two shapes now exercise
-            # reconcile_stale_physical_collection's owner gate differently.
-            self._reconcile_tumbler = reconcile_tumbler
-
-        def register(self, *args, **kw):
-            from nexus.catalog.tumbler import Tumbler
-            # Positional owner/title (per-file fallback path) or all-kw.
-            with_created = kw.pop("with_created", False)
-            self.register_calls.append(kw)
-            if kw.get("file_path") in getattr(self, "reconcile_paths", ()):
-                pair = (Tumbler.parse(self._reconcile_tumbler), False)
-            else:
-                pair = (Tumbler.parse("1.1.99"), True)
-            return pair if with_created else pair[0]
-
-        def register_many(self, owner, docs, *, with_created=False):
-            from nexus.catalog.tumbler import Tumbler
-            out = []
-            for d in docs:
-                self.register_calls.append(d)
-                # ``reconcile_paths``: file_paths the fake server "already
-                # holds" under another owner (nexus-53cae) -- reconciled, not
-                # created, and handed back under that owner's tumbler.
-                if d.get("file_path") in getattr(self, "reconcile_paths", ()):
-                    out.append((Tumbler.parse(self._reconcile_tumbler), False))
-                else:
-                    out.append((Tumbler.parse("1.1.99"), True))
-            if with_created:
-                return out
-            return [t for t, _ in out]
-
-        def update(self, tumbler, **fields):
-            self.update_calls.append({"tumbler": str(tumbler), **fields})
-
-        def update_many(self, docs: list[dict]) -> list[int]:
-            # nexus-xedhp / substantive-critic finding: without this method,
-            # _catalog_hook's Pass 1b capability check (`getattr(writer,
-            # "update_many", None)`) always falls back to the per-file
-            # `update()` loop, and the batched branch is never exercised by
-            # any test. Defining it here is what makes
-            # TestCatalogHookBatchedServiceMode a genuine service-mode test.
-            self.update_many_calls.append(docs)
-            if self._update_many_raises:
-                raise RuntimeError("simulated update_many transport failure")
-            return [1 for _ in docs]
-
-        def close(self) -> None:
-            pass
-
-    def _http_client_and_log(
-        self, monkeypatch, docs: list[dict], *, show_responses: dict[str, dict] | None = None,
-        list_by_file_paths_response: dict[str, list[dict]] | None = None,
-    ):
-        """Real HttpCatalogClient over a MockTransport serving *docs*.
-
-        ``show_responses`` (nexus-r1tnx round 3): optional
-        ``{tumbler: document_dict}`` map answering ``/v1/catalog/show``
-        (``reader.resolve(tumbler)``) — the resolve probe
-        ``reconcile_stale_physical_collection`` makes for a batched
-        ``created=False`` pair. Absent/unmatched tumblers fall through to
-        the existing empty-``{}`` response (``resolve()`` reads that as
-        "not found" and reconciliation is a no-op), so every test that
-        predates this parameter is unaffected.
-
-        ``list_by_file_paths_response`` (nexus-1vc0n): optional
-        ``{file_path: [document_dict, ...]}`` map answering
-        ``POST /v1/catalog/list_by_file_paths`` — the bulk
-        ``find_all_by_file_paths`` call ``_catalog_hook`` now makes once
-        per register page, BEFORE that page's ``register_many``. Absent means empty (no
-        cross-owner conflict anywhere), the pre-nexus-1vc0n behaviour every
-        test that predates this parameter still gets.
-        """
-        import httpx
-
-        from nexus.catalog.http_catalog_client import HttpCatalogClient
-
-        requests: list[tuple[str, dict]] = []
-        _show_responses = show_responses or {}
-        _list_by_file_paths_response = list_by_file_paths_response or {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            params = dict(request.url.params)
-            requests.append((request.url.path, params))
-            if request.url.path == "/v1/catalog/owners/by_repo":
-                return httpx.Response(200, json={"tumbler_prefix": "1.1"})
-            if request.url.path == "/v1/catalog/list":
-                return httpx.Response(200, json={"documents": docs})
-            if request.url.path == "/v1/catalog/show":
-                doc = _show_responses.get(params.get("tumbler", ""))
-                if doc is not None:
-                    return httpx.Response(200, json=doc)
-            if request.url.path == "/v1/catalog/list_by_file_paths" and request.method == "POST":
-                return httpx.Response(200, json={"documents": _list_by_file_paths_response})
-            return httpx.Response(200, json={})
-
-        monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
-        client = HttpCatalogClient(base_url="http://mock.test")
-        client._client = httpx.Client(
-            base_url="http://mock.test",
-            transport=httpx.MockTransport(handler),
-        )
-        return client, requests
-
-    def _run_hook(
-        self, tmp_path, monkeypatch, docs, head_hash, *, writer=None, files=None,
-        show_responses: dict[str, dict] | None = None,
-        list_by_file_paths_response: dict[str, list[dict]] | None = None,
-    ):
-        from nexus.indexer import _catalog_hook
-
-        monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
-        client, requests = self._http_client_and_log(
-            monkeypatch, docs, show_responses=show_responses,
-            list_by_file_paths_response=list_by_file_paths_response,
-        )
-        writer = writer if writer is not None else self._StubWriter()
-
-        import nexus.catalog.factory as factory
-        monkeypatch.setattr(factory, "make_catalog_reader", lambda **kw: client)
-        monkeypatch.setattr(factory, "make_catalog_writer", lambda **kw: writer)
-
-        if files is None:
-            files = [tmp_path / "a.py"]
-        result = _catalog_hook(
-            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
-            head_hash=head_hash,
-            indexed_files=[(f, "code", "code__nexus") for f in files],
-        )
-        return result, writer, requests
-
-    def _doc_for(self, f, *, head_hash, tumbler: str = "1.1.1") -> dict:
-        import hashlib
-
-        return {
-            "tumbler": tumbler,
-            "title": f.name,
-            "content_type": "code",
-            "file_path": f.name,
-            "physical_collection": "code__nexus",
-            "head_hash": head_hash,
-            "source_mtime": f.stat().st_mtime,
-            "meta": {"content_hash": hashlib.sha256(f.read_bytes()).hexdigest()},
-            # Java payloads carry explicit nulls; _to_entry must coerce.
-            "author": None,
-            "year": None,
-            "corpus": None,
-            "source_uri": None,
-        }
-
-    def test_warm_rerun_no_updates_no_per_file_lookups(self, tmp_path, monkeypatch):
-        f = tmp_path / "a.py"
-        f.write_text("stable")
-        doc = self._doc_for(f, head_hash="same")
-
-        result, writer, requests = self._run_hook(
-            tmp_path, monkeypatch, [doc], head_hash="same",
-        )
-
-        assert writer.update_calls == []
-        assert writer.register_calls == []
-        assert set(result) == {f}
-        # No per-file lookups: zero /list calls carrying file_path.
-        assert [p for path, p in requests
-                if path == "/v1/catalog/list" and "file_path" in p] == []
-        # Exactly 2 owner-list fetches: hook join + housekeeping.
-        assert len([p for path, p in requests
-                    if path == "/v1/catalog/list" and "owner" in p]) == 2
-
-    def test_changed_head_hash_updates_through_json_boundary(
-        self, tmp_path, monkeypatch,
-    ):
-        # nexus-xedhp / substantive-critic Critical: with a service-mode
-        # writer that actually exposes update_many, Pass 1b must route
-        # through the BATCHED path, not the per-file update() fallback —
-        # this is the branch that was never exercised before _StubWriter
-        # gained update_many.
-        f = tmp_path / "a.py"
-        f.write_text("stable")
-        doc = self._doc_for(f, head_hash="old")
-
-        _, writer, _ = self._run_hook(
-            tmp_path, monkeypatch, [doc], head_hash="new",
-        )
-
-        assert len(writer.update_many_calls) == 1, "must route through the batched update_many path"
-        assert writer.update_many_calls[0][0]["head_hash"] == "new"
-        assert writer.update_many_calls[0][0]["tumbler"] == "1.1.1"
-        assert writer.update_calls == [], "per-file update() must NOT fire when update_many succeeds"
-
-    def test_update_many_pages_at_boundary(
-        self, tmp_path, monkeypatch,
-    ):
-        # nexus-vxgnh critique: Pass 1b genuinely pages changed_batch at
-        # _CATALOG_REGISTER_PAGE (indexer.py Pass 1b loop) — behavior that no
-        # test drove past a single page. Shrink the page size and prove it.
-        monkeypatch.setattr("nexus.indexer._CATALOG_REGISTER_PAGE", 2)
-        writer = self._StubWriter()
-        files, docs = [], []
-        for i in range(5):
-            f = tmp_path / f"f{i}.py"
-            f.write_text("stable")
-            files.append(f)
-            docs.append(self._doc_for(f, head_hash="old", tumbler=f"1.1.{i + 1}"))
-
-        _, writer, _ = self._run_hook(
-            tmp_path, monkeypatch, docs, head_hash="new", files=files,
-            writer=writer,
-        )
-
-        assert [len(c) for c in writer.update_many_calls] == [2, 2, 1], \
-            "5 changed docs at page=2 must batch as 2+2+1"
-        assert writer.update_calls == []
-
-    def test_update_many_failure_falls_back_to_per_file_update(
-        self, tmp_path, monkeypatch,
-    ):
-        # nexus-xedhp: a whole-batch update_many failure must not sink the
-        # run — Pass 1b falls back to the per-file update() loop, mirroring
-        # register_many's established per-file failure isolation.
-        f = tmp_path / "a.py"
-        f.write_text("stable")
-        doc = self._doc_for(f, head_hash="old")
-
-        writer = self._StubWriter(update_many_raises=True)
-        result, writer, _ = self._run_hook(
-            tmp_path, monkeypatch, [doc], head_hash="new", writer=writer,
-        )
-
-        assert len(writer.update_many_calls) == 1, "must attempt the batched path first"
-        assert len(writer.update_calls) == 1, "must fall back to per-file update() on batch failure"
-        assert writer.update_calls[0]["head_hash"] == "new"
-        assert set(result) == {f}
-        assert writer.update_calls[0]["head_hash"] == "new"
-
-
 class TestCatalogHookErrorSafe:
     @pytest.mark.t2_tenant
     def test_hook_does_not_propagate_errors(self, tmp_path, monkeypatch):
@@ -915,151 +573,143 @@ class TestCatalogHookErrorSafe:
 
 @pytest.mark.t2_tenant
 class TestRunHousekeeping:
-    """Tests for _run_housekeeping() — orphan detection with miss_count tracking."""
+    """Orphan detection with miss_count tracking and rename detection, driven through ``_catalog_hook`` with
+    ``walk="complete"``.
 
-    def _make_cat(self, tmp_path: Path) -> tuple[Path, "Catalog"]:
-        return _make_catalog(tmp_path)
+    RDR-193 Step 6 (nexus-u5m5g.7) moved this state machine into the engine's reconcile commit
+    (``nexus.catalog_reconcile_commit``), so these tests no longer call ``_run_housekeeping`` (deleted) with a
+    hand-set ``indexed_set``: each seeds the catalog by indexing real files, removes or renames files on disk, and
+    runs the hook again, then reads the catalog. They are the observable-state bar of parity with the old client path;
+    the same cases, over a much larger fixture and compared row for row against the old path's golden file, are in
+    ``tests/integration/test_rdr193_reconcile_parity.py``, and the engine's own behaviour is pinned by
+    ``service/src/test/java/dev/nexus/service/CatalogReconcileCommitBehaviourTest.java``.
+    """
+
+    HASH = "ho05e001"
+
+    @staticmethod
+    def _ctype(rel: str) -> tuple[str, str]:
+        return ("prose", "docs__nexus") if rel.endswith(".md") else ("code", "code__nexus")
+
+    def _write(self, root: Path, rel: str, text: str) -> Path:
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        return p
+
+    def _run(self, root: Path, rels: list[str], *, head: str = "h1") -> None:
+        from nexus.indexer import _catalog_hook
+
+        files = [(root / r, *self._ctype(r)) for r in rels]
+        _catalog_hook(
+            repo=root, repo_name="nexus", repo_hash=self.HASH, head_hash=head,
+            indexed_files=files, walk="complete",
+        )
+
+    def _setup(self, tmp_path, monkeypatch):
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        return cat
+
+    def _seed(self, cat, root: Path, files: dict[str, str]) -> dict[str, object]:
+        """Index *files* (rel -> text, in order: the order is the mint order) and return rel -> tumbler."""
+        for rel, text in files.items():
+            self._write(root, rel, text)
+        self._run(root, list(files))
+        owner = cat.owner_for_repo(self.HASH)
+        return {rel: cat.by_file_path(owner, rel).tumbler for rel in files}
+
+    def _t(self, cat, rel: str):
+        return cat.by_file_path(cat.owner_for_repo(self.HASH), rel).tumbler
 
     def test_miss_count_incremented_for_missing_file(self, tmp_path, monkeypatch):
-        """Entry not in indexed_set → miss_count goes from 0 to 1, not deleted."""
-        from nexus.indexer import _run_housekeeping
-        from nexus.catalog.tumbler import Tumbler
+        """A catalog entry whose file is not in the walk → miss_count goes from 0 to 1, not deleted."""
+        cat = self._setup(tmp_path, monkeypatch)
+        t = self._seed(cat, tmp_path, {"src/missing.py": "m = 1\n"})["src/missing.py"]
+        (tmp_path / "src/missing.py").unlink()
 
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        owner = cat.register_owner("nexus", "repo", repo_hash="aaa111")
-        owner_t = cat.owner_for_repo("aaa111")
-        t = cat.register(owner_t, "missing.py", content_type="code", file_path="src/missing.py")
-
-        _run_housekeeping(cat, owner_t, indexed_set=set())
+        self._run(tmp_path, [])
 
         entry = cat.resolve(t)
         assert entry is not None  # not deleted yet
         assert entry.meta.get("miss_count") == 1
 
     def test_miss_count_reset_when_file_seen(self, tmp_path, monkeypatch):
-        """Entry in indexed_set with miss_count=1 → reset to 0."""
-        from nexus.indexer import _run_housekeeping
-        from nexus.catalog.tumbler import Tumbler
+        """An entry in the walk with miss_count=1 → reset to 0."""
+        cat = self._setup(tmp_path, monkeypatch)
+        t = self._seed(cat, tmp_path, {"src/present.py": "p = 1\n"})["src/present.py"]
+        cat.update(t, meta={"miss_count": 1})  # simulate a prior miss
 
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        owner = cat.register_owner("nexus", "repo", repo_hash="bbb222")
-        owner_t = cat.owner_for_repo("bbb222")
-        t = cat.register(owner_t, "present.py", content_type="code", file_path="src/present.py")
-        # Simulate a prior miss
-        cat.update(t, meta={"miss_count": 1})
-
-        _run_housekeeping(cat, owner_t, indexed_set={"src/present.py"})
+        self._run(tmp_path, ["src/present.py"])
 
         entry = cat.resolve(t)
         assert entry is not None
         assert entry.meta.get("miss_count", 0) == 0
 
     def test_orphan_deleted_at_threshold(self, tmp_path, monkeypatch):
-        """Entry with miss_count=1, not in indexed_set → increments to 2 → deleted."""
-        from nexus.indexer import _run_housekeeping
-
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        owner = cat.register_owner("nexus", "repo", repo_hash="ccc333")
-        owner_t = cat.owner_for_repo("ccc333")
-        t = cat.register(owner_t, "stale.py", content_type="code", file_path="src/stale.py")
+        """An entry with miss_count=1 whose file is not in the walk → increments to 2 → deleted."""
+        cat = self._setup(tmp_path, monkeypatch)
+        t = self._seed(cat, tmp_path, {"src/stale.py": "s = 1\n"})["src/stale.py"]
         cat.update(t, meta={"miss_count": 1})
+        (tmp_path / "src/stale.py").unlink()
 
-        _run_housekeeping(cat, owner_t, indexed_set=set())
+        self._run(tmp_path, [])
 
-        # Should be deleted after reaching threshold of 2
-        assert cat.resolve(t) is None
+        assert cat.resolve(t) is None  # deleted after reaching the threshold of 2
 
     def test_already_at_threshold_gets_deleted(self, tmp_path, monkeypatch):
-        """Entry with miss_count already >= 2 and not in indexed_set is deleted."""
-        from nexus.indexer import _run_housekeeping
-
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        owner = cat.register_owner("nexus", "repo", repo_hash="ddd444")
-        owner_t = cat.owner_for_repo("ddd444")
-        t = cat.register(owner_t, "dead.py", content_type="code", file_path="src/dead.py")
+        """An entry with miss_count already >= 2 and not in the walk is deleted."""
+        cat = self._setup(tmp_path, monkeypatch)
+        t = self._seed(cat, tmp_path, {"src/dead.py": "d = 1\n"})["src/dead.py"]
         cat.update(t, meta={"miss_count": 2})
+        (tmp_path / "src/dead.py").unlink()
 
-        _run_housekeeping(cat, owner_t, indexed_set=set())
+        self._run(tmp_path, [])
 
         assert cat.resolve(t) is None
 
     def test_present_files_not_affected(self, tmp_path, monkeypatch):
-        """Files in indexed_set are never modified (miss_count stays at 0 if already 0)."""
-        from nexus.indexer import _run_housekeeping
+        """Files in the walk are never aged (miss_count stays at 0 if already 0)."""
+        cat = self._setup(tmp_path, monkeypatch)
+        t = self._seed(cat, tmp_path, {"src/ok.py": "ok = 1\n"})["src/ok.py"]
 
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        owner = cat.register_owner("nexus", "repo", repo_hash="eee555")
-        owner_t = cat.owner_for_repo("eee555")
-        t = cat.register(owner_t, "ok.py", content_type="code", file_path="src/ok.py")
-
-        _run_housekeeping(cat, owner_t, indexed_set={"src/ok.py"})
+        self._run(tmp_path, ["src/ok.py"])
 
         entry = cat.resolve(t)
         assert entry is not None
         assert entry.meta.get("miss_count", 0) == 0
 
     def test_rename_detected_by_content_hash(self, tmp_path, monkeypatch):
-        """File renamed: orphan with matching content_hash gets file_path updated, links preserved."""
-        from nexus.indexer import _run_housekeeping
-
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        owner = cat.register_owner("nexus", "repo", repo_hash="fff666")
-        owner_t = cat.owner_for_repo("fff666")
-        # Old entry at old path with a content hash
-        old_t = cat.register(owner_t, "old_name.py", content_type="code", file_path="src/old_name.py",
-                             meta={"content_hash": "deadbeef1234"})
-        # Create a link from old entry to another doc
-        other_t = cat.register(owner_t, "rdr-1", content_type="rdr", file_path="docs/rdr/rdr-1.md")
+        """File renamed: the orphan with a matching content_hash is retired and its links move to the new entry."""
+        cat = self._setup(tmp_path, monkeypatch)
+        ts = self._seed(cat, tmp_path, {"src/old_name.py": "same body\n", "docs/rdr/rdr-1.md": "# rdr one\n"})
+        old_t, other_t = ts["src/old_name.py"], ts["docs/rdr/rdr-1.md"]
         cat.link(old_t, other_t, "implements", created_by="test")
+        (tmp_path / "src/old_name.py").unlink()
+        self._write(tmp_path, "src/new_name.py", "same body\n")
 
-        # New entry already registered at new path with same content hash
-        new_t = cat.register(owner_t, "new_name.py", content_type="code", file_path="src/new_name.py",
-                             meta={"content_hash": "deadbeef1234"})
+        self._run(tmp_path, ["src/new_name.py", "docs/rdr/rdr-1.md"])
 
-        # indexed_set has new path but not old
-        _run_housekeeping(cat, owner_t, indexed_set={"src/new_name.py", "docs/rdr/rdr-1.md"})
-
-        # Old entry should be deleted (rename transfers links, then deletes)
-        assert cat.resolve(old_t) is None
-        # Links should be transferred to the new entry
-        links = cat.links_from(new_t)
-        assert any(str(l.to_tumbler) == str(other_t) for l in links)
+        new_t = self._t(cat, "src/new_name.py")
+        assert cat.resolve(old_t) is None  # a rename transfers links, then deletes the old entry
+        assert any(str(l.to_tumbler) == str(other_t) for l in cat.links_from(new_t))
 
     def test_rename_does_not_turn_a_link_between_the_two_entries_into_a_self_link(self, tmp_path, monkeypatch):
         """nexus-x3bxj: a retired entry whose text matches a live one (a symlink ghost) can link to it, or be linked
         from it. Moving those links onto the live entry would make it link to itself, so they are dropped; every
         other link still moves."""
-        from nexus.indexer import _run_housekeeping
-
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        cat.register_owner("nexus", "repo", repo_hash="fff999")
-        owner_t = cat.owner_for_repo("fff999")
-        ghost_t = cat.register(owner_t, "ghost.md", content_type="docs", file_path="docs/ghost.md",
-                               meta={"content_hash": "abad1dea"})
-        target_t = cat.register(owner_t, "target.md", content_type="docs", file_path="docs/target.md",
-                                meta={"content_hash": "abad1dea"})
-        other_t = cat.register(owner_t, "rdr-2", content_type="rdr", file_path="docs/rdr/rdr-2.md")
+        cat = self._setup(tmp_path, monkeypatch)
+        ts = self._seed(cat, tmp_path, {"docs/ghost.md": "abad1dea\n", "docs/target.md": "abad1dea\n",
+                                        "docs/rdr/rdr-2.md": "# rdr two\n"})
+        ghost_t, target_t, other_t = ts["docs/ghost.md"], ts["docs/target.md"], ts["docs/rdr/rdr-2.md"]
         cat.link(ghost_t, target_t, "cites", created_by="test")
         cat.link(target_t, ghost_t, "relates", created_by="test")
         cat.link(ghost_t, other_t, "implements", created_by="test")
         cat.link(other_t, ghost_t, "quotes", created_by="test")
         cat.link(ghost_t, ghost_t, "supersedes", created_by="test")  # the ghost's own self-link
+        (tmp_path / "docs/ghost.md").unlink()
 
-        _run_housekeeping(cat, owner_t, indexed_set={"docs/target.md", "docs/rdr/rdr-2.md"})
+        self._run(tmp_path, ["docs/target.md", "docs/rdr/rdr-2.md"])
 
         assert cat.resolve(ghost_t) is None
         out = cat.links_from(target_t)
@@ -1076,23 +726,17 @@ class TestRunHousekeeping:
     def test_rename_keeps_the_spans_of_a_moved_link(self, tmp_path, monkeypatch):
         """nexus-12ml0: the renamed entry's text is the same (same content_hash), so a span into it still
         points at the same text; a moved link keeps from_span and to_span, outgoing and incoming."""
-        from nexus.indexer import _run_housekeeping
-
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        cat.register_owner("nexus", "repo", repo_hash="aaa121")
-        owner_t = cat.owner_for_repo("aaa121")
-        old_t = cat.register(owner_t, "old.md", content_type="docs", file_path="docs/old.md",
-                             meta={"content_hash": "5ca1ab1e"})
-        other_t = cat.register(owner_t, "rdr-3", content_type="rdr", file_path="docs/rdr/rdr-3.md")
+        cat = self._setup(tmp_path, monkeypatch)
+        ts = self._seed(cat, tmp_path, {"docs/old.md": "5ca1ab1e\n", "docs/rdr/rdr-3.md": "# rdr three\n"})
+        old_t, other_t = ts["docs/old.md"], ts["docs/rdr/rdr-3.md"]
         cat.link(old_t, other_t, "cites", created_by="test", from_span="3-7", to_span="12-14")
         cat.link(other_t, old_t, "quotes", created_by="test", from_span="1-2", to_span="20-25")
-        new_t = cat.register(owner_t, "new.md", content_type="docs", file_path="docs/new.md",
-                             meta={"content_hash": "5ca1ab1e"})
+        (tmp_path / "docs/old.md").unlink()
+        self._write(tmp_path, "docs/new.md", "5ca1ab1e\n")
 
-        _run_housekeeping(cat, owner_t, indexed_set={"docs/new.md", "docs/rdr/rdr-3.md"})
+        self._run(tmp_path, ["docs/new.md", "docs/rdr/rdr-3.md"])
 
+        new_t = self._t(cat, "docs/new.md")
         out = [l for l in cat.links_from(new_t) if l.link_type == "cites"]
         inc = [l for l in cat.links_to(new_t) if l.link_type == "quotes"]
         assert [(l.from_span, l.to_span) for l in out] == [("3-7", "12-14")], out
@@ -1101,26 +745,19 @@ class TestRunHousekeeping:
     def test_rename_of_two_entries_in_one_run_redirects_a_link_between_them(self, tmp_path, monkeypatch):
         """nexus-12ml0: when A and B are both renamed in one run and A links to B, the moved link joins the two
         new entries. Copying it as A'->B would leave A' linked to B, which the same run deletes."""
-        from nexus.indexer import _run_housekeeping
-
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        cat.register_owner("nexus", "repo", repo_hash="bbb121")
-        owner_t = cat.owner_for_repo("bbb121")
-        a_t = cat.register(owner_t, "a.md", content_type="docs", file_path="docs/a.md",
-                           meta={"content_hash": "aaaa0001"})
-        b_t = cat.register(owner_t, "b.md", content_type="docs", file_path="docs/b.md",
-                           meta={"content_hash": "bbbb0002"})
+        cat = self._setup(tmp_path, monkeypatch)
+        ts = self._seed(cat, tmp_path, {"docs/a.md": "aaaa0001\n", "docs/b.md": "bbbb0002\n"})
+        a_t, b_t = ts["docs/a.md"], ts["docs/b.md"]
         cat.link(a_t, b_t, "cites", created_by="test")
         cat.link(b_t, a_t, "quotes", created_by="test")
-        a2_t = cat.register(owner_t, "a2.md", content_type="docs", file_path="docs/a2.md",
-                            meta={"content_hash": "aaaa0001"})
-        b2_t = cat.register(owner_t, "b2.md", content_type="docs", file_path="docs/b2.md",
-                            meta={"content_hash": "bbbb0002"})
+        (tmp_path / "docs/a.md").unlink()
+        (tmp_path / "docs/b.md").unlink()
+        self._write(tmp_path, "docs/a2.md", "aaaa0001\n")
+        self._write(tmp_path, "docs/b2.md", "bbbb0002\n")
 
-        _run_housekeeping(cat, owner_t, indexed_set={"docs/a2.md", "docs/b2.md"})
+        self._run(tmp_path, ["docs/a2.md", "docs/b2.md"])
 
+        a2_t, b2_t = self._t(cat, "docs/a2.md"), self._t(cat, "docs/b2.md")
         assert cat.resolve(a_t) is None and cat.resolve(b_t) is None
         gone = {str(a_t), str(b_t)}
         for t in (a2_t, b2_t):
@@ -1134,28 +771,21 @@ class TestRunHousekeeping:
     ):
         """nexus-12ml0: a delete is a tombstone, so after run 1 renames A to A2 the row A->X is still read when
         run 2 renames X to X2. Moving it as A->X2 hit the engine's dangling-endpoint refusal, which aborted
-        housekeeping on that run and every later one; it is not moved, and X is retired."""
-        from nexus.indexer import _run_housekeeping
-
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        cat.register_owner("nexus", "repo", repo_hash="ddd121")
-        owner_t = cat.owner_for_repo("ddd121")
-        a_t = cat.register(owner_t, "a.md", content_type="docs", file_path="docs/a.md",
-                           meta={"content_hash": "aaaa1201"})
-        x_t = cat.register(owner_t, "x.md", content_type="docs", file_path="docs/x.md",
-                           meta={"content_hash": "eeee1202"})
+        the run and every later one; it is not moved, and X is retired."""
+        cat = self._setup(tmp_path, monkeypatch)
+        ts = self._seed(cat, tmp_path, {"docs/a.md": "aaaa1201\n", "docs/x.md": "eeee1202\n"})
+        a_t, x_t = ts["docs/a.md"], ts["docs/x.md"]
         cat.link(a_t, x_t, "cites", created_by="test")
-        a2_t = cat.register(owner_t, "a2.md", content_type="docs", file_path="docs/a2.md",
-                            meta={"content_hash": "aaaa1201"})
-        _run_housekeeping(cat, owner_t, indexed_set={"docs/a2.md", "docs/x.md"})
+        (tmp_path / "docs/a.md").unlink()
+        self._write(tmp_path, "docs/a2.md", "aaaa1201\n")
+        self._run(tmp_path, ["docs/a2.md", "docs/x.md"])
         assert cat.resolve(a_t) is None
 
-        x2_t = cat.register(owner_t, "x2.md", content_type="docs", file_path="docs/x2.md",
-                            meta={"content_hash": "eeee1202"})
-        _run_housekeeping(cat, owner_t, indexed_set={"docs/a2.md", "docs/x2.md"})
+        (tmp_path / "docs/x.md").unlink()
+        self._write(tmp_path, "docs/x2.md", "eeee1202\n")
+        self._run(tmp_path, ["docs/a2.md", "docs/x2.md"])
 
+        a2_t, x2_t = self._t(cat, "docs/a2.md"), self._t(cat, "docs/x2.md")
         assert cat.resolve(x_t) is None
         assert not [l for l in cat.links_to(x2_t) if str(l.from_tumbler) == str(a_t)]
         assert [l.link_type for l in cat.links_from(a2_t) if str(l.to_tumbler) == str(x2_t)] == ["cites"]
@@ -1165,27 +795,20 @@ class TestRunHousekeeping:
     ):
         """nexus-12ml0, the outgoing mirror: run 1 renames T to T2 and leaves the row X->T; run 2 renames X to X2.
         X->T is not moved as X2->T, and X->T2 moves as X2->T2."""
-        from nexus.indexer import _run_housekeeping
-
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        cat.register_owner("nexus", "repo", repo_hash="ddd122")
-        owner_t = cat.owner_for_repo("ddd122")
-        x_t = cat.register(owner_t, "x.md", content_type="docs", file_path="docs/x.md",
-                           meta={"content_hash": "eeee1222"})
-        t_t = cat.register(owner_t, "t.md", content_type="docs", file_path="docs/t.md",
-                           meta={"content_hash": "ffff1221"})
+        cat = self._setup(tmp_path, monkeypatch)
+        ts = self._seed(cat, tmp_path, {"docs/x.md": "eeee1222\n", "docs/t.md": "ffff1221\n"})
+        x_t, t_t = ts["docs/x.md"], ts["docs/t.md"]
         cat.link(x_t, t_t, "cites", created_by="test")
-        t2_t = cat.register(owner_t, "t2.md", content_type="docs", file_path="docs/t2.md",
-                            meta={"content_hash": "ffff1221"})
-        _run_housekeeping(cat, owner_t, indexed_set={"docs/x.md", "docs/t2.md"})
+        (tmp_path / "docs/t.md").unlink()
+        self._write(tmp_path, "docs/t2.md", "ffff1221\n")
+        self._run(tmp_path, ["docs/x.md", "docs/t2.md"])
         assert cat.resolve(t_t) is None
 
-        x2_t = cat.register(owner_t, "x2.md", content_type="docs", file_path="docs/x2.md",
-                            meta={"content_hash": "eeee1222"})
-        _run_housekeeping(cat, owner_t, indexed_set={"docs/x2.md", "docs/t2.md"})
+        (tmp_path / "docs/x.md").unlink()
+        self._write(tmp_path, "docs/x2.md", "eeee1222\n")
+        self._run(tmp_path, ["docs/x2.md", "docs/t2.md"])
 
+        x2_t, t2_t = self._t(cat, "docs/x2.md"), self._t(cat, "docs/t2.md")
         assert cat.resolve(x_t) is None
         assert not [l for l in cat.links_from(x2_t) if str(l.to_tumbler) == str(t_t)]
         assert [l.link_type for l in cat.links_from(x2_t) if str(l.to_tumbler) == str(t2_t)] == ["cites"]
@@ -1195,122 +818,72 @@ class TestRunHousekeeping:
         """nexus-12ml0: an orphan on its second miss is deleted in the same run that renames an entry it links
         with. Its link is not moved onto the new entry, whichever is processed first: before, the move hit the
         engine's dangling-endpoint refusal; after, it would point at the deleted orphan."""
-        from nexus.indexer import _run_housekeeping
-
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        cat.register_owner("nexus", "repo", repo_hash="ccc12" + ("1" if orphan_first else "2"))
-        owner_t = cat.owner_for_repo("ccc12" + ("1" if orphan_first else "2"))
-
-        def _orphan():
-            return cat.register(owner_t, "gone.md", content_type="docs", file_path="docs/gone.md",
-                                meta={"miss_count": 1})
-
-        def _old():
-            return cat.register(owner_t, "old.md", content_type="docs", file_path="docs/old.md",
-                                meta={"content_hash": "c0ffee12"})
-
-        if orphan_first:
-            orphan_t, old_t = _orphan(), _old()
-        else:
-            old_t, orphan_t = _old(), _orphan()
+        cat = self._setup(tmp_path, monkeypatch)
+        order = {"docs/gone.md": "gone body\n", "docs/old.md": "c0ffee12\n"}
+        if not orphan_first:
+            order = dict(reversed(list(order.items())))
+        ts = self._seed(cat, tmp_path, order)
+        orphan_t, old_t = ts["docs/gone.md"], ts["docs/old.md"]
+        cat.update(orphan_t, meta={"miss_count": 1})
         cat.link(orphan_t, old_t, "cites", created_by="test")
         cat.link(old_t, orphan_t, "quotes", created_by="test")
-        new_t = cat.register(owner_t, "new.md", content_type="docs", file_path="docs/new.md",
-                             meta={"content_hash": "c0ffee12"})
+        (tmp_path / "docs/gone.md").unlink()
+        (tmp_path / "docs/old.md").unlink()
+        self._write(tmp_path, "docs/new.md", "c0ffee12\n")
 
-        _run_housekeeping(cat, owner_t, indexed_set={"docs/new.md"})
+        self._run(tmp_path, ["docs/new.md"])
 
+        new_t = self._t(cat, "docs/new.md")
         assert cat.resolve(orphan_t) is None and cat.resolve(old_t) is None
         touching = cat.links_from(new_t) + cat.links_to(new_t)
         assert not [l for l in touching if str(orphan_t) in (str(l.from_tumbler), str(l.to_tumbler))], touching
 
     def test_rename_carries_non_evidentiary_stamp_to_new_entry(self, tmp_path, monkeypatch):
-        """nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round
-        4): a manually-stamped document survives a rename. Without this,
-        the old entry's non_evidentiary meta key is discarded when
-        _run_housekeeping deletes it -- the new entry (registered at the
-        new path by an earlier pass in the SAME index run) never
-        inherits it, so the very next `nx index repo` after a `git mv`
-        silently un-stamps the document."""
-        from nexus.indexer import _run_housekeeping
+        """nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 4): a manually-stamped document survives a
+        rename. Without this, the old entry's non_evidentiary meta key is discarded with the old entry, so the very
+        next `nx index repo` after a `git mv` silently un-stamps the document."""
+        import hashlib
 
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        cat = self._setup(tmp_path, monkeypatch)
+        old_t = self._seed(cat, tmp_path, {"src/old_name.py": "deadbeef5678\n"})["src/old_name.py"]
+        # stamped by an operator, NOT under tests/fixtures/, so nothing auto-derives this stamp from its path
+        cat.update(old_t, meta={"non_evidentiary": True})
+        (tmp_path / "src/old_name.py").unlink()
+        self._write(tmp_path, "src/new_name.py", "deadbeef5678\n")
 
-        owner = cat.register_owner("nexus", "repo", repo_hash="fff777")
-        owner_t = cat.owner_for_repo("fff777")
-        # Old entry, manually stamped non_evidentiary by an operator --
-        # NOT under tests/fixtures/, so nothing auto-derives this stamp
-        # from its path.
-        old_t = cat.register(
-            owner_t, "old_name.py", content_type="code",
-            file_path="src/old_name.py",
-            meta={"content_hash": "deadbeef5678", "non_evidentiary": True},
-        )
-        # New entry already registered at the new path (an earlier pass
-        # in the same run), with its OWN freshly-computed content_hash
-        # but no stamp of its own -- the new path isn't a fixture path
-        # either.
-        new_t = cat.register(
-            owner_t, "new_name.py", content_type="code",
-            file_path="src/new_name.py",
-            meta={"content_hash": "deadbeef5678"},
-        )
+        self._run(tmp_path, ["src/new_name.py"])
 
-        _run_housekeeping(cat, owner_t, indexed_set={"src/new_name.py"})
-
-        assert cat.resolve(old_t) is None  # old entry still deleted
-        new_entry = cat.resolve(new_t)
+        assert cat.resolve(old_t) is None  # the old entry is still deleted
+        new_entry = cat.by_file_path(cat.owner_for_repo(self.HASH), "src/new_name.py")
         assert new_entry is not None
         assert new_entry.meta.get("non_evidentiary") is True
-        # The new entry's OWN content_hash is authoritative and untouched.
-        assert new_entry.meta.get("content_hash") == "deadbeef5678"
+        # the new entry's OWN content_hash is authoritative and untouched
+        assert new_entry.meta.get("content_hash") == hashlib.sha256(b"deadbeef5678\n").hexdigest()
 
-    def test_rename_does_not_stamp_new_entry_when_old_entry_unstamped(
-        self, tmp_path, monkeypatch,
-    ):
-        """The transfer is conditional -- an ordinary (unstamped) rename
-        must not acquire a stamp from nowhere."""
-        from nexus.indexer import _run_housekeeping
+    def test_rename_does_not_stamp_new_entry_when_old_entry_unstamped(self, tmp_path, monkeypatch):
+        """The transfer is conditional: an ordinary (unstamped) rename must not acquire a stamp from nowhere."""
+        cat = self._setup(tmp_path, monkeypatch)
+        old_t = self._seed(cat, tmp_path, {"src/old_name.py": "cafef00d\n"})["src/old_name.py"]
+        (tmp_path / "src/old_name.py").unlink()
+        self._write(tmp_path, "src/new_name.py", "cafef00d\n")
 
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        owner = cat.register_owner("nexus", "repo", repo_hash="fff888")
-        owner_t = cat.owner_for_repo("fff888")
-        old_t = cat.register(
-            owner_t, "old_name.py", content_type="code",
-            file_path="src/old_name.py",
-            meta={"content_hash": "cafef00d"},
-        )
-        new_t = cat.register(
-            owner_t, "new_name.py", content_type="code",
-            file_path="src/new_name.py",
-            meta={"content_hash": "cafef00d"},
-        )
-
-        _run_housekeeping(cat, owner_t, indexed_set={"src/new_name.py"})
+        self._run(tmp_path, ["src/new_name.py"])
 
         assert cat.resolve(old_t) is None
-        new_entry = cat.resolve(new_t)
+        new_entry = cat.by_file_path(cat.owner_for_repo(self.HASH), "src/new_name.py")
         assert new_entry is not None
         assert not new_entry.meta.get("non_evidentiary")
 
     def test_rename_not_triggered_without_content_hash(self, tmp_path, monkeypatch):
-        """Orphan without content_hash follows normal miss_count path, not rename."""
-        from nexus.indexer import _run_housekeeping
+        """An orphan without a content_hash follows the normal miss_count path, not rename (even when a present
+        file has the very text it had)."""
+        cat = self._setup(tmp_path, monkeypatch)
+        t = self._seed(cat, tmp_path, {"src/no_hash.py": "same text\n"})["src/no_hash.py"]
+        cat.update(t, meta={"content_hash": ""})
+        (tmp_path / "src/no_hash.py").unlink()
+        self._write(tmp_path, "src/elsewhere.py", "same text\n")
 
-        catalog_dir, cat = self._make_cat(tmp_path)
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-
-        owner = cat.register_owner("nexus", "repo", repo_hash="ggg777")
-        owner_t = cat.owner_for_repo("ggg777")
-        # No content_hash in meta
-        t = cat.register(owner_t, "no_hash.py", content_type="code", file_path="src/no_hash.py")
-
-        _run_housekeeping(cat, owner_t, indexed_set=set())
+        self._run(tmp_path, ["src/elsewhere.py"])
 
         entry = cat.resolve(t)
         assert entry is not None  # not renamed, just incremented
@@ -1429,7 +1002,7 @@ class TestCatalogHookEphemeralPathGuard:
                     (polluted, "rdr", "rdr__test-u8n4r-1"),
                     (good, "code", "code__test-u8n4r-1"),
                 ],
-                skip_housekeeping=True,
+                walk="partial",
             )
 
         assert count_documents() == 1
@@ -1495,7 +1068,7 @@ class TestCatalogHookEphemeralPathGuard:
             repo=worktree, repo_name="primary", repo_hash="u8n4r0002",
             head_hash="h1",
             indexed_files=[(src, "code", "code__test-u8n4r-2")],
-            skip_housekeeping=True,
+            walk="partial",
         )
 
         assert count_documents() == 1
@@ -1537,7 +1110,7 @@ class TestCatalogHookEphemeralPathGuard:
                 repo=worktree, repo_name="primary", repo_hash="u8n4r0004",
                 head_hash="h1",
                 indexed_files=[(draft, "rdr", "rdr__test-u8n4r-4")],
-                skip_housekeeping=True,
+                walk="partial",
             )
 
         assert count_documents() == 0
@@ -1585,7 +1158,7 @@ class TestCatalogHookEphemeralPathGuard:
                 repo=worktree, repo_name="primary", repo_hash="u8n4r0006",
                 head_hash="h1",
                 indexed_files=[(draft, "rdr", "rdr__test-u8n4r-6")],
-                skip_housekeeping=True,
+                walk="partial",
             )
 
         assert count_documents() == 0
@@ -1622,7 +1195,7 @@ class TestCatalogHookEphemeralPathGuard:
             repo=sandbox_root, repo_name="sandbox", repo_hash="u8n4r0003",
             head_hash="h1",
             indexed_files=[(fake_file, "code", "code__test-u8n4r-3")],
-            skip_housekeeping=True,
+            walk="partial",
         )
 
         assert count_documents() == 1
@@ -1689,7 +1262,7 @@ class TestCatalogHookEphemeralPathGuard:
                 repo=worktree, repo_name="primary", repo_hash="u8n4r-real-0005",
                 head_hash="h1",
                 indexed_files=indexed_files,
-                skip_housekeeping=True,
+                walk="partial",
             )
 
         assert count_documents() == 1
@@ -1740,341 +1313,112 @@ def test_indexed_relpaths_skips_outside_repo_without_aborting(tmp_path: Path) ->
     assert result == {"in.py"}
 
 
+@pytest.mark.t2_tenant
 class TestCatalogHookReconciledIsNotNew:
-    """nexus-53cae (2026-09-04): 198 docs/rdr files were absent from owner
-    1.1's snapshot, register_many reconciled each onto a live curator-owner
-    row by source_uri, and the hook counted the returned tumblers as new on
-    every run ("Catalog: 199 new", 113 runs). The count now follows the
-    server's ``created`` flag."""
+    """nexus-53cae (2026-09-04): 198 docs/rdr files were absent from owner 1.1's snapshot, the register reconciled
+    each onto a live curator-owner row by source_uri, and the hook counted the returned tumblers as new on every run
+    ("Catalog: 199 new", 113 runs). The count follows the commit's ``created`` action, not the number of rows.
+
+    RDR-193 Step 6 (nexus-u5m5g.7): the engine's commit now resolves a path by source_uri and reports
+    ``same_owner_by_uri`` / ``foreign_owner`` rows, so these run against the real engine instead of a stub writer.
+
+    Not carried over (the subject left the client; no test replaces them, the parity bar is catalog state and not
+    log events): ``test_a_batched_mint_over_an_existing_path_is_announced``,
+    ``test_a_conflict_minted_between_pages_is_seen_by_the_later_page`` and
+    ``test_a_batched_reconcile_onto_another_owner_is_announced`` (nexus-1vc0n's ``catalog_mint_over_existing_file_path``
+    and ``catalog_mint_resolved_existing_document`` events came from one bulk ``find_all_by_file_paths`` read per
+    register page, which the hook no longer makes), and the three ``test_the_per_file_fallback*`` tests (register_many
+    and its per-file fallback are gone; a failed commit has no fallback, pinned by
+    ``tests/test_catalog_hook_reconcile_contract.py::test_a_failed_commit_leaves_every_file_without_an_id_and_names_it_unregistered``).
+    The foreign-owner and same-owner physical_collection cases live on below and in
+    ``tests/integration/test_rdr193_reconcile_parity.py`` (``id_foreign`` / ``id_same_owner``).
+    """
+
+    REPO_HASH = "53cae001"
+
+    def _hook(self, root, files, head="h1"):
+        from nexus.indexer import _catalog_hook
+
+        return _catalog_hook(
+            repo=root, repo_name="nexus", repo_hash=self.REPO_HASH, head_hash=head,
+            indexed_files=[(f, "code", "code__nexus") for f in files],
+        )
+
+    def _foreign_row(self, cat, path, *, collection="code__OLD") -> str:
+        other = cat.register_owner("recon_other", "curator")
+        return str(cat.register(other, "foreign", content_type="code", file_path=path.name,
+                                physical_collection=collection, source_uri=f"file://{path.resolve()}"))
 
     def test_a_reconciled_row_is_counted_and_named_not_called_new(
         self, tmp_path, monkeypatch, capsys
     ) -> None:
         import structlog.testing
 
-        t = TestCatalogHookBatchedServiceMode()
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         a, b = tmp_path / "a.py", tmp_path / "b.py"
         a.write_text("a = 1\n")
         b.write_text("b = 2\n")
-        writer = t._StubWriter()
-        writer.reconcile_paths = {"b.py"}
+        foreign = self._foreign_row(cat, b)
+
         with structlog.testing.capture_logs() as logs:
-            mapping, writer, _ = t._run_hook(
-                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b]
-            )
+            mapping = self._hook(tmp_path, [a, b])
+
         err = capsys.readouterr().err
         assert "Catalog: 1 new, 0 updated, 1 reconciled onto rows outside this owner" in err, err
         assert "done (1 new," in err
-        assert mapping[b] == "1.10.41", "the reconciled path still maps to its live row"
-        assert mapping[a] == "1.1.99"
+        assert mapping[b] == foreign, "the reconciled path still maps to its live row"
         events = [e for e in logs if e["event"] == "catalog_register_reconciled_onto_existing_row"]
-        assert len(events) == 1 and events[0]["tumbler"] == "1.10.41" and events[0]["rel_path"] == "b.py"
+        assert len(events) == 1 and events[0]["tumbler"] == foreign and events[0]["rel_path"] == "b.py"
 
-    def test_a_foreign_owners_reconciled_row_is_never_repointed(
-        self, tmp_path, monkeypatch,
-    ) -> None:
-        """nexus-r1tnx round 4 (fix-check CRITICAL): b.py resolves onto
-        1.10.41, which belongs to owner ``1.10`` -- a DIFFERENT owner than
-        this fixture's own (``1.1``, from the ``by_repo`` mock). The
-        engine's source_uri idempotency leg that produces this resolve is
-        NOT owner-scoped, so this is the REAL shape a cross-owner
-        ``created=False`` batched resolve takes: repointing 1.10.41's
-        physical_collection to THIS run's target would reassign owner
-        1.10's document based on owner 1.1's intent. Must not write."""
+    def test_a_foreign_owners_reconciled_row_is_never_repointed(self, tmp_path, monkeypatch) -> None:
+        """nexus-r1tnx round 4 (fix-check CRITICAL): b.py resolves onto a row of ANOTHER owner. Repointing its
+        physical_collection to THIS run's target would reassign that owner's document on this owner's intent. The
+        commit reports it ``foreign_owner`` and leaves the row as it is."""
         from nexus.mcp_infra import (
             get_reconciled_collections_count,
             reset_reconciled_collections_count,
         )
         reset_reconciled_collections_count()
 
-        t = TestCatalogHookBatchedServiceMode()
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         a, b = tmp_path / "a.py", tmp_path / "b.py"
         a.write_text("a = 1\n")
         b.write_text("b = 2\n")
-        writer = t._StubWriter()
-        writer.reconcile_paths = {"b.py"}
+        foreign = self._foreign_row(cat, b, collection="code__OLD")
 
-        import structlog.testing
-        with structlog.testing.capture_logs() as logs:
-            _, writer, _ = t._run_hook(
-                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
-                show_responses={
-                    "1.10.41": {"tumbler": "1.10.41", "physical_collection": "code__OLD"},
-                },
-            )
+        self._hook(tmp_path, [a, b])
 
-        assert writer.update_calls == [], (
-            f"a foreign owner's document must not be repointed: {writer.update_calls}"
-        )
+        assert cat.resolve(foreign).physical_collection == "code__OLD", "a foreign owner's document must not be repointed"
         assert get_reconciled_collections_count() == 0
-        events = [
-            e for e in logs
-            if e["event"] == "catalog_physical_collection_reconcile_skipped_foreign_owner"
-        ]
-        assert len(events) == 1, f"expected exactly one divergence log, got {logs}"
-        assert events[0]["resolved_tumbler"] == "1.10.41"
-        assert events[0]["owner"] == "1.1"
 
     def test_a_same_owners_reconciled_rows_stale_physical_collection_is_repointed(
         self, tmp_path, monkeypatch,
     ) -> None:
-        """The genuine nexus-2t63u case: b.py resolves onto 1.1.55, a
-        document under THIS fixture's own owner (1.1) -- reached via a
-        source_uri/file_path match plain-owner-scoped lookup missed, not a
-        cross-owner collision. The BATCHED ``register_many`` fast path's
-        own ``created=False`` branch must still reconcile
-        ``physical_collection`` here, exactly like the per-file fallback
-        and the same-owner branches already do."""
-        from nexus.mcp_infra import (
-            get_reconciled_collections_count,
-            reset_reconciled_collections_count,
-        )
-        reset_reconciled_collections_count()
-
-        t = TestCatalogHookBatchedServiceMode()
+        """The genuine nexus-2t63u case: b.py matches a document under THIS owner by source_uri although the
+        owner-scoped path lookup missed it (the row carries another file_path). The commit resolves it
+        (``same_owner_by_uri``) and repoints its stale ``physical_collection``."""
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         a, b = tmp_path / "a.py", tmp_path / "b.py"
         a.write_text("a = 1\n")
         b.write_text("b = 2\n")
-        writer = t._StubWriter(reconcile_tumbler="1.1.55")
-        writer.reconcile_paths = {"b.py"}
+        self._hook(tmp_path, [a])  # creates the owner
+        owner = cat.owner_for_repo(self.REPO_HASH)
+        stale = str(cat.register(owner, "b.py", content_type="code", file_path="old-b.py",
+                                 physical_collection="code__OLD", source_uri=f"file://{b.resolve()}"))
 
-        _, writer, _ = t._run_hook(
-            tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
-            show_responses={
-                "1.1.55": {"tumbler": "1.1.55", "physical_collection": "code__OLD"},
-            },
-        )
+        mapping = self._hook(tmp_path, [a, b])
 
-        assert {"tumbler": "1.1.55", "physical_collection": "code__nexus"} in writer.update_calls, (
-            f"the same-owner reconciled row's stale physical_collection was "
-            f"never repointed: update_calls={writer.update_calls}"
-        )
-        assert get_reconciled_collections_count() == 1
-
-    def test_a_batched_mint_over_an_existing_path_is_announced(
-        self, tmp_path, monkeypatch,
-    ) -> None:
-        """nexus-1vc0n: the batched fast path's own ``created=True`` branch
-        must announce a genuine cross-owner mint, fed by the bulk
-        ``find_all_by_file_paths`` answer computed BEFORE ``register_many``
-        -- the same event ``announce_cross_owner_mint`` fires for the
-        per-file fallback, at one round trip per register page instead
-        of one per doc."""
-        import structlog.testing
-
-        t = TestCatalogHookBatchedServiceMode()
-        a = tmp_path / "a.py"
-        a.write_text("a = 1\n")
-
-        with structlog.testing.capture_logs() as logs:
-            t._run_hook(
-                tmp_path, monkeypatch, docs=[], head_hash="h1", files=[a],
-                list_by_file_paths_response={
-                    "a.py": [{"tumbler": "1.10.7", "title": "a.py (other owner)",
-                              "content_type": "code", "file_path": "a.py"}],
-                },
-            )
-
-        events = [e for e in logs if e["event"] == "catalog_mint_over_existing_file_path"]
-        assert len(events) == 1, f"expected exactly one mint announcement, got {logs}"
-        assert events[0]["file_path"] == "a.py"
-        assert events[0]["existing_tumblers"] == ["1.10.7"]
-
-    def test_a_conflict_minted_between_pages_is_seen_by_the_later_page(
-        self, tmp_path, monkeypatch,
-    ) -> None:
-        """nexus-1vc0n critique round: the bulk lookup runs once PER PAGE,
-        just before that page's register_many, not once for the whole
-        batch. A concurrent indexer that mints b.py under another owner
-        after page 1 registered must still be announced on page 2. With a
-        batch-wide snapshot taken before page 1 this event never fires."""
-        import structlog.testing
-
-        monkeypatch.setattr("nexus.indexer._CATALOG_REGISTER_PAGE", 1)
-        t = TestCatalogHookBatchedServiceMode()
-        a, b = tmp_path / "a.py", tmp_path / "b.py"
-        a.write_text("a = 1\n")
-        b.write_text("b = 2\n")
-        # Non-empty so the fixture keeps THIS dict (it substitutes a fresh
-        # one for a falsy argument); an empty entry list is "no conflict".
-        live = {"unrelated.py": []}
-        writer = t._StubWriter()
-        inner = writer.register_many
-        pages: list[int] = []
-
-        def register_many(owner, docs, *, with_created=False):
-            pages.append(len(docs))
-            out = inner(owner, docs, with_created=with_created)
-            if len(pages) == 1:  # a concurrent indexer, after page 1
-                live["b.py"] = [{"tumbler": "1.10.9", "title": "b.py (other owner)",
-                                 "content_type": "code", "file_path": "b.py"}]
-            return out
-
-        writer.register_many = register_many
-
-        with structlog.testing.capture_logs() as logs:
-            t._run_hook(
-                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer,
-                files=[a, b], list_by_file_paths_response=live,
-            )
-
-        assert pages == [1, 1], f"expected two one-doc pages, got {pages}"
-        events = [e for e in logs if e["event"] == "catalog_mint_over_existing_file_path"]
-        assert [e["file_path"] for e in events] == ["b.py"], logs
-        assert events[0]["existing_tumblers"] == ["1.10.9"]
-
-    def test_a_batched_reconcile_onto_another_owner_is_announced(
-        self, tmp_path, monkeypatch,
-    ) -> None:
-        """nexus-1vc0n: the ``created=False`` counterpart. b.py reconciles
-        onto 1.10.41 (owner ``1.10``, a DIFFERENT owner than this
-        fixture's own ``1.1``) -- the batched fast path's reconciled
-        branch had NO signal for this at all before nexus-1vc0n (only the
-        per-file fallback called ``announce_cross_owner_resolve``); the
-        bulk lookup now feeds it here too, silent unless created is False
-        AND a real conflict was found."""
-        import structlog.testing
-
-        t = TestCatalogHookBatchedServiceMode()
-        a, b = tmp_path / "a.py", tmp_path / "b.py"
-        a.write_text("a = 1\n")
-        b.write_text("b = 2\n")
-        writer = t._StubWriter()
-        writer.reconcile_paths = {"b.py"}
-
-        with structlog.testing.capture_logs() as logs:
-            t._run_hook(
-                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
-                list_by_file_paths_response={
-                    "b.py": [{"tumbler": "1.10.41", "title": "b.py (other owner)",
-                              "content_type": "code", "file_path": "b.py"}],
-                },
-            )
-
-        events = [e for e in logs if e["event"] == "catalog_mint_resolved_existing_document"]
-        assert len(events) == 1, f"expected exactly one resolve announcement, got {logs}"
-        assert events[0]["file_path"] == "b.py"
-        assert events[0]["existing_tumblers"] == ["1.10.41"]
-        # The created=True mint announce must NOT also fire for this doc.
-        mint_events = [e for e in logs if e["event"] == "catalog_mint_over_existing_file_path"]
-        assert not mint_events, f"a reconciled (created=False) doc must not also mint-announce: {mint_events}"
+        assert mapping[b] == stale
+        assert cat.resolve(stale).physical_collection == "code__nexus", "the stale physical_collection was never repointed"
 
     def test_all_created_keeps_the_plain_line(self, tmp_path, monkeypatch, capsys) -> None:
-        t = TestCatalogHookBatchedServiceMode()
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         a = tmp_path / "a.py"
         a.write_text("a = 1\n")
-        t._run_hook(tmp_path, monkeypatch, docs=[], head_hash="h1", files=[a])
+        self._hook(tmp_path, [a])
         err = capsys.readouterr().err
         assert "Catalog: 1 new, 0 updated\n" in err, err
-
-    def test_the_per_file_fallback_also_honours_created(
-        self, tmp_path, monkeypatch, capsys
-    ) -> None:
-        """Review [24413] Major: the hook's OWN fallback (register_many raised
-        past the client's internal fallback) called register() without the
-        flag and counted every doc as new."""
-        t = TestCatalogHookBatchedServiceMode()
-        a, b = tmp_path / "a.py", tmp_path / "b.py"
-        a.write_text("a = 1\n")
-        b.write_text("b = 2\n")
-        writer = t._StubWriter()
-        writer.reconcile_paths = {"b.py"}
-
-        def boom(*a, **k):
-            raise RuntimeError("batch endpoint down")
-
-        writer.register_many = boom
-        mapping, writer, _ = t._run_hook(
-            tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b]
-        )
-        err = capsys.readouterr().err
-        assert "Catalog: 1 new, 0 updated, 1 reconciled onto rows outside this owner" in err, err
-        assert mapping[b] == "1.10.41" and mapping[a] == "1.1.99"
-
-    def test_the_per_file_fallbacks_same_owner_resolve_is_repointed(
-        self, tmp_path, monkeypatch,
-    ) -> None:
-        """nexus-r1tnx round 5 (fix-check2 gap): the per-file fallback's
-        own ``reconcile_stale_physical_collection`` call (reached only
-        when ``register_many`` itself raises) had no BEHAVIORAL test of
-        its owner gate -- only the static call-count wiring test. b.py
-        resolves onto 1.1.55, a document under THIS fixture's own owner
-        (1.1) -- the genuine nexus-2t63u same-owner case -- so the
-        fallback must still repoint its stale physical_collection."""
-        from nexus.mcp_infra import (
-            get_reconciled_collections_count,
-            reset_reconciled_collections_count,
-        )
-        reset_reconciled_collections_count()
-
-        t = TestCatalogHookBatchedServiceMode()
-        a, b = tmp_path / "a.py", tmp_path / "b.py"
-        a.write_text("a = 1\n")
-        b.write_text("b = 2\n")
-        writer = t._StubWriter(reconcile_tumbler="1.1.55")
-        writer.reconcile_paths = {"b.py"}
-
-        def boom(*a, **k):
-            raise RuntimeError("batch endpoint down")
-
-        writer.register_many = boom
-        _, writer, _ = t._run_hook(
-            tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
-            show_responses={
-                "1.1.55": {"tumbler": "1.1.55", "physical_collection": "code__OLD"},
-            },
-        )
-
-        assert {"tumbler": "1.1.55", "physical_collection": "code__nexus"} in writer.update_calls, (
-            f"the per-file fallback's same-owner resolve was never repointed: "
-            f"update_calls={writer.update_calls}"
-        )
-        assert get_reconciled_collections_count() == 1
-
-    def test_the_per_file_fallbacks_cross_owner_resolve_is_never_repointed(
-        self, tmp_path, monkeypatch,
-    ) -> None:
-        """The owner-gate mirror of the test above: b.py resolves onto
-        1.10.41, which belongs to owner 1.10 -- a DIFFERENT owner than
-        this fixture's own (1.1). The per-file fallback's reconcile call
-        must not write to that foreign document; it must only log the
-        divergence, exactly like the batched path's own owner gate."""
-        from nexus.mcp_infra import (
-            get_reconciled_collections_count,
-            reset_reconciled_collections_count,
-        )
-        reset_reconciled_collections_count()
-
-        t = TestCatalogHookBatchedServiceMode()
-        a, b = tmp_path / "a.py", tmp_path / "b.py"
-        a.write_text("a = 1\n")
-        b.write_text("b = 2\n")
-        writer = t._StubWriter()
-        writer.reconcile_paths = {"b.py"}
-
-        def boom(*a, **k):
-            raise RuntimeError("batch endpoint down")
-
-        writer.register_many = boom
-
-        import structlog.testing
-        with structlog.testing.capture_logs() as logs:
-            _, writer, _ = t._run_hook(
-                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
-                show_responses={
-                    "1.10.41": {"tumbler": "1.10.41", "physical_collection": "code__OLD"},
-                },
-            )
-
-        assert writer.update_calls == [], (
-            f"the per-file fallback must not repoint a foreign owner's "
-            f"document: {writer.update_calls}"
-        )
-        assert get_reconciled_collections_count() == 0
-        events = [
-            e for e in logs
-            if e["event"] == "catalog_physical_collection_reconcile_skipped_foreign_owner"
-        ]
-        assert len(events) == 1, f"expected exactly one divergence log, got {logs}"
-        assert events[0]["resolved_tumbler"] == "1.10.41"
-        assert events[0]["owner"] == "1.1"

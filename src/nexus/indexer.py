@@ -1024,101 +1024,6 @@ def _migrate_legacy_collections(
     return result
 
 
-def _delete_docs_for_paths(repo: Path, deleted_relpaths: list[str]) -> None:
-    """Delete the catalog documents for explicitly-deleted paths (nexus-fltb4).
-
-    The delta path's replacement for housekeeping's miss-count sweep: git
-    already told us these worktree-relative paths are gone (rename detection
-    applied), so their docs are tombstoned immediately rather than waiting on
-    the two-run sweep. CORRECTION (nexus-d6qmz round 3, review
-    nexus/critique-nexus-d6qmz-7710a262b-2026-09-09): this used to claim "the
-    manifest FK CASCADE then exposes their chunks to _prune_deleted_files's
-    orphan sweep" — false. ``writer.delete_document`` is a plain soft-
-    tombstone UPDATE (sets ``deleted_at``) that deliberately does NOT cascade
-    (nexus-mqd6t tripwire; store_hook.py's nexus-3ck2g docstring says the
-    same). The underlying T3 chunk stays referenced by the tombstoned
-    manifest until ``nx catalog purge-trash`` reclaims it past its age
-    window (one day by default) — same latency as a git deletion always
-    had here.
-
-    ``reader.by_file_path`` filters ``deleted_at IS NULL`` server-side
-    (``documentsByFilePath``, ``service/.../CatalogRepository.java``), so an
-    already-tombstoned path is a safe no-op HERE by construction — not
-    merely because the ``entry is None`` check happens to catch it. A
-    caller (e.g. ``_stored_paths_among`` below, which reads through
-    ``by_owner`` — the identical ``deleted_at IS NULL`` filter,
-    ``documentsByOwner``) never needs its own tombstone check before
-    feeding a path in here; an already-reclaimed path never re-enters this
-    function's caller's ``delta_deleted`` in the first place.
-
-    Best-effort per path; a failed lookup/delete is logged and skipped (the
-    next FULL run's housekeeping recovers it).
-
-    A full walk also feeds paths that are still present but no longer
-    indexable (an excluded RDR basename, a whitespace-only file, a symlink,
-    nexus-gnw42). On a ``--since-head`` run that happens only when the delta
-    is non-empty: an empty delta returns before the walk, so such a path is
-    retired by the next run with any change, or the next full run.
-    """
-    try:
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-        reader = make_catalog_reader()
-        if reader is None:
-            return
-        writer = make_catalog_writer()
-        _, repo_hash = _repo_identity(repo)
-        owner = reader.owner_for_repo(repo_hash)
-        if owner is None:
-            return
-        for rel in deleted_relpaths:
-            try:
-                entry = reader.by_file_path(owner, rel)
-                if entry is None:
-                    # nexus-yzij1: the lookup is owner-scoped and CANNOT see a
-                    # row for this path owned by anyone else. Widening the
-                    # DELETE would be worse than the silence — a file leaving
-                    # this repo is no reason to tombstone another owner's
-                    # document of it — so the fix is to stop the miss being
-                    # indistinguishable from "no such document anywhere".
-                    # Its own try: this lookup attempts no delete, so letting
-                    # it fall into the handler below would file it under
-                    # "since_head_delete_doc_failed" and report a delete
-                    # failure that never happened.
-                    try:
-                        others = reader.find_all_by_file_path(rel)
-                    except Exception:  # noqa: BLE001 — informational only; a delete was never attempted
-                        _log.debug(
-                            "since_head_delete_foreign_owner_probe_failed",
-                            file_path=rel, exc_info=True,
-                        )
-                        others = []
-                    if others:
-                        _log.info(
-                            "since_head_delete_skipped_foreign_owner",
-                            file_path=rel,
-                            owner=str(owner),
-                            matches=len(others),
-                            candidates=[str(e.tumbler) for e in others],
-                            detail="catalogued under another owner; left live "
-                                   "deliberately — this run owns neither the "
-                                   "row nor the decision to remove it.",
-                        )
-                    continue
-                writer.delete_document(entry.tumbler)
-                _log.info(
-                    "since_head_deleted_doc",
-                    file_path=rel, tumbler=str(entry.tumbler),
-                )
-            except Exception:  # noqa: BLE001 — per-path best-effort; full-run housekeeping recovers
-                _log.warning(
-                    "since_head_delete_doc_failed", file_path=rel, exc_info=True,
-                )
-    except Exception:  # noqa: BLE001 — catalog unavailable: nothing to delete from
-        _log.debug("since_head_delete_docs_unavailable", exc_info=True)
-
-
 def _stored_paths_among(repo: Path, candidate_relpaths: set[str]) -> set[str]:
     """Filter *candidate_relpaths* down to the ones with a LIVE catalog document
     (nexus-d6qmz round 2, review nexus/review-nexus-d6qmz-7710a262b-since-head-
@@ -1134,13 +1039,11 @@ def _stored_paths_among(repo: Path, candidate_relpaths: set[str]) -> set[str]:
     the full per-collection orphan sweep on every incremental run forever
     — in steady state there is nothing left to reclaim after the first run.
 
-    ONE batched ``by_owner`` read (mirrors ``_run_housekeeping``'s own
-    pattern), never one lookup per candidate path — the candidate set is
+    ONE batched ``by_owner`` read, never one lookup per candidate path — the candidate set is
     at most a handful of basenames, but the cost that matters is per-RUN,
     not per-path. ``by_owner`` is backed by the IDENTICAL ``deleted_at IS
     NULL`` filter as ``by_file_path`` (``documentsByOwner`` /
-    ``documentsByFilePath``, ``service/.../CatalogRepository.java`` — see
-    ``_delete_docs_for_paths``'s docstring), so an already-tombstoned path
+    ``documentsByFilePath``, ``service/.../CatalogRepository.java``), so an already-tombstoned path
     drops out of ``owned_paths`` on its own the run right after it was
     reclaimed — this function never needs its own tombstone check, and an
     already-reclaimed README can never re-enter ``delta_deleted``.
@@ -1332,109 +1235,68 @@ def _catalog_hook(
     repo_hash: str,
     head_hash: str,
     indexed_files: list[tuple[Path, str, str]],
-    skip_housekeeping: bool = False,
+    walk: str = "complete",
     stale_fence_doc_ids: set[str] | None = None,
     on_phase: Callable[[str], None] | None = None,
     complete_doc_hashes: dict[str, str] | None = None,
     needs_fence: dict[str, tuple[str, str]] | None = None,
     unregistered: dict[Path, str] | None = None,
-    housekeeping_keep: list[Path] | None = None,
+    keep_paths: list[Path] | None = None,
+    deleted_relpaths: list[str] | None = None,
     sensitive_globs: tuple[str, ...] = (),
     sensitive_wanted: set[Path] | None = None,
     sensitive_confirmed: set[Path] | None = None,
 ) -> dict[Path, str]:
-    """Register/update indexed files in catalog. Silently skipped if catalog absent.
+    """Register/update the indexed files in the catalog through one engine reconcile run (RDR-193 Step 6,
+    nexus-u5m5g.7). The result is ``{abs_path: doc_id}`` (empty when the catalog cannot be reached).
 
-    ``sensitive_globs`` (RDR-243 Q8, nexus-rfvyy.8.8) are the ``--sensitive-glob`` patterns. A file whose
-    repo-relative path matches one is registered with ``sensitive = true`` (a new document carries it in
-    its register request), and an existing document that is not yet flagged is raised through the audited
-    ``set_sensitivity`` route, also when nothing else about the file changed. ``sensitive_wanted`` is an
-    OUT-param holding every matching file; ``sensitive_confirmed`` holds those the catalog now holds
-    flagged. A caller that embeds must not embed a wanted file that is not confirmed (the flag is the
-    only thing the later skips and local-only legs read).
+    The hook does what only the client can: it takes each file's ``stat``, reads and hashes it, guards the
+    ephemeral worktree and temp-dir paths, and builds one landing row per file (its ``base_metadata`` and the stamp of
+    its tags, category, source_format and RDR id). The rows are staged on the engine in pages of at most
+    ``_CATALOG_REGISTER_PAGE``, the run is committed once and polled to its end, and every structure below is rebuilt
+    from the commit's outcome with no further request (:mod:`nexus.catalog.reconcile_run`). The diff against the
+    catalog, the update of changed rows, the miss-count sweep, rename detection with its link moves and the explicit
+    deletions are the engine's: there is no client-side fallback, and a commit that fails leaves the run unregistered
+    (every file named ``catalog_hook_failed``), so no chunk of the run is written under a document the catalog does
+    not hold.
 
-    ``housekeeping_keep`` (nexus-2k66t.4.2) names files that exist but were
-    deliberately not offered for registration this run (PDFs held back because
-    the PDF stack is missing). They count as present for the orphan sweep, so a
-    refused run never ages their existing catalog rows toward deletion.
+    ``walk`` is ``complete`` when *indexed_files* is every file of the repository (a file the catalog holds that is not
+    among them is counted missing, swept after two runs, or renamed when its content reappears at a new path) and
+    ``partial`` for a delta (``--since-head``) walk: nothing is counted, swept or renamed, and only the rows named are
+    touched (the mass-delete class of nexus-fltb4).
 
-    ``unregistered`` (nexus-z0o2p.20, RDR-223 P2.10) is an optional OUT-param:
-    ``abs_path -> cause`` for every file this call could NOT resolve to a
-    catalog document, so the run can say why a file has none instead of only
-    that it has none. Causes: ``ephemeral:<reason>`` (registration refused by
-    the worktree/tempdir guard), ``register_failed`` (the per-file register
-    raised), ``catalog_hook_failed`` (the whole hook raised). A file in none
-    of these states that still has no id reads ``unexplained`` downstream.
-    Purely additive: nothing else in this function reads it.
+    ``deleted_relpaths`` are the paths git (or the walk's own exclusions) reported gone: the commit trashes their
+    documents before the files are indexed, with no link move. ``keep_paths`` (nexus-2k66t.4.2) are files that exist but
+    were deliberately not offered this run (PDFs held back because the PDF stack is missing); they count as present, so a
+    refused run never ages their rows toward the sweep.
 
-    ``complete_doc_hashes`` (nexus-vayt7) is the sibling OUT-param of
-    ``stale_fence_doc_ids``: every EXISTING document whose reported
-    ``index_state`` is ``'complete'`` has ``tumbler -> index_content_hash``
-    added in place, from the same owner-scoped fetch. The orchestrator
-    overlays it onto the staleness caches, whose own entries carry no hash
-    (a chunk row's ``content_hash`` is the last writer's, not this
-    document's; see ``indexer_utils.apply_catalog_content_hashes``), so a
-    document absent from this map is stale.
+    ``sensitive_globs`` (RDR-243 Q8, nexus-rfvyy.8.8) are the ``--sensitive-glob`` patterns. A file whose repo-relative
+    path matches one is staged ``sensitive``, so a new document is born flagged, and an existing document that is not yet
+    flagged is raised through the audited ``set_sensitivity`` route (the commit never flags an existing one), also when
+    nothing else about the file changed. ``sensitive_wanted`` is an OUT-param holding every matching file;
+    ``sensitive_confirmed`` holds those the catalog now holds flagged. A caller that embeds must not embed a wanted file
+    that is not confirmed.
 
-    ``on_phase`` (nexus-jg3x5): the orchestrator's ``[post]`` phase channel.
-    When supplied, each link generator that can do work for this batch
-    emits ``Catalog linking: <kind>…`` on entry and ``Catalog linking:
-    <kind> done (<s>s)`` on exit, carrying the SAME measured duration the
-    ``catalog_hook_stage_timing`` event records. ``None`` (every other
-    caller) emits nothing.
+    OUT-params, each filled in place from the outcome's rows:
 
-    Returns a ``{abs_path: doc_id}`` map (empty when the catalog is absent
-    or cannot be opened) so the orchestrator can build a
-    ``doc_id_resolver`` closure and inject it into ``IndexContext``
-    before per-file indexing runs (RDR-101 Phase 3 PR δ Stage B). The
-    return type is additive — existing test call sites that ignore the
-    return value continue to work unchanged.
+    ``unregistered`` (nexus-z0o2p.20, RDR-223 P2.10): ``abs_path -> cause`` for every file this call could NOT resolve
+    to a catalog document: ``ephemeral:<reason>`` (refused by the worktree/tempdir guard), ``register_failed`` (the
+    file's row could not be built), ``register_refused`` (the engine refused the row: its derived source URI lies outside
+    the owner's repo root) and ``catalog_hook_failed`` (the whole run failed).
 
-    ``stale_fence_doc_ids`` (nexus-cp46b) is an optional OUT-param: when
-    supplied, every EXISTING document (Pass 1's ``existing is not None``
-    branch below) whose reported ``index_state`` is ``'indexing'`` or
-    ``'failed'`` has its tumbler added to the set in place. This reuses
-    the SAME owner-scoped catalog fetch (``path_to_entry`` /
-    ``cat.by_file_path``) this pass already pays for — no extra per-file
-    or per-run HTTP round trip. The orchestrator threads the populated
-    set into the per-collection ``StalenessCache.never_fresh`` so a doc
-    stranded mid-run (content unchanged, fence stuck at 'indexing'/
-    'failed') is forced stale on the next normal ``nx index repo`` pass
-    instead of being permanently skipped by the content-hash-only
-    staleness check (the bug this bead fixes). A document whose
-    ``index_state`` was never reported at all (pre-fence engine —
-    ``index_state_reported=False``) is excluded, matching the
-    floor-tolerant stance ``doc_indexer._index_run_fresh`` /
-    ``indexer_utils.non_complete_documents`` already use elsewhere.
+    ``stale_fence_doc_ids`` (nexus-cp46b): the tumbler of every existing document fenced ``indexing`` or ``failed``
+    (a run stranded mid-way), so the staleness caches force it stale instead of skipping it on its unchanged content.
 
-    ``needs_fence`` (nexus-hg2dw) is an optional OUT-param:
-    ``doc_id -> (file_hash, physical_collection)`` for every document THIS
-    call determines needs real indexing work this run — a brand-new
-    registration, or an EXISTING document whose file content genuinely
-    changed (the ``file_hash != existing.meta["content_hash"]`` signal
-    already trusted elsewhere in this function for ``relink_rdr_tumblers``,
-    deliberately narrower than the broader ``changed`` flag that also
-    fires on a bare head_hash/mtime/collection bump with the file's
-    content untouched).
+    ``complete_doc_hashes`` (nexus-vayt7): ``tumbler -> index_content_hash`` for every existing document fenced
+    ``complete``, the doc-level hash of record the staleness caches are overlaid with.
 
-    ROUND 2 CORRECTION (T2 critique-nexus-hg2dw-36602c67f [24598] finding
-    1, CRITICAL): this set is NOT fence-begun in bulk here or anywhere
-    else right after registration — an earlier version of this fix did
-    that (one round trip per collection, immediately after Pass 1) and it
-    enlarged an UNCATCHABLE exit's (SIGKILL/OOM-kill) blast radius from
-    the original incident's small in-flight batch to the run's entire
-    not-yet-processed file set, since a hard kill never runs
-    ``index_repository``'s ``finally``. The fence now begins PER FILE
-    instead, inside ``prose_indexer.index_prose_file`` /
-    ``code_indexer.index_code_file``, immediately before that file's own
-    chunking starts — this out-param exists purely to SCOPE the exit-time
-    reconciliation (``_reconcile_needs_fence``, called from
-    ``index_repository``'s existing ``finally``, catchable exits only) to
-    exactly the documents Pass 1 determined need checking, without a
-    full-corpus catalog scan. A doc whose content did NOT change is
-    deliberately excluded from this set entirely — including it would let
-    reconciliation clobber a correct 'complete' stamp for a file this run
-    never touches.
+    ``needs_fence`` (nexus-hg2dw): ``doc_id -> (file_hash, physical_collection)`` for every document this run
+    determined needs real indexing work: a brand-new registration, or an existing document whose file CONTENT changed
+    (deliberately narrower than "the row changed": a bare HEAD bump touches every row and must not fence them all). It
+    only scopes the exit-time reconciliation (``_reconcile_needs_fence``); the per-file fence begins in each producer.
+
+    ``on_phase`` (nexus-jg3x5): the orchestrator's ``[post]`` phase channel; each link generator that can do work for
+    this batch emits ``Catalog linking: <kind>…`` on entry and ``... done (<s>s)`` on exit.
     """
     file_to_doc_id: dict[Path, str] = {}
     reader = None
@@ -1495,83 +1357,28 @@ def _catalog_hook(
         import functools  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         import sys  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-        # nexus-c14zi: TTY-gate the raw ``\r`` writes below (and the ones
-        # ``_maybe_run_housekeeping`` makes through the same ``progress``
-        # callback) — see ``_catalog_progress``'s own docstring for why.
+        # nexus-c14zi: TTY-gate the raw ``\r`` writes below — see
+        # ``_catalog_progress``'s own docstring for why.
         _progress = functools.partial(
             _catalog_progress,
             is_tty=sys.stderr.isatty(), on_phase=on_phase, write=sys.stderr.write,
         )
         _progress(f"  Catalog: registering {len(indexed_files)} files…\r")
 
-        # nexus-dst5h: ONE owner-scoped fetch + local join instead of a
-        # per-file ``by_file_path`` round-trip. In service mode each
-        # per-file lookup was a WAN HTTPS call (and the server returns the
-        # full owner list per call — GH #1350 class), so a warm run paid
-        # ~len(indexed_files) serial round-trips before indexing anything.
-        # The snapshot is taken once: a file registered by a CONCURRENT
-        # writer after this point is misclassified as new, takes the
-        # register-branch, and register()'s own idempotency check returns
-        # the existing tumbler (fields refresh on the next pass).
-        # A fetch failure must NOT no-op the whole hook (the nexus-o6aa.10.4
-        # ghost class): fall back to the per-file lookups, loudly.
-        path_to_entry: dict[str, object] | None
-        try:
-            path_to_entry = {e.file_path: e for e in cat.by_owner(owner)}
-        except Exception as exc:  # noqa: BLE001 — degraded path must keep the hook alive
-            path_to_entry = None
-            _log.warning(
-                "catalog_hook_owner_list_failed_falling_back_per_file",
-                repo=repo_name, error=str(exc),
-            )
-        new_tumblers = []
-        # content_type of every doc landing in new_tumblers, tracked
-        # alongside it (populated in the same register_many/register
-        # success branches below). Lets the link-generation call site
-        # skip a generator's catalog fetches entirely when none of this
-        # run's new documents are of that generator's source type — see
-        # link_generator._no_qualifying_seed.
+        new_tumblers: list = []
         new_content_types: set[str] = set()
-        # nexus-o6aa.10.4 follow-up: track per-file failures so the
-        # catalog hook stops failing silently. Pre-fix, a single
-        # cat.register() exception inside the loop tripped the outer
-        # except at line ~362 which logs at DEBUG, suppressing the
-        # rest of the registrations and leaving file_to_doc_id empty
-        # for every subsequent file in this run. Found via Hal's
-        # ghost-chunk class on 2026-05-02.
-        skipped_files: list[tuple[Path, str]] = []
-        reconciled: list[tuple[Path, str]] = []  # nexus-53cae: registered onto a live row outside this owner
+        relink_rdr_tumblers: list = []
         ephemeral_skipped = 0  # nexus-u8n4r: worktree/tempdir registrations refused.
+        skipped_files: list[tuple[Path, str]] = []
         import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-        # Pass 1: resolve each file to existing-or-new. Changed existing docs are
-        # updated inline; NEW docs are accumulated for ONE batched register_many
-        # (nexus-9dvqy, duoak.11 sink #2) — the per-file writer.register() loop
-        # was the 333s serial-WAN registration sink. The per-file try/except keeps
-        # the ghost-class isolation intact: one bad file must never strip doc_ids
-        # from the rest of the repo.
-        # nexus-oub13: per-stage wall timing. The live "Catalog registration
-        # done (115.5s)" phase wraps FIVE stages (resolve/update, update_many,
-        # register_many pages, link generation, housekeeping) with no way to
-        # tell which owns the wall — the ~38s/page inference attributed the
-        # whole phase to register_many unproven. One summary log per run +
-        # one log per register page.
+        # nexus-oub13: per-stage wall timing, one summary log per run.
         _stage_t0 = time.monotonic()
         _stage_s: dict[str, float] = {}
-        new_batch: list[tuple[Path, dict]] = []
-        # RDR-243 Q8: existing documents matched by --sensitive-glob that are not flagged yet.
-        raise_batch: list[tuple[Path, str]] = []
-        # nexus-xedhp: changed-but-existing docs, batched via update_many
-        # (Pass 1b, below) instead of an inline per-file writer.update().
-        changed_batch: list[tuple[Path, dict]] = []
-        # Sam's ruling 2026-09-04 (nexus-y8bkt): supersedes edges are part
-        # of indexing. Link generation below is incremental over NEW
-        # registrations, so an RDR whose frontmatter gained supersedes /
-        # superseded_by after it was first registered never got its edge
-        # (measured: zero extractor edges on a tenant with 189 RDRs). An
-        # existing RDR whose CONTENT hash changed is re-fed to the
-        # dependency generator as if new; head-hash-only bumps are not.
-        relink_rdr_tumblers: list = []
+        # One landing row per file, in walk order, then the files held back, then the explicit deletions.
+        rows: list[dict] = []
+        staged: dict[str, dict] = {}  # the present rows, by repo-relative path
+        rel_to_abs: dict[str, Path] = {}
         from nexus.sensitive_write import sensitive_glob_matches  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
         for abs_path, content_type, collection_name in indexed_files:
             try:
@@ -1693,444 +1500,92 @@ def _catalog_hook(
             rdr_stamp = {**rdr_stamp, **document_register_meta(content_type, rel_path)}
 
             try:
-                existing = (
-                    path_to_entry.get(rel_path)
-                    if path_to_entry is not None
-                    else cat.by_file_path(owner, rel_path)
-                )
-                if existing is None:
-                    # Defer the write: accumulate for the batched register_many
-                    # in pass 2. new_tumblers / file_to_doc_id are populated there.
-                    new_batch.append((abs_path, {
-                        "title": abs_path.name,
-                        "content_type": content_type,
-                        "file_path": rel_path,
-                        "physical_collection": collection_name,
-                        "head_hash": head_hash,
-                        "meta": _register_time_meta(rel_path, file_hash, rdr_stamp),
-                        "source_mtime": source_mtime,
-                        **({"sensitive": True} if _sens_glob else {}),
-                    }))
-                else:
-                    if _sens_glob:
-                        if getattr(existing, "sensitive", False) is True:
-                            if sensitive_confirmed is not None:
-                                sensitive_confirmed.add(abs_path)
-                        else:
-                            raise_batch.append((abs_path, str(existing.tumbler)))
-                    # nexus-dst5h: skip the write when nothing changed —
-                    # a warm re-run otherwise pays one serial update
-                    # round-trip per file. An empty file_hash (read
-                    # failure) is inconclusive, not a change. The mtime
-                    # compare relies on st_mtime round-tripping bit-exact
-                    # through storage (SQLite REAL / PG DOUBLE PRECISION /
-                    # JSON); a storage change that truncates precision
-                    # flips this to always-changed (harmless) — never
-                    # compare with tolerance, drift means changed.
-                    # nexus-hg2dw: the CONTENT-specific signal, isolated from
-                    # the broader `changed` (head_hash/mtime/collection) flag
-                    # below — a bare HEAD bump flips `changed` for the WHOLE
-                    # repo on every commit regardless of any file's actual
-                    # content, so it cannot drive fence-begin without forcing
-                    # every unchanged document to 'indexing' on every run.
-                    content_hash_changed = (
-                        bool(file_hash)
-                        and existing.meta.get("content_hash", "") != file_hash
-                    )
-                    # nexus-jypmj.7: a registration that lacks the RDR frontmatter stamp (made before the stamp
-                    # existed) or carries a different one is written once, so a plain re-index fills it; the
-                    # next run finds it equal and writes nothing.
-                    # nexus-3ax49 (Sam's ruling, 2026-11-01): the tags and category are filled only where the
-                    # document holds none, so a curated value is neither stale nor rewritten; the rest of the
-                    # stamp (source_format, the rdr id) keeps its compare-and-overwrite.
-                    rdr_stamp = fill_only_meta(rdr_stamp, existing.meta)
-                    stamp_stale = any(
-                        existing.meta.get(k, _STAMP_MISSING) != v for k, v in rdr_stamp.items()
-                    )
-                    changed = (
-                        existing.head_hash != head_hash
-                        or existing.physical_collection != collection_name
-                        or existing.source_mtime != source_mtime
-                        or content_hash_changed
-                        or stamp_stale
-                    )
-                    if content_type == "rdr" and content_hash_changed:
-                        relink_rdr_tumblers.append(existing.tumbler)
-                    if needs_fence is not None and content_hash_changed:
-                        needs_fence[str(existing.tumbler)] = (file_hash, collection_name)
-                    if changed:
-                        # nexus-xedhp: accumulate for the batched update_many
-                        # below instead of an inline per-file writer.update()
-                        # round trip — a HEAD bump (any new git commit) flips
-                        # EVERY indexed doc's stored head_hash to "changed",
-                        # so on a warm re-run this is the whole repo's
-                        # population, not a rare exception.
-                        changed_batch.append((abs_path, {
-                            "tumbler": str(existing.tumbler),
-                            "head_hash": head_hash,
-                            "physical_collection": collection_name,
-                            "meta": _register_time_meta(rel_path, file_hash, rdr_stamp),
-                            "source_mtime": source_mtime,
-                        }))
-                    file_to_doc_id[abs_path] = str(existing.tumbler)
-                    # nexus-cp46b: a doc fenced 'indexing'/'failed' is a
-                    # stranded run (RUNFENCE, nexus-5xn3k.3), not merely
-                    # "unchanged" — the content-hash staleness cache must
-                    # never skip it just because content still matches.
-                    # ``index_state_reported`` False = pre-fence engine
-                    # (nothing to say, not a stale signal) — same floor-
-                    # tolerant convention as _index_run_fresh/
-                    # non_complete_documents.
-                    if (
-                        stale_fence_doc_ids is not None
-                        and getattr(existing, "index_state_reported", True)
-                        and getattr(existing, "index_state", None) in ("indexing", "failed")
-                    ):
-                        stale_fence_doc_ids.add(str(existing.tumbler))
-                    # nexus-vayt7: the fence's content hash is the doc-level
-                    # hash of record; chunk metadata cannot carry one.
-                    if (
-                        complete_doc_hashes is not None
-                        and getattr(existing, "index_state_reported", True)
-                        and getattr(existing, "index_state", None) == "complete"
-                        and getattr(existing, "index_content_hash", "")
-                    ):
-                        complete_doc_hashes[str(existing.tumbler)] = (
-                            existing.index_content_hash
-                        )
-            except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-                # Per-file failure must NOT abort the rest of the loop.
-                # The previous behaviour swallowed every subsequent
-                # registration too, leaving the entire repo's chunks
-                # without doc_id metadata (the ghost class).
+                if rel_path in staged:
+                    # two files with one repo-relative key (an outside-the-repo path falls back to its bare name):
+                    # the engine takes one row per path, and the second has no identity of its own
+                    raise ValueError(f"another file of this run is already staged as {rel_path!r}")
+                # The RDR's frontmatter id is recorded on the catalog document synchronously (nexus-jypmj.7); the
+                # document's own tags, category and source_format ride the same stamp (nexus-6pfgb.8, .23). The tags
+                # and category are fill-only for an existing document (nexus-3ax49): the engine applies that rule.
+                row = {
+                    "kind": "present", "seq": len(rows), "file_path": rel_path, "content_type": content_type,
+                    "title": abs_path.name, "physical_collection": collection_name, "head_hash": head_hash,
+                    "source_mtime": source_mtime, "content_hash": file_hash,
+                    "base_metadata": _register_time_meta(rel_path, file_hash) or {},
+                    "stamp": rdr_stamp, "sensitive": _sens_glob,
+                }
+                rows.append(row)
+                staged[rel_path] = row
+                rel_to_abs[rel_path] = abs_path
+            except Exception as exc:  # noqa: BLE001 — per-file isolation: one bad file must never strip ids from the rest of the repo
                 skipped_files.append((abs_path, str(exc)))
                 if unregistered is not None:
                     unregistered[abs_path] = "register_failed"
                 _log.warning(
                     "catalog_hook_register_failed",
-                    rel_path=rel_path,
-                    abs_path=str(abs_path),
-                    error=str(exc),
-                    exc_info=True,
+                    rel_path=rel_path, abs_path=str(abs_path), error=str(exc), exc_info=True,
                 )
+
+        _seen = set(staged)
+        for _rel in sorted(_indexed_relpaths([(p, "", "") for p in (keep_paths or [])], repo)):
+            if _rel not in _seen:
+                _seen.add(_rel)
+                rows.append({"kind": "keep", "seq": len(rows), "file_path": _rel})
+        for _rel in deleted_relpaths or []:
+            if _rel not in _seen:
+                _seen.add(_rel)
+                rows.append({"kind": "deleted", "seq": len(rows), "file_path": _rel})
 
         _stage_s["pass1_resolve"] = time.monotonic() - _stage_t0
         _stage_mark = time.monotonic()
 
-        # RDR-243 Q8 (nexus-rfvyy.8.8): raise the flag on EXISTING documents a --sensitive-glob matches, through
-        # the audited route (``sensitive`` is not an updatable column, so update_many would be refused). It
-        # runs whether or not anything else about the file changed. A page that fails leaves its files
-        # unconfirmed, and the caller then does not embed them.
-        if raise_batch:
-            from nexus.sensitive_write import SENSITIVE_REASON  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
-            _set_sens = getattr(writer, "set_sensitivity", None)
-            for _start in range(0, len(raise_batch), _CATALOG_REGISTER_PAGE):
-                _page = raise_batch[_start : _start + _CATALOG_REGISTER_PAGE]
-                try:
-                    if not callable(_set_sens):
-                        raise RuntimeError("the catalog writer has no set_sensitivity")
-                    _set_sens([t for _, t in _page], True, reason=f"{SENSITIVE_REASON}: nx index repo --sensitive-glob")
-                except Exception as exc:  # noqa: BLE001 — boundary: any failure of the audited route leaves these files unflagged, and the run does not embed them
-                    _log.warning(
-                        "sensitive_glob_flag_not_set", repo=repo_name, files=len(_page),
-                        error_type=type(exc).__name__, error=str(exc),
-                    )
-                    continue
-                if sensitive_confirmed is not None:
-                    sensitive_confirmed.update(p for p, _ in _page)
-                # An existing document indexed before the glob matched may sit in topics labelled from its text
-                # (RDR-243 Phase 3 fix r3, nexus-rfvyy.8, N1): relabel them, best effort and logged, as
-                # raise_flag does.
-                from nexus import sensitive_topics  # noqa: PLC0415 - deferred: only a late flag needs it
+        from nexus.catalog import reconcile_run  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+        outcome = reconcile_run.stage_and_commit(writer, owner, rows, walk=walk, page=_CATALOG_REGISTER_PAGE)
+        applied = reconcile_run.apply_outcome(outcome, rel_to_abs=rel_to_abs, staged=staged)
+        # RDR-243 Q8 (nexus-rfvyy.8.8): the commit never flags an existing document; raise those a --sensitive-glob
+        # matched through the audited route. A page that fails leaves its files unconfirmed, so the run does not embed them.
+        reconcile_run.raise_pending_sensitivity(writer, applied, repo_name=repo_name, page=_CATALOG_REGISTER_PAGE)
 
-                sensitive_topics.withhold_after_flag_best_effort(writer, [t for _, t in _page], source="index repo --sensitive-glob")
-
-        # Pass 1b: batch-update the CHANGED existing docs (nexus-xedhp,
-        # duoak.11 follow-up). A HEAD bump flips every doc's stored head_hash
-        # to "changed", so on a warm re-run this is the whole repo's
-        # population — the serial per-file writer.update() this replaces was
-        # measured at 175.5s / 1718 files (~102ms/file, all WAN round trips).
-        # ``update_many`` is service-mode-only (nexus_xedhp scope; see
-        # catalog/factory.py's _SERVICE_ONLY_WRITE_OPS) — SQLite/daemon-mode
-        # writers don't expose it, so this capability check safely falls
-        # back to the original per-file loop there, matching the
-        # write_manifest_many precedent in Pass 2's sibling below.
-        if changed_batch:
-            _update_many = getattr(writer, "update_many", None)
-            if callable(_update_many):
-                for _start in range(0, len(changed_batch), _CATALOG_REGISTER_PAGE):
-                    page = changed_batch[_start : _start + _CATALOG_REGISTER_PAGE]
-                    page_docs = [doc for _, doc in page]
-                    try:
-                        counts = _update_many(page_docs)
-                        if len(counts) != len(page):
-                            raise ValueError(
-                                f"update_many returned {len(counts)} counts "
-                                f"for {len(page)} updates"
-                            )
-                    except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback
-                        _log.warning(
-                            "catalog_update_many_failed_falling_back_per_file",
-                            repo=repo_name, page_size=len(page), exc_info=True,
-                        )
-                        for path, doc in page:
-                            try:
-                                writer.update(
-                                    doc["tumbler"],
-                                    **{k: v for k, v in doc.items() if k != "tumbler"},
-                                )
-                            except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
-                                skipped_files.append((path, str(exc)))
-                                _log.warning(
-                                    "catalog_hook_update_failed",
-                                    abs_path=str(path), error=str(exc), exc_info=True,
-                                )
-            else:
-                # SQLite/daemon-mode writer: no batched path, unchanged
-                # behaviour (the original per-file inline update() loop).
-                for path, doc in changed_batch:
-                    try:
-                        writer.update(
-                            doc["tumbler"],
-                            **{k: v for k, v in doc.items() if k != "tumbler"},
-                        )
-                    except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
-                        skipped_files.append((path, str(exc)))
-                        _log.warning(
-                            "catalog_hook_update_failed",
-                            abs_path=str(path), error=str(exc), exc_info=True,
-                        )
-
-        _stage_s["pass1b_update_many"] = time.monotonic() - _stage_mark
-        _stage_mark = time.monotonic()
-
-        # nexus-1vc0n: the bulk owner-agnostic twin of
-        # ``find_cross_owner_conflict``, one round trip PER PAGE, taken
-        # immediately BEFORE that page's register_many call for the
-        # identical reason find_cross_owner_conflict's own docstring gives
-        # for running before register(): querying after would also see
-        # this run's own just-minted rows and misreport an uncontested path
-        # as conflicting with itself. Per page rather than once per batch
-        # (critique round, nexus-1vc0n): a cold index spans many pages,
-        # each paying a round trip, and a
-        # batch-wide snapshot went stale across them, missing a conflict
-        # a concurrent indexer minted meanwhile or naming a tumbler since
-        # tombstoned. The per-doc ``find_cross_owner_conflict`` cost that
-        # path_ambiguity.py's module docstring rules out of this loop (one
-        # owner-agnostic ``/list?file_path=`` per doc) becomes one bulk
-        # ``find_all_by_file_paths`` call per register_many page instead.
-        def _page_conflicts(page_docs: list[dict]) -> dict[str, list[str]]:
-            try:
-                existing = cat.find_all_by_file_paths(
-                    [d["file_path"] for d in page_docs],
-                )
-            except Exception:  # noqa: BLE001 — announce must never fail the write
-                _log.debug(
-                    "catalog_bulk_conflict_lookup_failed",
-                    repo=repo_name, exc_info=True,
-                )
-                return {}
-            return {
-                fp: [str(e.tumbler) for e in entries]
-                for fp, entries in existing.items()
-            }
-
-        # Pass 2: batch-register the NEW docs, one page per register_many round-
-        # trip (one multi-row INSERT server-side), not 1000 serial writes.
-        # register_many is 1:1-or-raise; the client already degrades a failed batch to per-doc
-        # register() internally, and if even that raises we fall back here to a
-        # per-file register with the same ghost-class isolation as pass 1.
-        #
-        # nexus-r1tnx round 2 (code-review finding): a cross-owner path
-        # collision IS possible here (a repo file this owner is registering
-        # can already be catalogued under a DIFFERENT owner — the exact
-        # nexus-yzij1 population this whole module exists to make audible).
-        # nexus-1vc0n closes it: the per-page ``_page_conflicts`` lookup
-        # feeds ``announce_cross_owner_mint``/``announce_cross_owner_
-        # resolve`` below exactly like the per-file fallback's
-        # ``find_cross_owner_conflict`` answer feeds the SAME two
-        # functions — one round trip per page, not one per doc.
-        #
-        # nexus-r1tnx round 3: ``reconcile_stale_physical_collection`` is a
-        # DIFFERENT cost shape and DOES run in this batched loop, at the
-        # ``reconciled.append`` site below — it costs one resolve() plus a
-        # conditional update(), paid only for a doc THIS batch's own
-        # ``created=False`` pairs already singled out, not the whole page,
-        # so it never reintroduces the N+1 that ruled out the per-doc
-        # conflict check above.
-        for _start in range(0, len(new_batch), _CATALOG_REGISTER_PAGE):
-            page = new_batch[_start : _start + _CATALOG_REGISTER_PAGE]
-            page_docs = [doc for _, doc in page]
-            _conflicts_by_path = _page_conflicts(page_docs)
-            _page_t0 = time.monotonic()
-            _page_ok = False
-            try:
-                pairs = writer.register_many(owner, page_docs, with_created=True)
-                _page_ok = True
-                # register_many is 1:1-or-raise; guard the invariant explicitly so
-                # a short return can never SILENTLY truncate via zip() (the ghost-
-                # doc class). A mismatch routes to the per-file fallback below.
-                if len(pairs) != len(page):
-                    raise ValueError(
-                        f"register_many returned {len(pairs)} tumblers for "
-                        f"{len(page)} docs"
-                    )
-                for (path, doc), (tum, created) in zip(page, pairs):
-                    file_to_doc_id[path] = str(tum)
-                    if doc.get("sensitive") and sensitive_confirmed is not None:
-                        sensitive_confirmed.add(path)
-                    _fp = doc.get("file_path", "")
-                    _conflict = _conflicts_by_path.get(_fp) or None
-                    if created:
-                        new_tumblers.append(tum)
-                        new_content_types.add(doc.get("content_type", ""))
-                        if needs_fence is not None:
-                            needs_fence[str(tum)] = (
-                                (doc.get("meta") or {}).get("content_hash", ""),
-                                doc.get("physical_collection", ""),
-                            )
-                        # nexus-1vc0n: the bulk-lookup twin of the per-file
-                        # fallback's announce_cross_owner_mint call below —
-                        # silent unless _conflict actually names another
-                        # owner's document at this path (the bulk answer
-                        # computed above), matching the single-path
-                        # contract exactly.
-                        from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-                            announce_cross_owner_mint,
-                        )
-                        announce_cross_owner_mint(
-                            _conflict, file_path=_fp, owner=owner,
-                            context="indexer._catalog_hook", created=created,
-                        )
-                        continue
-                    # The owner-scoped snapshot had no row for this path,
-                    # yet the server reconciled onto a live row by
-                    # source_uri: a row under ANOTHER owner (nexus-53cae:
-                    # 198 RDRs under the curator owner with absolute paths,
-                    # reported as "199 new" on every run for weeks). Not new,
-                    # not linked, and named, so the count cannot lie again.
-                    reconciled.append((path, str(tum)))
-                    _log.warning(
-                        "catalog_register_reconciled_onto_existing_row",
-                        repo=repo_name, rel_path=_fp,
-                        tumbler=str(tum), owner=str(owner),
-                    )
-                    # nexus-r1tnx round 3: find_cross_owner_conflict stays
-                    # OUT of this batched loop (documented above — one
-                    # /list?file_path= per doc would turn this page's ONE
-                    # register_many round trip into N+1), but
-                    # reconcile_stale_physical_collection is a DIFFERENT
-                    # cost shape: one resolve() + a conditional update(),
-                    # paid only for a doc that already reconciled — a
-                    # subset this batch's own pairs already singled out,
-                    # not the whole page. Closes the same nexus-2t63u
-                    # stale-physical_collection exposure the per-file
-                    # fallback below already closes, without reintroducing
-                    # the N+1 the conflict check was kept out for.
-                    #
-                    # nexus-1vc0n: announce_cross_owner_resolve is the
-                    # created=False counterpart, fed by the SAME bulk
-                    # _conflict answer as the created=True branch above —
-                    # the batched fast path's own reconciled branch had no
-                    # signal for this at all before (only the per-file
-                    # fallback below called it).
-                    from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-                        announce_cross_owner_resolve,
-                        reconcile_stale_physical_collection,
-                    )
-                    announce_cross_owner_resolve(
-                        _conflict, file_path=_fp, owner=owner,
-                        context="indexer._catalog_hook", created=created,
-                    )
-                    reconcile_stale_physical_collection(
-                        reader, writer, tumbler=tum,
-                        target_collection=doc.get("physical_collection", ""),
-                        file_path=_fp,
-                        owner=owner,
-                    )
-            except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback
-                _log.warning(
-                    "catalog_register_many_failed_falling_back_per_file",
-                    repo=repo_name, page_size=len(page), exc_info=True,
-                )
-                for path, doc in page:
-                    try:
-                        # nexus-r1tnx round 2: one register() call per doc
-                        # here (register_many already failed), so this is
-                        # exactly the per-document write path
-                        # find_cross_owner_conflict is costed for — unlike
-                        # the batched fast path above, this pays no extra
-                        # round trip by wiring it.
-                        from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-                            announce_cross_owner_mint,
-                            announce_cross_owner_resolve,
-                            find_cross_owner_conflict,
-                            reconcile_stale_physical_collection,
-                        )
-                        _conflict = find_cross_owner_conflict(reader, doc.get("file_path", ""))
-                        # with_created here too, or this fallback re-opens the
-                        # nexus-53cae miscount for every doc it handles
-                        # (review [24413] Major).
-                        tum, created = writer.register(
-                            owner, doc["title"], with_created=True,
-                            **{k: v for k, v in doc.items() if k != "title"},
-                        )
-                        file_to_doc_id[path] = str(tum)
-                        if doc.get("sensitive") and sensitive_confirmed is not None:
-                            sensitive_confirmed.add(path)
-                        if created:
-                            new_tumblers.append(tum)
-                            new_content_types.add(doc.get("content_type", ""))
-                            if needs_fence is not None:
-                                needs_fence[str(tum)] = (
-                                    (doc.get("meta") or {}).get("content_hash", ""),
-                                    doc.get("physical_collection", ""),
-                                )
-                            announce_cross_owner_mint(
-                                _conflict, file_path=doc.get("file_path", ""),
-                                owner=owner, context="catalog_hook_per_file_fallback",
-                                created=created,
-                            )
-                        else:
-                            reconciled.append((path, str(tum)))
-                            _log.warning(
-                                "catalog_register_reconciled_onto_existing_row",
-                                repo=repo_name, rel_path=doc.get("file_path", ""),
-                                tumbler=str(tum), owner=str(owner),
-                            )
-                            announce_cross_owner_resolve(
-                                _conflict, file_path=doc.get("file_path", ""),
-                                owner=owner, context="catalog_hook_per_file_fallback",
-                                created=created,
-                            )
-                            # nexus-r1tnx round 4: this per-file fallback
-                            # never got the reconcile call in round 2 or 3
-                            # (fix-check finding) — wired now, with the
-                            # same owner gate the batched path above uses.
-                            reconcile_stale_physical_collection(
-                                reader, writer, tumbler=tum,
-                                target_collection=doc.get("physical_collection", ""),
-                                file_path=doc.get("file_path", ""),
-                                owner=owner,
-                            )
-                    except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
-                        skipped_files.append((path, str(exc)))
-                        if unregistered is not None:
-                            unregistered[path] = "register_failed"
-                        _log.warning(
-                            "catalog_hook_register_failed",
-                            abs_path=str(path), error=str(exc), exc_info=True,
-                        )
-            finally:
-                # Fires on success AND failure — the slow/failing pages are
-                # exactly what this profiler must not miss (review M-2).
-                _log.info(
-                    "catalog_register_page",
-                    page=_start // _CATALOG_REGISTER_PAGE + 1,
-                    docs=len(page),
-                    elapsed_s=round(time.monotonic() - _page_t0, 2),
-                    ok=_page_ok,
-                )
+        file_to_doc_id.update(applied.file_to_doc_id)
+        new_tumblers = applied.new_tumblers
+        new_content_types = applied.new_content_types
+        relink_rdr_tumblers = applied.relink_rdr_tumblers
+        if needs_fence is not None:
+            needs_fence.update(applied.needs_fence)
+        if stale_fence_doc_ids is not None:
+            stale_fence_doc_ids.update(applied.stale_fence_doc_ids)
+        if complete_doc_hashes is not None:
+            complete_doc_hashes.update(applied.complete_doc_hashes)
+        if sensitive_confirmed is not None:
+            sensitive_confirmed.update(applied.sensitive_confirmed)
+        # nexus-53cae: a file whose path the owner did not hold resolved onto a live row by source_uri (the same
+        # owner's, or another owner's: that row is left as it is). Not new, not linked, and named, so the count
+        # cannot lie again.
+        reconciled = applied.reconciled
+        for _path, _tum in reconciled:
+            _log.warning(
+                "catalog_register_reconciled_onto_existing_row",
+                repo=repo_name, rel_path=str(_path.relative_to(repo)) if _path.is_relative_to(repo) else _path.name,
+                tumbler=_tum, owner=str(owner),
+            )
+        for _path, _cause in applied.refused.items():
+            skipped_files.append((_path, _cause))
+            if unregistered is not None:
+                unregistered[_path] = "register_refused"
+            _log.warning("catalog_hook_register_refused", abs_path=str(_path), reason=_cause, owner=str(owner))
+        for _dup in outcome.get("duplicate_path", []):
+            _log.warning("catalog_reconcile_duplicate_path", owner=str(owner), **_dup)
+        for _skip in outcome.get("deleted_skipped_foreign_owner", []):
+            # nexus-yzij1: catalogued under another owner, left live deliberately: this run owns neither the row nor
+            # the decision to remove it.
+            _log.info("since_head_delete_skipped_foreign_owner", owner=str(owner), **_skip)
+        _log.info(
+            "catalog_reconcile_committed",
+            owner=str(owner), repo=repo_name, walk=walk, rows=len(rows),
+            created=len(new_tumblers), updated=applied.updated, trashed=len(outcome.get("trashed", [])),
+            renamed=len(outcome.get("renamed", [])), swept=len(outcome.get("swept", [])),
+            reconciled=len(reconciled), refused=len(applied.refused),
+        )
 
         if skipped_files or ephemeral_skipped or reconciled:
             _updated = (
@@ -2159,7 +1614,7 @@ def _catalog_hook(
                 f"{len(indexed_files) - len(new_tumblers)} updated\n"
             )
 
-        _stage_s["pass2_register"] = time.monotonic() - _stage_mark
+        _stage_s["stage_commit"] = time.monotonic() - _stage_mark
         _stage_mark = time.monotonic()
 
         # Auto-generate links after registration (incremental: only new entries)
@@ -2262,15 +1717,6 @@ def _catalog_hook(
             )
 
         _stage_s["linking"] = time.monotonic() - _stage_mark
-        _stage_mark = time.monotonic()
-
-        # Housekeeping: detect and evict orphaned catalog entries.
-        _maybe_run_housekeeping(
-            cat, owner, indexed_files, repo,
-            writer=writer, skip_housekeeping=skip_housekeeping,
-            progress=_progress, keep=housekeeping_keep,
-        )
-        _stage_s["housekeeping"] = time.monotonic() - _stage_mark
 
         _log.info(
             "catalog_hook_stage_timing",
@@ -2278,7 +1724,7 @@ def _catalog_hook(
             **{k: round(v, 1) for k, v in _stage_s.items()},
             files=len(indexed_files),
             new_docs=len(new_tumblers),
-            changed_docs=len(changed_batch),
+            changed_docs=applied.updated,
             links=links_created,
         )
         _progress(f"  Catalog: done ({len(new_tumblers)} new, {links_created} links)\n")
@@ -2302,7 +1748,6 @@ def _catalog_hook(
         if reader is not None:
             reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
     return file_to_doc_id
-
 
 def _relink_changed_pdfs(fence_run_state: dict) -> None:
     """nexus-h0uy7: same-as maintenance for the documents this run changed.
@@ -2435,49 +1880,14 @@ def _reconcile_needs_fence(fence_run_state: dict) -> None:
             _fence_fail(doc_id, "index run exited without completing this document")
 
 
-def _maybe_run_housekeeping(
-    cat,
-    owner,
-    indexed_files: list,
-    repo: "Path",
-    *,
-    writer,
-    skip_housekeeping: bool,
-    progress: "Callable[[str], object]" = lambda _s: None,
-    keep: "list[Path] | None" = None,
-) -> None:
-    """The nexus-fltb4 mass-delete gate, as a behavioral seam (nexus-4kh95).
-
-    ``keep`` (nexus-2k66t.4.2): files that exist but were deliberately not
-    offered this run (PDFs held back while the PDF stack is missing). They
-    count as present, so a refused run does not age their catalog rows toward
-    the two-miss delete.
-
-    Housekeeping's miss-count sweep interprets "not in this run's indexed
-    set" as "gone" — run against a PARTIAL (delta-filtered) walk it marks
-    every unvisited doc as missing and evicts them after two runs (the
-    mass-delete class). ``skip_housekeeping=True`` (set by the --since-head
-    delta path) must therefore never reach :func:`_run_housekeeping`.
-    Extracted from ``_catalog_hook``'s body so the gate is testable by
-    CALLING it, not by source-text inspection.
-    """
-    if skip_housekeeping:
-        _log.debug("catalog_housekeeping_skipped", reason="partial_walk")
-        return
-    progress("  Catalog: housekeeping…\r")
-    indexed_set = _indexed_relpaths(indexed_files, repo)
-    if keep:
-        indexed_set |= _indexed_relpaths([(p, "", "") for p in keep], repo)
-    _run_housekeeping(cat, owner, indexed_set, writer=writer)
-
-
 def _indexed_relpaths(indexed_files: list, repo: "Path") -> set[str]:
     """Repo-relative paths of the indexed files, tolerant of symlink mismatch.
 
     nexus-f3tyz: a single ``abs_path.relative_to(repo)`` ValueError (macOS
     symlinks ``/tmp`` -> ``/private/tmp`` and ``/var`` -> ``/private/var`` make
     one path not literally under ``repo``) previously aborted the whole
-    housekeeping set-comprehension, so ``_run_housekeeping`` was silently
+    set-comprehension, so the housekeeping that used it (now the engine's reconcile
+    commit, which is handed the ``keep`` rows built from it) was silently
     skipped and orphaned catalog rows never got evicted. Fall back to comparing
     resolved paths (the relative suffix is identical, so the key stays
     consistent with registration); skip a genuinely-outside-repo path rather
@@ -2502,152 +1912,6 @@ def _indexed_relpaths(indexed_files: list, repo: "Path") -> set[str]:
 # Consecutive index runs an orphan may be missing before housekeeping
 # deletes it; the rename link pre-pass predicts the same sweep from it.
 _ORPHAN_DELETE_MISSES: int = 2
-
-
-def _run_housekeeping(
-    cat: "CatalogReader",
-    owner: "Tumbler",
-    indexed_set: set[str],
-    *,
-    writer: object = None,
-) -> None:
-    """Orphan detection with miss_count tracking and rename detection.
-
-    For each catalog entry owned by *owner*:
-    - If the file is present in *indexed_set*, reset miss_count to 0.
-    - If absent and a content_hash match exists at a new path, treat as rename:
-      transfer links to the new entry and delete the old one.
-    - If absent with no rename match, increment miss_count. Delete once it reaches ``_ORPHAN_DELETE_MISSES``.
-    """
-    # RDR-146 P1.2 strict split: reads via ``cat``, writes via ``w``
-    # (the write-only proxy; defaults to ``cat`` for single-object callers).
-    w = writer if writer is not None else cat
-    owner_entries = cat.by_owner(owner)
-
-    # Build content_hash → entry map for rename detection
-    hash_to_entry: dict[str, object] = {}
-    for e in owner_entries:
-        ch = (e.meta or {}).get("content_hash", "")
-        if ch and e.file_path in indexed_set:
-            hash_to_entry[ch] = e
-
-    # Every entry this run retires as a rename, old tumbler -> new tumbler,
-    # built before any link moves so a link between two renamed entries can
-    # be redirected whichever one is processed first (nexus-12ml0).
-    # Orphans the miss-count sweep below deletes in this same run: a link
-    # to or from one of them is not moved, since the engine refuses an edge
-    # to a deleted entry and an edge to one about to go would dangle.
-    renamed_to: dict[str, object] = {}
-    swept: set[str] = set()
-    for e in owner_entries:
-        if e.file_path in indexed_set:
-            continue
-        ch = (e.meta or {}).get("content_hash", "")
-        if ch and ch in hash_to_entry:
-            renamed_to[str(e.tumbler)] = hash_to_entry[ch].tumbler
-        elif int((e.meta or {}).get("miss_count", 0)) + 1 >= _ORPHAN_DELETE_MISSES:
-            swept.add(str(e.tumbler))
-
-    def _moved(t: object) -> object:
-        return renamed_to.get(str(t), t)
-
-    # A delete is a tombstone and leaves its link rows, so a link read here
-    # can name an entry deleted in an EARLIER run (a second rename of a
-    # file whose partner was renamed before). The engine refuses an edge to
-    # it, which used to abort housekeeping on every later run; such a link
-    # is not moved (nexus-12ml0). Liveness is looked up once per tumbler.
-    live: dict[str, bool] = {}
-
-    def _is_live(t: object) -> bool:
-        key = str(t)
-        if key not in live:
-            live[key] = cat.resolve(t) is not None
-        return live[key]
-
-    for entry in owner_entries:
-        if entry.file_path in indexed_set:
-            meta = entry.meta or {}
-            if int(meta.get("miss_count", 0)) > 0:
-                meta = dict(meta)
-                meta["miss_count"] = 0
-                w.update(entry.tumbler, meta=meta)
-            continue
-
-        # Check for rename: orphan's content_hash matches a newly-indexed entry
-        orphan_hash = (entry.meta or {}).get("content_hash", "")
-        if orphan_hash and orphan_hash in hash_to_entry:
-            new_entry = hash_to_entry[orphan_hash]
-            # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review
-            # round 4): carry the non_evidentiary stamp across a
-            # rename. The old entry is about to be deleted below —
-            # without this, a manually-stamped document (`nx catalog
-            # update --meta '{"non_evidentiary": true}'`) is silently
-            # un-stamped by the very next `nx index repo` after a
-            # `git mv`. Only THIS one key transfers: the new entry's
-            # OWN meta (its freshly-computed content_hash, its own
-            # path's auto-stamp, if any) is authoritative for the new
-            # file and must not be clobbered by the old entry's other
-            # fields. A no-op when the new entry already carries the
-            # stamp (e.g. renamed INTO tests/fixtures/).
-            from nexus.catalog.types import NON_EVIDENTIARY_META_KEY  # noqa: PLC0415 — deliberate function-scoped import (avoid a module-level catalog dep in the indexer)
-            old_meta = entry.meta or {}
-            if old_meta.get(NON_EVIDENTIARY_META_KEY):
-                new_meta = dict(new_entry.meta or {})
-                if not new_meta.get(NON_EVIDENTIARY_META_KEY):
-                    new_meta[NON_EVIDENTIARY_META_KEY] = True
-                    w.update(new_entry.tumbler, meta=new_meta)
-            # Transfer links from old entry to new entry, both directions.
-            # Each endpoint that names an entry renamed in this run is
-            # redirected to that entry's new tumbler, so a link between two
-            # renamed entries joins their new entries rather than pointing
-            # at one this run deletes (nexus-12ml0). A link that then joins
-            # an entry to itself (a symlink ghost citing its own target, the
-            # target citing the ghost, the ghost's own self-link) is dropped
-            # (nexus-x3bxj). The text is unchanged (same content_hash), so
-            # the spans move with the link (nexus-12ml0). link_if_absent
-            # keys on (from, to, type): when the new entry already holds
-            # that edge, the existing row and its spans are left as they are.
-            for lnk in cat.links_from(entry.tumbler) + cat.links_to(entry.tumbler):
-                src, dst = _moved(lnk.from_tumbler), _moved(lnk.to_tumbler)
-                if str(src) == str(dst) or {str(src), str(dst)} & swept:
-                    continue
-                other = dst if str(src) == str(new_entry.tumbler) else src
-                if not _is_live(other):
-                    continue
-                w.link_if_absent(
-                    src, dst, lnk.link_type,
-                    created_by=lnk.created_by,
-                    from_span=lnk.from_span, to_span=lnk.to_span,
-                )
-            w.delete_document(entry.tumbler)
-            _log.info(
-                "housekeeping_rename_detected",
-                old_path=entry.file_path,
-                new_path=new_entry.file_path,
-                old_tumbler=str(entry.tumbler),
-                new_tumbler=str(new_entry.tumbler),
-            )
-            continue
-
-        # File not in this index run — increment miss_count
-        meta = dict(entry.meta or {})
-        miss_count = int(meta.get("miss_count", 0)) + 1
-
-        if miss_count >= _ORPHAN_DELETE_MISSES:
-            w.delete_document(entry.tumbler)
-            _log.info(
-                "housekeeping_orphan_deleted",
-                tumbler=str(entry.tumbler),
-                file_path=entry.file_path,
-            )
-        else:
-            meta["miss_count"] = miss_count
-            w.update(entry.tumbler, meta=meta)
-            _log.debug(
-                "housekeeping_miss_count_incremented",
-                tumbler=str(entry.tumbler),
-                miss_count=miss_count,
-            )
 
 
 def select_local_mode_embed_fn(local_ef: Callable[[list[str]], list[list[float]]]) -> Callable[[list[str]], list[list[float]]]:
@@ -4739,8 +4003,8 @@ def _prune_deleted_files(
         replaces the chash at that slot, so the old chash is no longer
         referenced).
 
-    Timing for deleted files: ``_run_housekeeping`` defers
-    ``cat.delete_document`` until ``miss_count >= 2`` (rename-detection
+    Timing for deleted files: the reconcile commit's housekeeping defers the
+    delete until ``miss_count >= 2`` (rename-detection
     grace window). The document and its manifest rows therefore survive
     the first index run after a file is removed; this GC only sweeps
     the orphaned T3 chunks on the second run, when housekeeping
@@ -5604,18 +4868,17 @@ def _run_index(
     # RDR_DIR_NON_RDR_BASENAMES below) survives on disk untouched — the
     # exclusion only stops it being RE-discovered here, it never reaches
     # the stored catalog row. Left alone, the only reclaim path is
-    # ``_run_housekeeping``'s two-run miss-count sweep (the file is simply
-    # absent from every run's ``indexed_set``). Collected here (every
+    # the reconcile commit's two-run miss-count sweep (the file is simply
+    # absent from every complete walk). Collected here (every
     # excluded basename present on disk, whether or not it still has a
     # stored document — that filtering happens once, batched, below via
     # ``_stored_paths_among``) and fed into ``delta_deleted`` so a path
     # that DOES still have a stored document rides the SAME same-run
-    # tombstone (``_delete_docs_for_paths``) the --since-head path already
-    # uses for a real git deletion — tombstoned THIS run, not the second
+    # tombstone (a ``deleted`` row of the reconcile commit) the --since-head path
+    # already uses for a real VCS deletion — tombstoned THIS run, not the second
     # one (the underlying T3 chunk still follows only at
     # ``nx catalog purge-trash``'s window, same as a git deletion — see
-    # the comment above ``_delete_docs_for_paths(repo, delta_deleted)``
-    # below). A repo's own permanent docs/rdr/README.md is present on disk
+    # the comment at the prune-deleted phase below). A repo's own permanent docs/rdr/README.md is present on disk
     # every run, so this SET is non-empty every run; ``_stored_paths_among``
     # is what keeps ``delta_deleted`` (and the expensive orphan sweep it
     # triggers) empty in steady state, once there is nothing left to
@@ -6345,13 +5608,14 @@ def _run_index(
         indexed_files=indexed_for_catalog,
         # nexus-fltb4: miss-counting against a delta-filtered walk would mark
         # every unvisited doc as missing and mass-delete after two runs.
-        skip_housekeeping=delta_changed is not None,
+        walk="partial" if delta_changed is not None else "complete",
         stale_fence_doc_ids=_stale_fence_doc_ids,
         on_phase=on_phase,
         complete_doc_hashes=_complete_doc_hashes,
         needs_fence=_needs_fence,
         unregistered=_unregistered_causes,
-        housekeeping_keep=_pdf_held,
+        keep_paths=_pdf_held,
+        deleted_relpaths=delta_deleted,
         sensitive_globs=sensitive_globs,
         sensitive_wanted=_sensitive_wanted,
         sensitive_confirmed=_sensitive_confirmed,
@@ -7770,33 +7034,14 @@ def _run_index(
         if delta_changed is not None and not delta_deleted:
             _phase("  skipped (--since-head: no deletions in delta)")
         else:
-            if delta_deleted:
-                # nexus-fltb4: git said these paths are GONE (rename
-                # detection already applied) — tombstone their catalog
-                # docs NOW. CORRECTION (nexus-d6qmz round 3, review
-                # nexus/critique-nexus-d6qmz-7710a262b-2026-09-09): this
-                # used to claim "the manifest CASCADE exposes their
-                # chunks to the orphan sweep below" — that is false.
-                # deleteDocument (service CatalogRepository.java) is a
-                # plain soft-tombstone UPDATE (sets deleted_at) that
-                # deliberately does NOT cascade (nexus-mqd6t tripwire;
-                # store_hook.py's nexus-3ck2g docstring says the same).
-                # The document drops out of every live-only lookup
-                # (by_file_path, by_owner, ...) THIS run; its T3 chunk
-                # stays referenced by the tombstoned manifest until
-                # `nx catalog purge-trash` reclaims it past its age
-                # window (one day by default) — same latency as a real
-                # git deletion, not a same-run chunk sweep.
-                # nexus-d6qmz: a FULL walk can also populate delta_deleted
-                # — not only real git deletions ride this list. Paths
-                # this run's RDR-basename exclusion found present-but-
-                # no-longer-discovered (rdr_excluded_present, filtered to
-                # still-live documents by _stored_paths_among, above) are
-                # appended to delta_deleted too, so a stored document at
-                # an excluded path is tombstoned THIS run exactly like a
-                # git deletion, instead of waiting on housekeeping's
-                # two-run miss-count sweep.
-                _delete_docs_for_paths(repo, delta_deleted)
+            # nexus-fltb4 / RDR-193 Step 6 (nexus-u5m5g.7): the catalog documents of ``delta_deleted`` (the VCS said
+            # these paths are GONE, rename detection already applied; a FULL walk also feeds it the paths its
+            # RDR-basename, whitespace-only and symlink exclusions found present-but-no-longer-indexed, nexus-d6qmz,
+            # nexus-5j8fp, nexus-gnw42) were staged as ``deleted`` rows of the reconcile run and trashed by its commit
+            # BEFORE indexing started, so there is nothing to delete here. A trash is a plain soft tombstone
+            # (``deleted_at``) that does NOT cascade (nexus-mqd6t): the T3 chunk stays referenced by the tombstoned
+            # manifest until `nx catalog purge-trash` reclaims it past its age window, same latency as a real
+            # deletion, not a same-run chunk sweep.
             _prune_deleted_files(
                 code_collection, docs_collection, db, catalog=_cat,
                 rdr_collection=rdr_col_name, on_phase=on_phase,

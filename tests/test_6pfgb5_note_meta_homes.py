@@ -34,6 +34,7 @@ class _FakeCatalog:
         self.docs: dict[str, SimpleNamespace] = {}
         self.updates: list[tuple[str, dict]] = []
         self.registers: list[dict] = []
+        self.ror_calls: list[dict] = []
 
     # reads
     def docs_for_chashes(self, chashes):
@@ -73,6 +74,31 @@ class _FakeCatalog:
             tumbler=Tumbler.parse(tumbler), title=title, content_type=content_type, file_path="",
             physical_collection=physical_collection, source_uri=source_uri, chunk_count=1, meta=dict(meta))
         return (tumbler, True) if with_created else tumbler
+
+    def resolve_or_register(self, owner_name, *, source_uri="", file_path="", title="", year=None, title_fallback=False,
+                            source_mtime=None, content_type=None, physical_collection=None, sensitive=False):
+        """The engine's ``POST /doc/resolve_or_register`` (RDR-193 Part A1, nexus-u5m5g.7): a live row holding the
+        source_uri (under another owner: ``foreign_owner``, left alone), else with ``title_fallback`` a ghost of the
+        owner with exactly this title and content type takes the source_uri, else a new row is registered (it carries
+        no ``meta``: the caller stamps it in a following update)."""
+        from nexus.catalog.http_catalog_client import ResolveOutcome
+
+        self.ror_calls.append({"source_uri": source_uri, "title_fallback": title_fallback})
+        hit = next((d for d in self.docs.values() if source_uri and d.source_uri == source_uri), None)
+        if hit is not None:
+            return ResolveOutcome(str(hit.tumbler), False, not str(hit.tumbler).startswith("1.1."))
+        if title_fallback and title:
+            ghost = next((d for d in self.docs.values() if d.title == title and d.content_type == content_type
+                          and d.chunk_count == 0), None)
+            if ghost is not None:
+                ghost.source_uri = source_uri
+                return ResolveOutcome(str(ghost.tumbler), False, False)
+        tumbler = f"1.1.{len(self.docs) + 1}"
+        self.registers.append({"title": title, "meta": {}})  # a mint, as the register leg counts it
+        self.docs[tumbler] = SimpleNamespace(
+            tumbler=Tumbler.parse(tumbler), title=title, content_type=content_type, file_path="",
+            physical_collection=physical_collection, source_uri=source_uri, chunk_count=1, meta={})
+        return ResolveOutcome(tumbler, True, False)
 
     def update(self, tumbler, *, physical_collection=None, meta=None, source_uri=None):
         self.updates.append((str(tumbler), dict(meta or {})))

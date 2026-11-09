@@ -18,7 +18,6 @@ import pytest
 
 import nexus.catalog.http_catalog_client as hcc
 from nexus.catalog.http_catalog_client import HttpCatalogClient
-from nexus.catalog.store_hook import _find_ghost_by_title
 from nexus.catalog.tumbler import Tumbler
 
 
@@ -107,34 +106,12 @@ class TestTheChunkCountFilter:
         assert len(c.client.find_by_title_exact("The Note")) == 2
 
 
-class TestTheGhostReconcileAsksForGhostsOnly:
-    """``store_hook._find_ghost_by_title`` hands the ghost filter to the reader (nexus-gacz0)
-    and keeps its own checks as the guard."""
-
-    class _Reader:
-        def __init__(self, entries) -> None:
-            self.entries = entries
-            self.calls: list[tuple] = []
-
-        def find_by_title_exact(self, title, **kw):
-            self.calls.append((title, kw))
-            return self.entries
-
-    @staticmethod
-    def _entry(tumbler: str, chunk_count: int):
-        return SimpleNamespace(tumbler=Tumbler.parse(tumbler), chunk_count=chunk_count)
-
-    def test_the_reader_is_asked_for_the_owners_ghosts_of_that_title(self) -> None:
-        owner = Tumbler.parse("1.1")
-        ghost = self._entry("1.1.7", 0)
-        reader = self._Reader([ghost])
-        assert _find_ghost_by_title(reader, owner, "The Note") is ghost
-        assert reader.calls == [("The Note", {"content_type": "knowledge", "owner": owner, "chunk_count": 0})]
-
-    def test_a_reader_that_ignores_the_filters_cannot_widen_the_match(self) -> None:
-        owner = Tumbler.parse("1.1")
-        reader = self._Reader([self._entry("1.1.3", 5), self._entry("2.1.1", 0)])
-        assert _find_ghost_by_title(reader, owner, "The Note") is None
+# RDR-193 Step 6 (nexus-u5m5g.7): ``store_hook._find_ghost_by_title``, which this file's ``TestTheGhostReconcileAsksForGhostsOnly``
+# pinned (the owner's ghosts of an exact title, asked of the reader and re-checked on the client), is deleted: the ghost leg is
+# now the engine's ``resolve_or_register`` with ``title_fallback``. Its cases are covered by
+# ``CatalogHandlerReconcileRoutesTest`` (a ghost of the owner with exactly that title is reused and takes the source URI; a
+# populated row, another owner's ghost and a request without ``title_fallback`` are not) and, through the hook, by
+# ``tests/test_rdr193_resolve_or_register_sites.py::test_a_ghost_of_the_same_title_is_reused_and_takes_the_source_uri``.
 
 
 class TestAnOldEngine:
