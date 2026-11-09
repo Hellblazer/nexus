@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="From 7.6.1 to 8.0.0: what changed in Nexus between August and November 2026, theme by theme, and what an upgrade from 7.6.x needs.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
+<title>From 7.6.1 to 8.0.0</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#EEF1F4; --paper:#FFFFFF; --ink:#1B2430; --ink-2:#4A5666; --ink-3:#7A8697;
+  --line:#D5DBE3; --brass:#A87A22; --brass-soft:#F3EAD3; --blue:#24466B; --blue-soft:#E1E9F3;
+  --ok:#2E7D4F; --ok-soft:#E3F1E8; --warn:#9A6A12; --code-bg:#1B2430; --code-fg:#E9EDF2; --code-cmt:#8A97A8;
+  --t1:#B96E2B; --t2:#24466B; --t3:#2E7D4F;
+  --radius:6px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+    --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+    --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+    --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+  --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+  --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+  --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+}
+*{box-sizing:border-box}
+/* Code blocks scroll sideways inside their column. A grid or flex child defaults to min-width:auto, which lets a long <pre> line widen the track and the page; min-width:0 on every wrapper between the track and the <pre> stops that. */
+.wrap,.wrap>*,main,.step,.cmd,.tbl,.further,.callout,.lesson{min-width:0}
+pre{max-width:100%}
+
+html{margin:0}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;font-size:16px;line-height:1.55;padding-inline:clamp(16px,4vw,40px);padding-block:40px 80px;}
+.wrap{max-width:1040px;margin:0 auto;display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;align-items:start}
+@media (max-width:820px){.wrap{grid-template-columns:1fr;gap:24px}.rail{position:static!important}}
+h1,h2,h3{font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-weight:600;line-height:1.15;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,5vw,46px);letter-spacing:-.01em}
+h2{font-size:27px}
+h3{font-size:18px;margin-top:26px}
+p{margin:12px 0;max-width:68ch}
+.lede{font-size:18px;color:var(--ink-2);max-width:62ch}
+.topnav{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.topnav a{font-size:14px;font-weight:500;text-decoration:none}
+.topnav a:hover{text-decoration:underline}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:12px}
+a{color:var(--blue)}
+code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:var(--blue-soft);padding:1px 5px;border-radius:4px}
+.hidden{display:none!important}
+
+/* rail */
+.rail{position:sticky;top:24px}
+.rail .eyebrow{margin-bottom:8px}
+.rail ol{list-style:none;padding:0;margin:0;display:grid;gap:2px}
+.rail a{display:block;padding:7px 8px;border-radius:4px;color:var(--ink-2);text-decoration:none;font-size:14px;line-height:1.35}
+.rail a:hover{background:var(--paper)}
+.rail .meta{font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5}
+
+/* lessons */
+.lesson{padding:36px 0 8px;border-top:1px solid var(--line);scroll-margin-top:16px}
+.lesson:first-of-type{border-top:0;padding-top:8px}
+.lhead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.lnum{font-family:"Source Serif 4",Georgia,serif;font-size:30px;font-weight:600;color:var(--brass);line-height:1}
+.ltime{font-size:13px;color:var(--ink-3);margin-left:auto}
+.why{border-left:3px solid var(--brass);padding:2px 0 2px 14px;color:var(--ink-2);margin:16px 0 10px;max-width:66ch}
+pre{margin:0;background:var(--code-bg);color:var(--code-fg);border-radius:var(--radius);padding:14px 16px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:14px;line-height:1.6;overflow-x:auto}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;padding-right:76px}
+pre .c{color:var(--code-cmt)}
+.cmd{position:relative;margin:12px 0}
+.copy{position:absolute;top:8px;right:8px;font:inherit;font-size:12px;font-weight:500;padding:4px 9px;border-radius:4px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--code-fg);cursor:pointer}
+.copy:hover{background:rgba(255,255,255,.14)}
+.copy:focus-visible{outline:2px solid var(--brass)}
+.see{margin:10px 0 4px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+pre.out{background:var(--paper);color:var(--ink-2);border:1px dashed var(--line);font-size:13px}
+pre.out b{color:var(--ink);font-weight:500}
+.note{font-size:14px;color:var(--ink-2);margin:8px 0;max-width:68ch}
+.callout{border-left:3px solid var(--brass);background:var(--brass-soft);padding:12px 16px;border-radius:0 var(--radius) var(--radius) 0;margin:18px 0;font-size:15px;max-width:68ch}
+.callout p{margin:4px 0}
+.callout.rule{border-color:var(--blue);background:var(--blue-soft)}
+
+.ph{color:var(--brass);font-style:italic}
+pre .ph{color:#E0B24C}
+
+
+/* figures */
+figure.fig{margin:18px 0;max-width:68ch}
+figure.fig svg{width:100%;height:auto;display:block;color:var(--ink)}
+figure.fig figcaption{font-size:13px;color:var(--ink-3);margin-top:6px}
+figure.fig text{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:12.5px;fill:currentColor}
+figure.fig .sm{font-size:10.5px;fill:var(--ink-3);letter-spacing:.05em;text-transform:uppercase}
+figure.fig .lbl{font-size:11px;fill:var(--ink-2)}
+figure.fig rect.box{fill:var(--paper);stroke:currentColor;stroke-width:1}
+figure.fig rect.you{fill:var(--brass-soft);stroke:var(--brass);stroke-width:1.2}
+figure.fig line,figure.fig path{stroke:currentColor;stroke-width:1.2;fill:none}
+figure.fig .you-edge{stroke:var(--brass)}
+figure.fig .dash{stroke-dasharray:4 3}
+
+/* investigate further */
+.further{margin:22px 0 6px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:0 var(--radius) var(--radius) 0;background:var(--paper);padding:12px 16px;max-width:68ch}
+.further h4{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
+.further ul{margin:0;padding-left:20px;font-size:15px;color:var(--ink-2)}
+.further li{margin:4px 0}
+
+/* tier diagram */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0;max-width:68ch}
+@media (max-width:560px){.tiers{grid-template-columns:1fr}}
+.tier{background:var(--paper);border:1px solid var(--line);border-top:4px solid var(--tc);border-radius:var(--radius);padding:12px 14px}
+.tier b{font-family:"Source Serif 4",Georgia,serif;font-size:20px;font-weight:600;color:var(--tc);display:block}
+.tier small{display:block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
+.tier p{font-size:14px;margin:4px 0;color:var(--ink-2)}
+.tier code{font-size:.85em}
+.arrowrow{font-size:13px;color:var(--ink-3);margin:-6px 0 14px;max-width:68ch}
+
+/* entry table */
+table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0;max-width:68ch}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.tbl{overflow-x:auto}
+.gloss-wrap{margin:22px 0 8px;max-width:68ch}
+details.gloss{border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);margin:6px 0}
+details.gloss summary{cursor:pointer;padding:10px 14px;font-weight:500;list-style:none;display:flex;justify-content:space-between}
+details.gloss summary::after{content:"+";color:var(--brass);font-family:"IBM Plex Mono",monospace}
+details.gloss[open] summary::after{content:"–"}
+details.gloss table{margin:0;font-size:14px}
+details.gloss td:first-child{font-weight:500;white-space:nowrap;width:9em}
+details.gloss tr:last-child td{border-bottom:0}
+ol.plain,ul.plain{margin:6px 0 10px;padding-left:22px;max-width:66ch}
+ol.plain li,ul.plain li{margin:3px 0}
+.finish{border:1px solid var(--line);background:var(--paper);border-radius:var(--radius);padding:18px 20px;margin-top:40px;max-width:68ch}
+.finish h2{font-size:24px}
+.footer{margin-top:60px;font-size:13px;color:var(--ink-3)}
+@media (prefers-reduced-motion:reduce){.copy{transition:none}}
+</style>
+<style>
+main{max-width:68ch}
+main h2{margin-top:36px}
+main h3{margin-top:24px}
+main p,main li{font-size:16.5px;line-height:1.6}
+main ul{padding-left:1.2em}
+main li{margin:6px 0}
+main ol li{margin:8px 0}
+main code{font-size:.9em}
+</style>
+<script data-goatcounter="https://hellblazer-nexus.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="rail" aria-label="Sections">
+  <div class="eyebrow">From 7.6.1 to 8.0.0</div>
+  <ol id="toc">
+    <li><a href="#storage-only-postgres-and-nothing-else">Storage: Only Postgres and nothing else</a></li>
+    <li><a href="#vector-search-one-table-per-model-and-a-check-on-recall">Vector search: one table per model, and a check on recall</a></li>
+    <li><a href="#document-metadata-comes-from-the-catalog">Document metadata comes from the catalog</a></li>
+    <li><a href="#search-and-answers">Search and answers</a></li>
+    <li><a href="#sensitive-documents">Sensitive documents</a></li>
+    <li><a href="#install-and-platforms">Install and platforms</a></li>
+    <li><a href="#agents-the-tuple-space-and-waiting-for-ci">Agents: the tuple space and waiting for CI</a></li>
+    <li><a href="#agents-decisions-for-a-person">Agents: decisions for a person</a></li>
+    <li><a href="#agents-small-programs-in-a-sandbox">Agents: small programs in a sandbox</a></li>
+    <li><a href="#if-you-are-upgrading-from-7-6-x">If you are upgrading from 7.6.x</a></li>
+    <li><a href="#further-reading">Further reading</a></li>
+  </ol>
+  <div class="meta"><a href="./">← Install guide</a><br><a href="getting-started.html">← Getting started</a><br><a href="rdr.html">← Working with RDRs</a><br><a href="research.html">← Research with Nexus</a><br><a href="research-in-nexus.html">← Research in Nexus</a><br><a href="tuple-space.html">The tuple space →</a><br><a href="coordination.html">Coordination →</a><br><a href="how-agents-ship.html">How agents ship →</a></div>
+</nav>
+
+<main>
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · exploration</span><a href="./">← Install guide</a></div>
+<h1 id="from-7-6-1-to-8-0-0">From 7.6.1 to 8.0.0</h1>
+<p>It’s been a long journey from Milan to Minsk - wait.  Wrong show.   In the Nexus show, there’s been a lot of work in the last three months.   The storage became Postgres only: no SQLite and no ChromaDB.  The vector search got one partition per embedding model and a check on the search’s own recall.  Search answers now tell you when the evidence is thin. Documents can now be marked sensitive to keep them out of the LLM.  The plugin now installs the command line nx tooling for you, simplifying the installation.  Nexus is now officially supported on Windows and the local engine and Postgres service are native executables.  Agents can now wait for each other, ask a person for a decision, and run small programs in a sandbox.</p>
+<p>This post goes through the changes one theme at a time. For each change, it says what changed, what it means if you use Nexus, and the Nexus release where you first see it. Near the end, a short list says what an upgrade from 7.6.x does by itself and what it leaves for you to do.</p>
+<h2 id="storage-only-postgres-and-nothing-else">Storage: Only Postgres and nothing else</h2>
+<p>Since 7.23.0, Nexus does not use SQLite databases at all. Everything is now in Postgres, behind the engine: session scratch, memory, the catalog and the vectors. So you have one store to back up, and one place to ask about your data. If <code>nx doctor</code> finds an old <code>memory.db</code> or <code>.catalog.db</code> file, it tells you that you can safely delete it.</p>
+<p>Since 7.74.0, the local cluster also has a password. Before, it trusted every local connection. New clusters use scram-sha-256 with a superuser password. An existing cluster changes to this on its next service start. A local tool that connected to the local Postgres cluster without a password now needs the password that the service keeps.</p>
+<p>From 7.95.0, the engine does not start on a PostgreSQL older than 17. If you try, it logs <code>pg_version_below_floor</code> and stops before it accesses the schema. If your local data directory came from an older PostgreSQL, use <code>nx daemon service pg-upgrade --old-bin &lt;bin dir&gt;</code>, from 7.99.0. It is a dry run until you add <code>--apply</code>.</p>
+<p>On the managed service, the automatic upgrade at session start does less work since 7.91.0. It does not read the whole catalog, and only one upgrade runs at a time for each config directory. The data steps that it skips run when you run <code>nx upgrade</code> yourself, one time, from one machine.</p>
+<h2 id="vector-search-one-table-per-model-and-a-check-on-recall">Vector search: one table per model, and a check on recall</h2>
+<p>Since 7.73.0 (engine 0.1.150), every embedding model has its own partition of the chunk table. The engine divides the chunk table by model and then by tenant. So a search reads only your data, embedded by one model. Two embedding models with the same dimension no longer share an HNSW index. On a local install, this migration is one-way. The first engine start rewrites every vector into the new partitions. It needs free disk space of at least 2.2 times the size of the vector tables.</p>
+<p>In 7.77.0, three days later, large collections got their own index. A collection with 20,000 rows or more gets its own partial HNSW index. The engine builds these indexes one at a time, without blocking writes. The engine searches smaller collections exactly. A filtered search of the shared index can miss the nearest rows of a small collection, and an exact scan of so few rows is fast. <code>NX_SEARCH_PCI=0</code> stops the engine from building and dropping these indexes. The engine still uses the indexes that it already built. The result is speed: on the managed service, a search through such an index takes tens of milliseconds, not most of a second.</p>
+<p>Since 7.97.0 (engine 0.1.181), the engine also checks its own results. An approximate index can drift as its collection changes. So, for each indexed collection, the engine keeps a small set of recent query vectors. It compares the answers of each index with an exact scan, and it marks the index green, red or unmeasured. <code>GET /v1/status</code> shows the counts. The engine reports a red index but does not rebuild it. A red index tells you to reindex that collection.</p>
+<h2 id="document-metadata-comes-from-the-catalog">Document metadata comes from the catalog</h2>
+<p>A search hit now gets its title, path, tags and bibliographic fields from the document that owns it. Nexus stores identical chunk text only once. Before, a chunk that two documents shared showed the document that wrote it last. In 7.90.0, search and <code>query</code> stopped reading the file path from a chunk row. From 7.91.0, the catalog answers a <code>where</code> filter on the tags or category of a document, for each owning document. 7.95.0 added this to the metadata, aspect and graph searches and to <code>get</code>. From 8.0.0, the client writes only the chunk keys on each chunk row, and the expiry of a note comes from its catalog entry. The result: a filter on a title, a tag or a year finds the documents that have it, and a hit names the correct document.</p>
+<h2 id="search-and-answers">Search and answers</h2>
+<p>Since 7.89.0, <code>nx_answer</code> tells you when the evidence for the answer is thin. Before it answers, <code>nx_answer</code> checks if the retrieved evidence covers each part of the question. A partial answer carries an <code>[insufficient-evidence: &lt;n&gt; unresolved]</code> notice, so it does not look complete. The check adds some model calls. To turn the check off, set the environment variable <code>NX_ANSWER_COVERAGE=0</code>.</p>
+<p>From 7.97.0, a question that lists entities gets a multi-step query plan. An example is "which companies were affected". Before, such a question got one query with no coverage check, and the answer could lose a name that the evidence had. Now the builtin <code>entity-resolution</code> plan searches, follows links, ranks, and writes the answer. Then the coverage check applies. This takes much longer than one query. You can also map the documents of a collection to entity keys (<code>entity.collections</code>, from 7.95.0). Then a plan can resolve those keys to documents by exact title. From 7.97.0, the coverage check also uses this mapping to repair a missing part, by default. A test on the HERB set named every company correctly. One case has no measured precision yet: an answer written from a join that the coverage check did not confirm. If you do not set <code>entity.collections</code>, nothing about keys changes.</p>
+<p>Since 7.89.0, MinerU is the PDF extractor. It is the default for <code>nx index pdf</code>, <code>nx dt index</code> and <code>nx dt capture</code>. Docling, the earlier extractor, and its dependency are removed. The old option values still work: they run MinerU and print one line that says so.</p>
+<p>Engine 0.1.185 (9 November) skips the slow half of the text gate for long lexical queries. It is live on the managed service. Local installs get it only when a client release pins it, and no client release does yet. The text gate in front of hybrid search ran a trigram match next to the full-text match. On 35 sentence-length questions checked locally, the trigram half let no rows through, and it cost 20 to 30 times as much as the full-text half. So a gate text of more than eight words now skips the trigram half. The cost: above eight words, a pasted passage with one changed word, or an identifier inside a longer sentence, no longer matches through trigrams.</p>
+<h2 id="sensitive-documents">Sensitive documents</h2>
+<p>Since 7.96.0, you can mark a document as sensitive. Nexus then keeps that document out of what it sends to the LLM or to an outside embedding service. You set the flag when you add a document: use <code>--sensitive</code> with <code>nx index pdf</code>, <code>nx index md</code>, <code>nx dt index</code>, <code>nx dt capture</code> or <code>nx store put</code>. You can also set it later with <code>nx catalog sensitive</code>. By default, a local install embeds a sensitive document with the local model. Only <code>--ack-external-embedder</code> sends it to Voyage. In cloud mode, the CLI requires that flag, and first tells you what will leave the machine. The MCP <code>store_put</code> tool cannot acknowledge, so it refuses. Nexus records every change of the flag, with its reason and the person who made it.</p>
+<p>Since 7.98.0, reads also obey the flag. A read that sends data to a model, such as <code>nx_answer</code> or taxonomy discovery, asks the engine to remove flagged chunks inside the read. On an engine that cannot do this, the read refuses. By default, the MCP read tools do not give flagged hits to the model of the session. <code>nx dt index</code> copies the DEVONthink AI exclusion setting into the flag. The flag has known gaps, listed in the sensitivity guide. Read the guide before you depend on the flag.</p>
+<h2 id="install-and-platforms">Install and platforms</h2>
+<p>Since 7.81.0, the plugin installs the nx command line for you. The MCP server of the conexus plugin has a <code>setup</code> tool. Say "Set up Nexus", and it installs the CLI, in local mode or CLI-only. <code>nx doctor</code> then reports the result of the setup. For the managed service, setup opens a credentials page on your own machine, so the token never goes through the model. Since 7.83.0, the plugin is also the recommended way to install Nexus in Claude Desktop. The older desktop extension does not update itself. Its notice tells you how to change to the plugin.</p>
+<p>Nexus now runs natively on Windows x64. 7.72.0 installs and runs the local engine: the engine, the bundled PostgreSQL 17 with pgvector, and the CLI. You do not need WSL. 7.72.1 fixes a hang in MCP search on Windows. The executables are not code-signed yet. Windows on ARM and 32-bit Windows refuse to install. <code>nx init</code> checks Smart App Control before it provisions, and <code>nx doctor</code> reports it (7.81.0). The Windows guide lists the supported versions.</p>
+<h2 id="agents-the-tuple-space-and-waiting-for-ci">Agents: the tuple space and waiting for CI</h2>
+<p>Since 7.41.0, agents have a shared place where they leave messages for each other. This place is the tuple space. It holds small records: one session writes a record, and another session claims it. Sessions use it to give each other work and mail. Later releases added claim renewal and replies inside an acknowledgement (7.44.0), size limits (7.45.0), and boards, queues, locks and a verb to give a claim back (7.51.0). A session that started without the channel flag, for example in the Claude Desktop Code tab, can run <code>nx tuple wait</code> as a background task. The session continues when its mail arrives (7.90.0). From 8.0.0, <code>nx ci wait &lt;sha&gt;</code> waits on the CI board for the runs of that commit. It prints one line with the result of each run, and its exit code tells a script the result. An adapter that you host yourself fills the board from GitHub webhooks (RDR-220). So an agent can wait for a peer, or for CI where the board has data, without asking every minute.</p>
+<h2 id="agents-decisions-for-a-person">Agents: decisions for a person</h2>
+<p>Some decisions only a person can make. A session writes such a decision as an ask: the question, the options, and whether each option can be undone. Sessions that follow the conexus <code>asks</code> skill keep a status entry on a shared board, and the ask goes in that entry. <code>nx console</code> shows the open work of every session, with the asks first (7.86.2). Since 7.97.0, <code>nx ask list</code>, <code>show</code>, <code>answer</code> and <code>digest</code> let you answer from the terminal. Your answer goes back to the session that asked. So you can answer many sessions from one place.</p>
+<h2 id="agents-small-programs-in-a-sandbox">Agents: small programs in a sandbox</h2>
+<p>Since 7.99.0, agents can run small programs in a sandbox. <code>nx run NAME</code> and the MCP tool <code>procedure_run</code> run a library procedure. The procedure is Lua 5.4 in a separate worker with an empty environment. Nexus checks it before it runs, and limits its instructions, memory, time and result size. A four-line header declares the arguments of the procedure and what it can read. In 8.0.0, two record-keeping steps of the agents use procedures. The agent gives the facts, the procedure returns the record in one fixed shape, and the agent stores it. A later search can trust records that all have one shape.</p>
+<h2 id="if-you-are-upgrading-from-7-6-x">If you are upgrading from 7.6.x</h2>
+<p><code>nx upgrade</code> does most of the work. It updates the package, moves the engine to the pinned version of the release, and updates the database roles and grants, the running service, the plugin and the plan library. Then it runs the data steps that fill the new catalog fields. You can safely repeat every step. The engine migrates its own schema on the first boot. The service changes the local cluster to password authentication on its next start.</p>
+<p>A few things may need you:</p>
+<ul>
+<li><strong>Free disk, on a local install.</strong> The first start of the 7.73.0 engine rewrites every vector in one transaction and cannot be undone. Check that the disk holding the Postgres data has free space of at least 2.2 times the vector tables, and reindex or delete any collection whose vectors do not match its model's width, before you upgrade. Either problem stops the migration, and the engine stays stopped.</li>
+<li><strong>A local cluster older than PostgreSQL 17.</strong> The engine will not start on it. Copy the data directory, run <code>nx daemon service pg-upgrade --old-bin &lt;bin dir&gt;</code>, read the dry run, and run it again with <code>--apply</code>. If you do not need the data, move the directory aside and run <code>nx init</code>.</li>
+<li><strong>The managed service.</strong> Run <code>nx upgrade</code> once yourself, from one machine, so the data steps that the automatic upgrade skips run for your tenant.</li>
+<li><strong>Note expiry.</strong> 8.0.0 reads a note's expiry from its catalog entry, so some lapsed notes become due. With the 8.0.0 client, <code>nx catalog backfill-meta --list-ttl-first-sign</code> is a dry run that lists the lapsed notes the first expiry sweep under the new rule would retire. Read the list before that sweep runs.</li>
+<li><strong>The desktop extension.</strong> If you installed Nexus in Claude Desktop as the <code>.mcpb</code> extension, switch to the conexus plugin and remove the extension.</li>
+<li><strong>A self-hosted engine role with BYPASSRLS that is not a superuser.</strong> The engine refuses it from 7.95.0. Run <code>ALTER ROLE &lt;role&gt; NOBYPASSRLS</code> as a superuser, then restart.</li>
+</ul>
+<p>One thing <code>nx upgrade</code> does not repair: 7.6.1 stored some <code>nx store put</code> and MCP knowledge writes without a catalog entry. 7.7.0 fixed new writes. For the earlier ones, <code>nx catalog orphan-backfill synthetic &lt;collection&gt;</code> registers catalog entries for chunks that have none.</p>
+<p>Then run <code>nx doctor</code>. No row should show as failed. The migration runbook has the detail for each step.</p>
+<h2 id="further-reading">Further reading</h2>
+<ul>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md">Migration runbook</a>, every upgrade step and how to check it</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/sensitivity.md">Sensitive documents</a>, what the flag covers and what it does not</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/windows-install.md">Windows install</a>, the native Windows path</li>
+<li><a href="tuple-space.html">The tuple space</a> and <a href="coordination.html">Coordination</a>, how agents wait and hand off work</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/CHANGELOG.md">CHANGELOG</a>, every release in this window, with the details this essay leaves out</li>
+</ul>
+<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/journey-from-7-6-1.md">docs/exploration/journey-from-7-6-1.md</a> in <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a>.</p>
+</main>
+</div>
+</body>
+</html>
