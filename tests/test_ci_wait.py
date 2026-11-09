@@ -358,3 +358,93 @@ class TestCli:
 def test_a_sha_that_is_not_hex_exits_5_not_the_timeout_code() -> None:
     result = CliRunner().invoke(ci_group, ["wait", "develop"])
     assert result.exit_code == 5 and "7 to 40 hex digits" in result.output
+
+
+# ── a capped row: the adapter's 1024-byte cap drops trailing runs (body n) ───
+#
+# bob, conexus 051060d build_wake_tuple: ``n`` is the count of every run in the
+# fold, ``runs`` is a prefix of that list sorted by (run_id, attempt), and the
+# cap drops whole trailing entries, so what is missing is the highest run ids.
+
+
+def _capped(runs: list[list[object]], n: int) -> ci_wait.DoneRow:
+    done = ci_wait.parse_done_row(_row({"sha": SHA, "runs": runs, "url": "u", "n": n}))
+    assert done is not None
+    return done
+
+
+class TestCappedRow:
+    def test_n_is_read_and_a_missing_n_is_uncapped(self) -> None:
+        assert _capped([[1, 1, "CI", "success"]], 3).total == 3
+        done = ci_wait.parse_done_row(_row({"sha": SHA, "runs": [[1, 1, "CI", "success"]], "url": "u"}))
+        assert done is not None and done.total is None
+
+    @pytest.mark.parametrize("n", [0, 1.5, "3", True, None])
+    def test_an_n_that_is_not_a_count_of_the_fold_is_malformed(self, n) -> None:
+        body = {"sha": SHA, "runs": [[1, 1, "CI", "success"], [2, 1, "CI", "success"]], "url": "u", "n": n}
+        if n is None:
+            body["n"] = 1  # fewer than the runs the row lists
+        assert ci_wait.parse_done_row(_row(body)) is None
+
+    def test_a_capped_row_with_no_listed_failure_is_unknown_not_success(self) -> None:
+        line, code = ci_wait.summarize(_capped([[1, 1, "CI", "success"], [2, 1, "Docs", "success"]], 3))
+        assert code == ci_wait.EXIT_UNKNOWN
+        assert "2 of 3 runs listed" in line and line.startswith(f"{SHA[:12]} unknown:")
+
+    def test_a_listed_failure_settles_a_capped_row_without_github(self) -> None:
+        done = _capped([[1, 1, "CI", "failure"], [2, 1, "Docs", "success"]], 4)
+        same = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop",
+                                     fetch=lambda *a: pytest.fail("read GitHub with a failure listed"))
+        assert same is done
+        line, code = ci_wait.summarize(same)
+        assert code == ci_wait.EXIT_FAILURE and "2 of 4 runs listed" in line
+
+    def test_an_uncapped_row_never_reads_github(self) -> None:
+        done = _capped([[1, 1, "CI", "success"]], 1)
+        assert ci_wait.complete_runs(done, "Hellblazer/nexus", "develop",
+                                     fetch=lambda *a: pytest.fail("read GitHub for a whole row")) is done
+
+    def test_the_dropped_runs_come_from_github_and_a_dropped_failure_fails(self) -> None:
+        done = _capped([[10, 1, "CI", "success"], [11, 1, "Docs", "success"]], 4)
+        asked: list[tuple[str, str, str]] = []
+
+        def fetch(gh_repo: str, sha: str, branch: str) -> list[ci_wait.Run]:
+            asked.append((gh_repo, sha, branch))
+            return [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Docs", "success"),
+                    ci_wait.Run(12, 1, "Service CI", "failure"), ci_wait.Run(13, 1, "Windows", "success")]
+
+        full = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop", fetch=fetch)
+        assert asked == [("Hellblazer/nexus", SHA, "develop")]
+        assert [r.run_id for r in full.runs] == [10, 11, 12, 13]
+        line, code = ci_wait.summarize(full)
+        assert code == ci_wait.EXIT_FAILURE
+        assert "Service CI failure (run 12)" in line and "runs listed" not in line
+
+    @pytest.mark.parametrize("github", [
+        None,  # GitHub unreadable, or the list may be cut short
+        [ci_wait.Run(10, 1, "CI", "success")],  # GitHub lists none of the dropped runs
+        [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(12, 1, "Service CI", "success"),
+         ci_wait.Run(13, 1, "Docs", "success"), ci_wait.Run(14, 1, "More", "success")],  # more than n
+    ])
+    def test_github_that_cannot_supply_exactly_the_dropped_runs_leaves_it_unknown(self, github) -> None:
+        done = _capped([[10, 1, "CI", "success"]], 3)
+        full = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop", fetch=lambda *a: github)
+        line, code = ci_wait.summarize(full)
+        assert code == ci_wait.EXIT_UNKNOWN and "1 of 3 runs listed" in line
+
+    def test_a_dropped_run_github_still_shows_running_is_unknown(self) -> None:
+        done = _capped([[10, 1, "CI", "success"]], 2)
+        full = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop",
+                                     fetch=lambda *a: [ci_wait.Run(10, 1, "CI", "success"),
+                                                       ci_wait.Run(11, 1, "Service CI", None)])
+        assert ci_wait.summarize(full)[1] == ci_wait.EXIT_UNKNOWN
+
+    def test_the_command_completes_a_capped_row(self, monkeypatch) -> None:
+        board = _Board(_Clock())
+        board.post(SHA, [], body={"sha": SHA, "runs": [[10, 1, "CI", "success"]], "url": "u", "n": 2})
+        monkeypatch.setattr(ci_cmd, "_store", lambda: board)
+        monkeypatch.setattr(ci_wait, "gh_push_runs", lambda gh, sha, branch: [
+            ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Service CI", "failure")])
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "1"])
+        assert result.exit_code == 1, result.output
+        assert "Service CI failure (run 11)" in result.stdout.strip().splitlines()[-1]

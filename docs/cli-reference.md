@@ -2986,7 +2986,7 @@ The board wake is best effort: a run set the adapter could not fold posts no row
 | 1 | a run failed |
 | 2 | no row for the sha before `--timeout`, and GitHub does not show every run finished |
 | 3 | runs were cancelled or stale and none failed |
-| 4 | a conclusion could not be read, is one this table does not know, or disagrees with the board's outcome |
+| 4 | a conclusion could not be read, is one this table does not know, or disagrees with the board's outcome; or the board row was capped (its `n` counts more runs than it lists, none listed failed) and GitHub could not supply exactly the dropped runs |
 | 5 | the wait could not run: not a sha, no tuple store, a refused board read, or the engine unreachable until the deadline |
 
 Click's own usage errors (a missing sha, `--timeout` out of range) exit 2, as for every `nx` command.

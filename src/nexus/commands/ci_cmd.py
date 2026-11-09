@@ -52,8 +52,9 @@ def ci_wait_cmd(
     Exit 0 when every run succeeded (neutral and skipped count), 1 on any
     failure (failure, timed_out, startup_failure, action_required), 3 when
     runs were cancelled or stale and none failed, 2 on timeout, 4 when a
-    conclusion could not be read or the board's outcome disagrees with the
-    conclusions, and 5 when the wait could not run (a bad SHA, no tuple store,
+    conclusion could not be read, the board's outcome disagrees with the
+    conclusions, or the row lists fewer runs than its count (the adapter's
+    size cap) and GitHub could not supply the rest, and 5 when the wait could not run (a bad SHA, no tuple store,
     a refused board read, or the board unreachable until the deadline).
     Click's own usage errors (a missing SHA, --timeout out of range) exit 2.
     """
@@ -87,7 +88,7 @@ def ci_wait_cmd(
         line, code = _at_deadline(sha, gh, branch, subspace, timeout_min)
         click.echo(line)
         raise SystemExit(code)
-    line, code = ci_wait.summarize(ci_wait.fill_conclusions(row, gh))
+    line, code = ci_wait.summarize(ci_wait.complete_runs(ci_wait.fill_conclusions(row, gh), gh, branch))
     click.echo(line)
     raise SystemExit(code)
 

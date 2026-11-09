@@ -13,7 +13,10 @@ body ``{state, sha, runs, url}``. Since .11.1 each ``runs`` entry is
 ``[run_id, attempt, workflow, conclusion]`` with GitHub's conclusion verbatim;
 a row written before it has ``[run_id, attempt]``, conclusion unknown, and
 for those runs this reads each run's conclusion from GitHub once, after the
-row arrives.
+row arrives. The body's ``n`` counts every run in the fold; the adapter's
+1024-byte cap drops trailing entries, so when ``n`` is more than the runs
+listed and none of them failed, the dropped runs are read from GitHub once,
+and the result is unknown if they cannot be.
 
 Outcome, the reduction the adapter's ``outcome`` dim states (bob, .11.1):
 failure if any run is failure, timed_out, startup_failure or
@@ -92,6 +95,14 @@ class DoneRow:
     runs: tuple[Run, ...]
     url: str
     outcome_dim: str | None = None
+    #: The body's ``n``: how many runs the fold holds. More than ``len(runs)``
+    #: when the adapter's 1024-byte cap dropped trailing entries; None on a row
+    #: written before .11.1, which is never capped.
+    total: int | None = None
+
+    @property
+    def capped(self) -> bool:
+        return self.total is not None and self.total > len(self.runs)
 
 
 def done_subspace(repo: str, branch: str) -> str:
@@ -127,8 +138,13 @@ def parse_done_row(row: TupleRow) -> DoneRow | None:
             runs.append(Run(int(entry[0]), int(entry[1]), workflow, conclusion))
     except (TypeError, ValueError, OverflowError):
         return None
+    total = body.get("n")
+    if total is not None and (
+        not isinstance(total, int) or isinstance(total, bool) or total < max(1, len(runs))
+    ):
+        return None
     outcome = row.dims.get("outcome") if isinstance(row.dims, dict) else None
-    return DoneRow(row.id, body["sha"].lower(), tuple(runs), str(body.get("url") or ""), outcome)
+    return DoneRow(row.id, body["sha"].lower(), tuple(runs), str(body.get("url") or ""), outcome, total)
 
 
 def reduce_outcome(conclusions: list[str | None]) -> str | None:
@@ -201,7 +217,31 @@ def fill_conclusions(
             name, conclusion = fetch(gh_repo, r.run_id, r.attempt)
             r = Run(r.run_id, r.attempt, r.workflow or name, conclusion)
         runs.append(r)
-    return DoneRow(row.tuple_id, row.sha, tuple(runs), row.url, row.outcome_dim)
+    return DoneRow(row.tuple_id, row.sha, tuple(runs), row.url, row.outcome_dim, row.total)
+
+
+def complete_runs(
+    row: DoneRow, gh_repo: str, branch: str,
+    fetch: Callable[[str, str, str], list[Run] | None] | None = None,
+) -> DoneRow:
+    """A capped row with the runs the cap dropped, read from GitHub once.
+
+    The adapter sorts the fold by (run_id, attempt) and drops whole trailing
+    entries, so the missing runs are the highest run ids. A listed failure
+    already settles the outcome, and an uncapped row is whole: neither reads
+    GitHub. Otherwise the sha's push runs whose id is above the highest listed
+    one are appended, and only when that makes exactly ``total`` runs; anything
+    else leaves the row capped, which :func:`summarize` reports as unknown."""
+    if not row.capped or any(r.conclusion in FAILURE_CONCLUSIONS for r in row.runs):
+        return row
+    listed = (fetch or gh_push_runs)(gh_repo, row.sha, branch)
+    if listed is None:
+        return row
+    top = max((r.run_id for r in row.runs), default=0)
+    dropped = sorted((r for r in listed if r.run_id > top), key=lambda r: (r.run_id, r.attempt))
+    if len(row.runs) + len(dropped) != row.total:
+        return row
+    return DoneRow(row.tuple_id, row.sha, row.runs + tuple(dropped), row.url, row.outcome_dim, row.total)
 
 
 def _matches(row: TupleRow, sha: str) -> DoneRow | None:
@@ -292,14 +332,20 @@ def summarize(row: DoneRow) -> tuple[str, int]:
     the row's own conclusions, both are printed and the exit is 4: the two
     copies of the rule have drifted, and neither is trusted."""
     outcome = reduce_outcome([r.conclusion for r in row.runs]) if row.runs else None
+    if row.capped and outcome != "failure":
+        # The runs the cap dropped are unread: only a listed failure settles it.
+        outcome = None
     line = result_line(row, outcome)
+    if row.capped:
+        rest = "" if outcome == "failure" else "; the rest could not be read"
+        line += f" ({len(row.runs)} of {row.total} runs listed{rest})"
     if row.outcome_dim and outcome and row.outcome_dim != outcome:
         return f"{line} (outcome mismatch: the board says {row.outcome_dim})", EXIT_UNKNOWN
     return line, wait_exit_code(outcome)
 
 
 __all__: list[str] = [
-    "BoardUnreadableError", "DoneRow", "Run", "done_subspace", "fill_conclusions", "find_done_row",
+    "BoardUnreadableError", "DoneRow", "Run", "complete_runs", "done_subspace", "fill_conclusions", "find_done_row",
     "gh_push_runs", "gh_run_conclusion", "parse_done_row", "reduce_outcome", "result_line",
     "summarize", "wait_exit_code",
     "EXIT_CANCELLED", "EXIT_FAILURE", "EXIT_SUCCESS", "EXIT_TIMEOUT", "EXIT_UNKNOWN", "EXIT_UNUSABLE",
