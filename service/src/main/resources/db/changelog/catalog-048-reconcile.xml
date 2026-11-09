@@ -788,6 +788,13 @@ EXCEPTION WHEN OTHERS THEN
     IF v_state = '57014' OR v_msg LIKE 'reconcile_commit %' THEN
         RAISE;
     END IF;
+    -- A deadlock, a serialization failure or a lock not available says nothing about any file: it is transient,
+    -- so it names no file_path and tells the caller to submit the commit again (the run stays staged).
+    IF v_state IN ('40P01', '40001', '55P03') THEN
+        RAISE EXCEPTION '%',
+            'reconcile_commit transient_db_error: SQLSTATE ' || v_state || ': ' || v_msg
+            || '. Nothing was written; the run is still staged, so submit the commit again.';
+    END IF;
     RAISE EXCEPTION '%',
         'reconcile_commit write_failed: '
         || CASE WHEN v_cur IS NOT NULL THEN 'file_path ' || v_cur || ': ' ELSE '' END

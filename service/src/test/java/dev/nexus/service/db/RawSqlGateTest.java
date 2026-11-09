@@ -3087,7 +3087,10 @@ class RawSqlGateTest {
         "login-role", "role-admin-option", "product-schema-owner", "table-schema", "drop-exclusive-role",
         "auto-explain",
         // nexus-rfvyy.7.17: the chunk-text census's negative-control function plants, behind PgContainerHelper.plantCensusProbe*
-        "census-probe-leak", "census-probe-rel", "census-probe-overloads", "census-probe-kept");
+        "census-probe-leak", "census-probe-rel", "census-probe-overloads", "census-probe-kept",
+        // nexus-u5m5g.3: the reconcile commit's transient-error test trigger, behind PgContainerHelper.installDeadlockOnTrash
+        // (a plain file name only)
+        "deadlock-trigger-install");
 
     /**
      * The parameterised test changelogs that are NOT on the validated list, each with the reason it is allowed. Every

@@ -853,6 +853,40 @@ class CatalogReconcileCommitBehaviourTest extends CatalogReconcileTestBase {
         assertThat(snapshot(t)).isEqualTo(before);
     }
 
+    @Test
+    void aDeadlockDuringARowWrite_isATransientError_namingNoFile_andLeavesTheRunStaged() throws Exception {
+        String t = tenantWithOwner();
+        seed(t, OWNER, "ok.py");
+        seed(t, OWNER, "victim.py");
+        String before = snapshot(t);
+        stage(t, OWNER, "r1", "partial", deleted(0, "ok.py"), deleted(1, "victim.py"));
+        // a trigger raises a real deadlock SQLSTATE while the commit trashes victim.py, a per-row write that would
+        // otherwise name its file_path: a deadlock is nobody's file, so the error must not blame one
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.installDeadlockOnTrash(su, "victim.py");
+            try {
+                assertThatThrownBy(() -> repo.reconcileCommit(t, OWNER, "r1", COMMIT_TIMEOUT))
+                    .isInstanceOf(ReconcileCommitException.class)
+                    .satisfies(e -> assertThat(((ReconcileCommitException) e).code()).isEqualTo("transient_db_error"))
+                    .hasMessageContaining("SQLSTATE 40P01")
+                    .hasMessageContaining("submit the commit again")
+                    .satisfies(e -> assertThat(e.getMessage()).doesNotContain("file_path").doesNotContain("Operator action"));
+            } finally {
+                PgContainerHelper.removeDeadlockOnTrash(su);
+            }
+        }
+        assertThat(snapshot(t)).as("all or nothing").isEqualTo(before);
+        assertThat(runState(t, "r1")).as("the run stays staged for a resubmit").isEqualTo("staged");
+        assertThat(repo.reconcileCommit(t, OWNER, "r1", COMMIT_TIMEOUT)).as("the resubmit succeeds").isNotNull();
+    }
+
+    @Test
+    void aStatementTimeoutLongerThanSetConfigTakes_isRefusedByTheRepository() {
+        assertThatThrownBy(() -> repo.reconcileCommit("t", OWNER, "r1", java.time.Duration.ofDays(30)))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("at most");
+    }
+
     // ── row-level security, probed with no tenant predicate ─────────────
 
     private int unfilteredRows(String tenant, org.jooq.Table<?> table) {
