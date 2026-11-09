@@ -140,11 +140,17 @@ things to avoid carefully; they are impossible.
    the CI board adapter's default branches are develop and main, so `board/ci/nexus-main--done`
    is the other topic). It
    posts one `kind=sha` row per completed run set of a sha, after the last push
-   run for it completes, with body `{state: concluded, sha, runs, url}`; `runs`
-   lists the `[run, attempt]` pairs it waited on. The row carries no
-   conclusion, and completed includes cancelled: a sha whose only run was
-   cancelled by the next push gets a wake too. Read the `kind=run` rows or the
-   check runs for the verdict, and a cancelled run per the rule below. The
+   run for it completes, with body `{state: concluded, sha, runs, n, url}`;
+   each `runs` entry is `[run, attempt, workflow, conclusion]` with GitHub's
+   own conclusion (nexus-1d6pz.11.1; rows from before it hold `[run, attempt]`
+   pairs and no conclusion), and `n` is the number of runs, which is more than
+   `len(runs)` when the body cap dropped trailing entries. Completed includes
+   cancelled: a sha whose only run was cancelled by the next push gets a wake
+   too. Once the adapter's result dims are on, the row also carries `sha` and
+   `outcome` dims (failure if any run failed, else cancelled, else success;
+   absent when a conclusion is unknown and nothing failed). For a truncated
+   list, or a missing conclusion, read the `kind=run` rows or the check runs,
+   and a cancelled run per the rule below. The
    wake is best-effort: the adapter drops it without retry on a GitHub or
    engine error, at its 8 s deadline, or when two runs finish together beyond
    its one re-read, so a missing wake is not a signal; if it has not come when
