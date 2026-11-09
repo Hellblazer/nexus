@@ -12,11 +12,13 @@ carries (the part a path list cannot decide). The harness is tests/_preflight_ha
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
 
 from tests._preflight_harness import (
+    _SHELLS,
     REPO_ROOT,
     _bare,
     _change,
@@ -106,8 +108,18 @@ def test_r20_r21_the_mcp_check_text_names_the_lists_a_registration_edits(repo: P
     # The hook lists are for hook_* tools only; any other tool is covered by _ALLOWED_TOOLS.
     assert "for a hook_* tool only, HOOK_TOOLS in src/nexus/mcp/hooks.py" in text
     assert "_ALLOWED_HOOK_TOOLS in src/nexus/hooks/auto_approve.py" in text
-    assert "any other tool is allowed by _ALLOWED_TOOLS" in text
+    # A new non-hook tool is ADDED to _ALLOWED_TOOLS, or, when destructive, to the manual-approval set
+    # with a requires-manual-approval case; the drift guard fails on a tool in neither.
+    assert "a new non-hook tool is ADDED to _ALLOWED_TOOLS in src/nexus/hooks/auto_approve.py" in text
+    assert (
+        "or, if it is destructive, to _MANUAL_APPROVAL_REQUIRED in tests/hooks/test_permission_request_hooks.py"
+        " with a requires-manual-approval case" in text
+    )
     assert "test_every_registered_conexus_tool_is_auto_approved" in text
+    # The catalog server has its own name set, docstring count and doc row and heading.
+    assert "a tool registered on the nexus-catalog server edits test_catalog_registered_tools" in text
+    assert "the module docstring count of src/nexus/mcp/catalog.py" in text
+    assert "the catalog row and section heading in docs/mcp-servers.md" in text
     # The three hand-typed counts and the lint that checks them (lint-marked, so the whole bucket).
     assert "docs/mcp-servers.md table row and section heading" in text
     assert "module docstring of src/nexus/mcp/core.py" in text
@@ -231,20 +243,57 @@ def test_r13_the_schema_steps_come_in_the_order_cheap_first_parity_last(repo: Pa
     assert all(c.startswith(w) for c, w in zip(checks, wanted)), checks
 
 
-def test_r10_a_changeset_prints_the_ddl_ceiling_and_says_how_to_measure_the_bump(
-    repo: Path, stubs: Path
+def _ceiling_line() -> str:
+    """The line the command must print, read from the toml itself (tomllib for the value, the file for
+    the line number), so it follows the ceiling the day it moves."""
+    toml = REPO_ROOT / "tests" / "ddl_ceiling.toml"
+    value = tomllib.loads(toml.read_text("utf-8"))["python_unit"]["migration_ddl_per_worker"]
+    at = [n for n, line in enumerate(toml.read_text("utf-8").splitlines(), 1) if line.startswith("migration_ddl_per_worker = ")]
+    assert len(at) == 1, at
+    return f"{at[0]}:migration_ddl_per_worker = {value}"
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+def test_r10_the_ddl_command_prints_exactly_the_ceiling_line(repo: Path, stubs: Path, shell: str) -> None:
+    """Exactly one line, equal to the current ceiling: an unanchored grep prints about forty comment lines,
+    and the line is what the bump edits."""
+    [row] = _fires(repo, [CHANGESET], DDL)
+    rc, lines = _run(REPO_ROOT, stubs, row["command"], shell)
+    assert rc == 0, lines
+    assert lines == [_ceiling_line()], lines
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+def test_r10_the_ddl_command_fails_when_the_ceiling_key_is_gone(
+    repo: Path, stubs: Path, tmp_path: Path, shell: str
 ) -> None:
+    """The control: a toml without the key makes the step fail, so a command that cannot fail
+    (`|| true`, a grep that matches anything) is red here."""
+    [row] = _fires(repo, [CHANGESET], DDL)
+    bare = tmp_path / "bare"
+    (bare / "tests").mkdir(parents=True)
+    (bare / "tests" / "ddl_ceiling.toml").write_text("[python_unit]\nother = 1\n", encoding="utf-8")
+    rc, lines = _run(bare, stubs, row["command"], shell)
+    assert rc != 0, lines
+
+
+def test_r10_a_changeset_says_what_the_ddl_ceiling_counts_and_how_to_measure_the_bump(repo: Path) -> None:
     [row] = _fires(repo, [CHANGESET], DDL)
     assert (row["class"], row["heavy"]) == ("schema", False)
-    # The command runs for real in the checkout and prints the ceiling line that the bump edits.
-    rc, lines = _run(REPO_ROOT, stubs, row["command"])
-    assert rc == 0, lines
-    assert any(re.fullmatch(r"[0-9]+:migration_ddl_per_worker = [0-9]+", line) for line in lines), lines
     text = row["check"]
+    # Every DDL statement a fresh migration runs, however the changeset spells it.
+    assert "counts every DDL statement a fresh migration runs" in text
+    for kind in ("ALTER TABLE", "CREATE INDEX", "CREATE TRIGGER", "a REVOKE", "CREATE POLICY"):
+        assert kind in text, kind
+    assert "a NO FORCE and FORCE ROW LEVEL SECURITY pair" in text
+    assert "DDL a function runs" in text and "aspects-005" in text
+    assert "a DROP lowers the number, so it can go down" in text
+    assert "changes nothing" not in text  # a NO FORCE toggle or a function's DDL counts with no spelled-out statement
     assert "migration_ddl_per_worker in tests/ddl_ceiling.toml in the same commit, tolerance 0" in text
     assert "citing the commit and the measurement on the comment line above" in text
-    # The count follows the toml's method (a scoped substrate run), not a hand count.
+    # The count follows the toml's method (a scoped substrate run), on a tree rebased onto develop.
     assert "Take the number from a scoped substrate run, not a hand count" in text
+    assert "rebased onto current develop" in text
     assert "tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued" in text
     assert "`ddl: migration=N`" in text
     assert "runAlways table grant (+1, +2 with a sequence)" in text
@@ -263,12 +312,21 @@ def test_r1_r4_the_engine_main_suite_says_whole_suite_and_the_name_filter_is_the
 ) -> None:
     _change(repo, {"service/src/main/java/A.java": "class A {}\n"})
     text = _check(_Run(repo)(), "the engine main suite")
-    assert "The whole suite, for any service/src/main edit" in text
+    assert "needs the whole suite" in text
     assert "a behavioral constant a fixture is sized against" in text
     assert "a -Dtest name filter is the inner loop only" in text
     assert "*GateTest, *WiringTest and *ConformanceTest" in text
-    assert "a test-only edit that adds SQL-looking literals" in text
     assert "`grep -rl Main.java service/src/test tests`" in text
+    # The repo's hand-run limits (AGENTS.md rule 13, docs/agents/test-running.md items 2 to 4).
+    assert "through scripts/mvnw-leased.sh --lab-run, never wrapped in lab-run" in text
+    assert "Once per tree" in text
+    assert "this sha, clean" in text and "already has a green full engine run" in text
+    assert "'no green full run of this tree exists'" in text
+    assert "by sha and status file" in text
+    assert "a fix round that touches only a test or a doc file does not trigger one" in text
+    # The narrow trigger: a test-only edit that adds SQL-looking literals, a scanner set or the suite.
+    assert "The one test-only edit that does: SQL-looking literals or fixtures" in text
+    assert "-Dtest='*GateTest,*WiringTest,*ConformanceTest,*ScanTest,<touched>'" in text
 
 
 def test_r41_the_drift_ledger_step_says_commit_first(repo: Path) -> None:
@@ -307,14 +365,15 @@ def test_each_new_step_collects_a_test_from_each_file_it_names_under_its_own_arg
         assert any(i.startswith(name + "::") for i in ids), (name, argv)
 
 
+@pytest.mark.parametrize("shell", _SHELLS)
 @pytest.mark.parametrize(("prefix", "paths", "files"), _NEW)
 def test_each_new_pytest_step_is_gated_and_runs_under_the_shell(
-    repo: Path, stubs: Path, prefix: str, paths: list[str], files: int
+    repo: Path, stubs: Path, prefix: str, paths: list[str], files: int, shell: str
 ) -> None:
     _change(repo, {p: "x\n" for p in paths})
     [row] = _rows(_Run(repo)(), prefix)
     assert row["command"].startswith("log=$(mktemp "), prefix
     assert " -rf " in _inner(row["command"]), prefix
-    rc, lines = _run(repo, stubs, row["command"])
+    rc, lines = _run(repo, stubs, row["command"], shell)
     assert rc == 0, lines
     assert "1 passed in 0.01s" in lines

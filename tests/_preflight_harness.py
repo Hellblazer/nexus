@@ -332,6 +332,9 @@ EVERYTHING: dict[str, str | None] = {
     "tests/e2e/x.sh": "x\n",
     "service/src/main/java/A.java": "class A {}\n",
     "service/src/main/resources/db/changelog/x-001.xml": "<x/>\n",
+    # the mcp-surface and tuple-template classes, so the all-shell contract test reaches them
+    "src/nexus/mcp/core.py": "x = 1\n",
+    "service/src/main/resources/tuples/templates/aspects.yaml": "x\n",
     "conexus/hooks/hooks.json": "{}\n",
     "docs/a.md": "a\n",
 }

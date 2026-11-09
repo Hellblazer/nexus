@@ -126,9 +126,6 @@ def test_every_step_that_names_files_collects_a_test_from_each_under_its_own_arg
             "tests/e2e/hook-cli-skew/run.sh": "x\n",
             "service/src/main/java/dev/nexus/service/db/CatalogRepository.java": "x\n",
             "src/nexus/catalog/recovery_bundle.py": "x = 1\n",
-            # the mcp-surface and tuple-template classes (tests/test_procedure_preflight_enumerations.py)
-            "src/nexus/mcp/core.py": "x = 1\n",
-            "service/src/main/resources/tuples/templates/aspects.yaml": "x\n",
         },
     )
     out = _Run(repo)()

@@ -161,12 +161,17 @@ local CLASSES = {
       -- source scanners (which a *WiringTest or *ConformanceTest is as much as a
       -- *GateTest). The source-scan pins on Main.java are found by grep, not by name.
       return {
-        step("the engine main suite (on a pool host: --lab-run needs lab-run on PATH). The whole suite, for any"
-          .. " service/src/main edit, a behavioral constant a fixture is sized against and Main.java included:"
-          .. " a -Dtest name filter is the inner loop only, and never reaches the repo-wide scanners, named"
-          .. " *GateTest, *WiringTest and *ConformanceTest, that read the whole service tree; a test-only edit"
-          .. " that adds SQL-looking literals or fixtures runs it too. `grep -rl Main.java service/src/test tests`"
-          .. " finds the source-scan pins on Main.java",
+        step("the engine main suite, through scripts/mvnw-leased.sh --lab-run, never wrapped in lab-run (on a pool"
+          .. " host: --lab-run needs lab-run on PATH). Any service/src/main edit needs the whole suite, a behavioral"
+          .. " constant a fixture is sized against and Main.java included: a -Dtest name filter is the inner loop"
+          .. " only, and never reaches the repo-wide scanners, named *GateTest, *WiringTest and *ConformanceTest,"
+          .. " that read the whole service tree. Once per tree (AGENTS.md rule 13): skip it when this tree (this sha,"
+          .. " clean) already has a green full engine run, whoever ran it, or develop CI already has the verdict;"
+          .. " announce a run with its change class, the sha and 'no green full run of this tree exists', and hand it"
+          .. " on by sha and status file; a fix round that touches only a test or a doc file does not trigger one."
+          .. " The one test-only edit that does: SQL-looking literals or fixtures added to a Java test can trip a"
+          .. " *ConformanceTest, so it runs -Dtest='*GateTest,*WiringTest,*ConformanceTest,*ScanTest,<touched>' or the"
+          .. " whole suite. `grep -rl Main.java service/src/test tests` finds the source-scan pins on Main.java",
           "scripts/mvnw-leased.sh --lab-run lab-m -q test -Dnexus.ddl.suite=main", true),
         step("the engine integration group (on a pool host)",
           "scripts/mvnw-leased.sh --lab-run lab-m -q test -Dnexus.ddl.suite=integration"
@@ -196,15 +201,20 @@ local CLASSES = {
         -- Advisory: the command prints the ceiling the bump edits. Whether the changeset
         -- adds DDL, and how many statements the substrate counts, a path list cannot see.
         -- The method follows tests/ddl_ceiling.toml: the number is measured, never counted
-        -- by hand (the runAlways grants loop adds a table grant the changeset does not show).
-        table.insert(out, step("the DDL ceiling, an advisory (the command prints the current ceiling): a changeset"
-            .. " that adds a DDL statement (CREATE TABLE or FUNCTION, its GRANT, ENABLE and FORCE ROW LEVEL SECURITY,"
-            .. " CREATE POLICY, DROP) bumps migration_ddl_per_worker in tests/ddl_ceiling.toml in the same commit,"
-            .. " tolerance 0, citing the commit and the measurement on the comment line above. Take the number from a"
-            .. " scoped substrate run, not a hand count: a new table adds a runAlways table grant (+1, +2 with a"
-            .. " sequence) that the changeset does not show. Run"
+        -- by hand (the runAlways grants loop adds a table grant the changeset does not show,
+        -- and DDL a function runs counts too).
+        table.insert(out, step("the DDL ceiling, an advisory (the command prints the current ceiling): the ceiling"
+            .. " counts every DDL statement a fresh migration runs, however the changeset spells it: CREATE TABLE,"
+            .. " CREATE FUNCTION and its GRANT, ALTER TABLE, CREATE INDEX, CREATE TRIGGER, a REVOKE, CREATE POLICY,"
+            .. " a DROP, a NO FORCE and FORCE ROW LEVEL SECURITY pair, and DDL a function runs (aspects-005's counting"
+            .. " helper ran a nested pair twice). A changeset that adds, removes or changes any of them moves"
+            .. " migration_ddl_per_worker in tests/ddl_ceiling.toml in the same commit, tolerance 0, citing the commit"
+            .. " and the measurement on the comment line above; a DROP lowers the number, so it can go down, and the"
+            .. " ceiling is lowered with it. Take the number from a scoped substrate run, not a hand count, measured on a"
+            .. " tree rebased onto current develop (a peer's changeset moves the base): a new table adds a runAlways"
+            .. " table grant (+1, +2 with a sequence) that the changeset does not show. Run"
             .. " tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued under lab-remote and read"
-            .. " the `ddl: migration=N` summary line. A changeset with no DDL statement changes nothing",
+            .. " the `ddl: migration=N` summary line",
           "grep -n '^migration_ddl_per_worker = ' tests/ddl_ceiling.toml", false))
       end
       -- It asks a live Postgres through the engine substrate, so it is heavy and
@@ -230,10 +240,15 @@ local CLASSES = {
           .. " in the same commit with `uv run python scripts/mcp_wire_snapshot.py --write`; review the diff, it"
           .. " holds only what you changed. Registering a tool also edits the name set in tests/test_mcp_package.py"
           .. " (test_core_registered_tools); for a hook_* tool only, HOOK_TOOLS in src/nexus/mcp/hooks.py and"
-          .. " _ALLOWED_HOOK_TOOLS in src/nexus/hooks/auto_approve.py (any other tool is allowed by _ALLOWED_TOOLS"
-          .. " in that file, which test_every_registered_conexus_tool_is_auto_approved checks); and three"
-          .. " hand-typed counts, the docs/mcp-servers.md table row and section heading and the module docstring of"
-          .. " src/nexus/mcp/core.py, which tests/test_mcp_tool_count_docs.py checks and the whole lint bucket runs."
+          .. " _ALLOWED_HOOK_TOOLS in src/nexus/hooks/auto_approve.py; a new non-hook tool is ADDED to _ALLOWED_TOOLS"
+          .. " in src/nexus/hooks/auto_approve.py or, if it is destructive, to _MANUAL_APPROVAL_REQUIRED in"
+          .. " tests/hooks/test_permission_request_hooks.py with a requires-manual-approval case"
+          .. " (test_every_registered_conexus_tool_is_auto_approved fails on a tool in neither); a tool registered on"
+          .. " the nexus-catalog server edits test_catalog_registered_tools, the module docstring count of"
+          .. " src/nexus/mcp/catalog.py and the catalog row and section heading in docs/mcp-servers.md; and three"
+          .. " hand-typed counts for the core server, the docs/mcp-servers.md table row and section heading and the"
+          .. " module docstring of src/nexus/mcp/core.py, which tests/test_mcp_tool_count_docs.py checks and the whole"
+          .. " lint bucket runs."
           .. " Before the first run, grep the tree for an existing tool's bare name and for the current count as a"
           .. " standalone number",
           gated(PYTEST .. " tests/test_mcp_wire_snapshot.py tests/test_mcp_package.py"
