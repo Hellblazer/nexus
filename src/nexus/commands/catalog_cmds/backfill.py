@@ -470,6 +470,7 @@ def backfill_meta_cmd(
                 f"  {name}: examined {st.examined}, held {st.present}, skipped (shared) {st.shared}, "
                 f"{'stamped' if apply else 'would stamp'} {st.stamped}, residue {sum(st.residue.values())}{why}"
             )
+        click.echo(f"  {report.repo_owners} repository owner(s) seen for the repo-collection tags rule (nexus-6pfgb.43).")
         if report.tags_legacy_strings_left:
             click.echo(f"  {report.tags_legacy_strings_left} legacy tags strings left for the array rung (nexus-6pfgb.38).")
         if report.lookups_failed:

@@ -184,7 +184,7 @@ def document_register_meta(content_type: str, file_path: str | Path) -> dict[str
 
 
 def backfill_tags_category(
-    content_type: str | None, file_path: str | Path | None,
+    content_type: str | None, file_path: str | Path | None, *, repo_owned: bool = False,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """The ``tags`` and ``category`` an indexed document of *content_type* at *file_path* may be given after
     the fact, and the reason for each key the entry's own two columns cannot settle (nexus-9cstf).
@@ -201,7 +201,12 @@ def backfill_tags_category(
       markdown hook (``nx index md`` / ``rdr``, ``collection reindex``, DEVONthink) agree. For any other
       extension they do NOT (the repo pass tags the extension, ``nx index md`` of the same file tags
       ``markdown``) and nothing on the entry tells them apart, so ``tags`` is residue
-      ``ambiguous_indexer``. At a ``.pdf`` path both keys are: the repo pass registers a PDF as type
+      ``ambiguous_indexer``. By policy (nexus-6pfgb.43, Sam's answer to ask linda/residue-tags-repair), a
+      *repo_owned* document (in its own repository's ``docs__`` or ``rdr__`` collection, decided by the
+      caller) at a repo-relative path takes the repo pass's value, its extension, or residue ``no_extension``
+      when it has none. That is a choice, not proof of which indexer ran: since nexus-3o4lt the markdown
+      hook also registers a repo file under the repo owner with a relative path, and a markdown-path write
+      (``nx index md``, or ``nx collection reindex`` before nexus-rmp2p) tagged its rows ``markdown``. At a ``.pdf`` path both keys are: the repo pass registers a PDF as type
       ``pdf``, so this entry came from a markdown-hook or import path, and ``nx index pdf`` of the same file
       stamps ``["pdf"]`` / ``paper`` where category ``prose`` would be stamped here. A fill-only write is
       permanent, so neither key is guessed (both residue ``ambiguous_indexer``).
@@ -233,11 +238,26 @@ def backfill_tags_category(
     values = {k: stamped[k] for k in ("tags", "category") if k in stamped}
     residue: dict[str, str] = {}
     if content_type in _PROSE_CONTENT_TYPES and suffix not in _MARKDOWN_SUFFIXES:
+        if repo_owned and is_repo_relative(path) and "tags" in values:
+            return values, residue  # the repo pass registered it: its extension (nexus-6pfgb.43)
         values.pop("tags", None)  # the repo pass would say the extension, the markdown hook "markdown"
-        residue["tags"] = "ambiguous_indexer" if path else "no_file_path"
+        if not path:
+            residue["tags"] = "no_file_path"
+        elif repo_owned and is_repo_relative(path):
+            residue["tags"] = "no_extension"  # the repo pass writes no tag for a file with no extension
+        else:
+            residue["tags"] = "ambiguous_indexer"
     elif "tags" not in values:
         residue["tags"] = "no_extension" if path else "no_file_path"
     return values, residue
+
+
+def is_repo_relative(file_path: str) -> bool:
+    """True for a path the repo pass registers (relative to the repository root): not absolute on POSIX or
+    Windows, no URI scheme, not empty."""
+    if not file_path or file_path.startswith(("/", "\\")) or "://" in file_path:
+        return False
+    return not (len(file_path) > 1 and file_path[1] == ":" and file_path[0].isalpha())
 
 
 def _with_tag(tag: str, category: str) -> dict[str, Any]:

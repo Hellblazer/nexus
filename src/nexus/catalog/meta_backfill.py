@@ -38,7 +38,8 @@ decides, per document, which keys the catalog may take from those rows, and noth
   ``nx index pdf`` registers, ``pdf`` what the repo PDF path registers), each key by its own presence, with
   no chunk row read (each key is open when unset by the predicate above, not only when absent). A key the rule cannot settle is residue with its reason: ``ambiguous_indexer`` (``tags``
   of a prose or rdr file that is not ``.md`` / ``.markdown``: the repo pass tags the extension, ``nx index md``
-  tags ``markdown``, and the entry cannot say which ran; both keys of a prose or rdr file at a ``.pdf`` path,
+  tags ``markdown``, and the entry cannot say which ran, except that by policy a document in its own repository's
+  ``docs__`` / ``rdr__`` collection at a repo-relative path takes the extension, nexus-6pfgb.43; both keys of a prose or rdr file at a ``.pdf`` path,
   where ``nx index pdf`` would have stamped ``paper``), ``not_pdf_path`` (both keys of a ``paper`` whose path is
   not ``.pdf``), ``no_extension``, ``no_file_path`` (a ``paper`` with no path is an ``nx catalog backfill``
   placeholder), ``no_rule``.
@@ -74,7 +75,7 @@ import signal
 import threading
 import time
 from collections import Counter, deque
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -290,7 +291,52 @@ def plan_source_format(entry: Any) -> Plan:
     return plan
 
 
-def plan_tags_category(entry: Any) -> Plan:
+def repo_owner_prefixes(reader: Any) -> frozenset[str]:
+    """The tumbler prefixes of every repository owner, deactivated ones included (a removed repo's documents
+    were still registered by the repo pass). Empty when the reader cannot list owners: no document is then
+    taken for repo-owned, which only leaves residue; the report carries the count (``repo_owners``)."""
+    lister = getattr(reader, "list_owners", None)
+    if lister is None:
+        return frozenset()
+    owners = lister(include_deactivated=True)  # a reader that cannot take the flag fails loudly, never drops owners
+    return frozenset(
+        str(o.get("tumbler_prefix") or "") for o in owners or []
+        if isinstance(o, dict) and o.get("owner_type") == "repo" and o.get("tumbler_prefix")
+    )
+
+
+#: The collection types ``nx index repo`` mints for prose and RDRs (docs/collections.md).
+_REPO_PROSE_COLLECTION_TYPES: frozenset[str] = frozenset({"docs", "rdr"})
+
+
+def repo_prose_collections(reader: Any) -> dict[str, str]:
+    """``{collection name: owner_id}`` for every ``docs`` / ``rdr`` collection row of the catalog. The owner is the
+    row's ``owner_id`` column, which for these types the engine sets from the tumbler of the documents in the
+    collection (docs/collections.md, nexus-6pbwx), never the name's segment. Empty when the reader cannot list them."""
+    lister = getattr(reader, "list_collections", None)
+    if lister is None:
+        return {}
+    out: dict[str, str] = {}
+    for kind in sorted(_REPO_PROSE_COLLECTION_TYPES):  # the route's own content_type filter
+        for r in lister(content_type=kind) or []:
+            if isinstance(r, dict) and r.get("name"):
+                out[str(r["name"])] = str(r.get("owner_id") or "")
+    return out
+
+
+def in_own_repo_collection(entry: Any, prefixes: frozenset[str], collections: Mapping[str, str]) -> bool:
+    """True when *entry* is under a repository owner AND its collection is a ``docs`` / ``rdr`` collection whose
+    catalog ``owner_id`` is that owner's segment (the owner prefix with ``-`` for ``.``)."""
+    tumbler = str(getattr(entry, "tumbler", "") or "")
+    owner = collections.get(str(getattr(entry, "physical_collection", "") or ""))
+    if not owner:
+        return False
+    return any(tumbler.startswith(p + ".") and owner == p.replace(".", "-") for p in prefixes)
+
+
+def plan_tags_category(
+    entry: Any, repo_prefixes: frozenset[str] = frozenset(), repo_collections: Mapping[str, str] | None = None,
+) -> Plan:
     """The ``tags`` and ``category`` the catalog may stamp on an indexed *entry* (nexus-9cstf).
 
     Derived the way :func:`plan_source_format` derives its key, from the entry's own ``content_type`` and
@@ -309,7 +355,10 @@ def plan_tags_category(entry: Any) -> Plan:
             plan.outcome[key] = PRESENT
     if not open_keys:
         return plan
-    values, residue = backfill_tags_category(getattr(entry, "content_type", "") or "", getattr(entry, "file_path", "") or "")
+    values, residue = backfill_tags_category(
+        getattr(entry, "content_type", "") or "", getattr(entry, "file_path", "") or "",
+        repo_owned=in_own_repo_collection(entry, repo_prefixes, repo_collections or {}),
+    )
     for key in open_keys:
         if key in values:
             plan.meta[key] = values[key]
@@ -439,6 +488,7 @@ class Report:
     lookups_failed: int = 0         # documents whose owner or row read failed: keys withheld
     writes_failed: int = 0
     tags_legacy_strings_left: int = 0
+    repo_owners: int = 0            # repository owners the run saw: 0 means the repo-collection tags rule found none
     keys: dict[str, KeyStats] = field(default_factory=dict)
     applied: bool = False
     interrupted: bool = False       # stopped before the last batch; only finished batches are counted
@@ -469,6 +519,7 @@ class Report:
             "documents_to_stamp": self.documents_to_stamp, "documents_written": self.documents_written,
             "lookups_failed": self.lookups_failed, "writes_failed": self.writes_failed,
             "tags_legacy_strings_left_for_the_array_rung": self.tags_legacy_strings_left,
+            "repo_owners": self.repo_owners,
             "keys": {k: v.as_dict() for k, v in sorted(self.keys.items())},
         }
         if self.started_after:
@@ -671,6 +722,8 @@ def backfill_meta(
     base = count_requests()
     history: deque[tuple[float, int]] = deque([(started, base)], maxlen=RECENT_ROUNDS + 1)
     listing = list(reader.all_documents())
+    repo_prefixes = repo_owner_prefixes(reader)
+    repo_collections = repo_prose_collections(reader) if repo_prefixes else {}
     live_entries = [e for e in listing if not getattr(e, "alias_of", "")]
     if not live_entries:
         raise VacuousRunError("examined 0 documents: an empty catalog is a failed sweep, not a clean one")
@@ -679,6 +732,7 @@ def backfill_meta(
         applied=apply, started_after=start_after, last_tumbler=start_after, resume_after=start_after,
         list_only=list_only,
     )
+    report.repo_owners = len(repo_prefixes)
     if start_after:
         at = next((i for i, e in enumerate(listing) if str(e.tumbler) == start_after), None)
         if at is None:
@@ -699,6 +753,7 @@ def backfill_meta(
             _run_batch(
                 reader, t3, writer, chunk, live, apply, report, pause, pause_after_write=index < batches,
                 list_first_sign=list_first_sign, list_only=list_only, now=listing_now,
+                repo_prefixes=repo_prefixes, repo_collections=repo_collections,
             )
         except KeyboardInterrupt:
             report = before  # the interrupted batch counts for nothing; a rerun redoes it
@@ -836,7 +891,8 @@ def _list_first_sign(reader: Any, t3: Any, notes: list[Any], report: Report, now
 def _run_batch(
     reader: Any, t3: Any, writer: Any | None, entries: list[Any], live: dict[str, Any], apply: bool, report: Report,
     pause: Callable[[], None], *, pause_after_write: bool = True, list_first_sign: bool = False,
-    list_only: bool = False, now: datetime | None = None,
+    list_only: bool = False, now: datetime | None = None, repo_prefixes: frozenset[str] = frozenset(),
+    repo_collections: Mapping[str, str] | None = None,
 ) -> None:
     notes = [e for e in entries if getattr(e, "content_type", "") == "knowledge"]
     docs = [e for e in entries if getattr(e, "content_type", "") != "knowledge"]
@@ -987,7 +1043,7 @@ def _run_batch(
         if kind == "doc":
             # derived from the entry: no lookup, so a failed one does not withhold them
             parts.append(plan_source_format(e))
-            parts.append(plan_tags_category(e))
+            parts.append(plan_tags_category(e, repo_prefixes, repo_collections))
         merged = Plan()
         for p in parts:
             _record(report, kind, p)

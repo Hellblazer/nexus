@@ -521,11 +521,11 @@ def test_no_content_type_is_left_out_of_the_row_sourced_keys(ctype):
 
 # ── nexus-9cstf: tags and category of an indexed document are derived from the entry ────────────
 
-def _indexed(meta, content_type, file_path, tumbler="1.4.1"):
+def _indexed(meta, content_type, file_path, tumbler="1.4.1", collection="docs__x__m__v1"):
     """An indexed document whose row-sourced keys are all held, so only the derived keys are open."""
     held = {"extraction_method": "m", "quality_gate_overridden": False, "extraction_source": "file", "frecency_score": 0.0}
     return _entry({**held, **meta}, title="d", tumbler=tumbler, content_type=content_type, file_path=file_path,
-                  author="Ann", collection="docs__x__m__v1")
+                  author="Ann", collection=collection)
 
 
 @pytest.mark.parametrize("content_type,path,tags,category", [
@@ -771,3 +771,104 @@ def test_the_backfill_agrees_with_the_single_file_verbs_where_it_derives_a_value
     assert values == {k: pdf_register_meta("p.pdf", "paper")[k] for k in ("tags", "category")}
     values, _ = backfill_tags_category("pdf", "p.pdf")
     assert values == {k: pdf_register_meta("p.pdf", "pdf")[k] for k in ("tags", "category")}
+
+
+# ── nexus-6pfgb.43: a prose document in its own repo's docs/rdr collection takes its extension as tags ───────
+
+REPO = frozenset({"1.87"})
+OWN_DOCS = "docs__1-87__voyage-context-3__v1"
+OWN_RDR = "rdr__1-87__voyage-context-3__v1"
+#: The catalog's docs/rdr collection rows as repo_prose_collections gives them: name -> owner_id (the row's column).
+COLLS = {OWN_DOCS: "1-87", OWN_RDR: "1-87", "docs__1-88__m__v1": "1-88", "docs__1-870__m__v1": "1-870",
+         "docs__1-4__m__v1": "1-4", "docs__renamed__m__v1": "1-87"}
+
+
+def _repo_doc(meta, content_type, path, tumbler="1.87.12", collection=OWN_DOCS):
+    return _indexed(meta, content_type, path, tumbler=tumbler, collection=collection)
+
+
+@pytest.mark.parametrize("content_type,path,tags,collection", [
+    ("prose", "Ghidra/Processors/x86/data/ia.sinc", ["sinc"], OWN_DOCS),
+    ("prose", "ddl_utils/src/main/resources/a.SQL", ["sql"], OWN_DOCS),   # lower-cased, as the repo pass writes it
+    ("rdr", "docs/notes.rst", ["rst"], OWN_RDR),
+    ("prose", "a/b.sql", ["sql"], "docs__renamed__m__v1"),   # the row owner_id decides, not the name segment
+])
+def test_a_prose_document_in_its_own_repo_collection_takes_the_repo_pass_extension(content_type, path, tags, collection):
+    plan = mb.plan_tags_category(_repo_doc({}, content_type, path, collection=collection), REPO, COLLS)
+    assert plan.meta == {"tags": tags, "category": "prose"}
+    assert plan.outcome == {"tags": STAMPED, "category": STAMPED}
+
+
+@pytest.mark.parametrize("tumbler,path,collection,reason", [
+    ("1.4.1", "notes/a.txt", "docs__1-4__m__v1", "ambiguous_indexer"),       # not under a repo owner
+    ("1.870.1", "notes/a.txt", "docs__1-870__m__v1", "ambiguous_indexer"),   # a string prefix is not a segment match
+    ("1.87.12", "notes/a.txt", "knowledge__1-87__m__v1", "ambiguous_indexer"),  # no docs/rdr row for it
+    ("1.87.12", "notes/a.txt", "docs__1-88__m__v1", "ambiguous_indexer"),    # another repo's collection
+    ("1.87.12", "notes/a.txt", "", "ambiguous_indexer"),                     # no physical collection
+    ("1.87.12", "/abs/notes/a.txt", OWN_DOCS, "ambiguous_indexer"),
+    ("1.87.12", "C:\\repo\\a.txt", OWN_DOCS, "ambiguous_indexer"),
+    ("1.87.12", "file:///repo/a.txt", OWN_DOCS, "ambiguous_indexer"),
+    ("1.87.12", "Makefile", OWN_DOCS, "no_extension"),                       # the repo pass writes no tag without one
+    ("1.87.12", "", OWN_DOCS, "no_file_path"),
+])
+def test_a_prose_document_the_rule_cannot_place_stays_residue(tumbler, path, collection, reason):
+    plan = mb.plan_tags_category(_repo_doc({}, "prose", path, tumbler=tumbler, collection=collection), REPO, COLLS)
+    assert plan.meta == {"category": "prose"}, "no tags key without a real value"
+    assert plan.outcome["tags"] == f"residue:{reason}"
+
+
+def test_the_repo_rule_is_fill_only_and_leaves_a_pdf_path_ambiguous():
+    held = mb.plan_tags_category(_repo_doc({"tags": ["markdown"]}, "prose", "a/b.sinc"), REPO, COLLS)
+    assert held.meta == {"category": "prose"} and held.outcome["tags"] == PRESENT
+    pdf = mb.plan_tags_category(_repo_doc({}, "prose", "a/b.pdf"), REPO, COLLS)
+    assert pdf.meta == {} and pdf.outcome == {"tags": "residue:ambiguous_indexer", "category": "residue:ambiguous_indexer"}
+
+
+def test_repo_owner_prefixes_takes_repo_owners_including_deactivated_ones():
+    calls = []
+
+    class _R:
+        def list_owners(self, *, include_deactivated=False):
+            calls.append(include_deactivated)
+            return [{"tumbler_prefix": "1.87", "owner_type": "repo"}, {"tumbler_prefix": "1.2", "owner_type": "curator"},
+                    {"tumbler_prefix": "", "owner_type": "repo"}]
+
+    assert mb.repo_owner_prefixes(_R()) == frozenset({"1.87"}) and calls == [True]
+    assert mb.repo_owner_prefixes(object()) == frozenset()
+
+
+def test_a_reader_whose_owner_listing_refuses_the_flag_fails_loudly():
+    class _Old:
+        def list_owners(self):
+            return [{"tumbler_prefix": "1.87", "owner_type": "repo"}]
+
+    with pytest.raises(TypeError):
+        mb.repo_owner_prefixes(_Old())
+
+
+def test_the_run_stamps_from_the_owner_listing_and_reports_how_many_repo_owners_it_saw():
+    w = _World()
+    w.entries = [_repo_doc({}, "prose", "Ghidra/a.sinc", tumbler="1.87.5"),
+                 _indexed({}, "prose", "notes/b.txt", tumbler="1.4.5")]
+    w.list_owners = lambda include_deactivated=False: [{"tumbler_prefix": "1.87", "owner_type": "repo"}]
+    w.list_collections = lambda lifecycle_state=None, content_type=None: (
+        [{"name": OWN_DOCS, "content_type": "docs", "owner_id": "1-87"}] if content_type in (None, "docs") else [])
+    rep = mb.backfill_meta(w, w, w, apply=True)
+    stamped = {u["tumbler"]: u["meta"].get("tags") for u in w.updates}
+    assert stamped.get("1.87.5") == ["sinc"] and stamped.get("1.4.5") is None
+    assert rep.keys["doc.tags"].stamped == 1 and rep.keys["doc.tags"].residue == {"ambiguous_indexer": 1}
+    assert rep.repo_owners == 1 and rep.as_dict()["repo_owners"] == 1
+
+
+def test_repo_prose_collections_keeps_docs_and_rdr_rows_with_their_owner_column():
+    rows = [{"name": OWN_DOCS, "content_type": "docs", "owner_id": "1-87"},
+            {"name": "knowledge__1-87__m__v1", "content_type": "knowledge", "owner_id": "1-87"},
+            {"name": "code__1-87__m__v1", "content_type": "code", "owner_id": "1-87"},
+            {"name": OWN_RDR, "content_type": "rdr", "owner_id": "1-87"}]
+
+    class _R:  # the route filters by content_type, as GET /v1/catalog/collections/list does
+        def list_collections(self, lifecycle_state=None, content_type=None):
+            return [r for r in rows if content_type is None or r["content_type"] == content_type]
+
+    assert mb.repo_prose_collections(_R()) == {OWN_DOCS: "1-87", OWN_RDR: "1-87"}
+    assert mb.repo_prose_collections(object()) == {}
