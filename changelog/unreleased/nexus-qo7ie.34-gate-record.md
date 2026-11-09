@@ -1,0 +1,3 @@
+### Added
+
+- **The `gate_record` procedure builds a review agent's T2 gate record** (RDR-240 Technical Design 6; client only). `nx run gate_record`, or `procedure_run` from MCP, takes `kind` (`review`, `critique`, `confirm` or `fix-check`), `bead`, an optional `rdr`, `sha`, `outcome` (`justified`, `partial` or `not-justified`), `body` and an optional `round`. It returns `{project, title, tags, content}` for T2 project `<repo>`: the title is `<kind>-<sha>-<bead>-<date>[-r<round>]`, and the tags carry `kind:gate`, `bead:` and, when an RDR is given, `rdr:`, which the RDR-209 rollup reads. It writes nothing; the caller writes the four fields unchanged with `memory_put` and no TTL. The review agents switch to it in the plugin release that ships with it (nexus-qo7ie.34).
