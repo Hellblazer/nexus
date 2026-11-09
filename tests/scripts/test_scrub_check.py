@@ -104,12 +104,18 @@ def test_a_hit_after_a_control_character_inside_a_line_is_seen(
     assert any("log.txt: 1 scrub hits" in e for e in sc.check(repo))
 
 
-def test_a_path_with_a_colon_and_a_non_ascii_name_parse(repo: Path) -> None:
-    _put(repo, "a:b.md", f"{HOME}\n")
+def test_a_non_ascii_path_parses(repo: Path) -> None:
     _put(repo, "\u00fcn.md", f"{HOME}\n")
-    errors = "\n".join(sc.check(repo))
-    assert "a:b.md: 1 scrub hits" in errors
-    assert "\u00fcn.md: 1 scrub hits" in errors
+    assert any("\u00fcn.md: 1 scrub hits" in e for e in sc.check(repo))
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="NTFS refuses ':' in a file name, so no such path exists there",
+)
+def test_a_path_with_a_colon_parses(repo: Path) -> None:
+    _put(repo, "a:b.md", f"{HOME}\n")
+    assert any("a:b.md: 1 scrub hits" in e for e in sc.check(repo))
 
 
 def test_the_durations_file_is_exempt(repo: Path) -> None:
