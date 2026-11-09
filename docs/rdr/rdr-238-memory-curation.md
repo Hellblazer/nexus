@@ -695,7 +695,8 @@ over 30 days, the most transcripts keep (about 30 days, inferred; research
 9). Each count is stored in T2 when it is taken. The `git stash` rule counts only a
 stash that changes state: `git stash list`, `show` and `create` touch neither
 `refs/stash` nor the working tree and are not counted (Sam, 2026-11-09, ask
-q12-stash-scope; a dry run found 27 of 37 stash sessions in 14 days only listed).
+q12-stash-scope; over 14 days the detector found 31 of 78 main sessions with
+any stash command and 4 with one that changes state).
 
 #### Step 2: Split
 

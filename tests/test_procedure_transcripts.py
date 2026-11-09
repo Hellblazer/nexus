@@ -557,6 +557,8 @@ STASH, FIND, TRAILER = "git-stash", "full-disk-find", "claude-session-trailer"
     ("git stash show -p stash@{0}", None),
     ("git -C /tmp/x stash show", None),
     ("git stash create", None),
+    ("git stash list>/tmp/x", None),
+    ("git stash pop>/tmp/x", STASH),
     ("git stash push -m wip", STASH),
     ("git stash save wip", STASH),
     ("git stash -u", STASH),

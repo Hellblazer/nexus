@@ -113,7 +113,8 @@
 --
 -- Violation rules (RDR-238 Phase 2): em-dash in assistant prose (code left out); git-stash,
 -- a git command whose subcommand, past the global options (-C dir, --no-pager), is stash,
--- unless the word after it is list, show or create (those change no state);
+-- unless the word after it is list, show or create (those touch neither refs/stash nor the
+-- working tree);
 -- full-disk-find, a find whose start path (quoted or not) is /, ~, $HOME, /Users, /home or
 -- one directory below the last two; claude-session-trailer, a Claude-Session: line in a git
 -- commit segment (its arguments or its heredoc); backtick-in-quoted-arg, a backtick inside
@@ -912,7 +913,7 @@ local function bash_hits(cmd, hit)
     local c = k and seg.w[k] or ""
     if is_cmd(c, "git") then
       local sub, j = git_sub(seg, k)
-      if sub == "stash" and not STASH_READ_ONLY[seg.w[j + 1] or ""] then
+      if sub == "stash" and not STASH_READ_ONLY[(seg.w[j + 1] or ""):match("^[%w-]*")] then
         hit["git-stash"] = true
       elseif sub == "commit" and names_trailer(seg) then
         hit["claude-session-trailer"] = true
