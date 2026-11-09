@@ -922,7 +922,10 @@ nx --version                 # must print X.Y.Z
 ### 12a. Memory curation report (RDR-238; report only, never blocks)
 
 Once Step 12's restart has every session on the new version, run the curation report
-in one session, with the reinstalled `nx`:
+in one session, with the reinstalled `nx`. With no other session live, run it as soon as
+`nx --version` prints X.Y.Z. If Sam defers the restart, skip the step and say so in the
+ship record: a long foreground run would hold a session at `shell` through the restart
+round.
 
 ```bash
 nx memory curate --files --t2 --agents --cold || echo "curation step skipped (exit $?); the release goes on"
@@ -931,15 +934,19 @@ nx memory curate --files --t2 --agents --cold || echo "curation step skipped (ex
 It prints the report and stores it in T2 as `<repo>/curation-report-<date>` (90-day
 TTL): memory files that are unindexed, oversized or dangling, T2 rows and reviewer
 memory to look at, and (`--cold`) memory files, T2 namespaces, MCP tools, CLI verbs
-and nested CLAUDE.md files with no write and no use in 30 days. `--cold` reads every
-transcript of the window three times, so it takes minutes.
+and nested CLAUDE.md files with no write and no use in 30 days. With `--files` and
+`--cold` together it reads every transcript of the window four times (`--files` once
+for read counts, `--cold` three times), so it takes a while: 305 s on the laptop
+on 2026-11-09, over a 30-day window. If it is still running after 30 minutes, stop it
+(the one pid you started), say so in the ship record and finish the release.
 
 This step never blocks the release. The command exits 0 whatever it finds, and a
-section that cannot run prints one "not available" line while the others still run.
-A non-zero exit or "No such command" (in the plugin-only lane the local `nx` can
+section that cannot run prints a "not available" line (`--cold` prints one per kind)
+while the others still run. A last line "report not stored" means the T2 write failed:
+there is nothing to link, so say that in the ship record. A non-zero exit or "No such command" (in the plugin-only lane the local `nx` can
 predate the verb) is reported in the ship record, and the release is still done.
-The report changes nothing: retiring what it lists is a person's decision, so link
-the report from the ship record and leave the list to Sam.
+The report changes nothing: retiring what it lists is a person's decision and rides
+its own change, so link the report from the ship record and leave the list to Sam.
 
 ## Plugin-only fast lane
 
