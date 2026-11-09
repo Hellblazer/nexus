@@ -47,4 +47,11 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/skills/rdr-research/SKILL.md`
+  nexus-qo7ie.33: `add` builds the record with the `research_add` procedure (`procedure_run`), reads the title back, and writes all four returned fields with `memory_put`; no more `nx rdr preamble rdr-research -- add`. Needs a package with `procedure_run` (7.99.0 or later). The bare-argument refusal follows in a later package release.
+- `conexus/skills/rdr-fix-checklist/SKILL.md`
+  nexus-qo7ie.33: the pre-edit research entry is recorded through the rdr-research skill's `add`, not the bare-argument CLI.
+- `conexus/skills/rdr-gate-checklist/SKILL.md`
+  nexus-qo7ie.33: a vacuous Layer 2 is filled through the rdr-research skill's `add`, not the bare-argument CLI.
+
 ## Deferred to the next client release
