@@ -119,6 +119,14 @@ _DOCUMENTED_EXCLUSIONS: dict[tuple[str, str], str] = {
         "consumed and deleted; a rename mid-job is out of scope and re-homing them "
         "would mutate in-flight work."
     ),
+    ("catalog_reconcile_rows", "physical_collection"): (
+        "RDR-193 Step 2 (catalog-048): the landing rows of one staged reconcile run, not "
+        "collection-scoped storage. They live only until catalog_reconcile_commit applies "
+        "them to catalog_documents in one transaction or catalog_reconcile_reap drops the "
+        "stale run; nothing reads them as a collection's contents, so collectionIsEmpty "
+        "must not count them, and re-homing them would rewrite a run the client staged "
+        "under the name it walked. Same class as pdf_pipeline."
+    ),
     ("chash_remap", "source_collection"): (
         "RULING (nexus-4nll0, decided): chash_remap is RF-186-1 raw-fact substrate -- "
         "append-only, no verdict surface, audit outlives the collection it describes -- "
