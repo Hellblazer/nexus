@@ -240,6 +240,24 @@ class StatusHandlerTest {
     }
 
     @Test
+    void chunkMetadataKeyWouldRefuseTotal_topLevelFieldCountsAnOffendingWriteOnce_notACleanOne() throws Exception {
+        // RDR-236 Phase 4 Step 2a (bead nexus-6pfgb.66), [additive]: delta discipline, driven through the check.
+        start(new StatusHandler(null));
+        long before = get().get("chunk_metadata_key_would_refuse_total").asLong();
+        var check = new dev.nexus.service.vectors.ChunkKeyAllowlistCheck();
+        var clean = java.util.Map.of("chunk_text_hash", "h", "embedding_model", "m");
+        var offending = java.util.Map.of("chunk_text_hash", "h", "title", "t", "doc_id", "d");
+
+        check.observe("t", "knowledge-collection", "upsert-chunks", java.util.List.of(clean), 1, null, null);
+        assertThat(get().get("chunk_metadata_key_would_refuse_total").asLong()).as("a clean write").isEqualTo(before);
+
+        check.observe("t", "knowledge-collection", "upsert-chunks", java.util.List.of(clean, offending, offending), 3,
+            null, null);
+        assertThat(get().get("chunk_metadata_key_would_refuse_total").asLong() - before)
+            .as("one request counts once, however many chunks or keys offend").isEqualTo(1L);
+    }
+
+    @Test
     void testTenantResetRoute_isAlwaysPresent_falseUnlessTheRouteIsRegistered() throws Exception {
         // nexus-0bl77, [additive]. On /v1/status and not /version: the conexus image smoke fails on any /version
         // key outside the public contract.

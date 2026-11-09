@@ -354,6 +354,14 @@ public final class NexusService {
             dev.nexus.service.vectors.OwnerlessWritePolicy.fromEnv();
 
     /**
+     * RDR-236 Phase 4 Step 2a (nexus-6pfgb.66): the log-mode chunk-metadata allow-list, one instance for the vector
+     * and catalog handlers. Its log windows are keyed by tenant; the tenant reset route evicts them with the ownerless
+     * log windows.
+     */
+    private final dev.nexus.service.vectors.ChunkKeyAllowlistCheck chunkKeyAllowlistCheck =
+            new dev.nexus.service.vectors.ChunkKeyAllowlistCheck();
+
+    /**
      * Convenience constructor: no vector backend (original signature for existing tests).
      * The {@code /v1/vectors/*} routes answer 503 (explicit refusal, never a 404 or NPE).
      *
@@ -805,7 +813,7 @@ public final class NexusService {
             ? new dev.nexus.service.db.CombinedWriteService(tenantScope, catalogRepo, docEmbedderRouter)
             : null;
         var catalogCtx = server.createContext("/v1/catalog",
-                new CatalogHandler(catalogRepo, combinedWriteService, reconcileJobs));
+                new CatalogHandler(catalogRepo, combinedWriteService, reconcileJobs, chunkKeyAllowlistCheck));
         catalogCtx.getFilters().addAll(authFilter);
 
         // /v1/tenants/* + /v1/service-tokens/* — token lifecycle admin (bead nexus-gmiaf.32.3).
@@ -838,7 +846,7 @@ public final class NexusService {
         // repository for storage/query, embedder router for /embed) is absent — a
         // missing backend is a refusal, never a 404 that masquerades as an unknown route.
         this.vectorHandler = new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker,
-                ownerlessWritePolicy, requestLedger);
+                ownerlessWritePolicy, requestLedger, chunkKeyAllowlistCheck);
         var vectorCtx = server.createContext("/v1/vectors", this.vectorHandler);
         vectorCtx.getFilters().addAll(authFilter);
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
@@ -1075,7 +1083,8 @@ public final class NexusService {
                 catalogRepo::evictGhostSweepTenant),
             dev.nexus.service.db.TenantKeyedState.of("MintRateLimiter", mintRateLimiter::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("OwnerlessLogLimiter",
-                t -> pgVectorRepository == null ? 0 : pgVectorRepository.evictOwnerlessLogTenant(t)),
+                t -> (pgVectorRepository == null ? 0 : pgVectorRepository.evictOwnerlessLogTenant(t))
+                    + chunkKeyAllowlistCheck.evictTenant(t)),
             dev.nexus.service.db.TenantKeyedState.of("ChunkReaper",
                 t -> chunkReaper == null ? 0 : chunkReaper.evictTenant(t)),
             dev.nexus.service.db.TenantKeyedState.of("NexusService.dataSweepFailuresByTenant",

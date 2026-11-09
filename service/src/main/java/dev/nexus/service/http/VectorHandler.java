@@ -13,6 +13,7 @@ import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.EmbeddingModelUnavailableException;
+import dev.nexus.service.vectors.ChunkKeyAllowlistCheck;
 import dev.nexus.service.vectors.OwnerlessChunkWriteException;
 import dev.nexus.service.vectors.OwnerlessWritePolicy;
 import dev.nexus.service.vectors.OwnershipGuard;
@@ -152,6 +153,8 @@ public final class VectorHandler implements HttpHandler {
     private final PgVectorRepository  pgRepo;
     private final RerankStage         rerankStage;
     private final OwnerlessWritePolicy ownerlessWritePolicy;
+    /** RDR-236 Step 2a (nexus-6pfgb.66): the log-mode chunk-metadata allow-list the two metadata-writing routes ask. */
+    private final ChunkKeyAllowlistCheck chunkKeyCheck;
     /** RDR-222 Phase 1: null when the handler is built without a ledger; a keyed request is then refused. */
     private final KeyedSweep keyedSweep;
     /**
@@ -209,6 +212,19 @@ public final class VectorHandler implements HttpHandler {
                          dev.nexus.service.vectors.Reranker reranker,
                          OwnerlessWritePolicy ownerlessWritePolicy,
                          dev.nexus.service.db.RequestLedger requestLedger) {
+        this(embedderRouter, pgRepo, reranker, ownerlessWritePolicy, requestLedger, new ChunkKeyAllowlistCheck());
+    }
+
+    /**
+     * Full wiring plus the chunk-metadata allow-list check (RDR-236 Phase 4 Step 2a, nexus-6pfgb.66). {@code
+     * NexusService} passes the one instance it also hands the catalog handler and evicts per tenant.
+     */
+    public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo,
+                         dev.nexus.service.vectors.Reranker reranker,
+                         OwnerlessWritePolicy ownerlessWritePolicy,
+                         dev.nexus.service.db.RequestLedger requestLedger,
+                         ChunkKeyAllowlistCheck chunkKeyCheck) {
+        this.chunkKeyCheck = java.util.Objects.requireNonNull(chunkKeyCheck, "chunkKeyCheck");
         this.embedderRouter = embedderRouter;
         this.pgRepo         = pgRepo;
         this.rerankStage    = new RerankStage(reranker);
@@ -462,6 +478,18 @@ public final class VectorHandler implements HttpHandler {
     }
 
     /**
+     * Log mode of the chunk-metadata allow-list (RDR-236 Phase 4 Step 2a, nexus-6pfgb.66): counts and logs a write
+     * that names a key outside the CHUNK set, then lets it proceed. Called after the request is validated and before
+     * any write, the place Step 2c's refusal will sit; it never throws.
+     */
+    private void observeChunkKeys(HttpExchange ex, String tenant, String collection, String route,
+                                  List<Map<String, Object>> metadatas, int requested) {
+        var headers = ex.getRequestHeaders();
+        chunkKeyCheck.observe(tenant, collection, route, metadatas, requested,
+                headers.getFirst("User-Agent"), headers.getFirst(CLIENT_VERSION_HEADER));
+    }
+
+    /**
      * Header the final-cut client's vector, T2, catalog and scratch clients send (RDR-223 Phase 3
      * Step 2, nexus-z0o2p.24): the conexus version. The hook paths (mailbox drain, tuple ledger
      * projection) and the engine-status probe do not send it. The ownerless-write log line carries
@@ -584,6 +612,7 @@ public final class VectorHandler implements HttpHandler {
                     "ids length " + ids.size() + " != documents length " + documents.size());
         }
 
+        observeChunkKeys(ex, tenant, collection, "upsert-chunks", metadatas, ids.size());
         if (embeddings != null) {
             // Same-model vector PASSTHROUGH (nexus-hxry2): store the supplied vectors
             // verbatim, no embedder call (token usage 0). Dimension is validated
@@ -1433,6 +1462,7 @@ public final class VectorHandler implements HttpHandler {
                     "metadatas length " + metadatas.size() + " != ids length " + ids.size());
         }
 
+        observeChunkKeys(ex, tenant, collection, "update-metadata", metadatas, ids.size());
         // RDR-181 (bead nexus-f0r8p.2): updateMetadata now returns the actual
         // affected-row count rather than void — report it verbatim instead of
         // assuming every id existed (a stale/deleted id previously reported as

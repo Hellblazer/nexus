@@ -705,13 +705,14 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, CONFIG);
             }
-            // COUNTER (46)
+            // COUNTER (47)
             for (String f : List.of(
                 "Bge768Embedder.onnxInvocationCount",
                 "CatalogRepository.vacuumInProgress",
                 "CceEmbedder.callEwmaNanos",
                 "CceEmbedder.waitingBatches",
                 "NexusService.consecutiveDataSweepFailures",
+                "ChunkKeyAllowlistActivity.WOULD_REFUSE",
                 "ChunkReaper.censusBackoffTotal",
                 "ChunkReaper.censusTimedOutTotal",
                 "ChunkReaper.failedPassesTotal",

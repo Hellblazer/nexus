@@ -13,6 +13,7 @@ import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.GraphScopeFilter;
 import dev.nexus.service.db.QuarantineOrigin;
+import dev.nexus.service.vectors.ChunkKeyAllowlistCheck;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -128,6 +129,8 @@ public final class CatalogHandler implements HttpHandler {
     private final dev.nexus.service.db.CombinedWriteService combinedWriteService;
     /** RDR-193 Part C (nexus-u5m5g.3): the reconcile commit jobs; null answers the commit and poll routes 503. */
     private final EngineJobs<Void> reconcileJobs;
+    /** RDR-236 Step 2a (nexus-6pfgb.66): the log-mode chunk-metadata allow-list the three combined routes ask. */
+    private final ChunkKeyAllowlistCheck chunkKeyCheck;
     /** RDR-193 Part A4 (nexus-u5m5g.4): the link batch routes and the combined list read. */
     private final CatalogLinksHandler linkRoutes;
     /** The statement timeout a reconcile commit runs under: the reconcile instance's maximum runtime, never more. */
@@ -174,11 +177,29 @@ public final class CatalogHandler implements HttpHandler {
     CatalogHandler(CatalogRepository repo,
                    dev.nexus.service.db.CombinedWriteService combinedWriteService,
                    EngineJobs<Void> reconcileJobs, java.time.Duration reconcileStatementTimeout) {
+        this(repo, combinedWriteService, reconcileJobs, reconcileStatementTimeout, new ChunkKeyAllowlistCheck());
+    }
+
+    /**
+     * Production wiring plus the chunk-metadata allow-list check (RDR-236 Phase 4 Step 2a, nexus-6pfgb.66): {@code
+     * NexusService} passes the one instance it also hands the vector handler and evicts per tenant.
+     */
+    public CatalogHandler(CatalogRepository repo,
+                          dev.nexus.service.db.CombinedWriteService combinedWriteService,
+                          EngineJobs<Void> reconcileJobs, ChunkKeyAllowlistCheck chunkKeyCheck) {
+        this(repo, combinedWriteService, reconcileJobs, RECONCILE_STATEMENT_TIMEOUT, chunkKeyCheck);
+    }
+
+    CatalogHandler(CatalogRepository repo,
+                   dev.nexus.service.db.CombinedWriteService combinedWriteService,
+                   EngineJobs<Void> reconcileJobs, java.time.Duration reconcileStatementTimeout,
+                   ChunkKeyAllowlistCheck chunkKeyCheck) {
         if (reconcileStatementTimeout == null || reconcileStatementTimeout.isZero() || reconcileStatementTimeout.isNegative()
                 || reconcileStatementTimeout.compareTo(java.time.Duration.ofMillis(Integer.MAX_VALUE)) > 0) {
             throw new IllegalArgumentException("the reconcile statement timeout must be positive and at most "
                 + Integer.MAX_VALUE + " ms (the range of statement_timeout), got " + reconcileStatementTimeout);
         }
+        this.chunkKeyCheck = java.util.Objects.requireNonNull(chunkKeyCheck, "chunkKeyCheck");
         this.repo = repo;
         this.linkRoutes = new CatalogLinksHandler(new dev.nexus.service.db.CatalogLinksRepository(repo));
         this.combinedWriteService = combinedWriteService;
@@ -1399,6 +1420,7 @@ public final class CatalogHandler implements HttpHandler {
                     + MAX_CHUNKS_PER_APPEND + ")\"}"); return;
             }
             boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
+            observeChunkKeys(exchange, tenant, collection, "manifest/append", chunks);
             var combined = combinedWriteService.appendCombined(
                 tenant, collection, docId, rows, chunks, forceReEmbed, sweepChashes,
                 parseEmbeddingModel(body.get("embedding_model")), parseMetadataMode(body));
@@ -1510,6 +1532,7 @@ public final class CatalogHandler implements HttpHandler {
             return;
         }
         boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
+        observeChunkKeys(exchange, tenant, collection, "manifest/append_many", chunks);
         var combined = combinedWriteService.appendManyCombined(tenant, collection, docs, chunks, forceReEmbed,
             parseEmbeddingModel(body.get("embedding_model")), parseMetadataMode(body));
         if (combined.tokens() > 0) {
@@ -1517,6 +1540,22 @@ public final class CatalogHandler implements HttpHandler {
                 VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(combined.response()));
+    }
+
+    /**
+     * Log mode of the chunk-metadata allow-list (RDR-236 Phase 4 Step 2a, nexus-6pfgb.66): counts and logs a combined
+     * write whose chunk metadata names a key outside the CHUNK set, then lets it proceed. Called after the request is
+     * validated and before the embed and every write, the place Step 2c's refusal will sit; it never throws.
+     */
+    private void observeChunkKeys(HttpExchange exchange, String tenant, String collection, String route,
+                                  List<Map<String, Object>> chunks) {
+        List<Object> metadatas = new ArrayList<>(chunks.size());
+        for (Map<String, Object> chunk : chunks) {
+            metadatas.add(chunk.get("metadata"));
+        }
+        var headers = exchange.getRequestHeaders();
+        chunkKeyCheck.observe(tenant, collection, route, metadatas, chunks.size(),
+            headers.getFirst("User-Agent"), headers.getFirst(VectorHandler.CLIENT_VERSION_HEADER));
     }
 
     /** Most keys one request may name in {@code metadata_delete_keys}. */
@@ -1786,6 +1825,7 @@ public final class CatalogHandler implements HttpHandler {
             // 'collection' already validated above (required unconditionally).
             List<Map<String, Object>> chunks = parseChunks(rawChunks);
             boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
+            observeChunkKeys(exchange, tenant, collection, "manifest/write_many", chunks);
             var combined = combinedWriteService.writeManyCombined(
                 tenant, collection, chunks, docs, complete, sweep, forceReEmbed,
                 parseEmbeddingModel(body.get("embedding_model")), parseMetadataMode(body));
