@@ -889,3 +889,60 @@ def test_the_row_counts_only_when_its_indexed_at_is_later_than_put_at_plus_the_s
 def test_an_entry_with_no_put_at_is_never_treated_as_newer_than_its_rows(row, stale):
     meta = {"ttl_days": 1}
     assert note_ttl.catalog_ttl_stale(meta, _ago(2), [row], owner_tumbler="1.1.1", owner_title="N") is stale
+
+
+# ── nexus-6pfgb.65 round 1b fix: held_by_first_sign_alone is the notes whose expiry Step 1 changes ───────
+#
+# The guard runs only on a note that has lapsed, so only a note with a catalog TTL can be on the list. A
+# row with no readable indexed_at and a TTL that differs from the catalog's was held by the pre-Step-1
+# first sign and is ignored now: it is on the list too, under its own reason.
+
+_NOTE = {"owner_tumbler": "1.1.1", "owner_title": "N"}
+
+
+def _held(meta, rows):
+    return note_ttl.held_by_first_sign_alone(meta, rows, **_NOTE)
+
+
+def test_a_catalog_permanent_note_is_never_on_the_list_whatever_its_rows_hold():
+    """Step 1 cannot change a note that never lapses: a permanent entry (ttl_days 0 or absent) with an old
+    TTL'd row, the shape of every post-.18 import, is not held-by-first-sign in any sense that matters."""
+    old_ttl_row = {"catalog_doc_id": "1.1.1", "title": "N", "indexed_at": _ago(30), "ttl_days": 5}
+    for meta in ({"ttl_days": 0, "put_at": _ago(2)}, {"put_at": _ago(2)}, {"ttl_days": None, "put_at": _ago(2)}):
+        assert _held(meta, [old_ttl_row]) == [], meta
+
+
+def test_a_row_with_a_differing_ttl_and_no_readable_indexed_at_is_held_by_the_first_sign_alone():
+    meta = {"ttl_days": 1, "put_at": _ago(2)}
+    bare = {"catalog_doc_id": "1.1.1", "title": "N"}                       # what a current client leaves
+    junk = {"catalog_doc_id": "1.1.1", "title": "N", "indexed_at": "junk", "ttl_days": 5}
+    assert _held(meta, [bare]) == [bare]
+    assert _held(meta, [junk]) == [junk]
+    assert _held(meta, [{**bare, "ttl_days": 1}]) == [], "control: the TTLs match"
+
+
+def test_a_row_with_an_indexed_at_later_than_put_at_plus_the_skew_still_empties_the_list():
+    """The second sign still catches it after Step 1, so the note is not released."""
+    meta = {"ttl_days": 1, "put_at": _ago(2)}
+    bare = {"catalog_doc_id": "1.1.1", "title": "N"}
+    later = {"catalog_doc_id": "1.1.1", "title": "N", "indexed_at": _ago(0.5)}
+    assert _held(meta, [bare, later]) == []
+
+
+def test_an_entry_with_no_readable_put_at_has_nothing_the_rule_changed_and_is_not_listed():
+    """The guard is direct: without a put_at the rule has no threshold to read a row against, and nothing
+    there changed with Step 1, so a row with an indexed_at and a differing TTL is not listed."""
+    row = {"catalog_doc_id": "1.1.1", "title": "N", "indexed_at": _ago(30), "ttl_days": 5}
+    for meta in ({"ttl_days": 1}, {"ttl_days": 1, "put_at": ""}, {"ttl_days": 1, "put_at": "junk"}, None):
+        assert _held(meta, [row]) == [], meta
+
+
+def test_expires_at_is_the_clock_plus_the_ttl_and_lapsed_is_true_from_that_instant():
+    meta = {"ttl_days": 3, "put_at": _ago(2)}
+    at = note_ttl.expires_at(meta, "")
+    assert at == NOW - timedelta(days=2) + timedelta(days=3)
+    assert not note_ttl.lapsed(meta, "", now=at - timedelta(seconds=1))
+    assert note_ttl.lapsed(meta, "", now=at)
+    assert note_ttl.expires_at({"ttl_days": 0, "put_at": _ago(2)}, "") is None
+    assert note_ttl.expires_at({"ttl_days": 3}, "") is None, "no readable clock"
+    assert note_ttl.expires_at({"ttl_days": 3_000_000, "put_at": _ago(2)}, "") is None, "past datetime's range: never"

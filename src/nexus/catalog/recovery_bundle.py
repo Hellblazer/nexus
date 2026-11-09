@@ -256,8 +256,9 @@ def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
     writes it, so a note stored with every other key unset still has an answer (all empty, and not
     counted as unrecovered). An entry with none is a legacy one, or a note stored with every key
     unset before nexus-6pfgb.15. :func:`export_knowledge_doc` exports such a note with all three empty
-    and no longer asks its chunk row (RDR-236 Phase 4 Step 1, nexus-6pfgb.65): the backfill filled every
-    keyless note it could, and the residue was accepted at the dry run.
+    and no longer asks its chunk row (RDR-236 Phase 4 Step 1, nexus-6pfgb.65): the operator-run backfill
+    (``nx catalog backfill-meta``; the upgrade does not run it) fills a keyless note's keys from its rows
+    where it can attribute them, and the export notice names it.
     """
     from nexus.catalog.store_hook import NOTE_META_KEYS, split_note_tags  # noqa: PLC0415 — deferred, store_hook has a heavy import graph
 
@@ -299,8 +300,9 @@ def export_knowledge_doc(
     last writer's. An entry with none of the note keys (written before nexus-6pfgb.5, or stored with
     none of them before nexus-6pfgb.15 made every put write ``put_at``) exports all three empty
     (``ttl_days`` permanent): the export has no row path (RDR-236 Phase 4 Step 1, nexus-6pfgb.65).
-    The backfill (nexus-6pfgb.10) already filled every keyless note whose row it could attribute, and
-    the residue was accepted at the dry run, so a row is never a source: a TTL a departed co-owner left
+    The backfill (nexus-6pfgb.10, operator-run: ``nx catalog backfill-meta``, which the upgrade does not run)
+    fills a keyless note whose row it can attribute; a note it has not been run on exports empty. A row is
+    never a source here: a TTL a departed co-owner left
     on one would make a permanent note expire after import, and a client no longer writes a note's own
     facts to its rows at all. *summary* counts the note, and names it, when a piece row still holds a
     tags, category or ttl_days value the record does not carry. ``ttl_days`` is a positive integer or
@@ -328,8 +330,8 @@ def export_knowledge_doc(
     content = "".join(str(p["content"]) for p in rows)
     keys = _own_note_keys(entry)
     if keys is None:
-        # The row is never a source (RDR-236 Phase 4 Step 1, nexus-6pfgb.65): the backfill filled every
-        # keyless note it could, and the residue was accepted at the dry run. A row's values are only
+        # The row is never a source (RDR-236 Phase 4 Step 1, nexus-6pfgb.65): `nx catalog backfill-meta` is the
+        # operator's way to fill a keyless note first, and the upgrade does not run it. A row's values are only
         # counted, so the operator is told what the record does not carry.
         keys = {"tags": [], "category": "", "ttl_days": None}
         if any(k["tags"] or k["category"] or k["ttl_days"] for k in map(_row_keys, rows)):

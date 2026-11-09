@@ -265,7 +265,9 @@ def test_backfill_meta_dry_run_lists_the_notes_held_by_the_first_sign_of_catalog
         tumblers[title] = str(entry.tumbler)
         stamp_legacy_note_rows(client, notes, out.chunk_ids, catalog_doc_id=tumblers[title], title=title, **row)
 
-    report = _run()
+    assert "ttl_first_sign_only" not in _run(), "a plain dry run lists nothing and reads no row for it"
+
+    report = _run("--list-ttl-first-sign")
 
     section = report["ttl_first_sign_only"]
     assert [n["tumbler"] for n in section["notes"]] == [tumblers["A"]], section
@@ -273,5 +275,10 @@ def test_backfill_meta_dry_run_lists_the_notes_held_by_the_first_sign_of_catalog
     only = section["notes"][0]
     assert only["title"] == "A" and only["catalog_ttl_days"] == 1 and only["row_ttl_days"] is None
     assert only["row_indexed_at"] == month_ago and only["reason"] == "first sign only"
+    assert only["lapsed_now"] is False and only["expires_at"], "put a moment ago with a 1 day TTL: not lapsed"
+
+    only_report = _run("--list-ttl-first-sign-only")
+    assert [n["tumbler"] for n in only_report["ttl_first_sign_only"]["notes"]] == [tumblers["A"]]
+    assert only_report["list_only"] is True and only_report["documents_to_stamp"] == 0
     assert report["documents_to_stamp"] == 0, "read-only: the listing stamps nothing"
     assert reader.by_source_uri(uri_for(notes, "A")).meta.get("ttl_days") == 1, "and changes no entry"

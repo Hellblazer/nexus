@@ -168,6 +168,9 @@ def test_catalog_export_names_the_notes_whose_keys_could_not_be_recovered(tmp_pa
     assert "    knowledge__y: (untitled)\n" in result.output
     assert "\x1b" not in result.output and '"bad\\u001b[2Jtitle"' in result.output, "a title is escaped"
     assert "re-put it with its tags, category and TTL" in result.output
+    # the backfill is operator-run (the upgrade ladder does not run it): the notice names it as the way to
+    # recover a keyless note's keys from its rows, before the export (nexus-6pfgb.65 Step 1b review)
+    assert "nx catalog backfill-meta --apply" in result.output and "before exporting" in result.output
 
 
 def test_catalog_export_caps_the_unrecovered_titles_it_prints(tmp_path, monkeypatch):

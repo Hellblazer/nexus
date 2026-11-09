@@ -80,19 +80,27 @@ def clock_start(meta: Any, indexed_at: str) -> str:
     return indexed_at or ""
 
 
-def lapsed(meta: Any, indexed_at: str, *, now: datetime) -> bool:
-    """Whether the note's own TTL has run out at *now*. A permanent note, or one with no readable
-    clock, never lapses."""
+def expires_at(meta: Any, indexed_at: str) -> datetime | None:
+    """The instant the note's own TTL runs out: its clock (:func:`clock_start`) plus ``ttl_days``. ``None``
+    for a permanent note, one with no readable clock, or a ``ttl_days`` that carries the clock past the
+    last representable date (it never runs out)."""
     days = note_ttl_days(meta)
     if days <= 0:
-        return False
+        return None
     start = parse_iso(clock_start(meta, indexed_at))
     if start is None:
-        return False
+        return None
     try:
-        return (now - start) >= timedelta(days=days)
-    except OverflowError:  # a ttl_days past timedelta's range (huge, or 1e300): it never runs out
-        return False
+        return start + timedelta(days=days)
+    except OverflowError:  # a ttl_days past the datetime range (huge, or 1e300): it never runs out
+        return None
+
+
+def lapsed(meta: Any, indexed_at: str, *, now: datetime) -> bool:
+    """Whether the note's own TTL has run out at *now* (from :func:`expires_at` on). A permanent note, or
+    one with no readable clock, never lapses."""
+    at = expires_at(meta, indexed_at)
+    return at is not None and now >= at
 
 
 def row_written_by(owner_tumbler: Any, row_meta: Any, *, owner_title: str) -> bool:
@@ -110,9 +118,11 @@ def row_written_by(owner_tumbler: Any, row_meta: Any, *, owner_title: str) -> bo
     title names one note in a collection. Either side empty is no match.
 
     A row with no ``catalog_doc_id`` (written before the stamp, or by a path that omits it) is nobody's:
-    ``False``, never a fall-back to "the only owner left". The expiry sweep asks this before reading a
-    row's TTL as a note's, and the recovery-bundle export before taking a keyless note's row values
-    (nexus-6pfgb.34). For ``tags`` and ``category`` alone the export also accepts a sole-owner row
+    ``False``, never a fall-back to "the only owner left". Its callers are the backfill's fill-from-row
+    path (``nx catalog backfill-meta``), the display fallback for a keyless note's row TTL, and the legacy
+    expire path, which asks it before reading a keyless note's row TTL as the note's (nexus-6pfgb.34). The
+    recovery-bundle export does not: since RDR-236 Phase 4 Step 1 (nexus-6pfgb.65) it never reads a note's
+    keys off a chunk row. For ``tags`` and ``category`` alone the backfill also accepts a sole-owner row
     :func:`row_may_give_tags` allows (nexus-6pfgb.35).
     """
     if not isinstance(row_meta, dict) or not owner_title:
@@ -224,25 +234,42 @@ def held_by_first_sign_alone(
     meta: Any, rows: Any, *, owner_tumbler: Any, owner_title: str, skew: timedelta = PUT_SKEW,
 ) -> list[dict]:
     """The rows that hold this note by the first sign of the pre-Step-1 :func:`catalog_ttl_stale` alone
-    (nexus-6pfgb.65): a row that names the note, carries an ``indexed_at``, whose TTL is not the catalog's,
-    and whose ``indexed_at`` is NOT later than ``put_at`` plus *skew*. These are a pre-``.18`` import's
-    permanent row, or a note whose owner changed its TTL with a new-client re-put: two shapes the rows
-    cannot tell apart. Since Step 1 :func:`catalog_ttl_stale` ignores them; the backfill's dry run lists
-    them so Sam can read the list. Empty for an entry with no readable ``put_at`` (nothing there changed
-    with Step 1) and for a row with no readable ``indexed_at`` (a row no client wrote TTL facts to).
+    (nexus-6pfgb.65): a row that names the note whose TTL is not the catalog's and whose ``indexed_at`` is
+    NOT later than ``put_at`` plus *skew*, or that has no readable ``indexed_at`` at all (the pre-Step-1
+    rule held it by the TTL alone; Step 1 ignores a row with no clock). A row with an ``indexed_at`` is a
+    pre-``.18`` import's permanent row, or a note whose owner changed its TTL with a new-client re-put:
+    two shapes the rows cannot tell apart. The backfill's dry run lists these notes so Sam can read the
+    list. They are the notes whose expiry Step 1 changes, so the list is empty for:
+
+    - a catalog-permanent note (``ttl_days`` absent or ``0``): it never lapses, and the guard runs only on
+      a note that has;
+    - an entry with no readable ``put_at``: nothing there changed with Step 1;
+    - a note another row still holds by the ``indexed_at`` sign: Step 1 does not release it.
+
     Pure; it decides nothing about expiry."""
     put_at = parse_iso(meta.get("put_at")) if isinstance(meta, dict) else None
     if put_at is None:
         return []
     days = note_ttl_days(meta)
+    if days <= 0:
+        return []
     rows = list(rows or ())
     if catalog_ttl_stale(meta, "", rows, owner_tumbler=owner_tumbler, owner_title=owner_title, skew=skew):
         return []   # held by the second sign too: a note the indexed_at sign still catches is not this list's
-    out: list[dict] = []
-    for row in rows:
-        if not row_names_note(owner_tumbler, row, owner_title=owner_title):
-            continue
-        stamped = parse_iso(row.get("indexed_at"))
-        if stamped is not None and note_ttl_days(row) != days:
-            out.append(row)
-    return out
+    return [
+        row for row in rows
+        if row_names_note(owner_tumbler, row, owner_title=owner_title) and note_ttl_days(row) != days
+    ]
+
+
+FIRST_SIGN_REASON = "first sign only"
+NO_INDEXED_AT_REASON = "first sign, no indexed_at"
+
+
+def first_sign_reason(held: Any) -> str:
+    """Why the rows :func:`held_by_first_sign_alone` returned held the note: ``first sign only`` when one of
+    them carries a readable ``indexed_at`` (not later than ``put_at`` plus the skew), ``first sign, no
+    indexed_at`` when none does (Step 1 ignores a row with no clock)."""
+    if any(isinstance(r, dict) and parse_iso(r.get("indexed_at")) is not None for r in held or ()):
+        return FIRST_SIGN_REASON
+    return NO_INDEXED_AT_REASON

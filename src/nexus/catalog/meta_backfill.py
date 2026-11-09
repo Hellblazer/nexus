@@ -17,8 +17,10 @@ decides, per document, which keys the catalog may take from those rows, and noth
   ``indexed_at``. ``tags``, ``category`` and ``source_agent`` come from that same row or, when there is
   none, from a piece row of a chunk the note solely owns that :func:`~nexus.catalog.note_ttl.row_may_give_tags`
   allows; a note recovered that way has no TTL of its own to give, so it gets ``put_at`` from that row and
-  ``ttl_days`` 0, and leaves the keyless count. The rules are the helpers the expiry sweep and the
-  recovery-bundle export use; they are not forked here. An entry that already holds a note key is
+  ``ttl_days`` 0, and leaves the keyless count. The rules are the helpers the expiry sweep and the display
+  fallback use; they are not forked here. The verb is operator-run (``nx catalog backfill-meta``); the
+  upgrade ladder does not run it, and the recovery-bundle export reads no chunk row, so a keyless note this
+  has not been run on exports with its keys empty. An entry that already holds a note key is
   authoritative (an absent key is an unset one): only ``put_at`` may still be filled, and only from a row
   whose TTL is the entry's. ``put_at`` counts as unset when it is absent, or when the entry carries a TTL and
   the key holds no non-empty string (``""``, null, a number): the table CHECK of nexus-6pfgb.44 reads those as
@@ -74,13 +76,15 @@ import time
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 
 from nexus.catalog.indexed_meta import SOURCE_FORMAT_KEY, backfill_tags_category, catalog_source_format, is_unset
 from nexus.catalog.note_ttl import (
-    PUT_SKEW, held_by_first_sign_alone, parse_iso, note_ttl_days, row_may_give_tags, row_written_by,
+    PUT_SKEW, expires_at, first_sign_reason, held_by_first_sign_alone, parse_iso, note_ttl_days, row_may_give_tags,
+    row_written_by,
 )
 from nexus.catalog.store_hook import NOTE_META_KEYS, split_note_tags
 from nexus.db import request_gate
@@ -447,10 +451,12 @@ class Report:
     cut_batch: int = 0              # the batch a second interrupt cut (0: none); its writes may have landed
     started_after: str = ""         # the --start-after tumbler this run skipped up to
     # nexus-6pfgb.65 (RDR-236 Phase 4 Step 1): the notes the TTL sweep's guard held by the first sign of
-    # note_ttl.catalog_ttl_stale alone until Step 1, listed by a dry run for Sam to read. Read-only.
-    ttl_first_sign_checked: bool = False    # a dry run looked; an apply run does not
+    # note_ttl.catalog_ttl_stale alone until Step 1, listed by a dry run asked to (list_first_sign) for Sam to
+    # read. Read-only.
+    ttl_first_sign_checked: bool = False    # a dry run looked, because it was asked to; no other run does
     ttl_first_sign_notes: list[dict[str, Any]] = field(default_factory=list)
     ttl_first_sign_unread: int = 0          # keyed notes whose manifest or rows could not be read: unknown, not "none"
+    list_only: bool = False                 # the run made no stamping plan: it only listed
 
     def stats(self, kind: str, key: str) -> KeyStats:
         return self.keys.setdefault(f"{kind}.{key}", KeyStats())
@@ -472,6 +478,8 @@ class Report:
                 "count": len(self.ttl_first_sign_notes), "unread": self.ttl_first_sign_unread,
                 "notes": self.ttl_first_sign_notes,
             }
+        if self.list_only:  # the counts above carry no stamping plan: say so
+            out["list_only"] = True
         if self.interrupted:  # absent from a finished run, so its JSON is what it always was
             out.update(
                 interrupted=True, batches_done=self.batches_done, batches_total=self.batches_total,
@@ -621,6 +629,7 @@ def backfill_meta(
     progress: Callable[[Progress], None] | None = None, should_stop: Callable[[], bool] | None = None,
     sleep: Callable[[float], None] | None = None, clock: Callable[[], float] = time.monotonic,
     requests: Callable[[], int] | None = None, stop_after_failed_rounds: int = 0, start_after: str = "",
+    list_first_sign: bool = False, list_only: bool = False, now: datetime | None = None,
 ) -> Report:
     """Examine every live document and stamp (``apply``) or count (dry run) what :func:`plan_note` and
     :func:`plan_indexed_rows` allow. Raises :class:`VacuousRunError` when the
@@ -639,7 +648,15 @@ def backfill_meta(
     (``ORDER BY tumbler`` in the database's collation, so not a numeric order: ``1.10`` can sort before
     ``1.2``), so the skip is by position in that listing, never by comparing tumblers. A tumbler the listing
     does not hold raises :class:`ResumePointError`. The skipped documents still count as owners of their
-    chunks."""
+    chunks.
+
+    *list_first_sign* (a dry run only) also lists the keyed notes whose expiry RDR-236 Phase 4 Step 1 changes
+    (:func:`_list_first_sign`), at *now* (default: the clock). It reads the manifests and chunk rows (text
+    included) of every note with a catalog TTL, which the plain run does not, so it runs only when asked.
+    *list_only* lists and makes no stamping plan (it implies *list_first_sign*)."""
+    if (list_first_sign or list_only) and apply:
+        raise ValueError("the first-sign listing is a dry run only: it cannot be combined with apply")
+    list_first_sign = list_first_sign or list_only
     if batch < 1:
         raise ValueError(f"batch must be at least 1, got {batch}")
     if pause_ms < 0:
@@ -655,7 +672,10 @@ def backfill_meta(
     if not live_entries:
         raise VacuousRunError("examined 0 documents: an empty catalog is a failed sweep, not a clean one")
     live = {str(e.tumbler): e for e in live_entries}    # every owner counts, the skipped ones too
-    report = Report(applied=apply, started_after=start_after, last_tumbler=start_after, resume_after=start_after)
+    report = Report(
+        applied=apply, started_after=start_after, last_tumbler=start_after, resume_after=start_after,
+        list_only=list_only,
+    )
     if start_after:
         at = next((i for i, e in enumerate(listing) if str(e.tumbler) == start_after), None)
         if at is None:
@@ -673,7 +693,10 @@ def backfill_meta(
         chunk = entries[start:start + batch]
         before = copy.deepcopy(report)
         try:
-            _run_batch(reader, t3, writer, chunk, live, apply, report, pause, pause_after_write=index < batches)
+            _run_batch(
+                reader, t3, writer, chunk, live, apply, report, pause, pause_after_write=index < batches,
+                list_first_sign=list_first_sign, list_only=list_only, now=now,
+            )
         except KeyboardInterrupt:
             report = before  # the interrupted batch counts for nothing; a rerun redoes it
             report.interrupted = True
@@ -741,26 +764,27 @@ def _fetch_rows(t3: Any, wants: dict[str, list[str]]) -> tuple[dict[str, dict[st
     return rows, errors
 
 
-FIRST_SIGN_REASON = "first sign only"
+def _list_first_sign(reader: Any, t3: Any, notes: list[Any], report: Report, now: datetime | None = None) -> None:
+    """Add to *report* the notes whose expiry RDR-236 Phase 4 Step 1 (nexus-6pfgb.65) changes: the keyed notes
+    ``note_ttl.catalog_ttl_stale`` held by its first sign alone until Step 1, the row's TTL differing from the
+    catalog's while the row's ``indexed_at`` is not later than ``put_at`` plus the skew (a pre-``.18`` import's
+    permanent row, or a note whose owner changed its TTL with a new-client re-put: two shapes the rows cannot
+    tell apart), or the row having no readable ``indexed_at`` (reason ``first sign, no indexed_at``). Step 1
+    stops holding them, so Sam reads this list first. Each says whether it has already lapsed at *now* (default:
+    the clock at the call) and when it expires: a lapsed note is what the first sweep after Step 1 ships would
+    retire. A dry run only. Read-only: it writes nothing, stamps nothing and changes no expiry decision.
 
-
-def _list_first_sign(reader: Any, t3: Any, notes: list[Any], report: Report) -> None:
-    """Add to *report* the keyed notes ``note_ttl.catalog_ttl_stale`` held by its first sign alone until
-    RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): the row's TTL differs from the catalog's while the row's
-    ``indexed_at`` is not later than ``put_at`` plus the skew (a pre-``.18`` import's permanent row, or a note
-    whose owner changed its TTL with a new-client re-put: two shapes the rows cannot tell apart). Step 1 stops
-    holding them, so Sam reads this list first. A dry run only. Read-only: it writes nothing, stamps nothing
-    and changes no expiry decision.
-
-    Only a note with a readable ``put_at`` can be on the list (the rule's threshold is ``put_at`` plus the
-    skew); such a note is complete for :func:`plan_note`, so the batch has not read its rows. They are read
-    here, by the note's manifest chashes as the sweep's guard does (one manifest read for the batch, one
-    store-get per collection). A read that fails counts the note in ``ttl_first_sign_unread`` and never
-    fails the run: its absence from the list is then unknown, not a finding."""
+    Only a note with a readable ``put_at`` and a catalog TTL can be on the list (the rule's threshold is
+    ``put_at`` plus the skew, and a catalog-permanent note never lapses); such a note is complete for
+    :func:`plan_note`, so the batch has not read its rows. They are read here, by the note's manifest chashes as
+    the sweep's guard does (one manifest read for the batch, one store-get per collection, chunk text included).
+    A read that fails counts the note in ``ttl_first_sign_unread`` and never fails the run: its absence from the
+    list is then unknown, not a finding."""
     report.ttl_first_sign_checked = True
-    keyed = [e for e in notes if parse_iso(_meta(e).get("put_at")) is not None]
+    keyed = [e for e in notes if parse_iso(_meta(e).get("put_at")) is not None and note_ttl_days(_meta(e)) > 0]
     if not keyed:
         return
+    now = now or datetime.now(UTC)
     try:
         manifests = reader.get_manifests([str(e.tumbler) for e in keyed]) or {}
     except Exception as exc:  # noqa: BLE001 — the list only informs; its loss is counted, the run goes on
@@ -789,24 +813,32 @@ def _list_first_sign(reader: Any, t3: Any, notes: list[Any], report: Report) -> 
         if not held:
             continue
         meta = _meta(e)
+        expiry = expires_at(meta, getattr(e, "indexed_at", "") or "")
         report.ttl_first_sign_notes.append({
             "tumbler": str(e.tumbler), "title": getattr(e, "title", "") or "", "collection": e.physical_collection,
             "catalog_ttl_days": meta.get("ttl_days"), "put_at": meta.get("put_at"),
             "row_ttl_days": held[0].get("ttl_days"), "row_indexed_at": held[0].get("indexed_at"),
-            "rows": len(held), "reason": FIRST_SIGN_REASON,
+            "rows": len(held),
+            "reason": first_sign_reason(held),
+            "expires_at": expiry.isoformat() if expiry is not None else None,
+            "lapsed_now": expiry is not None and now >= expiry,
         })
 
 
 def _run_batch(
     reader: Any, t3: Any, writer: Any | None, entries: list[Any], live: dict[str, Any], apply: bool, report: Report,
-    pause: Callable[[], None], *, pause_after_write: bool = True,
+    pause: Callable[[], None], *, pause_after_write: bool = True, list_first_sign: bool = False,
+    list_only: bool = False, now: datetime | None = None,
 ) -> None:
     notes = [e for e in entries if getattr(e, "content_type", "") == "knowledge"]
     docs = [e for e in entries if getattr(e, "content_type", "") != "knowledge"]
     report.documents_examined += len(entries)
     report.documents_notes += len(notes)
-    if not apply:
-        _list_first_sign(reader, t3, notes, report)
+    if list_first_sign and not apply:
+        _list_first_sign(reader, t3, notes, report, now)
+    if list_only:
+        pause()   # the batch's reads are done
+        return    # no stamping plan: no owner lookup, no document row, no payload
 
     needs_rows_docs = [e for e in docs if doc_row_keys_wanted(e)]
     needs_rows_notes = [e for e in notes if put_at_is_open(_meta(e))]
