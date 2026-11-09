@@ -56,7 +56,6 @@ ALLOWED: dict[str, str] = {
     "tests/test_dt_capture_cmd.py": "nx dt capture accepts the old --extractor names",
     "tests/scripts/test_check_dependency_drift.py": "a bump of the removed package is routine, not a finding",
     "tests/test_degraded_pages_line.py": "documents indexed before RDR-237 keep their legacy extraction_method",
-    "tests/test_metadata_extraction_method.py": "legacy extraction_method values stay storable",
     "tests/test_rdr237_resume_provenance.py": "legacy extraction_method values are not recomputed on resume",
     "tests/integration/test_rdr237_catalog_hook_record.py": "legacy extraction_method values stay readable in the catalog",
 }

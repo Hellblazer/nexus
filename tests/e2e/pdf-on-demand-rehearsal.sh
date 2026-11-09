@@ -290,7 +290,8 @@ leg_b() {
     after_version="$(_nx --version)"
     [ "$before_version" = "$after_version" ] || fail "the conexus version moved: $before_version -> $after_version"
     grep -qi "switching to MinerU" "$LOGS/b-index.log" || fail "the formula PDF did not take the MinerU route"
-    grep -q "pymupdf_normalized" "$LOGS/b-index.log" && fail "a quiet fallback to pymupdf_normalized"
+    # (The former check for "pymupdf_normalized" is gone: nothing has written that value since RDR-237, so it
+    # could never fire; the MinerU-route assertion above is the live check against a quiet fallback.)
     # Installed versions == uv.lock: the lock check the 2k66t.4.1 leg uses.
     # lock_check.py takes the constraints file the generation's own wheel shipped, and (this
     # generation carries the stack) the pdf extra's witness as well as the default ones.
