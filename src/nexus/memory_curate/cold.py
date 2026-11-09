@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``nx memory curate --cold`` (RDR-238 Technical Design 4 and 5, nexus-qo7ie.19).
 
-Lists each store of five kinds with no write and no use in the window. Report only: retiring
+Lists each store of six kinds with no write and no use in the window. Report only: retiring
 a cold store is a person's decision, and nothing here deletes, quarantines or rewrites anything.
 Each row gives the store, its last write (where the store has writes), its last use, its size
-and its owner (where known). Tuple subspaces wait for RDR-239's dictionary view (RDR-238 Phase 3
-Step 3b).
+and its owner (where known). The sixth kind, tuple subspaces (RDR-238 Phase 3 Step 3b, nexus-qo7ie.20),
+reads RDR-239's dictionary view from the engine, not the transcripts: see :func:`tuple_lines`.
 
 Use, per kind (Sam's K6 decision, nexus-qo7ie.5; the report header prints these):
 
@@ -54,7 +54,7 @@ import re
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
@@ -62,6 +62,8 @@ from nexus import memory_curate as mc
 from nexus._hook_runtime.memory_scan import INDEX_FILES, scan
 
 LABELS = ("memory files", "T2 namespaces", "MCP tools", "CLI verbs", "injected context")
+TUPLES = "tuple subspaces"
+_UNVERIFIED = "Unverified: "  # RDR-239 Technical Design 4: the mark on a writers or readers string nothing in the repository backs
 _NEVER = "none in the window"
 _MCP_NAME = re.compile(r"^mcp__(?P<server>.+?)__(?P<tool>.+)$", re.DOTALL)
 _SERVER_CORE = re.compile(r"(^|_)nexus$")
@@ -74,12 +76,13 @@ def _rules() -> list[str]:
         "cold = no write and no use in the window; report only, nothing is retired or changed",
         "use (K6): memory file = a Read-tool open or a subagent load (a write is a Write or Edit, or an mtime in the "
         "window); T2 namespace = a memory_get of one of its titles or a memory_search naming it; MCP tool = a call; "
-        "CLI verb = `nx <verb> [<sub>]` in a Bash command; nested CLAUDE.md or AGENTS.md = a nested_memory load",
+        "CLI verb = `nx <verb> [<sub>]` in a Bash command; nested CLAUDE.md or AGENTS.md = a nested_memory load; "
+        "tuple subspace = a post (the census's newest_created_at, consumed and expired rows included; it records no read time)",
         f"excluded (K6), no 'never used' claim: {' and '.join(INDEX_FILES)} as a whole (an index line counts as used "
         "when its linked file is read), the root CLAUDE.md and AGENTS.md and every file an `instructions` attachment "
         "loads, and tool definitions as injected text",
         "scope: uses are counted in this repository's sessions only (the main checkout and its worktrees), so a store "
-        "used only elsewhere reads as cold; tuple subspaces are not covered (they wait for RDR-239's dictionary view)",
+        "used only elsewhere reads as cold (tuple subspaces are read from the engine and are not scoped by repository)",
         f"read scope: {mc.READ_SCOPE_NOTE}",
     ]
 
@@ -633,6 +636,108 @@ def _injected(q: _Queries, root: Path) -> list[str]:
     return out
 
 
+# ── tuple subspaces ──────────────────────────────────────────────────────────────────
+
+
+def _default_tuple_store() -> Any:
+    from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: only --cold pays for it
+
+    return HttpTupleStore()
+
+
+def has_no_verified_writer(doc: Any) -> bool:
+    """A template doc names no writer that something in the repository backs: ``writers`` is absent or empty, or
+    every entry starts with ``Unverified: `` (RDR-239 TD4 marks ``board/<topic>`` and ``queue/<name>`` so, which
+    is why the list is read and not only its length)."""
+    writers = doc.get("writers") if isinstance(doc, dict) else None
+    items = [writers] if isinstance(writers, str) else list(writers or [])
+    return not any(isinstance(w, str) and w.strip() and not w.startswith(_UNVERIFIED) for w in items)
+
+
+def _writers_text(doc: dict[str, Any]) -> str:
+    writers = doc.get("writers")
+    items = [writers] if isinstance(writers, str) else [w if isinstance(w, str) else json.dumps(w) for w in writers or []]
+    return " / ".join(items) if items else "none declared"
+
+
+def tuple_lines(days: int, now: datetime, open_tuples: Callable[[], Any]) -> list[str]:
+    """The tuple-subspace block: subspaces with no post in *days*, and templates nothing writes to.
+
+    Read through the engine's own dictionary view, never by running the CLI: ``registry(doc=True)`` gives each
+    template's ``doc`` (with ``writers``) and ``subspace_list`` a census row per concrete subspace, each naming its
+    owning template (the engine's ``template`` field, or the shared client resolver for an engine that predates it).
+    A subspace is cold when its newest post (``newest_created_at``: every row, consumed and expired ones too, so a
+    take-enabled subspace that reads zero live rows is not cold while it is posted to) is before ``now - days``.
+    A template is listed by name when it has no verified writer (:func:`has_no_verified_writer`) and no census row
+    resolves to it: a subspace whose rows are all consumed or expired is still a subspace. An engine whose registry
+    serves no ``doc`` for any template cannot tell either, so the block says so, lists the cold subspaces with the
+    owner unknown, and judges no template. *open_tuples* returns a store (``registry``, ``subspace_list``, ``close``).
+    """
+    from nexus.tuple_templates import resolve_tuple_template  # noqa: PLC0415 — deferred with the engine client
+
+    store = open_tuples()
+    try:
+        templates: list[dict[str, Any]] = store.registry(doc=True).get("templates", [])
+        census = list(store.subspace_list(None))
+    finally:
+        store.close()
+    by_name = {t.get("name"): t for t in templates}
+    documented = any(t.get("doc") for t in templates)
+    since = now - timedelta(days=days)
+
+    def owner_of(row: Any) -> str | None:
+        if row.template_known:
+            return row.template
+        resolved = resolve_tuple_template(templates, row.subspace)
+        return None if resolved is None else resolved.get("name")
+
+    cold: list[tuple[datetime, ColdRow]] = []
+    unjudged = 0
+    owned: set[str | None] = set()
+    for row in census:
+        name = owner_of(row)
+        owned.add(name)
+        posted = _when(row.newest_created_at)
+        if posted is None:
+            unjudged += 1
+            continue
+        if posted >= since:
+            continue
+        if not documented:
+            owner = "unknown (the engine predates the dictionary)"
+        elif name not in by_name:
+            owner = "none (no registered template resolves)"
+        elif not by_name[name].get("doc"):
+            owner = f"{name}, which has no doc block"
+        else:
+            owner = _writers_text(by_name[name]["doc"])
+        size = f"{row.available} available, {row.claimed} claimed, {row.consumed} consumed, {row.dead} dead"
+        cold.append((posted, ColdRow(row.subspace, _show(row.newest_created_at, "n/a"), "n/a", size, owner)))
+    cold.sort(key=lambda pr: (pr[0], pr[1].store))
+    rows = [r for _, r in cold]
+    if not documented:
+        out = [f"{TUPLES}: not available: the engine predates the dictionary (its registry serves no doc block), so "
+               "owners cannot be read and no template is judged; the cold subspaces below are from the census alone",
+               *(r.line() for r in rows)]
+    else:
+        out = _listing(TUPLES, rows, len(census), f" subspaces in the census (no post in {days} days)")
+        writerless = [t for t in templates if t.get("doc") and t.get("name") not in owned
+                      and has_no_verified_writer(t["doc"])]
+        out.append(f"  writerless templates (no verified writer) with no subspace in the census: {len(writerless)}")
+        out += [f"  {ColdRow(str(t['name']), 'n/a', 'n/a', 'no subspace', _writers_text(t['doc'])).line()}"
+                for t in sorted(writerless, key=lambda t: str(t["name"]))]
+        blind = sum(1 for t in templates if not t.get("doc"))
+        if blind:
+            out.append(f"  ({blind} template{' has' if blind == 1 else 's have'} no doc block: not judged)")
+    if unjudged:
+        out.append(f"  ({unjudged} subspace{'' if unjudged == 1 else 's'} in the census with no readable post time: not judged)")
+    out.append("  limits: last write is the census's newest post over every row, consumed and expired included, so a "
+               "take-enabled subspace that reads zero live rows is cold only when it is not posted to; the census "
+               "records no read time, so last use is n/a; a subspace whose rows were all purged is no longer in the "
+               "census; the owner is read from the template's doc, which nothing keeps true")
+    return out
+
+
 # ── the section ──────────────────────────────────────────────────────────────────────
 
 
@@ -647,6 +752,7 @@ def cold_lines(
     days: int, now: datetime, cwd: Path, repo: str, directory: Path | None, root: Path,
     open_db: Callable[[], AbstractContextManager[Any]], hooks_dir: Path | None = None,
     src_hooks_dir: Path | None = None, commands_dir: Path | None = None,
+    open_tuples: Callable[[], Any] | None = None,
 ) -> list[str]:
     """The ``--cold`` body: the rules, the window, then one block per kind (see the module docstring).
 
@@ -654,12 +760,15 @@ def cold_lines(
     *hooks_dir* is the plugin's hook directory (default ``<root>/conexus/hooks``), *src_hooks_dir* the harness hooks'
     Python (default ``<root>/src/nexus/hooks``) and *commands_dir* the plugin's slash commands (default
     ``<root>/conexus/commands``): the tools and verbs they run are printed as invoked by a hook or run by a slash
-    command, not as cold (:func:`hook_invoked`).
+    command, not as cold (:func:`hook_invoked`). *open_tuples* returns the tuple-space client the tuple row reads
+    (default: :class:`~nexus.db.t2.http_tuple_store.HttpTupleStore` on the configured service); that row reads the
+    engine, not the transcripts, so it runs whether or not the transcript kinds do.
     """
+    tuples = _guarded(TUPLES, lambda: tuple_lines(days, now, open_tuples or _default_tuple_store))
     opened = open_window(days, now, cwd)
     if isinstance(opened, mc.ReadsUnavailable):
         return [f"window: {opened.window.describe()}", *_rules(),
-                *(ln for label in LABELS for ln in _unavailable(label, opened.reason))]
+                *(ln for label in LABELS for ln in _unavailable(label, opened.reason)), *tuples]
     window, sessions = opened
     q = _Queries(window, sessions)
     hooks = hook_invoked(
@@ -672,6 +781,7 @@ def cold_lines(
         _guarded("MCP tools", lambda: _tools(q, hooks)),
         _guarded("CLI verbs", lambda: _verbs(q, hooks)),
         _guarded("injected context", lambda: _injected(q, root)),
+        tuples,
     ]
     cuts = [f"{query} query: {n} records were cut, so these counts are floors and stores used in a cut record may "
             "be listed although they were used" for query, n in sorted(q.cut.items())]
