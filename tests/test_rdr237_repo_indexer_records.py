@@ -26,10 +26,14 @@ DEGRADED = {"mineru-no-formula": [3], "pymupdf-text": [12]}
 class _Writer:
     """Records ``update`` calls; ``fail`` makes them raise."""
 
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail: bool = False, current_author: str = "") -> None:
         self.updates: list[tuple[str, dict]] = []
         self.closed = False
         self._fail = fail
+        self._author = current_author
+
+    def resolve(self, tumbler, **_kw):
+        return type("Doc", (), {"author": self._author})()
 
     def update(self, tumbler, **fields) -> None:
         if self._fail:
@@ -40,7 +44,7 @@ class _Writer:
         self.closed = True
 
 
-def _chunks_filling(method: str, pages: dict):
+def _chunks_filling(method: str, pages: dict, author: str = ""):
     """A ``_pdf_chunks`` that fills ``extraction_stats`` the way the real one does."""
 
     def fake(file, content_hash, model, now_iso, corpus, *, extraction_stats=None, **kw):
@@ -48,7 +52,7 @@ def _chunks_filling(method: str, pages: dict):
             extraction_stats.update({
                 "extraction_method": method, "extraction_pages": pages, "page_count": 12,
                 "quality_gate_overridden": False, "extraction_source": "file",
-                "title": "T", "author": "",
+                "title": "T", "author": author,
             })
         return [("id1", "Page 1", {"chunk_text_hash": "id1", "embedding_model": model},
                  {"page_number": 1})]
@@ -56,7 +60,7 @@ def _chunks_filling(method: str, pages: dict):
     return fake
 
 
-def _index(tmp_path: Path, method: str, pages: dict, *, doc_id: str = "1.1.7", writer=None):
+def _index(tmp_path: Path, method: str, pages: dict, *, doc_id: str = "1.1.7", writer=None, author: str = ""):
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     pdf = repo / "paper.pdf"
@@ -67,7 +71,7 @@ def _index(tmp_path: Path, method: str, pages: dict, *, doc_id: str = "1.1.7", w
     db.get_or_create_collection.return_value = col
     db.get_collection.return_value = col
     writer = writer if writer is not None else _Writer()
-    with patch("nexus.doc_indexer._pdf_chunks", side_effect=_chunks_filling(method, pages)), \
+    with patch("nexus.doc_indexer._pdf_chunks", side_effect=_chunks_filling(method, pages, author)), \
             patch("nexus.doc_indexer._fence_begin"), \
             patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
@@ -96,6 +100,21 @@ def test_a_clean_re_extract_through_the_repo_indexer_writes_an_empty_map(tmp_pat
     assert writer.updates == [("1.1.7", {"meta": {
         "extraction_method": "mineru", "extraction_pages": {},
         "quality_gate_overridden": False, "extraction_source": "file"}})]
+
+
+def test_the_extractions_author_reaches_the_catalog_document_where_it_has_none(tmp_path) -> None:
+    """No chunk row carries the author since RDR-236 Phase 4 Step 1, so the repo indexer sends the extraction's
+    author to the document (fill-only, as the streaming and single-request routes do through the hook)."""
+    _count, writer, _pdf = _index(tmp_path, "mineru", {}, author="A. Author")
+    ((tumbler, fields),) = writer.updates
+    assert tumbler == "1.1.7" and fields["author"] == "A. Author", fields
+    assert "meta" in fields, "the extraction record still lands in the same write"
+
+
+def test_a_curated_author_is_not_replaced_by_the_extractions(tmp_path) -> None:
+    _count, writer, _pdf = _index(tmp_path, "mineru", {}, writer=_Writer(current_author="Curated"), author="A. Author")
+    ((_t, fields),) = writer.updates
+    assert "author" not in fields, fields
 
 
 def test_a_file_with_no_catalog_document_logs_that_nothing_was_recorded(tmp_path) -> None:

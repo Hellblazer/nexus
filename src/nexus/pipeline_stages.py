@@ -10,11 +10,9 @@ Three concurrent stages connected by the engine-backed pipeline buffer
 2. **chunker_loop** — polls pages, chunks stable prefix, embeds → ``pdf_chunks``
 3. **uploader_loop** — reads embedded chunks, writes them to T3 with their owner rows (RDR-223)
 
-After all three stages complete, the orchestrator runs post-passes to:
-- Enrich chunk metadata from the ExtractionResult (title, author, etc.)
-- Tag table-page chunks (table_regions post-pass)
-- Correct chunk_count to the final total
-- Prune stale chunks from a previous version
+After all three stages complete, the orchestrator registers the document in the catalog (its title,
+author and extraction record come from the ExtractionResult; a chunk row carries only its CHUNK keys,
+RDR-236 Phase 4 Step 1), runs the document-grain hooks and stamps the run complete.
 """
 from __future__ import annotations
 
@@ -32,7 +30,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from nexus.catalog.types import ManifestRow
     from nexus.hook_registry import HookRegistry
 
 import httpx
@@ -50,7 +47,6 @@ from nexus.pdf_extractor import (
     stop_mineru_workers,
 )
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
-from nexus.retry import _vector_with_retry
 from nexus.util.termination import TerminationRequested, interrupts_deferred, sigterm_raises
 
 _log = structlog.get_logger(__name__)
@@ -737,9 +733,9 @@ class UploadRun:
     """The multi-batch writer one streaming run uploads through, and what the run needs of it later.
 
     The uploader creates the writer when its first batch arrives and the orchestrator stamps it
-    complete after the post-passes (``defer_completion``): the passes enrich chunk metadata after
-    the last chunk has landed, and a process killed between the stamp and the passes would leave a
-    document that looks complete and is missing its title and author. A run made by a direct
+    complete after the catalog hook (``defer_completion``): the hook writes the document's title,
+    author and extraction record after the last chunk has landed, and a process killed between the
+    stamp and the hook would leave a document that looks complete and is missing them. A run made by a direct
     caller of :func:`uploader_loop` (no *run* given) stamps in ``finish()``.
     """
 
@@ -767,8 +763,8 @@ class UploadRun:
         # nexus-ypgbz: the document's registration carries the file hash (this run's *content_hash* is the
         # PDF's sha256) before the writer begins, so before the completion stamp. See the helper.
         stamp_registered_content_hash(self._raw_cat, doc_id, content_hash)
-        # The streaming stub's metadata is deliberately partial (the post-pass fills title, author
-        # and extraction method), so the write MERGES it into what is stored and names no keys to
+        # The streaming stub's metadata is deliberately partial (the catalog hook fills the document's
+        # title, author and extraction record), so the write MERGES it into what is stored and names no keys to
         # delete: replacing would strip the ``bib_*`` enrichment a forced re-index must keep.
         self.cat = MetadataMergingCatalog(self._raw_cat, collection, [], on_request=self._on_request)
         self.writer = MultiBatchDocumentWriter(
@@ -837,7 +833,7 @@ def uploader_loop(
     run cannot write and raises ``CatalogIdentityMissingError``.
 
     *run* (the orchestrator passes one) holds the writer so the orchestrator can stamp the run
-    complete after the post-passes; a direct caller passes none and the writer stamps itself.
+    complete after the catalog hook; a direct caller passes none and the writer stamps itself.
 
     Pass *dry_run=True* (nexus-uxg4u round 2) for a preview: the chunks go straight into *t3*,
     the caller's throwaway store, with no owner row and no catalog write, and the hook fan-out
@@ -1147,7 +1143,7 @@ def _catalog_extraction_meta(extraction: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def record_pdf_extraction_on_document(
-    doc_id: str, pdf_path: Path, collection_name: str, extraction: Mapping[str, Any],
+    doc_id: str, pdf_path: Path, collection_name: str, extraction: Mapping[str, Any], *, author: str = "",
 ) -> None:
     """Record an extraction on an already-registered catalog document (``nx index repo``, RDR-237).
 
@@ -1157,6 +1153,10 @@ def record_pdf_extraction_on_document(
     whole, ``{}`` included, so a clean re-extract clears an old map). It never raises: an empty
     *doc_id* or a failed write logs ``catalog_pdf_extraction_not_recorded`` (``reason``
     ``repo_indexer_no_document`` or ``repo_indexer_update_failed``) naming the file.
+
+    *author* is the extraction's author (no chunk row carries one since RDR-236 Phase 4 Step 1): it fills the
+    document's ``author`` column only where that is empty, as :func:`_catalog_pdf_hook` does, so a curated
+    author is never replaced; a document whose current author cannot be read is left as it is.
     """
     meta = _catalog_extraction_meta(extraction)
 
@@ -1179,7 +1179,15 @@ def record_pdf_extraction_on_document(
         if writer is None:
             _not_recorded("no_catalog_writer")
             return
-        writer.update(doc_id, meta=meta)
+        fields: dict[str, Any] = {"meta": meta}
+        if author:
+            try:
+                current = getattr(writer.resolve(doc_id), "author", None)
+            except Exception:  # noqa: BLE001 - unreadable: leave the author as it is
+                current = None
+            if current is not None and not str(current).strip():
+                fields["author"] = author
+        writer.update(doc_id, **fields)
     except Exception as exc:  # noqa: BLE001 - best-effort: the PDF is indexed either way; named, not raised
         _not_recorded("repo_indexer_update_failed", error=str(exc))
     finally:
@@ -1594,7 +1602,30 @@ def _catalog_pdf_hook(
             reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe
 
 
-def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int:
+#: Chunk hashes per ``chunk_text_hash $in`` lookup in the orphan cleanup.
+_ORPHAN_SELECT_BATCH = 200
+
+
+def _manifest_chashes_of(doc_id: str) -> list[str]:
+    """The distinct chunk hashes of *doc_id*'s catalog manifest, in order; ``[]`` when it has none.
+
+    A catalog read failure propagates: the caller is the ``--force`` deadlock-break, which is fail-loud."""
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    reader = make_catalog_reader()
+    if reader is None:
+        return []
+    try:
+        seen: dict[str, None] = {}
+        for row in reader.get_manifest(doc_id):
+            if getattr(row, "chash", ""):
+                seen[row.chash] = None
+        return list(seen)
+    finally:
+        reader.close()
+
+
+def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str, doc_id: str = "") -> int:
     """Delete orphan T3 chunks for *content_hash* in *collection* — the
     second half of the nexus-9ji ``--force`` deadlock-break.
 
@@ -1639,10 +1670,25 @@ def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int
     # cleanup exists to find is, by definition, one with no live
     # own-collection manifest owner -- live(c) would hide exactly the
     # population being cleaned up.
-    orphan_meta = col.get_all_metadata(
-        where={"content_hash": content_hash}, include_non_live=True,
-    )
-    orphan_ids = orphan_meta.get("ids", []) or []
+    #
+    # RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): a chunk row written since carries no ``content_hash``, so
+    # that lookup cannot see it. The selector is the document's catalog manifest (its chashes, the
+    # rows' ``chunk_text_hash``) where there is one; the ``content_hash`` lookup stays only as the
+    # fallback for a document with no manifest rows, whose chunks are the legacy rows that carry it.
+    manifest_chashes = _manifest_chashes_of(doc_id) if doc_id else []
+    orphan_ids: list = []
+    if manifest_chashes:
+        for i in range(0, len(manifest_chashes), _ORPHAN_SELECT_BATCH):
+            batch = manifest_chashes[i:i + _ORPHAN_SELECT_BATCH]
+            found = col.get_all_metadata(
+                where={"chunk_text_hash": {"$in": batch}}, include_non_live=True,
+            )
+            orphan_ids += found.get("ids", []) or []
+    else:
+        orphan_meta = col.get_all_metadata(
+            where={"content_hash": content_hash}, include_non_live=True,
+        )
+        orphan_ids = orphan_meta.get("ids", []) or []
     if not orphan_ids:
         _log.info(
             "force_t3_orphan_cleanup_none_found",
@@ -1807,8 +1853,8 @@ def _reconcile_resumed_run(db: HttpPipelineDB, doc_id: str, content_hash: str) -
       those two signals is reset, not stamped;
     * the embedded rows, the flagged rows and ``chunks_created`` all agree;
     * the document's index-run fence is still ``indexing`` for THIS content hash, which is what a
-      run leaves that sent its last request and never stamped (a failed post-pass, a kill before
-      the stamp). If the document was indexed at other bytes since, the fence carries their hash
+      run leaves that sent its last request and never stamped (a failure in the catalog hook, a kill
+      before the stamp). If the document was indexed at other bytes since, the fence carries their hash
       and the manifest is not this buffer's.
 
     What the tail's stamp proves, and what it does not (M-3): the proof is the file-content hash
@@ -2048,15 +2094,12 @@ def pipeline_index_pdf(
     *title_override* (nexus-1uov1), when non-empty, wins over
     :func:`~nexus.indexer_utils.resolve_pdf_title`'s guess everywhere
     this pipeline resolves a title — the catalog-registration hook below
-    and the metadata-enrichment post-pass that stamps every chunk's own
-    ``title``. See :func:`nexus.doc_indexer._pdf_chunks`'s docstring for
+    and the run summary's ``title``. See :func:`nexus.doc_indexer._pdf_chunks`'s docstring for
     the motivating case (``nx dt index``).
 
-    After the three stages complete, runs post-passes to:
-    - Enrich chunk metadata from the ExtractionResult
-    - Tag table-page chunks
-    - Correct chunk_count to the final total
-    - Prune stale chunks from a previous version
+    After the three stages complete, registers the document in the catalog with the
+    ExtractionResult's title, author and extraction record (a chunk row carries only its CHUNK
+    keys), runs the document-grain hooks and stamps the run complete.
 
     *allow_degraded_extraction* (nexus-wi1uv): forwarded to
     ``extractor_loop``/``PDFExtractor.extract``. Default ``False`` — a
@@ -2209,7 +2252,7 @@ def pipeline_index_pdf(
         # or a sibling document sharing the bytes loses its run (the
         # cross-row WAL destruction of the parked key-widen attempt).
         db.delete_pipeline_data(content_hash, collection=collection, pdf_path=str(pdf_path))
-        _force_t3_orphan_cleanup(t3, collection, content_hash)
+        _force_t3_orphan_cleanup(t3, collection, content_hash, doc_id)
 
     # Pre-flight: check if pipeline should run before resolving credentials.
     # nexus-euczk: the create makes the row 'running' server-side, and only its answer gives the
@@ -2296,7 +2339,7 @@ def pipeline_index_pdf(
 
     # RDR-223: the index-run fence begins inside the writer, as its first request, so no chunk
     # lands before it (the old explicit begin sat here). The writer stays open until the tail
-    # stamps it complete, after the post-passes.
+    # stamps it complete, after the catalog hook.
     run = _interrupt_after_create(db, content_hash, lambda: UploadRun(on_request=on_write_started))
     try:
         cancel = threading.Event()
@@ -2485,25 +2528,21 @@ def pipeline_index_pdf(
             extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
             extraction_stats.update(extraction_record(_em))
 
-        # Resolve collection once for all post-passes (avoids repeated API calls).
-        col = t3.get_or_create_collection(collection)
-
         # From here until the stamp has landed, the buffer is what a retry needs: the uploader has
         # marked the row 'completed', and a 'completed' leftover is WIPED by the next create (so a
-        # kill in the post-passes or before the stamp would cost a full re-extraction). Hand the
+        # kill before the stamp would cost a full re-extraction). Hand the
         # row back as 'failed' now, so the next run resumes it and _reconcile_resumed_run sends
         # only the stamp. The buffer is deleted after the stamp, never before.
         _rearm_failed(db, content_hash, "upload finished — kept until the completion stamp lands")
 
-        # Track post-pass success — pipeline data preserved on failure (nexus-pfmr).
-        #
         # RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): the two chunk-row post-passes that stood here are
         # gone. The extraction enrichment wrote the document's title, author, extraction method and
         # quality-gate flag onto each chunk row, and the table-page pass wrote ``chunk_type``; a chunk
         # row carries only its CHUNK keys now, and the same title, author, method and flag are the
-        # catalog document's, written by ``_catalog_pdf_hook`` below. ``post_pass_ok`` stays as the
-        # shape the failure-preserving branches read; nothing sets it False today.
-        post_pass_ok = True
+        # catalog document's, written by ``_catalog_pdf_hook`` below. With them went the flag that
+        # said a post-pass failed and kept the buffer for a retry: what a failure before the stamp
+        # leaves for the retry is the row handed back as 'failed' above (nexus-6m9zy.5), and the
+        # buffer is deleted only after the stamp.
 
         # 3. Stale chunk pruning: DELETED dead code (nexus-tbkk1). This used
         # to query T3 via nexus.doc_indexer._identity_where's source_path
@@ -2516,30 +2555,12 @@ def pipeline_index_pdf(
         # wiring.
         #
         # SIGNAL NARROWING (both reviewers, nexus-tbkk1 fix round): the
-        # deleted step's own try/except used to set post_pass_ok=False (and
-        # so preserve this run's checkpoint for retry, see below) on a T3
-        # QUERY failure during the prune window — that specific signal is
-        # gone. Narrow: passes 1/2 above already probe the same T3
-        # collection, so a genuinely degraded service is still very likely
-        # caught there; only a failure window unique to the (now-removed)
-        # prune's own query timing is silently lost.
+        # deleted step's own try/except used to fail the run's post-pass flag
+        # (and so preserve this run's checkpoint for retry) on a T3 QUERY
+        # failure during the prune window; that specific signal is gone.
 
         state = db.get_pipeline_state(content_hash)
         total_chunks = state["chunks_uploaded"] if state else 0
-
-        if not post_pass_ok:
-            # nexus-6m9zy.5 (#10): uploader_loop already called db.mark_completed() -- BEFORE any
-            # post-pass ran -- the moment chunks_uploaded caught up to chunks_created. A
-            # 'completed' leftover is wiped by the next create_pipeline() (nexus-edjmu), which
-            # would discard the very checkpoint this branch preserves. The row was handed back as
-            # 'failed' above (never clear_orphan_wal: that would delete the chunk/page data too),
-            # so the next create sees 'failed' -> 'resuming', every stage short-circuits (all of it
-            # is uploaded) and the post-passes run again for a genuine retry.
-            _log.warning(
-                "pipeline_data_preserved",
-                content_hash=content_hash,
-                reason="one or more post-passes failed — data kept for retry",
-            )
 
         # Catalog hook: register PDF in catalog (opt-in, graceful absence)
         # 2026-08-19: this used to read ``metadata["title"]`` / ``["author"]`` —
@@ -2622,19 +2643,18 @@ def pipeline_index_pdf(
                 # silently-failed extraction. No content-free exception exists
                 # for PDFs.
                 _fence_fail(doc_id, "zero chunks extracted")
-            elif post_pass_ok:
+            else:
                 from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 - deferred: keeps the module import light
 
                 try:
                     if run.writer is not None and run.finished:
                         # The writer sent every request and left the run 'indexing'
-                        # (defer_completion): the post-passes above have run, so the document is
-                        # whole. A refusal propagates, as the explicit stamp's did; the writer
-                        # recorded it.
+                        # (defer_completion): the document is whole. A refusal propagates, as the
+                        # explicit stamp's did; the writer recorded it.
                         run.writer.complete()
                     elif resumed_tail:
-                        # Every chunk was written by an earlier process (a retry of a run whose
-                        # post-pass failed, or that died before its stamp: nothing was left to
+                        # Every chunk was written by an earlier process (a retry of a run that
+                        # died before its stamp: nothing was left to
                         # upload, so no writer ran) and the document's fence proved the manifest
                         # is that run's (_reconcile_resumed_run). Stamp it, fail-closed: an
                         # unstamped answer or a transport failure raises and the fence stays
@@ -2655,18 +2675,10 @@ def pipeline_index_pdf(
                     raise
                 # Any other stamp failure leaves the row 'failed' and the buffer in place (above),
                 # so the next run resumes it as a tail.
-            else:
-                _log.warning(
-                    "index_run_complete_skipped_post_pass_failed",
-                    doc_id=doc_id,
-                    content_hash=content_hash,
-                    reason="post-pass failed — fence stays 'indexing' for retry",
-                )
 
         # The buffer goes LAST, after the stamp (or where none is needed): a stamp that failed, or
         # a kill before it, must find the buffer so the next run sends only the stamp.
-        if post_pass_ok:
-            db.delete_pipeline_data(content_hash)
+        db.delete_pipeline_data(content_hash)
 
         return total_chunks
     finally:

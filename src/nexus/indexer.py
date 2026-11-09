@@ -3681,6 +3681,7 @@ def _index_pdf_file(
     from nexus.pipeline_stages import extraction_record, record_pdf_extraction_on_document  # noqa: PLC0415 — deferred: pipeline_stages imports the indexers
     record_pdf_extraction_on_document(
         catalog_doc_id, file, collection_name, extraction_record(_extraction_stats),
+        author=str(_extraction_stats.get("author", "")),
     )
 
     # The chunk rows are the CHUNK keys only (RDR-236 Phase 4 Step 1): the document's title, tags,
@@ -5071,6 +5072,32 @@ def _drain_batcher_with_markers(
             f"{time.monotonic() - t0:.1f}s{_fail_suffix}"
         )
     return flushed
+
+
+def _flush_begin_pairs(file_contexts: list) -> "list[tuple[str, str]]":
+    """The ``(catalog_doc_id, content_hash)`` pairs a flush stamps ``indexing`` before its upload.
+
+    A file with chunks, a catalog identity and a staged file hash. The hash is the CONTEXT's: a chunk
+    row carries the CHUNK keys only since RDR-236 Phase 4 Step 1 (nexus-6pfgb.65), so there is none to read.
+    """
+    pairs: list[tuple[str, str]] = []
+    for _path, _c in file_contexts:
+        if not isinstance(_c, dict):
+            continue
+        _cdid = _c.get("catalog_doc_id")
+        if not _cdid:
+            continue
+        _chash = _c.get("content_hash", "") if _c.get("metadatas") else ""
+        if _chash:
+            pairs.append((_cdid, _chash))
+    return pairs
+
+
+def _flush_manifest_complete(file_contexts: list) -> "dict[str, str]":
+    """The ``{catalog_doc_id: content_hash}`` completion claims a flush rides to the engine
+    (ChunkBatcher is file-atomic, so each file in the flush is whole). Same rule, same source of the
+    hash, as :func:`_flush_begin_pairs`."""
+    return dict(_flush_begin_pairs(file_contexts))
 
 
 def _aggregate_flush_metas(file_contexts: list) -> list[dict]:
@@ -6895,16 +6922,7 @@ def _run_index(
             # extraction _fire_flush_grain_hooks below already does for the
             # completion ride. ONE begin-many round trip per FLUSH (not per
             # file) — the exact cost the :3631-era comment objected to.
-            pairs: list[tuple[str, str]] = []
-            for _path, _c in _file_contexts:
-                if not isinstance(_c, dict):
-                    continue
-                _cdid = _c.get("catalog_doc_id")
-                if not _cdid:
-                    continue
-                _chash = _c.get("content_hash", "") if _c.get("metadatas") else ""
-                if _chash:
-                    pairs.append((_cdid, _chash))
+            pairs = _flush_begin_pairs(_file_contexts)
             if not pairs:
                 return
             from nexus.doc_indexer import _fence_begin_many  # noqa: PLC0415 — deferred import; test patch target
@@ -6963,16 +6981,7 @@ def _run_index(
             # ChunkBatcher's on_batch_begin, before the upload even started
             # (nexus-vw594 F1). This closure only carries the ride-along
             # complete map.
-            _manifest_complete: dict[str, str] = {}
-            for _path, _c in _file_contexts:
-                if not isinstance(_c, dict):
-                    continue
-                _cdid = _c["catalog_doc_id"]
-                if not _cdid:
-                    continue
-                _chash = _c.get("content_hash", "") if _c["metadatas"] else ""
-                if _chash:
-                    _manifest_complete[_cdid] = _chash
+            _manifest_complete = _flush_manifest_complete(_file_contexts)
             _t0 = time.monotonic()
             # nexus-lde88 G4: hook_timings= gets the registry's own per-hook
             # (taxonomy_assign_batch_hook / manifest_write_batch_hook) split

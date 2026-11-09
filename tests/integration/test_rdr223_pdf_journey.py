@@ -20,7 +20,7 @@ The journeys (RDR-223 Test Plan 8 for each path, and the bead tests):
   makes no ``upsert-chunks`` call;
 * re-indexing an unchanged PDF re-embeds nothing and sweeps nothing;
 * a forced re-index keeps the ``bib_*`` enrichment;
-* the streaming run stamps the document complete only after its metadata post-pass;
+* the streaming run stamps the document complete only after the catalog write of its title, author and extraction record;
 * a streaming upload killed hard (no failure handler runs, the buffer keeps its flags) is finished
   by ONE rerun that re-sends the whole document from chunk 0 WITHOUT extracting the PDF again or
   embedding anything twice (the engine resets the buffer's upload flags, RDR-223 D1);
@@ -28,7 +28,7 @@ The journeys (RDR-223 Test Plan 8 for each path, and the bead tests):
   and a request REFUSED before it wrote anything (a 422, a connect error) rolls the fresh
   registration back: no failed document with zero chunks;
 * a refused completion stamp keeps the document and leaves the fence ``indexing``;
-* a streaming run whose post-pass failed, or whose stamp failed, is finished by a rerun that sends
+* a streaming run whose stamp failed is finished by a rerun that sends
   only the stamp (no data request, no fence begin, no second extraction), after which the buffer goes;
 * every non-streaming path stamps complete LAST: a kill in a post-store hook leaves the document
   ``indexing`` and the rerun fires the hooks again (RDR-223 D2);
@@ -597,9 +597,9 @@ def test_a_small_streaming_pdf_is_one_write_many_and_a_separate_stamp_after_it(
     tmp_path, fake_pdf,
 ) -> None:
     """The common shape: at most 128 chunks, so the writer's one request is a ``write_many`` with
-    the sweep on. Its completion is DEFERRED (the streaming run enriches metadata after the last
-    chunk lands), so the ``write_many`` carries no stamp and the orchestrator sends
-    ``complete_index_run`` afterwards, after the metadata post-pass."""
+    the sweep on. Its completion is DEFERRED (the streaming run writes the document's catalog metadata
+    after the last chunk lands), so the ``write_many`` carries no stamp and the orchestrator sends
+    ``complete_index_run`` afterwards, after the catalog write."""
     lines = _lines("streamsmall", 10)
     fake_pdf(lines)
     path = _write_pdf(tmp_path, "streamsmall")
@@ -963,7 +963,7 @@ def test_a_post_store_hook_that_raises_never_fails_a_stamped_document(
     tmp_path, fake_pdf, streaming, size,
 ) -> None:
     """Order, per path: streaming fires each batch's hooks once its request is sent and stamps LAST
-    (after the post-pass and the document hooks); the incremental and small paths, like
+    (after the catalog write and the document hooks); the incremental and small paths, like
     ``_index_document``, stamp with the write and fire the hooks after it. The second order is safe
     because ``HookRegistry`` contains a hook's ``Exception`` (logged, recorded, never raised), so a
     hook cannot turn the stamped document into a failed one. This pins that: a hook of every grain
@@ -1253,22 +1253,6 @@ def test_a_refused_stamp_keeps_the_fresh_document_and_its_chunks_and_leaves_the_
     with _traffic():
         _index(path, marker, streaming=streaming)
     assert _index_state(doc_id) == "complete"
-
-
-# ── a streaming run whose post-pass failed: the rerun sends only the stamp ──────────────
-
-
-def _pipeline_rows(path: Path) -> list[dict]:
-    from nexus.db.http_pipeline_client import HttpPipelineDB
-    from nexus.doc_indexer import _sha256
-
-    content_hash = _sha256(path)
-    return [r for r in HttpPipelineDB()._get("/v1/pipeline/list")["pipelines"]
-            if r["content_hash"] == content_hash and r["pdf_path"] == str(path)]
-
-
-
-
 
 
 @pytest.mark.parametrize(

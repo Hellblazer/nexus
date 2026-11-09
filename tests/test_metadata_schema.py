@@ -253,6 +253,19 @@ def test_validate_rejects_unknown_key() -> None:
         validate({"content_hash": "x", "bogus_key": "x"})
 
 
+def test_validate_rejects_non_primitive_values() -> None:
+    """Chroma metadata only accepts str/int/float/bool/None — enforce upstream.
+    Use a key in :data:`ALLOWED_TOP_LEVEL` (so the key-set check passes) with a
+    non-primitive value to exercise the type check specifically."""
+    from nexus.metadata_schema import ALLOWED_TOP_LEVEL, MetadataSchemaError, validate
+
+    for key in sorted(ALLOWED_TOP_LEVEL):
+        validate({key: "x"})  # non-vacuity: the key passes the key-set check with a primitive
+        for bad in (["a", "b"], {"a": 1}, ("a",), b"x"):
+            with pytest.raises(MetadataSchemaError, match="non-primitive"):
+                validate({key: bad})
+
+
 
 
 def test_normalize_output_fits_under_chroma_cap() -> None:
