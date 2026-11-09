@@ -367,6 +367,9 @@ _REPO = Path(__file__).resolve().parent.parent
 _ENGINE_VERSION_SRC = (_REPO / "src" / "nexus" / "engine_version.py").read_text()
 _FLOOR_LINE = re.compile(r"^NOTE_URI_MIN_ENGINE_VERSION[^=\n]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)[^\n]*$", re.M)
 _PIN_LINE = re.compile(r"^REQUIRED_ENGINE_VERSION[^=\n]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", re.M)
+# nexus-u5m5g.7: the resolve_or_register `sensitive` floor is a second stamped floor (it leads the pin on develop).
+_RESOLVE_FLOOR_LINE = re.compile(
+    r"^RESOLVE_SENSITIVE_MIN_ENGINE_VERSION[^=\n]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)[^\n]*$", re.M)
 
 
 def _version_in(pattern: re.Pattern[str]) -> tuple[int, int, int]:
@@ -379,6 +382,12 @@ def _with_floor(version: tuple[int, int, int] | None) -> str:
     """The real engine_version.py with its floor line rewritten (``None`` removes it)."""
     line = "" if version is None else f"NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = {version!r}"
     return _FLOOR_LINE.sub(line, _ENGINE_VERSION_SRC, count=1)
+
+
+def _with_resolve_floor(version: tuple[int, int, int] | None) -> str:
+    """The real engine_version.py with the resolve_or_register floor line rewritten (``None`` removes it)."""
+    line = "" if version is None else f"RESOLVE_SENSITIVE_MIN_ENGINE_VERSION: tuple[int, int, int] = {version!r}"
+    return _RESOLVE_FLOOR_LINE.sub(line, _ENGINE_VERSION_SRC, count=1)
 
 
 def _ci_stamp_commands() -> list[str]:
@@ -404,17 +413,24 @@ def _run_stamp(tmp_path: Path, argv: list[str], engine_version_text: str) -> tup
 
 
 def _stamp_cases(tmp_path: Path, argv: list[str]) -> None:
-    """Value-agnostic: the real constants are read, never the placeholder, so setting the floor at the landing bead needs no edit here."""
-    pin, floor = _version_in(_PIN_LINE), _version_in(_FLOOR_LINE)
-    expect = ".".join(map(str, max(pin, floor)))
+    """Value-agnostic: the real constants are read, never the placeholder, so setting a floor at its landing bead needs no edit here."""
+    pin, floor, resolve = _version_in(_PIN_LINE), _version_in(_FLOOR_LINE), _version_in(_RESOLVE_FLOOR_LINE)
+    expect = ".".join(map(str, max(pin, floor, resolve)))
     rc, out, err = _run_stamp(tmp_path, argv, _ENGINE_VERSION_SRC)
-    assert (rc, out) == (0, expect), "the stamp is max(pin, floor) of the tree as it is: " + err
+    assert (rc, out) == (0, expect), "the stamp is max(pin, every floor) of the tree as it is: " + err
     rc, out, err = _run_stamp(tmp_path, argv, _with_floor((0, 1, 9999)))
     assert (rc, out) == (0, "0.1.9999"), "a floor above the pin must be what the gate jar is stamped with: " + err
     rc, out, err = _run_stamp(tmp_path, argv, _with_floor((0, 0, 1)))
-    assert (rc, out) == (0, ".".join(map(str, pin))), "a floor below the pin leaves the pin"
+    assert (rc, out) == (0, ".".join(map(str, max(pin, resolve)))), "a floor below the pin leaves the pin (or the other floor)"
     rc, out, err = _run_stamp(tmp_path, argv, _with_floor(None))
     assert rc != 0 or out == "", "a missing floor constant must not stamp"
+    # nexus-u5m5g.7: the resolve_or_register floor is stamped like the note-URI one (the gate jar must accept `sensitive`)
+    rc, out, err = _run_stamp(tmp_path, argv, _with_resolve_floor((0, 1, 9999)))
+    assert (rc, out) == (0, "0.1.9999"), "the resolve_or_register floor above the pin must be what the gate jar is stamped with: " + err
+    rc, out, err = _run_stamp(tmp_path, argv, _with_resolve_floor((0, 0, 1)))
+    assert (rc, out) == (0, ".".join(map(str, max(pin, floor)))), "the resolve_or_register floor below the pin leaves the pin"
+    rc, out, err = _run_stamp(tmp_path, argv, _with_resolve_floor(None))
+    assert rc != 0 or out == "", "a missing resolve_or_register floor constant must not stamp"
 
 
 class TestTheGateJarStampSites:

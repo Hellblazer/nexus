@@ -39,6 +39,8 @@ def _note_uri_floor_at_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gate._engine_version, "NOTE_URI_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
     # RDR-243 Phase 2 (nexus-rfvyy.7): the sensitivity-exclude floor leads the pin on develop the same way.
     monkeypatch.setattr(gate._engine_version, "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
+    # RDR-193 Step 6 (nexus-u5m5g.7): the resolve_or_register `sensitive` floor leads the pin the same way.
+    monkeypatch.setattr(gate._engine_version, "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
 
 
 @pytest.fixture(autouse=True)
@@ -658,6 +660,57 @@ def test_the_live_sensitivity_floor_leads_or_meets_the_pin() -> None:
     m = re.search(r"^SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src, re.M)
     assert m is not None
     assert tuple(int(g) for g in m.groups()) >= (0, 1, 182)
+
+
+# ── RDR-193 Step 6 resolve_or_register `sensitive` floor vs the pin (nexus-u5m5g.7) ────
+
+def test_a_pin_below_the_resolve_sensitive_floor_fails_the_release_check(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(gate._engine_version, "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
+    assert gate.check_resolve_sensitive_floor_vs_pin() == 1
+    err = capsys.readouterr().err
+    assert "RESOLVE SENSITIVE FLOOR CHECK FAILED" in err and "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION" in err
+    assert ".".join(map(str, _PIN_BELOW_FLOOR)) in err
+
+
+@pytest.mark.parametrize(
+    "floor",
+    [pytest.param((0, 0, 0), id="unset"), pytest.param(REQUIRED_ENGINE_VERSION, id="equal"),
+     pytest.param((0, 0, 1), id="below")],
+)
+def test_a_pin_at_or_above_the_resolve_sensitive_floor_passes(monkeypatch, floor) -> None:
+    monkeypatch.setattr(gate._engine_version, "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION", floor)
+    assert gate.check_resolve_sensitive_floor_vs_pin() == 0
+
+
+def test_ledger_only_and_the_bare_form_both_run_the_resolve_sensitive_floor_check(monkeypatch, tmp_path) -> None:
+    """The other floors at the pin, so only this floor can fail these; the network probe never runs."""
+    monkeypatch.setattr(gate._engine_version, "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", _write_ledger(tmp_path, None)):
+        assert gate.main(["--ledger-only"]) == 1
+    with patch.object(gate, "probe_managed_service") as probe, \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+        assert gate.main(["--url", _TEST_URL]) == 1
+        assert gate.main(["--paired-deploy-auto"]) == 1
+    probe.assert_not_called()
+
+
+def test_one_run_names_all_three_failing_feature_floors(monkeypatch, capsys) -> None:
+    for name in ("NOTE_URI_MIN_ENGINE_VERSION", "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION",
+                 "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION"):
+        monkeypatch.setattr(gate._engine_version, name, _PIN_BELOW_FLOOR)
+    assert gate.check_feature_floors_vs_pin() == 1
+    err = capsys.readouterr().err
+    assert all(banner in err for banner in (
+        "NOTE URI FLOOR CHECK FAILED", "SENSITIVITY EXCLUDE FLOOR CHECK FAILED", "RESOLVE SENSITIVE FLOOR CHECK FAILED"))
+
+
+def test_the_live_resolve_sensitive_floor_is_the_engine_that_accepts_the_field() -> None:
+    """The tree's literal (the autouse fixture patches the attribute, so read the source): engine-service-v0.1.185
+    (catalog-048-7) is the first engine that accepts `sensitive` on resolve_or_register; v0.1.184 refuses it with a 400."""
+    src = (REPO_ROOT / "src" / "nexus" / "engine_version.py").read_text(encoding="utf-8")
+    m = re.search(r"^RESOLVE_SENSITIVE_MIN_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src, re.M)
+    assert m is not None
+    assert tuple(int(g) for g in m.groups()) >= (0, 1, 185)
 
 
 # ── --client-precondition (nexus-9ssih deploy-order gate) ───────────────────

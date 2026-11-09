@@ -109,7 +109,10 @@ surfaces the whole fix list. The checks:
   release must pin an engine that can hold `nx-note://`; the floor leads the pin
   on develop, which no develop run checks), and when it is below
   `SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION` (RDR-243 Phase 2: a release must pin an
-  engine with vectors-055, or every `nx_answer` search step is refused);
+  engine with vectors-055, or every `nx_answer` search step is refused), and when it
+  is below `RESOLVE_SENSITIVE_MIN_ENGINE_VERSION` (RDR-193 Step 6: a release must pin
+  an engine whose `resolve_or_register` accepts `sensitive`, or every sensitive titled
+  put and curator register is refused with a 400);
 - `ci-evidence-contexts` -- the required-context drift tests, run with `-m ""` so
   the integration-marked live branch-protection check actually executes;
 - `mandatory-pins` -- the GitHub-backed `mandatory_regression_pin` tests under

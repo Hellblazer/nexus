@@ -29,6 +29,9 @@ def _note_uri_floor_at_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         floor._engine_version, "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION", floor._engine_version.REQUIRED_ENGINE_VERSION
     )
+    monkeypatch.setattr(
+        floor._engine_version, "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION", floor._engine_version.REQUIRED_ENGINE_VERSION
+    )
 
 _TOKENLESS = (
     "- `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` -- bead nexus-fake -- "

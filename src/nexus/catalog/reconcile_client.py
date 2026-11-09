@@ -20,19 +20,22 @@ _log = structlog.get_logger(__name__)
 
 
 class CatalogReconcileError(RuntimeError):
-    """A reconcile stage or commit that did not end in an outcome (RDR-193 Step 6, nexus-u5m5g.7).
+    """A reconcile stage or commit that did not end in an outcome, or a ``resolve_or_register`` an older engine refused
+    (RDR-193 Step 6, nexus-u5m5g.7).
 
     ``reason`` is the engine's own (``run_not_found``, ``incomplete_stage``, ``transient_db_error``,
     ``commit_timeout``, ``job_stopped``, ``commit_in_progress`` ...) or one the client names: ``commit_conflict``
     (another run of the owner was committing, so this run's rows were not committed, whatever became of that other
     run), ``registry_busy`` (the engine's job registry stayed full through every resubmit), ``engine_job_lost`` (the
-    engine lost the job twice), ``poll_deadline`` and ``no_outcome``. ``http_status`` is the status the commit ended
+    engine lost the job twice), ``poll_deadline``, ``no_outcome`` and ``engine_too_old``
+    (a ``resolve_or_register`` that sent ``sensitive`` to an engine below ``RESOLVE_SENSITIVE_MIN_ENGINE_VERSION``, which
+    answers it 400; nothing was written). ``http_status`` is the status the commit ended
     with when the engine gave one, ``job_id`` the job concerned. A raise here is never to be read as a commit: nothing
     the run staged is to be trusted.
     """
 
     def __init__(self, reason: str, error: str, *, http_status: int | None = None, job_id: str = "") -> None:
-        super().__init__(f"catalog reconcile commit failed ({reason}): {error}")
+        super().__init__(f"catalog reconcile failed ({reason}): {error}")
         self.reason = reason
         self.error = error
         self.http_status = http_status
@@ -77,6 +80,31 @@ def _error_body(resp: "httpx.Response") -> dict:
     except Exception:  # noqa: BLE001 - an unreadable error body is an empty one
         return {}
     return body if isinstance(body, dict) else {}
+
+
+def _is_sensitive_refusal(resp: "httpx.Response") -> bool:
+    """True when *resp* is the 400 an engine below ``RESOLVE_SENSITIVE_MIN_ENGINE_VERSION`` gives a ``sensitive`` key:
+    ``{"error": "'sensitive' is not supported by resolve_or_register yet (RDR-193 Step 6): ..."}`` (engine-service-v0.1.184's
+    ``CatalogRepository.resolveOrRegister``). Any other 400, and any other status, is not this refusal."""
+    if resp.status_code != 400:
+        return False
+    error = str(_error_body(resp).get("error") or "")
+    return "'sensitive'" in error and "not supported" in error
+
+
+def _engine_too_old(cause: httpx.HTTPStatusError) -> CatalogReconcileError:
+    from nexus.engine_version import RESOLVE_SENSITIVE_MIN_ENGINE_VERSION  # noqa: PLC0415 - read at call time, as the other floors are
+
+    floor = ".".join(str(part) for part in RESOLVE_SENSITIVE_MIN_ENGINE_VERSION)
+    return CatalogReconcileError(
+        "engine_too_old",
+        f"the serving engine does not accept `sensitive` on resolve_or_register (it answered 400: "
+        f"{str(_error_body(cause.response).get('error') or '')!r}); it is needed from engine {floor} "
+        f"(RESOLVE_SENSITIVE_MIN_ENGINE_VERSION). Nothing was registered. Remedy: upgrade the engine to {floor} or later "
+        f"(a local engine moves with the client release that pins it, then `nx daemon restart-stale`; the managed "
+        f"engine, once it is upgraded)",
+        http_status=400,
+    )
 
 
 class ReconcileClient:
@@ -282,6 +310,11 @@ class ReconcileClient:
             body["physical_collection"] = physical_collection
         if sensitive:
             body["sensitive"] = True
-        result = self._post("/doc/resolve_or_register", body) or {}
+        try:
+            result = self._post("/doc/resolve_or_register", body) or {}
+        except httpx.HTTPStatusError as exc:
+            if sensitive and _is_sensitive_refusal(exc.response):
+                raise _engine_too_old(exc) from exc
+            raise
         foreign = bool(result.get("foreign_owner"))
         return ResolveOutcome(str(result["tumbler"]), False if foreign else bool(result.get("created", False)), foreign)

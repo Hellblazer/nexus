@@ -20,12 +20,14 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
+import httpx
 import pytest
 import structlog
 
 from nexus.catalog import reconcile_client as hcc
 from nexus.db.t2 import _refreshable_client
 from nexus.catalog.http_catalog_client import CatalogReconcileError, HttpCatalogClient
+from nexus.engine_version import RESOLVE_SENSITIVE_MIN_ENGINE_VERSION
 
 OUTCOME = {"rows": [{"file_path": "a.py", "tumbler": "1.1.1", "action": "created"}], "trashed": [], "renamed": [],
            "swept": [], "duplicate_path": [], "deleted_skipped_foreign_owner": [], "sensitivity_pending": []}
@@ -138,8 +140,6 @@ def test_stage_posts_the_run_header_and_one_page_and_returns_the_staged_count(cl
 def test_stage_is_sent_once_whatever_the_answer(client, script) -> None:
     """A page the engine staged and whose answer was lost would be a duplicate on a resend, so the transport never
     resends it blindly: a 503 is one request, and it raises."""
-    import httpx
-
     script.on("POST", STAGE, (503, {"error": "busy"}))
     with pytest.raises(httpx.HTTPStatusError):
         client.reconcile_stage("1.9", "run-1", "complete", 1, [{"kind": "present", "seq": 0, "file_path": "a.py"}])
@@ -386,6 +386,47 @@ def test_resolve_or_register_reports_a_foreign_owner_row_as_not_created(client, 
     script.on("POST", ROR, (200, {"tumbler": "1.2.3", "foreign_owner": True}))
     out = client.resolve_or_register("standalone-docs", source_uri="file:///x/a.md", title="A")
     assert (str(out.tumbler), out.created, out.foreign_owner) == ("1.2.3", False, True)
+
+
+# engine-service-v0.1.184's CatalogRepository.resolveOrRegister refused the key like this (IllegalArgumentException, which
+# CatalogHandler answers as a 400 {"error": <message>}); read from the tag's source, not guessed.
+_ENGINE_184_SENSITIVE_REFUSAL = (
+    "'sensitive' is not supported by resolve_or_register yet (RDR-193 Step 6): register the document, "
+    "then raise the flag through the audited route")
+
+
+def test_a_sensitive_call_an_old_engine_refuses_raises_engine_too_old_naming_the_floor_and_the_remedy(client, script) -> None:
+    script.on("POST", ROR, (400, {"error": _ENGINE_184_SENSITIVE_REFUSAL}))
+    with pytest.raises(CatalogReconcileError) as info:
+        client.resolve_or_register("knowledge", source_uri="nx-note://c/t", title="T", sensitive=True)
+    err = info.value
+    floor = ".".join(map(str, RESOLVE_SENSITIVE_MIN_ENGINE_VERSION))
+    assert (err.reason, err.http_status) == ("engine_too_old", 400)
+    assert floor == "0.1.185"
+    assert f"{floor} or later" in str(err) and "upgrade the engine" in str(err)
+    assert "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION" in str(err)
+    assert isinstance(err.__cause__, Exception) and err.__cause__.response.status_code == 400
+    assert script.count("POST", ROR) == 1  # a refusal is not resent
+
+
+def test_a_sensitive_call_answered_400_for_another_reason_is_not_taken_for_an_old_engine(client, script) -> None:
+    script.on("POST", ROR, (400, {"error": "'owner_name' (or 'curator') required"}))
+    with pytest.raises(httpx.HTTPStatusError) as info:
+        client.resolve_or_register("knowledge", source_uri="nx-note://c/t", title="T", sensitive=True)
+    assert info.value.response.status_code == 400
+
+
+def test_a_non_sensitive_call_never_takes_the_engine_too_old_branch(client, script) -> None:
+    script.on("POST", ROR, (400, {"error": _ENGINE_184_SENSITIVE_REFUSAL}))
+    with pytest.raises(httpx.HTTPStatusError):
+        client.resolve_or_register("knowledge", source_uri="nx-note://c/t", title="T")
+
+
+def test_a_sensitive_call_answered_409_or_500_is_not_taken_for_an_old_engine(client, script) -> None:
+    for status in (409, 500):
+        script.on("POST", ROR, (status, {"error": _ENGINE_184_SENSITIVE_REFUSAL}))
+        with pytest.raises(httpx.HTTPStatusError):
+            client.resolve_or_register("knowledge", source_uri="nx-note://c/t", title="T", sensitive=True)
 
 
 def test_resolve_or_register_needs_an_identity(client, script) -> None:
