@@ -47,6 +47,8 @@ import pytest
 from click.testing import CliRunner
 
 import nexus.commands.rdr as rdr_mod
+from nexus.catalog.tumbler import Tumbler
+from nexus.catalog.types import CatalogEntry
 from nexus.commands.rdr import (
     _from_statuses_for_event,
     _gate_repo_name,
@@ -1210,3 +1212,82 @@ def test_reaccept_after_resume_stamps_the_new_accepted_date_on_the_file(tmp_path
     text = f.read_text()
     assert "accepted_date: 2026-09-17" in text and "2026-01-05" not in text, text
     assert text.count("accepted_date:") == 1
+
+
+# ---------------------------------------------------------------------------
+# RDR-193 Step 7 (nexus-u5m5g.8): set-status resolves RDRs through the two scoped reads
+# ---------------------------------------------------------------------------
+
+
+class _ScopedFakeCatalog:
+    """A catalog double that serves ONLY the engine's combined list read (``list_scoped``): a tenant-wide
+    ``all_documents`` is a failure, and every scoped call is recorded."""
+
+    def __init__(self, entries) -> None:
+        self.entries = entries
+        self.calls: list[tuple[str, tuple[str, ...], str]] = []
+        self.links: list[tuple[str, str, str]] = []
+
+    def all_documents(self, *_a, **_k):
+        raise AssertionError("set-status must not list the tenant")
+
+    def list_scoped(self, *, owner="", content_types=(), source_uri_prefix=""):
+        assert source_uri_prefix or (owner and content_types), "an unscoped list"
+        self.calls.append((str(owner), tuple(sorted(content_types)), source_uri_prefix))
+        out = list(self.entries)
+        if owner:
+            out = [e for e in out if str(e.tumbler).startswith(f"{owner}.")]
+        if content_types:
+            out = [e for e in out if e.content_type in content_types]
+        if source_uri_prefix:
+            out = [e for e in out if e.source_uri.startswith(source_uri_prefix)]
+        return out
+
+    def resolve_path(self, _tumbler):
+        return None
+
+    def links_from(self, tumbler, link_type="", link_types=None):
+        return []
+
+    def link_if_absent(self, from_t, to_t, link_type, created_by, **_):
+        self.links.append((str(from_t), str(to_t), link_type))
+        return True
+
+
+def test_set_status_resolves_an_rdr_registered_under_a_stale_owner_through_the_two_scoped_reads(
+    tmp_path, monkeypatch,
+):
+    """RDR-14 is registered under a stale owner 1.3 (never re-indexed under the current owner 1.7); its
+    ``source_uri`` is still this repository's own ``docs/rdr/``. The flip to ``superseded`` writes the
+    successor's edge to it, found by the SECOND scoped read (the rows under ``rdr_source_prefix``), and
+    never lists the tenant."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 14, "accepted", extra_fm="superseded_by: RDR-015\n")
+    _write_rdr(rdr_dir, 15, "accepted")
+    _write_readme(rdr_dir, 14, "Accepted")
+    prefix = f"file://{rdr_dir}/"
+
+    def entry(tumbler: str, num: int) -> CatalogEntry:
+        rel = f"docs/rdr/rdr-{num:03d}-example-title.md"
+        return CatalogEntry(
+            tumbler=Tumbler.parse(tumbler), title=f"RDR-{num:03d}", author="", year=2026, content_type="rdr",
+            file_path=rel, corpus="rdr", physical_collection="", chunk_count=1, head_hash="", indexed_at="",
+            source_uri=f"file://{tmp_path}/{rel}",
+        )
+
+    cat = _ScopedFakeCatalog([entry("1.7.2", 15), entry("1.3.9", 14)])
+    monkeypatch.setattr(rdr_mod, "_catalog_reader_factory", lambda: cat)
+    monkeypatch.setattr(rdr_mod, "_rdr_repo_scope", lambda _cat, _root: (Tumbler.parse("1.7"), prefix))
+    _install_fake_t2(monkeypatch, entries={})
+
+    res = _invoke(rdr_dir, "14", "superseded")
+
+    assert res.exit_code == 0, res.output
+    assert "catalog edge ensured: RDR-15 supersedes RDR-14" in res.output, res.output
+    assert cat.links == [("1.7.2", "1.3.9", "supersedes")]
+    # the edge writer and the dependents walk each resolve once: two scoped reads apiece, the current
+    # owner's rdr and prose rows, then the rows under the source prefix
+    assert cat.calls and len(cat.calls) % 2 == 0, cat.calls
+    for first, second in zip(cat.calls[0::2], cat.calls[1::2], strict=True):
+        assert first == ("1.7", ("prose", "rdr"), "")
+        assert second == ("", ("prose", "rdr"), prefix)

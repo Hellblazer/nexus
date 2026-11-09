@@ -76,7 +76,7 @@ def _stub_generators(
     calls: list[str] = []
 
     def make(kind: str):
-        def _gen(cat, *, writer=None, new_tumblers=None, new_content_types=None):  # noqa: ANN001
+        def _gen(cat, *, writer=None, new_tumblers=None, new_content_types=None, inputs=None):  # noqa: ANN001
             calls.append(kind)
             clock.now += durations[kind]
             return 1
@@ -190,7 +190,7 @@ class TestGeneratorFailureClosesItsPhase:
         The hook itself still returns (the outer handler logs + audits)."""
         calls = _stub_generators(monkeypatch, clock, {"rdr": 8.1, "prose": 0.0, "pdf": 3.4})
 
-        def boom(cat, *, writer=None, new_tumblers=None, new_content_types=None):  # noqa: ANN001
+        def boom(cat, *, writer=None, new_tumblers=None, new_content_types=None, inputs=None):  # noqa: ANN001
             calls.append("prose")
             clock.now += 2.5
             raise RuntimeError("prose generator exploded")
@@ -276,7 +276,7 @@ class TestRdrDependencyGeneratorRegistration:
             monkeypatch, clock, {"rdr": 8.1, "prose": 25.9, "pdf": 3.4},
         )
 
-        def _dep_gen(cat, *, writer=None, new_tumblers=None, new_content_types=None):  # noqa: ANN001
+        def _dep_gen(cat, *, writer=None, new_tumblers=None, new_content_types=None, inputs=None):  # noqa: ANN001
             calls.append("rdr-dependency")
             clock.now += 4.2
             return 1
@@ -333,7 +333,7 @@ class TestChangedRdrIsRelinked:
         seeds: list[list[str]] = []
 
         def bind(cat, repo_root):  # noqa: ANN001
-            def _gen(cat, *, writer=None, new_tumblers=None, new_content_types=None):  # noqa: ANN001
+            def _gen(cat, *, writer=None, new_tumblers=None, new_content_types=None, inputs=None):  # noqa: ANN001
                 seeds.append([str(t) for t in (new_tumblers or [])])
                 return 0
             return ("rdr-dependency", _gen)

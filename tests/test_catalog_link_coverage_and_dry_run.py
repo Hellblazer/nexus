@@ -67,6 +67,49 @@ class TestDryRunLinkWriter:
         DryRunLinkWriter().close()
 
 
+class TestDryRunLinkWriterBatchCalls:
+    """RDR-193 Step 7: the generators write through ``links_upsert_many`` and ``links_same_content``, so
+    the recorder answers those too."""
+
+    @staticmethod
+    def _tumbler_edge(f: str, t: str, lt: str = "relates") -> dict:
+        return {"from": {"tumbler": f}, "to": {"tumbler": t}, "link_type": lt, "created_by": "x"}
+
+    @staticmethod
+    def _path_edge(f: str, owner: str, path: str) -> dict:
+        return {
+            "from": {"tumbler": f}, "to": {"owner": owner, "file_path": path},
+            "link_type": "implements", "created_by": "filepath_extractor",
+        }
+
+    def test_a_tumbler_edge_is_counted_against_the_existing_links_like_link_if_absent(self) -> None:
+        w = DryRunLinkWriter(existing={("1.1.1", "1.1.2", "relates")})
+        result = w.links_upsert_many([
+            self._tumbler_edge("1.1.1", "1.1.2"), self._tumbler_edge("1.1.1", "1.1.3"),
+            self._tumbler_edge("1.1.1", "1.1.3"),
+        ])
+        assert result == {"created": 1, "skipped": 2, "unresolved": []}
+        assert [(p.from_tumbler, p.to_tumbler) for p in w.proposed] == [("1.1.1", "1.1.3")]
+        assert w.path_edges == 0
+
+    def test_a_path_edge_is_recorded_with_its_path_and_counted_as_a_path_edge(self) -> None:
+        w = DryRunLinkWriter()
+        w.links_upsert_many([self._path_edge("1.1.5", "1.1", "src/a.py"), self._tumbler_edge("1.1.5", "1.1.6")])
+        assert [p.to_tumbler for p in w.proposed] == ["path:1.1:src/a.py", "1.1.6"]
+        assert w.path_edges == 1
+
+    def test_the_same_path_edge_twice_counts_once(self) -> None:
+        w = DryRunLinkWriter()
+        edge = self._path_edge("1.1.5", "1.1", "src/a.py")
+        assert w.links_upsert_many([edge, edge])["created"] == 1
+
+    def test_same_content_counts_what_was_submitted_and_previews_no_link(self) -> None:
+        w = DryRunLinkWriter()
+        assert w.links_same_content(["1.1.1", "1.1.2"], prune=False) == {"created": 0, "retracted": 0}
+        assert w.same_content_sent == 2
+        assert w.proposed == []
+
+
 class _FakeLinkReader:
     """Pages link_query the way HttpCatalogClient does."""
 

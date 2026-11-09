@@ -77,7 +77,20 @@ class _FakeCatalog:
     written: list = field(default_factory=list)
 
     def all_documents(self, content_type: str | None = None) -> list[CatalogEntry]:
-        return [e for e in self.entries if content_type is None or e.content_type == content_type]
+        raise AssertionError("set-status resolves RDRs through two scoped reads, never a tenant-wide listing")
+
+    def list_scoped(self, *, owner: object = "", content_types: tuple = (), source_uri_prefix: str = "") -> list[CatalogEntry]:
+        """The engine's combined filter (RDR-193 Step 7): an owner with content types, or a source prefix."""
+        if not source_uri_prefix and not (owner and content_types):
+            raise ValueError("unscoped list")
+        out = list(self.entries)
+        if owner:
+            out = [e for e in out if str(e.tumbler).startswith(f"{owner}.")]
+        if content_types:
+            out = [e for e in out if e.content_type in content_types]
+        if source_uri_prefix:
+            out = [e for e in out if e.source_uri.startswith(source_uri_prefix)]
+        return out
 
     def resolve_path(self, tumbler: object) -> Path | None:
         return None  # only consulted to disambiguate colliding numbers; none here

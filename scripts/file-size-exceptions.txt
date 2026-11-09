@@ -122,7 +122,6 @@ src/nexus/upgrade_finish.py 3931
 tests/_engine_substrate.py 3866
 tests/_storage_touch_guard.py 1733
 tests/catalog/test_http_catalog_client.py 3389
-tests/catalog/test_link_generator_service_mode.py 1407
 tests/catalog/test_manifest_write_many.py 1379
 tests/catalog/test_multi_batch_write.py 1293
 tests/catalog/test_recovery_bundle.py 1578

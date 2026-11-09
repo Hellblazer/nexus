@@ -140,7 +140,7 @@ def test_a_head_bump_alone_fills_no_needs_fence_and_relinks_no_rdr(tmp_path: Pat
     seen: list[list[str]] = []
 
     def bound(cat, repo):  # noqa: ANN001
-        def gen(cat, *, writer, new_tumblers, new_content_types):  # noqa: ANN001, ARG001
+        def gen(cat, *, writer, new_tumblers, new_content_types, inputs=None):  # noqa: ANN001, ARG001
             seen.append([str(t) for t in new_tumblers])
             return 0
         return "rdr-dependency", gen
@@ -158,7 +158,7 @@ def test_a_changed_rdr_is_handed_to_the_dependency_generator_as_if_new(tmp_path:
     seen: list[list[str]] = []
 
     def bound(cat, repo):  # noqa: ANN001
-        def gen(cat, *, writer, new_tumblers, new_content_types):  # noqa: ANN001, ARG001
+        def gen(cat, *, writer, new_tumblers, new_content_types, inputs=None):  # noqa: ANN001, ARG001
             seen.append([str(t) for t in new_tumblers])
             return 0
         return "rdr-dependency", gen

@@ -1646,6 +1646,7 @@ def _catalog_hook(
                 generate_pdf_corpus_links,
                 generate_prose_filepath_links,
                 generate_rdr_filepath_links,
+                hook_link_inputs,
                 incremental_generator_applies,
             )
             # nexus-oub13 critique M5: per-generator wall so the "linking"
@@ -1676,6 +1677,13 @@ def _catalog_hook(
             # catalog that has never completed an index has nothing to scope
             # endpoint resolution against) — skip rather than pass a bogus
             # owner.
+            # RDR-193 Step 7 (residual 6): the generators learn each new document's path and content type
+            # from this run's own rows (the reconcile outcome's file_to_doc_id and the staged rows), not
+            # from a catalog listing, and path edges name this repository's owner.
+            _link_inputs = hook_link_inputs(
+                owner, file_to_doc_id=file_to_doc_id, rel_to_abs=rel_to_abs, staged=staged,
+                seeds=[*new_tumblers, *relink_rdr_tumblers],
+            )
             _dep_entry = bind_rdr_dependency_generator(cat, repo)
             if _dep_entry is not None:
                 _generators.append(_dep_entry)
@@ -1696,7 +1704,7 @@ def _catalog_hook(
                 try:
                     _link_counts[_kind] = _gen(
                         cat, writer=writer, new_tumblers=_seed_tumblers,
-                        new_content_types=_seed_types,
+                        new_content_types=_seed_types, inputs=_link_inputs,
                     )
                 except Exception:
                     # Close the phase before the outer handler logs and
