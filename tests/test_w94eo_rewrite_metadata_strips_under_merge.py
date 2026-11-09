@@ -61,9 +61,10 @@ def test_rewrite_metadata_strips_a_legacy_key_and_converges(t2_service_env) -> N
     assert _rewrite_collection_metadata(t3, _COLLECTION) == (0, 1, 1)
 
 
-def test_rewrite_metadata_exempts_no_key_not_even_bib_fields(t2_service_env) -> None:
-    """RDR-236 Phase 4 Step 1: a chunk row is the CHUNK keys, so the rewrite verb strips every other key,
-    ``bib_*`` included (the bibliography is the catalog document's, written by ``nx enrich bib``)."""
+def test_rewrite_metadata_keeps_bib_fields_and_strips_every_other_legacy_key(t2_service_env) -> None:
+    """RDR-236 Phase 4 Step 1: the rewrite verb strips every non-CHUNK key EXCEPT ``bib_*`` and ``content_type``.
+    Row-only bibliography from before the catalog bib columns may still be the only copy, so it stays until the
+    Step 3 sweep (nexus-6pfgb.43), which runs after the backfill; the legacy key still goes."""
     t3 = make_t3()
     chash = _seed(t3)
     t3.update_chunks(_COLLECTION, [chash], [{"bib_year": 0}])
@@ -71,6 +72,8 @@ def test_rewrite_metadata_exempts_no_key_not_even_bib_fields(t2_service_env) -> 
 
     assert _rewrite_collection_metadata(t3, _COLLECTION)[0] == 1
     meta = _stored(t3, chash)
-    assert "bib_year" not in meta and _LEGACY not in meta, meta
+    assert meta.get("bib_year") == 0, meta
+    assert _LEGACY not in meta, meta
+    assert set(meta) <= {"chunk_text_hash", "embedding_model", "bib_year"}, meta
 
     assert _rewrite_collection_metadata(t3, _COLLECTION) == (0, 1, 1)

@@ -896,8 +896,9 @@ def test_index_repository_pdf_routing(
     assert "content_type" not in pdf_results[0] and "title" not in pdf_results[0]
 
 
+@pytest.mark.parametrize("row_shape", ["legacy-keyed", "current-keyed"])
 def test_reindex_self_heals_missing_manifest(
-    rich_repo: Path, local_t3: T3Database, tmp_path: Path,
+    rich_repo: Path, local_t3: T3Database, tmp_path: Path, row_shape: str,
 ) -> None:
     """nexus-c21fk (GH #1397 field find): the staleness check keys on T3
     chunk state only, so a doc whose chunks exist in T3 but whose
@@ -906,7 +907,13 @@ def test_reindex_self_heals_missing_manifest(
     blind to it, and the documented advice ('re-index repairs it')
     structurally wrong. The exact bead repro: index, delete a doc's
     manifest rows + zero its chunk_count, re-index. The self-heal pass
-    must rebuild the manifest from T3 WITHOUT re-embedding."""
+    must rebuild the manifest from T3 WITHOUT re-embedding.
+
+    RDR-236 Phase 4 Step 1 (nexus-6pfgb.65): the heal finds a document's chunks by the file's ``content_hash``
+    on the row, a key only a pre-Step-1 client wrote. ``legacy-keyed`` is the stuck population of the field
+    report (every chunk row carries that key and an inline ``doc_id``); ``current-keyed`` is the rows a
+    current client writes (chunk keys only), which the heal cannot find, so the repair is the re-index of the
+    now-stale file: same chunk hashes, same manifest, the T3 chunk set unchanged."""
     # nexus-i711w: no Catalog.init — the hook writes to the active (engine)
     # catalog in service mode. PORT-VERIFY: the second settling pass can
     # trip the nexus-7vuw rename's mode-split 404 fallback (module header).
@@ -1024,15 +1031,24 @@ def test_reindex_self_heals_missing_manifest(
         if "Nexus is a semantic search and knowledge management system" in doc
     ]
     assert readme_ids
-    # RDR-236 Phase 4 Step 1: the heal finds a document's chunks by the file's content hash on the row, a key
-    # only a pre-Step-1 client wrote; the stuck population is exactly such rows, so give them both keys.
-    entry = active_reader().resolve(tumbler)
-    file_hash = (entry.meta or {}).get("content_hash") or entry.index_content_hash
-    assert file_hash
-    docs_col.update(
-        ids=readme_ids,
-        metadatas=[{"doc_id": str(tumbler), "content_hash": file_hash} for _ in readme_ids],
-    )
+    if row_shape == "legacy-keyed":
+        # RDR-236 Phase 4 Step 1: the heal finds a document's chunks by the file's content hash on the row, a key
+        # only a pre-Step-1 client wrote, on EVERY chunk of the document (not just the one the inline doc_id
+        # below is stamped on); the stuck population is exactly such rows.
+        entry = active_reader().resolve(tumbler)
+        file_hash = (entry.meta or {}).get("content_hash") or entry.index_content_hash
+        assert file_hash
+        document_chunks = [r.chash for r in manifest_before]
+        assert set(readme_ids) <= set(document_chunks)
+        docs_col.update(
+            ids=document_chunks,
+            metadatas=[{"content_hash": file_hash} for _ in document_chunks],
+        )
+        docs_col.update(ids=readme_ids, metadatas=[{"doc_id": str(tumbler)} for _ in readme_ids])
+    else:
+        # The rows a current client writes hold the chunk keys only; stamp the inline doc_id on none of them.
+        stored = docs_col.get(ids=readme_ids, include=["metadatas"], sensitivity="include")["metadatas"]
+        assert not any({"content_hash", "doc_id"} & set(m) for m in stored), stored
 
     # Snapshot T3 so we can prove the heal never re-embedded anything.
     ids_before = sorted(docs_col.get(sensitivity="include")["ids"])
