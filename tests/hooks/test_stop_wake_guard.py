@@ -1075,10 +1075,19 @@ class TestCiWakeArmed:
         assert decision.block and decision.reason in (swg.CLASS_PROMISE, swg.CLASS_TIMED), decision
 
     @pytest.mark.parametrize("text", [
+        "CI is still running, then I'll check the dashboard at 14:30.",
+        "CI is still running, then I'll rebase the branch.",
+    ])
+    def test_a_clause_that_carries_a_second_step_is_not_covered(self, tmp_path: Path, text: str) -> None:
+        _status(tmp_path)
+        assert self._decide(tmp_path, text).block
+
+    @pytest.mark.parametrize("text", [
         "The reviewers are still running.",
         "The embedding index build is in progress.",
         "The release PR checks are still running.",
         "The Monitor hasn't reported yet.",
+        "Once the tests finish I'll run the migration.",
     ])
     def test_a_wait_the_develop_wake_does_not_report_is_not_covered(self, tmp_path: Path, text: str) -> None:
         _status(tmp_path)

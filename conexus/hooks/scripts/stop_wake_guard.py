@@ -629,7 +629,12 @@ _CI_DONE_TOPIC = re.compile(r"board/ci/[^/]+--done")
 #: shards, the push or a sha, and nothing a develop push's wake does not carry (a PR, a release, a tag, main,
 #: another repository). "The reviewers are still running" or "the index build is in progress" is a CI-wait
 #: clause to the text classifier and no CI wake at all, so it is never covered.
-_DEVELOP_CI_NOUN = re.compile(r"\b(?:ci|checks?|runs?|workflows?|pipelines?|shards?|push(?:ed)?|sha|develop)\b", re.I)
+_DEVELOP_CI_NOUN = re.compile(
+    r"\b(?:ci|checks?|runs|(?:the|ci|workflow|develop) run|workflows?|pipelines?|shards?|push(?:ed)?|sha|develop)\b", re.I
+)
+#: A second step riding in the same clause ("CI is still running, then I'll check the dashboard"): the wake
+#: covers the CI wait, not the step after it.
+_SECOND_STEP = re.compile(r"\bthen\b[^.]{0,40}\b(?:i'll|i will|i'm going to|we'll)\b", re.I)
 _NOT_DEVELOP_CI = re.compile(
     r"\b(?:pr|prs|pull requests?|release|tag|tags|main|reviewers?|agents?|monitors?|planner|deploy(?:ment)?|"
     r"other repo(?:sitory)?|staging|production)\b",
@@ -639,7 +644,12 @@ _NOT_DEVELOP_CI = re.compile(
 
 def is_develop_ci_clause(clause: str) -> bool:
     """Whether *clause* waits on the kind of CI a develop push's --done wake reports."""
-    return bool(_DEVELOP_CI_NOUN.search(clause)) and not _NOT_DEVELOP_CI.search(clause)
+    return (
+        bool(_DEVELOP_CI_NOUN.search(clause))
+        and not _NOT_DEVELOP_CI.search(clause)
+        and not _TIMED.search(clause)
+        and not _SECOND_STEP.search(clause)
+    )
 
 
 def _server_config_dir(env: dict[str, str]) -> str:
