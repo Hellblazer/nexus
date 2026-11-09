@@ -46,6 +46,17 @@ def test_add_reads_the_title_back_before_it_writes_all_four_fields() -> None:
     )
     assert get < put, "the read-back must come before the write"
     assert "never write over" in add
+    assert "`Not found`" in add, "the read-back must say what a free title looks like"
+    assert "real\n   line breaks" in add or "real line breaks" in add, "content's \\n are line breaks"
+    assert "never\n   write the record by hand" in add, "a procedure error must stop, not fall back to a hand write"
+
+
+def test_the_skill_has_one_write_path() -> None:
+    text = _SKILL.read_text()
+    hand_puts = [ln for ln in text.splitlines() if "memory_put" in ln and 'title="NNN-research-' in ln]
+    assert not hand_puts, f"a hand-built research memory_put survives: {hand_puts}"
+    assert "rdr,research,{classification}" not in text, "a hand-built tag set survives"
+    assert "just write the T2 record" not in text
 
 
 def test_add_spells_the_vocabulary_as_the_table_does() -> None:
