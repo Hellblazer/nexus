@@ -133,6 +133,7 @@ import httpx
 import structlog
 
 from nexus.db.limits import MAX_QUERY_RESULTS
+from nexus.mcp.ci_notice import ci_done_sha
 from nexus.db.t2.http_tuple_store import SchemaViolationError
 from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
 from nexus.tuple_sender import (
@@ -600,40 +601,6 @@ def _board_exact_read(
         f'tuple_rd("{subspace}", n={_BOARD_BATCH_READ_ROWS}, from_created_at="{first_created_at}", '
         f'from_id="{first_id}", through_created_at="{last[1]}", through_id="{last[0]}")'
     )
-
-
-#: nexus-1d6pz.11.3: the CI board's result topic (one per repo and branch) and the only
-#: sha a notice repeats: exactly 40 lowercase hex digits, as the conexus adapter writes it.
-_CI_DONE_TOPIC = re.compile(r"board/ci/[^/]+--done")
-_SHA40 = re.compile(r"[0-9a-f]{40}")
-#: A --done body is at most 1024 bytes (the board-ci template); a larger one is not parsed on
-#: the event loop, and its notice names no sha.
-_CI_DONE_BODY_MAX = 4096
-
-
-def _ci_done_sha(subspace: str, row: TupleRow) -> str | None:
-    """nexus-1d6pz.11.3: the commit a ``board/ci/*--done`` row reports, carried in the
-    notice's meta (``sha``; ``shas`` on a batch) so a session can tell which push a wake is
-    for without a read. Meta only, never the notice text: the text stays built from
-    identifiers the server controls (T2 nexus_rdr/211-decision-push-reference-2026-09-17).
-    The row's ``sha`` dim when it is set (the adapter writes it once engine v0.1.184 carries
-    the board-ci template, nexus-1d6pz.11.1), else the body's ``sha``. Notices are otherwise
-    reference-only because a body is unattested, so nothing of it passes but a value that is
-    exactly 40 lowercase hex digits; anything else gives None and the notice names no sha."""
-    if not _CI_DONE_TOPIC.fullmatch(subspace):
-        return None
-    dim = row.dims.get("sha") if isinstance(row.dims, dict) else None
-    if isinstance(dim, str) and _SHA40.fullmatch(dim):
-        return dim
-    raw = row.body
-    if not isinstance(raw, str) or len(raw) > _CI_DONE_BODY_MAX:
-        return None
-    try:
-        body = json.loads(raw)
-    except (ValueError, RecursionError):
-        return None
-    sha = body.get("sha") if isinstance(body, dict) else None
-    return sha if isinstance(sha, str) and _SHA40.fullmatch(sha) else None
 
 
 def _board_notification_content(
@@ -1678,7 +1645,7 @@ class ChannelWaiter:
             for key in ("from", "kind"):
                 if row.dims.get(key):
                     meta[key] = row.dims[key]
-            sha = _ci_done_sha(subspace, row)
+            sha = ci_done_sha(subspace, row)
             if sha:
                 meta["sha"] = sha
             case = _row_case(row)
@@ -1705,7 +1672,7 @@ class ChannelWaiter:
                 # account for each post without a second read
                 "tuple_ids": ",".join(row.id for row in kept),
             }
-            row_shas = [_ci_done_sha(subspace, row) for row in kept]
+            row_shas = [ci_done_sha(subspace, row) for row in kept]
             if any(row_shas):
                 # aligned with tuple_ids; "-" where no sha could be vouched for
                 meta["shas"] = ",".join(sha or "-" for sha in row_shas)
