@@ -702,7 +702,7 @@ def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days
     if do_files:
         def _files_lines() -> list[str]:
             directory = memory_dir(cwd)
-            reads = mc.load_reads(mc.read_window(days, now)) if directory is not None else None
+            reads = mc.load_reads(days, now, directory) if directory is not None else None
             return mc.files_section(directory, reads)
 
         lines += mc.section("--files", _files_lines)
