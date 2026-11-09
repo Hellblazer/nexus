@@ -679,4 +679,274 @@ class CatalogReconcileCommitBehaviourTest extends CatalogReconcileTestBase {
         assertThat(listOf(out, "swept")).as("not a sweep: it was deleted explicitly").isEmpty();
         assertThat(listOf(out, "trashed")).containsExactly(gone);
     }
+
+    // ══ fix round r1 (nexus-u5m5g.3) ════════════════════════════════════
+
+    // ── a deleted path with live duplicates under the owner ─────────────
+
+    @Test
+    void aDeletedPathWithLiveDuplicates_trashesTheRowTheOldPathTrashes_andReportsTheOthers() {
+        String t = tenantWithOwner();
+        // tumblers 9 and 10: the text order and the numeric order disagree, so "lowest" and "greatest" are different rows
+        for (String tumbler : List.of(OWNER + ".9", OWNER + ".10")) {
+            insertDoc(t, tumbler, "dup.py", Map.of(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "code__seed",
+                CATALOG_DOCUMENTS.HEAD_HASH, "H0"));
+        }
+        // the old path (indexer._delete_docs_for_paths -> by_file_path) trashes match[0] of this lookup, which the
+        // database orders by tumbler: the first in its text order
+        @SuppressWarnings("unchecked")
+        String trashedByTheOldPath = (String) repo.documentsByOwnerAndFilePath(t, OWNER, "dup.py", 0, 0).get(0).get("tumbler");
+        String other = trashedByTheOldPath.equals(OWNER + ".9") ? OWNER + ".10" : OWNER + ".9";
+        assertThat(trashedByTheOldPath).as("non-vacuity: the old lookup's first row is not the one the match arm prefers")
+            .isEqualTo(OWNER + ".10");
+
+        Map<String, Object> out = reconcile(t, OWNER, "r1", "partial", deleted(0, "dup.py"));
+
+        assertThat(col(t, trashedByTheOldPath, "deleted_at")).as("the row the old path trashes").isNotNull();
+        assertThat(col(t, other, "deleted_at")).as("the other duplicate is left live").isNull();
+        assertThat(actionOf(out, "dup.py")).isEqualTo("deleted");
+        assertThat(tumblerOf(out, "dup.py")).isEqualTo(trashedByTheOldPath);
+        assertThat(listOf(out, "trashed")).containsExactly(trashedByTheOldPath);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> dup = (Map<String, Object>) listOf(out, "duplicate_path").get(0);
+        assertThat(listOf(out, "duplicate_path")).as("the others are reported, as before").hasSize(1);
+        assertThat(dup.get("file_path")).isEqualTo("dup.py");
+        assertThat(dup.get("tumbler")).isEqualTo(other);
+    }
+
+    @Test
+    void aPresentPathWithLiveDuplicates_stillUpdatesTheGreatestTumbler() {
+        String t = tenantWithOwner();
+        for (String tumbler : List.of(OWNER + ".9", OWNER + ".10")) {
+            insertDoc(t, tumbler, "dup.py", Map.of(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "code__seed",
+                CATALOG_DOCUMENTS.HEAD_HASH, "H0"));
+        }
+        Map<String, Object> out = reconcile(t, OWNER, "r1", "partial", present(0, "dup.py"));
+        assertThat(tumblerOf(out, "dup.py")).as("update_many's row: the one documentsByOwner lists last").isEqualTo(OWNER + ".9");
+        assertThat(((Map<?, ?>) listOf(out, "duplicate_path").get(0)).get("tumbler")).isEqualTo(OWNER + ".10");
+    }
+
+    // ── the link write helper, and a rename move that follows alias_of ──
+
+    private String linkWrite(String tenant, String from, String to, String type, String fromSpan, String toSpan,
+                             String by, boolean ifAbsent) {
+        return scope.withTenant(tenant, ctx -> ctx.select(dev.nexus.service.jooq.nexus.Routines.catalogLinkWrite(
+                from, to, type, fromSpan, toSpan, by, ifAbsent))
+            .fetchOne(0, String.class));
+    }
+
+    @Test
+    void theLinkWriteHelper_resolvesAliases_checksLiveness_dropsSelfLinks_andFoldsAnExistingEdge() {
+        String t = tenantWithOwner();
+        String x = seed(t, OWNER, "x.py");
+        String alias = seed(t, OWNER, "alias.py");
+        String canon = seed(t, OWNER, "canon.py");
+        String dead = seed(t, OWNER, "dead.py");
+        setDoc(t, alias, CATALOG_DOCUMENTS.ALIAS_OF, canon);
+        tombstone(t, dead, false);
+
+        assertThat(linkWrite(t, x, alias, "cites", "1-2", "3-4", "alice", true)).isEqualTo("created");
+        assertThat(links(t)).as("the edge lands on the canonical row").containsExactly(x + ">" + canon + ":cites:alice:1-2:3-4:");
+
+        assertThat(linkWrite(t, x, canon, "cites", "9-9", "9-9", "bob", true))
+            .as("if-absent: the raw edge exists, nothing is touched").isEqualTo("exists");
+        assertThat(linkWrite(t, x, alias, "cites", "5-6", "7-8", "bob", true))
+            .as("if-absent keys on the raw edge; the resolved one exists, so it merges as POST /link does").isEqualTo("merged");
+        assertThat(links(t)).hasSize(1).first().asString().startsWith(x + ">" + canon + ":cites:alice:5-6:7-8:").contains("bob");
+
+        assertThat(linkWrite(t, x, x, "relates", "", "", "u", false)).as("a self-link").isEqualTo("self");
+        assertThat(linkWrite(t, x, dead, "relates", "", "", "u", false)).as("a tombstoned endpoint").isEqualTo("dangling");
+        assertThat(linkWrite(t, x, OWNER + ".777", "relates", "", "", "u", false)).as("an absent endpoint").isEqualTo("dangling");
+        assertThat(links(t)).as("none of those wrote").hasSize(1);
+    }
+
+    @Test
+    void aRenameMove_followsAliasOf_likeTodaysPostLink() {
+        String t = tenantWithOwner();
+        String old = seed(t, OWNER, "old.py", Map.of("meta", Map.of("content_hash", "H")));
+        String canon = seed(t, OWNER, "canon.py", Map.of("head_hash", "H1"));
+        String aliasRow = seed(t, OWNER, "alias.py", Map.of("head_hash", "H1"));
+        String incoming = seed(t, OWNER, "incoming.py", Map.of("head_hash", "H1"));
+        link(t, old, aliasRow, "cites", "alice", "1-2", "3-4");
+        link(t, incoming, old, "relates", "bob", "", "");
+        setDoc(t, aliasRow, CATALOG_DOCUMENTS.ALIAS_OF, canon);
+        setDoc(t, incoming, CATALOG_DOCUMENTS.ALIAS_OF, canon);
+
+        Map<String, Object> out = reconcile(t, OWNER, "r1", "complete",
+            present(0, "new.py").hash("H"), present(1, "canon.py"));
+
+        String neu = tumblerOf(out, "new.py");
+        assertThat(links(t)).contains(neu + ">" + canon + ":cites:alice:1-2:3-4:", canon + ">" + neu + ":relates:bob:::")
+            .as("no edge to or from the alias rows themselves")
+            .noneMatch(l -> l.startsWith(neu + ">" + aliasRow) || l.startsWith(incoming + ">" + neu));
+    }
+
+    // ── a failure outside the three upsert writes names its SQLSTATE, its message and, per row, the file ──
+
+    /** Runs {@code body} with a CHECK constraint on {@code table}, added and dropped as the superuser (RLS does not apply to it). */
+    private void withConstraint(org.jooq.Table<?> table, String name, org.jooq.Condition check, Runnable body) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            suCtx(su).alterTable(table).add(org.jooq.impl.DSL.constraint(name).check(check)).execute();
+            try {
+                body.run();
+            } finally {
+                suCtx(su).alterTable(table).dropConstraintIfExists(name).execute();
+            }
+        }
+    }
+
+    @Test
+    void aHousekeepingMergeTheDatabaseRefuses_failsWithTheSqlStateAndTheMessage_writingNothing() throws Exception {
+        String t = tenantWithOwner();
+        seed(t, OWNER, "a.py");
+        seed(t, OWNER, "poison.py");
+        String before = snapshot(t);
+        stage(t, OWNER, "r1", "complete", present(0, "a.py").set("head_hash", "H0"));
+        // poison.py may not carry a miss_count (the first miss of a complete walk writes one)
+        withConstraint(CATALOG_DOCUMENTS, "rc048_miss_poison",
+            org.jooq.impl.DSL.not(CATALOG_DOCUMENTS.FILE_PATH.eq("poison.py")
+                .and(CATALOG_DOCUMENTS.METADATA.cast(org.jooq.impl.SQLDataType.VARCHAR).like("%miss_count%"))), () ->
+            assertThatThrownBy(() -> repo.reconcileCommit(t, OWNER, "r1", COMMIT_TIMEOUT))
+                .isInstanceOf(ReconcileCommitException.class)
+                .satisfies(e -> assertThat(((ReconcileCommitException) e).code()).isEqualTo("write_failed"))
+                .hasMessageContaining("SQLSTATE 23514").hasMessageContaining("rc048_miss_poison"));
+        assertThat(snapshot(t)).as("all or nothing").isEqualTo(before);
+        assertThat(runState(t, "r1")).isEqualTo("staged");
+    }
+
+    @Test
+    void anExplicitDeletionTheDatabaseRefuses_failsNamingTheRowAndTheSqlState() throws Exception {
+        String t = tenantWithOwner();
+        seed(t, OWNER, "ok.py");
+        seed(t, OWNER, "poison.py");
+        String before = snapshot(t);
+        stage(t, OWNER, "r1", "partial", deleted(0, "ok.py"), deleted(1, "poison.py"));
+        withConstraint(CATALOG_DOCUMENTS, "rc048_trash_poison",
+            org.jooq.impl.DSL.not(CATALOG_DOCUMENTS.FILE_PATH.eq("poison.py").and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())), () ->
+            assertThatThrownBy(() -> repo.reconcileCommit(t, OWNER, "r1", COMMIT_TIMEOUT))
+                .isInstanceOf(ReconcileCommitException.class)
+                .satisfies(e -> assertThat(((ReconcileCommitException) e).code()).isEqualTo("write_failed"))
+                .hasMessageContaining("file_path poison.py").hasMessageContaining("23514")
+                .hasMessageContaining("rc048_trash_poison"));
+        assertThat(snapshot(t)).as("the trash of ok.py is rolled back with it").isEqualTo(before);
+    }
+
+    @Test
+    void aLinkInsertTheDatabaseRefuses_failsNamingTheOldRowsFilePath() throws Exception {
+        String t = tenantWithOwner();
+        String old = seed(t, OWNER, "old.py", Map.of("meta", Map.of("content_hash", "H")));
+        String partner = seed(t, OWNER, "partner.py", Map.of("head_hash", "H1"));
+        link(t, old, partner, "poison", "u", "", "");
+        String before = snapshot(t);
+        stage(t, OWNER, "r1", "complete", present(0, "new.py").hash("H"), present(1, "partner.py"));
+        // the new row mints as OWNER.3 (two seeded rows before it); no 'poison' link may start there, so the seeded link
+        // (from OWNER.1) stands and the copy the move inserts is refused
+        withConstraint(dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS, "rc048_link_poison",
+            org.jooq.impl.DSL.not(dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS.LINK_TYPE.eq("poison")
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS.FROM_TUMBLER.eq(OWNER + ".3"))), () ->
+            assertThatThrownBy(() -> repo.reconcileCommit(t, OWNER, "r1", COMMIT_TIMEOUT))
+                .isInstanceOf(ReconcileCommitException.class)
+                .satisfies(e -> assertThat(((ReconcileCommitException) e).code()).isEqualTo("write_failed"))
+                .hasMessageContaining("file_path old.py").hasMessageContaining("23514")
+                .hasMessageContaining("rc048_link_poison"));
+        assertThat(snapshot(t)).isEqualTo(before);
+    }
+
+    // ── row-level security, probed with no tenant predicate ─────────────
+
+    private int unfilteredRows(String tenant, org.jooq.Table<?> table) {
+        return scope.withTenant(tenant, ctx -> ctx.fetchCount(table));
+    }
+
+    @Test
+    void rls_aSelectWithNoTenantPredicateSeesOnlyTheCallersRows_andSeesAllWithRlsOff() throws Exception {
+        String a = tenantWithOwner();
+        String b = tenantWithOwner();
+        stage(a, OWNER, "rls-run", "partial", present(0, "a.py"), present(1, "b.py"));
+
+        assertThat(unfilteredRows(b, dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_ROWS))
+            .as("tenant B, rows table, no tenant predicate").isZero();
+        assertThat(unfilteredRows(b, dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS))
+            .as("tenant B, runs table, no tenant predicate").isZero();
+        assertThat(unfilteredRows(a, dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_ROWS))
+            .as("the same query as the owning tenant finds its rows").isEqualTo(2);
+
+        // the probe can fail: with row-level security off, the same query as tenant B sees A's rows
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var rowsTable = dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_ROWS;
+            var runsTable = dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS;
+            PgContainerHelper.setRowSecurity(su, rowsTable, PgContainerHelper.RowSecurityMode.DISABLE);
+            PgContainerHelper.setRowSecurity(su, runsTable, PgContainerHelper.RowSecurityMode.DISABLE);
+            try {
+                assertThat(unfilteredRows(b, dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_ROWS))
+                    .as("control, RLS off: B reads A's landing rows").isGreaterThanOrEqualTo(2);
+                assertThat(unfilteredRows(b, dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS))
+                    .as("control, RLS off: B reads A's run header").isGreaterThanOrEqualTo(1);
+            } finally {
+                PgContainerHelper.setRowSecurity(su, rowsTable, PgContainerHelper.RowSecurityMode.ENABLE);
+                PgContainerHelper.setRowSecurity(su, runsTable, PgContainerHelper.RowSecurityMode.ENABLE);
+            }
+        }
+        assertThat(unfilteredRows(b, dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_ROWS)).as("RLS back on").isZero();
+        assertThat(unfilteredRows(b, dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS)).isZero();
+    }
+
+    // ── a commit in flight, and two commits of one run ──────────────────
+
+    /** Locks a run's header row FOR UPDATE in {@code su}'s open transaction, as the commit's first statement does. */
+    private void holdRunHeader(Connection su, String tenant, String run) {
+        suCtx(su).selectOne().from(dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS.TENANT_ID.eq(tenant)
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS.RUN_ID.eq(run)))
+            .forUpdate().fetch();
+    }
+
+    @Test
+    void aStagePageForARunWhoseCommitHoldsItsHeader_isRefusedWithoutWaiting() throws Exception {
+        String t = tenantWithOwner();
+        repo.reconcileStage(t, OWNER, "busy", "partial", 2, maps(present(0, "a.py")));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            holdRunHeader(su, t, "busy");
+            long t0 = System.nanoTime();
+            assertThatThrownBy(() -> repo.reconcileStage(t, OWNER, "busy", "partial", 2, maps(present(1, "b.py"))))
+                .isInstanceOf(dev.nexus.service.db.CatalogRepository.ReconcileRunBusyException.class)
+                .hasMessageContaining("busy");
+            assertThat((System.nanoTime() - t0) / 1_000_000).as("refused at once, not after waiting out the commit").isLessThan(5_000);
+            assertThat(stagedRows(t, "busy")).as("the refused page staged nothing").isEqualTo(1);
+            su.rollback();
+        }
+        repo.reconcileStage(t, OWNER, "busy", "partial", 2, maps(present(1, "b.py")));
+        assertThat(stagedRows(t, "busy")).as("the same page lands once the header is free").isEqualTo(2);
+    }
+
+    @Test
+    void twoCommitsOfOneRunRacing_oneDoesTheWork_theOtherGetsTheStoredOutcome_nothingIsWrittenTwice() throws Exception {
+        String t = tenantWithOwner();
+        stage(t, OWNER, "race", "complete", present(0, "a.py"), present(1, "b.py"), present(2, "c.py"));
+        Map<String, Object> first;
+        Map<String, Object> second;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);   // two threads of our own, not the common pool's
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            // both commits queue on the run header's lock, as two submissions of one run would
+            holdRunHeader(su, t, "race");
+            var one = pool.submit(() -> repo.reconcileCommit(t, OWNER, "race", COMMIT_TIMEOUT));
+            var two = pool.submit(() -> repo.reconcileCommit(t, OWNER, "race", COMMIT_TIMEOUT));
+            awaitCommitsBlocked(su, 2);
+            su.rollback();
+            first = one.get(60, java.util.concurrent.TimeUnit.SECONDS);
+            second = two.get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(second).as("both answers are the one stored outcome").isEqualTo(first);
+        assertThat(outcomeRows(first)).hasSize(3);
+        assertThat(outcomeRows(first)).allSatisfy(r -> assertThat(r.get("action")).isEqualTo("created"));
+        assertThat(liveCount(t, OWNER)).as("three documents, not six").isEqualTo(3);
+        assertThat(nextSeq(t, OWNER)).as("three sequence numbers claimed, once").isEqualTo(3L);
+        assertThat(runState(t, "race")).isEqualTo("committed");
+    }
 }

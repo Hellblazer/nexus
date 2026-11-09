@@ -57,6 +57,8 @@ package dev.nexus.service.http;
  * <tr><td>POST /import/document (per row)</td><td>tumbler</td><td>VALIDATED (fix round 1 — was the ship-blocker gap)</td></tr>
  * <tr><td>POST /doc/register</td><td>owner_prefix (as tumbler_prefix), tumbler (optional)</td><td>VALIDATED</td></tr>
  * <tr><td>POST /doc/register_many</td><td>owner_prefix (as tumbler_prefix), per-doc tumbler (optional)</td><td>VALIDATED</td></tr>
+ * <tr><td>POST /reconcile/stage</td><td>owner (an owner prefix under another key; the commit mints documents under it)</td><td>VALIDATED (RDR-193 fix round r1, nexus-u5m5g.3)</td></tr>
+ * <tr><td>POST /reconcile/commit</td><td>owner (the commit creates the owner row named by it)</td><td>VALIDATED (RDR-193 fix round r1, nexus-u5m5g.3)</td></tr>
  * <tr><td>GET /show</td><td>tumbler (query)</td><td>LOOKUP-ONLY</td></tr>
  * <tr><td>POST /update</td><td>tumbler (body)</td><td>LOOKUP-ONLY</td></tr>
  * <tr><td>DELETE /delete</td><td>tumbler (query or body)</td><td>LOOKUP-ONLY</td></tr>

@@ -192,7 +192,9 @@ migration_wal_bytes_per_worker = 11038000
 # 2 CREATE TABLE (catalog_reconcile_runs, catalog_reconcile_rows), ENABLE and FORCE ROW LEVEL SECURITY on each (4) and 1 CREATE POLICY each (2); 2 CREATE FUNCTION (catalog_reconcile_commit, catalog_reconcile_reap) and
 # their 2 GRANT EXECUTE to nexus_svc. That is 12 statements in the changesets; the other 2 are the runAlways grants loop's table grant for each new table (no sequence, so one each, as vectors-054 above).
 # Counted from the changeset's statements (12) plus the loop (2) and measured: chas lab-m via lab-remote, 2026-11-08, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-u5m5g.3 tree (base df09d9505), ddl: migration=2386. Commit: the nexus-u5m5g.3 commit that adds catalog-048-reconcile.xml.
-migration_ddl_per_worker = 2386
+# 2386 -> 2388 (2026-11-08, same bead, fix round r1): catalog-048-4 adds nexus.catalog_link_write (the one link write the commit's rename move calls): 1 CREATE FUNCTION and its GRANT EXECUTE to nexus_svc, no table.
+# Counted from the changeset's statements (2) and measured: chas lab-m via lab-remote, 2026-11-08, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-u5m5g.3 tree (base 4b8e25d31 plus the fix round), ddl: migration=2388.
+migration_ddl_per_worker = 2388
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

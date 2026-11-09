@@ -27,11 +27,20 @@
                    sensitivity inheritance and its audit); housekeeping on complete walks only; explicit deletions;
                    finish. It does NOT write the owner row's head_hash (the base of the next delta, written at run end).
                    Every set-based write that cannot name a row on failure is retried one row at a time in a rolled
-                   back subtransaction, and the failure names the first row's file_path (residual 4).
+                   back subtransaction, and the failure names the first row's file_path (residual 4). Every other failure
+                   but the statement timeout ends with its SQLSTATE and message, and with the row's file_path when the
+                   failing statement is a write on one row (a link move, a trash).
 
     catalog-048-3  nexus.catalog_reconcile_reap(p_interval) RETURNS integer: drops the headers and rows of the
                    tenant's runs created longer ago than the interval (default 24 hours), committed or not. It runs at
                    the start of every stage call, so no scheduler is needed.
+
+    catalog-048-4  nexus.catalog_link_write(from, to, link_type, from_span, to_span, created_by, if_absent) RETURNS
+                   text: the one link write, today's POST /link as a function (alias resolution on both endpoints, a
+                   liveness check, a self-link dropped, the upsert with the creator folded into co_discovered_by, and
+                   link_if_absent's skip of an edge that already exists as the client names it). The commit's rename
+                   move calls it once per link, and Step 3's batch link route reuses it. Placed last so that the
+                   commit, which calls it through dynamic SQL, has no ordering dependency on it.
 
     Placed after vectors-056-gc-quarantine-expires-at.xml (the tail when this landed) and before the grants-nexus-svc.xml
     runAlways block (the established late-append convention): the grants loop gives nexus_svc DML on both tables. The
@@ -149,6 +158,13 @@ DECLARE
     v_coll_uri   text;
     v_rows       jsonb;
     v_outcome    jsonb;
+    v_src       text;        -- the columns of one row of the link move loop (plpgsql_check cannot follow a record over dynamic SQL)
+    v_dst        text;
+    v_ltype      text;
+    v_fspan      text;
+    v_tspan      text;
+    v_by         text;
+    v_trash      text;        -- the tumbler of one row of a trash loop
 BEGIN
     -- Every statement over the working set is dynamic: the temp tables do not exist until this call creates them,
     -- so a static statement is a plpgsql_check error (the precedent is vectors-056). Parameters of every EXECUTE:
@@ -221,7 +237,7 @@ BEGIN
     $s$ USING v_tenant, p_owner, p_run_id;
     EXECUTE v_nc || 'CREATE UNIQUE INDEX _rc_w_path ON _rc_w (file_path)';
     EXECUTE v_nc || 'ANALYZE _rc_w';   -- a temp table has no statistics until told; the joins below are chosen from them
-    EXECUTE v_nc || 'CREATE TEMP TABLE _rc_t (tumbler text, kind text) ON COMMIT DROP';
+    EXECUTE v_nc || 'CREATE TEMP TABLE _rc_t (tumbler text, kind text, file_path text) ON COMMIT DROP';
     EXECUTE v_nc || 'CREATE TEMP TABLE _rc_m (tumbler text, file_path text, miss integer, meta jsonb, renamed_to text, fate text) ON COMMIT DROP';
 
     -- ── the owner row (ensureOwnerRow) ──────────────────────────────────
@@ -289,14 +305,19 @@ BEGIN
         USING v_tenant, p_owner, p_run_id, v_now, v_root_norm, v_root, v_otype;
 
     -- ── match arm (a): the live row under the owner with the same file_path ──
+    -- rn = 1 is the row the client path writes to. For a present row that is update_many's: the one documentsByOwner
+    -- lists last (the greatest tumbler in the database's text order). For a deleted row it is by_file_path's: match[0]
+    -- of documentsByOwnerAndFilePath, ORDER BY tumbler, the FIRST in that order. The others are reported as duplicate_path.
     EXECUTE v_nc || $s$
     CREATE TEMP TABLE _rc_a ON COMMIT DROP AS
     SELECT d.file_path, d.tumbler,
-           row_number() OVER (PARTITION BY d.file_path ORDER BY d.tumbler DESC) AS rn
+           CASE WHEN x.kind = 'deleted'
+                THEN row_number() OVER (PARTITION BY d.file_path ORDER BY d.tumbler ASC)
+                ELSE row_number() OVER (PARTITION BY d.file_path ORDER BY d.tumbler DESC) END AS rn
       FROM nexus.catalog_documents d
+      JOIN _rc_w x ON x.file_path = d.file_path
      WHERE d.tenant_id = $1 AND d.deleted_at IS NULL
-       AND starts_with(d.tumbler, $2 || '.')
-       AND d.file_path IN (SELECT x.file_path FROM _rc_w x)$s$ USING v_tenant, p_owner;
+       AND starts_with(d.tumbler, $2 || '.')$s$ USING v_tenant, p_owner;
     EXECUTE v_nc || $s$
     UPDATE _rc_w w SET a_tumbler = a.tumbler
       FROM _rc_a a
@@ -549,8 +570,8 @@ BEGIN
             IF v_cur IS NULL THEN
                 RAISE EXCEPTION 'reconcile_commit write_failed: % (no single staged row reproduces it); nothing was written', v_msg;
             END IF;
-            RAISE EXCEPTION 'reconcile_commit write_failed: file_path %: %. Nothing was written. Operator action: fix or remove that file, then re-run nx index repo.',
-                v_cur, v_msg;
+            RAISE EXCEPTION 'reconcile_commit write_failed: file_path %: SQLSTATE %: %. Nothing was written. Operator action: fix or remove that file, then re-run nx index repo.',
+                v_cur, v_pstate, v_msg;
         END;
     END LOOP;
 
@@ -622,16 +643,19 @@ BEGIN
                    ('null'::jsonb, 'false'::jsonb, '0'::jsonb, '""'::jsonb, '[]'::jsonb, '{}'::jsonb))$s$ USING v_tenant;
 
         -- links move from or to the old row, both endpoints mapped through this run's rename map; a link that
-        -- becomes a self-link, touches a swept row, or whose other endpoint is not live is skipped; insert only
-        -- when (from, to, link_type) is absent, copying created_by and the spans but not the link's metadata
-        EXECUTE v_nc || $s$
-        WITH ren AS (SELECT m.tumbler AS old_t, m.renamed_to AS new_t FROM _rc_m m WHERE m.fate = 'rename'),
+        -- becomes a self-link or touches a swept row is skipped here, and nexus.catalog_link_write (catalog-048-4,
+        -- the one link write: today's POST /link) resolves alias_of on both endpoints, skips a dangling one and
+        -- inserts only when the (from, to, link_type) the client names is absent, copying created_by and the spans
+        -- but not the link's metadata. One call per link, in the client path's order; v_cur names the old row's
+        -- file_path if a call fails.
+        FOR v_cur, v_src, v_dst, v_ltype, v_fspan, v_tspan, v_by IN EXECUTE v_nc || $s$
+        WITH ren AS (SELECT m.tumbler AS old_t, m.renamed_to AS new_t, m.file_path AS old_path FROM _rc_m m WHERE m.fate = 'rename'),
              cand AS (
-                SELECT r.old_t, r.new_t, 0 AS dir, l.id, l.from_tumbler, l.to_tumbler, l.link_type,
+                SELECT r.old_t, r.new_t, r.old_path, 0 AS dir, l.id, l.from_tumbler, l.to_tumbler, l.link_type,
                        l.from_span, l.to_span, l.created_by
                   FROM ren r JOIN nexus.catalog_links l ON l.tenant_id = $1 AND l.from_tumbler = r.old_t
                 UNION ALL
-                SELECT r.old_t, r.new_t, 1, l.id, l.from_tumbler, l.to_tumbler, l.link_type,
+                SELECT r.old_t, r.new_t, r.old_path, 1, l.id, l.from_tumbler, l.to_tumbler, l.link_type,
                        l.from_span, l.to_span, l.created_by
                   FROM ren r JOIN nexus.catalog_links l ON l.tenant_id = $1 AND l.to_tumbler = r.old_t),
              mapped AS (
@@ -639,21 +663,27 @@ BEGIN
                   FROM cand c
                   LEFT JOIN ren f ON f.old_t = c.from_tumbler
                   LEFT JOIN ren t ON t.old_t = c.to_tumbler)
-        INSERT INTO nexus.catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, from_span, to_span, created_by)
-        SELECT $1, m.src, m.dst, m.link_type, coalesce(m.from_span, ''), coalesce(m.to_span, ''), m.created_by
+        SELECT m.old_path, m.src, m.dst, m.link_type, coalesce(m.from_span, '') AS from_span,
+               coalesce(m.to_span, '') AS to_span, m.created_by
           FROM mapped m
          WHERE m.src <> m.dst
            AND m.src NOT IN (SELECT s.tumbler FROM _rc_m s WHERE s.fate = 'sweep')
            AND m.dst NOT IN (SELECT s.tumbler FROM _rc_m s WHERE s.fate = 'sweep')
-           AND EXISTS (SELECT 1 FROM nexus.catalog_documents d
-                        WHERE d.tenant_id = $1 AND d.deleted_at IS NULL
-                          AND d.tumbler = CASE WHEN m.src = m.new_t THEN m.dst ELSE m.src END)
-         ORDER BY m.old_t, m.dir, m.id
-        ON CONFLICT (tenant_id, from_tumbler, to_tumbler, link_type) DO NOTHING$s$ USING v_tenant;
+         ORDER BY m.old_t, m.dir, m.id$s$ USING v_tenant
+        LOOP
+            -- v_cur is the loop's first column, the old row's file_path
+            EXECUTE v_nc || 'SELECT nexus.catalog_link_write($1, $2, $3, $4, $5, $6, true)'
+                USING v_src, v_dst, v_ltype, v_fspan, v_tspan, v_by;
+        END LOOP;
+        v_cur := NULL;
 
         -- links move before the trash, so the catalog-032 cascade, which fires only at purge, never sees them
-        EXECUTE v_nc || 'INSERT INTO _rc_t SELECT m.tumbler, m.fate FROM _rc_m m WHERE m.fate IN (''rename'', ''sweep'')';
-        EXECUTE v_nc || 'SELECT nexus.document_trash(m.tumbler) FROM _rc_m m WHERE m.fate IN (''rename'', ''sweep'')';
+        EXECUTE v_nc || 'INSERT INTO _rc_t SELECT m.tumbler, m.fate, m.file_path FROM _rc_m m WHERE m.fate IN (''rename'', ''sweep'')';
+        FOR v_trash, v_cur IN EXECUTE v_nc || 'SELECT m.tumbler, m.file_path FROM _rc_m m WHERE m.fate IN (''rename'', ''sweep'') ORDER BY m.tumbler'
+        LOOP
+            PERFORM nexus.document_trash(v_trash);
+        END LOOP;
+        v_cur := NULL;
 
         -- every other missing row counts a miss; a present row with a miss count is reset (metadata-only merges)
         EXECUTE v_nc || $s$
@@ -678,10 +708,14 @@ BEGIN
      WHERE w.kind = 'deleted' AND w.a_tumbler IS NULL$s$ USING v_tenant, p_owner;
     EXECUTE v_nc || $s$
     INSERT INTO _rc_t
-    SELECT w.a_tumbler, 'delete'
+    SELECT w.a_tumbler, 'delete', w.file_path
       FROM _rc_w w JOIN nexus.catalog_documents d ON d.tenant_id = $1 AND d.tumbler = w.a_tumbler
      WHERE w.kind = 'deleted' AND w.a_tumbler IS NOT NULL AND d.deleted_at IS NULL$s$ USING v_tenant;
-    EXECUTE v_nc || 'SELECT nexus.document_trash(t.tumbler) FROM _rc_t t WHERE t.kind = ''delete''';
+    FOR v_trash, v_cur IN EXECUTE v_nc || 'SELECT t.tumbler, t.file_path FROM _rc_t t WHERE t.kind = ''delete'' ORDER BY t.tumbler'
+    LOOP
+        PERFORM nexus.document_trash(v_trash);
+    END LOOP;
+    v_cur := NULL;
 
     -- ── the outcome ──
     EXECUTE v_nc || 'UPDATE _rc_w w SET target = coalesce(w.a_tumbler, w.b_tumbler)';
@@ -745,12 +779,20 @@ BEGIN
      WHERE h.tenant_id = v_tenant AND h.run_id = p_run_id;
     RETURN v_outcome;
 EXCEPTION WHEN OTHERS THEN
+    -- Every failure but the statement timeout (the caller maps 57014 to commit_timeout) and the ones this function
+    -- named itself ends the job with its SQLSTATE and message; when the failing statement was a write on one row
+    -- (an upsert row, a link move, a trash) v_cur names that row's file_path. A set-based write (the miss-count
+    -- merges, the audit insert) carries the SQLSTATE and message only: the server withholds the failing row from a
+    -- role that row-level security applies to.
     GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT, v_state = RETURNED_SQLSTATE;
-    IF v_state IN ('57014', '40P01', '40001', '55P03') OR v_msg LIKE 'reconcile_commit %' OR v_cur IS NULL THEN
+    IF v_state = '57014' OR v_msg LIKE 'reconcile_commit %' THEN
         RAISE;
     END IF;
-    RAISE EXCEPTION 'reconcile_commit write_failed: file_path %: %. Nothing was written. Operator action: fix or remove that file, then re-run nx index repo.',
-        v_cur, v_msg;
+    RAISE EXCEPTION '%',
+        'reconcile_commit write_failed: '
+        || CASE WHEN v_cur IS NOT NULL THEN 'file_path ' || v_cur || ': ' ELSE '' END
+        || 'SQLSTATE ' || v_state || ': ' || v_msg || '. Nothing was written.'
+        || CASE WHEN v_cur IS NOT NULL THEN ' Operator action: fix or remove that file, then re-run nx index repo.' ELSE '' END;
 END;
 $fn$;
 
@@ -796,6 +838,106 @@ GRANT EXECUTE ON FUNCTION nexus.catalog_reconcile_reap(interval) TO nexus_svc;
             <sql splitStatements="true" stripComments="false">
                 REVOKE EXECUTE ON FUNCTION nexus.catalog_reconcile_reap(interval) FROM nexus_svc;
                 DROP FUNCTION IF EXISTS nexus.catalog_reconcile_reap(interval);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-048-4" author="nexus-u5m5g.3">
+        <comment>nexus.catalog_link_write(p_from, p_to, p_link_type, p_from_span, p_to_span, p_created_by, p_if_absent) RETURNS text (RDR-193 fix round r1): the one link write, today's POST /link as a function. plpgsql, VOLATILE, SECURITY INVOKER. The reconcile commit's rename move calls it per link, and Step 3's batch link route reuses it. A function definition and its GRANT EXECUTE; no data effect at migration time.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_link_write(
+    p_from text, p_to text, p_link_type text, p_from_span text, p_to_span text, p_created_by text,
+    p_if_absent boolean DEFAULT false)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant  text := current_setting('nexus.tenant', true);
+    v_ends    text[] := ARRAY[p_from, p_to];
+    v_res     text[] := ARRAY[NULL, NULL]::text[];
+    v_k       integer;
+    v_hop     integer;
+    v_cur     text;
+    v_next    text;
+    v_seen    text[];
+    v_created boolean;
+BEGIN
+    -- What upsertLink does, in this order. Returns 'self' (nothing written), 'exists' (nothing written),
+    -- 'dangling' (nothing written), 'created' or 'merged'.
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION 'catalog_link_write no_tenant: nexus.tenant is not set';
+    END IF;
+
+    -- a link from a document to itself, as the client names it, is not written (checked before alias resolution, as the
+    -- client path checks it before it calls POST /link)
+    IF p_from = p_to THEN
+        RETURN 'self';
+    END IF;
+
+    -- link_if_absent: the edge the client names, unresolved, is already there, so nothing is touched
+    IF p_if_absent AND EXISTS (SELECT 1 FROM nexus.catalog_links l
+                                WHERE l.tenant_id = v_tenant AND l.from_tumbler = p_from AND l.to_tumbler = p_to
+                                  AND l.link_type = p_link_type) THEN
+        RETURN 'exists';
+    END IF;
+
+    -- alias resolution on both endpoints (resolveAliasTarget): follow alias_of to the canonical row, at most 16 hops;
+    -- stop on a cycle, and stop on the last row that exists when a pointer names a row that is gone or tombstoned
+    FOR v_k IN 1..2 LOOP
+        v_cur := v_ends[v_k];
+        v_seen := ARRAY[v_cur];
+        FOR v_hop IN 1..16 LOOP
+            SELECT d.alias_of INTO v_next FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.tumbler = v_cur AND d.deleted_at IS NULL;
+            EXIT WHEN v_next IS NULL OR v_next = '' OR v_next = ANY (v_seen);
+            PERFORM 1 FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.tumbler = v_next AND d.deleted_at IS NULL;
+            EXIT WHEN NOT FOUND;
+            v_seen := v_seen || v_next;
+            v_cur := v_next;
+        END LOOP;
+        v_res[v_k] := v_cur;
+    END LOOP;
+
+    -- both resolved endpoints must be live documents of this tenant
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d
+                    WHERE d.tenant_id = v_tenant AND d.tumbler = v_res[1] AND d.deleted_at IS NULL)
+       OR NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d
+                       WHERE d.tenant_id = v_tenant AND d.tumbler = v_res[2] AND d.deleted_at IS NULL) THEN
+        RETURN 'dangling';
+    END IF;
+
+    -- the upsert: an existing edge keeps its creator, takes the new spans, and folds the new creator into
+    -- metadata.co_discovered_by (the LNK_META_FOLD rule of upsertLink)
+    INSERT INTO nexus.catalog_links AS l (tenant_id, from_tumbler, to_tumbler, link_type, from_span, to_span, created_by)
+    VALUES (v_tenant, v_res[1], v_res[2], p_link_type, coalesce(p_from_span, ''), coalesce(p_to_span, ''), p_created_by)
+    ON CONFLICT (tenant_id, from_tumbler, to_tumbler, link_type) DO UPDATE
+       SET from_span = EXCLUDED.from_span,
+           to_span = EXCLUDED.to_span,
+           metadata = coalesce(l.metadata, jsonb_build_object())
+                      || jsonb_build_object('co_discovered_by',
+                           CASE WHEN jsonb_typeof(coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by') = 'array'
+                                THEN coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by'
+                                ELSE jsonb_build_array() END
+                           || CASE WHEN EXCLUDED.created_by <> '' AND EXCLUDED.created_by IS DISTINCT FROM l.created_by
+                                        AND NOT (CASE WHEN jsonb_typeof(coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by') = 'array'
+                                                      THEN coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by'
+                                                      ELSE jsonb_build_array() END) @> to_jsonb(EXCLUDED.created_by)
+                                   THEN jsonb_build_array(EXCLUDED.created_by)
+                                   ELSE jsonb_build_array() END)
+    RETURNING (l.xmax = 0) INTO v_created;
+    RETURN CASE WHEN v_created THEN 'created' ELSE 'merged' END;
+END;
+$fn$;
+
+GRANT EXECUTE ON FUNCTION nexus.catalog_link_write(text, text, text, text, text, text, boolean) TO nexus_svc;
+]]></sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+                REVOKE EXECUTE ON FUNCTION nexus.catalog_link_write(text, text, text, text, text, text, boolean) FROM nexus_svc;
+                DROP FUNCTION IF EXISTS nexus.catalog_link_write(text, text, text, text, text, text, boolean);
             </sql>
         </rollback>
     </changeSet>

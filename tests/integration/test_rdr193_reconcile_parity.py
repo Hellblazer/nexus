@@ -28,7 +28,9 @@ and a recorder lets the test see which tumblers the hook handed them (the ``new_
 Each fixture case lives under its own top-level directory; a difference is attributed to the case of its row.
 ``KNOWN_DIVERGENCES`` pins, per case, the difference the RDR deliberately keeps or is silent on, with its reason;
 the comparison for such a case asserts exactly that difference, so it fails if the difference goes away or
-changes. Every other case must match.
+changes. Every other case must match. There are none at present: the one the first round pinned (a rename move
+does not follow ``alias_of``) was closed in fix round r1 by the engine's shared ``catalog_link_write``, so every
+case matches in both walks and the partial-walk test compares every case too.
 
 The old path's end state is also the golden file ``tests/fixtures/rdr193_reconcile_parity_expected.json``, which
 Step 6 keeps when it deletes the client path. ``NX_PARITY_REGEN_GOLDEN=1`` rewrites it from the old path; without
@@ -184,8 +186,11 @@ FILES: list[F] = [
     F("misc/sens_existing.txt", "prose", "sensitive existing body\n"),
     F("misc/sens_new.txt", "prose", None, "sensitive new body\n"),
     F("misc/plain_new.txt", "prose", None, "plain new body\n"),
+    # a deleted path that two live rows of the owner hold (the twin is registered in prepare()): the old path trashes the
+    # first tumbler in the database's text order (by_file_path -> match[0]); the commit must trash that row, not the greatest
+    F("del_dup/dup.txt", "prose", "deleted duplicate body\n", None),
 ]
-DELETED = ["ren_and_deleted/a.txt", "misc/del.txt", "id_deleted_foreign/held.txt"]
+DELETED = ["ren_and_deleted/a.txt", "misc/del.txt", "id_deleted_foreign/held.txt", "del_dup/dup.txt"]
 KEEP = ["misc/keep.txt"]
 
 #: The action each path must get from the commit. It is not parity: it proves each case reached the arm it is
@@ -204,24 +209,13 @@ EXPECTED_ACTIONS = {
     "stamp_cat/cat_set.txt": "unchanged", "id_legacy/unchanged.txt": "unchanged", "fence/complete.txt": "unchanged",
     "id_same_owner/x.txt": "same_owner_by_uri", "id_foreign/x.txt": "foreign_owner",
     "misc/keep.txt": "keep", "ren_and_deleted/a.txt": "deleted", "misc/del.txt": "deleted",
-    "id_deleted_foreign/held.txt": "deleted",
+    "id_deleted_foreign/held.txt": "deleted", "del_dup/dup.txt": "deleted",
 }
 
-#: case -> (reason, the RDR line, the exact differences ``(section, key, column, old, new)``). Filled from the
-#: first live run; a case that is not here must match.
-KNOWN_DIVERGENCES: dict[str, tuple[str, str, list[tuple]]] = {
-    "ren_alias": (
-        "a link moved by a rename keeps an alias endpoint as it is; today's link_if_absent goes through POST /link, "
-        "which follows alias_of and writes the edge to the canonical row (Part A+B choice 6: the commit does not "
-        "resolve aliases on a move). The RDR is silent on it: A1 describes the move without alias resolution, and "
-        "the declared alias difference is only the batch link route of A4",
-        "863-870 (the rename move, silent); 506-510 (today's POST /link resolves alias_of); 1009-1014 and 1295 (declared, A4 only)",
-        [
-            ("links", "ren_alias::M:ren_alias/a2.txt#0 -> M:ren_alias/alias.txt#0 [cites]", "<row>", "<absent>", "<present>"),
-            ("links", "ren_alias::M:ren_alias/a2.txt#0 -> M:ren_alias/target.txt#0 [cites]", "<row>", "<present>", "<absent>"),
-        ],
-    ),
-}
+#: case -> (reason, the RDR line, the exact differences ``(section, key, column, old, new)``). A case that is not
+#: here must match. Empty since fix round r1: the engine's ``catalog_link_write`` makes a rename move follow
+#: ``alias_of`` as today's ``POST /link`` does, which closed the one divergence the first round pinned.
+KNOWN_DIVERGENCES: dict[str, tuple[str, str, list[tuple]]] = {}
 
 
 # ── plumbing: raw SQL against the tenant ─────────────────────────────────────────────────────────────────────────
@@ -685,6 +679,11 @@ class Scenario:
                                 file_path="id_duplicate/alt/dup.txt", physical_collection=COLLECTIONS["prose"],
                                 source_uri=f"file://{c.root}/id_duplicate/alt/dup.txt"))
         _update_doc(self.tenant, twin, "file_path = 'id_duplicate/dup.txt'")
+        # the deleted path with a live duplicate: registered after the seed row, so its tumbler is the greater of the two
+        del_twin = str(cat.register(c.owner, "del dup twin", content_type="prose",
+                                    file_path="del_dup/alt/dup.txt", physical_collection=COLLECTIONS["prose"],
+                                    source_uri=f"file://{c.root}/del_dup/alt/dup.txt"))
+        _update_doc(self.tenant, del_twin, "file_path = 'del_dup/dup.txt'")
         cat.register(c.other, "held elsewhere", content_type="prose", file_path="id_deleted_foreign/held.txt",
                      source_uri=f"file://{c.root}-elsewhere/held.txt")
 
@@ -765,6 +764,12 @@ def test_the_commit_leaves_what_the_client_path_leaves(tmp_path: Path, t2_tenant
             assert f"M:{rel}#0" in renamed_olds, f"{rel} was not renamed: {sorted(renamed_olds)}"
         assert f"M:ren_link_swept/s.txt#0" in {key[t] for t in outcome["swept"]}, outcome["swept"]
         assert "id_duplicate/dup.txt" in {d["file_path"] for d in outcome["duplicate_path"]}, outcome["duplicate_path"]
+        # the deleted duplicate: the commit trashes the lower tumbler (the old path's row) and reports the other
+        dup_rows = [d for d in outcome["duplicate_path"] if d["file_path"] == "del_dup/dup.txt"]
+        assert len(dup_rows) == 1, outcome["duplicate_path"]
+        trashed_dup = next(r["tumbler"] for r in outcome["rows"] if r["file_path"] == "del_dup/dup.txt")
+        assert trashed_dup in outcome["trashed"] and dup_rows[0]["tumbler"] not in outcome["trashed"], outcome["trashed"]
+        assert key[trashed_dup] == "M:del_dup/dup.txt#0" and key[dup_rows[0]["tumbler"]] == "M:del_dup/dup.txt#1"
         assert "id_deleted_foreign/held.txt" in {d["file_path"] for d in outcome["deleted_skipped_foreign_owner"]}
         assert outcome["sensitivity_pending"] == [sc.t(new, "misc/sens_existing.txt")], outcome["sensitivity_pending"]
         assert set(outcome["trashed"]) == run_new["trashed_now"], (outcome["trashed"], run_new["trashed_now"])
@@ -830,13 +835,16 @@ def test_a_partial_walk_commit_touches_no_unvisited_row(tmp_path: Path, t2_tenan
             sc.prepare(c)
             _write_run2(c)
         visited = ["fill/f01.py", "ch_content/doc.txt", "ch_fence/changed.txt", "ch_fence/new.txt", "ren_single/b.txt"]
-        snap_old, _ = sc.run(old, complete=False, rels=visited, keep=[], deleted=["misc/del.txt"])
-        snap_new, run_new = sc.run(new, complete=False, rels=visited, keep=[], deleted=["misc/del.txt"])
+        # misc/del.txt has one live row; del_dup/dup.txt has two, and only the old path's row (the first in text order) goes
+        deleted = ["misc/del.txt", "del_dup/dup.txt"]
+        snap_old, _ = sc.run(old, complete=False, rels=visited, keep=[], deleted=deleted)
+        snap_new, run_new = sc.run(new, complete=False, rels=visited, keep=[], deleted=deleted)
         outcome = run_new["outcome"]
         assert outcome["renamed"] == [] and outcome["swept"] == [], "a partial walk must not rename or sweep"
-        assert len(outcome["trashed"]) == 1 and set(outcome["trashed"]) == run_new["trashed_now"], outcome["trashed"]
+        assert len(outcome["trashed"]) == 2 and set(outcome["trashed"]) == run_new["trashed_now"], outcome["trashed"]
         by_case, row_counts = _verdicts(snap_old.sections, snap_new.sections)
-        failures = [f"{c}: {_fmt(d)}" for c, ds in by_case.items() for d in ds if c not in KNOWN_DIVERGENCES]
+        # every case is compared, including any a complete walk pins: nothing is skipped here
+        failures = [f"{c}: {_fmt(d)}" for c, ds in by_case.items() for d in ds]
         print(  # noqa: T201 — first-run record, read with -s
             f"partial walk: cases examined {len(row_counts)}, rows compared {sum(row_counts.values())}, "
               f"differences {sum(len(v) for v in by_case.values())}")
