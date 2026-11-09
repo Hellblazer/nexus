@@ -45,7 +45,7 @@ def _put_keyless(**kw):
     with patch.object(store_hook, "catalog_store_hook_tracked", _hook):
         result = put_note(**kw)
     # A pre-Step-1 client also stamped the note's own facts on its chunk rows (RDR-236 Phase 4 Step 1: a
-    # current client writes the CHUNK keys only), which is where the keyless export recovers them from.
+    # current client writes the CHUNK keys only); the export must leave those row values behind.
     stamp_legacy_note_rows(
         HttpVectorClient(), kw["collection"], result.chunk_ids, catalog_doc_id=result.catalog_doc_id,
         title=kw["title"], tags=kw.get("tags", ""), category=kw.get("category", ""),
@@ -93,9 +93,11 @@ def test_a_split_note_exports_its_whole_text_and_round_trips_through_import(t2_s
     assert docs["split-keyless"]["content"] == keyless_body
     assert (docs["split-keyed"]["tags"], docs["split-keyed"]["category"],
             docs["split-keyed"]["ttl_days"]) == (["alpha"], "design", 7)
-    # The keyless note wrote its own first piece, so the first piece's row values are its own.
+    # The keyless note wrote its own pieces and its rows hold its values, but the export has no row path
+    # (RDR-236 Phase 4 Step 1, nexus-6pfgb.65): it carries none and counts the note as one that lost some.
     assert (docs["split-keyless"]["tags"], docs["split-keyless"]["category"],
-            docs["split-keyless"]["ttl_days"]) == (["beta"], "finding", 30)
+            docs["split-keyless"]["ttl_days"]) == ([], "", None)
+    assert summary.note_keys_unrecovered_notes == [(collection, "split-keyless")]
     assert summary.notes_incomplete == 0
 
     imported = import_bundle(reader, reader, client, bundle)

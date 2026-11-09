@@ -126,8 +126,8 @@ def test_a_note_stored_with_no_keys_never_exports_a_departed_co_owners_keys(
                  ttl_days=7, source_agent="agent-b")
     assert b.status == STORED, b.reason
     row = client.get_by_id(collection, a.chunk_ids[0], sensitivity="include")
-    # The engine returns the last writer's catalog_doc_id and title in the row's metadata: the pair
-    # note_ttl.row_written_by reads, the signal the export gates on (nexus-6pfgb.34).
+    # The engine returns the last writer's catalog_doc_id and title in the row's metadata, and B's
+    # values: the row says B wrote it, and the export reads none of it for A (nexus-6pfgb.65).
     assert row["catalog_doc_id"] == b.catalog_doc_id and row["title"] == "keyed-B" and row["ttl_days"] == 7
     moved = put_note(content=body + " (moved)", collection=collection, title="keyed-B", tags="beta",
                      category="finding", ttl_days=7, source_agent="agent-b")
@@ -153,11 +153,12 @@ def _put_keyless(**kw):
         return put_note(**kw)
 
 
-def test_a_keyless_note_that_wrote_its_own_row_exports_the_rows_values(t2_service_env, tmp_path):
+def test_a_keyless_note_that_wrote_its_own_row_exports_none_of_the_rows_values(t2_service_env, tmp_path):
     """B (keys) then A, a pre-catalog-keys put with tags, category and a TTL of its own, store the same
     text. A's entry holds no note key; the row is A's write (A's stamp, A's title) and holds A's values,
-    so the export carries them through ``row_written_by``'s accept branch (nexus-6pfgb.34). B is not
-    the row's writer and keeps its own catalog keys."""
+    and the export still carries none of them: it has no row path (RDR-236 Phase 4 Step 1,
+    nexus-6pfgb.65), and counts A as a note whose row held values the record lacks. B is not the row's
+    writer and keeps its own catalog keys."""
     client = HttpVectorClient(tenant=t2_service_env)
     collection = t3_collection_name("6pfgb14-lastwriter", t3=client)
     body = "6pfgb14 body written last by a note whose keys are only on the row"
@@ -175,10 +176,10 @@ def test_a_keyless_note_that_wrote_its_own_row_exports_the_rows_values(t2_servic
     summary, docs = _exported(client, tmp_path, collection)
 
     assert (docs["legacy-A"]["tags"], docs["legacy-A"]["category"], docs["legacy-A"]["ttl_days"]) == (
-        ["alpha"], "design", 30)
+        [], "", None)
     assert (docs["keyed-B"]["tags"], docs["keyed-B"]["category"], docs["keyed-B"]["ttl_days"]) == (
         ["beta"], "finding", 7)
-    assert summary.note_keys_unrecovered == 0
+    assert summary.note_keys_unrecovered_notes == [(collection, "legacy-A")]
 
 
 def test_a_rejected_keyless_note_re_put_with_its_values_exports_them(t2_service_env, tmp_path):

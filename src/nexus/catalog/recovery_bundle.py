@@ -62,7 +62,6 @@ from nexus.aspect_readers import (
     is_note_uri,
     uri_for,
 )
-from nexus.catalog.note_ttl import row_may_give_tags, row_written_by
 from nexus.catalog.types import CatalogEntry
 from nexus.errors import NoteUriEngineTooOldError
 from nexus.ttl import MAX_TTL_DAYS
@@ -136,9 +135,9 @@ class ExportSummary:
     notes_incomplete_notes: list[tuple[str, str]] = field(default_factory=list)
     unresolvable_link_endpoints: int = 0
     #: Notes whose catalog entry holds none of its own note keys (written before nexus-6pfgb.5, or
-    #: stored with none of them before nexus-6pfgb.15) while the chunk row carries a tags, category or
-    #: ttl_days value that is not provably its own (the row's ``catalog_doc_id`` and ``title`` are not
-    #: both this note's): the record carries none.
+    #: stored with none of them before nexus-6pfgb.15) while a chunk row carries a tags, category or
+    #: ttl_days value: the record carries none, because the export never reads a note's keys off a row
+    #: (nexus-6pfgb.65).
     note_keys_unrecovered: int = 0
     #: ``(collection, title)`` of each of those notes, in export order, so the command can name them
     #: (a title is unique within a collection only).
@@ -256,9 +255,9 @@ def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
     key is unset, never "ask the chunk row". ``put_at`` counts: every put since nexus-6pfgb.15
     writes it, so a note stored with every other key unset still has an answer (all empty, and not
     counted as unrecovered). An entry with none is a legacy one, or a note stored with every key
-    unset before nexus-6pfgb.15. :func:`export_knowledge_doc` lets a chunk row fill such an entry when
-    :func:`nexus.catalog.note_ttl.row_written_by` says the row is this note's own write, and fill its
-    tags and category alone on sole ownership (nexus-6pfgb.35).
+    unset before nexus-6pfgb.15. :func:`export_knowledge_doc` exports such a note with all three empty
+    and no longer asks its chunk row (RDR-236 Phase 4 Step 1, nexus-6pfgb.65): the backfill filled every
+    keyless note it could, and the residue was accepted at the dry run.
     """
     from nexus.catalog.store_hook import NOTE_META_KEYS, split_note_tags  # noqa: PLC0415 — deferred, store_hook has a heavy import graph
 
@@ -281,7 +280,6 @@ def _own_entity_key(entry: CatalogEntry) -> str:
 
 def export_knowledge_doc(
     entry: CatalogEntry, manifest_rows: list, rows_by_chash: dict[str, dict], summary: ExportSummary,
-    owners_by_chash: dict[str, list[str]] | None = None,
 ) -> dict | None:
     """Build one ``knowledge_doc`` record from the note's manifest rows and the chunk rows
     :func:`export_bundle` read for its collection (*rows_by_chash*); ``None`` when the note cannot be
@@ -299,23 +297,14 @@ def export_knowledge_doc(
     ``tags``, ``category`` and ``ttl_days`` are the NOTE'S OWN, read from its catalog entry's ``meta``
     (nexus-6pfgb.5): two notes with identical text share one chunk row, and the row carries only the
     last writer's. An entry with none of the note keys (written before nexus-6pfgb.5, or stored with
-    none of them before nexus-6pfgb.15 made every put write ``put_at``) takes a piece row's values only
-    when the row is this note's own write (:func:`nexus.catalog.note_ttl.row_written_by`: the row's
-    ``catalog_doc_id`` is this entry's tumbler AND its ``title`` this entry's title), the first such
-    piece in position order: every piece of one put carries that put's values, and a piece another
-    note shares may have been restamped by it. A row a later note wrote and a row carrying a stale
-    ``.nxexp`` stamp under another title are not, whoever else holds the chunk now: a row is not
-    rewritten when a co-owner leaves (nexus-6pfgb.34).
-
-    ``ttl_days`` comes from no other row, since a TTL a departed co-owner left on a row would make a
-    permanent note expire after import. ``tags`` and ``category`` alone, a wrong value being cosmetic,
-    also come from a piece row this note is the sole live owner of (*owners_by_chash*, from
-    :func:`export_bundle`'s one owner lookup, owners in other collections left out), unless the row's
-    stamp AND title both name another note (:func:`nexus.catalog.note_ttl.row_may_give_tags`): the first such piece in position
-    order (Sam, nexus-6pfgb.35 option B, the middle reading). That recovers an unstamped legacy row, a
-    renamed note (its own stamp, its old title) and an ``.nxexp`` import (the source box's stamp, its
-    own title). *summary* counts the note when a piece row held a value where the record has none.
-    ``ttl_days`` is a positive integer or ``None``.
+    none of them before nexus-6pfgb.15 made every put write ``put_at``) exports all three empty
+    (``ttl_days`` permanent): the export has no row path (RDR-236 Phase 4 Step 1, nexus-6pfgb.65).
+    The backfill (nexus-6pfgb.10) already filled every keyless note whose row it could attribute, and
+    the residue was accepted at the dry run, so a row is never a source: a TTL a departed co-owner left
+    on one would make a permanent note expire after import, and a client no longer writes a note's own
+    facts to its rows at all. *summary* counts the note, and names it, when a piece row still holds a
+    tags, category or ttl_days value the record does not carry. ``ttl_days`` is a positive integer or
+    ``None``.
     """
     ordered = sorted(manifest_rows, key=lambda r: r.position)
     pieces = [rows_by_chash.get(mrow.chash) for mrow in ordered]
@@ -339,31 +328,18 @@ def export_knowledge_doc(
     content = "".join(str(p["content"]) for p in rows)
     keys = _own_note_keys(entry)
     if keys is None:
-        written = next((p for p in rows if row_written_by(entry.tumbler, p, owner_title=entry.title)), None)
-        if written is not None:
-            keys = _row_keys(written)
-        else:
-            keys = {"tags": [], "category": "", "ttl_days": None}
-            me = str(entry.tumbler)
-            sole = next((
-                piece for mrow, piece in zip(ordered, rows)
-                if row_may_give_tags(entry.tumbler, piece, owner_title=entry.title or "") and set((owners_by_chash or {}).get(mrow.chash, [])) == {me}
-            ), None)
-            if sole is not None:
-                keys.update(tags=_row_keys(sole)["tags"], category=_row_keys(sole)["category"])
-            dropped = any(
-                (k["tags"] and not keys["tags"]) or (k["category"] and not keys["category"])
-                or (k["ttl_days"] and not keys["ttl_days"])
-                for k in map(_row_keys, rows)
+        # The row is never a source (RDR-236 Phase 4 Step 1, nexus-6pfgb.65): the backfill filled every
+        # keyless note it could, and the residue was accepted at the dry run. A row's values are only
+        # counted, so the operator is told what the record does not carry.
+        keys = {"tags": [], "category": "", "ttl_days": None}
+        if any(k["tags"] or k["category"] or k["ttl_days"] for k in map(_row_keys, rows)):
+            summary.note_keys_unrecovered += 1
+            summary.note_keys_unrecovered_notes.append((entry.physical_collection, entry.title or ""))
+            _log.info(
+                "recovery_export_note_keys_unrecovered",
+                tumbler=str(entry.tumbler),
+                title=entry.title,
             )
-            if dropped:
-                summary.note_keys_unrecovered += 1
-                summary.note_keys_unrecovered_notes.append((entry.physical_collection, entry.title or ""))
-                _log.info(
-                    "recovery_export_note_keys_unrecovered",
-                    tumbler=str(entry.tumbler),
-                    title=entry.title,
-                )
     return {
         "record": "knowledge_doc",
         "source_uri": entry.source_uri or "",
@@ -401,47 +377,10 @@ def _collection_rows(t3: Any, collection: str, chashes: list[str]) -> dict[str, 
         return {}
 
 
-def _tag_row_owners(
-    reader: Any,
-    selected: list[tuple[CatalogEntry, str, list]],
-    rows_by_collection: dict[str, dict[str, dict]],
-    collection_of: dict[str, str],
-) -> dict[str, list[str]]:
-    """``chash -> live owner tumblers in the chash's own collection`` for the pieces whose ownership can
-    decide a record's tags and category (:func:`export_knowledge_doc`, nexus-6pfgb.35 option B): rows
-    that hold a tag or category and :func:`~nexus.catalog.note_ttl.row_may_give_tags` allows, of keyless notes none of whose
-    pieces is their own write. One ``docs_for_chashes`` lookup for all of them, none when there are
-    none. ``docs_for_chashes`` is catalog-wide, so an owner the catalog walk places in another
-    collection (a different T3 row with the same text) is dropped; an owner the walk did not see is
-    kept, which can only withhold tags. A failed lookup withholds every such tag rather than the
-    backup: those notes are counted and named as unrecovered."""
-    wanted: dict[str, str] = {}
-    for entry, _leg, mrows in selected:
-        if _own_note_keys(entry) is not None:
-            continue
-        rows_by_chash = rows_by_collection.get(entry.physical_collection, {})
-        pieces = [(m.chash, rows_by_chash.get(m.chash)) for m in mrows]
-        if any(p is not None and row_written_by(entry.tumbler, p, owner_title=entry.title) for _c, p in pieces):
-            continue
-        for chash, row in pieces:
-            if row is not None and (row.get("tags") or row.get("category")) and row_may_give_tags(entry.tumbler, row, owner_title=entry.title or ""):
-                wanted.setdefault(chash, entry.physical_collection)
-    if not wanted:
-        return {}
-    try:
-        owners = reader.docs_for_chashes(list(wanted))
-    except Exception as exc:  # noqa: BLE001 — the lookup only adds cosmetic keys; its loss is counted per note, the backup goes on
-        _log.warning("recovery_export_owner_lookup_failed", chashes=len(wanted), error=str(exc))
-        return {}
-    return {
-        chash: [str(t) for t in ts if collection_of.get(str(t), wanted[chash]) == wanted[chash]]
-        for chash, ts in (owners or {}).items() if chash in wanted
-    }
-
-
 def _row_keys(row: dict) -> dict[str, Any]:
     """A chunk row's ``tags``, ``category`` and ``ttl_days`` in the record's shape: the row keeps a
-    comma string, the record carries the array (nexus-6pfgb.38)."""
+    comma string, the record carries the array (nexus-6pfgb.38). Read only to count what a keyless
+    note's record does not carry (:func:`export_knowledge_doc`), never to fill it."""
     from nexus.catalog.store_hook import split_note_tags  # noqa: PLC0415 — deferred, store_hook has a heavy import graph
 
     return {
@@ -570,12 +509,8 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
         collection: _collection_rows(t3, collection, list(dict.fromkeys(chashes)))
         for collection, chashes in chashes_by_collection.items()
     }
-    collection_of = {str(e.tumbler): e.physical_collection for e in entries}
-    owners_by_chash = _tag_row_owners(reader, selected, rows_by_collection, collection_of)
     for entry, _leg, rows in selected:
-        rec = export_knowledge_doc(
-            entry, rows, rows_by_collection[entry.physical_collection], summary, owners_by_chash,
-        )
+        rec = export_knowledge_doc(entry, rows, rows_by_collection[entry.physical_collection], summary)
         if rec is not None:
             docs.append(rec)
 
