@@ -22,11 +22,19 @@ THE RULE. Exit 0 and print nothing (allow the stop) when any of these holds:
   build that does not send them would otherwise have this guard fire while a subagent or Monitor is
   running. Both fields were present on the build below, so this branch is a guard for older builds;
 - the closing text (``last_assistant_message``) is empty or not text;
-- the clause that would block is a CI wait and the session's nexus MCP server records a CI wake
-  (nexus-1d6pz.11.5; :func:`ci_wake_state`): its channel waiter alive and fresh, the conexus
-  channel flag on the ``claude`` launch, and a ``board/ci/*--done`` topic subscribed. With the
-  subscription but no flag the block names ``nx ci wait <sha>``, the background command that wakes
-  a session without the channel.
+- every clause that would block is a develop-CI wait (it names CI, checks, runs, a workflow, a
+  pipeline, shards, the push or a sha, and no PR, release, tag, main, reviewer, agent or deploy;
+  :func:`is_develop_ci_clause`) and the session's nexus MCP server records a CI wake
+  (nexus-1d6pz.11.5; :func:`ci_wake_state`): its channel waiter alive, fresh and not stalled, the
+  client's initialize handshake seen, the conexus channel flag on the ``claude`` launch, and a
+  ``board/ci/*--done`` topic subscribed. Covered clauses are skipped and the rest of the text is
+  still read, so a covered CI wait never hides a later promise. With a live waiter and the
+  subscription but the flag read as absent, the block names ``nx ci wait <sha>``, the background
+  command that wakes a session without the channel. Two limits are accepted: the --done wake is
+  best effort (a run set the board adapter could not fold posts nothing, and only ``nx ci wait``
+  reads GitHub at its deadline), and a present flag does not prove Claude Code registered the
+  channel (a plugin off the allowlist, an organisation policy, an unconfirmed development-channel
+  dialog). The record names topics, not shas, so any ``board/ci/*--done`` topic counts.
 
 Otherwise only the TAIL of the text is read (the last ``_TAIL_CHARS`` characters, from a sentence
 boundary): the end of a turn is where a promise lives, and a status line near the top must not
@@ -82,6 +90,7 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from typing import NamedTuple
 
 KILL_SWITCH_ENV = "NX_STOP_WAKE_GUARD"
@@ -518,8 +527,10 @@ def _ends_on_sam(clause: str) -> bool:
     )
 
 
-def evaluate_text(text: str) -> Verdict:
-    """Classify a closing text. Pure: no environment, no I/O."""
+def evaluate_text(text: str, ci_covered: "Callable[[str], bool] | None" = None) -> Verdict:
+    """Classify a closing text. Pure: no environment, no I/O. *ci_covered*, when given, names the CI-wait
+    clauses a wake already covers (nexus-1d6pz.11.5): each is skipped and the rest of the text is still read,
+    so a covered CI wait never hides a later promise or timed step."""
     sam = peer = past = 0
     #: 0 none; 1 a gate on "you" or a question (a follow-up that starts on a chain word hangs from it); 2 an
     #: approval gate on Sam (a follow-up that merely depends on "that" or "it" hangs from it too). A clause that
@@ -569,6 +580,8 @@ def evaluate_text(text: str) -> Verdict:
                 # up to ``_CHAIN_GAP`` clauses.
                 chain = 0
                 continue
+            if cls == CLASS_CI_WAIT and ci_covered is not None and ci_covered(clause):
+                break  # covered by an armed wake: on to the next clause
             if final_sam:
                 # The message ends on Sam (a question, a hand-off, an approval to wait for): his reply is the wake.
                 return Verdict(False, cls, clause, sam, peer, past, True)
@@ -612,26 +625,54 @@ _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _CI_DONE_TOPIC = re.compile(r"board/ci/[^/]+--done")
 
 
+#: A CI-wait clause the develop --done wake can cover: it names CI, checks, runs, a workflow, a pipeline,
+#: shards, the push or a sha, and nothing a develop push's wake does not carry (a PR, a release, a tag, main,
+#: another repository). "The reviewers are still running" or "the index build is in progress" is a CI-wait
+#: clause to the text classifier and no CI wake at all, so it is never covered.
+_DEVELOP_CI_NOUN = re.compile(r"\b(?:ci|checks?|runs?|workflows?|pipelines?|shards?|push(?:ed)?|sha|develop)\b", re.I)
+_NOT_DEVELOP_CI = re.compile(
+    r"\b(?:pr|prs|pull requests?|release|tag|tags|main|reviewers?|agents?|monitors?|planner|deploy(?:ment)?|"
+    r"other repo(?:sitory)?|staging|production)\b",
+    re.I,
+)
+
+
+def is_develop_ci_clause(clause: str) -> bool:
+    """Whether *clause* waits on the kind of CI a develop push's --done wake reports."""
+    return bool(_DEVELOP_CI_NOUN.search(clause)) and not _NOT_DEVELOP_CI.search(clause)
+
+
+def _server_config_dir(env: dict[str, str]) -> str:
+    """The directory the MCP server writes under: nexus.config.nexus_config_dir's rule exactly
+    (NEXUS_CONFIG_DIR, stripped, else ~/.config/nexus), not this hook's log-dir rule."""
+    override = env.get("NEXUS_CONFIG_DIR", "").strip()
+    return override or os.path.join(os.path.expanduser("~"), ".config", "nexus")
+
+
 def ci_wake_state(session_id: object, env: dict[str, str], *, now: float | None = None) -> str:
-    """CI_WAKE_ARMED, CI_WAKE_NO_CHANNEL (a --done subscription whose posts are not pushed) or
-    CI_WAKE_NONE. Any doubt (no record, unreadable, stale, waiter not alive) is CI_WAKE_NONE."""
+    """CI_WAKE_ARMED, CI_WAKE_NO_CHANNEL (a live waiter with a --done subscription in a session read as
+    launched without the channel flag) or CI_WAKE_NONE. Any doubt (no record, unreadable, stale or from the
+    future, waiter not alive, the client's initialize handshake not seen or a send stalled, the flag
+    unreadable) is CI_WAKE_NONE, which blocks as before."""
     if not isinstance(session_id, str) or not _SAFE_SESSION_ID.fullmatch(session_id):
         return CI_WAKE_NONE
-    path = os.path.join(_config_dir(env), "tuple-watch", "channel-status.d", session_id)
+    path = os.path.join(_server_config_dir(env), "tuple-watch", "channel-status.d", session_id)
     try:
         with open(path, encoding="utf-8") as handle:
             status = json.load(handle)
         age = (time.time() if now is None else now) - os.path.getmtime(path)
     except (OSError, ValueError):
         return CI_WAKE_NONE
-    if not isinstance(status, dict):
+    if not isinstance(status, dict) or not 0 <= age <= CI_WAKE_FRESH_S:
         return CI_WAKE_NONE
     topics = status.get("board_topics")
     if not isinstance(topics, list) or not any(isinstance(t, str) and _CI_DONE_TOPIC.fullmatch(t) for t in topics):
         return CI_WAKE_NONE
-    if status.get("channel_flag") is not True:
+    if status.get("alive") is not True or status.get("gate_stalled") is True:
+        return CI_WAKE_NONE
+    if status.get("channel_flag") is False:
         return CI_WAKE_NO_CHANNEL
-    if status.get("alive") is not True or status.get("gate_stalled") is True or age > CI_WAKE_FRESH_S:
+    if status.get("channel_flag") is not True or status.get("gate_open") is not True:
         return CI_WAKE_NONE
     return CI_WAKE_ARMED
 
@@ -658,8 +699,11 @@ def decide(payload: object, env: dict[str, str], *, now: float | None = None) ->
     if verdict.block and verdict.cls == CLASS_CI_WAIT:
         wake = ci_wake_state(payload.get("session_id"), env, now=now)
         if wake == CI_WAKE_ARMED:
-            return Decision(False, "ci-wake-armed", "", detail)
-        if wake == CI_WAKE_NO_CHANNEL:
+            covered = evaluate_text(text, ci_covered=is_develop_ci_clause)
+            if not covered.block:
+                return Decision(False, "ci-wake-armed", "", detail)
+            verdict = covered
+        elif wake == CI_WAKE_NO_CHANNEL and is_develop_ci_clause(verdict.clause):
             return Decision(True, CLASS_CI_WAIT_NO_CHANNEL, verdict.clause, detail)
     if verdict.block:
         return Decision(True, verdict.cls, verdict.clause, detail)
@@ -673,11 +717,8 @@ def block_reason(cls: str, clause: str) -> str:
     if len(quoted) > _REASON_CLAUSE_CAP:
         quoted = quoted[: _REASON_CLAUSE_CAP - 3] + "..."
     if cls == CLASS_CI_WAIT_NO_CHANNEL:
-        quoted_ = " ".join(clause.split())
-        if len(quoted_) > _REASON_CLAUSE_CAP:
-            quoted_ = quoted_[: _REASON_CLAUSE_CAP - 3] + "..."
         return (
-            f'Stop-hook wake guard: your last message closes on a CI wait ("{quoted_}"). This session is subscribed to '
+            f'Stop-hook wake guard: your last message closes on a CI wait ("{quoted}"). This session is subscribed to '
             "a CI board's --done topic, but it was not launched with the conexus channel, so that post will not wake "
             "it. Run `nx ci wait <sha>` as a background command now (its exit is the wake and its line is the result), "
             "then end the turn."

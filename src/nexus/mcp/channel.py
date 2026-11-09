@@ -972,8 +972,20 @@ class ChannelWaiter:
         thread: every `tick()` already rebuilds its `WaitSpec`s fresh from
         `subs.entries()`, so the new list is live at the very next tick,
         at most one `wait_timeout_s` later. This callback's only job is
-        the log line the RDR asks to "record what you did"."""
+        the log line the RDR asks to "record what you did".
+
+        nexus-1d6pz.11.5: it also republishes the status record, so the
+        Stop-hook wake guard sees a ``--done`` subscription made just before
+        a turn ends (and its removal) at once rather than after the next
+        park. The write is handed to the waiter's own loop, the only thread
+        that writes the record, so two writers never share its tmp file."""
         _log.info("channel_waiter_subscription_changed", session_id=self.session_id)
+        loop = getattr(self, "_loop", None)
+        if loop is not None and self.state_dir is not None:
+            try:
+                loop.call_soon_threadsafe(self._publish_status)
+            except RuntimeError:  # the loop is closed: the waiter is gone, nothing to publish
+                pass
 
     # ── status (the doctor-row bead, .13, is the intended reader) ───────────
 
@@ -1035,6 +1047,7 @@ class ChannelWaiter:
             # (conexus/hooks/scripts/stop_wake_guard.py): a live waiter, the
             # channel flag and a board/ci/*--done topic together are a CI wake.
             "channel_flag": self._channel_flag,
+            "gate_open": _gate_is_open(),
             "board_topics": self._board_topics(),
         }
 
