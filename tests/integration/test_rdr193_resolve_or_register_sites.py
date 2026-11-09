@@ -7,6 +7,10 @@ document through ``POST /v1/catalog/doc/resolve_or_register``: the engine looks 
 of the same title where asked, and otherwise registers the document (born flagged when sensitive), carrying the title,
 year and source_mtime. The tests count the requests on the wire against the real engine (``t2_tenant``) and read the
 rows back; the ``created`` signal that ``rollback_minted_catalog_entry`` depends on is pinned in both directions.
+
+Every case reads a row the engine keeps, so none can run over a stub; the module lives in ``tests/integration`` because
+an engine-backed test is not counted by the python_unit tenant ceiling there (tests/AGENTS.md). CI runs it when one of the
+three sites or this file changes (``integration (affected)``) and the nightly gate runs the whole family.
 """
 from __future__ import annotations
 
@@ -16,9 +20,10 @@ import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.store_hook import catalog_store_hook_tracked
+from nexus.doc_indexer import _register_or_lookup_doc_id
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
-pytestmark = pytest.mark.t2_tenant
+pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]
 
 ROR = "/v1/catalog/doc/resolve_or_register"
 REGISTER = "/v1/catalog/doc/register"
@@ -116,8 +121,6 @@ def test_a_stamp_that_cannot_be_written_rolls_the_minted_row_back_and_reports_no
 # ── doc_indexer ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 def test_the_preflight_registers_a_curator_document_with_one_request_and_a_second_call_finds_it(tmp_path: Path, wire) -> None:
-    from nexus.doc_indexer import _register_or_lookup_doc_id
-
     f = tmp_path / "paper.md"
     f.write_text("# Paper\nbody\n")
     first, created = _register_or_lookup_doc_id(
@@ -140,8 +143,6 @@ def test_the_preflight_registers_a_curator_document_with_one_request_and_a_secon
 
 
 def test_the_preflight_resolves_onto_a_row_another_owner_holds_and_does_not_mint(tmp_path: Path, wire) -> None:
-    from nexus.doc_indexer import _register_or_lookup_doc_id
-
     f = tmp_path / "held.md"
     f.write_text("# Held\n")
     cat = HttpCatalogClient()

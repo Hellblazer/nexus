@@ -8,7 +8,8 @@ best-effort path for the callers that cannot raise), so the run must read the fa
   named unregistered and the identity-less drop that fails an ordinary run never fires);
 * ``index_repository`` does not advance ``owners.head_hash`` over it, or the next ``--since-head`` diff never offers
   the deletions again;
-* ``nx index repo`` exits non-zero over it;
+* ``nx index repo`` exits non-zero over it (``tests/integration/test_rdr193_failed_commit_cli.py``: a CLI run that reaches
+  the faked indexer ends in storage touches, so it takes a tenant, and the python_unit leg does not count one there);
 * no chunk of the run is written under a document the catalog never committed (vector client spied: zero calls).
 """
 from __future__ import annotations
@@ -18,9 +19,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from click.testing import CliRunner
+import structlog.testing
 
 from nexus.catalog.http_catalog_client import CatalogReconcileError
+from nexus.indexer import _catalog_hook, _run_index, index_repository
+from nexus.mcp_infra import reset_ephemeral_registration_skips, reset_manifest_identity_drops
 from tests.test_indexer_seam_b_cutover import _reg, _service_mode_patches
 from tests.test_z0o2p20_identity_less_files import _CapturingBatcher, _http_db
 
@@ -38,8 +41,6 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _collectors():
-    from nexus.mcp_infra import reset_ephemeral_registration_skips, reset_manifest_identity_drops
-
     reset_manifest_identity_drops()
     reset_ephemeral_registration_skips()
     yield
@@ -97,8 +98,6 @@ def git_repo(tmp_path: Path) -> Path:
 
 
 def _run(repo: Path, writer: _FailingWriter, **run_kw):
-    from nexus.indexer import _run_index
-
     db = _http_db()
     with _service_mode_patches(db, extra=_failing_catalog(writer)) as mocks, patch(
         "nexus.chunk_batcher.ChunkBatcher", _CapturingBatcher,
@@ -109,25 +108,22 @@ def _run(repo: Path, writer: _FailingWriter, **run_kw):
 
 # ── the hook reports the failure to its caller ───────────────────────────────────────────────────────────────────
 
-@pytest.mark.t2_tenant
 def test_the_hook_reports_a_failed_commit_through_its_out_param(tmp_path: Path) -> None:
-    from nexus.indexer import _catalog_hook
-
     failures: list[str] = []
-    with patch("nexus.catalog.factory.make_catalog_reader", lambda **kw: _Reader()), patch(
-        "nexus.catalog.factory.make_catalog_writer", lambda **kw: _FailingWriter("commit_conflict"),
-    ):
+    audited: list[dict] = []  # the audit row is a T2 write; this test has no tenant, so the recorder stands in
+    with patch("nexus.indexer.record_catalog_hook_failure", lambda **kw: audited.append(kw)), patch(
+        "nexus.catalog.factory.make_catalog_reader", lambda **kw: _Reader(),
+    ), patch("nexus.catalog.factory.make_catalog_writer", lambda **kw: _FailingWriter("commit_conflict")):
         ids = _catalog_hook(
             repo=tmp_path, repo_name="r", repo_hash="abcd1234", head_hash="h", indexed_files=[],
             walk="partial", deleted_relpaths=["gone.py"], failures=failures,
         )
     assert ids == {}
     assert len(failures) == 1 and "commit_conflict" in failures[0], failures
+    assert [a["hook_name"] for a in audited] == ["catalog_index_hook"], "the failure is audited once"
 
 
 def test_the_hook_reports_no_failure_for_a_commit_that_succeeds(tmp_path: Path) -> None:
-    from nexus.indexer import _catalog_hook
-
     class Ok(_FailingWriter):
         def reconcile_commit(self, owner, run_id):  # noqa: ANN001, ARG002
             return {"rows": []}
@@ -180,10 +176,6 @@ def registry():
 def test_the_since_head_base_is_not_advanced_over_a_failed_catalog_commit(
     tmp_path: Path, registry, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import structlog.testing
-
-    from nexus.indexer import index_repository
-
     monkeypatch.setenv("HOME", str(tmp_path))
     with structlog.testing.capture_logs() as logs, patch(
         "nexus.indexer._run_index", return_value={"catalog_hook_failed": 1},
@@ -198,34 +190,12 @@ def test_the_base_is_advanced_when_the_catalog_commit_did_not_fail(
     tmp_path: Path, registry, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Control: the same call with a zero count advances, so the test above fails for the count and nothing else."""
-    from nexus.indexer import index_repository
-
     monkeypatch.setenv("HOME", str(tmp_path))
     with patch("nexus.indexer._run_index", return_value={"catalog_hook_failed": 0}), patch(
         "nexus.indexer._current_head", return_value="abc",
     ), patch("nexus.indexer._set_owner_head_hash") as mock_set:
         index_repository(tmp_path, registry)
     mock_set.assert_called_once_with(tmp_path, "abc")
-
-
-# ── the CLI exits non-zero ───────────────────────────────────────────────────────────────────────────────────────
-
-@pytest.mark.t2_tenant
-def test_nx_index_repo_exits_non_zero_when_the_catalog_commit_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from nexus.cli import main
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    d = tmp_path / "myrepo"
-    d.mkdir()
-    (d / ".git").mkdir()
-    reg = MagicMock()
-    reg.get.return_value = {"collection": "code__myrepo"}
-    with patch("nexus.commands.index._registry", return_value=reg), patch(
-        "nexus.indexer.index_repository", return_value={"files_changed": 0, "catalog_hook_failed": 1},
-    ):
-        result = CliRunner().invoke(main, ["index", "repo", str(d)])
-    assert result.exit_code != 0, result.output
-    assert "catalog" in result.output.lower() and "commit" in result.output.lower(), result.output
 
 
 # ── S4 / I2: a failed commit writes no chunk ─────────────────────────────────────────────────────────────────────
