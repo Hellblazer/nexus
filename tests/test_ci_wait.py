@@ -20,9 +20,9 @@ SHA = "a0dc17ec284ffce6d4ff5264a626b7ef8e1a293a"
 OTHER = "261600dab59f41455dd633b7d1e2a1ff7a4880de"
 
 
-def _row(body: object, tid: str = "t1") -> TupleRow:
+def _row(body: object, tid: str = "t1", dims: dict[str, str] | None = None) -> TupleRow:
     return TupleRow(
-        id=tid, subspace="board/ci/x--done", template="board/ci/<topic>", keys={}, dims={},
+        id=tid, subspace="board/ci/x--done", template="board/ci/<topic>", keys={}, dims=dims or {},
         body=body if isinstance(body, str) else json.dumps(body), claim_state=None, claimant=None, lease_until=None, attempts=0,
         consumed_at=None, consumed_by=None, expires_at=None, created_at="2026-11-08T12:00:00Z",
     )
@@ -68,7 +68,11 @@ class TestParse:
         ))
         assert done is not None and done.runs[0].workflow == "CI" and done.runs[0].conclusion == "success"
 
-    @pytest.mark.parametrize("body", ["not json", {"runs": []}, {"sha": SHA, "runs": [[1]]}])
+    @pytest.mark.parametrize("body", [
+        "not json", {"runs": []}, {"sha": SHA, "runs": [[1]]}, {"sha": SHA, "runs": [[None, 1]]},
+        {"sha": SHA, "runs": [["x", 1]]}, {"sha": SHA, "runs": 5}, {"sha": SHA, "runs": [[1, None]]},
+        {"sha": SHA, "runs": [[True, 1]]},
+    ])
     def test_a_body_that_is_not_a_done_body_is_none(self, body) -> None:
         assert ci_wait.parse_done_row(_row(body)) is None
 
@@ -79,8 +83,9 @@ class TestParse:
         assert done is not None
         asked: list[int] = []
 
-        def fetch(repo: str, run_id: int) -> tuple[str | None, str | None]:
+        def fetch(repo: str, run_id: int, attempt: int) -> tuple[str | None, str | None]:
             asked.append(run_id)
+            assert attempt == 1
             assert repo == "Hellblazer/nexus"
             return "Service CI", "failure"
 
@@ -116,11 +121,14 @@ class _Board:
         self.rows: list[tuple[float, TupleRow]] = []
         self.parks: list[int] = []
 
-    def post(self, sha: str, runs: list[list[object]], *, at: float = 0.0, url: str = "https://example/run") -> str:
+    def post(
+        self, sha: str, runs: list[list[object]], *, at: float = 0.0, url: str = "https://example/run",
+        dims: dict[str, str] | None = None, body: object = None,
+    ) -> str:
         seq = len(self.rows) + 1
         tid = f"{seq:064x}"
-        body = {"state": "concluded", "sha": sha, "runs": runs, "url": url}
-        row = _row(body, tid)
+        row = _row(body if body is not None else {"state": "concluded", "sha": sha, "runs": runs, "url": url},
+                   tid, dims)
         row = TupleRow(**{**{f: getattr(row, f) for f in row.__dataclass_fields__},
                           "created_at": f"2026-11-08T12:00:{seq:02d}Z"})
         self.rows.append((at, row))
@@ -180,8 +188,64 @@ class TestFindDoneRow:
         board.post(SHA, [[1, 1, "CI", "success"]], at=200)
         assert ci_wait.find_done_row(board, ci_wait.done_subspace("nexus", "develop"), SHA,
                                      timeout_s=60, clock=clock) is None
-        assert 60 <= clock.now < 200
+        assert 60 <= clock.now <= 60 + ci_wait.PARK_CAP_S
         assert all(p <= ci_wait.PARK_CAP_S for p in board.parks)
+
+
+    def test_fresh_ignores_the_earlier_attempt_already_on_the_topic(self) -> None:
+        """A wait started on a rerun: attempt 1's failed row is still there."""
+        clock, board = self._setup()
+        board.post(SHA, [[10, 1, "CI", "failure"]], url="https://example/attempt1")
+        board.post(SHA, [[10, 2, "CI", "success"]], at=80, url="https://example/attempt2")
+        sub = ci_wait.done_subspace("nexus", "develop")
+        stale = ci_wait.find_done_row(board, sub, SHA, timeout_s=600, clock=_Clock())
+        assert stale is not None and stale.url == "https://example/attempt1"  # the default takes it
+        row = ci_wait.find_done_row(board, sub, SHA, timeout_s=600, fresh=True, clock=clock)
+        assert row is not None and row.url == "https://example/attempt2" and clock.now == 80
+
+    def test_a_malformed_row_for_any_sha_is_skipped(self) -> None:
+        clock, board = self._setup()
+        board.post(OTHER, [], body={"sha": OTHER, "runs": [["x", 1]]})
+        board.post(SHA, [], body={"sha": SHA, "runs": 5})
+        board.post(SHA, [[10, 1, "CI", "success"]], at=40)
+        row = ci_wait.find_done_row(board, ci_wait.done_subspace("nexus", "develop"), SHA,
+                                    timeout_s=600, clock=clock)
+        assert row is not None and row.runs[0].run_id == 10
+
+    def test_a_read_that_fails_is_retried_and_a_board_down_to_the_deadline_is_unreadable(self) -> None:
+        clock, board = self._setup()
+        board.post(SHA, [[10, 1, "CI", "success"]])
+        fails = {"left": 2}
+        real_rd = board.rd
+
+        def flaky(*a, **k):
+            if fails["left"]:
+                fails["left"] -= 1
+                raise ConnectionError("engine restarting")
+            return real_rd(*a, **k)
+
+        board.rd = flaky  # type: ignore[method-assign]
+
+        def sleep(seconds: float) -> None:
+            clock.now += seconds
+
+        sub = ci_wait.done_subspace("nexus", "develop")
+        row = ci_wait.find_done_row(board, sub, SHA, timeout_s=60, clock=clock, sleep=sleep)
+        assert row is not None and clock.now == 10  # two retries of 5 s
+
+        down = _Board(clock)
+        down.rd = lambda *a, **k: (_ for _ in ()).throw(ConnectionError("down"))  # type: ignore[method-assign]
+        with pytest.raises(ci_wait.BoardUnreadableError, match="down"):
+            ci_wait.find_done_row(down, sub, SHA, timeout_s=30, clock=clock, sleep=sleep)
+
+    def test_an_outcome_dim_that_disagrees_with_the_conclusions_exits_4(self) -> None:
+        board = _Board(_Clock())
+        board.post(SHA, [[10, 1, "CI", "failure"]], dims={"outcome": "success"})
+        row = ci_wait.find_done_row(board, ci_wait.done_subspace("nexus", "develop"), SHA,
+                                    timeout_s=1, clock=board.clock)
+        assert row is not None
+        line, code = ci_wait.summarize(row)
+        assert code == 4 and "outcome mismatch: the board says success" in line
 
 
 class TestCli:
@@ -196,29 +260,69 @@ class TestCli:
 
     def test_a_pre_11_1_row_reads_its_conclusions_once(self, monkeypatch) -> None:
         board = _Board(_Clock())
-        board.post(SHA, [[30, 1], [31, 1]])
+        board.post(SHA, [[30, 1], [31, 2]])
         monkeypatch.setattr(ci_cmd, "_store", lambda: board)
         asked: list[tuple[str, int]] = []
 
-        def fake_gh(gh_repo: str, run_id: int) -> tuple[str | None, str | None]:
-            asked.append((gh_repo, run_id))
+        def fake_gh(gh_repo: str, run_id: int, attempt: int) -> tuple[str | None, str | None]:
+            asked.append((gh_repo, run_id, attempt))
             return ("CI" if run_id == 30 else "Service CI"), "success"
 
         monkeypatch.setattr(ci_wait, "gh_run_conclusion", fake_gh)
         result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "1"])
         assert result.exit_code == 0, result.output
-        assert asked == [("Hellblazer/nexus", 30), ("Hellblazer/nexus", 31)]
+        assert asked == [("Hellblazer/nexus", 30, 1), ("Hellblazer/nexus", 31, 2)]
 
     def test_an_unreadable_conclusion_exits_4(self, monkeypatch) -> None:
         board = _Board(_Clock())
         board.post(SHA, [[30, 1]])
         monkeypatch.setattr(ci_cmd, "_store", lambda: board)
-        monkeypatch.setattr(ci_wait, "gh_run_conclusion", lambda repo, run_id: (None, None))
+        monkeypatch.setattr(ci_wait, "gh_run_conclusion", lambda repo, run_id, attempt: (None, None))
         result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "1"])
         assert result.exit_code == 4, result.output
         assert "unknown" in result.stdout
 
 
-def test_a_sha_that_is_not_hex_is_refused() -> None:
+    def test_no_store_exits_5_not_1(self, monkeypatch) -> None:
+        def boom():
+            raise RuntimeError("no engine configured")
+
+        monkeypatch.setattr(ci_cmd, "_store", boom)
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "1"])
+        assert result.exit_code == 5, result.output
+        assert "unusable: no tuple store" in result.stdout
+
+    @pytest.mark.parametrize(("runs", "code", "needle"), [
+        (None, 2, "GitHub could not be read"),
+        ([], 2, "GitHub lists no push runs"),
+        ([ci_wait.Run(1, 1, "CI", "success"), ci_wait.Run(2, 1, "Service CI", None)], 2, "1 of 2 runs still running"),
+        ([ci_wait.Run(1, 1, "CI", "success"), ci_wait.Run(2, 1, "Service CI", "failure")], 1,
+         "the wake was dropped; read from GitHub"),
+    ])
+    def test_at_the_deadline_github_is_read_once(self, monkeypatch, runs, code, needle) -> None:
+        board = _Board(_Clock())
+        monkeypatch.setattr(ci_cmd, "_store", lambda: board)
+        asked: list[str] = []
+
+        def fake_runs(gh_repo: str, sha: str):
+            asked.append(sha)
+            return runs
+
+        monkeypatch.setattr(ci_wait, "gh_push_runs", fake_runs)
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "0"])
+        assert result.exit_code == code, result.output
+        assert asked == [SHA]
+        assert result.stdout.strip().splitlines()[-1].startswith(f"{SHA[:12]} ")
+        assert needle in result.stdout
+
+    def test_a_prefix_times_out_without_reading_github(self, monkeypatch) -> None:
+        board = _Board(_Clock())
+        monkeypatch.setattr(ci_cmd, "_store", lambda: board)
+        monkeypatch.setattr(ci_wait, "gh_push_runs", lambda *a: pytest.fail("read GitHub for a prefix"))
+        result = CliRunner().invoke(ci_group, ["wait", SHA[:10], "--timeout", "0"])
+        assert result.exit_code == 2 and "give the full sha" in result.stdout
+
+
+def test_a_sha_that_is_not_hex_exits_5_not_the_timeout_code() -> None:
     result = CliRunner().invoke(ci_group, ["wait", "develop"])
-    assert result.exit_code == 2 and "7 to 40 hex digits" in result.output
+    assert result.exit_code == 5 and "7 to 40 hex digits" in result.output
