@@ -1006,7 +1006,8 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     ) -> list[TupleRow]:
         """The row *start* names (its own ``(created_at, id)``) and the rows
         after it, oldest first, at most *n*; with *through*, they stop at that
-        row, inclusive (nexus-1d6pz.11.2). A board notice announces posts that
+        row, inclusive, and more than *n* rows up to it is an error, not a short
+        read (nexus-1d6pz.11.2). A board notice announces posts that
         need not be consecutive in the subspace (a row that committed late, or
         a claimed or dead row the announce skipped, can sort between them), so
         its read is bounded by its first and last posts, not by a count.
@@ -1051,8 +1052,13 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             cursor = (page[-1].created_at or cursor[0], page[-1].id)
         if not out:
             raise LookupError(_not_in(start, subspace))
-        if end is not None and not reached_end and len(out) < n:
-            raise LookupError(_not_in(through, subspace))  # type: ignore[arg-type]
+        if end is not None and not reached_end:
+            if len(out) < n:
+                raise LookupError(_not_in(through, subspace))  # type: ignore[arg-type]
+            raise SchemaViolationError(
+                f"more than n={n} rows lie from the 'from' row to the 'through' row in {subspace}; "
+                "raise n, or read on with since_created_at/since_id from the last row returned"
+            )
         return out
 
     def _rd_request(
