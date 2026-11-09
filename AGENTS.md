@@ -71,6 +71,7 @@ Full text with history: [hot-rules](docs/agents/hot-rules.md).
 - **`develop` is releasable; Chroma is gone.** Pre-PG installs: `docs/migration-runbook.md` § Installs that predate Postgres (the redirect path is in hot-rules).
 - **Integration branch is `develop`.** Open PRs against `develop`, not `main`. Releases promote `develop` to `main` via a PR-gated release branch (nexus-mkj6u); there are NO direct-to-`main` commits at all (`docs/contributing.md` § Release Process).
 - **Before adding to a file over its size cap, move the area you touch into its own module first** (`scripts/file_size_ratchet.py`; ceilings in `scripts/file-size-exceptions.txt` only fall, and the lint bucket fails a file past its ceiling).
+- **Changelog entries go in `changelog/unreleased/<bead-id>.md`, never under `## [Unreleased]` in CHANGELOG.md** (`scripts/changelog_fold.py`; the release folds them, and `changelog_fold.py check` refuses a hand bullet there).
 - **Never `git add -A` or `git add .`.** Stage by explicit path so untracked drafts don't sneak in.
 - **Push `develop` only through `scripts/git-push-develop.sh <sha>...`**: it refuses unless `origin/develop..develop` equals the commits you name (worktree rule 8 below). Never `git commit --amend` in the primary checkout. See `docs/contributing.md` § Git Workflow.
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
