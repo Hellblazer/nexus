@@ -440,6 +440,76 @@ class EgressGuardCensusTest {
                 && p.contains("no declaration"));
     }
 
+    /** A pool method, as Main writes it, with the URL lines and the parameter list left to each case. */
+    private static String poolMethod(String params, String body) {
+        return "final class Main {\n static String requireEnv(String n) { return System.getenv(n); }\n"
+            + " static Object m(" + params + ") {\n" + body + "\n  var c = new HikariConfig();\n"
+            + "  c.setJdbcUrl(dbUrl);\n  return new HikariDataSource(c);\n }\n}\n";
+    }
+
+    private static final String GOOD_URL = "String dbUrl = requireEnv(\"NX_DB_URL\");";
+
+    @Test
+    void fixture_theUrlSourceRuleAcceptsTheSanctionedShapes_includingASameNamedParameterInAnotherMethod() {
+        assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java", poolMethod("", GOOD_URL))).isEmpty();
+        assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java",
+            poolMethod("", "String dbUrl = System.getenv(\"NX_DB_URL\");"))).isEmpty();
+        // Another method takes a parameter of the same name: it is that method's, not the pool method's.
+        assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java", poolMethod("", GOOD_URL).replace("}\n}\n",
+            "}\n static void other(String dbUrl, String u) { }\n}\n"))).isEmpty();
+        // A local resolved through AdminConnection.resolve, and an AdminConnection parameter.
+        assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java", poolMethod("",
+            "AdminConnection a = AdminConnection.resolve(System::getenv, \"u\", \"u\", \"p\");\n"
+            + "String dbUrl = a.url();"))).isEmpty();
+        assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java", poolMethod("dev.nexus.service.db.AdminConnection a",
+            "String dbUrl = a.url();"))).isEmpty();
+    }
+
+    /** Each bypass the first review probed: every one returned no problem before the rule read assignments and scopes. */
+    @Test
+    void fixture_eachBypassOfTheUrlSourceRuleFails() {
+        record Bypass(String what, String source, String mentions) { }
+        List<Bypass> bypasses = List.of(
+            new Bypass("a reassignment after the declaration",
+                poolMethod("", GOOD_URL + "\ndbUrl = \"jdbc:postgresql://remote/x\";"), "dbUrl"),
+            new Bypass("a reassignment inside an if",
+                poolMethod("", GOOD_URL + "\nif (dbUrl.isEmpty()) { dbUrl = \"jdbc:remote\"; }"), "dbUrl"),
+            new Bypass("a compound assignment",
+                poolMethod("", GOOD_URL + "\ndbUrl += \"?host=remote\";"), "dbUrl"),
+            new Bypass("a field mutated in another method, the pool reading the field",
+                "final class Main {\n static String dbUrl;\n static void set() { dbUrl = \"jdbc:remote\"; }\n"
+                + poolMethod("", "").replace("final class Main {\n", ""), "no declaration"),
+            new Bypass("a method parameter of the same name",
+                poolMethod("String dbUrl", ""), "dbUrl"),
+            new Bypass("a parameter of the same name, a good declaration sitting in another method",
+                poolMethod("String dbUrl", "").replace("}\n}\n",
+                    "}\n static void ok() { " + GOOD_URL + " }\n}\n"), "dbUrl"),
+            new Bypass("a lambda parameter of the same name",
+                poolMethod("", GOOD_URL + "\njava.util.List.of(\"x\").forEach(dbUrl -> { });"), "dbUrl"),
+            new Bypass("a parenthesised lambda parameter of the same name",
+                poolMethod("", GOOD_URL + "\njava.util.Map.of().forEach((k, dbUrl) -> { });"), "dbUrl"),
+            new Bypass("a var shadow beside the good declaration",
+                poolMethod("", GOOD_URL + "\n{ var dbUrl = \"jdbc:remote\"; }"), "dbUrl"),
+            new Bypass("a second String declaration in a nested block",
+                poolMethod("", GOOD_URL + "\n{ String dbUrl = \"jdbc:remote\"; }"), "dbUrl"),
+            new Bypass("an AdminConnection built with a literal URL",
+                poolMethod("", "var a = new AdminConnection(\"jdbc:evil\", \"u\", \"p\");\nString dbUrl = a.url();"),
+                "AdminConnection"),
+            new Bypass("an AdminConnection local typed so but built with a literal",
+                poolMethod("", "AdminConnection a = new AdminConnection(\"jdbc:evil\", \"u\", \"p\");\n"
+                    + "String dbUrl = a.url();"), "AdminConnection"),
+            new Bypass("an AdminConnection parameter reassigned to a literal-built one",
+                poolMethod("AdminConnection a", "a = new AdminConnection(\"jdbc:evil\", \"u\", \"p\");\n"
+                    + "String dbUrl = a.url();"), "AdminConnection"),
+            new Bypass("a setJdbcUrl outside any method",
+                "final class Main {\n static { var c = new HikariConfig(); String dbUrl = requireEnv(\"NX_DB_URL\");"
+                + " c.setJdbcUrl(dbUrl); }\n static String requireEnv(String n) { return n; }\n}\n", "enclosing method"));
+        for (Bypass b : bypasses) {
+            assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java", b.source()))
+                .as(b.what()).isNotEmpty().anyMatch(p -> p.contains(b.mentions()));
+        }
+    }
+
     @Test
     void fixture_theUrlSourceRuleCountsTheSitesItExamined() throws IOException {
         plant(MAIN_JAVA, TWO_POOL_MAIN);

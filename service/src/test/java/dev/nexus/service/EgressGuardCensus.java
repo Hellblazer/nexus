@@ -23,8 +23,8 @@ import java.util.stream.Stream;
  * Voyage classes, and only when keyed, and to its database at {@code NX_DB_URL} over JDBC. This scan checks
  * part of that by text over the main sources. Comments are stripped (string literals are kept, because the
  * Voyage hosts live in them). Then every outbound construct in {@link #CONSTRUCTS} must sit in a file on
- * {@link #ALLOWLIST}, with that construct named on the entry and a reason beside it. It does not check that
- * the database URL comes from {@code NX_DB_URL}; see "Not checked".
+ * {@link #ALLOWLIST}, with that construct named on the entry and a reason beside it. It reads where the two
+ * Hikari pools' URLs come from (see "JDBC pools"), and nothing else about the database URL; see "Not checked".
  *
  * <p>What it checks: the constructs in {@link #CONSTRUCTS}, including static imports of a listed member,
  * datagram sockets, DNS lookups, URL objects, socket factories, a Runtime held in a variable, a
@@ -36,16 +36,27 @@ import java.util.stream.Stream;
  *
  * <p>JDBC pools (nexus-4lqi7): {@code new HikariConfig}, {@code setJdbcUrl} and {@code new HikariDataSource} are
  * constructs like the rest, pinned to exact counts (Main builds two pools). {@link #jdbcUrlProblems} then reads
- * each {@code setJdbcUrl} argument: it must be a plain variable declared in the same file from the
- * {@code NX_DB_URL} lookup ({@code requireEnv} or {@code System.getenv}) or from {@code url()} on an
- * {@code AdminConnection} (the {@code NX_DB_ADMIN_URL} resolution). This catches a new pool and a pool handed a
- * literal or another source; it does not catch a bad value of the right variable, which is the operator's
- * to set.
+ * each {@code setJdbcUrl} argument inside the method that makes the call: a plain variable, declared once there as
+ * a local {@code String} and never reassigned, whose value is the {@code NX_DB_URL} lookup
+ * ({@code requireEnv} or {@code System.getenv}) or {@code url()} on an {@code AdminConnection} that is a
+ * method parameter or a local built by {@code AdminConnection.resolve(}, itself never reassigned. This catches a new
+ * pool, a pool handed a literal or another source, and a URL variable that is reassigned, shadowed or passed in
+ * under the same name. The rule is textual and name-based: it reads one method, not data flow.
  *
  * <p>Not checked, by this class or by any other test in the repository:
  * <ul>
- *   <li>the roughly dozen {@code ds.getConnection()} call sites on those pools, and any DataSource built
- *       another way (a {@code DataSource} handed in, or a driver-specific class);</li>
+ *   <li>the VALUE of {@code NX_DB_URL} or {@code NX_DB_ADMIN_URL}: an operator who puts a remote host in the
+ *       environment gets a pool to it, and nothing here objects;</li>
+ *   <li>the inputs to {@code AdminConnection}: the {@code resolve} call and its {@code defaultUrl} argument, and
+ *       who calls a method that takes an {@code AdminConnection} parameter (the rule trusts the parameter);</li>
+ *   <li>the URL sources at the {@code DriverManager.getConnection} sites (PciBuilderSession, AspectQueueDrain's
+ *       {@code admin.url()}, EngineSingletonLock's {@code jdbcUrl} parameter, BackendReaper, AdminDdlSession):
+ *       they are counted and pinned, and their arguments are not read;</li>
+ *   <li>the Hikari forms the URL rule does not read: {@code new HikariConfig(Properties)} or
+ *       {@code (String)}, {@code addDataSourceProperty}, {@code setDataSourceClassName}, {@code setDataSource},
+ *       a {@code cfg::setJdbcUrl} method reference (the first is counted as a pool site; none is read for its URL);</li>
+ *   <li>the 15 {@code .getConnection()} call sites (11 files) on those pools and any DataSource built another
+ *       way (one handed in, or a driver-specific class);</li>
  *   <li>any dependency's code, such as {@code java.net.http}, raw sockets or DNS used inside a library;</li>
  *   <li>the GraalVM native image the engine ships as (the witnesses run on a JVM);</li>
  *   <li>DJL's Rust tokenizers library, whose network I/O is JNI that no Java-level check sees;</li>
@@ -340,7 +351,12 @@ final class EgressGuardCensus {
     private static final Pattern NX_DB_URL_LOOKUP = Pattern.compile(
         "(?:\\brequireEnv|\\bSystem\\s*\\.\\s*getenv)\\s*\\(\\s*\"NX_DB_URL\"\\s*\\)");
     private static final Pattern ADMIN_URL_CALL = Pattern.compile("(\\w+)\\s*\\.\\s*url\\s*\\(\\s*\\)");
-    private static final Pattern ADMIN_CONNECTION_VARIABLE = Pattern.compile("\\bAdminConnection\\s+(\\w+)\\b");
+    private static final Set<String> NOT_A_TYPE =
+        Set.of("return", "throw", "new", "else", "case", "yield", "assert", "instanceof", "do");
+    private static final Set<String> CONTROL_HEADS =
+        Set.of("if", "for", "while", "switch", "catch", "synchronized", "try", "else", "do");
+    private static final Pattern METHOD_HEADER = Pattern.compile(
+        "(?s)^[^()]*?\\b\\w+\\s*\\([^{};]*\\)\\s*(?:throws\\s+[\\w.,\\s]+)?$");
 
     /** How many {@code setJdbcUrl} calls {@link #jdbcUrlProblems} examines under {@code root}: its non-vacuity count. */
     static int jdbcUrlSites(Path root) throws IOException {
@@ -356,53 +372,221 @@ final class EgressGuardCensus {
         return n;
     }
 
+    /** A method: its header (from the previous statement boundary) and its body braces, as offsets into the source. */
+    private record MethodSpan(int headerStart, int open, int close) {
+    }
+
     /**
-     * Where each {@code setJdbcUrl} argument in one file comes from. The argument must be a plain variable, and
-     * every {@code String <name> = ...;} declaration of it in the file must read the {@code NX_DB_URL} lookup or
-     * call {@code url()} on a variable declared with the type {@code AdminConnection}. A file with no such
-     * declaration fails: the rule has nothing to read. Textual, like the rest of this class.
+     * The innermost method whose body holds {@code pos}, or null. Walks the braces from the top (string, text-block
+     * and char literals skipped), then takes the innermost open brace whose header looks like a method header: a
+     * name and a parenthesised list, not led by a control keyword.
      */
-    static List<String> jdbcUrlProblems(String rel, String strippedSource) {
-        List<String> problems = new ArrayList<>();
-        int calls = 0;
-        Matcher call = SET_JDBC_URL_CALL.matcher(strippedSource);
-        while (call.find()) {
-            calls++;
-        }
-        List<String> variables = new ArrayList<>();
-        Matcher plain = SET_JDBC_URL_VARIABLE.matcher(strippedSource);
-        while (plain.find()) {
-            variables.add(plain.group(1));
-        }
-        if (variables.size() < calls) {
-            problems.add(rel + " calls setJdbcUrl " + (calls - variables.size()) + " time(s) with an argument that is not "
-                + "a plain variable: a pool URL must come from the NX_DB_URL lookup or an AdminConnection, named by a variable");
-        }
-        Set<String> adminReceivers = new java.util.HashSet<>();
-        Matcher admin = ADMIN_CONNECTION_VARIABLE.matcher(strippedSource);
-        while (admin.find()) {
-            adminReceivers.add(admin.group(1));
-        }
-        for (String name : new java.util.TreeSet<>(variables)) {
-            Pattern declaration = Pattern.compile("\\bString\\s+" + Pattern.quote(name) + "\\s*=\\s*([^;]+);");
-            Matcher d = declaration.matcher(strippedSource);
-            int found = 0;
-            while (d.find()) {
-                found++;
-                String rhs = d.group(1);
-                Matcher url = ADMIN_URL_CALL.matcher(rhs);
-                boolean fromAdmin = url.matches() && adminReceivers.contains(url.group(1));
-                if (!fromAdmin && !NX_DB_URL_LOOKUP.matcher(rhs).matches()) {
-                    problems.add(rel + " gives setJdbcUrl the variable " + name + " = " + rhs.strip()
-                        + ", which is neither the NX_DB_URL lookup nor url() on an AdminConnection");
+    private static MethodSpan enclosingMethod(String src, int pos) {
+        java.util.ArrayDeque<Integer> open = new java.util.ArrayDeque<>();
+        List<int[]> spans = new ArrayList<>();   // {open, close} of every brace pair that holds pos
+        int n = src.length();
+        int i = 0;
+        while (i < n) {
+            char c = src.charAt(i);
+            if (src.startsWith("\"\"\"", i)) {
+                int j = i + 3;
+                while (j < n && !src.startsWith("\"\"\"", j)) {
+                    j += src.charAt(j) == '\\' ? 2 : 1;
                 }
+                i = Math.min(n, j + 3);
+            } else if (c == '"' || c == '\'') {
+                int j = i + 1;
+                while (j < n && src.charAt(j) != c && src.charAt(j) != '\n') {
+                    j += src.charAt(j) == '\\' ? 2 : 1;
+                }
+                i = Math.min(n, j + 1);
+            } else {
+                if (c == '{') {
+                    open.push(i);
+                } else if (c == '}' && !open.isEmpty()) {
+                    int o = open.pop();
+                    if (o < pos && pos < i) {
+                        spans.add(new int[] {o, i});
+                    }
+                }
+                i++;
             }
-            if (found == 0) {
+        }
+        MethodSpan best = null;
+        for (int[] sp : spans) {   // inner pairs close first, so the first method-shaped one is the innermost
+            int start = Math.max(Math.max(src.lastIndexOf(';', sp[0] - 1), src.lastIndexOf('{', sp[0] - 1)),
+                src.lastIndexOf('}', sp[0] - 1)) + 1;
+            String header = src.substring(start, sp[0]).strip();
+            String head = header.split("[\\s(]", 2)[0];
+            if (!CONTROL_HEADS.contains(head) && !header.contains("->") && METHOD_HEADER.matcher(header).matches()) {
+                best = new MethodSpan(start, sp[0], sp[1]);
+                break;
+            }
+        }
+        return best;
+    }
+
+    /** One declaration-shaped use of a name: a typed local, field or parameter, or a lambda parameter. */
+    private record Declaration(String type, int at, int end) {
+    }
+
+    private static List<Declaration> declarationsOf(String name, String region, int base) {
+        List<Declaration> found = new ArrayList<>();
+        Matcher typed = Pattern.compile("(?<![\\w.$])([A-Za-z_][\\w.]*(?:<[^;(){}=]*>)?(?:\\[\\])*)\\s+"
+            + Pattern.quote(name) + "\\b\\s*(?==|;|,|\\)|:)").matcher(region);
+        while (typed.find()) {
+            if (!NOT_A_TYPE.contains(typed.group(1))) {
+                found.add(new Declaration(typed.group(1), base + typed.start(), base + typed.end()));
+            }
+        }
+        Matcher lambda = Pattern.compile("(?<![\\w.$])" + Pattern.quote(name) + "\\s*->|\\(\\s*(?:\\w+\\s*,\\s*)*"
+            + Pattern.quote(name) + "\\s*(?:,\\s*\\w+\\s*)*\\)\\s*->").matcher(region);
+        while (lambda.find()) {
+            found.add(new Declaration("lambda", base + lambda.start(), base + lambda.end()));
+        }
+        return found;
+    }
+
+    private static int assignmentsTo(String name, String region) {
+        Matcher m = Pattern.compile("(?<![\\w$])" + Pattern.quote(name) + "\\s*(?:<<|>>>?|[-+*/%&|^])?=(?!=)")
+            .matcher(region);
+        int n = 0;
+        while (m.find()) {
+            n++;
+        }
+        return n;
+    }
+
+    /**
+     * Where each {@code setJdbcUrl} argument in one file comes from, read inside the method that makes the call
+     * (nexus-4lqi7). The argument must be a plain variable, and within that method (its parameter list and body):
+     * the name is declared exactly once, as {@code String <name> = <rhs>;} (so no parameter, lambda parameter,
+     * {@code var}, field or second declaration of the name); it is assigned nowhere else (no reassignment, no
+     * {@code +=}); and the right-hand side is the {@code NX_DB_URL} lookup, or {@code url()} on a receiver that is
+     * an {@code AdminConnection} parameter never reassigned, or a local built by {@code AdminConnection.resolve(}
+     * and never reassigned. Textual, like the rest of this class: it is name-based and reads one method.
+     */
+    static List<String> jdbcUrlProblems(String rel, String source) {
+        List<String> problems = new ArrayList<>();
+        String src = blankLiterals(source);   // same offsets; a name inside a string is not a use of the name
+        Matcher call = SET_JDBC_URL_CALL.matcher(src);
+        while (call.find()) {
+            Matcher arg = SET_JDBC_URL_VARIABLE.matcher(src);
+            if (!arg.find(call.start()) || arg.start() != call.start()) {
+                problems.add(rel + " calls setJdbcUrl with an argument that is not a plain variable: a pool URL must "
+                    + "come from the NX_DB_URL lookup or an AdminConnection, named by a variable");
+                continue;
+            }
+            String name = arg.group(1);
+            MethodSpan m = enclosingMethod(src, call.start());
+            if (m == null) {
+                problems.add(rel + " calls setJdbcUrl(" + name + ") outside a method the rule can find: "
+                    + "there is no enclosing method to read the source of " + name + " in");
+                continue;
+            }
+            String region = src.substring(m.headerStart(), m.close());
+            List<Declaration> declarations = declarationsOf(name, region, m.headerStart());
+            Declaration only = declarations.size() == 1 ? declarations.get(0) : null;
+            if (declarations.isEmpty()) {
                 problems.add(rel + " gives setJdbcUrl the variable " + name + ", which has no declaration "
-                    + "`String " + name + " = ...;` in the file: its source cannot be read");
+                    + "`String " + name + " = ...;` in its method: a field or other source cannot be read");
+                continue;
+            }
+            if (only == null || !"String".equals(only.type()) || only.at() < m.open()
+                || !src.startsWith("=", skipBlanks(src, only.end()))) {
+                problems.add(rel + " gives setJdbcUrl the variable " + name + ", which its method declares "
+                    + declarations.size() + " time(s) (types " + declarations.stream().map(Declaration::type).toList()
+                    + "): it must be declared once, as a local `String " + name + " = ...;`, not a parameter, lambda "
+                    + "parameter, var or a second declaration");
+                continue;
+            }
+            if (assignmentsTo(name, region) != 1) {
+                problems.add(rel + " assigns " + name + " again after its declaration in the method that gives it to "
+                    + "setJdbcUrl: a pool URL variable is assigned once");
+                continue;
+            }
+            int eq = skipBlanks(src, only.end());
+            String rhs = source.substring(eq + 1, src.indexOf(';', eq)).strip();
+            Matcher url = ADMIN_URL_CALL.matcher(rhs);
+            boolean ok = NX_DB_URL_LOOKUP.matcher(rhs).matches()
+                || (url.matches() && adminReceiverIsTrusted(url.group(1), src, m));
+            if (!ok) {
+                problems.add(rel + " gives setJdbcUrl the variable " + name + " = " + rhs
+                    + ", which is neither the NX_DB_URL lookup nor url() on an AdminConnection parameter or one built "
+                    + "by AdminConnection.resolve(");
             }
         }
         return problems;
+    }
+
+    /** The source with the inside of every string, text-block and char literal replaced by spaces, offsets kept. */
+    private static String blankLiterals(String src) {
+        StringBuilder out = new StringBuilder(src);
+        int n = src.length();
+        int i = 0;
+        while (i < n) {
+            char c = src.charAt(i);
+            int end;
+            if (src.startsWith("\"\"\"", i)) {
+                int j = i + 3;
+                while (j < n && !src.startsWith("\"\"\"", j)) {
+                    j += src.charAt(j) == '\\' ? 2 : 1;
+                }
+                end = Math.min(n, j + 3);
+                blank(out, i + 3, Math.max(i + 3, end - 3));
+            } else if (c == '"' || c == '\'') {
+                int j = i + 1;
+                while (j < n && src.charAt(j) != c && src.charAt(j) != '\n') {
+                    j += src.charAt(j) == '\\' ? 2 : 1;
+                }
+                end = Math.min(n, j + 1);
+                blank(out, i + 1, Math.max(i + 1, end - 1));
+            } else {
+                i++;
+                continue;
+            }
+            i = end;
+        }
+        return out.toString();
+    }
+
+    private static void blank(StringBuilder out, int from, int to) {
+        for (int k = from; k < to && k < out.length(); k++) {
+            if (out.charAt(k) != '\n') {
+                out.setCharAt(k, ' ');
+            }
+        }
+    }
+
+    private static int skipBlanks(String src, int from) {
+        int i = from;
+        while (i < src.length() && Character.isWhitespace(src.charAt(i))) {
+            i++;
+        }
+        return i;
+    }
+
+    /** {@code receiver} is declared once in the method, never reassigned, and is a parameter or a resolve() local. */
+    private static boolean adminReceiverIsTrusted(String receiver, String src, MethodSpan m) {
+        String region = src.substring(m.headerStart(), m.close());
+        List<Declaration> declarations = declarationsOf(receiver, region, m.headerStart());
+        if (declarations.size() != 1 || assignmentsTo(receiver, region) > 1) {
+            return false;
+        }
+        Declaration d = declarations.get(0);
+        boolean adminType = d.type().equals("AdminConnection") || d.type().endsWith(".AdminConnection");
+        if (adminType && d.at() < m.open()) {
+            return assignmentsTo(receiver, region) == 0;   // a parameter, never reassigned
+        }
+        if (adminType || d.type().equals("var")) {
+            return resolveLocal(receiver).matcher(src.substring(d.at(), m.close())).find();
+        }
+        return false;
+    }
+
+    private static Pattern resolveLocal(String receiver) {
+        return Pattern.compile("^[\\w.<>]+\\s+" + Pattern.quote(receiver)
+            + "\\s*=\\s*(?:[\\w.]+\\s*\\.\\s*)?AdminConnection\\s*\\.\\s*resolve\\s*\\(");
     }
 
     private static final Pattern URL_CONSTANT = Pattern.compile(
