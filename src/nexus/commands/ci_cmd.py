@@ -2,6 +2,7 @@
 """``nx ci``: CI wakes read from the CI board (nexus-1d6pz.11.4)."""
 from __future__ import annotations
 
+import math
 import re
 
 import click
@@ -52,9 +53,13 @@ def ci_wait_cmd(
     failure (failure, timed_out, startup_failure, action_required), 3 when
     runs were cancelled or stale and none failed, 2 on timeout, 4 when a
     conclusion could not be read or the board's outcome disagrees with the
-    conclusions, and 5 when the wait could not run (a bad SHA, or the board
-    unreadable until the deadline).
+    conclusions, and 5 when the wait could not run (a bad SHA, no tuple store,
+    a refused board read, or the board unreachable until the deadline).
+    Click's own usage errors (a missing SHA, --timeout out of range) exit 2.
     """
+    if not math.isfinite(timeout_min):
+        click.echo(f"{sha} unusable: --timeout must be a number of minutes")
+        raise SystemExit(ci_wait.EXIT_UNUSABLE)
     if not _SHA.fullmatch(sha):
         click.echo(f"{sha} unusable: give a commit sha, 7 to 40 hex digits")
         raise SystemExit(ci_wait.EXIT_UNUSABLE)
@@ -74,7 +79,12 @@ def ci_wait_cmd(
         click.echo(f"{sha[:12]} unusable: {subspace} could not be read: {exc}")
         raise SystemExit(ci_wait.EXIT_UNUSABLE) from None
     if row is None:
-        line, code = _at_deadline(sha, gh, subspace, timeout_min)
+        if fresh:
+            # GitHub cannot tell a rerun that has not started from the earlier
+            # attempt it would replace, so a --fresh wait never reads it.
+            click.echo(f"{sha[:12]} timeout: no new row on {subspace} after {timeout_min:g} min (--fresh)")
+            raise SystemExit(ci_wait.EXIT_TIMEOUT)
+        line, code = _at_deadline(sha, gh, branch, subspace, timeout_min)
         click.echo(line)
         raise SystemExit(code)
     line, code = ci_wait.summarize(ci_wait.fill_conclusions(row, gh))
@@ -82,13 +92,13 @@ def ci_wait_cmd(
     raise SystemExit(code)
 
 
-def _at_deadline(sha: str, gh_repo: str, subspace: str, timeout_min: float) -> tuple[str, int]:
+def _at_deadline(sha: str, gh_repo: str, branch: str, subspace: str, timeout_min: float) -> tuple[str, int]:
     """No row by the deadline: one GitHub read of the sha's push runs tells a
     dropped board wake (every run finished) from CI still running."""
     head = f"{sha[:12]} timeout: no row on {subspace} after {timeout_min:g} min"
     if len(sha) != 40:
         return f"{head}; give the full sha to check GitHub at the deadline", ci_wait.EXIT_TIMEOUT
-    runs = ci_wait.gh_push_runs(gh_repo, sha)
+    runs = ci_wait.gh_push_runs(gh_repo, sha, branch)
     if runs is None:
         return f"{head}; GitHub could not be read", ci_wait.EXIT_TIMEOUT
     if not runs:

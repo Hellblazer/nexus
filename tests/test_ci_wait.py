@@ -71,7 +71,7 @@ class TestParse:
     @pytest.mark.parametrize("body", [
         "not json", {"runs": []}, {"sha": SHA, "runs": [[1]]}, {"sha": SHA, "runs": [[None, 1]]},
         {"sha": SHA, "runs": [["x", 1]]}, {"sha": SHA, "runs": 5}, {"sha": SHA, "runs": [[1, None]]},
-        {"sha": SHA, "runs": [[True, 1]]},
+        {"sha": SHA, "runs": [[True, 1]]}, '{"sha": "%s", "runs": [[1e999, 1]]}' % SHA,
     ])
     def test_a_body_that_is_not_a_done_body_is_none(self, body) -> None:
         assert ci_wait.parse_done_row(_row(body)) is None
@@ -238,6 +238,24 @@ class TestFindDoneRow:
         with pytest.raises(ci_wait.BoardUnreadableError, match="down"):
             ci_wait.find_done_row(down, sub, SHA, timeout_s=30, clock=clock, sleep=sleep)
 
+        refused = _Board(clock)
+        refused.rd = lambda *a, **k: (_ for _ in ()).throw(ValueError("schema"))  # type: ignore[method-assign]
+        before = clock.now
+        with pytest.raises(ci_wait.BoardUnreadableError, match="schema"):
+            ci_wait.find_done_row(refused, sub, SHA, timeout_s=3600, clock=clock, sleep=sleep)
+        assert clock.now == before, "a non-transient error is reported at once, not retried"
+
+    def test_a_page_with_no_created_at_cannot_spin(self) -> None:
+        clock, board = self._setup()
+        board.post(OTHER, [[1, 1, "CI", "success"]])
+        row = board.rows[0][1]
+        board.rows[0] = (0.0, TupleRow(**{**{f: getattr(row, f) for f in row.__dataclass_fields__},
+                                          "created_at": None}))
+        board.rd = lambda *a, **k: [board.rows[0][1]]  # type: ignore[method-assign]
+        with pytest.raises(ci_wait.BoardUnreadableError, match="cannot advance"):
+            ci_wait.find_done_row(board, ci_wait.done_subspace("nexus", "develop"), SHA,
+                                  timeout_s=60, clock=clock)
+
     def test_an_outcome_dim_that_disagrees_with_the_conclusions_exits_4(self) -> None:
         board = _Board(_Clock())
         board.post(SHA, [[10, 1, "CI", "failure"]], dims={"outcome": "success"})
@@ -304,8 +322,9 @@ class TestCli:
         monkeypatch.setattr(ci_cmd, "_store", lambda: board)
         asked: list[str] = []
 
-        def fake_runs(gh_repo: str, sha: str):
+        def fake_runs(gh_repo: str, sha: str, branch: str):
             asked.append(sha)
+            assert branch == "develop"
             return runs
 
         monkeypatch.setattr(ci_wait, "gh_push_runs", fake_runs)
@@ -321,6 +340,19 @@ class TestCli:
         monkeypatch.setattr(ci_wait, "gh_push_runs", lambda *a: pytest.fail("read GitHub for a prefix"))
         result = CliRunner().invoke(ci_group, ["wait", SHA[:10], "--timeout", "0"])
         assert result.exit_code == 2 and "give the full sha" in result.stdout
+
+
+    def test_a_fresh_wait_never_reads_github_at_the_deadline(self, monkeypatch) -> None:
+        board = _Board(_Clock())
+        board.post(SHA, [[10, 1, "CI", "failure"]])
+        monkeypatch.setattr(ci_cmd, "_store", lambda: board)
+        monkeypatch.setattr(ci_wait, "gh_push_runs", lambda *a: pytest.fail("read GitHub under --fresh"))
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "0", "--fresh"])
+        assert result.exit_code == 2 and "no new row" in result.stdout
+
+    def test_a_timeout_that_is_not_a_number_exits_5(self) -> None:
+        result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "nan"])
+        assert result.exit_code == 5, result.output
 
 
 def test_a_sha_that_is_not_hex_exits_5_not_the_timeout_code() -> None:

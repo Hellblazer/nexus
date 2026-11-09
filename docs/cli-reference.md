@@ -2978,7 +2978,7 @@ Waits until the CI runs for `<sha>` (a full sha, or a prefix of at least 7 hex d
 
 The outcome reduces GitHub's own run conclusions with no policy of ours: failure if any run is `failure`, `timed_out`, `startup_failure` or `action_required`; else cancelled if any is `cancelled` or `stale`; else success (`success`, `neutral` and `skipped` count as success). Required checks and flake judgment stay with the reader. When the row carries the board's own `outcome` and it disagrees with that reduction, both are printed and the exit is 4. A row written before the board carried conclusions (its runs are `[run_id, attempt]` pairs) gets them from one `gh api` read per run attempt, after the row arrives.
 
-The board wake is best effort: a run set the adapter could not fold posts no row. So when no row has come by `--timeout` (default 60 minutes, at most a day) and the sha is a full one, it reads the sha's push runs from GitHub once: if every run has finished it prints their outcome, marked as read from GitHub, with the usual exit code; otherwise it exits 2 saying how many are still running. A board read that fails is retried every 5 seconds until the deadline.
+The board wake is best effort: a run set the adapter could not fold posts no row. So when no row has come by `--timeout` (default 60 minutes, at most a day) and the sha is a full one (and the wait is not `--fresh`, since GitHub cannot tell a rerun that has not started from the attempt it replaces), it reads the sha's push runs from GitHub once: if every run has finished it prints their outcome, marked as read from GitHub, with the usual exit code; otherwise it exits 2 saying how many are still running. A board read that fails because the engine is unreachable, times out or answers 5xx or 429 is retried every 5 seconds until the deadline; any other failure ends the wait at once. The deadline read asks for the sha's push runs on `--branch` only, so the same sha's runs on main or a release tag do not count.
 
 | Exit | Meaning |
 |---|---|
@@ -2987,7 +2987,9 @@ The board wake is best effort: a run set the adapter could not fold posts no row
 | 2 | no row for the sha before `--timeout`, and GitHub does not show every run finished |
 | 3 | runs were cancelled or stale and none failed |
 | 4 | a conclusion could not be read, is one this table does not know, or disagrees with the board's outcome |
-| 5 | the wait could not run: not a sha, or no tuple store or board read until the deadline |
+| 5 | the wait could not run: not a sha, no tuple store, a refused board read, or the engine unreachable until the deadline |
+
+Click's own usage errors (a missing sha, `--timeout` out of range) exit 2, as for every `nx` command.
 
 ## nx collection
 
