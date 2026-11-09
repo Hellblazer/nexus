@@ -32,8 +32,8 @@ def ci_group() -> None:
 @click.option("--repo", default="nexus", show_default=True, help="Repository part of the board topic.")
 @click.option("--branch", default="develop", show_default=True, help="Branch part of the board topic.")
 @click.option("--gh-repo", default=None,
-              help="owner/name for the GitHub reads (a row with no conclusions, and the one read at "
-                   "the deadline) [default: Hellblazer/<repo>].")
+              help="owner/name for the GitHub reads (a row with no conclusions, a row capped by the "
+                   "board's size limit, and the one read at the deadline) [default: Hellblazer/<repo>].")
 @click.option("--park-s", type=click.IntRange(1, ci_wait.PARK_CAP_S), default=ci_wait.PARK_CAP_S,
               hidden=True, help="Seconds per park (tests).")
 def ci_wait_cmd(
@@ -53,9 +53,10 @@ def ci_wait_cmd(
     failure (failure, timed_out, startup_failure, action_required), 3 when
     runs were cancelled or stale and none failed, 2 on timeout, 4 when a
     conclusion could not be read, the board's outcome disagrees with the
-    conclusions, or the row lists fewer runs than its count (the adapter's
-    size cap) and GitHub could not supply the rest, and 5 when the wait could not run (a bad SHA, no tuple store,
-    a refused board read, or the board unreachable until the deadline).
+    conclusions, or the row lists fewer runs than its count (the board's
+    size cap) and GitHub's runs for the sha are not exactly the missing ones,
+    and 5 when the wait could not run (a bad SHA, no tuple store, a refused
+    board read, or the board unreachable until the deadline).
     Click's own usage errors (a missing SHA, --timeout out of range) exit 2.
     """
     if not math.isfinite(timeout_min):

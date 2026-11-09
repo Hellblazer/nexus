@@ -183,8 +183,9 @@ def gh_run_conclusion(gh_repo: str, run_id: int, attempt: int) -> tuple[str | No
 def gh_push_runs(gh_repo: str, sha: str, branch: str) -> list[Run] | None:
     """The push runs GitHub lists for *sha* (a full sha) on *branch*, each
     with its conclusion or None while it runs; None when GitHub cannot be read
-    or the list may be cut short. Read once, at the deadline only, to tell a
-    dropped board wake from CI still running. The branch filter keeps out the
+    or the list may be cut short. Read at most once per wait: at the deadline,
+    to tell a dropped board wake from CI still running, or for a capped row
+    (:func:`complete_runs`). The branch filter keeps out the
     same sha's runs elsewhere (main after a promotion, a release tag)."""
     got = _gh_json(
         f"repos/{gh_repo}/actions/runs?head_sha={sha}&event=push&branch={quote(branch, safe='')}&per_page=100",
@@ -226,20 +227,32 @@ def complete_runs(
 ) -> DoneRow:
     """A capped row with the runs the cap dropped, read from GitHub once.
 
-    The adapter sorts the fold by (run_id, attempt) and drops whole trailing
-    entries, so the missing runs are the highest run ids. A listed failure
-    already settles the outcome, and an uncapped row is whole: neither reads
-    GitHub. Otherwise the sha's push runs whose id is above the highest listed
-    one are appended, and only when that makes exactly ``total`` runs; anything
-    else leaves the row capped, which :func:`summarize` reports as unknown."""
+    The adapter folds each run id once, at one attempt, sorts the fold by run
+    id and drops whole trailing entries, so the missing runs are the highest
+    run ids. A listed failure already settles the outcome, and an uncapped row
+    is whole: neither reads GitHub. Otherwise GitHub's push runs for the sha on
+    *branch* are accepted only when they are the fold, by identity and not just
+    by count: exactly ``total`` runs, the ids up to the highest listed one
+    exactly the listed ids, each listed run at the attempt the row names (a
+    newer attempt is a rerun that started after the row), and each dropped run
+    on its first attempt (a later attempt cannot be told from a rerun since
+    the fold). Anything else leaves the row capped, which :func:`summarize`
+    reports as unknown: a capped row whose dropped run was rerun stays exit 4.
+    """
     if not row.capped or any(r.conclusion in FAILURE_CONCLUSIONS for r in row.runs):
         return row
     listed = (fetch or gh_push_runs)(gh_repo, row.sha, branch)
     if listed is None:
         return row
-    top = max((r.run_id for r in row.runs), default=0)
-    dropped = sorted((r for r in listed if r.run_id > top), key=lambda r: (r.run_id, r.attempt))
-    if len(row.runs) + len(dropped) != row.total:
+    by_id = {r.run_id: r for r in listed}
+    if len(by_id) != len(listed) or len(listed) != row.total:
+        return row
+    ids = {r.run_id for r in row.runs}
+    top = max(ids, default=0)
+    if {i for i in by_id if i <= top} != ids or any(by_id[r.run_id].attempt != r.attempt for r in row.runs):
+        return row
+    dropped = sorted((r for r in listed if r.run_id > top), key=lambda r: r.run_id)
+    if any(r.attempt != 1 for r in dropped):
         return row
     return DoneRow(row.tuple_id, row.sha, row.runs + tuple(dropped), row.url, row.outcome_dim, row.total)
 
@@ -337,7 +350,7 @@ def summarize(row: DoneRow) -> tuple[str, int]:
         outcome = None
     line = result_line(row, outcome)
     if row.capped:
-        rest = "" if outcome == "failure" else "; the rest could not be read"
+        rest = "" if outcome == "failure" else "; GitHub did not confirm the rest"
         line += f" ({len(row.runs)} of {row.total} runs listed{rest})"
     if row.outcome_dim and outcome and row.outcome_dim != outcome:
         return f"{line} (outcome mismatch: the board says {row.outcome_dim})", EXIT_UNKNOWN
