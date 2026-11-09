@@ -380,6 +380,7 @@ def test_progress_goes_to_stderr_and_stdout_keeps_the_json_it_always_had(monkeyp
         "applied", "documents_examined", "documents_notes", "documents_complete", "documents_all_shared",
         "documents_to_stamp", "documents_written", "lookups_failed", "writes_failed",
         "tags_legacy_strings_left_for_the_array_rung", "keys",
+        "repo_owners",  # nexus-6pfgb.43: always present, 0 when the repo-collection tags rule saw no repo owner
     }, "an uninterrupted run adds nothing to the report"
 
 

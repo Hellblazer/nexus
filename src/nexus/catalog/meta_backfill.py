@@ -489,6 +489,7 @@ class Report:
     writes_failed: int = 0
     tags_legacy_strings_left: int = 0
     repo_owners: int = 0            # repository owners the run saw: 0 means the repo-collection tags rule found none
+    repo_listing_failed: bool = False  # the owner or collection listing failed, so the rule was off for the run
     keys: dict[str, KeyStats] = field(default_factory=dict)
     applied: bool = False
     interrupted: bool = False       # stopped before the last batch; only finished batches are counted
@@ -520,6 +521,7 @@ class Report:
             "lookups_failed": self.lookups_failed, "writes_failed": self.writes_failed,
             "tags_legacy_strings_left_for_the_array_rung": self.tags_legacy_strings_left,
             "repo_owners": self.repo_owners,
+            **({"repo_listing_failed": True} if self.repo_listing_failed else {}),
             "keys": {k: v.as_dict() for k, v in sorted(self.keys.items())},
         }
         if self.started_after:
@@ -722,8 +724,13 @@ def backfill_meta(
     base = count_requests()
     history: deque[tuple[float, int]] = deque([(started, base)], maxlen=RECENT_ROUNDS + 1)
     listing = list(reader.all_documents())
-    repo_prefixes = repo_owner_prefixes(reader)
-    repo_collections = repo_prose_collections(reader) if repo_prefixes else {}
+    repo_listing_failed = False
+    try:
+        repo_prefixes = repo_owner_prefixes(reader)
+        repo_collections = repo_prose_collections(reader) if repo_prefixes else {}
+    except Exception as exc:  # noqa: BLE001 — the listings only enable the repo-collection tags rule; its loss is reported, the run goes on
+        _log.warning("repo_owner_listing_failed", error=repr(exc))
+        repo_prefixes, repo_collections, repo_listing_failed = frozenset(), {}, True
     live_entries = [e for e in listing if not getattr(e, "alias_of", "")]
     if not live_entries:
         raise VacuousRunError("examined 0 documents: an empty catalog is a failed sweep, not a clean one")
@@ -733,6 +740,7 @@ def backfill_meta(
         list_only=list_only,
     )
     report.repo_owners = len(repo_prefixes)
+    report.repo_listing_failed = repo_listing_failed
     if start_after:
         at = next((i for i, e in enumerate(listing) if str(e.tumbler) == start_after), None)
         if at is None:
