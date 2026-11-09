@@ -3595,16 +3595,20 @@ public final class PgVectorRepository {
      * (nexus-seo4k; Sam's choice, ask linda/lexical-trigram-scope option 1). Above it {@link #hybridRank} sets the
      * transaction-local GUC {@link #LEXICAL_TRGM_GUC} to {@code off}, and {@code nexus.text_gate_probe_<dim>}
      * (vectors-057) gates on the FTS half alone: for a sentence-length question the trigram GIN bitmap passed nothing
-     * on 35 of 35 measured questions and cost 20 to 30 times the FTS half. Known loss: above this length a pasted
-     * passage with one word changed no longer matches through the trigram half; identifiers, partial identifiers and
-     * short phrases keep it.
+     * on 35 of 35 measured questions and cost 20 to 30 times the FTS half. Known loss: above this length a row only
+     * the trigram half would pass is no longer returned (a pasted passage with an edit, an identifier inside a longer
+     * sentence, a code window the english stemmer tokenises differently); at or below it nothing changes.
      */
     public static final int LEXICAL_TRGM_MAX_WORDS = 8;
 
     /** The probe's switch (vectors-057): {@code off} skips the trigram half; unset or anything else keeps it. */
     public static final String LEXICAL_TRGM_GUC = "nexus.lexical_trgm";
 
-    /** True when {@code gateText} is longer than {@link #LEXICAL_TRGM_MAX_WORDS} whitespace-separated words. */
+    /**
+     * True when {@code gateText} is longer than {@link #LEXICAL_TRGM_MAX_WORDS} whitespace-separated words. Words split on
+     * ASCII whitespace ({@code \\s+}), so a CJK or NBSP-separated query counts as fewer words and keeps the trigram half:
+     * today's behaviour, the safe direction.
+     */
     public static boolean skipsTrigramGate(String gateText) {
         if (gateText == null) return false;
         String t = gateText.strip();
@@ -4019,11 +4023,9 @@ public final class PgVectorRepository {
         // reuses via a cheap chash = ANY(...) PK filter, never re-running the
         // expensive `<%` trigram gate a second time.
         // nexus-seo4k: a gate text of more than LEXICAL_TRGM_MAX_WORDS words gates on the FTS half alone; the probe
-        // reads this GUC and picks its FTS-only statement. Not set otherwise (a transaction-local setting ends with
-        // the transaction, so a pooled connection never carries it to the next caller).
-        if (skipsTrigramGate(gateQueryText)) {
-            PgSession.setLocal(ctx, LEXICAL_TRGM_GUC, "off");
-        }
+        // reads this GUC and picks its FTS-only statement. Set either way, so a second hybridRank in one transaction
+        // never inherits the first one's 'off' (transaction-local: a pooled connection never carries it further).
+        PgSession.setLocal(ctx, LEXICAL_TRGM_GUC, skipsTrigramGate(gateQueryText) ? "off" : "on");
         org.jooq.Table<?> probeFn = switch (dim) {
             case 384  -> TEXT_GATE_PROBE_384.call(
                 gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);

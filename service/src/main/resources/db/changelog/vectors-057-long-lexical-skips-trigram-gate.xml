@@ -18,10 +18,11 @@
             RETURN QUERY <today's SELECT, unchanged>;
         END IF;
     The GUC is the caller's: the engine (PgVectorRepository.hybridRank) sets it transaction-locally to 'off' for a gate
-    text of more than LEXICAL_TRGM_MAX_WORDS (8) words and does not set it otherwise, so an unset GUC (including the empty
+    text of more than LEXICAL_TRGM_MAX_WORDS (8) words and to 'on' otherwise; anything but 'off', an unset GUC (including the empty
     string a custom GUC reads as once a transaction that set it has ended) runs today's statement. Sam's choice (ask
-    linda/lexical-trigram-scope, option 1). Known loss: above 8 words a pasted passage with one word changed no longer
-    matches through the trigram half; identifiers, partial identifiers and short phrases keep it.
+    linda/lexical-trigram-scope, option 1). Known loss: above 8 words a row that only the trigram half would pass is no longer returned: a pasted
+    passage with an edit, an identifier or partial identifier inside a longer sentence, or a code window the english
+    stemmer tokenises differently; at 8 words or fewer nothing changes.
 
     WHAT STAYS. Every signature, the return type (SETOF bytea), the owner, the grants and the security posture: CREATE OR
     REPLACE keeps the oid and the ACL, so the Liquibase walk does not have to re-grant. The posture is whatever vectors-031-2
@@ -29,8 +30,10 @@
     search_path and plan_cache_mode = force_custom_plan, exactly vectors-031-2's definer body); otherwise they were LANGUAGE
     sql SECURITY INVOKER and become plpgsql SECURITY INVOKER (a function holding two statements cannot be one inlined SQL
     expression), with plan_cache_mode = force_custom_plan so the call's values reach the planner as the definer form's do.
-    The by-chash rank and the HNSW-first rank are not changed: the rank re-applies the OR gate to rows that already passed
-    the probe, so its OR short-circuits on the FTS half, and HNSW-first runs only when the probe exceeds its cap.
+    The by-chash rank and the HNSW-first rank are not changed: the selective rank takes the probe's chash set and applies
+    no text gate, and HNSW-first runs only when the probe exceeds its cap (then the OR gate is a per-row filter). The
+    chash_allow paths (text_gated_search_allowed, manifest_search with chashes) never call the probe, so a long query
+    there still evaluates the trigram half per allowed row (at most MAX_CHASH_ALLOW rows).
 
     The post-conditions: exactly one signature per probe, the three agree on SECURITY DEFINER, and the posture is the one
     read at the start.

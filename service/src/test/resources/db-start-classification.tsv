@@ -30,6 +30,7 @@ StagingSchemaDropLiquibaseTest	startEmptyDatabase	WALK	walks to before staging-0
 P225MigrationWalkIntegrationTest	startEmptyDatabase	WALK	runs vectors-030-1 as production does over a seeded pre-walk layout and asserts the partitioned result, its failure and resume paths
 P225DropRetiredIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-036-1 over a seeded pre-walk layout, applies the drop alone, rolls it back and compares the retired tables' catalog shape
 SchemaRollbackRoundTripIntegrationTest	startEmptyDatabase	WALK	rolls the walk back to a tag and re-walks, asserting what each rollback leaves
+SchemaRollbackRoundTripIntegrationTest	startDedicated	CLUSTER_STATE	migrates AS nexus_svc (the single-role posture, vectors-057 invoker probes) and rolls vectors-057-1 back; nexus_svc owning the schema is cluster state the shared cluster must not hold
 SchemaUpgradeRehearsalIntegrationTest	startEmptyDatabase	WALK	walks the old engine's changelog tree, injects divergence or legacy rows, then upgrades to HEAD
 SchemaMigratorIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's own contract: aged-box walks as a non-superuser owner, outcome counts, journal, locks
 WalkLockPreflightIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's lock-capacity preflight and the walk's own lock count, both only while vectors-030-1 is still pending
