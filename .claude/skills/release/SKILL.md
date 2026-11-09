@@ -25,7 +25,7 @@ neither file.)
 (the upgrade shakeout) and Step 6c (sandbox shakedown) went with the scripts they
 ran. The battery is now the fresh-install MVV, the package-upgrade convergence
 MVV and the local-service gate, behind one preflight. Steps that remain:
-0, 0c, 1, 2, 3, 4, 4a, 5, 6d, 7, 8, 8a, 9, 10, 11, 11b, 11c, 12.
+0, 0c, 1, 2, 3, 4, 4a, 5, 6d, 7, 8, 8a, 9, 10, 11, 11b, 11c, 12, 12a.
 
 **RDR-237 prerequisite (the release that first carries MinerU-only extraction).**
 That release (every PDF through MinerU, the old extractor removed, no default-on MinerU
@@ -919,6 +919,28 @@ nx --version                 # must print X.Y.Z
 
 `pyproject.toml` bumps the project version, but the local `nx` shim does not point at a wheel: it resolves `<tools>/current` at spawn time and execs the generation that pointer names, so until this step flips `current` every new spawn still lands in the old generation (and existing holders keep running from theirs afterwards). Caught on v4.9.11: `nx --version` reported 4.9.10 even after PyPI showed 4.9.11.
 
+### 12a. Memory curation report (RDR-238; report only, never blocks)
+
+Once Step 12's restart has every session on the new version, run the curation report
+in one session, with the reinstalled `nx`:
+
+```bash
+nx memory curate --files --t2 --agents --cold || echo "curation step skipped (exit $?); the release goes on"
+```
+
+It prints the report and stores it in T2 as `<repo>/curation-report-<date>` (90-day
+TTL): memory files that are unindexed, oversized or dangling, T2 rows and reviewer
+memory to look at, and (`--cold`) memory files, T2 namespaces, MCP tools, CLI verbs
+and nested CLAUDE.md files with no write and no use in 30 days. `--cold` reads every
+transcript of the window three times, so it takes minutes.
+
+This step never blocks the release. The command exits 0 whatever it finds, and a
+section that cannot run prints one "not available" line while the others still run.
+A non-zero exit or "No such command" (in the plugin-only lane the local `nx` can
+predate the verb) is reported in the ship record, and the release is still done.
+The report changes nothing: retiring what it lists is a person's decision, so link
+the report from the ship record and leave the list to Sam.
+
 ## Plugin-only fast lane
 
 A patch release that ships plugin-surface content (`conexus/`, `sn/`,
@@ -1109,6 +1131,8 @@ script is exempt from idle only), and checks again after the install and before
 each session's exit. Name the mode: after a `--fresh` run a bare restart is
 refused until you pass `--fresh` or `--resume`. `--force` overrides the round.
 No Windows guest leg.
+After the restart, run Step 12a (the curation report); it tolerates a local `nx`
+that predates the verb.
 
 For the first real use of this lane, paste the eligibility output, the battery
 table and the delivery-proof verdict into bead nexus-rbmja.13.
@@ -1119,6 +1143,7 @@ push its tags once their gates are green (engine-release skill Step 4 states the
 
 ## Common Mistakes
 
+- **Holding a release on the curation report (Step 12a).** The report never blocks: a red section, a non-zero exit or a missing verb goes in the ship record and the release is done. Acting on what it lists is Sam's decision, not a release step.
 - **Freehanding a version surface or a tag from memory of AGENTS.md instead of invoking this skill.** It skips the pre-push and post-publish verification that catches a failed publish (v4.32.13: the tag's workflow failed, PyPI was skipped, and the release was declared done anyway). Invoke `release` (or `engine-release`) before touching either.
 - **Bumping only `pyproject.toml` and missing the four plugin manifests.** CI parity check catches this late. Run the Step 8 pre-push check.
 - **Skipping the integration suite.** Unit-only is what CI runs; integration is your last gate against keyed-API regressions before tag-push.
