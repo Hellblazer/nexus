@@ -56,6 +56,7 @@ from nexus.lua_runtime.runner import run_procedure
 from nexus.lua_runtime.verb_types import VerbContext
 from nexus.mcp import core
 from tests._module_seam import setattr_in
+from tests._tmp_root import child_env_with_tmpdir
 
 REPO_ROOT = Path(hd.__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / ".nexus" / "procedures" / "preflight.lua"
@@ -266,9 +267,8 @@ def _run(
     assert shell is not None
     logs = stubs.parent / f"logs-{len(list(stubs.parent.iterdir()))}"
     logs.mkdir()
-    env = _env()
+    env = child_env_with_tmpdir(_env(), logs)
     env["PATH"] = f"{stubs}{os.pathsep}{env.get('PATH', '')}"
-    env["TMPDIR"] = str(logs)
     env.update(env_extra or {})
     proc = subprocess.run(
         [shell, "-c", command],
