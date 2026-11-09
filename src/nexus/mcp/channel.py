@@ -574,17 +574,31 @@ def _mailbox_notification_content(
     return text + _label_sentence(case, session) if case else text
 
 
-def _board_exact_read(subspace: str, count: int, first_id: str, first_created_at: str | None) -> str:
-    """nexus-1d6pz.11.2: the read that returns exactly the *count* announced
-    rows, starting AT the first one (``tuple_rd``'s inclusive ``from``). A
-    row with no ``created_at`` (the engine always sends one) gets the plain
-    pointer, never a ``tuple_rd(subspace, n)`` that would read the OLDEST
-    rows of the subspace."""
-    if not first_created_at:
+#: nexus-1d6pz.11.2: the row cap a batch notice's read carries. Its through bound
+#: ends the read at the last announced post; this only has to clear the rows that
+#: can sort between the first and last (the announced ones plus any that committed
+#: late, or that the announce skipped as claimed or dead). The engine's default
+#: read cap.
+_BOARD_BATCH_READ_ROWS: int = 300
+
+
+def _board_exact_read(
+    subspace: str, first_id: str, first_created_at: str | None,
+    last: tuple[str, str | None] | None = None,
+) -> str:
+    """nexus-1d6pz.11.2: the read that returns the announced posts. A single
+    post reads one row starting AT it; a batch reads from its first post
+    through its last, inclusive, because the announced posts need not be
+    consecutive in the subspace. A row with no ``created_at`` (the engine
+    always sends one) gets the plain pointer, never a ``tuple_rd(subspace,
+    n)``, which reads the OLDEST rows of the subspace."""
+    if not first_created_at or (last is not None and not last[1]):
         return "tuple_rd on that subspace"
+    if last is None:
+        return f'tuple_rd("{subspace}", n=1, from_created_at="{first_created_at}", from_id="{first_id}")'
     return (
-        f'tuple_rd("{subspace}", n={count}, from_created_at="{first_created_at}", '
-        f'from_id="{first_id}")'
+        f'tuple_rd("{subspace}", n={_BOARD_BATCH_READ_ROWS}, from_created_at="{first_created_at}", '
+        f'from_id="{first_id}", through_created_at="{last[1]}", through_id="{last[0]}")'
     )
 
 
@@ -594,23 +608,25 @@ def _board_notification_content(
 ) -> str:
     text = (
         f"nexus board post: subspace {subspace}, tuple {tuple_id}. Read it with "
-        f"{_board_exact_read(subspace, 1, tuple_id, created_at)}. Posts are never claimed."
+        f"{_board_exact_read(subspace, tuple_id, created_at)}. Posts are never claimed."
     )
     return text + _label_sentence(case, session) if case else text
 
 
 def _board_batch_notification_content(
     subspace: str, count: int, first_id: str, last_id: str, first_created_at: str | None,
+    last_created_at: str | None = None,
     *, unverified: list[tuple[str, str, str | None]] | None = None,
 ) -> str:
     """Bead nexus-zxthy: ONE notification for *count* posts of one wait.
     Identifiers only, as the single-post shape (Sam, 2026-09-17, T2
     nexus_rdr/211-decision-push-reference-2026-09-17): the subspace, the
     count, the first and last tuple id, and how to read them. The read
-    starts AT the first post (*first_created_at* is its ``created_at``) and
-    returns the *count* announced posts (nexus-1d6pz.11.2; it once fell
-    back to ``tuple_rd(subspace, n)``, which reads the OLDEST rows)."""
-    read = _board_exact_read(subspace, count, first_id, first_created_at)
+    runs from the first post through the last, inclusive (nexus-1d6pz.11.2;
+    it once fell back to ``tuple_rd(subspace, n)``, which reads the OLDEST
+    rows); a post that committed late can sort between them and is
+    returned too, and the meta's ``tuple_ids`` names the announced ones."""
+    read = _board_exact_read(subspace, first_id, first_created_at, (last_id, last_created_at))
     text = (
         f"nexus board posts: subspace {subspace}, {count} new posts, tuples {first_id} "
         f"to {last_id}. Read them with {read}. Posts are never claimed."
@@ -1624,7 +1640,7 @@ class ChannelWaiter:
                 if len(unverified) == len(kept) and len(words) == 1:
                     meta["sender"] = words.pop()
             content = _board_batch_notification_content(
-                subspace, len(kept), first.id, last.id, first.created_at,
+                subspace, len(kept), first.id, last.id, first.created_at, last.created_at,
                 unverified=unverified,
             )
             if not await self._send(content, meta, hold=delivered):

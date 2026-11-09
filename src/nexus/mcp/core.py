@@ -8996,6 +8996,12 @@ def tuple_rd(
     from_id: Annotated[str, Field(
         description="The id of that same row (64 hex characters). See from_created_at.",
     )] = "",
+    through_created_at: Annotated[str, Field(
+        description="With from_*: the created_at of the row to stop AT, inclusive. Pair with through_id.",
+    )] = "",
+    through_id: Annotated[str, Field(
+        description="The id of that same row (64 hex characters). See through_created_at.",
+    )] = "",
     timeout_s: Annotated[int, Field(
         description="Seconds to park when nothing matches immediately; 0 (default) never blocks. "
                     "At most 25 by default (the engine's NX_TUPLE_TIMEOUT_CAP_SECONDS); a longer value is refused, not clamped.",
@@ -9015,11 +9021,20 @@ def tuple_rd(
     before this client's clock; the claimant and `lease_until` are the
     stale holder's) or `dead`.
     `since_created_at` and `since_id` come from a returned row, together.
-    `from_created_at` and `from_id` name one row to start at, inclusive
-    (nexus-1d6pz.11.2); with no `since` and no `from`, the read starts at the
-    OLDEST row, not the newest.
+    `from_created_at` and `from_id` name one row to start at, inclusive, and
+    `through_created_at` and `through_id` one row to stop at, inclusive; with
+    no `since` and no `from`, the read starts at the OLDEST row, not the newest.
     """
+    # nexus-1d6pz.11.2: the inclusive from/through read a board notice prints.
     try:
+        if bool(through_created_at) != bool(through_id):
+            from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+            raise SchemaViolationError(
+                "through_created_at and through_id come as a pair, both from one row (its created_at and its id)"
+            )
+        if through_created_at and not from_created_at:
+            from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
+            raise SchemaViolationError("through_created_at/through_id bound a from_created_at/from_id read")
         if bool(from_created_at) != bool(from_id):
             from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
             raise SchemaViolationError(
@@ -9036,7 +9051,10 @@ def tuple_rd(
                 from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
                 raise SchemaViolationError("from_created_at reads what is there; it does not park (timeout_s=0)")
             with _t2_ctx() as db:
-                rows = db.tuples.rd_from(subspace, keys_pattern, n=n, start=(from_created_at, from_id))
+                rows = db.tuples.rd_from(
+                    subspace, keys_pattern, n=n, start=(from_created_at, from_id),
+                    through=(through_created_at, through_id) if through_created_at else None,
+                )
             return [_tuple_row_to_dict(r) for r in rows]
         if bool(since_created_at) != bool(since_id):
             # bead nexus-o9gt2: one half used to be silently ignored, reading from the start.

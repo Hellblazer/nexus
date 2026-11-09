@@ -26,10 +26,12 @@ from datetime import UTC, datetime
 
 import pytest
 
+from nexus.db.t2.records import TupleRow
 from nexus.mcp import channel
 from nexus.mcp.core import tuple_out, tuple_rd
 from nexus.mcp.subscriptions import SubscriptionSet
 from nexus.mcp_infra import t2_ctx
+from nexus.tuple_wait import render_row
 
 pytestmark = pytest.mark.t2_tenant
 
@@ -113,6 +115,56 @@ class TestBoardNoticeReadIsExact:
             subs.shutdown()
 
 
+class TestBatchReads:
+    def test_the_first_notice_after_subscribe_is_a_batch_and_its_read_is_exact(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """The G3 evidence: a batch with no earlier delivered post to anchor on."""
+        topic = f"first-{uuid.uuid4().hex[:8]}"
+        subspace = f"board/{topic}"
+        old = [_post(subspace, topic, f"old {i}") for i in range(2)]
+        session_id = str(uuid.uuid4())
+        subs = SubscriptionSet(session_id=session_id)
+        try:
+            subs.subscribe(subspace, templates=[], store_factory=t2_ctx, state_dir=tmp_path)
+            subs._board[subspace] = datetime.now(UTC).isoformat()  # noqa: SLF001
+            sender = _Sender()
+            waiter = channel.ChannelWaiter(
+                session_id, t2_ctx, subs, sender=sender, wait_timeout_s=1, board_start_skew_s=0.0,
+            )
+            batch = [_post(subspace, topic, f"b {i}") for i in range(3)]
+            asyncio.run(waiter.tick())
+            notices = [(c, m) for c, m in sender.calls if m.get("subspace") == subspace]
+            assert len(notices) == 1 and notices[0][1].get("count") == "3", sender.calls
+            assert _run_printed_read(notices[0][0]) == batch
+            assert [r["id"] for r in tuple_rd(subspace, n=1)] == [old[0]]
+        finally:
+            subs.shutdown()
+
+    def test_a_batch_whose_posts_are_not_consecutive_still_returns_its_last_post(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """A row sorting between two announced posts (here B, which this
+        delivery leaves out, as a late commit would): the read returns A, B and
+        C, never [A, B] without C."""
+        topic = f"gap-{uuid.uuid4().hex[:8]}"
+        subspace = f"board/{topic}"
+        ids = [_post(subspace, topic, f"r{i}") for i in range(3)]
+        with t2_ctx() as db:
+            rows = {r.id: r for r in db.tuples.rd(subspace, n=10)}
+        session_id = str(uuid.uuid4())
+        subs = SubscriptionSet(session_id=session_id)
+        try:
+            sender = _Sender()
+            waiter = channel.ChannelWaiter(session_id, t2_ctx, subs, sender=sender, wait_timeout_s=1)
+            asyncio.run(waiter._deliver_board_rows(subspace, [rows[ids[0]], rows[ids[2]]], None))  # noqa: SLF001
+            (content, meta), = sender.calls
+            assert meta["tuple_ids"] == f"{ids[0]},{ids[2]}"
+            assert _run_printed_read(content) == ids
+        finally:
+            subs.shutdown()
+
+
 class TestTupleRdInclusiveStart:
     def test_from_returns_the_named_row_first_then_the_rows_after_it(self, t2_service_env) -> None:
         topic = f"from-{uuid.uuid4().hex[:8]}"
@@ -144,11 +196,45 @@ class TestTupleRdInclusiveStart:
             "board/x", n=1, since_created_at="2026-11-08T00:00:00Z", since_id="a" * 64,
             from_created_at="2026-11-08T00:00:00Z", from_id="a" * 64,
         )
-        assert len(out) == 1 and "error" in out[0], out
+        assert len(out) == 1 and "not both" in out[0].get("error", ""), out
 
     def test_half_a_from_pair_is_refused(self, t2_service_env) -> None:
         out = tuple_rd("board/x", n=1, from_created_at="2026-11-08T00:00:00Z")
-        assert len(out) == 1 and "error" in out[0], out
+        assert len(out) == 1 and "come as a pair" in out[0].get("error", ""), out
+
+    def test_through_without_from_is_refused(self, t2_service_env) -> None:
+        out = tuple_rd("board/x", n=1, through_created_at="2026-11-08T00:00:00Z", through_id="a" * 64)
+        assert len(out) == 1 and "bound a from_created_at" in out[0].get("error", ""), out
+
+    @pytest.mark.parametrize(("kwargs", "needle"), [
+        ({"n": 0}, "must be at least 1"),
+        ({"from_created_at": "2026-11-08T00:00:00"}, "UTC offset"),
+        ({"from_id": "abc"}, "is not a tuple id"),
+    ])
+    def test_a_malformed_from_read_is_refused_by_name(self, t2_service_env, kwargs, needle) -> None:
+        args = {"n": 1, "from_created_at": "2026-11-08T00:00:00Z", "from_id": "a" * 64, **kwargs}
+        out = tuple_rd(f"board/bad-{uuid.uuid4().hex[:6]}", **args)
+        assert len(out) == 1 and needle in out[0].get("error", ""), out
+
+    def test_through_stops_at_its_row_and_returns_rows_between(self, t2_service_env) -> None:
+        """The superset property a batch notice relies on: a row sorting between
+        the first and last announced posts (late commit, or skipped by the
+        announce) is returned, and the last announced post is never lost."""
+        topic = f"through-{uuid.uuid4().hex[:8]}"
+        subspace = f"board/{topic}"
+        ids = [_post(subspace, topic, f"r{i}") for i in range(4)]
+        rows = {r["id"]: r for r in tuple_rd(subspace, n=10)}
+        a, c = rows[ids[0]], rows[ids[2]]
+        got = tuple_rd(
+            subspace, n=300, from_created_at=a["created_at"], from_id=a["id"],
+            through_created_at=c["created_at"], through_id=c["id"],
+        )
+        assert [r["id"] for r in got] == ids[:3]
+        missing = tuple_rd(
+            subspace, n=300, from_created_at=a["created_at"], from_id=a["id"],
+            through_created_at=c["created_at"], through_id="0" * 63 + "1",
+        )
+        assert len(missing) == 1 and "not in" in missing[0].get("error", ""), missing
 
 
 class TestNoticeText:
@@ -161,12 +247,21 @@ class TestNoticeText:
             'from_id="p1")'
         ) in content
 
-    def test_batch_notice_prints_the_inclusive_read_from_its_first_row(self) -> None:
+    def test_batch_notice_prints_a_read_from_its_first_post_through_its_last(self) -> None:
         content = channel._board_batch_notification_content(  # noqa: SLF001
-            "board/ci/x", 3, "p1", "p3", "2026-11-08T12:00:00.000001Z",
+            "board/ci/x", 3, "p1", "p3", "2026-11-08T12:00:00.000001Z", "2026-11-08T12:00:02Z",
         )
         assert (
-            'tuple_rd("board/ci/x", n=3, from_created_at="2026-11-08T12:00:00.000001Z", '
-            'from_id="p1")'
+            'tuple_rd("board/ci/x", n=300, from_created_at="2026-11-08T12:00:00.000001Z", '
+            'from_id="p1", through_created_at="2026-11-08T12:00:02Z", through_id="p3")'
         ) in content
         assert "newest" not in content
+
+    def test_nx_tuple_wait_prints_the_same_exact_read(self) -> None:
+        row = TupleRow(
+            id="b" * 64, subspace="board/ci/x", template="board/ci/<topic>", keys={}, dims={},
+            body="x", claim_state=None, claimant=None, lease_until=None, attempts=0,
+            consumed_at=None, consumed_by=None, expires_at=None, created_at="2026-11-08T12:00:00Z",
+        )
+        text = render_row("board/ci/x", row)
+        assert f'tuple_rd("board/ci/x", n=1, from_created_at="2026-11-08T12:00:00Z", from_id="{"b" * 64}")' in text

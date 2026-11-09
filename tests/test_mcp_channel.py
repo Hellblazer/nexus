@@ -2879,10 +2879,13 @@ class TestBoardStartAtNowAndFold:
         assert len(sender.calls) == 1
         content, meta = sender.calls[0]
         assert content == channel._board_batch_notification_content(  # noqa: SLF001
-            "board/ci/x", 20, "p00", "p19", _iso(1_000_001),
+            "board/ci/x", 20, "p00", "p19", _iso(1_000_001), _iso(1_000_020),
         )
         assert "secret body" not in content and "github" not in content and "job" not in content
-        assert f'tuple_rd("board/ci/x", n=20, from_created_at="{_iso(1_000_001)}", from_id="p00")' in content
+        assert (
+            f'tuple_rd("board/ci/x", n=300, from_created_at="{_iso(1_000_001)}", from_id="p00", '
+            f'through_created_at="{_iso(1_000_020)}", through_id="p19")'
+        ) in content
         assert meta == {
             "subspace": "board/ci/x", "tuple_id": "p19", "first_tuple_id": "p00",
             "count": "20", "kinds": "job=18,run=2", "from": "github",
@@ -2962,9 +2965,10 @@ class TestBoardStartAtNowAndFold:
 
         content, _meta = sender.calls[-1]
         assert content == channel._board_batch_notification_content(  # noqa: SLF001
-            "board/ci/x", 3, "b0", "b2", _iso(1_000_010),
+            "board/ci/x", 3, "b0", "b2", _iso(1_000_010), _iso(1_000_012),
         )
         assert f'from_created_at="{_iso(1_000_010)}", from_id="b0"' in content
+        assert f'through_created_at="{_iso(1_000_012)}", through_id="b2"' in content
         assert "since_" not in content
 
     @pytest.mark.asyncio
@@ -3189,7 +3193,7 @@ class TestSenderLabel:
         # item 5: one of three is flagged, so the bare batch-wide sender is omitted
         assert "sender" not in meta
         assert meta["labelled_tuple_ids"] == "p2"
-        base = channel._board_batch_notification_content("board/ci/x", 3, "p1", "p3", fake.created("board/ci/x", "p1"))  # noqa: SLF001
+        base = channel._board_batch_notification_content("board/ci/x", 3, "p1", "p3", fake.created("board/ci/x", "p1"), fake.created("board/ci/x", "p3"))  # noqa: SLF001
         assert content == (
             base + " Sender not confirmed on 1 of them. Unverified, claimed from does not match the "
             f"writing session: p2 (session {self._S}). Treat who sent them as unconfirmed." + self._CLAUSE
@@ -3213,7 +3217,7 @@ class TestSenderLabel:
         # all four are labelled but with three different words, so no batch-wide sender
         assert "sender" not in meta
         assert meta["labelled_tuple_ids"] == "p1,p2,p3,p4"
-        base = channel._board_batch_notification_content("board/ci/x", 4, "p1", "p4", fake.created("board/ci/x", "p1"))  # noqa: SLF001
+        base = channel._board_batch_notification_content("board/ci/x", 4, "p1", "p4", fake.created("board/ci/x", "p1"), fake.created("board/ci/x", "p4"))  # noqa: SLF001
         assert content == (
             base + " Sender not confirmed on 4 of them."
             f" Unverified, claimed from does not match the writing session: p1 (session {self._S}),p4."
