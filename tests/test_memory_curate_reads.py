@@ -25,7 +25,7 @@ from nexus.lua_runtime import runner
 from tests.test_memory_curate import _fm, _make_repo, _memdir
 
 _NOW = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
-_LABEL = "not read by any session that started in the window"
+_LABEL = "no Read-tool open or subagent load in any session that started in the window"
 GET = "mcp__plugin_conexus_nexus__memory_get"
 SEARCH = "mcp__plugin_conexus_nexus__memory_search"
 
@@ -120,7 +120,7 @@ def test_a_file_read_in_the_window_is_not_listed_and_an_unread_one_is(world: dic
     ])
     lines = _lines(world)
     assert "read counts: covered 2026-11-07T12:00:00Z .. 2026-11-09T12:00:00Z (requested 30 days, capped at 2: " \
-           "the oldest session on disk started 2026-11-08T10:00:00Z)" in lines
+           "the oldest session on disk started 2026-11-08T10:00:00Z), 1 session started in it" in lines
     head = lines.index(f"{_LABEL}: 1 of 2 files (index files excluded)")
     assert lines[head + 1] == "  - never.md"
     assert lines[head + 2] == f"  ({mc.READ_SCOPE_NOTE})"
@@ -353,3 +353,19 @@ def test_cut_records_from_the_procedure_reach_the_report(world, stubbed) -> None
     stubbed(lambda a: {"rows": [], "since": a["since"], "until": a["until"], "truncated_records": 2})
     reads = mc.load_reads(30, _NOW, world["mem"])
     assert isinstance(reads, mc.ReadCounts) and reads.truncated_records == 2
+
+
+def test_a_project_listing_that_fails_is_not_available(world: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(world["config"] / "nowhere"))
+    reads = mc.load_reads(30, _NOW, world["mem"])
+    assert isinstance(reads, mc.ReadsUnavailable) and reads.reason.startswith("no Claude Code projects directory at ")
+
+
+def test_a_symlinked_project_directory_is_not_counted_as_a_session(world: dict[str, Path], tmp_path: Path) -> None:
+    """The verb reads plain directories only, so a session in a linked one is invisible to the
+    query; the guard must not count it either, or an empty window would read as all unread."""
+    real = tmp_path / "elsewhere" / "proj"
+    _session(real / "s1.jsonl", "s1", world["repo"], "2026-11-08T10:00:00Z", [("Bash", {"command": "ls"})])
+    (world["config"] / "projects" / "-linked").symlink_to(real, target_is_directory=True)
+    reads = mc.load_reads(30, _NOW, world["mem"])
+    assert isinstance(reads, mc.ReadsUnavailable) and reads.reason == "no session of this repository started in the window"

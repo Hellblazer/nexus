@@ -161,7 +161,8 @@ _FILE_READ_KINDS = frozenset({"file_read", "loaded"})
 #: What the report says it counts, printed under the unread list (critic r1, nexus-qo7ie.18):
 #: RDR-240's memory query sees the Read tool and subagent loads only.
 READ_SCOPE_NOTE = ("counts a Read-tool open or a subagent load only; a file read with cat, grep "
-                   "or sed through Bash, found by Grep, or attached to a prompt is not counted")
+                   "or sed through Bash, found by Grep, or attached to a prompt is not counted, and "
+                   "neither is a session that started before the window and was resumed in it")
 
 
 @dataclass(frozen=True)
@@ -209,6 +210,8 @@ class ReadCounts:
     window: ReadWindow
     rows: list[dict[str, Any]]
     truncated_records: int = 0
+    #: Main sessions of this repository that started in the window: the sessions counted.
+    sessions: int = 0
 
 
 @dataclass(frozen=True)
@@ -261,6 +264,8 @@ def repo_session_starts(cwd: Path) -> list[datetime] | str:
         return f"the repository's project directories could not be listed: {type(exc).__name__}: {exc}"
     starts: list[datetime] = []
     for name in names:
+        if (root / name).is_symlink():
+            continue  # the verb reads plain directories only (verbs_transcripts._plain_dir)
         for f in sorted((root / name).glob("*.jsonl")):
             if f.is_symlink() or not f.is_file():
                 continue
@@ -303,7 +308,8 @@ def load_reads(days: int, now: datetime, directory: Path, cwd: Path | None = Non
     if blocked:
         return ReadsUnavailable(window, blocked)
     lo = datetime.strptime(window.since, _FMT).replace(tzinfo=timezone.utc)
-    if not any(lo <= s < now for s in starts):
+    counted = sum(1 for s in starts if lo <= s < now)
+    if not counted:
         return ReadsUnavailable(window, "no session of this repository started in the window")
     since, pages = window.since, []
     try:
@@ -327,7 +333,7 @@ def load_reads(days: int, now: datetime, directory: Path, cwd: Path | None = Non
         return ReadsUnavailable(window, runner.describe_error(exc) or type(exc).__name__)
     except JoinError as exc:
         return ReadsUnavailable(window, f"join: {exc}")
-    return ReadCounts(window, list(joined["rows"]), int(joined.get("truncated_records") or 0))
+    return ReadCounts(window, list(joined["rows"]), int(joined.get("truncated_records") or 0), counted)
 
 
 def _same_file(name: str, directory: Path) -> str | None:
@@ -372,10 +378,11 @@ def read_lines(directory: Path, files: list[str], reads: ReadCounts | ReadsUnava
     counts = file_read_counts(reads, directory)
     candidates = sorted(f for f in files if f not in INDEX_FILES)
     unread = [f for f in candidates if counts.get(f, 0) == 0]
-    lines = [f"read counts: {reads.window.describe()}"]
+    started = f"{reads.sessions} session{'' if reads.sessions == 1 else 's'} started in it"
+    lines = [f"read counts: {reads.window.describe()}, {started}"]
     if reads.truncated_records:
         lines.append(f"read counts: {reads.truncated_records} records were cut, so these counts are floors")
-    label = "not read by any session that started in the window"
+    label = "no Read-tool open or subagent load in any session that started in the window"
     if unread:
         lines.append(f"{label}: {len(unread)} of {len(candidates)} files (index files excluded)")
         lines += [f"  - {f}" for f in unread]
