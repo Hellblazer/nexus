@@ -690,6 +690,44 @@ def test_a_failed_row_read_for_the_listing_is_counted_and_never_fails_the_run():
     assert report.lookups_failed == 0 and report.documents_complete == 3
 
 
+def test_a_listed_note_in_a_later_batch_of_a_run_with_progress_is_listed():
+    """Review r2 of b1d604af4: the progress block read the clock into a name the listing also used, so from the
+    second batch on the listing compared a float with a datetime and the run died. The held note sits in the LAST
+    of three one-document batches, with a progress callback, the shape every real CLI run has."""
+    w = _ttl_world()
+    w.entries.reverse()     # A, the held note, is now batch 3 of 3
+    seen = []
+
+    report = mb.backfill_meta(w, w, None, apply=False, list_first_sign=True, batch=1, progress=seen.append, now=EXPIRES)
+
+    assert len(seen) >= 2, "non-vacuous: progress fired before the listed note's batch"
+    assert [n["tumbler"] for n in report.ttl_first_sign_notes] == ["1.1.1"]
+    assert report.ttl_first_sign_notes[0]["lapsed_now"] is True
+
+
+def test_the_command_lists_a_note_in_a_later_batch(monkeypatch):
+    w = _ttl_world()
+    w.entries.reverse()
+
+    listed, _ = _invoke(monkeypatch, w, "--list-ttl-first-sign", "--batch-size", "1")
+
+    assert listed.exit_code == 0, listed.output
+    assert "1.1.1" in listed.output and "a-note" in listed.output, listed.output
+
+
+def test_failed_listing_reads_stop_the_run_after_the_failed_round_limit():
+    """A failed listing read is trouble for --stop-after-failed-rounds, so a listing run against a failing service
+    stops instead of walking the whole catalog one failing request per batch."""
+    w = _ttl_world()
+    w.fail_rows_for = {w.entries[0].physical_collection}
+
+    report = mb.backfill_meta(w, w, None, apply=False, list_first_sign=True, batch=1, stop_after_failed_rounds=2,
+                              now=EXPIRES)
+
+    assert report.interrupted and report.stop_reason == mb.STOP_FAILED_ROUNDS, report
+    assert report.batches_done == 2 and report.ttl_first_sign_unread == 2
+
+
 def test_the_command_counts_the_list_in_the_summary_and_prints_it_only_under_the_flag(monkeypatch):
     listed, _ = _invoke(monkeypatch, _ttl_world(), "--list-ttl-first-sign")
     assert listed.exit_code == 0, listed.output
