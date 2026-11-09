@@ -2,7 +2,7 @@
 """The report behind ``nx memory curate`` (RDR-238 Technical Design 4, nexus-qo7ie.17).
 
 Three sections, ``--files``, ``--t2`` and ``--agents``; only the ``--files`` read counts read
-transcripts (nexus-qo7ie.18). The fourth, ``--cold``, lives in :mod:`nexus.memory_curate_cold`
+transcripts (nexus-qo7ie.18). The fourth, ``--cold``, lives in :mod:`nexus.memory_curate.cold`
 (nexus-qo7ie.19) and shares this module's window, session and path helpers. Each section
 function returns its body lines; :func:`build_report` adds the headings and never lets one
 section stop another. The report only lists. Nothing here deletes, quarantines, rewrites or
@@ -298,7 +298,7 @@ def load_reads(days: int, now: datetime, directory: Path, cwd: Path | None = Non
     it is not counted, and with none in the window there is nothing to count). Called from
     Python only (RDR-238 Technical Design 5), so ``nx memory curate`` adds no Lua.
     """
-    from nexus.memory_curate_cold import query_pages  # noqa: PLC0415 — deferred: only a read count pays for the runtime
+    from nexus.memory_curate.cold import query_pages  # noqa: PLC0415 — deferred: only a read count pays for the runtime
 
     starts = repo_session_starts(cwd or Path.cwd())
     window = read_window(days, now, min(starts) if isinstance(starts, list) and starts else None)

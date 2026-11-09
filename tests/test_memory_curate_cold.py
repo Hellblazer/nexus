@@ -22,10 +22,11 @@ from click.testing import CliRunner
 
 import nexus.lua_runtime as lua_runtime
 from nexus import memory_curate as mc
-from nexus import memory_curate_cold as cold
+from nexus.memory_curate import cold
 from nexus.cli import main
 from nexus.lua_runtime import runner
 from tests.test_memory_curate import _fm, _git, _make_repo, _memdir
+from tests._module_seam import setattr_in
 from tests.test_memory_curate_reads import _NOW, _session, world  # noqa: F401 — `world` is a fixture
 
 GET = "mcp__plugin_conexus_nexus__memory_get"
@@ -34,6 +35,10 @@ CAT_SEARCH = "mcp__plugin_conexus_nexus-catalog__search"
 LABELS = ("memory files", "T2 namespaces", "MCP tools", "CLI verbs", "injected context")
 OLD = "2026-09-01T00:00:00+00:00"
 EMPTY: dict = {"rows": []}
+STAMP = "2026-11-08T10:00:01Z"
+#: A quiet window that is not an empty one: a T2 read of another project and one Bash call.
+MEM: dict = {"rows": [{"kind": "t2_get", "name": "elsewhere/x", "count": 1, "last_use": STAMP}]}
+TOOLS: dict = {"rows": [{"kind": "tool", "name": "Bash", "count": 1, "last_use": STAMP}]}
 
 
 def _rows(lines: list[str], label: str) -> list[str]:
@@ -48,6 +53,22 @@ def _rows(lines: list[str], label: str) -> list[str]:
 
 def _stores(lines: list[str], label: str) -> list[str]:
     return [r.split(" | ")[0] for r in _rows(lines, label)]
+
+
+def _block(lines: list[str], label: str) -> list[str]:
+    start = next(i for i, ln in enumerate(lines) if ln.startswith(f"{label}:"))
+    out = [lines[start]]
+    for ln in lines[start + 1:]:
+        if any(ln.startswith(f"{other}:") for other in LABELS):
+            break
+        out.append(ln)
+    return out
+
+
+def _hooked(lines: list[str], label: str) -> list[str]:
+    """The stores a section prints as invoked by a hook, not seen in transcripts."""
+    block = _block(lines, label)
+    return [ln.strip()[2:].split(" | ")[0] for ln in block if ln.startswith("    - ")]
 
 
 def _head(lines: list[str], label: str) -> str:
@@ -110,7 +131,15 @@ def _plant(tmp: Path) -> dict[str, Path]:
     (repo / "docs" / "CLAUDE.md").symlink_to("AGENTS.md")
     (repo / "sub").mkdir()
     (repo / "sub" / "CLAUDE.md").write_text("x" * 400)
-    _git(repo, "add", "AGENTS.md", "CLAUDE.md", "docs/AGENTS.md", "docs/CLAUDE.md", "sub/CLAUDE.md")
+    for d in ("other", "viaitx", "lone", "linked", "tests/fx"):
+        (repo / d).mkdir(parents=True)
+    (repo / "other" / "CLAUDE.md").write_text("loaded from another worktree\n")
+    (repo / "viaitx" / "CLAUDE.md").write_text("loaded as an instructions attachment\n")
+    (repo / "lone" / "AGENTS.md").write_text("no CLAUDE.md beside it\n")
+    (repo / "linked" / "CLAUDE.md").symlink_to("../AGENTS.md")  # the root file: always loaded
+    (repo / "tests" / "fx" / "CLAUDE.md").write_text("a fixture\n")
+    _git(repo, "add", "AGENTS.md", "CLAUDE.md", "docs/AGENTS.md", "docs/CLAUDE.md", "sub/CLAUDE.md", "other/CLAUDE.md",
+         "viaitx/CLAUDE.md", "lone/AGENTS.md", "linked/CLAUDE.md", "tests/fx/CLAUDE.md")
     _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "files")
     project = mem.parent
     _session(project / "s0.jsonl", "s0", repo, "2026-10-20T10:00:00Z", [("Bash", {"command": "ls"})])
@@ -128,8 +157,22 @@ def _plant(tmp: Path) -> dict[str, Path]:
         "type": "nested_memory", "path": str(repo / "docs" / "AGENTS.md"),
         "content": {"type": "Project", "content": "docs rules"}})
     _attach(project / "s1.jsonl", "s1", repo, {
-        "type": "instructions", "files": [{"path": str(repo / "CLAUDE.md"), "type": "Project", "content": "root"}]})
-    return {"repo": repo, "config": config, "mem": mem}
+        "type": "nested_memory", "path": "/elsewhere/other-worktree/other/CLAUDE.md",  # a session in another worktree
+        "content": {"type": "Project", "content": "other"}})
+    _attach(project / "s1.jsonl", "s1", repo, {
+        "type": "instructions", "files": [
+            {"path": str(repo / "CLAUDE.md"), "type": "Project", "content": "root"},
+            {"path": str(repo / "viaitx" / "CLAUDE.md"), "type": "Project", "content": "x"}]})
+    hooks = tmp / "hooks"
+    (hooks / "scripts").mkdir(parents=True)
+    (hooks / "hooks.json").write_text(json.dumps({"hooks": {
+        "SubagentStart": [{"hooks": [{"type": "mcp_tool", "server": "plugin:conexus:nexus", "tool": "store_put",
+                                      "input": {}}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": "uv", "args": ["run", "x.py"]}]}]}}))
+    (hooks / "scripts" / "h.py").write_text(
+        'state = _run_nx(["memory", "rollup", entry_id, "--project", P], cwd, 5)\n'
+        'ok = run_cmd(["nx", "doctor"], timeout=9)\nnote = "nx search appears in prose only"\n')
+    return {"repo": repo, "config": config, "mem": mem, "hooks": hooks}
 
 
 _PROJECTS = {
@@ -138,6 +181,10 @@ _PROJECTS = {
     "coldrepo_used": [_row("coldrepo_used", "x", OLD)],
     "coldrepo_searched": [_row("coldrepo_searched", "y", OLD)],
     "coldrepo_fresh": [_row("coldrepo_fresh", "z", "2026-11-08T09:00:00+00:00")],
+    # read in the window by something the transcripts do not show (a Bash `nx memory get`): the engine stamped it
+    "coldrepo_accessed": [{**_row("coldrepo_accessed", "q", OLD), "last_accessed": "2026-11-08T09:30:00Z"}],
+    "coldrepo_stale_access": [{**_row("coldrepo_stale_access", "q", OLD), "last_accessed": OLD}],
+    "coldrepo_never_read": [{**_row("coldrepo_never_read", "q", OLD), "last_accessed": ""}],
     "coldrepo2": [_row("coldrepo2", "n", OLD)],  # another repository's project: not this repo's
 }
 
@@ -150,7 +197,7 @@ def planted(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict]:
         mp.setenv("CLAUDE_CONFIG_DIR", str(w["config"]))
         mp.setenv("NX_NO_TELEMETRY", "1")
         w["lines"] = cold.cold_lines(
-            30, _NOW, w["repo"], "coldrepo", w["mem"], w["repo"], _t2(_PROJECTS))
+            30, _NOW, w["repo"], "coldrepo", w["mem"], w["repo"], _t2(_PROJECTS), hooks_dir=w["hooks"])
         yield w
 
 
@@ -169,20 +216,29 @@ def test_memory_files_list_the_unused_and_unwritten_and_not_the_used(planted: di
 
 def test_t2_namespaces_list_the_idle_projects_of_this_repo_only(planted: dict) -> None:
     lines = planted["lines"]
-    assert _stores(lines, "T2 namespaces") == ["coldrepo", "coldrepo_old"]
+    assert _stores(lines, "T2 namespaces") == [
+        "coldrepo", "coldrepo_never_read", "coldrepo_old", "coldrepo_stale_access"]
+    assert _head(lines, "T2 namespaces").startswith("T2 namespaces: 4 cold of 8 ")
     old = next(r for r in _rows(lines, "T2 namespaces") if r.startswith("coldrepo_old "))
     assert "last write 2026-09-02" in old and "last use none in the window" in old
     assert "2 rows" in old and old.endswith("owner coldrepo")
-    # used (memory_get), searched (memory_search), fresh (a row in the window) and coldrepo2 (not this repo): none listed.
+    # used (memory_get), searched (memory_search), fresh (a row in the window), accessed (last_accessed in the window:
+    # a Bash `nx memory get` the transcripts do not show) and coldrepo2 (not this repo): none listed.
+    limit = " ".join(_block(lines, "T2 namespaces"))
+    assert "Bash `nx memory` reads are attributed to a project only through last_accessed" in limit
+    assert "reads as written after the first run" in limit
 
 
 def test_mcp_tools_list_every_registered_tool_never_called_keyed_by_server(planted: dict) -> None:
     lines = planted["lines"]
     registry = cold.mcp_registry()
-    expected = {f"{server}/{tool}" for server, tool in registry} - {"nexus/memory_get", "nexus/memory_search", "nexus-catalog/search"}
+    expected = {f"{server}/{tool}" for server, tool in registry} - {"nexus/memory_get", "nexus/memory_search", "nexus-catalog/search", "nexus/store_put"}
     assert set(_stores(lines, "MCP tools")) == expected
     assert "nexus/search" in expected and "nexus/memory_get" not in expected  # one short name, two servers
-    assert _head(lines, "MCP tools") == f"MCP tools: {len(expected)} cold of {len(registry)} registered"
+    assert _head(lines, "MCP tools") == f"MCP tools: {len(expected)} cold of {len(registry)} registered (1 invoked by a hook)"
+    # store_put is invoked by a hook (hooks.json mcp_tool): printed as such, not as cold
+    assert _hooked(lines, "MCP tools") == ["nexus/store_put"] and "nexus/store_put" not in _stores(lines, "MCP tools")
+    assert "invoked by a hook, not seen in transcripts: 1" in "\n".join(_block(lines, "MCP tools"))
     assert not any("other" in s for s in _stores(lines, "MCP tools"))  # a foreign server is dropped, never counted
     assert all("tokens" in r and r.endswith(r.split(" | ")[0].split("/")[0]) for r in _rows(lines, "MCP tools"))
 
@@ -190,18 +246,30 @@ def test_mcp_tools_list_every_registered_tool_never_called_keyed_by_server(plant
 def test_cli_verbs_list_every_leaf_never_used(planted: dict) -> None:
     lines = planted["lines"]
     leaves = {u.name for u in cold.cli_units()}
-    assert set(_stores(lines, "CLI verbs")) == leaves - {"nx search", "nx memory curate"}
-    assert "nx doctor" in _stores(lines, "CLI verbs") and "nx memory rollup" in _stores(lines, "CLI verbs")
-    assert _head(lines, "CLI verbs") == f"CLI verbs: {len(leaves) - 2} cold of {len(leaves)}"
+    hooked = {"nx doctor", "nx memory rollup"}  # the planted hook script runs both as subprocesses
+    assert set(_stores(lines, "CLI verbs")) == leaves - {"nx search", "nx memory curate"} - hooked
+    assert set(_hooked(lines, "CLI verbs")) == hooked and "nx memory list" in _stores(lines, "CLI verbs")
+    assert _head(lines, "CLI verbs") == f"CLI verbs: {len(leaves) - 4} cold of {len(leaves)} (2 invoked by a hook)"
+    for label in ("MCP tools", "CLI verbs"):  # the limits a transcript count has, printed under both
+        limits = " ".join(_block(lines, label))
+        for needle in ("calls by hooks and subprocesses", "terminal and CI use", "bash -c and ssh bodies",
+                       "a group option before the sub verb", "other repositories' sessions"):
+            assert needle in limits, (label, needle)
 
 
 def test_injected_context_lists_the_nested_instruction_file_never_loaded(planted: dict) -> None:
     lines = planted["lines"]
-    assert _stores(lines, "injected context") == ["sub/CLAUDE.md"]
+    assert _stores(lines, "injected context") == ["sub/CLAUDE.md"]  # other/ was loaded from another worktree's path,
+    # viaitx/ only through an `instructions` attachment, linked/ is the root file: none of them listed
     row = _rows(lines, "injected context")[0]
     assert "~100 tokens" in row and "last use none in the window" in row
     # docs/AGENTS.md was loaded (its CLAUDE.md link names the same file) and the root pair is not nested.
-    assert _head(lines, "injected context").startswith("injected context: 1 cold of 2")
+    assert _head(lines, "injected context").startswith("injected context: 1 cold of 4")
+    block = "\n".join(_block(lines, "injected context"))
+    assert "not judged: no CLAUDE.md, Claude Code loads only CLAUDE.md on demand: lone/AGENTS.md" in block
+    assert "not judged: fixtures under tests/: 1 file" in block
+    assert "linked/CLAUDE.md" in block and "symlinked to the root instruction file" in block
+    assert ".claude/rules/*.md" in block and "not covered" in block
 
 
 # ── K6 ───────────────────────────────────────────────────────────────────────────────
@@ -211,7 +279,7 @@ def test_k6_always_loaded_items_are_excluded_and_the_report_says_so(planted: dic
     lines = planted["lines"]
     text = "\n".join(lines)
     assert "excluded (K6), no 'never used' claim: MEMORY.md" in text
-    assert "1 file loaded by an `instructions` attachment in the window" in text
+    assert "2 files loaded by an `instructions` attachment in the window" in text
     for store in ("MEMORY.md", "CLAUDE.md", "AGENTS.md"):  # whole-store names, never a row
         assert not any(s == store for label in LABELS for s in _stores(lines, label))
     assert "tool definitions" in text
@@ -323,6 +391,8 @@ def stubbed(world: dict[str, Path], monkeypatch: pytest.MonkeyPatch):  # noqa: F
             calls.append(args["query"])
             assert len(calls) <= 20, "a broken guard would loop here"
             got = by_query[args["query"]]
+            if isinstance(got, Exception):
+                raise got
             return {"since": args["since"], "until": args["until"], **got} if isinstance(got, dict) else got
 
         monkeypatch.setattr(runner, "run_procedure", stub)
@@ -332,7 +402,7 @@ def stubbed(world: dict[str, Path], monkeypatch: pytest.MonkeyPatch):  # noqa: F
 
 
 def test_a_failed_tools_query_blanks_only_the_tool_rows(world: dict[str, Path], stubbed) -> None:  # noqa: F811
-    calls = stubbed({"memory": EMPTY, "loads": EMPTY, "tools": ["not", "a", "page"]})
+    calls = stubbed({"memory": MEM, "loads": EMPTY, "tools": ["not", "a", "page"]})
     lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
     reason = "not available: result: the tools query returned list, not a page"
     assert _head(lines, "MCP tools") == f"MCP tools: {reason}"
@@ -345,7 +415,7 @@ def test_a_failed_tools_query_blanks_only_the_tool_rows(world: dict[str, Path], 
 def test_a_failed_memory_query_blanks_the_file_and_t2_rows_and_a_failed_loads_query_the_injected_ones(
     world: dict[str, Path], stubbed,  # noqa: F811
 ) -> None:
-    stubbed({"memory": ["x"], "loads": ["y"], "tools": EMPTY})
+    stubbed({"memory": ["x"], "loads": ["y"], "tools": TOOLS})
     lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
     for label in ("memory files", "T2 namespaces"):
         assert _head(lines, label) == f"{label}: not available: result: the memory query returned list, not a page"
@@ -354,8 +424,8 @@ def test_a_failed_memory_query_blanks_the_file_and_t2_rows_and_a_failed_loads_qu
 
 
 def test_cut_records_say_the_cold_lists_may_hold_a_used_store(world: dict[str, Path], stubbed) -> None:  # noqa: F811
-    cut = {"rows": [], "truncated_records": 2}
-    stubbed({"memory": cut, "loads": EMPTY, "tools": EMPTY})
+    cut = {**MEM, "truncated_records": 2}
+    stubbed({"memory": cut, "loads": EMPTY, "tools": TOOLS})
     lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
     assert any("records were cut" in ln and "may be listed although they were used" in ln for ln in lines)
 
@@ -363,7 +433,7 @@ def test_cut_records_say_the_cold_lists_may_hold_a_used_store(world: dict[str, P
 def test_a_memory_directory_the_query_cannot_see_blanks_only_the_file_rows(
     world: dict[str, Path], stubbed, tmp_path: Path,  # noqa: F811
 ) -> None:
-    stubbed({"memory": EMPTY, "loads": EMPTY, "tools": EMPTY})
+    stubbed({"memory": MEM, "loads": EMPTY, "tools": TOOLS})
     notes = tmp_path / "notes"
     notes.mkdir()
     (notes / "a.md").write_text(_fm("A", "x"))
@@ -373,7 +443,7 @@ def test_a_memory_directory_the_query_cannot_see_blanks_only_the_file_rows(
 
 
 def test_a_t2_that_cannot_be_read_blanks_only_the_t2_rows(world: dict[str, Path], stubbed) -> None:  # noqa: F811
-    stubbed({"memory": EMPTY, "loads": EMPTY, "tools": EMPTY})
+    stubbed({"memory": MEM, "loads": EMPTY, "tools": TOOLS})
 
     @contextlib.contextmanager
     def broken() -> Iterator[None]:
@@ -385,6 +455,90 @@ def test_a_t2_that_cannot_be_read_blanks_only_the_t2_rows(world: dict[str, Path]
     assert "not available" not in _head(lines, "memory files")
 
 
+# ── review round 1 ───────────────────────────────────────────────────────────────────
+
+
+def test_a_memory_file_used_only_through_a_subagent_load_is_not_cold(world: dict[str, Path], stubbed) -> None:  # noqa: F811
+    load = {"kind": "loaded", "name": str(world["mem"] / "read_me.md"), "count": 1, "last_use": STAMP}
+    stubbed({"memory": {"rows": [*MEM["rows"], load]}, "loads": EMPTY, "tools": TOOLS})
+    lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
+    assert _stores(lines, "memory files") == ["never.md"]
+
+
+def test_no_memory_directory_is_not_available_with_its_reason(world: dict[str, Path], stubbed) -> None:  # noqa: F811
+    stubbed({"memory": MEM, "loads": EMPTY, "tools": TOOLS})
+    lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", None, world["repo"], _t2(_PROJECTS))
+    assert _head(lines, "memory files") == "memory files: not available: no memory directory found for this repository"
+
+
+def test_a_failed_git_listing_is_not_available_never_zero_cold(world: dict[str, Path], stubbed, tmp_path: Path) -> None:  # noqa: F811
+    stubbed({"memory": MEM, "loads": EMPTY, "tools": TOOLS})
+    plain = tmp_path / "not-a-checkout"
+    plain.mkdir()
+    lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], plain, _t2(_PROJECTS))
+    assert _head(lines, "injected context") == f"injected context: not available: git ls-files failed in {plain}"
+    assert "0 cold of 0" not in "\n".join(_block(lines, "injected context"))
+
+
+def test_a_query_that_succeeds_with_no_rows_for_started_sessions_is_not_available(
+    world: dict[str, Path], stubbed,  # noqa: F811
+) -> None:
+    stubbed({"memory": EMPTY, "loads": EMPTY, "tools": EMPTY})
+    lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
+    quiet = "not available: the {} query returned no {} for 1 session"
+    assert _head(lines, "MCP tools") == "MCP tools: " + quiet.format("tools", "calls")
+    assert _head(lines, "CLI verbs") == "CLI verbs: " + quiet.format("tools", "calls")
+    for label in ("memory files", "T2 namespaces"):
+        assert _head(lines, label) == f"{label}: " + quiet.format("memory", "memory reads, writes or T2 calls")
+    assert _no_rows(lines)
+
+
+def test_a_memory_search_naming_no_project_counts_as_a_use_of_every_project(world: dict[str, Path], stubbed) -> None:  # noqa: F811
+    stubbed({"memory": {"rows": [{"kind": "t2_search", "name": "(all)", "count": 1, "last_use": STAMP}]},
+             "loads": EMPTY, "tools": TOOLS})
+    lines = cold.cold_lines(30, _NOW, world["repo"], "coldrepo", world["mem"], world["repo"], _t2(_PROJECTS))
+    assert _head(lines, "T2 namespaces").startswith("T2 namespaces: 0 cold of 8 ")
+    assert "a memory_search naming no project counts as a use of every project" in " ".join(_block(lines, "T2 namespaces"))
+
+
+def test_the_injected_kind_is_refused_on_windows_like_the_file_kind(
+    world: dict[str, Path], stubbed, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    stubbed({"memory": MEM, "loads": EMPTY, "tools": TOOLS})
+    setattr_in(monkeypatch, cold, "os.name", "nt")  # this module's os only (tests/_module_seam.py)
+    lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
+    assert "Windows paths" in _head(lines, "injected context") and "not available" in _head(lines, "injected context")
+
+
+def test_one_failed_query_is_run_once_and_blanks_both_kinds_that_share_it(world: dict[str, Path], stubbed) -> None:  # noqa: F811
+    calls = stubbed({"memory": MEM, "loads": EMPTY, "tools": RuntimeError("boom")})
+    lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
+    assert _head(lines, "MCP tools") == "MCP tools: not available: RuntimeError: boom"
+    assert _head(lines, "CLI verbs") == "CLI verbs: not available: RuntimeError: boom"
+    assert calls.count("tools") == 1
+
+
+def test_the_hook_scan_reads_mcp_tool_entries_and_nx_argvs_from_the_scripts(tmp_path: Path) -> None:
+    hooks = tmp_path / "h"
+    (hooks / "scripts" / "routing").mkdir(parents=True)
+    (hooks / "hooks.json").write_text(json.dumps({"hooks": {"SubagentStart": [{"hooks": [
+        {"type": "mcp_tool", "server": "plugin:conexus:nexus", "tool": "hook_subagent_start"},
+        {"type": "mcp_tool", "server": "plugin:conexus:nexus-catalog", "tool": "show"},
+        {"type": "mcp_tool", "server": "plugin:other:thing", "tool": "x"},
+        {"type": "command", "command": "uv", "args": ["run", "nx_launch.py", "nx-hook", "preflight"]}]}]}}))
+    (hooks / "scripts" / "routing" / "a.py").write_text(
+        'x = _run_nx(["command-context", "continuation"], cwd, 1)\n'
+        'y = _run_nx(["memory", "get", row_id, "--project", P], cwd, 1)\n'
+        'run_cmd(["nx", "self", "install"] if g else ["nx", "upgrade"], timeout=1)\n'
+        'z = _run_nx(["--version"], cwd, 1)\nw = _run_nx([variable], cwd, 1)\n')
+    scan = cold.hook_invoked(hooks)
+    assert scan.tools == {("nexus", "hook_subagent_start"), ("nexus-catalog", "show")}
+    assert scan.verbs == {("command-context", "continuation"), ("memory", "get"), ("self", "install"),
+                          ("upgrade", None), ("nx-hook", "preflight")}
+    none = cold.hook_invoked(tmp_path / "missing")
+    assert none.tools == set() and none.verbs == set() and none.note.startswith("no hook directory")
+
+
 # ── the docs match the code ──────────────────────────────────────────────────────────
 
 
@@ -393,8 +547,10 @@ def test_the_docs_describe_cold() -> None:
     ref = (root / "docs" / "cli-reference.md").read_text(encoding="utf-8")
     section = ref.split("**`curate` flags:**", 1)[1].split("**`promote` flags:**", 1)[0]
     bullet = next(ln for ln in section.splitlines() if ln.startswith("- `--cold`"))
-    for needle in ("MCP tool", "CLI verb", "nested", "K6", "not available", "Tuple subspaces"):
+    for needle in ("MCP tool", "CLI verb", "nested", "K6", "not available", "Tuple subspaces", "invoked by a hook",
+                   "last_accessed", ".claude/rules", "once per section", "no CLAUDE.md"):
         assert needle in bullet, needle
+    assert "three times" not in section
     assert "until Step 3" not in section and "RDR-240's tools, loads" not in section
     assert "K6" in cold.__doc__ and "--cold" in cold.__doc__
     fragment = (root / "changelog" / "unreleased" / "nexus-qo7ie.19.md").read_text(encoding="utf-8")
