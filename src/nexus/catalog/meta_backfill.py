@@ -657,6 +657,9 @@ def backfill_meta(
     if (list_first_sign or list_only) and apply:
         raise ValueError("the first-sign listing is a dry run only: it cannot be combined with apply")
     list_first_sign = list_first_sign or list_only
+    # The listing's clock, fixed once for the whole run: every batch judges lapsed_now against the same instant.
+    # Its own name, so nothing else in this function (the progress block's clock readings) can rebind it.
+    listing_now: datetime = now if now is not None else datetime.now(UTC)
     if batch < 1:
         raise ValueError(f"batch must be at least 1, got {batch}")
     if pause_ms < 0:
@@ -695,7 +698,7 @@ def backfill_meta(
         try:
             _run_batch(
                 reader, t3, writer, chunk, live, apply, report, pause, pause_after_write=index < batches,
-                list_first_sign=list_first_sign, list_only=list_only, now=now,
+                list_first_sign=list_first_sign, list_only=list_only, now=listing_now,
             )
         except KeyboardInterrupt:
             report = before  # the interrupted batch counts for nothing; a rerun redoes it
@@ -706,7 +709,12 @@ def backfill_meta(
             break
         report.batches_done = index
         report.last_tumbler = str(chunk[-1].tumbler)
-        trouble = (report.lookups_failed - before.lookups_failed) + (report.writes_failed - before.writes_failed)
+        # A listing read that failed counts as trouble too, so --stop-after-failed-rounds also stops a listing run
+        # against a failing service instead of walking the whole catalog one failing request per batch.
+        trouble = (
+            (report.lookups_failed - before.lookups_failed) + (report.writes_failed - before.writes_failed)
+            + (report.ttl_first_sign_unread - before.ttl_first_sign_unread)
+        )
         failed_streak = failed_streak + 1 if trouble else 0
         clean_so_far = clean_so_far and not trouble
         if clean_so_far:
@@ -719,11 +727,11 @@ def backfill_meta(
             elif should_stop is not None and should_stop():
                 stop_reason = STOP_SIGNAL
         if progress is not None and (index % every == 0 or index == batches or stop_reason):
-            now, total = history[-1]
+            at, total = history[-1]
             then, was = history[0]
             snapshot = Progress(
                 index, batches, report.documents_examined, len(entries), total - base,
-                now - started, total - was, now - then, len(history) - 1,
+                at - started, total - was, at - then, len(history) - 1,
                 report.lookups_failed, report.writes_failed, report.last_tumbler,
             )
             _log.info(
