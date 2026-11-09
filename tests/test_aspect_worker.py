@@ -40,6 +40,7 @@ from nexus.db.t2 import T2Database
 
 from tests._catalog_fixture_ops import register_real_doc_id
 from tests._module_seam import module_time
+from tests._settle import FakeClock, settle
 
 # hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id (and,
 # since the same turn, aspect_extraction_queue.doc_id via the engine's
@@ -1833,38 +1834,46 @@ class TestTupleSlotFanOut:
 
 
 class TestClaimRenewerBound:
+    """Driven by a virtual clock (tests/_settle.py, nexus-3ceda.11) at the
+    production cadence, so every round count below is exact under any load."""
+
     def test_renewal_stops_at_the_deadline_and_never_resumes(self) -> None:
         from nexus.aspect_worker_tuples import ClaimRenewer, HeldClaim
 
+        clock = FakeClock()
         renewed: list = []
         claims = [HeldClaim(i, f"w:{i}", f"c{i}", f"t{i}", 0, None) for i in range(5)]
-        r = ClaimRenewer(claims, renewed.append, interval_s=0.02, deadline_s=0.15,
-                         lapse_errors=(KeyError,))
+        r = ClaimRenewer(claims, renewed.append, interval_s=120.0, deadline_s=300.0,
+                         lapse_errors=(KeyError,), clock=clock)
         r.start()
-        time.sleep(0.6)
-        n = len(renewed)
-        time.sleep(0.2)
+        clock.step(120.0)
+        clock.step(120.0)
+        assert r.rounds == 2 and len(renewed) == 10, "two rounds before the deadline"
+        clock.advance(120.0)  # t=360, past the 300 s deadline: the loop exits
+        settle(lambda: not r.stopped_at_deadline and {"rounds": r.rounds}, what="the renewer's deadline")
         r.stop()
-        assert r.stopped_at_deadline, "past the deadline the renewer gave up"
-        assert len(renewed) == n and 0 < n <= 5 * 8, "bounded: a handful of rounds, then silence"
+        clock.advance(600.0)
+        assert r.rounds == 2 and len(renewed) == 10, "past the deadline: silence"
         assert {c.claim_id for c in renewed} == {f"c{i}" for i in range(5)}, "every claim, by its own id"
 
     def test_stop_before_the_deadline_ends_it(self) -> None:
         from nexus.aspect_worker_tuples import ClaimRenewer, HeldClaim
 
+        clock = FakeClock()
         renewed: list = []
         r = ClaimRenewer([HeldClaim(0, "w:0", "c0", "t0", 0, None)], renewed.append,
-                         interval_s=0.02, deadline_s=60.0, lapse_errors=(KeyError,))
+                         interval_s=120.0, deadline_s=3600.0, lapse_errors=(KeyError,), clock=clock)
         r.start()
-        time.sleep(0.1)
+        clock.step(120.0)
         r.stop()
-        n = len(renewed)
-        time.sleep(0.1)
-        assert len(renewed) == n and not r.stopped_at_deadline
+        assert r._thread is not None and not r._thread.is_alive(), "stop() ended the renewer's loop"
+        clock.advance(1200.0)
+        assert len(renewed) == 1 and r.rounds == 1 and not r.stopped_at_deadline
 
     def test_a_lost_claim_is_dropped_from_the_set(self) -> None:
         from nexus.aspect_worker_tuples import ClaimRenewer, HeldClaim
 
+        clock = FakeClock()
         seen: list = []
 
         def renew(c):  # noqa: ANN001
@@ -1873,11 +1882,13 @@ class TestClaimRenewerBound:
                 raise KeyError("lapsed")
 
         claims = [HeldClaim(0, "w:0", "c0", "t0", 0, None), HeldClaim(1, "w:1", "c1", "t1", 0, None)]
-        r = ClaimRenewer(claims, renew, interval_s=0.02, deadline_s=60.0, lapse_errors=(KeyError,))
+        r = ClaimRenewer(claims, renew, interval_s=120.0, deadline_s=3600.0, lapse_errors=(KeyError,), clock=clock)
         r.start()
-        time.sleep(0.2)
+        for _ in range(3):
+            clock.step(120.0)
         r.stop()
-        assert seen.count("c0") == 1 and seen.count("c1") >= 3
+        assert r._thread is not None and not r._thread.is_alive(), "stop() ended the renewer's loop"
+        assert seen == ["c0", "c1", "c1", "c1"], "c0 lapsed in round 1 and was never renewed again"
 
     def test_the_deadline_formula_is_the_extractors_worst_case_plus_the_margin(self) -> None:
         from nexus.aspect_extractor import worst_case_extract_seconds
@@ -1894,18 +1905,22 @@ class TestClaimRenewerBound:
     ) -> None:
         tuples = _FakeTuples([_task_body(0), _task_body(1)])
         tuple_env.install(_FakeTupleDb(tuples))
+        clock = FakeClock()
 
         def slow(items, **kw):  # noqa: ANN001
-            time.sleep(0.3)
+            clock.step(120.0)  # the extraction outlives two renewal intervals
+            clock.step(120.0)
             return [_record_for(c, s) for (c, s, *_r) in items]
 
         monkeypatch.setattr("nexus.aspect_worker._extract_aspects_batch", slow)
-        side = _tuple_worker(renew_every_s=0.05, deadline_s=lambda n: 30.0)._tuple_side
+        side = _tuple_worker(renew_every_s=120.0, deadline_s=lambda n: 3600.0, clock=clock)._tuple_side
         claims, _ = side.claim_batch(park=False)
         side.process(claims)
 
         renews = tuples.ops("renew")
-        assert {(r[1], r[2]) for r in renews} == {(c.claim_id, c.claimant) for c in claims}
+        assert sorted((r[1], r[2]) for r in renews) == sorted([(c.claim_id, c.claimant) for c in claims] * 2), (
+            "each held claim renewed once per interval, two intervals"
+        )
         assert all(r[3] == 600 for r in renews)
         first_verdict = min(i for i, c in enumerate(tuples.calls) if c[0] in ("persist", "ack", "nack"))
         assert all(c[0] != "renew" for c in tuples.calls[first_verdict:]), "stopped before the verdicts"

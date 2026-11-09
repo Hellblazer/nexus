@@ -94,6 +94,7 @@ from nexus.util.win_console import ConsoleBreakResult
 from tests._child_encoding import PYTHON_CHILD_ENCODING
 from tests._child_process import NEVER_ALIVE_PID, kill_if_identity
 from tests._module_seam import patch_in, patch_time
+from tests._settle import settle
 from tests.daemon._children import CHILD_PYTHON, spawn_sleeper
 
 # RDR-224 (nexus-f9bgu.19): this suite runs on native Windows too. The three
@@ -516,10 +517,7 @@ class StorageServiceRecordHarness(_LeaseHarness):
             start_new_session=True,
             **_OWN_GROUP,  # the supervisor's stop sends a REAL CTRL_BREAK on Windows
         )
-        ready_deadline = time.monotonic() + 30.0
-        while not ready.exists() and time.monotonic() < ready_deadline:
-            time.sleep(0.02)
-        assert ready.exists(), "the stand-in engine never started"
+        settle(lambda: not ready.exists() and f"no {ready.name}", 30.0, what="the stand-in engine's start")
         sup._proc = engine
         owner_registry = ServiceRegistry(dir=self._cd, tier=self._REGISTRY_TIER, clock=self._clock)
         sup._registry = owner_registry
@@ -626,21 +624,15 @@ class AspectWorkerRecordHarness(_LeaseHarness):
         a.start()
         b.start()
         try:
-            deadline = time.monotonic() + 5.0
-            while not a.is_fenced() and time.monotonic() < deadline:
-                time.sleep(0.02)
-            assert a.is_fenced(), "A must be fenced once B (higher generation) publishes"
+            settle(lambda: not a.is_fenced() and "A not fenced", 5.0, what="A's fencing by B (higher generation)")
 
             # The loop exits within one tick: _heartbeat_loop's own
             # must-stop-when-fenced check sets self._stop, independent of
             # anyone calling .stop() -- this is the ACTUAL production
             # decision, not a proxy.
-            deadline2 = time.monotonic() + 2.0
-            while not a._stop.is_set() and time.monotonic() < deadline2:
-                time.sleep(0.02)
-            assert a._stop.is_set(), (
-                "the fenced owner's heartbeat loop must request its own "
-                "stop within roughly one tick"
+            settle(
+                lambda: not a._stop.is_set() and "A's stop not requested", 2.0,
+                what="the fenced owner's own stop request",
             )
             assert not b.is_fenced(), "the successor must never be fenced by its own predecessor's fencing"
 
@@ -678,12 +670,9 @@ class AspectWorkerRecordHarness(_LeaseHarness):
         try:
             assert not daemon._stop.is_set()
             shutil.rmtree(self._cd)
-            deadline = time.monotonic() + 5.0
-            while not daemon._stop.is_set() and time.monotonic() < deadline:
-                time.sleep(0.02)
-            assert daemon._stop.is_set(), (
-                "an owner whose lease directory was removed must request its own "
-                "stop within a few ticks"
+            settle(
+                lambda: not daemon._stop.is_set() and "stop not requested", 5.0,
+                what="the stop of an owner whose lease directory was removed",
             )
         finally:
             daemon.stop()
@@ -1637,10 +1626,7 @@ class TestTerminationSurvivorVerdict:
             **_OWN_GROUP,
         )
         try:
-            deadline = time.monotonic() + 30.0
-            while time.monotonic() < deadline and not pid_running(proc.pid):
-                time.sleep(0.02)
-            assert pid_running(proc.pid) is True, "fixture must be running"
+            settle(lambda: not pid_running(proc.pid) and {"pid": proc.pid}, 30.0, what="the fixture's start")
             # SIGTERM is ignored by the child, so this exercises the SIGKILL
             # escalation, not the graceful leg.
             stubborn = terminate_pids([proc.pid], grace_s=0.5)
@@ -2472,9 +2458,7 @@ def test_a_stand_in_whose_harness_died_exits_instead_of_polling_forever(tmp_path
     engine_pid = None
     try:
         if script == "supervisor":
-            deadline = time.monotonic() + 30
-            while not (tmp_path / "ready.json").exists() and time.monotonic() < deadline:
-                time.sleep(0.05)
+            settle(lambda: not (tmp_path / "ready.json").exists() and "no ready.json", 30.0, what="the supervisor's start")
             engine_pid = json.loads((tmp_path / "ready.json").read_text(encoding="utf-8"))["engine"]
         time.sleep(1.5)
         assert child.poll() is None, "non-vacuity: the stand-in waits while its harness lives"
@@ -2482,10 +2466,7 @@ def test_a_stand_in_whose_harness_died_exits_instead_of_polling_forever(tmp_path
         harness.wait(timeout=10)
         assert child.wait(timeout=10) == 3
         if engine_pid is not None:
-            deadline = time.monotonic() + 10
-            while pid_running(engine_pid) and time.monotonic() < deadline:
-                time.sleep(0.05)
-            assert not pid_running(engine_pid), "the supervisor's engine child exits too"
+            settle(lambda: pid_running(engine_pid) and {"engine_pid": engine_pid}, 10.0, what="the supervisor's engine child's exit")
     finally:
         for p in (child, harness):
             with contextlib.suppress(OSError):

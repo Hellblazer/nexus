@@ -51,6 +51,7 @@ from nexus.daemon.service_registry import (
     ttl_for_tier,
 )
 from tests._module_seam import setattr_in
+from tests._settle import FakeClock
 
 _POSIX = sys.platform != "win32"
 _posix_only = pytest.mark.skipif(not _POSIX, reason="removing a directory under a running worker needs POSIX unlink semantics")
@@ -172,12 +173,23 @@ class _ClaimWorker:
         return 0
 
 
-class _Mono:
-    def __init__(self) -> None:
-        self.now = 1000.0
+class _Mono(FakeClock):
+    """The daemon's monotonic clock, virtual (tests/_settle.py, nexus-3ceda.11):
+    the heartbeat runs only when the test beats it, so "no stop yet" is checked
+    after a heartbeat that really ran at the new time."""
 
-    def __call__(self) -> float:
-        return self.now
+    def __init__(self) -> None:
+        super().__init__(start=1000.0)
+
+    @property
+    def now(self) -> float:
+        return self()
+
+    def beat(self, daemon: awd.AspectWorkerDaemon, seconds: float = 0.02) -> None:
+        """Advance *seconds* (one heartbeat interval by default); return once the
+        heartbeat has run at the new time (and parked again, or ended because it
+        stopped the daemon)."""
+        self.step(seconds, exited=lambda: not daemon._hb_thread.is_alive())
 
 
 def _daemon(
@@ -201,12 +213,20 @@ def _wait(pred: Callable[[], bool], seconds: float = 5.0) -> bool:
 
 def test_the_daemon_requests_its_own_stop_when_its_directory_is_removed(tmp_path: Path) -> None:
     cfg = tmp_path / "cfg"
-    d = _daemon(cfg, _ClaimWorker(lambda: None), _Mono())
+    mono = _Mono()
+    d = _daemon(cfg, _ClaimWorker(lambda: None), mono)
     d.start()
     try:
+        mono.beat(d)
         assert not d._stop.is_set()
         shutil.rmtree(cfg)
-        assert _wait(d._stop.is_set), "the heartbeat loop must stop the daemon once the directory is gone"
+        from nexus.daemon.service_registry import DIR_GONE_TICKS  # noqa: PLC0415 — test-local
+
+        for _ in range(DIR_GONE_TICKS - 1):
+            mono.beat(d)
+            assert not d._stop.is_set(), "one missed tick is not an exit (a transient ENOENT)"
+        mono.beat(d)
+        assert d._stop.is_set(), "the heartbeat loop must stop the daemon once the directory is gone"
     finally:
         d.stop()
     assert not cfg.exists(), "stop() must not mark or relinquish into a directory that is gone"
@@ -224,13 +244,12 @@ def test_failed_claims_stop_the_daemon_only_after_the_bound(tmp_path: Path) -> N
     d.start()
     try:
         assert _wait(lambda: calls["n"] >= 1), "the worker's first claim failed"
-        time.sleep(0.2)  # several heartbeat ticks, clock not advanced
+        mono.beat(d)  # one heartbeat, the clock moved one interval
         assert not d._stop.is_set(), "a failing claim alone is not an exit"
-        mono.now += 99.0
-        time.sleep(0.2)
+        mono.beat(d, 99.0)
         assert not d._stop.is_set(), "99 s of a 100 s bound"
-        mono.now += 2.0
-        assert _wait(d._stop.is_set), "past the bound the daemon stops itself"
+        mono.beat(d, 2.0)
+        assert d._stop.is_set(), "past the bound the daemon stops itself"
         assert d._left_for_unreachable_engine
     finally:
         d.stop()
@@ -243,8 +262,7 @@ def test_one_answered_claim_restarts_the_unreachable_clock(tmp_path: Path) -> No
     d.start()
     try:
         assert _wait(lambda: d._unreachable_since is None), "an answered claim clears the clock"
-        mono.now += 500.0
-        time.sleep(0.2)
+        mono.beat(d, 500.0)
         assert not d._stop.is_set()
     finally:
         d.stop()
@@ -255,9 +273,8 @@ def test_a_zero_bound_turns_the_exit_off(tmp_path: Path) -> None:
     d = _daemon(tmp_path / "cfg", _ClaimWorker(lambda: "failure"), mono, bound=0)
     d.start()
     try:
-        time.sleep(0.2)
-        mono.now += 10_000_000.0
-        time.sleep(0.2)
+        mono.beat(d)
+        mono.beat(d, 10_000_000.0)
         assert not d._stop.is_set()
     finally:
         d.stop()
@@ -654,7 +671,7 @@ def test_a_worker_whose_claims_keep_answering_never_exits(tmp_path: Path) -> Non
         for _ in range(20):
             before = seen["contact"]
             assert _wait(lambda: seen["contact"] > before), "an answered claim between clock steps"
-            mono.now += 60.0
+            mono.beat(d, 60.0)
             assert not d._stop.is_set(), "a worker with a live claim path was stopped by the failure clock"
         assert mono.now >= 2200.0 and seen["failure"] >= 1
     finally:
@@ -669,8 +686,8 @@ def test_the_same_failing_claims_without_contact_do_exit(tmp_path: Path) -> None
     d.start()
     try:
         assert _wait(lambda: d._unreachable_since is not None)
-        mono.now += 500.0
-        assert _wait(d._stop.is_set), "the unreachable exit must still fire when nothing reaches the engine"
+        mono.beat(d, 500.0)
+        assert d._stop.is_set(), "the unreachable exit must still fire when nothing reaches the engine"
     finally:
         d.stop()
 
@@ -684,8 +701,8 @@ def test_the_unreachable_exit_skips_the_tuple_claim_release(tmp_path: Path) -> N
     d.start()
     try:
         assert _wait(lambda: d._unreachable_since is not None)
-        mono.now += 500.0
-        assert _wait(d._stop.is_set)
+        mono.beat(d, 500.0)
+        assert d._stop.is_set()
     finally:
         d.stop()
     assert worker.released == 0, "the unreachable-exit path must not wait on the dead engine"

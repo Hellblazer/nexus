@@ -26,7 +26,6 @@ These tests pin the lifecycle contract:
 """
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -40,6 +39,7 @@ from nexus.daemon.aspect_worker_daemon import (
     _default_worker_factory,
 )
 from nexus.daemon.service_registry import ServiceRegistry, ttl_for_tier
+from tests._settle import FakeClock, settle
 
 _ASPECT_TIER = "aspect_worker"
 
@@ -96,14 +96,22 @@ class _ClaimReportingWorker(_FakeWorker):
         return 0
 
 
-class _Mono:
-    """A fixed monotonic clock the test steps by hand."""
+class _Mono(FakeClock):
+    """The daemon's monotonic clock, virtual (tests/_settle.py, nexus-3ceda.11):
+    the heartbeat runs only when the test beats it, so "no stop yet" is checked
+    after a heartbeat that really ran at the new time."""
 
     def __init__(self) -> None:
-        self.now = 1000.0
+        super().__init__(start=1000.0)
 
-    def __call__(self) -> float:
-        return self.now
+    @property
+    def now(self) -> float:
+        return self()
+
+    def beat(self, daemon: AspectWorkerDaemon, seconds: float) -> None:
+        """Advance *seconds*; return once the heartbeat has run at the new time
+        (and parked again, or ended because it stopped the daemon)."""
+        self.step(seconds, exited=lambda: not daemon._hb_thread.is_alive())
 
 
 def test_start_binds_the_daemons_config_dir_to_the_worker(tmp_path: Path) -> None:
@@ -262,9 +270,7 @@ def test_live_heartbeat_loop_detects_fencing(tmp_path) -> None:
     d1.start()
     d2.start()  # higher generation — fences d1
     try:
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and not d1.is_fenced():
-            time.sleep(0.02)
+        settle(lambda: not d1.is_fenced() and "d1 not fenced yet", what="the live heartbeat")
         assert d1.is_fenced() is True   # the LIVE heartbeat thread detected it
         assert d2.is_fenced() is False
     finally:
@@ -377,14 +383,10 @@ def test_claim_failures_past_the_bound_stop_the_daemon(tmp_path: Path) -> None:
     try:
         assert worker.on_failure is not None, "non-vacuity: the hook must be attached"
         worker.on_failure()  # the first claim fails at t=0
-        mono.now += 99.0
-        time.sleep(0.1)  # several heartbeat ticks
+        mono.beat(d, 99.0)
         assert not d._stop.is_set(), "99 s of a 100 s bound: no exit yet"
         worker.on_failure()  # more failing claims keep the same clock running
-        mono.now += 2.0
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and not d._stop.is_set():
-            time.sleep(0.02)
+        mono.beat(d, 2.0)
         assert d._stop.is_set(), "the heartbeat must request the stop once failures outlast the bound"
         assert d._left_for_unreachable_engine is True
     finally:
@@ -403,17 +405,13 @@ def test_an_answered_claim_clears_the_clock_before_the_bound_so_no_exit(tmp_path
     try:
         assert worker.on_failure is not None and worker.on_contact is not None
         worker.on_failure()  # the clock starts at t=0
-        mono.now += 90.0
+        mono.beat(d, 90.0)
         worker.on_contact()  # an answered claim: the clock is cleared
         assert d._unreachable_since is None, "the answered claim must clear the clock"
         worker.on_failure()  # a new failing run starts at t=90
-        mono.now += 90.0  # 180 s since the first failure, 90 s into the second run
-        time.sleep(0.1)  # several heartbeat ticks
+        mono.beat(d, 90.0)  # 180 s since the first failure, 90 s into the second run
         assert not d._stop.is_set(), "the answered claim must have cleared the clock"
-        mono.now += 20.0  # 110 s into the second run: past the bound
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and not d._stop.is_set():
-            time.sleep(0.02)
+        mono.beat(d, 20.0)  # 110 s into the second run: past the bound
         assert d._stop.is_set(), "the second failing run outlasted the bound and must stop the daemon"
     finally:
         d.stop()

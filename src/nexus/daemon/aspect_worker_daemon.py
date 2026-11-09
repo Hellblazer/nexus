@@ -46,6 +46,7 @@ from typing import Any
 
 import structlog
 
+from nexus import clock as nxclock
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     HolderStopResult,
@@ -336,7 +337,7 @@ class AspectWorkerDaemon:
         return bool(self._supervisor is not None and self._supervisor.fenced)
 
     def _heartbeat_loop(self) -> None:
-        while not self._stop.wait(self._heartbeat_interval):
+        while not nxclock.wait(self._monotonic, self._stop, self._heartbeat_interval):
             supervisor = self._supervisor
             if supervisor is None:
                 continue
