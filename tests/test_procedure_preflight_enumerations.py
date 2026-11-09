@@ -283,11 +283,14 @@ def test_r10_a_changeset_says_what_the_ddl_ceiling_counts_and_how_to_measure_the
     text = row["check"]
     # Every DDL statement a fresh migration runs, however the changeset spells it.
     assert "counts every DDL statement a fresh migration runs" in text
-    for kind in ("ALTER TABLE", "CREATE INDEX", "CREATE TRIGGER", "a REVOKE", "CREATE POLICY"):
+    for kind in ("ALTER TABLE", "CREATE INDEX", "CREATE TRIGGER", "a REVOKE", "CREATE POLICY", "ENABLE and FORCE ROW LEVEL SECURITY"):
         assert kind in text, kind
     assert "a NO FORCE and FORCE ROW LEVEL SECURITY pair" in text
     assert "DDL a function runs" in text and "aspects-005" in text
-    assert "a DROP lowers the number, so it can go down" in text
+    # A DROP is itself a counted statement (+1; vectors-036-1, aspects-005): the net goes down only
+    # because a dropped table also removes its runAlways table grant (review r2).
+    assert "a DROP lowers" not in text
+    assert "a dropped table also removes its runAlways table grant" in text
     assert "changes nothing" not in text  # a NO FORCE toggle or a function's DDL counts with no spelled-out statement
     assert "migration_ddl_per_worker in tests/ddl_ceiling.toml in the same commit, tolerance 0" in text
     assert "citing the commit and the measurement on the comment line above" in text
