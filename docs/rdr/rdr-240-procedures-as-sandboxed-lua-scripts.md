@@ -459,11 +459,13 @@ schema.
    and does not close it.
 8. **`preflight`.** Arguments `base` (the commit to diff against); grants
    `git.diff_names` and `git.diff_stat`. Classifies the diff (Python, engine
-   `service/`, plugin surface, docs, workflow YAML, schema changeset) from a
+   `service/`, plugin surface, docs, workflow YAML, schema changeset, Lua
+   procedures with the tables they read) from a
    class table held as a local Lua table in the script, reviewed like any
    source line, and returns the checks each class needs as commands: ruff on
    touched files, the class's tripwire tests, the commands that run the
-   affected-integration and docs-reader selectors
+   affected-integration and docs-reader selectors, the procedure tests when a
+   procedure or its table changed
    (`scripts/select_affected_integration_tests.py`,
    `scripts/select_docs_reader_tests.py`), the drift ledger when the plugin
    surface changed, the gate-jar staleness check when `service/` changed,
