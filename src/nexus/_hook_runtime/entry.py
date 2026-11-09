@@ -130,6 +130,9 @@ import sys
 #: beads in the epic land.
 VERB_TABLE: dict[str, str] = {
     "session-start": "nexus.hooks.session_start_verb",
+    # RDR-238 Phase 3 Step 1 (nexus-qo7ie.16): the memory curation check by hand; at session
+    # start it runs inside session-start, so hooks.json does not name it.
+    "memory-curation-check": "nexus.hooks.memory_curation_check",
     # The three SessionStart scripts that were plugin Python, ported into
     # the wheel at bead nexus-q02nx.21. Their closures permitted it: two
     # are stdlib-only and rdr_hook's sole non-stdlib import was
