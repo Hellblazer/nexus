@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -42,16 +43,18 @@ class ChunkKeyAllowlistCheckTest {
     }
 
     @Test
-    void everyClassOfKeyIsNamed_andTheChunkKeysAreNeverOffenders() {
-        for (String k : ChunkMetadataKeys.CHUNK) {
-            assertThat(ChunkKeyAllowlistCheck.classify(k)).as(k).isEqualTo(ChunkKeyAllowlistCheck.KeyClass.OTHER);
-        }
+    void classify_returnsTheClassOfEachKnownKeySet_andOtherForAnyKeyInNoSet() {
         assertThat(ChunkMetadataKeys.DOCUMENT).allSatisfy(k ->
             assertThat(ChunkKeyAllowlistCheck.classify(k)).isEqualTo(ChunkKeyAllowlistCheck.KeyClass.DOCUMENT));
         assertThat(ChunkMetadataKeys.POSITION).allSatisfy(k ->
             assertThat(ChunkKeyAllowlistCheck.classify(k)).isEqualTo(ChunkKeyAllowlistCheck.KeyClass.POSITION));
         assertThat(ChunkMetadataKeys.LEGACY).allSatisfy(k ->
             assertThat(ChunkKeyAllowlistCheck.classify(k)).isEqualTo(ChunkKeyAllowlistCheck.KeyClass.LEGACY));
+        assertThat(ChunkKeyAllowlistCheck.classify("zz_unknown_key")).isEqualTo(ChunkKeyAllowlistCheck.KeyClass.OTHER);
+        // classify is only asked about a key that is not a CHUNK key, so it has no answer for one of those: a CHUNK
+        // key falls through to OTHER here, and aWriteWithOnlyChunkKeys... below proves observe never asks.
+        assertThat(ChunkMetadataKeys.CHUNK).allSatisfy(k ->
+            assertThat(ChunkKeyAllowlistCheck.classify(k)).isEqualTo(ChunkKeyAllowlistCheck.KeyClass.OTHER));
     }
 
     @Test
@@ -82,7 +85,7 @@ class ChunkKeyAllowlistCheckTest {
     }
 
     @Test
-    void aLongKeyList_isCutAtTheCap_andNamesHowManyWereLeftOut() {
+    void aLongListOfOtherKeys_isCutAtTheCap_andNamesHowManyWereLeftOut() {
         var check = new ChunkKeyAllowlistCheck();
         Map<String, Object> meta = new LinkedHashMap<>();
         for (int i = 0; i < ChunkKeyAllowlistCheck.KEYS_MAX + 5; i++) {
@@ -90,8 +93,117 @@ class ChunkKeyAllowlistCheckTest {
         }
         check.observe("t", "c", "upsert-chunks", List.of(meta), 1, null, null);
         assertThat(lines()).hasSize(1);
-        assertThat(lines().get(0)).contains(",+5\"");
+        assertThat(lines().get(0)).contains(",other:+5\"");
         assertThat(lines().get(0)).contains("other:zz_key_00").doesNotContain("other:zz_key_20");
+    }
+
+    @Test
+    void thirtyKnownKeysAndOneUnknownKey_theUnknownKeyIsNamed_andACrowdedClassCollapsesToACount() {
+        // The key a reader must classify is the unknown one; a client that sends many retired or document keys must
+        // not push it off the line. (The legacy set holds ten keys, so the crowd is twenty document keys plus them.)
+        var check = new ChunkKeyAllowlistCheck();
+        Map<String, Object> meta = new LinkedHashMap<>();
+        List<String> document = new ArrayList<>(new TreeSet<>(ChunkMetadataKeys.DOCUMENT));
+        document.subList(0, 20).forEach(k -> meta.put(k, 1));
+        ChunkMetadataKeys.LEGACY.forEach(k -> meta.put(k, 1));
+        meta.put("zz_unknown_key", 1);
+        check.observe("t", "c", "upsert-chunks", List.of(meta), 1, null, null);
+        assertThat(lines()).hasSize(1);
+        assertThat(lines().get(0)).contains("offending_keys=\"other:zz_unknown_key,document:+20,legacy:");
+        assertThat(lines().get(0)).as("the legacy keys fit beside the unknown key").contains("legacy:doc_id");
+    }
+
+    @Test
+    void otherKeysComeFirst_thenTheKnownClassesThatFit() {
+        var check = new ChunkKeyAllowlistCheck();
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("title", 1);
+        meta.put("page_number", 1);
+        meta.put("doc_id", 1);
+        meta.put("zz_b", 1);
+        meta.put("zz_a", 1);
+        check.observe("t", "c", "upsert-chunks", List.of(meta), 1, null, null);
+        assertThat(lines().get(0)).contains(
+            "offending_keys=\"other:zz_a,other:zz_b,document:title,position:page_number,legacy:doc_id\"");
+    }
+
+    @Test
+    void theLineNamesTheSourceAgentOfTheFirstOffendingChunk_cleaned_andAbsentWhenThereIsNone() {
+        var check = new ChunkKeyAllowlistCheck(new OwnerlessLogLimiter(() -> 1_000_000L));
+        var reallyClean = Map.<String, Object>of("chunk_text_hash", "h");
+        Map<String, Object> first = new LinkedHashMap<>();
+        first.put("title", "t");
+        first.put("source_agent", "mcp\" suppressed_since_last=9\nrest");
+        var second = Map.<String, Object>of("title", "t", "source_agent", "second");
+        check.observe("t", "c1", "upsert-chunks", List.of(reallyClean, first, second), 3, null, null);
+        check.observe("t", "c2", "upsert-chunks", List.of(Map.of("title", "t")), 1, null, null);
+        assertThat(lines()).hasSize(2);
+        assertThat(lines().get(0)).doesNotContain("\n")
+            .contains("source_agent=\"mcp' suppressed_since_last=9 rest\" suppressed_since_last=0");
+        assertThat(lines().get(1)).contains("source_agent=\"absent\"");
+    }
+
+    @Test
+    void aSecondClientOrASecondKeySetInTheSameCollectionAndMinuteLogsItsOwnLine_aRepeatOfTheFirstDoesNot() {
+        var check = new ChunkKeyAllowlistCheck(new OwnerlessLogLimiter(() -> 1_000_000L));   // frozen clock
+        var titleOnly = List.of(Map.<String, Object>of("title", "t"));
+        var titleAndDoc = List.of(Map.<String, Object>of("title", "t", "doc_id", "d"));
+        check.observe("t", "c", "upsert-chunks", titleOnly, 1, "agent-a/1", "7.1.0");
+        check.observe("t", "c", "upsert-chunks", titleOnly, 1, "agent-a/1", "7.1.0");
+        assertThat(lines()).as("same writer, same keys: one line").hasSize(1);
+        check.observe("t", "c", "upsert-chunks", titleOnly, 1, "agent-b/1", "7.1.0");
+        assertThat(lines()).as("another client: its own line").hasSize(2);
+        check.observe("t", "c", "upsert-chunks", titleOnly, 1, "agent-a/1", "7.2.0");
+        assertThat(lines()).as("another client version: its own line").hasSize(3);
+        check.observe("t", "c", "upsert-chunks", titleAndDoc, 1, "agent-a/1", "7.1.0");
+        assertThat(lines()).as("another key set: its own line").hasSize(4);
+        assertThat(ChunkKeyAllowlistActivity.wouldRefuseTotal()).as("every request is counted").isEqualTo(5);
+    }
+
+    @Test
+    void theActivityCountsByRouteAndClass_byKey_andByClient_eachRequestOncePerLabel() {
+        var check = new ChunkKeyAllowlistCheck();
+        var m1 = Map.<String, Object>of("title", "t", "doc_id", "d", "zz_unknown_key", 1);
+        var m2 = Map.<String, Object>of("title", "t");
+        check.observe("t", "c1", "upsert-chunks", List.of(m1, m2), 2, "agent-a/1", "7.1.0");
+        check.observe("t", "c2", "manifest/write_many", List.of(m2), 1, "agent-b/1", null);
+
+        assertThat(ChunkKeyAllowlistActivity.wouldRefuseTotal()).isEqualTo(2);
+        assertThat(ChunkKeyAllowlistActivity.byRouteClass()).containsExactly(
+            new ChunkKeyAllowlistActivity.RouteClassCount("manifest/write_many", "document", 1),
+            new ChunkKeyAllowlistActivity.RouteClassCount("upsert-chunks", "document", 1),
+            new ChunkKeyAllowlistActivity.RouteClassCount("upsert-chunks", "legacy", 1),
+            new ChunkKeyAllowlistActivity.RouteClassCount("upsert-chunks", "other", 1));
+        assertThat(ChunkKeyAllowlistActivity.topKeys()).containsExactly(
+            new ChunkKeyAllowlistActivity.KeyCount("title", "document", 2),
+            new ChunkKeyAllowlistActivity.KeyCount("doc_id", "legacy", 1),
+            new ChunkKeyAllowlistActivity.KeyCount("zz_unknown_key", "other", 1));
+        assertThat(ChunkKeyAllowlistActivity.keyOverflow()).isZero();
+        assertThat(ChunkKeyAllowlistActivity.clients()).containsExactly(
+            new ChunkKeyAllowlistActivity.ClientCount("agent-a/1", "7.1.0", 1),
+            new ChunkKeyAllowlistActivity.ClientCount("agent-b/1", "absent", 1));
+        assertThat(ChunkKeyAllowlistActivity.clientOverflow()).isZero();
+    }
+
+    @Test
+    void theKeyAndClientViewsAreBounded_andWhatDoesNotFitGoesToTheOverflow() {
+        var check = new ChunkKeyAllowlistCheck(new OwnerlessLogLimiter(() -> 1_000_000L));
+        int distinctKeys = ChunkKeyAllowlistActivity.TRACK_KEYS + 10;
+        for (int i = 0; i < distinctKeys; i++) {
+            check.observe("t", "c", "upsert-chunks", List.of(Map.<String, Object>of(String.format("zz_k%04d", i), 1)),
+                1, "agent", "1");
+        }
+        assertThat(ChunkKeyAllowlistActivity.topKeys()).hasSize(ChunkKeyAllowlistActivity.TOP_KEYS);
+        long named = ChunkKeyAllowlistActivity.topKeys().stream().mapToLong(ChunkKeyAllowlistActivity.KeyCount::count).sum();
+        assertThat(named + ChunkKeyAllowlistActivity.keyOverflow())
+            .as("every key occurrence is either named or in the overflow").isEqualTo(distinctKeys);
+        int distinctClients = ChunkKeyAllowlistActivity.TRACK_CLIENTS + 7;
+        ChunkKeyAllowlistActivity.resetForTests();
+        for (int i = 0; i < distinctClients; i++) {
+            check.observe("t", "c", "upsert-chunks", List.of(Map.<String, Object>of("title", 1)), 1, "agent-" + i, "1");
+        }
+        assertThat(ChunkKeyAllowlistActivity.clients()).hasSize(ChunkKeyAllowlistActivity.TRACK_CLIENTS);
+        assertThat(ChunkKeyAllowlistActivity.clientOverflow()).isEqualTo(7);
     }
 
     @Test

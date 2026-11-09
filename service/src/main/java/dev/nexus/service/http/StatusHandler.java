@@ -6,7 +6,6 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.EmbedActivitySnapshot;
 import dev.nexus.service.vectors.EmbedderRouter;
-import dev.nexus.service.vectors.ChunkKeyAllowlistActivity;
 import dev.nexus.service.vectors.OwnerlessWriteActivity;
 import dev.nexus.service.vectors.OwnerlessWritePolicy;
 import dev.nexus.service.vectors.RacedEmbedActivity;
@@ -553,8 +552,9 @@ public final class StatusHandler implements HttpHandler {
 
         // RDR-236 Phase 4 Step 2a (bead nexus-6pfgb.66), [additive]: client chunk-metadata writes that named a key
         // outside the allow-list and were let through, since boot (log mode: nothing is refused yet). One count per
-        // request, never rate limited; the log line is the sample, this is the complete signal.
-        body.append(",\"chunk_metadata_key_would_refuse_total\":").append(ChunkKeyAllowlistActivity.wouldRefuseTotal());
+        // request, never rate limited; the log line is the sample, this is the complete signal. The total, and the
+        // bounded counts by route and class, key and client: ChunkKeyStatusJson names the shapes.
+        body.append(ChunkKeyStatusJson.fields());
 
         // nexus-0bl77, [additive]: always present; true only when the test-only tenant reset route is registered.
         body.append(",\"test_tenant_reset_route\":").append(testTenantResetRoute);

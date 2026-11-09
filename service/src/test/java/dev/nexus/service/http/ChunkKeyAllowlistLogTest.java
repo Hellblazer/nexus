@@ -157,10 +157,10 @@ class ChunkKeyAllowlistLogTest extends AtomicWriteTestBase {
         String line = lines().get(0);
         assertThat(line).contains("route=manifest/write_many").contains("tenant=" + TENANT)
             .contains("collection=\"" + f.collection() + "\"")
-            .contains("offending_keys=\"document:title,position:page_number,legacy:doc_id,other:zz_unknown_key\"")
+            .contains("offending_keys=\"other:zz_unknown_key,document:title,position:page_number,legacy:doc_id\"")
             .contains("offending_chunks=1").contains("requested=1")
             .contains("user_agent=\"nx-test-agent/9\"").contains("client_version=\"7.99.0\"")
-            .contains("suppressed_since_last=0");
+            .contains("source_agent=\"absent\"").contains("suppressed_since_last=0");
         assertThat(ChunkKeyAllowlistActivity.wouldRefuseTotal()).isEqualTo(1);
         Map<String, Object> stored = storedMetadata(f.collection(), chash);
         assertThat(stored).as("log mode writes the metadata as sent").containsKeys("title", "page_number", "doc_id",
@@ -289,7 +289,7 @@ class ChunkKeyAllowlistLogTest extends AtomicWriteTestBase {
         assertThat(r.json().get("updated").asInt()).isEqualTo(1);
         assertThat(lines()).hasSize(1);
         assertThat(lines().get(0)).contains("route=update-metadata")
-            .contains("offending_keys=\"document:title,other:zz_unknown_key\"");
+            .contains("offending_keys=\"other:zz_unknown_key,document:title\"");
         assertThat(ChunkKeyAllowlistActivity.wouldRefuseTotal()).isEqualTo(1);
         assertThat(storedMetadata(f.collection(), chash)).containsEntry("title", "renamed");
     }
@@ -359,5 +359,34 @@ class ChunkKeyAllowlistLogTest extends AtomicWriteTestBase {
         assertThat(line).doesNotContain("\n").contains("tenant=" + TENANT).doesNotContain("tenant=evil").contains("tenant~evil")
             .contains("suppressed_since_last=0");
         assertThat(line.split("event=").length).as("one event= in the whole line").isEqualTo(2);
+        // The five quoted fields (collection, offending_keys, user_agent, client_version, source_agent) own ten
+        // quote characters between them: the forged key's own quote is turned into an apostrophe and cannot close
+        // the offending_keys field early.
+        assertThat(line.chars().filter(c -> c == '"').count()).as("quote count of the whole line").isEqualTo(10);
+        var field = java.util.regex.Pattern.compile("offending_keys=\"([^\"]*)\"").matcher(line);
+        assertThat(field.find()).isTrue();
+        assertThat(field.group(1)).isEqualTo("other:x'_tenant~evil_suppressed_since_last~77_event~forged.other.y");
+    }
+
+    // ── the seams ────────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void anUpsertTheOwnershipCheckRefuses_isStillCounted_theCheckRunsBeforeTheRefusal() throws Exception {
+        // Seam (a) of ChunkKeyAllowlistCheck: the check sits before the ownerless 422, so a refused request counts.
+        Fx f = fixture("ckl-owned-refused");
+        String chash = ch("ckl-never-seeded-" + f.docId());   // no manifest row references it: ownerless
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("collection", f.collection());
+        body.put("ids", List.of(chash));
+        body.put("documents", List.of("ckl-never-seeded-" + f.docId()));
+        body.put("metadatas", List.of(offendingMetadata(chash)));
+
+        Resp r = send(vectors, "/v1/vectors/upsert-chunks", body);
+
+        assertThat(r.status()).as("the write is refused for ownership, body: %s", r.body()).isEqualTo(422);
+        assertThat(ChunkKeyAllowlistActivity.wouldRefuseTotal()).isEqualTo(1);
+        assertThat(lines()).hasSize(1);
+        assertThat(lines().get(0)).contains("route=upsert-chunks").contains("legacy:doc_id");
+        assertThat(chunkExists(f.collection(), chash)).as("and nothing was stored").isFalse();
     }
 }

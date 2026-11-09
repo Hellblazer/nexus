@@ -258,6 +258,46 @@ class StatusHandlerTest {
     }
 
     @Test
+    void chunkMetadataKeyWouldRefuse_labelledViewsNameTheRouteClassKeyAndClient() throws Exception {
+        // The shapes ChunkKeyStatusJson documents: arrays of objects plus a numeric overflow, all additive.
+        dev.nexus.service.vectors.ChunkKeyAllowlistActivity.resetForTests();
+        start(new StatusHandler(null));
+        var check = new dev.nexus.service.vectors.ChunkKeyAllowlistCheck();
+        var meta = java.util.Map.<String, Object>of("title", "t", "doc_id", "d", "zz_unknown_key", 1);
+        check.observe("t", "knowledge-collection", "update-metadata", java.util.List.of(meta), 1, "nx-agent/3", "7.9.0");
+        check.observe("t", "knowledge-collection", "update-metadata", java.util.List.of(meta), 1, "nx-agent/3", "7.9.0");
+
+        var s = get();
+        assertThat(s.get("chunk_metadata_key_would_refuse_total").asLong()).isEqualTo(2);
+
+        var routeClass = s.get("chunk_metadata_key_would_refuse_by_route_class");
+        assertThat(routeClass.isArray()).isTrue();
+        assertThat(routeClass).hasSize(3);
+        java.util.Set<String> classes = new java.util.TreeSet<>();
+        for (var e : routeClass) {
+            assertThat(e.get("route").asText()).isEqualTo("update-metadata");
+            assertThat(e.get("count").asLong()).isEqualTo(2);
+            classes.add(e.get("key_class").asText());
+        }
+        assertThat(classes).containsExactly("document", "legacy", "other");
+
+        var keys = s.get("chunk_metadata_key_would_refuse_by_key");
+        assertThat(keys.get("top")).hasSize(3);
+        assertThat(keys.get("top").get(0).get("count").asLong()).isEqualTo(2);
+        java.util.Set<String> names = new java.util.TreeSet<>();
+        keys.get("top").forEach(e -> names.add(e.get("key_class").asText() + ":" + e.get("key").asText()));
+        assertThat(names).containsExactly("document:title", "legacy:doc_id", "other:zz_unknown_key");
+        assertThat(keys.get("overflow").asLong()).isZero();
+
+        var clients = s.get("chunk_metadata_key_would_refuse_by_client");
+        assertThat(clients.get("clients")).hasSize(1);
+        assertThat(clients.get("clients").get(0).get("user_agent").asText()).isEqualTo("nx-agent/3");
+        assertThat(clients.get("clients").get(0).get("client_version").asText()).isEqualTo("7.9.0");
+        assertThat(clients.get("clients").get(0).get("count").asLong()).isEqualTo(2);
+        assertThat(clients.get("overflow").asLong()).isZero();
+    }
+
+    @Test
     void testTenantResetRoute_isAlwaysPresent_falseUnlessTheRouteIsRegistered() throws Exception {
         // nexus-0bl77, [additive]. On /v1/status and not /version: the conexus image smoke fails on any /version
         // key outside the public contract.

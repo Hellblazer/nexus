@@ -194,8 +194,12 @@ class TenantResetLeakCanaryTest {
             + "EngineJobsTest and TenantKeyedEvictorsTest cover its evictor",
         "ChunkReaper", "its timeout streaks and resume cursors are filled by a reaper pass over a T3 collection, "
             + "which needs a vector backend this engine does not have; TenantKeyedEvictorsTest covers its evictor",
-        "OwnerlessLogLimiter", "its states are filled by an ownerless-chunk log line the reaper emits, so it needs "
-            + "the same vector backend; TenantKeyedEvictorsTest covers its evictor"));
+        "OwnerlessLogLimiter", "this evictor drops the log windows of two holders, the vector repository's "
+            + "ownerless-chunk line and the chunk-metadata allow-list check's chunk_metadata_key_would_refuse line "
+            + "(ChunkKeyAllowlistCheck, nexus-6pfgb.66). Both are filled by a client chunk write, which needs the "
+            + "vector backend and the combined write service this engine does not have, so the canary cannot feed "
+            + "either; TenantKeyedEvictorsTest covers the limiter's evictor and TenantResetRouteTest drives a reset "
+            + "through the allow-list check's own windows"));
 
     /** The structures the workload feeds, named as {@code kindOf} names them: the positive control. */
     private static final List<String> EXPECTED_KINDS = List.copyOf(FED.values());

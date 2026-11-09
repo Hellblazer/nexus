@@ -5,11 +5,14 @@ package dev.nexus.service.vectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Collection;
-import java.util.LinkedHashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
@@ -35,10 +38,34 @@ import java.util.TreeSet;
  *
  * <p><b>Never fails a write.</b> The check is observation. It catches every RuntimeException and logs it at debug.
  *
- * <p>The log limiter and the line's client fields are the ownerless-write check's ({@link OwnerlessLogLimiter},
- * {@link OwnerlessLogText}): one line per route, tenant and collection per minute, with the request's {@code
- * User-Agent} and {@code X-Nexus-Client-Version}, each cleaned so a tenant-controlled value cannot forge a field.
- * The offending key names are client text too, and are cleaned and cut the same way.
+ * <p><b>What the line and the counters name.</b> Step 2b reads the log and the status route to find who writes
+ * which key, so both name the writer. The line carries the route, tenant, collection, the offending keys (the
+ * {@code other} keys first, then the known classes, see {@link #keyList}), the client's {@code User-Agent} and {@code
+ * X-Nexus-Client-Version}, and the {@code source_agent} of the first offending chunk (the ownerless line names its
+ * first unowned chunk the same way). The limiter key is route, tenant, collection, a signature of the offending key
+ * set and the client, so a second client or a second key set in the same collection logs its own line in the same
+ * minute; the limiter's bound ({@link OwnerlessLogLimiter#MAX_KEYS} keys plus one overflow bucket) is what keeps the
+ * log finite. {@link ChunkKeyAllowlistActivity} keeps the counts by route and class, by key and by client, and those
+ * are the complete signal; the line is a sample. Every client-controlled text (collection, user agent, version,
+ * source agent, key names) is cleaned and cut by {@link OwnerlessLogText}, so none can forge a field.
+ *
+ * <p><b>Seams: what the count is, and is not.</b> Read the numbers with these in mind.
+ * <ol>
+ *   <li>The check runs before the write, so a request is counted even when a later step refuses or fails it: the
+ *       ownerless 422, an embed failure, an unregistered collection, a supersede refusal in the combined write. A
+ *       request the client retries or re-sends is counted each time it arrives; these routes keep no replay ledger.
+ *       The count is requests that offered a key, not writes that stored one.</li>
+ *   <li>The append routes ({@code append}, {@code append_many}) observe every chunk in the body. The combined write
+ *       later drops a chunk no manifest row references, and keeps the first of two chunks with one chash, so those
+ *       routes can count an offending chunk the service never stores. Step 2c's refusal must not hang off this
+ *       count alone on those two routes.</li>
+ *   <li>Writers inside the engine are not seen: {@code ReembedRunner.moveDocsCombined} and the {@code gc} restore
+ *       SQL copy stored metadata verbatim and never pass a handler. A PDF pipeline row staged before an upgrade is
+ *       replayed through {@code upsert-chunks} with the metadata it was staged with, so it is seen late, when it is
+ *       replayed, and counted as the replaying client.</li>
+ *   <li>The test tree seeds legacy-keyed rows through these routes on purpose (dozens of test files): an engine
+ *       booted by a test counts them, and only a production engine's counters mean anything.</li>
+ * </ol>
  */
 public final class ChunkKeyAllowlistCheck {
 
@@ -59,6 +86,10 @@ public final class ChunkKeyAllowlistCheck {
 
         KeyClass(String wire) {
             this.wire = wire;
+        }
+
+        String wire() {
+            return wire;
         }
     }
 
@@ -118,7 +149,8 @@ public final class ChunkKeyAllowlistCheck {
             if (metadatas == null || metadatas.isEmpty() || isBypass(collection)) {
                 return;
             }
-            Map<String, KeyClass> offending = new TreeMap<>();
+            Map<String, KeyClass> offending = new TreeMap<>();   // raw key -> class
+            Map<?, ?> firstOffending = null;
             int offendingChunks = 0;
             for (Object m : metadatas) {
                 if (!(m instanceof Map<?, ?> meta)) {
@@ -133,50 +165,103 @@ public final class ChunkKeyAllowlistCheck {
                 }
                 if (offends) {
                     offendingChunks++;
+                    if (firstOffending == null) {
+                        firstOffending = meta;
+                    }
                 }
             }
             if (offending.isEmpty()) {
                 return;
             }
-            ChunkKeyAllowlistActivity.recordWouldRefuse();
-            long suppressed = limiter.tryAcquire(route + "|" + tenant + "|" + collection);
+            String ua = OwnerlessLogText.quoted(userAgent, FIELD_MAX);
+            String version = OwnerlessLogText.quoted(clientVersion, FIELD_MAX);
+            Map<String, KeyClass> cleaned = new TreeMap<>();     // cleaned key text -> class
+            offending.forEach((k, c) -> cleaned.put(keyText(k), c));
+            ChunkKeyAllowlistActivity.recordWouldRefuse(route, cleaned, ua, version);
+            // One line per route, tenant, collection, key set and client per window: a second writer or a second
+            // key set in the same collection is not the first one's suppressed repeat. The delimiter is stripped
+            // from client text so a tenant-keyed eviction (which matches |tenant|) reads only the tenant field.
+            String limiterKey = route + "|" + tenant + "|" + collection + "|" + signature(offending.keySet())
+                + "|" + ua.replace('|', '/') + "|" + version.replace('|', '/');
+            long suppressed = limiter.tryAcquire(limiterKey);
             if (suppressed < 0) {
                 return;
             }
             log.warn("event=chunk_metadata_key_would_refuse route={} tenant={} collection=\"{}\" offending_keys=\"{}\" "
-                    + "offending_chunks={} requested={} user_agent=\"{}\" client_version=\"{}\" suppressed_since_last={}",
-                route, tenant, OwnerlessLogText.quoted(collection, 256), keyList(offending), offendingChunks,
-                requested, OwnerlessLogText.quoted(userAgent, FIELD_MAX),
-                OwnerlessLogText.quoted(clientVersion, FIELD_MAX), suppressed);
+                    + "offending_chunks={} requested={} user_agent=\"{}\" client_version=\"{}\" source_agent=\"{}\" "
+                    + "suppressed_since_last={}",
+                route, tenant, OwnerlessLogText.quoted(collection, 256), keyList(cleaned), offendingChunks,
+                requested, ua, version, sourceAgent(firstOffending), suppressed);
         } catch (RuntimeException e) {
             log.debug("event=chunk_metadata_key_check_failed route={} error={}", route, e.toString());
         }
     }
 
-    /**
-     * {@code class:key} pairs, comma separated, grouped by class then sorted, at most {@link #KEYS_MAX} of them and a
-     * {@code +N} for the rest. A key is client text: cleaned, cut, and stripped of the two delimiters of this list,
-     * of {@code =} and of spaces, so it cannot start a {@code key=value} field of its own inside the quotes.
-     */
-    private static String keyList(Map<String, KeyClass> offending) {
-        Set<String> parts = new LinkedHashSet<>();
-        for (KeyClass c : KeyClass.values()) {
-            Set<String> sorted = new TreeSet<>();
-            for (var e : offending.entrySet()) {
-                if (e.getValue() == c) {
-                    sorted.add(c.wire + ":" + keyText(e.getKey()));
-                }
-            }
-            parts.addAll(sorted);
-        }
-        List<String> all = List.copyOf(parts);
-        if (all.size() <= KEYS_MAX) {
-            return String.join(",", all);
-        }
-        return String.join(",", all.subList(0, KEYS_MAX)) + ",+" + (all.size() - KEYS_MAX);
+    /** The first offending chunk's {@code source_agent}, cleaned like the other client fields; {@code absent} if none. */
+    private static String sourceAgent(Map<?, ?> chunkMetadata) {
+        Object v = chunkMetadata == null ? null : chunkMetadata.get("source_agent");
+        return OwnerlessLogText.quoted(v instanceof String s ? s : null, FIELD_MAX);
     }
 
-    private static String keyText(String key) {
+    /** A short stable digest of the offending key set, bounded however many keys offend. */
+    private static String signature(Collection<String> sortedKeys) {
+        try {
+            MessageDigest sha = MessageDigest.getInstance("SHA-256");
+            for (String k : sortedKeys) {
+                sha.update(k.getBytes(StandardCharsets.UTF_8));
+                sha.update((byte) '\n');
+            }
+            return HexFormat.of().formatHex(sha.digest(), 0, 8);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);   // SHA-256 is mandatory on every JVM; caught by observe
+        }
+    }
+
+    /**
+     * {@code class:key} pairs, comma separated. The {@code other} keys, the ones a reader has to classify, come first
+     * and in full up to {@link #KEYS_MAX}, then {@code other:+N} for the rest. A known class (document, position,
+     * legacy) follows as its keys when they all fit in the slots {@code other} left, and otherwise as one {@code
+     * class:+N} count, so a client that sends twenty retired keys and one unknown key still has the unknown key
+     * named. Keys are already cleaned by {@link #keyText}.
+     */
+    static String keyList(Map<String, KeyClass> offending) {
+        Map<KeyClass, TreeSet<String>> byClass = new java.util.EnumMap<>(KeyClass.class);
+        for (var e : offending.entrySet()) {
+            byClass.computeIfAbsent(e.getValue(), c -> new TreeSet<>()).add(e.getKey());
+        }
+        List<String> parts = new ArrayList<>();
+        TreeSet<String> others = byClass.getOrDefault(KeyClass.OTHER, new TreeSet<>());
+        int listed = 0;
+        for (String k : others) {
+            if (listed == KEYS_MAX) {
+                break;
+            }
+            parts.add("other:" + k);
+            listed++;
+        }
+        if (others.size() > listed) {
+            parts.add("other:+" + (others.size() - listed));
+        }
+        for (KeyClass c : new KeyClass[] {KeyClass.DOCUMENT, KeyClass.POSITION, KeyClass.LEGACY}) {
+            TreeSet<String> keys = byClass.get(c);
+            if (keys == null) {
+                continue;
+            }
+            if (listed + keys.size() <= KEYS_MAX) {
+                keys.forEach(k -> parts.add(c.wire + ":" + k));
+                listed += keys.size();
+            } else {
+                parts.add(c.wire + ":+" + keys.size());
+            }
+        }
+        return String.join(",", parts);
+    }
+
+    /**
+     * A key is client text: cleaned, cut, and stripped of the two delimiters of {@link #keyList}, of {@code =} and of
+     * spaces, so it cannot start a {@code key=value} field of its own inside the quotes.
+     */
+    static String keyText(String key) {
         String text = OwnerlessLogText.plain(key, KEY_MAX)
             .replace(',', '.').replace(':', '.').replace('=', '~').replace(' ', '_')
             .replace('"', '\'').replace('\\', '/');

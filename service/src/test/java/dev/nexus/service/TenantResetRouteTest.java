@@ -23,6 +23,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.lang.reflect.Field;
 import java.sql.Connection;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -184,6 +185,51 @@ class TenantResetRouteTest {
         } finally {
             CollectionRegistry.evictTenant(tenant);
             CollectionRegistry.evict("default", defaultCollection);
+        }
+    }
+
+    /**
+     * RDR-236 Step 2a (nexus-6pfgb.66) review I2: the chunk-metadata allow-list's log windows are evicted by the
+     * {@code OwnerlessLogLimiter} evictor of {@code NexusService}. Drives a real service's own check (the instance its
+     * handlers share): an offending write logs once and its repeat is suppressed, the reset route for that tenant
+     * forgets the window, so the next write logs again; another tenant's window survives. Without the
+     * {@code chunkKeyAllowlistCheck.evictTenant(t)} term in the evictor the third write stays suppressed.
+     */
+    @Test
+    void aTenantResetForgetsTheChunkKeyAllowlistLogWindow_andLeavesAnotherTenantsWindow() throws Exception {
+        String x = "rr-ckl-x-" + shortId();
+        String y = "rr-ckl-y-" + shortId();
+        Field field = NexusService.class.getDeclaredField("chunkKeyAllowlistCheck");
+        field.setAccessible(true);
+        var check = (dev.nexus.service.vectors.ChunkKeyAllowlistCheck) field.get(on);
+        var logger = (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(dev.nexus.service.vectors.ChunkKeyAllowlistCheck.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            var offending = List.of(Map.<String, Object>of("title", "t"));
+            java.util.function.Function<String, Long> logged = tenant -> appender.list.stream()
+                .filter(e -> e.getFormattedMessage().contains("event=chunk_metadata_key_would_refuse"))
+                .filter(e -> e.getFormattedMessage().contains(" tenant=" + tenant + " ")).count();
+
+            for (String t : new String[] {x, y}) {
+                check.observe(t, "knowledge-coll", "upsert-chunks", offending, 1, "ua", "1");
+                check.observe(t, "knowledge-coll", "upsert-chunks", offending, 1, "ua", "1");
+                assertThat(logged.apply(t)).as("%s: the repeat inside the window is suppressed", t).isEqualTo(1);
+            }
+
+            var reset = post(on, PATH, ROOT, "{\"tenant\":\"" + x + "\"}");
+            assertThat(reset.statusCode()).as(reset.body()).isEqualTo(200);
+
+            check.observe(x, "knowledge-coll", "upsert-chunks", offending, 1, "ua", "1");
+            check.observe(y, "knowledge-coll", "upsert-chunks", offending, 1, "ua", "1");
+            assertThat(logged.apply(x)).as("X's window was forgotten, so X logs again").isEqualTo(2);
+            assertThat(logged.apply(y)).as("Y's window survived X's reset").isEqualTo(1);
+        } finally {
+            logger.detachAppender(appender);
+            check.evictTenant(x);
+            check.evictTenant(y);
         }
     }
 
