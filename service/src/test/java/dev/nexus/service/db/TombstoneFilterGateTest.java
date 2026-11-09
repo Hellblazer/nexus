@@ -131,7 +131,10 @@ class TombstoneFilterGateTest {
         "CatalogRepository.java",
             Path.of("src", "main", "java", "dev", "nexus", "service", "db", "CatalogRepository.java"),
         "PgVectorRepository.java",
-            Path.of("src", "main", "java", "dev", "nexus", "service", "vectors", "PgVectorRepository.java")
+            Path.of("src", "main", "java", "dev", "nexus", "service", "vectors", "PgVectorRepository.java"),
+        // RDR-193 Step 3 (nexus-u5m5g.4): the index-time linking reads, split out of CatalogRepository; one catalog_documents read
+        "CatalogLinksRepository.java",
+            Path.of("src", "main", "java", "dev", "nexus", "service", "db", "CatalogLinksRepository.java")
     );
 
     // ── Tokens ──────────────────────────────────────────────────────────────

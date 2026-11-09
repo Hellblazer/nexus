@@ -31,6 +31,44 @@ public final class CatalogLinksRepository {
     /** SQLSTATE the functions raise for a malformed request ({@code invalid_parameter_value}). */
     private static final String INVALID_PARAMETER = "22023";
 
+    /** SQLSTATEs of a deadlock, a serialization failure (the lock pass's 'unstable') and a lock wait that ran out. */
+    private static final java.util.Set<String> TRANSIENT_STATES = java.util.Set.of("40P01", "40001", "55P03");
+
+    /**
+     * A link call ended on a transient database error (deadlock, serialization failure, lock not available): nothing was
+     * written and the same call is safe to submit again. The route answers it 503 {@code transient_db_error}, as the
+     * reconcile commit's poll does, never the 500 of an unknown failure.
+     */
+    public static final class TransientDbException extends RuntimeException {
+        private final String sqlState;
+
+        TransientDbException(String sqlState, String message, Throwable cause) {
+            super(message, cause);
+            this.sqlState = sqlState;
+        }
+
+        public String sqlState() {
+            return sqlState;
+        }
+    }
+
+    /** The SQLSTATE of the first {@link SQLException} in {@code e}'s cause chain, or null. */
+    private static String sqlStateOf(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof SQLException se && se.getSQLState() != null) return se.getSQLState();
+        }
+        return null;
+    }
+
+    /** Rethrows a transient database error as {@link TransientDbException}; any other error is the caller's to rethrow. */
+    private static void throwIfTransient(DataAccessException e) {
+        String state = sqlStateOf(e);
+        if (state != null && TRANSIENT_STATES.contains(state)) {
+            throw new TransientDbException(state, "the link write hit a transient database error (SQLSTATE " + state
+                + "); nothing was written, submit it again", e);
+        }
+    }
+
     private final TenantScope tenantScope;
 
     public CatalogLinksRepository(CatalogRepository base) {
@@ -46,7 +84,8 @@ public final class CatalogLinksRepository {
      *
      * @return {@code {created, skipped, unresolved}} where {@code unresolved} is a list of
      *         {@code {index, side, reason}} (reason {@code dangling} or {@code no_path}); a malformed edge is an
-     *         {@link IllegalArgumentException} (the function raises SQLSTATE 22023)
+     *         {@link IllegalArgumentException} (the function raises SQLSTATE 22023); a deadlock, a serialization failure
+     *         or a lock wait that ran out is a {@link TransientDbException}
      */
     public Map<String, Object> linksUpsertMany(String tenant, List<Map<String, Object>> edges) {
         if (edges == null) {
@@ -70,6 +109,7 @@ public final class CatalogLinksRepository {
                         throw new IllegalArgumentException(m == null ? "invalid edges" : m, e);
                     }
                 }
+                throwIfTransient(e);
                 throw e;
             }
             JSONB unresolved = r.get(up.UNRESOLVED);
@@ -102,7 +142,13 @@ public final class CatalogLinksRepository {
         }
         String[] arr = tumblers.toArray(new String[0]);
         return tenantScope.withTenant(tenant, ctx -> {
-            JSONB out = dev.nexus.service.jooq.nexus.Routines.catalogLinkSameContent(ctx.configuration(), arr, prune);
+            JSONB out;
+            try {
+                out = dev.nexus.service.jooq.nexus.Routines.catalogLinkSameContent(ctx.configuration(), arr, prune);
+            } catch (DataAccessException e) {
+                throwIfTransient(e);
+                throw e;
+            }
             try {
                 return CatalogRepository.MAPPER.readValue(out.data(), MAP_TYPE);
             } catch (JsonProcessingException e) {

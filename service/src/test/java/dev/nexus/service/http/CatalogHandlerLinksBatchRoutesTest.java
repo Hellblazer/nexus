@@ -51,6 +51,9 @@ class CatalogHandlerLinksBatchRoutesTest {
     CatalogRepository repo;
     CatalogHandler handler;
     com.zaxxer.hikari.HikariDataSource svcDs;
+    /** A second pool whose sessions give up on a lock after half a second, and the handler over it. */
+    com.zaxxer.hikari.HikariDataSource shortLockDs;
+    CatalogHandler shortLockHandler;
     int tenantSeq = 0;
 
     @BeforeAll
@@ -72,10 +75,21 @@ class CatalogHandlerLinksBatchRoutesTest {
         tenantScope = new TenantScope(svcDs);
         repo = new CatalogRepository(tenantScope);
         handler = new CatalogHandler(repo);
+
+        var shortCfg = new com.zaxxer.hikari.HikariConfig();
+        shortCfg.setJdbcUrl(pg.getJdbcUrl());
+        shortCfg.setUsername(SVC_ROLE);
+        shortCfg.setPassword(SVC_PASS);
+        shortCfg.setMaximumPoolSize(2);
+        shortCfg.setAutoCommit(true);
+        shortCfg.setConnectionInitSql("SET lock_timeout = '500ms'");
+        shortLockDs = new com.zaxxer.hikari.HikariDataSource(shortCfg);
+        shortLockHandler = new CatalogHandler(new CatalogRepository(new TenantScope(shortLockDs)));
     }
 
     @AfterAll
     void stopAll() {
+        if (shortLockDs != null) shortLockDs.close();
         if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
     }
@@ -194,7 +208,61 @@ class CatalogHandlerLinksBatchRoutesTest {
         assertThat(call(tenantWithDocs(), "GET", "/v1/catalog/links/upsert_many", "").status).isEqualTo(405);
     }
 
+    /** Holds {@code tumbler} of the tenant FOR UPDATE in {@code su}'s open transaction, as a merge in flight does. */
+    private void holdRow(Connection su, String tenant, String tumbler) {
+        org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES).selectOne()
+            .from(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+            .forUpdate().fetch();
+    }
+
+    @Test
+    void upsertMany_aLockWaitThatRunsOut_is503TransientDbError_nothingIsWritten_andTheRetryWrites() throws Exception {
+        String t = tenantWithDocs();
+        String body = MAPPER.writeValueAsString(Map.of("edges", List.of(edge("1.1.1", "1.1.2", "cites"))));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            holdRow(su, t, "1.1.2");   // a merge holds the target; the batch's FOR KEY SHARE waits 500 ms and gives up (55P03)
+
+            Resp r = callOn(shortLockHandler, t, "POST", "/v1/catalog/links/upsert_many", body);
+
+            assertThat(r.status).as(r.body).isEqualTo(503);
+            assertThat(r.json().get("reason").asText()).isEqualTo("transient_db_error");
+            assertThat(r.json().get("error").asText()).contains("submit it again");
+            su.rollback();
+        }
+        assertThat(linkCount(t)).as("the failed call wrote nothing").isZero();
+
+        Resp retry = callOn(shortLockHandler, t, "POST", "/v1/catalog/links/upsert_many", body);
+        assertThat(retry.status).as(retry.body).isEqualTo(200);
+        assertThat(retry.json().get("created").asInt()).isEqualTo(1);
+    }
+
     // ── same_content ────────────────────────────────────────────────────
+
+    @Test
+    void sameContent_aLockWaitThatRunsOut_is503TransientDbError_nothingIsWritten_andTheRetryWrites() throws Exception {
+        String t = tenantWithDocs();
+        pdf(t, "p1.pdf", "K");   // 1.1.3, the anchor
+        pdf(t, "p2.pdf", "K");   // 1.1.4
+        String body = "{\"tumblers\":[\"1.1.4\"]}";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            holdRow(su, t, "1.1.3");
+
+            Resp r = callOn(shortLockHandler, t, "POST", "/v1/catalog/links/same_content", body);
+
+            assertThat(r.status).as(r.body).isEqualTo(503);
+            assertThat(r.json().get("reason").asText()).isEqualTo("transient_db_error");
+            su.rollback();
+        }
+        assertThat(linkCount(t)).as("the failed call wrote nothing").isZero();
+
+        Resp retry = callOn(shortLockHandler, t, "POST", "/v1/catalog/links/same_content", body);
+        assertThat(retry.status).as(retry.body).isEqualTo(200);
+        assertThat(retry.json().toString()).isEqualTo("{\"created\":1,\"retracted\":0}");
+    }
 
     private void pdf(String t, String path, String key) {
         repo.registerDocument(t, "1.1", new LinkedHashMap<>(Map.of("title", path, "file_path", path, "content_type", "pdf",
@@ -248,10 +316,14 @@ class CatalogHandlerLinksBatchRoutesTest {
     }
 
     private Resp call(String tenant, String method, String path, String body) throws Exception {
+        return callOn(handler, tenant, method, path, body);
+    }
+
+    private Resp callOn(CatalogHandler h, String tenant, String method, String path, String body) throws Exception {
         CapturingExchange ex = new CapturingExchange(method, URI.create(path), body);
         RequestContext.set(new RequestContext.Principal(tenant, null, false, false, "tenant", "test-credential-hash"));
         try {
-            handler.handle(ex);
+            h.handle(ex);
         } finally {
             RequestContext.clear();
         }

@@ -51,6 +51,15 @@ final class CatalogLinksHandler {
     }
 
     /**
+     * A deadlock, a serialization failure or a lock wait that ran out ended the call and nothing was written: 503 with
+     * reason {@code transient_db_error}, the retryable answer the reconcile commit's poll gives, never a 500.
+     */
+    private static void transientFailure(HttpExchange exchange, CatalogLinksRepository.TransientDbException e) throws IOException {
+        send(exchange, 503, "{\"error\":" + CatalogHandler.MAPPER.writeValueAsString(e.getMessage())
+            + ",\"reason\":\"" + CatalogHandler.TRANSIENT_DB_ERROR + "\"}");
+    }
+
+    /**
      * POST /v1/catalog/links/upsert_many — the batch link upsert, one transaction. Body: {@code {"edges": [{"from": E,
      * "to": E, "link_type": "...", "created_by": "...", "from_span"?: "...", "to_span"?: "..."}, ...]}} where an
      * endpoint {@code E} is {@code {"tumbler": "..."}} or {@code {"owner": "...", "file_path": "..."}}. At most
@@ -59,8 +68,10 @@ final class CatalogLinksHandler {
      *
      * <p>Response: {@code {"created": N, "skipped": N, "unresolved": [{"index", "side", "reason"}]}}; {@code reason} is
      * {@code dangling} (a tumbler that is not a live document after alias resolution) or {@code no_path} (a path that
-     * matched no document of the named owner or of its repository). An existing link is skipped and keeps its fields.
+     * matched no document of the named owner or of its repository, or a path that leaves the owner's repo_root). An existing link is skipped and keeps its fields.
      * A path present only in another repository is {@code no_path}: the cross-repository drop is the design, not a gap.
+     * A deadlock, a serialization failure or a lock wait that ran out answers 503 {@code transient_db_error}: nothing was
+     * written, submit the call again.
      */
     void upsertMany(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -80,7 +91,11 @@ final class CatalogLinksHandler {
             @SuppressWarnings("unchecked") Map<String, Object> edge = (Map<String, Object>) edges.get(i);
             checked.add(edge);
         }
-        send(exchange, 200, CatalogHandler.MAPPER.writeValueAsString(links.linksUpsertMany(tenant, checked)));
+        try {
+            send(exchange, 200, CatalogHandler.MAPPER.writeValueAsString(links.linksUpsertMany(tenant, checked)));
+        } catch (CatalogLinksRepository.TransientDbException e) {
+            transientFailure(exchange, e);
+        }
     }
 
     /** Why {@code edge} is not a link edge, or null when it is: from and to endpoints, a link_type, optional strings. */
@@ -124,8 +139,12 @@ final class CatalogLinksHandler {
             error(exchange, 400, "'prune' must be a boolean"); return;
         }
         @SuppressWarnings("unchecked") List<String> tumblers = (List<String>) l;
-        send(exchange, 200, CatalogHandler.MAPPER.writeValueAsString(
-            links.linkSameContent(tenant, tumblers, Boolean.TRUE.equals(rawPrune))));
+        try {
+            send(exchange, 200, CatalogHandler.MAPPER.writeValueAsString(
+                links.linkSameContent(tenant, tumblers, Boolean.TRUE.equals(rawPrune))));
+        } catch (CatalogLinksRepository.TransientDbException e) {
+            transientFailure(exchange, e);
+        }
     }
 
     // ── GET /list, the combined branch ──────────────────────────────────

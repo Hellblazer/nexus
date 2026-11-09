@@ -2105,8 +2105,10 @@
         Bead nexus-u5m5g.3 (RDR-193 Phase 1 Step 2, Part A1): the catalog reconcile on the engine. catalog-048-1 creates the
         landing tables nexus.catalog_reconcile_runs and nexus.catalog_reconcile_rows (tenant RLS); catalog-048-2 creates
         nexus.catalog_reconcile_commit(p_owner, p_run_id), the one-transaction commit of a staged run; catalog-048-3
-        creates nexus.catalog_reconcile_reap(p_interval); see the included file's own header. Two tables, two functions
-        and their grants, no DATA EFFECT. After vectors-056, before the grants-nexus-svc.xml runAlways block.
+        creates nexus.catalog_reconcile_reap(p_interval); catalog-048-4 to -6 (nexus-u5m5g.3 and .4) add the link functions
+        catalog_link_write, catalog_link_endpoint, catalog_link_lock_endpoints, catalog_links_upsert_many and
+        catalog_link_same_content; see the included file's own header. Two tables, seven functions and their grants, no
+        DATA EFFECT. After vectors-056, before the grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/catalog-048-reconcile.xml"/>
 

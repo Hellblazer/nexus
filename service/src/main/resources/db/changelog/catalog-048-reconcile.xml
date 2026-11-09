@@ -38,23 +38,31 @@
     catalog-048-4  nexus.catalog_link_write(from, to, link_type, from_span, to_span, created_by, if_absent) RETURNS
                    text: the one link write, today's POST /link as a function (alias resolution on both endpoints, a
                    liveness check, a self-link dropped, the upsert with the creator folded into co_discovered_by, and
-                   link_if_absent's skip of an edge that already exists as the client names it). The commit's rename
-                   move calls it once per link, and Step 3's batch link route reuses it. Placed last so that the
-                   commit, which calls it through dynamic SQL, has no ordering dependency on it.
+                   link_if_absent's skip of an edge that already exists as the client names it; created_at comes from
+                   the column default, now(), hygiene-001-7). The commit's rename move calls it once per
+                   link, and so does the same-content linker (catalog-048-6, with if_absent); the batch link route
+                   (catalog-048-5) does not call it, because that route declares the opposite merge rule. Placed last
+                   so that the commit, which calls it through dynamic SQL, has no ordering dependency on it.
 
     catalog-048-5  (nexus-u5m5g.4, RDR-193 Step 3, Part A4 item 1) nexus.catalog_link_endpoint(p_end jsonb) RETURNS text, the
                    canonical live tumbler an edge endpoint names ({tumbler}: follow alias_of; {owner, file_path}: first by
                    identity through the NAMED owner's repo_root, whichever owner registered the row, then that owner's
-                   file_path, the one documentsByOwner lists last), and nexus.catalog_links_upsert_many(p_edges jsonb)
-                   RETURNS TABLE(created, skipped, unresolved): every endpoint resolved, the resolved rows locked FOR KEY
-                   SHARE in sorted order for the whole batch, an endpoint that is not live or matches no path returned in
-                   unresolved (dangling, no_path), the rest inserted ON CONFLICT DO NOTHING so an existing link keeps its
-                   fields. It does not call catalog_link_write: that function merges into an existing edge (spans
-                   overwritten, creator folded into co_discovered_by) and the batch declares the opposite.
+                   file_path, the one documentsByOwner lists last; NULL when nothing live is named, which includes an
+                   alias whose canonical is tombstoned or gone and a path that leaves the named owner's repo_root),
+                   nexus.catalog_link_lock_endpoints(p_ends jsonb) RETURNS text[] (resolve every endpoint, lock the
+                   resolved rows FOR KEY SHARE in sorted order, resolve again if a locked row turned out to be an alias:
+                   resolveAndLockLinkEndpoints, shared by the batch upsert and the same-content linker), and
+                   nexus.catalog_links_upsert_many(p_edges jsonb) RETURNS TABLE(created, skipped, unresolved): an endpoint
+                   that is not live or matches no path returned in unresolved (dangling, no_path), the rest inserted
+                   ON CONFLICT DO NOTHING so an existing link keeps its fields. It does not call catalog_link_write: that
+                   function merges into an existing edge (spans overwritten, creator folded into co_discovered_by) and
+                   the batch declares the opposite. A call that cannot settle its endpoints in 8 rounds raises SQLSTATE
+                   40001, which the route answers as a transient 503.
 
     catalog-048-6  (nexus-u5m5g.4, Part A4 item 3) nexus.catalog_link_same_content(p_tumblers text[], p_prune boolean)
                    RETURNS jsonb {created, retracted}: generate_pdf_corpus_links and prune_stale_same_as_links in one
-                   transaction. It writes through catalog_link_write(if_absent), link_if_absent as it is today.
+                   transaction. It locks every member and anchor it will link (catalog_link_lock_endpoints) and then
+                   writes through catalog_link_write(if_absent), link_if_absent as it is today.
 
     Placed after vectors-056-gc-quarantine-expires-at.xml (the tail when this landed) and before the grants-nexus-svc.xml
     runAlways block (the established late-append convention): the grants loop gives nexus_svc DML on both tables. The
@@ -964,7 +972,7 @@ GRANT EXECUTE ON FUNCTION nexus.catalog_link_write(text, text, text, text, text,
     </changeSet>
 
     <changeSet id="catalog-048-5" author="nexus-u5m5g.4">
-        <comment>nexus.catalog_link_endpoint(p_end jsonb) RETURNS text and nexus.catalog_links_upsert_many(p_edges jsonb) RETURNS TABLE(created integer, skipped integer, unresolved jsonb) (RDR-193 Part A4 item 1, Step 3): the batch link upsert. plpgsql, VOLATILE, SECURITY INVOKER. Function definitions and their GRANT EXECUTE; no data effect at migration time.</comment>
+        <comment>nexus.catalog_link_endpoint(p_end jsonb) RETURNS text, nexus.catalog_link_lock_endpoints(p_ends jsonb) RETURNS text[] and nexus.catalog_links_upsert_many(p_edges jsonb) RETURNS TABLE(created integer, skipped integer, unresolved jsonb) (RDR-193 Part A4 item 1, Step 3): the batch link upsert. plpgsql, VOLATILE, SECURITY INVOKER. Function definitions and their GRANT EXECUTE; no data effect at migration time.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.catalog_link_endpoint(p_end jsonb)
 RETURNS text
@@ -973,18 +981,19 @@ VOLATILE
 SECURITY INVOKER
 AS $fn$
 DECLARE
-    v_tenant  text := current_setting('nexus.tenant', true);
-    v_cur     text;
-    v_next    text;
-    v_seen    text[];
-    v_hop     integer;
-    v_owner   text;
-    v_path    text;
-    v_root    text;
-    v_segs    text[];
-    v_seg     text;
-    v_raw     text;
-    v_uri     text;
+    v_tenant    text := current_setting('nexus.tenant', true);
+    v_cur       text;
+    v_next      text;
+    v_seen      text[];
+    v_hop       integer;
+    v_owner     text;
+    v_path      text;
+    v_root      text;
+    v_root_norm text := '';
+    v_segs      text[];
+    v_seg       text;
+    v_raw       text;
+    v_inner     text;
 BEGIN
     -- The canonical live tumbler an edge endpoint names, or NULL when there is none. An endpoint is {tumbler} or
     -- {owner, file_path}; the caller reads a NULL as dangling for the first and no_path for the second.
@@ -1004,18 +1013,35 @@ BEGIN
 
         -- (1) identity: the live row, of any owner, whose source_uri is the URI the NAMED owner's repo_root and the
         -- path derive (deriveSourceUri, lexical, as the reconcile commit derives it). The owner named is the owner of
-        -- the repository being linked, never the source document's. Another repository's file has another root, so
-        -- it can never match here.
+        -- the repository being linked, never the source document's. The derived URI must lie inside that repo_root, the
+        -- containment rule of the reconcile commit: an absolute path into another repository, a path whose dot
+        -- segments climb out of the root, and any absolute path under an owner with no usable root name no file of this
+        -- repository, so they are NULL (no_path) and never reach another repository's row.
         SELECT o.repo_root INTO v_root FROM nexus.catalog_owners o
          WHERE o.tenant_id = v_tenant AND o.tumbler_prefix = v_owner;
+        IF left(coalesce(v_root, ''), 1) = '/' THEN
+            v_segs := '{}';
+            FOREACH v_seg IN ARRAY string_to_array(v_root, '/') LOOP
+                IF v_seg = '' OR v_seg = '.' THEN CONTINUE;
+                ELSIF v_seg = '..' THEN
+                    IF cardinality(v_segs) > 0 THEN v_segs := v_segs[1:cardinality(v_segs) - 1]; END IF;
+                ELSE v_segs := v_segs || v_seg;
+                END IF;
+            END LOOP;
+            v_root_norm := '/' || array_to_string(v_segs, '/');
+        END IF;
+
         IF left(v_path, 1) = '/' THEN
             v_raw := v_path;
-        ELSIF left(coalesce(v_root, ''), 1) = '/' THEN
-            v_raw := rtrim(v_root, '/') || '/' || v_path;
+        ELSIF v_root_norm <> '' THEN
+            v_raw := rtrim(v_root_norm, '/') || '/' || v_path;
         ELSE
             v_raw := '';
         END IF;
         IF v_raw <> '' THEN
+            IF v_root_norm = '' THEN
+                RETURN NULL;
+            END IF;
             v_segs := '{}';
             FOREACH v_seg IN ARRAY string_to_array(v_raw, '/') LOOP
                 IF v_seg = '' OR v_seg = '.' THEN CONTINUE;
@@ -1024,9 +1050,13 @@ BEGIN
                 ELSE v_segs := v_segs || v_seg;
                 END IF;
             END LOOP;
-            v_uri := 'file:///' || array_to_string(v_segs, '/');
+            v_inner := '/' || array_to_string(v_segs, '/');
+            IF NOT (v_inner = v_root_norm
+                    OR starts_with(v_inner, CASE WHEN v_root_norm = '/' THEN '/' ELSE v_root_norm || '/' END)) THEN
+                RETURN NULL;
+            END IF;
             SELECT d.tumbler INTO v_cur FROM nexus.catalog_documents d
-             WHERE d.tenant_id = v_tenant AND d.source_uri = v_uri AND d.deleted_at IS NULL;
+             WHERE d.tenant_id = v_tenant AND d.source_uri = 'file://' || v_inner AND d.deleted_at IS NULL;
         END IF;
 
         -- (2) failing that, the named owner's live row with that file_path; of several, the one documentsByOwner
@@ -1058,8 +1088,12 @@ BEGIN
         v_cur := v_next;
     END LOOP;
 
-    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d
-                    WHERE d.tenant_id = v_tenant AND d.tumbler = v_cur AND d.deleted_at IS NULL) THEN
+    -- The walk ends on a live canonical row. It also ends on a row that is still an alias: its canonical is tombstoned
+    -- or gone, the chain is a cycle, or it is longer than 16 hops. Such an endpoint names no live document (the Java
+    -- link write reports it dangling), so it is NULL here and never reaches the lock pass, where it could not settle.
+    SELECT d.alias_of INTO v_next FROM nexus.catalog_documents d
+     WHERE d.tenant_id = v_tenant AND d.tumbler = v_cur AND d.deleted_at IS NULL;
+    IF NOT FOUND OR coalesce(v_next, '') <> '' THEN
         RETURN NULL;
     END IF;
     RETURN v_cur;
@@ -1067,6 +1101,69 @@ END;
 $fn$;
 
 GRANT EXECUTE ON FUNCTION nexus.catalog_link_endpoint(jsonb) TO nexus_svc;
+
+CREATE OR REPLACE FUNCTION nexus.catalog_link_lock_endpoints(p_ends jsonb)
+RETURNS text[]
+LANGUAGE plpgsql
+VOLATILE
+SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant text := current_setting('nexus.tenant', true);
+    v_n      integer;
+    v_i      integer;
+    v_round  integer;
+    v_res    text[];
+    v_stale  boolean;
+    v_t      text;
+    v_alias  text;
+BEGIN
+    -- p_ends is a JSON array of endpoints ({tumbler} or {owner, file_path}). Returns an array of the same length: the
+    -- canonical live tumbler of each (NULL where an endpoint names nothing live), the rows of all of them locked FOR KEY
+    -- SHARE until the transaction ends. The resolveAndLockLinkEndpoints contract: resolve every endpoint, lock the
+    -- resolved rows one at a time in ascending "C" order, the whole set sorted together (a concurrent merge needs a
+    -- conflicting lock on the same rows and takes its own pair in sorted order, so neither side can deadlock). A
+    -- locked row found aliased or gone means a merge or a delete raced the resolution: resolve again, bounded.
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION 'catalog_link_lock_endpoints no_tenant: nexus.tenant is not set';
+    END IF;
+    IF jsonb_typeof(p_ends) IS DISTINCT FROM 'array' THEN
+        RAISE EXCEPTION 'catalog_link_lock_endpoints invalid_endpoints: p_ends is a JSON array of endpoints' USING ERRCODE = '22023';
+    END IF;
+    v_n := jsonb_array_length(p_ends);
+    IF v_n = 0 THEN
+        RETURN '{}'::text[];
+    END IF;
+
+    FOR v_round IN 1..8 LOOP
+        v_res := array_fill(NULL::text, ARRAY[v_n]);
+        FOR v_i IN 1..v_n LOOP
+            v_res[v_i] := nexus.catalog_link_endpoint(p_ends -> (v_i - 1));
+        END LOOP;
+
+        v_stale := false;
+        FOR v_t IN
+            SELECT x.t FROM (SELECT DISTINCT y.t FROM unnest(v_res) AS y(t) WHERE y.t IS NOT NULL) x
+             ORDER BY x.t COLLATE "C"
+        LOOP
+            SELECT d.alias_of INTO v_alias FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.tumbler = v_t AND d.deleted_at IS NULL
+               FOR KEY SHARE;
+            IF NOT FOUND OR coalesce(v_alias, '') <> '' THEN
+                v_stale := true;
+            END IF;
+        END LOOP;
+        IF NOT v_stale THEN
+            RETURN v_res;
+        END IF;
+    END LOOP;
+    -- 40001 (serialization_failure) is the retryable class: the caller submits the call again
+    RAISE EXCEPTION 'catalog_link_lock_endpoints unstable: endpoint resolution did not settle after 8 rounds (concurrent merges kept re-aliasing an endpoint)'
+        USING ERRCODE = '40001';
+END;
+$fn$;
+
+GRANT EXECUTE ON FUNCTION nexus.catalog_link_lock_endpoints(jsonb) TO nexus_svc;
 
 CREATE OR REPLACE FUNCTION nexus.catalog_links_upsert_many(p_edges jsonb)
 RETURNS TABLE(created integer, skipped integer, unresolved jsonb)
@@ -1078,13 +1175,11 @@ DECLARE
     v_tenant text := current_setting('nexus.tenant', true);
     v_n      integer;
     v_i      integer;
-    v_round  integer;
     v_edge   jsonb;
-    v_from   text[];
-    v_to     text[];
-    v_stale  boolean;
-    v_t      text;
-    v_alias  text;
+    v_ends   jsonb;
+    v_res    text[];
+    v_from   text;
+    v_to     text;
     v_cnt    integer;
     v_type   text;
 BEGIN
@@ -1118,53 +1213,33 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Resolve every endpoint, then lock the resolved rows FOR KEY SHARE one at a time in ascending order (the
-    -- resolveAndLockLinkEndpoints contract: a concurrent merge needs a conflicting lock on the same rows, and takes
-    -- its own pair in sorted order, so neither side can deadlock). The whole batch is locked sorted together, never
-    -- edge by edge. A locked row found aliased or gone means a merge or a delete raced the resolution: resolve again,
-    -- bounded.
-    FOR v_round IN 1..8 LOOP
-        v_from := array_fill(NULL::text, ARRAY[v_n]);
-        v_to := array_fill(NULL::text, ARRAY[v_n]);
-        FOR v_i IN 1..v_n LOOP
-            v_edge := p_edges -> (v_i - 1);
-            v_from[v_i] := nexus.catalog_link_endpoint(v_edge -> 'from');
-            v_to[v_i] := nexus.catalog_link_endpoint(v_edge -> 'to');
-        END LOOP;
-
-        v_stale := false;
-        FOR v_t IN
-            SELECT x.t FROM (SELECT DISTINCT y.t FROM unnest(v_from || v_to) AS y(t) WHERE y.t IS NOT NULL) x
-             ORDER BY x.t COLLATE "C"
-        LOOP
-            SELECT d.alias_of INTO v_alias FROM nexus.catalog_documents d
-             WHERE d.tenant_id = v_tenant AND d.tumbler = v_t AND d.deleted_at IS NULL
-               FOR KEY SHARE;
-            IF NOT FOUND OR coalesce(v_alias, '') <> '' THEN
-                v_stale := true;
-            END IF;
-        END LOOP;
-        EXIT WHEN NOT v_stale;
-        IF v_round = 8 THEN
-            RAISE EXCEPTION 'catalog_links_upsert_many unstable: endpoint resolution did not settle after 8 rounds (concurrent merges kept re-aliasing an endpoint)';
-        END IF;
-    END LOOP;
+    -- Resolve every endpoint and lock the resolved rows of the whole batch together, sorted (never edge by edge). The
+    -- endpoints go in as [from 0, to 0, from 1, to 1, ...] and come back in the same places.
+    SELECT jsonb_agg(e.ep ORDER BY e.ord) INTO v_ends
+      FROM (SELECT g.i * 2 AS ord, p_edges -> g.i -> 'from' AS ep FROM generate_series(0, v_n - 1) AS g(i)
+            UNION ALL
+            SELECT g.i * 2 + 1, p_edges -> g.i -> 'to' FROM generate_series(0, v_n - 1) AS g(i)) e;
+    v_res := nexus.catalog_link_lock_endpoints(v_ends);
 
     FOR v_i IN 1..v_n LOOP
         v_edge := p_edges -> (v_i - 1);
-        IF v_from[v_i] IS NULL OR v_to[v_i] IS NULL THEN
+        v_from := v_res[v_i * 2 - 1];
+        v_to := v_res[v_i * 2];
+        IF v_from IS NULL OR v_to IS NULL THEN
             -- the first endpoint that did not resolve is named; a tumbler endpoint that is not live is dangling, a
             -- path that matched no row is no_path
             unresolved := unresolved || jsonb_build_array(jsonb_build_object(
                 'index', v_i - 1,
-                'side', CASE WHEN v_from[v_i] IS NULL THEN 'from' ELSE 'to' END,
-                'reason', CASE WHEN coalesce((v_edge -> (CASE WHEN v_from[v_i] IS NULL THEN 'from' ELSE 'to' END)) ->> 'tumbler', '') <> ''
+                'side', CASE WHEN v_from IS NULL THEN 'from' ELSE 'to' END,
+                'reason', CASE WHEN coalesce((v_edge -> (CASE WHEN v_from IS NULL THEN 'from' ELSE 'to' END)) ->> 'tumbler', '') <> ''
                                THEN 'dangling' ELSE 'no_path' END));
             CONTINUE;
         END IF;
         v_type := v_edge ->> 'link_type';
+        -- created_at is not named: the column is NOT NULL DEFAULT now() (hygiene-001-7), so a new row is stamped and an
+        -- existing one, skipped by DO NOTHING, keeps its stamp
         INSERT INTO nexus.catalog_links AS l (tenant_id, from_tumbler, to_tumbler, link_type, from_span, to_span, created_by)
-        VALUES (v_tenant, v_from[v_i], v_to[v_i], v_type,
+        VALUES (v_tenant, v_from, v_to, v_type,
                 coalesce(v_edge ->> 'from_span', ''), coalesce(v_edge ->> 'to_span', ''),
                 coalesce(v_edge ->> 'created_by', ''))
         ON CONFLICT (tenant_id, from_tumbler, to_tumbler, link_type) DO NOTHING;
@@ -1186,6 +1261,8 @@ GRANT EXECUTE ON FUNCTION nexus.catalog_links_upsert_many(jsonb) TO nexus_svc;
             <sql splitStatements="true" stripComments="false">
                 REVOKE EXECUTE ON FUNCTION nexus.catalog_links_upsert_many(jsonb) FROM nexus_svc;
                 DROP FUNCTION IF EXISTS nexus.catalog_links_upsert_many(jsonb);
+                REVOKE EXECUTE ON FUNCTION nexus.catalog_link_lock_endpoints(jsonb) FROM nexus_svc;
+                DROP FUNCTION IF EXISTS nexus.catalog_link_lock_endpoints(jsonb);
                 REVOKE EXECUTE ON FUNCTION nexus.catalog_link_endpoint(jsonb) FROM nexus_svc;
                 DROP FUNCTION IF EXISTS nexus.catalog_link_endpoint(jsonb);
             </sql>
@@ -1210,8 +1287,10 @@ DECLARE
     v_retracted text[] := '{}';
     v_n_retr    integer := 0;
     v_seed      text[];
-    v_member    text;
-    v_anchor    text;
+    v_members   text[];
+    v_anchors   text[];
+    v_ends      jsonb;
+    v_i         integer;
     v_res       text;
     v_created   integer := 0;
 BEGIN
@@ -1284,7 +1363,10 @@ BEGIN
         -- content_hash, never head_hash (nexus-utkop); the anchor is the least tumbler in "C" order (Python's
         -- min(str(tumbler)); a numeric order would re-anchor 1.2.9 and 1.2.10 and orphan their links). A group acts
         -- when it has a seed member; a seeded anchor gets every member, otherwise only the seeded members link.
-        FOR v_member, v_anchor IN
+        SELECT coalesce(array_agg(q.tumbler ORDER BY q.tumbler COLLATE "C"), '{}'),
+               coalesce(array_agg(q.anchor ORDER BY q.tumbler COLLATE "C"), '{}')
+          INTO v_members, v_anchors
+          FROM (
             WITH docs AS (
                 SELECT d.tumbler, coalesce(nullif(d.index_content_hash, ''), nullif(d.metadata ->> 'content_hash', '')) AS gkey
                   FROM nexus.catalog_documents d
@@ -1298,14 +1380,22 @@ BEGIN
                    AND x.gkey IN (SELECT s.gkey FROM docs s WHERE s.tumbler = ANY (v_seed) AND s.gkey IS NOT NULL))
             SELECT g.tumbler, g.anchor FROM grp g
              WHERE g.n >= 2 AND g.tumbler <> g.anchor
-               AND (g.anchor = ANY (v_seed) OR g.tumbler = ANY (v_seed))
-             ORDER BY g.tumbler COLLATE "C"
-        LOOP
-            v_res := nexus.catalog_link_write(v_member, v_anchor, 'same-as', '', '', 'content_hash_dedup', true);
-            IF v_res = 'created' THEN
-                v_created := v_created + 1;
-            END IF;
-        END LOOP;
+               AND (g.anchor = ANY (v_seed) OR g.tumbler = ANY (v_seed))) q;
+
+        IF cardinality(v_members) > 0 THEN
+            -- Lock every member and anchor about to be linked, sorted together, resolving again if a locked row turns
+            -- out to have been merged away (the lock pass of catalog_links_upsert_many): catalog_link_write alone
+            -- takes no row lock, so a merge could re-alias an endpoint between its alias walk and its insert.
+            SELECT jsonb_agg(jsonb_build_object('tumbler', u.t)) INTO v_ends FROM unnest(v_members || v_anchors) AS u(t);
+            PERFORM nexus.catalog_link_lock_endpoints(v_ends);
+
+            FOR v_i IN 1..cardinality(v_members) LOOP
+                v_res := nexus.catalog_link_write(v_members[v_i], v_anchors[v_i], 'same-as', '', '', 'content_hash_dedup', true);
+                IF v_res = 'created' THEN
+                    v_created := v_created + 1;
+                END IF;
+            END LOOP;
+        END IF;
     END IF;
 
     RETURN jsonb_build_object('created', v_created, 'retracted', v_n_retr);

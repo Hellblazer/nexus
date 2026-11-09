@@ -330,6 +330,19 @@ abstract class CatalogReconcileTestBase {
         return v == null ? "" : v;
     }
 
+    /** created_at of the one link (from, to, any type) of the tenant; null when the column is NULL or there is no such link. */
+    java.time.OffsetDateTime linkCreatedAt(String tenant, String from, String to) {
+        return scope.withTenant(tenant, ctx -> ctx.select(CATALOG_LINKS.CREATED_AT).from(CATALOG_LINKS)
+            .where(CATALOG_LINKS.TENANT_ID.eq(tenant).and(CATALOG_LINKS.FROM_TUMBLER.eq(from)).and(CATALOG_LINKS.TO_TUMBLER.eq(to)))
+            .fetchOne(CATALOG_LINKS.CREATED_AT));
+    }
+
+    void setLinkCreatedAt(String tenant, String from, String to, java.time.OffsetDateTime value) {
+        scope.withTenant(tenant, ctx -> ctx.update(CATALOG_LINKS).set(CATALOG_LINKS.CREATED_AT, value)
+            .where(CATALOG_LINKS.TENANT_ID.eq(tenant).and(CATALOG_LINKS.FROM_TUMBLER.eq(from)).and(CATALOG_LINKS.TO_TUMBLER.eq(to)))
+            .execute());
+    }
+
     /** The audit rows of the tenant as {@code tumbler|old|new|reason|actor}, in write order. */
     List<String> audit(String tenant) {
         return scope.withTenant(tenant, ctx -> ctx.select().from(CATALOG_SENSITIVITY_CHANGES)

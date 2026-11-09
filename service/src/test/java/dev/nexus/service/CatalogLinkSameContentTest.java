@@ -182,6 +182,80 @@ class CatalogLinkSameContentTest extends CatalogReconcileTestBase {
         assertThat(links(t)).hasSize(1);
     }
 
+    // ── created_at: the column is NOT NULL DEFAULT now() (hygiene-001-7); these pin that an insert here leaves it stamped ──
+
+    private String linkWrite(String tenant, String from, String to, String type, String by, boolean ifAbsent) {
+        return scope.withTenant(tenant, ctx -> ctx.select(dev.nexus.service.jooq.nexus.Routines.catalogLinkWrite(
+                from, to, type, "", "", by, ifAbsent))
+            .fetchOne(0, String.class));
+    }
+
+    @Test
+    void aNewDedupLinkIsStampedCreatedAt_andALinkItSkipsKeepsItsStamp() {
+        String t = newTenant();
+        pdf(t, "1.12.1", "K");
+        pdf(t, "1.12.2", "K");
+        pdf(t, "1.12.3", "K");
+        dedupLink(t, "1.12.3", "1.12.1");   // already there
+        java.time.OffsetDateTime old = java.time.OffsetDateTime.parse("2001-02-03T04:05:06Z");
+        setLinkCreatedAt(t, "1.12.3", "1.12.1", old);
+
+        assertThat(run(t, false, "1.12.2", "1.12.3").get("created")).isEqualTo(1);
+
+        java.time.OffsetDateTime stamped = linkCreatedAt(t, "1.12.2", "1.12.1");
+        assertThat(stamped).as("a same-as link written by the linker has a created_at").isNotNull();
+        assertThat(stamped).isBetween(java.time.OffsetDateTime.now().minusMinutes(10), java.time.OffsetDateTime.now().plusMinutes(10));
+        assertThat(linkCreatedAt(t, "1.12.3", "1.12.1").toInstant()).as("the existing link was skipped, not restamped").isEqualTo(old.toInstant());
+
+        setLinkCreatedAt(t, "1.12.2", "1.12.1", old);
+        assertThat(run(t, false, "1.12.2").get("created")).isEqualTo(0);
+        assertThat(linkCreatedAt(t, "1.12.2", "1.12.1").toInstant()).isEqualTo(old.toInstant());
+    }
+
+    @Test
+    void theLinkWriteHelper_stampsANewRow_andAMergeKeepsTheStamp() {
+        String t = newTenant();
+        pdf(t, "1.13.1", "A");
+        pdf(t, "1.13.2", "B");
+
+        assertThat(linkWrite(t, "1.13.2", "1.13.1", "relates", "alice", false)).isEqualTo("created");
+        assertThat(linkCreatedAt(t, "1.13.2", "1.13.1")).isNotNull();
+
+        java.time.OffsetDateTime old = java.time.OffsetDateTime.parse("2001-02-03T04:05:06Z");
+        setLinkCreatedAt(t, "1.13.2", "1.13.1", old);
+        assertThat(linkWrite(t, "1.13.2", "1.13.1", "relates", "bob", false)).isEqualTo("merged");
+        assertThat(linkCreatedAt(t, "1.13.2", "1.13.1").toInstant()).as("the merge path never touches created_at").isEqualTo(old.toInstant());
+    }
+
+    // ── the lock pass ───────────────────────────────────────────────────
+
+    @Test
+    void theMembersAndAnchorsAreLockedBeforeTheyAreLinked_andFollowAnAliasThatLandedWhileWaiting() throws Exception {
+        String t = newTenant();
+        pdf(t, "1.20.1", "K");   // the anchor
+        pdf(t, "1.20.2", "K");   // the member
+        pdf(t, "1.20.9", "Z");   // a document of another group that a merge is about to make 1.20.2's canonical
+        Map<String, Object> res;
+        var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            suCtx(su).selectOne().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.20.2"))).forUpdate().fetch();
+            var call = pool.submit(() -> run(t, false, "1.20.2"));
+            awaitCommitsBlocked(su, 1);   // without the lock pass the linker would not wait for the merge at all
+            assertThat(call.isDone()).as("the linker waits for the row lock").isFalse();
+            suCtx(su).update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, "1.20.9")
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.20.2"))).execute();
+            su.commit();
+            res = call.get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(res.get("created")).isEqualTo(1);
+        assertThat(links(t)).as("written after the alias landed: the link starts at the canonical").containsExactly(dedup("1.20.9", "1.20.1"));
+    }
+
     // ── prune ───────────────────────────────────────────────────────────
 
     @Test

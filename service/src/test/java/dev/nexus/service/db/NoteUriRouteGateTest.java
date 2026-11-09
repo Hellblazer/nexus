@@ -96,6 +96,7 @@ class NoteUriRouteGateTest {
     private static final String ASP = "AspectRepository.java";
     private static final String PGV = "PgVectorRepository.java";
     private static final String MLS = "ManifestLabelStage.java";
+    private static final String LNK = "CatalogLinksRepository.java";
 
     static final List<Entry> ENTRIES = List.of(
         // ── LISTED: CatalogRepository ─────────────────────────────────────
@@ -173,6 +174,10 @@ class NoteUriRouteGateTest {
         exempt(CAT, "mostRecentTombstonedMany", Cls.PASS_THROUGH, "RDR-243 sensitivity inheritance (nexus-rfvyy.6.24): the batch form of mostRecentTombstoned; its URIs are the already-canonical ones register_many derived"),
         exempt(CAT, "documentFields", Cls.PASS_THROUGH, "column list of a document read; returns the stored value"),
         exempt(CAT, "docRowFromRecord", Cls.PASS_THROUGH, "renders a stored row; RDR-231 forbids response rewriting"),
+        // ── PASS_THROUGH: CatalogLinksRepository ──────────────────────────
+        exempt(LNK, "documentsByOwnerContentTypes", Cls.PASS_THROUGH,
+            "list?source_uri_prefix= with an owner or content_type (RDR-193 Step 3, nexus-u5m5g.4): the prefix is a file: URI prefix matched "
+                + "literally with LIKE and never rewritten; a note URI is matched whole, and canonicalized, by documentsBySourceUri"),
         // ── PASS_THROUGH: AspectRepository ────────────────────────────────
         exempt(ASP, "EX_SOURCE_URI", Cls.PASS_THROUGH, "field: EXCLUDED.source_uri for the aspect upsert arm"),
         exempt(ASP, "EX_SOURCE_URI_COALESCE", Cls.PASS_THROUGH, "field: EXCLUDED.source_uri coalesced for the aspect import arm"),
@@ -355,6 +360,7 @@ class NoteUriRouteGateTest {
         Map<String, Path> files = new LinkedHashMap<>();
         files.put(CAT, MAIN.resolve("db").resolve(CAT));
         files.put(ASP, MAIN.resolve("db").resolve(ASP));
+        files.put(LNK, MAIN.resolve("db").resolve(LNK));
         try (Stream<Path> s = Files.walk(MAIN.resolve("vectors"))) {
             s.filter(p -> p.toString().endsWith(".java")).sorted()
                 .forEach(p -> files.put(p.getFileName().toString(), p));
@@ -409,6 +415,7 @@ class NoteUriRouteGateTest {
         assertThat(perFile.keySet()).as("vectors files scanned").contains(PGV, MLS);
         assertThat(perFile.get(CAT).refCount()).as("CatalogRepository references seen").isGreaterThanOrEqualTo(45);
         assertThat(perFile.get(ASP).refCount()).as("AspectRepository references seen").isGreaterThanOrEqualTo(33);
+        assertThat(perFile.get(LNK).refCount()).as("CatalogLinksRepository references seen").isGreaterThanOrEqualTo(1);
         // 3 until nexus-6pfgb.26 moved the stored-URI read (sourceUrisByChash) into ManifestLabelStage.firstOwners;
         // the two enrichment methods are what is left here.
         assertThat(perFile.get(PGV).refCount()).as("PgVectorRepository references seen").isGreaterThanOrEqualTo(2);

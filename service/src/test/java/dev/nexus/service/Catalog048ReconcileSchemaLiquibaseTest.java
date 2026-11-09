@@ -29,7 +29,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code catalog_link_write(...)} the commit's rename move calls. A walk: migrate to just before the changeset,
  * assert the objects are absent, apply, check columns, keys, forced row-level security, the tenant policy, the
  * function signatures and the grants, roll the six changesets back, reapply. catalog-048-5 and -6 (nexus-u5m5g.4,
- * RDR-193 Step 3) add {@code catalog_link_endpoint}, {@code catalog_links_upsert_many} and {@code catalog_link_same_content}.
+ * RDR-193 Step 3) add {@code catalog_link_endpoint}, {@code catalog_link_lock_endpoints}, {@code catalog_links_upsert_many} and
+ * {@code catalog_link_same_content}.
  */
 class Catalog048ReconcileSchemaLiquibaseTest {
 
@@ -52,6 +53,7 @@ class Catalog048ReconcileSchemaLiquibaseTest {
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_reconcile%")).isEmpty();
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_write")).isEmpty();
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_endpoint")).isEmpty();
+                assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_lock_endpoints")).isEmpty();
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_links_upsert_many")).isEmpty();
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_same_content")).isEmpty();
             }
@@ -113,6 +115,10 @@ class Catalog048ReconcileSchemaLiquibaseTest {
                     .containsExactly("v", false, "plpgsql", "text");
                 assertThat(execGranted(ctx, "nexus.catalog_link_endpoint(jsonb)"))
                     .as("nexus_svc may execute the endpoint resolver").isTrue();
+                assertThat(routine(ctx, "catalog_link_lock_endpoints")).as("text[], plpgsql, VOLATILE, SECURITY INVOKER")
+                    .containsExactly("v", false, "plpgsql", "_text");
+                assertThat(execGranted(ctx, "nexus.catalog_link_lock_endpoints(jsonb)"))
+                    .as("nexus_svc may execute the endpoint lock pass").isTrue();
                 assertThat(routine(ctx, "catalog_links_upsert_many")).as("a set-returning plpgsql VOLATILE SECURITY INVOKER function")
                     .containsExactly("v", false, "plpgsql", "record");
                 assertThat(execGranted(ctx, "nexus.catalog_links_upsert_many(jsonb)"))
@@ -137,6 +143,7 @@ class Catalog048ReconcileSchemaLiquibaseTest {
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_reconcile%")).as("rollback drops both functions").isEmpty();
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_write")).as("and the link write").isEmpty();
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_endpoint")).as("and the endpoint resolver").isEmpty();
+                assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_lock_endpoints")).as("and the endpoint lock pass").isEmpty();
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_links_upsert_many")).as("and the batch upsert").isEmpty();
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_same_content")).as("and the same-content linker").isEmpty();
             }
@@ -153,6 +160,7 @@ class Catalog048ReconcileSchemaLiquibaseTest {
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_reconcile%")).hasSize(2);
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_write")).hasSize(1);
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_endpoint")).hasSize(1);
+                assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_lock_endpoints")).hasSize(1);
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_links_upsert_many")).hasSize(1);
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_same_content")).hasSize(1);
                 // the runAlways grants loop is the last include, so only the full walk shows its DML grants

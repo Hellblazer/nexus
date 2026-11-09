@@ -185,7 +185,93 @@ class CatalogLinksUpsertManyTest extends CatalogReconcileTestBase {
         assertThat(links(t)).as("nothing else written").hasSize(1);
     }
 
+    @Test
+    void anAbsolutePathIntoAnotherRepository_andADotDotPathOutOfTheRoot_areNoPath() {
+        String t = tenantWith("1.1", "/r");
+        owner(t, "1.3", "/other");
+        owner(t, "1.4", "/rx");   // shares the textual prefix "/r" with the named owner's root
+        String src = seed(t, "1.1", "docs/src.md");
+        seed(t, "1.3", "docs/b.md");   // file:///other/docs/b.md
+        seed(t, "1.4", "docs/c.md");   // file:///rx/docs/c.md
+
+        Map<String, Object> res = upsert(t,
+            edge(tum(src), path("1.1", "/other/docs/b.md"), "cites", "gen"),            // absolute, into the other repository
+            edge(tum(src), path("1.1", "../other/docs/b.md"), "cites", "gen"),          // dot segments climb out of /r
+            edge(tum(src), path("1.1", "docs/../../other/docs/b.md"), "cites", "gen"),
+            edge(tum(src), path("1.1", "/rx/docs/c.md"), "cites", "gen"));              // "/rx" starts with "/r" but is not inside it
+
+        assertThat(res.get("created")).isEqualTo(0);
+        assertThat(unresolved(res)).containsExactly("0:to:no_path", "1:to:no_path", "2:to:no_path", "3:to:no_path");
+        assertThat(links(t)).as("no edge reaches another repository's file").isEmpty();
+    }
+
+    @Test
+    void anAbsolutePath_underAnOwnerWithNoRepoRoot_orNoSuchOwner_isNoPath() {
+        String t = tenantWith("1.1", "/r");
+        owner(t, "1.2", "");
+        String src = seed(t, "1.1", "docs/src.md");
+        seed(t, "1.1", "docs/a.md");   // file:///r/docs/a.md
+
+        Map<String, Object> res = upsert(t,
+            edge(tum(src), path("1.2", "/r/docs/a.md"), "cites", "gen"),     // an owner with no repo_root has no repository to contain it
+            edge(tum(src), path("9.9", "/r/docs/a.md"), "cites", "gen"));    // no such owner
+
+        assertThat(res.get("created")).isEqualTo(0);
+        assertThat(unresolved(res)).containsExactly("0:to:no_path", "1:to:no_path");
+        assertThat(links(t)).isEmpty();
+    }
+
     // ── tumbler endpoints ───────────────────────────────────────────────
+
+    /** An alias chain {@code first -> first+1 -> ... -> last}: {@code n} live documents under 1.1, the last one not an alias. */
+    private void aliasChain(String t, int first, int n) {
+        for (int i = 0; i < n; i++) {
+            Map<org.jooq.Field<?>, Object> more = new LinkedHashMap<>();
+            if (i < n - 1) more.put(CATALOG_DOCUMENTS.ALIAS_OF, "1.1." + (first + i + 1));
+            insertDoc(t, "1.1." + (first + i), "chain" + (first + i) + ".md", more);
+        }
+    }
+
+    @Test
+    void anAliasWhoseCanonicalIsTombstonedMissingCyclicOrTooFar_isDangling_andTheRestOfTheBatchStillWrites() {
+        String t = tenantWith("1.1", "/r");
+        String a = seed(t, "1.1", "a.md");
+        String b = seed(t, "1.1", "b.md");
+        String gone = seed(t, "1.1", "gone.md");
+        tombstone(t, gone, false);
+        insertDoc(t, "1.1.50", "toTombstone.md", Map.of(CATALOG_DOCUMENTS.ALIAS_OF, gone));
+        insertDoc(t, "1.1.51", "toMissing.md", Map.of(CATALOG_DOCUMENTS.ALIAS_OF, "1.1.999"));
+        insertDoc(t, "1.1.52", "cycleA.md", Map.of(CATALOG_DOCUMENTS.ALIAS_OF, "1.1.53"));
+        insertDoc(t, "1.1.53", "cycleB.md", Map.of(CATALOG_DOCUMENTS.ALIAS_OF, "1.1.52"));
+        aliasChain(t, 100, 20);   // 1.1.100 .. 1.1.119: 19 hops from the first to the live canonical, past the 16-hop limit
+        aliasChain(t, 200, 3);    // 1.1.200 -> 1.1.201 -> 1.1.202: within the limit
+
+        Map<String, Object> res = upsert(t,
+            edge(tum(a), tum("1.1.50"), "cites", "gen"),     // alias of a tombstoned document
+            edge(tum("1.1.51"), tum(a), "cites", "gen"),     // alias of a document that is not there
+            edge(tum(a), tum("1.1.52"), "cites", "gen"),     // a cycle
+            edge(tum(a), tum("1.1.100"), "cites", "gen"),    // a chain past the hop limit
+            edge(tum(a), tum(b), "cites", "gen"),            // fine
+            edge(tum(a), tum("1.1.200"), "cites", "gen"));   // a chain within the limit resolves to its end
+
+        assertThat(res.get("created")).as("the batch is not failed by the stuck aliases").isEqualTo(2);
+        assertThat(unresolved(res)).containsExactly("0:to:dangling", "1:from:dangling", "2:to:dangling", "3:to:dangling");
+        assertThat(links(t)).containsExactlyInAnyOrder(a + ">" + b + ":cites:gen:::", a + ">1.1.202:cites:gen:::");
+    }
+
+    @Test
+    void aPathWhoseRowIsAnAliasOfATombstonedDocument_isNoPath() {
+        String t = tenantWith("1.1", "/r");
+        String src = seed(t, "1.1", "src.md");
+        String gone = seed(t, "1.1", "gone.md");
+        tombstone(t, gone, false);
+        insertDoc(t, "1.1.50", "stuck.md", Map.of(CATALOG_DOCUMENTS.ALIAS_OF, gone));
+
+        Map<String, Object> res = upsert(t, edge(tum(src), path("1.1", "stuck.md"), "cites", "gen"));
+
+        assertThat(res.get("created")).isEqualTo(0);
+        assertThat(unresolved(res)).containsExactly("0:to:no_path");
+    }
 
     @Test
     void anAliasEndpointResolvesToItsCanonical() {
@@ -256,6 +342,85 @@ class CatalogLinksUpsertManyTest extends CatalogReconcileTestBase {
         linksRepo.linksUpsertMany(t, List.of(withSpans(edge(tum(a), tum(b), "cites", "gen"), "chash:aa", "chash:bb")));
 
         assertThat(links(t)).containsExactly(a + ">" + b + ":cites:gen:chash:aa:chash:bb:");
+    }
+
+    // ── the lock pass ───────────────────────────────────────────────────
+
+    @Test
+    void aRowLockedByAMerge_isWaitedFor_andTheEdgeThenFollowsItsNewAlias() throws Exception {
+        String t = tenantWith("1.1", "/r");
+        String a = seed(t, "1.1", "a.md");
+        String b = seed(t, "1.1", "b.md");
+        String c = seed(t, "1.1", "c.md");
+        Map<String, Object> res;
+        var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            // a merge in flight: it holds c FOR UPDATE, as mergeDocuments does, and is about to alias it to b
+            suCtx(su).selectOne().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(c))).forUpdate().fetch();
+            var call = pool.submit(() -> upsert(t, edge(tum(a), tum(c), "cites", "gen")));
+            awaitCommitsBlocked(su, 1);   // the batch resolved c unaliased and is now waiting for its FOR KEY SHARE lock
+            assertThat(call.isDone()).as("the batch waits for the merge").isFalse();
+            suCtx(su).update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, b)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(c))).execute();
+            su.commit();
+            res = call.get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(res.get("created")).isEqualTo(1);
+        assertThat(links(t)).as("resolved again after the lock: the edge lands on the canonical, not on the alias it raced")
+            .containsExactly(a + ">" + b + ":cites:gen:::");
+    }
+
+    @Test
+    void aRowDeletedWhileTheBatchWaitsForItsLock_leavesTheEdgeDangling() throws Exception {
+        String t = tenantWith("1.1", "/r");
+        String a = seed(t, "1.1", "a.md");
+        String b = seed(t, "1.1", "b.md");
+        String c = seed(t, "1.1", "c.md");
+        Map<String, Object> res;
+        var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            suCtx(su).selectOne().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(c))).forUpdate().fetch();
+            var call = pool.submit(() -> upsert(t, edge(tum(a), tum(c), "cites", "gen"), edge(tum(a), tum(b), "cites", "gen")));
+            awaitCommitsBlocked(su, 1);
+            suCtx(su).update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(c))).execute();
+            su.commit();
+            res = call.get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(res.get("created")).isEqualTo(1);
+        assertThat(unresolved(res)).containsExactly("0:to:dangling");
+        assertThat(links(t)).containsExactly(a + ">" + b + ":cites:gen:::");
+    }
+
+    // ── created_at: the column is NOT NULL DEFAULT now() (hygiene-001-7); these pin that an insert here leaves it stamped ──
+
+    @Test
+    void aNewLinkIsStampedCreatedAt_andASkippedOneKeepsItsStamp() {
+        String t = tenantWith("1.1", "/r");
+        String a = seed(t, "1.1", "a.md");
+        String b = seed(t, "1.1", "b.md");
+
+        upsert(t, edge(tum(a), tum(b), "cites", "gen"));
+        java.time.OffsetDateTime stamped = linkCreatedAt(t, a, b);
+        assertThat(stamped).as("a link inserted by the batch has a created_at (bulk_unlink and created_at_before read it)").isNotNull();
+        assertThat(stamped).isBetween(java.time.OffsetDateTime.now().minusMinutes(10), java.time.OffsetDateTime.now().plusMinutes(10));
+
+        java.time.OffsetDateTime old = java.time.OffsetDateTime.parse("2001-02-03T04:05:06Z");
+        setLinkCreatedAt(t, a, b, old);
+        Map<String, Object> again = upsert(t, edge(tum(a), tum(b), "cites", "other"));
+
+        assertThat(again.get("skipped")).isEqualTo(1);
+        assertThat(linkCreatedAt(t, a, b).toInstant()).as("a skipped existing link is not restamped").isEqualTo(old.toInstant());
     }
 
     // ── the batch ───────────────────────────────────────────────────────
