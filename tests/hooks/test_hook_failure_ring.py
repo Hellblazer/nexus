@@ -19,6 +19,7 @@ from nexus.commands.hook import hook_group
 from nexus.hooks import subagent_stop_t1_nudge as nudge
 from nexus.mcp import hooks as _hooks
 from tests._child_encoding import PYTHON_CHILD_ENCODING
+from tests._module_seam import setattr_in
 
 _CRASHING_VERB = (
     "import os\n"
@@ -215,7 +216,7 @@ def test_a_failed_write_leaves_no_temp_file(tmp_path: Path, monkeypatch: pytest.
     def no_replace(*_: object) -> None:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(failure_ring.os, "replace", no_replace)
+    setattr_in(monkeypatch, failure_ring, "os.replace", no_replace)
     assert _rec(tmp_path, {"n": 1}) is None
     assert list(tmp_path.iterdir()) == []
 

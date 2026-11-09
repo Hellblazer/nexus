@@ -262,18 +262,17 @@ def test_a_worker_blocked_in_a_subprocess_still_counts() -> None:
     assert wd._stack_keys(blocked, _PKG) == "index_repo (nexus/indexer.py:77) <- select (selectors.py:415)"
 
 
-def test_a_failed_thread_start_forgets_the_call_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_failed_thread_start_forgets_the_call_and_retries() -> None:
     starts: list[int] = []
-    real_start = threading.Thread.start
 
-    def flaky_start(self: threading.Thread) -> None:
-        starts.append(1)
-        if len(starts) == 1:
-            raise RuntimeError("can't start new thread")
-        real_start(self)
+    class _FlakyThread(threading.Thread):
+        def start(self) -> None:
+            starts.append(1)
+            if len(starts) == 1:
+                raise RuntimeError("can't start new thread")
+            super().start()
 
-    monkeypatch.setattr(threading.Thread, "start", flaky_start)
-    dog = SlowCallWatchdog(30.0, log=_Log(), pkg_dir=_PKG)
+    dog = SlowCallWatchdog(30.0, log=_Log(), pkg_dir=_PKG, thread_factory=_FlakyThread)
     with pytest.raises(RuntimeError, match="start new thread"):
         dog.begin("search")
     assert dog._calls == {} and dog._thread is None

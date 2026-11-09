@@ -4,7 +4,6 @@ daemons carry it in their lease and ``nx doctor`` reads it back (nexus-3ceda.3).
 from __future__ import annotations
 
 import ast
-import ctypes
 import inspect
 import textwrap
 import os
@@ -18,6 +17,7 @@ from nexus import health
 from nexus.daemon import footprint
 from nexus.daemon.footprint import FootprintGauge, doctor_rows, lease_footprints, sample, warn_mb
 from nexus.daemon.service_registry import ServiceRegistry, ServiceSupervisor
+from tests._module_seam import setattr_in
 
 _MEASURES_RSS = sys.platform.startswith("linux") or sys.platform == "darwin"
 
@@ -203,6 +203,7 @@ def test_the_macos_reader_takes_resident_size_or_the_physical_footprint(monkeypa
             return 0
 
     for resident, phys, want in ((100, 300, 300), (500, 200, 500)):
-        monkeypatch.setattr(ctypes, "CDLL", lambda *_a, r=resident, p=phys, **_k: _Lib(r * 1024 * 1024, p * 1024 * 1024))
+        setattr_in(monkeypatch, footprint, "ctypes.CDLL",
+                   lambda *_a, r=resident, p=phys, **_k: _Lib(r * 1024 * 1024, p * 1024 * 1024))
         got = footprint._macos()
         assert got == {"rss_mb": float(want), "idle_wakeups": 7.0}

@@ -357,8 +357,11 @@ def record(
         import time  # noqa: PLC0415 -- crash path only
         import traceback  # noqa: PLC0415 -- crash path only
 
+        # Owner-only on Windows too: entries can hold prompts and command lines.
+        from nexus._winsec import make_user_dir, open_private  # noqa: PLC0415 -- crash path only
+
         directory = ring_dir(env) if directory is None else directory
-        directory.mkdir(parents=True, exist_ok=True)
+        make_user_dir(directory)
         try:
             os.chmod(directory, 0o700)
         except OSError:
@@ -395,7 +398,7 @@ def record(
         name = f"{_PREFIX}{when.strftime('%Y%m%dT%H%M%S')}{int(stamp * 1e6) % 1_000_000:06d}-{os.getpid()}-{safe_hook}"
         path = directory / (name + _SUFFIX)
         tmp = directory / (name + _TMP_SUFFIX)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd = open_private(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         os.replace(tmp, path)

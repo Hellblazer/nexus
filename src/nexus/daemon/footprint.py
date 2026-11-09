@@ -20,6 +20,7 @@ On Windows only the CPU seconds and thread count are reported; memory reads
 """
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
 import threading
@@ -64,8 +65,6 @@ def _linux() -> dict[str, float | None]:
 
 
 def _macos() -> dict[str, float | None]:
-    import ctypes  # noqa: PLC0415 -- only a sample on macOS pays it
-
     lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     # rusage_info_v0: a 16-byte uuid, then u64 user_time, system_time,
     # pkg_idle_wkups, interrupt_wkups, pageins, wired_size, resident_size,
@@ -95,7 +94,9 @@ def sample(*, now: Callable[[], float] = time.time) -> dict[str, Any]:
     plus system seconds since start."""
     found: dict[str, float | None] = {}
     try:
-        if sys.platform.startswith("linux"):
+        if sys.platform == "win32":
+            found = {}  # no /proc and no libproc: memory reads None, CPU and threads still report
+        elif sys.platform.startswith("linux"):
             found = _linux()
         elif sys.platform == "darwin":
             found = _macos()
@@ -233,9 +234,9 @@ def doctor_rows(
     from nexus.health import HealthResult  # noqa: PLC0415 -- avoids an import cycle
 
     if config_dir is None:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415
+        from nexus import config as _config  # noqa: PLC0415 -- the module, so a test's override of it is seen
 
-        config_dir = nexus_config_dir()
+        config_dir = _config.nexus_config_dir()
     stamp = time.time() if now is None else now
     rows = lease_footprints(config_dir, now=stamp)
     if not rows:

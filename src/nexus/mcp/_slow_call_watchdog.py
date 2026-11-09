@@ -150,8 +150,10 @@ class SlowCallWatchdog:
         log: Any = None,
         start_thread: bool = True,
         pkg_dir: str = _PKG_DIR,
+        thread_factory: Callable[..., threading.Thread] = threading.Thread,
     ) -> None:
         self._pkg_dir = pkg_dir
+        self._thread_factory = thread_factory
         self.threshold_s = threshold_s
         self._interval_s = interval_s
         self._clock = clock
@@ -173,7 +175,7 @@ class SlowCallWatchdog:
             token = self._next_id
             self._calls[token] = _Call(tool, now, now + self.threshold_s)
             if self._start_thread and self._thread is None:
-                thread = threading.Thread(target=self._run, name="nx-slow-call-watchdog", daemon=True)
+                thread = self._thread_factory(target=self._run, name="nx-slow-call-watchdog", daemon=True)
                 try:
                     thread.start()
                 except Exception:
