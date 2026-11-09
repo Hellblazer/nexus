@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.Vectors057RollbackIntegrationTest;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChunksIsolationCheck;
 import dev.nexus.service.db.PgSession;
@@ -258,6 +259,49 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
         });
         assertThat(exactOff).as("switch off: the exact token still passes by its FTS half, A's rows only")
             .containsExactlyInAnyOrderElementsOf(idsA);
+    }
+
+    /**
+     * nexus-seo4k (vectors-057), the invoker posture's ROLLBACK: migrated as nexus_svc itself vectors-031-2 left the
+     * probes SECURITY INVOKER and LANGUAGE sql, and vectors-057 moved them to plpgsql. Rolling back vectors-057-1
+     * alone must put the LANGUAGE sql invoker bodies back, with no SET clause, and leave every other function in
+     * schema nexus as a database that never saw vectors-057 has it. The comparison lives in
+     * {@link Vectors057RollbackIntegrationTest} beside the definer posture; this class hosts the invoker call
+     * because it is the one class that creates nexus_svc as the owner, on containers of their own (nexus_svc owning
+     * the schema is cluster state the shared cluster must not hold, and {@code TestRoleUniquenessScanTest} allows a
+     * second creator of one role only if each declares it exclusive on the shared cluster, which nexus_svc cannot
+     * be). Two more containers: the rolled-back database and the baseline walked to vectors-057-1's predecessor.
+     */
+    @Test
+    void vectors057Rollback_restoresTheInvokerProbes_asVectors031Left_languageSqlAgain() throws Exception {
+        PostgreSQLContainer<?> rolledPg = null;
+        PostgreSQLContainer<?> baselinePg = null;
+        try {
+            rolledPg = PgContainerHelper.startDedicated();
+            baselinePg = PgContainerHelper.startDedicated();
+            try (Connection su = rolledPg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, SVC, PgContainerHelper.SVC_PASSWORD);
+            }
+            try (Connection su = baselinePg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, SVC, PgContainerHelper.SVC_PASSWORD);
+            }
+            Vectors057RollbackIntegrationTest.assertRollbackRestoresVectors031Probes(rolledPg, baselinePg,
+                (c, name) -> {
+                    var cfg = new HikariConfig();
+                    cfg.setJdbcUrl(c.getJdbcUrl());
+                    cfg.setUsername(SVC);
+                    cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
+                    cfg.setMaximumPoolSize(2);
+                    cfg.setPoolName(name);
+                    return new HikariDataSource(cfg);
+                }, false, SVC);
+        } finally {
+            try {
+                if (baselinePg != null) baselinePg.stop();
+            } finally {
+                if (rolledPg != null) rolledPg.stop();
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------------------
