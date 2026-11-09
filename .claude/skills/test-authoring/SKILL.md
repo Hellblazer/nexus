@@ -60,14 +60,14 @@ fixed commands for it come from preflight (`nx run preflight`).
 
 ## Shell tests under CI's checkout
 
-Source for this and the sections below: `feedback_test_runs_before_push.md` in
-Sam's nexus project memory (`~/.claude/projects/<nexus project>/memory/`); the
-R-numbers are those of T2 `nexus/qo7ie.36-census-feedback_test_runs_before_push`.
+Source for this and the sections below: T2
+`nexus/qo7ie.36-census-feedback_test_runs_before_push`.
 
-A shell test newly wired into pytest runs on CI's depth-1, tagless checkout, so
-anything that walks `v*` tags needs an override there (`harness_lock_test.sh`,
-b6027cb2e). Check the test against a depth-1 clone with no tags before it
-lands (R35).
+A shell test newly wired into pytest runs on CI's depth-1 checkout, which has no
+tags. Anything in it that walks `v*` tags needs an override there
+(`harness_lock_test.sh` needed one, b6027cb2e).
+
+- Before such a test lands, run it in a depth-1 clone with no tags.
 
 ## Timing pins
 
@@ -77,26 +77,29 @@ stretched a step by seconds (2026-10-30).
 
 - Prove "no wait" against a visibly large wait (100 polls of 1 s) and bound the
   result at a tenth of it. A bound of one or two seconds on a whole-second clock
-  cannot tell "no wait" from "slow" (R63).
-- Wait on the sampler's own tick counter, not a sleep (R64).
+  cannot tell "no wait" from "slow".
+- Wait on the sampler's own tick counter, not a sleep.
 - When one test runs two phases that each have a retry ladder, set the earlier
-  phase's ladder far beyond the later phase's wait so the two cannot overlap (R65).
+  phase's ladder far beyond the later phase's wait so the two cannot overlap.
 - When a paired local run fails once, capture the failing test's name before
-  rerunning (R66).
+  rerunning.
 
 ## Fresh-install leg
 
 A change that alters what a virgin box's doctor sees (a default flip, a retired
-path, a ratio with no minimum count) needs `tests/e2e/fresh-install-mvv.sh`: only
-that leg starts from nothing. A green full run and a green lint bucket do not
-reach it (nexus-lnwn1: `nx doctor` red at live=1 dead=1) (R70).
+path, a ratio with no minimum count) needs `tests/e2e/fresh-install-mvv.sh`.
+
+- Run it for such a change: only that leg starts from nothing, and a green full
+  run and a green lint bucket do not reach it. One change left `nx doctor` red on
+  a fresh box with one live and one dead record, and only this leg saw it
+  (nexus-lnwn1).
 
 ## Module marks and the tenant ceiling
 
-- A test added to an existing file inherits that file's module marks. A module
-  `pytestmark = pytest.mark.t2_tenant` makes every test in it mint a tenant, so one
-  new test moved the ceiling by one and turned develop's pytest-gate red
-  (nexus-egv6q). Read the file's `pytestmark` first, and put a tenant-free pin in a
-  tenant-free module (R73).
-- A tenant-ceiling comment that names a verb trips that verb's own repo-wide name
-  scan; describe the verb without spelling it (R74).
+- Read the `pytestmark` of an existing file before you add a test to it: the test
+  inherits the module's marks. A module `pytestmark = pytest.mark.t2_tenant` makes
+  every test in it mint a tenant, and one new test moved the ceiling by one and
+  turned develop's pytest-gate red (nexus-egv6q).
+- Put a tenant-free pin in a tenant-free module.
+- Describe a verb in a tenant-ceiling comment without spelling its name: a comment
+  that names a verb trips that verb's own repo-wide name scan.

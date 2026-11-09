@@ -50,6 +50,14 @@ local function live(pathspecs)
   return "git diff -z --no-renames --diff-filter=d --name-only " .. RANGE .. " -- " .. words(pathspecs)
 end
 
+-- A diff piped into xargs -r reads an unreadable diff (a base ref that is absent
+-- where the command runs, as in a copy without the remote-tracking ref) as an empty
+-- list and exits 0, so nothing is checked and nothing says so. pipefail, in a
+-- subshell so it does not leak into the caller, makes git's failure the pipeline's.
+local function piped(list, tool)
+  return "( set -o pipefail; " .. list .. " | xargs -0 -r " .. tool .. " )"
+end
+
 local function any(files, pattern)
   for _, f in ipairs(files) do
     if string.find(f, pattern) then
@@ -65,9 +73,9 @@ local function step(check, command, heavy)
   return {check = check, command = command, heavy = heavy}
 end
 
--- Rules cited below as R<n> are the numbered rules of the maintainer's memory
--- file feedback_test_runs_before_push.md (~/.claude/projects/<nexus project>/memory/),
--- numbered in T2 nexus/qo7ie.36-census-feedback_test_runs_before_push (nexus-qo7ie.36).
+-- Rules cited below as R<n> are the numbered rules of the census in T2
+-- nexus/qo7ie.36-census-feedback_test_runs_before_push (nexus-qo7ie.36), which
+-- numbers the rules of the maintainer's test-runs-before-push memory file.
 
 -- The result contract on every pytest command this procedure emits (R44, R55; the
 -- source's piped_test_exit and gate_the_push_on_the_pin sections). A run's output
@@ -77,8 +85,8 @@ end
 -- A bare `grep -q passed` is not that: "1 failed, 964 passed" matches it, and an
 -- empty filter reads as a pass. "no tests ran", a run that printed nothing and a
 -- selection deselected by marker all fail it. The summary may carry pytest's "="
--- decoration (a watched_pytest.py run does), and a command that can select
--- nothing (the integration selection) says so on its own line.
+-- decoration (a run without -q does), and a command that can select nothing (the
+-- integration selection) says so on its own line.
 local PYTEST = "uv run pytest -q -rf -p no:randomly"
 -- Default addopts is -m 'not integration and not slow and not lint', so a step that
 -- names a lint-marked file collects nothing from it ("10 deselected") and, with a
@@ -121,12 +129,18 @@ local CLASSES = {
       -- (.github/workflows/ci.yml, the ruff lint job: uvx ruff@<v> check src/).
       if any(files, "^src/.*%.py$") then
         table.insert(out, step("ruff check on the changed src/ files",
-          live({":(glob)src/**/*.py"}) .. " | xargs -0 -r uvx " .. RUFF .. " check --force-exclude --", false))
+          piped(live({":(glob)src/**/*.py"}), "uvx " .. RUFF .. " check --force-exclude --"), false))
       end
+      -- NOT_SLOW: under default addopts a changed lint-marked file would collect
+      -- nothing here and the summary accepts "N deselected", so it reads green.
+      -- Integration-marked changed files run in the integration row; slow-marked
+      -- ones in the nightly local-service gate.
       if any(files, "^tests/.*test_[^/]*%.py$") then
-        table.insert(out, step("the changed test files, with the default-loop guard that judges only its own invocation",
-          gated("{ " .. live({":(glob)tests/**/test_*.py"}) .. "; printf '%s\\0' "
-            .. words(CHANGED_TEST_GUARDS) .. "; } | xargs -0 -r " .. PYTEST .. " --"), false))
+        table.insert(out, step("the changed test files, with the default-loop guard that judges only its own"
+          .. " invocation (a changed lint-marked file runs here too; integration-marked ones run in the integration"
+          .. " row, slow-marked ones in the nightly gate)",
+          gated(piped("{ " .. live({":(glob)tests/**/test_*.py"}) .. " && printf '%s\\0' "
+            .. words(CHANGED_TEST_GUARDS) .. "; }", PYTEST .. " " .. NOT_SLOW .. " --")), false))
       end
       -- tests/test_cli_registration.py checks every command module is wired into
       -- cli.py; no test that shares a subject with a command module names it, so a
@@ -221,8 +235,8 @@ local CLASSES = {
     checks = function()
       return {
         step("actionlint on the changed workflows",
-          live({":(glob).github/workflows/*.yml", ":(glob).github/workflows/*.yaml"})
-            .. " | xargs -0 -r actionlint --", false),
+          piped(live({":(glob).github/workflows/*.yml", ":(glob).github/workflows/*.yaml"}),
+            "actionlint --"), false),
       }
     end,
   },
@@ -333,7 +347,7 @@ local function standing(select_all)
     -- CI's mark expression (ci.yml INTEGRATION_MARK_EXPR) and its rule that a
     -- change to the selector selects every integration file.
     step("the integration tests the change affects",
-      gated("f=$(" .. sel .. ")"
+      gated("f=$(set -o pipefail; " .. sel .. ")"
         .. " && { if [ -z \"$f\" ]; then echo '" .. NOTHING .. "'; else printf '%s\\n' \"$f\" | xargs lab-remote -- "
         .. PYTEST .. " -o addopts= -m " .. MARK .. "; fi; }", true),
       true),
@@ -432,6 +446,10 @@ local TRIPWIRES = {
     -- suite, once per tree. "Engine-only" in a brief is the defect. On chas in a
     -- lab-l grant through watched_pytest.py, the gate jar built first
     -- (docs/agents/test-running.md, Hand runs and develop CI, items 3 and 4).
+    -- watched_pytest.py refuses -q (it adds -v) and writes pytest's output only to
+    -- its own --log; its stdout is one status line. So the command names a log,
+    -- prints the log's tail, where the gate's wrapper reads the summary line, and
+    -- exits with watched_pytest's own code (a test runs it for real).
     when = function(names)
       return any(names, "^src/nexus/") or any(names, "^service/")
     end,
@@ -439,8 +457,8 @@ local TRIPWIRES = {
       .. " already has a green full run, whoever ran it, or develop CI already has the verdict; announce it with"
       .. " its change class, the sha and 'no green full run of this tree exists' (AGENTS.md rule 13)",
       gated("lab-remote -c lab-l --fetch full-suite-status.json -- bash -c 'scripts/build-gate-jar.sh && "
-        .. "python3 scripts/watched_pytest.py --stall 180 --status full-suite-status.json -- "
-        .. PYTEST .. " -n auto'"),
+        .. "python3 scripts/watched_pytest.py --stall 180 --status full-suite-status.json --log full-suite.log -- "
+        .. "uv run pytest -rf -p no:randomly -n auto; rc=$?; tail -n 40 full-suite.log; exit $rc'"),
       true),
   },
 }
