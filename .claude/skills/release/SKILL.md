@@ -192,6 +192,14 @@ the evidence gate's borrowed-parent path, `local-service-gate.sh` under
 battery output; a non-zero count is not a failure, it is the list of greens
 that rest on a default, and each one is named in the ship record.
 
+**Battery rounds** (Sam, 2026-09-06, after a day of one stale pin per hour-long
+gate; the source is `feedback_test_runs_before_push.md` in Sam's nexus project
+memory, § what_to_run_before_push, Long batteries). Run the whole battery to
+completion and collect every red, fix once, then rerun only the reds. Each leg is
+its own background job, so a red at minute 25 is triaged while the rest run. A
+tree that carries a changeset needs `--candidate-migration`; the other legs
+converge to the pinned engine (`engine-release` skill, Step 1).
+
 **`fresh-install-mvv.sh` — the virgin-journey gate (nexus-nolqs, 2026-07-21).**
 Every other E2E gate starts from a POPULATED install and tests the upgrade
 axis; the unit suite THEN pinned the SQLite opt-out backend — since retired at
@@ -445,7 +453,11 @@ every substrate-backed test fails at setup. On 2026-10-08, 7.75.0's PR CI
 (12 shards) and a hellmini full suite (25,636 setup errors) both ran while
 engine-service-v0.1.154 was still building. The suite's session-start
 preflight now refuses such a run in seconds, but a refused CI run is still a
-wasted round: check first.
+wasted round: check first. Opening a PR, or pushing to a branch that has one, IS
+a long run for this reason: PR #1597 (7.75.0) was opened before its pinned
+engine-service-v0.1.154 existed and all 12 test shards failed on the PG-bundle
+download. Source: `feedback_test_runs_before_push.md` in Sam's nexus project
+memory (`~/.claude/projects/<nexus project>/memory/`), § check_preconditions_before_long_runs.
 
 **A paired release whose engine range carries a data-effecting changeset needs
 its relay attestation in THIS branch's tree.** Run
