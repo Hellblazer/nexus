@@ -16,7 +16,7 @@ import pytest
 from nexus import health
 from nexus.daemon import footprint
 from nexus.daemon.footprint import FootprintGauge, doctor_rows, lease_footprints, sample, warn_mb
-from nexus.daemon.service_registry import ServiceRegistry, ServiceSupervisor
+from nexus.daemon.service_registry import ElectionBusyError, ServiceRegistry, ServiceSupervisor
 from tests._module_seam import setattr_in
 
 _MEASURES_RSS = sys.platform.startswith("linux") or sys.platform == "darwin"
@@ -207,3 +207,17 @@ def test_the_macos_reader_takes_resident_size_or_the_physical_footprint(monkeypa
                    lambda *_a, r=resident, p=phys, **_k: _Lib(r * 1024 * 1024, p * 1024 * 1024))
         got = footprint._macos()
         assert got == {"rss_mb": float(want), "idle_wakeups": 7.0}
+
+
+def test_a_busy_election_leaves_the_held_lease_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = _registry(tmp_path)
+    sup = ServiceSupervisor(registry, "t-1", version="1", endpoint_provider=lambda: {"port": 1},
+                            footprint=_fixed_gauge(42.0))
+    held = sup.publish_once()
+
+    def busy(_record: object) -> object:
+        raise ElectionBusyError("flock busy")
+
+    monkeypatch.setattr(registry, "heartbeat", busy)
+    sup.heartbeat_tick()
+    assert sup.record is held and "footprint" not in held.payload

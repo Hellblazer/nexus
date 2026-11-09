@@ -1265,14 +1265,15 @@ class ServiceSupervisor:
                         hint="the lease directory is gone; standing down instead of re-creating it",
                     )
                 return
+        # The footprint rides on the record we stamp, never on the one we hold: a
+        # busy election or a fence leaves the held lease exactly as it was.
+        stamped = self._record
         try:
-            self._record = replace(
-                self._record, payload={**self._record.payload, "footprint": self._footprint.read()}
-            )
+            stamped = replace(self._record, payload={**self._record.payload, "footprint": self._footprint.read()})
         except Exception as exc:  # noqa: BLE001 -- a gauge must never cost a heartbeat
             _log.debug("service_supervisor_footprint_failed", scope=self._scope_key, error=str(exc))
         try:
-            self._record = self._registry.heartbeat(self._record)
+            self._record = self._registry.heartbeat(stamped)
         except StaleOwnerError:
             self.fenced = True
             _log.info(
