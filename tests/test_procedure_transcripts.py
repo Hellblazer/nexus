@@ -1642,7 +1642,7 @@ def test_a_page_that_fills_inside_a_day_ends_at_an_hour_of_the_records_it_read_w
     assert tj.join_pages("skills", pages)["rows"] == tj.join_pages("skills", [whole])["rows"]
 
 
-def test_a_day_whose_calls_alone_pass_the_bound_is_divided_by_the_hours_in_hand() -> None:
+def test_a_day_whose_calls_alone_pass_the_bound_is_divided_by_the_hours_already_read() -> None:
     records = _hourly(1, per=20)  # 80 calls in one day, 20 an hour
     for query in ("skills", "tools", "violations"):
         pages, fakes = pages_of(records, query, since=_day(0), until=_day(1), patch=calls_cap(50))
@@ -1659,7 +1659,7 @@ def test_an_hour_over_the_bound_on_its_own_is_taken_whole_so_a_page_advances() -
     assert [len(f.calls) for f in fakes] == [1, 1]
 
 
-def test_a_start_the_script_cannot_place_is_never_divided_in_hand_and_each_session_counts_once() -> None:
+def test_a_start_the_script_cannot_place_never_divides_the_records_read_and_each_session_counts_once() -> None:
     # The verb takes any ISO offset; the script reads only UTC. Put in the wrong hour, the 12:00
     # session would be admitted with 09:00 and read again by the page that starts at 10:00.
     records = _hourly(1, per=20)
