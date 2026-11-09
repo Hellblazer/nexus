@@ -84,7 +84,7 @@ class TestUserPrimePath:
         assert got == home / ".config" / "beads" / "PRIME.md"
 
     def test_defaults_are_ambient_when_not_injected(self) -> None:
-        # No platform/home/environ passed — must resolve without raising.
+        # No platform, home or environ passed — must resolve without raising.
         # Read-only: this computes a path, it does not touch the
         # filesystem, so exercising the true ambient fallback here is safe
         # even outside the conftest fence.

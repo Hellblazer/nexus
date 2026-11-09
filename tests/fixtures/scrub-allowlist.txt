@@ -6,9 +6,13 @@
 user ...
 user .config
 user .local
+user Administrator
 user D
+user Default
 user John
+user Public
 user RUNNER
+user Shared
 user USER
 user a
 user a.b
@@ -24,8 +28,10 @@ user me
 user nexus
 user nobody
 user node
+user nxguest
 user nxtest
 user runner
+user runneradmin
 user somebody
 user someone
 user test
@@ -69,7 +75,6 @@ tests/daemon/test_service_stop_leaves_aspect_worker.py 2
 tests/daemon/test_windows_autostart.py 6
 tests/daemon/test_windows_case_insensitive_paths.py 10
 tests/db/test_catalog_consumer_qnp5s_integration.py 7
-tests/e2e/windows-guest/driver/stduser.ps1 1
 tests/fixtures/incident_3c92m_commands.py 3
 tests/fixtures/windows_engine/embedded-resources-fragment.json 6
 tests/mcp/test_mode_diagnostics.py 2
@@ -77,7 +82,6 @@ tests/scripts/fixtures/wixar_real_ci_fixed_output.txt 1
 tests/scripts/fixtures/wixar_real_ci_mass_skip_output.txt 1
 tests/test_catalog_reconcile_stale.py 2
 tests/test_doctor_check_mcp_logs.py 1
-tests/test_engine_windows_smoke.py 1
 tests/test_fhim9_file_path_match.py 4
 tests/test_gh896_catalog_link_tokens.py 5
 tests/test_health_tuple_doctor_rows.py 1
@@ -88,7 +92,6 @@ tests/test_install_layout_windows.py 7
 tests/test_mineru_child_dll_dirs.py 2
 tests/test_pdf_stack.py 3
 tests/test_pdf_title_placeholder.py 2
-tests/test_pg_bundle_windows.py 1
 tests/test_procedure_transcripts.py 2
 tests/test_rdr237_ladder.py 1
 tests/test_registry.py 1
@@ -97,7 +100,6 @@ tests/test_routing_destructive_action_advice.py 3
 tests/test_source_uri_home_key.py 5
 tests/test_t1_discovery.py 1
 tests/test_windows_engine_release.py 3
-tests/test_windows_gate_driver.py 1
-tests/test_windows_job_cleanup.py 4
+tests/test_windows_job_cleanup.py 1
 tests/test_windows_process_identity_sites.py 4
 tool-spill/tests/register.test.ts 1

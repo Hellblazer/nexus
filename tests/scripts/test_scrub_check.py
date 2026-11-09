@@ -62,6 +62,11 @@ def repo(tmp_path: Path) -> Path:
         ("home", '"/Users/' + 'jdoe"'),
         ("home", "/mnt/c/Users/" + "jdoe/x"),
         ("home", "C:/Users/" + "jdoe"),
+        ("home", "/System/Volumes/Data/Users/" + "jdoe/x"),
+        ("home", "/var/home/" + "jdoe"),
+        ("home", "gcc -I/home/" + "jdoe/inc"),
+        ("home", "rsync://chas/home/" + "jdoe/x"),
+        ("winhome", "\\\\wsl$\\Ubuntu\\home\\" + "jdoe\\x"),
         ("winhome", "C:\\Users\\" + "Jdoe\\x"),
         ("winhome", "c:\\\\users\\\\" + "jdoe"),  # JSON-escaped, lower case
         ("tailnet", TAILNET),
@@ -86,7 +91,7 @@ def test_placeholders_and_trailer_mentions_pass(repo: Path) -> None:
         repo,
         "docs/ok.md",
         f"{PLACEHOLDER}\n~/git/proj\nclaude.ai/install\nstrip the Claude-Session: trailer\n"
-        "/Users/ alone\nsrc/home/pages/x.py\nsee /home/you.\nclaude.ai/artifact/abc\n*.ts.net\n",
+        "/Users/ alone\nsee /home/you.\nC:\\Users\\you\\x\nclaude.ai/artifact/abc\n*.ts.net\n",
     )
     assert sc.check(repo) == []
 
@@ -234,8 +239,25 @@ def test_base_mode_refuses_allowlist_widening(repo: Path) -> None:
     errors = "\n".join(sc.check(repo, rev="HEAD", base=base))
     assert "allowlist adds user jdoe2" in errors
     assert "allowlist raises a.md 1 -> 2" in errors
+    assert sc.widening(({"you"}, {}), ({"you"}, {"c.md": 1})) == [
+        "allowlist adds c.md at 1"
+    ]
     assert sc.widening(({"you"}, {"a.md": 2}), ({"you"}, {"a.md": 1})) == [], (
         "lowering is no widening"
+    )
+
+
+def test_the_first_push_against_a_base_without_an_allowlist_is_not_a_widening(
+    repo: Path,
+) -> None:
+    _commit(repo)  # base: src/clean.py only, no allowlist committed
+    base = _head(repo)
+    _put(repo, "a.md", f"{HOME}\n")
+    _allow(repo, "user you\na.md 1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "--", sc.ALLOWLIST], check=True)
+    _commit(repo)
+    assert sc.check(repo, rev="HEAD", base=base) == [], (
+        "the commit that introduces the gate pushes"
     )
 
 

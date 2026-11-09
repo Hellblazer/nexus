@@ -10,11 +10,12 @@
 Sam ruled that the nexus repo stays scrubbed (ask nexus-scrubbed, 2026-11-09). Every tracked text file
 is scanned for:
 
-- ``home``: a ``/Users/<name>`` or ``/home/<name>`` path (with or without a slash after the name,
-  ``/mnt/c/Users/<name>`` included, ``src/home/...`` not) whose ``<name>`` is not listed as
+- ``home``: a ``/Users/<name>`` or ``/home/<name>`` path anywhere in a path (with or without a slash
+  after the name; ``/mnt/c/Users``, ``/System/Volumes/Data/Users``, ``/var/home`` included) whose ``<name>`` is not listed as
   ``user <name>`` in the allowlist (placeholders such as ``x``, ``someone``, ``you``, and service
   accounts such as ``runner``). Write examples with a placeholder (``/Users/you/...``) or ``~``.
-- ``winhome``: the Windows form, ``C:\\Users\\<name>`` (one or more backslashes), same names.
+- ``winhome``: the Windows forms, ``C:\\Users\\<name>`` and the WSL share's ``\\wsl$\\<distro>\\home\\<name>``
+  (one or more backslashes), same names.
 - ``tailnet``: a ``<host>.ts.net`` or ``<host>.<tailnet>.ts.net`` hostname.
 - ``chat``: a claude.ai chat, share or code-session link (the ``RULES`` pattern below).
 - ``session``: a ``Claude-Session:`` trailer carrying an id, any case (code and docs that name the
@@ -59,9 +60,12 @@ EXIT_FOUND: int = 10
 #: told from a real one.
 _NAME = r"([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])"
 RULES: dict[str, str] = {
-    # Not after two path characters, so src/home/pages is no hit but /mnt/c/Users/<name> is.
-    "home": r"(?<![A-Za-z0-9._-]{2})/(?:Users|home)/" + _NAME,
-    "winhome": r"\b[A-Za-z]:\\+(?i:users)\\+" + _NAME,  # NTFS folds case
+    # Anywhere in a path (/System/Volumes/Data/Users, /var/home, -I/home, //host/home): a source
+    # directory named home or Users would be a false positive, and the tree has none.
+    "home": r"/(?:Users|home)/" + _NAME,
+    # C:\Users\<name> (NTFS folds case) and the WSL share's \\wsl$\<distro>\home\<name>.
+    "winhome": r"(?:\b[A-Za-z]:\\+(?i:users)|\\+(?i:wsl\$|wsl\.localhost)\\+[^\\\s]+\\+home)\\+"
+    + _NAME,
     "tailnet": r"\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)?\.ts\.net\b",
     "chat": r"claude\.ai/(?:(?:chat|share)/|code/session[_/])",
     "session": r"(?i)claude-session: *[0-9a-f][0-9a-f-]{7,}",
@@ -69,7 +73,7 @@ RULES: dict[str, str] = {
 _USER_RULES: frozenset[str] = frozenset({"home", "winhome"})
 #: A case-insensitive git grep prefilter, a superset of every rule (POSIX ERE has no lookaround);
 #: hits are re-tested in Python.
-_GREP = r"/(users|home)/[a-z0-9._-]|[a-z]:\\+users|\.ts\.net|claude\.ai/(chat|share|code/session)|claude-session:"
+_GREP = r"/(users|home)/[a-z0-9._-]|[a-z]:\\+users|\\wsl|\.ts\.net|claude\.ai/(chat|share|code/session)|claude-session:"
 #: Never scanned: the allowlist names placeholders; the durations file is regenerated from test ids.
 EXEMPT: frozenset[str] = frozenset({ALLOWLIST, ".test_durations.json"})
 
