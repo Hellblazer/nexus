@@ -287,14 +287,16 @@ local CLASSES = {
       -- R37 (Addendum 2026-09-18, Fourth recurrence, Never chain): a bead id
       -- cited in docs/ must be in tests/fixtures/bead_ids.txt. The local lint
       -- bucket passes without it (it resolves through the live beads database
-      -- when one is present); CI has none and reads only the manifest. So
-      -- refresh, then require the manifest to match HEAD: a diff means the
-      -- refreshed manifest is not committed with the doc yet.
+      -- when one is present); CI has none and reads only the manifest. The two
+      -- lint tests that check it decide: every cited id is in the manifest, and,
+      -- where bd answers, every cited live bead is. The manifest is not required
+      -- to hold every live bead, so a refresh-then-clean-diff check reds on every
+      -- bead filed since the last refresh (2026-11-09, two uncited beads).
       if any(files, "^docs/") then
-        table.insert(out, step("the bead ids cited in docs/ are in the manifest (needs bd, so run it where the beads database is)",
-          "uv run python scripts/refresh_bead_id_manifest.py && "
-            .. "{ git diff --quiet HEAD -- tests/fixtures/bead_ids.txt || "
-            .. "{ echo 'the manifest changed: commit tests/fixtures/bead_ids.txt with the doc'; false; }; }",
+        table.insert(out, step("the bead ids cited in docs/ are in the manifest (the freshness half needs bd;"
+            .. " when it fails, run scripts/refresh_bead_id_manifest.py and commit tests/fixtures/bead_ids.txt with the doc)",
+          gated(PYTEST .. " " .. NOT_SLOW
+            .. " -k 'cited_bead_ids_resolve or bead_id_manifest_is_fresh_where_bd_is' tests/test_docs_reference_rot.py"),
           false))
       end
       -- CI's docs lane also runs the fragment check (a fragment-only or

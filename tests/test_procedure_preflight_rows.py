@@ -270,26 +270,19 @@ def test_r37_a_docs_change_refreshes_the_bead_manifest(
     assert bool(rows) is fires
     if fires:
         assert (rows[0]["class"], rows[0]["heavy"]) == ("docs", False)
-        assert rows[0]["command"] == BEAD_MANIFEST
+        assert _inner(rows[0]["command"]) == BEAD_MANIFEST
+        # The remedy is named for when the lint fails, never required up front.
+        assert "refresh_bead_id_manifest.py" in rows[0]["check"]
 
 
-def test_r37_the_refresh_must_leave_the_manifest_as_committed(
-    repo: Path, stubs: Path, tmp_path: Path
-) -> None:
-    _change(repo, {"tests/fixtures/bead_ids.txt": "nexus-aaaaa\n"})
-    _git(repo, "tag", "-f", "base")
+def test_r37_never_requires_the_manifest_to_hold_every_live_bead(repo: Path) -> None:
+    """A refresh pulls in every bead filed since the last one, cited or not, so a
+    refresh-then-clean-diff step reds every docs batch whenever anyone has filed a
+    bead (2026-11-09: nexus-z7can and nexus-zu8rq, cited nowhere)."""
     _change(repo, {"docs/a.md": "a\n"})
     cmd = _command(_Run(repo)(), "the bead ids cited in docs/")
-    assert _run(repo, stubs, cmd)[0] == 0  # the refresh finds nothing new
-    adder = tmp_path / "adder"
-    adder.mkdir()
-    uv = adder / "uv"
-    uv.write_text("#!/bin/sh\nprintf 'nexus-bbbbb\\n' >> tests/fixtures/bead_ids.txt\n", encoding="utf-8")
-    uv.chmod(0o755)
-    rc, lines = _run(repo, adder, cmd)  # the refresh adds an id nobody committed
-    assert rc != 0 and any("commit tests/fixtures/bead_ids.txt" in line for line in lines), lines
-    _git(repo, "commit", "-qam", "manifest")
-    assert _run(repo, stubs, cmd)[0] == 0
+    assert "git diff --quiet HEAD -- tests/fixtures/bead_ids.txt" not in cmd
+    assert "refresh_bead_id_manifest.py &&" not in cmd
 
 
 @pytest.mark.parametrize(

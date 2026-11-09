@@ -38,11 +38,13 @@ DRIFT = REPO_ROOT / ".github" / "workflows" / "plugin-drift-ledger.yml"
 BASH = shutil.which("bash")
 ZSH = shutil.which("zsh")
 MARK = "'integration and not lived_in and not keyed_voyage and not mandatory_regression_pin'"
-#: R37: the bead-id manifest refresh, then no diff against HEAD (Addendum 2026-09-18).
+#: R37: the two lint tests that resolve the bead ids cited under docs/ (Addendum
+#: 2026-09-18). The manifest is not required to hold every live bead, only the cited
+#: ones (tests/test_docs_reference_rot.py, test_bead_id_manifest_is_fresh_where_bd_is),
+#: so a refresh-then-clean-diff check reds on every bead filed since the last refresh.
 BEAD_MANIFEST = (
-    "uv run python scripts/refresh_bead_id_manifest.py && "
-    "{ git diff --quiet HEAD -- tests/fixtures/bead_ids.txt || "
-    "{ echo 'the manifest changed: commit tests/fixtures/bead_ids.txt with the doc'; false; }; }"
+    "uv run pytest -q -rf -p no:randomly -m 'not integration and not slow'"
+    " -k 'cited_bead_ids_resolve or bead_id_manifest_is_fresh_where_bd_is' tests/test_docs_reference_rot.py"
 )
 #: CI's docs lane runs this when a fragment or a changelog changed (nexus-3ceda.2).
 FOLD_CHECK = "uv run python scripts/changelog_fold.py check"
