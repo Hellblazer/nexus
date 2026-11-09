@@ -17,7 +17,7 @@ A file over its fail cap passes only when ``scripts/file-size-exceptions.txt`` l
 a ceiling is written at the file's size plus one slack of headroom, so an ordinary edit never touches
 the exceptions file. A ceiling more than two slacks above its file fails, so the commit that splits
 a file lowers its ceiling (``update-exceptions``) and the ceiling really falls. An entry for a file
-now under its cap, or gone, is reported.
+now under its cap, or gone, fails until it is removed.
 
 Shape rule, ``src/nexus`` only (``__init__.py`` counts as a module). A directory may hold at most 40
 Python modules directly, and a module ``x.py`` may not sit beside a ``x_*.py`` family (make it a
@@ -227,12 +227,17 @@ def check(root: Path) -> Findings:
         elif not is_test and n > SOURCE_SOFT_CAP:
             warnings.append(f"{p}: {n} lines, over the soft cap of {SOURCE_SOFT_CAP}")
     for p, ceiling in sorted(ceilings.items()):
+        # A stale entry fails: left in place, it would let the file regrow to the old ceiling.
         if p not in sizes:
-            notes.append(
-                f"{p}: listed with ceiling {ceiling} but not a tracked source or test file: remove it"
+            errors.append(
+                f"{p}: listed with ceiling {ceiling} but not a tracked source or test file; remove it: "
+                "python3 scripts/file_size_ratchet.py update-exceptions"
             )
         elif sizes[p][0] <= _cap_for(sizes[p][1]):
-            notes.append(f"{p}: now within its cap: remove its exception")
+            errors.append(
+                f"{p}: now within its cap; remove its exception: "
+                "python3 scripts/file_size_ratchet.py update-exceptions"
+            )
 
     counts, families = measure_shape(root)
     dir_ceilings, fam_allowed = _read_shape(root / SHAPE_EXCEPTIONS)

@@ -91,7 +91,7 @@ def test_ceiling_holds_and_growth_past_it_fails(repo: Path) -> None:
     assert any("over its ceiling of 20" in e for e in fsr.check(repo).errors)
 
 
-def test_slack_and_stale_entries_are_noted(repo: Path) -> None:
+def test_headroom_passes_and_stale_entries_fail(repo: Path) -> None:
     _write(repo, "src/nexus/big.py", 18)
     _write(repo, "src/nexus/small.py", 5)
     _track(repo)
@@ -99,13 +99,16 @@ def test_slack_and_stale_entries_are_noted(repo: Path) -> None:
         "src/nexus/big.py 20\nsrc/nexus/small.py 30\nsrc/nexus/gone.py 40\n"
     )
     f = fsr.check(repo)
-    assert f.errors == []
-    joined = "\n".join(f.notes)
+    joined = "\n".join(f.errors + f.notes)
     assert "big.py" not in joined, (
         "headroom within tolerance is the seeded norm, not a finding"
     )
-    assert "small.py: now within its cap" in joined
-    assert "gone.py: listed with ceiling 40 but not a tracked" in joined
+    assert any("small.py: now within its cap" in e for e in f.errors), (
+        "a stale entry would let the file regrow to the old ceiling"
+    )
+    assert any(
+        "gone.py: listed with ceiling 40 but not a tracked" in e for e in f.errors
+    )
 
 
 def test_dir_cap_and_family_rule(repo: Path) -> None:
