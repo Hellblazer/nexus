@@ -429,7 +429,7 @@ def _source_uri_home_key(uri: str) -> str:
     """Stable grouping key for source_uri "home" detection.
 
     For ``file://`` URIs, returns the first four path segments
-    (e.g. ``/Users/hal.hildebrand/git/ART``) so two entries from the
+    (e.g. ``/Users/you/git/ART``) so two entries from the
     same repo cluster regardless of the file inside that repo.
 
     For ``x-devonthink-item://`` URIs (RDR-099 DEVONthink integration),
@@ -460,7 +460,7 @@ def _source_uri_home_key(uri: str) -> str:
         return _EMPTY_HOME_KEY
     p = urlparse(uri)
     if p.scheme == "file":
-        # path = "/Users/hal.hildebrand/git/ART/docs/rdr/X.md"
+        # path = "/Users/you/git/ART/docs/rdr/X.md"
         # parts = ["", "Users", "hal.hildebrand", "git", "ART", ...]
         # Take through the 5th component (the project root).
         parts = p.path.split("/")

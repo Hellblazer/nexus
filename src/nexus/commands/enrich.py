@@ -2231,7 +2231,7 @@ def _source_uri_host_key(uri: str) -> str:
     """Stable grouping key for source_uri "home" detection.
 
     For ``file://`` URIs, returns the first three path segments
-    (e.g. ``/Users/hal.hildebrand/git/ART``) so two entries from the
+    (e.g. ``/Users/you/git/ART``) so two entries from the
     same repo cluster into one bucket regardless of the file inside
     that repo. For other schemes, returns ``<scheme>://<netloc>``
     so a mixed catalog still gets meaningful grouping.
@@ -2240,7 +2240,7 @@ def _source_uri_host_key(uri: str) -> str:
 
     p = urlparse(uri)
     if p.scheme == "file":
-        # /Users/hal.hildebrand/git/ART/docs/rdr/X.md
+        # /Users/you/git/ART/docs/rdr/X.md
         # -> ['', 'Users', 'hal.hildebrand', 'git', 'ART', 'docs', ...]
         # Take through the 5th component (the project root).
         parts = p.path.split("/")

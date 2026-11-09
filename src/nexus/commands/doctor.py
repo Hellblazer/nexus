@@ -213,7 +213,7 @@ def _resolve_claude_cache_dir(cwd: Path | None = None) -> Path:
 
     Slug rule (observed on macOS 2026-04-25): cwd with both ``/`` and
     ``.`` replaced by ``-``. Example for cwd
-    ``/Users/hal.hildebrand/git/nexus``:
+    ``/Users/you/git/nexus``:
     ``-Users-hal-hildebrand-git-nexus``.
 
     Empty slug means cwd was the filesystem root (very unusual);

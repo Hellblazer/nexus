@@ -65,6 +65,7 @@
 #     --skip-lock <reason>        NX_PUSH_SKIP_LOCK
 #     --batch-minutes <n>         NX_PUSH_BATCH_MINUTES
 #     --tenant-check <0|1>        NX_PUSH_TENANT_CHECK (0 skips the tenant hint)
+#     --skip-scrub <reason>       NX_PUSH_SKIP_SCRUB (push past the scrub gate, on the record)
 #   A bad flag exits 64 with PUSH_REFUSED_USAGE before anything is fetched.
 #
 #   A vouched MERGE commit also vouches for everything it merges in (the
@@ -208,6 +209,9 @@
 #                               only a dev-checkout/venv `nx` is on PATH;
 #                               the installed generation was not found, and
 #                               NX_PUSH_SKIP_LOCK is unset
+#  12  PUSH_REFUSED_SCRUB       the tip adds a personal home path, tailnet
+#                               hostname, chat link or session trailer
+#                               (scripts/scrub_check.py check --rev <tip>)
 #  64  PUSH_REFUSED_USAGE       a flag is unknown, lacks its value, or flags that
 #                               cannot combine were combined; nothing was fetched
 #  11  PUSH_LOCK_RELEASE_FAILED a claim was taken (nx tuple in succeeded)
@@ -320,7 +324,7 @@ trap _release_push_lock EXIT
 # assignment. Parsed before the first remote call: a typo costs nothing.
 _usage_refuse() {
   echo "PUSH_REFUSED_USAGE $*"
-  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range[=<digest>] --skip-scope-audit --skip-lock --batch-minutes --tenant-check (see the header of $0)."
+  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range[=<digest>] --skip-scope-audit --skip-lock --batch-minutes --tenant-check --skip-scrub (see the header of $0)."
   exit 64
 }
 _vouch_args=()
@@ -357,7 +361,7 @@ while [[ $# -gt 0 ]]; do
       continue
       ;;
     --source | --remote | --branch | --allowed-paths | --allowed-paths-from \
-      | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check) ;;
+      | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check | --skip-scrub) ;;
     *) _usage_refuse "unknown flag $_name" ;;
     esac
     if (( _has_val )); then
@@ -375,6 +379,7 @@ while [[ $# -gt 0 ]]; do
     --branch) NX_PUSH_BRANCH="$_val"; _echo_flags+=("$_name" "$_val") ;;
     --skip-lock) NX_PUSH_SKIP_LOCK="$_val"; _echo_flags+=("$_name" "$_val") ;;
     --skip-scope-audit) NX_PUSH_SKIP_SCOPE_AUDIT="$_val" ;;
+    --skip-scrub) NX_PUSH_SKIP_SCRUB="$_val"; _echo_flags+=("$_name" "$_val") ;;
     --batch-minutes) NX_PUSH_BATCH_MINUTES="$_val" ;;
     --tenant-check)
       [[ "$_val" == "0" || "$_val" == "1" ]] || _usage_refuse "--tenant-check takes 0 or 1, got '$_val'"
@@ -705,6 +710,28 @@ if [[ "${NX_PUSH_TENANT_CHECK:-1}" != "0" && -n "$_tenant_root" && -f "$_tenant_
     while IFS= read -r _tenant_line; do
       echo "PUSH_TENANT_HINT ${_tenant_line:0:400}" >&2
     done <<<"$_tenant_out"
+  fi
+fi
+
+# ── Scrub gate (nexus-3ceda.7) ───────────────────────────────────────────
+# Sam ruled the repo stays scrubbed (ask nexus-scrubbed, 2026-11-09): no
+# personal home path, tailnet hostname, chat link or session trailer in a
+# committed file beyond what tests/fixtures/scrub-allowlist.txt grandfathers.
+# The check reads the TIP's files and allowlist (--rev), not the working
+# tree, so a dirty checkout neither hides nor invents a hit. CI's lint bucket
+# and docs lane run the same check; this catches it before the push. A
+# checkout without the script (an older branch) skips it.
+# --skip-scrub '<reason>' (env NX_PUSH_SKIP_SCRUB) pushes past it, on the record.
+_scrub_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "${NX_PUSH_SKIP_SCRUB:-}" ]]; then
+  echo "PUSH_SCRUB_SKIPPED reason=${NX_PUSH_SKIP_SCRUB}" >&2
+elif [[ -n "$_scrub_root" && -f "$_scrub_root/scripts/scrub_check.py" ]] && command -v python3 >/dev/null 2>&1; then
+  if ! _scrub_out="$(python3 "$_scrub_root/scripts/scrub_check.py" --root "$_scrub_root" check --rev "$tip" 2>&1)"; then
+    printf '%s\n' "$_scrub_out"
+    echo "PUSH_REFUSED_SCRUB the tip $tip adds a personal path, hostname, chat link or session trailer (see above)."
+    echo "Use a placeholder (/Users/you/..., ~, <host>); a legitimate one: python3 scripts/scrub_check.py"
+    echo "update-exceptions --allow-raise, with the reason in the commit message."
+    exit 12
   fi
 fi
 

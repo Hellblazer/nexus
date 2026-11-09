@@ -77,7 +77,7 @@ fix landed.)
 
 **Repo scoping is load-bearing, not optional** (CRITICAL fix, code-review +
 critique, 2026-09-01): the SAME catalog holds other repos' RDR registrations
-under other owners — measured live, `/Users/hal.hildebrand/git/ART` is
+under other owners — measured live, `/Users/you/git/ART` is
 registered `content_type="rdr"` in this same catalog under a different owner
 — so a same-basename collision across repos is real, not hypothetical. Repo
 identity is `rdr_source_prefix(repo_root)`, a `file://` prefix anchored on

@@ -1273,6 +1273,12 @@ jobs:
           # lint leg's checkout).
           fetch-depth: 0
 
+      - name: Scrub gate (a docs-only commit skips the lint bucket that also runs it)
+        # nexus-3ceda.7: no personal home path, tailnet hostname, chat link or
+        # session trailer beyond tests/fixtures/scrub-allowlist.txt. Stdlib
+        # only, so it runs before uv; well under a second.
+        run: python3 scripts/scrub_check.py check
+
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: "3.12"

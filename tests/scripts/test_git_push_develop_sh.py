@@ -187,6 +187,67 @@ class TestBatchingHint:
         assert ("PUSH_BATCH_HINT" in proc.stderr) == (value != "0")
 
 
+class TestScrubGate:
+    """nexus-3ceda.7: the push runs scripts/scrub_check.py on the TIP's files and refuses a
+    personal home path with PUSH_REFUSED_SCRUB, exit 12. The real script is copied into the
+    fixture repo; the strings are built by concatenation so this file stays clean."""
+
+    _HOME = "/Users/" + "jdoe" + "/git/proj"
+
+    def _arm(self, work: Path) -> None:
+        (work / "scripts").mkdir(exist_ok=True)
+        shutil.copy(REPO_ROOT / "scripts" / "scrub_check.py", work / "scripts" / "scrub_check.py")
+        (work / "tests" / "fixtures").mkdir(parents=True, exist_ok=True)
+        (work / "tests" / "fixtures" / "scrub-allowlist.txt").write_text("user you\n")
+        _git("add", "scripts/scrub_check.py", "tests/fixtures/scrub-allowlist.txt", cwd=work)
+        _git("commit", "-q", "-m", "arm", cwd=work)
+        _git("push", "-q", "origin", "develop", cwd=work)
+
+    def _commit_text(self, work: Path, name: str, text: str) -> str:
+        (work / name).write_text(text)
+        _git("add", name, cwd=work)
+        _git("commit", "-q", "-m", name, cwd=work)
+        return _git("rev-parse", "HEAD", cwd=work)
+
+    def test_a_tip_with_a_personal_path_is_refused(self, repos) -> None:
+        origin, work = repos
+        self._arm(work)
+        before = _remote_tip(origin)
+        sha = self._commit_text(work, "note.md", f"see {self._HOME}\n")
+        proc = _run(work, sha)
+        assert proc.returncode == 12, proc.stdout + proc.stderr
+        assert "PUSH_REFUSED_SCRUB" in proc.stdout
+        assert "note.md: 1 scrub hits, over no allowance" in proc.stdout
+        assert _remote_tip(origin) == before
+
+    def test_a_clean_tip_pushes(self, repos) -> None:
+        origin, work = repos
+        self._arm(work)
+        sha = self._commit_text(work, "note.md", "see /Users/you/git/proj\n")
+        proc = _run(work, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_a_dirty_working_tree_does_not_decide(self, repos) -> None:
+        origin, work = repos
+        self._arm(work)
+        sha = self._commit_text(work, "note.md", "clean\n")
+        (work / "note.md").write_text(f"{self._HOME}\n")  # uncommitted
+        proc = _run(work, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_skip_scrub_pushes_on_the_record(self, repos) -> None:
+        origin, work = repos
+        self._arm(work)
+        sha = self._commit_text(work, "note.md", f"see {self._HOME}\n")
+        proc = _run_flags(work, "--skip-scrub", "scrub flag test", "--skip-lock", "scrub flag test",
+                          "--skip-scope-audit", "scrub flag test", sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "PUSH_SCRUB_SKIPPED reason=scrub flag test" in proc.stderr
+        assert _remote_tip(origin) == sha
+
+
 class TestTenantHint:
     """nexus-g37hn: a push whose range changes a test module runs scripts/tenant_delta.py and
     prints its output as PUSH_TENANT_HINT lines on stderr. Never a refusal. A stub stands in
