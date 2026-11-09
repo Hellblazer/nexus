@@ -264,7 +264,7 @@ class TestProseFilepathLinks:
         repo.mkdir()
         prose_file = repo / "docs" / "guide.md"
         prose_file.parent.mkdir(parents=True)
-        prose_file.write_text("See ``conexus/skills/foo.md`` for usage.\n")
+        prose_file.write_text("See ``conexus/hooks/foo.py`` for usage.\n")
 
         cat = self._make_catalog(tmp_path)
         owner = cat.register_owner(
@@ -275,8 +275,8 @@ class TestProseFilepathLinks:
             file_path="docs/guide.md",
         )
         code_tumbler = cat.register(
-            owner, "foo.md", content_type="code",
-            file_path="conexus/skills/foo.md",
+            owner, "foo.py", content_type="code",
+            file_path="conexus/hooks/foo.py",
         )
 
         count = generate_prose_filepath_links(cat)
@@ -284,6 +284,21 @@ class TestProseFilepathLinks:
         links = cat.links_from(prose_tumbler)
         assert len(links) == 1
         assert str(links[0].to_tumbler) == str(code_tumbler)
+
+    def test_a_markdown_path_never_links_even_to_a_document_that_exists(self, tmp_path: Path) -> None:
+        """The engine resolves a path to a document of any content type; the old client matched only
+        code documents. A ``.md`` target is not sent, so a prose file naming another prose or RDR
+        document gets no ``implements`` link (RDR-193 Step 7, fix round 1)."""
+        repo = tmp_path / "myrepo"
+        (repo / "docs").mkdir(parents=True)
+        (repo / "docs" / "guide.md").write_text("See ``docs/other.md`` and ``docs/rdr/rdr-001.md``.\n")
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("myrepo", "repo", repo_hash="abc12345", repo_root=str(repo))
+        cat.register(owner, "Guide", content_type="prose", file_path="docs/guide.md")
+        cat.register(owner, "Other", content_type="prose", file_path="docs/other.md")
+        cat.register(owner, "RDR-001", content_type="rdr", file_path="docs/rdr/rdr-001.md")
+
+        assert generate_prose_filepath_links(cat) == 0
 
     def test_bare_filename_does_not_match(self, tmp_path: Path) -> None:
         """A prose mention of bare ``foo.py`` (no directory segment)

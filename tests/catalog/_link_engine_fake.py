@@ -269,6 +269,17 @@ class FakeLinkEngineHandler(BaseHTTPRequestHandler):
         elif op == "/resolve_many":
             entries = {d: State.documents[d] for d in body.get("doc_ids", []) if d in State.documents}
             self._send_json({"entries": entries})
+        elif op == "/list_by_file_paths":
+            # CatalogHandler.handleListByFilePaths: owner-agnostic, exact file_path, a path with no
+            # live document is absent from the map
+            wanted = [fp for fp in body.get("file_paths", []) if isinstance(fp, str)]
+            found = {
+                fp: sorted(
+                    (d for d in State.documents.values() if d.get("file_path") == fp), key=lambda d: d["tumbler"],
+                )
+                for fp in wanted
+            }
+            self._send_json({"documents": {fp: docs for fp, docs in found.items() if docs}})
         elif op == "/unlink":
             gone = State.links_matching(
                 body.get("from_tumbler", ""), body.get("to_tumbler", ""), body.get("link_type", ""),

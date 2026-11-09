@@ -140,6 +140,69 @@ class TestFilepathLinkersMakeNoListReads:
             "created_by": "filepath_extractor",
         }]
 
+    def test_a_source_under_another_owner_names_the_hook_run_owner_not_its_own(
+        self, reader, writer, repo,
+    ) -> None:
+        """On the hook path the path edge names the run's owner (``inputs.owner``), not the owner of
+        the source's tumbler: a source registered under a stale owner (here 1.2) still links into the
+        repository the run indexes (1.1). Deriving the owner from the source tumbler goes red."""
+        State.set_owner("1.2", repo_root=str(repo))
+        _code("1.1.1", repo, "src/nexus/a.py")
+        f = repo / "docs/rdr/rdr-001-x.md"
+        f.write_text("See `src/nexus/a.py`.\n")
+        State.add_document(
+            "1.2.3", title="rdr", content_type="rdr", file_path="docs/rdr/rdr-001-x.md",
+            source_uri=f"file://{f}",
+        )
+        State.requests.clear()
+        count = generate_rdr_filepath_links(
+            reader, writer=writer, new_tumblers=[Tumbler.parse("1.2.3")],
+            inputs=_inputs(("1.2.3", "docs/rdr/rdr-001-x.md", "rdr")),
+        )
+        (body,) = State.posts("/links/upsert_many")
+        assert body["edges"][0]["from"] == {"tumbler": "1.2.3"}
+        assert body["edges"][0]["to"] == {"owner": OWNER, "file_path": "src/nexus/a.py"}
+        assert count == 1
+
+    def test_a_seed_the_hook_holds_no_row_for_takes_the_run_owner_too(
+        self, reader, writer, repo, tmp_path: Path,
+    ) -> None:
+        """``_seed_docs``' fallback for a tumbler the hook has no row for (one ``resolve_many``) is
+        a document of THIS run: it names ``inputs.owner``, not the repository owner a ``source_uri``
+        lookup would find (here the stale owner 1.2, whose root holds the file)."""
+        stale_root = (tmp_path / "stale").resolve()
+        (stale_root / "docs/rdr").mkdir(parents=True)
+        State.set_owner("1.2", repo_root=str(stale_root))
+        _code("1.1.1", repo, "src/nexus/a.py")
+        f = stale_root / "docs/rdr/rdr-001-x.md"
+        f.write_text("See `src/nexus/a.py`.\n")
+        State.add_document(
+            "1.2.3", title="rdr", content_type="rdr", file_path="docs/rdr/rdr-001-x.md",
+            source_uri=f"file://{f}",
+        )
+        State.requests.clear()
+        generate_rdr_filepath_links(
+            reader, writer=writer, new_tumblers=[Tumbler.parse("1.2.3")], inputs=_inputs(),
+        )
+        assert State.posts("/resolve_many"), "the seed had no hook row: one resolve_many probe"
+        (body,) = State.posts("/links/upsert_many")
+        assert body["edges"][0]["to"]["owner"] == OWNER
+
+    def test_the_rdr_linker_skips_when_no_new_document_is_an_rdr_even_without_a_row(
+        self, reader, writer, repo,
+    ) -> None:
+        """The seed predicate is the only thing that keeps the linker from probing a seed the hook
+        holds no row for. Removing ``_no_qualifying_seed`` from the RDR linker makes this one
+        ``resolve_many`` read."""
+        _code("1.1.1", repo, "src/nexus/a.py")
+        State.requests.clear()
+        count = generate_rdr_filepath_links(
+            reader, writer=writer, new_tumblers=[Tumbler.parse("1.1.1")], new_content_types={"code"},
+            inputs=_inputs(),
+        )
+        assert count == 0
+        assert State.requests == []
+
     def test_a_path_the_engine_cannot_resolve_is_sent_and_not_counted(self, reader, writer, repo) -> None:
         """The client no longer knows which paths exist (that read is gone); the engine says."""
         _source("1.1.3", repo, "docs/rdr/rdr-001-x.md", "rdr", "See `src/nexus/missing.py`.\n")

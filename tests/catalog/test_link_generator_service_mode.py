@@ -238,17 +238,43 @@ class TestProseFilepathLinksServiceMode:
         """nexus-sob9 widening contract: docs/ -> conexus/ (no src/ anchor)
         must link via the wider prose regex."""
         prose_path = tmp_path / "guide.md"
-        prose_path.write_text("See ``conexus/skills/foo.md`` for usage.\n")
+        prose_path.write_text("See ``conexus/hooks/foo.py`` for usage.\n")
         _State.add_document(
             "1.1.1", title="Guide", content_type="prose",
             file_path=str(prose_path),
         )
         _State.add_document(
-            "1.1.2", title="foo.md", content_type="code",
-            file_path="conexus/skills/foo.md",
+            "1.1.2", title="foo.py", content_type="code",
+            file_path="conexus/hooks/foo.py",
         )
         count = generate_prose_filepath_links(reader, writer=writer)
         assert count == 1
+
+    def test_a_markdown_path_gets_no_edge_and_no_link(self, reader, writer, tmp_path) -> None:
+        """The old client matched only ``code`` documents, so a prose file naming ``docs/other.md``
+        never linked to it. The engine resolves a path to a document of ANY content type, so the
+        client must not send a ``.md`` target at all (RDR-193 declares only the cross-repository
+        change). The ``.py`` path in the same file is still sent."""
+        prose_path = tmp_path / "guide.md"
+        prose_path.write_text("See ``docs/other.md`` and ``src/nexus/foo.py``.\n")
+        _State.add_document("1.1.1", title="Guide", content_type="prose", file_path=str(prose_path))
+        _State.add_document("1.1.2", title="Other", content_type="prose", file_path="docs/other.md")
+        _State.add_document("1.1.3", title="foo.py", content_type="code", file_path="src/nexus/foo.py")
+        _State.requests.clear()
+        assert generate_prose_filepath_links(reader, writer=writer) == 1
+        (body,) = _State.posts("/links/upsert_many")
+        assert [e["to"]["file_path"] for e in body["edges"]] == ["src/nexus/foo.py"]
+        assert [(lnk["from_tumbler"], lnk["to_tumbler"]) for lnk in _State.links] == [("1.1.1", "1.1.3")]
+
+    def test_a_file_naming_only_a_markdown_path_sends_nothing(self, reader, writer, tmp_path) -> None:
+        prose_path = tmp_path / "guide.md"
+        prose_path.write_text("See ``docs/other.md``.\n")
+        _State.add_document("1.1.1", title="Guide", content_type="prose", file_path=str(prose_path))
+        _State.add_document("1.1.2", title="Other", content_type="rdr", file_path="docs/other.md")
+        _State.requests.clear()
+        assert generate_prose_filepath_links(reader, writer=writer) == 0
+        assert _State.posts("/links/upsert_many") == []
+        assert _State.links == []
 
     def test_bare_filename_does_not_match(self, reader, writer, tmp_path) -> None:
         prose_path = tmp_path / "loose.md"
@@ -347,7 +373,15 @@ class TestPdfCorpusLinksServiceMode:
 class TestPdfCorpusSameAsPruneServiceMode:
     """nexus-h0uy7: a PDF re-indexed with new bytes must lose the same-as
     link it no longer earns. Pruning is per link, never a bulk delete by
-    created_by, and touches only content_hash_dedup links."""
+    created_by, and touches only content_hash_dedup links.
+
+    What these tests exercise: the CLIENT's calls and the retained client copy
+    (``prune_stale_same_as_links``) against ``tests/catalog/_link_engine_fake.py``. Every
+    ``relink_changed_pdfs`` case (the ``links_same_content(prune=True)`` ones below) runs the FAKE's
+    copy of the engine's prune and group rule, not the engine's: they pin what the client sends and
+    does with the reply, never that the engine retracts or re-joins these links. The engine's own
+    rule is pinned by the Java suite and by ``tests/integration/test_rdr193_linking_e2e.py``, whose
+    parity case runs the client's decision and the engine's on one fixture."""
 
     @staticmethod
     def _doc(t: str, h: str, *, content_type: str = "pdf", **fields: Any) -> None:
@@ -463,7 +497,7 @@ class TestPdfCorpusSameAsPruneServiceMode:
 
     def test_relink_rejoins_members_when_the_anchor_changes(self, reader, writer) -> None:
         """The anchor re-indexed with new bytes: its members still share a
-        key, so they re-join the next anchor in the same pass."""
+        key, so they re-join the next anchor in the same pass. (The fake's copy of the engine rule.)"""
         for t in ("1.1.1", "1.1.2", "1.1.3"):
             self._doc(t, "same")
         assert generate_pdf_corpus_links(reader, writer=writer) == 2
@@ -474,6 +508,7 @@ class TestPdfCorpusSameAsPruneServiceMode:
         ]
 
     def test_relink_joins_a_changed_pdf_to_its_new_group(self, reader, writer) -> None:
+        """The fake's copy of the engine's prune and group rule; see the class docstring."""
         self._doc("1.1.1", "old")
         self._doc("1.1.2", "old")
         self._doc("1.1.3", "new-bytes")
@@ -485,6 +520,7 @@ class TestPdfCorpusSameAsPruneServiceMode:
         ]
 
     def test_a_new_anchor_gets_every_member_of_its_group(self, reader, writer) -> None:
+        """The fake's copy of the engine's group rule; see the class docstring."""
         self._doc("1.1.5", "same")
         self._doc("1.1.6", "same")
         generate_pdf_corpus_links(reader, writer=writer)
@@ -497,7 +533,8 @@ class TestPdfCorpusSameAsPruneServiceMode:
     def test_index_time_hook_prunes_the_runs_changed_pdfs(
         self, reader, fake_server: str, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """nexus-h0uy7: the post-run pass in indexer.py, scoped by needs_fence."""
+        """nexus-h0uy7: the post-run pass in indexer.py, scoped by needs_fence. The retraction is the
+        fake's copy of the engine's prune rule; this pins that the hook sends the changed set."""
         from nexus import indexer  # noqa: PLC0415 — keeps this module's import cost unchanged
         from nexus.catalog import factory  # noqa: PLC0415 — patch target
 
@@ -778,20 +815,29 @@ class TestGenerateLinksCliDryRunAndWritePass:
             ("1.1.2", "1.1.1", "implements"), ("1.1.4", "1.1.3", "same-as"),
         }
 
-    def test_dry_run_counts_path_edges_as_an_upper_bound_and_does_not_preview_same_content(
+    def test_dry_run_counts_only_paths_that_exist_and_links_not_already_present(
         self, reader, writer, monkeypatch, tmp_path,
     ) -> None:
+        """One batch read resolves the paths: ``a.py`` is a new link, ``b.py`` is linked already,
+        ``gone.py`` names no document. The same-content linker's links are not previewed."""
         rdr = tmp_path / "rdr.md"
-        rdr.write_text("See `src/nexus/a.py` and `src/nexus/gone.py`.\n")
+        rdr.write_text("See `src/nexus/a.py`, `src/nexus/b.py` and `src/nexus/gone.py`.\n")
         _State.add_document("1.1.1", title="a.py", content_type="code", file_path="src/nexus/a.py")
+        _State.add_document("1.1.5", title="b.py", content_type="code", file_path="src/nexus/b.py")
         _State.add_document("1.1.2", title="rdr", content_type="rdr", file_path=str(rdr))
+        _State.links.append({
+            "from_tumbler": "1.1.2", "to_tumbler": "1.1.5", "link_type": "implements",
+            "created_by": "filepath_extractor", "from_span": "", "to_span": "",
+        })
         _State.add_document("1.1.3", content_type="pdf", index_content_hash="h")
         _State.add_document("1.1.4", content_type="pdf", index_content_hash="h")
         out = self._cli(reader, writer, monkeypatch, "--dry-run")
-        assert "rdr-filepath: would create 2 link(s)" in out, out
-        assert "2 of these are path edges the engine resolves" in out and "an upper bound" in out
+        assert "rdr-filepath: would create 1 link(s)" in out, out
+        assert "1 path(s) name no document at that path under the repository's owner and are not counted" in out
+        assert "path edges the engine resolves" not in out and "upper bound" not in out
+        assert "1.1.2 -> 1.1.1 (implements) by filepath_extractor" in out
         assert "pdf-corpus: 2 document(s) would go to the engine's same-content linker" in out
         assert "are NOT previewed" in out
-        assert _State.links == [], "a dry run writes nothing"
+        assert len(_State.links) == 1, "a dry run writes nothing"
         assert _State.count("POST", "/links/upsert_many") == 0 and _State.count("POST", "/links/same_content") == 0
-
+        assert _State.count("POST", "/list_by_file_paths") == 1, "the paths are resolved in one batch read"

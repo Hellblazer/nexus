@@ -27,6 +27,9 @@ from nexus.catalog.rdr_canonical import (
     rdr_source_prefix,
     resolve_all,
 )
+# Re-exported: the dry-run recorder and the hook's inputs live in their own modules (size ceiling).
+from nexus.catalog.link_dry_run import DryRunLinkWriter, ProposedLink, load_existing_link_keys
+from nexus.catalog.link_hook_inputs import HookLinkInputs, hook_link_inputs
 from nexus.catalog.tumbler import Tumbler
 from nexus.md_chunker import parse_frontmatter
 
@@ -63,55 +66,6 @@ def _entries_of_type(cat: CatalogReader, content_type: str) -> list[CatalogEntry
     return cat.all_documents(content_type=content_type)
 
 
-# ── What the index hook hands the generators (RDR-193 Step 7, residual 6) ────
-
-
-@dataclass(frozen=True)
-class HookLinkInputs:
-    """What the index hook already knows about the documents of this run.
-
-    The hook registered them in one reconcile commit and holds each one's tumbler, repo-relative
-    path and content type (``file_to_doc_id`` and the staged rows). Handing that to the generators
-    is what lets them skip the catalog reads that used to learn it: the type listings, and the
-    per-document probe.
-
-    *owner* is the repository owner whose files these are; a path edge names it, so the engine
-    resolves each path inside that repository. *docs* maps a tumbler to ``(file_path,
-    content_type)``.
-    """
-
-    owner: str
-    docs: Mapping[str, tuple[str, str]]
-
-
-def hook_link_inputs(
-    owner: object,
-    *,
-    file_to_doc_id: Mapping[Path, str],
-    rel_to_abs: Mapping[str, Path],
-    staged: Mapping[str, Mapping[str, object]],
-    seeds: Iterable[Tumbler | str],
-) -> HookLinkInputs:
-    """Build the generators' inputs from the hook's own structures, with no catalog read.
-
-    *seeds* are the tumblers the generators will be seeded with (this run's new documents, and the
-    RDRs whose content changed). A seed the run has no staged row for is left out, never guessed:
-    a generator that needs it falls back to one ``resolve_many`` for the missing ones.
-    """
-    abs_by_tumbler = {str(t): p for p, t in file_to_doc_id.items()}
-    rel_by_abs = {p: rel for rel, p in rel_to_abs.items()}
-    docs: dict[str, tuple[str, str]] = {}
-    for seed in seeds:
-        tumbler = str(seed)
-        abs_path = abs_by_tumbler.get(tumbler)
-        rel = rel_by_abs.get(abs_path) if abs_path is not None else None
-        row = staged.get(rel) if rel is not None else None
-        if row is None:
-            continue
-        docs[tumbler] = (str(row.get("file_path") or rel), str(row.get("content_type") or ""))
-    return HookLinkInputs(owner=str(owner), docs=docs)
-
-
 @dataclass(frozen=True)
 class _Doc:
     """A seed document as the generators read it: from the hook (``owner`` set) or the catalog."""
@@ -127,7 +81,9 @@ def _seed_docs(
     cat: CatalogReader, new_tumblers: list[Tumbler], inputs: HookLinkInputs | None,
 ) -> list[_Doc]:
     """The documents of *new_tumblers*, in order. Those the hook holds come from *inputs* (no
-    read); the rest cost one ``resolve_many`` (a probe bounded by the seeds, never a listing)."""
+    read); the rest cost one ``resolve_many`` (a probe bounded by the seeds, never a listing).
+    With *inputs* every one of them is a document of the hook's run, so each names ``inputs.owner``
+    whether or not the hook held its row."""
     held = inputs.docs if inputs is not None else {}
     missing = sorted({str(t) for t in new_tumblers if str(t) not in held})
     resolved = cat.resolve_many(missing) if missing else {}
@@ -139,7 +95,10 @@ def _seed_docs(
             out.append(_Doc(key, file_path, content_type, owner=inputs.owner if inputs is not None else None))
         elif key in resolved:
             e = resolved[key]
-            out.append(_Doc(key, e.file_path, e.content_type, e.source_uri))
+            out.append(_Doc(
+                key, e.file_path, e.content_type, e.source_uri,
+                owner=inputs.owner if inputs is not None else None,
+            ))
     return out
 
 
@@ -412,13 +371,19 @@ _FILE_PATH_RE = re.compile(
 # ``.claude/`` profiles) that the RDR anchor list misses entirely.
 # The prose regex requires AT LEAST ONE ``/`` (so a bare
 # ``foo.py`` mention doesn't match) plus a recognised source
-# extension. The match is then checked against catalog code
-# entries by exact ``file_path`` so non-existent-in-catalog
-# strings fall through silently.
+# extension. The engine resolves each match by ``file_path`` inside the
+# repository, so a path that names no document falls through silently.
+#
+# No ``md`` arm (RDR-193 Step 7 fix round 1): the engine resolves a path to
+# a document of ANY content type, where the old client's ``path_to_code``
+# dict held only ``code`` documents, so a ``.md`` match never linked. A
+# ``.md`` arm would now link a prose file to every prose or RDR document it
+# names (820 such edges against 2048 to code on this repository), a change
+# RDR-193 does not declare.
 _PROSE_PATH_RE = re.compile(
     r"(?:[\w.-]+/)+"                              # at least one dir segment
     r"[\w.-]+"                                    # filename
-    r"\.(?:py|java|go|rs|ts|tsx|js|jsx|c|cpp|h|rb|php|swift|kt|scala|md)"
+    r"\.(?:py|java|go|rs|ts|tsx|js|jsx|c|cpp|h|rb|php|swift|kt|scala)"
 )
 
 
@@ -896,7 +861,9 @@ def generate_prose_filepath_links(
     path that names no document of the repository is reported unresolved
     and writes nothing, and the tenant-wide ``path_to_code`` dict is gone.
     The engine matches a document of any content type at that path, where
-    the old client dict held only ``code`` documents.
+    the old client dict held only ``code`` documents; ``_PROSE_PATH_RE``
+    therefore has no ``.md`` arm, so the only paths sent are source-file
+    paths and the set of targets matches the old client's.
 
     SOURCE content_type(s) are ``{"prose", "markdown", "docs"}``; a run
     whose new_tumblers are all "code" produces no new links here either.
@@ -1120,177 +1087,3 @@ def _settled_pdf_key(entry: CatalogEntry) -> str:
     if entry.index_content_hash and meta_key and entry.index_content_hash != meta_key:
         return ""
     return _pdf_content_hash(entry)
-
-
-
-
-# ── Dry-run preview (nexus-glivh) ────────────────────────────────────────────
-#
-# `nx catalog generate-links --dry-run` previously printed "dry-run mode not
-# yet supported for link preview" and previewed nothing, so the only way to
-# learn what a pass would do was to let it write to a live catalog. That is
-# the wrong order for a generator whose failure mode is VOLUME: the
-# implements-heuristic flood (nexus-ybj1b) had to be disabled at engine
-# v0.1.57 after exactly that kind of unmeasured pass.
-
-@dataclass(frozen=True)
-class ProposedLink:
-    """One link a dry run would have created."""
-    from_tumbler: str
-    to_tumbler: str
-    link_type: str
-    created_by: str
-
-
-class DryRunLinkWriter:
-    """A ``CatalogWriter``-shaped recorder that writes nothing.
-
-    Composes with the generators UNCHANGED: they already take a ``writer=``,
-    so a dry run is the real code path with the writes swapped out. A preview
-    computed by a separate path is a preview of the wrong thing.
-
-    ``link_if_absent`` returns True only when a link is genuinely new, so a
-    count means "would create" and never "would attempt". Pre-existing links
-    are supplied up front via :func:`load_existing_link_keys` rather than
-    probed one at a time, which would be thousands of round trips.
-    """
-
-    def __init__(self, existing: set[tuple[str, str, str]] | None = None) -> None:
-        self._existing: set[tuple[str, str, str]] = existing or set()
-        self._seen: set[tuple[str, str, str]] = set()
-        self._proposed: list[ProposedLink] = []
-        self._retracted: list[ProposedLink] = []
-        self._path_edges = 0
-        self._same_content_sent = 0
-
-    def link_if_absent(
-        self, from_t: object, to_t: object, link_type: str,
-        created_by: str = "", **_meta: object,
-    ) -> bool:
-        key = (str(from_t), str(to_t), str(link_type))
-        # Dedupe within the run as well as against the catalog: a generator
-        # that proposes the same edge twice must not be counted twice, or the
-        # projected volume is inflated by its own repetition.
-        if key in self._existing or key in self._seen:
-            return False
-        self._seen.add(key)
-        self._proposed.append(
-            ProposedLink(str(from_t), str(to_t), str(link_type), str(created_by))
-        )
-        return True
-
-    def links_upsert_many(self, edges: list[dict]) -> dict:
-        """Record the edges a generator would send through ``links_upsert_many`` (RDR-193 Step 7).
-
-        A tumbler edge is counted against the existing links like ``link_if_absent``'s. A path edge
-        (``{owner, file_path}``) is the engine's to resolve, so it is recorded with the path as its
-        endpoint (``path:<owner>:<file_path>``): it is counted before the engine skips the paths it
-        cannot resolve and the links that exist, an UPPER BOUND, and ``path_edges`` says how many
-        of the proposals are such.
-        """
-        def label(end: dict) -> str:
-            return str(end["tumbler"]) if end.get("tumbler") else f"path:{end['owner']}:{end['file_path']}"
-
-        created = skipped = 0
-        for edge in edges:
-            from_label, to_label = label(edge["from"]), label(edge["to"])
-            key = (from_label, to_label, str(edge["link_type"]))
-            if key in self._existing or key in self._seen:
-                skipped += 1
-                continue
-            self._seen.add(key)
-            self._proposed.append(ProposedLink(from_label, to_label, key[2], str(edge.get("created_by", ""))))
-            if not edge["to"].get("tumbler"):
-                self._path_edges += 1
-            created += 1
-        return {"created": created, "skipped": skipped, "unresolved": []}
-
-    def links_same_content(self, tumblers: list[str], *, prune: bool = False) -> dict:
-        """Count the documents a generator would send to the engine's same-content linker. The
-        grouping runs in the engine, so the links it would create are not previewed
-        (``same_content_sent`` is what was submitted)."""
-        self._same_content_sent += len(tumblers)
-        return {"created": 0, "retracted": 0}
-
-    @property
-    def path_edges(self) -> int:
-        """How many proposals are path edges the engine would still have to resolve."""
-        return self._path_edges
-
-    @property
-    def same_content_sent(self) -> int:
-        """Documents submitted to the same-content linker, whose links this preview cannot count."""
-        return self._same_content_sent
-
-    # The generators only ever call link_if_absent, but a writer that silently
-    # accepted a direct link() would write nothing while reporting nothing —
-    # fail loud instead of previewing a lie.
-    def link(self, *_args: object, **_kwargs: object) -> None:
-        raise NotImplementedError(
-            "DryRunLinkWriter received a direct link() call. Dry-run preview "
-            "only models link_if_absent; a generator using link() would write "
-            "unconditionally and its volume would not appear in this preview."
-        )
-
-    def unlink(self, from_t: object, to_t: object, link_type: str = "") -> int:
-        """Record a retraction (nexus-h0uy7's same-as prune); delete nothing."""
-        self._retracted.append(
-            ProposedLink(str(from_t), str(to_t), str(link_type), created_by="")
-        )
-        return 1
-
-    def close(self) -> None:
-        return None
-
-    @property
-    def proposed(self) -> list[ProposedLink]:
-        return list(self._proposed)
-
-    @property
-    def retracted(self) -> list[ProposedLink]:
-        return list(self._retracted)
-
-    def count_by_link_type(self) -> dict[str, int]:
-        out: dict[str, int] = {}
-        for p in self._proposed:
-            out[p.link_type] = out.get(p.link_type, 0) + 1
-        return out
-
-    def count_by_creator(self) -> dict[str, int]:
-        out: dict[str, int] = {}
-        for p in self._proposed:
-            out[p.created_by] = out.get(p.created_by, 0) + 1
-        return out
-
-    def fan_out(self) -> dict[str, int]:
-        """Proposed out-degree per source document.
-
-        The number that decides whether a pass is a fix or a flood: total
-        count hides a single document proposing thousands of edges.
-        """
-        out: dict[str, int] = {}
-        for p in self._proposed:
-            out[p.from_tumbler] = out.get(p.from_tumbler, 0) + 1
-        return out
-
-
-def load_existing_link_keys(cat: CatalogReader, *, page: int = 200) -> set[tuple[str, str, str]]:
-    """Every ``(from, to, link_type)`` already in the catalog.
-
-    Paged; the whole link set is small enough to hold in memory (order 1e3 on
-    a real corpus). Raises rather than returning a partial set, because a
-    short read would silently inflate the "would create" count with links that
-    already exist.
-    """
-    keys: set[tuple[str, str, str]] = set()
-    offset = 0
-    while True:
-        batch = cat.link_query(limit=page, offset=offset)
-        if not batch:
-            break
-        for link in batch:
-            keys.add((str(link.from_tumbler), str(link.to_tumbler), str(link.link_type)))
-        if len(batch) < page:
-            break
-        offset += page
-    return keys

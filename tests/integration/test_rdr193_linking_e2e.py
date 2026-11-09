@@ -9,6 +9,8 @@ The Test Plan scenarios of Part A4:
   resolves ``{owner, file_path}`` by the file's identity, inside the named repository;
 * two PDFs with the same content in different collections get ONE ``same-as`` link, to the text-least tumbler: the
   anchor rule is ``min(str(tumbler))``, so ``1.N.10`` anchors ``1.N.9`` (a numeric order would re-anchor existing groups);
+* the client's same-as prune (``prune_stale_same_as_links``, still behind ``nx catalog generate-links``) and the engine's
+  (``links_same_content(prune=True)``, the index path) retract the same links on one fixture;
 * the real index hook hands the generators its own rows (``HookLinkInputs``) and, in the linking window, lists no type
   tenant-wide and writes the path edges through ONE ``links_upsert_many`` call.
 """
@@ -20,7 +22,7 @@ import pytest
 
 import nexus.catalog.link_generator as link_generator
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-from nexus.catalog.link_generator import generate_pdf_corpus_links
+from nexus.catalog.link_generator import generate_pdf_corpus_links, prune_stale_same_as_links
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.db.t3 import T3Database
@@ -196,5 +198,89 @@ def test_two_pdfs_with_the_same_content_in_different_collections_get_one_same_as
 
         again = generate_pdf_corpus_links(cat, writer=writer, new_tumblers=[nine, ten], new_content_types={"pdf"})
         assert again == 0, "idempotent: the existing link is left as it is"
+    finally:
+        writer.close()
+
+
+#: (label, content_type, content_hash) of the documents of one parity fixture. "" is a document with no key.
+_PRUNE_DOCS = (
+    ("m1", "pdf", "h1"), ("m2", "pdf", "h1"),    # same key: kept
+    ("s1", "pdf", "h2"), ("s2", "pdf", "h3"),    # keys differ: retracted
+    ("c1", "pdf", "h4"), ("c2", "pdf", "h5"),    # keys differ but co-asserted by another creator: kept
+    ("n1", "pdf", ""), ("n2", "pdf", "h6"),      # one endpoint has no key: kept (unknown is not changed)
+    ("r1", "prose", ""), ("r2", "pdf", "h7"),     # an endpoint is no longer a pdf: retracted
+    ("x1", "pdf", "h8"), ("x2", "pdf", "h9"),    # keys differ, but another creator's link: never touched
+)
+#: (from, to, created_by, metadata) of the same-as links on the fixture.
+_PRUNE_LINKS = (
+    ("m2", "m1", "content_hash_dedup", {}),
+    ("s2", "s1", "content_hash_dedup", {}),
+    ("c2", "c1", "content_hash_dedup", {"co_discovered_by": "someone"}),
+    ("n2", "n1", "content_hash_dedup", {}),
+    ("r2", "r1", "content_hash_dedup", {}),
+    ("x2", "x1", "someone_else", {}),
+)
+
+
+def _prune_fixture(cat, writer, name: str) -> tuple[dict[str, Tumbler], set[tuple[str, str, str]]]:
+    """Register the fixture under its own owner. The engine groups documents tenant-wide, so each copy's
+    content hashes carry its *name*: a hash shared across the two copies would link them to each other.
+    Returns ``(tumbler by label, the same-as links as (from, to,
+    created_by) label triples)``."""
+    owner = writer.register_owner(f"e2e_prune_{name}", "curator")
+    tumblers = {
+        label: writer.register(
+            owner, f"{label}.pdf", content_type=ct, physical_collection=f"knowledge__prune_{name}",
+            meta={"content_hash": f"{h}-{name}"} if h else None,
+        )
+        for label, ct, h in _PRUNE_DOCS
+    }
+    for src, dst, creator, meta in _PRUNE_LINKS:
+        writer.link(tumblers[src], tumblers[dst], "same-as", creator, **meta)
+    return tumblers, _same_as(cat, tumblers)
+
+
+def _same_as(cat, tumblers: dict[str, Tumbler]) -> set[tuple[str, str, str]]:
+    label = {str(t): lbl for lbl, t in tumblers.items()}
+    return {
+        (label.get(str(lnk.from_tumbler), str(lnk.from_tumbler)), label.get(str(lnk.to_tumbler), str(lnk.to_tumbler)), lnk.created_by)
+        for t in tumblers.values()
+        for lnk in cat.links_from(t, link_type="same-as")
+    }
+
+
+def test_the_clients_same_as_prune_and_the_engines_retract_the_same_links_on_one_fixture(
+    tmp_path: Path, catalog_env: Path,
+) -> None:
+    """Parity for the duplicated rule (RDR-193 Step 7, review of ceccd73cf): ``prune_stale_same_as_links`` is the client's
+    copy of the engine's prune, kept for the maintenance verb. Two identical fixtures, one pruned by the client and one by
+    ``links_same_content(prune=True)``: the retracted links must be the same ones, so the copies cannot drift apart
+    unnoticed."""
+    cat = make_catalog_reader()
+    writer = make_catalog_writer()
+    try:
+        by_client, before_client = _prune_fixture(cat, writer, "client")
+        by_engine, before_engine = _prune_fixture(cat, writer, "engine")
+        assert before_client == before_engine and len(before_client) == len(_PRUNE_LINKS), (
+            "non-vacuity: both fixtures start with all six links"
+        )
+
+        client_retracted = prune_stale_same_as_links(
+            cat, writer=writer, scope={str(t) for t in by_client.values()},
+        )
+        reply = writer.links_same_content([str(t) for t in by_engine.values()], prune=True)
+
+        after_client, after_engine = _same_as(cat, by_client), _same_as(cat, by_engine)
+        removed_client, removed_engine = before_client - after_client, before_engine - after_engine
+        assert removed_client == {
+            ("s2", "s1", "content_hash_dedup"), ("r2", "r1", "content_hash_dedup"),
+        }, f"the fixture must exercise the rule: {removed_client}"
+        assert removed_client == removed_engine, (
+            f"the client's prune and the engine's retracted different links: client {removed_client}, "
+            f"engine {removed_engine}"
+        )
+        assert len(client_retracted) == int(reply["retracted"]) == len(removed_client)
+        assert after_client == after_engine, "the two fixtures end with the same links (the engine created none)"
+        assert int(reply.get("created", 0)) == 0
     finally:
         writer.close()

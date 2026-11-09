@@ -745,7 +745,7 @@ def generate_links_cmd(
         same_content_unpreviewed = 0
         path_edges_previewed = 0
         for name, fn in selected:
-            recorder = DryRunLinkWriter(existing=existing)
+            recorder = DryRunLinkWriter(existing=existing, resolver=cat)
             try:
                 fn(cat, writer=recorder)
             except Exception as exc:  # noqa: BLE001 — one generator's failure must not read as zero
@@ -765,6 +765,12 @@ def generate_links_cmd(
             proposals = recorder.proposed
             grand += len(proposals)
             click.echo(f"  {name}: would create {len(proposals)} link(s)")
+            if recorder.unresolved_paths:
+                click.echo(
+                    f"    {recorder.unresolved_paths} path(s) name no document at that path under the "
+                    "repository's owner and are not counted (the engine reports them unresolved; it can "
+                    "also match a file registered under another owner, so this is a close estimate)"
+                )
             if not proposals:
                 continue
             if recorder.path_edges:
