@@ -18,7 +18,7 @@ removed with `POST /v1/vectors/resolve`, nexus-3t0jv.) Pinned by
 | `t2/` | Package: nine domain stores + `T2Database` facade. See **T2 domain stores** below. |
 | `t3.py` | `T3Database` — a facade retained for INJECTED clients (tests, `--dry-run`). Production `make_t3()` returns `HttpVectorClient` unconditionally and constructs no vector client of its own (RDR-155 P4a.2). |
 | `http_vector_client.py` | `HttpVectorClient` — the production T3: every vector op over `/v1/vectors`, pgvector storage, server-side embedding and rerank (RDR-188). |
-| `inmemory_vector_store.py` | `InMemoryVectorClient` — the in-process substitute for tests, the plan-match session cache, and `nx index --dry-run`. Chroma-parity semantics (cosine, `$eq`/`$in`/`$and` where-grammar, upsert/dedup, dimension pinning) are differentially verified, not assumed. |
+| `inmemory_vector_store.py` | `InMemoryVectorClient` — the in-process substitute for tests, the plan-match session cache, and `nx index --dry-run`. Chroma-parity semantics (cosine, upsert/dedup, dimension pinning) are verified by `tests/test_vector_substrate_contract.py`; its where grammar is the engine's (fields ANDed, one operator per field, `$and`/`$or` refused before any row is read), compared with the engine on seeded filters by `tests/test_where_filter_differential.py` (nexus-3ceda.11). |
 | `local_ef.py` | `LocalEmbeddingFunction` — client-side EF for local-Python paths only; T3 embeds server-side. Retirement is tracked on `nexus-sghyo` (the client does no embedding). |
 | `limits.py` | Load-bearing chunking/paging caps (`SAFE_CHUNK_BYTES`, `MAX_QUERY_RESULTS`), rehomed here from the deleted `chroma_quotas.py` at `nexus-rn3wo.2`. |
 

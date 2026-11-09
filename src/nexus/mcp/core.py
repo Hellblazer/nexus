@@ -5140,8 +5140,8 @@ def query(
     where: Annotated[str, Field(
         description=(
             "Metadata filter, KEY=VALUE comma-separated (e.g. \"tags=arch\"). "
-            "Comparison operators and $and/$or are supported only when no catalog "
-            "param is set; combined with one, `where` is equality-only."
+            "Comparison operators (one condition per field) are supported only when "
+            "no catalog param is set; combined with one, `where` is equality-only."
         ),
     )] = "",
     limit: Annotated[int, Field(description="Maximum documents to return.")] = 10,
@@ -5180,7 +5180,7 @@ def query(
       HttpVectorClient-backed T3 (every local and cloud install since
       RDR-155 P4b); it errors rather than falling back without one.
     - With a catalog param set, `where` is equality-only; without one,
-      comparison operators and $and/$or are supported.
+      comparison operators are supported, one condition per field.
     - Ranking differs by path: the plain corpus path boosts by frecency and
       bibliographic quality; the catalog-param path ranks by raw vector
       distance only.

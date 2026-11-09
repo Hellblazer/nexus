@@ -24,10 +24,13 @@ store's permanent conformance pin. Deliberate properties:
   ``SharedSystemClient`` shares process state by settings hash — the
   documented gotcha), two ``InMemoryVectorClient`` instances share
   nothing.
-* **The where-grammar is the USED subset, fail-loud.** Implicit ``$eq``,
-  explicit ``$eq``/``$ne``/``$in``, comparisons
-  ``$gt``/``$gte``/``$lt``/``$lte``, and ``$and``/``$or`` — anything
-  else raises ``ValueError`` rather than silently half-matching.
+* **The where-grammar is the engine's, fail-loud.** Implicit ``$eq``,
+  explicit ``$eq``/``$ne``/``$in``/``$nin``, comparisons
+  ``$gt``/``$gte``/``$lt``/``$lte``, one operator per field, fields ANDed —
+  anything else (``$and``/``$or`` included, which the engine refuses) raises
+  ``ValueError`` rather than silently half-matching or passing a filter the
+  engine would refuse. ``tests/test_where_filter_differential.py`` compares
+  this store with the engine on seeded filters (nexus-3ceda.11).
 """
 from __future__ import annotations
 
@@ -55,52 +58,107 @@ def _cosine_distance(a_normed: list[float], b_normed: list[float]) -> float:
     return min(2.0, max(0.0, d))
 
 
-def _matches(meta: dict[str, Any], where: dict[str, Any]) -> bool:
-    """The Mongo-style subset the consumers use; unknown operators raise."""
+_RANGE_OPS: frozenset[str] = frozenset({"$gt", "$gte", "$lt", "$lte"})
+_LIST_OPS: frozenset[str] = frozenset({"$in", "$nin"})
+_OPERATORS: frozenset[str] = frozenset({"$eq", "$ne"}) | _LIST_OPS | _RANGE_OPS
+
+
+def _scalar(value: Any) -> bool:
+    return not isinstance(value, (dict, list, tuple, set))
+
+
+def _validate_where(where: dict[str, Any]) -> None:
+    """Refuse, before any row is read, every shape the engine refuses with an HTTP 400.
+
+    The fields of one dict are ANDed, and each field holds a scalar (implicit
+    ``$eq``) or a map of exactly one operator: ``$eq``/``$ne`` with a scalar,
+    ``$in``/``$nin`` with a list of scalars, or ``$gt``/``$gte``/``$lt``/``$lte``
+    with a number or a string. The engine's search path (``planWhere``) refuses
+    everything else, and its get path (``metadataCondition``) refuses all of it
+    but a list or map operand for ``$eq``/``$ne`` or as an item of ``$in``/``$nin``,
+    which it matches as text; this store refuses those as the search path does.
+    Checking up front, not per row, is what makes the refusal certain: a check
+    reached only while matching a row is skipped on an empty collection and
+    behind a field the row already failed, and a unit test reading through this
+    store would pass on a filter production refuses (nexus-3ceda.11, where an
+    accepted ``$and`` hid a 400 on every multi-clause CLI filter;
+    ``tests/test_where_filter_differential.py`` compares the two on seeded
+    filters).
+    """
     for key, cond in where.items():
-        if key == "$and":
-            if not all(_matches(meta, sub) for sub in cond):
-                return False
-        elif key == "$or":
-            if not any(_matches(meta, sub) for sub in cond):
-                return False
-        elif key.startswith("$"):
+        if key.startswith("$"):
             raise ValueError(
-                f"unsupported where operator {key!r} — the in-memory store "
-                "implements the used subset ($eq/$ne/$in/$and/$or) and fails "
-                "loud on anything else (P4b contract)"
+                f"compound where operator {key!r} is not supported; express each "
+                "field as its own predicate (all fields are ANDed), as the engine requires"
             )
-        elif isinstance(cond, dict):
-            for op, operand in cond.items():
-                if op == "$eq":
-                    if meta.get(key) != operand:
-                        return False
-                elif op == "$ne":
-                    if meta.get(key) == operand:
-                        return False
-                elif op == "$in":
-                    if meta.get(key) not in operand:
-                        return False
-                elif op in ("$gt", "$gte", "$lt", "$lte"):
-                    # Oracle-verified: a row missing the field never
-                    # matches a comparison operator.
-                    value = meta.get(key)
-                    if value is None:
-                        return False
-                    if op == "$gt" and not value > operand:
-                        return False
-                    if op == "$gte" and not value >= operand:
-                        return False
-                    if op == "$lt" and not value < operand:
-                        return False
-                    if op == "$lte" and not value <= operand:
-                        return False
-                else:
-                    raise ValueError(
-                        f"unsupported where operator {op!r} on field {key!r}"
-                    )
-        else:
+        if not isinstance(cond, dict):
+            if not _scalar(cond):
+                raise ValueError(f"where value for field {key!r} must be a scalar, got {cond!r}")
+            continue
+        if len(cond) != 1:
+            raise ValueError(
+                f"where operator map for field {key!r} must hold exactly one "
+                f"operator, got {sorted(cond)}"
+            )
+        ((op, operand),) = cond.items()
+        if op not in _OPERATORS:
+            raise ValueError(f"unsupported where operator {op!r} on field {key!r}")
+        if op in _LIST_OPS:
+            if not isinstance(operand, list) or not all(_scalar(v) for v in operand):
+                raise ValueError(f"{op} for field {key!r} expects a list of scalars, got {operand!r}")
+        elif op in _RANGE_OPS:
+            if isinstance(operand, bool) or not isinstance(operand, (int, float, str)):
+                raise ValueError(f"{op} for field {key!r} expects a number or a string, got {operand!r}")
+            if isinstance(operand, float) and not math.isfinite(operand):
+                raise ValueError(f"{op} for field {key!r} expects a finite number, got {operand!r}")
+        elif not _scalar(operand):
+            raise ValueError(f"{op} for field {key!r} expects a scalar, got {operand!r}")
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _matches(meta: dict[str, Any], where: dict[str, Any]) -> bool:
+    """Whether a row's metadata satisfies *where*, which :func:`_validate_where`
+    has already accepted."""
+    for key, cond in where.items():
+        if not isinstance(cond, dict):
             if meta.get(key) != cond:  # implicit $eq
+                return False
+            continue
+        ((op, operand),) = cond.items()
+        value = meta.get(key)
+        if op == "$eq":
+            if value != operand:
+                return False
+        elif op == "$ne":
+            if value == operand:
+                return False
+        elif op == "$in":
+            if value not in operand:
+                return False
+        elif op == "$nin":
+            # The engine's ``IS NULL OR NOT IN``: a row missing the field matches.
+            if value in operand:
+                return False
+        else:
+            # A row missing the field never matches a comparison. As on the engine's
+            # search path, an operand compares only with a stored value of its own
+            # kind: a number with a number (the ``jsonb_typeof = 'number'`` guard),
+            # a string with a string. (The get path compares a string operand with
+            # any value's text; pinned in tests/test_where_filter_differential.py.)
+            if value is None:
+                return False
+            if _is_number(operand) != _is_number(value) or isinstance(operand, str) != isinstance(value, str):
+                return False
+            if op == "$gt" and not value > operand:
+                return False
+            if op == "$gte" and not value >= operand:
+                return False
+            if op == "$lt" and not value < operand:
+                return False
+            if op == "$lte" and not value <= operand:
                 return False
     return True
 
@@ -258,6 +316,7 @@ class InMemoryCollection:
             if ids is not None:
                 victims = [i for i in ids if i in self._rows]
             elif where is not None:
+                _validate_where(where)
                 victims = [r.id for r in self._rows.values()
                            if _matches(r.metadata, where)]
             else:
@@ -308,6 +367,7 @@ class InMemoryCollection:
             else:
                 rows = [self._rows[i] for i in self._order]
             if where is not None:
+                _validate_where(where)
                 rows = [r for r in rows if _matches(r.metadata, where)]
             if offset:
                 rows = rows[offset:]
@@ -335,6 +395,8 @@ class InMemoryCollection:
         with self._lock:
             for q in query_embeddings:
                 self._check_dimension(len(q))
+            if where is not None:
+                _validate_where(where)
             candidates = [r for r in self._rows.values()
                           if where is None or _matches(r.metadata, where)]
             ids_out, docs_out, metas_out, dists_out = [], [], [], []
