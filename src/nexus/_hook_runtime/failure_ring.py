@@ -230,6 +230,10 @@ def _cut(value: Any, cap: int) -> Any:
 #: so the scrub's cost is bounded however the payload is shaped.
 _WALK_BUDGET_CHARS = 256 * 1024
 _MAX_DEPTH = 32
+#: What one node of the walk costs against the budget, beyond its characters: a
+#: tree of numbers or empty containers carries no characters, and charging one per
+#: node let a 200x200x200 cube walk 256K nodes in the crash handler.
+_NODE_COST = 16
 
 
 def _precut(value: Any, budget: list[int], depth: int = 0) -> Any:
@@ -238,7 +242,7 @@ def _precut(value: Any, budget: list[int], depth: int = 0) -> Any:
     whole walk to :data:`_WALK_BUDGET_CHARS`."""
     if budget[0] <= 0 or depth > _MAX_DEPTH:
         return "...[cut: over the size budget]"
-    budget[0] -= 1  # every node costs something, so a wide tree of numbers is bounded too
+    budget[0] -= _NODE_COST  # every node costs something, so a wide tree of numbers is bounded too
     if isinstance(value, str):
         kept = value[:min(_PRECUT_CHARS, budget[0])]
         budget[0] -= len(kept)

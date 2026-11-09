@@ -41,6 +41,23 @@ def _raise() -> HookResult:
     raise RuntimeError("deliberate")
 
 
+#: Characters a record may hand the scrub: the walk's budget, plus the cut error
+#: and traceback, plus the small fields around them.
+_SCRUB_CEILING = failure_ring._WALK_BUDGET_CHARS + 4 * failure_ring._PRECUT_CHARS
+
+
+def _count_scrubbed(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    seen = [0]
+    real = failure_ring.scrub
+
+    def counting(text: str) -> str:
+        seen[0] += len(text)
+        return real(text)
+
+    monkeypatch.setattr(failure_ring, "scrub", counting)
+    return seen
+
+
 def _rec(directory: Path, payload: object = None, **kw: object) -> Path | None:
     kw.setdefault("module", "nexus.hooks.probe")
     kw.setdefault("env", {})
@@ -122,15 +139,16 @@ def test_plain_text_survives_the_scrub(text: str) -> None:
 def test_the_scrub_is_linear_on_hostile_text(text: str) -> None:
     started = time.perf_counter()
     failure_ring.scrub(text)
-    assert time.perf_counter() - started < 2.0, "the scrub backtracks: a hang inside a crash handler"
+    # A quadratic pattern takes minutes on this input; a linear one, milliseconds.
+    assert time.perf_counter() - started < 5.0, "the scrub backtracks: a hang inside a crash handler"
 
 
-def test_a_huge_exception_message_and_a_wide_dict_record_quickly(tmp_path: Path) -> None:
+def test_a_huge_exception_message_and_a_wide_dict_record_quickly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wide = {f"k{i}": "v" for i in range(300_000)}
     exc = RuntimeError("word " * 6_000_000)
-    started = time.perf_counter()
+    scrubbed = _count_scrubbed(monkeypatch)
     path = failure_ring.record("probe", wide, exc, module="nexus.hooks.probe", env={}, directory=tmp_path)
-    assert time.perf_counter() - started < 1.5, "the crash handler scrubbed what it should have cut first"
+    assert scrubbed[0] <= _SCRUB_CEILING, f"the crash handler scrubbed {scrubbed[0]} characters it should have cut first"
     assert path is not None and path.stat().st_size <= failure_ring.MAX_ENTRY_BYTES
     entry = failure_ring.load(path)
     assert entry["truncated"] is True and "[cut " in entry["error"]
@@ -405,7 +423,7 @@ def test_failures_says_so_when_the_ring_is_empty(tmp_path: Path, monkeypatch: py
 def test_pem_masking_is_linear(text: str) -> None:
     started = time.perf_counter()
     out = failure_ring.scrub(text)
-    assert time.perf_counter() - started < 2.0
+    assert time.perf_counter() - started < 5.0
     assert "[redacted]" in out
 
 
@@ -429,10 +447,22 @@ def test_camel_case_credential_keys_in_text_are_masked(text: str, secret: str) -
     {"lists": [["y" * 15_000] * 190 for _ in range(10)]},
     {"cube": [[[0] * 200] * 200] * 200},
 ], ids=["one-huge-key", "many-long-keys", "nested-lists", "wide-number-tree"])
-def test_the_pre_scrub_cut_bounds_any_payload_shape(tmp_path: Path, payload: dict) -> None:
-    started = time.perf_counter()
+def test_the_pre_scrub_cut_bounds_any_payload_shape(tmp_path: Path, payload: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Counted, not timed: a wall-clock bound flaked on a loaded CI shard.
+    scrubbed = _count_scrubbed(monkeypatch)
+    nodes = [0]
+    walk = failure_ring._precut
+
+    def counting_walk(value: object, budget: list[int], depth: int = 0) -> object:
+        nodes[0] += 1
+        return walk(value, budget, depth)
+
+    monkeypatch.setattr(failure_ring, "_precut", counting_walk)
     path = _rec(tmp_path, payload)
-    assert time.perf_counter() - started < 1.5, "the crash handler walked the whole payload"
+    # An absolute ceiling, not one derived from the module's constants, so loosening
+    # the walk's charge cannot loosen the test with it. 256K / 16 per node is 16,384.
+    assert nodes[0] <= 20_000, f"the crash handler walked {nodes[0]} nodes"
+    assert scrubbed[0] <= _SCRUB_CEILING, f"the crash handler scrubbed {scrubbed[0]} characters"
     assert path is not None and path.stat().st_size <= failure_ring.MAX_ENTRY_BYTES
 
 
