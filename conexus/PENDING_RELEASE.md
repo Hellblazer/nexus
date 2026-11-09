@@ -47,7 +47,7 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/skills/peer-messaging/SKILL.md`
-  nexus-1d6pz.11.6: one bullet on waiting for your push's CI by the wake (a --done subscription with the channel, `nx ci wait <sha>` without it), never a Monitor or a poll; a peer's sha still matters because window beads close on the tip.
-
 ## Deferred to the next client release
+
+- `conexus/skills/peer-messaging/SKILL.md`
+  nexus-1d6pz.11.6: one bullet on waiting for your push's CI by the wake (a --done subscription with the channel, `nx ci wait <sha>` without it), never a Monitor or a poll (deferred: the notice sha it names is nexus-1d6pz.11.3's src/ change, not in v8.0.0); a peer's sha still matters because window beads close on the tip.
