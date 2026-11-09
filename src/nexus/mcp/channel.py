@@ -846,8 +846,16 @@ class ChannelWaiter:
         board_wait_rows: int = DEFAULT_BOARD_WAIT_ROWS,
         board_coalesce_s: float = DEFAULT_BOARD_COALESCE_S,
         board_start_skew_s: float = DEFAULT_BOARD_START_SKEW_S,
+        channel_flag_probe: Callable[[], bool | None] | None = None,
     ) -> None:
         self.session_id = session_id
+        #: nexus-1d6pz.11.5: whether this session's ``claude`` was launched
+        #: with the conexus channel flag (``nexus.channel_launch``), read once
+        #: at :meth:`run`'s start and published in :meth:`status`, so the
+        #: Stop-hook wake guard can tell a board subscription that pushes from
+        #: one whose posts wait for the next prompt. Tests inject the probe.
+        self._channel_flag_probe = channel_flag_probe
+        self._channel_flag: bool | None = None
         self.store_factory = store_factory
         self.subs = subs
         self.sender = sender
@@ -1023,7 +1031,30 @@ class ChannelWaiter:
             # with no later send reads healthy at once, not after the next row.
             "gate_stalled": stalled,
             "gate_stalled_since": self._gate_stalled_since.isoformat() if stalled and self._gate_stalled_since else None,
+            # nexus-1d6pz.11.5: read by the Stop-hook wake guard
+            # (conexus/hooks/scripts/stop_wake_guard.py): a live waiter, the
+            # channel flag and a board/ci/*--done topic together are a CI wake.
+            "channel_flag": self._channel_flag,
+            "board_topics": self._board_topics(),
         }
+
+    def _board_topics(self) -> list[str]:
+        try:
+            return list(self.subs.board_topics())
+        except Exception:  # noqa: BLE001 — a status field, never a crash
+            return []
+
+    def _read_channel_flag(self) -> bool | None:
+        """The channel launch flag, ``None`` when it cannot be read. Never raises."""
+        try:
+            if self._channel_flag_probe is not None:
+                return self._channel_flag_probe()
+            from nexus.channel_launch import channel_launch_state  # noqa: PLC0415 — deferred: spawns ps, read once
+
+            return channel_launch_state()
+        except Exception as exc:  # noqa: BLE001 — unknown, never a crash of the waiter
+            _log.debug("channel_flag_unreadable", session_id=self.session_id, error=str(exc))
+            return None
 
     def _clear_stall_if_open(self) -> None:
         """Forget a stall once the gate has opened (the late handshake case)."""
@@ -1138,6 +1169,7 @@ class ChannelWaiter:
         already refused to trust."""
         self._loop = asyncio.get_running_loop()
         self._alive = True
+        self._channel_flag = await asyncio.to_thread(self._read_channel_flag)
         self._publish_status()
         try:
             await self._check_engine_floor_at_start()
