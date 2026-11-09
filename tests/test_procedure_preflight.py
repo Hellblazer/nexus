@@ -193,8 +193,12 @@ def test_a_changeset_is_engine_and_schema(repo: Path) -> None:
     # The validation test is not lint-marked: a `-m lint` here deselected all 32 of its tests and
     # exited 0 (wren). The parity test reads the changelogs against COLLECTION_SCOPED_TABLES
     # through a live engine substrate, so it is heavy and comes after the gate jar.
+    # The health test and the DDL-ceiling advisory sit between them
+    # (tests/test_procedure_preflight_enumerations.py).
     assert _bare(_commands(out)["schema"]) == [
         "uv run pytest -q -rf -p no:randomly tests/test_changelog_validate_precondition_lint.py",
+        "uv run pytest -q -rf -p no:randomly tests/test_health_service_checks.py",
+        "grep -n '^migration_ddl_per_worker = ' tests/ddl_ceiling.toml",
         "uv run pytest -q -rf -p no:randomly tests/catalog/test_collection_scoped_tables_schema_parity.py",
     ]
     parity = _rows(out, "the collection-scoped tables schema parity test")[0]

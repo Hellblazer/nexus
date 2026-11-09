@@ -156,8 +156,17 @@ local CLASSES = {
     name = "engine",
     patterns = {"^service/"},
     checks = function()
+      -- The text is the part of the rule a path cannot carry: the whole suite is for
+      -- every service/src/main edit, and a name filter never reaches the repo-wide
+      -- source scanners (which a *WiringTest or *ConformanceTest is as much as a
+      -- *GateTest). The source-scan pins on Main.java are found by grep, not by name.
       return {
-        step("the engine main suite (on a pool host: --lab-run needs lab-run on PATH)",
+        step("the engine main suite (on a pool host: --lab-run needs lab-run on PATH). The whole suite, for any"
+          .. " service/src/main edit, a behavioral constant a fixture is sized against and Main.java included:"
+          .. " a -Dtest name filter is the inner loop only, and never reaches the repo-wide scanners, named"
+          .. " *GateTest, *WiringTest and *ConformanceTest, that read the whole service tree; a test-only edit"
+          .. " that adds SQL-looking literals or fixtures runs it too. `grep -rl Main.java service/src/test tests`"
+          .. " finds the source-scan pins on Main.java",
           "scripts/mvnw-leased.sh --lab-run lab-m -q test -Dnexus.ddl.suite=main", true),
         step("the engine integration group (on a pool host)",
           "scripts/mvnw-leased.sh --lab-run lab-m -q test -Dnexus.ddl.suite=integration"
@@ -177,12 +186,82 @@ local CLASSES = {
       if any(files, "^service/src/main/resources/db/changelog/") then
         table.insert(out, step("the changeset validation lint",
           gated(PYTEST .. " tests/test_changelog_validate_precondition_lint.py"), false))
+        -- A changeset that adds a tenant table has two hand-kept lists the engine suite
+        -- never reads: health._RLS_TENANT_TABLES and the test's mirror of it. The test
+        -- is in the default suite and no one edits it when the table is the change.
+        table.insert(out, step("the health service checks (a tenant table goes into _RLS_TENANT_TABLES in"
+            .. " src/nexus/health.py and into the mirrored list in tests/test_health_service_checks.py; a changeset"
+            .. " that adds one without both reds develop)",
+          gated(PYTEST .. " tests/test_health_service_checks.py"), false))
+        -- Advisory: the command prints the ceiling the bump edits. Whether the changeset
+        -- adds DDL, and how many statements the substrate counts, a path list cannot see.
+        -- The method follows tests/ddl_ceiling.toml: the number is measured, never counted
+        -- by hand (the runAlways grants loop adds a table grant the changeset does not show).
+        table.insert(out, step("the DDL ceiling, an advisory (the command prints the current ceiling): a changeset"
+            .. " that adds a DDL statement (CREATE TABLE or FUNCTION, its GRANT, ENABLE and FORCE ROW LEVEL SECURITY,"
+            .. " CREATE POLICY, DROP) bumps migration_ddl_per_worker in tests/ddl_ceiling.toml in the same commit,"
+            .. " tolerance 0, citing the commit and the measurement on the comment line above. Take the number from a"
+            .. " scoped substrate run, not a hand count: a new table adds a runAlways table grant (+1, +2 with a"
+            .. " sequence) that the changeset does not show. Run"
+            .. " tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued under lab-remote and read"
+            .. " the `ddl: migration=N` summary line. A changeset with no DDL statement changes nothing",
+          "grep -n '^migration_ddl_per_worker = ' tests/ddl_ceiling.toml", false))
       end
       -- It asks a live Postgres through the engine substrate, so it is heavy and
       -- runs after the gate jar (the jar step comes first for any code push).
       table.insert(out, step("the collection-scoped tables schema parity test (needs the engine substrate)",
         gated(PYTEST .. " tests/catalog/test_collection_scoped_tables_schema_parity.py"), true))
       return out
+    end,
+  },
+  {
+    -- A change under src/nexus/mcp/ can move a surface that is pinned far from the code:
+    -- the committed wire snapshot, the registered-name set and the auto-approve drift
+    -- guard are default-suite tests of files nobody edits with the tool. The text is
+    -- what a registration also edits (the hook lists are for hook_* tools only; any
+    -- other tool is covered by _ALLOWED_TOOLS) and the greps no path list can run.
+    name = "mcp-surface",
+    patterns = {"^src/nexus/mcp/"},
+    checks = function()
+      return {
+        step("the MCP wire surface pins (the wire snapshot, the registered tool names, the auto-approve drift"
+          .. " guard). A change to a registered tool's wire surface, a parameter's type, name or default or the set"
+          .. " of parameters (a description is not in the snapshot), regenerates tests/fixtures/mcp_wire_snapshot.json"
+          .. " in the same commit with `uv run python scripts/mcp_wire_snapshot.py --write`; review the diff, it"
+          .. " holds only what you changed. Registering a tool also edits the name set in tests/test_mcp_package.py"
+          .. " (test_core_registered_tools); for a hook_* tool only, HOOK_TOOLS in src/nexus/mcp/hooks.py and"
+          .. " _ALLOWED_HOOK_TOOLS in src/nexus/hooks/auto_approve.py (any other tool is allowed by _ALLOWED_TOOLS"
+          .. " in that file, which test_every_registered_conexus_tool_is_auto_approved checks); and three"
+          .. " hand-typed counts, the docs/mcp-servers.md table row and section heading and the module docstring of"
+          .. " src/nexus/mcp/core.py, which tests/test_mcp_tool_count_docs.py checks and the whole lint bucket runs."
+          .. " Before the first run, grep the tree for an existing tool's bare name and for the current count as a"
+          .. " standalone number",
+          gated(PYTEST .. " tests/test_mcp_wire_snapshot.py tests/test_mcp_package.py"
+            .. " tests/hooks/test_permission_request_hooks.py"), false),
+      }
+    end,
+  },
+  {
+    -- A new tuple template (the engine class runs the Java count pins) also has Python
+    -- and prose mirrors: the keys+nonce census in tests/test_tuple_shakeout_semantics.py
+    -- is a default-suite test of a file nobody edits with the template, and two mirrors
+    -- have no test at all.
+    name = "tuple-template",
+    patterns = {"^service/src/main/resources/tuples/templates/"},
+    checks = function()
+      return {
+        step("the tuple template census (tests/test_tuple_shakeout_semantics.py needs no substrate). A new tuple"
+          .. " template also updates, by hand: the Java count pins (TemplateRegistryTest, TupleTemplatesTest,"
+          .. " TupleHandlerWiringTest, TupleRepositoryTest, which the engine suite runs); the nonce parameter"
+          .. " description of tuple_out in src/nexus/mcp/core.py, which must name EVERY template whose id_from is"
+          .. " keys+nonce (a census, not examples); the --nonce help of nx tuple out in"
+          .. " src/nexus/commands/tuple_cmd.py, which no test pins; and the template tables and counts in"
+          .. " docs/tuple-space.md, docs/operations/tuple-space.md, docs/architecture.md, docs/storage-tiers.md and"
+          .. " docs/exploration/linda-in-nexus.md, which no test pins either"
+          .. " (tests/test_tuple_template_doc_paths_lint.py checks cited paths, not counts). Before the first run,"
+          .. " grep src/nexus and conexus for one existing template name in prose (queue/<name>)",
+          gated(PYTEST .. " tests/test_tuple_shakeout_semantics.py"), false),
+      }
     end,
   },
   {
@@ -339,7 +418,13 @@ local function standing(select_all)
     -- tests/test_cli_runner_output_invariant.py (R13, lint-marked).
     step("the whole lint bucket",
       gated("lab-remote -- bash -c 'scripts/build-gate-jar.sh && " .. PYTEST .. " -m lint -n auto'"), true),
-    step("the drift ledger and the lifecycle gate (not lint-marked)",
+    -- The ledger test reads COMMITTED trees (it diffs ref..HEAD against the pinned
+    -- tag), so it is run after the commit: an uncommitted conexus/ edit is invisible
+    -- to it and it calls the new entries stale.
+    step("the drift ledger and the lifecycle gate (not lint-marked); commit first: the drift test diffs committed"
+      .. " trees against the pinned tag, so an uncommitted run reports on the previous commit."
+      .. " tests/test_plugin_ledger.py is parser coverage, not an entry check: run it when"
+      .. " scripts/plugin_ledger.py changed",
       gated(PYTEST .. " tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py"),
       false),
     step("tests that mint a tenant, at +0 or below",

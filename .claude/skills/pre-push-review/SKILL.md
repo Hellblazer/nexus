@@ -1,6 +1,6 @@
 ---
 name: pre-push-review
-description: Use when about to push nexus work and deciding what to run first, reading a green or red test result before a push, fixing a lint or ruff finding, rebasing before a push, or briefing concurrent runs and reviewers that share a tree.
+description: Use when about to push nexus work and deciding what to run first, reading a green or red test result before a push, fixing a lint or ruff finding, rebasing before a push, or briefing an implementer, concurrent runs and reviewers that share a tree.
 effort: low
 ---
 
@@ -62,3 +62,11 @@ A rebase rewrites the shas that docs cite (642e8f42f became 83f6b9197) and can p
 - **Give a critic briefed to mutate and restore its own worktree.** It is a writer, not a reviewer.
 - **Read a block-shaped mass failure under overlap as contention**, and rerun the reds alone in quiet. That rerun is mandatory evidence, whichever way it comes out.
 - **Run one full Python suite per box.** A second run queues (`AGENTS.md` rule 5, `docs/agents/test-running.md`); afterwards reap dead clusters with `scripts/sweep-test-substrates.sh`.
+
+## Briefs
+
+A brief carries what the agent's own run cannot tell it. These three omissions each cost a develop red.
+
+- **A brief for a `service/src` edit says "run the full engine suite".** A `-Dtest` filter is the inner loop: it never selects the repo-wide `*GateTest`, `*WiringTest` and `*ConformanceTest` scanners, and preflight's engine class names the whole run.
+- **A brief whose scope includes a file under `conexus/` (hooks, skills, agents, scripts) names the `conexus/PENDING_RELEASE.md` line as a deliverable.** That holds for a doc-only `SKILL.md` edit too. The line follows the ledger's header (one path per bullet, on the bullet's first line; the bead is attributed by its commit message). The brief also says that `tests/test_plugin_release_drift_ledger.py` runs after the commit, because it diffs committed trees against the pinned tag. A brief without the line reds the drift ledger on develop (2026-10-31, a hook script edit).
+- **A brief that adds substrate tests names `uv run python scripts/tenant_delta.py --base <develop sha>`**, run in the integration worktree before the push. Read the `PUSH_TENANT_HINT` line the push script prints for the count that range adds.

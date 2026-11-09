@@ -8,7 +8,8 @@ temp repository. ``_run`` runs an emitted command in bash or zsh with stub tools
 PATH. The tests: tests/test_procedure_preflight.py (the classes, the mirrors, the real run
 path), tests/test_procedure_preflight_rows.py (the rows a diff's paths decide) and
 tests/test_procedure_preflight_contract.py (the result contract, the collect-only pin and
-the real-tool runs). Split from one file at the 1000-line cap (scripts/file_size_ratchet.py).
+the real-tool runs) and tests/test_procedure_preflight_enumerations.py (the rows for the
+hand-kept enumerations: MCP surface, tuple templates, changesets). Split from one file at the 1000-line cap (scripts/file_size_ratchet.py).
 """
 
 from __future__ import annotations
