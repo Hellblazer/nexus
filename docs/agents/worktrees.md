@@ -347,8 +347,9 @@ things to avoid carefully; they are impossible.
     14fb28184: the Python suite in about 11 min, `scripts/mvnw-leased.sh
     test` in 9 min. Since the lab-run grants (2026-10-17) a full suite runs
     inside a grant and `-n auto` follows it, clamped to the grant's memory
-    (`tests/_xdist_cap.py`): lab-l runs 15 workers, 28,085 tests in 1317 s
-    on 7.82.0. Detach a long
+    (`tests/_xdist_cap.py`): lab-l ran 15 workers, 28,085 tests in 1317 s
+    on 7.82.0; since 2026-11-09 it runs 12 (4 GiB a worker), and a full
+    suite at 15 measured 52 GB on lab-xl in 31 min. Detach a long
     run with `setsid -f`, not `nohup ... &`: a backgrounded process inherits
     SIGINT ignored, and one test reads that (nexus-jo8za). Details: T2
     `nexus/chas-test-host-howto`.

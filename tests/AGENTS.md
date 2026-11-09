@@ -11,7 +11,7 @@ Default local dev loop: `uv run pytest -n auto`. `pytest-xdist` is a `dev`-group
 **`-n auto` is capped twice** (`tests/_xdist_cap.py`; `NX_XDIST_NO_CAP=1` opts out of both):
 
 - *Shared memory* (nexus-6qp25). Every worker boots its own Postgres cluster, each holding one SysV segment against `kern.sysv.shmmni`, a budget shared with every other cluster on the box (a gate, a peer's suite, a cluster orphaned by a killed battery). When it runs out, `initdb` dies with `shmget: No space left on device` and EVERY substrate-backed test errors at setup: thousands of errors that look like a catastrophic regression and are contention. Diagnose with `ipcs -m` before suspecting the code. The cap does nothing on a quiet machine.
-- *Memory grant* (nexus-vo9qn). Workers <= min(`LAB_MEM_MB`, cgroup `memory.max`) / 3264 MiB (about 3.2 GiB, the measured per-worker peak of a FULL suite). So `-n auto` runs 15 on lab-l and 5 on lab-m, and the clamp prints its reason. Nothing applies without a visible limit (a laptop).
+- *Memory grant* (nexus-vo9qn). Workers <= min(`LAB_MEM_MB`, cgroup `memory.max`) / 4096 MiB (4 GiB: a FULL suite measured about 3.5 GB a worker on 2026-11-09, plus headroom). So `-n auto` runs 12 on lab-l and 4 on lab-m, and the clamp prints its reason. Nothing applies without a visible limit (a laptop).
 
 Both caps rewrite xdist's `option.tx` as well as `numprocesses` (`set_worker_count`): setting the count alone prints "clamped" and still spawns every worker (`TestClampsReallyReduceWorkers` runs real xdist). Measurements and the cost on lab-m: [test-running](../docs/agents/test-running.md) § Worker caps.
 
@@ -33,7 +33,7 @@ not a code failure: do not rerun hoping it passes.
   events (info level, so rerun with `--log-level=INFO`) give each start's root and
   the headroom the decision saw.
 - Remedies, in order: (1) fewer workers or a larger `lab-run` class: `-n` =
-  headroom / 3.2 GiB (a 16 GB grant carries 5), which is also what the memory cap
+  headroom / 4 GiB (a 16 GB grant carries 4), which is also what the memory cap
   computes unless `NX_XDIST_NO_CAP=1` overrode it; (2) `NX_TEST_PG_ROOT=<dir>`
   puts every cluster under a directory you choose (a disk you accept writing to);
   (3) `NX_TEST_PG_ROOT=default` puts every cluster back on the tempdir, which is
