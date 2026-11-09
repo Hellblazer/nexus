@@ -37,6 +37,9 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import quote
+
+import httpx
 
 from nexus.bounded_subprocess import run_bounded
 from nexus.db.t2.records import TupleRow
@@ -122,7 +125,7 @@ def parse_done_row(row: TupleRow) -> DoneRow | None:
             workflow = entry[2] if len(entry) >= 4 and isinstance(entry[2], str) else None
             conclusion = entry[3] if len(entry) >= 4 and isinstance(entry[3], str) else None
             runs.append(Run(int(entry[0]), int(entry[1]), workflow, conclusion))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     outcome = row.dims.get("outcome") if isinstance(row.dims, dict) else None
     return DoneRow(row.id, body["sha"].lower(), tuple(runs), str(body.get("url") or ""), outcome)
@@ -161,17 +164,22 @@ def gh_run_conclusion(gh_repo: str, run_id: int, attempt: int) -> tuple[str | No
     return (name if isinstance(name, str) else None), (conclusion if isinstance(conclusion, str) else None)
 
 
-def gh_push_runs(gh_repo: str, sha: str) -> list[Run] | None:
-    """The push runs GitHub lists for *sha* (a full sha), each with its
-    conclusion or None while it runs; None when GitHub cannot be read. Read
-    once, at the deadline only, to tell a dropped board wake from CI still
-    running."""
+def gh_push_runs(gh_repo: str, sha: str, branch: str) -> list[Run] | None:
+    """The push runs GitHub lists for *sha* (a full sha) on *branch*, each
+    with its conclusion or None while it runs; None when GitHub cannot be read
+    or the list may be cut short. Read once, at the deadline only, to tell a
+    dropped board wake from CI still running. The branch filter keeps out the
+    same sha's runs elsewhere (main after a promotion, a release tag)."""
     got = _gh_json(
-        f"repos/{gh_repo}/actions/runs?head_sha={sha}&event=push&per_page=100",
-        "[.workflow_runs[] | [.id, .run_attempt, .name, .conclusion]]",
+        f"repos/{gh_repo}/actions/runs?head_sha={sha}&event=push&branch={quote(branch, safe='')}&per_page=100",
+        "[.total_count, [.workflow_runs[] | [.id, .run_attempt, .name, .conclusion, .head_branch]]]",
     )
-    if not isinstance(got, list):
+    if not (isinstance(got, list) and len(got) == 2 and isinstance(got[1], list)):
         return None
+    total, rows = got
+    if not isinstance(total, int) or total > len(rows):
+        return None
+    got = [r for r in rows if isinstance(r, list) and len(r) == 5 and r[4] == branch]
     try:
         return [Run(int(r[0]), int(r[1]), r[2] if isinstance(r[2], str) else None,
                     r[3] if isinstance(r[3], str) else None) for r in got]
@@ -201,6 +209,17 @@ def _matches(row: TupleRow, sha: str) -> DoneRow | None:
     return done if done is not None and done.sha.startswith(sha) else None
 
 
+def _transient(exc: BaseException) -> bool:
+    """A failed read worth retrying: the engine unreachable, timing out, or
+    answering 5xx or 429. Anything else (auth, a refused read, a bug) is
+    reported at once rather than retried for the whole timeout."""
+    if isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500 or exc.response.status_code == 429
+    return False
+
+
 def find_done_row(
     store: _Reader, subspace: str, sha: str, *, timeout_s: float, fresh: bool = False,
     park_s: int = PARK_CAP_S, clock: Callable[[], float] = time.monotonic,
@@ -220,17 +239,19 @@ def find_done_row(
         while True:
             try:
                 return store.rd(subspace, n=_PAGE, since=cursor, timeout_s=timeout)
-            except Exception as exc:  # noqa: BLE001 — any failed read is retried, then reported
+            except Exception as exc:  # noqa: BLE001 — classified below: retried if transient, else reported
                 remaining = deadline - clock()
-                if remaining <= 0:
+                if not _transient(exc) or remaining <= 0:
                     raise BoardUnreadableError(f"{type(exc).__name__}: {exc}") from exc
                 sleep(min(_RETRY_S, remaining))
 
     def advance(page: list[TupleRow]) -> None:
         nonlocal cursor
-        last = page[-1]
-        if last.created_at:
-            cursor = (last.created_at, last.id)
+        last = next((r for r in reversed(page) if r.created_at), None)
+        moved = (last.created_at, last.id) if last is not None and last.created_at else None
+        if moved is None or moved == cursor:
+            raise BoardUnreadableError(f"{subspace}: a page of rows with no created_at; the read cannot advance")
+        cursor = moved
 
     while True:  # what is already there, oldest first; keep the newest match
         page = read()
