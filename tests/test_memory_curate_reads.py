@@ -22,6 +22,7 @@ import nexus.lua_runtime as lua_runtime
 from nexus import memory_curate as mc
 from nexus.cli import main
 from nexus.lua_runtime import runner
+from tests._module_seam import setattr_in
 from tests.test_memory_curate import _fm, _make_repo, _memdir
 
 _NOW = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
@@ -342,10 +343,10 @@ def test_a_pager_that_never_finishes_stops_at_the_page_cap(world, stubbed, monke
 def test_on_windows_the_counts_are_not_available(monkeypatch: pytest.MonkeyPatch) -> None:
     """Checked on every platform: the refusal looks at os.name before any path, and no CI leg
     runs this file on Windows."""
-    monkeypatch.setattr(mc.os, "name", "nt")
+    setattr_in(monkeypatch, mc, "os.name", "nt")  # this module's os only (tests/_module_seam.py)
     reason = mc._unmatchable(Path("/x/memory"))
     assert reason is not None and "Windows paths" in reason
-    monkeypatch.setattr(mc.os, "name", "posix")
+    setattr_in(monkeypatch, mc, "os.name", "posix")
     assert mc._unmatchable(Path("/x/memory")) is None
 
 
