@@ -1499,7 +1499,9 @@ sensitive document; a duplicate label inside one batch resolves without a
 
 #### Step 5: Wire ledger and engine cut 1
 
-Record the routes in `docs/wire-contract-pending.md` as `[additive]`. Cut
+Record the routes in `docs/wire-contract-pending.md`, each `[additive]` except
+the `GET /list` owner-with-`content_type` filter, which is `[not-additive]`
+(it now honours `owner`; no released client sends the pair). Cut
 the engine through the `engine-release` skill and its current gates: Step 2
 (engine suite and native build green on the exact commit), 3g (no held
 changeset), 4 (the tag, Sam's), 5 (`--acquire` against the published
@@ -1688,7 +1690,8 @@ The Minimum Viable Validation is in scope and runs at the end of Phase 2
 ### Cross-Cutting Concerns
 
 - **Versioning**: paired releases; floor bumps with each engine cut;
-  routes recorded as `[additive]` in the wire ledger.
+  routes recorded in the wire ledger, `[additive]` except the `GET /list`
+  owner-with-`content_type` filter (`[not-additive]`).
 - **Build tool compatibility**: pure Java, native-image safe; Liquibase
   changesets follow the per-dimension and GRANT re-issue shape.
 - **Licensing**: N/A (no new dependency).
