@@ -157,14 +157,35 @@ class TestShakeoutTupleSemantics:
         assert "HTTP 400" not in err and "string length not even" not in err
 
     def test_f11_a_real_cursor_from_a_returned_row_resumes_after_it(self, t2_service_env) -> None:
+        """`since` resumes AFTER a row; `from` starts AT one and `through` stops
+        AT one, both inclusive (nexus-1d6pz.11.2, the read a board notice
+        prints); a start or end row not in the subspace is an error, never the
+        next row, and reaching n before the end row is refused, never a short
+        read."""
         addr = _uniq("addr")
-        for i in range(2):
-            tuple_out(f"mailbox/{addr}", {"to": addr}, {"from": "s"}, f"m{i}", nonce=_uniq("nonce"))
-        first = tuple_rd(f"mailbox/{addr}", {"to": addr}, n=1)[0]
-        rest = tuple_rd(
-            f"mailbox/{addr}", {"to": addr}, n=5, since_created_at=first["created_at"], since_id=first["id"],
-        )
+        sub, keys = f"mailbox/{addr}", {"to": addr}
+        for i in range(4):
+            tuple_out(sub, keys, {"from": "s"}, f"m{i}", nonce=_uniq("nonce"))
+        rows = tuple_rd(sub, keys, n=10)
+        assert [r["body"] for r in rows] == ["m0", "m1", "m2", "m3"]
+        first, second, third = rows[0], rows[1], rows[2]
+        rest = tuple_rd(sub, keys, n=1, since_created_at=first["created_at"], since_id=first["id"])
         assert [r["body"] for r in rest] == ["m1"]
+
+        def frm(row: dict, **kw) -> list[dict]:
+            return tuple_rd(sub, keys, from_created_at=row["created_at"], from_id=row["id"], **kw)
+
+        assert [r["body"] for r in frm(second, n=1)] == ["m1"]
+        assert [r["body"] for r in frm(second, n=10)] == ["m1", "m2", "m3"]
+        through = {"through_created_at": third["created_at"], "through_id": third["id"]}
+        assert [r["body"] for r in frm(first, n=300, **through)] == ["m0", "m1", "m2"]
+        assert [r["body"] for r in frm(third, n=300, **through)] == ["m2"]
+        short = frm(first, n=2, **through)
+        assert len(short) == 1 and "more than n=2 rows" in short[0].get("error", ""), short
+        gone = tuple_rd(sub, keys, n=1, from_created_at=second["created_at"], from_id="0" * 63 + "1")
+        assert len(gone) == 1 and "is not in" in gone[0].get("error", ""), gone
+        no_end = frm(first, n=300, through_created_at=third["created_at"], through_id="f" * 64)
+        assert len(no_end) == 1 and "is not in" in no_end[0].get("error", ""), no_end
 
 
 class TestTupleInAckNack:

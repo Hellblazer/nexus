@@ -9050,11 +9050,12 @@ def tuple_rd(
             if timeout_s:
                 from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415 — rare/branch-local path
                 raise SchemaViolationError("from_created_at reads what is there; it does not park (timeout_s=0)")
+            from nexus.db.t2.http_tuple_store import check_from_read  # noqa: PLC0415 — rare/branch-local path
+            start = (from_created_at, from_id)
+            through = (through_created_at, through_id) if through_created_at else None
+            check_from_read(n, start, through)  # refused before any storage is opened
             with _t2_ctx() as db:
-                rows = db.tuples.rd_from(
-                    subspace, keys_pattern, n=n, start=(from_created_at, from_id),
-                    through=(through_created_at, through_id) if through_created_at else None,
-                )
+                rows = db.tuples.rd_from(subspace, keys_pattern, n=n, start=start, through=through)
             return [_tuple_row_to_dict(r) for r in rows]
         if bool(since_created_at) != bool(since_id):
             # bead nexus-o9gt2: one half used to be silently ignored, reading from the start.
