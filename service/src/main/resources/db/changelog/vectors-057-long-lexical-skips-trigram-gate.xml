@@ -1,0 +1,553 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-seo4k: a long lexical query skips the trigram half of the text gate.
+
+    WHY. nexus.text_gate_probe_<dim> admits a row when
+        c.chunk_tsv @@ plainto_tsquery('english', p_text)  OR  p_text <% c.chunk_text
+    The planner builds a BitmapOr of the two GIN indexes (idx_chunks_tsv, idx_chunks_trgm), so the trigram GIN scan runs
+    whatever the FTS half returns. For a sentence-length question that scan passes nothing (35 of 35 questions measured,
+    T2 nexus/seo4k-trigram-gate-recall-2026-11-09) and costs 20 to 30 times the FTS half. A STABLE current_setting guard
+    inside the one predicate does not help: the planner still builds both bitmap scans (T2
+    nexus/seo4k-guard-plan-2026-11-09). Only a choice made before the statement is planned removes the trigram scan, so
+    the function holds two statements and picks one.
+
+    WHAT CHANGES. Each probe's body becomes
+        IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+            RETURN QUERY <today's SELECT with the gate reduced to the FTS half>;
+        ELSE
+            RETURN QUERY <today's SELECT, unchanged>;
+        END IF;
+    The GUC is the caller's: the engine (PgVectorRepository.hybridRank) sets it transaction-locally to 'off' for a gate
+    text of more than LEXICAL_TRGM_MAX_WORDS (8) words and does not set it otherwise, so an unset GUC (including the empty
+    string a custom GUC reads as once a transaction that set it has ended) runs today's statement. Sam's choice (ask
+    linda/lexical-trigram-scope, option 1). Known loss: above 8 words a pasted passage with one word changed no longer
+    matches through the trigram half; identifiers, partial identifiers and short phrases keep it.
+
+    WHAT STAYS. Every signature, the return type (SETOF bytea), the owner, the grants and the security posture: CREATE OR
+    REPLACE keeps the oid and the ACL, so the Liquibase walk does not have to re-grant. The posture is whatever vectors-031-2
+    chose and this changeset reads it back: when the three probes are SECURITY DEFINER they stay so (plpgsql with the fixed
+    search_path and plan_cache_mode = force_custom_plan, exactly vectors-031-2's definer body); otherwise they were LANGUAGE
+    sql SECURITY INVOKER and become plpgsql SECURITY INVOKER (a function holding two statements cannot be one inlined SQL
+    expression), with plan_cache_mode = force_custom_plan so the call's values reach the planner as the definer form's do.
+    The by-chash rank and the HNSW-first rank are not changed: the rank re-applies the OR gate to rows that already passed
+    the probe, so its OR short-circuits on the FTS half, and HNSW-first runs only when the probe exceeds its cap.
+
+    The post-conditions: exactly one signature per probe, the three agree on SECURITY DEFINER, and the posture is the one
+    read at the start.
+
+    No DATA EFFECT: function definitions only. Placed after catalog-048 (the current tail), before the grants-nexus-svc.xml
+    runAlways block.
+-->
+
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-057-1" author="nexus-seo4k">
+        <comment>nexus-seo4k: text_gate_probe_384/768/1024 hold two statements and pick one by the caller's transaction-local GUC nexus.lexical_trgm: 'off' runs the gate as the FTS half alone, anything else (unset included) runs today's FTS-or-trigram statement. The engine sets the GUC to 'off' for a gate text of more than 8 words, so a sentence-length lexical query no longer builds the trigram GIN bitmap that passed nothing and cost 20 to 30 times the FTS half. Same signatures, same return type, same owner and grants (CREATE OR REPLACE); the SECURITY DEFINER or INVOKER posture vectors-031-2 chose is read back and kept (the invoker form moves from LANGUAGE sql to plpgsql). No data effect: function definitions only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DO $do$
+DECLARE
+    definer boolean;
+    n_def   int;
+BEGIN
+    SELECT count(*) FILTER (WHERE p.prosecdef) INTO n_def
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+    IF n_def NOT IN (0, 3) THEN
+        RAISE EXCEPTION 'vectors-057-1: % of the 3 text_gate_probe functions are SECURITY DEFINER; the three must agree before this changeset reads the posture', n_def;
+    END IF;
+    definer := n_def = 3;
+    IF definer THEN
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+     LIMIT p_cap;
+    ELSE
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+    END IF;
+END
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+     LIMIT p_cap;
+    ELSE
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+    END IF;
+END
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+     LIMIT p_cap;
+    ELSE
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+    END IF;
+END
+$$$f$;
+    ELSE
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+     LIMIT p_cap;
+    ELSE
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+    END IF;
+END
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+     LIMIT p_cap;
+    ELSE
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+    END IF;
+END
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+     LIMIT p_cap;
+    ELSE
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+    END IF;
+END
+$$$f$;
+    END IF;
+END
+$do$;
+
+DO $post$
+DECLARE
+    n         int;
+    n_def     int;
+    stale     text;
+    n_plpgsql int;
+BEGIN
+    SELECT count(*) INTO n
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+    IF n <> 3 THEN
+        SELECT string_agg(p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')', ', ')
+          INTO stale
+          FROM pg_catalog.pg_proc p
+         WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+           AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+        RAISE EXCEPTION 'vectors-057-1: expected exactly 3 text_gate_probe functions (one signature each), found %: %', n, stale;
+    END IF;
+    SELECT count(*) FILTER (WHERE p.prosecdef),
+           count(*) FILTER (WHERE p.prolang = (SELECT l.oid FROM pg_catalog.pg_language l WHERE l.lanname = 'plpgsql'))
+      INTO n_def, n_plpgsql
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+    IF n_def NOT IN (0, 3) THEN
+        RAISE EXCEPTION 'vectors-057-1: % of the 3 text_gate_probe functions are SECURITY DEFINER; the three must agree', n_def;
+    END IF;
+    IF n_plpgsql <> 3 THEN
+        RAISE EXCEPTION 'vectors-057-1: % of the 3 text_gate_probe functions are plpgsql; the three must be', n_plpgsql;
+    END IF;
+END
+$post$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DO $do$
+BEGIN
+    IF (SELECT count(*) FILTER (WHERE p.prosecdef) = 3
+          FROM pg_catalog.pg_proc p
+         WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+           AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024')) THEN
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+END
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+END
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+END
+$$$f$;
+    ELSE
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap
+$$$f$;
+    END IF;
+END
+$do$;
+]]></sql>
+        </rollback>
+
+    </changeSet>
+
+</databaseChangeLog>

@@ -3591,6 +3591,28 @@ public final class PgVectorRepository {
     static final int SELECTIVE_GATE_MAX = 5000;
 
     /**
+     * Longest gate text, in whitespace-separated words, whose text gate still includes the trigram half
+     * (nexus-seo4k; Sam's choice, ask linda/lexical-trigram-scope option 1). Above it {@link #hybridRank} sets the
+     * transaction-local GUC {@link #LEXICAL_TRGM_GUC} to {@code off}, and {@code nexus.text_gate_probe_<dim>}
+     * (vectors-057) gates on the FTS half alone: for a sentence-length question the trigram GIN bitmap passed nothing
+     * on 35 of 35 measured questions and cost 20 to 30 times the FTS half. Known loss: above this length a pasted
+     * passage with one word changed no longer matches through the trigram half; identifiers, partial identifiers and
+     * short phrases keep it.
+     */
+    public static final int LEXICAL_TRGM_MAX_WORDS = 8;
+
+    /** The probe's switch (vectors-057): {@code off} skips the trigram half; unset or anything else keeps it. */
+    public static final String LEXICAL_TRGM_GUC = "nexus.lexical_trgm";
+
+    /** True when {@code gateText} is longer than {@link #LEXICAL_TRGM_MAX_WORDS} whitespace-separated words. */
+    public static boolean skipsTrigramGate(String gateText) {
+        if (gateText == null) return false;
+        String t = gateText.strip();
+        if (t.isEmpty()) return false;
+        return t.split("\\s+").length > LEXICAL_TRGM_MAX_WORDS;
+    }
+
+    /**
      * RDR-155 Phase 3 - hybrid search: text signals ({@code tsvector} FTS + {@code pg_trgm}
      * trigram similarity) gate the candidate set, vector cosine distance ranks it, fused in
      * ONE query against the dispatched {@code chunks_<dim>} table. Replaces the engine's
@@ -3615,6 +3637,7 @@ public final class PgVectorRepository {
      *   <li><strong>Trigram rescue.</strong> The {@code pg_trgm} leg exists for queries the
      *       english stemmer mishandles (typos, identifiers): a query that matches no FTS
      *       lexeme still returns rows whose text is trigram-similar.
+     *       A gate text of more than {@link #LEXICAL_TRGM_MAX_WORDS} words skips this leg (nexus-seo4k, vectors-057).
      *   <li><strong>Same envelope as {@link #search}.</strong> Tenant RLS scope, per-dim
      *       dispatch with mixed-dim fail-loud, {@code collection IN (...)} multi-collection
      *       union, metadata {@code where} equality predicates ANDed with the text gate,
@@ -3995,6 +4018,12 @@ public final class PgVectorRepository {
         // for the selective case, supplies the exact chash set the rank query below
         // reuses via a cheap chash = ANY(...) PK filter, never re-running the
         // expensive `<%` trigram gate a second time.
+        // nexus-seo4k: a gate text of more than LEXICAL_TRGM_MAX_WORDS words gates on the FTS half alone; the probe
+        // reads this GUC and picks its FTS-only statement. Not set otherwise (a transaction-local setting ends with
+        // the transaction, so a pooled connection never carries it to the next caller).
+        if (skipsTrigramGate(gateQueryText)) {
+            PgSession.setLocal(ctx, LEXICAL_TRGM_GUC, "off");
+        }
         org.jooq.Table<?> probeFn = switch (dim) {
             case 384  -> TEXT_GATE_PROBE_384.call(
                 gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);

@@ -8,6 +8,7 @@ import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChunksIsolationCheck;
+import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TenantScope;
 import liquibase.Contexts;
@@ -216,6 +217,47 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
             .getValues(0, byte[].class).stream().map(b -> HexFormat.of().formatHex(b)).toList());
         assertThat(fromB).as("the probe stamped B, naming both collections: B's chunks only")
             .containsExactlyInAnyOrderElementsOf(idsB);
+    }
+
+    /**
+     * nexus-seo4k (vectors-057), the invoker posture: migrated as nexus_svc the probes are SECURITY INVOKER, and
+     * vectors-057 keeps that and moves them from LANGUAGE sql to plpgsql so one function can hold the FTS-only
+     * statement beside today's. With {@code nexus.lexical_trgm} unset a typo'd token passes the probe by its
+     * trigram half; with it {@code off} the same call returns nothing (the FTS half misses the typo), and the exact
+     * token still passes under both.
+     */
+    @Test
+    void migratedAsTheServiceRole_theInvokerProbesAreNowPlpgsql_andHonourTheTrigramSwitch() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var probes = PgCatalogProbes.functionDefinitionsIn(DSL.using(su, SQLDialect.POSTGRES), "nexus")
+                .values().stream().filter(f -> f.identity().startsWith("text_gate_probe_")).toList();
+            assertThat(probes).as("the three probes, one signature each").hasSize(3);
+            for (var f : probes) {
+                assertThat(f.securityDefiner()).as("%s stays SECURITY INVOKER", f.identity()).isFalse();
+                assertThat(f.language()).as("%s is plpgsql since vectors-057", f.identity()).isEqualTo("plpgsql");
+                assertThat(f.owner()).as("%s keeps its owner", f.identity()).isEqualTo(SVC);
+                assertThat(f.acl()).as("%s keeps nexus_svc's EXECUTE", f.identity()).contains("nexus_svc=X/");
+            }
+        }
+        String typoToken = "qzvkwz";   // one letter from TOKEN: a trigram hit (about 0.7), an FTS miss
+        var typoProbe = TEXT_GATE_PROBE_384.call(typoToken, new String[] {COLL_A}, null, null, 10_000, MODEL, TENANT_A);
+        var exactProbe = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A}, null, null, 10_000, MODEL, TENANT_A);
+        List<String> typoUnset = tenantScope.withTenant(TENANT_A, ctx -> ctx.selectFrom(typoProbe).fetch()
+            .getValues(0, byte[].class).stream().map(b -> HexFormat.of().formatHex(b)).toList());
+        assertThat(typoUnset).as("switch unset: the trigram half passes the typo'd token").containsExactlyInAnyOrderElementsOf(idsA);
+        List<String> typoOff = tenantScope.withTenant(TENANT_A, ctx -> {
+            PgSession.setLocal(ctx, "nexus.lexical_trgm", "off");
+            return ctx.selectFrom(typoProbe).fetch().getValues(0, byte[].class).stream()
+                .map(b -> HexFormat.of().formatHex(b)).toList();
+        });
+        assertThat(typoOff).as("switch off: the FTS half alone, the typo'd token passes nothing").isEmpty();
+        List<String> exactOff = tenantScope.withTenant(TENANT_A, ctx -> {
+            PgSession.setLocal(ctx, "nexus.lexical_trgm", "off");
+            return ctx.selectFrom(exactProbe).fetch().getValues(0, byte[].class).stream()
+                .map(b -> HexFormat.of().formatHex(b)).toList();
+        });
+        assertThat(exactOff).as("switch off: the exact token still passes by its FTS half, A's rows only")
+            .containsExactlyInAnyOrderElementsOf(idsA);
     }
 
     // ---------------------------------------------------------------------------------------------------

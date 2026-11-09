@@ -613,6 +613,26 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     }
 
     /**
+     * nexus-seo4k: with nexus.lexical_trgm = off (what the engine sets for a gate text of more than
+     * {@code PgVectorRepository.LEXICAL_TRGM_MAX_WORDS} words) the probe's body is the FTS half alone: a Bitmap Index Scan
+     * of the FTS GIN index and none of the trigram one. The control is the same call with the GUC unset, whose plan
+     * reaches the trigram index (the BitmapOr of both halves), so the "none" is not vacuous.
+     */
+    @Test
+    void gateProbe_withTheTrigramGucOff_plansTheFtsHalfOnly_andWithItUnsetPlansBoth() throws Exception {
+        String off = probeBodyPlan("text_gate_probe_384 (nexus.lexical_trgm = off), body plan as nexus_svc", RARE_TOKEN, true);
+        assertThat(off).as("the FTS half still drives the gate. Plan was:%n%s", off).containsPattern(ftsIndexOnTheTenantLeaf());
+        assertThat(off).as("no trigram index scan with the GUC off. Plan was:%n%s", off)
+            .doesNotContainPattern(trigramIndexOnTheTenantLeaf());
+        assertThat(seqScansOfTheTenantLeaf(off)).as("no sequential scan of the tenant's leaf. Plan was:%n%s", off).isEmpty();
+
+        String on = probeBodyPlan("text_gate_probe_384 (nexus.lexical_trgm unset), body plan as nexus_svc", RARE_TOKEN, false);
+        assertThat(on).as("control: with the GUC unset the body still reaches the trigram index. Plan was:%n%s", on)
+            .containsPattern(trigramIndexOnTheTenantLeaf());
+        assertThat(on).as("control: and the FTS index. Plan was:%n%s", on).containsPattern(ftsIndexOnTheTenantLeaf());
+    }
+
+    /**
      * The three functions vectors-029 changed are definer functions with a pinned search_path and no
      * EXECUTE for PUBLIC; nexus_svc keeps EXECUTE (the calls above would fail otherwise).
      */
@@ -981,6 +1001,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
 
     private String tenantLeaf;
     private List<String> tenantLeafGinIndexes;
+    private List<String> tenantLeafTrgmIndexes;
 
     /** The leaf of nexus.chunks holding TENANT's chunks, and the names of its child indexes of idx_chunks_tsv and idx_chunks_trgm. */
     private synchronized void readTenantLeaf() throws Exception {
@@ -997,7 +1018,16 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                 .and(DSL.field(DSL.name("tablename"), String.class).eq(tenantLeaf))
                 .and(DSL.field(DSL.name("indexdef"), String.class).like("%USING gin%"))
                 .fetch(indexName);
+            // nexus-seo4k: the trigram one of the two, found by its operator class.
+            tenantLeafTrgmIndexes = ctx.select(indexName)
+                .from(DSL.table(DSL.name("pg_catalog", "pg_indexes")))
+                .where(DSL.field(DSL.name("schemaname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("tablename"), String.class).eq(tenantLeaf))
+                .and(DSL.field(DSL.name("indexdef"), String.class).like("%gin_trgm_ops%"))
+                .fetch(indexName);
         }
+        assertThat(tenantLeafTrgmIndexes).as("non-vacuity: leaf %s carries exactly one trigram GIN index",
+            tenantLeaf).hasSize(1);
         assertThat(tenantLeafGinIndexes).as("non-vacuity: leaf %s carries child indexes of both GIN text indexes",
             tenantLeaf).hasSize(2);
     }
@@ -1006,6 +1036,20 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     private Pattern ginIndexOnTheTenantLeaf() throws Exception {
         readTenantLeaf();
         return Pattern.compile("Bitmap Index Scan on (" + String.join("|", tenantLeafGinIndexes) + ")");
+    }
+
+    /** {@code Bitmap Index Scan on <the child of idx_chunks_trgm on the tenant's leaf>}. */
+    private Pattern trigramIndexOnTheTenantLeaf() throws Exception {
+        readTenantLeaf();
+        return Pattern.compile("Bitmap Index Scan on (" + String.join("|", tenantLeafTrgmIndexes) + ")");
+    }
+
+    /** {@code Bitmap Index Scan on <the child of idx_chunks_tsv on the tenant's leaf>} (the GIN index that is not the trigram one). */
+    private Pattern ftsIndexOnTheTenantLeaf() throws Exception {
+        readTenantLeaf();
+        List<String> fts = tenantLeafGinIndexes.stream().filter(n -> !tenantLeafTrgmIndexes.contains(n)).toList();
+        assertThat(fts).as("non-vacuity: the leaf's other GIN index is the FTS one").hasSize(1);
+        return Pattern.compile("Bitmap Index Scan on (" + String.join("|", fts) + ")");
     }
 
     /** The plan lines that seq-scan the tenant's leaf. The tenant's other leaves (one per other model) are empty,
@@ -1025,9 +1069,17 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
      * The whole entry lands in the evidence file; the return value is the plan alone.
      */
     private String probeBodyPlan(String label, String token) throws Exception {
+        return probeBodyPlan(label, token, false);
+    }
+
+    /** As above; {@code trigramOff} sets nexus.lexical_trgm to off for the call, the way a long lexical query's transaction does (nexus-seo4k). */
+    private String probeBodyPlan(String label, String token, boolean trigramOff) throws Exception {
         int from = PgContainerHelper.serverLog(pg).length();
         Table<?> fn = probe384(token, COLL);
-        int rows = explainScope.withTenant(TENANT, ctx -> ctx.selectFrom(fn).fetch().size());
+        int rows = explainScope.withTenant(TENANT, ctx -> {
+            if (trigramOff) PgSession.setLocal(ctx, PgVectorRepository.LEXICAL_TRGM_GUC, "off");
+            return ctx.selectFrom(fn).fetch().size();
+        });
         String block = null;
         for (int attempt = 0; attempt < 100 && block == null; attempt++) {
             String logs = PgContainerHelper.serverLog(pg);
