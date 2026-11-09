@@ -1,0 +1,3 @@
+### Added
+
+- **A CI board notice names the commit its result is for** (nexus-1d6pz.11.3). The channel's notice for a `board/ci/<repo>-<branch>--done` post carries `sha="<40 hex>"` (and the text says `for sha ...`; a batch carries `shas`, aligned with `tuple_ids`), so a session that pushed tells its own wake from a peer's without a `tuple_rd`. The sha comes from the row's `sha` dim once the adapter writes it (engine v0.1.184), else from the row body, and only when it is exactly 40 lowercase hex digits: the body is unattested, so nothing else of it reaches the notice. `scripts/git-push-develop.sh`'s `PUSH_WAIT` channel line names the sha to look for.
