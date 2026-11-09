@@ -101,7 +101,7 @@ def test_slack_and_stale_entries_are_noted(repo: Path) -> None:
     f = fsr.check(repo)
     assert f.errors == []
     joined = "\n".join(f.notes)
-    assert "big.py: 18 lines, below its ceiling of 20" in joined
+    assert "big.py" not in joined, "headroom within tolerance is the seeded norm, not a finding"
     assert "small.py: now within its cap" in joined
     assert "gone.py: listed with ceiling 40 but not a tracked" in joined
 
@@ -136,8 +136,13 @@ def test_update_lowers_and_drops_without_flag(repo: Path) -> None:
         "src/nexus/big.py 20\nsrc/nexus/small.py 30\n"
     )
     assert fsr.update_exceptions(repo, allow_raise=False) == []
-    assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 18}
+    assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 20}, (
+        "an accepted ceiling is kept, not churned"
+    )
     assert fsr.check(repo).notes == []
+    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 30\n")  # past two slacks
+    assert fsr.update_exceptions(repo, allow_raise=False) == []
+    assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 21}, "18 + 3"
 
 
 def test_update_refuses_raise_and_new_entries_without_flag(repo: Path) -> None:
@@ -157,9 +162,9 @@ def test_update_refuses_raise_and_new_entries_without_flag(repo: Path) -> None:
     )
     assert fsr.update_exceptions(repo, allow_raise=True) == []
     assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {
-        "src/nexus/big.py": 22,
-        "src/nexus/new.py": 16,
-    }
+        "src/nexus/big.py": 25,
+        "src/nexus/new.py": 19,
+    }, "a raise or new entry is written at size plus one slack"
     assert fsr.check(repo).errors == []
 
 
@@ -208,9 +213,9 @@ def test_tracked_but_deleted_file_is_skipped(repo: Path) -> None:
 def test_slack_past_tolerance_fails(repo: Path) -> None:
     _write(repo, "src/nexus/big.py", 16)
     _track(repo)
-    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 19\n")
-    assert fsr.check(repo).errors == [], "3 lines of slack is within SLACK_MIN"
-    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 20\n")
+    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 22\n")
+    assert fsr.check(repo).errors == [], "two slacks of SLACK_MIN (6 lines) are tolerated"
+    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 23\n")
     assert any("lower it in this commit" in e for e in fsr.check(repo).errors)
 
 
@@ -267,7 +272,7 @@ def test_update_keeps_a_grown_listed_directory_at_its_ceiling(repo: Path) -> Non
     (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 20\n")
     assert fsr.update_exceptions(repo, allow_raise=False) == []
     assert fsr._read_shape(repo / fsr.SHAPE_EXCEPTIONS)[0] == {"src/nexus/pkg": 4}
-    assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 16}
+    assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 20}
     assert fsr.update_exceptions(repo, allow_raise=True) == []
     assert fsr._read_shape(repo / fsr.SHAPE_EXCEPTIONS)[0] == {"src/nexus/pkg": 5}
 
@@ -278,9 +283,10 @@ def test_slack_fraction_applies_to_large_files(
     monkeypatch.setattr(fsr, "SOURCE_HARD_CAP", 100)
     _write(repo, "src/nexus/big.py", 200)
     _track(repo)
-    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 210\n")  # 5% of 200 is 10
+    # slack is taken from the ceiling: 5% of 222 is 11, two of them reach 222 exactly
+    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 222\n")
     assert fsr.check(repo).errors == []
-    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 211\n")
+    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 223\n")
     assert any("lower it in this commit" in e for e in fsr.check(repo).errors)
 
 
@@ -302,6 +308,24 @@ def test_update_seeds_at_the_hard_cap_not_the_soft_cap(repo: Path) -> None:
     _track(repo)
     assert fsr.update_exceptions(repo, allow_raise=False) == []
     assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {}
+
+
+def test_seeded_ceilings_carry_headroom_so_a_small_growth_passes(repo: Path) -> None:
+    _write(repo, "src/nexus/big.py", 20)
+    _track(repo)
+    assert fsr.update_exceptions(repo, allow_raise=True) == []
+    assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 23}
+    _write(repo, "src/nexus/big.py", 23)  # an ordinary edit
+    assert fsr.check(repo).errors == []
+    assert fsr.update_exceptions(repo, allow_raise=False) == [], "an accepted entry is no raise"
+    assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {"src/nexus/big.py": 23}
+    _write(repo, "src/nexus/big.py", 24)
+    assert any("over its ceiling of 23" in e for e in fsr.check(repo).errors)
+
+
+def test_a_shrink_by_a_whole_headroom_passes_at_every_size() -> None:
+    for size in (1600, 2100, 5000, 20000):
+        assert fsr.accepted(size - fsr.slack_allowed(size), fsr.ceiling_for(size)), size
 
 
 def test_duplicate_entries_are_refused(repo: Path) -> None:

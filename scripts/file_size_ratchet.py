@@ -13,10 +13,11 @@ Size rule. Every tracked source file is counted in physical lines:
     test    tests/**/*.py, service/src/test/**/*.java        fail over 1000
 
 A file over its fail cap passes only when ``scripts/file-size-exceptions.txt`` lists it as
-``<path> <ceiling>`` and its size is at or below that ceiling. A ceiling may keep a little slack
-above its file (``max(100 lines, 5%)``), so an ordinary edit never touches the exceptions file; more
-slack than that fails, so the commit that splits a file lowers its ceiling (``update-exceptions``)
-and the ceiling really falls. An entry for a file now under its cap, or gone, is reported.
+``<path> <ceiling>`` and its size is at or below that ceiling. With ``slack = max(100 lines, 5%)``,
+a ceiling is written at the file's size plus one slack of headroom, so an ordinary edit never touches
+the exceptions file. A ceiling more than two slacks above its file fails, so the commit that splits
+a file lowers its ceiling (``update-exceptions``) and the ceiling really falls. An entry for a file
+now under its cap, or gone, is reported.
 
 Shape rule, ``src/nexus`` only (``__init__.py`` counts as a module). A directory may hold at most 40
 Python modules directly, and a module ``x.py`` may not sit beside a ``x_*.py`` family (make it a
@@ -42,7 +43,8 @@ SOURCE_SOFT_CAP: int = 800
 SOURCE_HARD_CAP: int = 1500
 TEST_CAP: int = 1000
 DIR_MODULE_CAP: int = 40
-#: Slack a ceiling may keep above its file before check fails: max(SLACK_MIN, SLACK_FRACTION * size).
+#: One slack is max(SLACK_MIN, SLACK_FRACTION * size): a ceiling is seeded one slack above its file
+#: and check fails it once it sits more than two slacks above (Sam, ask ratchet-rollout: headroom).
 SLACK_MIN: int = 100
 SLACK_FRACTION: float = 0.05
 
@@ -57,8 +59,9 @@ EXIT_OK: int = 0
 EXIT_OVER: int = 10
 
 _SIZE_HEADER = """\
-# File-size ceilings (scripts/file_size_ratchet.py, nexus-3ceda.1). One `<path> <ceiling>` per line.
-# A listed file may not grow past its ceiling. Ceilings only fall: lower one in the commit that
+# File-size ceilings (scripts/file_size_ratchet.py, nexus-3ceda.1). One `<path> <ceiling>` per line,
+# at the file's size plus max(100 lines, 5%) of headroom. A listed file may not grow past its
+# ceiling. Ceilings only fall: a shrink of more than two headrooms lowers its entry in the commit that
 # shrinks the file (`python3 scripts/file_size_ratchet.py update-exceptions`); raising one or adding
 # a file needs `--allow-raise` and a reason in the commit message. Before adding to a file over its
 # cap, move the area you touch into its own module first.
@@ -171,6 +174,17 @@ def slack_allowed(size: int) -> int:
     return max(SLACK_MIN, int(SLACK_FRACTION * size))
 
 
+def ceiling_for(size: int) -> int:
+    """The ceiling written for a file of this size: one slack of headroom above it."""
+    return size + slack_allowed(size)
+
+
+def accepted(size: int, ceiling: int) -> bool:
+    """Whether check accepts this ceiling: not exceeded, and at most two slacks above the file.
+    The slack is taken from the ceiling, so a shrink by a whole headroom passes at every size."""
+    return size <= ceiling <= size + 2 * slack_allowed(ceiling)
+
+
 _RAISE_HINT = "(a legitimate raise: update-exceptions --allow-raise, with the reason in the commit message)"
 
 
@@ -204,15 +218,11 @@ def check(root: Path) -> Findings:
                     f"{p}: {n} lines, over its ceiling of {ceiling}; ceilings only fall, "
                     f"so move the area you touched into its own module first {_RAISE_HINT}"
                 )
-            elif ceiling - n > slack_allowed(n):
+            elif not accepted(n, ceiling):
                 errors.append(
                     f"{p}: {n} lines, {ceiling - n} below its ceiling of {ceiling} (more than "
-                    f"{slack_allowed(n)} of slack); lower it in this commit: "
+                    f"{2 * slack_allowed(ceiling)}); the shrink is real, so lower it in this commit: "
                     "python3 scripts/file_size_ratchet.py update-exceptions"
-                )
-            elif n < ceiling:
-                notes.append(
-                    f"{p}: {n} lines, below its ceiling of {ceiling}: lower it (update-exceptions)"
                 )
         elif not is_test and n > SOURCE_SOFT_CAP:
             warnings.append(f"{p}: {n} lines, over the soft cap of {SOURCE_SOFT_CAP}")
@@ -261,13 +271,10 @@ def update_exceptions(root: Path, allow_raise: bool) -> list[str]:
     """Rewrite both exceptions files to today's state; return refusals (nothing written if any)."""
     source, tests = measure_sizes(root)
     old = _read_pairs(root / SIZE_EXCEPTIONS)
-    new: dict[str, int] = {}
-    for p, n in source.items():
-        if n > SOURCE_HARD_CAP:
-            new[p] = n
-    for p, n in tests.items():
-        if n > TEST_CAP:
-            new[p] = n
+    over = {
+        **{p: n for p, n in source.items() if n > SOURCE_HARD_CAP},
+        **{p: n for p, n in tests.items() if n > TEST_CAP},
+    }
     counts, families = measure_shape(root)
     old_dirs, old_fams = _read_shape(root / SHAPE_EXCEPTIONS)
     new_dirs = {d: n for d, n in counts.items() if n > DIR_MODULE_CAP}
@@ -281,7 +288,7 @@ def update_exceptions(root: Path, allow_raise: bool) -> list[str]:
 
     refusals: list[str] = []
     if not allow_raise:
-        for p, n in sorted(new.items()):
+        for p, n in sorted(over.items()):
             if p not in old:
                 refusals.append(f"{p}: new exception at {n} lines")
             elif n > old[p]:
@@ -294,6 +301,9 @@ def update_exceptions(root: Path, allow_raise: bool) -> list[str]:
     if refusals:
         return refusals
 
+    # An entry check accepts stays as it is (no churn on a shared file); a new, raised or too-slack
+    # one is rewritten at the file's size plus its headroom.
+    new = {p: old[p] if p in old and accepted(n, old[p]) else ceiling_for(n) for p, n in over.items()}
     body = "".join(f"{p} {n}\n" for p, n in sorted(new.items()))
     (root / SIZE_EXCEPTIONS).write_text(_SIZE_HEADER + body)
     shape = "".join(f"dir {d} {n}\n" for d, n in sorted(new_dirs.items()))
