@@ -13890,6 +13890,18 @@ public final class CatalogRepository {
         }
     }
 
+    /**
+     * A stage page for a run whose commit holds the run header (it has started and is not finished): refused without
+     * waiting, because the commit's closing DELETE would drop a row it never read. The handler's 409.
+     */
+    public static final class ReconcileRunBusyException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        public ReconcileRunBusyException(String message) {
+            super(message);
+        }
+    }
+
     /** The most landing rows one stage call takes (the 14 bind parameters a row binds keep a page far under the driver's limit). */
     static final int RECONCILE_STAGE_MAX_ROWS = 1000;
     /** The age past which a run is dropped by the reap every stage call starts with (design item 3: 24 hours). */
@@ -13920,20 +13932,27 @@ public final class CatalogRepository {
         var seenPaths = new HashSet<String>();
         var staged = new ArrayList<Object[]>(rows.size());
         for (Map<String, Object> r : rows) {
-            String kind = s(r, "kind");
+            String kind = reconcileString(r, "kind", "?");
             if (!"present".equals(kind) && !"keep".equals(kind) && !"deleted".equals(kind)) {
                 throw new IllegalArgumentException("row kind must be present, keep or deleted, got '" + kind + "'");
             }
-            String filePath = s(r, "file_path");
-            if (filePath == null || filePath.isEmpty()) throw new IllegalArgumentException("a row needs a non-empty file_path");
+            String filePath = reconcileString(r, "file_path", "?");
+            if (filePath.isEmpty()) throw new IllegalArgumentException("a row needs a non-empty file_path");
             if (!seenPaths.add(filePath)) {
                 throw new IllegalArgumentException("duplicate file_path in the run: " + filePath);
             }
-            Integer seq = i(r, "seq");
-            if (seq == null || seq < 0) throw new IllegalArgumentException("a row needs a seq of 0 or more (file_path " + filePath + ")");
+            Object seqRaw = r.get("seq");
+            if (!(seqRaw instanceof Integer seq) || seq < 0) {
+                throw new IllegalArgumentException("a row needs a 'seq' that is a whole number of 0 or more in the range of a 32-bit integer (file_path " + filePath + ")");
+            }
+            Object mtimeRaw = r.get("source_mtime");
+            if (mtimeRaw != null && !(mtimeRaw instanceof Number)) {
+                throw new IllegalArgumentException("'source_mtime' must be a number (file_path " + filePath + ")");
+            }
             staged.add(new Object[] {
-                seq, kind, filePath, nne(s(r, "content_type")), nne(s(r, "title")), nne(s(r, "physical_collection")),
-                nne(s(r, "head_hash")), nd(dbl(r, "source_mtime")), nne(s(r, "content_hash")),
+                seq, kind, filePath, reconcileString(r, "content_type", filePath), reconcileString(r, "title", filePath),
+                reconcileString(r, "physical_collection", filePath), reconcileString(r, "head_hash", filePath),
+                mtimeRaw == null ? 0.0 : ((Number) mtimeRaw).doubleValue(), reconcileString(r, "content_hash", filePath),
                 reconcileObject(r, "base_metadata", filePath), reconcileObject(r, "stamp", filePath), sensitiveFlag(r)});
         }
         return tenantScope.withTenant(tenant, ctx -> {
@@ -13943,11 +13962,24 @@ public final class CatalogRepository {
                .values(tenant, runId, owner, walk, expectedRows)
                .onConflict(CATALOG_RECONCILE_RUNS.TENANT_ID, CATALOG_RECONCILE_RUNS.RUN_ID).doNothing()
                .execute();
-            var header = ctx.select(CATALOG_RECONCILE_RUNS.OWNER_TUMBLER, CATALOG_RECONCILE_RUNS.WALK,
-                                    CATALOG_RECONCILE_RUNS.EXPECTED_ROWS, CATALOG_RECONCILE_RUNS.STATE)
-                            .from(CATALOG_RECONCILE_RUNS)
-                            .where(CATALOG_RECONCILE_RUNS.TENANT_ID.eq(tenant).and(CATALOG_RECONCILE_RUNS.RUN_ID.eq(runId)))
-                            .fetchOne();
+            // FOR SHARE NOWAIT on the header, held to the end of this page's transaction: the commit's first statement
+            // takes the same row FOR UPDATE, so a page cannot land while a commit has the run (it would be deleted
+            // by the commit's closing DELETE without having been read), and a commit waits for a page in flight
+            var headerQuery = ctx.select(CATALOG_RECONCILE_RUNS.OWNER_TUMBLER, CATALOG_RECONCILE_RUNS.WALK,
+                                         CATALOG_RECONCILE_RUNS.EXPECTED_ROWS, CATALOG_RECONCILE_RUNS.STATE)
+                                 .from(CATALOG_RECONCILE_RUNS)
+                                 .where(CATALOG_RECONCILE_RUNS.TENANT_ID.eq(tenant).and(CATALOG_RECONCILE_RUNS.RUN_ID.eq(runId)))
+                                 .forShare().noWait();
+            org.jooq.Record4<String, String, Integer, String> header;
+            try {
+                header = headerQuery.fetchOne();
+            } catch (org.jooq.exception.DataAccessException e) {
+                if ("55P03".equals(sqlStateOf(e))) {
+                    throw new ReconcileRunBusyException("run " + runId + " has a commit in progress, so this page was not "
+                        + "staged; wait for the commit's outcome, then stage a new run");
+                }
+                throw e;
+            }
             if (!owner.equals(header.value1())) {
                 throw new IllegalArgumentException("run " + runId + " was started for owner " + header.value1() + ", not " + owner);
             }
@@ -13995,6 +14027,17 @@ public final class CatalogRepository {
                 throw e;
             }
         });
+    }
+
+    /**
+     * A staged row's string field: absent or null is the empty string, a string is itself, anything else is refused
+     * naming the field and the file ({@code s} would read a number as absent and stage an empty value silently).
+     */
+    private static String reconcileString(Map<String, Object> row, String key, String filePath) {
+        Object v = row.get(key);
+        if (v == null) return "";
+        if (v instanceof String sv) return sv;
+        throw new IllegalArgumentException("'" + key + "' must be a string (file_path " + filePath + ")");
     }
 
     /** A staged row's {@code base_metadata} or {@code stamp}: absent or null is the empty object; anything but an object is refused. */
@@ -14131,6 +14174,12 @@ public final class CatalogRepository {
             throw new IllegalArgumentException(
                 "a 'source_uri', or an absolute 'file_path' to derive one from, is required: it is the document's identity");
         }
+        // Step 6 implements the flag (born flagged, audited, inherited); until then a request that carries it is refused
+        // rather than answered as if it had been honoured
+        if (req.get("sensitive") != null) {
+            throw new IllegalArgumentException("'sensitive' is not supported by resolve_or_register yet "
+                + "(RDR-193 Step 6): register the document, then raise the flag through the audited route");
+        }
         final String ownerPrefix = curatorOwnerPrefix(tenant, ownerName);
         final String ownerDot = ownerPrefix + ".";
 
@@ -14147,7 +14196,8 @@ public final class CatalogRepository {
                 return new ResolveOutcome(hit.value1(), false, false);
             }
             if (titleFallback && !title.isEmpty()) {
-                var ghosts = documentsByTitleQuery(ctx, title, ownerPrefix, null, 0).fetch();
+                // store_hook._find_ghost_by_title filters content_type="knowledge": the request's type, when it gives one
+                var ghosts = documentsByTitleQuery(ctx, title, ownerPrefix, contentType, 0).fetch();
                 if (!ghosts.isEmpty()) {
                     var ghost = ghosts.get(0);
                     backfillTitleAndYear(ctx, tenant, ghost.get(CATALOG_DOCUMENTS.TUMBLER), ghost.get(CATALOG_DOCUMENTS.TITLE),

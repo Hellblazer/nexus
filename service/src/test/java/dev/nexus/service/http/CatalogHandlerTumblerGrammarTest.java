@@ -313,6 +313,77 @@ class CatalogHandlerTumblerGrammarTest {
         assertThat((java.util.List<?>) body.get("tumblers")).hasSize(2);
     }
 
+    // ── /reconcile/stage and /reconcile/commit (RDR-193 Part C, nexus-u5m5g.3) ───────────────
+    //
+    // Both routes take the owner under the key "owner" and the commit lazily INSERTs a catalog_owners row named by
+    // it and mints "<owner>.N" documents: an unvalidated one-segment or three-segment owner is the phantom-owner
+    // class nexus-v3w9n exists for. The key is not "tumbler_prefix", so a grep census on that literal misses it.
+
+    private static final String RECONCILE_ROW =
+        "{\"seq\":0,\"kind\":\"present\",\"file_path\":\"a.py\",\"title\":\"a.py\"}";
+
+    private static String stageBody(String owner, String run) {
+        return "{\"owner\":\"" + owner + "\",\"run_id\":\"" + run + "\",\"walk\":\"partial\","
+            + "\"expected_rows\":1,\"rows\":[" + RECONCILE_ROW + "]}";
+    }
+
+    private void assertGrammarRefusal(CapturingExchange ex, String field, String value) throws Exception {
+        assertThat(ex.status).as("response body: %s", ex.bodyString()).isEqualTo(400);
+        Map<String, Object> body = MAPPER.readValue(ex.bodyString(), Map.class);
+        assertThat(body.get("rule")).isEqualTo("tumbler-grammar");
+        assertThat(body.get("field")).isEqualTo(field);
+        assertThat(body.get("value")).isEqualTo(value);
+    }
+
+    @Test
+    void reconcileStage_oneSegmentOwner_400sNamingRule_andStagesNothing() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/reconcile/stage", stageBody("7801", "rc-grammar-1"));
+        handleWithTenant(ex);
+        assertGrammarRefusal(ex, "owner", "7801");
+        var runs = dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS;
+        assertThat((Integer) tenantScope.withTenant(TENANT, ctx -> ctx.fetchCount(runs,
+            runs.TENANT_ID.eq(TENANT).and(runs.RUN_ID.eq("rc-grammar-1")))))
+            .as("the refused page created no run header").isZero();
+    }
+
+    @Test
+    void reconcileStage_threeSegmentOwner_400sNamingRule() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/reconcile/stage", stageBody("1.7802.3", "rc-grammar-2"));
+        handleWithTenant(ex);
+        assertGrammarRefusal(ex, "owner", "1.7802.3");
+    }
+
+    @Test
+    void reconcileStage_conformingOwner_succeeds() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/reconcile/stage", stageBody("1.7804", "rc-grammar-3"));
+        handleWithTenant(ex);
+        assertThat(ex.status).as("response body: %s", ex.bodyString()).isEqualTo(200);
+    }
+
+    @Test
+    void reconcileCommit_oneSegmentOwner_400sNamingRule_beforeAnyRegistryOrOwnerWrite() throws Exception {
+        // the handler built here has no job registry, which answers 503 to a conforming owner: the 400 comes first
+        CapturingExchange ex = post("/v1/catalog/reconcile/commit", "{\"owner\":\"7805\",\"run_id\":\"rc-grammar-4\"}");
+        handleWithTenant(ex);
+        assertGrammarRefusal(ex, "owner", "7805");
+        assertThat(repo.listOwners(TENANT, true)).as("no owner row was minted from the string")
+            .noneMatch(o -> "7805".equals(o.get("tumbler_prefix")));
+    }
+
+    @Test
+    void reconcileCommit_threeSegmentOwner_400sNamingRule() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/reconcile/commit", "{\"owner\":\"1.7806.2\",\"run_id\":\"rc-grammar-5\"}");
+        handleWithTenant(ex);
+        assertGrammarRefusal(ex, "owner", "1.7806.2");
+    }
+
+    @Test
+    void reconcileCommit_conformingOwner_passesTheGrammar() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/reconcile/commit", "{\"owner\":\"1.7807\",\"run_id\":\"rc-grammar-6\"}");
+        handleWithTenant(ex);
+        assertThat(ex.status).as("response body: %s", ex.bodyString()).isEqualTo(503);   // no registry on this handler
+    }
+
     // ── helpers (mirrors CatalogHandlerRegisterCreatedFlagTest) ────────────────
 
     private void handleWithTenant(CapturingExchange ex) throws Exception {

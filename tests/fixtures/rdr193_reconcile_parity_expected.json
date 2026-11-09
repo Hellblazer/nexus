@@ -260,6 +260,76 @@
    "title": "edit.md",
    "year": 0
   },
+  "del_dup::M:del_dup/dup.txt#0": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": "<set>",
+   "file_path": "del_dup/dup.txt",
+   "head_hash": "h1",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "category": "prose",
+    "content_hash": "6529f65d55fac293ecfef6194a5bac1cca2975471b3d4ce527edecc282ec3c91",
+    "miss_count": 1,
+    "source_format": "prose",
+    "tags": [
+     "txt"
+    ]
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 1700000075,
+   "source_uri": "file://@ROOT/del_dup/dup.txt",
+   "title": "dup.txt",
+   "year": 0
+  },
+  "del_dup::M:del_dup/dup.txt#1": {
+   "alias_of": "",
+   "author": "",
+   "bib_authors": "",
+   "bib_citation_count": 0,
+   "bib_doi": "",
+   "bib_enriched_at": null,
+   "bib_openalex_id": "",
+   "bib_semantic_scholar_id": "",
+   "bib_venue": "",
+   "bib_year": 0,
+   "chunk_count": 0,
+   "content_type": "prose",
+   "corpus": "",
+   "deleted_at": null,
+   "file_path": "del_dup/dup.txt",
+   "head_hash": "",
+   "index_content_hash": "",
+   "index_run_id": "",
+   "index_started_at": null,
+   "index_state": null,
+   "indexed_at": null,
+   "metadata": {
+    "miss_count": 1
+   },
+   "physical_collection": "docs__rdr193parity",
+   "sensitive": false,
+   "source_mtime": 0,
+   "source_uri": "file://@ROOT/del_dup/alt/dup.txt",
+   "title": "del dup twin",
+   "year": 0
+  },
   "fence::M:fence/complete.txt#0": {
    "alias_of": "",
    "author": "",
@@ -2954,13 +3024,19 @@
    "tumbler": "M.47"
   },
   "ch_fence::M:ch_fence/new.txt#0": {
-   "tumbler": "M.72"
+   "tumbler": "M.74"
   },
   "ch_head::M:ch_head/doc.txt#0": {
    "tumbler": "M.44"
   },
   "ch_rdr::M:ch_rdr/edit.md#0": {
    "tumbler": "M.46"
+  },
+  "del_dup::M:del_dup/dup.txt#0": {
+   "tumbler": "M.60"
+  },
+  "del_dup::M:del_dup/dup.txt#1": {
+   "tumbler": "M.62"
   },
   "fence::M:fence/complete.txt#0": {
    "tumbler": "M.50"
@@ -3002,7 +3078,7 @@
    "tumbler": "M.54"
   },
   "id_duplicate::M:id_duplicate/dup.txt#1": {
-   "tumbler": "M.60"
+   "tumbler": "M.61"
   },
   "id_foreign::X:id_foreign/x.txt#0": {
    "tumbler": "X.1"
@@ -3026,7 +3102,7 @@
    "tumbler": "M.55"
   },
   "misc::M:misc/plain_new.txt#0": {
-   "tumbler": "M.74"
+   "tumbler": "M.76"
   },
   "misc::M:misc/reset_miss.txt#0": {
    "tumbler": "M.58"
@@ -3035,13 +3111,13 @@
    "tumbler": "M.59"
   },
   "misc::M:misc/sens_new.txt#0": {
-   "tumbler": "M.73"
+   "tumbler": "M.75"
   },
   "ren_alias::M:ren_alias/a.txt#0": {
    "tumbler": "M.28"
   },
   "ren_alias::M:ren_alias/a2.txt#0": {
-   "tumbler": "M.69"
+   "tumbler": "M.71"
   },
   "ren_alias::M:ren_alias/alias.txt#0": {
    "tumbler": "M.29"
@@ -3053,7 +3129,7 @@
    "tumbler": "M.26"
   },
   "ren_and_deleted::M:ren_and_deleted/b.txt#0": {
-   "tumbler": "M.68"
+   "tumbler": "M.70"
   },
   "ren_and_deleted::M:ren_and_deleted/other.txt#0": {
    "tumbler": "M.27"
@@ -3062,19 +3138,19 @@
    "tumbler": "M.17"
   },
   "ren_link_between::M:ren_link_between/a2.txt#0": {
-   "tumbler": "M.63"
+   "tumbler": "M.65"
   },
   "ren_link_between::M:ren_link_between/b.txt#0": {
    "tumbler": "M.18"
   },
   "ren_link_between::M:ren_link_between/b2.txt#0": {
-   "tumbler": "M.64"
+   "tumbler": "M.66"
   },
   "ren_link_swept::M:ren_link_swept/a.txt#0": {
    "tumbler": "M.21"
   },
   "ren_link_swept::M:ren_link_swept/a2.txt#0": {
-   "tumbler": "M.65"
+   "tumbler": "M.67"
   },
   "ren_link_swept::M:ren_link_swept/s.txt#0": {
    "tumbler": "M.22"
@@ -3083,7 +3159,7 @@
    "tumbler": "M.23"
   },
   "ren_link_tombstoned::M:ren_link_tombstoned/a2.txt#0": {
-   "tumbler": "M.66"
+   "tumbler": "M.68"
   },
   "ren_link_tombstoned::M:ren_link_tombstoned/t.txt#0": {
    "tumbler": "M.24"
@@ -3092,7 +3168,7 @@
    "tumbler": "M.25"
   },
   "ren_non_evid::M:ren_non_evid/a2.txt#0": {
-   "tumbler": "M.67"
+   "tumbler": "M.69"
   },
   "ren_onto_earlier::M:ren_onto_earlier/a.txt#0": {
    "tumbler": "M.13"
@@ -3119,7 +3195,7 @@
    "tumbler": "M.12"
   },
   "ren_single::M:ren_single/b.txt#0": {
-   "tumbler": "M.61"
+   "tumbler": "M.63"
   },
   "ren_two_onto_one::M:ren_two_onto_one/m1.txt#0": {
    "tumbler": "M.15"
@@ -3128,7 +3204,7 @@
    "tumbler": "M.16"
   },
   "ren_two_onto_one::M:ren_two_onto_one/t.txt#0": {
-   "tumbler": "M.62"
+   "tumbler": "M.64"
   },
   "stamp_cat::M:stamp_cat/cat_absent.txt#0": {
    "tumbler": "M.41"
@@ -3140,7 +3216,7 @@
    "tumbler": "M.43"
   },
   "stamp_empty_hash::M:stamp_empty_hash/new.txt#0": {
-   "tumbler": "M.71"
+   "tumbler": "M.73"
   },
   "stamp_rdr::M:stamp_rdr/id_change.md#0": {
    "tumbler": "M.33"
@@ -3149,7 +3225,7 @@
    "tumbler": "M.34"
   },
   "stamp_rdr::M:stamp_rdr/null_new.md#0": {
-   "tumbler": "M.70"
+   "tumbler": "M.72"
   },
   "stamp_sf::M:stamp_sf/doc.txt#0": {
    "tumbler": "M.35"
@@ -3174,7 +3250,7 @@
   "(owners)::M": {
    "deactivated_at": null,
    "head_hash": null,
-   "next_seq": 74,
+   "next_seq": 76,
    "owner_type": "repo",
    "repo_root": "@ROOT"
   },

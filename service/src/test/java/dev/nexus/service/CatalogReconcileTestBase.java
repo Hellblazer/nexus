@@ -391,4 +391,22 @@ abstract class CatalogReconcileTestBase {
     DSLContext suCtx(Connection su) {
         return DSL.using(su, SQLDialect.POSTGRES);
     }
+
+    /**
+     * Waits until {@code n} backends of this database are blocked on a lock (30 s at most). The only lock a test holds
+     * is the one it took, and pg_stat_activity's query text lags a backend that is already waiting (it can still show
+     * the previous statement), so the wait itself is what is counted, not the text.
+     */
+    void awaitCommitsBlocked(Connection su, int n) throws Exception {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+        while (true) {
+            int blocked = PgContainerHelper.backendsBlockedOnLocks(suCtx(su));
+            if (blocked >= n) return;
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("fewer than " + n + " commits blocked on the held lock: " + blocked + "\n"
+                    + PgContainerHelper.backendActivity(suCtx(su)));
+            }
+            Thread.sleep(50);
+        }
+    }
 }

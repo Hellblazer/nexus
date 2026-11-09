@@ -128,6 +128,13 @@ public final class CatalogHandler implements HttpHandler {
     /** The statement timeout a reconcile commit runs under: the reconcile instance's maximum runtime, never more. */
     private final java.time.Duration reconcileStatementTimeout;
 
+    /**
+     * The statement timeout production runs a reconcile commit under: the reconcile registry's per-job cap, because
+     * that cap interrupts nothing inside the database (the job only asks {@code stopReason()} before its statement),
+     * so the database must stop a stuck statement at the same bound.
+     */
+    static final java.time.Duration RECONCILE_STATEMENT_TIMEOUT = EngineJobs.RECONCILE.maxRuntime();
+
     public CatalogHandler(CatalogRepository repo) {
         this(repo, null);
     }
@@ -151,17 +158,31 @@ public final class CatalogHandler implements HttpHandler {
     public CatalogHandler(CatalogRepository repo,
                            dev.nexus.service.db.CombinedWriteService combinedWriteService,
                            EngineJobs<Void> reconcileJobs) {
-        this(repo, combinedWriteService, reconcileJobs, EngineJobs.RECONCILE.maxRuntime());
+        this(repo, combinedWriteService, reconcileJobs, RECONCILE_STATEMENT_TIMEOUT);
     }
 
-    /** As above with the commit's statement timeout given (a test shortens it; it never exceeds the job cap in service). */
+    /**
+     * As above with the commit's statement timeout given (a test shortens it; it never exceeds the job cap in
+     * service). {@code statement_timeout} is a 32-bit count of milliseconds, so a timeout that is not positive or does
+     * not fit is refused here, not on the first commit.
+     */
     CatalogHandler(CatalogRepository repo,
                    dev.nexus.service.db.CombinedWriteService combinedWriteService,
                    EngineJobs<Void> reconcileJobs, java.time.Duration reconcileStatementTimeout) {
+        if (reconcileStatementTimeout == null || reconcileStatementTimeout.isZero() || reconcileStatementTimeout.isNegative()
+                || reconcileStatementTimeout.compareTo(java.time.Duration.ofMillis(Integer.MAX_VALUE)) > 0) {
+            throw new IllegalArgumentException("the reconcile statement timeout must be positive and at most "
+                + Integer.MAX_VALUE + " ms (the range of statement_timeout), got " + reconcileStatementTimeout);
+        }
         this.repo = repo;
         this.combinedWriteService = combinedWriteService;
         this.reconcileJobs = reconcileJobs;
         this.reconcileStatementTimeout = reconcileStatementTimeout;
+    }
+
+    /** The statement timeout this handler's reconcile commit runs under. */
+    java.time.Duration reconcileStatementTimeout() {
+        return reconcileStatementTimeout;
     }
 
     @Override
@@ -463,12 +484,20 @@ public final class CatalogHandler implements HttpHandler {
      * return immediately without ever reaching the DB.
      */
     private boolean rejectIfBadOwnerPrefix(HttpExchange exchange, String value) throws IOException {
+        return rejectIfBadOwnerPrefix(exchange, value, "tumbler_prefix");
+    }
+
+    /**
+     * {@link #rejectIfBadOwnerPrefix(HttpExchange, String)} for a route that names the owner under another key
+     * ({@code owner} on the reconcile routes), so the 400 names the field the caller actually sent.
+     */
+    private boolean rejectIfBadOwnerPrefix(HttpExchange exchange, String value, String field) throws IOException {
         // Blank/absent is the auto-mint path (server allocates a conforming
         // "1.N" prefix itself) — only a genuinely present value is checked.
         if (value == null || value.isBlank() || TumblerGrammar.isOwnerPrefix(value)) {
             return false;
         }
-        sendTumblerGrammarViolation(exchange, "tumbler_prefix", value);
+        sendTumblerGrammarViolation(exchange, field, value);
         return true;
     }
 
@@ -3137,6 +3166,8 @@ public final class CatalogHandler implements HttpHandler {
     private void handleReconcileStage(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        // the owner names the address the commit mints documents under: grammar first, before any row is read
+        if (rejectIfBadOwnerPrefix(exchange, stringOrNull(body.get("owner")), "owner")) return;
         if (!(body.get("rows") instanceof List<?> raw)) {
             throw new IllegalArgumentException("'rows' must be a list");
         }
@@ -3148,12 +3179,20 @@ public final class CatalogHandler implements HttpHandler {
             if (!(o instanceof Map<?, ?> m)) throw new IllegalArgumentException("every row must be an object");
             rows.add((Map<String, Object>) m);
         }
-        Object expected = body.get("expected_rows");
-        if (!(expected instanceof Integer || expected instanceof Long)) {
-            throw new IllegalArgumentException("'expected_rows' must be a whole number");
+        // an int, not a long narrowed to one: 4294967297 would wrap to 1 and pass the header's count check
+        if (!(body.get("expected_rows") instanceof Integer expected)) {
+            throw new IllegalArgumentException("'expected_rows' must be a whole number in the range of a 32-bit integer");
         }
-        int staged = repo.reconcileStage(tenant, stringOrNull(body.get("owner")), stringOrNull(body.get("run_id")),
-            stringOrNull(body.get("walk")), ((Number) expected).intValue(), rows);
+        int staged;
+        try {
+            staged = repo.reconcileStage(tenant, stringOrNull(body.get("owner")), stringOrNull(body.get("run_id")),
+                stringOrNull(body.get("walk")), expected, rows);
+        } catch (CatalogRepository.ReconcileRunBusyException busy) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("error", busy.getMessage());
+            err.put("reason", "commit_in_progress");
+            HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(err)); return;
+        }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("staged", staged)));
     }
 
@@ -3173,6 +3212,8 @@ public final class CatalogHandler implements HttpHandler {
         String runId = stringOrNull(body.get("run_id"));
         if (owner == null || owner.isBlank()) throw new IllegalArgumentException("'owner' must be non-blank");
         if (runId == null || runId.isBlank()) throw new IllegalArgumentException("'run_id' must be non-blank");
+        // before the registry check and before any job: the commit lazily creates the owner row named by this string
+        if (rejectIfBadOwnerPrefix(exchange, owner, "owner")) return;
         if (reconcileJobs == null) {
             HttpUtil.send(exchange, 503, "{\"error\":\"the reconcile job registry is not available\"}"); return;
         }

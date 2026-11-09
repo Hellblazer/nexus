@@ -702,7 +702,236 @@ class CatalogHandlerReconcileRoutesTest {
         return curatorPrefix(t, name);
     }
 
+    // ── fix round r1 (nexus-u5m5g.3): stage strictness, a commit in flight, two commits of one run ──
+
+    private Resp stageRaw(String t, Map<String, Object> body) throws Exception {
+        return call(t, "POST", "/v1/catalog/reconcile/stage", MAPPER.writeValueAsString(body));
+    }
+
+    @Test
+    void stage_refusesAFieldOfTheWrongType_namingTheFieldAndTheFile_andStagesNothing() throws Exception {
+        String t = tenantWithOwner();
+        var bad = new LinkedHashMap<String, Object>();
+        bad.put("head_hash", 5);
+        bad.put("title", 5);
+        bad.put("content_hash", true);
+        bad.put("content_type", List.of("x"));
+        bad.put("physical_collection", 5);
+        bad.put("source_mtime", "late");
+        bad.put("seq", 4294967297L);   // an int would wrap this to 1
+        for (var e : bad.entrySet()) {
+            var row = present(0, "typed.py");
+            row.put(e.getKey(), e.getValue());
+            Resp r = stage(t, "typed-" + e.getKey(), "partial", 1, List.of(row));
+            assertThat(r.status).as(e.getKey() + " -> " + r.body).isEqualTo(400);
+            assertThat(r.json().get("error").asText()).contains(e.getKey()).contains("typed.py");
+            assertThat(stagedRows(t, "typed-" + e.getKey())).isZero();
+        }
+        assertThat(stage(t, "typed-ok", "partial", 1, List.of(present(0, "typed.py"))).status)
+            .as("control: the same row with well-typed fields stages").isEqualTo(200);
+    }
+
+    @Test
+    void stage_expectedRowsMustBeAnIntInRange_neverAWrappedLong() throws Exception {
+        String t = tenantWithOwner();
+        for (Object badCount : List.of(4294967297L, 2147483648L, -1, "1", 1.5)) {
+            var body = new LinkedHashMap<String, Object>();
+            body.put("owner", OWNER);
+            body.put("run_id", "count-" + badCount);
+            body.put("walk", "partial");
+            body.put("expected_rows", badCount);
+            body.put("rows", List.of(present(0, "c.py")));
+            Resp r = stageRaw(t, body);
+            assertThat(r.status).as("expected_rows " + badCount + " -> " + r.body).isEqualTo(400);
+            assertThat(r.json().get("error").asText()).contains("expected_rows");
+            assertThat(stagedRows(t, "count-" + badCount)).isZero();
+        }
+    }
+
+    @Test
+    void stage_whileTheRunsCommitIsRunning_is409_andTheCommitReadsEveryRowItDeletes() throws Exception {
+        String t = tenantWithOwner();
+        String doc = repo.registerDocument(t, OWNER, Map.of("title", "held.py", "file_path", "held.py",
+            "content_type", "code", "physical_collection", "code__seed", "head_hash", "H0"));
+        assertThat(stage(t, "busy", "partial", 1, List.of(present(0, "held.py"))).status).isEqualTo(200);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            // the commit takes the run header's lock, then blocks on this document row: it has started and is not done
+            DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc))).forUpdate().fetch();
+            String jobId = commit(t, "busy").json().get("job_id").asText();
+            awaitCommitBlockedOnALock(su);
+
+            Resp late = stage(t, "busy", "partial", 1, List.of(present(1, "late.py")));
+            assertThat(late.status).as("a page for a run whose commit has started: " + late.body).isEqualTo(409);
+            assertThat(late.json().get("reason").asText()).isEqualTo("commit_in_progress");
+
+            su.rollback();
+            JsonNode end = awaitEnd(t, jobId);
+            assertThat(end.get("status").asText()).as(end.toString()).isEqualTo("succeeded");
+            assertThat(end.get("outcome").get("rows")).as("the commit read exactly the rows that were staged").hasSize(1);
+        }
+        assertThat(stagedRows(t, "busy")).isZero();
+        assertThat(liveDocs(t)).as("held.py only; the refused page wrote nothing").isEqualTo(1);
+    }
+
+    @Test
+    void commit_twoCommitsOfOneRunAtOnce_doTheWorkOnce() throws Exception {
+        String t = tenantWithOwner();
+        assertThat(stage(t, "twice", "complete", 3,
+            List.of(present(0, "a.py"), present(1, "b.py"), present(2, "c.py"))).status).isEqualTo(200);
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var go = new CountDownLatch(1);
+            var first = pool.submit(() -> { go.await(); return commit(t, "twice"); });
+            var second = pool.submit(() -> { go.await(); return commit(t, "twice"); });
+            go.countDown();
+            Resp a = first.get(60, TimeUnit.SECONDS);
+            Resp b = second.get(60, TimeUnit.SECONDS);
+            assertThat(a.status).as(a.body).isEqualTo(202);
+            assertThat(b.status).as(b.body).isEqualTo(202);
+            JsonNode endA = awaitEnd(t, a.json().get("job_id").asText());
+            JsonNode endB = awaitEnd(t, b.json().get("job_id").asText());
+            assertThat(endA.get("status").asText()).as(endA.toString()).isEqualTo("succeeded");
+            assertThat(endB.get("status").asText()).as(endB.toString()).isEqualTo("succeeded");
+            assertThat(endB.get("outcome")).as("the second answer is the stored outcome or the same job's").isEqualTo(endA.get("outcome"));
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(liveDocs(t)).as("three documents, not six").isEqualTo(3);
+        assertThat(ownerNextSeq(t)).as("three sequence numbers claimed, once").isEqualTo(3L);
+    }
+
+    @Test
+    void poll_aHousekeepingMergeTheDatabaseRefuses_endsFailedWithTheSqlStateAndTheMessage() throws Exception {
+        String t = tenantWithOwner();
+        for (String p : List.of("a.py", "poison.py")) {
+            repo.registerDocument(t, OWNER, Map.of("title", p, "file_path", p, "content_type", "code",
+                "physical_collection", "code__seed", "head_hash", "H1"));
+        }
+        // a complete walk that offers only a.py: poison.py gets its first miss, and the CHECK refuses that merge
+        assertThat(stage(t, "miss", "complete", 1, List.of(present(0, "a.py"))).status).isEqualTo(200);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // poison.py may not carry a miss_count (the first miss of a complete walk writes one)
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENTS).add(DSL.constraint("rc193_routes_miss_poison")
+                .check(DSL.not(CATALOG_DOCUMENTS.FILE_PATH.eq("poison.py")
+                    .and(CATALOG_DOCUMENTS.METADATA.cast(org.jooq.impl.SQLDataType.VARCHAR).like("%miss_count%"))))).execute();
+            try {
+                JsonNode end = awaitEnd(t, commit(t, "miss").json().get("job_id").asText());
+                assertThat(end.get("status").asText()).as(end.toString()).isEqualTo("failed");
+                assertThat(end.get("reason").asText()).isEqualTo("write_failed");
+                assertThat(end.get("error").asText()).contains("SQLSTATE 23514").contains("rc193_routes_miss_poison");
+            } finally {
+                DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENTS).dropConstraintIfExists("rc193_routes_miss_poison").execute();
+            }
+        }
+        assertThat(runState(t, "miss")).as("all or nothing: the run stays staged").isEqualTo("staged");
+        assertThat(liveDocs(t)).isEqualTo(2);
+    }
+
+    // ── the statement timeout ───────────────────────────────────────────
+
+    @Test
+    void theProductionStatementTimeout_isTheReconcileJobCap_andOneTooLargeForSetConfigIsRefusedAtConstruction() {
+        assertThat(CatalogHandler.RECONCILE_STATEMENT_TIMEOUT)
+            .as("the named default is the registry's per-job cap, not a number of its own")
+            .isEqualTo(EngineJobs.RECONCILE.maxRuntime());
+        assertThat(new CatalogHandler(repo, null, jobs).reconcileStatementTimeout())
+            .as("the three-argument constructor, which production uses, takes the named default")
+            .isEqualTo(EngineJobs.RECONCILE.maxRuntime());
+        assertThat(new CatalogHandler(repo, null, jobs, Duration.ofMillis(Integer.MAX_VALUE)).reconcileStatementTimeout())
+            .as("the largest value statement_timeout takes (a 32-bit count of milliseconds)")
+            .isEqualTo(Duration.ofMillis(Integer.MAX_VALUE));
+        for (Duration bad : List.of(Duration.ofMillis(Integer.MAX_VALUE + 1L), Duration.ofDays(30), Duration.ZERO, Duration.ofSeconds(-1))) {
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> new CatalogHandler(repo, null, jobs, bad))
+                .as("timeout " + bad).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("statement");
+        }
+    }
+
+    // ── resolve_or_register, fix round r1 ───────────────────────────────
+
+    @Test
+    void resolve_titleFallback_appliesTheRequestsContentType_aGhostOfAnotherTypeIsNotAdopted() throws Exception {
+        String t = "rc193http-" + (++tenantSeq);
+        String prefix = registerCurator(t, "knowledge");
+        String proseGhost = repo.registerDocument(t, prefix, Map.of("title", "Typed Ghost", "content_type", "prose",
+            "physical_collection", "docs__c1", "chunk_count", 0));
+        Resp other = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/typed1", "title", "Typed Ghost",
+            "title_fallback", true, "content_type", "knowledge"));
+        assertThat(other.status).as(other.body).isEqualTo(200);
+        assertThat(other.json().get("created").asBoolean()).as("a prose ghost is not a knowledge note's ghost").isTrue();
+        assertThat(other.json().get("tumbler").asText()).isNotEqualTo(proseGhost);
+        assertThat(docBy(t, proseGhost).get(CATALOG_DOCUMENTS.SOURCE_URI)).isEmpty();
+
+        String knowledgeGhost = repo.registerDocument(t, prefix, Map.of("title", "Typed Ghost Two", "content_type", "knowledge",
+            "physical_collection", "knowledge__c1", "chunk_count", 0));
+        Resp same = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/typed2", "title", "Typed Ghost Two",
+            "title_fallback", true, "content_type", "knowledge"));
+        assertThat(same.json().get("tumbler").asText()).as("a ghost of the requested type is adopted").isEqualTo(knowledgeGhost);
+        assertThat(same.json().get("created").asBoolean()).isFalse();
+    }
+
+    @Test
+    void resolve_refusesASensitiveField_untilTheStepThatImplementsIt() throws Exception {
+        String t = "rc193http-" + (++tenantSeq);
+        for (Object flag : List.of(true, false)) {
+            Resp r = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/sens-" + flag, "title", "S",
+                "sensitive", flag));
+            assertThat(r.status).as("sensitive=" + flag + " -> " + r.body).isEqualTo(400);
+            assertThat(r.json().get("error").asText()).contains("sensitive");
+        }
+        assertThat(docCount(t)).as("nothing was written for a refused request").isZero();
+    }
+
+    @Test
+    void resolve_oneTenantNeverSeesAnothersDocuments_andWritesUnderItsOwnOnly() throws Exception {
+        String a = "rc193http-" + (++tenantSeq);
+        String b = "rc193http-" + (++tenantSeq);
+        String prefixA = registerCurator(a, "knowledge");
+        String docA = resolve(a, req("owner_name", "knowledge", "source_uri", "nx-note://c1/shared", "title", "Shared Title"))
+            .json().get("tumbler").asText();
+        String ghostA = repo.registerDocument(a, prefixA, Map.of("title", "Shared Ghost", "content_type", "knowledge",
+            "physical_collection", "knowledge__c1", "chunk_count", 0));
+        String beforeA = docBy(a, docA).formatJSON() + docBy(a, ghostA).formatJSON();
+
+        // B asks for A's source_uri, and for A's ghost by title: it finds neither, and registers under B
+        Resp bySource = resolve(b, req("owner_name", "knowledge", "source_uri", "nx-note://c1/shared", "title", "Shared Title"));
+        assertThat(bySource.status).as(bySource.body).isEqualTo(200);
+        assertThat(bySource.json().get("created").asBoolean()).isTrue();
+        assertThat(bySource.json().has("foreign_owner")).as("A's owner is not B's foreign owner").isFalse();
+        Resp byTitle = resolve(b, req("owner_name", "knowledge", "source_uri", "nx-note://c1/other", "title", "Shared Ghost",
+            "title_fallback", true));
+        assertThat(byTitle.json().get("created").asBoolean()).as("A's ghost is not adoptable by B").isTrue();
+
+        assertThat(docCount(b)).as("B holds exactly its two registrations").isEqualTo(2);
+        assertThat(docCount(a)).as("A still holds exactly its two documents").isEqualTo(2);
+        assertThat(docBy(a, docA).formatJSON() + docBy(a, ghostA).formatJSON()).as("and nothing of A's was written").isEqualTo(beforeA);
+        assertThat(docBy(a, ghostA).get(CATALOG_DOCUMENTS.SOURCE_URI)).isEmpty();
+    }
+
     // ── reading the database ────────────────────────────────────────────
+
+    /**
+     * Waits until a backend of this database is blocked on a lock. The only lock the test holds is the one it took,
+     * and pg_stat_activity's query text lags a backend that is already waiting, so the wait is what is counted.
+     */
+    private static void awaitCommitBlockedOnALock(Connection su) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        while (true) {
+            if (PgContainerHelper.backendsBlockedOnLocks(ctx) > 0) return;
+            assertThat(System.nanoTime())
+                .as(() -> "the commit never blocked on the held row: " + PgContainerHelper.backendActivity(ctx))
+                .isLessThan(deadline);
+            Thread.sleep(50);
+        }
+    }
+
+    private long ownerNextSeq(String t) {
+        return tenantScope.withTenant(t, ctx -> ctx.select(CATALOG_OWNERS.NEXT_SEQ).from(CATALOG_OWNERS)
+            .where(CATALOG_OWNERS.TENANT_ID.eq(t).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(OWNER))).fetchOne(CATALOG_OWNERS.NEXT_SEQ));
+    }
 
     private int stagedRows(String t, String run) {
         return tenantScope.withTenant(t, ctx -> ctx.fetchCount(CATALOG_RECONCILE_ROWS,

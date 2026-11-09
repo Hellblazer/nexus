@@ -25,16 +25,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * RDR-193 Part A1 (nexus-u5m5g.3): {@code catalog-048-reconcile.xml} adds the two landing tables
  * ({@code catalog_reconcile_runs}, {@code catalog_reconcile_rows}), {@code catalog_reconcile_commit(text, text)} and
- * {@code catalog_reconcile_reap(interval)}. A walk: migrate to just before the changeset, assert the objects are
- * absent, apply, check columns, keys, forced row-level security, the tenant policy, the function signatures and the
- * grants, roll the three changesets back, reapply.
+ * {@code catalog_reconcile_reap(interval)}, and (catalog-048-4, fix round r1) the one link write
+ * {@code catalog_link_write(...)} the commit's rename move calls. A walk: migrate to just before the changeset,
+ * assert the objects are absent, apply, check columns, keys, forced row-level security, the tenant policy, the
+ * function signatures and the grants, roll the four changesets back, reapply.
  */
 class Catalog048ReconcileSchemaLiquibaseTest {
 
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     /** The last changeset of the changelog before catalog-048 (the tail it is placed after). */
     private static final String PRIOR_CHANGESET_ID = "vectors-056-2";
-    private static final String LAST_TARGET_CHANGESET_ID = "catalog-048-3";
+    private static final String LAST_TARGET_CHANGESET_ID = "catalog-048-4";
 
     @Test
     void addsTheTablesAndFunctions_rollsBackAndReapplies() throws Exception {
@@ -48,6 +49,7 @@ class Catalog048ReconcileSchemaLiquibaseTest {
                 assertThat(PgCatalogProbes.tableExists(ctx, "nexus", "catalog_reconcile_runs")).isFalse();
                 assertThat(PgCatalogProbes.tableExists(ctx, "nexus", "catalog_reconcile_rows")).isFalse();
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_reconcile%")).isEmpty();
+                assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_write")).isEmpty();
             }
             try (Connection su = dedicated.createConnection("")) {
                 migrateUpTo(su, LAST_TARGET_CHANGESET_ID);
@@ -94,13 +96,21 @@ class Catalog048ReconcileSchemaLiquibaseTest {
                     .as("nexus_svc may execute the commit").isTrue();
                 assertThat(execGranted(ctx, "nexus.catalog_reconcile_reap(interval)"))
                     .as("nexus_svc may execute the reap").isTrue();
+
+                assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_write"))
+                    .as("the one link write the commit calls (Step 3's batch link route reuses it)")
+                    .containsExactly("catalog_link_write");
+                assertThat(routine(ctx, "catalog_link_write")).as("text, plpgsql, VOLATILE, SECURITY INVOKER")
+                    .containsExactly("v", false, "plpgsql", "text");
+                assertThat(execGranted(ctx, "nexus.catalog_link_write(text, text, text, text, text, text, boolean)"))
+                    .as("nexus_svc may execute the link write").isTrue();
             }
             try (Connection su = dedicated.createConnection("")) {
                 Database database = DatabaseFactory.getInstance()
                     .findCorrectDatabaseImplementation(new JdbcConnection(su));
                 try (Liquibase liquibase = new Liquibase(
                         MASTER_CHANGELOG, new ClassLoaderResourceAccessor(), database)) {
-                    liquibase.rollback(3, new Contexts(), new LabelExpression());
+                    liquibase.rollback(4, new Contexts(), new LabelExpression());
                 }
             }
             try (Connection su = dedicated.createConnection("")) {
@@ -108,6 +118,7 @@ class Catalog048ReconcileSchemaLiquibaseTest {
                 assertThat(PgCatalogProbes.tableExists(ctx, "nexus", "catalog_reconcile_runs")).as("rollback drops the runs table").isFalse();
                 assertThat(PgCatalogProbes.tableExists(ctx, "nexus", "catalog_reconcile_rows")).as("rollback drops the rows table").isFalse();
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_reconcile%")).as("rollback drops both functions").isEmpty();
+                assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_write")).as("and the link write").isEmpty();
             }
             try (Connection su = dedicated.createConnection("")) {
                 Database database = DatabaseFactory.getInstance()
@@ -120,6 +131,7 @@ class Catalog048ReconcileSchemaLiquibaseTest {
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
                 assertThat(PgCatalogProbes.tableExists(ctx, "nexus", "catalog_reconcile_runs")).isTrue();
                 assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_reconcile%")).hasSize(2);
+                assertThat(PgCatalogProbes.routineNamesLike(ctx, "nexus", "catalog_link_write")).hasSize(1);
                 // the runAlways grants loop is the last include, so only the full walk shows its DML grants
                 assertThat(tableDmlGranted(ctx, "nexus.catalog_reconcile_runs")).as("the grants loop covers the runs table").isTrue();
                 assertThat(tableDmlGranted(ctx, "nexus.catalog_reconcile_rows")).as("and the rows table").isTrue();
