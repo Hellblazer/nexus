@@ -169,9 +169,11 @@ local CLASSES = {
           .. " clean) already has a green full engine run, whoever ran it, or develop CI already has the verdict;"
           .. " announce a run with its change class, the sha and 'no green full run of this tree exists', and hand it"
           .. " on by sha and status file; a fix round that touches only a test or a doc file does not trigger one."
-          .. " The one test-only edit that does: SQL-looking literals or fixtures added to a Java test can trip a"
-          .. " *ConformanceTest, so it runs -Dtest='*GateTest,*WiringTest,*ConformanceTest,*ScanTest,<touched>' or the"
-          .. " whole suite. `grep -rl Main.java service/src/test tests` finds the source-scan pins on Main.java",
+          .. " Two test-only edits do. A change to a shared test changelog (db/changelog-test/, above all"
+          .. " db.changelog-test-objects.xml) runs the whole suite plus the integration group: every class that"
+          .. " installs test objects reads it, so no name filter finds them. SQL-looking literals or fixtures added to"
+          .. " a Java test can trip a *ConformanceTest, so they run"
+          .. " -Dtest='*GateTest,*WiringTest,*ConformanceTest,*ScanTest,<touched>' or the whole suite. `grep -rl Main.java service/src/test tests` finds the source-scan pins on Main.java",
           "scripts/mvnw-leased.sh --lab-run lab-m -q test -Dnexus.ddl.suite=main", true),
         step("the engine integration group (on a pool host)",
           "scripts/mvnw-leased.sh --lab-run lab-m -q test -Dnexus.ddl.suite=integration"

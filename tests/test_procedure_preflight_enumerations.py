@@ -327,8 +327,12 @@ def test_r1_r4_the_engine_main_suite_says_whole_suite_and_the_name_filter_is_the
     assert "'no green full run of this tree exists'" in text
     assert "by sha and status file" in text
     assert "a fix round that touches only a test or a doc file does not trigger one" in text
-    # The narrow trigger: a test-only edit that adds SQL-looking literals, a scanner set or the suite.
-    assert "The one test-only edit that does: SQL-looking literals or fixtures" in text
+    # The narrow triggers: a shared test changelog is consumed by every class that installs test
+    # objects, so it runs the whole suite plus the integration group (loss check r1, d9d1a2891);
+    # SQL-looking literals added to a Java test run a scanner set or the suite.
+    assert "Two test-only edits do." in text
+    assert "db/changelog-test/" in text and "the whole suite plus the integration group" in text
+    assert "SQL-looking literals or fixtures" in text
     assert "-Dtest='*GateTest,*WiringTest,*ConformanceTest,*ScanTest,<touched>'" in text
 
 
