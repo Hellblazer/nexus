@@ -40,7 +40,8 @@ public final class PgSession {
         "hnsw.max_scan_tuples",
         "hnsw.scan_mem_multiplier",
         "pg_trgm.word_similarity_threshold",
-        // nexus-seo4k: the text-gate probe's switch (vectors-057): "off" skips the trigram half of the gate.
+        // nexus-seo4k / nexus-bbtc2: the text gate's switch (vectors-057, vectors-058): "off" skips the trigram half in
+        // the probe, "substring" replaces it with a substring match (see PgVectorRepository.LEXICAL_TRGM_GUC).
         "nexus.lexical_trgm",
         "statement_timeout",
         // nexus-r0vkh: the taxonomy assign transaction bounds its lock WAIT as

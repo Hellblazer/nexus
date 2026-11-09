@@ -2124,6 +2124,17 @@
     <include file="db/changelog/vectors-057-long-lexical-skips-trigram-gate.xml"/>
 
     <!--
+        Bead nexus-bbtc2: a single-token lexical query gates on an exact substring. vectors-058-1 gives
+        nexus.text_gate_probe_384/768/1024 a third statement for nexus.lexical_trgm = 'substring' (the engine sets it for a
+        one-token gate text): the FTS half OR a case-insensitive substring match the trigram GIN prunes, in place of
+        word_similarity. vectors-058-2 makes the ten LANGUAGE sql functions that gate rows another scan produced read
+        'substring' the same way, so every branch admits the same rows for a one-token gate text; see the included file's own header. Same signatures, owner,
+        grants and security posture; function definitions only, no DATA EFFECT. After vectors-057, before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-058-short-lexical-substring-gate.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

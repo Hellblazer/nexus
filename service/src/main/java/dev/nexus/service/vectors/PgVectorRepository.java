@@ -3597,17 +3597,55 @@ public final class PgVectorRepository {
      * (vectors-057) gates on the FTS half alone: for a sentence-length question the trigram GIN bitmap passed nothing
      * on 35 of 35 measured questions and cost 20 to 30 times the FTS half. Known loss: above this length a row only
      * the trigram half would pass is no longer returned (a pasted passage with an edit, an identifier inside a longer
-     * sentence, a code window the english stemmer tokenises differently); at or below it nothing changes.
+     * sentence, a code window the english stemmer tokenises differently). At or below it the trigram half stays,
+     * except that a one-token text matches by substring in its place ({@link #LEXICAL_TRGM_SUBSTRING}).
      */
     public static final int LEXICAL_TRGM_MAX_WORDS = 8;
 
-    /** The probe's switch (vectors-057): {@code off} skips the trigram half; unset or anything else keeps it. */
+    /**
+     * The gate's switch (vectors-057, vectors-058). The probe reads all three values: {@code off} skips the trigram
+     * half, {@code substring} replaces it with a substring match of the gate text (ILIKE, so case-folded), unset or
+     * anything else keeps word_similarity. The row-gating functions (HNSW-first, the chash_allow rank, the manifest
+     * paths) read {@code substring} only and keep word_similarity under {@code off}, as vectors-057 left them.
+     */
     public static final String LEXICAL_TRGM_GUC = "nexus.lexical_trgm";
+
+    /** {@link #LEXICAL_TRGM_GUC} value for a gate text of more than {@link #LEXICAL_TRGM_MAX_WORDS} words. */
+    public static final String LEXICAL_TRGM_OFF = "off";
+
+    /**
+     * {@link #LEXICAL_TRGM_GUC} value for a one-token gate text (nexus-bbtc2; Sam's choice, ask
+     * linda/short-lexical-trigram option 1). For one token the trigram half mostly admitted fuzzy neighbours, not rows
+     * holding the token (5 of 5,731 added rows over 20 identifiers), at about 0.13 ms of word_similarity per candidate:
+     * 19-23 s for an identifier on the live corpus. Known loss: a row that only resembles the token (a fuzzy neighbour,
+     * or the right identifier under a typo in the query) is no longer returned; every row containing the token is.
+     */
+    public static final String LEXICAL_TRGM_SUBSTRING = "substring";
+
+    /** {@link #LEXICAL_TRGM_GUC} value that keeps the word_similarity trigram half (2 to 8 words). */
+    public static final String LEXICAL_TRGM_ON = "on";
+
+    /**
+     * The {@link #LEXICAL_TRGM_GUC} value for {@code gateText}: {@link #LEXICAL_TRGM_OFF} when {@link #skipsTrigramGate}
+     * holds, {@link #LEXICAL_TRGM_SUBSTRING} when the stripped text is one token, else {@link #LEXICAL_TRGM_ON}. One
+     * token means no whitespace of any kind inside: ASCII, Unicode spaces (NBSP, the ideographic space) and line
+     * separators all split, so a query separated by any of them keeps the trigram half as before. A null or blank text
+     * keeps {@link #LEXICAL_TRGM_ON}.
+     */
+    public static String lexicalTrgmMode(String gateText) {
+        if (skipsTrigramGate(gateText)) return LEXICAL_TRGM_OFF;
+        if (gateText == null) return LEXICAL_TRGM_ON;
+        String t = gateText.strip();
+        if (t.isEmpty()) return LEXICAL_TRGM_ON;
+        return t.codePoints().anyMatch(c -> Character.isWhitespace(c) || Character.isSpaceChar(c))
+            ? LEXICAL_TRGM_ON : LEXICAL_TRGM_SUBSTRING;
+    }
 
     /**
      * True when {@code gateText} is longer than {@link #LEXICAL_TRGM_MAX_WORDS} whitespace-separated words. Words split on
-     * ASCII whitespace ({@code \\s+}), so a CJK or NBSP-separated query counts as fewer words and keeps the trigram half:
-     * today's behaviour, the safe direction.
+     * ASCII whitespace ({@code \\s+}), so a CJK or NBSP-separated query counts as fewer words and keeps the trigram half
+     * here. {@link #lexicalTrgmMode} splits on every kind of whitespace, so an NBSP-separated query is not one token
+     * there either, while a space-less CJK sentence is one token and matches by substring.
      */
     public static boolean skipsTrigramGate(String gateText) {
         if (gateText == null) return false;
@@ -3959,11 +3997,15 @@ public final class PgVectorRepository {
      *        re-run, so a fan-out arm's later statements are bounded by the budget that remains, as
      *        {@link #runArm}'s are; false keeps the first bound for every statement
      */
-    private Result<? extends Record> hybridRank(DSLContext ctx, int dim, Vector queryVec, String gateQueryText,
+    private Result<? extends Record> hybridRank(DSLContext ctx, int dim, Vector queryVec, String rawGateText,
                                                 String[] colls, WherePlan wherePlan, int nResults,
                                                 int selectiveGateMax, String model, String tenant,
                                                 java.util.function.IntSupplier statementTimeoutMs,
                                                 boolean rebind, byte[][] chashAllow) {
+        // nexus-bbtc2: a one-token gate text is matched by substring, so the token itself is the pattern; surrounding
+        // whitespace would only make the pattern miss.
+        final String trgmMode = lexicalTrgmMode(rawGateText);
+        final String gateQueryText = LEXICAL_TRGM_SUBSTRING.equals(trgmMode) ? rawGateText.strip() : rawGateText;
         // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
         // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
         // inherit it. Set here, before the first fetch, rather than per branch: a
@@ -3982,6 +4024,14 @@ public final class PgVectorRepository {
         // do not. Pinned per-transaction so the gate is independent of cluster config --
         // every schema function below is LANGUAGE sql and cannot SET LOCAL its own GUC.
         PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
+        // nexus-seo4k / nexus-bbtc2: which form of the trigram half every gated statement below uses: 'off' (more than
+        // LEXICAL_TRGM_MAX_WORDS words) drops it, 'substring' (one token) replaces it with a substring match, 'on' keeps
+        // word_similarity. The probe (vectors-058-1) reads all three; the row-gating functions (vectors-058-2: the
+        // chash_allow rank, the manifest paths, HNSW-first) read 'substring' only. They run in the chash_allow branch
+        // too, so it is set before that branch, and set either way so
+        // a second hybridRank in one transaction never inherits the first one's value (transaction-local: a pooled
+        // connection never carries it further).
+        PgSession.setLocal(ctx, LEXICAL_TRGM_GUC, trgmMode);
         // nexus-6nkn3: a custom plan per execution so the planner sees the
         // collection set's selectivity (a cached generic HNSW plan on a tiny
         // collection ran ~30s and returned EMPTY in production).
@@ -4022,10 +4072,6 @@ public final class PgVectorRepository {
         // for the selective case, supplies the exact chash set the rank query below
         // reuses via a cheap chash = ANY(...) PK filter, never re-running the
         // expensive `<%` trigram gate a second time.
-        // nexus-seo4k: a gate text of more than LEXICAL_TRGM_MAX_WORDS words gates on the FTS half alone; the probe
-        // reads this GUC and picks its FTS-only statement. Set either way, so a second hybridRank in one transaction
-        // never inherits the first one's 'off' (transaction-local: a pooled connection never carries it further).
-        PgSession.setLocal(ctx, LEXICAL_TRGM_GUC, skipsTrigramGate(gateQueryText) ? "off" : "on");
         org.jooq.Table<?> probeFn = switch (dim) {
             case 384  -> TEXT_GATE_PROBE_384.call(
                 gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);

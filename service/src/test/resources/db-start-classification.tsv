@@ -31,6 +31,7 @@ P225MigrationWalkIntegrationTest	startEmptyDatabase	WALK	runs vectors-030-1 as p
 P225DropRetiredIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-036-1 over a seeded pre-walk layout, applies the drop alone, rolls it back and compares the retired tables' catalog shape
 SchemaRollbackRoundTripIntegrationTest	startEmptyDatabase	WALK	rolls the walk back to a tag and re-walks, asserting what each rollback leaves
 Vectors057RollbackIntegrationTest	startEmptyDatabase	WALK	rolls vectors-057-1 back alone on a two-role walk and compares every nexus function with a database walked to its predecessor
+Vectors058RollbackIntegrationTest	startEmptyDatabase	WALK	rolls vectors-058-1 and vectors-058-2 back on a two-role walk and compares every nexus function with a database walked to vectors-057
 SchemaUpgradeRehearsalIntegrationTest	startEmptyDatabase	WALK	walks the old engine's changelog tree, injects divergence or legacy rows, then upgrades to HEAD
 SchemaMigratorIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's own contract: aged-box walks as a non-superuser owner, outcome counts, journal, locks
 WalkLockPreflightIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's lock-capacity preflight and the walk's own lock count, both only while vectors-030-1 is still pending

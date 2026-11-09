@@ -418,9 +418,11 @@ class ManifestObjectParityTest {
         assertThat(gateDisagreements(bodies)).as("gates that differ from manifest_search_384's").isEmpty();
         // Non-vacuity: the extracted gate is the whole gate (both arms), not an empty or truncated group.
         String gate = gateClause(bodies.get("manifest_qualifying_hits"));
-        assertThat(gate).startsWith("(p_query_text IS NULL").endsWith("c.chunk_text)")
+        assertThat(gate).startsWith("(p_query_text IS NULL").endsWith("|| '%')))")
             .contains("c.chunk_tsv @@ plainto_tsquery('english', p_query_text)")
-            .contains("p_query_text OPERATOR(nexus.<%) c.chunk_text");
+            .contains("p_query_text OPERATOR(nexus.<%) c.chunk_text")
+            .as("vectors-058: the trigram and substring arms read nexus.lexical_trgm")
+            .contains("nexus.lexical_trgm").contains("OPERATOR(pg_catalog.~~*)");
     }
 
     private Map<String, String> withMutatedGate(String proname, String from, String to) {
@@ -430,7 +432,7 @@ class ManifestObjectParityTest {
     @Test
     void aGateArmDroppedFromTheCount_isReported() {
         var mutated = withMutatedGate("manifest_qualifying_hits",
-            "OR p_query_text OPERATOR(nexus.<%) c.chunk_text", "OR false");
+            "AND p_query_text OPERATOR(nexus.<%) c.chunk_text)", "AND false)");
         assertThat(gateDisagreements(mutated)).hasSize(1)
             .allMatch(s -> s.startsWith("manifest_qualifying_hits gate differs from manifest_search_384"));
     }

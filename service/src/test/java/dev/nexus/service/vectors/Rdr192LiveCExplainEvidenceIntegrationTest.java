@@ -633,6 +633,23 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     }
 
     /**
+     * nexus-bbtc2 (vectors-058-1): with nexus.lexical_trgm = substring (a one-token gate text) the probe's body matches
+     * the token by ILIKE, and because the pattern is a constant when the body is planned, the trigram GIN serves it:
+     * a trigram index scan, an ILIKE condition, no word_similarity operator and no sequential scan of the leaf.
+     */
+    @Test
+    void gateProbe_withTheTrigramGucSubstring_plansTheSubstringMatchOnTheTrigramIndex() throws Exception {
+        String sub = probeBodyPlan("text_gate_probe_384 (nexus.lexical_trgm = substring), body plan as nexus_svc",
+            RARE_TOKEN, PgVectorRepository.LEXICAL_TRGM_SUBSTRING);
+        assertThat(sub).as("the substring match uses the trigram index. Plan was:%n%s", sub)
+            .containsPattern(trigramIndexOnTheTenantLeaf());
+        assertThat(sub).as("the pattern is folded to a constant ILIKE. Plan was:%n%s", sub)
+            .contains("~~* '%" + RARE_TOKEN + "%'::text");
+        assertThat(sub).as("no word_similarity under substring. Plan was:%n%s", sub).doesNotContain("<%");
+        assertThat(seqScansOfTheTenantLeaf(sub)).as("no sequential scan of the tenant's leaf. Plan was:%n%s", sub).isEmpty();
+    }
+
+    /**
      * The three functions vectors-029 changed are definer functions with a pinned search_path and no
      * EXECUTE for PUBLIC; nexus_svc keeps EXECUTE (the calls above would fail otherwise).
      */
@@ -1074,10 +1091,15 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
 
     /** As above; {@code trigramOff} sets nexus.lexical_trgm to off for the call, the way a long lexical query's transaction does (nexus-seo4k). */
     private String probeBodyPlan(String label, String token, boolean trigramOff) throws Exception {
+        return probeBodyPlan(label, token, trigramOff ? PgVectorRepository.LEXICAL_TRGM_OFF : null);
+    }
+
+    /** As above with nexus.lexical_trgm set to {@code guc} for the call, or left unset when it is null. */
+    private String probeBodyPlan(String label, String token, String guc) throws Exception {
         int from = PgContainerHelper.serverLog(pg).length();
         Table<?> fn = probe384(token, COLL);
         int rows = explainScope.withTenant(TENANT, ctx -> {
-            if (trigramOff) PgSession.setLocal(ctx, PgVectorRepository.LEXICAL_TRGM_GUC, "off");
+            if (guc != null) PgSession.setLocal(ctx, PgVectorRepository.LEXICAL_TRGM_GUC, guc);
             return ctx.selectFrom(fn).fetch().size();
         });
         String block = null;

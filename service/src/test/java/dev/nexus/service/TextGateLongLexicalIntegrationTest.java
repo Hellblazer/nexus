@@ -59,8 +59,11 @@ class TextGateLongLexicalIntegrationTest {
     /** {@link #NINE} with its third word changed: an FTS miss and a trigram hit. */
     static final String TYPO_TEXT = "zorblax quindle frumpot wibblesnort glorptang mexicane trollopy vandergriff snorkelwick";
     static final String IDENT_TEXT = "alpha quuxlongidentifier beta";
-    /** One word, a one-letter typo of the identifier: an FTS miss and a trigram hit. */
-    static final String TYPO_IDENT = "quuxlongidentifer";
+    /**
+     * Two words, the second a one-letter typo of the identifier: an FTS miss and a trigram hit. Two words, because a
+     * single token matches by substring since vectors-058 (nexus-bbtc2) and so loses the typo rescue.
+     */
+    static final String TYPO_IDENT = "alpha quuxlongidentifer";
 
     PostgreSQLContainer<?> pg;
     HikariDataSource ds;
@@ -144,7 +147,7 @@ class TextGateLongLexicalIntegrationTest {
         assertThat(PgVectorRepository.skipsTrigramGate(NINE)).as("nine words").isTrue();
         assertThat(PgVectorRepository.skipsTrigramGate("  " + EIGHT + "\t \n")).as("eight words, padded").isFalse();
         assertThat(PgVectorRepository.skipsTrigramGate(NINE.replace(" ", "  \t\n "))).as("nine words, any whitespace").isTrue();
-        assertThat(PgVectorRepository.skipsTrigramGate(TYPO_IDENT)).as("one word").isFalse();
+        assertThat(PgVectorRepository.skipsTrigramGate(TYPO_IDENT)).as("two words").isFalse();
         assertThat(PgVectorRepository.skipsTrigramGate("")).as("empty").isFalse();
         assertThat(PgVectorRepository.skipsTrigramGate("   ")).as("blank").isFalse();
         assertThat(PgVectorRepository.skipsTrigramGate(null)).as("null").isFalse();
@@ -180,7 +183,7 @@ class TextGateLongLexicalIntegrationTest {
 
     @Test
     void theGuc_aloneControlsTheProbe_aShortTypodIdentifierPassesOnlyWhileTheTrigramHalfIsOn() {
-        assertThat(probe(TYPO_IDENT, null)).as("short typo'd identifier, GUC unset: the trigram half passes it")
+        assertThat(probe(TYPO_IDENT, null)).as("short query holding a typo'd identifier, GUC unset: the trigram half passes it")
             .containsExactly(ident);
         assertThat(probe(TYPO_IDENT, "off")).as("the same text with the GUC off: nothing, the FTS half misses it")
             .isEmpty();
@@ -189,23 +192,23 @@ class TextGateLongLexicalIntegrationTest {
     // ── the engine's use of it ──────────────────────────────────────────────
 
     @Test
-    void hybridSearch_aLongQueryReturnsOnlyFtsMatches_aShortTypodIdentifierKeepsTheTrigramHalf() {
+    void hybridSearch_aLongQueryReturnsOnlyFtsMatches_aShortQueryWithATypodIdentifierKeepsTheTrigramHalf() {
         assertThat(ids(repo.hybridSearch(TENANT, NINE, List.of(COLL), K, null)))
             .as("nine words: the row only the trigram half would pass is absent").containsExactly(exact);
         assertThat(ids(repo.hybridSearch(TENANT, EIGHT, List.of(COLL), K, null)))
             .as("eight words: the trigram half is still on, so the typo row (an FTS miss) passes beside the exact row")
             .containsExactlyInAnyOrder(exact, typo);
         assertThat(ids(repo.hybridSearch(TENANT, TYPO_IDENT, List.of(COLL), K, null)))
-            .as("a short typo'd identifier").containsExactly(ident);
+            .as("a short query holding a typo'd identifier").containsExactly(ident);
     }
 
     @Test
-    void theLexicalArm_aLongQueryReturnsOnlyFtsMatches_aShortTypodIdentifierKeepsTheTrigramHalf() {
+    void theLexicalArm_aLongQueryReturnsOnlyFtsMatches_aShortQueryWithATypodIdentifierKeepsTheTrigramHalf() {
         PerCollectionResult longQ = repo.searchPerCollection(TENANT, NINE, List.of(COLL), K, 1200, null, null, false, false, true);
         assertThat(longQ.lexical().get(0).ids()).as("lexical arm, nine words").containsExactly(exact);
         assertThat(longQ.lexical().get(0).error()).isNull();
         PerCollectionResult shortQ = repo.searchPerCollection(TENANT, TYPO_IDENT, List.of(COLL), K, 1200, null, null, false, false, true);
-        assertThat(shortQ.lexical().get(0).ids()).as("lexical arm, short typo'd identifier").containsExactly(ident);
+        assertThat(shortQ.lexical().get(0).ids()).as("lexical arm, short query holding a typo'd identifier").containsExactly(ident);
     }
 
     @Test
@@ -214,7 +217,7 @@ class TextGateLongLexicalIntegrationTest {
         // A pool of four: run enough short searches that every connection is reused; none may see the GUC still off.
         for (int i = 0; i < 8; i++) {
             assertThat(ids(repo.hybridSearch(TENANT, TYPO_IDENT, List.of(COLL), K, null)))
-                .as("short typo'd identifier, round %d", i).containsExactly(ident);
+                .as("short query holding a typo'd identifier, round %d", i).containsExactly(ident);
         }
     }
 }

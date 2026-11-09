@@ -7,6 +7,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.Vectors057RollbackIntegrationTest;
+import dev.nexus.service.Vectors058RollbackIntegrationTest;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChunksIsolationCheck;
 import dev.nexus.service.db.PgSession;
@@ -286,6 +287,45 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
                 PgContainerHelper.bootstrapNonSuperuserOwner(su, SVC, PgContainerHelper.SVC_PASSWORD);
             }
             Vectors057RollbackIntegrationTest.assertRollbackRestoresVectors031Probes(rolledPg, baselinePg,
+                (c, name) -> {
+                    var cfg = new HikariConfig();
+                    cfg.setJdbcUrl(c.getJdbcUrl());
+                    cfg.setUsername(SVC);
+                    cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
+                    cfg.setMaximumPoolSize(2);
+                    cfg.setPoolName(name);
+                    return new HikariDataSource(cfg);
+                }, false, SVC);
+        } finally {
+            try {
+                if (baselinePg != null) baselinePg.stop();
+            } finally {
+                if (rolledPg != null) rolledPg.stop();
+            }
+        }
+    }
+
+    /**
+     * nexus-bbtc2 (vectors-058), the invoker posture's ROLLBACK: rolling back vectors-058-1 (and vectors-058-2 after it)
+     * must leave the invoker probes as vectors-057 left them and the ten row gates as before vectors-058, every other
+     * function as a database migrated only to vectors-057 has it. The comparison lives in
+     * {@link Vectors058RollbackIntegrationTest} beside the definer posture; this class hosts the invoker call for the
+     * reason the vectors-057 test above gives.
+     */
+    @Test
+    void vectors058Rollback_restoresVectors057sGate_inTheInvokerPosture() throws Exception {
+        PostgreSQLContainer<?> rolledPg = null;
+        PostgreSQLContainer<?> baselinePg = null;
+        try {
+            rolledPg = PgContainerHelper.startDedicated();
+            baselinePg = PgContainerHelper.startDedicated();
+            try (Connection su = rolledPg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, SVC, PgContainerHelper.SVC_PASSWORD);
+            }
+            try (Connection su = baselinePg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, SVC, PgContainerHelper.SVC_PASSWORD);
+            }
+            Vectors058RollbackIntegrationTest.assertRollbackRestoresVectors057Gate(rolledPg, baselinePg,
                 (c, name) -> {
                     var cfg = new HikariConfig();
                     cfg.setJdbcUrl(c.getJdbcUrl());
