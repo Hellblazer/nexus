@@ -15,14 +15,18 @@ from click.testing import CliRunner
 from nexus._hook_runtime import failure_ring
 from nexus._hook_runtime._io import HookResult, never_fail
 from nexus.commands.hook import hook_group
+from nexus.hooks import subagent_stop_t1_nudge as nudge
 from nexus.mcp import hooks as _hooks
 from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 _CRASHING_VERB = (
+    "import os\n"
     "from nexus._hook_runtime._io import HookResult\n"
     "def run(payload):\n"
     "    if payload and payload.get('tool_name') == 'Boom':\n"
     "        raise RuntimeError('crashed on ' + payload['tool_name'])\n"
+    "    if payload and payload.get('tool_name') == 'Env':\n"
+    "        raise RuntimeError('env ' + os.environ.get('NX_PROBE_MODE', '-') + ' cwd ' + os.getcwd())\n"
     "    return HookResult(stdout='fine')\n"
 )
 
@@ -35,6 +39,12 @@ def _raise() -> HookResult:
     raise RuntimeError("deliberate")
 
 
+def _rec(directory: Path, payload: object = None, **kw: object) -> Path | None:
+    kw.setdefault("module", "nexus.hooks.probe")
+    kw.setdefault("env", {})
+    return failure_ring.record("probe", payload, RuntimeError("x"), directory=directory, **kw)  # type: ignore[arg-type]
+
+
 def test_a_recorded_entry_is_redacted_and_private(tmp_path: Path) -> None:
     payload = {
         "prompt": "use token=abcdef123456 please",
@@ -42,7 +52,8 @@ def test_a_recorded_entry_is_redacted_and_private(tmp_path: Path) -> None:
         "items": [1, True, None, "password: hunter22"],
     }
     env = {"NX_FOO": "1", "NX_API_KEY": "k", "CLAUDE_PROJECT_DIR": "/p", "NEXUS_TOKEN": "t",
-           "HOME": "/home/u", "AWS_SECRET": "s"}
+           "HOME": "/home/u", "AWS_SECRET": "s", "NX_DB_PASS": "hunter2xx", "NX_DB_ADMIN_PASS": "adm1npw",
+           "NX_DB_URL": "postgresql://u:pw123456@h/db", "NX_DB_DSN": "x"}
     path = failure_ring.record("probe", payload, RuntimeError("secret=abcdef123456 leaked"),
                                module="m.v", env=env, directory=tmp_path, now=1_700_000_000.0)
     assert path is not None and path.parent == tmp_path
@@ -53,42 +64,83 @@ def test_a_recorded_entry_is_redacted_and_private(tmp_path: Path) -> None:
                                               "Authorization": "[redacted]"}
     assert entry["payload"]["items"] == [1, True, None, "password: [redacted]"]
     assert entry["env"] == {"CLAUDE_PROJECT_DIR": "/p", "NX_FOO": "1"}
-    assert "abcdef123456" not in path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    for secret in ("abcdef123456", "hunter2xx", "adm1npw", "pw123456"):
+        assert secret not in text, secret
     assert entry["error_type"] == "RuntimeError"
     assert entry["error"] == "secret=[redacted] leaked"
-    assert entry["traceback"].startswith("RuntimeError") or "RuntimeError" in entry["traceback"]
     if os.name == "posix":
         assert path.stat().st_mode & 0o777 == 0o600
         assert tmp_path.stat().st_mode & 0o777 == 0o700
 
 
+@pytest.mark.parametrize(("text", "secret"), [
+    ('curl -H "Authorization: Bearer abc123SECRETxyz" https://x', "abc123SECRETxyz"),
+    ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA"),
+    ("export GITHUB_TOKEN=ghp_abcdefghijkl12345 && make", "ghp_abcdefghijkl12345"),
+    ("OPENAI_API_KEY=sk-abcdef123456 python run.py", "sk-abcdef123456"),
+    ("NX_VOYAGE_API_KEY=pa-zzzzzzzzzz nx index", "pa-zzzzzzzzzz"),
+    ("PGPASSWORD=hunter2hunter2 psql", "hunter2hunter2"),
+    ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG", "wJalrXUtnFEMI"),
+    ("curl -u admin:s3cretpass https://x", "s3cretpass"),
+    ("psql postgres://user:pw123456@host/db", "pw123456"),
+    ('{"password": "hunter22hunter"}', "hunter22hunter"),
+    ("--db-password=letmein99 --verbose", "letmein99"),
+    ("key AKIAABCDEFGHIJKLMNOP in text", "AKIAABCDEFGHIJKLMNOP"),
+])
+def test_credentials_in_free_text_are_masked(text: str, secret: str) -> None:
+    out = failure_ring.scrub(text)
+    assert secret not in out, out
+    assert "[redacted]" in out
+
+
+def test_plain_command_text_survives_the_scrub() -> None:
+    text = "git log --oneline -5 && uv run pytest tests/test_x.py -k session_id"
+    assert failure_ring.scrub(text) == text
+
+
 def test_the_switch_turns_capture_off(tmp_path: Path) -> None:
     ring = tmp_path / "ring"
-    assert failure_ring.record("probe", {}, RuntimeError("x"), env={failure_ring.DISABLE_ENV: "0"},
-                               directory=ring) is None
+    for off in ("0", "false", "OFF", "no"):
+        assert _rec(ring, {}, env={failure_ring.DISABLE_ENV: off}) is None
     assert not ring.exists()
+
+
+def test_an_entry_with_no_module_is_not_recorded(tmp_path: Path) -> None:
+    assert _rec(tmp_path, {"a": 1}, module=None) is None
+    assert failure_ring.entries(tmp_path) == []
 
 
 def test_recording_never_raises(tmp_path: Path) -> None:
     blocker = tmp_path / "file"
     blocker.write_text("not a directory", encoding="utf-8")
-    assert failure_ring.record("probe", {"a": object()}, RuntimeError("x"), env={},
-                               directory=blocker / "ring") is None
+    assert _rec(blocker / "ring", {"a": object()}) is None
 
 
-def test_an_oversized_entry_is_cut_to_fit(tmp_path: Path) -> None:
-    big = {"tool_input": {"content": "x" * (failure_ring.MAX_ENTRY_BYTES * 3)}}
-    path = failure_ring.record("probe", big, RuntimeError("x"), env={}, directory=tmp_path)
-    assert path is not None
+@pytest.mark.parametrize("payload", [
+    {"tool_input": {"content": "x" * (failure_ring.MAX_ENTRY_BYTES * 3)}},
+    {"tool_response": {"filenames": [f"/repo/src/pkg/module_{i}.py" for i in range(120_000)]}},
+    {"rows": [{"id": i, "name": f"n{i}"} for i in range(3000)]},
+    {"ints": list(range(300_000))},
+], ids=["one-big-string", "wide-list", "many-dicts", "many-ints"])
+def test_an_oversized_entry_is_cut_to_fit_and_survives(tmp_path: Path, payload: dict) -> None:
+    older = _rec(tmp_path, {"n": 0}, now=1_700_000_000.0)
+    path = _rec(tmp_path, payload, now=1_700_000_001.0)
+    assert path is not None and path.exists()
     assert path.stat().st_size <= failure_ring.MAX_ENTRY_BYTES
-    entry = failure_ring.load(path)
-    assert entry["truncated"] is True
-    assert "[cut " in entry["payload"]["tool_input"]["content"]
+    assert failure_ring.load(path)["truncated"] is True
+    assert failure_ring.entries(tmp_path) == [older, path], "a big entry evicted the ring"
+
+
+def test_a_cut_list_says_how_much_was_cut(tmp_path: Path) -> None:
+    path = _rec(tmp_path, {"files": [f"f{i}" for i in range(50_000)]})
+    assert path is not None
+    files = failure_ring.load(path)["payload"]["files"]
+    assert isinstance(files, list) and files[-1].startswith("...[cut ")
 
 
 def test_the_ring_keeps_the_newest_within_both_caps(tmp_path: Path) -> None:
-    paths = [failure_ring.record("probe", {"n": i}, RuntimeError("x"), env={}, directory=tmp_path,
-                                 now=1_700_000_000.0 + i) for i in range(5)]
+    paths = [_rec(tmp_path, {"n": i}, now=1_700_000_000.0 + i) for i in range(5)]
     stranger = tmp_path / "keep-me.json"
     stranger.write_text("{}", encoding="utf-8")
     assert failure_ring.prune(tmp_path, max_entries=3) == 2
@@ -96,16 +148,32 @@ def test_the_ring_keeps_the_newest_within_both_caps(tmp_path: Path) -> None:
     one = paths[4].stat().st_size
     assert failure_ring.prune(tmp_path, max_bytes=one) == 2
     assert failure_ring.entries(tmp_path) == paths[4:]
+    assert failure_ring.prune(tmp_path, max_bytes=0, keep=paths[4]) == 0, "prune deleted the kept entry"
     assert stranger.exists(), "prune touched a file that is not the ring's"
 
 
 def test_record_prunes_to_the_entry_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(failure_ring, "MAX_ENTRIES", 2)
     for i in range(4):
-        failure_ring.record("probe", {"n": i}, RuntimeError("x"), env={}, directory=tmp_path,
-                            now=1_700_000_000.0 + i)
+        _rec(tmp_path, {"n": i}, now=1_700_000_000.0 + i)
     kept = [failure_ring.load(p)["payload"]["n"] for p in failure_ring.entries(tmp_path)]
     assert kept == [2, 3]
+
+
+def test_a_failed_write_leaves_no_temp_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_replace(*_: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(failure_ring.os, "replace", no_replace)
+    assert _rec(tmp_path, {"n": 1}) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_prune_sweeps_a_leftover_temp_file(tmp_path: Path) -> None:
+    stale = tmp_path / "hookfail-20260101T000000000000-1-probe.json.tmp"
+    stale.write_text("partial", encoding="utf-8")
+    failure_ring.prune(tmp_path)
+    assert not stale.exists()
 
 
 def test_load_refuses_what_is_not_an_entry(tmp_path: Path) -> None:
@@ -130,16 +198,17 @@ def test_never_fail_saves_the_payload_and_names_it_on_stderr(
     assert f"replay with: nx hook replay {path}" in capsys.readouterr().err
 
 
-def test_a_crash_while_reading_the_payload_still_records_and_still_fails_open(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_a_crash_while_reading_the_payload_still_fails_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
     def bad_payload() -> object:
         raise OSError("payload gone")
 
-    assert never_fail(_raise, "probe", payload=bad_payload).crashed
-    assert failure_ring.entries(tmp_path / "hook-failures") == []
+    assert never_fail(_raise, "probe", payload=bad_payload, module="m.v").crashed
+    err = capsys.readouterr().err
+    assert "swallowed RuntimeError: deliberate" in err and "replay with" not in err
 
 
 def test_the_command_tier_records_and_replay_raises_the_same_crash(
@@ -164,9 +233,7 @@ def test_the_command_tier_records_and_replay_raises_the_same_crash(
 
     monkeypatch.syspath_prepend(str(tmp_path))
     with pytest.raises(RuntimeError, match="crashed on Boom"):
-        failure_ring.replay(path)
-    out = CliRunner().invoke(hook_group, ["replay", str(path)])
-    assert isinstance(out.exception, RuntimeError) and "crashed on Boom" in str(out.exception)
+        failure_ring.replay(path, module_roots=("probe_verb",))
 
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
     listed = CliRunner().invoke(hook_group, ["failures", "--json"])
@@ -174,14 +241,46 @@ def test_the_command_tier_records_and_replay_raises_the_same_crash(
     assert json.loads(listed.output.splitlines()[0])["path"] == str(path)
 
 
-def test_replay_of_a_fixed_verb_prints_its_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    (tmp_path / "fixed_verb.py").write_text(_CRASHING_VERB, encoding="utf-8")
+def test_replay_refuses_a_module_that_is_not_a_hook_verb(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    entry = tmp_path / "hookfail-evil.json"
+    entry.write_text(json.dumps({"format": 1, "hook": "x", "module": "subprocess",
+                                 "payload": {"/usr/bin/touch": 1, str(marker): 2}}), encoding="utf-8")
+    with pytest.raises(failure_ring.ReplayRefused, match="not a hook verb"):
+        failure_ring.replay(entry)
+    out = CliRunner().invoke(hook_group, ["replay", str(entry)])
+    assert out.exit_code == 1 and "not a hook verb" in out.output
+    assert not marker.exists()
+
+
+def test_replay_applies_the_recorded_env_and_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "env_verb.py").write_text(_CRASHING_VERB, encoding="utf-8")
     monkeypatch.syspath_prepend(str(tmp_path))
-    path = failure_ring.record("probe", {"tool_name": "Calm"}, RuntimeError("old"), module="fixed_verb",
-                               env={}, directory=tmp_path / "ring")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    path = _rec(tmp_path / "ring", {"tool_name": "Env"}, module="env_verb", env={"NX_PROBE_MODE": "strict"})
+    assert path is not None
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("NX_PROBE_MODE", raising=False)
+    with pytest.raises(RuntimeError, match=r"env strict cwd .*work"):
+        failure_ring.replay(path, module_roots=("env_verb",))
+    assert "NX_PROBE_MODE" not in os.environ and Path.cwd() == tmp_path
+
+
+def test_replay_of_a_verb_that_no_longer_crashes_prints_its_answer(tmp_path: Path) -> None:
+    path = _rec(tmp_path, {}, module="nexus.hooks.mcp_connect_check")
+    assert path is not None
     out = CliRunner().invoke(hook_group, ["replay", str(path)])
     assert out.exit_code == 0, out.output
-    assert "fine" in out.output
+    assert "No crash this time" in out.stderr
+
+
+def test_replay_warns_about_a_cut_entry(tmp_path: Path) -> None:
+    path = _rec(tmp_path, {"ints": list(range(100_000))}, module="nexus.hooks.mcp_connect_check")
+    assert path is not None
+    out = CliRunner().invoke(hook_group, ["replay", str(path)])
+    assert "was cut to fit" in out.stderr
 
 
 def test_the_tool_tier_records_the_run_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,6 +293,22 @@ def test_the_tool_tier_records_the_run_module(tmp_path: Path, monkeypatch: pytes
     assert entry["hook"] == "hook_probe_boom"
     assert entry["module"] == __name__
     assert entry["payload"] == {"session_id": "s-2"}
+
+
+def test_the_nudge_verbs_own_boundary_records_a_replayable_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+
+    def broken(_payload: object) -> HookResult:
+        raise RuntimeError("nudge broke")
+
+    monkeypatch.setattr(nudge, "_decide", broken)
+    assert nudge.run({"agent_type": "developer"}).crashed
+    (path,) = failure_ring.entries(tmp_path / "hook-failures")
+    entry = failure_ring.load(path)
+    assert entry["module"] == "nexus.hooks.subagent_stop_t1_nudge"
+    assert entry["payload"] == {"agent_type": "developer"}
 
 
 def test_failures_says_so_when_the_ring_is_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

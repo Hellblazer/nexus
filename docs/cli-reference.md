@@ -3179,17 +3179,6 @@ escape-rate per rule.
 | `--from-store` | Read the durable `routing_events` engine table (nexus-gjv9b PART 2's replacement for the JSONL log) instead; `--log-path` is ignored |
 | `--since ISO_DATE` | With `--from-store`: only events at or after this date/datetime |
 
-### nx hook failures, nx hook replay
-
-```
-nx hook failures [--json]
-nx hook replay PATH
-```
-
-A hook never fails the session: when a hook verb crashes, the crash is swallowed and the event proceeds. The input that caused it is saved to a bounded local ring under `~/.config/nexus/hook-failures/` (at most 50 entries and 2 MiB; files readable only by you; strings run through the credential redactor, credential-named keys dropped, the environment cut to an allowlist of `NX_`, `NEXUS_` and `CLAUDE_` variables without credential names). The swallowed-crash line on the hook's stderr names the saved file. `NX_HOOK_FAILURE_RING=0` turns the capture off.
-
-`failures` lists the saved entries, newest first. `replay` runs the recorded verb's `run(payload)` on the saved input outside the never-fail boundary, so the crash raises with its traceback. It runs the verb for real, side effects included, and the input is the redacted one, so a crash that depended on a redacted value may not come back.
-
 JSON output shape (nexus-mzvwa.9): `{"rules": {<rule>: {...}}, "selftest_excluded": N,
 "unregistered_rules": [...]}` — `unregistered_rules` present only when a
 hooks.json registration surface was found. Fail-ladder self-test rows
@@ -3221,6 +3210,19 @@ JSONL log — that machinery stays in place only to protect installs still
 running pre-swap code.
 
 ---
+
+### nx hook failures, nx hook replay
+
+```
+nx hook failures [--json]
+nx hook replay PATH
+```
+
+A hook never fails the session: when a hook verb crashes, the crash is swallowed and the event proceeds. The input that caused it is saved to a bounded local ring under `~/.config/nexus/hook-failures/` (at most 50 entries and 2 MiB, one entry at most 128 KiB, oldest dropped first), and the swallowed-crash line on the hook's stderr names the saved file. `NX_HOOK_FAILURE_RING=0` turns the capture off.
+
+What is kept: the payload as the hook received it, so prompts, command lines and file text are stored as they were, apart from credentials. Those are masked: `Authorization`, `Bearer` and `Basic` values, `NAME_TOKEN=...`-style assignments and quoted JSON keys whose name carries a credential word, URL userinfo, `curl -u user:pass`, and well-known token prefixes; a value under a credential-named key is dropped whole. The environment is cut to `NX_`, `NEXUS_` and `CLAUDE_` variables whose names carry no credential word (`KEY`, `TOKEN`, `SECRET`, `PASS`, `PWD`, `AUTH`, `URL`, `DSN` and others). Long strings and lists are cut to fit, and the entry says `truncated`. On POSIX the files are readable only by you (0600 in a 0700 directory); on Windows the profile's permissions decide.
+
+`failures` lists the saved entries, newest first. `replay` runs the recorded verb's `run(payload)` on the saved input outside the never-fail boundary, with the recorded environment subset and working directory, so the crash raises with its traceback. It refuses an entry whose module is not a hook verb (`nexus.hooks.*`, `nexus._hook_runtime.*`). It runs the verb for real, side effects included, and the input is the masked one, so a crash that depended on a masked or cut value may not come back; it warns when the entry was cut.
 
 ## nx init
 

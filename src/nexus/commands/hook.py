@@ -422,8 +422,15 @@ def replay_cmd(path: str) -> None:
         entry = failure_ring.load(Path(path))
     except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Replaying {entry['hook']} ({entry.get('module')}) recorded {entry.get('recorded_at')}.", err=True)
-    result = failure_ring.replay(Path(path))
+    click.echo(f"Replaying {entry['hook']} ({entry.get('module')}) recorded {entry.get('recorded_at')}, "
+               "with its recorded environment subset and working directory.", err=True)
+    if entry.get("truncated"):
+        click.echo("Warning: this entry was cut to fit the ring; a crash that depended on the cut part "
+                   "may not come back.", err=True)
+    try:
+        result = failure_ring.replay(Path(path))
+    except failure_ring.ReplayRefused as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo("No crash this time; the verb returned:", err=True)
     if result.stdout is not None:
         click.echo(result.stdout)

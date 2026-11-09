@@ -433,7 +433,7 @@ def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
         result = never_fail(
             _body,
             hook=tool_name,
-            payload=lambda: built.get("payload", kwargs),
+            payload=lambda: built.get("payload"),
             module=getattr(spec.run, "__module__", None),
         )
         return CallToolResult(content=[TextContent(type="text", text=result.stdout or "")], is_error=False)

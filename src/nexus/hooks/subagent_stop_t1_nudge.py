@@ -209,4 +209,4 @@ def _decide(payload: dict | None) -> HookResult:
 
 def run(payload: dict | None) -> HookResult:
     """Return the nudge envelope when a real agent stops with no T1 put."""
-    return never_fail(lambda: _decide(payload), "subagent-stop-t1-nudge")
+    return never_fail(lambda: _decide(payload), "subagent-stop-t1-nudge", payload=lambda: payload, module=__name__)
