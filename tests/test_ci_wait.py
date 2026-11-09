@@ -379,12 +379,21 @@ class TestCappedRow:
         done = ci_wait.parse_done_row(_row({"sha": SHA, "runs": [[1, 1, "CI", "success"]], "url": "u"}))
         assert done is not None and done.total is None
 
-    @pytest.mark.parametrize("n", [0, 1.5, "3", True, None])
-    def test_an_n_that_is_not_a_count_of_the_fold_is_malformed(self, n) -> None:
-        body = {"sha": SHA, "runs": [[1, 1, "CI", "success"], [2, 1, "CI", "success"]], "url": "u", "n": n}
-        if n is None:
-            body["n"] = 1  # fewer than the runs the row lists
-        assert ci_wait.parse_done_row(_row(body)) is None
+    @pytest.mark.parametrize("n", [True, 2.5, 3.0, "3"])
+    def test_an_n_that_is_not_an_int_is_malformed(self, n) -> None:
+        # One listed run, so each value would pass the count check on its own:
+        # only the type checks refuse these.
+        assert ci_wait.parse_done_row(_row({"sha": SHA, "runs": [[1, 1, "CI", "success"]], "url": "u", "n": n})) is None
+
+    def test_an_n_below_the_runs_listed_or_below_one_is_malformed(self) -> None:
+        two = [[1, 1, "CI", "success"], [2, 1, "CI", "success"]]
+        assert ci_wait.parse_done_row(_row({"sha": SHA, "runs": two, "url": "u", "n": 1})) is None
+        # The fold always holds the triggering run: n=0 with no runs listed is not a fold.
+        assert ci_wait.parse_done_row(_row({"sha": SHA, "runs": [], "url": "u", "n": 0})) is None
+
+    def test_an_explicit_null_n_reads_as_a_row_from_before_n(self) -> None:
+        done = ci_wait.parse_done_row(_row({"sha": SHA, "runs": [[1, 1, "CI", "success"]], "url": "u", "n": None}))
+        assert done is not None and done.total is None and not done.capped
 
     def test_a_capped_row_with_no_listed_failure_is_unknown_not_success(self) -> None:
         line, code = ci_wait.summarize(_capped([[1, 1, "CI", "success"], [2, 1, "Docs", "success"]], 3))
@@ -448,3 +457,37 @@ class TestCappedRow:
         result = CliRunner().invoke(ci_group, ["wait", SHA, "--timeout", "1"])
         assert result.exit_code == 1, result.output
         assert "Service CI failure (run 11)" in result.stdout.strip().splitlines()[-1]
+
+    # Each n makes the count alone agree (listed + GitHub runs above the top
+    # == n), so only the identity checks refuse.
+    @pytest.mark.parametrize(("n", "github", "why"), [
+        (2, [ci_wait.Run(10, 2, "CI", "success"), ci_wait.Run(11, 1, "Svc", "success")],
+         "a listed run was rerun after the row: GitHub shows attempt 2"),
+        (2, [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 2, "Svc", "success")],
+         "a dropped run on attempt 2 may hide the fold's failed attempt 1"),
+        (3, [ci_wait.Run(20, 1, "CI", "success"), ci_wait.Run(21, 1, "Svc", "success")],
+         "the listed run is not in GitHub's list at all"),
+        (2, [ci_wait.Run(9, 1, "Other", "success"), ci_wait.Run(11, 1, "Svc", "success")],
+         "GitHub has a run below the top that the row does not list"),
+        (3, [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Svc", "success"),
+             ci_wait.Run(11, 1, "Svc", "success")], "GitHub lists one run id twice"),
+    ])
+    def test_github_runs_that_are_not_the_fold_by_identity_leave_it_unknown(self, n, github, why) -> None:
+        done = _capped([[10, 1, "CI", "success"]], n)
+        full = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop", fetch=lambda *a: github)
+        assert full is done, why
+        assert ci_wait.summarize(full)[1] == ci_wait.EXIT_UNKNOWN, why
+
+    def test_an_extra_run_cannot_stand_in_for_a_missing_attempt(self) -> None:
+        """Count alone matched here: 2 listed + 3 above the top = n. GitHub's 11
+        is at attempt 2, so the fold's attempt is not what GitHub shows."""
+        done = _capped([[10, 1, "CI", "success"], [11, 1, "Svc", "success"]], 5)
+        github = [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 2, "Svc", "success"),
+                  ci_wait.Run(12, 1, "A", "success"), ci_wait.Run(13, 1, "B", "success"),
+                  ci_wait.Run(14, 1, "C", "success")]
+        full = ci_wait.complete_runs(done, "Hellblazer/nexus", "develop", fetch=lambda *a: github)
+        assert ci_wait.summarize(full)[1] == ci_wait.EXIT_UNKNOWN
+
+    def test_a_capped_row_that_github_cannot_confirm_says_so(self) -> None:
+        line, code = ci_wait.summarize(_capped([[10, 1, "CI", "success"]], 2))
+        assert code == ci_wait.EXIT_UNKNOWN and line.endswith("(1 of 2 runs listed; GitHub did not confirm the rest)")
