@@ -550,7 +550,22 @@ STASH, FIND, TRAILER = "git-stash", "full-disk-find", "claude-session-trailer"
     ("git commit -F - <<'EOF'\nuse git stash here\nEOF", None),
     # global options before the subcommand, a stash after a heredoc, a comment
     ("git -C /tmp/x stash", STASH),
-    ("git --no-pager stash list", STASH),
+    ("git --no-pager stash list", None),
+    # only a stash that changes state counts (Sam, ask q12-stash-scope, 2026-11-09):
+    # list, show and create touch neither refs/stash nor the working tree
+    ("git stash list", None),
+    ("git stash show -p stash@{0}", None),
+    ("git -C /tmp/x stash show", None),
+    ("git stash create", None),
+    ("git stash push -m wip", STASH),
+    ("git stash save wip", STASH),
+    ("git stash -u", STASH),
+    ("git stash apply", STASH),
+    ("git stash drop stash@{1}", STASH),
+    ("git stash clear", STASH),
+    ("git stash branch b", STASH),
+    ("git stash store abc123", STASH),
+    ("git stash list; git stash pop", STASH),
     ("git -c core.pager=cat stash pop", STASH),
     ("git --git-dir=.git stash", STASH),
     ("git --git-dir .git --work-tree . stash", STASH),

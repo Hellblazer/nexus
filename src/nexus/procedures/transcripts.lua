@@ -112,7 +112,8 @@
 -- are not applied.
 --
 -- Violation rules (RDR-238 Phase 2): em-dash in assistant prose (code left out); git-stash,
--- a git command whose subcommand, past the global options (-C dir, --no-pager), is stash;
+-- a git command whose subcommand, past the global options (-C dir, --no-pager), is stash,
+-- unless the word after it is list, show or create (those change no state);
 -- full-disk-find, a find whose start path (quoted or not) is /, ~, $HOME, /Users, /home or
 -- one directory below the last two; claude-session-trailer, a Claude-Session: line in a git
 -- commit segment (its arguments or its heredoc); backtick-in-quoted-arg, a backtick inside
@@ -569,11 +570,15 @@ local function git_sub(seg, k)
     elseif w:sub(1, 1) == "-" then
       j = j + 1
     else
-      return w
+      return w, j
     end
   end
   return nil
 end
+
+-- A stash subcommand that touches neither refs/stash nor the working tree: only a stash
+-- that changes state counts (Sam, ask q12-stash-scope, 2026-11-09).
+local STASH_READ_ONLY = {list = true, show = true, create = true}
 
 local VERB = "^[a-z][a-z0-9_%-]*$"
 
@@ -906,8 +911,8 @@ local function bash_hits(cmd, hit)
     local k = head(seg)
     local c = k and seg.w[k] or ""
     if is_cmd(c, "git") then
-      local sub = git_sub(seg, k)
-      if sub == "stash" then
+      local sub, j = git_sub(seg, k)
+      if sub == "stash" and not STASH_READ_ONLY[seg.w[j + 1] or ""] then
         hit["git-stash"] = true
       elseif sub == "commit" and names_trailer(seg) then
         hit["claude-session-trailer"] = true

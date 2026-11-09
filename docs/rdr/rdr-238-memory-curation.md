@@ -692,7 +692,10 @@ The measured domain is five rules: the em dash rule, which has the volume
 for a 14-day window, and four rare rules (`git stash`, full-disk `find`, the
 Claude-Session trailer, backticks in quoted arguments), pooled into one rate
 over 30 days, the most transcripts keep (about 30 days, inferred; research
-9). Each count is stored in T2 when it is taken.
+9). Each count is stored in T2 when it is taken. The `git stash` rule counts only a
+stash that changes state: `git stash list`, `show` and `create` touch neither
+`refs/stash` nor the working tree and are not counted (Sam, 2026-11-09, ask
+q12-stash-scope; a dry run found 27 of 37 stash sessions in 14 days only listed).
 
 #### Step 2: Split
 
