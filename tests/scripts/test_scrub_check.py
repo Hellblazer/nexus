@@ -57,9 +57,20 @@ def repo(tmp_path: Path) -> Path:
     [
         ("home", HOME),
         ("home", LINUX_HOME),
+        ("home", "HOME=/Users/" + "jdoe"),  # no slash after the name
+        ("home", "cd /home/" + "jdoe"),
+        ("home", '"/Users/' + 'jdoe"'),
+        ("home", "/mnt/c/Users/" + "jdoe/x"),
+        ("home", "C:/Users/" + "jdoe"),
+        ("winhome", "C:\\Users\\" + "Jdoe\\x"),
+        ("winhome", "c:\\\\users\\\\" + "jdoe"),  # JSON-escaped, lower case
         ("tailnet", TAILNET),
+        ("tailnet", "tail1234" + ".ts.net"),
         ("chat", CHAT),
+        ("chat", "https://claude.ai/" + "share/abc"),
+        ("chat", "https://claude.ai/" + "code/session_01AbCdEf"),
         ("session", TRAILER),
+        ("session", "claude-" + "session: 0f0f0f0f-0000"),
     ],
 )
 def test_each_rule_fails_a_new_hit(repo: Path, rule: str, text: str) -> None:
@@ -75,8 +86,29 @@ def test_placeholders_and_trailer_mentions_pass(repo: Path) -> None:
         repo,
         "docs/ok.md",
         f"{PLACEHOLDER}\n~/git/proj\nclaude.ai/install\nstrip the Claude-Session: trailer\n"
-        "/Users/ alone\n",
+        "/Users/ alone\nsrc/home/pages/x.py\nsee /home/you.\nclaude.ai/artifact/abc\n*.ts.net\n",
     )
+    assert sc.check(repo) == []
+
+
+@pytest.mark.parametrize("sep", ["\f", "\r", "\x0b", "\x85", "\u2028"])
+def test_a_hit_after_a_control_character_inside_a_line_is_seen(
+    repo: Path, sep: str
+) -> None:
+    _put(repo, "log.txt", f"progress{sep}{HOME}\n")
+    assert any("log.txt: 1 scrub hits" in e for e in sc.check(repo))
+
+
+def test_a_path_with_a_colon_and_a_non_ascii_name_parse(repo: Path) -> None:
+    _put(repo, "a:b.md", f"{HOME}\n")
+    _put(repo, "\u00fcn.md", f"{HOME}\n")
+    errors = "\n".join(sc.check(repo))
+    assert "a:b.md: 1 scrub hits" in errors
+    assert "\u00fcn.md: 1 scrub hits" in errors
+
+
+def test_the_durations_file_is_exempt(repo: Path) -> None:
+    _put(repo, ".test_durations.json", f'{{"{HOME}": 1}}\n')
     assert sc.check(repo) == []
 
 
@@ -156,6 +188,66 @@ def test_rev_scans_the_commit_not_the_working_tree(repo: Path) -> None:
     assert sc.check(repo) == []
 
 
+def _head(root: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_base_mode_scans_the_range_messages(repo: Path) -> None:
+    subprocess.run(["git", "-C", str(repo), "add", "--", sc.ALLOWLIST], check=True)
+    _commit(repo)
+    base = _head(repo)
+    _put(repo, "src/more.py", "y = 2\n")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-qm",
+            f"work\n\n{TRAILER}",
+        ],
+        check=True,
+    )
+    errors = sc.check(repo, rev="HEAD", base=base)
+    assert len(errors) == 1 and "message: session" in errors[0], errors
+    assert sc.check(repo, rev="HEAD") == [], "without --base only the files are judged"
+
+
+def test_base_mode_refuses_allowlist_widening(repo: Path) -> None:
+    _put(repo, "a.md", f"{HOME}\n")
+    _allow(repo, "user you\na.md 1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "--", sc.ALLOWLIST], check=True)
+    _commit(repo)
+    base = _head(repo)
+    _put(repo, "a.md", f"{HOME}\n{HOME}\n")
+    _put(repo, "b.md", "/Users/" + "jdoe2/x\n")
+    _allow(repo, "user you\nuser jdoe2\na.md 2\n")
+    subprocess.run(["git", "-C", str(repo), "add", "--", sc.ALLOWLIST], check=True)
+    _commit(repo)
+    assert sc.check(repo, rev="HEAD") == [], "the tip is self-consistent"
+    errors = "\n".join(sc.check(repo, rev="HEAD", base=base))
+    assert "allowlist adds user jdoe2" in errors
+    assert "allowlist raises a.md 1 -> 2" in errors
+    assert sc.widening(({"you"}, {"a.md": 2}), ({"you"}, {"a.md": 1})) == [], (
+        "lowering is no widening"
+    )
+
+
+def test_a_bad_rev_is_a_clean_error(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        sc.main(["--root", str(repo), "check", "--rev", "no-such-ref"]) == sc.EXIT_FOUND
+    )
+    assert "'no-such-ref' is not a commit" in capsys.readouterr().err
+
+
 def test_the_allowlist_itself_is_not_scanned(repo: Path) -> None:
     _allow(repo, f"user you\n# example {HOME}\n")
     subprocess.run(["git", "-C", str(repo), "add", "--", sc.ALLOWLIST], check=True)
@@ -202,9 +294,12 @@ def test_the_allowlist_is_fast_lane_eligible() -> None:
 
 @pytest.mark.lint
 def test_repo_is_scrubbed_or_grandfathered() -> None:
-    users, ceilings = sc.read_allowlist(_REPO / sc.ALLOWLIST)
-    # Non-vacuity: the allowlist must load and the scan must see the tree.
-    assert "you" in users and ceilings, "allowlist did not load"
+    users, _ = sc.read_allowlist(_REPO / sc.ALLOWLIST)
+    # Non-vacuity that survives a fully drained allowlist: the loaded rules still see a planted leak,
+    # and the scan sees the tree.
+    assert "you" in users, "allowlist did not load"
+    planted = {r for r, _ in sc.hits_in(f"{HOME} {TAILNET} {CHAT} {TRAILER}", users)}
+    assert planted == {"home", "tailnet", "chat", "session"}
     assert sc.tracked_count(_REPO) > 1000
     errors = sc.check(_REPO)
     assert errors == [], "\n".join(errors)

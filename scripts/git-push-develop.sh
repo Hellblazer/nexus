@@ -209,9 +209,11 @@
 #                               only a dev-checkout/venv `nx` is on PATH;
 #                               the installed generation was not found, and
 #                               NX_PUSH_SKIP_LOCK is unset
-#  12  PUSH_REFUSED_SCRUB       the tip adds a personal home path, tailnet
-#                               hostname, chat link or session trailer
-#                               (scripts/scrub_check.py check --rev <tip>)
+#  12  PUSH_REFUSED_SCRUB       the tip's tree or an outbound commit message
+#                               carries a personal home path, tailnet hostname,
+#                               chat link or session trailer, or the allowlist
+#                               widens the remote's (scripts/scrub_check.py
+#                               check --rev <tip> --base <remote branch>)
 #  64  PUSH_REFUSED_USAGE       a flag is unknown, lacks its value, or flags that
 #                               cannot combine were combined; nothing was fetched
 #  11  PUSH_LOCK_RELEASE_FAILED a claim was taken (nx tuple in succeeded)
@@ -686,6 +688,35 @@ elif { (( _range_allowlist )) || read -r -a _allowed_paths <<< "$(printf '%s' "$
   exit 7
 fi
 
+# ── Scrub gate (nexus-3ceda.7) ───────────────────────────────────────────
+# Sam ruled the repo stays scrubbed (ask nexus-scrubbed, 2026-11-09): no
+# personal home path, tailnet hostname, chat link or session trailer in a
+# committed file beyond what tests/fixtures/scrub-allowlist.txt grandfathers.
+# The check reads the TIP's files and allowlist (--rev), not the working
+# tree, so a dirty checkout neither hides nor invents a hit; with --base it
+# also scans the outbound commit messages and refuses an allowlist that
+# widens the remote branch's. CI's lint bucket and docs lane run the file
+# check; this catches it before the push, and sub-second, so it runs before
+# the tenant hint. A checkout without the script (an older branch) or a host
+# without python3 skips it with a PUSH_SCRUB_SKIPPED line on stderr.
+# --skip-scrub '<reason>' (env NX_PUSH_SKIP_SCRUB) pushes past it, on the record.
+_scrub_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "${NX_PUSH_SKIP_SCRUB:-}" ]]; then
+  echo "PUSH_SCRUB_SKIPPED reason=${NX_PUSH_SKIP_SCRUB}" >&2
+elif [[ -z "$_scrub_root" || ! -f "$_scrub_root/scripts/scrub_check.py" ]]; then
+  echo "PUSH_SCRUB_SKIPPED reason=no scripts/scrub_check.py in this checkout" >&2
+elif ! command -v python3 >/dev/null 2>&1; then
+  echo "PUSH_SCRUB_SKIPPED reason=no python3 on PATH" >&2
+elif ! _scrub_out="$(python3 "$_scrub_root/scripts/scrub_check.py" --root "$_scrub_root" check \
+      --rev "$tip" --base "refs/remotes/$remote/$branch" 2>&1)"; then
+  printf '%s\n' "$_scrub_out"
+  echo "PUSH_REFUSED_SCRUB the tip $tip's tree, its outbound commit messages or its allowlist carry a personal path,"
+  echo "hostname, chat link or session trailer (see above). Use a placeholder (/Users/you/..., ~, <host>); a"
+  echo "legitimate one: python3 scripts/scrub_check.py update-exceptions --allow-raise, then push with"
+  echo "--skip-scrub '<reason>'."
+  exit 12
+fi
+
 # ── Tenant ceiling hint (nexus-g37hn) ───────────────────────────────────
 # Develop went red twice on 2026-10-21/22 on pytest-gate's storage-touch fan-in
 # because a pushed test minted a tenant over tests/storage_touch_ceiling.toml
@@ -710,28 +741,6 @@ if [[ "${NX_PUSH_TENANT_CHECK:-1}" != "0" && -n "$_tenant_root" && -f "$_tenant_
     while IFS= read -r _tenant_line; do
       echo "PUSH_TENANT_HINT ${_tenant_line:0:400}" >&2
     done <<<"$_tenant_out"
-  fi
-fi
-
-# ── Scrub gate (nexus-3ceda.7) ───────────────────────────────────────────
-# Sam ruled the repo stays scrubbed (ask nexus-scrubbed, 2026-11-09): no
-# personal home path, tailnet hostname, chat link or session trailer in a
-# committed file beyond what tests/fixtures/scrub-allowlist.txt grandfathers.
-# The check reads the TIP's files and allowlist (--rev), not the working
-# tree, so a dirty checkout neither hides nor invents a hit. CI's lint bucket
-# and docs lane run the same check; this catches it before the push. A
-# checkout without the script (an older branch) skips it.
-# --skip-scrub '<reason>' (env NX_PUSH_SKIP_SCRUB) pushes past it, on the record.
-_scrub_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-if [[ -n "${NX_PUSH_SKIP_SCRUB:-}" ]]; then
-  echo "PUSH_SCRUB_SKIPPED reason=${NX_PUSH_SKIP_SCRUB}" >&2
-elif [[ -n "$_scrub_root" && -f "$_scrub_root/scripts/scrub_check.py" ]] && command -v python3 >/dev/null 2>&1; then
-  if ! _scrub_out="$(python3 "$_scrub_root/scripts/scrub_check.py" --root "$_scrub_root" check --rev "$tip" 2>&1)"; then
-    printf '%s\n' "$_scrub_out"
-    echo "PUSH_REFUSED_SCRUB the tip $tip adds a personal path, hostname, chat link or session trailer (see above)."
-    echo "Use a placeholder (/Users/you/..., ~, <host>); a legitimate one: python3 scripts/scrub_check.py"
-    echo "update-exceptions --allow-raise, with the reason in the commit message."
-    exit 12
   fi
 fi
 

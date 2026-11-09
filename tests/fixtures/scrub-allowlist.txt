@@ -1,15 +1,19 @@
 # Scrub-gate allowlist (scripts/scrub_check.py, nexus-3ceda.7; Sam, ask nexus-scrubbed).
-#   user <name>      a placeholder home-directory name that is not a person (/Users/<name>/, /home/<name>/)
+#   user <name>      a home-directory name that is not a person: a placeholder or a service account
 #   <path> <count>   a file that carried hits when the gate came in; its count only falls
 # Lower counts and drop files with `python3 scripts/scrub_check.py update-exceptions`; adding a file
 # or raising a count needs `--allow-raise` and a reason in the commit message.
 user ...
 user .config
 user .local
+user D
+user John
+user RUNNER
 user USER
 user a
 user a.b
 user admin
+user alice
 user bob
 user cwd
 user dev
@@ -30,7 +34,7 @@ user u
 user user
 user x
 user you
-.test_durations.json 7
+docs/agents/test-running.md 1
 docs/field-reports/2026-04-15-architecture-as-code-from-art.md 1
 docs/plans/2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md 1
 docs/rdr/rdr-019-chromadb-transient-retry.md 2
@@ -44,6 +48,7 @@ docs/rdr/rdr-122-llm-json-repair-pass.md 2
 docs/rdr/rdr-123-nx-answer-a2ui-surfaces.md 1
 docs/rdr/rdr-125-routing-hook-plugin-ownership.md 1
 docs/rdr/rdr-137-eliminate-repos-json.md 2
+infra/hellmini/README.md 1
 scripts/experiments/out/temporal_validity_ab_2026-09-08/windows.json 4
 scripts/experiments/out/temporal_validity_ab_v2_2026-09-09/windows.json 4
 scripts/experiments/out/temporal_validity_ab_v3_2026-09-09/windows.json 4
@@ -58,23 +63,41 @@ service/src/test/java/dev/nexus/service/CatalogRepositoryTest.java 3
 service/src/test/java/dev/nexus/service/PlpgsqlCheck.java 1
 service/src/test/resources/plpgsql-check-findings.sql 1
 tests/catalog/test_rdr_canonical_tumbler.py 3
+tests/daemon/test_service_registry.py 1
+tests/daemon/test_service_start_via_unit.py 1
 tests/daemon/test_service_stop_leaves_aspect_worker.py 2
-tests/daemon/test_windows_case_insensitive_paths.py 4
+tests/daemon/test_windows_autostart.py 6
+tests/daemon/test_windows_case_insensitive_paths.py 10
 tests/db/test_catalog_consumer_qnp5s_integration.py 7
+tests/e2e/windows-guest/driver/stduser.ps1 1
 tests/fixtures/incident_3c92m_commands.py 3
 tests/fixtures/windows_engine/embedded-resources-fragment.json 6
+tests/mcp/test_mode_diagnostics.py 2
 tests/scripts/fixtures/wixar_real_ci_fixed_output.txt 1
 tests/scripts/fixtures/wixar_real_ci_mass_skip_output.txt 1
 tests/test_catalog_reconcile_stale.py 2
 tests/test_doctor_check_mcp_logs.py 1
+tests/test_engine_windows_smoke.py 1
 tests/test_fhim9_file_path_match.py 4
-tests/test_gh896_catalog_link_tokens.py 3
+tests/test_gh896_catalog_link_tokens.py 5
 tests/test_health_tuple_doctor_rows.py 1
-tests/test_install_census_generation_windows.py 1
-tests/test_install_layout_windows.py 1
-tests/test_pdf_title_placeholder.py 1
-tests/test_procedure_transcripts.py 1
+tests/test_install_census_generation_windows.py 2
+tests/test_install_generation_windows.py 3
+tests/test_install_layout_twins_agree.py 1
+tests/test_install_layout_windows.py 7
+tests/test_mineru_child_dll_dirs.py 2
+tests/test_pdf_stack.py 3
+tests/test_pdf_title_placeholder.py 2
+tests/test_pg_bundle_windows.py 1
+tests/test_procedure_transcripts.py 2
+tests/test_rdr237_ladder.py 1
 tests/test_registry.py 1
 tests/test_repo_identity_stability.py 22
-tests/test_routing_destructive_action_advice.py 1
+tests/test_routing_destructive_action_advice.py 3
 tests/test_source_uri_home_key.py 5
+tests/test_t1_discovery.py 1
+tests/test_windows_engine_release.py 3
+tests/test_windows_gate_driver.py 1
+tests/test_windows_job_cleanup.py 4
+tests/test_windows_process_identity_sites.py 4
+tool-spill/tests/register.test.ts 1

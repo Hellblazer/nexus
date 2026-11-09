@@ -237,6 +237,39 @@ class TestScrubGate:
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert _remote_tip(origin) == sha
 
+    def test_a_session_trailer_in_an_outbound_message_is_refused(self, repos) -> None:
+        origin, work = repos
+        self._arm(work)
+        before = _remote_tip(origin)
+        (work / "note.md").write_text("clean\n")
+        _git("add", "note.md", cwd=work)
+        _git("commit", "-q", "-m", "note\n\nClaude-" + "Session: 0f0f0f0f-0000-4000-8000-000000000000", cwd=work)
+        proc = _run(work, _git("rev-parse", "HEAD", cwd=work))
+        assert proc.returncode == 12, proc.stdout + proc.stderr
+        assert "message: session" in proc.stdout
+        assert _remote_tip(origin) == before
+
+    def test_the_refusal_comes_before_the_tenant_hint(self, repos) -> None:
+        origin, work = repos
+        self._arm(work)
+        (work / "scripts" / "tenant_delta.py").write_text(TestTenantHint._STUB.format(rc=0))
+        _git("add", "scripts/tenant_delta.py", cwd=work)
+        _git("commit", "-q", "-m", "stub", cwd=work)
+        _git("push", "-q", "origin", "develop", cwd=work)
+        (work / "tests" / "test_x.py").write_text(f"P = '{self._HOME}'\n")
+        _git("add", "tests/test_x.py", cwd=work)
+        _git("commit", "-q", "-m", "test", cwd=work)
+        proc = _run(work, _git("rev-parse", "HEAD", cwd=work))
+        assert proc.returncode == 12, proc.stdout + proc.stderr
+        assert not (work / "tenant-stub-ran").exists(), "the sub-second scrub refuses before the 30 s hint"
+
+    def test_a_checkout_without_the_script_says_it_skipped(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "plain")
+        proc = _run(work, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "PUSH_SCRUB_SKIPPED reason=no scripts/scrub_check.py in this checkout" in proc.stderr
+
     def test_skip_scrub_pushes_on_the_record(self, repos) -> None:
         origin, work = repos
         self._arm(work)
