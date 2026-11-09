@@ -53,5 +53,11 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   nexus-1d6pz.11.5: a closing develop-CI wait is allowed when the session's channel status record shows a live, fresh, unstalled waiter, the initialize handshake, the conexus channel flag and a `board/ci/*--done` subscription (other clauses are still read); a live waiter with the subscription but no flag blocks naming `nx ci wait <sha>`, and every CI-wait block offers it.
 - `conexus/skills/orchestration/SKILL.md`
   nexus-3ceda.2: a per-change changelog fragment is not a shared file; the agent that made the change writes it.
+- `conexus/skills/rdr-research/SKILL.md`
+  nexus-qo7ie.33: `add` builds the record with the `research_add` procedure (`procedure_run`), reads the title back, and writes all four returned fields with `memory_put`; no more `nx rdr preamble rdr-research -- add`. Needs a package with `procedure_run` (7.99.0 or later). The bare-argument refusal follows in a later package release.
+- `conexus/skills/rdr-fix-checklist/SKILL.md`
+  nexus-qo7ie.33: the pre-edit research entry is recorded through the rdr-research skill's `add`, not the bare-argument CLI.
+- `conexus/skills/rdr-gate-checklist/SKILL.md`
+  nexus-qo7ie.33: a vacuous Layer 2 is filled through the rdr-research skill's `add`, not the bare-argument CLI.
 
 ## Deferred to the next client release

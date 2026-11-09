@@ -33,22 +33,21 @@ In any brief or relay, put the absolute path itself where `<RDR dir>` stands, ne
 
 **Behavior:**
 
-1. **Record the finding via the Bash tool** (nexus-zu1q0 — this used to be
-   computed here as prose: list T2 titles, parse the max sequence, upsert
-   the result. That computation raced: two adds in the same session could
-   both compute seq 1, and the second `memory_put` silently overwrote the
-   first finding. The sequence is now computed and guarded server-side):
-   `nx rdr preamble rdr-research -- add <id> <finding text tokens...>`
-   (literal argv tokens, per the apostrophe-crash rule above). It derives
-   the next sequence from existing `<id>-research-*` T2 titles, writes the
-   record, and re-checks the computed title immediately before writing,
-   advancing past a collision instead of upserting over it (two adds in
-   the same instant can still race; consecutive adds cannot). It prints the recorded title
-   (`{repo}_rdr/NNN-research-{seq}`); read that back to fill in step 3 below.
-   Classification and verification method are flags of the add, each from
-   a closed set, and the gate's Layer 2 census reads them:
-   `nx rdr preamble rdr-research -- add <id> --classification verified|documented|assumed --method source_search|spike|docs_only <finding text tokens...>`.
-   A value outside either set is refused. Source stays in the finding text.
+1. **Build the record with the `research_add` procedure.** It checks the
+   vocabulary and takes the next sequence number; it writes nothing:
+   `mcp__plugin_conexus_nexus__procedure_run(name="research_add", args={"rdr": <id as an integer>, "classification": "verified", "method": "source_search", "finding": "<one line>"})`.
+   `classification` is one of `verified`, `documented`, `assumed`; `method`
+   is one of `source_search`, `spike`, `docs_only`, spelled exactly so. The
+   finding is one line (the source goes in it); do not pass `repo`, which the
+   host fills. It returns `{project, title, content, tags}`; an `args:` error
+   names the value it refused.
+
+2. **Read the title back, then write.** `mcp__plugin_conexus_nexus__memory_get(project=<project>, title=<title>)`
+   must find nothing. If a record is already there, another add took that
+   number: run step 1 again, never write over it. Then
+   `mcp__plugin_conexus_nexus__memory_put(project=<project>, title=<title>, content=<content>, tags=<tags>)`
+   with all four fields exactly as returned (omit `ttl`). The title
+   (`{repo}_rdr/NNN-research-{seq}`) is the one step 3 cites.
 
 3. **Append to RDR markdown**: Add a formatted entry to the Research Findings > Key Discoveries section:
    Prose register (`$RDR_DIR/REGISTER.md`, fallback `${CLAUDE_PLUGIN_ROOT}/resources/rdr/REGISTER.md`): findings in plain terms a non-native-speaker expert can follow; say what is known and what is not; a dead end recorded plainly is a finding.
@@ -94,7 +93,7 @@ In any brief or relay, put the absolute path itself where `<RDR dir>` stands, ne
 A research entry that records a gate fix is written BEFORE the edit, never
 transcribed from it:
 
-1. Record the entry first: `nx rdr preamble rdr-research -- add <id> ...`.
+1. Record the entry first, by steps 1 and 2 of `add` above.
    Its `commits:` field is filled in after the commit exists.
 2. Every clause the fix will add carries a tool-produced quote from its
    source (`sed -n`, `grep -n`, a T2 read) or the explicit marker
