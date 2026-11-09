@@ -82,7 +82,7 @@ class CatalogHandlerLinksBatchRoutesTest {
         shortCfg.setPassword(SVC_PASS);
         shortCfg.setMaximumPoolSize(2);
         shortCfg.setAutoCommit(true);
-        shortCfg.setConnectionInitSql("SET lock_timeout = '500ms'");
+        shortCfg.addDataSourceProperty("options", "-c lock_timeout=500");
         shortLockDs = new com.zaxxer.hikari.HikariDataSource(shortCfg);
         shortLockHandler = new CatalogHandler(new CatalogRepository(new TenantScope(shortLockDs)));
     }
