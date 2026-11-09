@@ -99,9 +99,11 @@ def test_registry_collection_name_unique_for_same_basename(tmp_path: Path) -> No
 # ── Test 3: T3 put() with ttl_days > 0 stores indexed_at + ttl_days ──────────
 
 def test_t3_put_with_ttl_stores_indexed_at_and_ttl_days() -> None:
-    """put() with ttl_days=30 must store both ``indexed_at`` (ISO 8601)
-    and ``ttl_days``. Expiry is derived Python-side via
-    ``metadata_schema.is_expired`` from these two fields.
+    """put() with ttl_days=30 writes a chunk row with the CHUNK keys only (RDR-236 Phase 4 Step 1: the TTL
+    and the write time are the note's catalog entry's, written by the caller's note writer, so the facade
+    drops them). A row an older client wrote carries ``indexed_at`` (ISO 8601) and ``ttl_days``, and the
+    expiry is derived Python-side via ``metadata_schema.is_expired`` from those two fields: stamped on
+    below the way that client wrote them, the derived check keeps its pin.
 
     Regression guard: previously the schema stored a precomputed
     ``expires_at`` string; that field was removed in the
@@ -125,7 +127,10 @@ def test_t3_put_with_ttl_stores_indexed_at_and_ttl_days() -> None:
     col = client.get_collection("knowledge__ttltest", embedding_function=ef)
     result = col.get(ids=[doc_id], include=["metadatas"], sensitivity="include")
     assert result["metadatas"], "Document not found after put()"
-    meta = result["metadatas"][0]
+    assert set(result["metadatas"][0]) <= {"chunk_text_hash", "embedding_model"}, result["metadatas"][0]
+
+    col.update(ids=[doc_id], metadatas=[{"indexed_at": datetime.now(UTC).isoformat(), "ttl_days": 30}])
+    meta = col.get(ids=[doc_id], include=["metadatas"], sensitivity="include")["metadatas"][0]
 
     indexed_at = meta.get("indexed_at", "")
     assert indexed_at, "indexed_at must be a non-empty ISO 8601 string"

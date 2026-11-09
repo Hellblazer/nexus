@@ -168,12 +168,15 @@ class TestStaleChunkMetadataDoesNotForceReindex:
         # after a shared or embed-skipped upsert: not this doc's hash.
         col = local_t3.get_collection(entry.physical_collection)
         rows = col.get(include=["metadatas"], sensitivity="include")
+        # RDR-236 Phase 4 Step 1: a current client writes no ``content_hash`` on a chunk row, so the stale
+        # row is one an older client left: stamp the key on every chunk of the document's collection (it
+        # holds this one document), as that client did.
         touched = [
             (cid, {**m, "content_hash": "first-writer-of-a-shared-chash"})
             for cid, m in zip(rows["ids"], rows["metadatas"])
-            if m.get("content_hash") == entry.index_content_hash
+            if "content_hash" not in m
         ]
-        assert touched, "the doc must have at least one chunk carrying its hash"
+        assert touched, "the doc must have at least one chunk to stamp"
         col.update(ids=[c for c, _ in touched], metadatas=[m for _, m in touched])
 
         call_order = _wrap_fence_helpers(monkeypatch)

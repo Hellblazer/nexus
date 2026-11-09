@@ -152,6 +152,18 @@ def _do_index(repo: Path, registry: RepoRegistry, t3: T3Database, monkeypatch) -
         index_repository(repo, registry, force=False)
 
 
+def _pdf_chunk_metas(docs_col) -> list[dict]:
+    """The metadata of the PDF's chunk rows, found through its catalog manifest: a chunk row carries no
+    content type since RDR-236 Phase 4 Step 1, so the document's own chunks are the manifest's chashes."""
+    owners = active_reader().list_owners()
+    assert owners, "expected catalog owner registered by indexer"
+    entry = active_reader().by_file_path(Tumbler.parse(owners[0]["tumbler_prefix"]), "doc.pdf")
+    assert entry is not None, "expected a catalog entry for doc.pdf"
+    chashes = [r.chash for r in active_reader().get_manifest(str(entry.tumbler))]
+    assert chashes, "non-vacuity: the PDF's manifest names its chunks"
+    return docs_col.get(ids=chashes, include=["metadatas"], sensitivity="include")["metadatas"]
+
+
 def test_pdf_indexer_registers_catalog_and_writes_manifest(
     pdf_repo: Path,
     registry: RepoRegistry,
@@ -177,15 +189,15 @@ def test_pdf_indexer_registers_catalog_and_writes_manifest(
     result = docs_col.get(include=["metadatas"], sensitivity="include")
     assert result["ids"], "expected at least one PDF chunk in T3 docs collection"
 
-    # Filter to PDF chunks (the docs__ collection holds prose + PDF mixed).
-    pdf_metas = [m for m in result["metadatas"] if m.get("content_type") == "pdf"]
-    assert pdf_metas, "expected at least one chunk with content_type='pdf'"
+    # The PDF's chunks (the docs__ collection holds prose + PDF mixed): the manifest names them.
+    pdf_metas = _pdf_chunk_metas(docs_col)
 
-    # Phase 3: chunks must NOT carry doc_id any more.
+    # Phase 3: chunks must NOT carry doc_id any more; RDR-236 Phase 4 Step 1: they carry the CHUNK keys only.
     for m in pdf_metas:
         assert "doc_id" not in m, (
             f"Phase 3: PDF chunk metadata must not carry doc_id; got {m!r}"
         )
+        assert set(m) <= {"chunk_text_hash", "embedding_model"}, m
 
     # Resolve the catalog owner and the PDF's catalog entry.
     # nexus-aqbrk: list_owners() is the public equivalent of the raw
@@ -240,7 +252,7 @@ def test_pdf_indexer_doc_id_absent_when_catalog_uninitialized(
     result = docs_col.get(include=["metadatas"], sensitivity="include")
     assert result["ids"], "indexer should still write chunks when catalog absent"
 
-    pdf_metas = [m for m in result["metadatas"] if m.get("content_type") == "pdf"]
+    pdf_metas = _pdf_chunk_metas(docs_col)
     assert pdf_metas, "expected at least one PDF chunk"
 
     for m in pdf_metas:
