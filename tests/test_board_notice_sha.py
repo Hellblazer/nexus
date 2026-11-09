@@ -17,7 +17,7 @@ import uuid
 import pytest
 
 from nexus.db.t2.records import TupleRow
-from nexus.mcp import channel
+from nexus.mcp import channel, ci_notice
 from tests.hooks.test_stop_wake_guard import _load as _load_guard
 from tests.test_mcp_channel import _FakeSender, _FakeTupleStore, _fake_store_factory, _subs
 
@@ -119,7 +119,7 @@ async def test_an_oversized_or_non_string_body_gives_no_sha() -> None:
     big = json.dumps({**_done(SHA_A), "pad": "x" * 5000})
     [(_c, meta)] = await _deliver(DONE, [_row("t1", big)])
     assert "sha" not in meta
-    assert channel._ci_done_sha(DONE, dataclasses.replace(_row("t2", "{}"), body=5)) is None  # noqa: SLF001
+    assert ci_notice.ci_done_sha(DONE, dataclasses.replace(_row("t2", "{}"), body=5)) is None  # noqa: SLF001
 
 
 def test_the_channel_and_the_stop_hook_guard_agree_on_the_ci_done_topic() -> None:
@@ -128,4 +128,4 @@ def test_the_channel_and_the_stop_hook_guard_agree_on_the_ci_done_topic() -> Non
     guard = _load_guard()
     for topic in ["board/ci/nexus-develop--done", "board/ci/a--done", "board/ci/a/b--done", "board/ci/--done",
                   "board/ci/a--done/", "board/ci/a--donex", "board/releases"]:
-        assert bool(channel._CI_DONE_TOPIC.fullmatch(topic)) == bool(guard._CI_DONE_TOPIC.fullmatch(topic)), topic  # noqa: SLF001
+        assert bool(ci_notice.CI_DONE_TOPIC.fullmatch(topic)) == bool(guard._CI_DONE_TOPIC.fullmatch(topic)), topic  # noqa: SLF001
