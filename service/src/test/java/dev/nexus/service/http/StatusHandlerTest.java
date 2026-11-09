@@ -300,7 +300,7 @@ class StatusHandlerTest {
         assertThat(get().get("chunk_metadata_key_would_refuse_total").asLong()).as("the write was counted").isEqualTo(1);
 
         HttpResponse<String> resp = http.send(
-                HttpRequest.newBuilder(URI.create(baseUrl + "/v1/status")).GET().build(),
+                dev.nexus.service.TestHttp.request(baseUrl + "/v1/status").GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertThat(resp.statusCode()).isEqualTo(200);
         assertThat(resp.body())
