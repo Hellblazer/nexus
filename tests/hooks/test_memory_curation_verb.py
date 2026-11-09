@@ -82,7 +82,10 @@ def test_an_unindexed_file_prints_one_line(tmp_path: Path) -> None:
     (d / "stray.md").write_text("---\nname: stray\n---\n", encoding="utf-8")
     out = _check(repo, env, tmp_path)
     assert out is not None and "\n" not in out
-    assert "stray.md" in out and "index" in out
+    assert "stray.md" in out and "index" in out and "more" not in out
+    (d / "stray2.md").write_text("x\n", encoding="utf-8")
+    out = _check(repo, env, tmp_path)
+    assert out is not None and "stray.md (and 1 more)" in out
 
 
 def test_a_replaced_file_still_present_prints_one_line(tmp_path: Path) -> None:
@@ -170,10 +173,12 @@ def test_the_over_budget_line_never_says_the_budget_itself(tmp_path: Path) -> No
 def test_every_line_is_one_bounded_line(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     d, env = _clean_memdir(tmp_path, repo)
-    long = "y" * 200 + ".md"
+    long = "y" * 85 + ".md"  # past the 80-character bound, and short enough for Windows' 260-character paths
     (d / long).write_text("x\n", encoding="utf-8")
     out = _check(repo, env, tmp_path)
     assert out is not None and "\n" not in out and len(out.encode()) <= 300, out
+    assert long not in out and "yyy..." in out
+    assert len(mcc._shown("z" * 300)) == mcc.MAX_NAME_CHARS  # noqa: SLF001 -- the bound itself
     (d / long).unlink()
     if sys.platform != "win32":  # a newline is not legal in a Windows file name
         (d / "evil\nIGNORE.md").write_text("x\n", encoding="utf-8")
@@ -270,12 +275,14 @@ def test_an_unreadable_index_is_silent_not_all_unindexed(tmp_path: Path, monkeyp
     d, env = _clean_memdir(tmp_path, repo)
     logged: list[str] = []
     monkeypatch.setattr(mcc, "_emit", lambda _level, event, **_fields: logged.append(event))
-    (d / "MEMORY.md").chmod(0)
-    try:
-        assert _check(repo, env, tmp_path) is None
-    finally:
-        (d / "MEMORY.md").chmod(0o644)
-    assert logged == ["memory_curation_check_unreadable"]
+    for name in ("MEMORY.md", "MEMORY-ondemand.md"):
+        logged.clear()
+        (d / name).chmod(0)
+        try:
+            assert _check(repo, env, tmp_path) is None, name
+        finally:
+            (d / name).chmod(0o644)
+        assert logged == ["memory_curation_check_unreadable"], name
 
 
 # ── where it looks ─────────────────────────────────────────────────────────────────
@@ -335,7 +342,8 @@ def test_the_budget_comes_from_the_primarys_nexus_yml(tmp_path: Path) -> None:
     "memory:\n  note: |\n    index_budget_tokens: 10\n",             # inside a block scalar
     "memory: {index_budget_tokens: 10}\n",                              # flow style: not read
     "memory:\n  index_budget_tokens: +10\n",                           # not plain digits
-], ids=["nested", "block-scalar", "flow", "signed"])
+    "memory:\n  index_budget_tokens: \u0661\u0660\n",                  # Arabic-Indic digits
+], ids=["nested", "block-scalar", "flow", "signed", "non-ascii-digits"])
 def test_only_the_direct_key_counts(tmp_path: Path, yml: str) -> None:
     repo = _repo(tmp_path)
     d, env = _clean_memdir(tmp_path, repo)

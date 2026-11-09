@@ -3,7 +3,8 @@
 
 Prints at most one line about the repository's Claude Code memory directory, and nothing when
 the directory is clean. It runs on every session start inside the ``session-start`` verb and
-``nx hook session-start`` (both call :func:`with_curation_line`), so it adds no ``hooks.json``
+``nx hook session-start`` (both through ``session_start_verb.with_curation``, which wraps
+:func:`with_curation_line`), so it adds no ``hooks.json``
 entry and no process; this verb runs the same check by hand. Sharing that process means a
 failure here must never cost the guidance it is appended to, so every entry point swallows.
 
