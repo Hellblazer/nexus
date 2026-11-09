@@ -376,6 +376,9 @@ public final class CatalogRepository {
         });
     }
 
+    /** The scope this repository runs in, for the sibling repositories split out of it (CatalogLinksRepository). */
+    TenantScope tenantScope() { return tenantScope; }
+
     /**
      * Test-only (nexus-tyxnh): observe whether a purge-trash VACUUM sweep is
      * currently running on {@link #vacuumExecutor}. Lets a test bounded-poll for
@@ -14102,7 +14105,7 @@ public final class CatalogRepository {
     }
 
     /** The server's own message text of a driver exception (no SQLSTATE prefix, no CONTEXT lines), else its message. */
-    private static String serverMessageOf(Throwable t) {
+    static String serverMessageOf(Throwable t) {
         try {
             Object sem = t.getClass().getMethod("getServerErrorMessage").invoke(t);
             if (sem != null) {
@@ -14298,7 +14301,7 @@ public final class CatalogRepository {
     // ══════════════════════════════════════════════════════════════════════════
 
     @SuppressWarnings("unchecked")
-    private static SelectField<?>[] documentFields() {
+    static SelectField<?>[] documentFields() {
         return new SelectField<?>[]{
             CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
             CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
@@ -14318,7 +14321,7 @@ public final class CatalogRepository {
     }
 
     /** Convert a jOOQ Record.intoMap() to a strongly-typed doc map. */
-    private static Map<String, Object> docRowFromRecord(Map<String, Object> raw) {
+    static Map<String, Object> docRowFromRecord(Map<String, Object> raw) {
         Map<String, Object> m = new LinkedHashMap<>();
         // Column names in intoMap() are the unqualified column names
         m.put("tumbler",             raw.getOrDefault("tumbler", null));

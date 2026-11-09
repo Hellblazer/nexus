@@ -542,7 +542,7 @@ public class TenantKeyedStateGateTest {
                 "RemapRepository.tenantScope", "CombinedWriteService.tenantScope", "TaxonomyRepository.tenantScope",
                 "TupleRepository.tenantScope", "TelemetryRepository.tenantScope", "LadderRepository.tenantScope",
                 "PlanRepository.tenantScope", "MemoryRepository.tenantScope", "PipelineRepository.tenantScope",
-                "CatalogRepository.tenantScope", "ChashRepository.tenantScope", "AspectRepository.tenantScope",
+                "CatalogRepository.tenantScope", "CatalogLinksRepository.tenantScope", "ChashRepository.tenantScope", "AspectRepository.tenantScope",
                 "ScratchRepository.tenantScope", "ManifestLabelStage.tenantScope")) {
                 notKeyed.put(f, HANDLE);
             }

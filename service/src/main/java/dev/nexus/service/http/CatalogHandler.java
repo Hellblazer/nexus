@@ -91,6 +91,8 @@ import java.util.*;
  *   POST  /v1/catalog/import/chunk       ETL import chunk
  *   POST  /v1/catalog/import/collection  ETL import collection
  *   POST  /v1/catalog/doc/resolve_or_register  resolve a document by (owner, source_uri) or register it (RDR-193, nexus-u5m5g.3)
+ *   POST  /v1/catalog/links/upsert_many  batch link upsert (RDR-193, nexus-u5m5g.4; CatalogLinksHandler)
+ *   POST  /v1/catalog/links/same_content same-as linker (RDR-193, nexus-u5m5g.4; CatalogLinksHandler)
  *   POST  /v1/catalog/reconcile/stage    stage one page (at most 1000) of a reconcile run's landing rows (RDR-193)
  *   POST  /v1/catalog/reconcile/commit   commit a staged run as a background job: 202 {job_id}, 409 / 503 (RDR-193)
  *   GET   /v1/catalog/reconcile/{job_id} the commit job: running, succeeded with the outcome, or failed with the error (RDR-193)
@@ -125,6 +127,8 @@ public final class CatalogHandler implements HttpHandler {
     private final dev.nexus.service.db.CombinedWriteService combinedWriteService;
     /** RDR-193 Part C (nexus-u5m5g.3): the reconcile commit jobs; null answers the commit and poll routes 503. */
     private final EngineJobs<Void> reconcileJobs;
+    /** RDR-193 Part A4 (nexus-u5m5g.4): the link batch routes and the combined list read. */
+    private final CatalogLinksHandler linkRoutes;
     /** The statement timeout a reconcile commit runs under: the reconcile instance's maximum runtime, never more. */
     private final java.time.Duration reconcileStatementTimeout;
 
@@ -175,6 +179,7 @@ public final class CatalogHandler implements HttpHandler {
                 + Integer.MAX_VALUE + " ms (the range of statement_timeout), got " + reconcileStatementTimeout);
         }
         this.repo = repo;
+        this.linkRoutes = new CatalogLinksHandler(new dev.nexus.service.db.CatalogLinksRepository(repo));
         this.combinedWriteService = combinedWriteService;
         this.reconcileJobs = reconcileJobs;
         this.reconcileStatementTimeout = reconcileStatementTimeout;
@@ -316,6 +321,8 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Scoring hot-path batch endpoints (nexus-qnp5s) ───────────
                 case "/docs/chunk-counts"     -> handleDocChunkCounts(exchange, tenant, method);
                 case "/links/from-batch"      -> handleLinksFromBatch(exchange, tenant, method);
+                case "/links/upsert_many"     -> handleLinksUpsertMany(exchange, tenant, method);
+                case "/links/same_content"    -> handleLinksSameContent(exchange, tenant, method);
 
                 // ── Batch resolve endpoints (nexus-7lm3q) ────────────────────
                 case "/resolve_many"          -> handleResolveMany(exchange, tenant, method);
@@ -600,10 +607,14 @@ public final class CatalogHandler implements HttpHandler {
         String owner        = queryParam(exchange, "owner");
         String filePath      = queryParam(exchange, "file_path");
         String sourceUri     = queryParam(exchange, "source_uri");
+        List<String> contentTypes = CatalogLinksHandler.queryParamAll(exchange, "content_type");
+        String sourceUriPrefix    = queryParam(exchange, "source_uri_prefix");
 
         List<Map<String, Object>> docs;
         if (collection != null && !collection.isBlank()) {
             docs = repo.documentsByCollection(tenant, collection, filterLimit, offset);
+        } else if (CatalogLinksHandler.wantsCombinedList(owner, contentTypes, sourceUriPrefix)) {
+            docs = linkRoutes.list(tenant, owner, contentTypes, sourceUriPrefix, filterLimit, offset);   // RDR-193 Part A4
         } else if (contentType != null && !contentType.isBlank()) {
             docs = repo.documentsByContentType(tenant, contentType, filterLimit, offset);
         } else if (corpus != null && !corpus.isBlank()) {
@@ -3526,6 +3537,16 @@ public final class CatalogHandler implements HttpHandler {
         }
         var links = repo.linksFromBatch(tenant, tumblers);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(links));
+    }
+
+    /** POST /v1/catalog/links/upsert_many (RDR-193 Part A4, nexus-u5m5g.4): the body is {@link CatalogLinksHandler#upsertMany}. */
+    private void handleLinksUpsertMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        linkRoutes.upsertMany(exchange, tenant, method);
+    }
+
+    /** POST /v1/catalog/links/same_content (RDR-193 Part A4, nexus-u5m5g.4): the body is {@link CatalogLinksHandler#sameContent}. */
+    private void handleLinksSameContent(HttpExchange exchange, String tenant, String method) throws IOException {
+        linkRoutes.sameContent(exchange, tenant, method);
     }
 
     /**

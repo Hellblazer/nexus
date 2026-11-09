@@ -218,6 +218,19 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "shape (400/404 mapping, the docs-only content_type guard) is pinned "
         "Java-side by CatalogHandlerSetAspectsEnabledTest"
     ),
+    "/links/upsert_many": (
+        "RDR-193 Part A4 (nexus-u5m5g.4): DELIBERATELY engine-only until the linking client "
+        "(Step 7, which adds HttpCatalogClient.links_upsert_many and drops this entry): no "
+        "Catalog or HttpCatalogClient method exists yet, so the route is outside the "
+        "shared-surface parity gate by construction. Its wire shape is validated Java-side by "
+        "CatalogHandlerLinksBatchRoutesTest and the SQL by CatalogLinksUpsertManyTest. The "
+        "census checks both directions, so this entry must go when the fake gains the route"
+    ),
+    "/links/same_content": (
+        "RDR-193 Part A4 (nexus-u5m5g.4): engine-only until the linking client (Step 7) for the "
+        "same reason as /links/upsert_many above; validated Java-side by "
+        "CatalogHandlerLinksBatchRoutesTest and CatalogLinkSameContentTest"
+    ),
     "/reconcile/stage": (
         "RDR-193 Part A1 (nexus-u5m5g.3): DELIBERATELY engine-only until the client switch "
         "(Step 6, which adds HttpCatalogClient.reconcile_stage and drops this entry): there is "

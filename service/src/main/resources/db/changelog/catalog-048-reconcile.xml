@@ -42,6 +42,20 @@
                    move calls it once per link, and Step 3's batch link route reuses it. Placed last so that the
                    commit, which calls it through dynamic SQL, has no ordering dependency on it.
 
+    catalog-048-5  (nexus-u5m5g.4, RDR-193 Step 3, Part A4 item 1) nexus.catalog_link_endpoint(p_end jsonb) RETURNS text, the
+                   canonical live tumbler an edge endpoint names ({tumbler}: follow alias_of; {owner, file_path}: first by
+                   identity through the NAMED owner's repo_root, whichever owner registered the row, then that owner's
+                   file_path, the one documentsByOwner lists last), and nexus.catalog_links_upsert_many(p_edges jsonb)
+                   RETURNS TABLE(created, skipped, unresolved): every endpoint resolved, the resolved rows locked FOR KEY
+                   SHARE in sorted order for the whole batch, an endpoint that is not live or matches no path returned in
+                   unresolved (dangling, no_path), the rest inserted ON CONFLICT DO NOTHING so an existing link keeps its
+                   fields. It does not call catalog_link_write: that function merges into an existing edge (spans
+                   overwritten, creator folded into co_discovered_by) and the batch declares the opposite.
+
+    catalog-048-6  (nexus-u5m5g.4, Part A4 item 3) nexus.catalog_link_same_content(p_tumblers text[], p_prune boolean)
+                   RETURNS jsonb {created, retracted}: generate_pdf_corpus_links and prune_stale_same_as_links in one
+                   transaction. It writes through catalog_link_write(if_absent), link_if_absent as it is today.
+
     Placed after vectors-056-gc-quarantine-expires-at.xml (the tail when this landed) and before the grants-nexus-svc.xml
     runAlways block (the established late-append convention): the grants loop gives nexus_svc DML on both tables. The
     functions are granted explicitly. nexus_diag gets nothing on the tables in the view era (the reembed tables
@@ -945,6 +959,365 @@ GRANT EXECUTE ON FUNCTION nexus.catalog_link_write(text, text, text, text, text,
             <sql splitStatements="true" stripComments="false">
                 REVOKE EXECUTE ON FUNCTION nexus.catalog_link_write(text, text, text, text, text, text, boolean) FROM nexus_svc;
                 DROP FUNCTION IF EXISTS nexus.catalog_link_write(text, text, text, text, text, text, boolean);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-048-5" author="nexus-u5m5g.4">
+        <comment>nexus.catalog_link_endpoint(p_end jsonb) RETURNS text and nexus.catalog_links_upsert_many(p_edges jsonb) RETURNS TABLE(created integer, skipped integer, unresolved jsonb) (RDR-193 Part A4 item 1, Step 3): the batch link upsert. plpgsql, VOLATILE, SECURITY INVOKER. Function definitions and their GRANT EXECUTE; no data effect at migration time.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_link_endpoint(p_end jsonb)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant  text := current_setting('nexus.tenant', true);
+    v_cur     text;
+    v_next    text;
+    v_seen    text[];
+    v_hop     integer;
+    v_owner   text;
+    v_path    text;
+    v_root    text;
+    v_segs    text[];
+    v_seg     text;
+    v_raw     text;
+    v_uri     text;
+BEGIN
+    -- The canonical live tumbler an edge endpoint names, or NULL when there is none. An endpoint is {tumbler} or
+    -- {owner, file_path}; the caller reads a NULL as dangling for the first and no_path for the second.
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION 'catalog_link_endpoint no_tenant: nexus.tenant is not set';
+    END IF;
+
+    IF jsonb_typeof(p_end) IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'catalog_link_endpoint invalid_endpoint: an endpoint is {tumbler} or {owner, file_path}' USING ERRCODE = '22023';
+    END IF;
+
+    IF coalesce(p_end ->> 'tumbler', '') <> '' THEN
+        v_cur := p_end ->> 'tumbler';
+    ELSIF coalesce(p_end ->> 'owner', '') <> '' AND coalesce(p_end ->> 'file_path', '') <> '' THEN
+        v_owner := p_end ->> 'owner';
+        v_path := p_end ->> 'file_path';
+
+        -- (1) identity: the live row, of any owner, whose source_uri is the URI the NAMED owner's repo_root and the
+        -- path derive (deriveSourceUri, lexical, as the reconcile commit derives it). The owner named is the owner of
+        -- the repository being linked, never the source document's. Another repository's file has another root, so
+        -- it can never match here.
+        SELECT o.repo_root INTO v_root FROM nexus.catalog_owners o
+         WHERE o.tenant_id = v_tenant AND o.tumbler_prefix = v_owner;
+        IF left(v_path, 1) = '/' THEN
+            v_raw := v_path;
+        ELSIF left(coalesce(v_root, ''), 1) = '/' THEN
+            v_raw := rtrim(v_root, '/') || '/' || v_path;
+        ELSE
+            v_raw := '';
+        END IF;
+        IF v_raw <> '' THEN
+            v_segs := '{}';
+            FOREACH v_seg IN ARRAY string_to_array(v_raw, '/') LOOP
+                IF v_seg = '' OR v_seg = '.' THEN CONTINUE;
+                ELSIF v_seg = '..' THEN
+                    IF cardinality(v_segs) > 0 THEN v_segs := v_segs[1:cardinality(v_segs) - 1]; END IF;
+                ELSE v_segs := v_segs || v_seg;
+                END IF;
+            END LOOP;
+            v_uri := 'file:///' || array_to_string(v_segs, '/');
+            SELECT d.tumbler INTO v_cur FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.source_uri = v_uri AND d.deleted_at IS NULL;
+        END IF;
+
+        -- (2) failing that, the named owner's live row with that file_path; of several, the one documentsByOwner
+        -- lists last (ORDER BY tumbler in the database's own collation, the last row), as the reconcile commit's arm (a)
+        IF v_cur IS NULL THEN
+            SELECT d.tumbler INTO v_cur FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.file_path = v_path AND d.deleted_at IS NULL
+               AND starts_with(d.tumbler, v_owner || '.')
+             ORDER BY d.tumbler DESC LIMIT 1;
+        END IF;
+        IF v_cur IS NULL THEN
+            RETURN NULL;
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'catalog_link_endpoint invalid_endpoint: an endpoint is {tumbler} or {owner, file_path}' USING ERRCODE = '22023';
+    END IF;
+
+    -- alias resolution (resolveAliasTarget), as catalog_link_write walks it: follow alias_of to the canonical row, at
+    -- most 16 hops; stop on a cycle, and stop on the last row that exists when a pointer names a row that is gone
+    v_seen := ARRAY[v_cur];
+    FOR v_hop IN 1..16 LOOP
+        SELECT d.alias_of INTO v_next FROM nexus.catalog_documents d
+         WHERE d.tenant_id = v_tenant AND d.tumbler = v_cur AND d.deleted_at IS NULL;
+        EXIT WHEN v_next IS NULL OR v_next = '' OR v_next = ANY (v_seen);
+        PERFORM 1 FROM nexus.catalog_documents d
+         WHERE d.tenant_id = v_tenant AND d.tumbler = v_next AND d.deleted_at IS NULL;
+        EXIT WHEN NOT FOUND;
+        v_seen := v_seen || v_next;
+        v_cur := v_next;
+    END LOOP;
+
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d
+                    WHERE d.tenant_id = v_tenant AND d.tumbler = v_cur AND d.deleted_at IS NULL) THEN
+        RETURN NULL;
+    END IF;
+    RETURN v_cur;
+END;
+$fn$;
+
+GRANT EXECUTE ON FUNCTION nexus.catalog_link_endpoint(jsonb) TO nexus_svc;
+
+CREATE OR REPLACE FUNCTION nexus.catalog_links_upsert_many(p_edges jsonb)
+RETURNS TABLE(created integer, skipped integer, unresolved jsonb)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant text := current_setting('nexus.tenant', true);
+    v_n      integer;
+    v_i      integer;
+    v_round  integer;
+    v_edge   jsonb;
+    v_from   text[];
+    v_to     text[];
+    v_stale  boolean;
+    v_t      text;
+    v_alias  text;
+    v_cnt    integer;
+    v_type   text;
+BEGIN
+    -- One transaction. Each edge is {from, to, link_type, created_by, from_span?, to_span?}; an endpoint is {tumbler} or
+    -- {owner, file_path}. There is no metadata and no allow_dangling: no index-path caller passes either.
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION 'catalog_links_upsert_many no_tenant: nexus.tenant is not set';
+    END IF;
+    IF jsonb_typeof(p_edges) IS DISTINCT FROM 'array' THEN
+        RAISE EXCEPTION 'catalog_links_upsert_many invalid_edges: p_edges is a JSON array of edges' USING ERRCODE = '22023';
+    END IF;
+
+    created := 0;
+    skipped := 0;
+    unresolved := '[]'::jsonb;
+    v_n := jsonb_array_length(p_edges);
+    IF v_n = 0 THEN
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    -- shape check before any lookup, so an invalid edge fails the whole call
+    FOR v_i IN 1..v_n LOOP
+        v_edge := p_edges -> (v_i - 1);
+        IF jsonb_typeof(v_edge) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(v_edge -> 'from') IS DISTINCT FROM 'object'
+           OR jsonb_typeof(v_edge -> 'to') IS DISTINCT FROM 'object'
+           OR coalesce(v_edge ->> 'link_type', '') = '' THEN
+            RAISE EXCEPTION 'catalog_links_upsert_many invalid_edge: edge % needs from, to and link_type', v_i - 1
+                USING ERRCODE = '22023';
+        END IF;
+    END LOOP;
+
+    -- Resolve every endpoint, then lock the resolved rows FOR KEY SHARE one at a time in ascending order (the
+    -- resolveAndLockLinkEndpoints contract: a concurrent merge needs a conflicting lock on the same rows, and takes
+    -- its own pair in sorted order, so neither side can deadlock). The whole batch is locked sorted together, never
+    -- edge by edge. A locked row found aliased or gone means a merge or a delete raced the resolution: resolve again,
+    -- bounded.
+    FOR v_round IN 1..8 LOOP
+        v_from := array_fill(NULL::text, ARRAY[v_n]);
+        v_to := array_fill(NULL::text, ARRAY[v_n]);
+        FOR v_i IN 1..v_n LOOP
+            v_edge := p_edges -> (v_i - 1);
+            v_from[v_i] := nexus.catalog_link_endpoint(v_edge -> 'from');
+            v_to[v_i] := nexus.catalog_link_endpoint(v_edge -> 'to');
+        END LOOP;
+
+        v_stale := false;
+        FOR v_t IN
+            SELECT x.t FROM (SELECT DISTINCT y.t FROM unnest(v_from || v_to) AS y(t) WHERE y.t IS NOT NULL) x
+             ORDER BY x.t COLLATE "C"
+        LOOP
+            SELECT d.alias_of INTO v_alias FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.tumbler = v_t AND d.deleted_at IS NULL
+               FOR KEY SHARE;
+            IF NOT FOUND OR coalesce(v_alias, '') <> '' THEN
+                v_stale := true;
+            END IF;
+        END LOOP;
+        EXIT WHEN NOT v_stale;
+        IF v_round = 8 THEN
+            RAISE EXCEPTION 'catalog_links_upsert_many unstable: endpoint resolution did not settle after 8 rounds (concurrent merges kept re-aliasing an endpoint)';
+        END IF;
+    END LOOP;
+
+    FOR v_i IN 1..v_n LOOP
+        v_edge := p_edges -> (v_i - 1);
+        IF v_from[v_i] IS NULL OR v_to[v_i] IS NULL THEN
+            -- the first endpoint that did not resolve is named; a tumbler endpoint that is not live is dangling, a
+            -- path that matched no row is no_path
+            unresolved := unresolved || jsonb_build_array(jsonb_build_object(
+                'index', v_i - 1,
+                'side', CASE WHEN v_from[v_i] IS NULL THEN 'from' ELSE 'to' END,
+                'reason', CASE WHEN coalesce((v_edge -> (CASE WHEN v_from[v_i] IS NULL THEN 'from' ELSE 'to' END)) ->> 'tumbler', '') <> ''
+                               THEN 'dangling' ELSE 'no_path' END));
+            CONTINUE;
+        END IF;
+        v_type := v_edge ->> 'link_type';
+        INSERT INTO nexus.catalog_links AS l (tenant_id, from_tumbler, to_tumbler, link_type, from_span, to_span, created_by)
+        VALUES (v_tenant, v_from[v_i], v_to[v_i], v_type,
+                coalesce(v_edge ->> 'from_span', ''), coalesce(v_edge ->> 'to_span', ''),
+                coalesce(v_edge ->> 'created_by', ''))
+        ON CONFLICT (tenant_id, from_tumbler, to_tumbler, link_type) DO NOTHING;
+        GET DIAGNOSTICS v_cnt = ROW_COUNT;
+        IF v_cnt = 1 THEN
+            created := created + 1;
+        ELSE
+            skipped := skipped + 1;
+        END IF;
+    END LOOP;
+
+    RETURN NEXT;
+END;
+$fn$;
+
+GRANT EXECUTE ON FUNCTION nexus.catalog_links_upsert_many(jsonb) TO nexus_svc;
+]]></sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+                REVOKE EXECUTE ON FUNCTION nexus.catalog_links_upsert_many(jsonb) FROM nexus_svc;
+                DROP FUNCTION IF EXISTS nexus.catalog_links_upsert_many(jsonb);
+                REVOKE EXECUTE ON FUNCTION nexus.catalog_link_endpoint(jsonb) FROM nexus_svc;
+                DROP FUNCTION IF EXISTS nexus.catalog_link_endpoint(jsonb);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-048-6" author="nexus-u5m5g.4">
+        <comment>nexus.catalog_link_same_content(p_tumblers text[], p_prune boolean) RETURNS jsonb (RDR-193 Part A4 item 3, Step 3): the same-as linker generate_pdf_corpus_links and prune_stale_same_as_links apply today, in one transaction. plpgsql, VOLATILE, SECURITY INVOKER. A function definition and its GRANT EXECUTE; no data effect at migration time.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_link_same_content(p_tumblers text[], p_prune boolean DEFAULT false)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant    text := current_setting('nexus.tenant', true);
+    v_cand      integer;
+    v_csrc      text[];
+    v_cdst      text[];
+    v_live      integer;
+    v_retracted text[] := '{}';
+    v_n_retr    integer := 0;
+    v_seed      text[];
+    v_member    text;
+    v_anchor    text;
+    v_res       text;
+    v_created   integer := 0;
+BEGIN
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION 'catalog_link_same_content no_tenant: nexus.tenant is not set';
+    END IF;
+    IF p_tumblers IS NULL OR cardinality(p_tumblers) = 0 THEN
+        RETURN jsonb_build_object('created', 0, 'retracted', 0);
+    END IF;
+
+    -- ── prune: retract the stale dedup links that touch the given tumblers ──
+    IF p_prune THEN
+        -- candidates: same-as links by content_hash_dedup with an endpoint in scope; a link another creator also
+        -- asserted (co_discovered_by set) is kept, because unlink deletes the whole row
+        SELECT coalesce(array_agg(l.from_tumbler), '{}'), coalesce(array_agg(l.to_tumbler), '{}')
+          INTO v_csrc, v_cdst
+          FROM nexus.catalog_links l
+         WHERE l.tenant_id = v_tenant AND l.link_type = 'same-as' AND l.created_by = 'content_hash_dedup'
+           AND (l.from_tumbler = ANY (p_tumblers) OR l.to_tumbler = ANY (p_tumblers))
+           AND coalesce(l.metadata -> 'co_discovered_by', 'null'::jsonb) IN ('null'::jsonb, '[]'::jsonb, '{}'::jsonb, '""'::jsonb, 'false'::jsonb, '0'::jsonb);
+        v_cand := cardinality(v_csrc);
+
+        IF v_cand > 0 THEN
+            SELECT count(*) INTO v_live FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.deleted_at IS NULL AND d.content_type IN ('pdf', 'paper');
+            IF v_live = 0 THEN
+                -- reads as a failed fetch: acting on it would retract every link at once
+                RETURN jsonb_build_object('created', 0, 'retracted', 0, 'refused', 'empty_fetch');
+            END IF;
+
+            -- a link is stale when an endpoint is no longer a live pdf/paper document, or when both endpoints have a
+            -- settled key and the keys differ; an unsettled key (index_content_hash and the metadata hash both set
+            -- and disagreeing) is unknown, not changed, and keeps the link. Each retraction is one row (from, to,
+            -- same-as), never a bulk delete by creator.
+            WITH k AS (
+                SELECT d.tumbler,
+                       CASE WHEN d.index_content_hash <> '' AND coalesce(d.metadata ->> 'content_hash', '') <> ''
+                                 AND d.index_content_hash <> d.metadata ->> 'content_hash'
+                            THEN ''
+                            ELSE coalesce(nullif(d.index_content_hash, ''), d.metadata ->> 'content_hash', '') END AS skey
+                  FROM nexus.catalog_documents d
+                 WHERE d.tenant_id = v_tenant AND d.deleted_at IS NULL AND d.content_type IN ('pdf', 'paper')),
+            pairs AS (
+                SELECT c.src, c.dst, a.tumbler IS NOT NULL AND b.tumbler IS NOT NULL AS both_live,
+                       a.skey AS askey, b.skey AS bskey
+                  FROM unnest(v_csrc, v_cdst) AS c(src, dst)
+                  LEFT JOIN k a ON a.tumbler = c.src
+                  LEFT JOIN k b ON b.tumbler = c.dst),
+            gone AS (
+                DELETE FROM nexus.catalog_links l
+                 USING pairs p
+                 WHERE l.tenant_id = v_tenant AND l.from_tumbler = p.src AND l.to_tumbler = p.dst AND l.link_type = 'same-as'
+                   AND NOT (p.both_live AND (p.askey = '' OR p.bskey = '' OR p.askey = p.bskey))
+                RETURNING l.from_tumbler)
+            SELECT coalesce(array_agg(from_tumbler), '{}') INTO v_retracted FROM gone;
+            v_n_retr := cardinality(v_retracted);
+        END IF;
+    END IF;
+
+    -- ── link: the given live pdf/paper members, and the from-side of every retracted link ──
+    SELECT coalesce(array_agg(DISTINCT t), '{}') INTO v_seed
+      FROM (SELECT d.tumbler AS t FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.deleted_at IS NULL AND d.content_type IN ('pdf', 'paper')
+               AND d.tumbler = ANY (p_tumblers)
+            UNION
+            SELECT r FROM unnest(v_retracted) AS r) s;
+
+    IF cardinality(v_seed) > 0 THEN
+        -- groups are the live pdf/paper documents across the tenant, keyed by index_content_hash, else the metadata
+        -- content_hash, never head_hash (nexus-utkop); the anchor is the least tumbler in "C" order (Python's
+        -- min(str(tumbler)); a numeric order would re-anchor 1.2.9 and 1.2.10 and orphan their links). A group acts
+        -- when it has a seed member; a seeded anchor gets every member, otherwise only the seeded members link.
+        FOR v_member, v_anchor IN
+            WITH docs AS (
+                SELECT d.tumbler, coalesce(nullif(d.index_content_hash, ''), nullif(d.metadata ->> 'content_hash', '')) AS gkey
+                  FROM nexus.catalog_documents d
+                 WHERE d.tenant_id = v_tenant AND d.deleted_at IS NULL AND d.content_type IN ('pdf', 'paper')),
+            grp AS (
+                SELECT x.tumbler, x.gkey,
+                       min(x.tumbler COLLATE "C") OVER (PARTITION BY x.gkey) AS anchor,
+                       count(*) OVER (PARTITION BY x.gkey) AS n
+                  FROM docs x
+                 WHERE x.gkey IS NOT NULL
+                   AND x.gkey IN (SELECT s.gkey FROM docs s WHERE s.tumbler = ANY (v_seed) AND s.gkey IS NOT NULL))
+            SELECT g.tumbler, g.anchor FROM grp g
+             WHERE g.n >= 2 AND g.tumbler <> g.anchor
+               AND (g.anchor = ANY (v_seed) OR g.tumbler = ANY (v_seed))
+             ORDER BY g.tumbler COLLATE "C"
+        LOOP
+            v_res := nexus.catalog_link_write(v_member, v_anchor, 'same-as', '', '', 'content_hash_dedup', true);
+            IF v_res = 'created' THEN
+                v_created := v_created + 1;
+            END IF;
+        END LOOP;
+    END IF;
+
+    RETURN jsonb_build_object('created', v_created, 'retracted', v_n_retr);
+END;
+$fn$;
+
+GRANT EXECUTE ON FUNCTION nexus.catalog_link_same_content(text[], boolean) TO nexus_svc;
+]]></sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+                REVOKE EXECUTE ON FUNCTION nexus.catalog_link_same_content(text[], boolean) FROM nexus_svc;
+                DROP FUNCTION IF EXISTS nexus.catalog_link_same_content(text[], boolean);
             </sql>
         </rollback>
     </changeSet>
