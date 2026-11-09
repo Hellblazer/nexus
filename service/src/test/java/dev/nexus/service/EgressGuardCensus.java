@@ -41,7 +41,9 @@ import java.util.stream.Stream;
  * ({@code requireEnv} or {@code System.getenv}) or {@code url()} on an {@code AdminConnection} that is a
  * method parameter or a local built by {@code AdminConnection.resolve(}, itself never reassigned. This catches a new
  * pool, a pool handed a literal or another source, and a URL variable that is reassigned, shadowed or passed in
- * under the same name. The rule is textual and name-based: it reads one method, not data flow.
+ * under the same name. The rule is textual and name-based: it reads one method, not data flow, and it
+ * trusts by name a method called {@code requireEnv} and a call spelled {@code AdminConnection.resolve(},
+ * whatever they resolve to.
  *
  * <p>Not checked, by this class or by any other test in the repository:
  * <ul>
@@ -50,11 +52,13 @@ import java.util.stream.Stream;
  *   <li>the inputs to {@code AdminConnection}: the {@code resolve} call and its {@code defaultUrl} argument, and
  *       who calls a method that takes an {@code AdminConnection} parameter (the rule trusts the parameter);</li>
  *   <li>the URL sources at the {@code DriverManager.getConnection} sites (PciBuilderSession, AspectQueueDrain's
- *       {@code admin.url()}, EngineSingletonLock's {@code jdbcUrl} parameter, BackendReaper, AdminDdlSession):
+ *       {@code admin.url()}, EngineSingletonLock's {@code jdbcUrl} parameter, BackendReaper, AdminDdlSession,
+ *       PoolerModeCheck):
  *       they are counted and pinned, and their arguments are not read;</li>
  *   <li>the Hikari forms the URL rule does not read: {@code new HikariConfig(Properties)} or
  *       {@code (String)}, {@code addDataSourceProperty}, {@code setDataSourceClassName}, {@code setDataSource},
- *       a {@code cfg::setJdbcUrl} method reference (the first is counted as a pool site; none is read for its URL);</li>
+ *       a {@code cfg::setJdbcUrl} method reference (the first is counted as a pool site; none is read for its URL),
+ *       and an assignment to the URL variable written with a parenthesised left side ({@code (u) = ...});</li>
  *   <li>the 15 {@code .getConnection()} call sites (11 files) on those pools and any DataSource built another
  *       way (one handed in, or a driver-specific class);</li>
  *   <li>any dependency's code, such as {@code java.net.http}, raw sockets or DNS used inside a library;</li>
