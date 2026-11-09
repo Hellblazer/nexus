@@ -854,6 +854,13 @@ generations of 7.69.0 minutes after 7.70.0 published (2026-10-04): read
 `nx --version`, never the "built generation" line. Before handing Sam the
 command:
 
+- Before `--ask-ready`, post the upgrade hold on the board and message every
+  live peer: hold, stop ALL background shells and agents with TaskStop
+  (finished agents' included, not only foreground runs), then reply READY.
+  The releaser cannot stop a peer's shells, and `--ask-ready` types only to an
+  idle session, so a session pinned at `shell` is never asked and is skipped
+  after `--wait` (kimi_nexus_edb, 2026-10-26).
+
 - Read the dry run's `-n` values against ListAgents. A restart keeps each
   session's CURRENT name (Sam, 2026-10-31); before the script dropped the launch
   `-n`, every `/rename`d session would have come back as `nexus_7ff`.
