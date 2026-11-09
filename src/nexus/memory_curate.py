@@ -2,7 +2,8 @@
 """The report behind ``nx memory curate`` (RDR-238 Technical Design 4, nexus-qo7ie.17).
 
 Three sections, ``--files``, ``--t2`` and ``--agents``; only the ``--files`` read counts read
-transcripts (nexus-qo7ie.18). Each section
+transcripts (nexus-qo7ie.18). The fourth, ``--cold``, lives in :mod:`nexus.memory_curate_cold`
+(nexus-qo7ie.19) and shares this module's window, session and path helpers. Each section
 function returns its body lines; :func:`build_report` adds the headings and never lets one
 section stop another. The report only lists. Nothing here deletes, quarantines, rewrites or
 restores a file or a row; retiring anything is a person's decision.
@@ -297,8 +298,7 @@ def load_reads(days: int, now: datetime, directory: Path, cwd: Path | None = Non
     it is not counted, and with none in the window there is nothing to count). Called from
     Python only (RDR-238 Technical Design 5), so ``nx memory curate`` adds no Lua.
     """
-    from nexus.lua_runtime import runner  # noqa: PLC0415 — deferred: only a read count pays for the runtime
-    from nexus.lua_runtime.transcripts_join import JoinError, join_pages  # noqa: PLC0415 — deferred with it
+    from nexus.memory_curate_cold import query_pages  # noqa: PLC0415 — deferred: only a read count pays for the runtime
 
     starts = repo_session_starts(cwd or Path.cwd())
     window = read_window(days, now, min(starts) if isinstance(starts, list) and starts else None)
@@ -311,29 +311,10 @@ def load_reads(days: int, now: datetime, directory: Path, cwd: Path | None = Non
     counted = sum(1 for s in starts if lo <= s < now)
     if not counted:
         return ReadsUnavailable(window, "no session of this repository started in the window")
-    since, pages = window.since, []
-    try:
-        while True:
-            page = runner.run_procedure(
-                "transcripts", {"query": "memory", "since": since, "until": window.until, "project": "repo"},
-            )
-            if not isinstance(page, dict):
-                return ReadsUnavailable(window, f"result: the memory query returned {type(page).__name__}, not a page")
-            pages.append(page)
-            nxt = page.get("next_since")
-            if not nxt:
-                break
-            if not isinstance(nxt, str) or nxt <= since:
-                return ReadsUnavailable(window, f"result: the memory query did not advance past {since}")
-            if len(pages) >= MAX_READ_PAGES:
-                return ReadsUnavailable(window, f"result: the memory query did not finish in {MAX_READ_PAGES} pages")
-            since = nxt
-        joined = join_pages("memory", pages)
-    except runner.PROCEDURE_ERRORS as exc:
-        return ReadsUnavailable(window, runner.describe_error(exc) or type(exc).__name__)
-    except JoinError as exc:
-        return ReadsUnavailable(window, f"join: {exc}")
-    return ReadCounts(window, list(joined["rows"]), int(joined.get("truncated_records") or 0), counted)
+    result = query_pages("memory", window.since, window.until, MAX_READ_PAGES)
+    if isinstance(result, str):
+        return ReadsUnavailable(window, result)
+    return ReadCounts(window, result[0], result[1], counted)
 
 
 def _same_file(name: str, directory: Path) -> str | None:
@@ -788,7 +769,3 @@ def report_title(now: datetime, *, files: bool, t2: bool, agents: bool, cold: bo
         return base
     chosen = [n for n, on in (("files", files), ("t2", t2), ("agents", agents), ("cold", cold)) if on]
     return f"{base}-{'-'.join(chosen)}"
-
-
-def cold_lines() -> list[str]:
-    return ["not available: needs RDR-240's tools, loads and memory queries (planned in RDR-238 Phase 3 Step 3)"]
