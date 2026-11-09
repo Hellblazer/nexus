@@ -192,9 +192,12 @@ class TestRegisterHookTools:
 
         _run(mcp.call_tool("hook_probe", {}))
 
-        assert emitted == [
-            ("warning", "hook_boundary_swallowed_exception", {"hook": "hook_probe", "error": "boom"})
-        ]
+        assert len(emitted) == 1
+        level, event, fields = emitted[0]
+        assert (level, event) == ("warning", "hook_boundary_swallowed_exception")
+        saved = fields.pop("payload_saved")  # the failure ring's entry (nexus-3ceda.3)
+        assert fields == {"hook": "hook_probe", "error": "boom"}
+        assert saved is not None and saved.endswith(".json")
 
     def test_multiple_hooks_reach_only_their_own_run(self):
         calls: dict[str, int] = {"a": 0, "b": 0}

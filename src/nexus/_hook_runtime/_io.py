@@ -282,7 +282,26 @@ def permission_request(behavior: str) -> str:
     )
 
 
-def never_fail(body: Callable[[], HookResult], hook: str) -> HookResult:
+def _record_failure(hook: str, payload: Callable[[], object] | None, module: str | None,
+                    exc: BaseException) -> str | None:
+    """Save the payload behind a swallowed crash to the local ring
+    (:mod:`nexus._hook_runtime.failure_ring`); return the entry's path, or None."""
+    try:
+        from nexus._hook_runtime import failure_ring  # noqa: PLC0415 — crash path only
+
+        path = failure_ring.record(hook, payload() if payload is not None else None, exc, module=module)
+        return None if path is None else str(path)
+    except Exception:  # noqa: BLE001 — a diagnostic must not become the crash it reports
+        return None
+
+
+def never_fail(
+    body: Callable[[], HookResult],
+    hook: str,
+    *,
+    payload: Callable[[], object] | None = None,
+    module: str | None = None,
+) -> HookResult:
     """Run *body*, turning any crash into a silent, successful result.
 
     The bash layer gets this for free by never setting ``set -e``; Python has no
@@ -296,6 +315,12 @@ def never_fail(body: Callable[[], HookResult], hook: str) -> HookResult:
     reason: ``asyncio.CancelledError`` is a ``BaseException``, the tool tier
     calls ``run()`` from async handlers, and a swallowed cancellation breaks the
     caller's own timeout rather than the hook's.
+
+    A swallowed crash also saves the hook's input to a bounded local ring so
+    ``nx hook replay`` can run it again (nexus-3ceda.3). *payload* returns that
+    input (called only on a crash, so a payload read inside *body* can be
+    passed through a closure), and *module* names the module whose
+    ``run(payload)`` the replay calls.
     """
     try:
         return body()
@@ -315,13 +340,15 @@ def never_fail(body: Callable[[], HookResult], hook: str) -> HookResult:
         # sibling of 52919bb20's fix rather than a hypothetical.
         if isinstance(exc, BaseExceptionGroup) and exc.subgroup(asyncio.CancelledError):
             raise
-        _emit("warning", "hook_boundary_swallowed_exception", hook=hook, error=str(exc))
+        saved = _record_failure(hook, payload, module, exc)
+        _emit("warning", "hook_boundary_swallowed_exception", hook=hook, error=str(exc), payload_saved=saved)
         # Also one line on stderr (nexus-3lc5s). The log file alone made a
         # swallowed crash indistinguishable, to anyone holding only the
         # process's streams, from a verb that ran and had nothing to say:
         # exit 0, both streams empty. stderr is never a decision channel.
         try:
-            sys.stderr.write(f"[nx-hook] {hook}: swallowed {type(exc).__name__}: {exc}\n")
+            tail = f" (input saved; replay with: nx hook replay {saved})" if saved else ""
+            sys.stderr.write(f"[nx-hook] {hook}: swallowed {type(exc).__name__}: {exc}{tail}\n")
             sys.stderr.flush()
         except Exception:  # noqa: BLE001, S110 — a diagnostic must not become the crash it reports
             pass

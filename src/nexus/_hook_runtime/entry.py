@@ -412,13 +412,17 @@ def main() -> None:
 
         install_stream_sink(_sink)
 
+        # The payload, kept for never_fail's failure ring: read inside the
+        # boundary (a stdin read must not escape it), saved only on a crash.
+        read: dict[str, object] = {}
+
         def _dispatch():
             if failed_import is not None:
                 raise failed_import
-            payload = read_payload(sys.stdin)
+            read["payload"] = payload = read_payload(sys.stdin)
             return module.run(payload)
 
-        result = never_fail(_dispatch, verb)
+        result = never_fail(_dispatch, verb, payload=lambda: read.get("payload"), module=module_path)
     finally:
         # sys.modules, not a fresh import: an import that failed above would
         # otherwise run again here, inside a finally.

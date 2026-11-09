@@ -1,0 +1,3 @@
+### Added
+
+- **A swallowed hook crash saves its input, and `nx hook replay` runs it again.** A hook never fails the session, so a crash was swallowed and the input that caused it was lost. The input now goes to a bounded local ring under `~/.config/nexus/hook-failures/` (50 entries, 2 MiB; files readable only by you; strings run through the credential redactor, credential-named keys dropped, the environment cut to an allowlist), and the hook's stderr line names the file. `nx hook failures` lists the entries; `nx hook replay PATH` runs the recorded verb on the saved input outside the never-fail boundary, so the crash raises with its traceback. `NX_HOOK_FAILURE_RING=0` turns the capture off (nexus-3ceda.3).

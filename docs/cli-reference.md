@@ -3160,7 +3160,7 @@ The four verbs that take a `PATH` (`status`, `install`, `uninstall`, `update`) e
 
 ### nx hook routing-stats
 
-The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `mailbox-arm --session-id ID` prints the same `tuple_subscribe` instruction `session-start` emits, or nothing when it could not succeed; nothing calls it automatically any more (RDR-211 nexus-rplay.14 deleted the per-prompt re-arm it used to serve), so it stays only for manual use — the `UserPromptSubmit` drain hook is the unconditional floor regardless of whether a session ever subscribes. `routing-stats` is the group's one operator-facing verb.
+The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `mailbox-arm --session-id ID` prints the same `tuple_subscribe` instruction `session-start` emits, or nothing when it could not succeed; nothing calls it automatically any more (RDR-211 nexus-rplay.14 deleted the per-prompt re-arm it used to serve), so it stays only for manual use — the `UserPromptSubmit` drain hook is the unconditional floor regardless of whether a session ever subscribes. `routing-stats`, `failures` and `replay` are its operator-facing verbs.
 
 ```
 nx hook routing-stats [--log-path PATH] [--json] [--escapes] [--from-store] [--since ISO_DATE]
@@ -3178,6 +3178,17 @@ escape-rate per rule.
 | `--escapes` | List escape events with their `# routing-allow:` reasons (the escape-audit surface); combines with `--json` |
 | `--from-store` | Read the durable `routing_events` engine table (nexus-gjv9b PART 2's replacement for the JSONL log) instead; `--log-path` is ignored |
 | `--since ISO_DATE` | With `--from-store`: only events at or after this date/datetime |
+
+### nx hook failures, nx hook replay
+
+```
+nx hook failures [--json]
+nx hook replay PATH
+```
+
+A hook never fails the session: when a hook verb crashes, the crash is swallowed and the event proceeds. The input that caused it is saved to a bounded local ring under `~/.config/nexus/hook-failures/` (at most 50 entries and 2 MiB; files readable only by you; strings run through the credential redactor, credential-named keys dropped, the environment cut to an allowlist of `NX_`, `NEXUS_` and `CLAUDE_` variables without credential names). The swallowed-crash line on the hook's stderr names the saved file. `NX_HOOK_FAILURE_RING=0` turns the capture off.
+
+`failures` lists the saved entries, newest first. `replay` runs the recorded verb's `run(payload)` on the saved input outside the never-fail boundary, so the crash raises with its traceback. It runs the verb for real, side effects included, and the input is the redacted one, so a crash that depended on a redacted value may not come back.
 
 JSON output shape (nexus-mzvwa.9): `{"rules": {<rule>: {...}}, "selftest_excluded": N,
 "unregistered_rules": [...]}` — `unregistered_rules` present only when a

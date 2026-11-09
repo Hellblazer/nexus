@@ -422,9 +422,19 @@ def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
     tool_name = f"hook_{spec.name}"
 
     def _tool(**kwargs: Any) -> CallToolResult:
+        # The nested payload, kept for never_fail's failure ring (nexus-3ceda.3);
+        # built inside the boundary, as before, so a bad argument cannot escape it.
+        built: dict[str, Any] = {}
+
+        def _body() -> HookResult:
+            built["payload"] = payload = nest_payload(kwargs) or None
+            return _run_bounded(spec, payload, tool_name)
+
         result = never_fail(
-            lambda: _run_bounded(spec, nest_payload(kwargs) or None, tool_name),
+            _body,
             hook=tool_name,
+            payload=lambda: built.get("payload", kwargs),
+            module=getattr(spec.run, "__module__", None),
         )
         return CallToolResult(content=[TextContent(type="text", text=result.stdout or "")], is_error=False)
 
