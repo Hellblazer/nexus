@@ -161,7 +161,7 @@ class ChunkKeyAllowlistCheckTest {
     }
 
     @Test
-    void theActivityCountsByRouteAndClass_byKey_andByClient_eachRequestOncePerLabel() {
+    void theActivityCountsByRouteAndClass_eachRequestOncePerClass() {
         var check = new ChunkKeyAllowlistCheck();
         var m1 = Map.<String, Object>of("title", "t", "doc_id", "d", "zz_unknown_key", 1);
         var m2 = Map.<String, Object>of("title", "t");
@@ -174,36 +174,19 @@ class ChunkKeyAllowlistCheckTest {
             new ChunkKeyAllowlistActivity.RouteClassCount("upsert-chunks", "document", 1),
             new ChunkKeyAllowlistActivity.RouteClassCount("upsert-chunks", "legacy", 1),
             new ChunkKeyAllowlistActivity.RouteClassCount("upsert-chunks", "other", 1));
-        assertThat(ChunkKeyAllowlistActivity.topKeys()).containsExactly(
-            new ChunkKeyAllowlistActivity.KeyCount("title", "document", 2),
-            new ChunkKeyAllowlistActivity.KeyCount("doc_id", "legacy", 1),
-            new ChunkKeyAllowlistActivity.KeyCount("zz_unknown_key", "other", 1));
-        assertThat(ChunkKeyAllowlistActivity.keyOverflow()).isZero();
-        assertThat(ChunkKeyAllowlistActivity.clients()).containsExactly(
-            new ChunkKeyAllowlistActivity.ClientCount("agent-a/1", "7.1.0", 1),
-            new ChunkKeyAllowlistActivity.ClientCount("agent-b/1", "absent", 1));
-        assertThat(ChunkKeyAllowlistActivity.clientOverflow()).isZero();
     }
 
     @Test
-    void theKeyAndClientViewsAreBounded_andWhatDoesNotFitGoesToTheOverflow() {
+    void manyDistinctKeysAndClientsGrowNoView_theRouteClassViewStaysAtItsFixedSize() {
         var check = new ChunkKeyAllowlistCheck(new OwnerlessLogLimiter(() -> 1_000_000L));
-        int distinctKeys = ChunkKeyAllowlistActivity.TRACK_KEYS + 10;
-        for (int i = 0; i < distinctKeys; i++) {
+        for (int i = 0; i < 300; i++) {
             check.observe("t", "c", "upsert-chunks", List.of(Map.<String, Object>of(String.format("zz_k%04d", i), 1)),
-                1, "agent", "1");
+                1, "agent-" + i, "1");
         }
-        assertThat(ChunkKeyAllowlistActivity.topKeys()).hasSize(ChunkKeyAllowlistActivity.TOP_KEYS);
-        long named = ChunkKeyAllowlistActivity.topKeys().stream().mapToLong(ChunkKeyAllowlistActivity.KeyCount::count).sum();
-        assertThat(named + ChunkKeyAllowlistActivity.keyOverflow())
-            .as("every key occurrence is either named or in the overflow").isEqualTo(distinctKeys);
-        int distinctClients = ChunkKeyAllowlistActivity.TRACK_CLIENTS + 7;
-        ChunkKeyAllowlistActivity.resetForTests();
-        for (int i = 0; i < distinctClients; i++) {
-            check.observe("t", "c", "upsert-chunks", List.of(Map.<String, Object>of("title", 1)), 1, "agent-" + i, "1");
-        }
-        assertThat(ChunkKeyAllowlistActivity.clients()).hasSize(ChunkKeyAllowlistActivity.TRACK_CLIENTS);
-        assertThat(ChunkKeyAllowlistActivity.clientOverflow()).isEqualTo(7);
+        assertThat(ChunkKeyAllowlistActivity.wouldRefuseTotal()).isEqualTo(300);
+        assertThat(ChunkKeyAllowlistActivity.byRouteClass())
+            .as("300 distinct keys and clients add no row: the labels are route and class")
+            .containsExactly(new ChunkKeyAllowlistActivity.RouteClassCount("upsert-chunks", "other", 300));
     }
 
     @Test

@@ -38,16 +38,18 @@ import java.util.TreeSet;
  *
  * <p><b>Never fails a write.</b> The check is observation. It catches every RuntimeException and logs it at debug.
  *
- * <p><b>What the line and the counters name.</b> Step 2b reads the log and the status route to find who writes
- * which key, so both name the writer. The line carries the route, tenant, collection, the offending keys (the
- * {@code other} keys first, then the known classes, see {@link #keyList}), the client's {@code User-Agent} and {@code
+ * <p><b>What the line and the counters name.</b> Step 2b reads the log to find who writes which key, so the line
+ * names the writer. The line carries the route, tenant, collection, the offending keys (the {@code other} keys
+ * first, then the known classes, see {@link #keyList}), the client's {@code User-Agent} and {@code
  * X-Nexus-Client-Version}, and the {@code source_agent} of the first offending chunk (the ownerless line names its
  * first unowned chunk the same way). The limiter key is route, tenant, collection, a signature of the offending key
  * set and the client, so a second client or a second key set in the same collection logs its own line in the same
  * minute; the limiter's bound ({@link OwnerlessLogLimiter#MAX_KEYS} keys plus one overflow bucket) is what keeps the
- * log finite. {@link ChunkKeyAllowlistActivity} keeps the counts by route and class, by key and by client, and those
- * are the complete signal; the line is a sample. Every client-controlled text (collection, user agent, version,
- * source agent, key names) is cleaned and cut by {@link OwnerlessLogText}, so none can forge a field.
+ * log finite. {@link ChunkKeyAllowlistActivity} keeps the total and the counts by route and class, and those are the
+ * complete signal; the line is a sample. The status route carries no key name and no client text, because it has no
+ * tenant scope and that text is one tenant's; the per-key and per-client detail is in this line only. Every
+ * client-controlled text (collection, user agent, version, source agent, key names) is cleaned and cut by {@link
+ * OwnerlessLogText}, so none can forge a field.
  *
  * <p><b>Seams: what the count is, and is not.</b> Read the numbers with these in mind.
  * <ol>
@@ -177,7 +179,7 @@ public final class ChunkKeyAllowlistCheck {
             String version = OwnerlessLogText.quoted(clientVersion, FIELD_MAX);
             Map<String, KeyClass> cleaned = new TreeMap<>();     // cleaned key text -> class
             offending.forEach((k, c) -> cleaned.put(keyText(k), c));
-            ChunkKeyAllowlistActivity.recordWouldRefuse(route, cleaned, ua, version);
+            ChunkKeyAllowlistActivity.recordWouldRefuse(route, cleaned);
             // One line per route, tenant, collection, key set and client per window: a second writer or a second
             // key set in the same collection is not the first one's suppressed repeat. The delimiter is stripped
             // from client text so a tenant-keyed eviction (which matches |tenant|) reads only the tenant field.
