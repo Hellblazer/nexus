@@ -9,12 +9,16 @@ staleness decision. Each one counts the requests the run made and reads the rows
 * a delta run with one file deleted: its document is trashed by the commit, no unvisited row is touched;
 * the commit never moves the owner's ``head_hash`` (the run end does, only when nothing was deferred or failed);
 * a path another owner holds: the run reports it, that row is left as it is, the file's chunks carry its tumbler;
+* a refused row (a staged path outside the repository root): no tumbler, the other rows of the run committed;
+* a held PDF (the PDF stack is missing): the owner's ``head_hash`` is held and the next delta holds the file again;
+* a ``git mv``: the old document is gone, the new one stands under a new tumbler, the old one's links moved to it;
 * hand-set tags and category are kept, ``source_format`` is re-stamped;
 * ``--sensitive-glob`` on an existing unflagged document: the commit does not flag it, the client raises it;
 * the engine losing the commit job (a restart: the poll answers 404): one resubmit, and the final state is right.
 
-Scenarios the commit's own arms decide on rows an index run cannot produce on demand (a ``refused`` row, the rename and
-stamp matrices, the duplicate-path rules) are in ``test_rdr193_reconcile_parity.py`` and the engine's Java tests.
+Scenarios the commit's own arms decide on rows an index run cannot produce on demand (the rename and stamp matrices,
+the duplicate-path rules) are in ``test_rdr193_reconcile_parity.py`` and the engine's Java tests; the ``refused`` row is
+staged directly here (``reconcile_stage`` and a commit), since no walk of a real repository produces one.
 """
 from __future__ import annotations
 
@@ -24,7 +28,8 @@ import httpx
 import pytest
 import structlog
 
-from nexus import indexer
+from nexus import indexer, pdf_stack
+from nexus.catalog import reconcile_run
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.db.t3 import T3Database
@@ -204,6 +209,9 @@ def test_a_path_another_owner_holds_is_reported_and_that_row_is_left_as_it_is(
     try:
         entry = row.resolve(foreign)
         assert entry.physical_collection == "docs__foreign" and entry.title == "foreign notes", "that row is unchanged"
+        own = str(row.by_file_path(row.owner_for_repo(_repo_identity(repo)[1]), "docs/guide.md").tumbler)
+        assert row.get_manifest(own), "non-vacuity: the run wrote chunks for an ordinary file, so an empty manifest below means something"
+        assert row.get_manifest(foreign), "the chunks of the held file were written under the tumbler of the row that holds it"
     finally:
         row.close()
 
@@ -279,3 +287,145 @@ def test_a_commit_job_the_engine_lost_is_resubmitted_once_and_the_state_is_right
     assert {"src/app.py", "docs/guide.md", "docs/notes.md", "docs/extra.md"} <= set(rows)
     assert all(r["index_state"] == "complete" for p, r in rows.items() if p.endswith((".py", ".md"))), \
         "the run went on with the committed state: every document was indexed"
+
+
+# ── r1: the cases the bead names that the first cut left out ─────────────────────────────────────────────────────
+
+def _run_stats(repo: Path, t3: T3Database, monkeypatch: pytest.MonkeyPatch, *, since_head: bool = False) -> tuple[dict, list[str]]:
+    """``index_repository`` against the owner's REAL stored base, returning its stats and phase lines (``_index`` and
+    ``_index_delta`` return neither, and ``_index_delta`` pins the base)."""
+    from unittest.mock import patch
+
+    from nexus.registry import RepoRegistry
+    from tests._catalog_fixture_ops import seed_manifest_chunks
+    from tests.conftest import fake_credentials
+
+    monkeypatch.setenv("NX_LOCAL", "1")
+    reg = RepoRegistry(repo.parent / "repos.json")
+    reg.add(repo)
+    orig = t3._write_batch
+
+    def seeding(col, collection_name, ids, documents, metadatas, embeddings=None, **kwargs):  # noqa: ANN001
+        orig(col, collection_name, ids, documents, metadatas, embeddings, **kwargs)
+        seed_manifest_chunks(collection_name, ids)
+
+    monkeypatch.setattr(t3, "_write_batch", seeding)
+    phases: list[str] = []
+    with patch("nexus.db.make_t3", return_value=t3), patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        stats = indexer.index_repository(repo, reg, force=False, since_head=since_head, on_phase=phases.append)
+    return stats, phases
+
+
+def _present(seq: int, path: str, **kw) -> dict:
+    return {"kind": "present", "seq": seq, "file_path": path, "content_type": "code", "title": Path(path).name,
+            "physical_collection": "code__e2e", "head_hash": "h", "source_mtime": 1.0, "content_hash": f"c{seq}",
+            "base_metadata": {}, "stamp": {}, "sensitive": False, **kw}
+
+
+def test_a_refused_row_has_no_tumbler_and_the_rest_of_the_run_is_committed(
+    tmp_path: Path, catalog_env: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A present row whose path leaves the repository (its derived source URI lies outside the owner's root) is refused
+    by the engine, row by row: the outcome says ``refused`` with no tumbler, the other rows land, and the client reads
+    the refusal back as an unregistered file named with the engine's reason. No walk of a real repository produces such
+    a row, so it is staged directly through the real ``reconcile_stage`` and commit."""
+    repo = _indexed_repo(tmp_path, local_t3, monkeypatch)
+    cat = HttpCatalogClient()
+    try:
+        owner = cat.owner_for_repo(_repo_identity(repo)[1])
+        rows = [_present(0, "src/fresh.py"), _present(1, "../escape.py")]
+        outcome = reconcile_run.stage_and_commit(cat, owner, rows, walk="partial")
+        by_path = {r["file_path"]: r for r in outcome["rows"]}
+        assert by_path["../escape.py"]["action"] == "refused" and not by_path["../escape.py"]["tumbler"], by_path
+        assert by_path["../escape.py"].get("reason"), "the engine names why"
+        assert by_path["src/fresh.py"]["action"] == "created" and by_path["src/fresh.py"]["tumbler"], by_path
+        applied = reconcile_run.apply_outcome(
+            outcome, rel_to_abs={"src/fresh.py": repo / "src/fresh.py", "../escape.py": repo / "../escape.py"},
+            staged={r["file_path"]: r for r in rows})
+        assert applied.refused == {repo / "../escape.py": by_path["../escape.py"]["reason"]}
+        assert list(applied.file_to_doc_id) == [repo / "src/fresh.py"] and applied.missing == []
+        assert cat.by_file_path(owner, "src/fresh.py") is not None, "the other row of the run was committed"
+        assert cat.by_file_path(owner, "../escape.py") is None, "no document exists for the refused path"
+    finally:
+        cat.close()
+
+
+def _hide_pdf_stack(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(pdf_stack.POLICY_ENV, "refuse")
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "MinerU and torch are not installed"))
+    monkeypatch.setattr(pdf_stack, "install_plan",
+                        lambda: pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND))
+    pdf_stack.reset_cache()
+
+
+def test_a_held_pdf_holds_the_owner_head_hash_and_the_next_delta_holds_it_again(
+    tmp_path: Path, catalog_env: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PDF the run could not take (the stack is missing and installs are refused) is deferred work: the run is clean
+    otherwise, but the owner's ``head_hash`` stays where it was, so the next ``--since-head`` diff offers the file
+    again. Both runs go through the real ``index_repository`` against the real engine."""
+    repo = _indexed_repo(tmp_path, local_t3, monkeypatch)
+    base = indexer._get_owner_head_hash(repo)
+    assert base == _head(repo), "non-vacuity: the clean run advanced the base"
+    (repo / "paper.pdf").write_bytes(b"%PDF-1.4 fake content")
+    _commit(repo)
+    assert _head(repo) != base
+    _hide_pdf_stack(monkeypatch)
+    for attempt in (1, 2):
+        stats, phases = _run_stats(repo, local_t3, monkeypatch, since_head=True)
+        assert stats["pdf_stack_held"] == 1, (attempt, stats)
+        assert any(p.startswith("--since-head: 1 changed") for p in phases), (attempt, phases)
+        assert indexer._get_owner_head_hash(repo) == base, f"the base moved past a held PDF (run {attempt})"
+    assert "paper.pdf" not in _rows(), "a held PDF is not registered"
+
+
+def test_a_git_mv_is_a_rename_the_commit_moves_with_its_links(
+    tmp_path: Path, catalog_env: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _indexed_repo(tmp_path, local_t3, monkeypatch)
+    before = _rows()
+    old, linked = before["docs/notes.md"]["tumbler"], before["docs/extra.md"]["tumbler"]
+    cat = HttpCatalogClient()
+    try:
+        assert cat.link(linked, old, "relates", "e2e"), "the link exists before the rename"
+    finally:
+        cat.close()
+    _git(repo, "mv", "docs/notes.md", "docs/notes-renamed.md")
+    _git(repo, "commit", "-m", "rename")
+    _run_stats(repo, local_t3, monkeypatch)
+    after = _rows()
+    assert "docs/notes.md" not in after, "the old path's document is gone"
+    new = after["docs/notes-renamed.md"]["tumbler"]
+    assert new != old, "the new path is a document of its own"
+    cat = HttpCatalogClient()
+    try:
+        assert [str(link.from_tumbler) for link in cat.links_to(new, "relates")] == [linked], "the old document's links moved"
+    finally:
+        cat.close()
+
+
+def test_a_head_bump_hands_no_rdr_to_the_dependency_generator(
+    tmp_path: Path, catalog_env: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare HEAD bump touches every row but changes no content, so no RDR is re-fed to the dependency generator as if
+    it were new (the generator the commit's ``relink_rdr_tumblers`` would otherwise feed)."""
+    from nexus.catalog import link_generator
+
+    repo = _indexed_repo(tmp_path, local_t3, monkeypatch)
+    (repo / "docs" / "rdr").mkdir()
+    (repo / "docs" / "rdr" / "rdr-001-x.md").write_text("---\ntitle: t\nid: RDR-001\n---\n# x\nbody\n", encoding="utf-8")
+    _commit(repo)
+    _index(repo, local_t3, monkeypatch)
+    assert "docs/rdr/rdr-001-x.md" in _rows(), "non-vacuity: the RDR is a document"
+    seen: list[list[str]] = []
+
+    def bound(cat, repo_path):  # noqa: ANN001, ARG001
+        def gen(cat, *, writer, new_tumblers, new_content_types):  # noqa: ANN001, ARG001
+            seen.append([str(t) for t in new_tumblers])
+            return 0
+        return "rdr-dependency", gen
+
+    monkeypatch.setattr(link_generator, "bind_rdr_dependency_generator", bound)
+    _git(repo, "commit", "--allow-empty", "-m", "bump")
+    _index(repo, local_t3, monkeypatch)
+    assert seen == [[]], f"the generator ran once and was handed no RDR: {seen}"

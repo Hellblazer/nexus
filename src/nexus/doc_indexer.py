@@ -1331,43 +1331,13 @@ def _register_or_lookup_doc_id(
             _flag(existing.tumbler)
             return (str(existing.tumbler), False) if with_created else str(existing.tumbler)
 
-        # nexus-u8n4r: refuse registration when the identity about to be
-        # STORED (``fp`` — absolute when no ``base_path`` was threaded, as
-        # is the case for the standalone ``nx index md``/``nx index rdr``
-        # pre-flight path) sits under an agent worktree or system temp
-        # dir, UNLESS this owner's own repo_root is itself rooted there
-        # (throwaway owners / the pytest tmp-dir suite). See
-        # ``nexus.repo_identity.should_skip_ephemeral_registration`` for
-        # the full rationale; curator owners (this function's default)
-        # normally carry an empty repo_root, so this is a documented
-        # residual, not a gap this call site closes on its own.
-        from nexus.repo_identity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.repo_identity)
-            canonicalize_worktree_path,
-            is_worktree_or_tempdir_path,
-            owner_repo_root_best_effort,
-            should_skip_ephemeral_registration,
-        )
-        _owner_repo_root = owner_repo_root_best_effort(reader, owner)
-        # nexus-kkumv: when the owner's own root is NOT itself worktree/
-        # tempdir-rooted (i.e. NOT the deliberate throwaway-owner
-        # population the guard below exempts), rewrite a worktree-marker
-        # ``fp`` to its primary-repo identity BEFORE the refusal check —
-        # but only when the primary-repo mirror genuinely exists on disk
-        # (mirrors indexer.py's worktree-unique-file precedent). A file
-        # that only exists inside the worktree still falls through to the
-        # refusal below, unchanged.
-        if not is_worktree_or_tempdir_path(_owner_repo_root):
-            _canonical_fp = canonicalize_worktree_path(fp)
-            if _canonical_fp != fp and Path(_canonical_fp).is_file():
-                fp = _canonical_fp
-        if should_skip_ephemeral_registration(fp, _owner_repo_root):
-            _log.warning(
-                "ephemeral_path_registration_skipped",
-                path=fp, owner=str(owner), reason="worktree_or_tempdir",
-            )
-            from nexus.mcp_infra import _record_ephemeral_registration_skip  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
-            _record_ephemeral_registration_skip(fp, str(owner), reason="worktree_or_tempdir")
+        # nexus-u8n4r / nexus-kkumv: the ephemeral-path guard (nexus.catalog.doc_resolve.ephemeral_guard)
+        from nexus.catalog.doc_resolve import ephemeral_guard  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+
+        _guarded_fp = ephemeral_guard(reader, owner, fp)
+        if _guarded_fp is None:
             return ("", False) if with_created else ""
+        fp = _guarded_fp
 
         try:
             source_mtime = file_path.stat().st_mtime
@@ -1384,66 +1354,17 @@ def _register_or_lookup_doc_id(
         import os as _os  # noqa: PLC0415 — deliberate function-scoped import
 
         if home is None and (source_uri or derived_source_uri or _os.path.isabs(fp)):
-            # RDR-193 Step 6 (nexus-u5m5g.7): a CURATOR document with an identity of its own is resolved or
-            # registered by ONE ``resolve_or_register`` request, in place of the cross-owner probe, the register
-            # and the reconcile that followed it. The engine looks the source URI up (a live row under another
-            # owner, a repository's row of this very file included, comes back as ``foreign_owner`` and is neither
-            # adopted nor written; one under this owner is returned with its empty title and zero year filled),
-            # and otherwise registers it, born flagged when *sensitive* and carrying the title, year and
-            # source_mtime. The ephemeral-worktree guard above stays on the client. The legs that resolve a
-            # document the older way (a legacy relative path, the repo owner's row) are the lookups above.
-            # nexus-yzij1 / nexus-r1tnx: the cross-owner conflict (the same path catalogued under another owner) is
-            # read BEFORE the request, which would otherwise see the row it mints, and announced AFTER it, once its
-            # own ``created`` signal says whether it minted anything.
-            from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-                announce_cross_owner_mint,
-                announce_cross_owner_resolve,
-                find_cross_owner_conflict,
-            )
-            _conflict = find_cross_owner_conflict(reader, fp)
-            _outcome = writer.resolve_or_register(
-                owner_name, source_uri=source_uri or derived_source_uri, file_path=fp,
-                title=title or file_path.stem, year=year or None, source_mtime=source_mtime,
-                content_type=content_type, physical_collection=physical_collection, sensitive=sensitive,
-            )
-            tumbler, created = str(_outcome.tumbler), _outcome.created
-            announce_cross_owner_mint(
-                _conflict, file_path=fp, owner=owner, context="register_or_lookup_doc_id", created=created,
-            )
-            if not created:
-                announce_cross_owner_resolve(
-                    _conflict, file_path=fp, owner=owner, context="register_or_lookup_doc_id", created=created,
-                )
-            if _outcome.foreign_owner:
-                _log.warning(
-                    "doc_register_resolved_onto_foreign_owner_row",
-                    tumbler=tumbler, file_path=fp, owner=str(owner), context="register_or_lookup_doc_id",
-                )
-            if created:
-                # The route registers neither the stamp, the author nor the corpus: they follow in one update
-                # (advisory: the row is minted and resolved, so a failed write is logged and the run goes on).
-                _extra: dict = {}
-                if _stamp:
-                    _extra["meta"] = _stamp
-                if author:
-                    _extra["author"] = author
-                if corpus:
-                    _extra["corpus"] = corpus
-                if _extra:
-                    try:
-                        writer.update(tumbler, **_extra)
-                    except Exception:  # noqa: BLE001 — boundary catch: advisory stamp write, must never discard a minted tumbler
-                        _log.warning("doc_register_stamp_write_failed", tumbler=tumbler, file_path=fp, exc_info=True)
-            else:
-                from nexus.catalog.path_ambiguity import reconcile_stale_physical_collection  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+            # RDR-193 Step 6 (nexus-u5m5g.7): a curator document with an identity of its own is resolved or
+            # registered by ONE ``resolve_or_register`` request (nexus.catalog.doc_resolve), in place of the
+            # cross-owner probe, the register and the reconcile that followed it.
+            from nexus.catalog.doc_resolve import resolve_curator_document  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
 
-                # resolved onto an existing row instead of minting one: the same nexus-2t63u reconciliation the
-                # ``existing is not None`` branch above does
-                reconcile_stale_physical_collection(
-                    reader, writer, tumbler=tumbler, target_collection=physical_collection, file_path=fp, owner=owner,
-                )
-                # The engine raises the flag on a match by source URI only; this one may be a file-path match.
-                _flag(tumbler)
+            tumbler, created = resolve_curator_document(
+                reader, writer, owner=owner, owner_name=owner_name, fp=fp, source_uri=source_uri or derived_source_uri,
+                title=title or file_path.stem, year=year or None, source_mtime=source_mtime, content_type=content_type,
+                physical_collection=physical_collection, sensitive=sensitive, stamp=_stamp, author=author,
+                corpus=corpus, flag=_flag,
+            )
             if with_created:
                 return tumbler, created
             return tumbler
@@ -4046,100 +3967,29 @@ def _catalog_markdown_hook(
                     new_collection=collection_name,
                 )
         else:
-            # nexus-u8n4r: refuse a brand-new registration when ``fp``
-            # (absolute when no ``base_path`` was threaded — the shape
-            # this function's callers, ``nx collection reindex`` and the
-            # standalone RDR-only index command, use) sits under an
-            # agent worktree or system temp dir, unless this owner's own
-            # repo_root is itself rooted there. See
-            # ``nexus.repo_identity.should_skip_ephemeral_registration``.
-            # An already-existing doc (the branch above) is left alone —
-            # this only stops NEW pollution, not a re-index of something
-            # registered before this guard existed.
-            from nexus.repo_identity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.repo_identity)
-                canonicalize_worktree_path,
-                is_worktree_or_tempdir_path,
-                owner_repo_root_best_effort,
-                should_skip_ephemeral_registration,
-            )
-            _owner_repo_root = owner_repo_root_best_effort(reader, owner)
-            # nexus-kkumv: same worktree-to-primary canonicalization as
-            # ``_register_or_lookup_doc_id`` above — only when the owner
-            # root is not itself a deliberate worktree/tempdir throwaway,
-            # and only when the primary-repo mirror exists on disk.
-            if not is_worktree_or_tempdir_path(_owner_repo_root):
-                _canonical_fp = canonicalize_worktree_path(fp)
-                if _canonical_fp != fp and Path(_canonical_fp).is_file():
-                    fp = _canonical_fp
-            if should_skip_ephemeral_registration(fp, _owner_repo_root):
-                _log.warning(
-                    "ephemeral_path_registration_skipped",
-                    path=fp, owner=str(owner), reason="worktree_or_tempdir",
-                )
-                from nexus.mcp_infra import _record_ephemeral_registration_skip  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
-                _record_ephemeral_registration_skip(fp, str(owner), reason="worktree_or_tempdir")
+            # nexus-u8n4r / nexus-kkumv: refuse a brand-new registration under an agent worktree or temp dir
+            # (nexus.catalog.doc_resolve.ephemeral_guard). An already-existing doc (the branch above) is left alone:
+            # this only stops NEW pollution, not a re-index of something registered before the guard existed.
+            from nexus.catalog.doc_resolve import ephemeral_guard  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+
+            _guarded_fp = ephemeral_guard(reader, owner, fp)
+            if _guarded_fp is None:
                 return
+            fp = _guarded_fp
             # RDR-193 Step 6 (nexus-u5m5g.7): a document with an identity of its own is resolved or registered
-            # by ONE ``resolve_or_register`` request, carrying the title, year and source_mtime, in place of the
-            # cross-owner probe, the register and the reconcile that followed it. The engine matches by source
-            # URI (a live row under another owner comes back as ``foreign_owner``, neither adopted nor written)
-            # and otherwise registers the document. The route registers neither the meta, the author nor the
-            # chunk count, so they follow in one update.
+            # by ONE ``resolve_or_register`` request (nexus.catalog.doc_resolve), carrying the title, year and
+            # source_mtime, in place of the cross-owner probe, the register and the reconcile that followed it.
             import os as _os  # noqa: PLC0415 — deliberate function-scoped import
 
             if source_uri or derived_source_uri or _os.path.isabs(fp):
-                # nexus-yzij1 / nexus-r1tnx: the conflict is read before the request and announced after it
-                from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-                    announce_cross_owner_mint,
-                    announce_cross_owner_resolve,
-                    find_cross_owner_conflict,
-                )
-                _conflict = find_cross_owner_conflict(reader, fp)
-                _outcome = writer.resolve_or_register(
-                    owner_name, source_uri=source_uri or derived_source_uri, file_path=fp,
-                    title=title, year=year or None, source_mtime=source_mtime,
-                    content_type=content_type, physical_collection=collection_name,
-                )
-                _tumbler = str(_outcome.tumbler)
-                announce_cross_owner_mint(
-                    _conflict, file_path=fp, owner=owner, context="catalog_markdown_hook", created=_outcome.created,
-                )
-                if not _outcome.created:
-                    announce_cross_owner_resolve(
-                        _conflict, file_path=fp, owner=owner, context="catalog_markdown_hook", created=_outcome.created,
-                    )
-                if _outcome.foreign_owner:
-                    _log.warning(
-                        "doc_register_resolved_onto_foreign_owner_row",
-                        tumbler=_tumbler, file_path=fp, owner=str(owner), context="catalog_markdown_hook",
-                    )
-                if _outcome.created:
-                    _created_update: dict = {"meta": doc_meta, "chunk_count": chunk_count}
-                    if author:
-                        _created_update["author"] = author
-                    writer.update(_tumbler, **_created_update)
-                else:
-                    from nexus.catalog.path_ambiguity import reconcile_stale_physical_collection  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+                from nexus.catalog.doc_resolve import resolve_markdown_document  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
 
-                    # the nexus-2t63u reconciliation of the ``existing is not None`` branch above, for a row the
-                    # request resolved onto instead of minting
-                    reconcile_stale_physical_collection(
-                        reader, writer, tumbler=_tumbler, target_collection=collection_name, file_path=fp, owner=owner,
-                    )
-                    # The resolved row keeps its own meta (no ``meta`` merge on a resolve): the record rides an
-                    # update, and so does the author, under the same fill-only rule as the branch above
-                    # (nexus-6pfgb.7): only where the resolved row's author is empty.
-                    try:
-                        _resolved = reader.resolve(_tumbler)
-                    except Exception:  # noqa: BLE001 — advisory read: without it the author is not filled and the stamp takes this call's arguments
-                        _resolved = None
-                    _resolved_update = {
-                        "meta": _meta_of_row(_resolved) if _resolved is not None
-                        else {k: v for k, v in doc_meta.items() if k not in FILL_ONLY_KEYS}
-                    }
-                    if author and _resolved is not None and not (getattr(_resolved, "author", "") or "").strip():
-                        _resolved_update["author"] = author
-                    writer.update(_tumbler, **_resolved_update)
+                resolve_markdown_document(
+                    reader, writer, owner=owner, owner_name=owner_name, fp=fp, source_uri=source_uri or derived_source_uri,
+                    title=title, year=year or None, source_mtime=source_mtime, content_type=content_type,
+                    collection_name=collection_name, author=author, chunk_count=chunk_count, doc_meta=doc_meta,
+                    meta_of_row=_meta_of_row, fill_only_keys=FILL_ONLY_KEYS,
+                )
                 return
             # nexus-yzij1: the structural twin of the mint in
             # ``pipeline_stages._catalog_pdf_hook``, and it gets the same

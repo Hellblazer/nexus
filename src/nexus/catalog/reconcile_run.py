@@ -57,6 +57,8 @@ class Applied:
     sensitivity_pending: dict[str, list[Path]] = field(default_factory=dict)
     reconciled: list[tuple[Path, str]] = field(default_factory=list)
     refused: dict[Path, str] = field(default_factory=dict)
+    #: staged present rows the outcome has no row for (the engine answers one row per staged row, so this is a defect)
+    missing: list[Path] = field(default_factory=list)
     updated: int = 0
 
 
@@ -64,15 +66,19 @@ def apply_outcome(outcome: dict, *, rel_to_abs: dict[str, Path], staged: dict[st
     """Rebuild the hook's out-structures from the outcome's ``rows`` (RDR-193 Part A2, lines 949-965).
 
     *rel_to_abs* maps the staged ``file_path`` of each present row to the file; *staged* holds the row as staged. An
-    outcome row for a path outside *rel_to_abs* (a ``keep`` or ``deleted`` row) belongs to no file of this run.
+    outcome row for a path outside *rel_to_abs* (a ``keep`` or ``deleted`` row) belongs to no file of this run. A staged
+    present row with no outcome row is listed in ``missing`` and warned of: it is in neither ``file_to_doc_id`` nor
+    ``refused``, and the caller must not read it as registered.
     """
     out = Applied()
     flagged_wanted: dict[str, list[Path]] = {}  # tumbler -> files of this run a glob matched
+    answered: set[str] = set()
     for r in outcome.get("rows", []):
         rel = r.get("file_path", "")
         abs_path = rel_to_abs.get(rel)
         if abs_path is None:
             continue
+        answered.add(rel)
         action = r.get("action")
         tumbler = r.get("tumbler")
         if action == "refused" or not tumbler:
@@ -106,7 +112,29 @@ def apply_outcome(outcome: dict, *, rel_to_abs: dict[str, Path], staged: dict[st
             out.sensitive_confirmed.add(abs_path)
     for tumbler in outcome.get("sensitivity_pending", []):
         out.sensitivity_pending[str(tumbler)] = flagged_wanted.get(str(tumbler), [])
+    for rel, abs_path in rel_to_abs.items():
+        if rel not in answered:
+            out.missing.append(abs_path)
+            _log.warning("catalog_reconcile_row_missing_from_outcome", file_path=rel, abs_path=str(abs_path))
     return out
+
+
+def log_outcome(outcome: dict, *, owner: Any, repo: str) -> None:
+    """One log event for each document the commit renamed, swept or deleted explicitly (the events the Python
+    housekeeping and the since-head delete logged, ``housekeeping_rename_detected``, ``housekeeping_orphan_deleted`` and
+    ``since_head_deleted_doc``). The outcome carries tumblers for the first two and the path with it only for a
+    ``deleted`` row and a renamed document's new one.
+    """
+    by_tumbler = {str(r["tumbler"]): str(r.get("file_path", "")) for r in outcome.get("rows", []) if r.get("tumbler")}
+    for item in outcome.get("renamed", []):
+        _log.info("housekeeping_rename_detected", owner=str(owner), repo=repo, old_tumbler=str(item.get("old", "")),
+                  new_tumbler=str(item.get("new", "")), new_path=by_tumbler.get(str(item.get("new", "")), ""))
+    for tumbler in outcome.get("swept", []):
+        _log.info("housekeeping_orphan_deleted", owner=str(owner), repo=repo, tumbler=str(tumbler))
+    for r in outcome.get("rows", []):
+        if r.get("action") == "deleted" and r.get("tumbler"):
+            _log.info("since_head_deleted_doc", owner=str(owner), repo=repo, file_path=r.get("file_path", ""),
+                      tumbler=str(r["tumbler"]))
 
 
 def raise_pending_sensitivity(writer: Any, applied: Applied, *, repo_name: str, page: int = STAGE_PAGE) -> None:

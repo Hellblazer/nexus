@@ -268,25 +268,63 @@ def test_an_existing_unflagged_document_is_raised_through_the_audited_route_not_
 
 # ── no fallback: a failed commit registers nothing ──────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("reason", ["run_not_found", "transient_db_error", "commit_conflict"])
 def test_a_failed_commit_leaves_every_file_without_an_id_and_names_it_unregistered(
-    tmp_path: Path, monkeypatch, wire, reason: str,
+    tmp_path: Path, monkeypatch, wire,
 ) -> None:
+    """The hook's own half of "a failed commit registers nothing". What the RUN then does about it (no chunk written,
+    a non-zero exit, the since-head base held) is ``tests/test_rdr193_failed_commit_run.py``: the hook never writes
+    chunks or manifests, so nothing here could say so."""
     def failing(self, owner, run_id):  # noqa: ANN001, ARG001
-        raise CatalogReconcileError(reason, "the engine said no", http_status=422)
+        raise CatalogReconcileError("transient_db_error", "the engine said no", http_status=503)
 
     monkeypatch.setattr(HttpCatalogClient, "reconcile_commit", failing)
     a = _write(tmp_path, "a.py", "a\n")
     b = _write(tmp_path, "b.py", "b\n")
     unregistered: dict[Path, str] = {}
-    ids = _hook(tmp_path, [(a, "code", "code__hookrepo"), (b, "code", "code__hookrepo")], unregistered=unregistered)
+    failures: list[str] = []
+    ids = _hook(tmp_path, [(a, "code", "code__hookrepo"), (b, "code", "code__hookrepo")], unregistered=unregistered,
+                failures=failures)
     assert ids == {}
     assert unregistered == {a: "catalog_hook_failed", b: "catalog_hook_failed"}
-    paths = {p for _m, p in wire}
-    assert not paths & FORBIDDEN_SINGLE_WRITES, "no per-file fallback after a failed commit"
-    assert not [p for p in paths if p.startswith("/v1/catalog/manifest") or p.startswith("/v1/vectors")], \
-        "nothing was written to the manifest or T3 for the run"
+    assert len(failures) == 1 and "transient_db_error" in failures[0]
+    assert not {p for _m, p in wire} & FORBIDDEN_SINGLE_WRITES, "no per-file fallback after a failed commit"
     assert _doc(tmp_path, "a.py") is None, "the staged run was never applied"
+
+
+def test_a_commit_the_engine_cannot_find_fails_the_hook_the_same_way(tmp_path: Path, monkeypatch) -> None:
+    """The real engine's own failure, not a stand-in: a run whose stage never reached the engine has no header to
+    commit, and the engine says so (``run_not_found``). Nothing is registered, and the failure is reported."""
+    monkeypatch.setattr(HttpCatalogClient, "reconcile_stage", lambda self, *a, **k: 0)
+    a = _write(tmp_path, "a.py", "a\n")
+    unregistered: dict[Path, str] = {}
+    failures: list[str] = []
+    ids = _hook(tmp_path, [(a, "code", "code__hookrepo")], unregistered=unregistered, failures=failures)
+    assert ids == {} and unregistered == {a: "catalog_hook_failed"}
+    assert len(failures) == 1, failures
+    assert _doc(tmp_path, "a.py") is None
+
+
+# ── a file the walk saw but staged no present row for counts as present ─────────────────────────────────────────
+
+def test_a_row_under_an_ephemeral_path_is_not_aged_toward_the_sweep_by_complete_walks(tmp_path: Path) -> None:
+    """The old housekeeping built its present set from every file the walk saw, the ephemeral-skipped included, so a
+    pre-guard row at such a path was never counted missing. The staged ``keep`` row keeps that: two complete walks that
+    skip the file leave its row alive and uncounted."""
+    ok = _write(tmp_path, "ok.py", "ok\n")
+    eph = _write(tmp_path, ".claude/worktrees/agent/x.py", "e\n")
+    files = [(ok, "code", "code__hookrepo"), (eph, "code", "code__hookrepo")]
+    _hook(tmp_path, files[:1])
+    cat = HttpCatalogClient()
+    try:
+        cat.register(cat.owner_for_repo(REPO_HASH), "x.py", content_type="code",
+                     file_path=".claude/worktrees/agent/x.py", physical_collection="code__hookrepo")
+    finally:
+        cat.close()
+    for head in ("h2", "h3", "h4"):
+        _hook(tmp_path, files, head=head)
+    row = _doc(tmp_path, ".claude/worktrees/agent/x.py")
+    assert row is not None, "the row was swept"
+    assert not row.meta.get("miss_count"), "the row was counted missing"
 
 
 # ── deleted rows and a partial walk ─────────────────────────────────────────────────────────────────────────────

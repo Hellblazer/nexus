@@ -1246,6 +1246,7 @@ def _catalog_hook(
     sensitive_globs: tuple[str, ...] = (),
     sensitive_wanted: set[Path] | None = None,
     sensitive_confirmed: set[Path] | None = None,
+    failures: list[str] | None = None,
 ) -> dict[Path, str]:
     """Register/update the indexed files in the catalog through one engine reconcile run (RDR-193 Step 6,
     nexus-u5m5g.7). The result is ``{abs_path: doc_id}`` (empty when the catalog cannot be reached).
@@ -1279,10 +1280,16 @@ def _catalog_hook(
 
     OUT-params, each filled in place from the outcome's rows:
 
+    ``failures``: one line for each failure of the whole run (the commit failed, the catalog could not be reached). The hook
+    never raises (its callers cannot), so a run with no file to name unregistered (a delta of only deletions) would otherwise
+    read a failed commit as a clean one. ``_run_index`` counts it into ``catalog_hook_failed``, which fails the run and holds
+    the ``--since-head`` base.
+
     ``unregistered`` (nexus-z0o2p.20, RDR-223 P2.10): ``abs_path -> cause`` for every file this call could NOT resolve
     to a catalog document: ``ephemeral:<reason>`` (refused by the worktree/tempdir guard), ``register_failed`` (the
     file's row could not be built), ``register_refused`` (the engine refused the row: its derived source URI lies outside
-    the owner's repo root) and ``catalog_hook_failed`` (the whole run failed).
+    the owner's repo root), ``no_outcome_row`` (the commit answered no row for a staged one) and ``catalog_hook_failed``
+    (the whole run failed).
 
     ``stale_fence_doc_ids`` (nexus-cp46b): the tumbler of every existing document fenced ``indexing`` or ``failed``
     (a run stranded mid-way), so the staleness caches force it stale instead of skipping it on its unchanged content.
@@ -1379,6 +1386,7 @@ def _catalog_hook(
         rows: list[dict] = []
         staged: dict[str, dict] = {}  # the present rows, by repo-relative path
         rel_to_abs: dict[str, Path] = {}
+        _unstaged_rels: list[str] = []  # files the walk saw that got no present row (the ephemeral guard, a failed build)
         from nexus.sensitive_write import sensitive_glob_matches  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
         for abs_path, content_type, collection_name in indexed_files:
             try:
@@ -1459,6 +1467,10 @@ def _catalog_hook(
                 _record_ephemeral_registration_skip(
                     _registered_path, str(owner), reason=_skip_reason,
                 )
+                # RDR-193 Step 6 (r1): the file exists, so it counts as present for the engine's miss count; a row an
+                # earlier run left at this path must not age toward the sweep (the old housekeeping took its present
+                # set from every file the walk saw).
+                _unstaged_rels.append(rel_path)
                 continue
 
             # nexus-8luh: capture mtime at index time so stale-source
@@ -1519,6 +1531,7 @@ def _catalog_hook(
                 rel_to_abs[rel_path] = abs_path
             except Exception as exc:  # noqa: BLE001 — per-file isolation: one bad file must never strip ids from the rest of the repo
                 skipped_files.append((abs_path, str(exc)))
+                _unstaged_rels.append(rel_path)  # as the ephemeral skip above: the file exists, so its row is kept
                 if unregistered is not None:
                     unregistered[abs_path] = "register_failed"
                 _log.warning(
@@ -1527,7 +1540,7 @@ def _catalog_hook(
                 )
 
         _seen = set(staged)
-        for _rel in sorted(_indexed_relpaths([(p, "", "") for p in (keep_paths or [])], repo)):
+        for _rel in sorted({*_indexed_relpaths([(p, "", "") for p in (keep_paths or [])], repo), *_unstaged_rels}):
             if _rel not in _seen:
                 _seen.add(_rel)
                 rows.append({"kind": "keep", "seq": len(rows), "file_path": _rel})
@@ -1573,6 +1586,12 @@ def _catalog_hook(
             if unregistered is not None:
                 unregistered[_path] = "register_refused"
             _log.warning("catalog_hook_register_refused", abs_path=str(_path), reason=_cause, owner=str(owner))
+        for _path in applied.missing:
+            # the commit answered no row for this file (reconcile_run warned): it has no document id, and is named
+            skipped_files.append((_path, "no_outcome_row"))
+            if unregistered is not None:
+                unregistered[_path] = "no_outcome_row"
+        reconcile_run.log_outcome(outcome, owner=owner, repo=repo_name)
         for _dup in outcome.get("duplicate_path", []):
             _log.warning("catalog_reconcile_duplicate_path", owner=str(owner), **_dup)
         for _skip in outcome.get("deleted_skipped_foreign_owner", []):
@@ -1738,6 +1757,8 @@ def _catalog_hook(
             source_path=str(repo), collection="",
             hook_name="catalog_index_hook", error=str(exc),
         )
+        if failures is not None:
+            failures.append(f"{type(exc).__name__}: {exc}")
         if unregistered is not None:
             for _lost_path, _t, _c in indexed_files:
                 if _lost_path not in file_to_doc_id:
@@ -2093,6 +2114,9 @@ def index_repository(
                     + stats.get("chunk_flush_throttled_files", 0)
                     + stats.get("transient_upsert_deferred_files", 0)
                     + stats.get("identity_less_dropped_files", 0)
+                    # RDR-193 Step 6 (r1): a failed reconcile commit with no file to drop (a delta of only
+                    # deletions): the deletions are in no later delta.
+                    + stats.get("catalog_hook_failed", 0)
                     # nexus-2k66t.4.2: a held PDF was not offered this run; the
                     # next --since-head diff must still contain it.
                     + stats.get("pdf_stack_held", 0)
@@ -2110,6 +2134,7 @@ def index_repository(
                         chunk_flush_throttled_files=stats.get("chunk_flush_throttled_files", 0),
                         transient_upsert_deferred_files=stats.get("transient_upsert_deferred_files", 0),
                         identity_less_dropped_files=stats.get("identity_less_dropped_files", 0),
+                        catalog_hook_failed=stats.get("catalog_hook_failed", 0),
                         pdf_mineru_tripped=stats.get("pdf_mineru_tripped", 0),
                         pdf_mineru_not_attempted=len(stats.get("pdf_mineru_not_attempted_paths") or ()),
                     )
@@ -4629,8 +4654,8 @@ def _refuse_identity_less_files(
       dir). Counted by the ephemeral-skip summary, not a failure, not in the
       durable record (``nx doctor`` would go red over it), and does not hold
       the --since-head base.
-    * anything else (``register_failed``, ``catalog_hook_failed``,
-      ``unexplained``): a named identity drop with nothing written, which
+    * anything else (``register_failed``, ``register_refused``,
+      ``no_outcome_row``, ``catalog_hook_failed``, ``unexplained``): a named identity drop with nothing written, which
       fails the run summary and holds the --since-head base.
 
     The second kind is returned in ``refusals`` too; the count of dropped
@@ -5587,6 +5612,9 @@ def _run_index(
     # RDR-243 Q8: files --sensitive-glob matched, and those the catalog now holds flagged.
     _sensitive_wanted: set[Path] = set()
     _sensitive_confirmed: set[Path] = set()
+    # RDR-193 Step 6 (r1): whole-run failures of the hook (a failed commit). A delta run of only deletions has no file to
+    # name unregistered, so this is what fails it.
+    _catalog_hook_failures: list[str] = []
     # RDR-243 Q8: how many of the files this run visited each --sensitive-glob pattern matched
     # (a pattern that matched none is a typo or a stale pattern, and the CLI says so loudly).
     _sensitive_glob_counts: dict[str, int] = {}
@@ -5619,6 +5647,7 @@ def _run_index(
         sensitive_globs=sensitive_globs,
         sensitive_wanted=_sensitive_wanted,
         sensitive_confirmed=_sensitive_confirmed,
+        failures=_catalog_hook_failures,
     )
     if on_phase is not None:
         on_phase(
@@ -7352,6 +7381,10 @@ def _run_index(
         # It also counts a file dropped AFTER that up-front pass (an oversize
         # backstop or the flush refusing it), read back from the drop collector.
         "identity_less_dropped_files": _identity_less_dropped,
+        # RDR-193 Step 6 (r1): 1 when the catalog hook failed as a whole (the reconcile commit failed). Fails the
+        # run (index_repo_cmd) and holds the --since-head base (index_repository), also when no file is named
+        # unregistered (a delta of only deletions).
+        "catalog_hook_failed": len(_catalog_hook_failures),
         # nexus-z0o2p.20: True iff the durable record of those drops could not
         # be written; index_repo_cmd says so in the summary (the run does not
         # fail over it).

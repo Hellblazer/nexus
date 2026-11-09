@@ -23,7 +23,8 @@ from typing import Any
 import pytest
 import structlog
 
-from nexus.catalog import http_catalog_client as hcc
+from nexus.catalog import reconcile_client as hcc
+from nexus.db.t2 import _refreshable_client
 from nexus.catalog.http_catalog_client import CatalogReconcileError, HttpCatalogClient
 
 OUTCOME = {"rows": [{"file_path": "a.py", "tumbler": "1.1.1", "action": "created"}], "trashed": [], "renamed": [],
@@ -92,6 +93,9 @@ def client(script: _Script, monkeypatch: pytest.MonkeyPatch):
     # no real waiting: the schedule keeps its length (the contract is the number of resubmits), not its seconds
     monkeypatch.setattr(hcc, "_RECONCILE_RESUBMIT_BACKOFF_S", (0.0, 0.0, 0.0))
     monkeypatch.setattr(hcc, "_RECONCILE_POLL_INTERVAL_S", 0.0)
+    # The transport's own gateway ladder is off here, so each case counts the CLIENT's submits; the cases that are about
+    # the transport (a 502 ridden out, the bound of the two together) switch it back on.
+    monkeypatch.setattr(_refreshable_client, "_GATEWAY_RETRY_SLEEPS", ())
     c = HttpCatalogClient(base_url=f"http://127.0.0.1:{server.server_address[1]}", _token="t")
     try:
         yield c
@@ -162,6 +166,68 @@ def test_a_409_polls_the_named_running_job_and_never_resubmits(client, script) -
     assert info.value.reason == "commit_conflict" and info.value.job_id == "other"
     assert script.count("POST", COMMIT) == 1, "a 409 is never answered with a second submit"
     assert script.count("GET", _poll("other")) == 2, "the named job is polled to its end"
+
+
+def test_a_409_whose_named_job_was_lost_raises_commit_conflict_and_not_the_private_loss(client, script) -> None:
+    """r1 fix 4: the poll of the OTHER run's job can answer 404 (an engine restart). That is not this run's lost
+    job, so it is neither resubmitted nor leaked as the private ``_ReconcileJobLost``: the contract is that a commit
+    that did not end in an outcome raises ``CatalogReconcileError``, and this run was not committed."""
+    script.on("POST", COMMIT, (409, {"error": "another run of this owner is committing", "job_id": "other"}))
+    script.on("GET", _poll("other"), (404, {"error": "no such reconcile job"}))
+    with pytest.raises(CatalogReconcileError) as info:
+        client.reconcile_commit("1.9", "run-1")
+    assert info.value.reason == "commit_conflict" and info.value.job_id == "other"
+    assert "lost" in info.value.error
+    assert script.count("POST", COMMIT) == 1 and script.count("GET", _poll("other")) == 1
+
+
+def test_a_409_whose_named_job_failed_raises_commit_conflict_and_not_that_jobs_reason(client, script) -> None:
+    """r1 fix 4: the other job's failure is the other run's. Carrying its reason (here ``run_not_found``) would make
+    this run look as if its own staged rows were missing; the reason is ``commit_conflict``, and the text names why."""
+    script.on("POST", COMMIT, (409, {"error": "another run of this owner is committing", "job_id": "other"}))
+    script.on("GET", _poll("other"), _running("other"), _failed("run_not_found", 422, "other"))
+    with pytest.raises(CatalogReconcileError) as info:
+        client.reconcile_commit("1.9", "run-1")
+    assert info.value.reason == "commit_conflict" and info.value.job_id == "other"
+    assert "run_not_found" in info.value.error, "the other job's end is named in the text"
+    assert script.count("POST", COMMIT) == 1
+
+
+def test_a_stage_answered_409_commit_in_progress_raises_a_catalog_reconcile_error(client, script) -> None:
+    """r1 fix 4: staging into a run the engine is already committing is refused (409, reason ``commit_in_progress``).
+    It raises the client's own error with the engine's reason, never a bare ``HTTPStatusError``, and is sent once."""
+    script.on("POST", STAGE, (409, {"error": "run run-1 is being committed", "reason": "commit_in_progress"}))
+    with pytest.raises(CatalogReconcileError) as info:
+        client.reconcile_stage("1.9", "run-1", "complete", 1, [{"kind": "present", "seq": 0, "file_path": "a.py"}])
+    assert info.value.reason == "commit_in_progress" and info.value.http_status == 409
+    assert script.count("POST", STAGE) == 1
+
+
+def test_the_commit_submit_rides_out_a_gateway_502_through_the_transport(client, script, monkeypatch) -> None:
+    """r1 fix 8: the submit is idempotent (the engine answers the running job, or the stored outcome, for one
+    ``{owner, run_id}``), so the transport's own ladder carries it over a gateway 502 that single-shot sending would
+    have raised."""
+    monkeypatch.setattr(_refreshable_client, "_GATEWAY_RETRY_SLEEPS", (0.0, 0.0, 0.0))
+    script.on("POST", COMMIT, (502, {"error": "bad gateway"}), (202, {"job_id": "j1"}))
+    script.on("GET", _poll("j1"), _succeeded())
+    assert client.reconcile_commit("1.9", "run-1") == OUTCOME
+    assert script.count("POST", COMMIT) == 2, "the 502 and the resend"
+    assert script.bodies("POST", COMMIT)[0] == script.bodies("POST", COMMIT)[1]
+
+
+def test_the_transport_ladder_and_the_resubmit_ladder_multiply_but_stay_bounded(client, script, monkeypatch) -> None:
+    """r1 fix 8: a registry that stays full is sent at most four submits (the first and three resubmits) times four
+    transport sends each. Counted, so a change that lets one ladder feed the other without a cap turns this red."""
+    from nexus.db import gateway_hold
+
+    monkeypatch.setattr(_refreshable_client, "_GATEWAY_RETRY_SLEEPS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(gateway_hold, "record_503", lambda sleep_s, **kw: 0.0)  # no shared hold held for real
+    monkeypatch.setattr(gateway_hold, "wait_before_attempt", lambda **kw: 0.0)
+    script.on("POST", COMMIT, (503, {"error": "the registry is full"}))
+    with pytest.raises(CatalogReconcileError) as info:
+        client.reconcile_commit("1.9", "run-1")
+    assert info.value.reason == "registry_busy"
+    assert script.count("POST", COMMIT) == 4 * 4
 
 
 def test_a_404_poll_logs_engine_job_lost_and_resubmits_once(client, script) -> None:
