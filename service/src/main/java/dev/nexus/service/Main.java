@@ -59,6 +59,15 @@ public final class Main {
 
     private static final Logger log = LoggerFactory.getLogger(Main.class);
 
+    /**
+     * nexus-17jvq: the step {@code main} runs FIRST, before anything can load a DJL class. DJL's tokenizer build
+     * calls home to the AWS metadata address and its CUDA path downloads a JNI library; the engine loads only
+     * local files. A method of its own (nexus-4lqi7) so the egress witness child runs this step, not a copy of it.
+     */
+    static void goOfflineAtStartup() {
+        LocalTokenizers.goOffline();
+    }
+
     public static void main(String[] args) throws Exception {
         // nexus-37n79: the build's trust-store check asks the built executable what it trusts, and
         // the engine starts nothing for that question.
@@ -66,9 +75,7 @@ public final class Main {
             TrustAnchors.print(System.out);
             return;
         }
-        // nexus-17jvq: FIRST, before anything can load a DJL class. DJL's tokenizer build calls home to the
-        // AWS metadata address and its CUDA path downloads a JNI library; the engine loads only local files.
-        LocalTokenizers.goOffline();
+        goOfflineAtStartup();
         // nexus-rph82: one clock for the whole process, pinned before any
         // datasource negotiates a session zone. See SchemaMigrator.pinJvmTimeZoneToUtc.
         // nexus-9gaj7: the pin asserts itself and fails loud (System.exit(1))

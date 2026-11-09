@@ -41,9 +41,7 @@ import java.util.stream.Stream;
  *   <li>any dependency's code, such as {@code java.net.http}, raw sockets or DNS used inside a library;</li>
  *   <li>the GraalVM native image the engine ships as (the witnesses run on a JVM);</li>
  *   <li>DJL's Rust tokenizers library, whose network I/O is JNI that no Java-level check sees;</li>
- *   <li>{@code Main.goOffline()}, which the witness child does not run ({@code LocalTokenizers.build}
- *       re-applies it), and an outbound call spelled through reflection or reached by a type this list does
- *       not name.</li>
+ *   <li>an outbound call spelled through reflection or reached by a type this list does not name.</li>
  * </ul>
  * {@code EgressRuntimeWitnessTest} and {@code EgressVoyageClientWitnessTest} are separate, narrower runtime
  * checks and do not close these.
