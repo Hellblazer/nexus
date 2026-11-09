@@ -23,16 +23,19 @@ which, so every thread but the watchdog's own is sampled and only stacks that
 pass through the nexus package's own files are counted: an idle worker carries
 none, and a loop parked in ``select`` is skipped though ``main()`` sits at its
 base. Other nexus background threads (a subscription waiter, say) are counted
-too, so a hot frame there is a neighbour of the slow call, not the call.
+too, so a hot frame there is a neighbour of the slow call, not the call. A
+worker blocked in ``subprocess.communicate`` is in ``selectors.py`` as well and
+is counted: only a stack that also runs the asyncio loop is skipped. Each
+counted stack contributes its innermost nexus frame and its innermost frame
+overall, so a call blocked in ``httpx`` reads as
+``search (nexus/mcp/core.py:123) <- _recv (ssl.py:…)``. Concurrent slow calls
+share the samples taken while they overlap. Logged at WARNING the first time a
+tool is slow in this process, INFO after (warn once per site).
 
 **Scope.** Every ``tools/call`` on both servers, which includes ``nx_answer``
 and the tool-tier hooks. Command-tier hooks (``nx-hook``) are short-lived
 processes and are not watched. The summary is its own event beside the call's
-``mcp_tool_call`` line, matched by ``pid`` and tool. Each counted stack contributes its innermost nexus frame and its
-innermost frame overall, so a call blocked in ``httpx`` reads as
-``search (nexus/mcp/core.py:123) <- _recv (ssl.py:…)``. Concurrent slow calls
-share the samples taken while they overlap. Logged at WARNING the first time a
-tool is slow in this process, INFO after (warn once per site).
+``mcp_tool_call`` line, matched by ``pid`` and tool.
 """
 from __future__ import annotations
 
@@ -78,12 +81,22 @@ def _where(frame: Any, pkg_dir: str) -> str:
     return f"{code.co_name} ({short}:{frame.f_lineno})"
 
 
+def _in_event_loop(frame: Any) -> bool:
+    f, depth = frame, 0
+    while f is not None and depth < 64:
+        if f.f_code.co_filename.endswith(os.path.join("asyncio", "base_events.py")):
+            return True
+        f, depth = f.f_back, depth + 1
+    return False
+
+
 def _stack_keys(frame: Any, pkg_dir: str = _PKG_DIR) -> str | None:
     """The key one thread's stack contributes, or None when no frame is nexus code."""
     innermost = frame
     # An idle event loop parked in select carries the server's own main() at its
-    # base: that is not where a call's time went.
-    if os.path.basename(innermost.f_code.co_filename) == "selectors.py":
+    # base: that is not where a call's time went. Only a loop: a worker blocked in
+    # subprocess.communicate is in selectors.py too, and that is a slow call's time.
+    if os.path.basename(innermost.f_code.co_filename) == "selectors.py" and _in_event_loop(innermost):
         return None
     ours = None
     f = frame
@@ -253,7 +266,7 @@ class SlowCallWatchdog:
             try:
                 with self._cond:
                     wait = self._wait_s()
-                    self._cond.wait(timeout=wait)
+                    self._cond.wait(timeout=None if wait is None else min(wait, threading.TIMEOUT_MAX))
                 self.sample_once()
             except Exception:  # noqa: BLE001 -- the watchdog must never take the server down; back off and go on
                 time.sleep(1.0)

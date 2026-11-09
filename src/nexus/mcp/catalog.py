@@ -36,6 +36,16 @@ from nexus.mcp._slow_call_watchdog import install_slow_call_watchdog as _install
 
 _SLOW_CALL_STATUS: str = _install_slow_call_watchdog(mcp)
 
+
+def _patch_statuses(core_results: dict[str, str]) -> dict[str, str]:
+    """What this server reports: core's import-time patches, with this server's own
+    tool-call log and watchdog in place of core's (the watchdog only when it is on)."""
+    out = {k: v for k, v in core_results.items() if k != "slow_call_watchdog"}
+    out["tool_call_log"] = _TOOL_CALL_LOG_STATUS
+    if _SLOW_CALL_STATUS != "off":
+        out["slow_call_watchdog"] = _SLOW_CALL_STATUS
+    return out
+
 _BULK_DELETE_CONFIRM_THRESHOLD = 10
 
 
@@ -1049,9 +1059,7 @@ def main():
 
     report_sdk_patches(
         log,
-        {**{k: v for k, v in _SDK_PATCH_RESULTS.items() if k != "slow_call_watchdog"},
-         "tool_call_log": _TOOL_CALL_LOG_STATUS,
-         **({} if _SLOW_CALL_STATUS == "off" else {"slow_call_watchdog": _SLOW_CALL_STATUS})},
+        _patch_statuses(_SDK_PATCH_RESULTS),
         server="nx-mcp-catalog",
         pid=os.getpid(),
     )

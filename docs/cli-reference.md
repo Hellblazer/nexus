@@ -3687,7 +3687,7 @@ without the plugin or without a registry.
 **Process footprint row (nexus-3ceda.3).** "Process footprint" lists each
 running supervised daemon (the storage service supervisor and the aspect
 workers) with its own resident memory, peak, CPU seconds and threads, read from
-the `footprint` the daemon writes into its lease on each heartbeat (on macOS memory is the physical footprint, compressed pages included; threads are OS threads on Linux and Python threads elsewhere; sampled at
+the `footprint` the daemon writes into its lease on each heartbeat (on macOS memory is the larger of resident size and the physical footprint, which counts compressed pages; threads are OS threads on Linux and Python threads elsewhere; sampled at
 most every 30 s; a sample older than 5 minutes shows its age). It warns when one
 is past `NX_FOOTPRINT_WARN_MB` (default 1024). It measures the Python
 supervisor process, not the Java engine it runs. Memory reads on Linux and

@@ -3,7 +3,10 @@
 daemons carry it in their lease and ``nx doctor`` reads it back (nexus-3ceda.3)."""
 from __future__ import annotations
 
+import ast
+import ctypes
 import inspect
+import textwrap
 import os
 import sys
 from pathlib import Path
@@ -184,4 +187,22 @@ def test_the_doctor_check_wraps_doctor_rows_and_never_raises(
 
 
 def test_run_health_checks_includes_the_row() -> None:
-    assert "_check_process_footprint()" in inspect.getsource(health.run_health_checks)
+    tree = ast.parse(textwrap.dedent(inspect.getsource(health.run_health_checks)))
+    called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "_check_process_footprint" in called  # a call, not a comment or a string
+
+
+def test_the_macos_reader_takes_resident_size_or_the_physical_footprint(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Lib:
+        def __init__(self, resident: int, phys: int) -> None:
+            self.resident, self.phys = resident, phys
+
+        def proc_pid_rusage(self, _pid: int, _flavor: int, ref: object) -> int:
+            buf = ref._obj  # type: ignore[attr-defined]
+            buf[4], buf[8], buf[9] = 7, self.resident, self.phys  # idle wakeups, resident_size, phys_footprint
+            return 0
+
+    for resident, phys, want in ((100, 300, 300), (500, 200, 500)):
+        monkeypatch.setattr(ctypes, "CDLL", lambda *_a, r=resident, p=phys, **_k: _Lib(r * 1024 * 1024, p * 1024 * 1024))
+        got = footprint._macos()
+        assert got == {"rss_mb": float(want), "idle_wakeups": 7.0}

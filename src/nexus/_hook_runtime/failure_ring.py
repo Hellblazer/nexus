@@ -238,6 +238,7 @@ def _precut(value: Any, budget: list[int], depth: int = 0) -> Any:
     whole walk to :data:`_WALK_BUDGET_CHARS`."""
     if budget[0] <= 0 or depth > _MAX_DEPTH:
         return "...[cut: over the size budget]"
+    budget[0] -= 1  # every node costs something, so a wide tree of numbers is bounded too
     if isinstance(value, str):
         kept = value[:min(_PRECUT_CHARS, budget[0])]
         budget[0] -= len(kept)
@@ -452,7 +453,7 @@ def _recorded_context(entry: Mapping[str, Any]) -> Generator[None]:
                 os.environ[k] = v
 
 
-def replay(path: Path, *, module_roots: Sequence[str] = REPLAY_MODULE_ROOTS, recorded_env: bool = False) -> Any:
+def replay(path: Path, *, module_roots: Sequence[str] | None = None, recorded_env: bool = False) -> Any:
     """Run the recorded hook's ``run(payload)`` again, OUTSIDE the never-fail boundary,
     so the crash it recorded raises here with its traceback. With *recorded_env*,
     also under the recorded environment subset (less anything naming a path, dir,
@@ -470,7 +471,7 @@ def replay(path: Path, *, module_roots: Sequence[str] = REPLAY_MODULE_ROOTS, rec
     module = entry.get("module")
     if not isinstance(module, str) or not module:
         raise ReplayRefused(f"{path} names no module to replay (hook {entry['hook']!r})")
-    if not module.startswith(tuple(module_roots)):
+    if not module.startswith(tuple(REPLAY_MODULE_ROOTS if module_roots is None else module_roots)):
         raise ReplayRefused(f"{path} names module {module!r}, which is not a hook verb; replay refuses it")
     payload = entry["payload"]
     if not recorded_env:

@@ -398,13 +398,13 @@ def test_failures_says_so_when_the_ring_is_empty(tmp_path: Path, monkeypatch: py
 
 @pytest.mark.parametrize("text", [
     "-----BEGIN RSA PRIVATE KEY-----\n" * 30_000,
-    "-----BEGIN " * 50_000,
+    "x -----BEGIN EC PRIVATE KEY----- y " * 30_000,
 ])
 def test_pem_masking_is_linear(text: str) -> None:
     started = time.perf_counter()
     out = failure_ring.scrub(text)
     assert time.perf_counter() - started < 2.0
-    assert "[redacted]" in out or "PRIVATE KEY" not in text
+    assert "[redacted]" in out
 
 
 def test_a_key_left_open_is_still_masked() -> None:
@@ -425,9 +425,23 @@ def test_camel_case_credential_keys_in_text_are_masked(text: str, secret: str) -
     {"word " * 1_200_000: 1},
     {f"k{i}" + "x" * 1_000_000: i for i in range(20)},
     {"lists": [["y" * 15_000] * 190 for _ in range(10)]},
-], ids=["one-huge-key", "many-long-keys", "nested-lists"])
+    {"cube": [[[0] * 200] * 200] * 200},
+], ids=["one-huge-key", "many-long-keys", "nested-lists", "wide-number-tree"])
 def test_the_pre_scrub_cut_bounds_any_payload_shape(tmp_path: Path, payload: dict) -> None:
     started = time.perf_counter()
     path = _rec(tmp_path, payload)
     assert time.perf_counter() - started < 1.5, "the crash handler walked the whole payload"
     assert path is not None and path.stat().st_size <= failure_ring.MAX_ENTRY_BYTES
+
+
+def test_the_cli_applies_the_recorded_env_only_with_the_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "cli_env_verb.py").write_text(_CRASHING_VERB, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delenv("NX_PROBE_MODE", raising=False)
+    path = _rec(tmp_path / "ring", {"tool_name": "Env"}, module="cli_env_verb", env={"NX_PROBE_MODE": "strict"})
+    assert path is not None
+    monkeypatch.setattr(failure_ring, "REPLAY_MODULE_ROOTS", ("cli_env_verb",))
+    plain = CliRunner().invoke(hook_group, ["replay", str(path)])
+    flagged = CliRunner().invoke(hook_group, ["replay", "--recorded-env", str(path)])
+    assert "env - cwd" in str(plain.exception)
+    assert "env strict cwd" in str(flagged.exception)

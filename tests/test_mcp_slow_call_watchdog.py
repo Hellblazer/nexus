@@ -241,9 +241,42 @@ def test_an_installed_watchdog_reports_as_applied() -> None:
 @pytest.mark.parametrize("module", ["nexus.mcp.core", "nexus.mcp.catalog"])
 @pytest.mark.parametrize(("value", "installed"), [("5", True), ("", False)])
 def test_both_servers_install_it_only_when_asked(module: str, value: str, installed: bool) -> None:
+    statuses = ("m._SDK_PATCH_RESULTS" if module == "nexus.mcp.core"
+                else "m._patch_statuses(__import__('nexus.mcp.core', fromlist=['x'])._SDK_PATCH_RESULTS)")
     code = (f"import {module} as m; "
-            "print(any(getattr(x, '_nx_slow_call_watchdog', False) for x in m.mcp.middleware))")
+            "print(any(getattr(x, '_nx_slow_call_watchdog', False) for x in m.mcp.middleware)); "
+            f"print({statuses}.get('slow_call_watchdog'))")
     env = {**os.environ, wd.THRESHOLD_ENV: value}
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, check=True,
                          timeout=120)
-    assert out.stdout.strip().splitlines()[-1] == str(installed)
+    present, status = out.stdout.strip().splitlines()[-2:]
+    assert present == str(installed)
+    # Off reports nothing: an "off" status would log mcp_sdk_patch_not_applied on every start.
+    assert status == ("applied" if installed else "None")
+
+
+def test_a_worker_blocked_in_a_subprocess_still_counts() -> None:
+    blocked = _frame("select", "/usr/lib/python3.12/selectors.py", 415,
+                     back=_frame("_communicate", "/usr/lib/python3.12/subprocess.py", 2100,
+                                 back=_frame("index_repo", _PKG + "indexer.py", 77)))
+    assert wd._stack_keys(blocked, _PKG) == "index_repo (nexus/indexer.py:77) <- select (selectors.py:415)"
+
+
+def test_a_failed_thread_start_forgets_the_call_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    starts: list[int] = []
+    real_start = threading.Thread.start
+
+    def flaky_start(self: threading.Thread) -> None:
+        starts.append(1)
+        if len(starts) == 1:
+            raise RuntimeError("can't start new thread")
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", flaky_start)
+    dog = SlowCallWatchdog(30.0, log=_Log(), pkg_dir=_PKG)
+    with pytest.raises(RuntimeError, match="start new thread"):
+        dog.begin("search")
+    assert dog._calls == {} and dog._thread is None
+    token = dog.begin("search")
+    assert dog._thread is not None and len(starts) == 2
+    assert dog.end(token) is None
