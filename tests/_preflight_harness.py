@@ -44,9 +44,11 @@ MARK = "'integration and not lived_in and not keyed_voyage and not mandatory_reg
 #: ones (tests/test_docs_reference_rot.py, test_bead_id_manifest_is_fresh_where_bd_is),
 #: so a refresh-then-clean-diff check reds on every bead filed since the last refresh.
 BEAD_MANIFEST = (
-    "uv run pytest -q -rf -p no:randomly -m 'not integration and not slow'"
+    "uv run pytest -q -rf -p no:randomly --color=no -m 'not integration and not slow'"
     " -k 'cited_bead_ids_resolve or bead_id_manifest_is_fresh_where_bd_is' tests/test_docs_reference_rot.py"
 )
+#: What a gated command runs after a clean summary: its log is not kept.
+PASSING_LOG_REMOVAL = ' && rm -f "$log"'
 #: CI's docs lane runs this when a fragment or a changelog changed (nexus-3ceda.2).
 FOLD_CHECK = "uv run python scripts/changelog_fold.py check"
 #: R33: the precondition of the lint bucket (feedback_test_runs_before_push, Third recurrence).
@@ -217,6 +219,9 @@ def stubs(tmp_path: Path) -> Path:
             # It reads its stdin to the end first, as a real selector does: a pipeline under
             # pipefail must not take a SIGPIPE from the diff writer for a failure.
             'case "$*" in *select_*_tests.py*) cat >/dev/null; echo "${STUB_SELECT-tests/a.py tests/b c.py}"; exit 0;; esac\n'
+            # STUB_NUL puts a NUL byte in the output first, as a test's raw output can: a
+            # plain grep then reads the log as binary and prints no matching line.
+            '[ -n "${STUB_NUL-}" ] && printf "raw\\000out\\n"\n'
             f'printf "%s\\n" "{tool}"\n'
             'for a in "$@"; do printf "<%s>\\n" "$a"; done\n'
             # A pytest run ends with its summary line and exit code, as pytest does
@@ -234,14 +239,20 @@ def _run(
     command: str,
     shell: str | None = BASH,
     env_extra: dict[str, str | None] | None = None,
+    keep_passing_log: bool = True,
 ) -> tuple[int, list[str]]:
     """Run an emitted command; returns its exit code and the lines it showed.
 
     A gated pytest command (the result contract, R44/R55) keeps its output in a
     log made by ``mktemp``. ``TMPDIR`` points at a directory of the test's own, and
-    the log's lines come first, then the command's own stdout.
+    the log's lines come first, then the command's own stdout. A passing run removes
+    its log; *keep_passing_log* (the default) drops that removal, so a test can read
+    what a stub tool printed. The removal itself is pinned with it False.
     """
     assert shell is not None
+    if keep_passing_log:
+        assert command.count(PASSING_LOG_REMOVAL) <= 1, command
+        command = command.replace(PASSING_LOG_REMOVAL, "")
     logs = stubs.parent / f"logs-{len(list(stubs.parent.iterdir()))}"
     logs.mkdir()
     env = child_env_with_tmpdir(_env(), logs)

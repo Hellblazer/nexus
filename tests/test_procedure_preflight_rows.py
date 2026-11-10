@@ -10,12 +10,15 @@ tests/_preflight_harness.py.
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from tests._preflight_harness import (
     BEAD_MANIFEST,
+    _env,
     EVERYTHING,
     FOLD_CHECK,
     REPO_ROOT,
@@ -47,7 +50,7 @@ def test_a_procedure_change_runs_the_procedure_tests(repo: Path) -> None:
     assert _class_names(out) == ["procedure"]
     assert out["code"] is True
     assert _bare(_commands(out)["procedure"]) == [
-        "uv run pytest -q -rf -p no:randomly -m 'not integration and not slow'"
+        "uv run pytest -q -rf -p no:randomly --color=no -m 'not integration and not slow'"
         " tests/test_*procedure*.py tests/test_run_cmd.py"
     ]
 
@@ -165,7 +168,7 @@ def test_r8_the_store_parity_test_follows_the_http_stores(
     assert bool(rows) is fires
     if fires:
         assert _inner(rows[0]["command"]).endswith(
-            "pytest -q -rf -p no:randomly tests/db/test_http_t2_store_parity.py"
+            "pytest -q -rf -p no:randomly --color=no tests/db/test_http_t2_store_parity.py"
         )
 
 
@@ -181,7 +184,7 @@ def test_r10_hooks_json_gets_the_sc8_upgrade_test(
     if fires:
         assert rows[0]["class"] == "plugin"
         assert _inner(rows[0]["command"]) == (
-            "uv run pytest -q -rf -p no:randomly tests/test_upgrade_e2e.py -k SC8"
+            "uv run pytest -q -rf -p no:randomly --color=no tests/test_upgrade_e2e.py -k SC8"
         )
 
 
@@ -196,7 +199,7 @@ def test_r11_the_catalog_gate_census_follows_src_nexus(
     assert bool(rows) is fires
     if fires:
         assert _inner(rows[0]["command"]).endswith(
-            "pytest -q -rf -p no:randomly tests/test_kmo9h_catalog_gate_census.py"
+            "pytest -q -rf -p no:randomly --color=no tests/test_kmo9h_catalog_gate_census.py"
         )
 
 
@@ -237,7 +240,7 @@ def test_r31_the_tmp_root_scan_follows_any_test_file(
     assert bool(rows) is fires
     if fires:
         assert _inner(rows[0]["command"]).endswith(
-            "pytest -q -rf -p no:randomly tests/test_tmp_root.py"
+            "pytest -q -rf -p no:randomly --color=no tests/test_tmp_root.py"
         )
 
 
@@ -248,7 +251,7 @@ def test_r33_untracked_files_are_checked_before_the_lint_bucket(
     out = _Run(repo)()
     names = [c["check"] for c in out["checks"]]
     pre = next(i for i, n in enumerate(names) if n.startswith("precondition of the lint bucket"))
-    assert names.index("the whole lint bucket") == pre + 1
+    assert names[pre + 1].startswith("the whole lint bucket"), names
     assert out["checks"][pre]["heavy"] is False
     cmd = out["checks"][pre]["command"]
     assert _run(repo, stubs, cmd)[0] == 0
@@ -281,8 +284,27 @@ def test_r37_never_requires_the_manifest_to_hold_every_live_bead(repo: Path) -> 
     bead (2026-11-09: nexus-z7can and nexus-zu8rq, cited nowhere)."""
     _change(repo, {"docs/a.md": "a\n"})
     cmd = _command(_Run(repo)(), "the bead ids cited in docs/")
-    assert "git diff --quiet HEAD -- tests/fixtures/bead_ids.txt" not in cmd
-    assert "refresh_bead_id_manifest.py &&" not in cmd
+    # The whole command is the two lint tests under the result contract, nothing before
+    # them: no refresh, no diff of the manifest (bead-row review r1, note a).
+    assert _inner(cmd) == BEAD_MANIFEST
+    assert "bead_ids.txt" not in _inner(cmd)
+    assert "refresh_bead_id_manifest" not in _inner(cmd)
+
+
+def test_r37_the_bead_row_selects_exactly_its_two_lint_tests() -> None:
+    """The row selects by -k substring; a later test whose name contains either fragment would
+    run too, unseen by any pin (bead-row review r1, note b). Collect over the row's own argv."""
+    argv = BEAD_MANIFEST.removeprefix("uv run pytest -q ")  # one -q below: two print counts, not ids
+    proc = subprocess.run(
+        ["bash", "-c", f"{sys.executable} -m pytest --collect-only -q -p no:cacheprovider {argv}"],
+        cwd=REPO_ROOT, env={**_env(), "NX_TEST_T2_SUBSTRATE": "none"},
+        capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    ids = sorted(line for line in proc.stdout.splitlines() if "::" in line)
+    assert [i.split("::")[-1].split("[")[0] for i in ids] == [
+        "test_bead_id_manifest_is_fresh_where_bd_is",
+        "test_cited_bead_ids_resolve",
+    ], proc.stdout[-2000:]
 
 
 @pytest.mark.parametrize(
@@ -293,32 +315,32 @@ def test_r39_an_e2e_change_runs_tests_scripts(repo: Path, path: str, fires: bool
     rows = _fires(repo, [path], "the e2e script census")
     assert bool(rows) is fires
     if fires:
-        assert _inner(rows[0]["command"]).endswith("pytest -q -rf -p no:randomly tests/scripts")
+        assert _inner(rows[0]["command"]).endswith("pytest -q -rf -p no:randomly --color=no tests/scripts")
 
 
 @pytest.mark.parametrize(
     ("path", "fires"),
     [
         ("src/nexus/exporter.py", True),
-        ("src/nexus/pipeline_stages.py", True),
-        ("src/nexus/chunk_batcher.py", True),
-        ("src/nexus/catalog/recovery_bundle.py", True),
-        ("src/nexus/commands/store.py", True),
-        ("src/nexus/commands/memory.py", True),
         ("src/nexus/mcp/core.py", True),
-        ("src/nexus/health.py", False),
-        ("src/nexus/commands/other.py", False),
+        # The gate AST-scans every fire_batch( call site under src/nexus/, so an indexer
+        # edit or a new module reds it as surely as an anchored file (z7can item 7).
+        ("src/nexus/indexer.py", True),
+        ("src/nexus/catalog/note_write.py", True),
+        ("src/nexus/health.py", True),
+        ("src/nexus/procedures/x.lua", False),
+        ("src/conexus_shim.py", False),
         ("tests/test_vw594_fence_coverage_gate.py", False),
     ],
 )
-def test_r62_the_fence_gate_follows_the_files_it_anchors(
+def test_r62_the_fence_gate_follows_every_python_file_it_scans(
     repo: Path, path: str, fires: bool
 ) -> None:
     rows = _fires(repo, [path], "the vw594 fence coverage gate")
     assert bool(rows) is fires
     if fires:
         assert _inner(rows[0]["command"]).endswith(
-            "pytest -q -rf -p no:randomly tests/test_vw594_fence_coverage_gate.py"
+            "pytest -q -rf -p no:randomly --color=no tests/test_vw594_fence_coverage_gate.py"
         )
 
 
@@ -346,7 +368,7 @@ def test_the_cli_registration_test_follows_commands_and_cli(
     if fires:
         assert rows[0]["class"] == "python"
         assert _inner(rows[0]["command"]).endswith(
-            "pytest -q -rf -p no:randomly tests/test_cli_registration.py"
+            "pytest -q -rf -p no:randomly --color=no tests/test_cli_registration.py"
         )
 
 
@@ -371,7 +393,7 @@ def test_the_collection_scoped_tables_parity_test_follows_changelogs_and_catalog
     if fires:
         assert (rows[0]["class"], rows[0]["heavy"]) == ("schema", True)
         assert _inner(rows[0]["command"]).endswith(
-            "pytest -q -rf -p no:randomly tests/catalog/test_collection_scoped_tables_schema_parity.py"
+            "pytest -q -rf -p no:randomly --color=no tests/catalog/test_collection_scoped_tables_schema_parity.py"
         )
 
 
@@ -403,7 +425,7 @@ def test_the_hooks_json_pin_tests_follow_hooks_json_and_the_skew_harness(
     if fires:
         assert rows[0]["class"] == "plugin"
         assert _inner(rows[0]["command"]) == (
-            "uv run pytest -q -rf -p no:randomly -m 'not integration and not slow'"
+            "uv run pytest -q -rf -p no:randomly --color=no -m 'not integration and not slow'"
             " tests/scripts/test_hook_harness_launcher_form.py"
             " tests/test_hook_budgets_pinned_to_hooks_json.py"
             " tests/test_hooks_json_verb_release_floor.py"
@@ -436,3 +458,49 @@ def test_a_fragment_alone_is_a_docs_change_as_ci_reads_it(repo: Path) -> None:
     _change(repo, {"changelog/unreleased/nexus-x.md": "### Added\n- x\n"})
     out = _Run(repo)()
     assert (out["code"], _class_names(out), out["unclassified"]) == (False, ["docs"], {})
+
+
+# ---- the changed-tests trigger and the daemon class (z7can item 2; window 41) ----------------
+
+
+@pytest.mark.parametrize(
+    ("path", "fires"),
+    [
+        ("tests/test_x.py", True),
+        ("tests/sub/test_x.py", True),
+        ("tests/a/b/test_y.py", True),
+        # helpers whose names only contain "test_"
+        ("tests/_test_helpers.py", False),
+        ("tests/helpers/latest_x.py", False),
+        ("tests/sub/attest_x.py", False),
+        ("tests/test_x.txt", False),
+        ("src/test_x.py", False),
+    ],
+)
+def test_the_changed_tests_step_follows_test_files_only(repo: Path, path: str, fires: bool) -> None:
+    assert bool(_fires(repo, [path], "the changed test files")) is fires
+
+
+@pytest.mark.parametrize(
+    ("path", "fires"),
+    [
+        ("src/nexus/daemon/service_registry.py", True),
+        ("src/nexus/daemon/sub/x.py", True),
+        ("src/nexus/daemonx.py", False),
+        ("src/nexus/x_daemon/y.py", False),
+        ("tests/daemon/test_x.py", False),
+    ],
+)
+def test_a_daemon_change_runs_the_whole_daemon_directory(repo: Path, path: str, fires: bool) -> None:
+    """A change under src/nexus/daemon/ ran the test file named for its module and not the file
+    beside it that pins the same module (window 41: test_service_registry_election_bound.py)."""
+    rows = _fires(repo, [path], "the daemon tests")
+    assert bool(rows) is fires
+    if fires:
+        [row] = rows
+        assert (row["class"], row["heavy"]) == ("daemon", True)
+        assert _inner(row["command"]) == (
+            "lab-remote -- bash -c 'scripts/build-gate-jar.sh && uv run pytest -q -rf -p no:randomly"
+            ' --color=no -m "not integration and not slow" -n auto tests/daemon\''
+        )
+        assert "daemon" in _class_names(_Run(repo)())

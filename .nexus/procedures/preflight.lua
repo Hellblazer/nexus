@@ -73,21 +73,26 @@ local function step(check, command, heavy)
   return {check = check, command = command, heavy = heavy}
 end
 
--- Rules cited below as R<n> are the numbered rules of the census in T2
--- nexus/qo7ie.36-census-feedback_test_runs_before_push (nexus-qo7ie.36), which
--- numbers the rules of the maintainer's test-runs-before-push memory file.
+-- Each row below says the failure it exists for. The incidents behind them are in the
+-- maintainer's memory files promoted by nexus-qo7ie.36, kept whole in T2 as
+-- nexus/qo7ie.36-file1-source-before-shrink (test runs before a push) and
+-- nexus/qo7ie.36-file3-source-before-shrink (hand-kept enumerations); the tests that pin
+-- the rows still carry that census's rule numbers in their names.
 
--- The result contract on every pytest command this procedure emits (R44, R55; the
--- source's piped_test_exit and gate_the_push_on_the_pin sections). A run's output
+-- The result contract on every pytest command this procedure emits. A run's output
 -- goes to a log with -rf, so a red names itself, and the command passes only when
 -- pytest exited 0 AND its summary line (the last line that ends in a duration)
 -- reads "N passed" with nothing else but warnings, skips, deselects and xfails.
+-- --color=no: FORCE_COLOR or PY_COLORS in the caller's environment would put ANSI codes
+-- around the summary, and no summary would match. grep -a: one binary byte in a log
+-- (a test's raw output) turns a plain grep's match into "Binary file matches". A
+-- passing run's log is removed; a red one's is kept and named.
 -- A bare `grep -q passed` is not that: "1 failed, 964 passed" matches it, and an
 -- empty filter reads as a pass. "no tests ran", a run that printed nothing and a
 -- selection deselected by marker all fail it. The summary may carry pytest's "="
 -- decoration (a run without -q does), and a command that can select nothing (the
 -- integration selection) says so on its own line.
-local PYTEST = "uv run pytest -q -rf -p no:randomly"
+local PYTEST = "uv run pytest -q -rf -p no:randomly --color=no"
 -- Default addopts is -m 'not integration and not slow and not lint', so a step that
 -- names a lint-marked file collects nothing from it ("10 deselected") and, with a
 -- clean-looking exit, reads green. A step that names files lets a later -m select
@@ -101,21 +106,23 @@ local NOTHING = "nothing selected"
 local function gated(command, may_select_nothing)
   local ok = "printf '%s\\n' \"$s\" | grep -Eq '" .. SUMMARY_OK .. "'"
   if may_select_nothing then
-    ok = "{ " .. ok .. " || { [ -z \"$s\" ] && grep -qx '" .. NOTHING .. "' \"$log\"; }; }"
+    ok = "{ " .. ok .. " || { [ -z \"$s\" ] && grep -aqx '" .. NOTHING .. "' \"$log\"; }; }"
   end
-  -- The template names TMPDIR: BSD mktemp with no argument ignores it.
+  -- The template names TMPDIR: BSD mktemp with no argument ignores it. A mktemp that
+  -- fails says so, instead of reaching the red branch with no log to show.
   return "log=$(mktemp \"${TMPDIR:-/tmp}/preflight.XXXXXX\") && { { " .. command .. "; } >\"$log\" 2>&1; rc=$?;"
-    .. " s=$(grep -E '" .. SUMMARY_AT .. "' \"$log\" | tail -n 1);"
-    .. " [ \"$rc\" -eq 0 ] && " .. ok .. " && printf '%s\\n' \"${s:-" .. NOTHING .. "}\"; }"
-    .. " || { tail -n 30 \"$log\"; echo \"red, or no clean pytest summary line; full log: $log\"; false; }"
+    .. " s=$(grep -aE '" .. SUMMARY_AT .. "' \"$log\" | tail -n 1);"
+    .. " [ \"$rc\" -eq 0 ] && " .. ok .. " && printf '%s\\n' \"${s:-" .. NOTHING .. "}\" && rm -f \"$log\"; }"
+    .. " || { if [ -z \"${log:-}\" ]; then echo \"preflight: mktemp could not make a log under ${TMPDIR:-/tmp}\"; else"
+    .. " tail -n 30 \"$log\"; echo \"red, or no clean pytest summary line; full log: $log\"; fi; false; }"
 end
 
--- R13 (tripwires): a default-loop guard that judges only what its own invocation
--- collected, so it runs in the same invocation as the changed tests. It is
+-- A default-loop guard judges only what its own invocation collected, so it runs in
+-- the same invocation as the changed tests. It is
 -- tests/test_mode_declarations_are_explicit.py (voyage names in a test without
 -- cloud_mode; it reads request.session.items and must not be lint-marked). The
--- source's second guard, tests/test_cli_runner_output_invariant.py, became a
--- lint test (dc2a2cca0), which default addopts deselect, so naming it here would
+-- other guard the memory file named, tests/test_cli_runner_output_invariant.py, became
+-- a lint test (dc2a2cca0), which default addopts deselect, so naming it here would
 -- run nothing; the standing lint bucket carries it (a test pins that).
 local CHANGED_TEST_GUARDS = {"tests/test_mode_declarations_are_explicit.py"}
 
@@ -135,7 +142,10 @@ local CLASSES = {
       -- nothing here and the summary accepts "N deselected", so it reads green.
       -- Integration-marked changed files run in the integration row; slow-marked
       -- ones in the nightly local-service gate.
-      if any(files, "^tests/.*test_[^/]*%.py$") then
+      -- A test file is tests/test_*.py or tests/<dir>/.../test_*.py. One pattern
+      -- `^tests/.*test_[^/]*%.py$` also took a helper whose name only contains
+      -- "test_" (_test_helpers.py, helpers/latest_x.py, both under tests).
+      if any(files, "^tests/test_[^/]*%.py$") or any(files, "^tests/.*/test_[^/]*%.py$") then
         table.insert(out, step("the changed test files, with the default-loop guard that judges only its own"
           .. " invocation (a changed lint-marked file runs here too; integration-marked ones run in the integration"
           .. " row, slow-marked ones in the nightly gate)",
@@ -231,7 +241,8 @@ local CLASSES = {
   {
     -- A change under src/nexus/mcp/ can move a surface that is pinned far from the code:
     -- the committed wire snapshot, the registered-name set and the auto-approve drift
-    -- guard are default-suite tests of files nobody edits with the tool. The text is
+    -- guard are default-suite tests of files nobody edits with the tool, and the tuple
+    -- shakeout census pins the tuple_out and tuple_subscribe descriptions in core.py. The text is
     -- what a registration also edits (the hook lists are for hook_* tools only; any
     -- other tool is covered by _ALLOWED_TOOLS) and the greps no path list can run.
     name = "mcp-surface",
@@ -239,8 +250,10 @@ local CLASSES = {
     checks = function()
       return {
         step("the MCP wire surface pins (the wire snapshot, the registered tool names, the auto-approve drift"
-          .. " guard). A change to a registered tool's wire surface, a parameter's type, name or default or the set"
-          .. " of parameters (a description is not in the snapshot), regenerates tests/fixtures/mcp_wire_snapshot.json"
+          .. " guard, and the tuple shakeout census, which pins the tuple_out and tuple_subscribe descriptions in"
+          .. " src/nexus/mcp/core.py). A change to a registered tool's wire surface, a parameter's type, name or default or the set"
+          .. " of parameters, or its qualname, module, is_async or required list (a description is not in the"
+          .. " snapshot), regenerates tests/fixtures/mcp_wire_snapshot.json"
           .. " in the same commit with `uv run python scripts/mcp_wire_snapshot.py --write`; review the diff, it"
           .. " holds only what you changed. Registering a tool also edits the name set in tests/test_mcp_package.py"
           .. " (test_core_registered_tools); for a hook_* tool only, HOOK_TOOLS in src/nexus/mcp/hooks.py and"
@@ -256,7 +269,7 @@ local CLASSES = {
           .. " Before the first run, grep the tree for an existing tool's bare name and for the current count as a"
           .. " standalone number",
           gated(PYTEST .. " tests/test_mcp_wire_snapshot.py tests/test_mcp_package.py"
-            .. " tests/hooks/test_permission_request_hooks.py"), false),
+            .. " tests/hooks/test_permission_request_hooks.py tests/test_tuple_shakeout_semantics.py"), false),
       }
     end,
   },
@@ -280,6 +293,23 @@ local CLASSES = {
           .. " (tests/test_tuple_template_doc_paths_lint.py checks cited paths, not counts). Before the first run,"
           .. " grep src/nexus and conexus for one existing template name in prose (queue/<name>)",
           gated(PYTEST .. " tests/test_tuple_shakeout_semantics.py"), false),
+      }
+    end,
+  },
+  {
+    -- A change under src/nexus/daemon/ ran its own test file and not the file beside it
+    -- that pins the same module (window 41: service_registry.py ran
+    -- test_service_registry.py, not test_service_registry_election_bound.py). The whole
+    -- directory is about 1700 tests, so it is heavy and runs through lab-remote, the gate
+    -- jar built first there as in the lint bucket.
+    name = "daemon",
+    patterns = {"^src/nexus/daemon/"},
+    checks = function()
+      return {
+        step("the daemon tests, the whole tests/daemon directory (a daemon module's tests are spread over"
+          .. " several files, and the one named for it is not all of them)",
+          gated("lab-remote -- bash -c 'scripts/build-gate-jar.sh && " .. PYTEST
+            .. " -m \"not integration and not slow\" -n auto tests/daemon'"), true),
       }
     end,
   },
@@ -319,7 +349,7 @@ local CLASSES = {
             .. " tests/test_hook_budgets_pinned_to_hooks_json.py tests/test_hooks_json_verb_release_floor.py"),
           false))
       end
-      -- R10 (tripwires): hooks.json has its own tripwire in the upgrade e2e.
+      -- hooks.json has its own tripwire in the upgrade e2e (its SC8 case).
       if any(files, "^conexus/hooks/hooks%.json$") then
         table.insert(out, step("the SC8 hooks.json test",
           gated(PYTEST .. " tests/test_upgrade_e2e.py -k SC8"), false))
@@ -382,7 +412,7 @@ local CLASSES = {
             .. " && printf '%s\\n' \"$f\" | xargs " .. PYTEST .. " -o addopts= " .. NOT_SLOW),
           false),
       }
-      -- R37 (Addendum 2026-09-18, Fourth recurrence, Never chain): a bead id
+      -- A bead id
       -- cited in docs/ must be in tests/fixtures/bead_ids.txt. The local lint
       -- bucket passes without it (it resolves through the live beads database
       -- when one is present); CI has none and reads only the manifest. The two
@@ -425,7 +455,7 @@ local function standing(select_all)
     or "git diff --no-renames --name-only " .. RANGE
       .. " | uv run python scripts/select_affected_integration_tests.py --repo ."
   return {
-    -- R33 (Third recurrence, 2026-10-15): the repo-wide shell lints enumerate
+    -- The repo-wide shell lints enumerate
     -- tracked files, so a new file that is not tracked is never scanned and the
     -- bucket reads green. The command fails, listing them, while any exists.
     step("precondition of the lint bucket: every new file is tracked (git add them; lab-remote sends"
@@ -433,9 +463,18 @@ local function standing(select_all)
       "u=$(git ls-files --others --exclude-standard) && [ -z \"$u\" ] || "
         .. "{ printf 'untracked files, so the repo-wide lints skip them (git add first):\\n%s\\n' \"$u\"; false; }",
       false),
-    -- R32/R59: the whole bucket, never a subset; it also carries
-    -- tests/test_cli_runner_output_invariant.py (R13, lint-marked).
-    step("the whole lint bucket",
+    -- The whole bucket, never a subset: a directory, a touched-file list or a -k is a
+    -- subset, and each cost a develop red. It also carries
+    -- tests/test_cli_runner_output_invariant.py (lint-marked).
+    --
+    -- The gate jar is built inside the lab-remote run, so inside its lab-run grant,
+    -- where AGENTS.md rule 13 would have engine builds take the build lease first
+    -- (--lab-run). lab-remote has no way to run a command outside a grant, so the build
+    -- stays here: a cache hit takes no build at all, a lease another build holds
+    -- refuses at once with exit 75 inside a grant (never a wait that holds the grant),
+    -- and a miss builds within the grant's cores and memory. A 75 here means: rerun.
+    step("the whole lint bucket (an exit 75 from the gate jar build means another build holds the host's"
+      .. " build lease: rerun)",
       gated("lab-remote -- bash -c 'scripts/build-gate-jar.sh && " .. PYTEST .. " -m lint -n auto'"), true),
     -- The ledger test reads COMMITTED trees (it diffs ref..HEAD against the pinned
     -- tag), so it is run after the commit: an uncommitted conexus/ edit is invisible
@@ -451,25 +490,16 @@ local function standing(select_all)
     step("whether the change needs a native Windows run (it reads origin/develop...HEAD)",
       "uv run scripts/windows_hand_test.py --check", false),
     -- CI's mark expression (ci.yml INTEGRATION_MARK_EXPR) and its rule that a
-    -- change to the selector selects every integration file.
+    -- change to the selector selects every integration file. The remote copy builds
+    -- the gate jar first, as the lint bucket does: a copy without one reds every
+    -- substrate test. The files come after the script's own argv ("$@").
     step("the integration tests the change affects",
       gated("f=$(set -o pipefail; " .. sel .. ")"
-        .. " && { if [ -z \"$f\" ]; then echo '" .. NOTHING .. "'; else printf '%s\\n' \"$f\" | xargs lab-remote -- "
-        .. PYTEST .. " -o addopts= -m " .. MARK .. "; fi; }", true),
+        .. " && { if [ -z \"$f\" ]; then echo '" .. NOTHING .. "'; else printf '%s\\n' \"$f\" | xargs lab-remote --"
+        .. " bash -c 'scripts/build-gate-jar.sh && exec \"$@\"' preflight " .. PYTEST .. " -o addopts= -m " .. MARK .. "; fi; }", true),
       true),
   }
 end
-
--- Rows that a diff's paths decide and no class owns: a check fires when `when`
--- holds of the changed paths (the verb's list, deleted paths included). Each is a
--- tripwire the source names for a change class; cheap ones first, the full suite
--- last. Where a rule needs more than paths (removed lines, symbols, the host's OS)
--- it is not here: it is a step of the repo skill .claude/skills/pre-push-review.
-local FENCE_GATE_FILES = {
-  "^src/nexus/exporter%.py$", "^src/nexus/pipeline_stages%.py$", "^src/nexus/chunk_batcher%.py$",
-  "^src/nexus/catalog/recovery_bundle%.py$", "^src/nexus/commands/store%.py$",
-  "^src/nexus/commands/memory%.py$", "^src/nexus/mcp/core%.py$",
-}
 
 local function any_of(names, patterns)
   for _, p in ipairs(patterns) do
@@ -480,9 +510,14 @@ local function any_of(names, patterns)
   return false
 end
 
+-- Rows that a diff's paths decide and no class owns: a check fires when `when`
+-- holds of the changed paths (the verb's list, deleted paths included). Each is a
+-- tripwire a past red showed a change class needs; cheap ones first, the full suite
+-- last. Where a rule needs more than paths (removed lines, symbols, the host's OS)
+-- it is not here: it is a step of the repo skill .claude/skills/pre-push-review.
 local TRIPWIRES = {
   {
-    -- R8 (service substrate): a new public method on any Http*Store fails
+    -- A new public method on any Http*Store fails
     -- the frozen-contract parity test, which is not lint-marked. The T2 stores
     -- live in db/t2/http_*.py, the scratch store beside them in db/.
     when = function(names)
@@ -492,7 +527,7 @@ local TRIPWIRES = {
       gated(PYTEST .. " tests/db/test_http_t2_store_parity.py"), false),
   },
   {
-    -- R11 (tripwires, new catalog access): the census counts Catalog.is_initialized
+    -- New catalog access: the census counts Catalog.is_initialized
     -- in every file under src/nexus, so a path in that tree is the narrowest
     -- trigger a path can name for "new catalog access". It is a superset by design.
     when = function(names)
@@ -502,7 +537,7 @@ local TRIPWIRES = {
       gated(PYTEST .. " tests/test_kmo9h_catalog_gate_census.py"), false),
   },
   {
-    -- R31 (Recurred 2026-10-23): the scan of TMPDIR overrides walks every python
+    -- The scan of TMPDIR overrides walks every python
     -- file under tests/ and is not lint-marked (a CI shard caught it), so a
     -- changed python file there, or the helper itself, can trip it.
     when = function(names)
@@ -512,7 +547,7 @@ local TRIPWIRES = {
       gated(PYTEST .. " tests/test_tmp_root.py"), false),
   },
   {
-    -- R39 (Third recurrence, 2026-10-15): tests/scripts holds a non-lint census of
+    -- tests/scripts holds a non-lint census of
     -- the tests/e2e scripts (bare python3). Run it after staging the new file.
     when = function(names)
       return any(names, "^tests/e2e/")
@@ -521,21 +556,21 @@ local TRIPWIRES = {
       gated(PYTEST .. " tests/scripts"), false),
   },
   {
-    -- R62 (the vw594 fence gate): it mutates the real source by exact-string
-    -- anchors in the files the source names; an edit that reshapes an anchored
-    -- line reds develop with "non-vacuity: '<anchor>' in <source>". When an
-    -- anchor moves, repoint the tuple and keep the mutation deleting the same
-    -- stamp. The gate's other anchored files (the indexers, catalog/note_write.py)
-    -- are not named by the source and are not triggers here.
+    -- The vw594 fence gate: it AST-scans every fire_batch( call site under src/nexus/
+    -- and mutates the real source by exact-string anchors; an edit that reshapes an
+    -- anchored line, or adds an unfenced call site anywhere under src/nexus/, reds
+    -- develop ("non-vacuity: '<anchor>' in <source>"). Its scan is the whole tree, so
+    -- its trigger is too (about 11 s). When an anchor moves, repoint the tuple and keep
+    -- the mutation deleting the same stamp.
     when = function(names)
-      return any_of(names, FENCE_GATE_FILES)
+      return any(names, "^src/nexus/.*%.py$")
     end,
     step = step("the vw594 fence coverage gate (an edit to an anchored line reds it; repoint the anchor,"
       .. " and keep the mutation deleting the same stamp)",
       gated(PYTEST .. " tests/test_vw594_fence_coverage_gate.py"), false),
   },
   {
-    -- R7 (service substrate): the wire-ledger check scans COMMITS, so it runs
+    -- The wire-ledger check scans COMMITS, so it runs
     -- after the commit; a lint bucket run on the uncommitted tree stays green and
     -- CI goes red (2026-09-16, 33ac72e02). Any service/ change runs it: the
     -- script's own pairing counts a src/nexus/ client module or a tests/ file
@@ -551,7 +586,7 @@ local TRIPWIRES = {
       "uv run python scripts/check_wire_contract_pairing.py", false),
   },
   {
-    -- R5 (service substrate; Recurred 2026-10-19, nexus-dxsjc; AGENTS.md rule 13):
+    -- The full Python suite (nexus-dxsjc; AGENTS.md rule 13):
     -- a push touching src/nexus/ or service/ is preceded by one full Python
     -- suite, once per tree. "Engine-only" in a brief is the defect. On chas in a
     -- lab-l grant through watched_pytest.py, the gate jar built first
@@ -568,7 +603,7 @@ local TRIPWIRES = {
       .. " its change class, the sha and 'no green full run of this tree exists' (AGENTS.md rule 13)",
       gated("lab-remote -c lab-l --fetch full-suite-status.json -- bash -c 'scripts/build-gate-jar.sh && "
         .. "python3 scripts/watched_pytest.py --stall 180 --status full-suite-status.json --log full-suite.log -- "
-        .. "uv run pytest -rf -p no:randomly -n auto; rc=$?; tail -n 40 full-suite.log; exit $rc'"),
+        .. "uv run pytest -rf -p no:randomly --color=no -n auto; rc=$?; tail -n 40 full-suite.log; exit $rc'"),
       true),
   },
 }

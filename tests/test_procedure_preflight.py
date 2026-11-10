@@ -132,19 +132,20 @@ def test_a_python_change_gets_ruff_its_tests_and_the_standing_checks(
         "( set -o pipefail; { git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
         "':(glob)tests/**/test_*.py' && printf '%s\\0' "
         "tests/test_mode_declarations_are_explicit.py; } | "
-        "xargs -0 -r uv run pytest -q -rf -p no:randomly -m 'not integration and not slow' -- )",
+        "xargs -0 -r uv run pytest -q -rf -p no:randomly --color=no -m 'not integration and not slow' -- )",
     ]
     assert _bare(_commands(out)["code"]) == [
         "scripts/build-gate-jar.sh",
         UNTRACKED,
-        "lab-remote -- bash -c 'scripts/build-gate-jar.sh && uv run pytest -q -rf -p no:randomly -m lint -n auto'",
-        "uv run pytest -q -rf -p no:randomly tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py",
+        "lab-remote -- bash -c 'scripts/build-gate-jar.sh && uv run pytest -q -rf -p no:randomly --color=no -m lint -n auto'",
+        "uv run pytest -q -rf -p no:randomly --color=no tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py",
         "uv run scripts/tenant_delta.py --strict --base=base",
         "uv run scripts/windows_hand_test.py --check",
         "f=$(set -o pipefail; git diff --no-renames --name-only base...HEAD | uv run python "
         "scripts/select_affected_integration_tests.py --repo .) && "
         '{ if [ -z "$f" ]; then echo \'nothing selected\'; else '
-        "printf '%s\\n' \"$f\" | xargs lab-remote -- uv run pytest -q -rf -p no:randomly"
+        "printf '%s\\n' \"$f\" | xargs lab-remote -- bash -c 'scripts/build-gate-jar.sh && exec \"$@\"' preflight"
+        " uv run pytest -q -rf -p no:randomly --color=no"
         f" -o addopts= -m {MARK}; fi; }}",
     ]
 
@@ -196,10 +197,10 @@ def test_a_changeset_is_engine_and_schema(repo: Path) -> None:
     # The health test and the DDL-ceiling advisory sit between them
     # (tests/test_procedure_preflight_enumerations.py).
     assert _bare(_commands(out)["schema"]) == [
-        "uv run pytest -q -rf -p no:randomly tests/test_changelog_validate_precondition_lint.py",
-        "uv run pytest -q -rf -p no:randomly tests/test_health_service_checks.py",
+        "uv run pytest -q -rf -p no:randomly --color=no tests/test_changelog_validate_precondition_lint.py",
+        "uv run pytest -q -rf -p no:randomly --color=no tests/test_health_service_checks.py",
         "grep -n '^migration_ddl_per_worker = ' tests/ddl_ceiling.toml",
-        "uv run pytest -q -rf -p no:randomly tests/catalog/test_collection_scoped_tables_schema_parity.py",
+        "uv run pytest -q -rf -p no:randomly --color=no tests/catalog/test_collection_scoped_tables_schema_parity.py",
     ]
     parity = _rows(out, "the collection-scoped tables schema parity test")[0]
     assert parity["heavy"] is True
@@ -212,7 +213,7 @@ def test_a_hook_change_gets_the_hook_tests_and_other_plugin_paths_add_none(
 ) -> None:
     _change(repo, {"conexus/hooks/x.py": "x\n"})
     assert _bare(_commands(_Run(repo)())["plugin"]) == [
-        "uv run pytest -q -rf -p no:randomly tests/hooks"
+        "uv run pytest -q -rf -p no:randomly --color=no tests/hooks"
     ]
     _change(repo, {"conexus/skills/x/SKILL.md": "x\n"})
     _git(repo, "tag", "after-hook")
@@ -249,7 +250,7 @@ def test_a_docs_only_change_gets_the_docs_readers_and_no_code_checks(
     assert _bare(_commands(out)["docs"]) == [
         "f=$(uv run python scripts/select_docs_reader_tests.py --repo .)"
         # CI's docs lane: -o addopts= so lint-marked docs scans run too, integration and slow stay out.
-        " && printf '%s\\n' \"$f\" | xargs uv run pytest -q -rf -p no:randomly"
+        " && printf '%s\\n' \"$f\" | xargs uv run pytest -q -rf -p no:randomly --color=no"
         " -o addopts= -m 'not integration and not slow'",
         BEAD_MANIFEST,
         FOLD_CHECK,  # CHANGELOG.md changed

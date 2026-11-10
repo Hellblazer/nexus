@@ -44,7 +44,7 @@ DDL = "the DDL ceiling"
 
 #: The one pytest argv each row emits, behind the result-contract wrapper (R44, R55 of the
 #: test-runs-before-push census).
-PYTEST = "uv run pytest -q -rf -p no:randomly"
+PYTEST = "uv run pytest -q -rf -p no:randomly --color=no"
 
 
 def _check(out: dict, prefix: str) -> str:
@@ -77,14 +77,16 @@ def test_r18_a_change_under_src_nexus_mcp_is_the_mcp_surface_class(
     assert bool(_rows(out, MCP)) is member, path
 
 
-def test_r18_the_mcp_surface_row_runs_the_three_pins_not_lint_marked(repo: Path) -> None:
+def test_r18_the_mcp_surface_row_runs_the_four_pins_not_lint_marked(repo: Path) -> None:
     rows = _fires(repo, ["src/nexus/mcp/core.py"], MCP)
     [row] = rows
     assert (row["class"], row["heavy"]) == ("mcp-surface", False)
-    # No -m: none of the three is lint-marked, so default addopts collect them all.
+    # No -m: none of the four is lint-marked, so default addopts collect them all. The tuple
+    # shakeout census pins tuple_out's and tuple_subscribe's descriptions in core.py, so an
+    # edit here can red it as surely as a template change (file-3 review r1).
     assert _bare([row["command"]]) == [
         f"{PYTEST} tests/test_mcp_wire_snapshot.py tests/test_mcp_package.py"
-        " tests/hooks/test_permission_request_hooks.py"
+        " tests/hooks/test_permission_request_hooks.py tests/test_tuple_shakeout_semantics.py"
     ]
 
 
@@ -349,7 +351,7 @@ def test_r41_the_drift_ledger_step_says_commit_first(repo: Path) -> None:
 # ---- the new steps under the contract the other rows keep ---------------------------------
 
 _NEW = [
-    (MCP, ["src/nexus/mcp/core.py"], 3),
+    (MCP, ["src/nexus/mcp/core.py"], 4),
     (TUPLE, [TEMPLATE], 1),
     (HEALTH, [CHANGESET], 1),
 ]

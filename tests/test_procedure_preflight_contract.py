@@ -44,6 +44,8 @@ from tests._preflight_harness import (
 
 _PYTEST_AT = re.compile(r"uv run pytest (.*?)(?: \)$|; fi; \}|'$|$)", re.S)
 _NAMED = re.compile(r"tests/[A-Za-z0-9_./*?\[\]-]+\.py")
+#: A directory a step names whole (the hook tests, the daemon tests): a bare tests/<dir> word.
+_NAMED_DIR = re.compile(r"(?<![\w/.-])(tests/[A-Za-z0-9_/-]+?)/?(?=[\s'\"]|$)")
 _PRINTF = re.compile(r"printf '%s\\0' ([^;]*);")
 
 
@@ -57,7 +59,8 @@ def _pytest_step(command: str) -> tuple[str, list[str], list[str]] | None:
         return None
     argv = m.group(1)
     appended = [w for p in _PRINTF.findall(inner) for w in p.split()]
-    named = _NAMED.findall(argv) + appended
+    dirs = [d for d in _NAMED_DIR.findall(argv) if (REPO_ROOT / d).is_dir()]
+    named = _NAMED.findall(argv) + dirs + appended
     return (argv, named, appended) if named else None
 
 
@@ -126,15 +129,22 @@ def test_every_step_that_names_files_collects_a_test_from_each_under_its_own_arg
             "tests/e2e/hook-cli-skew/run.sh": "x\n",
             "service/src/main/java/dev/nexus/service/db/CatalogRepository.java": "x\n",
             "src/nexus/catalog/recovery_bundle.py": "x = 1\n",
+            "src/nexus/daemon/x.py": "x = 1\n",
         },
     )
     out = _Run(repo)()
     steps = _steps_naming_files(out)
+    named_dirs = {n for c in steps for n in _pytest_step(c["command"])[1] if (REPO_ROOT / n).is_dir()}  # type: ignore[index]
+    assert {"tests/daemon", "tests/hooks"} <= named_dirs, named_dirs  # non-vacuity: directories are checked
     bad: list[str] = []
     for c in steps:
         argv, named, appended = _pytest_step(c["command"])  # type: ignore[misc]
         ids = _collected(argv, appended)
         for pattern in named:
+            if (REPO_ROOT / pattern).is_dir():
+                if not any(i.startswith(pattern + "/") for i in ids):
+                    bad.append(f"{c['check']}: no test collected from the directory {pattern}; argv: {argv}")
+                continue
             files = sorted(p.relative_to(REPO_ROOT).as_posix() for p in REPO_ROOT.glob(pattern))
             if not files:
                 bad.append(f"{c['check']}: {pattern} matches no file")
@@ -148,7 +158,9 @@ def test_every_step_that_names_files_collects_a_test_from_each_under_its_own_arg
 def test_every_file_a_row_names_exists() -> None:
     """R48 for the rows themselves: a guessed file name makes pytest collect nothing."""
     src = SOURCE.decode("ascii")
-    named = set(re.findall(r"\b((?:tests|scripts)/[A-Za-z0-9_./-]*\.(?:py|sh|txt))\b", src))
+    named = set(re.findall(r"\b((?:tests|scripts)/[A-Za-z0-9_./-]*\.(?:py|sh|txt|json|toml))\b", src))
+    # The step texts name a fixture and a ceiling file too (file-3 review r1).
+    assert {"tests/fixtures/mcp_wire_snapshot.json", "tests/ddl_ceiling.toml"} <= named, named
     assert len(named) >= 14, named  # non-vacuity: the rows' files were found
     assert {p for p in named if not (REPO_ROOT / p).exists()} == set()
 
@@ -262,15 +274,25 @@ def _project(root: Path, test: str) -> Path:
     return p
 
 
+#: A conftest that fails the session after a clean run: pytest prints "1 passed" and exits 1,
+#: as a coverage threshold or a sessionfinish guard does (z7can item 8).
+_FAILS_THE_SESSION = (
+    "def pytest_sessionfinish(session, exitstatus):\n"
+    "    session.exitstatus = 1\n"
+)
+
+
 @pytest.mark.parametrize(
-    ("test", "passes"),
+    ("test", "conftest", "passes"),
     [
-        ("def test_ok():\n    assert True\n", True),
-        ("def test_bad():\n    assert False\n", False),
+        ("def test_ok():\n    assert True\n", None, True),
+        ("def test_bad():\n    assert False\n", None, False),
+        ("def test_ok():\n    assert True\n", _FAILS_THE_SESSION, False),
     ],
+    ids=["green", "a-failing-test", "clean-summary-nonzero-exit"],
 )
 def test_the_full_suite_row_runs_under_the_real_watched_pytest(
-    repo: Path, tmp_path: Path, test: str, passes: bool
+    repo: Path, tmp_path: Path, test: str, conftest: str | None, passes: bool
 ) -> None:
     """The row's own argv, through the gated wrapper, with the real scripts/watched_pytest.py
     (stdlib only) and pytest. watched_pytest refuses -q and tees pytest's output only to its own
@@ -280,8 +302,13 @@ def test_the_full_suite_row_runs_under_the_real_watched_pytest(
     row = next(c for c in _Run(repo)()["checks"] if c["check"].startswith("the full Python suite"))
     assert " -q " not in _inner(row["command"])
     proj = _project(tmp_path, test)
+    if conftest is not None:
+        (proj / "conftest.py").write_text(conftest, encoding="utf-8")
     env = {**_UNSET_PYTEST, "HOME": str(tmp_path), "WATCHED_PYTEST_NOTIFY_URL": None}
     rc, lines = _run(proj, _real_tools(tmp_path), row["command"], BASH, env)
+    if conftest is not None:
+        # the summary alone reads green: only the exit code can turn this red
+        assert any(re.search(r"\b1 passed in [0-9.]+s", line) for line in lines), lines
     if passes:
         assert rc == 0, lines
         assert any(re.search(r"\b1 passed in [0-9.]+s", line) for line in lines), lines
@@ -353,3 +380,70 @@ def test_a_changed_lint_marked_test_file_is_collected_by_the_changed_tests_step(
 def _command_text(out: dict, prefix: str) -> str:
     [text] = [c["check"] for c in out["checks"] if c["check"].startswith(prefix)]
     return text
+
+
+# ---- the wrapper's own hygiene (z7can items 3, 4 and 5) -------------------------------------
+
+
+def test_every_pytest_command_turns_colour_off(repo: Path) -> None:
+    """FORCE_COLOR or PY_COLORS in the caller's environment put ANSI codes around the summary,
+    so no summary matches and every row reds; --color=no in every pytest argv prevents it."""
+    _change(repo, {**EVERYTHING, "src/nexus/daemon/x.py": "x = 1\n"})
+    runs = [c for c in _Run(repo)()["checks"] if "pytest" in c["command"]]
+    assert len(runs) >= 14, [c["check"] for c in runs]
+    for c in runs:
+        argvs = re.findall(r"pytest\b[^;|&']*", c["command"])
+        argvs = [a for a in argvs if not a.startswith("pytest_") and " -" in a]
+        assert argvs and all("--color=no" in a for a in argvs), (c["check"], argvs)
+
+
+def test_a_coloured_environment_still_reads_its_summary(repo: Path, tmp_path: Path) -> None:
+    """The real pytest under FORCE_COLOR and PY_COLORS: the changed-tests step still passes."""
+    _change(repo, {"tests/test_mode_declarations_are_explicit.py": "def test_g():\n    pass\n"})
+    _git(repo, "tag", "-f", "base")
+    _change(repo, {"tests/test_c.py": "def test_c():\n    pass\n"})
+    cmd = _command(_Run(repo)(), "the changed test files")
+    env = {**_UNSET_PYTEST, "FORCE_COLOR": "1", "PY_COLORS": "1"}
+    rc, lines = _run(repo, _real_tools(tmp_path), cmd, BASH, env)
+    assert rc == 0, lines
+    assert any(re.fullmatch(r"2 passed in [0-9.]+s", line) for line in lines), lines
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+def test_a_nul_byte_in_the_log_does_not_hide_the_summary(repo: Path, stubs: Path, shell: str) -> None:
+    """grep reads a log with a NUL byte as binary and prints "Binary file matches" instead of
+    the line, so the summary is lost and a green run reds; -a reads it as text."""
+    _change(repo, {"tests/sub/test_x.py": "def test(): pass\n"})
+    cmd = _command(_Run(repo)(), "the changed test files")
+    rc, lines = _run(repo, stubs, cmd, shell, {"STUB_NUL": "1"})
+    assert rc == 0, lines
+    assert "1 passed in 0.01s" in lines
+    rc, lines = _run(repo, stubs, cmd, shell, {"STUB_NUL": "1", "STUB_SUMMARY": "1 failed in 0.01s", "STUB_RC": "1"})
+    assert rc != 0, lines
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+def test_a_passing_run_removes_its_log_and_a_red_one_keeps_it(repo: Path, stubs: Path, shell: str) -> None:
+    _change(repo, {"tests/sub/test_x.py": "def test(): pass\n"})
+    cmd = _command(_Run(repo)(), "the changed test files")
+    rc, lines = _run(repo, stubs, cmd, shell, keep_passing_log=False)
+    assert rc == 0 and "1 passed in 0.01s" in lines, lines
+    assert not list(stubs.parent.glob("logs-*/preflight.*")), "a passing run's log is removed"
+    rc, lines = _run(repo, stubs, cmd, shell, {"STUB_SUMMARY": "1 failed in 0.01s", "STUB_RC": "1"},
+                     keep_passing_log=False)
+    assert rc != 0
+    kept = list(stubs.parent.glob("logs-*/preflight.*"))
+    assert len(kept) == 1 and any(f"full log: {kept[0]}" in line for line in lines), (kept, lines)
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+def test_a_mktemp_that_fails_says_so(repo: Path, stubs: Path, shell: str) -> None:
+    _change(repo, {"tests/sub/test_x.py": "def test(): pass\n"})
+    cmd = _command(_Run(repo)(), "the changed test files")
+    broken = stubs / "mktemp"
+    broken.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    broken.chmod(0o755)
+    rc, lines = _run(repo, stubs, cmd, shell)
+    assert rc != 0, lines
+    assert any(line.startswith("preflight: mktemp could not make a log under ") for line in lines), lines
+    assert not any("full log:" in line for line in lines), lines
