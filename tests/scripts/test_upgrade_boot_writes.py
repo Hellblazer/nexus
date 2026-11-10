@@ -126,3 +126,70 @@ def test_boot_work_absent_counts_as_empty() -> None:
     assert _mod.boot_work_empty({"version": "x"})
     assert _mod.boot_work_empty({"boot_work": []})
     assert not _mod.boot_work_empty({"boot_work": [{"kind": "pci_build"}]})
+
+
+def test_a_restart_with_nothing_in_flight_is_red() -> None:
+    # Review r1 blocker 1: with nothing in flight every rule held vacuously.
+    for mode in ("graceful", "kill", "with-pg"):
+        r = _mod.resume_analysis([{"index": "pci_a", "pid": 10, "left_progress": True}], [], [], mode)
+        assert not r["resume_ok"], mode
+        assert any("nothing" in w for w in r["resume_why"])
+
+
+def test_a_kept_build_that_finished_before_the_second_boot_sampled_is_kept() -> None:
+    # Review r1 blocker 3: the backend outlived the stop and finished before the resume boot's first sample.
+    r = _mod.resume_analysis(_FIRST, [], ["event=pci_anchor_adopted reason=missing index=pci_c"], "graceful",
+                             after_stop_pids={12})
+    assert r["resume_ok"], r["resume_why"]
+    assert r["survived_restart"] == ["pci_c"]
+
+
+def test_a_kept_backend_that_a_new_pid_rebuilt_anyway_is_not_kept() -> None:
+    r = _mod.resume_analysis(_FIRST, [{"index": "pci_c", "pid": 30, "left_progress": True}], [], "kill",
+                             after_stop_pids={12})
+    assert not r["resume_ok"]
+    assert r["killed_at_restart"] == ["pci_c"] and r["rebuilt_after_restart"] == ["pci_c"]
+
+
+def test_with_pg_refuses_two_rebuilds_of_one_index() -> None:
+    second = [{"index": "pci_c", "pid": 20, "left_progress": True}, {"index": "pci_c", "pid": 21, "left_progress": True}]
+    r = _mod.resume_analysis(_FIRST, second, [], "with-pg")
+    assert not r["resume_ok"]
+    assert "in-flight index rebuilt more than once: ['pci_c']" in r["resume_why"]
+
+
+@pytest.mark.parametrize("argv", [
+    ["--rot", "dimension_mismatch", "--interrupt-build"],
+    ["--restart-mid-queue", "3", "--no-second-boot"],
+])
+def test_flag_combinations_that_would_test_nothing_are_refused(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as e:
+        _mod.main(argv)
+    assert e.value.code == 2
+
+
+def test_a_reconcile_pass_that_skipped_every_leaf_does_not_count() -> None:
+    skipped = "event=pci_reconcile_pass ran_to_end=true leaves=8 processed_leaves=0 skipped_leaves=8"
+    worked = "event=pci_reconcile_pass ran_to_end=true leaves=8 processed_leaves=8 skipped_leaves=0"
+    assert not _mod.reconcile_pass_did_work([skipped])
+    assert _mod.reconcile_pass_did_work([skipped, worked])
+
+
+def test_an_unreadable_status_is_not_idle() -> None:
+    assert _mod.status_says_idle(200, {"version": "x"})          # predates boot_work
+    assert _mod.status_says_idle(404, None)                      # predates the route
+    assert not _mod.status_says_idle(0, None)                    # no answer
+    assert not _mod.status_says_idle(500, None)
+    assert not _mod.status_says_idle(200, {"boot_work": [{"kind": "pci_build"}]})
+
+
+def test_logwatch_reads_a_rotated_log_that_grew_past_the_old_offset(tmp_path: Path) -> None:
+    # Review r1 (S9): a fresh file (new inode) is read from its start even when it is already longer.
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = logs / "storage_service_jar.log"
+    log.write_text("x" * 10 + "\n", encoding="utf-8")
+    watch = _mod.LogWatch(tmp_path)
+    log.rename(logs / "storage_service_jar.log.1")
+    log.write_text("event=pci_anchor_adopted reason=missing index=pci_c\n" + "y" * 200 + "\n", encoding="utf-8")
+    assert watch.lines("event=pci_anchor_adopted")

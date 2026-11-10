@@ -27,7 +27,9 @@ taken as empty), no rows in ``pg_stat_progress_create_index`` or ``pg_stat_progr
 growth under ``--idle-wal-bytes`` over the last ``--idle-window`` seconds; and, unless
 ``--no-reconcile-wait``, a completed PCI reconcile pass in this boot's engine log plus the PCI end state (a
 valid ``pci_`` index for each large seeded collection, none INVALID). The ceiling applies to the total;
-the phases name where a regression is.
+the phases name where a regression is. The ceiling gates WAL only: data-file writes that are not
+WAL-logged (an index build's own heap and index pages beyond WAL, temp files) show in the reported
+``pg_stat_io`` figures, which are not gated.
 
 Every boot is followed by a second one on the same data dir: a same-version ``reboot`` after a good
 upgrade, a ``retry`` after a failed one (does the failure repeat), a ``resume`` after a mid-queue restart.
@@ -59,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import re
 import glob
 import json
 import os
@@ -335,40 +338,55 @@ def build_timeline(samples: list[Sample]) -> list[dict]:
     return out
 
 
-def resume_analysis(first: list[dict], second: list[dict], adopted_lines: list[str], mode: str) -> dict:
+def resume_analysis(first: list[dict], second: list[dict], adopted_lines: list[str], mode: str,
+                    after_stop_pids: set[int] | None = None) -> dict:
     """What a mid-queue restart did to the PCI queue. A build is identified by (index, backend pid): the
     same pid on both sides of the restart means the CREATE INDEX CONCURRENTLY kept running through it (it
-    cannot be resumed, only kept); a new pid for an index the first boot finished or lost is a rebuild."""
+    cannot be resumed, only kept); a new pid for an index the first boot finished or lost is a rebuild.
+    ``after_stop_pids`` are the CREATE INDEX backends pg_stat_activity still showed after the stop: a build
+    whose pid is among them was kept even when it finished before the second boot's first sample, as long
+    as no other pid built that index afterwards."""
+    after_stop_pids = after_stop_pids or set()
     done = {b["index"] for b in first if b["left_progress"]}
     lost = {(b["index"], b["pid"]) for b in first if not b["left_progress"]}
-    survived = sorted({n for n, pid in lost if any(b["index"] == n and b["pid"] == pid for b in second)})
     first_pids = {(b["index"], b["pid"]) for b in first}
-    rebuilt = sorted({b["index"] for b in second if (b["index"], b["pid"]) not in first_pids
-                      and (b["index"] in done or b["index"] in {n for n, _ in lost})})
+    new_builds = [b for b in second if (b["index"], b["pid"]) not in first_pids]
+    survived = sorted({n for n, pid in lost
+                       if any(b["index"] == n and b["pid"] == pid for b in second)
+                       or (pid in after_stop_pids and not any(b["index"] == n for b in new_builds))})
+    rebuilt = sorted({b["index"] for b in new_builds if b["index"] in done or b["index"] in {n for n, _ in lost}})
     pids: dict[str, set[int]] = {}
     for b in first + second:
         pids.setdefault(b["index"], set()).add(b["pid"])
+    in_flight = sorted({n for n, _ in lost})
+    killed = sorted(set(in_flight) - set(survived))
+    built_twice = sorted(n for n, ps in pids.items() if len(ps) > 1)
+    adopted = {n for n in survived if any(f"index={n}" in ln or n in ln for ln in adopted_lines)}
+    rebuild_counts = {n: sum(1 for b in new_builds if b["index"] == n) for n in in_flight}
     return {"finished_before_restart": sorted(done),
-            "in_flight_at_restart": sorted({n for n, _ in lost}),
+            "in_flight_at_restart": in_flight,
             "survived_restart": survived,
-            "killed_at_restart": sorted({n for n, _ in lost} - set(survived)),
+            "killed_at_restart": killed,
             "rebuilt_after_restart": rebuilt,
             "finished_rebuilt": sorted(set(rebuilt) & done),
-            "built_twice": sorted(n for n, ps in pids.items() if len(ps) > 1),
-            "adopted": sorted({n for n in survived if any(n in ln for ln in adopted_lines)}),
+            "built_twice": built_twice,
+            "adopted": sorted(adopted),
             "builds_after_restart": [b["index"] for b in second]} | _resume_verdict(
-                mode, survived, sorted({n for n, _ in lost} - set(survived)), rebuilt, sorted(set(rebuilt) & done),
-                sorted(n for n, ps in pids.items() if len(ps) > 1), sorted({n for n, _ in lost}),
-                {n for n in survived if any(n in ln for ln in adopted_lines)})
+                mode, survived, killed, rebuilt, sorted(set(rebuilt) & done), built_twice, in_flight, adopted,
+                rebuild_counts)
 
 
 def _resume_verdict(mode: str, survived: list[str], killed: list[str], rebuilt: list[str], finished_rebuilt: list[str],
-                    built_twice: list[str], in_flight: list[str], adopted: set[str]) -> dict:
+                    built_twice: list[str], in_flight: list[str], adopted: set[str],
+                    rebuild_counts: dict[str, int] | None = None) -> dict:
     """The restart leg's pass rule (wren, nexus-f3yqd.1). PG kept up (graceful, kill): the in-flight build is
     KEPT, so nothing is killed, rebuilt or built twice, and every survivor is adopted (adoption writes the
     anchor; an unadopted survivor reads as unanchored on the next restart). PG restarted (with-pg): no build
     survives, each in-flight index is rebuilt exactly once, and nothing that had finished is rebuilt."""
     why: list[str] = []
+    if not in_flight:
+        # Vacuous otherwise: with nothing in flight every rule below holds, and the leg tested nothing.
+        why.append("no pci_ build was in flight at the restart, so the leg tested nothing")
     if finished_rebuilt:
         why.append(f"finished indexes rebuilt: {finished_rebuilt}")
     if mode == "with-pg":
@@ -376,6 +394,9 @@ def _resume_verdict(mode: str, survived: list[str], killed: list[str], rebuilt: 
             why.append(f"builds survived a PG restart: {survived}")
         if sorted(rebuilt) != sorted(in_flight):
             why.append(f"rebuilt {rebuilt}, expected exactly the in-flight {in_flight}")
+        more = sorted(n for n, c in (rebuild_counts or {}).items() if c > 1)
+        if more:
+            why.append(f"in-flight index rebuilt more than once: {more}")
         if set(built_twice) - set(in_flight):
             why.append(f"built twice outside the in-flight set: {sorted(set(built_twice) - set(in_flight))}")
     else:
@@ -394,9 +415,10 @@ class MidQueueRestart(Exception):
     """Raised inside the idle wait once the Kth pci_ build of the boot has started (--restart-mid-queue)."""
 
 
-def applied(inst: "Install", changeset: str) -> bool:
-    rows = inst.sql(f"select count(*) from databasechangelog where id = '{changeset}'") or [["0"]]
-    return int(rows[0][0]) > 0
+def applied(inst: "Install", changeset: str) -> bool | None:
+    """Whether ``changeset`` is in databasechangelog; None when PG cannot be read (never a false "not applied")."""
+    rows = inst.sql(f"select count(*) from databasechangelog where id = '{changeset}'")
+    return None if rows is None else int(rows[0][0]) > 0
 
 
 def hnsw_indexes(inst: Install) -> list[tuple[str, str, bool]]:
@@ -431,6 +453,15 @@ def boot_work_empty(status: dict | None) -> bool:
     return not status["boot_work"]
 
 
+def status_says_idle(code: int, status: dict | None) -> bool:
+    """The ``/v1/status`` half of the idle rule: a 200 whose boot_work is empty (or absent, on an engine that
+    predates the field), or a 404 from an engine that predates the route. Any other answer (none, a 401, a
+    500) is not idle: a status that cannot be read says nothing about boot work."""
+    if code == 404:
+        return True
+    return code == 200 and boot_work_empty(status)
+
+
 @dataclass
 class IdleRule:
     window_s: float
@@ -443,16 +474,22 @@ class LogWatch:
 
     def __init__(self, config_dir: Path) -> None:
         self._dir = config_dir / "logs"
-        self._off = {p: p.stat().st_size for p in self._dir.glob("*.log")} if self._dir.is_dir() else {}
+        self._off: dict[Path, tuple[int, int]] = {}
+        if self._dir.is_dir():
+            for p in self._dir.glob("*.log"):
+                st = p.stat()
+                self._off[p] = (st.st_ino, st.st_size)
 
     def _start(self, path: Path) -> int:
         """Where this boot's lines begin. The supervisor rotates the log when it opens it at spawn, so a file
-        now shorter than its recorded offset is a fresh one and is read from its start."""
-        off = self._off.get(path, 0)
+        with a new inode, or shorter than its recorded offset, is a fresh one and is read from its start."""
+        ino, off = self._off.get(path, (None, 0))
         try:
-            return 0 if path.stat().st_size < off else off
+            st = path.stat()
         except OSError:
             return 0
+        # A different inode is a rotated (fresh) file; a shorter one is too, if rotation reused the inode.
+        return 0 if st.st_ino != ino or st.st_size < off else off
 
     def lines(self, *needles: str) -> list[str]:
         out: list[str] = []
@@ -484,6 +521,16 @@ class LogWatch:
 RECONCILE_PASS = ("event=pci_reconcile_pass", "ran_to_end=true")
 
 
+def reconcile_pass_did_work(lines: list[str]) -> bool:
+    """A completed pass that processed at least one leaf: ``ran_to_end=true`` is also logged when every leaf
+    was skipped, which says nothing about the indexes."""
+    for ln in lines:
+        m = re.search(r"\bprocessed_leaves=(\d+)", ln)
+        if m and int(m.group(1)) > 0:
+            return True
+    return False
+
+
 def wait_idle(inst: Install, port_fn, t0: float, samples: list[Sample], rule: IdleRule, deadline: float,
               what: str, extra=None, on_sample=None) -> Sample:
     """Sample every second until idle (module docstring) and ``extra()``, when given, is true; raise
@@ -499,16 +546,16 @@ def wait_idle(inst: Install, port_fn, t0: float, samples: list[Sample], rule: Id
             if on_sample is not None:
                 on_sample(samples)
             port = port_fn()
-            status = http_status(port, "/v1/status")[1] if port else None
+            code, status = http_status(port, "/v1/status") if port else (0, None)
             older = [x for x in samples if x.t <= s.t - rule.window_s]
-            if older and s.building == 0 and s.vacuuming == 0 and boot_work_empty(status) \
+            if older and s.building == 0 and s.vacuuming == 0 and status_says_idle(code, status) \
                     and (extra is None or extra()):
                 if s.lsn - older[-1].lsn < rule.wal_bytes:
                     return s
             if now - last_note > 60:
                 last_note = now
                 log(f"{what}: {s.t:.0f}s, wal +{s.lsn - samples[0].lsn} bytes, building={s.building} "
-                    f"vacuuming={s.vacuuming} boot_work_empty={boot_work_empty(status)}")
+                    f"vacuuming={s.vacuuming} status={code} boot_work_empty={boot_work_empty(status)}")
         time.sleep(1.0)
 
 
@@ -628,7 +675,6 @@ def interrupt_pci_build(inst: Install, a: argparse.Namespace, rep: Report) -> No
     idx = hnsw_indexes(inst)
     rep.hnsw_before = len(idx)
     rep.pci_before = sum(1 for n, _, ok in idx if n.startswith(PCI_PREFIX) and ok)
-    a._pci_before = sum(1 for n, _, _ in idx if n.startswith(PCI_PREFIX))  # noqa: SLF001
     a._before = {n: node for n, node, _ in idx}  # noqa: SLF001
     rep.interrupted_build = {"invalid_pci_before": invalid}
     rep.vectors_030_1_applied_before = applied(inst, "vectors-030-1")
@@ -674,7 +720,6 @@ def build_old_state(inst: Install, a: argparse.Namespace, env: dict[str, str], r
         time.sleep(5)
     rep.hnsw_before = len(idx)
     rep.pci_before = len(pci)
-    a._pci_before = len(pci)  # noqa: SLF001 - read by measure_boot's idle rule
     if a.rot:
         rep.rot = plant_rot(inst, a.rot)
     rep.vectors_030_1_applied_before = applied(inst, "vectors-030-1")
@@ -723,6 +768,42 @@ def _activity_sampler(inst: Install, path: Path, stop: threading.Event, d0: floa
             stop.wait(5.0)
 
 
+def run_doctor(inst: Install, a: argparse.Namespace, env: dict[str, str], label: str, t0: float) -> dict:
+    """``nx doctor`` once, timed. With ``--doctor-capture`` it runs under py-spy (idle frames included, so a
+    blocking call shows as its stack) with a DEBUG log and ``pg_stat_activity`` sampled every 5 s; when py-spy
+    cannot run or attach, doctor is run again plain and that is recorded."""
+    cmd = ["uv", "run", "--project", str(REPO), "nx", "doctor"]
+    d0 = time.monotonic()
+    if a.doctor_capture is None:
+        r = subprocess.run(cmd, env=env, cwd=REPO, capture_output=True, text=True, timeout=a.max_wait)
+        return {"started_s": round(d0 - t0, 1), "doctor_s": round(time.monotonic() - d0, 1), "rc": r.returncode}
+    a.doctor_capture.mkdir(parents=True, exist_ok=True)
+    stem = a.doctor_capture / f"doctor-{label}"
+    env_d = {**env, "NEXUS_LOG_LEVEL": "DEBUG"}
+    out_rec: dict = {"capture": str(stem)}
+    stop = threading.Event()
+    sampler = threading.Thread(target=_activity_sampler, args=(inst, stem.with_suffix(".activity.tsv"), stop, d0),
+                               daemon=True)
+    sampler.start()
+    try:
+        prof = ["uvx", "py-spy", "record", "--idle", "--subprocesses", "--rate", "10", "--format", "raw",
+                "-o", str(stem.with_suffix(".pyspy.txt")), "--"]
+        with stem.with_suffix(".log").open("w", encoding="utf-8") as out:
+            r = subprocess.run([*prof, *cmd, "--verbose"], env=env_d, cwd=REPO, stdout=out,
+                               stderr=subprocess.STDOUT, timeout=a.max_wait)
+        if not stem.with_suffix(".pyspy.txt").exists():
+            out_rec["pyspy_failed_rc"] = r.returncode
+            d0 = time.monotonic()
+            with stem.with_suffix(".log").open("a", encoding="utf-8") as out:
+                r = subprocess.run([*cmd, "--verbose"], env=env_d, cwd=REPO, stdout=out,
+                                   stderr=subprocess.STDOUT, timeout=a.max_wait)
+    finally:
+        stop.set()
+        sampler.join(timeout=10)
+    return out_rec | {"started_s": round(d0 - t0, 1), "doctor_s": round(time.monotonic() - d0, 1),
+                      "rc": r.returncode}
+
+
 def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], label: str, base_lsn: str) -> dict:
     """One boot of the new engine on the stopped install, measured from the cluster's last checkpoint
     (``base_lsn``) until idle, or until the boot fails: ``nx daemon service start`` exits non-zero, or
@@ -732,8 +813,12 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
     base = lsn_bytes(base_lsn)
     logs = LogWatch(inst.config_dir)
     t0 = time.monotonic()
+    # Output to a file, never a pipe: the supervisor can inherit the descriptor, and a read of a pipe it holds
+    # would block the failure path with no deadline.
+    start_log = inst.config_dir / f"harness-start-{label}.log"
+    start_out = start_log.open("w", encoding="utf-8")
     proc = subprocess.Popen(["uv", "run", "--project", str(REPO), "nx", "daemon", "service", "start"],
-                            env=new_env, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                            env=new_env, cwd=REPO, stdout=start_out, stderr=subprocess.STDOUT, text=True)
     deadline = t0 + a.max_wait
     samples: list[Sample] = []
     marks: dict[str, Sample] = {}
@@ -754,47 +839,23 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
                 marks["ready"] = s
         rc = proc.poll()
         if rc not in (None, 0):
-            out = proc.stdout.read() if proc.stdout else ""
+            start_out.flush()
+            out = start_log.read_text(encoding="utf-8", errors="replace")
             failure = f"nx daemon service start exited {rc}"
             rec["start_output_tail"] = out[-2000:]
             break
         time.sleep(0.5)
     doctor: dict = {}
     doc_thread: threading.Thread | None = None
-    if "ready" in marks:
+    # A boot that will be restarted mid-queue runs no doctor: it would outlive the stop and run against an
+    # install between two boots. The resume boot carries the doctor leg.
+    if "ready" in marks and not (a.restart_mid_queue and label == "upgrade"):
         def _doctor() -> None:
-            d0 = time.monotonic()
-            cmd = ["uv", "run", "--project", str(REPO), "nx", "doctor"]
-            env_d = dict(new_env)
-            cap = a.doctor_capture
-            if cap is None:
-                r = subprocess.run(cmd, env=env_d, cwd=REPO, capture_output=True, text=True, timeout=a.max_wait)
-            else:
-                cap.mkdir(parents=True, exist_ok=True)
-                stem = cap / f"doctor-{label}"
-                env_d["NEXUS_LOG_LEVEL"] = "DEBUG"
-                stop = threading.Event()
-                sampler = threading.Thread(target=_activity_sampler, args=(inst, stem.with_suffix(".activity.tsv"),
-                                                                           stop, d0), daemon=True)
-                sampler.start()
-                prof = ["uvx", "py-spy", "record", "--idle", "--subprocesses", "--rate", "10", "--format", "raw",
-                        "-o", str(stem.with_suffix(".pyspy.txt")), "--"]
-                with stem.with_suffix(".log").open("w", encoding="utf-8") as out:
-                    r = subprocess.run([*prof, *cmd, "--verbose"], env=env_d, cwd=REPO, stdout=out,
-                                       stderr=subprocess.STDOUT, timeout=a.max_wait)
-                if not stem.with_suffix(".pyspy.txt").exists():
-                    # py-spy could not run or attach (ptrace policy): doctor may not have run at all, so run it
-                    # plain, timed from here, and say so.
-                    doctor["pyspy_failed_rc"] = r.returncode
-                    d0 = time.monotonic()
-                    with stem.with_suffix(".log").open("a", encoding="utf-8") as out:
-                        r = subprocess.run([*cmd, "--verbose"], env=env_d, cwd=REPO, stdout=out,
-                                           stderr=subprocess.STDOUT, timeout=a.max_wait)
-                stop.set()
-                sampler.join(timeout=10)
-                doctor["capture"] = str(stem)
-            doctor.update({"started_s": round(d0 - t0, 1), "doctor_s": round(time.monotonic() - d0, 1),
-                           "rc": r.returncode})
+            try:
+                doctor.update(run_doctor(inst, a, new_env, label, t0))
+            except Exception as exc:  # noqa: BLE001 - recorded in the report, never a silent "still running"
+                doctor["error"] = f"{type(exc).__name__}: {exc}"
+
         doc_thread = threading.Thread(target=_doctor, daemon=True)
         doc_thread.start()
     if failure:
@@ -810,6 +871,7 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
         if proc.poll() is None:
             proc.terminate()
         proc.wait(timeout=60)
+        start_out.close()
         return rec
     # Idle only after a reconcile pass ran to its end in THIS boot (its first pass waits a boot jitter), and
     # only once the PCI end state is reached: a valid pci_ index for every large seeded collection and no
@@ -818,7 +880,7 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
     def extra() -> bool:
         if not a.reconcile_wait:
             return True
-        if not logs.seen(*RECONCILE_PASS):
+        if not reconcile_pass_did_work(logs.lines(*RECONCILE_PASS)):
             return False
         idx = [i for i in hnsw_indexes(inst) if i[0].startswith(PCI_PREFIX)]
         return sum(1 for i in idx if i[2]) >= a.collections and all(i[2] for i in idx)
@@ -862,13 +924,12 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
                     "phases": {"migrate": _phase(base, first_mark(marks), marks["bind"]),
                                "ready": _phase(marks["bind"].lsn, marks["bind"], marks["ready"]),
                                "until_restart": _phase(marks["ready"].lsn, marks["ready"], last)}})
-        if doc_thread is not None:
-            doc_thread.join(timeout=5)
-        rec["doctor"] = doctor or {"doctor_s": None, "note": "still running at the restart"}
+        rec["doctor"] = {"doctor_s": None, "note": "not run on a boot restarted mid-queue"}
         proc.wait(timeout=60)
+        start_out.close()
         return rec
     rec["pci_builds"] = build_timeline(samples)
-    rec["reconcile_pass_seen"] = logs.seen(*RECONCILE_PASS)
+    rec["reconcile_pass_seen"] = reconcile_pass_did_work(logs.lines(*RECONCILE_PASS))
     # The fix adopts through the existing anchor path (event=pci_anchor_adopted ... index=<name>); the
     # pci_index_adopted name is accepted too. pci_builders_kept is the boot's "left the builder running" line.
     adopted = logs.lines("event=pci_anchor_adopted") + logs.lines("event=pci_index_adopted")
@@ -895,6 +956,7 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
     rec["_indexes"] = {n: node for n, node, _ in after}
     stop_new(new_env)
     proc.wait(timeout=60)
+    start_out.close()
     return rec
 
 
@@ -902,6 +964,7 @@ def boot_new(inst: Install, a: argparse.Namespace, env: dict[str, str], rep: Rep
     """The gated boot, then a second boot on the same data dir: a same-version reboot when the upgrade
     reached ready (it should write next to nothing), a retry when it failed (does the failure repeat)."""
     first = measure_boot(inst, a, env, "upgrade", rep.checkpoint_lsn)
+    first.pop("_adopted_lines", None)
     before = a._before  # noqa: SLF001
     idx = first.pop("_indexes", {})
     rep.hnsw_rebuilt = sorted(n for n, node in idx.items() if n in before and before[n] != node)
@@ -917,16 +980,21 @@ def boot_new(inst: Install, a: argparse.Namespace, env: dict[str, str], rep: Rep
     if a.second_boot:
         label = ("resume" if "restarted_mid_queue_s" in first else
                  "reboot" if first["reached_ready"] else "retry")
-        # After a mid-queue restart PG is still up (both modes leave it running, as a user's restarts do), so
-        # the second boot counts from the live LSN read at the restart; otherwise from the clean checkpoint.
-        base = first.get("restart_lsn") or inst.checkpoint_lsn()
-        second = measure_boot(inst, a, env, label, base)
+        # After a graceful or kill restart PG is still up, so the second boot counts from the live LSN read at
+        # the restart; after a with-pg restart, a failed boot or a clean stop, from the stopped cluster's checkpoint.
+        try:
+            base = first.get("restart_lsn") or inst.checkpoint_lsn()
+            second = measure_boot(inst, a, env, label, base)
+        except HarnessError as exc:
+            # A failure of the second boot is its own result; it never overwrites the first boot's.
+            second = {"label": label, "reached_ready": False, "failure": f"second boot could not run: {exc}"}
         second.pop("_indexes", None)
         rep.boots.append(second)
         last = second
         if label == "resume":
             rep.resume = resume_analysis(first.get("pci_builds", []), second.get("pci_builds", []),
-                                         second.get("_adopted_lines", []), a.restart_mode)
+                                         second.get("_adopted_lines", []), a.restart_mode,
+                                         {x["pid"] for x in first.get("index_backends_after_stop") or []})
         second.pop("_adopted_lines", None)
     rep.hnsw_after = last.get("hnsw", 0)
     rep.pci_after = last.get("pci", 0)
@@ -978,6 +1046,10 @@ def main(argv: list[str] | None = None) -> int:
     unknown = [r for r in a.rot if r not in ROT_SHAPES]
     if unknown:
         ap.error(f"unknown rot shape(s) {unknown}; known: {', '.join(ROT_SHAPES)}")
+    if a.rot and a.interrupt_build:
+        ap.error("--rot and --interrupt-build cannot be combined: the interrupted state is taken before rot is planted")
+    if a.restart_mid_queue and not a.second_boot:
+        ap.error("--restart-mid-queue needs the second boot (drop --no-second-boot): the verdict is what it resumed")
     if a.prepare_only and a.work is None:
         ap.error("--prepare-only needs --work, the directory the old state is left in")
     if a.rows < PCI_BUILD_MIN_ROWS or a.control_rows >= PCI_BUILD_MIN_ROWS:
@@ -1003,8 +1075,13 @@ def main(argv: list[str] | None = None) -> int:
             rc = 0
             return rc
         boot_new(inst, a, env, rep)
-        if not rep.boots[0]["reached_ready"]:
+        if a.restart_mid_queue and "restarted_mid_queue_s" not in rep.boots[0]:
+            raise HarnessError(f"--restart-mid-queue {a.restart_mid_queue} never fired: the upgrade boot showed "
+                               f"fewer than {a.restart_mid_queue} pci_ builds, so the restart leg tested nothing")
+        failed = [b["label"] for b in rep.boots if not b.get("reached_ready")]
+        if failed:
             rep.verdict = "boot-failed"
+            rep.error = f"boots that never reached ready: {failed}"
             rc = 1
         elif rep.resume and not rep.resume["resume_ok"]:
             rep.verdict = "restart-red"
@@ -1013,13 +1090,21 @@ def main(argv: list[str] | None = None) -> int:
             over = a.ceiling is not None and rep.total_wal_bytes > a.ceiling
             rep.verdict = "over-ceiling" if over else ("under-ceiling" if a.ceiling is not None else "measured")
             rc = 1 if over else 0
-    except (HarnessError, subprocess.SubprocessError, OSError, KeyError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - every failure to measure is exit 2, never a red or a green
+        rc = 2
         rep.verdict = "error"
         rep.error = f"{type(exc).__name__}: {exc}"
     finally:
         if not (a.prepare_only and rep.verdict == "prepared"):
             subprocess.run(["uv", "run", "--project", str(REPO), "nx", "daemon", "service", "stop", "--with-pg"],
                            env=env, cwd=REPO, capture_output=True, text=True)
+        if not (a.prepare_only and rep.verdict == "prepared") and (inst.config_dir / "pg_credentials").exists():
+            # If the stop above failed, a postmaster may still hold this pgdata: stop it there before any removal.
+            try:
+                if (inst.pgdata / "postmaster.pid").exists():
+                    inst.pg_ctl("stop", "-m", "immediate", "-w")
+            except (subprocess.SubprocessError, OSError, KeyError):
+                pass
         if not (a.keep or a.work):
             shutil.rmtree(work, ignore_errors=True)
         text = json.dumps(asdict(rep), indent=1)
