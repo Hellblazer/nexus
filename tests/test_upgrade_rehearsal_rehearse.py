@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._module_seam import setattr_in
+
 DRIVER = Path(__file__).resolve().parent.parent / "scripts" / "upgrade_rehearsal.py"
 
 
@@ -386,7 +388,7 @@ def test_the_restart_gap_sleeps_between_the_stop_and_the_start(
             return
         real_sleep(seconds)
 
-    monkeypatch.setattr(ur.time, "sleep", sleep)
+    setattr_in(monkeypatch, ur, "time.sleep", sleep)
     v = ur.rehearse("7.76.0", world.cfg(restart_gap_s=gap))
     assert v["findings"] == [], v["findings"]
     assert len(at_gap) == 1, "the gap sleeps once, in the restart"
