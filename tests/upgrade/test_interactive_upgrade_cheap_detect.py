@@ -14,7 +14,7 @@ from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
 from nexus.upgrade_ladder.scan_reuse import VERIFY_REUSE_S, ScanReuse
 from nexus.upgrade_ladder.rungs.manifest_span_fill import TITLE_RULE_MARK
 from nexus.upgrade_ladder.auto_guard import CHEAP_PENDING
-from nexus.upgrade_ladder.rungs.manifest_section_labels import ManifestSectionLabelsRung
+from nexus.upgrade_ladder.rungs.manifest_section_labels import DOC_BATCH, ManifestSectionLabelsRung
 from nexus.upgrade_ladder.rungs.manifest_span_fill import ManifestSpanFillRung
 from nexus.upgrade_ladder.rungs.note_tags_array import NoteTagsArrayRung
 from nexus.upgrade_ladder.unattended import bounded_reads, cheap_detect, unattended_run
@@ -187,3 +187,22 @@ def test_a_held_scan_is_taken_once_and_expires() -> None:
     reuse.keep("clean")
     reuse.clear()
     assert reuse.take() is None
+
+
+def test_the_fill_counts_its_engine_reads_and_a_bigger_batch_takes_fewer() -> None:
+    """nexus-mjmjl: the call counter the rehearsal reads; 120 one-row documents are one chunk read at the
+    default batch and three at the old 50."""
+    from tests.upgrade.test_manifest_span_fill_rung import SPAN, Report, World, h  # noqa: PLC0415 — that file's fixture world
+
+    def reads(doc_batch: int) -> tuple[int, int]:
+        world = World()
+        for n in range(120):
+            d = world.doc(f"1.1.{n + 1}")
+            world.row(d, 0, h(n + 1))
+            world.chunk(h(n + 1), **SPAN)
+        rung = world.rung(doc_batch=doc_batch)
+        rung.converge(Report())
+        return rung._partial.chunk_gets, rung._partial.owner_reads
+
+    assert reads(DOC_BATCH) == (1, 2)  # one plan read, one re-read before the write
+    assert reads(50) == (3, 6)

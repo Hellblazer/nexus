@@ -184,6 +184,8 @@ class Counts:
     write_failed: int = 0
     write_refused_409: int = 0           # the engine answered 409 to the request (a superseded collection)
     restore_failed: int = 0              # documents whose indexed_at could not be written back after the fill
+    chunk_gets: int = 0                  # engine chunk-metadata reads (nexus-mjmjl: the call counter)
+    owner_reads: int = 0                 # chash_positions reads
     restore_failed_docs: list[str] = field(default_factory=list)
     by_collection: Counter = field(default_factory=Counter)
 
@@ -350,7 +352,7 @@ class ManifestSpanFillRung:
         # Ownership first (no chunk read needed to decide it); the verdict is a bucket name, or None for a single owner.
         live = [(doc, row) for doc, row, _n in candidates if not minted_by_orphan_backfill(doc)]
         owners, deleted = (
-            ManifestSectionLabelsRung._owner_rows(reader, sorted({r.chash for _d, r in live})) if live else ({}, {})
+            ManifestSectionLabelsRung._owner_rows(reader, sorted({r.chash for _d, r in live}), counts) if live else ({}, {})
         )
         verdict: dict[int, str | None] = {}
         for i, (doc, row, _n) in enumerate(candidates):
@@ -373,7 +375,7 @@ class ManifestSpanFillRung:
             wanted.setdefault(_row_collection(row, doc), []).append(row.chash)
         chunk_metas: dict[tuple[str, str], dict] = {}
         for collection, chashes in wanted.items():
-            for chash, meta in _chunk_metadatas(t3, collection, sorted(set(chashes))).items():
+            for chash, meta in _chunk_metadatas(t3, collection, sorted(set(chashes)), counts).items():
                 chunk_metas[(collection, chash)] = meta
 
         # (document, row, collection, columns to fill)
@@ -429,7 +431,9 @@ class ManifestSpanFillRung:
         stamps = {str(d.tumbler): getattr(d, "indexed_at", "") for d, _r, _c, _s in plan}  # as read at scan
         fresh = reader.get_manifests(docs) or {}
         fresh_rows = {t: {r.position: r for r in rows} for t, rows in fresh.items()}
-        again, again_deleted = ManifestSectionLabelsRung._owner_rows(reader, sorted({r.chash for _d, r, _c, _s in plan}))
+        again, again_deleted = ManifestSectionLabelsRung._owner_rows(
+            reader, sorted({r.chash for _d, r, _c, _s in plan}), counts,
+        )
         by_collection: dict[str, dict[str, list[dict]]] = {}
         for doc, row, collection, span in plan:
             tumbler = str(doc.tumbler)

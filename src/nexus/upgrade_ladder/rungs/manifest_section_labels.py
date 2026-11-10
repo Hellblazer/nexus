@@ -157,7 +157,7 @@ RUNG_NAME = RUNG_MANIFEST_SECTION_LABELS
 
 #: Documents read, planned and written per step. A document's manifest can hold thousands of rows, so
 #: this bounds the rows in memory and the size of one ``chash_positions`` / chunk read.
-DOC_BATCH = 50
+DOC_BATCH = 200
 
 #: Manifest rows in one ``append_manifest_many`` request (the engine runs each document of a request in its
 #: own transaction, and the sibling writers cut at 300). A document's rows spill into the next request.
@@ -250,6 +250,8 @@ class Counts:
     raced: int = 0                      # became written, moved, or gained a co-owner before the write
     write_failed: int = 0
     restore_failed: int = 0             # documents whose indexed_at could not be written back after the fill
+    chunk_gets: int = 0                 # engine chunk-metadata reads (nexus-mjmjl: the call counter)
+    owner_reads: int = 0                # chash_positions reads
     restore_failed_docs: list[str] = field(default_factory=list)
     by_collection: Counter = field(default_factory=Counter)
 
@@ -374,13 +376,17 @@ def _labels_from_chunk_row(metadata: dict, doc: Any) -> tuple[dict[str, Any] | N
     }, ""
 
 
-def _chunk_metadatas(t3: Any, collection: str, chashes: list[str]) -> dict[str, dict]:
+def _chunk_metadatas(t3: Any, collection: str, chashes: list[str], counts: Any = None) -> dict[str, dict]:
     """``chash -> chunk row metadata`` for the live chunks of *collection*; a collection the engine does
-    not have holds none."""
+    not have holds none. *counts*, when given, gains the engine reads it costs in ``chunk_gets`` (the client
+    pages ids at ``QUOTAS.MAX_RECORDS_PER_WRITE``)."""
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — deferred, keeps the registry import cheap
     from nexus.errors import collection_not_found_errors  # noqa: PLC0415 — deferred, imports back into the catalog
 
     if not chashes:
         return {}
+    if counts is not None:
+        counts.chunk_gets += -(-len(chashes) // QUOTAS.MAX_RECORDS_PER_WRITE)
     try:
         col = t3.get_collection(collection)
     except collection_not_found_errors() as exc:
@@ -486,7 +492,7 @@ class ManifestSectionLabelsRung:
                     legacy.append((doc, row))
         if not legacy:
             return
-        owners, deleted = self._owner_rows(reader, sorted({r.chash for _d, r in legacy}))
+        owners, deleted = self._owner_rows(reader, sorted({r.chash for _d, r in legacy}), counts)
 
         single: list[tuple[Any, Any]] = []
         for doc, row in legacy:
@@ -510,7 +516,7 @@ class ManifestSectionLabelsRung:
             wanted.setdefault(_row_collection(row, doc), []).append(row.chash)
         chunk_metas: dict[tuple[str, str], dict] = {}
         for collection, chashes in wanted.items():
-            for chash, meta in _chunk_metadatas(t3, collection, sorted(set(chashes))).items():
+            for chash, meta in _chunk_metadatas(t3, collection, sorted(set(chashes)), counts).items():
                 chunk_metas[(collection, chash)] = meta
 
         plan: list[tuple[Any, Any, str, dict[str, Any]]] = []  # (document, row, collection, labels)
@@ -540,12 +546,16 @@ class ManifestSectionLabelsRung:
         self._write(reader, writer, plan, counts)
 
     @staticmethod
-    def _owner_rows(reader: Any, chashes: list[str]) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    def _owner_rows(
+        reader: Any, chashes: list[str], counts: Any = None,
+    ) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
         """``(live, deleted)``: the live manifest rows holding each chash, and the rows of tombstoned documents
         holding it. Raises :class:`RouteAbsent` when the engine has no route, :class:`TombstonedHoldersUnreadable`
         when it cannot list the tombstoned holders: neither is 'nobody holds it'."""
         read = getattr(reader, "chash_positions_with_tombstoned", None)
         got = read(chashes) if read is not None else None
+        if counts is not None:
+            counts.owner_reads += 1
         if got is None:
             raise RouteAbsent("the engine has no /manifest/chash_positions route (with tombstoned holders)")
         rows, tombstoned = got
@@ -567,7 +577,7 @@ class ManifestSectionLabelsRung:
         stamps = {str(d.tumbler): getattr(d, "indexed_at", "") for d, _r, _c, _l in plan}  # as read at scan
         fresh = reader.get_manifests(docs) or {}
         fresh_rows = {t: {r.position: r for r in rows} for t, rows in fresh.items()}  # one index for the batch
-        again, again_deleted = self._owner_rows(reader, sorted({r.chash for _d, r, _c, _l in plan}))
+        again, again_deleted = self._owner_rows(reader, sorted({r.chash for _d, r, _c, _l in plan}), counts)
         by_collection: dict[str, dict[str, list[dict]]] = {}
         for doc, row, collection, labels in plan:
             tumbler = str(doc.tumbler)
