@@ -583,13 +583,22 @@ public final class SchemaMigrator {
                     database);
                  MigrationLock migrationLock = MigrationLock.acquire(conn, database, migrationLockWait)) {
 
-                // RDR-227 (nexus-43ulx.17): the lock is held, nothing has walked. End any index builder first.
-                terminatePciBuilders(conn);
-
                 // Count pending changesets for the structured log entry.
-                int pending = liquibase.listUnrunChangeSets(
-                    new Contexts(), new LabelExpression()).size();
+                List<ChangeSet> unrun = liquibase.listUnrunChangeSets(new Contexts(), new LabelExpression());
+                int pending = unrun.size();
                 log.info("event=schema_migration_pending changesets={}", pending);
+
+                // RDR-227 (nexus-43ulx.17): the lock is held, nothing has walked. End any index builder first, but
+                // only when the walk has schema work that can queue behind its build (nexus-f3yqd): the runAlways
+                // bodies run every boot and are written to skip a busy leaf, so an unchanged release's restart no
+                // longer throws away a build that took tens of minutes.
+                long schemaChangesets = unrun.stream().filter(cs -> !cs.isAlwaysRun()).count();
+                boolean buildersKept = schemaChangesets == 0;
+                if (buildersKept) {
+                    logPciBuildersKept(conn);
+                } else {
+                    terminatePciBuilders(conn, "reason=schema_changesets_pending n=" + schemaChangesets);
+                }
 
                 // nexus-jl08t: identify THIS walk's own rows via a pre-walk
                 // orderexecuted WATERMARK, not Liquibase's own deployment_id.
@@ -630,7 +639,7 @@ public final class SchemaMigrator {
 
                 update(liquibase);
                 afterUpdateHook.run();
-                repairPartitionAccessDrift(conn);
+                repairPartitionAccessDrift(conn, buildersKept);
                 // nexus-s9wav: the operator-visible outcome of vectors-034-2 (a skipped leaf, a leaf with
                 // autovacuum disabled); Liquibase drops notices and a WARNING reaches only the server log.
                 ChunksLeafAutovacuumCheck.checkAndLog(conn);
@@ -759,7 +768,7 @@ public final class SchemaMigrator {
      * <p>Runs on the migration connection AFTER Liquibase, which leaves auto-commit off; the repair needs it on,
      * or the owner DDL is rolled back when the connection closes.
      */
-    private static void repairPartitionAccessDrift(Connection conn) {
+    private static void repairPartitionAccessDrift(Connection conn, boolean buildersKept) {
         try {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             if (!chunksIsPartitioned(ctx)) {
@@ -773,6 +782,11 @@ public final class SchemaMigrator {
             log.warn("event=partition_access_drift_repaired count={} relations={}", before.gaps().size(),
                 before.gaps().stream().map(ChunksIsolationCheck.Gap::relation).distinct().toList());
             conn.setAutoCommit(true);
+            if (buildersKept) {
+                // nexus-f3yqd: the repair alters a leaf (ENABLE ROW LEVEL SECURITY, ACCESS EXCLUSIVE), which queues
+                // behind a build's ShareUpdateExclusiveLock while the build waits for this statement's snapshot.
+                terminatePciBuilders(conn, "reason=partition_access_drift");
+            }
             for (String parent : PARTITION_PARENTS) {
                 try {
                     dev.nexus.service.jooq.nexus.Routines.partitionSyncAccess(ctx.configuration(), parent, true);
@@ -836,13 +850,17 @@ public final class SchemaMigrator {
     static final String PCI_BUILDER_APPLICATION_NAME_PREFIX = "nexus-pci-builder-";
 
     /**
-     * RDR-227 Migrations (nexus-43ulx.17): end every per-collection index builder backend in this database before
-     * the walk. A walk that alters a leaf queues behind an in-flight {@code CREATE INDEX CONCURRENTLY}, and the
-     * build waits for the walk's transactions in turn; ending the build's session settles it. Terminate, never
-     * cancel: a cancel ends the statement, not the pass, and the pass would start its next build in the middle of
-     * the walk. Ending the session ends the pass ({@code PciBuilderSession} reads {@code 57P01} and {@code 08xxx}
-     * as the end of the pass) and releases the builder's advisory lock, so no later build starts; the interrupted
-     * build leaves an INVALID index that a later pass drops and rebuilds.
+     * RDR-227 Migrations (nexus-43ulx.17): end every per-collection index builder backend in this database. A walk
+     * that alters a leaf queues behind an in-flight {@code CREATE INDEX CONCURRENTLY}, and the build waits for the
+     * walk's transactions in turn; ending the build's session settles it. Terminate, never cancel: a cancel ends the
+     * statement, not the pass, and the pass would start its next build in the middle of the walk. Ending the session
+     * ends the pass ({@code PciBuilderSession} reads {@code 57P01} and {@code 08xxx} as the end of the pass) and
+     * releases the builder's advisory lock, so no later build starts; the interrupted build leaves an INVALID index
+     * that a later pass drops and rebuilds.
+     *
+     * <p>Called (nexus-f3yqd) only when the walk has a changeset that is not {@code runAlways}, or the post-walk
+     * partition repair has drift to fix: a build with neither pending is left to finish (see {@link #migrate}), and
+     * the next engine's pass is standby until it does, because the build's session holds the builder lock.
      *
      * <p>Called once the migration lock is held, so the builder's own pre-statement check (it skips DDL while the
      * migrator holds the lock) and this termination cover both orders: a builder that started its statement before
@@ -854,28 +872,49 @@ public final class SchemaMigrator {
      * migrator's own when {@code NX_DB_ADMIN_*} serve both, as they do in the supported configuration. A failure
      * is logged at ERROR, not WARN: with a split-role configuration it means a build the walk can deadlock with
      * was left running, which an operator must see.
+     *
+     * @param why the {@code reason=...} fields of the log line
      */
-    private static void terminatePciBuilders(Connection conn) {
+    private static void terminatePciBuilders(Connection conn, String why) {
         var pid = DSL.field(DSL.name("pid"), Integer.class);
-        var applicationName = DSL.field(DSL.name("application_name"), String.class);
-        var datname = DSL.field(DSL.name("datname"), String.class);
         try {
             int terminated = 0;
             for (Boolean ended : DSL.using(conn, SQLDialect.POSTGRES)
                     .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
                     .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
-                    .where(applicationName.startsWith(PCI_BUILDER_APPLICATION_NAME_PREFIX))
-                    .and(pid.ne(DSL.function("pg_backend_pid", SQLDataType.INTEGER)))
-                    .and(datname.eq(DSL.function("current_database", SQLDataType.VARCHAR)))
+                    .where(pciBuilderBackends())
                     .fetch(0, Boolean.class)) {
                 if (Boolean.TRUE.equals(ended)) {
                     terminated++;
                 }
             }
-            log.info("event=pci_builders_terminated count={}", terminated);
+            log.info("event=pci_builders_terminated count={} {}", terminated, why);
         } catch (DataAccessException e) {
             log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
         }
+    }
+
+    /** The walk has only runAlways work: say how many builder backends it leaves running. */
+    private static void logPciBuildersKept(Connection conn) {
+        try {
+            Integer count = DSL.using(conn, SQLDialect.POSTGRES)
+                .selectCount()
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(pciBuilderBackends())
+                .fetchOne(0, Integer.class);
+            log.info("event=pci_builders_kept count={} reason=only_run_always_pending", count);
+        } catch (DataAccessException e) {
+            log.warn("event=pci_builders_count_failed cause=\"{}\"", e.toString());
+        }
+    }
+
+    /** Builder-named backends of this database other than this session. */
+    private static org.jooq.Condition pciBuilderBackends() {
+        var applicationName = DSL.field(DSL.name("application_name"), String.class);
+        var datname = DSL.field(DSL.name("datname"), String.class);
+        return applicationName.startsWith(PCI_BUILDER_APPLICATION_NAME_PREFIX)
+            .and(DSL.field(DSL.name("pid"), Integer.class).ne(DSL.function("pg_backend_pid", SQLDataType.INTEGER)))
+            .and(datname.eq(DSL.function("current_database", SQLDataType.VARCHAR)));
     }
 
     /**

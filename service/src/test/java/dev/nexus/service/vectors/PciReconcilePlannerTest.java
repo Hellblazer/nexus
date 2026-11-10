@@ -257,10 +257,24 @@ class PciReconcilePlannerTest {
     // ---- invalid, in-flight and unparsed indexes ----
 
     @Test
-    void invalidIndexOutsideTheHoldersOwnBuild_isDroppedAsFailed_andNotRebuiltInTheSamePass() {
+    void invalidIndexOutsideTheHoldersOwnBuild_isDroppedAsFailed_andRebuiltInTheSamePass() {
+        // nexus-f3yqd (F): the drop frees the name and the slot, so the same plan builds it again: a wait of a full
+        // sweep period for the rebuild is a lost build slot of that length after a restart that ended a build. The
+        // executor skips the build when the drop did not happen (a CIC IF NOT EXISTS would no-op on the failed index).
         var actions = plan(leaf(invalid("c")), Map.of("c", B + 1), List.of(live("c")));
 
-        assertThat(actions).containsExactly(drop("c", DropReason.FAILED_BUILD));
+        assertThat(actions).containsExactly(drop("c", DropReason.FAILED_BUILD), build("c"));
+    }
+
+    @Test
+    void invalidIndexOfACollectionThatCannotBuild_isDroppedAndNothingIsBuilt() {
+        // Below B, not live, superseded, or backed off: the drop stands alone, as before.
+        assertThat(plan(leaf(invalid("c")), Map.of("c", B - 1), List.of(live("c"))))
+            .containsExactly(drop("c", DropReason.FAILED_BUILD));
+        assertThat(plan(leaf(invalid("c")), Map.of("c", B + 1), List.of(state("c", "quarantine"))))
+            .containsExactly(drop("c", DropReason.FAILED_BUILD));
+        assertThat(PciReconcilePlanner.plan(leaf(invalid("c")), Map.of("c", B + 1), List.of(live("c")), Set.of("c"),
+            null, DEFAULT)).as("backed off after a failed build").containsExactly(drop("c", DropReason.FAILED_BUILD));
     }
 
     @Test

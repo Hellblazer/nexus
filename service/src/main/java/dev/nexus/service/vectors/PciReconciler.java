@@ -496,8 +496,8 @@ public final class PciReconciler {
 
     /**
      * End the task. A pass in flight is interrupted, and this does not wait for it: an in-flight
-     * {@code CREATE INDEX CONCURRENTLY} ignores the interrupt, and the shutdown hook ends the builder's backend with
-     * {@code BackendReaper.terminateAtShutdown} instead. Harmless when never started or already stopped.
+     * {@code CREATE INDEX CONCURRENTLY} ignores the interrupt, and the shutdown hook leaves the builder's backend
+     * running so the build finishes in Postgres (nexus-f3yqd). Harmless when never started or already stopped.
      */
     public void stop() {
         ScheduledExecutorService toStop;
@@ -942,6 +942,13 @@ public final class PciReconciler {
             }
             adopt(pass, leaf, adoption);
         }
+        // nexus-f3yqd (F): a build that follows the drop of its failed index runs only if that drop happened.
+        Set<String> failedDrops = new HashSet<>();
+        for (Action action : actions) {
+            if (action instanceof Drop d && d.reason() == PciReconcilePlanner.DropReason.FAILED_BUILD) {
+                failedDrops.add(d.name());
+            }
+        }
         for (Action action : actions) {
             if (!pass.live() || Thread.currentThread().isInterrupted()) {
                 return;
@@ -951,6 +958,9 @@ public final class PciReconciler {
                     + "detail=\"a live, indexed collection counted zero rows: a counting failure, never acted on\"",
                     leafId(leaf), s.collection());
                 case Drop d -> drop(pass, leaf, d, tally);
+                case Build b when failedDrops.contains(b.name()) && !tally.droppedIndexes.contains(b.name()) ->
+                    log.info("event=pci_build_skipped reason=failed_index_not_dropped leaf={} index={} "
+                        + "detail=\"the next pass drops it again and builds\"", leafId(leaf), b.name());
                 case Build b -> build(pass, leaf, dim, b, tally);
             }
         }

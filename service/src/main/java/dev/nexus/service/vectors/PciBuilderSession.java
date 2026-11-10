@@ -168,6 +168,10 @@ public final class PciBuilderSession {
     private final String password;
     private final String applicationName;
     private final PciSettings settings;
+    /** nexus-f3yqd (E): the builder session's maintenance_work_mem in MB; empty keeps Postgres's own setting. */
+    private final java.util.OptionalInt buildMemoryMb;
+    /** Set once a parallel build ran out of shared memory (see {@code Pass#build}): later builds run serially. */
+    private volatile boolean serialBuilds;
     private volatile BuilderState state = BuilderState.OK;
     private volatile boolean noPrivilegeLogged;
 
@@ -179,6 +183,12 @@ public final class PciBuilderSession {
      * @param settings the {@code NX_SEARCH_PCI*} settings, resolved at boot
      */
     public PciBuilderSession(String url, String user, String password, String bootNonce, PciSettings settings) {
+        this(url, user, password, bootNonce, settings, PciBuildMemory.hostRamBytes());
+    }
+
+    /** As above with the RAM of this machine injected (tests): the build's memory bound reads it. */
+    PciBuilderSession(String url, String user, String password, String bootNonce, PciSettings settings,
+                      java.util.function.LongSupplier totalRamBytes) {
         this.url = Objects.requireNonNull(url, "url");
         this.user = Objects.requireNonNull(user, "user");
         this.password = Objects.requireNonNull(password, "password");
@@ -187,6 +197,26 @@ public final class PciBuilderSession {
         }
         this.applicationName = builderApplicationName(bootNonce);
         this.settings = Objects.requireNonNull(settings, "settings");
+        this.buildMemoryMb = PciBuildMemory.resolve(settings.buildMemMb(), PciBuildMemory.pgOnThisHost(url),
+            Objects.requireNonNull(totalRamBytes, "totalRamBytes"));
+        if (settings.enabled()) {
+            log.info("event=pci_build_memory maintenance_work_mem_mb={} source={}",
+                buildMemoryMb.isPresent() ? Integer.toString(buildMemoryMb.getAsInt()) : "postgres_default",
+                settings.buildMemMb() != null ? "NX_SEARCH_PCI_BUILD_MEM_MB"
+                    : buildMemoryMb.isPresent() ? "ram_fraction" : "postgres_setting_kept");
+        }
+    }
+
+    /** SQLSTATEs of a failed dynamic shared memory resize: {@code disk_full} (ENOSPC) and {@code out_of_memory}. */
+    private static boolean sharedMemoryShort(SQLException e) {
+        String state = e.getSQLState();
+        return ("53100".equals(state) || "53200".equals(state)) && e.getMessage() != null
+            && e.getMessage().contains("shared memory");
+    }
+
+    /** The maintenance_work_mem, in MB, the builder session sets before each build; empty when it sets none. */
+    java.util.OptionalInt buildMemoryMb() {
+        return buildMemoryMb;
     }
 
     /** The state the most recent pass ended in; {@link BuilderState#OK} before the first. */
@@ -474,7 +504,31 @@ public final class PciBuilderSession {
             }
             return run("build", BUILD_LOCK_TIMEOUT, name, leaf, () -> {
                 String sql = render(BUILD_TEMPLATE, name, leaf.schema(), leaf.name(), column, collection);
-                runBuild(sql);
+                // nexus-f3yqd (E): CREATE INDEX CONCURRENTLY cannot run in a transaction block, so SET LOCAL has no
+                // transaction to bind to; the setting is the session's, and this session is the builder's alone.
+                owner.buildMemoryMb.ifPresent(mb -> setSession("maintenance_work_mem", mb + "MB"));
+                if (owner.serialBuilds) {
+                    setSession("max_parallel_maintenance_workers", "0");
+                }
+                try {
+                    runBuild(sql);
+                } catch (SQLException e) {
+                    if (owner.buildMemoryMb.isEmpty() || owner.serialBuilds || !sharedMemoryShort(e)) {
+                        throw e;
+                    }
+                    // A parallel HNSW build keeps its graph in ONE shared-memory area sized by maintenance_work_mem,
+                    // which does not fit where /dev/shm is small (a container's default is 64 MB). The failed CREATE
+                    // INDEX CONCURRENTLY left an INVALID index, which the retry's IF NOT EXISTS would no-op against, so
+                    // it goes first; the build then runs serially, with its graph in private memory. Every later build
+                    // of this engine starts serial: the shortage does not go away.
+                    log.warn("event=pci_build_shared_memory_short index={} leaf={}.{} sqlstate={} "
+                        + "detail=\"retrying the build serially; later builds start serial\"", name, leaf.schema(),
+                        leaf.name(), e.getSQLState());
+                    owner.serialBuilds = true;
+                    setSession("max_parallel_maintenance_workers", "0");
+                    runDrop(render(DROP_TEMPLATE, leaf.schema(), name));
+                    runBuild(sql);
+                }
             });
         }
 

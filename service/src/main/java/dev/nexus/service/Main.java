@@ -564,7 +564,7 @@ public final class Main {
         // nexus-43ulx.19: the DDL half, on a task of its own beside the read half. It acts only when NX_SEARCH_PCI=1
         // (start() schedules nothing otherwise) and only on the engine that holds the builder lock. Started after
         // the read half so its first refresh() has a set to replace; stopped in the hook right after the listener and
-        // before the builder reaper, so a pass cannot open a new builder connection after the reaper ended the old one.
+        // before the pool's reaper. A build in flight is not ended (nexus-f3yqd).
         String pciBootNonce = dev.nexus.service.db.BackendReaper.bootNonce(applicationName);
         // nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Every engine runs a writer; only the builder-lock
         // holder's pass runs the 30-day delete (tenants: the reaper's, request_ledger_tenants and the pass's leaf tenants). nexus-4lnn1.1.4: the
@@ -639,12 +639,8 @@ public final class Main {
             }, () -> log.warn("event=parent_death_watchdog_skipped reason=no_parent_handle"));
         }
 
-        // RDR-227 (nexus-43ulx.17): the per-collection index builder's backend is named
-        // nexus-pci-builder-<this boot's nonce> and runs as the admin role.
-        String pciBuilderApplicationName = dev.nexus.service.vectors.PciBuilderSession.builderApplicationName(
-                pciBootNonce);
         // nexus-43ulx.19: the reconciler's scheduler stops here with shutdownNow() and NO await (an in-flight
-        // CREATE INDEX CONCURRENTLY is ended by the builder reaper below, not waited for).
+        // CREATE INDEX CONCURRENTLY is neither waited for nor ended: it finishes in Postgres, nexus-f3yqd).
         Runnable stopPciReconciler = pciReconciler::stop;
 
         // Everything the shutdown hook does that does not touch ONNX Runtime. Also the whole
@@ -665,16 +661,13 @@ public final class Main {
             // expired grace) runs no hook at all: that path is bounded only by the
             // statement_timeout on the search transactions.
             //
-            // nexus-43ulx.17: the pool's reaper (application role) and the builder's
-            // (admin role: pg_terminate_backend needs the target's role) run TOGETHER
-            // under one 9 s deadline. Worst case: each call is 3 s connect + 6 s socket
-            // read = 9 s, so in sequence they could take 18 s and miss the 10 s stop
-            // grace; together the pair costs 9 s, what the pool's call alone always did.
-            // A call still running at the deadline is abandoned and logged.
+            // nexus-f3yqd: only the pool's backends are ended. The per-collection index builder's backend (admin
+            // role, nexus-pci-builder-<nonce>) is left to finish a build in flight: its session holds the builder's
+            // advisory lock, so the next engine starts no parallel build, and it adopts the index when it is done.
+            // Stopping Postgres itself still ends the build. The call is one 3 s connect plus one 6 s socket read.
             dev.nexus.service.db.BackendReaper.terminateAtShutdown(
                     dbUrl, dbUser, dbPass, applicationName,
-                    ds.getHikariPoolMXBean().getActiveConnections(),
-                    adminConnection, pciBuilderApplicationName);
+                    ds.getHikariPoolMXBean().getActiveConnections());
             // nexus-43ulx.12: end the catalog reads before the pool they borrow from closes. AFTER the reaper and
             // never waiting: a read on a silent socket ignores the interrupt, and the reaper has a 10 s grace to
             // keep; closing the pool below aborts that socket.

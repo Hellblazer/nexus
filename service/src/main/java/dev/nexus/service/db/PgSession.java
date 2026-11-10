@@ -861,14 +861,30 @@ public final class PgSession {
     static final int SEARCH_PCI_MAX_PER_LEAF_MAX = 1_000;
 
     /**
-     * The four {@code NX_SEARCH_PCI*} settings, resolved once at class init.
+     * Bounds of {@code NX_SEARCH_PCI_BUILD_MEM_MB} (nexus-f3yqd): the maintenance_work_mem of an index build, in MB.
+     * There is no default here: unset means the builder computes min(1 GB, 1/8 of RAM) where Postgres is on the
+     * engine's host and keeps Postgres's own setting elsewhere.
+     */
+    static final int SEARCH_PCI_BUILD_MEM_MB_MIN = 16;
+    static final int SEARCH_PCI_BUILD_MEM_MB_MAX = 65_536;
+
+    /**
+     * The {@code NX_SEARCH_PCI*} settings, resolved once at class init.
      *
      * @param enabled        {@code NX_SEARCH_PCI}: the DDL (build/drop) half; the read half runs regardless
      * @param buildMinRows   {@code NX_SEARCH_PCI_BUILD_MIN_ROWS} (B)
      * @param sweepSeconds   {@code NX_SEARCH_PCI_SWEEP_SECONDS}
      * @param maxPerLeaf     {@code NX_SEARCH_PCI_MAX_PER_LEAF}
+     * @param buildMemMb     {@code NX_SEARCH_PCI_BUILD_MEM_MB}: the builder session's maintenance_work_mem in MB,
+     *                       or {@code null} when unset
      */
-    public record PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf) { }
+    public record PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf,
+                              Integer buildMemMb) {
+        /** The four settings that predate the build memory, with it unset. */
+        public PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf) {
+            this(enabled, buildMinRows, sweepSeconds, maxPerLeaf, null);
+        }
+    }
 
     private static final PciSettings PCI_SETTINGS = resolvePciSettings(System::getenv);
 
@@ -881,7 +897,8 @@ public final class PgSession {
             searchPci(env.apply("NX_SEARCH_PCI")),
             searchPciBuildMinRows(env.apply("NX_SEARCH_PCI_BUILD_MIN_ROWS")),
             searchPciSweepSeconds(env.apply("NX_SEARCH_PCI_SWEEP_SECONDS")),
-            searchPciMaxPerLeaf(env.apply("NX_SEARCH_PCI_MAX_PER_LEAF")));
+            searchPciMaxPerLeaf(env.apply("NX_SEARCH_PCI_MAX_PER_LEAF")),
+            searchPciBuildMemMb(env.apply("NX_SEARCH_PCI_BUILD_MEM_MB")));
     }
 
     /**
@@ -917,6 +934,15 @@ public final class PgSession {
     static int searchPciMaxPerLeaf(String raw) {
         return boundedInt("NX_SEARCH_PCI_MAX_PER_LEAF", raw, DEFAULT_SEARCH_PCI_MAX_PER_LEAF,
             0, SEARCH_PCI_MAX_PER_LEAF_MAX);
+    }
+
+    /** Parse {@code NX_SEARCH_PCI_BUILD_MEM_MB}: integer MB in [16, 65536], or {@code null} when unset or blank. */
+    static Integer searchPciBuildMemMb(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        return boundedInt("NX_SEARCH_PCI_BUILD_MEM_MB", raw, 0,
+            SEARCH_PCI_BUILD_MEM_MB_MIN, SEARCH_PCI_BUILD_MEM_MB_MAX);
     }
 
     private static int boundedInt(String variable, String raw, int dflt, int min, int max) {
@@ -960,8 +986,9 @@ public final class PgSession {
      * Called from {@code Main} inside the boot try block that refuses on a bad value.
      */
     public static void logPciBootSettings(PciSettings s, int routerMaxRows) {
-        log.info("event=pci_settings enabled={} build_min_rows={} sweep_seconds={} max_per_leaf={}",
-            s.enabled(), s.buildMinRows(), s.sweepSeconds(), s.maxPerLeaf());
+        log.info("event=pci_settings enabled={} build_min_rows={} sweep_seconds={} max_per_leaf={} build_mem_mb={}",
+            s.enabled(), s.buildMinRows(), s.sweepSeconds(), s.maxPerLeaf(),
+            s.buildMemMb() == null ? "auto" : s.buildMemMb());
         // Nothing builds when the switch is off or the per-leaf cap is 0, so B above T strands nothing new.
         boolean builds = s.enabled() && s.maxPerLeaf() > 0;
         if (builds && pciBuildThresholdAboveRouter(s.buildMinRows(), routerMaxRows)) {

@@ -235,6 +235,42 @@ class PgSessionPciSettingsTest {
         }
     }
 
+    // ---- NX_SEARCH_PCI_BUILD_MEM_MB (nexus-f3yqd) ------------------------------------------
+
+    @Test
+    void buildMemMb_isUnset_whenUnsetOrBlank() {
+        assertThat(PgSession.searchPciBuildMemMb(null)).isNull();
+        assertThat(PgSession.searchPciBuildMemMb("  ")).isNull();
+    }
+
+    @Test
+    void buildMemMb_takesTheBounds_andRefusesOnePast() {
+        assertThat(PgSession.SEARCH_PCI_BUILD_MEM_MB_MIN).isEqualTo(16);
+        assertThat(PgSession.SEARCH_PCI_BUILD_MEM_MB_MAX).isEqualTo(65_536);
+        assertThat(PgSession.searchPciBuildMemMb("16")).isEqualTo(16);
+        assertThat(PgSession.searchPciBuildMemMb(" 1024 ")).isEqualTo(1024);
+        assertThat(PgSession.searchPciBuildMemMb("65536")).isEqualTo(65_536);
+        for (String bad : new String[] {"15", "0", "-1", "65537", "1GB", "1.5", "abc"}) {
+            assertThatThrownBy(() -> PgSession.searchPciBuildMemMb(bad))
+                .as("value %s", bad)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("NX_SEARCH_PCI_BUILD_MEM_MB");
+        }
+    }
+
+    @Test
+    void resolve_carriesTheBuildMemory_andRefusesABadOneAtBoot() {
+        var set = PgSession.resolvePciSettings(
+            k -> "NX_SEARCH_PCI_BUILD_MEM_MB".equals(k) ? "512" : null);
+        assertThat(set.buildMemMb()).isEqualTo(512);
+        assertThat(PgSession.resolvePciSettings(k -> null).buildMemMb()).as("unset").isNull();
+        assertThatThrownBy(() -> PgSession.resolvePciSettings(
+                k -> "NX_SEARCH_PCI_BUILD_MEM_MB".equals(k) ? "8" : null))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("NX_SEARCH_PCI_BUILD_MEM_MB");
+        assertThat(new PgSession.PciSettings(true, 200, 600, 16).buildMemMb())
+            .as("the four-argument form leaves it unset").isNull();
+    }
+
     private static ILoggingEvent single(List<ILoggingEvent> events, Level level, String marker) {
         List<ILoggingEvent> hits = events.stream()
             .filter(e -> e.getLevel() == level && e.getFormattedMessage().contains(marker))
