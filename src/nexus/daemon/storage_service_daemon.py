@@ -2148,7 +2148,8 @@ class StorageServiceSupervisor:
     def _migration_active_statement(self) -> tuple[str | None, int | None, int | None]:
         """For the migration record (nexus-mjmjl): the head of the statement
         the migrating admin backend is executing, the database's size and the
-        source chunk table's size; ``(None, None, None)`` when they cannot be
+        source chunk table's size (heap, TOAST and indexes, from pg_class, so no
+        relation lock is taken); ``(None, None, None)`` when they cannot be
         read. Same guard, binary and bound as :meth:`_migration_pg_probe`."""
         nothing: tuple[str | None, int | None, int | None] = (None, None, None)
         if not self._creds.get("PG_DATA", "").strip():
@@ -2159,7 +2160,14 @@ class StorageServiceSupervisor:
 
             sql = (
                 "SELECT pg_database_size(current_database()) || '|' || "
-                "coalesce(pg_total_relation_size(to_regclass('nexus.chunks')), 0) || '|' || "
+                # The source's size from pg_class, never pg_total_relation_size: that opens
+                # the relation, and the walk holds ACCESS EXCLUSIVE on nexus.chunks for the
+                # whole copy, so the probe would wait out its bound every time. relpages is
+                # as of the last VACUUM/ANALYZE: an estimate, which is all this is.
+                "(SELECT coalesce(sum(c.relpages), 0)::bigint * current_setting('block_size')::bigint "
+                "FROM pg_class c WHERE c.oid = to_regclass('nexus.chunks') "
+                "OR c.oid = (SELECT reltoastrelid FROM pg_class WHERE oid = to_regclass('nexus.chunks')) "
+                "OR c.oid IN (SELECT indexrelid FROM pg_index WHERE indrelid = to_regclass('nexus.chunks'))) || '|' || "
                 "coalesce((SELECT left(regexp_replace(query, '\\s+', ' ', 'g'), 200) FROM pg_stat_activity "
                 "WHERE datname = current_database() AND usename = current_user AND state = 'active' "
                 "AND pid != pg_backend_pid() ORDER BY query_start LIMIT 1), '');"

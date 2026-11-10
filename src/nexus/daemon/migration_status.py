@@ -96,9 +96,8 @@ def iso(ts: float) -> str:
 def entry(
     *, changeset: str | None, pending: int | None, started: float, updated: float, step: str | None = None,
 ) -> dict[str, Any]:
-    """The migration as one ``boot_work`` entry. *statement* is the head of the
-    SQL the migrating backend is executing (``pg_stat_activity``), shown as the
-    inner step. *step* is the inner step's line, already in plain words."""
+    """The migration as one ``boot_work`` entry. *step* is the inner step's
+    line, already in plain words (from the executing statement's tag)."""
     where = []
     if changeset:
         where.append(f"at {changeset_id(changeset)}")
@@ -198,7 +197,8 @@ class Recorder:
             now - self._last_probe >= STEP_EVERY_S or key != self._last_key
         ):
             self._last_probe = now
-            self._step = self._walk_step(changeset)
+            # A failed probe keeps the last good step rather than blanking it.
+            self._step = self._walk_step(changeset) or self._step
         elif changeset_id(changeset) not in DO_NOT_STOP_IDS:
             self._step = None
         self._last_key, self._last_write = key, now
