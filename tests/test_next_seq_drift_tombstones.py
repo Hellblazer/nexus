@@ -56,3 +56,24 @@ def test_a_clean_owner_with_a_lower_tombstone_stays_clean(monkeypatch: pytest.Mo
     cat = _cat([{"tumbler_prefix": "1.12", "next_seq": 7}], ["1.12.7"], ["1.12.3"])
     r = _row(monkeypatch, cat)
     assert r.ok is True and r.detail == "none (1 owner(s) checked)", r.detail
+
+
+def test_a_lower_tombstone_never_lowers_the_high_water(monkeypatch: pytest.MonkeyPatch) -> None:
+    cat = _cat([{"tumbler_prefix": "1.12", "next_seq": 5}], ["1.12.9"], ["1.12.3"])
+    r = _row(monkeypatch, cat)
+    assert r.ok is False and "highest child=9" in r.detail, r.detail
+
+
+def test_odd_trash_entries_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    cat = _cat([{"tumbler_prefix": "1.12", "next_seq": 7}], ["1.12.7"], [])
+    cat.list_trash.side_effect = lambda *, limit, offset: [{"tumbler": "1.12.x"}, "junk", {"tumbler": "1.12.8.1"}] if offset == 0 else []
+    r = _row(monkeypatch, cat)
+    assert r.ok is True and r.detail == "none (1 owner(s) checked)", r.detail
+
+
+def test_an_engine_that_ignores_offset_does_not_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(h, "_TRASH_PAGE", 2)
+    cat = _cat([{"tumbler_prefix": "1.12", "next_seq": 7}], ["1.12.7"], [])
+    cat.list_trash.side_effect = lambda *, limit, offset: [{"tumbler": "1.12.9"}, {"tumbler": "1.12.10"}]
+    r = _row(monkeypatch, cat)
+    assert "highest child=10" in r.detail and cat.list_trash.call_count == 2, (r.detail, cat.list_trash.call_count)

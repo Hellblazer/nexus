@@ -37,6 +37,7 @@ _ENGINE_STATUS_UNSET: object = object()
 #: after the key word is replaced, whatever its shape, so a rotated token or
 #: a raw api_key never reaches a log line (nexus-8ooxn / nexus-hcy4w).
 _CHECK = "✓"
+_NOT_CHECKED = "[ ]"
 _WARN = "✗"
 # RDR-129 B4 (nexus-uq8a4): a third, soft state — the check could not complete
 # but the condition is benign/transient (e.g. a healthy-but-busy database), so
@@ -93,6 +94,9 @@ class HealthResult:
     * ``ok=False, warn=True``      → soft warning (⚠) — benign/transient,
       never fatal, never marks the run failed (RDR-129 B4)
     * ``ok=False, warn=False``     → hard failure (✗)
+
+    ``skipped``: the row was not checked this run (``[ ]``, JSON status ``skipped``). It is ``ok`` for the exit
+    code, but never rendered as a pass (F30, nexus-f3yqd.6).
     """
 
     label: str
@@ -101,6 +105,7 @@ class HealthResult:
     fix_suggestions: list[str] = field(default_factory=list)
     fatal: bool = False
     warn: bool = False
+    skipped: bool = False
 
 
 # ── Formatting ────────────────────────────────────────────────────────────────
@@ -118,7 +123,9 @@ def format_health_for_cli(
     failed = False
 
     for r in results:
-        if r.ok:
+        if r.ok and r.skipped:
+            status = _NOT_CHECKED
+        elif r.ok:
             status = _CHECK
         elif r.warn:
             status = _SOFT_WARN
@@ -201,7 +208,9 @@ def format_health_for_json(
     """
     checks = []
     for r in results:
-        if r.ok:
+        if r.ok and r.skipped:
+            status = "skipped"
+        elif r.ok:
             status = "ok"
         elif r.warn:
             status = "warn"
@@ -220,6 +229,7 @@ def format_health_for_json(
         "ok": sum(1 for c in checks if c["status"] == "ok"),
         "warn": sum(1 for c in checks if c["status"] == "warn"),
         "fail": sum(1 for c in checks if c["status"] == "fail"),
+        "skipped": sum(1 for c in checks if c["status"] == "skipped"),
     }
     payload = {
         "checks": checks,
@@ -12583,13 +12593,20 @@ def _tombstoned_tumblers(cat: Any) -> list[str] | None:
     The live walk filters ``deleted_at IS NULL``, but a tombstoned tumbler is still taken (the unique key is
     ``(tenant_id, tumbler)``) and the engine's ``highestChildSeq`` counts it (nexus-f3yqd.6)."""
     tumblers: list[str] = []
+    seen: set[str] = set()
     offset = 0
     try:
         while True:
             page = cat.list_trash(limit=_TRASH_PAGE, offset=offset)
             if not isinstance(page, list):
                 return None
-            tumblers.extend(str(d.get("tumbler", "") or "") for d in page if isinstance(d, dict))
+            batch = [str(d.get("tumbler", "") or "") for d in page if isinstance(d, dict)]
+            # A short page ends it; so does an empty one, or a repeat of the last page's first row (an engine
+            # that ignored ``offset`` would otherwise loop for ever).
+            if not batch or (tumblers and batch[0] in seen):
+                return tumblers
+            tumblers.extend(batch)
+            seen.update(batch)
             if len(page) < _TRASH_PAGE:
                 return tumblers
             offset += len(page)
@@ -13066,11 +13083,11 @@ _NEXT_SEQ_LABEL = "tumbler allocator drift"
 
 
 def _index_run_rows_not_checked() -> list[HealthResult]:
-    """The default sweep's index-run rows (F30, nexus-f3yqd.6): informational, so a fresh install's doctor
-    stays clean, and each names the flag that runs it."""
+    """The default sweep's index-run rows (F30, nexus-f3yqd.6): marked not checked (``[ ]``), never a pass or
+    a warning, so a fresh install's doctor stays clean, and each names the flag that runs it."""
     detail = ("not checked in the default sweep (it reads every catalog document); "
               "run `nx doctor --check-index-runs`")
-    return [HealthResult(label=label, ok=True, detail=detail)
+    return [HealthResult(label=label, ok=True, detail=detail, skipped=True)
             for label in (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL, _NEXT_SEQ_LABEL)]
 
 
@@ -13092,13 +13109,12 @@ def run_health_checks(
     *,
     verbose: bool = False,
     progress: Any = None,
-    index_runs: bool = False,
 ) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
-    ``index_runs``: run the three rows that read every catalog document (stale index-run fences, failed runs
-    with hidden chunks, allocator drift; one shared walk, 22 s measured on a laptop tenant). Off, the default,
-    each reports "not checked" and names ``nx doctor --check-index-runs`` (F30, nexus-f3yqd.6).
+    The three rows that read every catalog document (stale index-run fences, failed runs with hidden chunks,
+    allocator drift; one walk, 22 s measured on a laptop tenant) report "not checked" here and name
+    ``nx doctor --check-index-runs``, which runs them through :func:`run_index_run_checks` (F30, nexus-f3yqd.6).
 
     ``git_hooks_scope``: forwarded to :func:`_check_git_hooks` (nexus-jds59)
     to restrict the git-hooks stanza-drift walk to repos at or under the
@@ -13197,35 +13213,19 @@ def run_health_checks(
     # Shakedown 7.94.0 class A: the allocator-drift row below reads the same list, so ONE walk feeds all
     # three rows (it walked on its own before).
     # nexus-mjmjl: the corpus walk is the sweep's longest stretch on a big tenant; a named step.
+    # F30 (nexus-f3yqd.6): no catalog walk here; `nx doctor --check-index-runs` runs these rows.
     not_checked = {r.label: r for r in _index_run_rows_not_checked()}
-    if index_runs:
-        _index_run_docs: list[Any] | _WalkFailed | None = _row_stepper(progress)(  # type: ignore[assignment]
-            "_check_catalog_document_walk", _walk_documents_for_doctor,  # type: ignore[arg-type]
-        )
-        if _index_run_docs is None:
-            _index_run_docs = _WALK_FAILED
-    else:
-        _index_run_docs = _WALK_FAILED
-    results.extend(
-        _step("_check_stale_indexing_runs", lambda: _check_stale_indexing_runs(_index_run_docs))
-        if index_runs else [not_checked[_STALE_FENCES_LABEL]]
-    )
+    results.append(not_checked[_STALE_FENCES_LABEL])
     # nexus-0ntxj: a failed run's chunks stored with no manifest owner are
     # hidden by live(c). Degrades internally.
-    results.extend(
-        _step("_check_failed_runs_hidden_chunks", lambda: _check_failed_runs_hidden_chunks(_index_run_docs))
-        if index_runs else [not_checked[_HIDDEN_CHUNKS_LABEL]]
-    )
+    results.append(not_checked[_HIDDEN_CHUNKS_LABEL])
     # nexus-rte90: PDF chunks left with the upload placeholder metadata
     # (nexus-w94eo). Degrades internally.
     results.extend(_step("_check_pdf_stub_metadata", lambda: _check_pdf_stub_metadata()))
     # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
     # their own children. Self-healing is silent, so the blast radius must
     # be reportable rather than guessed.
-    results.extend(
-        _step("_check_next_seq_drift", lambda: _check_next_seq_drift(_index_run_docs))
-        if index_runs else [not_checked[_NEXT_SEQ_LABEL]]
-    )
+    results.append(not_checked[_NEXT_SEQ_LABEL])
     # nexus-c0g6e (GH #1529): topics whose cached doc_count disagrees with
     # the real topic_assignments count (6.18.1-era import drift, predating
     # taxonomy-013's recompute triggers). Self-heals on the engine's next
