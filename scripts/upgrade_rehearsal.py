@@ -30,6 +30,7 @@ The ceilings and the silence limit below are generous starting points, PENDING A
 Exit 0: every run passed. 1: a breach, a step failure or a non-vacuity finding in any run.
 2: the harness could not start (unreachable index, unknown version, bad flags).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -124,6 +125,7 @@ class StepResult:
 
 # --- the watchdog ----------------------------------------------------------------------------
 
+
 def _set_winsize(fd: int, rows: int = 40, cols: int = 140) -> None:
     try:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
@@ -170,15 +172,26 @@ def run_step(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{name}.log"
     chunks_path = log_dir / f"{name}.chunks.jsonl"
-    result = StepResult(name=name, status="failed", argv=list(argv),
-                        silence_limit_s=silence_limit_s, ceiling_s=ceiling_s)
+    result = StepResult(
+        name=name,
+        status="failed",
+        argv=list(argv),
+        silence_limit_s=silence_limit_s,
+        ceiling_s=ceiling_s,
+    )
     master, slave = pty.openpty()
     _set_winsize(slave)
     start = clock()
     try:
         proc = subprocess.Popen(
-            list(argv), stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, env=env,
-            cwd=str(cwd), start_new_session=True, close_fds=True,
+            list(argv),
+            stdin=subprocess.DEVNULL,
+            stdout=slave,
+            stderr=slave,
+            env=env,
+            cwd=str(cwd),
+            start_new_session=True,
+            close_fds=True,
         )
     except OSError as exc:
         os.close(master)
@@ -211,11 +224,17 @@ def run_step(
         while True:
             now = clock()
             if ceiling_s is not None and now - start > ceiling_s:
-                status, breach = "ceiling", f"ran past its ceiling of {ceiling_s:g}s (killed at {now - start:.1f}s)"
+                status, breach = (
+                    "ceiling",
+                    f"ran past its ceiling of {ceiling_s:g}s (killed at {now - start:.1f}s)",
+                )
                 break
             if silence_limit_s is not None and now - last > silence_limit_s:
                 longest = max(longest, now - last)
-                status, breach = "silent", f"silent: printed nothing for {now - last:.1f}s (limit {silence_limit_s:g}s)"
+                status, breach = (
+                    "silent",
+                    f"silent: printed nothing for {now - last:.1f}s (limit {silence_limit_s:g}s)",
+                )
                 break
             if proc.poll() is not None:
                 break
@@ -270,30 +289,47 @@ def run_step(
 
 # --- non-vacuity and version selection (pure) -------------------------------------------------
 
+
 def total_rows(prepare: dict) -> int:
     cols = prepare.get("collections") or {}
     return int(sum(int(v) for v in cols.values()))
 
 
 def nonvacuity_findings(
-    prepare: dict, steps: Sequence[StepResult], *, floor: int,
-    doctor_text: str, search_text: str, sentinel_expect: str, upgrade_text: str = "",
+    prepare: dict,
+    steps: Sequence[StepResult],
+    *,
+    floor: int,
+    doctor_text: str,
+    search_text: str,
+    sentinel_expect: str,
+    upgrade_text: str = "",
 ) -> list[str]:
     findings: list[str] = []
     if prepare.get("verdict") != "prepared":
-        findings.append(f"prepare verdict was {prepare.get('verdict')!r}, not 'prepared'")
+        findings.append(
+            f"prepare verdict was {prepare.get('verdict')!r}, not 'prepared'"
+        )
     rows = total_rows(prepare)
     if rows < floor:
-        findings.append(f"prepared store holds {rows} rows, below the floor of {floor}: the rehearsal would prove nothing")
+        findings.append(
+            f"prepared store holds {rows} rows, below the floor of {floor}: the rehearsal would prove nothing"
+        )
     by_name = {s.name: s for s in steps}
     for name in JUDGED_STEPS:
         s = by_name.get(name)
         if s is None or s.status == "not-run":
             findings.append(f"step {name} did not run")
-    if by_name.get("upgrade") is not None and by_name["upgrade"].ok and "DEFERRED" in strip_ansi(upgrade_text):
+    if (
+        by_name.get("upgrade") is not None
+        and by_name["upgrade"].ok
+        and "DEFERRED" in strip_ansi(upgrade_text)
+    ):
         # `nx upgrade` exits 0 when the engine is down and defers every rung: a green that did none
         # of the work. The rehearsal keeps the old stack up so the engine boot happens inside it.
-        findings.append("nx upgrade reported DEFERRED work: the engine was not reachable, so the upgrade did not run")
+        findings.append(
+            "nx upgrade reported DEFERRED work: the engine was not reachable, so the upgrade did not run"
+        )
     doctor = strip_ansi(doctor_text)
     if by_name.get("doctor") is not None and by_name["doctor"].ok:
         if not doctor.strip():
@@ -303,7 +339,9 @@ def nonvacuity_findings(
             findings.append("doctor reported ✗: " + "; ".join(bad)[:300])
     if by_name.get("search") is not None and by_name["search"].ok:
         if sentinel_expect not in strip_ansi(search_text):
-            findings.append(f"search did not return the seeded sentinel ({sentinel_expect!r})")
+            findings.append(
+                f"search did not return the seeded sentinel ({sentinel_expect!r})"
+            )
     return findings
 
 
@@ -318,20 +356,28 @@ def _vkey(version: str) -> tuple[tuple[int, ...], int] | None:
     return tuple(int(p) for p in m.group(1).split(".")), int(m.group(2) or 0)
 
 
-def resolve_from_versions(spec: str, published: Sequence[str], *, candidate: str) -> list[str]:
+def resolve_from_versions(
+    spec: str, published: Sequence[str], *, candidate: str
+) -> list[str]:
     """``both`` is [newest published below the candidate, last published 7.x], deduplicated."""
     finals = {v: _vkey(v) for v in published}
     finals = {v: k for v, k in finals.items() if k is not None}
     if spec != "both":
         if spec not in published:
-            raise RehearsalError(f"--from-version {spec} is not a published conexus version")
+            raise RehearsalError(
+                f"--from-version {spec} is not a published conexus version"
+            )
         return [spec]
     ckey = _vkey(candidate)
     if ckey is None:
-        raise RehearsalError(f"candidate version {candidate!r} is not a final release version")
+        raise RehearsalError(
+            f"candidate version {candidate!r} is not a final release version"
+        )
     below = sorted((v for v, k in finals.items() if k < ckey), key=lambda v: finals[v])
     if not below:
-        raise RehearsalError(f"no published conexus version below {candidate}: nothing to upgrade from")
+        raise RehearsalError(
+            f"no published conexus version below {candidate}: nothing to upgrade from"
+        )
     out = [below[-1]]
     sevens = [v for v in below if finals[v][0][0] == 7]
     if sevens and sevens[-1] not in out:
@@ -341,18 +387,33 @@ def resolve_from_versions(spec: str, published: Sequence[str], *, candidate: str
 
 def fetch_published_versions(timeout: float = 30.0) -> list[str]:
     try:
-        with urllib.request.urlopen("https://pypi.org/pypi/conexus/json", timeout=timeout) as resp:
+        with urllib.request.urlopen(
+            "https://pypi.org/pypi/conexus/json", timeout=timeout
+        ) as resp:
             data = json.load(resp)
     except Exception as exc:  # noqa: BLE001 - any failure here is "cannot start", never a skip
-        raise RehearsalError(f"could not read the published conexus versions from PyPI: {exc}") from exc
-    return [v for v, files in data.get("releases", {}).items()
-            if files and not any(f.get("yanked") for f in files)]
+        raise RehearsalError(
+            f"could not read the published conexus versions from PyPI: {exc}"
+        ) from exc
+    return [
+        v
+        for v, files in data.get("releases", {}).items()
+        if files and not any(f.get("yanked") for f in files)
+    ]
 
 
 # --- verdict ---------------------------------------------------------------------------------
 
-def build_verdict(*, from_version: str, target: str, steps: Sequence[StepResult],
-                  findings: list[str], prepare: dict | None, floor: int) -> dict:
+
+def build_verdict(
+    *,
+    from_version: str,
+    target: str,
+    steps: Sequence[StepResult],
+    findings: list[str],
+    prepare: dict | None,
+    floor: int,
+) -> dict:
     failed = [s for s in steps if s.status not in ("ok", "not-run")]
     passed = not failed and not findings and bool(steps)
     return {
@@ -385,8 +446,10 @@ def verdict_line(verdict: dict) -> str:
     word = "PASSED" if verdict["passed"] else "FAILED"
     bad = [s["name"] for s in verdict["steps"] if s["status"] not in ("ok", "not-run")]
     tail = "" if verdict["passed"] else f" at {', '.join(bad) or 'non-vacuity'}"
-    return (f"UPGRADE REHEARSAL {word}: from {verdict['from_version']} to {verdict['target']}"
-            f" ({verdict['prepared_rows']} rows){tail}")
+    return (
+        f"UPGRADE REHEARSAL {word}: from {verdict['from_version']} to {verdict['target']}"
+        f" ({verdict['prepared_rows']} rows){tail}"
+    )
 
 
 def combined_line(verdicts: Sequence[dict]) -> str:
@@ -398,7 +461,9 @@ def combined_line(verdicts: Sequence[dict]) -> str:
     for v in verdicts:
         if not v["passed"]:
             at = [s["name"] for s in v["steps"] if s["status"] not in ("ok", "not-run")]
-            bad.append(f"{v['from_version']} ({'at ' + ', '.join(at) if at else 'non-vacuity'})")
+            bad.append(
+                f"{v['from_version']} ({'at ' + ', '.join(at) if at else 'non-vacuity'})"
+            )
     return f"UPGRADE REHEARSAL FAILED: from {', '.join(bad) or names}"
 
 
@@ -408,6 +473,7 @@ def write_verdict(verdict: dict, path: Path) -> None:
 
 
 # --- one rehearsal ---------------------------------------------------------------------------
+
 
 @dataclasses.dataclass
 class Config:
@@ -432,7 +498,11 @@ def _ambient_uv_dir() -> str:
 
 def build_env(home: Path, config: Path) -> dict[str, str]:
     """The only environment a step sees: no cloud, no Voyage key, no ambient steering."""
-    path = ":".join(p for p in (str(home / ".local" / "bin"), _ambient_uv_dir(), "/usr/bin", "/bin") if p)
+    path = ":".join(
+        p
+        for p in (str(home / ".local" / "bin"), _ambient_uv_dir(), "/usr/bin", "/bin")
+        if p
+    )
     env = {
         "HOME": str(home),
         "PATH": path,
@@ -441,7 +511,17 @@ def build_env(home: Path, config: Path) -> dict[str, str]:
         "NX_LOCAL": "1",
         "NX_NO_TELEMETRY": "1",
     }
-    for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+    # A user's shell always carries its login name; without it getpass and the engine's PG
+    # provisioning disagree on the cluster superuser (first measuring run, 2026-11-10).
+    for k in (
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+    ):
         if os.environ.get(k):
             env[k] = os.environ[k]
     return env
@@ -468,7 +548,12 @@ def _reap_postmasters(run_dir: Path) -> list[str]:
 
 def rehearse(from_version: str, cfg: Config) -> dict:
     run_dir = cfg.work / f"from-{from_version}"
-    home, config, logs, cwd = run_dir / "home", run_dir / "config", run_dir / "logs", run_dir / "cwd"
+    home, config, logs, cwd = (
+        run_dir / "home",
+        run_dir / "config",
+        run_dir / "logs",
+        run_dir / "cwd",
+    )
     for d in (home, config, logs, cwd):
         d.mkdir(parents=True, exist_ok=True)
     env = build_env(home, config)
@@ -479,21 +564,56 @@ def rehearse(from_version: str, cfg: Config) -> dict:
     texts: dict[str, str] = {}
     stop = False
 
-    def go(name: str, argv: list[str], *, silence: float | None, ceiling: float, where: Path = cwd,
-           judged: bool = True) -> StepResult:
+    def go(
+        name: str,
+        argv: list[str],
+        *,
+        silence: float | None,
+        ceiling: float,
+        where: Path = cwd,
+        judged: bool = True,
+    ) -> StepResult:
         say(f"[{from_version}] {name}: {' '.join(shlex.quote(a) for a in argv)}")
-        r = run_step(name, argv, env=env, cwd=where, silence_limit_s=silence, ceiling_s=ceiling, log_dir=logs)
-        say(f"[{from_version}] {name}: {r.status} in {r.wall_s:.1f}s (longest gap {r.longest_gap_s:.1f}s) {r.reason}")
+        r = run_step(
+            name,
+            argv,
+            env=env,
+            cwd=where,
+            silence_limit_s=silence,
+            ceiling_s=ceiling,
+            log_dir=logs,
+        )
+        say(
+            f"[{from_version}] {name}: {r.status} in {r.wall_s:.1f}s (longest gap {r.longest_gap_s:.1f}s) {r.reason}"
+        )
         if judged:
             steps.append(r)
         elif not r.ok:
-            findings.append(f"setup step {name} {r.status}: {r.reason}; tail: {r.tail[-200:]}")
-        texts[name] = Path(logs / f"{name}.log").read_text(errors="replace") if (logs / f"{name}.log").exists() else ""
+            findings.append(
+                f"setup step {name} {r.status}: {r.reason}; tail: {r.tail[-200:]}"
+            )
+        texts[name] = (
+            Path(logs / f"{name}.log").read_text(errors="replace")
+            if (logs / f"{name}.log").exists()
+            else ""
+        )
         return r
 
     try:
-        r = go("install-prev", ["uv", "tool", "install", "--python", cfg.python, f"conexus=={from_version}"],
-               silence=None, ceiling=INSTALL_PREV_CEILING_S, judged=False)
+        r = go(
+            "install-prev",
+            [
+                "uv",
+                "tool",
+                "install",
+                "--python",
+                cfg.python,
+                f"conexus=={from_version}",
+            ],
+            silence=None,
+            ceiling=INSTALL_PREV_CEILING_S,
+            judged=False,
+        )
         stop = not r.ok
         if not stop and not Path(nx).exists():
             findings.append(f"install-prev left no nx at {nx}")
@@ -501,15 +621,33 @@ def rehearse(from_version: str, cfg: Config) -> dict:
 
         if not stop:
             json_path = run_dir / "prepare.json"
-            argv = [t.format(uv="uv", python=sys.executable, work=str(run_dir), prev=from_version,
-                             json=str(json_path), nx=nx) for t in shlex.split(cfg.prepare_cmd)]
-            r = go("prepare", argv, silence=None, ceiling=PREPARE_CEILING_S, where=cfg.repo, judged=False)
+            argv = [
+                t.format(
+                    uv="uv",
+                    python=sys.executable,
+                    work=str(run_dir),
+                    prev=from_version,
+                    json=str(json_path),
+                    nx=nx,
+                )
+                for t in shlex.split(cfg.prepare_cmd)
+            ]
+            r = go(
+                "prepare",
+                argv,
+                silence=None,
+                ceiling=PREPARE_CEILING_S,
+                where=cfg.repo,
+                judged=False,
+            )
             stop = not r.ok
             if not stop:
                 try:
                     prepare = json.loads(json_path.read_text())
                 except (OSError, ValueError) as exc:
-                    findings.append(f"prepare left no readable JSON at {json_path}: {exc}")
+                    findings.append(
+                        f"prepare left no readable JSON at {json_path}: {exc}"
+                    )
                     stop = True
             if prepare is not None and prepare.get("verdict") != "prepared":
                 findings.append(f"prepare verdict {prepare.get('verdict')!r}")
@@ -518,40 +656,83 @@ def rehearse(from_version: str, cfg: Config) -> dict:
         # The box a user upgrades has its engine running: the old stack comes up on the old data
         # before the package moves, so the new engine's first boot happens inside `nx upgrade`.
         if not stop:
-            r = go("start-old", [nx, "daemon", "service", "start"], silence=None,
-                   ceiling=START_OLD_CEILING_S, judged=False)
+            r = go(
+                "start-old",
+                [nx, "daemon", "service", "start"],
+                silence=None,
+                ceiling=START_OLD_CEILING_S,
+                judged=False,
+            )
             stop = not r.ok
 
         sil = cfg.silence_limit_s
         plan = [
-            ("package-upgrade", ["uv", "tool", "install", "--force", "--python", cfg.python, cfg.target_spec]),
+            (
+                "package-upgrade",
+                [
+                    "uv",
+                    "tool",
+                    "install",
+                    "--force",
+                    "--python",
+                    cfg.python,
+                    cfg.target_spec,
+                ],
+            ),
             ("upgrade", [nx, "upgrade"]),
             ("doctor", [nx, "doctor"]),
             ("search", [nx, "search", cfg.sentinel_query, "-m", "5"]),
         ]
         for name, argv in plan:
             if stop:
-                steps.append(StepResult(name=name, status="not-run", reason="an earlier step failed"))
+                steps.append(
+                    StepResult(
+                        name=name, status="not-run", reason="an earlier step failed"
+                    )
+                )
                 continue
             r = go(name, argv, silence=sil, ceiling=cfg.ceilings[name])
             stop = not r.ok
     finally:
         if Path(nx).exists():
-            go("cleanup-service", [nx, "daemon", "service", "stop", "--with-pg"],
-               silence=None, ceiling=CLEANUP_CEILING_S, judged=False)
-            go("cleanup-worker", [nx, "daemon", "aspect-worker", "stop", "--config-dir", str(config)],
-               silence=None, ceiling=CLEANUP_CEILING_S, judged=False)
+            go(
+                "cleanup-service",
+                [nx, "daemon", "service", "stop", "--with-pg"],
+                silence=None,
+                ceiling=CLEANUP_CEILING_S,
+                judged=False,
+            )
+            go(
+                "cleanup-worker",
+                [nx, "daemon", "aspect-worker", "stop", "--config-dir", str(config)],
+                silence=None,
+                ceiling=CLEANUP_CEILING_S,
+                judged=False,
+            )
         findings.extend(_reap_postmasters(run_dir))
 
     # A setup failure is already in findings; a step breach is in the step. Add non-vacuity only
     # when the prepare produced something to judge.
     if prepare is not None:
-        findings.extend(nonvacuity_findings(
-            prepare, steps, floor=cfg.rows_floor, doctor_text=texts.get("doctor", ""),
-            search_text=texts.get("search", ""), sentinel_expect=cfg.sentinel_expect,
-            upgrade_text=texts.get("upgrade", "")))
-    verdict = build_verdict(from_version=from_version, target=cfg.target_label, steps=steps,
-                            findings=findings, prepare=prepare, floor=cfg.rows_floor)
+        findings.extend(
+            nonvacuity_findings(
+                prepare,
+                steps,
+                floor=cfg.rows_floor,
+                doctor_text=texts.get("doctor", ""),
+                search_text=texts.get("search", ""),
+                sentinel_expect=cfg.sentinel_expect,
+                upgrade_text=texts.get("upgrade", ""),
+            )
+        )
+    verdict = build_verdict(
+        from_version=from_version,
+        target=cfg.target_label,
+        steps=steps,
+        findings=findings,
+        prepare=prepare,
+        floor=cfg.rows_floor,
+    )
     write_verdict(verdict, run_dir / "verdict.json")
     say(format_table(verdict))
     say(verdict_line(verdict))
@@ -559,6 +740,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
 
 
 # --- command line ----------------------------------------------------------------------------
+
 
 def _wheel_version(path: Path) -> str:
     m = re.match(r"conexus-([^-]+)-", path.name)
@@ -568,31 +750,68 @@ def _wheel_version(path: Path) -> str:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--work", type=Path, required=True, help="work dir; one from-<version> subdir per run")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--work",
+        type=Path,
+        required=True,
+        help="work dir; one from-<version> subdir per run",
+    )
     tgt = ap.add_mutually_exclusive_group(required=True)
-    tgt.add_argument("--target-wheel", type=Path, help="the candidate: a built conexus wheel")
-    tgt.add_argument("--target-release", metavar="X.Y.Z", help="the candidate: a published conexus version")
-    ap.add_argument("--from-version", default="both", metavar="X.Y.Z|both",
-                    help="previous release to start from. 'both' (the release-gate default) runs the "
-                         "newest published version below the candidate and the last published 7.x, "
-                         "each in its own work dir with its own table and verdict")
-    ap.add_argument("--published-versions", help="comma-separated override for the PyPI listing (offline use)")
-    ap.add_argument("--prepare-cmd", default=None,
-                    help=f"command that builds the old state; placeholders {{work}} {{prev}} {{json}} "
-                         f"{{nx}} {{uv}} {{python}}. Default: {REAL_PREPARE_CMD}")
-    ap.add_argument("--standin", action="store_true",
-                    help="use the small stand-in prepare (a few hundred documents) instead of the real "
-                         "seeder, with its own sentinel and a floor of %d rows" % STANDIN_ROWS_FLOOR)
-    ap.add_argument("--rows-floor", type=int, default=None, help=f"minimum prepared rows (default {DEFAULT_ROWS_FLOOR})")
+    tgt.add_argument(
+        "--target-wheel", type=Path, help="the candidate: a built conexus wheel"
+    )
+    tgt.add_argument(
+        "--target-release",
+        metavar="X.Y.Z",
+        help="the candidate: a published conexus version",
+    )
+    ap.add_argument(
+        "--from-version",
+        default="both",
+        metavar="X.Y.Z|both",
+        help="previous release to start from. 'both' (the release-gate default) runs the "
+        "newest published version below the candidate and the last published 7.x, "
+        "each in its own work dir with its own table and verdict",
+    )
+    ap.add_argument(
+        "--published-versions",
+        help="comma-separated override for the PyPI listing (offline use)",
+    )
+    ap.add_argument(
+        "--prepare-cmd",
+        default=None,
+        help=f"command that builds the old state; placeholders {{work}} {{prev}} {{json}} "
+        f"{{nx}} {{uv}} {{python}}. Default: {REAL_PREPARE_CMD}",
+    )
+    ap.add_argument(
+        "--standin",
+        action="store_true",
+        help="use the small stand-in prepare (a few hundred documents) instead of the real "
+        "seeder, with its own sentinel and a floor of %d rows" % STANDIN_ROWS_FLOOR,
+    )
+    ap.add_argument(
+        "--rows-floor",
+        type=int,
+        default=None,
+        help=f"minimum prepared rows (default {DEFAULT_ROWS_FLOOR})",
+    )
     ap.add_argument("--sentinel-query", default=None)
-    ap.add_argument("--sentinel-expect", default=None, help="text the search output must contain")
+    ap.add_argument(
+        "--sentinel-expect", default=None, help="text the search output must contain"
+    )
     ap.add_argument("--silence-limit", type=float, default=DEFAULT_SILENCE_LIMIT_S)
     ap.add_argument("--package-ceiling", type=float, default=PACKAGE_UPGRADE_CEILING_S)
     ap.add_argument("--upgrade-ceiling", type=float, default=UPGRADE_CEILING_S)
     ap.add_argument("--doctor-ceiling", type=float, default=DOCTOR_CEILING_S)
     ap.add_argument("--search-ceiling", type=float, default=SEARCH_CEILING_S)
-    ap.add_argument("--json-out", type=Path, help="combined verdict file (default WORK/verdict.json)")
+    ap.add_argument(
+        "--json-out",
+        type=Path,
+        help="combined verdict file (default WORK/verdict.json)",
+    )
     return ap
 
 
@@ -604,12 +823,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             wheel = args.target_wheel.resolve()
             if not wheel.is_file():
                 raise RehearsalError(f"no wheel at {wheel}")
-            candidate, spec, label = _wheel_version(wheel), str(wheel), f"wheel {wheel.name}"
+            candidate, spec, label = (
+                _wheel_version(wheel),
+                str(wheel),
+                f"wheel {wheel.name}",
+            )
         else:
-            candidate, spec, label = args.target_release, f"conexus=={args.target_release}", f"conexus {args.target_release}"
-        published = (args.published_versions.split(",") if args.published_versions
-                     else fetch_published_versions())
-        versions = resolve_from_versions(args.from_version, published, candidate=candidate)
+            candidate, spec, label = (
+                args.target_release,
+                f"conexus=={args.target_release}",
+                f"conexus {args.target_release}",
+            )
+        published = (
+            args.published_versions.split(",")
+            if args.published_versions
+            else fetch_published_versions()
+        )
+        versions = resolve_from_versions(
+            args.from_version, published, candidate=candidate
+        )
     except RehearsalError as exc:
         say(f"UPGRADE REHEARSAL NOT RUN: {exc}", err=True)
         return 2
@@ -626,11 +858,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         expect = args.sentinel_expect or SENTINEL_EXPECT
 
     cfg = Config(
-        work=args.work.resolve(), repo=repo, target_spec=spec, target_label=label, candidate=candidate,
-        prepare_cmd=prepare_cmd, rows_floor=floor, sentinel_query=query, sentinel_expect=expect,
+        work=args.work.resolve(),
+        repo=repo,
+        target_spec=spec,
+        target_label=label,
+        candidate=candidate,
+        prepare_cmd=prepare_cmd,
+        rows_floor=floor,
+        sentinel_query=query,
+        sentinel_expect=expect,
         silence_limit_s=args.silence_limit,
-        ceilings={"package-upgrade": args.package_ceiling, "upgrade": args.upgrade_ceiling,
-                  "doctor": args.doctor_ceiling, "search": args.search_ceiling},
+        ceilings={
+            "package-upgrade": args.package_ceiling,
+            "upgrade": args.upgrade_ceiling,
+            "doctor": args.doctor_ceiling,
+            "search": args.search_ceiling,
+        },
     )
     cfg.work.mkdir(parents=True, exist_ok=True)
     say(f"upgrade rehearsal: candidate {label}; starting from {', '.join(versions)}")
