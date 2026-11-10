@@ -1,5 +1,11 @@
 # Changelog
 
+## [8.1.2] - 2026-11-10
+
+Plugin version aligned with conexus 8.1.2. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- `conexus/hooks/scripts/compact_checkpoint.py`: nexus-ct9sv: another session's pre no longer prunes an idle session's unused checkpoint at 48 h; it keeps it until a 7-day limit, which is also inject's restore limit.
+
 ## [8.1.1] - 2026-11-10
 
 Plugin version aligned with conexus 8.1.1. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).

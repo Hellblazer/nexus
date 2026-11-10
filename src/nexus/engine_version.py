@@ -744,7 +744,7 @@ from __future__ import annotations
 #: text (rerank_sensitive_exclusion_supported). SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION
 #: is 0.1.182, so the pin rises with it. The eleven wire-ledger entries this
 #: release ships are all additive.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 186)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 187)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
