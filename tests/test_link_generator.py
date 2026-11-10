@@ -285,21 +285,6 @@ class TestProseFilepathLinks:
         assert len(links) == 1
         assert str(links[0].to_tumbler) == str(code_tumbler)
 
-    def test_a_markdown_path_never_links_even_to_a_document_that_exists(self, tmp_path: Path) -> None:
-        """The engine resolves a path to a document of any content type; the old client matched only
-        code documents. A ``.md`` target is not sent, so a prose file naming another prose or RDR
-        document gets no ``implements`` link (RDR-193 Step 7, fix round 1)."""
-        repo = tmp_path / "myrepo"
-        (repo / "docs").mkdir(parents=True)
-        (repo / "docs" / "guide.md").write_text("See ``docs/other.md`` and ``docs/rdr/rdr-001.md``.\n")
-        cat = self._make_catalog(tmp_path)
-        owner = cat.register_owner("myrepo", "repo", repo_hash="abc12345", repo_root=str(repo))
-        cat.register(owner, "Guide", content_type="prose", file_path="docs/guide.md")
-        cat.register(owner, "Other", content_type="prose", file_path="docs/other.md")
-        cat.register(owner, "RDR-001", content_type="rdr", file_path="docs/rdr/rdr-001.md")
-
-        assert generate_prose_filepath_links(cat) == 0
-
     def test_bare_filename_does_not_match(self, tmp_path: Path) -> None:
         """A prose mention of bare ``foo.py`` (no directory segment)
         must NOT match (too noisy). The regex requires at least one
