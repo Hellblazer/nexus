@@ -2580,8 +2580,8 @@ def _layer2_census_lines(rows: list[dict], t2_key: str) -> list[str]:
         return [
             "**Layer 2 VACUOUS**: no research records exist for this RDR, so the assumption "
             "audit has nothing to examine and cannot pass. Record findings first "
-            f"(`nx rdr preamble rdr-research -- add {t2_key} --classification <{'|'.join(CLASSIFICATIONS)}> "
-            f"--method <{'|'.join(METHODS)}> <finding>`), or write "
+            f"(`/conexus:rdr-research add {int(t2_key)}`: the `research_add` procedure with classification "
+            f"<{'|'.join(CLASSIFICATIONS)}> and method <{'|'.join(METHODS)}>, then `memory_put`), or write "
             "`research: none (<why>)` in the gate record so the vacuity is a decision on record.",
             "",
         ]
@@ -2611,7 +2611,7 @@ def _layer2_census_lines(rows: list[dict], t2_key: str) -> list[str]:
     if by_class.get("unclassified") or by_method.get("unstated"):
         lines.append(
             "Records with no classification or method were written before "
-            "`rdr-research add` took them as flags; classify them by hand or re-add them."
+            "research records carried them; classify them by hand or re-add them."
         )
     if high_risk:
         lines.append("Assumed findings with no evidence beyond documents:")
@@ -3258,12 +3258,6 @@ def _RDR_RESEARCH_LIST_RE(rdr_key: str) -> re.Pattern[str]:  # noqa: N802 — a 
     number = int(re.search(r"\d+", rdr_key).group(0))  # type: ignore[union-attr]
     return re.compile(rf"/0*{number}-research-")
 
-#: Bound on the "advance past a collision" retry loop in
-#: :func:`_rdr_research_add` — a defensive ceiling against looping forever
-#: under sustained contention, never expected to be hit in practice.
-_RDR_RESEARCH_MAX_SEQ_ATTEMPTS = 50
-
-
 def _rdr_research_next_seq(entries: list[dict], t2_key: str) -> int:
     """Return the next free research sequence number for *t2_key*.
 
@@ -3282,121 +3276,44 @@ def _rdr_research_next_seq(entries: list[dict], t2_key: str) -> int:
     return max(seqs) + 1 if seqs else 1
 
 
-def _rdr_research_add(
-    t2_key: str, finding_text: str, repo_name: str, *, classification: str = "", method: str = "",
-) -> str:
-    """Record a research finding for RDR *t2_key* in T2, returning the title.
+#: RDR-240 TD7 (nexus-qo7ie.33): the bare-argument add is retired. A finding passed as shell words was
+#: split by the shell (a semicolon ran ``git stash`` and truncated three records); the ``research_add``
+#: procedure takes it as one string and the caller writes the record it returns with ``memory_put``.
+#: The plugin switched to that path in conexus 8.0.0, so this package release refuses every ``add``.
+def _rdr_research_add_retired() -> str:
+    """The refusal text, its vocabulary read from the table at call time (no copy in this file)."""
+    from nexus.tables import rdr_research_vocab as vocab  # noqa: PLC0415 - deferred: only the refused add needs it
 
-    Bug this closes (nexus-zu1q0): the previous scheme (list existing
-    ``<id>-research-*`` titles, take max+1, then ``memory_put`` the result)
-    was computed by the calling agent as prose, not derived deterministically
-    here — two consecutive adds could both compute seq 1, and the second
-    ``memory_put`` (an upsert by ``(project, title)``) silently overwrote the
-    first finding rather than creating seq 2.
-
-    This still cannot fully rule out a genuine two-writer race (this process
-    lists, then writes, with no cross-process lock in between), so the write
-    is additionally guarded: immediately before writing, the target title is
-    checked for existence, and a collision advances to the next sequence
-    number rather than ever upserting over it. Giving up after
-    :data:`_RDR_RESEARCH_MAX_SEQ_ATTEMPTS` collisions fails loud instead of
-    looping forever under sustained contention.
-    """
-    project = f"{repo_name}_rdr"
-    with _t2_client_factory() as client:
-        entries = client.get_all(project=project)
-        seq = _rdr_research_next_seq(entries, t2_key)
-        for _ in range(_RDR_RESEARCH_MAX_SEQ_ATTEMPTS):
-            title = f"{t2_key}-research-{seq}"
-            if client.get(project=project, title=title) is None:
-                content = f"rdr_id: {t2_key}\nseq: {seq}\n"
-                if classification:
-                    content += f"classification: {classification}\n"
-                if method:
-                    content += f"verification_method: {method}\n"
-                content += f"finding: {finding_text}\n"
-                client.put(project=project, title=title, content=content, tags="rdr,research", ttl=None)
-                return title
-            seq += 1
-    raise click.ClickException(
-        f"rdr-research add: could not claim a free sequence number for RDR "
-        f"{t2_key} after {_RDR_RESEARCH_MAX_SEQ_ATTEMPTS} attempts — titles "
-        "are being created faster than this command can claim one; "
-        "investigate concurrent writers before retrying."
+    return (
+        "rdr-research add: this form is retired (RDR-240): a finding passed as shell words is split "
+        "by the shell. Record a finding with `/conexus:rdr-research add <id>`, which runs the "
+        "`research_add` procedure and writes the record it returns with `memory_put`:\n"
+        "  1. mcp__plugin_conexus_nexus__procedure_run(name=\"research_add\", args={\"rdr\": <id>, "
+        f"\"classification\": <{'|'.join(vocab.CLASSIFICATIONS)}>, \"method\": <{'|'.join(vocab.METHODS)}>, "
+        "\"finding\": \"<one line>\"})  (from a shell: `nx run research_add --args-file <json>`)\n"
+        "  2. memory_get the returned title: an entry with exactly that title means the number is "
+        "taken, so run step 1 again\n"
+        "  3. mcp__plugin_conexus_nexus__memory_put(project, title, content, tags) with the four "
+        "returned fields unchanged (`nx memory put - -p <project> -t <title> --tags <tags>` from a shell)"
     )
 
 
 @preamble.command("rdr-research")
 @click.argument("args", nargs=-1)
 def preamble_rdr_research(args: tuple[str, ...]) -> None:
-    """Print RDR research context (file Research Findings + T2 entries), or
-    record a new finding when invoked as ``add <id> <finding text...>``."""
+    """Print RDR research context (file Research Findings + T2 entries).
+
+    ``add`` is retired (RDR-240 TD7): it prints the ``research_add`` procedure path and exits nonzero."""
+    # Every add form is refused before anything is read or written: split or handed over as one
+    # element (nexus-u1jxt.10), with or without text, any case of the verb.
+    first = args[0].split()[:1] if args else []
+    if first and first[0].lower() == "add":
+        raise click.ClickException(_rdr_research_add_retired())
+
     repo_root, repo_name = _preamble_resolve_repo()
     rdr_dir = _preamble_rdr_dir(repo_root)
     rdr_path = Path(repo_root) / rdr_dir
     args_str = " ".join(args).strip()
-
-    # ``add <id> <finding text>`` (at least one text token) performs the T2
-    # write here, deterministically — see _rdr_research_add. ``add <id>``
-    # alone (no text) is unchanged: it falls through to the context-printing
-    # path below, exactly as before (nexus-zu1q0 scope).
-    # nexus-u1jxt.10: the add verb handed over as ONE element ("add 205 the
-    # finding ...", a caller that did not split its own line) used to fall
-    # through to the read path and print context, exit 0, writing nothing.
-    if len(args) == 1 and args[0].split()[:1] == ["add"]:
-        args = tuple(shlex.split(args[0]))
-    add_id = re.match(r"^(?:rdr-)?(\d+)$", args[1], re.IGNORECASE) if len(args) >= 3 else None
-    if add_id and args[0].lower() == "add":
-        # Zero-padded to three digits: that is the shape every live
-        # ``<id>-research-N`` title carries (``097-research-9``), so an
-        # unpadded ``97`` must find them, not fork a second namespace. An
-        # ``RDR-97`` token is the same id (probe P9: it used to fall
-        # through to the context print, exit 0, nothing written).
-        t2_key = f"{int(add_id.group(1)):03d}"
-        # --classification and --method are flags of the add, never part of
-        # the finding text (nexus-5r0ho item 8); each is one of a closed set.
-        rest: list[str] = []
-        classification = ""
-        method = ""
-        toks = list(args[2:])
-        k = 0
-        while k < len(toks):
-            tok = toks[k]
-            nxt = toks[k + 1] if k + 1 < len(toks) else None
-            consumed = 2
-            if tok.startswith(("--classification=", "--method=")):
-                tok, nxt = tok.split("=", 1)
-                consumed = 1
-            if tok in ("--classification", "--method"):
-                if nxt is None or nxt.startswith("--"):
-                    raise click.ClickException(f"rdr-research add: {tok} needs a value.")
-                val = nxt.strip().lower().replace("-", "_")
-                # One table for the CLI and the research_add procedure (RDR-240 TD7).
-                from nexus.tables.rdr_research_vocab import CLASSIFICATIONS, METHODS  # noqa: PLC0415 - deferred: only the add path needs it
-
-                allowed = CLASSIFICATIONS if tok == "--classification" else METHODS
-                if val not in allowed:
-                    raise click.ClickException(
-                        f"rdr-research add: {tok} must be one of {', '.join(allowed)}; got {nxt!r}."
-                    )
-                if tok == "--classification":
-                    classification = val
-                else:
-                    method = val
-                k += consumed
-                continue
-            rest.append(tok)
-            k += 1
-        finding_text = " ".join(rest).strip()
-        if not finding_text:
-            raise click.ClickException("rdr-research add: the finding text is empty.")
-        if len(finding_text.splitlines()) > 1:
-            # The record is read line by line (splitlines): a token holding a line break
-            # would plant its own fields, such as "acknowledged: true" (nexus-qo7ie.33).
-            raise click.ClickException("rdr-research add: the finding must be one line; it holds a line break.")
-        title = _rdr_research_add(t2_key, finding_text, repo_name, classification=classification, method=method)
-        print(f"Recorded T2 research finding: `{repo_name}_rdr/{title}`")
-        return
 
     print(f"**Repo:** `{repo_name}`  **RDR directory:** `{rdr_dir}`")
     print()
@@ -3490,8 +3407,8 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
             print(f"No RDRs found in `{rdr_dir}`")
         print()
         print(
-            "> **Usage**: `nx rdr preamble rdr-research -- <id>` or "
-            "`nx rdr preamble rdr-research -- add <id>`"
+            "> **Usage**: `nx rdr preamble rdr-research -- <id>`; record a finding with "
+            "`/conexus:rdr-research add <id>`"
         )
 
 
@@ -3591,7 +3508,7 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
             if not latest:
                 print(
                     f"> No gate record for RDR-{t2_key}; there is nothing to fix. A finding "
-                    f"from a review goes through `nx rdr preamble rdr-research -- add {t2_key} ...`."
+                    f"from a review goes through `/conexus:rdr-research add {int(t2_key)}`."
                 )
                 return
             content = latest.get("content", "") if isinstance(latest, dict) else ""
@@ -3698,8 +3615,8 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
     print("#### Before the edit")
     print()
     print(
-        f"1. Record the research entry first: `nx rdr preamble rdr-research -- add {t2_key} "
-        f"<finding tokens>` (it becomes `{project}/{t2_key}-research-{next_seq}`); the quote or "
+        f"1. Record the research entry first: `/conexus:rdr-research add {int(t2_key)}` (the "
+        f"`research_add` procedure, then `memory_put`; it becomes `{project}/{t2_key}-research-{next_seq}`); the quote or "
         "enumeration for every clause the fix will add lives there."
     )
     print("2. Edit the RDR at every site the finding names.")
