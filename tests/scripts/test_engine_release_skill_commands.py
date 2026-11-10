@@ -185,34 +185,61 @@ def test_every_path_in_the_named_windows_surface_exists_and_nothing_windows_is_l
 
 # nexus-f3yqd.1: the upgrade-boot write gate (Sam's release criterion, 2026-11-10).
 
-def _step_3h() -> str:
+def _step_3h_raw() -> str:
     assert "### 3h." in SKILL, "the engine-release skill has no Step 3h (the upgrade-boot write gate)"
-    return " ".join(SKILL.split("### 3h.")[1].split("### 4.")[0].split())
+    return SKILL.split("### 3h.")[1].split("### 4.")[0]
 
 
-def test_step_3h_runs_three_legs_of_the_harness_on_the_tag_commit_and_stops_on_any_failure() -> None:
+def _step_3h() -> str:
+    return " ".join(_step_3h_raw().split())
+
+
+def _legs() -> dict[str, str]:
+    """Each leg's command (the lines after its `# Leg X` marker), joined with continuations removed."""
+    block = _step_3h_raw().split("```bash")[1].split("```")[0]
+    legs: dict[str, list[str]] = {}
+    cur = None
+    for line in block.splitlines():
+        m = re.match(r"\s*# Leg ([ABC])\b", line)
+        if m:
+            cur = m.group(1)
+            legs[cur] = []
+        elif cur:
+            legs[cur].append(line.rstrip("\\").strip())
+    return {k: " ".join(v) for k, v in legs.items()}
+
+
+def test_step_3h_has_exactly_the_three_legs_each_with_its_own_bound() -> None:
+    legs = _legs()
+    assert sorted(legs) == ["A", "B", "C"], f"Step 3h legs: {sorted(legs)}"
+    a, b, c = legs["A"], legs["B"], legs["C"]
+    assert "--ceiling 67108864" in a and "--ceiling-reboot 67108864" in a, "Leg A bounds total WAL and the reboot"
+    assert "--restart-mid-queue" not in a, "Leg A is the plain upgrade, no restart"
+    for name, leg, mode in (("B", b, "graceful"), ("C", c, "kill")):
+        assert "--ceiling-boot 67108864" in leg, f"Leg {name} bounds the upgrade boot"
+        assert "--ceiling-reboot" not in leg, f"Leg {name}'s second boot is a resume boot and is not byte-gated"
+        assert f"--restart-mode {mode}" in leg, f"Leg {name} restarts with {mode}"
+        for opt in ("--prev-client 7.76.0", "--no-pci-wait", "--rot pending_aspect_queue", "--restart-mid-queue 3"):
+            assert opt in leg, f"Leg {name} lacks {opt}"
+    for name, leg in legs.items():
+        assert "scripts/build-gate-jar.sh" in leg, f"Leg {name} must build the jar in the tag tree"
+        assert "--new-jar" not in leg, f"Leg {name} must boot the jar it just built (the default), not a path"
+
+
+def test_step_3h_scopes_the_bounds_and_names_what_it_does_not_cover() -> None:
     s = _step_3h()
-    assert "scripts/upgrade_boot_writes.py" in s
-    for leg in ("Leg A", "Leg B", "Leg C"):
-        assert leg in s, f"{leg} is not in Step 3h"
-    assert "--prev-client 7.76.0" in s, "Legs B and C start before per-collection indexes"
-    assert "--rot pending_aspect_queue" in s and "--restart-mid-queue 3" in s
-    assert "--restart-mode graceful" in s and "--restart-mode kill" in s
-    assert "do not tag" in s
-
-
-def test_step_3h_bounds_the_upgrade_boot_at_64_mib_and_says_why_later_boots_are_not_gated() -> None:
-    s = _step_3h()
-    assert "67108864" in s and "64 MiB" in s
-    assert "UPGRADE boot only" in s
-    assert "not gated" in s, "Step 3h must say later boots are reported, not gated"
-    assert "kept build" in s, "and why: the kept build's WAL lands in the next boot's migrate phase"
+    assert "64 MiB" in s and "UPGRADE boot only" in s
+    assert "not gated" in s and "kept build" in s, "say why later boots are reported, not gated"
+    assert "do not tag" in s and "Exit 2" in s, "red stops the tag; a harness failure is rerun, never tagged on"
+    assert "TAG_TREE" in s and "build commit equals the tag commit" in s
 
 
 def test_every_harness_flag_step_3h_names_exists_in_the_harness() -> None:
-    s = _step_3h()
     harness = (REPO_ROOT / "scripts" / "upgrade_boot_writes.py").read_text()
-    flags = sorted(set(re.findall(r"(--[a-z][a-z-]+)", s)) - {"--with-pg"})
-    assert flags, "Step 3h names no harness flag"
-    missing = [f for f in flags if f'"{f}"' not in harness]
+    used = set()
+    for leg in _legs().values():
+        cmd = leg.split("upgrade_boot_writes.py", 1)[1]
+        used |= set(re.findall(r"(--[a-z][a-z-]+)", cmd))
+    assert used, "Step 3h names no harness flag"
+    missing = sorted(f for f in used if not re.search(r'add_argument\(\s*"' + re.escape(f) + r'"', harness))
     assert not missing, f"Step 3h names flags the harness does not define: {missing}"
