@@ -124,7 +124,13 @@ file:line for each site). **Verified** (source read):
 - 8.0.0 paired with engine v0.1.184, and the changelogs added in
   v0.1.175..v0.1.184 do no full-table move. So the 8.0.0 boot rewrite was
   `vectors-030-1` (on an install still below v0.1.150) or the PCI builds. The
-  repository cannot say which. nexus-f3yqd.1's measurement will.
+  repository alone cannot say which. On Sam's machine it is `vectors-030-1`
+  (wren, 2026-11-10). Rows that fail the changeset's own checks make it roll
+  back, so it never commits, and every boot starts the whole copy again. The
+  hotfix (wren, separate from this RDR) is a changeset that runs before it and
+  preserves those rows. This is the failure the rule prevents: a move inside
+  the walk is one transaction, so a single bad row discards all its work, on
+  every boot.
 - Java boot work that already runs batched and in the background:
   AspectQueueDrain, ChunkReaper, the T1, tuple and request-ledger sweeps, and ReembedRunner.
 
