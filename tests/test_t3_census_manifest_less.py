@@ -348,7 +348,7 @@ class _StubT3Client:
             raise self._raise_error
         return self._page_response
 
-    def list_collections(self, lifecycle_state=None, *, strict: bool = False) -> list[dict]:
+    def list_collections(self, lifecycle_state=None, *, strict: bool = False, routing: bool = False) -> list[dict]:
         # Mirrors HttpVectorClient.list_collections's real contract
         # (nexus-wbfpw.5 review round 1, Significant-2): strict=False
         # swallows a listing failure to [], strict=True re-raises it --

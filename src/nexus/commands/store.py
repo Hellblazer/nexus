@@ -401,7 +401,7 @@ def _reapable_known_collection(db: T3Database, col_name: str) -> bool:
     same test ``nx t3 gc`` applies (``membership.collection_is_known`` for the catalog half). The
     engine answers a reapable listing for ANY name with an empty 200, so without this a typo reads
     "0 reapable chunks", the same words a clean collection gets."""
-    if col_name in {c["name"] for c in db.list_collections(strict=True)}:
+    if col_name in {c["name"] for c in db.list_collections(strict=True, routing=True)}:  # names only (nexus-mjmjl)
         return True
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred for startup cost (nexus.catalog.factory)
     from nexus.catalog.membership import collection_is_known  # noqa: PLC0415 — deferred for startup cost (nexus.catalog.membership)

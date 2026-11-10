@@ -6615,7 +6615,10 @@ class HttpVectorClient:
             # and raise below with no __cause__. A caller that has to tell an
             # absent collection from a service that could not be asked (the
             # manifest heal's LOST marking) reads the __cause__.
-            cols = self.list_collections(strict=True)
+            # routing (nexus-mjmjl): existence needs the name only. The full listing counts every
+            # collection's live chunks (469 ms at 140k rows, linda's profile); the routing one reads the
+            # catalog (55 ms) and lists the same collections.
+            cols = self.list_collections(strict=True, routing=True)
             if not any(c.get("name") == name for c in cols):
                 raise CollectionNotFoundError(f"collection {name!r} not found in service")
         except VectorServiceError as exc:
