@@ -64,6 +64,25 @@ def _env() -> dict[str, str]:
     return env
 
 
+#: The variables by which an outer storage-touch guard adopts a nested pytest session as its
+#: child (tests/_storage_touch_guard.py, _INHERITED_ENV).
+_GUARD_LINK = ("NX_STORAGE_TOUCH_RUN_ID", "NX_STORAGE_TOUCH_GUARD_PID", "NX_STORAGE_TOUCH_CHILD_LOG")
+
+
+def collect_env() -> dict[str, str]:
+    """The environment for a ``pytest --collect-only`` child: its own session, not this one's.
+
+    A collect-only listing runs no test; it imports the collected modules, and what a module
+    builds at import (tests/scripts parametrizes ManagedService* errors) is collection, which no
+    in-process session is ever charged with. Inheriting PYTEST_CURRENT_TEST charged it to the
+    calling test; inheriting the guard's link reported it as a late child touch with no test
+    running, which develop CI's shard gate fails (window 57, run 42737391383). With neither, the
+    child is a separately guarded session and applies the guard's own collection rule."""
+    env = {k: v for k, v in _env().items() if not k.startswith("PYTEST_") and k not in _GUARD_LINK}
+    env["NX_TEST_T2_SUBSTRATE"] = "none"
+    return env
+
+
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(repo), *args], check=True, capture_output=True, env=_env()

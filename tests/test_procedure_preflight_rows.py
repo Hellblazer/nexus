@@ -18,7 +18,7 @@ import pytest
 
 from tests._preflight_harness import (
     BEAD_MANIFEST,
-    _env,
+    collect_env,
     EVERYTHING,
     FOLD_CHECK,
     REPO_ROOT,
@@ -297,7 +297,7 @@ def test_r37_the_bead_row_selects_exactly_its_two_lint_tests() -> None:
     argv = BEAD_MANIFEST.removeprefix("uv run pytest -q ")  # one -q below: two print counts, not ids
     proc = subprocess.run(
         ["bash", "-c", f"{sys.executable} -m pytest --collect-only -q -p no:cacheprovider {argv}"],
-        cwd=REPO_ROOT, env={**_env(), "NX_TEST_T2_SUBSTRATE": "none"},
+        cwd=REPO_ROOT, env=collect_env(),
         capture_output=True, text=True, encoding="utf-8", check=False,
     )
     ids = sorted(line for line in proc.stdout.splitlines() if "::" in line)

@@ -29,6 +29,7 @@ from tests._preflight_harness import (
     SOURCE,
     _change,
     _command,
+    collect_env,
     _env,
     _git,
     _inner,
@@ -72,11 +73,7 @@ def _collected(argv: str, appended: list[str]) -> list[str]:
     proc = subprocess.run(
         ["bash", "-c", f"{sys.executable} -m pytest --collect-only -q -p no:cacheprovider {argv} {' '.join(appended)}"],
         cwd=REPO_ROOT,
-        # No PYTEST_* from this run: a collect-only listing runs no test, and an inherited
-        # PYTEST_CURRENT_TEST would charge what the collected modules construct at import (a
-        # parametrize list of ManagedService* errors in tests/scripts) to the test calling this,
-        # which in-process collection is never charged with.
-        env={**{k: v for k, v in _env().items() if not k.startswith("PYTEST_")}, "NX_TEST_T2_SUBSTRATE": "none"},
+        env=collect_env(),  # its own session: see the helper
         capture_output=True,
         text=True,
         encoding="utf-8",
