@@ -3101,6 +3101,10 @@ class _ServiceCollectionStub:
                     "limit": limit_sent,
                     "offset": offset,
                 }
+                if include:
+                    # nexus-mjmjl: what the caller reads, as the where branch sends it. An engine that projects
+                    # by it skips the chunk text a metadata read never uses; an older one ignores the key.
+                    body["include"] = list(include)
                 if include_source_uri:
                     body["include_source_uri"] = True
                 if include_non_live:
