@@ -206,6 +206,9 @@ def test_every_option_outside_the_neutral_set_is_a_non_default_flag_when_set() -
         "json_out",
         "keep_work",
         "help",
+        # --expect-engine only refuses a wrong pin and fails a start on a wrong engine: it relaxes
+        # nothing (tests/test_upgrade_rehearsal_engine_identity.py holds both directions)
+        "expect_engine",
     }
     assert (
         ur.non_default_flags(ap, ap.parse_args([*base, "--json-out", "x.json"])) == []

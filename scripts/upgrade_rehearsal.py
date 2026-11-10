@@ -540,9 +540,11 @@ def engine_identity_findings(
         return []
     serving = serving_engine_from_doctor(doctor_text)
     if serving is None:
-        return ["nx doctor did not report the serving engine (no engine convergence row): which engine ran is unproven"]
+        pending = [ln.strip() for ln in strip_ansi(doctor_text).splitlines() if "ngine convergence" in ln]
+        detail = f": {pending[0][:200]}" if pending else " (no engine convergence row)"
+        return [f"nx doctor did not report the install converged on engine v{expected}{detail}"]
     if serving != expected:
-        return [f"the install serves engine v{serving}, but the candidate pins v{expected}: the rehearsal ran the wrong engine"]
+        return [f"the install converged on engine v{serving}, but the rehearsal expects v{expected}: the wrong engine ran"]
     return []
 
 
@@ -2544,6 +2546,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "and verdict",
     )
     ap.add_argument(
+        "--expect-engine",
+        metavar="X.Y.Z",
+        help="the engine tag this rehearsal must run (engine-release Step 5b.1): refuse before any start "
+        "when the candidate wheel pins another, and check each start's nx doctor names it",
+    )
+    ap.add_argument(
         "--published-versions",
         help="comma-separated override for the PyPI listing (offline use)",
     )
@@ -2633,7 +2641,9 @@ def _build_parser() -> argparse.ArgumentParser:
 #: Options that never change what is judged: where the work goes, what the candidate is, where the
 #: combined verdict is written, whether the stores are kept.
 _NEUTRAL_DESTS = frozenset(
-    {"work", "target_wheel", "target_release", "json_out", "keep_work", "help"}
+    {"work", "target_wheel", "target_release", "json_out", "keep_work", "help",
+     # --expect-engine only adds a refusal and a check; it relaxes nothing
+     "expect_engine"}
 )
 
 
@@ -2695,6 +2705,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_engine = (
             engine_pin_of_wheel(args.target_wheel.resolve()) if args.target_wheel is not None else None
         )
+        if args.expect_engine:
+            want = re.sub(r"^(engine-service-)?v", "", args.expect_engine.strip())
+            if not re.fullmatch(r"\d+\.\d+\.\d+", want):
+                raise RehearsalError(f"--expect-engine {args.expect_engine!r} is not X.Y.Z")
+            if expected_engine is not None and expected_engine != want:
+                raise RehearsalError(
+                    f"the candidate wheel pins engine v{expected_engine}, not v{want}: bump "
+                    "REQUIRED_ENGINE_VERSION in the tree first (engine-release Step 5b.1)"
+                )
+            expected_engine = want
     except RehearsalError as exc:
         say(f"{GATE_MARK} NOT RUN: {exc}", err=True)
         return EXIT_NOT_RUN

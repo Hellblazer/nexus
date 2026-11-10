@@ -227,6 +227,7 @@ def test_step_5b1_prescribes_the_user_seat_upgrade_rehearsal() -> None:
     assert "REQUIRED_ENGINE_VERSION" in step, "5b.1 must say the tree pins this tag"
     assert "NEXUS_SERVICE_JAR" in step, "5b.1 must rule out the environment's jar override too"
     assert "every line must name this tag" in step, "5b.1 must have the operator read the served engine"
+    assert "--expect-engine X.Y.Z" in fenced, "5b.1 must have the driver check the tag itself"
 
 
 # ── The one-engine-identity directive, as a test (Hal 2026-07-15) ────────────

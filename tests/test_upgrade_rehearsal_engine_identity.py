@@ -65,7 +65,11 @@ def test_the_serving_engine_is_read_from_doctor() -> None:
     ("doctor", "expected", "doctor_ok", "jar", "words"),
     [
         pytest.param(CONVERGED, "0.1.188", True, None, ["v0.1.187", "v0.1.188"], id="previous-tag-served"),
-        pytest.param("  ✓ fine\n", "0.1.188", True, None, ["did not report the serving engine"], id="no-line"),
+        pytest.param("  ✓ fine\n", "0.1.188", True, None, ["did not report the install converged", "no engine convergence row"], id="no-line"),
+        pytest.param(
+            "  ! Engine convergence: engine convergence pending — installed v0.1.186, release dependency v0.1.187\n",
+            "0.1.187", True, None, ["did not report the install converged", "installed v0.1.186"], id="pending-row-quoted",
+        ),
     ],
 )
 def test_a_wrong_or_unreported_engine_is_a_finding(
@@ -125,3 +129,43 @@ def test_main_passes_the_wheels_pin_to_every_start(tmp_path: Path, monkeypatch: 
                   "--published-versions", "7.76.0,7.99.0,8.0.0", "--json-out", str(out)])
     assert seen and set(seen) == {"0.1.188"}, seen
     assert json.loads(out.read_text())["runs"], rc
+
+
+def _spy_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: list[str]) -> tuple[int, list[str | None], str]:
+    monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
+    monkeypatch.setattr(ur, "install_exit_handlers", lambda: None)
+    w = _wheel(tmp_path, "REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 187)")
+    seen: list[str | None] = []
+
+    def spy(version: str, cfg: object) -> dict:
+        seen.append(cfg.expected_engine)  # type: ignore[attr-defined]
+        steps = [ur.StepResult(name=n, status="ok", exit_code=0, wall_s=1.0) for n in ur.JUDGED_STEPS]
+        return ur.build_verdict(
+            from_version=version, target="t", steps=steps, findings=[],
+            prepare={"verdict": "prepared", "collections": {"a": 60_000}}, floor=1,
+        )
+
+    monkeypatch.setattr(ur, "rehearse", spy)
+    monkeypatch.setattr(ur, "fetch_published_versions", lambda: ["7.76.0", "7.99.0", "8.0.0"])
+    out = tmp_path / "v.json"
+    rc = ur.main(["--work", str(tmp_path / "w"), "--target-wheel", str(w), "--json-out", str(out), *extra])
+    return rc, seen, out.read_text() if out.exists() else ""
+
+
+def test_expect_engine_refuses_a_candidate_pinning_another_tag_before_any_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The unbumped-pin case: the tree still pins 0.1.187, the release is for 0.1.188.
+    rc, seen, _ = _spy_main(tmp_path, monkeypatch, ["--expect-engine", "0.1.188"])
+    err = capsys.readouterr().err
+    assert rc == ur.EXIT_NOT_RUN and seen == [], (rc, seen)
+    assert "v0.1.187" in err and "v0.1.188" in err, err
+
+
+@pytest.mark.parametrize("spelled", ["0.1.187", "v0.1.187", "engine-service-v0.1.187"])
+def test_expect_engine_matching_the_pin_runs_and_stays_the_release_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spelled: str
+) -> None:
+    rc, seen, out = _spy_main(tmp_path, monkeypatch, ["--expect-engine", spelled])
+    assert seen and set(seen) == {"0.1.187"}, seen
+    assert rc == 0 and json.loads(out)["non_default_flags"] == [], out
