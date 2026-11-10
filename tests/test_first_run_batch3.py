@@ -41,9 +41,27 @@ def test_a_failed_setup_process_names_its_cause_before_the_fallback(monkeypatch:
         setup_tools._call_script("nx_setup.py", ["status"])
     text = str(raised.value)
     assert text == (
-        "The setup process failed (exit 1) and printed no answer. It printed: PermissionError: [Errno 13] setup dir"
+        "The setup process failed (exit 1) and printed no answer. Its last line on standard error was: "
+        "PermissionError: [Errno 13] setup dir"
         " Setup can also be done in a terminal: the user runs `nx init`."
     ), text
+
+
+def test_a_quoted_stderr_line_is_masked(monkeypatch: pytest.MonkeyPatch) -> None:
+    _child(monkeypatch, code=1, err="error: GET https://user:s3cret@host/x token=abc123 failed\n")
+    with pytest.raises(setup_tools.SetupError) as raised:
+        setup_tools._call_script("nx_setup.py", ["status"])
+    text = str(raised.value)
+    assert "s3cret" not in text and "abc123" not in text, text
+    assert "https://***@host/x token=*** failed" in text, text
+
+
+def test_a_zero_exit_with_bad_output_quotes_no_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A process that exited 0 may have printed an unrelated warning: it is not quoted as the cause."""
+    _child(monkeypatch, code=0, out="not json\n", err="DeprecationWarning: something unrelated\n")
+    with pytest.raises(setup_tools.SetupError) as raised:
+        setup_tools._call_script("nx_setup.py", ["status"])
+    assert "DeprecationWarning" not in str(raised.value)
 
 
 def test_with_no_stderr_the_message_says_only_what_it_knows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -67,7 +85,8 @@ def test_a_rerun_with_the_unit_present_says_why_it_exits_zero_and_names_the_logs
     )
     assert init_mod._provision_and_autostart_service(None) is None
     err = " ".join(capsys.readouterr().err.split())
-    assert "registered before this run, so it owns bring-up" in err and "exits 0" in err, err
+    assert "This is not an error: the autostart unit registered before this run brings it up" in err, err
+    assert "run `nx init` again to finish its last steps" in err, err
     assert str(tmp_path / "logs" / "storage_service.log") in err and "storage_service_native.log" in err, err
 
 
@@ -79,7 +98,9 @@ def test_a_ladder_that_did_not_converge_says_what_to_do(monkeypatch: pytest.Monk
         _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=InMemoryLedger)
     message = exc.value.message
     assert message.startswith("upgrade ladder did not converge — labels: verify-failed"), message
-    assert message.endswith("Fix what each step names; `nx upgrade --dry-run` lists the steps still pending."), message
+    assert message.endswith(
+        "Fix what each step above reports, then run `nx upgrade` again (`nx upgrade --dry-run` lists the steps still pending)."
+    ), message
 
 
 @pytest.mark.t2_tenant  # the walk defers, so the deferral log writes its T2 note (nexus-0sm1t)
@@ -99,6 +120,7 @@ def test_a_deferred_step_says_it_runs_again(monkeypatch: pytest.MonkeyPatch, cap
         ("pg_credentials", "run `nx upgrade` to migrate this install's data"),
         ("install_mode", "run `nx upgrade` to migrate this install's data"),
         ("service_url", "run `nx upgrade` to migrate this install's data"),
+        ("service_url_env", "run `nx upgrade` to migrate this install's data"),
         (None, "nothing is set up on this machine yet: run `nx init`"),
     ],
 )
@@ -111,7 +133,9 @@ def test_the_install_closing_line_names_the_next_command_for_this_box(tmp_path: 
     elif setup == "install_mode":
         (tmp_path / "config.yml").write_text("install:\n  mode: local\n")
     elif setup == "service_url":
-        (tmp_path / "config.yml").write_text("service_url: https://example.invalid\n")
+        (tmp_path / "config.yml").write_text("credentials:\n  service_url: https://example.invalid\n")
+    elif setup == "service_url_env":
+        monkeypatch.setenv("NX_SERVICE_URL", "https://example.invalid")
     line = self_cmd._after_install_line()
     assert expected in line, line
     assert "if this upgraded" not in line and "instead" not in line, line

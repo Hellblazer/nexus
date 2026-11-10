@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from typing import Any
@@ -342,16 +343,30 @@ def terminal_commands(mode: str) -> str:
 _FALLBACK = " Setup can also be done in a terminal: the user runs `nx init`."
 
 
+#: Masks for a quoted stderr line, as nx_setup.py masks its cause lines: credentials in a URL, a bearer token,
+#: and a ``token=`` style value.
+_SECRET_MASKS = (
+    (re.compile(r"(://)[^/\s:@]+:[^/\s@]+@"), r"\1***@"),
+    (re.compile(r"\b(bearer)\s+\S+", re.IGNORECASE), r"\1 ***"),
+    (re.compile(r"\b(token|password|secret|api[_-]?key)(\s*[=:]\s*)\S+", re.IGNORECASE), r"\1\2***"),
+)
+
+
 def _failure_help(stderr: str | None = None) -> str:
-    """What follows a failed setup-process message (F4, nexus-f3yqd.6): the last line the process printed to
-    standard error (a crash's exception line), then the terminal fallback. The setup log's path is not named
-    here: only ``nx_setup.py`` knows the setup directory's layout (tests/mcp/test_setup_tools.py guards that),
-    and ``setup_status`` names the log of any run that got as far as writing one."""
+    """What follows a failed setup-process message (F4, nexus-f3yqd.6): for a process that exited non-zero,
+    its last line on standard error (a crash's exception line), masked; then the terminal fallback. The
+    setup log's path is not named here: only ``nx_setup.py`` knows the setup directory's layout
+    (tests/mcp/test_setup_tools.py guards that), and ``setup_status`` names the log of any run that got as
+    far as writing one."""
     lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
     if not lines:
         return _FALLBACK
-    last = lines[-1] if len(lines[-1]) <= 300 else lines[-1][:297] + "..."
-    return f" It printed: {last}{_FALLBACK}"
+    last = lines[-1]
+    for pattern, replacement in _SECRET_MASKS:
+        last = pattern.sub(replacement, last)
+    if len(last) > 300:
+        last = last[:297] + "..."
+    return f" Its last line on standard error was: {last}{_FALLBACK}"
 
 
 def _call_script(script: str, args: list[str]) -> dict[str, Any]:
@@ -375,9 +390,9 @@ def _call_script(script: str, args: list[str]) -> dict[str, Any]:
     try:
         view = json.loads(lines[-1])
     except ValueError as exc:
-        raise SetupError(f"The setup process printed something other than JSON.{_failure_help(done.stderr)}") from exc
+        raise SetupError(f"The setup process printed something other than JSON.{_FALLBACK}") from exc
     if not isinstance(view, dict) or "state" not in view:
-        raise SetupError(f"The setup process printed an answer with no state.{_failure_help(done.stderr)}")
+        raise SetupError(f"The setup process printed an answer with no state.{_FALLBACK}")
     return view
 
 

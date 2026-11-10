@@ -168,7 +168,8 @@ def _upgrade_steps(
         # on-disk state each invocation, never recorded.
         steps.append((
             "Bring the engine, the PDF stack and the runtime to this release",
-            "checks only, under --skip-t3: it installs and cycles nothing" if skip_t3 else
+            "under --skip-t3 it skips the engine install, the PDF stack rebuild and the service restart"
+            if skip_t3 else
             "can download the engine and its PostgreSQL bundle, rebuild the PDF stack and restart services "
             "still on the old version; minutes when it does",
             lambda: _note_failure(failures, _converge_preconditions(auto_mode=auto_mode, skip_t3=skip_t3)),
@@ -661,8 +662,8 @@ def _run_ladder(
         summary = "; ".join(f"{run.name}: {run.outcome.value} ({run.detail})" for run in failed)
         # F17 (nexus-f3yqd.6): say what to do. The step reporter around the ladder prints the retry line.
         raise click.ClickException(
-            f"upgrade ladder did not converge — {summary}. Fix what each step names; "
-            "`nx upgrade --dry-run` lists the steps still pending."
+            f"upgrade ladder did not converge — {summary}. Fix what each step above reports, then run "
+            "`nx upgrade` again (`nx upgrade --dry-run` lists the steps still pending)."
         )
     if not report.converged and not auto_mode:
         # Deferred-only: the RDR-142 would-defer class is non-fatal by

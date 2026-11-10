@@ -159,5 +159,5 @@ def test_skip_t3_announces_no_restart_it_does_not_do(ran) -> None:
     assert "Restart running services" not in out, out
     assert "_cycle_supervised_daemons_to_current" not in ran
     pre = next(line for line in out.splitlines() if "Bring the engine, the PDF stack and the runtime" in line)
-    assert "restart" not in pre and "download" not in pre, pre
-    assert "--skip-t3" in pre, pre
+    assert "under --skip-t3 it skips the engine install, the PDF stack rebuild and the service restart" in pre, pre
+    assert "can download" not in pre, pre

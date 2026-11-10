@@ -532,10 +532,11 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
             # F9 (nexus-f3yqd.6): say why this is exit 0 when a fresh install in the same state is exit 1, and
             # name the logs the fresh branch names.
             click.echo(
-                "  The service has not published a lease yet. The autostart unit was registered before this "
-                "run, so it owns bring-up (it may still be starting, e.g. just after a login) and `nx init` "
-                "exits 0. If `nx daemon service status` shows no running service after a minute, read the "
-                f"supervisor log {config_dir / 'logs' / 'storage_service.log'} and the engine's own log in "
+                "  The service has not published a lease yet. This is not an error: the autostart unit "
+                "registered before this run brings it up (it may still be starting, e.g. just after a login). "
+                "Once `nx daemon service status` shows it running, run `nx init` again to finish its last "
+                "steps. If it is still not running after a minute, read the supervisor log "
+                f"{config_dir / 'logs' / 'storage_service.log'} and the engine's own log in "
                 f"{config_dir / 'logs'} (storage_service_native.log, or storage_service_jar.log for a jar "
                 "launch).",
                 err=True,

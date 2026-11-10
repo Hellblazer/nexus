@@ -1034,10 +1034,11 @@ _BUILD_FAILURE_PREFIXES = ("generation build failed", "legacy migration failed")
 #: ``<advice>\n\nuv output:`` shape :func:`split_build_failure` reads, and names no network or TLS words, so
 #: ``pdf_stack``'s classifier reads the message as it read uv's output alone.
 _UNRECOGNISED_BUILD_HINT = (
-    "nexus does not recognise this build failure; uv's first `error:` line below names the cause. "
-    "Adding --dry-run to the same `nx self install` command prints the build command, to run by hand "
-    "and read its whole output."
+    "nexus does not recognise this build failure; uv's output below says why it failed. "
+    "`nx self install --dry-run` prints the build command, to run by hand and read its whole output."
 )
+#: The same for a first install (``--bootstrap``), where there is no ``nx`` on PATH to run ``--dry-run`` with.
+_UNRECOGNISED_BOOTSTRAP_HINT = "nexus does not recognise this build failure; uv's output below says why it failed."
 
 
 def _target_installer(
@@ -1603,7 +1604,7 @@ def _build_flip_shims(
                 index_failure_hint(detail, bootstrap=bootstrap), platform_failure_hint(detail),
                 torch_backend_hint(detail),
             ) if h
-        ) or _UNRECOGNISED_BUILD_HINT
+        ) or (_UNRECOGNISED_BOOTSTRAP_HINT if bootstrap else _UNRECOGNISED_BUILD_HINT)
         # A streamed build already showed uv's output: repeat only its tail.
         shown = _tail(detail) if progress else detail
         label = "uv output (last lines; the full output is above)" if progress else "uv output"
@@ -1755,7 +1756,9 @@ def _windows_build_flip_shims(
         )
     except core.GenerationError as exc:
         detail = str(exc)
-        hint = index_failure_hint(detail, bootstrap=bootstrap) or _UNRECOGNISED_BUILD_HINT
+        hint = index_failure_hint(detail, bootstrap=bootstrap) or (
+            _UNRECOGNISED_BOOTSTRAP_HINT if bootstrap else _UNRECOGNISED_BUILD_HINT
+        )
         raise click.ClickException(
             f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
         ) from exc
@@ -2422,16 +2425,17 @@ def install_cmd(
 
 
 def _box_is_set_up() -> bool:
-    """Whether ``nx init`` (or onboarding to a managed service) ever ran here: ``install.mode`` or a
-    ``service_url`` in the saved config, or the local service's ``pg_credentials`` (the evidence
-    :func:`nexus.config.is_local_mode` reads)."""
+    """Whether ``nx init`` (or onboarding to a managed service) ever ran here: the local service's
+    ``pg_credentials``, a configured service address (``credentials.service_url`` or ``NX_SERVICE_URL``,
+    read as :func:`nexus.config.is_local_mode` reads it), or a recorded ``install.mode``."""
     from nexus import config as _config  # noqa: PLC0415 — deferred, keeps the CLI's cold start light
 
     try:
         if (_config.nexus_config_dir() / "pg_credentials").is_file():
             return True
-        saved = _config.load_config()
-        return bool((saved.get("install") or {}).get("mode") or str(saved.get("service_url") or "").strip())
+        if _config.get_credential("service_url").strip():  # config.yml credentials, or NX_SERVICE_URL
+            return True
+        return bool((_config.load_config().get("install") or {}).get("mode"))
     except Exception:  # noqa: BLE001 — an unreadable config reads as set up: `nx upgrade` is the safe advice there
         return True
 
