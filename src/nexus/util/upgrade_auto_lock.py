@@ -104,10 +104,25 @@ class AutoLock:
     def holder_pid(self) -> int | None:
         """The pid the holder wrote, or ``None`` (unreadable, or this process holds it)."""
         try:
-            first = (self.path.read_text(encoding="utf-8").split() or [""])[0]
+            first = (read_holder_text(self.path).split() or [""])[0]
             return int(first) if first.isdigit() else None
         except (OSError, ValueError):
             return None
+
+
+#: Where the holder's text starts. Windows locks a byte range (msvcrt.locking, one byte at the
+#: file position) and no other handle may read a locked byte, the same process included, so a
+#: pid written over the locked byte 0 could not be read while the lock was held (holder_pid
+#: answered None there). The lock stays on byte 0, which the lockstep hook's copy of the probe
+#: (conexus/hooks/scripts/version_lockstep_action.py) also takes; the text starts at byte 1.
+_TEXT_OFFSET = 1
+
+
+def read_holder_text(path: Path) -> str:
+    """The holder's ``<pid>[ pytest]`` text, read past the locked byte so it reads on Windows too."""
+    with open(path, "rb") as fh:
+        fh.seek(_TEXT_OFFSET)
+        return fh.read().decode("utf-8", errors="replace").strip()
 
 
 def acquire_auto_lock(config_dir: Path | None = None) -> AutoLock:
@@ -136,7 +151,7 @@ def acquire_auto_lock(config_dir: Path | None = None) -> AutoLock:
     try:
         os.ftruncate(fd, 0)
         mark = " pytest" if os.environ.get("PYTEST_CURRENT_TEST") else ""
-        os.write(fd, f"{os.getpid()}{mark}".encode("ascii"))
+        os.write(fd, f" {os.getpid()}{mark}".encode("ascii"))  # byte 0 is the locked byte
         os.lseek(fd, 0, os.SEEK_SET)  # msvcrt unlocks from the current position
     except OSError:
         pass  # the pid is for a human; the lock is what counts

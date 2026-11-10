@@ -68,7 +68,8 @@ def test_a_second_acquire_finds_the_lock_held_and_a_release_frees_it(config_dir:
     first = acquire_auto_lock()
     try:
         assert first.held_by_other is False and first.fd is not None
-        assert (config_dir / lock_mod.LOCK_NAME).read_text(encoding="utf-8") == f"{os.getpid()} pytest"  # a test's take is marked (nexus-iox43)
+        # read past the locked byte: Windows refuses a read of it from any other handle
+        assert lock_mod.read_holder_text(config_dir / lock_mod.LOCK_NAME) == f"{os.getpid()} pytest"  # a test's take is marked (nexus-iox43)
         second = acquire_auto_lock()
         assert second.held_by_other is True and second.fd is None
         assert second.holder_pid() == os.getpid()
@@ -85,20 +86,23 @@ def test_a_killed_holder_does_not_wedge_the_lock(config_dir: Path) -> None:
     """Stale-pid tolerance: the pid in the file is for a human. The OS drops the lock with the process."""
     holder = subprocess.Popen(  # noqa: S603 — argv list, the test's own interpreter
         [sys.executable, "-c", textwrap.dedent(f"""
-            import sys, time
+            import os, sys, time
             from pathlib import Path
             from nexus.util.upgrade_auto_lock import acquire_auto_lock
             lock = acquire_auto_lock(Path({str(config_dir)!r}))
             assert not lock.held_by_other
-            print("held", flush=True)
+            print("held", os.getpid(), flush=True)
             time.sleep(60)
         """)],
         stdout=subprocess.PIPE, text=True,
     )
     try:
-        assert holder.stdout.readline().strip() == "held"
+        word, pid = holder.stdout.readline().split()
+        assert word == "held"
         assert auto_lock_held() is True, "a live holder in ANOTHER process blocks"
-        assert (config_dir / lock_mod.LOCK_NAME).read_text(encoding="utf-8") == f"{holder.pid} pytest"  # inherits PYTEST_CURRENT_TEST
+        # The holder's own pid, not Popen's: on Windows a venv's python.exe is a launcher that
+        # runs the interpreter as its child, so Popen.pid is the launcher's.
+        assert lock_mod.read_holder_text(config_dir / lock_mod.LOCK_NAME) == f"{pid} pytest"  # inherits PYTEST_CURRENT_TEST
     finally:
         holder.kill()
         holder.wait(timeout=10)
@@ -245,7 +249,10 @@ def hook(monkeypatch, config_dir: Path) -> _Hook:
 
     def _record(*a, **k):
         seen.spawned.append(a)
-        raise OSError("recorded, not spawned")
+        # ValueError, not OSError: on Windows the hook retries a spawn that raises OSError
+        # without the job-breakaway flag, so one spawn would record twice. The hook's caller
+        # catches ValueError the same way (upgrade_auto.run), so the path is the same.
+        raise ValueError("recorded, not spawned")
 
     setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", _record)
     monkeypatch.setattr(upgrade_auto, "_emit", lambda level, event, **f: seen.events.append(event))
