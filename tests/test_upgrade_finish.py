@@ -4542,14 +4542,15 @@ class TestFinishPassUnderNxUpgrade:
         # deadline, engine unreachable, the --auto deadline) or the run can raise first.
         assert "converges" not in line, line
 
-    def test_nx_upgrade_auto_asks_no_rung_detect_and_still_says_it_cycles_the_service(self, tmp_path, monkeypatch):
+    def test_nx_upgrade_auto_asks_no_rung_detect_and_leaves_the_service_to_a_person(self, tmp_path, monkeypatch):
         """nexus-75w5d: the unattended run's finish pass does not call any rung's detect() (a rung read here
         runs before the command's own work and its single-instance lock, and the only rung line it could
-        print is 'this nx upgrade runs it next'). The service line is unchanged."""
+        print is 'this nx upgrade runs it next'). P0 (nexus-f3yqd): --auto never restarts the storage
+        service, so the line says a person cycles it, not that this run does."""
         line = self._finish(tmp_path, monkeypatch, ["-v", "upgrade", "--auto"])
         assert line is not None and "7.86.0 -> 7.86.1" in line
-        assert "NEEDS HUMAN" not in line, line
-        assert "service (pid 64750) is the storage service — this `nx upgrade` cycles it next" in line
+        assert "NEEDS HUMAN: service (pid 64750) is the storage service — cycle it" in line, line
+        assert "this `nx upgrade` cycles it next" not in line, line
         assert "rdr192-manifest-backfill" not in line, line
 
     @pytest.mark.parametrize("argv", [["doctor"], ["index", "repo", "."], ["daemon", "restart-stale"]])

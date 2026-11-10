@@ -1068,7 +1068,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: None,  # no live lease
-            _run_fn=lambda cmd, **kw: subprocess_calls.append(cmd),
+            _run_fn=lambda cmd, **kw: (subprocess_calls.append(cmd), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
         )
 
@@ -1091,7 +1091,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,  # live lease
-            _run_fn=lambda cmd, **kw: subprocess_calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (subprocess_calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
         )
 
@@ -1131,7 +1131,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,
-            _run_fn=lambda cmd, **kw: subprocess_calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (subprocess_calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
             _installed_version_fn=lambda: "9.9.9",
         )
@@ -1152,7 +1152,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,
-            _run_fn=lambda cmd, **kw: subprocess_calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (subprocess_calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
             _installed_version_fn=lambda: "9.9.9",
         )
@@ -1171,7 +1171,7 @@ class TestCycleStorageServiceToCurrent:
             calls: list[list[str]] = []
             _cycle_storage_service_to_current(
                 _discover_fn=lambda lease=lease: lease,
-                _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+                _run_fn=lambda cmd, **kw: (calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
                 _nx_bin_fn=lambda: ["nx"],
                 _installed_version_fn=lambda: "9.9.9",
             )
@@ -1197,7 +1197,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,
-            _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
         )
         assert calls == [], "default _installed_version_fn must drive the skip"
@@ -1223,7 +1223,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,
-            _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
         )
         assert len(calls) == 2, (
@@ -1243,7 +1243,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,
-            _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
             _installed_version_fn=lambda: "",
         )
@@ -1283,7 +1283,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=_real_discover,
-            _run_fn=lambda cmd, **kw: subprocess_calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (subprocess_calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
         )
 

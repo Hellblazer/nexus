@@ -1256,6 +1256,7 @@ class TestMatrixIsNotVacuous:
         def _run(argv, **_kwargs):
             # argv == [*nx, "daemon", "service", <verb>]
             calls.append(argv[-1])
+            return subprocess.CompletedProcess(argv, 0)  # the cycle reads the exit code
 
         # A live lease is present -> the cycle must fire stop then start.
         _cycle_storage_service_to_current(

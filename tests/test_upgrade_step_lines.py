@@ -48,7 +48,8 @@ def test_auto_is_quiet_on_stdout(ran) -> None:
     result = CliRunner().invoke(up.upgrade, ["--auto"])
     assert result.exit_code == 0
     assert "Step " not in result.stdout and "Summary:" not in result.stdout
-    assert ran == ["_run_upgrade", "_converge_preconditions", "_run_ladder", "_cycle_supervised_daemons_to_current"]
+    # P0 (nexus-f3yqd): --auto never restarts the storage service, so the final restart is not run.
+    assert ran == ["_run_upgrade", "_converge_preconditions", "_run_ladder"]
 
 
 def test_a_failing_step_says_so_and_the_summary_still_prints(monkeypatch, ran) -> None:
@@ -104,7 +105,7 @@ def test_a_finish_pass_that_never_announces_prints_nothing(capsys) -> None:
 def test_check_version_transition_wraps_the_pass_in_the_heartbeat(monkeypatch, capsys, tmp_path) -> None:
     from nexus import upgrade_finish
 
-    def fake_pass(config_dir, *, preview=None, _on_announce=None):
+    def fake_pass(config_dir, *, preview=None, engine_report_only=False, _on_announce=None):
         _on_announce("7.99.0", "8.0.0")
         return "summary"
 
@@ -117,7 +118,7 @@ def test_check_version_transition_wraps_the_pass_in_the_heartbeat(monkeypatch, c
 def test_a_finish_pass_that_raises_does_not_claim_it_finished(monkeypatch, capsys, tmp_path) -> None:
     from nexus import upgrade_finish
 
-    def fake_pass(config_dir, *, preview=None, _on_announce=None):
+    def fake_pass(config_dir, *, preview=None, engine_report_only=False, _on_announce=None):
         _on_announce("7.99.0", "8.0.0")
         raise RuntimeError("boom")
 

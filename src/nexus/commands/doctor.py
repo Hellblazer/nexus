@@ -3057,8 +3057,9 @@ def _doctor_progress() -> Any:
     "--fix",
     is_flag=True,
     default=False,
-    help="Reclaim catalog garbage (orphaned links, tombstones past 1 day); "
-         "then HNSW ef tuning on local collections (local mode only).",
+    help="DELETE catalog garbage, permanently: orphaned links, tombstoned documents "
+         "past 1 day and their stranded chunks (no undo; preview the counts with "
+         "--fix --dry-run). Then HNSW ef tuning on local collections (local mode only).",
 )
 @click.option(
     "--fix-paths",
@@ -3071,7 +3072,7 @@ def _doctor_progress() -> Any:
     is_flag=True,
     default=False,
     help="Report affected entries without writing changes "
-         "(use with --fix-paths or --trim-telemetry).",
+         "(use with --fix, --fix-paths or --trim-telemetry).",
 )
 @click.option(
     "--check-schema",
@@ -3734,6 +3735,25 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if probe_edge:
         _run_probe_edge(expect_host=expect_host)
+        return
+
+    if fix and dry_run:
+        # First-run audit item 27 (nexus-mjmjl): --fix deletes for good, so the row
+        # that suggests it also offers this preview, which counts exactly what --fix
+        # would delete (the same reads catalog_garbage makes) and writes nothing.
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.garbage import TRASH_MAX_AGE_DAYS, catalog_garbage  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        preview = catalog_garbage(make_catalog_reader())
+        if preview.error:
+            raise click.ClickException(
+                f"could not count catalog garbage: {preview.error.rstrip('. ')}. Check the engine with `nx doctor`."
+            )
+        click.echo(
+            f"--fix would delete, permanently: {preview.orphaned_links} orphaned link(s) (links whose"
+            f" document no longer exists), {preview.trash_documents} document(s) deleted more than"
+            f" {TRASH_MAX_AGE_DAYS} day ago, and the {preview.stranded_chunks} chunk(s) those documents"
+            " left behind. Nothing was deleted; run `nx doctor --fix` to delete them."
+        )
         return
 
     if fix:

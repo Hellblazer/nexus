@@ -3814,7 +3814,8 @@ Stranded-install check (nexus-gynt2): a doctor row (`Stranded pre-PG install`) g
 ```
 nx doctor --clean-checkpoints   # Delete orphaned PDF checkpoint files
 nx doctor --clean-pipelines     # Delete orphaned pipeline buffer entries
-nx doctor --fix                 # Reclaim catalog garbage (orphaned links, one-day purge-trash)
+nx doctor --fix --dry-run       # Count the catalog garbage --fix would delete; deletes nothing
+nx doctor --fix                 # DELETE catalog garbage permanently (orphaned links, tombstones past 1 day)
 nx doctor --fix-paths           # Migrate absolute file_path entries to relative (catalog + T3)
 nx doctor --fix-paths --dry-run # Preview migration without applying
 ```
@@ -3843,9 +3844,9 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--json` | Emit machine-parseable JSON. On the MAIN sweep (no mode flag) this emits `{"checks": [{name, ok, status: ok\|warn\|fail, detail, fatal, fix_suggestions}], "summary": {total, ok, warn, fail}, "local_mode"}` (nexus-0vycz — previously the flag was silently ignored there). Also honored by `--check-search`, `--check-quotas`, `--check-mcp-logs`. Combining `--json` with any other mode flag that cannot honor it is a usage error, never a silent ignore. |
 | `--verbose` | Main sweep only: add the detail the sweep leaves out (nexus-i827c). The Chunks leaf bloat row, when it warns, lists each leaf of `nexus.chunks` that needs attention, read from the engine's operator-only `GET /v1/admin/chunks-leaves` (needs the root service token). A listing from an expired engine view is headed `STALE` with the time of its last read. Ignored by the `--check-*` modes. This is the `nx doctor` flag, not the global `-v`/`--verbose` that turns on debug logging (it is a different flag: `nx -v doctor` and `nx doctor --verbose` do different things) |
 
-**Garbage sweep (7.32.0; Sam, 2026-09-05).** Two rows on every run. `Local garbage` reaps, in place, the litter nothing else touches: `t1_mint_<session>.lock` files older than a day whose session holds no lease (706 had accumulated since July), rotated logs (`*.log.N`) older than 14 days, and `operator-timeout-*` / `operator-budget-*` dispatch dumps older than 7. `Catalog garbage` counts orphaned links (an endpoint that resolves to no live document) and tombstoned documents plus stranded chunks past **one** day; a non-zero count is a ⚠ naming `nx doctor --fix`, and an unreachable engine is a ⚠ too, never a clean row. Each litter class this repo produces is a row in `nexus.garbage`; a new class is a new row there, not a new command.
+**Garbage sweep (7.32.0; Sam, 2026-09-05).** Two rows on every run. `Local garbage` reaps, in place, the litter nothing else touches: `t1_mint_<session>.lock` files older than a day whose session holds no lease (706 had accumulated since July), rotated logs (`*.log.N`) older than 14 days, and `operator-timeout-*` / `operator-budget-*` dispatch dumps older than 7. `Catalog garbage` counts orphaned links (an endpoint that resolves to no live document) and tombstoned documents plus stranded chunks past **one** day; a non-zero count is a ⚠ that offers `nx doctor --fix --dry-run` (counts what would go, deletes nothing) before `nx doctor --fix` (deletes them permanently), and an unreachable engine is a ⚠ too, never a clean row. Each litter class this repo produces is a row in `nexus.garbage`; a new class is a new row there, not a new command.
 
-The `--fix` flag first reclaims the catalog garbage the sweep counted (deletes every orphaned link, then runs the one-day `purge-trash`; fails loud on an engine error), then runs the HNSW `search_ef` step, which does nothing on the service-backed store (pgvector tunes HNSW on the server, through the engine's `NX_HNSW_EF_SEARCH`); in cloud mode it prints that tuning is server-side.
+The `--fix` flag permanently deletes the catalog garbage the sweep counted (there is no undo; `--fix --dry-run` shows the counts and deletes nothing): it deletes every orphaned link, then runs the one-day `purge-trash` (it fails loud on an engine error), then runs the HNSW `search_ef` step, which does nothing on the service-backed store (pgvector tunes HNSW on the server, through the engine's `NX_HNSW_EF_SEARCH`); in cloud mode it prints that tuning is server-side.
 
 **`Beads PRIME.md (user-level)`** (nexus-cnzei.8). Reports `[]` (no row at
 all) when neither `bd` nor the beads Claude Code plugin is detected on this
@@ -5220,6 +5221,8 @@ nx upgrade --yes                  # Unattended: pre-approve the billed re-embed 
 | `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
 | `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
 | `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see [`nx init`](#nx-init). For a standing opt-out use `nx config set beads_prime.manage false` instead |
+
+**The storage-service restart.** An upgrade restarts a running storage service on the new version. An interactive run prints a line before the restart and one after it. If the new service is still starting (its first start after an upgrade can migrate the database for several minutes), it says so, points at `nx daemon service status`, and the upgrade still succeeds. If the restart fails, the upgrade ends with what failed, the command to run and what `nx daemon service start` said, and exits 1. `--auto` and the lockstep hook's unattended run (`NX_UPGRADE_UNATTENDED=1`) print nothing for it, log it, and exit 0.
 
 Environment: `NX_ASSUME_YES=1` is `--yes`. `NX_UPGRADE_AUTO_DEADLINE_SECONDS` (seconds, default `900`, minimum `60`; anything else falls back to `900` with a warning) is the `--auto` time limit above and is ignored by an interactive `nx upgrade`.
 

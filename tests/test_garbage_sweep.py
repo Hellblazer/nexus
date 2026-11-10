@@ -8,6 +8,10 @@ import time
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
+
+from nexus import health
+from nexus.cli import main
 
 from nexus.db.t1 import (
     _t1_session_mint_lock_path,
@@ -303,3 +307,59 @@ class TestConnectMarkerAndCheckStateSweep:
         report = sweep_local_garbage(tmp_path, now=NOW)
         assert not old.exists() and young.exists()
         assert report.removed == {"connect_check_state": [old.name]}
+
+
+# ── nx doctor --fix --dry-run (first-run audit item 27, nexus-mjmjl) ─────────────
+
+
+class TestDoctorFixDryRun:
+    """--fix deletes for good, so the doctor row that suggests it offers this preview first: it
+    counts what --fix would delete with the same reads catalog_garbage makes, and opens no writer."""
+
+    def _invoke(self, monkeypatch, catalog):
+        opened: list[str] = []
+
+        def no_writer():
+            opened.append("writer")
+            raise AssertionError("--fix --dry-run opened the catalog writer")
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: catalog)
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog_writer", no_writer)
+        return CliRunner().invoke(main, ["doctor", "--fix", "--dry-run"]), opened
+
+    def test_it_counts_what_fix_would_delete_and_deletes_nothing(self, monkeypatch) -> None:
+        catalog = _FakeCatalog(_LINKS, _TRASH)
+        result, opened = self._invoke(monkeypatch, catalog)
+        assert result.exit_code == 0, result.output
+        assert opened == []
+        assert catalog.unlinked == []
+        assert all(c["dry_run"] is True for c in catalog.purge_calls) and catalog.purge_calls
+        text = " ".join(result.output.split())
+        assert "--fix would delete, permanently: 2 orphaned link(s)" in text
+        assert "880 document(s) deleted more than 1 day ago" in text
+        assert "the 1503 chunk(s) those documents left behind" in text
+        assert "Nothing was deleted" in result.output
+
+    def test_an_engine_error_fails_loud_instead_of_reading_as_nothing(self, monkeypatch) -> None:
+        result, opened = self._invoke(monkeypatch, _FakeCatalog(_LINKS, _TRASH, raise_on="links"))
+        assert result.exit_code != 0
+        assert "could not count catalog garbage: engine down" in result.output
+        assert opened == []
+
+
+def test_the_doctor_row_offers_the_preview_before_the_delete(monkeypatch, tmp_path) -> None:
+    """The row itself, from _check_garbage on a fake catalog with litter (review r1, S5)."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _FakeCatalog(_LINKS, _TRASH))
+    [row] = [r for r in health._check_garbage() if r.label == "Catalog garbage"]
+    assert row.fix_suggestions == [
+        "nx doctor --fix --dry-run (shows what would be deleted; deletes nothing)",
+        "nx doctor --fix (deletes them permanently)",
+    ]
+
+
+def test_the_fix_help_says_the_delete_is_permanent() -> None:
+    text = " ".join(CliRunner().invoke(main, ["doctor", "--help"]).output.split())
+    assert "DELETE catalog garbage, permanently" in text
+    assert "no undo; preview the counts with --fix --dry-run" in text
+    assert "(use with --fix, --fix-paths or --trim-telemetry)" in text

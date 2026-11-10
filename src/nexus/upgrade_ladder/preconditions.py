@@ -49,6 +49,9 @@ class PreconditionReport:
     current: bool
     detail: str = ""
     actions: tuple[str, ...] = ()
+    #: The user's sentence when this axis's converge action failed (the process axis's
+    #: restart); the command reports it and fails an interactive run (nexus-mjmjl item 14).
+    failure: str | None = None
 
 
 def _default_plugin_version() -> str | None:
@@ -230,6 +233,34 @@ def _engine_report(status: Any, *, actions: tuple[str, ...] = ()) -> Preconditio
     )
 
 
+def _version_key(version: str) -> tuple[int, ...] | None:
+    """The leading dotted integers of *version* ("8.0.1.dev3" -> (8, 0, 1)), or None."""
+    parts: list[int] = []
+    for piece in version.strip().lstrip("v").split("."):
+        digits = ""
+        for ch in piece:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+        if digits != piece:
+            break
+    return tuple(parts) if parts else None
+
+
+def lease_is_newer(lease_version: str, installed: str) -> bool:
+    """True when the service's lease names a NEWER client than this one (P0, nexus-f3yqd).
+
+    With two clients on one box the lease is written by whichever started the service; to the
+    older client a newer lease reads as a mismatch, and cycling it downgrades the service and
+    flip-flops between the two. A newer lease is reported, never cycled. Unparseable versions
+    are not newer (the caller keeps its mismatch rule)."""
+    lease_key, installed_key = _version_key(lease_version), _version_key(installed)
+    return lease_key is not None and installed_key is not None and lease_key > installed_key
+
+
 def _process_report(lease: Any | None, installed: str) -> PreconditionReport:
     if lease is None:
         return PreconditionReport(
@@ -245,6 +276,16 @@ def _process_report(lease: Any | None, installed: str) -> PreconditionReport:
             applicable=True,
             current=True,
             detail=f"supervisor runs installed {installed}",
+        )
+    if lease_version and installed and lease_is_newer(lease_version, installed):
+        return PreconditionReport(
+            name="process",
+            applicable=True,
+            current=True,
+            detail=(
+                f"the supervisor runs {lease_version}, newer than this client's {installed}"
+                " (another installed client started it); not downgrading it"
+            ),
         )
     # f0pmd divergence preserved: an empty/legacy lease version cannot prove
     # currency — fail TOWARD stale (a bounded cycle beats a stale supervisor).
@@ -374,11 +415,12 @@ def converge_preconditions(
     config_dir: Path,
     allow_engine_install: bool = True,
     allow_process_cycle: bool = True,
+    auto_mode: bool = True,
     _engine_detect_fn: Callable[[], Any] | None = None,
     _engine_converge_fn: Callable[[], list[str]] | None = None,
     _lease_fn: Callable[[], Any | None] | None = None,
     _installed_version_fn: Callable[[], str] | None = None,
-    _cycle_fn: Callable[[], None] | None = None,
+    _cycle_fn: Callable[[], str | None] | None = None,
     _provisioned_fn: Callable[[], bool] | None = None,
     _plugin_version_fn: Callable[[], str | None] | None = None,
     _lockstep_marker_fn: Callable[[], str | None] | None = None,
@@ -388,15 +430,13 @@ def converge_preconditions(
     process (re-derived AFTER the engine step; see module docstring for
     the coalescing argument).
 
-    ``allow_engine_install=False`` (the ``--auto`` form) prevents a
-    REDUNDANT same-invocation engine install: on a version transition the
-    root-level finisher (``check_version_transition``, which fires before
-    this stage on the same invocation) has already run the single shared
-    converge inline. The SessionStart timeout is protected by that path's
-    TRANSITION-GATING (at most one install per version bump, idempotent
-    skip every other session), not by this flag — see the P3 decision
-    addendum (nexus_rdr/185-p3-engine-trigger-duality-decision): one
-    mechanism, temporarily two triggers, the second P4-scoped for demotion.
+    ``allow_engine_install=False`` (the ``--auto`` form) installs nothing here.
+    Since P0 (nexus-f3yqd) the root-level finisher (``check_version_transition``,
+    which fires before this stage) only REPORTS a stale engine under ``--auto``
+    too, so neither trigger installs or restarts it in the hook's run: a stale
+    engine waits for a person's ``nx upgrade``, and ``nx doctor`` names it.
+    ``allow_process_cycle=False`` (``--auto``, the lockstep hook's unattended
+    run, ``--skip-t3``) reports a stale process and restarts nothing.
 
     Coalescing is the HAPPY-PATH property: a failed engine restart (or a
     start that returns a stale still-alive lease) leaves the process
@@ -421,10 +461,12 @@ def converge_preconditions(
         _installed_version_fn if _installed_version_fn is not None else _default_installed_version
     )
 
-    def _default_cycle() -> None:
+    def _default_cycle() -> str | None:
         from nexus.commands.upgrade import _cycle_storage_service_to_current  # noqa: PLC0415 — deferred to avoid import cycle
 
-        _cycle_storage_service_to_current()
+        # The command's own mode: an interactive upgrade says what the restart is doing and
+        # gets its failure back, so a start that fails here is not silent (nexus-mjmjl).
+        return _cycle_storage_service_to_current(auto_mode=auto_mode)
 
     cycle_fn = _cycle_fn if _cycle_fn is not None else _default_cycle
 
@@ -455,14 +497,17 @@ def converge_preconditions(
     # contract (P3 review Medium).
     process = _process_report(lease_fn(), installed)
     if not process.current and allow_process_cycle:
-        cycle_fn()
+        failure = cycle_fn()
         process = _process_report(lease_fn(), installed)  # re-derive post-cycle
         process = PreconditionReport(
             name=process.name,
             applicable=process.applicable,
-            current=process.current,
-            detail=process.detail,
-            actions=("cycled supervised service to the installed version",),
+            # A failed restart can leave no lease, which reads as "nothing to cycle":
+            # the cycle's own verdict decides, not the absence of a stale lease.
+            current=process.current and failure is None,
+            detail=process.detail if failure is None else "the restart failed (reported at the end)",
+            actions=() if failure else ("cycled supervised service to the installed version",),
+            failure=failure,
         )
     reports.append(process)
 

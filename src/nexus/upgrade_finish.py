@@ -331,6 +331,12 @@ class UpgradeInvocation:
     auto: bool = False  # the unattended `--auto` run: the finish pass must not detect() a rung (nexus-75w5d)
 
 
+def _env_unattended() -> bool:
+    from nexus.util.upgrade_auto_lock import env_unattended  # noqa: PLC0415 — stdlib-only, deferred
+
+    return env_unattended()
+
+
 def upgrade_invocation(argv: list[str] | None = None) -> UpgradeInvocation | None:
     """What THIS process's ``nx upgrade`` run will do after the finish pass, or ``None``
     when the process is not a real ``nx upgrade`` run.
@@ -359,7 +365,10 @@ def upgrade_invocation(argv: list[str] | None = None) -> UpgradeInvocation | Non
     if PREVIEW_ARGV_FLAG in args or "--help" in args or "-h" in args:
         return None
     return UpgradeInvocation(
-        walks_ladder=True, cycles_service="--skip-t3" not in args, auto="--auto" in args,
+        walks_ladder=True,
+        # P0 (nexus-f3yqd): --auto and the lockstep hook's unattended run never cycle it.
+        cycles_service="--skip-t3" not in args and "--auto" not in args and not _env_unattended(),
+        auto="--auto" in args,
     )
 
 
@@ -2220,7 +2229,7 @@ _ENGINE_INSTALL_FAILURES: dict[tuple[str, str], str] = {}
 
 
 def converge_engine(
-    config_dir: Path, *, dry_run: bool = False, unattended: bool = False,
+    config_dir: Path, *, dry_run: bool = False, unattended: bool = False, acquire: bool = True,
 ) -> list[str]:
     """Install the release-dependency engine and cycle the service on a
     mismatch. Returns human-readable action lines.
@@ -2246,6 +2255,12 @@ def converge_engine(
     (GH #1419 Issue 3b), so that disruption is reserved for a human who
     explicitly asked for convergence. The unattended pass reports the same
     facts and names the manual verb. Hal decision, 2026-07-24.
+
+    ``acquire`` False makes the whole function report-only: a version mismatch is
+    reported, never installed, and nothing is restarted, on every branch. An MCP
+    server's start and an ``nx upgrade --auto`` run the finish pass this way (P0,
+    nexus-f3yqd): a Claude session starting must never install or restart the engine
+    under the person's feet.
     """
     status = detect_engine_convergence(config_dir)
     if not status.applicable:
@@ -2288,7 +2303,7 @@ def converge_engine(
 
         if running.version is not None and running.version < status.required_version:
             got_run = ".".join(str(p) for p in running.version)
-            if unattended:
+            if unattended or not acquire:
                 return [
                     f"NOTE: the on-disk engine is v{req_s} but the RUNNING "
                     f"service is still v{got_run}. Not restarting it here — "
@@ -2467,6 +2482,18 @@ def converge_engine(
         return [
             f"would converge engine ({got_s} -> {req_s}): install the "
             f"pinned tag and restart the storage service{why}"
+        ]
+    if not acquire:
+        have = ".".join(str(p) for p in status.installed_version) if status.installed_version else "unknown"
+        if integrity is not None and not integrity.ok:
+            state = f"the installed storage engine is missing or damaged ({integrity.reason})"
+        else:
+            state = f"the storage engine is out of date (installed {have}, this release needs {req_s})"
+        return [
+            f"NOTE: {state}."
+            " Nothing was changed. Run `nx upgrade` when you can spare a few minutes: it installs"
+            " the new engine and restarts the storage service, and the first start may migrate"
+            " your data. `nx doctor` shows this too."
         ]
 
     from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred, CLI startup cost
@@ -3457,7 +3484,7 @@ def _announce_finish_pass(seen: str, version: str) -> None:
 
 
 def check_version_transition(
-    config_dir: Path, *, preview: bool | None = None,
+    config_dir: Path, *, preview: bool | None = None, engine_report_only: bool = False,
 ) -> str | None:
     """See :func:`_check_version_transition`. This wrapper keeps a heartbeat
     on stderr while a finish pass that announced itself runs (nexus-mjmjl:
@@ -3465,7 +3492,9 @@ def check_version_transition(
     beat = _FinishHeartbeat()
     ok = False
     try:
-        result = _check_version_transition(config_dir, preview=preview, _on_announce=beat.start)
+        result = _check_version_transition(
+            config_dir, preview=preview, engine_report_only=engine_report_only, _on_announce=beat.start,
+        )
         ok = True
         return result
     finally:
@@ -3518,7 +3547,7 @@ def _echo_err(text: str) -> None:
 
 
 def _check_version_transition(
-    config_dir: Path, *, preview: bool | None = None,
+    config_dir: Path, *, preview: bool | None = None, engine_report_only: bool = False,
     _on_announce: "Callable[[str, str], None] | None" = None,
 ) -> str | None:
     """Version-stamp auto-trigger. Returns a one-line summary when a
@@ -3741,8 +3770,11 @@ def _check_version_transition(
     # one leg's failure never swallows the actions already computed by the
     # others.
     try:
+        # P0 (nexus-f3yqd): an MCP server's start and `nx upgrade --auto` only report
+        # engine convergence. This pass consumes the version stamp either way, so nothing
+        # later finishes it automatically: `nx upgrade` does it, and `nx doctor` names it.
         actions = actions + converge_engine(
-            config_dir, unattended=True, dry_run=preview,
+            config_dir, unattended=True, dry_run=preview, acquire=not engine_report_only,
         )
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("engine_convergence_failed", exc_info=True)

@@ -281,7 +281,13 @@ def main(ctx: click.Context, verbose: bool) -> None:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import
         from nexus.upgrade_finish import check_version_transition  # noqa: PLC0415 — deferred import
 
-        _summary = check_version_transition(nexus_config_dir())
+        from nexus.util.upgrade_auto_lock import argv_is_auto_upgrade  # noqa: PLC0415 — stdlib-only, deferred
+
+        # P0 (nexus-f3yqd): the SessionStart hook's `nx upgrade --auto` reaches this
+        # trigger first; it reports a stale engine and never installs or restarts it.
+        _summary = check_version_transition(
+            nexus_config_dir(), engine_report_only=argv_is_auto_upgrade(sys.argv[1:]),
+        )
         if _summary:
             click.echo(f"[upgrade-finish] {_summary}", err=True)
     except Exception as exc:  # noqa: BLE001 — the trigger must never break CLI startup

@@ -2631,7 +2631,11 @@ def _check_garbage() -> list[HealthResult]:
                 f"{garbage.trash_documents} tombstoned document(s) and "
                 f"{garbage.stranded_chunks} stranded chunk(s) past 1 day"
             ),
-            fix_suggestions=["nx doctor --fix"],
+            # --fix deletes for good: the preview comes first (nexus-mjmjl item 27).
+            fix_suggestions=[
+                "nx doctor --fix --dry-run (shows what would be deleted; deletes nothing)",
+                "nx doctor --fix (deletes them permanently)",
+            ],
         ))
     else:
         results.append(HealthResult(label="Catalog garbage", ok=True, detail="none"))

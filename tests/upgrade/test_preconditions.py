@@ -262,7 +262,7 @@ def test_skip_t3_suppresses_converge_actions_but_still_reports(
     reports = converge_preconditions(
         config_dir=tmp_path,
         allow_engine_install=False,   # what --skip-t3 (and --auto) passes
-        allow_process_cycle=False,    # what --skip-t3 passes
+        allow_process_cycle=False,    # what --skip-t3, --auto and the unattended child pass (nexus-f3yqd)
         _engine_detect_fn=lambda: _EngineStatus(),
         _engine_converge_fn=_engine_converge,
         _lease_fn=lambda: _Lease(version="6.10.0"),
