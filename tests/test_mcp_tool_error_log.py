@@ -16,7 +16,9 @@ Driven through a real MCPServer and in-process client (``tests/_mcp_inproc.py``)
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
+import anyio
 import pytest
 import structlog
 from mcp.server.mcpserver import MCPServer
@@ -188,10 +190,6 @@ def test_a_raise_out_of_the_chain_is_logged_and_passes_through_unchanged(
 ) -> None:
     """What raises out of call_next (a protocol MCPError, a params ValidationError) is an error
     line too, and the caller gets that exception, never the logger's."""
-    from types import SimpleNamespace
-
-    import anyio
-
     if logger_breaks:
         monkeypatch.setattr(_tool_call_log, "_note_outcome", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("logger down")))
     server = _server()
