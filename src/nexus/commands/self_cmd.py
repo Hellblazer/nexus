@@ -2418,11 +2418,30 @@ def install_cmd(
     with reporter.step("Prune uv's package cache", f"cleanup only: {generation.name} is already in use"):
         click.echo(prune_uv_cache())
     reporter.summary()
-    click.echo(
-        "if this upgraded an existing install, run `nx upgrade` for migrations "
-        "(a fresh install is set up by `nx init` instead); "
-        "live sessions converge at their next spawn"
-    )
+    click.echo(_after_install_line())
+
+
+def _box_is_set_up() -> bool:
+    """Whether ``nx init`` (or onboarding to a managed service) ever ran here: ``install.mode`` or a
+    ``service_url`` in the saved config, or the local service's ``pg_credentials`` (the evidence
+    :func:`nexus.config.is_local_mode` reads)."""
+    from nexus import config as _config  # noqa: PLC0415 — deferred, keeps the CLI's cold start light
+
+    try:
+        if (_config.nexus_config_dir() / "pg_credentials").is_file():
+            return True
+        saved = _config.load_config()
+        return bool((saved.get("install") or {}).get("mode") or str(saved.get("service_url") or "").strip())
+    except Exception:  # noqa: BLE001 — an unreadable config reads as set up: `nx upgrade` is the safe advice there
+        return True
+
+
+def _after_install_line() -> str:
+    """The closing line of ``nx self install``, chosen for this machine (F23, nexus-f3yqd.6). It used to name
+    both cases and leave the choice to the user."""
+    if _box_is_set_up():
+        return "run `nx upgrade` to migrate this install's data; live sessions converge at their next spawn"
+    return "nothing is set up on this machine yet: run `nx init`"
 
 
 @self_group.command("gc")

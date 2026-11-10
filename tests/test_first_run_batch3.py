@@ -13,6 +13,7 @@ from nexus.commands.upgrade import _run_ladder
 from nexus.upgrade_ladder.registry import LadderRegistry
 
 from nexus.commands import init as init_mod
+from nexus.commands import self_cmd
 from nexus.daemon import installer
 from nexus.mcp import setup_tools
 from tests.upgrade.test_ladder_surfaces import InMemoryLedger, SurfaceRung, _DeferringRung
@@ -88,3 +89,30 @@ def test_a_deferred_step_says_it_runs_again(monkeypatch: pytest.MonkeyPatch, cap
     out = " ".join(capsys.readouterr().out.split())
     assert "rung 'census' deferred — engine census unavailable. It runs again on the next `nx upgrade`" in out, out
     assert "`nx doctor` names a step that defers on every run" in out
+
+
+# F23: `nx self install` closed with "if this upgraded an existing install, run nx upgrade (a fresh install is set up by
+# nx init instead)", leaving the user to decide which case applied. The code can tell.
+@pytest.mark.parametrize(
+    ("setup", "expected"),
+    [
+        ("pg_credentials", "run `nx upgrade` to migrate this install's data"),
+        ("install_mode", "run `nx upgrade` to migrate this install's data"),
+        ("service_url", "run `nx upgrade` to migrate this install's data"),
+        (None, "nothing is set up on this machine yet: run `nx init`"),
+    ],
+)
+def test_the_install_closing_line_names_the_next_command_for_this_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setup: str | None, expected: str) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    for name in ("NX_LOCAL", "NX_SERVICE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    if setup == "pg_credentials":
+        (tmp_path / "pg_credentials").write_text("x")
+    elif setup == "install_mode":
+        (tmp_path / "config.yml").write_text("install:\n  mode: local\n")
+    elif setup == "service_url":
+        (tmp_path / "config.yml").write_text("service_url: https://example.invalid\n")
+    line = self_cmd._after_install_line()
+    assert expected in line, line
+    assert "if this upgraded" not in line and "instead" not in line, line
+    assert "live sessions converge at their next spawn" in line or setup is None
