@@ -510,6 +510,18 @@ class _BatchProgress:
 
     def emit(self, event: str, **fields: object) -> None:
         _log.info(event, **fields)
+        if event == "ladder_engine_wait":
+            # nexus-f3yqd.5: a restart mid-step is waited out, never a failed upgrade; say so at once.
+            wait_s = fields.get("wait_s")
+            within = f" up to {int(wait_s)} s" if isinstance(wait_s, (int, float)) else ""
+            try:
+                click.echo(
+                    f"  the engine stopped answering (a restart?); waiting{within} for it, then this step resumes",
+                    err=self._err,
+                )
+            except Exception:  # noqa: BLE001 — a progress line never fails the walk
+                pass
+            return
         suffix = next((s for s in self._SUFFIXES if event.endswith(s)), None)
         if suffix is None:
             return

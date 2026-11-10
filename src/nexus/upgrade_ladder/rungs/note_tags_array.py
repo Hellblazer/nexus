@@ -47,6 +47,7 @@ from nexus.upgrade_ladder.auto_guard import (
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
+from nexus.upgrade_ladder.engine_outage import engine_unreachable
 from nexus.upgrade_ladder.scan_reuse import ScanReuse
 from nexus.upgrade_ladder.unattended import is_cheap_detect
 from nexus.upgrade_ladder.deadline import active_expired
@@ -256,6 +257,8 @@ class NoteTagsArrayRung:
         try:
             scanned = self._clean_scan.take() or self._read()
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is unknown, and unknown is not reached
+            if engine_unreachable(exc):
+                raise  # the runner waits for a restarting engine and confirms again (nexus-f3yqd.5)
             self._verify_detail = f"could not read the catalog to confirm the conversion: {exc}"
             return False
         if scanned is None:

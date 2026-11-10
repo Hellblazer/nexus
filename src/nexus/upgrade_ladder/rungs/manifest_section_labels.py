@@ -138,6 +138,7 @@ from nexus.upgrade_ladder.auto_guard import (
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
+from nexus.upgrade_ladder.engine_outage import engine_unreachable
 from nexus.upgrade_ladder.scan_reuse import ScanReuse
 from nexus.upgrade_ladder.unattended import is_cheap_detect
 from nexus.upgrade_ladder.census_progress import guarded
@@ -953,6 +954,8 @@ class ManifestSectionLabelsRung:
             # nexus-mjmjl: a confirming walk after a fill prints the same progress lines as the fill.
             counts = self._clean_scan.take() or self._dry_run(report=self._reporter)
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is unknown, and unknown is not reached
+            if engine_unreachable(exc):
+                raise  # the runner waits for a restarting engine and confirms again (nexus-f3yqd.5)
             self._verify_detail = f"could not read the catalog to confirm the fill: {exc}"
             return False
         if counts is None:
