@@ -1752,6 +1752,9 @@ class Config:
     profile_upgrade: bool = (
         False  # run nx upgrade under py-spy (timestamped samples, diagnosis only)
     )
+    restart_gap_s: float = (
+        0.0  # diagnosis only: seconds between the restart's stop and start
+    )
     keep_work: bool = (
         False  # --keep-work: the PG store (base, pg_wal) stays after each start
     )
@@ -2059,6 +2062,13 @@ def rehearse(from_version: str, cfg: Config) -> dict:
         """A second shell: nx daemon service stop, then start (no --with-pg), same HOME and env."""
         done: list[dict] = []
         for sub in ("stop", "start"):
+            if sub == "start" and cfg.restart_gap_s > 0:
+                # diagnosis only: a user who waits before starting the engine again, long enough
+                # that a client call outlives the pooled client's stale-connection retry
+                say(
+                    f"[{from_version}] pci-restart: waiting {cfg.restart_gap_s:.0f}s before start"
+                )
+                time.sleep(cfg.restart_gap_s)
             argv = [nx, "daemon", "service", sub]
             say(
                 f"[{from_version}] pci-restart-{sub}: {' '.join(argv)} (nx upgrade still running)"
@@ -2521,6 +2531,13 @@ def _build_parser() -> argparse.ArgumentParser:
         f"start older than {PCI_FIRST_VERSION}",
     )
     ap.add_argument(
+        "--restart-gap",
+        type=float,
+        default=0.0,
+        help="diagnosis only: seconds the PCI check's second-shell restart waits between nx daemon "
+        "service stop and start (an outage longer than the client's stale-connection retry)",
+    )
+    ap.add_argument(
         "--profile-upgrade",
         action="store_true",
         help="diagnosis only: run nx upgrade under py-spy record --idle --format chrometrace, so each "
@@ -2650,6 +2667,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         pci_collections=args.pci_collections,
         pci_end_bound_s=args.pci_end_bound,
         profile_upgrade=args.profile_upgrade,
+        restart_gap_s=args.restart_gap,
         keep_work=args.keep_work,
     )
     cfg.work.mkdir(parents=True, exist_ok=True)
