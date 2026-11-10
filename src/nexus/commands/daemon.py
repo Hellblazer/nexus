@@ -2078,8 +2078,11 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     from nexus.progress import boot_work as _boot_work  # noqa: PLC0415 — deferred import — only this subcommand path
 
     # The engine this lease names (nexus-f3yqd.3 review): with --config-dir the ambient resolver could name another.
-    work = _boot_work.local_entries(config_dir) or _boot_work.engine_entries(
-        fetch=lambda **kw: _engine_status_at(host, port, ep.get("token"), timeout=kw.get("timeout", 2.0)),
+    work = _boot_work.local_entries(config_dir) or (
+        _boot_work.engine_entries(
+            fetch=lambda **kw: _engine_status_at(host, port, ep.get("token"), timeout=kw.get("timeout", 2.0)),
+        )
+        if data.get("health") == "ok" else []  # an engine that did not answer /health is not asked again
     )
     if as_json:
         click.echo(_json.dumps({**data, "boot_work": work}, indent=2))

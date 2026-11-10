@@ -164,3 +164,21 @@ def test_service_status_shows_the_lease_engines_work_and_json_carries_it(tmp_pat
     as_json = invoke("--json")
     assert json.loads(as_json.output)["boot_work"] == [PCI]
     assert asked == [("127.0.0.1", 5999)] * 2  # the engine this lease names, not the ambient resolver's
+
+
+def test_the_status_request_goes_to_the_lease_engine_with_its_token(monkeypatch) -> None:
+    import httpx  # noqa: PLC0415 — the transport patched
+
+    from nexus.commands.daemon import _engine_status_at  # noqa: PLC0415 — the helper under test
+
+    seen: list[tuple] = []
+
+    def get(url, *, headers, timeout):
+        seen.append((url, headers, timeout))
+        return httpx.Response(200, json={"boot_work": [PCI]}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", get)
+    assert _engine_status_at("127.0.0.1", 5999, "tok", timeout=2.0) == {"boot_work": [PCI]}
+    assert seen == [("http://127.0.0.1:5999/v1/status", {"Authorization": "Bearer tok"}, 2.0)]
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: (_ for _ in ()).throw(httpx.ConnectError("refused")))
+    assert _engine_status_at("127.0.0.1", 5999, None, timeout=2.0) is None
