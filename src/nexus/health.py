@@ -9935,7 +9935,7 @@ def _check_pending_rungs() -> list[HealthResult]:
         from nexus.upgrade_ladder import registry as _ladder_registry  # noqa: PLC0415 — deferred to avoid module-load cost
         from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY  # noqa: PLC0415 — deferred to avoid module-load cost
         from nexus.upgrade_ladder.runner import pending_rungs  # noqa: PLC0415 — deferred to avoid module-load cost
-        from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — deferred to avoid module-load cost
+        from nexus.upgrade_ladder.unattended import bounded_reads, unattended_run  # noqa: PLC0415 — deferred to avoid module-load cost
 
         # Shakedown 7.94.0 class A (nexus-mq980): a rung whose detect() walks the whole catalog (the
         # manifest-section-labels dry run lists every document and reads manifests and T3 per batch) must not
@@ -9943,7 +9943,9 @@ def _check_pending_rungs() -> list[HealthResult]:
         # The same refusal `nx upgrade --auto` gets applies (auto_guard: managed service, no completion
         # record, and an engine that cannot count the fillable rows in one read); a local engine keeps its scan. A refused rung is reported below
         # as NOT CHECKED, never as converged.
-        with unattended_run():
+        # nexus-mjmjl: and against a local engine too, doctor makes no read that grows with the store
+        # (bounded_reads): a 43k-document local store spent minutes in one rung's dry-run scan here.
+        with unattended_run(), bounded_reads():
             statuses = pending_rungs(_ladder_registry.default_registry())
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.warning("doctor_pending_rungs_check_failed", error=str(exc))
@@ -10018,12 +10020,12 @@ def _check_pending_rungs() -> list[HealthResult]:
         parts.append(f"no pending rungs among those checked ({len(statuses) - len(not_checked)} of {len(statuses)})")
     if not_checked:
         parts.append(
-            f"not checked: {', '.join(not_checked)} (each answers only from a read of a whole managed "
-            "catalog or table, which `nx doctor` does not make, or from what an earlier interactive run recorded)"
+            f"not checked: {', '.join(not_checked)} (each answers only from a read of the whole catalog or a "
+            "whole table, which `nx doctor` does not make, or from what an earlier interactive run recorded)"
         )
         fixes.append(
-            "Run `nx upgrade` interactively (not --auto): it makes that read and records each rung it verifies "
-            "and this row then answers from the "
+            "Run `nx upgrade --dry-run` to check them (a read of every document: minutes on a large store), "
+            "or `nx upgrade` to check and fill; once `nx upgrade` records a rung, this row answers from the "
             "record without a read"
         )
     if record_note:
