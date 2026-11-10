@@ -1680,7 +1680,7 @@ class TestJsonMainSweep:
             assert {"name", "ok", "status", "detail"} <= set(entry)
             assert isinstance(entry["name"], str) and entry["name"]
             assert isinstance(entry["ok"], bool)
-            assert entry["status"] in ("ok", "warn", "fail")
+            assert entry["status"] in ("ok", "warn", "fail", "skipped")
             assert isinstance(entry["detail"], str)
 
     def test_summary_counts_match_checks(self, runner, mock_reg):
@@ -1694,7 +1694,8 @@ class TestJsonMainSweep:
         assert summary["ok"] == sum(1 for c in checks if c["status"] == "ok")
         assert summary["warn"] == sum(1 for c in checks if c["status"] == "warn")
         assert summary["fail"] == sum(1 for c in checks if c["status"] == "fail")
-        assert summary["ok"] + summary["warn"] + summary["fail"] == summary["total"]
+        assert summary["skipped"] == sum(1 for c in checks if c["status"] == "skipped")
+        assert summary["ok"] + summary["warn"] + summary["fail"] + summary["skipped"] == summary["total"]
 
     def test_all_healthy_exits_zero_and_reports_zero_fails(self, runner, mock_reg):
         import json as _json

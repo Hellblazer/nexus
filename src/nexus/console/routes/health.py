@@ -51,6 +51,8 @@ def _collect_health_data() -> dict[str, Any]:
                 "ok": r.ok,
                 # ok=False, warn=True is a soft warning, not a failure (HealthResult).
                 "warn": r.warn,
+                # Not checked this run (F30): shown as [ ], never as a pass.
+                "skipped": r.skipped,
                 "detail": r.detail,
                 "fix_suggestions": r.fix_suggestions,
             })
