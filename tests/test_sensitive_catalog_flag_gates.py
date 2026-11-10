@@ -69,6 +69,23 @@ def extractor_flags(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
 
 
 @pytest.fixture
+def mineru_worker_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    """A stand-in for the local MinerU worker, counted (labrun-pex). These tests are about server contact and
+    the skip warning; the sensitive path runs in full up to the parse, and a real parse held about 1 GB on a CI
+    shard. The worker raises at once, and a test asserts it was reached, so the seam cannot drift away silently."""
+    from nexus.pdf_extractor import PDFExtractor
+
+    calls: list[tuple] = []
+
+    def _fake_worker(self, pdf_path, start, end, formula_enable=True):
+        calls.append((start, end))
+        raise RuntimeError("the local MinerU worker is not exercised by this test")
+
+    monkeypatch.setattr(PDFExtractor, "_mineru_run_subprocess", _fake_worker)
+    return calls
+
+
+@pytest.fixture
 def bib_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Every title handed to the Semantic Scholar enricher."""
     calls: list[str] = []
@@ -97,7 +114,7 @@ def test_a_catalog_flagged_pdf_reindexed_without_the_flag_builds_only_sensitive_
 
 
 def test_a_catalog_flagged_pdf_never_reaches_a_mineru_server_without_the_flag(
-    t2_service_env, tmp_path: Path, server_watch: dict[str, list],
+    t2_service_env, tmp_path: Path, server_watch: dict[str, list], mineru_worker_calls: list[tuple],
 ) -> None:
     from nexus.doc_indexer import index_pdf
 
@@ -107,14 +124,15 @@ def test_a_catalog_flagged_pdf_never_reaches_a_mineru_server_without_the_flag(
 
     try:
         index_pdf(pdf, corpus=CORPUS, extractor="mineru", force=True, streaming="never")
-    except Exception:  # noqa: BLE001 — the local subprocess may be absent on this host; only server contact matters
+    except Exception:  # noqa: BLE001 — the stand-in worker raises; only server contact matters
         pass
 
+    assert mineru_worker_calls, "extraction was never reached, so no server contact proves nothing"
     assert server_watch == {"resolve": [], "probe": [], "http": [], "autostart": []}
 
 
 def test_the_mineru_skip_for_a_flagged_document_is_logged_loudly(
-    t2_service_env, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    t2_service_env, tmp_path: Path, capsys: pytest.CaptureFixture[str], mineru_worker_calls: list[tuple],
 ) -> None:
     from nexus.doc_indexer import index_pdf
 
@@ -126,35 +144,31 @@ def test_the_mineru_skip_for_a_flagged_document_is_logged_loudly(
     with structlog.testing.capture_logs() as logs:
         try:
             index_pdf(pdf, corpus=CORPUS, extractor="mineru", force=True, streaming="never")
-        except Exception:  # noqa: BLE001 — the local subprocess may be absent on this host; the skip is announced first
+        except Exception:  # noqa: BLE001 — the stand-in worker raises; the skip is announced first
             pass
 
     skips = [e for e in logs if e.get("event") == "sensitive_mineru_server_skipped"]
     assert skips and skips[0]["log_level"] == "warning" and skips[0]["reason"] == "catalog", logs
+    assert mineru_worker_calls, "extraction was never reached"
     assert "no MinerU server is contacted" in capsys.readouterr().err
 
 
 def test_the_verb_flag_logs_the_mineru_skip_in_the_library_and_says_it_on_the_single_file_cli(
-    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mineru_worker_calls: list[tuple],
 ) -> None:
     """``--sensitive`` on the single-file path: a structlog warning from the indexer and a CLI line."""
     from nexus.doc_indexer import index_pdf
 
     pdf = _pdf(tmp_path, "verb-flag-loud.pdf")
 
-    # labrun-pex: the warning is logged before extraction, and this test is about the warning, not the
-    # parse; a real local MinerU parse here held about 1 GB for its run on a CI shard. Stop at extraction.
-    def _no_extraction(*_a, **_k):
-        raise RuntimeError("extraction not exercised by this test")
-
-    monkeypatch.setattr("nexus.doc_indexer._pdf_chunks", _no_extraction)
     with structlog.testing.capture_logs() as logs:
         try:
             index_pdf(pdf, corpus=CORPUS, extractor="mineru", force=True, streaming="never", sensitive=True)
-        except Exception:  # noqa: BLE001 — the local subprocess may be absent on this host
+        except Exception:  # noqa: BLE001 — the stand-in worker raises after the warning is logged
             pass
     assert any(
         e.get("event") == "sensitive_mineru_server_skipped" and e.get("log_level") == "warning" for e in logs), logs
+    assert mineru_worker_calls, "extraction was never reached"
 
     from nexus.commands import index as index_cmds
 
@@ -204,6 +218,7 @@ def test_a_dry_run_of_a_catalog_flagged_pdf_builds_only_sensitive_extractors_and
 
 def test_a_dry_run_of_a_catalog_flagged_pdf_never_reaches_a_mineru_server(
     t2_service_env, tmp_path: Path, server_watch: dict[str, list], monkeypatch: pytest.MonkeyPatch,
+    mineru_worker_calls: list[tuple],
 ) -> None:
     from nexus.commands import index as index_cmds
 
@@ -213,8 +228,9 @@ def test_a_dry_run_of_a_catalog_flagged_pdf_never_reaches_a_mineru_server(
     assert _index_pdf(pdf).exit_code == 0
     _flag(_tumbler_of(pdf))
 
-    _dry_run(pdf, "--extractor", "mineru")  # the local subprocess may be absent here; only server contact matters
+    _dry_run(pdf, "--extractor", "mineru")  # the stand-in worker raises; only server contact matters
 
+    assert mineru_worker_calls, "extraction was never reached, so no server contact proves nothing"
     assert server_watch == {"resolve": [], "probe": [], "http": [], "autostart": []}
 
 
