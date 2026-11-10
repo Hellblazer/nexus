@@ -19,7 +19,7 @@ nx self install
 nx upgrade
 ```
 
-The first builds the current version and the second converges the data. From a CLI this old, `nx self install` can sit silent for up to ten minutes as it finishes: it is clearing uv's package cache, and it waits while any other uv process (another session's `uv run`, for example) holds that cache. Tell the user it is not stuck and to let it finish. On the older uv-tool layout (`nx self install` says this nx is not running from a generation) the first is `uv tool upgrade conexus`, and a third command, `nx self install`, then moves the box onto the generation layout and keeps PDF support (the upgrade alone leaves a slim tree). Afterwards the user reconnects the `nexus` server or starts a new session, and runs `/conexus:setup` again. Stop here.
+The first builds the current version and the second converges the data. From a CLI this old, `nx self install` can sit silent for up to ten minutes at the end, clearing uv's cache while another uv process holds it; tell the user it is not stuck and to let it finish. On the older uv-tool layout (`nx self install` says this nx is not running from a generation) the first is `uv tool upgrade conexus`, and a third command, `nx self install`, then moves the box onto the generation layout and keeps PDF support (the upgrade alone leaves a slim tree). Afterwards the user reconnects the `nexus` server or starts a new session, and runs `/conexus:setup` again. Stop here.
 
 ## Step 2: act on the answer
 
