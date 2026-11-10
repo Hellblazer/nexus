@@ -95,10 +95,10 @@ def test_the_engines_boot_work_entries_render_with_progress_and_step() -> None:
     now = boot_work._started(entry) + 90
     assert boot_work.render([entry], now=now) == [
         "The engine is building search indexes after an upgrade, running for 1 m 30 s: "
-        "3 of 11 indexes so far.",
+        "3 of 11 indexes.",
         "  now: building index: loading tuples (41,230 of 98,000 blocks)",
-        "  It is safe to stop: the index in progress is dropped and rebuilt from the start next boot; "
-        "finished ones are kept.",
+        "  Interrupting this command does not stop it. Stopping the service now: the index in progress is "
+        "dropped and rebuilt from the start next boot; finished ones are kept.",
     ]
 
 
@@ -244,5 +244,17 @@ def test_a_waiting_phase_shows_the_phase_without_numbers() -> None:
         "safe_to_stop": True, "on_stop": "x",
     }
     lines = boot_work.render([entry], now=boot_work._started(entry) + 5)
-    assert lines[0].endswith(": 1 of 2 indexes so far.")
+    assert lines[0].endswith(": 1 of 2 indexes.")
     assert lines[1] == "  now: waiting for writers before build"
+
+
+def test_a_top_level_total_not_yet_planned_shows_the_build_in_progress() -> None:
+    entry = {
+        "id": "pci-reconcile", "what": "building search indexes", "started_at": "2027-01-15T08:00:00Z",
+        "done": 2, "total": None, "unit": "indexes", "step": None, "safe_to_stop": True,
+        "on_stop": "the index build in progress is lost; it is rebuilt from the start on a later pass",
+    }
+    lines = boot_work.render([entry], now=boot_work._started(entry) + 5)
+    assert lines[0].endswith(": index 3.")
+    assert "safe to stop" not in " ".join(lines).lower()
+    assert lines[1].endswith("it is rebuilt from the start on a later pass.")

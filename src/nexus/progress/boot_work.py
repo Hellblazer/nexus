@@ -8,10 +8,11 @@ the supervisor's migration record (:mod:`nexus.daemon.migration_status`).
 Each entry: ``id``, ``what``, ``started_at`` (ISO-8601 UTC), ``done``,
 ``total``, ``unit``, an optional ``step`` (``what``, ``done``, ``total``,
 ``unit``) for an inner level of progress, ``safe_to_stop`` and ``on_stop``.
-The engine sends no durations: the elapsed time is derived here. ``total``
-can grow during a pass (builds are planned as the pass reaches them), so it
-reads "so far" and no time left is derived from it; a step whose ``done`` is
-null (a waiting phase) shows its phase alone. ``step.what`` names no
+The engine sends no durations: the elapsed time is derived here. A top-level
+``total`` is null until the pass has planned its last build (then final), so
+no time left is derived from it; a step whose ``done`` is null (a waiting
+phase) shows its phase alone; ``safe_to_stop`` never renders bare, always with
+``on_stop``; an empty list does not mean idle. ``step.what`` names no
 collection (``/v1/status`` is unauthenticated).
 
 :func:`render` turns entries into lines; :class:`Announcer` prints them from
@@ -58,16 +59,21 @@ def _count(n: Any) -> int | None:
     return int(n) if isinstance(n, (int, float)) and not isinstance(n, bool) and math.isfinite(n) else None
 
 
-def _progress(obj: dict[str, Any], *, so_far: bool) -> str:
+def _progress(obj: dict[str, Any], *, top: bool) -> str:
     """``done of total unit``; empty when ``done`` is null (a waiting phase).
-    The engine plans each build when its pass reaches it, so an entry's
-    ``total`` can grow: it reads "so far", and no time left is derived from it."""
+    At the top level ``total`` is null until the pass has planned its last
+    build (then it is final): show the build in progress, ``index <done+1>``.
+    ``done`` counts every build that ended, failed ones included."""
     done, total = _count(obj.get("done")), _count(obj.get("total"))
     unit = obj.get("unit") if isinstance(obj.get("unit"), str) else ""
     if done is None:
         return ""
-    text = f"{done:,}" + (f" of {total:,}" if total else "") + (f" {unit}" if unit else "")
-    return text + (" so far" if so_far and total else "")
+    if total is None:
+        if not top:
+            return f"{done:,}" + (f" {unit}" if unit else "")
+        noun = unit[:-2] if unit.endswith("es") else unit[:-1] if unit.endswith("s") else unit
+        return f"{noun or 'item'} {done + 1:,}"
+    return f"{done:,} of {total:,}" + (f" {unit}" if unit else "")
 
 
 def render(entries: Iterable[dict[str, Any]], *, now: float) -> list[str]:
@@ -81,19 +87,23 @@ def render(entries: Iterable[dict[str, Any]], *, now: float) -> list[str]:
             head = f"The engine is {what}" if not what.startswith("The engine") else what
             if elapsed is not None:
                 head += f", running for {duration(elapsed)}"
-            progress = _progress(entry, so_far=True)
+            progress = _progress(entry, top=True)
             if progress:
                 head += f": {progress}"
             lines.append(head + ".")
             step = entry.get("step")
             if isinstance(step, dict) and step.get("what"):
-                inner = _progress(step, so_far=False)
+                inner = _progress(step, top=False)
                 lines.append(f"  now: {step['what']}" + (f" ({inner})" if inner else ""))
             on_stop = entry.get("on_stop")
             if isinstance(entry.get("notice"), str) and entry["notice"]:
                 lines.append(f"  {entry['notice']}")
             elif entry.get("safe_to_stop") is True:
-                lines.append(f"  It is safe to stop" + (f": {on_stop}." if on_stop else "."))
+                # Never a bare "safe to stop" (engine review S3): say what stopping costs.
+                lines.append(
+                    "  Interrupting this command does not stop it."
+                    + (f" Stopping the service now: {on_stop}." if on_stop else "")
+                )
             else:
                 lines.append(
                     "  Commands that need the engine wait until it finishes; interrupting this command does not "
