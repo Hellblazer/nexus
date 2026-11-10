@@ -188,6 +188,7 @@ class World:
     def rung(self, **kw) -> ManifestSpanFillRung:
         kw.setdefault("record_fn", lambda: None)
         kw.setdefault("managed_fn", lambda: False)
+        kw.setdefault("owed_store", None)  # owed write-backs in memory: the default is a T2 note
         return ManifestSpanFillRung(
             reader_factory=lambda: None if self.no_catalog else self,
             writer_factory=lambda: self, t3_factory=lambda: self, **kw)

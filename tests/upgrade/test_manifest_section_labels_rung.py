@@ -259,6 +259,7 @@ class World:
     def rung(self, **kw) -> ManifestSectionLabelsRung:
         kw.setdefault("record_fn", lambda: None)  # no completion on file: the default would ask the engine's ledger
         kw.setdefault("stale_zero_fn", lambda: False)  # no deferral on file: the default would read the T2 note
+        kw.setdefault("owed_store", None)  # owed write-backs in memory: the default is a T2 note
         return ManifestSectionLabelsRung(
             reader_factory=lambda: None if self.no_catalog else self,
             writer_factory=lambda: self, t3_factory=lambda: self, **kw)
