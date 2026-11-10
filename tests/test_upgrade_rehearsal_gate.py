@@ -495,10 +495,21 @@ def test_a_proc_cmdline_is_split_on_its_nuls_and_an_empty_argument_dropped() -> 
     )
 
 
+def _cmdline_once_exec_completes(pid: int, deadline_s: float = 10.0) -> list[str] | None:
+    # Popen can return before the child's exec has replaced its image, and /proc/<pid>/cmdline
+    # reads empty until then (develop CI shard 3 on 7e3110e28). Wait, bounded, for the argv to appear.
+    end = time.monotonic() + deadline_s
+    while True:
+        argv = ur.cmdline_of(pid)
+        if argv or time.monotonic() >= end:
+            return argv
+        time.sleep(0.01)
+
+
 def test_cmdline_of_reads_a_live_process_through_the_real_path() -> None:
     victim = subprocess.Popen(["sleep", "60"], start_new_session=True)
     try:
-        assert ur.cmdline_of(victim.pid) == ["sleep", "60"]
+        assert _cmdline_once_exec_completes(victim.pid) == ["sleep", "60"]
     finally:
         victim.kill()
         victim.wait()
