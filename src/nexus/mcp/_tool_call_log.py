@@ -34,6 +34,16 @@ process), then greps ``mcp_tool_call pid=N`` after that start line's timestamp
 ``meta_keys_truncated`` set when anything was cut) so a hostile client cannot
 grow a line.
 
+FAILURES (nexus-3ceda.7). The key-set rule means ``mcp_tool_call`` is not one
+line per call, so it cannot say how often an agent retries after an error. Two
+more INFO events can: ``mcp_tool_error`` for every ``tools/call`` whose result
+is ``isError`` or that raised (a marked failure, a ``ToolError``, a crash, an
+unknown tool), and ``mcp_tool_after_error`` for the next call that process
+makes, with ``failed_tool``, ``same_tool`` and ``seconds`` since the failure.
+The retry-after-error rate is after-error lines with ``same_tool=True`` over
+error lines. Volume is bounded by the failure count. Like ``mcp_tool_call``,
+neither carries an argument, a result or the error text.
+
 HOOK. A ``Server.middleware`` entry (mcp 2.x; the 1.x ``request_handlers``
 wrap is gone with the decorator registry, nexus-sgmyl). The chain runs ahead of
 every inbound message, so the entry acts only on ``ctx.method == "tools/call"``
@@ -48,7 +58,8 @@ not break startup (nexus-vc5yb / nexus-3hc9z).
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import structlog
@@ -67,13 +78,20 @@ _MAX_KEY_LEN = 128
 _seen_keysets: set[tuple[tuple[str, ...], bool]] = set()
 _limit_noted = False
 
+#: The tool whose call last failed in this process and when (``_clock``), until
+#: the next ``tools/call`` logs what the agent did after it (nexus-3ceda.7).
+#: Same single-thread reasoning as ``_seen_keysets``.
+_last_failure: tuple[str | None, float] | None = None
+_clock: Callable[[], float] = time.monotonic
+
 
 def _reset_state() -> None:
     """Forget the remembered key-sets (tests; a process never needs it)."""
-    global _limit_noted, _cwd_healed
+    global _limit_noted, _cwd_healed, _last_failure
     _seen_keysets.clear()
     _limit_noted = False
     _cwd_healed = False
+    _last_failure = None
 
 
 def _meta_keys(params: Any) -> list[str]:
@@ -117,6 +135,42 @@ def _emit(params: Any) -> None:
     emit("mcp_tool_call", tool=name, meta_keys=keys, pid=os.getpid(), **extra)
 
 
+def _tool_name(params: Any) -> str | None:
+    name = params.get("name") if isinstance(params, Mapping) else None
+    return name[:_MAX_KEY_LEN] if isinstance(name, str) else None
+
+
+def _note_next_call(params: Any) -> None:
+    """The call after a failure: log what the agent did next, once (nexus-3ceda.7)."""
+    global _last_failure
+    if _last_failure is None:
+        return
+    failed_tool, at = _last_failure
+    _last_failure = None
+    tool = _tool_name(params)
+    structlog.get_logger(__name__).info(
+        "mcp_tool_after_error", tool=tool, failed_tool=failed_tool, same_tool=tool == failed_tool,
+        seconds=round(_clock() - at, 1), pid=os.getpid(),
+    )
+
+
+def _is_error(result: Any) -> bool:
+    if isinstance(result, Mapping):
+        return result.get("isError") is True
+    return getattr(result, "is_error", False) is True
+
+
+def _note_outcome(params: Any, failed: bool) -> None:
+    """Log a failed call and remember it for the next one. Tool name and outcome only:
+    never an argument, a result or the error text, which can carry tokens."""
+    global _last_failure
+    if not failed:
+        return
+    tool = _tool_name(params)
+    _last_failure = (tool, _clock())
+    structlog.get_logger(__name__).info("mcp_tool_error", tool=tool, pid=os.getpid())
+
+
 _cwd_healed = False
 
 
@@ -154,6 +208,23 @@ def install_tool_call_log(server: object) -> str:
                     _heal_cwd()
                 except Exception:  # noqa: BLE001 — a failed chdir must never break a tool call
                     pass
+                try:
+                    _note_next_call(ctx.params)
+                except Exception:  # noqa: BLE001 — observability must never break a tool call
+                    pass
+                try:
+                    result = await call_next(ctx)
+                except Exception:
+                    try:
+                        _note_outcome(ctx.params, True)
+                    except Exception:  # noqa: BLE001 — observability must never break a tool call
+                        pass
+                    raise
+                try:
+                    _note_outcome(ctx.params, _is_error(result))
+                except Exception:  # noqa: BLE001 — observability must never break a tool call
+                    pass
+                return result
             return await call_next(ctx)
 
         _logged._nx_tool_call_log = True  # type: ignore[attr-defined]
