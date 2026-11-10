@@ -141,6 +141,13 @@ def test_the_verb_flag_logs_the_mineru_skip_in_the_library_and_says_it_on_the_si
     from nexus.doc_indexer import index_pdf
 
     pdf = _pdf(tmp_path, "verb-flag-loud.pdf")
+
+    # labrun-pex: the warning is logged before extraction, and this test is about the warning, not the
+    # parse; a real local MinerU parse here held about 1 GB for its run on a CI shard. Stop at extraction.
+    def _no_extraction(*_a, **_k):
+        raise RuntimeError("extraction not exercised by this test")
+
+    monkeypatch.setattr("nexus.doc_indexer._pdf_chunks", _no_extraction)
     with structlog.testing.capture_logs() as logs:
         try:
             index_pdf(pdf, corpus=CORPUS, extractor="mineru", force=True, streaming="never", sensitive=True)

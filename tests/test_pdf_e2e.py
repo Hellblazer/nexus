@@ -112,7 +112,11 @@ def _local_embed(chunks, model, api_key="", input_type="document", timeout=120.0
 # ── AC-E1 / AC-E2 / AC-E3 — index_pdf E2E ────────────────────────────────────
 
 class TestIndexPdfE2E:
-    """AC-E1 / AC-E2 / AC-E3: index_pdf with real extraction + local embedding."""
+    """AC-E1 / AC-E2 / AC-E3: index_pdf with real extraction + local embedding.
+
+    AC-E1 keeps the default extractor, so the suite keeps one end-to-end index through real MinerU.
+    AC-E2 (page attribution) and AC-E3 (staleness) are not about the extractor; they use pymupdf, which
+    does not load MinerU's model (about 1 GB a parse on a CI shard, labrun-pex)."""
 
     def test_e2e_simple_pdf_queryable(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E1: simple.pdf indexed → query returns a pdf chunk with distance < 1.0."""
@@ -129,7 +133,8 @@ class TestIndexPdfE2E:
     def test_e2e_multipage_page_attribution(self, multipage_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E2: multipage.pdf → query for 'database transactions' returns page 2 chunk."""
         with patch("nexus.config.get_credential", side_effect=fake_credentials()):
-            count = index_pdf(multipage_pdf, "pdf-e2e-multipage", t3=local_t3, embed_fn=_local_embed)
+            count = index_pdf(multipage_pdf, "pdf-e2e-multipage", t3=local_t3, embed_fn=_local_embed,
+                              extractor="pymupdf")
 
         assert count > 1, (
             "Expected multiple chunks from multipage_pdf so page attribution is testable"
@@ -171,8 +176,10 @@ class TestIndexPdfE2E:
                      iter(col.get(limit=1, include=["metadatas"], sensitivity="include")["metadatas"]), None,
                  ),
              ):
-            first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed)
-            second = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed)
+            first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed,
+                              extractor="pymupdf")
+            second = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed,
+                               extractor="pymupdf")
 
         assert first > 0
         assert second == 0, "Second index of unchanged PDF must return 0"
