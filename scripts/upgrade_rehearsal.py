@@ -1301,7 +1301,8 @@ def write_verdict(verdict: dict, path: Path) -> None:
 def profiled(logs: Path, argv: list[str]) -> list[str]:
     """``argv`` under py-spy (diagnosis only): idle frames included and every sample timestamped
     (chrometrace), so a silent stretch in the chunk log can be matched to what the process was
-    doing. py-spy is the parent of the profiled process, so ptrace_scope 1 allows it."""
+    doing. py-spy is the parent of the profiled process, so ptrace_scope 1 allows it. No
+    --subprocesses: py-spy would follow the engine nx upgrade starts and never exit."""
     return [
         "uvx",
         "--from",
@@ -1309,7 +1310,6 @@ def profiled(logs: Path, argv: list[str]) -> list[str]:
         "py-spy",
         "record",
         "--idle",
-        "--subprocesses",
         "--format",
         "chrometrace",
         "--rate",
