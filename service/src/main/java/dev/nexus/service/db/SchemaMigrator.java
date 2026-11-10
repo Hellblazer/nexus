@@ -592,10 +592,15 @@ public final class SchemaMigrator {
                 // only when the walk has schema work that can queue behind its build (nexus-f3yqd): the runAlways
                 // bodies run every boot and are written to skip a busy leaf, so an unchanged release's restart no
                 // longer throws away a build that took tens of minutes.
-                long schemaChangesets = unrun.stream().filter(cs -> !cs.isAlwaysRun()).count();
+                //
+                // nexus-f3yqd.3: nor does a changeset that skips itself with onFail="CONTINUE" and so stays unrun until its guard
+                // passes (aspects-005-2, while the retired aspect queue holds rows): its body cannot conflict with a build.
+                List<ChangeSet> retrying = unrun.stream()
+                    .filter(cs -> !cs.isAlwaysRun() && RetryingChangesets.isSelfRetrying(cs)).toList();
+                long schemaChangesets = unrun.stream().filter(cs -> !cs.isAlwaysRun()).count() - retrying.size();
                 boolean buildersKept = schemaChangesets == 0;
                 if (buildersKept) {
-                    logPciBuildersKept(conn);
+                    logPciBuildersKept(conn, retrying);
                 } else {
                     terminatePciBuilders(conn, "reason=schema_changesets_pending n=" + schemaChangesets);
                 }
@@ -894,15 +899,19 @@ public final class SchemaMigrator {
         }
     }
 
-    /** The walk has only runAlways work: say how many builder backends it leaves running. */
-    private static void logPciBuildersKept(Connection conn) {
+    /** The walk has only runAlways (or self-retrying) work: say how many builder backends it leaves running, and what it let pass. */
+    private static void logPciBuildersKept(Connection conn, List<ChangeSet> retrying) {
         try {
             Integer count = DSL.using(conn, SQLDialect.POSTGRES)
                 .selectCount()
                 .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
                 .where(pciBuilderBackends())
                 .fetchOne(0, Integer.class);
-            log.info("event=pci_builders_kept count={} reason=only_run_always_pending", count);
+            log.info("event=pci_builders_kept count={} reason=only_run_always_pending retrying={}", count, retrying.size());
+            for (ChangeSet cs : retrying) {
+                log.info("event=pci_builders_kept_despite id={} reason=self_retrying_precondition",
+                    RetryingChangesets.describe(cs));
+            }
         } catch (DataAccessException e) {
             log.warn("event=pci_builders_count_failed cause=\"{}\"", e.toString());
         }
