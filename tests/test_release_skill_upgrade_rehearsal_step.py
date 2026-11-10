@@ -6,8 +6,22 @@ and before Step 7 commits the release branch; a failure is a blocker, never waiv
 
 from __future__ import annotations
 
+import importlib.util
 import re
+import sys
 from pathlib import Path
+
+DRIVER = Path(__file__).resolve().parent.parent / "scripts" / "upgrade_rehearsal.py"
+
+
+def _driver():
+    spec = importlib.util.spec_from_file_location("_upgrade_rehearsal_skill", DRIVER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["_upgrade_rehearsal_skill"] = module
+    spec.loader.exec_module(module)
+    return module
+
 
 SKILL = (
     Path(__file__).resolve().parent.parent
@@ -80,8 +94,80 @@ def test_the_step_states_the_pre_pci_ceiling_and_what_it_rests_on() -> None:
 def test_the_step_is_honest_about_the_limits_and_the_basis() -> None:
     step = _step()
     assert "Sam's decision of record" in step and "(Sam 2026-11-10, halcyon)" in step
-    assert "300 times its 0.4 s" in step and "floors against a hang" in step
+    assert "300 times its 0.4 s" in step and "a pure floor against a hang" in step
     assert "bound this fixture's size" in step
+    # the figures of record: 8.0.0 12.7 s, 7.99.0 12.6 to 14.2 s, 7.76.0 209 to 211 s
+    assert "12.7 s from 8.0.0" in step and "12.6 to 14.2 s from 7.99.0" in step
+    assert "12 to 14 s from the other starts and 209 to 211 s from 7.76.0" in step
+    assert "2.3 s" not in step and "660 s" not in step.replace("460 to 662 s", "")
+    # the silence margin and the calibration host
+    assert "silence limit leaves a margin of about 2" in step and "4.0 to 5.1 s" in step
+    assert "420 s, calibrated on chas lab-m" in step
+
+
+def test_the_step_scopes_sams_decision_to_the_seven_limits_he_accepted() -> None:
+    step = _step()
+    assert "Seven limits are Sam's decision of record" in step
+    for gate_own in ("1800 s hang guard", "900 s PCI end wait", "50,000-row floor"):
+        assert gate_own in step, gate_own
+    assert "the ten probe errors" in step and "are the gate's own, not his" in step
+
+
+def test_the_step_is_blocking_only_from_an_engine_pin_that_passes_the_pci_check() -> (
+    None
+):
+    text = SKILL.read_text(encoding="utf-8")
+    header = text[text.index("### 6e. ") :].splitlines()[0]
+    assert "engine 0.1.187 or later" in header
+    step = _step()
+    assert "aspects-005-2" in step and "cannot be waived" in step
+    assert "`--engine-jar PATH` is how to prove a fixed engine before its tag" in step
+    # NEXUS_TARGET_RELEASE is the post-publish rerun, not a pre-tag gate
+    assert "post-publish rerun, never the pre-tag gate" in step
+
+
+def test_the_step_names_the_evidence_line_and_the_infrastructure_outcomes() -> None:
+    step = _step()
+    assert "FAILURE EVIDENCE PRESERVED: <dir>" in step
+    assert "Copy those logs into the cut bead promptly" in step
+    for outcome in ("`lab-remote` exit 98", "`lab-run` exit 137", "a dropped ssh"):
+        assert outcome in step, outcome
+    assert "rerun it" in step and "never run the script unwrapped" in step
+    assert "the wrapper print its own `GATE: FAILED` and exit 1" in step
+
+
+def test_every_driver_limit_is_in_the_step_text_and_sams_values_are_pinned() -> None:
+    """A change to a limit in the driver goes red here until the skill and Sam's value agree."""
+    ur = _driver()
+    step = _step()
+    limits = {
+        "silence": (ur.DEFAULT_SILENCE_LIMIT_S, "prints nothing for {} s"),
+        "newest-below": (
+            ur.UPGRADE_CEILINGS_S["newest-below"],
+            "`nx upgrade` from the newest release below the candidate: {} s",
+        ),
+        "last-7x": (
+            ur.UPGRADE_CEILINGS_S["last-7x"],
+            "`nx upgrade` from the last 7.x: {} s",
+        ),
+        "pre-pci": (ur.UPGRADE_CEILINGS_S["pre-pci"], "`nx upgrade` from 7.76.0: {} s"),
+        "doctor": (ur.DOCTOR_CEILING_S, "`nx doctor` {} s"),
+        "search": (ur.SEARCH_CEILING_S, "`nx search` {} s"),
+        "package": (ur.PACKAGE_UPGRADE_CEILING_S, "package upgrade {} s"),
+    }
+    for name, (value, phrase) in limits.items():
+        assert value is not None, name
+        assert phrase.format(f"{value:g}") in step, (name, value, phrase)
+    # Sam's accepted values, 2026-11-10 (relayed by halcyon)
+    assert {name: value for name, (value, _) in limits.items()} == {
+        "silence": 10.0,
+        "newest-below": 120.0,
+        "last-7x": 120.0,
+        "pre-pci": 420.0,
+        "doctor": 60.0,
+        "search": 30.0,
+        "package": 120.0,
+    }
 
 
 def test_the_step_tells_a_setup_failure_from_a_judged_breach_and_skips_the_fast_lane() -> (
@@ -91,7 +177,10 @@ def test_the_step_tells_a_setup_failure_from_a_judged_breach_and_skips_the_fast_
     assert "A setup failure is not a judged breach" in step
     assert "`setup step ... failed`" in step and "A judged breach" in step
     assert "The plugin-only fast lane does not run it" in step
-    assert "no gate" in step
+    assert "are the base tag's, apart from the version" in step
+    assert "tree has no gate" not in step, (
+        "the old reason decays: a later tag has the gate"
+    )
 
 
 def test_the_step_keeps_the_pci_keep_check_and_the_write_rate() -> None:

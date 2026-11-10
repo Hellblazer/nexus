@@ -17,8 +17,8 @@
 #   every pci_ index, and the PCI keep check restarts the engine mid-build, during nx upgrade, and judges by pid).
 #   `--from-version X.Y.Z` runs one of them alone (and is then not the release gate). Around
 #   `nx upgrade` the driver also records the WAL bytes and MB/s PG wrote (see the driver's docstring
-#   for the extrapolation). The 7.76.0 start's nx upgrade ceiling is PENDING (nexus-f3yqd.5): until it
-#   is set that start cannot pass, and the gate ends NOT RUN (exit 2).
+#   for the extrapolation). A start whose nx upgrade ceiling is unset (a None entry in the driver's
+#   UPGRADE_CEILINGS_S) cannot pass, and the gate ends NOT RUN (exit 2).
 #
 # Self-provisioning: builds the wheel from THIS checkout (or, with NEXUS_TARGET_RELEASE=X.Y.Z,
 # installs that published version), uses a throwaway HOME and NEXUS_CONFIG_DIR under a work dir,
@@ -45,8 +45,9 @@
 #           NOT THE RELEASE GATE  every start passed under any non-default flag (--standin, a single
 #                                 --from-version, --engine-jar or NEXUS_SERVICE_JAR, any --*-ceiling, ...):
 #                                 a development run. --work, the target and --json-out, --keep-work do not count.
-# Only the "GATE:" line counts; the per-start lines never start with it. A run that ends without one
-# is FAILED. Run it in the background: it takes about an hour (see the release skill, Step 6e).
+# Only the "GATE:" line counts; the per-start lines never start with it. A run whose driver ends without
+# one (a crash, a bad flag) prints "UPGRADE REHEARSAL GATE: FAILED" and exits 1, whatever the driver's code
+# was. Run it in the background: it takes about an hour (see the release skill, Step 6e).
 set -euo pipefail
 
 # shellcheck source=lib/python.sh disable=SC1091
@@ -169,7 +170,12 @@ DRIVER_PID=""
 TEE_PID=""
 
 LAST_LINE="$(grep -E "$GATE_MATCH" "$WORK/driver.out" | tail -n1 || true)"
-[ -n "$LAST_LINE" ] || LAST_LINE="UPGRADE REHEARSAL GATE: FAILED: the driver ended (exit $rc) without a verdict line"
+if [ -z "$LAST_LINE" ]; then
+    # No gate line from the driver: the wrapper's own FAILED line, and exit 1 whatever the driver's code
+    # was (an argparse error exits 2, which the release skill reads as NOT RUN).
+    LAST_LINE="UPGRADE REHEARSAL GATE: FAILED: the driver ended (exit $rc) without a verdict line"
+    exit 1
+fi
 if [ "$rc" = 0 ] && [[ "$LAST_LINE" == "UPGRADE REHEARSAL GATE: PASSED"* ]]; then
     GATE_OK=1
     exit 0

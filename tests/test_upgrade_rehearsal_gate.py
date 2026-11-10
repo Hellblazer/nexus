@@ -8,6 +8,7 @@ postmaster reaper and the wrapper script's last line. No network, no engine, no 
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import os
 import shutil
@@ -90,8 +91,8 @@ def test_the_upgrade_ceiling_is_per_start_and_a_none_entry_is_pending(
 def test_every_measured_figure_is_recorded_beside_the_ceilings() -> None:
     src = DRIVER.read_text()
     for figure in (
-        "2.3 s",
-        "13.9-14.2 s",
+        "12.7 s",
+        "12.6-14.2 s",
         "460-662 s",
         "d258282c6",
         "211 s",
@@ -121,8 +122,12 @@ def test_a_start_with_a_pending_ceiling_is_pending_not_passed_even_when_every_st
     assert v["state"] == "PENDING" and v["passed"] is False
     assert v["pending"] == ["upgrade"]
     line = ur.verdict_line(v)
-    assert "PENDING" in line and "nexus-f3yqd.5" in line and "PASSED" not in line
-    assert "PENDING" in ur.format_table(v) and "nexus-f3yqd.5" in ur.format_table(v)
+    assert "PENDING" in line and "UPGRADE_CEILINGS_S" in line and "PASSED" not in line
+    assert "PENDING" in ur.format_table(v)
+    assert "UPGRADE_CEILINGS_S" in ur.format_table(v)
+    assert "mjmjl" not in ur.UPGRADE_CEILING_PENDING_NOTE, (
+        "the note covers any None entry, not one start's wait"
+    )
 
 
 def test_a_failed_step_or_a_finding_outranks_pending() -> None:
@@ -146,7 +151,7 @@ def test_a_pending_start_makes_the_gate_not_run_exit_2_and_names_the_ceiling() -
     word, line, code = ur.gate_result([_verdict("8.0.0"), _verdict("7.99.0"), pend])
     assert (word, code) == ("NOT RUN", 2)
     assert line.startswith("UPGRADE REHEARSAL GATE: NOT RUN")
-    assert "ceiling" in line and "7.76.0" in line and "nexus-f3yqd.5" in line
+    assert "ceiling" in line and "7.76.0" in line and "UPGRADE_CEILINGS_S" in line
     assert "PASSED" not in line.split("passed:")[0]
 
 
@@ -173,33 +178,51 @@ def test_a_non_default_flag_turns_a_pass_into_not_the_release_gate() -> None:
     assert fcode == 1 and "NOT THE RELEASE GATE: --silence-limit" in fline
 
 
-def test_every_relaxing_option_is_a_non_default_flag_and_the_plain_ones_are_not() -> (
-    None
-):
+def _non_default_argv(action: argparse.Action) -> list[str]:
+    """argv that sets ``action``'s option to a value other than its default."""
+    if isinstance(action, argparse.BooleanOptionalAction):
+        return [
+            action.option_strings[1]
+        ]  # --no-x: the default is None, so False differs
+    opt = action.option_strings[0]
+    if action.nargs == 0:  # store_true
+        return [opt]
+    if action.type in (int, float):
+        return [opt, str((action.default or 0) + 1)]
+    return [opt, "x"]
+
+
+def test_every_option_outside_the_neutral_set_is_a_non_default_flag_when_set() -> None:
     ap = ur._build_parser()
     base = ["--work", "w", "--target-release", "9.9.9"]
     assert ur.non_default_flags(ap, ap.parse_args(base)) == []
+    # the neutral set is pinned: adding to it silently stops a relaxing option counting
+    assert ur._NEUTRAL_DESTS == {
+        "work",
+        "target_wheel",
+        "target_release",
+        "json_out",
+        "keep_work",
+        "help",
+    }
     assert (
         ur.non_default_flags(ap, ap.parse_args([*base, "--json-out", "x.json"])) == []
-    )
+    ), "a neutral option is not a non-default flag"
     assert ur.non_default_flags(ap, ap.parse_args([*base, "--keep-work"])) == [], (
         "keeping the store changes nothing that is judged"
     )
-    for extra, want in (
-        (["--standin"], "--standin"),
-        (["--rows-floor", "5"], "--rows-floor"),
-        (["--silence-limit", "99"], "--silence-limit"),
-        (["--upgrade-ceiling", "999"], "--upgrade-ceiling"),
-        (["--doctor-ceiling", "999"], "--doctor-ceiling"),
-        (["--search-ceiling", "999"], "--search-ceiling"),
-        (["--package-ceiling", "999"], "--package-ceiling"),
-        (["--prepare-cmd", "true"], "--prepare-cmd"),
-        (["--no-pci-restart-check"], "--no-pci-restart-check"),
-        (["--from-version", "8.0.0"], "--from-version"),
-        (["--engine-jar", "j.jar"], "--engine-jar"),
-        (["--sentinel-expect", "x"], "--sentinel-expect"),
-    ):
-        assert want in ur.non_default_flags(ap, ap.parse_args([*base, *extra])), extra
+    examined = 0
+    for action in ap._actions:
+        if not action.option_strings or action.dest in ur._NEUTRAL_DESTS:
+            continue
+        examined += 1
+        extra = _non_default_argv(action)
+        got = ur.non_default_flags(ap, ap.parse_args([*base, *extra]))
+        assert got == [extra[0]], (action.dest, extra, got)
+    # non-vacuity: the parser has at least this many options outside the neutral set
+    assert examined >= 18, examined
+    for dest in ("restart_gap", "profile_upgrade", "pci_collections", "pci_end_bound"):
+        assert any(a.dest == dest for a in ap._actions), dest
 
 
 @pytest.fixture
@@ -727,6 +750,21 @@ def test_a_driver_that_crashes_after_a_start_line_is_not_a_pass(tmp_path: Path) 
         and "without a verdict line" in last
     )
     assert "PASSED" not in last
+
+
+def test_a_driver_that_dies_without_a_gate_line_makes_the_wrapper_fail_with_exit_1(
+    tmp_path: Path,
+) -> None:
+    # an argparse error exits 2, which the release skill reads as NOT RUN: the wrapper must say FAILED, exit 1
+    tree, env = _wrapper_tree(
+        tmp_path,
+        "import sys\nprint('usage: upgrade_rehearsal.py: error: bad flag', file=sys.stderr)\nsys.exit(2)\n",
+    )
+    r = _run_wrapper(tree, env)
+    last = r.stdout.strip().splitlines()[-1]
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert last.startswith("UPGRADE REHEARSAL GATE: FAILED")
+    assert "exit 2" in last and "without a verdict line" in last
 
 
 def test_the_wrapper_names_a_not_run_and_a_not_the_release_gate_line_exit_2(

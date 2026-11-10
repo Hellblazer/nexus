@@ -461,13 +461,19 @@ Trigger: this release carries a schema or data migration — a new `upgrade_ladd
 
 Full rationale and evidence citations: `docs/contributing.md` § Schema/data-migration releases.
 
-### 6e. Upgrade rehearsal from the user's seat (BLOCKING, nexus-f3yqd.5)
+### 6e. Upgrade rehearsal from the user's seat (BLOCKING on a candidate that pins engine 0.1.187 or later, nexus-f3yqd.5)
 
 Why (Sam, 2026-11-10): two upgrades to 8.0.0 each rewrote the local store for about
 20 minutes at the first engine boot, with nothing on screen, and no gate looked at
 what a user sees. This one takes a real install of the previous release with a
 sizeable local store, upgrades it the way a user does, and times what the user
 waits through.
+
+Engine pin: the step is blocking only on a candidate whose wheel pins engine 0.1.187
+or later. On an older pin the PCI keep check of the 7.76.0 start FAILS by design
+(aspects-005-2) and that failure cannot be waived, so raise the pin first (Step 0).
+`--engine-jar PATH` is how to prove a fixed engine before its tag; that run is not the
+release gate.
 
 Run it after Step 3's version bump, in the release worktree, on chas. It outruns a
 10-minute foreground call, so start it as a background command with its output in a
@@ -490,19 +496,22 @@ not newer than it. For each start it:
    2.4 GB; the 7.76.0 start seeds five large collections instead, about 140,000
    rows), then starts its engine;
 2. upgrades the package to the candidate wheel built from the worktree
-   (`NEXUS_TARGET_RELEASE=X.Y.Z` uses the published version instead), and checks that
+   (`NEXUS_TARGET_RELEASE=X.Y.Z` uses the published version instead: that is a
+   post-publish rerun, never the pre-tag gate), and checks that
    `nx --version` names the candidate;
 3. runs `nx upgrade`, `nx doctor` and `nx search` for the seeder's sentinel note.
 
 Each of those steps runs under a pty and FAILS when it prints nothing for 10 s, runs
-past its ceiling, or exits non-zero. Every limit below is Sam's decision of record
-(Sam 2026-11-10, halcyon): he accepted the 10 s silence limit and the measured
-ceilings, and the 420 s from 7.76.0 separately. The ceilings are per start, measured
-on 2026-11-10 on chas lab-m:
+past its ceiling, or exits non-zero. Seven limits are Sam's decision of record
+(Sam 2026-11-10, halcyon): the 10 s silence limit, the three `nx upgrade` ceilings
+below, `nx doctor`, `nx search` and the package upgrade. The 1800 s hang guard, the
+900 s PCI end wait, the 50,000-row floor and the ten probe errors named below are the
+gate's own, not his. The ceilings are per start, measured on 2026-11-10 on chas lab-m:
 
-- `nx upgrade` from the newest release below the candidate: 120 s (2.3 s from 8.0.0).
-- `nx upgrade` from the last 7.x: 120 s (13.9 to 14.2 s from 7.99.0).
-- `nx upgrade` from 7.76.0: 420 s. Measured 209 to 211 s on chas lab-m with the
+- `nx upgrade` from the newest release below the candidate: 120 s (12.7 s from 8.0.0,
+  a real engine change, 0.1.184 to 0.1.186).
+- `nx upgrade` from the last 7.x: 120 s (12.6 to 14.2 s from 7.99.0).
+- `nx upgrade` from 7.76.0: 420 s, calibrated on chas lab-m. Measured 209 to 211 s on chas lab-m with the
   rung-scan fix (nexus-mjmjl, conexus 8.1.1: 211 s at e979863a6, 209.1 s on develop
   after 8.1.1) for 140,000 rows in five collections (2.6 GB); 460 to 662 s before that
   fix. The ceiling is twice the measurement, because the same upgrade varied about 1.45
@@ -514,11 +523,13 @@ on 2026-11-10 on chas lab-m:
   that; Sam decides.
 - `nx doctor` 60 s (7.5 s), `nx search` 30 s (2.8 s), package upgrade 120 s (0.4 s).
 
-The margins are not uniform. Doctor, search and the last-7x upgrade sit at about 8 to
-11 times the slowest measured; the newest-below upgrade ceiling is about 50 times its
-2.3 s and the package ceiling is 300 times its 0.4 s, so those two are floors against
-a hang, not tight margins. All of them bound this fixture's size and say nothing about
-a store many times larger, where a silent stretch grows with the data.
+The margins are not uniform. Doctor, search and the two newer-start `nx upgrade`
+ceilings sit at about 8 to 11 times the slowest measured (120 s against 12.7 s and
+12.6 to 14.2 s); only the package ceiling, 300 times its 0.4 s, is a pure floor against
+a hang, not a margin. The silence limit leaves a margin of about 2: the longest silent
+gap measured on the current build is 4.0 to 5.1 s (doctor showed 5.7 s on an older
+build). All of them bound this fixture's size and say nothing about a store many times
+larger, where a silent stretch grows with the data.
 
 A run also fails when it checked nothing: PG's own row count (read through the
 install's psql) under 50,000 before or after `nx upgrade`, or fewer rows after than
@@ -570,8 +581,17 @@ says the same:
 
 Only exit 0 clears 6e. A FAILED is a release blocker, never waived here: a silent or
 slow step is what the user sees. NOT RUN and NOT THE RELEASE GATE are not passes
-either, and a release does not proceed on them. A failure keeps its step logs and engine and PG
-logs on chas. Paste each start's step table into the cut bead.
+either, and a release does not proceed on them. A failure prints
+`FAILURE EVIDENCE PRESERVED: <dir>` on stderr: the step logs, verdicts and the engine and
+PG logs stay in that directory on chas under the host's temp directory, and the
+multi-GB work tree is removed. Copy those logs into the cut bead promptly, and paste each
+start's step table there too.
+
+A run that ends with no gate line and no verdict (`lab-remote` exit 98 because another
+run holds this worktree's copy, `lab-run` exit 137 over the class's memory cap, a dropped
+ssh) is an infrastructure outcome, not a judgement of the candidate: rerun it (`--wait`
+on 98), never run the script unwrapped on the host. A driver that dies without a gate
+line (a crash, a bad flag) makes the wrapper print its own `GATE: FAILED` and exit 1.
 
 A setup failure is not a judged breach. When a start's install, prepare, engine start
 or version check fails (the network, PyPI, a stuck download), the start reports a
@@ -584,12 +604,11 @@ without a fix proves nothing.
 
 Wall time, from the measured parts: about 50 to 75 minutes. Preparing the store takes
 about 13 minutes for each 86,000-row start and about 20 minutes for the five-collection
-7.76.0 start; `nx upgrade` takes 2 to 14 s from the other starts and 211 to 660 s from
+7.76.0 start; `nx upgrade` takes 12 to 14 s from the other starts and 209 to 211 s from
 7.76.0; the PCI end wait adds up to 900 s; installs and the wheel build come on top.
 
-The plugin-only fast lane does not run it: that lane builds off the base tag, whose
-tree has no gate, and ships a wheel and engine that are the base tag's but for the
-version.
+The plugin-only fast lane does not run it: the wheel and engine that lane ships are the
+base tag's, apart from the version, so there is nothing new to rehearse.
 
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 

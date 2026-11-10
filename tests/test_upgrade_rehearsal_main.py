@@ -141,6 +141,34 @@ def test_the_engine_jar_in_the_environment_turns_a_pass_into_not_the_release_gat
     )
 
 
+def test_restart_gap_reaches_the_config_and_the_run_is_not_the_release_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restore_signal_handlers: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("NEXUS_SERVICE_JAR", raising=False)
+    monkeypatch.setattr(ur, "fetch_published_versions", lambda: PUBLISHED.split(","))
+    seen: list[float] = []
+
+    def spy(version: str, cfg: object) -> dict:
+        seen.append(cfg.restart_gap_s)  # type: ignore[attr-defined]
+        return _passing_rehearse(version, cfg)
+
+    monkeypatch.setattr(ur, "rehearse", spy)
+    out = tmp_path / "v.json"
+    argv = ["--work", str(tmp_path / "w"), "--target-release", "9.9.9"]
+    rc = ur.main([*argv, "--restart-gap", "37", "--json-out", str(out)])
+    assert seen and set(seen) == {37.0}, seen
+    assert rc == 2 and json.loads(out.read_text())["non_default_flags"] == [
+        "--restart-gap"
+    ]
+    seen.clear()
+    assert ur.main([*argv, "--json-out", str(out)]) == 0
+    assert set(seen) == {0.0}, "the default is no gap"
+    capsys.readouterr()
+
+
 def test_a_sigterm_reaches_the_handler_main_installed_and_the_run_unwinds(
     tmp_path: Path,
 ) -> None:

@@ -371,6 +371,32 @@ def test_a_restart_during_nx_upgrade_runs_to_a_pass_and_the_cleanup_frees_the_st
     assert json.loads((run / "verdict.json").read_text())["state"] == "PASSED"
 
 
+def test_the_restart_gap_sleeps_between_the_stop_and_the_start(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gap = 7.25  # a value nothing else sleeps for
+    world.upgrade_does(UPGRADE_BUILD, N="8")
+    world.restart_start_does("0")
+    real_sleep = ur.time.sleep
+    at_gap: list[list[str]] = []
+
+    def sleep(seconds: float) -> None:
+        if seconds == gap:  # record what had run, do not wait
+            at_gap.append(world.calls())
+            return
+        real_sleep(seconds)
+
+    monkeypatch.setattr(ur.time, "sleep", sleep)
+    v = ur.rehearse("7.76.0", world.cfg(restart_gap_s=gap))
+    assert v["findings"] == [], v["findings"]
+    assert len(at_gap) == 1, "the gap sleeps once, in the restart"
+    seen = at_gap[0]
+    assert "nx daemon service stop" in seen, "the stop has run before the gap"
+    assert sum(c.startswith("nx daemon service start") for c in seen) == 1, (
+        "only start-old has run: the restart's start comes after the gap"
+    )
+
+
 def test_a_restart_still_running_when_nx_upgrade_returns_is_joined_before_doctor(
     world: World,
 ) -> None:

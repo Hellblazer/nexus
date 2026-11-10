@@ -50,17 +50,24 @@ FAILURE (vacuous), not a pass. The fix ships in an engine newer than the wheel's
 ``--engine-jar`` (or ``NEXUS_SERVICE_JAR``) to run the check against a jar built from the fix; the
 override applies from ``start-old`` on, never to the old client's stack.
 
-The ceilings are per start and come from the first real-store runs (chas lab-m, 2026-11-10; the
-f3yqd.1 seeder's 86,000 rows, 2.4 GB, and for 7.76.0 140,000 rows in five collections, 2.6 GB). ``nx upgrade``
-is 120 s from the newest release below the candidate (2.3 s measured) and from the last 7.x (13.9-14.2 s),
-and 420 s from 7.76.0: twice the 209-211 s measured on chas lab-m with the rung-scan fix (nexus-mjmjl,
-conexus 8.1.1; 209.1 s on develop after 8.1.1, 211 s at e979863a6) for 140,000 rows in five collections,
-2.6 GB. Twice, because the same upgrade varied about 1.45 times between hosts (365 s on qwent, 531 s on
-chas before the fix), and no more, so the 460-662 s it took before the fix still fails. doctor (60 s, 7.5 s measured), search (30 s, 2.8 s) and the last-7x upgrade sit at about 8 to
-11 times the slowest measured; the newest-below upgrade (about 50 times) and the package upgrade (120 s
-against 0.4 s) are floors against a hang, not margins. All of them bound THIS fixture; a much larger store
-needs its own measurement. Every limit here, the 10 s silence limit included, is Sam's decision of
-record (Sam 2026-11-10, halcyon).
+The ceilings are per start and come from the first real-store runs (chas lab-m, 2026-11-10, the develop
+wheel, conexus 8.1.0 with engine 0.1.186; the f3yqd.1 seeder's 86,000 rows, 2.4 GB, and for 7.76.0 140,000
+rows in five collections, 2.6 GB). ``nx upgrade`` is 120 s from the newest release below the candidate
+(12.7 s measured from 8.0.0, a real engine change, 0.1.184 to 0.1.186) and from the last 7.x (12.6-14.2 s
+from 7.99.0), and 420 s from 7.76.0: twice the 209-211 s measured on chas lab-m with the rung-scan fix
+(nexus-mjmjl, conexus 8.1.1; 209.1 s on develop after 8.1.1, 211 s at e979863a6) for 140,000 rows in five
+collections, 2.6 GB. The 420 s is calibrated on chas lab-m. Twice, because the same upgrade varied about
+1.45 times between hosts (365 s on qwent, 531 s on chas before the fix), and no more, so the 460-662 s it
+took before the fix still fails. The silence limit is 10 s against a longest silent gap of 4.0-5.1 s
+measured (about twice; doctor showed 5.7 s on an older build). doctor (60 s, 7.5 s measured), search (30 s,
+2.8 s) and both nx upgrade ceilings from the newer starts sit at about 8 to 11 times the slowest measured;
+only the package upgrade (120 s against 0.4 s) is a pure floor against a hang, not a margin. All of them bound
+THIS fixture; a much larger store needs its own measurement. Sam accepted the seven limits (the 10 s silence
+limit, the three ``nx upgrade`` ceilings, doctor, search and the package upgrade) on 2026-11-10 (relayed by
+halcyon). The 1800 s hang guard, the 900 s PCI end wait, the 50,000-row floor and the ten probe errors are
+the gate's own. The PCI keep check passes on an engine 0.1.187 or later and fails on 0.1.186 (aspects-005-2),
+so a release candidate pins 0.1.187 or later before the 7.76.0 start can pass (``--engine-jar`` proves a fixed
+engine before its tag).
 
     upgrade_rehearsal.py --work DIR --target-wheel dist/conexus-X-py3-none-any.whl
     upgrade_rehearsal.py --work DIR --target-release 8.1.0 --from-version 8.0.0
@@ -106,33 +113,34 @@ from pathlib import Path
 # --- named limits, from the 2026-11-10 real-store runs (slowest measured in brackets) ---------
 DEFAULT_SILENCE_LIMIT_S: float = (
     10.0  # Sam's decision of record (Sam 2026-11-10, halcyon)
-    # [longest gap: 5.7 s doctor; 11.9 s nx upgrade from 7.99.0 on a build before the heartbeats, a breach]
+    # [longest gap 4.0-5.1 s on the current build, so a margin of about 2; 5.7 s doctor on an older
+    #  build; 11.9 s nx upgrade from 7.99.0 on a build before the heartbeats, a breach]
 )
 #: ``nx upgrade`` ceiling by kind of start (``start_kind``). ``None`` means PENDING: the value is not
 #: set yet, a run from that start can never be a PASS (verdict PENDING, combined NOT RUN, exit 2) and
 #: only ``UPGRADE_PENDING_HANG_GUARD_S`` bounds it. Measured, 86,000-row store (2.4 GB) for the first
 #: two and 140,000 rows in five collections (2.6 GB) for the third, chas lab-m, 2026-11-10:
-#:   newest-below: 2.3 s from 8.0.0.                      -> 120 s
-#:   last-7x:      13.9-14.2 s from 7.99.0.               -> 120 s
+#:   newest-below: 12.7 s from 8.0.0 (a real engine change, 0.1.184 to 0.1.186).  -> 120 s
+#:   last-7x:      12.6-14.2 s from 7.99.0.               -> 120 s
 #:   pre-pci:      460-662 s from 7.76.0 on develop d258282c6 (every pci_ index built inside the
 #:                 upgrade); 211 s with the rung-scan fix e979863a6 (nexus-mjmjl, in conexus 8.1.1)
 #:                 and 209.1 s on develop after 8.1.1                 -> 420 s (twice: host spread
 #:                 about 1.45x, 365 s qwent vs 531 s chas before the fix; the 460-662 s still fails)
-#: A None entry would make that start PENDING: never a PASS, only the hang guard bounding it.
+#: A None entry makes that start PENDING: never a PASS, only the hang guard bounding it.
 UPGRADE_CEILINGS_S: dict[str, float | None] = {
     "newest-below": 120.0,
     "last-7x": 120.0,
     "pre-pci": 420.0,
 }
 UPGRADE_CEILING_PENDING_NOTE: str = (
-    "upgrade ceiling PENDING (nexus-f3yqd.5 sets it from the develop measurement once nexus-mjmjl's "
-    "rung-scan fix is in conexus 8.1.1)"
+    "upgrade ceiling PENDING (the start's UPGRADE_CEILINGS_S entry is None: set it from a measurement "
+    "on the candidate's engine before this start can pass)"
 )
 #: A hang guard for a start whose ceiling is pending. It is NOT a ceiling and never makes a PASS.
 UPGRADE_PENDING_HANG_GUARD_S: float = 1800.0
 DOCTOR_CEILING_S: float = 60.0  # [7.5 s]
 SEARCH_CEILING_S: float = 30.0  # [2.8 s]
-PACKAGE_UPGRADE_CEILING_S: float = 120.0  # [0.4 s]; a floor, not a margin of 8-10x
+PACKAGE_UPGRADE_CEILING_S: float = 120.0  # [0.4 s]; a floor, not a margin
 VERSION_CHECK_CEILING_S: float = 60.0
 # Setup steps are not under test: a generous ceiling, no silence limit.
 INSTALL_PREV_CEILING_S: float = 900.0
