@@ -101,18 +101,53 @@ def test_a_success_logs_no_error_and_no_after_error(now: list[float]) -> None:
 def test_the_next_call_after_an_error_is_logged_once_with_same_tool_and_seconds(now: list[float]) -> None:
     server = _server()
     with capture_logs() as logs:
-        call_tool(server, "marked")
+        call_tool(server, "marked", {"value": "a"})
         now[0] += 4.0
-        call_tool(server, "marked")  # the retry: it fails again
+        call_tool(server, "marked", {"value": "a"})  # a blind retry: same arguments, fails again
+        now[0] += 2.0
+        call_tool(server, "marked", {"value": "b"})  # a corrected retry: other arguments
         now[0] += 1.0
-        call_tool(server, "ok")  # moved on after the second failure
+        call_tool(server, "ok")  # moved on
         call_tool(server, "ok")  # nothing pending: no line
     after = _of(logs, "mcp_tool_after_error")
-    assert [(a["tool"], a["failed_tool"], a["same_tool"], a["seconds"]) for a in after] == [
-        ("marked", "marked", True, 4.0),
-        ("ok", "marked", False, 1.0),
+    assert [(a["tool"], a["failed_tool"], a["same_tool"], a["same_args"], a["seconds"]) for a in after] == [
+        ("marked", "marked", True, True, 4.0),
+        ("marked", "marked", True, False, 2.0),
+        ("ok", "marked", False, False, 1.0),
     ], after
-    assert len(_of(logs, "mcp_tool_error")) == 2
+    errors = _of(logs, "mcp_tool_error")
+    assert [(e["streak"], e["calls"], e["superseded"]) for e in errors] == [(1, 1, False), (2, 2, False), (3, 3, False)]
+    assert {e["schema"] for e in errors + after} == {_tool_call_log.FAILURE_SCHEMA}
+    assert _SECRET not in repr(after) and "'a'" not in repr(after), "same_args is a bool; arguments never logged"
+
+
+def test_a_success_resets_the_streak(now: list[float]) -> None:
+    server = _server()
+    with capture_logs() as logs:
+        call_tool(server, "marked")
+        call_tool(server, "marked")
+        call_tool(server, "ok")  # ok's success does not touch marked's streak
+        call_tool(server, "crashes")
+    assert [(e["tool"], e["streak"]) for e in _of(logs, "mcp_tool_error")] == [
+        ("marked", 1), ("marked", 2), ("crashes", 1),
+    ]
+
+
+def test_a_failure_while_another_is_pending_says_superseded(now: list[float]) -> None:
+    """Parallel calls: B fails before any call follows A. One slot, so A's follow-up is lost, and B's line says so."""
+    with capture_logs() as logs:
+        _tool_call_log._note_outcome({"name": "a", "arguments": {}}, True)
+        _tool_call_log._note_outcome({"name": "b", "arguments": {}}, True)
+        _tool_call_log._note_next_call({"name": "b", "arguments": {}})
+    assert [e["superseded"] for e in _of(logs, "mcp_tool_error")] == [False, True]
+    assert [a["failed_tool"] for a in _of(logs, "mcp_tool_after_error")] == ["b"]
+
+
+def test_a_nameless_call_is_never_the_same_tool(now: list[float]) -> None:
+    with capture_logs() as logs:
+        _tool_call_log._note_outcome({"arguments": {}}, True)
+        _tool_call_log._note_next_call({"arguments": {}})
+    assert [(a["tool"], a["same_tool"], a["same_args"]) for a in _of(logs, "mcp_tool_after_error")] == [(None, False, False)]
 
 
 def test_a_rejected_call_counts_as_an_error(now: list[float]) -> None:
@@ -126,12 +161,45 @@ def test_a_rejected_call_counts_as_an_error(now: list[float]) -> None:
     assert [a["same_tool"] for a in _of(logs, "mcp_tool_after_error")] == [False]
 
 
-def test_a_raising_logger_never_breaks_the_call(now: list[float], monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("hook", ["_note_outcome", "_note_next_call"])
+def test_a_raising_logger_never_breaks_the_call(hook: str, now: list[float], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every guard: the success path, the marked-failure path, and the raise path, whose
+    own exception text must reach the client, not the logger's."""
     server = _server()
 
     def _boom(*_a, **_k):
         raise RuntimeError("logger down")
 
-    monkeypatch.setattr(_tool_call_log, "_note_outcome", _boom)
+    monkeypatch.setattr(_tool_call_log, hook, _boom)
     assert call_tool(server, "marked").is_error is True
     assert call_tool(server, "ok").is_error is False
+    crashed = call_tool(server, "crashes", {"value": "x"})
+    text = " ".join(getattr(c, "text", "") for c in crashed.content)
+    assert crashed.is_error is True and "boom x" in text and "logger down" not in text, text
+
+
+def _entry(server: MCPServer):
+    return next(m for m in server.middleware if getattr(m, "_nx_tool_call_log", False))
+
+
+@pytest.mark.parametrize("logger_breaks", [False, True])
+def test_a_raise_out_of_the_chain_is_logged_and_passes_through_unchanged(
+    logger_breaks: bool, now: list[float], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What raises out of call_next (a protocol MCPError, a params ValidationError) is an error
+    line too, and the caller gets that exception, never the logger's."""
+    from types import SimpleNamespace
+
+    import anyio
+
+    if logger_breaks:
+        monkeypatch.setattr(_tool_call_log, "_note_outcome", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("logger down")))
+    server = _server()
+    ctx = SimpleNamespace(method="tools/call", params={"name": "marked", "arguments": {}})
+
+    async def _raises(_ctx):
+        raise ValueError("the chain's own error")
+
+    with capture_logs() as logs, pytest.raises(ValueError, match="the chain's own error"):
+        anyio.run(_entry(server), ctx, _raises)
+    assert [e["tool"] for e in _of(logs, "mcp_tool_error")] == ([] if logger_breaks else ["marked"])
