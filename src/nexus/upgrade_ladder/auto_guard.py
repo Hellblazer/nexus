@@ -24,7 +24,7 @@ from collections.abc import Callable
 
 import structlog
 
-from nexus.upgrade_ladder.unattended import is_unattended
+from nexus.upgrade_ladder.unattended import is_bounded, is_unattended
 
 _log = structlog.get_logger(__name__)
 
@@ -43,8 +43,9 @@ def managed_service() -> bool:
 
 def refuses_unbounded_read(managed_fn: Callable[[], bool] = managed_service) -> bool:
     """True when this run is unattended (``--auto``, ``NX_UPGRADE_UNATTENDED=1``, the version-transition
-    callout) against a managed service. Keyed on the explicit signal, never on a bound deadline."""
-    return is_unattended() and managed_fn()
+    callout) against a managed service, or when it makes only bounded reads (``nx doctor``, any engine:
+    nexus-mjmjl). Keyed on the explicit signal, never on a bound deadline."""
+    return is_bounded() or (is_unattended() and managed_fn())
 
 
 def default_completion_record(rung_name: str) -> object | None:

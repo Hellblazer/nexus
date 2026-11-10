@@ -26,9 +26,12 @@ from collections.abc import Iterator
 
 from nexus.util.upgrade_auto_lock import UNATTENDED_ENV, env_unattended
 
-__all__ = ["UNATTENDED_ENV", "env_unattended", "is_unattended", "unattended_run"]
+__all__ = ["UNATTENDED_ENV", "bounded_reads", "env_unattended", "is_bounded", "is_unattended", "unattended_run"]
 
 _UNATTENDED: contextvars.ContextVar[bool] = contextvars.ContextVar("nexus_upgrade_unattended", default=False)
+#: nexus-mjmjl: ``nx doctor`` decides whether a rung is pending without any read whose cost grows with the store,
+#: against a local engine too (marginalia's py-spy: ~210 s of a 207-239 s doctor in one rung's dry-run scan).
+_BOUNDED: contextvars.ContextVar[bool] = contextvars.ContextVar("nexus_upgrade_bounded_reads", default=False)
 
 
 def is_unattended() -> bool:
@@ -47,3 +50,20 @@ def unattended_run(active: bool = True) -> Iterator[None]:
         yield
     finally:
         _UNATTENDED.reset(token)
+
+
+def is_bounded() -> bool:
+    """True inside :func:`bounded_reads`."""
+    return _BOUNDED.get()
+
+
+@contextlib.contextmanager
+def bounded_reads() -> Iterator[None]:
+    """Mark the enclosed run as one that makes no read whose cost grows with the store (``nx doctor``): a rung that
+    cannot answer from its completion record or a bounded engine count reports itself not checked, whatever the
+    engine (nexus-mjmjl)."""
+    token = _BOUNDED.set(True)
+    try:
+        yield
+    finally:
+        _BOUNDED.reset(token)
