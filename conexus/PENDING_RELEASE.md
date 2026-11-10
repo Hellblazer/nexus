@@ -49,5 +49,9 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/hooks/scripts/compact_checkpoint.py`
   nexus-ct9sv: another session's pre no longer prunes an idle session's unused checkpoint at 48 h; it keeps it until a 7-day limit, which is also inject's restore limit.
+- `conexus/launch/nx_setup.py`
+  nexus-f3yqd.6 (F3): a failed setup step names the cause line the command printed (never the nx init step reporter's tail; secrets masked), and its next step says to read the log before a retry.
+- `conexus/commands/setup.md`
+  nexus-f3yqd.6 (F3): on a failed or interrupted run, read the log for the cause before suggesting a retry.
 
 ## Deferred to the next client release
