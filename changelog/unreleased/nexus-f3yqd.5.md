@@ -1,0 +1,3 @@
+### Added
+
+- **A release gate that upgrades from the user's seat** (nexus-f3yqd.5). `tests/e2e/upgrade-rehearsal.sh` installs a previous published conexus with a sizeable local store in a throwaway HOME, upgrades the package the way a user does, then runs `nx upgrade`, `nx doctor` and `nx search`, and fails any step that prints nothing for more than 10 seconds, runs past its ceiling or exits non-zero. It runs twice by default, from the newest published version below the candidate and from the last published 7.x, each with its own step table and verdict line (`--from-version X.Y.Z` runs one). The driver is `scripts/upgrade_rehearsal.py`; its watchdog has an offline self-test.
