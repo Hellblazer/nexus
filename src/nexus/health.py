@@ -12393,6 +12393,13 @@ def _check_next_seq_drift(documents: list[Any] | _WalkFailed | None = None) -> l
             detail="skipped (corpus scan failed twice — drift not assessed "
                    "for ANY owner this run)",
         )]
+    # nexus-f3yqd.6: tombstoned children count, as the docstring says and the engine's sweep does.
+    trash = _tombstoned_tumblers(cat)
+    for tumbler in trash or []:
+        prefix, dot, tail = tumbler.rpartition(".")
+        if dot and tail.isdigit() and int(tail) > highs.get(prefix, 0):
+            highs[prefix] = int(tail)
+    unread = "" if trash is not None else "; tombstoned children not read, so drift a deleted child causes is not seen"
 
     drifted: list[tuple[str, int, int]] = []
     checked = 0
@@ -12427,7 +12434,7 @@ def _check_next_seq_drift(documents: list[Any] | _WalkFailed | None = None) -> l
         return [HealthResult(label=label, ok=True, detail="skipped (no owner was readable)")]
     if not drifted:
         return [HealthResult(
-            label=label, ok=True, detail=f"none ({checked} owner(s) checked)",
+            label=label, ok=True, detail=f"none ({checked} owner(s) checked{unread})",
         )]
 
     names = "; ".join(
@@ -12551,6 +12558,31 @@ def _check_failed_runs_hidden_chunks(documents: list[Any] | _WalkFailed | None =
             "then re-index the named sources; the documents stay 'failed' until a run completes",
         ],
     )]
+
+
+#: Page size for the tombstone read in :func:`_tombstoned_tumblers`.
+_TRASH_PAGE = 500
+
+
+def _tombstoned_tumblers(cat: Any) -> list[str] | None:
+    """Every tombstoned document's tumbler (``GET /trash``, paged), or ``None`` when it cannot be read.
+
+    The live walk filters ``deleted_at IS NULL``, but a tombstoned tumbler is still taken (the unique key is
+    ``(tenant_id, tumbler)``) and the engine's ``highestChildSeq`` counts it (nexus-f3yqd.6)."""
+    tumblers: list[str] = []
+    offset = 0
+    try:
+        while True:
+            page = cat.list_trash(limit=_TRASH_PAGE, offset=offset)
+            if not isinstance(page, list):
+                return None
+            tumblers.extend(str(d.get("tumbler", "") or "") for d in page if isinstance(d, dict))
+            if len(page) < _TRASH_PAGE:
+                return tumblers
+            offset += len(page)
+    except Exception as exc:  # noqa: BLE001 — an unreadable trash narrows the row, never crashes it
+        _log.warning("doctor_next_seq_trash_unread", error=str(exc))
+        return None
 
 
 def _highest_child_seqs(cat: Any, documents: list[Any] | _WalkFailed | None = None) -> dict[str, int]:
