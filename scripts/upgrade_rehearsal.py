@@ -78,6 +78,7 @@ passed under a flag that changes what is judged: --standin, --rows-floor, --sile
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import errno
 import fcntl
@@ -98,7 +99,7 @@ import termios
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from pathlib import Path
 
@@ -1750,6 +1751,9 @@ class Config:
     profile_upgrade: bool = (
         False  # run nx upgrade under py-spy (timestamped samples, diagnosis only)
     )
+    keep_work: bool = (
+        False  # --keep-work: the PG store (base, pg_wal) stays after each start
+    )
 
 
 def _ambient_uv_dir() -> str:
@@ -1791,11 +1795,16 @@ def build_env(home: Path, config: Path) -> dict[str, str]:
     return env
 
 
+def parse_cmdline(raw: bytes) -> list[str]:
+    """argv from the bytes of ``/proc/<pid>/cmdline``: arguments each ended by a NUL (an argument may
+    hold spaces, which a ``ps`` line cannot show). An empty argument is dropped."""
+    return [a for a in raw.decode("utf-8", "replace").split("\0") if a]
+
+
 def cmdline_of(pid: int) -> list[str] | None:
     """The process's argv: /proc where there is one, else ps; None when it cannot be read."""
     try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-        return [a for a in raw.decode("utf-8", "replace").split("\0") if a]
+        return parse_cmdline(Path(f"/proc/{pid}/cmdline").read_bytes())
     except OSError:
         pass
     try:
@@ -1876,15 +1885,19 @@ def _reap_postmasters(
             sleep(0.5)
         how = "ended after SIGINT"
         if _pid_alive(pid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            for _ in range(20):
-                if not _pid_alive(pid):
-                    break
-                sleep(0.25)
-            how = f"still running {grace_s:g}s after SIGINT: SIGKILLed"
+            if not is_our_postmaster(cmdline(pid), run_dir):
+                # The postmaster went and its pid now belongs to something else: never kill that.
+                how = "ended after SIGINT (its pid now belongs to another process: left alone)"
+            else:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                for _ in range(20):
+                    if not _pid_alive(pid):
+                        break
+                    sleep(0.25)
+                how = f"still running {grace_s:g}s after SIGINT: SIGKILLed"
         notes.append(f"stray postmaster {pid} under {run_dir}: {how}")
     return notes
 
@@ -1922,19 +1935,55 @@ class _Terminated(SystemExit):
     """SIGTERM/SIGHUP, as an exit that lets every ``finally`` (stack stop, reap) run."""
 
 
+class _ExitState:
+    """What the SIGTERM/SIGHUP handler knows: whether it has fired, whether the cleanup is running
+    (a signal then is held, not raised), and the exit code of a signal held during it."""
+
+    def __init__(self) -> None:
+        self.fired = False
+        self.cleaning = False
+        self.held: int | None = None
+
+
+_EXIT = _ExitState()
+
+
 def install_exit_handlers() -> None:
     """SIGTERM and SIGHUP become SystemExit(128+signal) in the main thread, once: a lab-run cancel, a
-    closed ssh session or a wrapper's kill must run the cleanup, not leave a postmaster and a store."""
-    state = {"fired": False}
+    closed ssh session or a wrapper's kill must run the cleanup, not leave a postmaster and a store.
+    A signal that lands once the cleanup has begun (``protected_cleanup``) is held until it ends."""
+    _EXIT.__init__()
 
     def handler(signum: int, _frame: object) -> None:
-        if state["fired"]:
-            return  # the cleanup is already running; a second signal must not cut it short
-        state["fired"] = True
+        if _EXIT.cleaning:
+            if _EXIT.held is None:
+                _EXIT.held = (
+                    128 + signum
+                )  # acted on when the cleanup is done, never in its middle
+            return
+        if _EXIT.fired:
+            return  # already unwinding; a second signal must not cut the unwind short
+        _EXIT.fired = True
         raise _Terminated(128 + signum)
 
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, handler)
+
+
+@contextlib.contextmanager
+def protected_cleanup() -> Iterator[None]:
+    """The stack stop, the reap and the store reclaim: a SIGTERM/SIGHUP landing inside must not skip
+    them (the handler would raise out of the middle of a stop), so it is held and raised when the block
+    ends. A signal in the few bytecodes before the block starts is the one gap left."""
+    _EXIT.cleaning = True
+    try:
+        yield
+    finally:
+        _EXIT.cleaning = False
+    held, _EXIT.held = _EXIT.held, None
+    if held is not None:
+        _EXIT.fired = True
+        raise _Terminated(held)
 
 
 def rehearse(from_version: str, cfg: Config) -> dict:
@@ -2296,43 +2345,56 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 )
                 findings.extend(f"{PCI_STEP}: {w}" for w in rep_.findings)
     finally:
-        upgrade_done.set()
-        if trigger is not None:
-            trigger.cancel()
-            trigger.join(PCI_RESTART_JOIN_S)
-        if watcher is not None:
-            watcher.stop()
-            if pci_evidence is None:
-                # The check did not run (an earlier step failed): the builds the watcher saw are still
-                # evidence of what the upgrade left running.
-                hist = watcher.history()
-                pci_evidence = {
-                    "not_run": True,
-                    "builders": _builders(hist),
-                    "timeline": _timeline(hist),
-                }
-        if Path(nx).exists():
-            go(
-                "cleanup-service",
-                [nx, "daemon", "service", "stop", "--with-pg"],
-                silence=None,
-                ceiling=CLEANUP_CEILING_S,
-                judged=False,
-            )
-            go(
-                "cleanup-worker",
-                [nx, "daemon", "aspect-worker", "stop", "--config-dir", str(config)],
-                silence=None,
-                ceiling=CLEANUP_CEILING_S,
-                judged=False,
-            )
-        reaped = _reap_postmasters(run_dir)
-        findings.extend(n for n in reaped if n.startswith("stray postmaster"))
-        for n in reaped:
-            say(f"[{from_version}] {n}")
-        if not reaped:  # nothing alive over the store: one store on disk at a time
-            for note in reclaim_store(config, run_dir):
-                say(f"[{from_version}] {note}")
+        with protected_cleanup():
+            upgrade_done.set()
+            if trigger is not None:
+                trigger.cancel()
+                trigger.join(PCI_RESTART_JOIN_S)
+            if watcher is not None:
+                watcher.stop()
+                if pci_evidence is None:
+                    # The check did not run (an earlier step failed): the builds the watcher saw are still
+                    # evidence of what the upgrade left running.
+                    hist = watcher.history()
+                    pci_evidence = {
+                        "not_run": True,
+                        "builders": _builders(hist),
+                        "timeline": _timeline(hist),
+                    }
+            if Path(nx).exists():
+                go(
+                    "cleanup-service",
+                    [nx, "daemon", "service", "stop", "--with-pg"],
+                    silence=None,
+                    ceiling=CLEANUP_CEILING_S,
+                    judged=False,
+                )
+                go(
+                    "cleanup-worker",
+                    [
+                        nx,
+                        "daemon",
+                        "aspect-worker",
+                        "stop",
+                        "--config-dir",
+                        str(config),
+                    ],
+                    silence=None,
+                    ceiling=CLEANUP_CEILING_S,
+                    judged=False,
+                )
+            reaped = _reap_postmasters(run_dir)
+            findings.extend(n for n in reaped if n.startswith("stray postmaster"))
+            for n in reaped:
+                say(f"[{from_version}] {n}")
+            # one store on disk at a time: freed once nothing is alive over it, unless kept
+            if cfg.keep_work:
+                say(
+                    f"[{from_version}] --keep-work: the store under {run_dir} is kept, not reclaimed"
+                )
+            elif not reaped:
+                for note in reclaim_store(config, run_dir):
+                    say(f"[{from_version}] {note}")
 
     # A setup failure is already in findings; a step breach is in the step. Add non-vacuity only
     # when the prepare produced something to judge.
@@ -2472,6 +2534,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--pci-end-bound", type=float, default=PCI_END_STATE_BOUND_S)
     ap.add_argument(
+        "--keep-work",
+        action="store_true",
+        help="keep each start's PG store (base, pg_wal) instead of freeing it once the start has "
+        "its verdict; changes nothing that is judged, so it is not a non-default setting",
+    )
+    ap.add_argument(
         "--json-out",
         type=Path,
         help="combined verdict file (default WORK/verdict.json)",
@@ -2480,9 +2548,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 #: Options that never change what is judged: where the work goes, what the candidate is, where the
-#: combined verdict is written.
+#: combined verdict is written, whether the stores are kept.
 _NEUTRAL_DESTS = frozenset(
-    {"work", "target_wheel", "target_release", "json_out", "help"}
+    {"work", "target_wheel", "target_release", "json_out", "keep_work", "help"}
 )
 
 
@@ -2581,6 +2649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         pci_collections=args.pci_collections,
         pci_end_bound_s=args.pci_end_bound,
         profile_upgrade=args.profile_upgrade,
+        keep_work=args.keep_work,
     )
     cfg.work.mkdir(parents=True, exist_ok=True)
     say(f"upgrade rehearsal: candidate {label}; starting from {', '.join(versions)}")

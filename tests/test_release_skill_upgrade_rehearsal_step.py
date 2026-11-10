@@ -104,3 +104,25 @@ def test_the_step_keeps_the_pci_keep_check_and_the_write_rate() -> None:
         in step.lower()
     )
     assert "MB/s" in step and "S*1024*r/MBps" in step
+
+
+def test_the_step_matches_the_wrapper_on_what_exits_1_and_what_exits_2() -> None:
+    step = _step()
+    # a wheel build that fails is the wrapper's FAILED exit 1; no usable Python is its NOT RUN exit 2
+    assert "or a wheel build that failed" in step
+    assert (
+        "no usable Python" in step
+        and "each prints its own `GATE: NOT RUN` line" in step
+    )
+    # any non-default option counts, named by the rule and not by a partial list
+    assert "some option was set to other than its default" in step
+    assert "`--work`, the target, `--json-out` and `--keep-work` do not count" in step
+
+
+def test_the_step_states_the_hang_guard_and_holds_a_pending_not_run_for_sams_call_once() -> (
+    None
+):
+    step = _step()
+    assert "1800 s hang guard" in step and "never makes a pass" in step
+    assert step.count("Sam decides") == 1, "said once, where the pending ceiling is"
+    assert "while the 7.76.0 ceiling is pending" not in step

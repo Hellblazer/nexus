@@ -65,16 +65,22 @@ def _verdict(version: str, **kw):
 # --- the per-start upgrade ceiling -----------------------------------------------------------------
 
 
-def test_the_upgrade_ceiling_is_per_start_and_the_pre_pci_one_is_pending() -> None:
+def test_the_upgrade_ceiling_is_per_start_and_a_none_entry_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     assert ur.start_kind("8.0.0") == "newest-below"
     assert ur.start_kind("8.0.0.post1") == "newest-below"
     assert ur.start_kind("7.99.0") == "last-7x"
     assert ur.start_kind("7.77.0") == "last-7x"
     assert ur.start_kind("7.76.0") == "pre-pci"
-    assert ur.upgrade_ceiling_for("8.0.0") == 120.0
-    assert ur.upgrade_ceiling_for("7.99.0") == 120.0
+    # a pending entry is a None in the table; the test sets it, so a real number later breaks nothing
+    monkeypatch.setitem(ur.UPGRADE_CEILINGS_S, "pre-pci", None)
+    assert ur.upgrade_ceiling_for("8.0.0") == ur.UPGRADE_CEILINGS_S["newest-below"]
+    assert ur.upgrade_ceiling_for("7.99.0") == ur.UPGRADE_CEILINGS_S["last-7x"]
     assert ur.upgrade_ceiling_for("7.76.0") is None, "no interim guess for 7.76.0"
     assert ur.upgrade_ceiling_for("7.76.0", override=300.0) == 300.0
+    monkeypatch.setitem(ur.UPGRADE_CEILINGS_S, "pre-pci", 700.0)
+    assert ur.upgrade_ceiling_for("7.76.0") == 700.0, "a set number is a ceiling"
     assert not hasattr(ur, "UPGRADE_CEILING_S"), "the single ceiling is gone"
     assert ur.UPGRADE_PENDING_HANG_GUARD_S > 662.0, (
         "a hang guard above the measured 460-662 s"
@@ -168,6 +174,9 @@ def test_every_relaxing_option_is_a_non_default_flag_and_the_plain_ones_are_not(
     assert (
         ur.non_default_flags(ap, ap.parse_args([*base, "--json-out", "x.json"])) == []
     )
+    assert ur.non_default_flags(ap, ap.parse_args([*base, "--keep-work"])) == [], (
+        "keeping the store changes nothing that is judged"
+    )
     for extra, want in (
         (["--standin"], "--standin"),
         (["--rows-floor", "5"], "--rows-floor"),
@@ -185,8 +194,19 @@ def test_every_relaxing_option_is_a_non_default_flag_and_the_plain_ones_are_not(
         assert want in ur.non_default_flags(ap, ap.parse_args([*base, *extra])), extra
 
 
+@pytest.fixture
+def restore_signal_handlers():
+    """main() installs SIGTERM/SIGHUP handlers in the pytest process: put the old ones back."""
+    saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+    yield
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
+
+
 def test_a_wheel_whose_version_is_already_published_is_refused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    restore_signal_handlers: None,
 ) -> None:
     wheel = tmp_path / "conexus-8.0.0-py3-none-any.whl"
     wheel.write_bytes(b"x")
@@ -400,22 +420,56 @@ def _pidfile(run_dir: Path, pid: int) -> None:
     (d / "postmaster.pid").write_text(f"{pid}\n{d}\n")
 
 
+def _proc_cmdline(*args: str) -> bytes:
+    """The bytes /proc/<pid>/cmdline holds: each argument ended by a NUL."""
+    return b"".join(a.encode() + b"\0" for a in args)
+
+
+def _ours(raw: bytes, run: Path) -> bool:
+    """The reaper's own path: the argv read from /proc bytes by the driver's parser."""
+    return ur.is_our_postmaster(ur.parse_cmdline(raw), run)
+
+
 def test_only_a_postgres_with_its_data_dir_under_the_run_dir_is_ours(
     tmp_path: Path,
 ) -> None:
     run = tmp_path / "from-8.0.0"
     data = run / "config" / "postgres"
     data.mkdir(parents=True)
-    assert ur.is_our_postmaster(["/x/bundle/bin/postgres", "-D", str(data)], run)
-    assert ur.is_our_postmaster(["postgres", f"-D{data}"], run)
-    assert not ur.is_our_postmaster(
-        ["/x/bin/postgres", "-D", str(tmp_path / "other")], run
+    assert _ours(_proc_cmdline("/x/bundle/bin/postgres", "-D", str(data)), run)
+    assert _ours(_proc_cmdline("postgres", f"-D{data}"), run)
+    spaced = (
+        run / "config" / "post gres"
+    )  # an argument with a space: only the NUL bytes keep it whole
+    assert _ours(_proc_cmdline("/x/bin/postgres", "-D", str(spaced)), run)
+    assert not _ours(
+        _proc_cmdline("/x/bin/postgres", "-D", str(tmp_path / "other")), run
     )
-    assert not ur.is_our_postmaster(["/x/bin/sleep", "-D", str(data)], run)
-    assert not ur.is_our_postmaster(
-        ["postgres", "-D", str(tmp_path / "from-8.0.0-evil")], run
+    assert not _ours(_proc_cmdline("/x/bin/sleep", "-D", str(data)), run)
+    assert not _ours(
+        _proc_cmdline("postgres", "-D", str(tmp_path / "from-8.0.0-evil")), run
     )
+    assert not _ours(b"", run)
     assert not ur.is_our_postmaster(None, run) and not ur.is_our_postmaster([], run)
+
+
+def test_a_proc_cmdline_is_split_on_its_nuls_and_an_empty_argument_dropped() -> None:
+    assert ur.parse_cmdline(b"a\0b c\0-Dx\0") == ["a", "b c", "-Dx"]
+    assert ur.parse_cmdline(b"a\0\0b") == ["a", "b"]
+    assert ur.parse_cmdline(b"") == []
+    assert ur.parse_cmdline(b"p\0\xff\0") == ["p", "\ufffd"], (
+        "a byte that is not UTF-8 never raises"
+    )
+
+
+def test_cmdline_of_reads_a_live_process_through_the_real_path() -> None:
+    victim = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        assert ur.cmdline_of(victim.pid) == ["sleep", "60"]
+    finally:
+        victim.kill()
+        victim.wait()
+    assert ur.cmdline_of(victim.pid) is None
 
 
 def _spawn_sleeper() -> subprocess.Popen:
@@ -514,6 +568,47 @@ def test_a_postmaster_that_ignores_sigint_is_killed_only_after_the_grace(
     finally:
         stubborn.kill()
         stubborn.wait()
+
+
+def test_a_pid_that_changed_hands_during_the_grace_is_not_killed(
+    tmp_path: Path,
+) -> None:
+    """The postmaster ends after the SIGINT and its pid is reused: the grace's end must look again."""
+    run = tmp_path / "from-8.0.0"
+    stranger = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, time\nsignal.signal(signal.SIGINT, signal.SIG_IGN)\nprint('up', flush=True)\ntime.sleep(60)",
+        ],
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+    )
+    assert stranger.stdout is not None and stranger.stdout.readline().strip() == b"up"
+    data = str(run / "config" / "postgres")
+    answers = [["postgres", "-D", data]]  # the first look: ours; every later one: not
+
+    def cmdline(pid: int) -> list[str] | None:
+        return answers.pop(0) if answers else ["python3", "-c", "x"]
+
+    now = [0.0]
+
+    def sleep(dt: float) -> None:
+        now[0] += dt
+        time.sleep(0.005)
+
+    try:
+        _pidfile(run, stranger.pid)
+        notes = ur._reap_postmasters(
+            run, grace_s=5.0, cmdline=cmdline, sleep=sleep, clock=lambda: now[0]
+        )
+        assert stranger.poll() is None, (
+            "a pid that is no longer our postgres is never killed"
+        )
+        assert "left alone" in notes[0] and "SIGKILLed" not in notes[0]
+    finally:
+        stranger.kill()
+        stranger.wait()
 
 
 def test_a_stale_pid_file_for_a_dead_process_is_ignored(tmp_path: Path) -> None:
@@ -637,6 +732,37 @@ def test_the_wrapper_names_a_not_run_and_a_not_the_release_gate_line_exit_2(
         r = _run_wrapper(tree, env)
         assert r.returncode == 2
         assert r.stdout.strip().splitlines()[-1] == f"UPGRADE REHEARSAL GATE: {word}"
+
+
+def test_a_harness_with_no_usable_python_prints_a_not_run_gate_line_and_exits_2(
+    tmp_path: Path,
+) -> None:
+    tree, env = _wrapper_tree(tmp_path, "print('never runs')\n")
+    env["NX_E2E_PYTHON"] = str(tmp_path / "no-such-python")
+    r = _run_wrapper(tree, env)
+    assert r.returncode == 2
+    last = r.stdout.strip().splitlines()[-1]
+    assert last.startswith("UPGRADE REHEARSAL GATE: NOT RUN")
+
+
+def test_keep_work_reaches_the_driver_so_the_store_is_kept_too(tmp_path: Path) -> None:
+    seen = tmp_path / "argv.txt"
+    body = (
+        "import sys, pathlib\n"
+        f"pathlib.Path({str(seen)!r}).write_text(' '.join(sys.argv[1:]))\n"
+        "print('UPGRADE REHEARSAL GATE: PASSED: from 8.0.0 to x')\n"
+    )
+    tree, env = _wrapper_tree(tmp_path, body)
+    r = subprocess.run(
+        ["bash", str(tree / "tests" / "e2e" / "upgrade-rehearsal.sh"), "--keep-work"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "--keep-work" in seen.read_text().split()
+    assert "WORK KEPT" in r.stderr
 
 
 def test_a_postmaster_that_survives_the_run_fails_the_gate_even_on_a_passed_line(

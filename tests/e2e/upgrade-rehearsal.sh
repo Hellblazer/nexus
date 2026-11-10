@@ -31,31 +31,37 @@
 #   --rows-floor N, --silence-limit S, --upgrade-ceiling S, ...   see scripts/upgrade_rehearsal.py --help
 #   --engine-jar PATH           run the new client's engine from a built jar (also NEXUS_SERVICE_JAR),
 #                               e.g. one built from the PCI restart fix
-#   --keep-work                 keep the work tree on success too (failure always keeps the logs)
+#   --keep-work                 keep the work tree on success too (failure always keeps the logs) and each
+#                               start's PG store (base, pg_wal), which the driver frees after every start otherwise
 #
 # Heavy: run it on a lab host, e.g.
 #   lab-remote -c lab-m -- tests/e2e/upgrade-rehearsal.sh
 # The last line is the gate's own, "UPGRADE REHEARSAL GATE: <word> ...", and the exit says the same:
 #   exit 0  PASSED                every start passed, no non-default setting
-#   exit 1  FAILED                a breach, a failed step, a non-vacuity finding, a surviving postmaster
-#   exit 2  NOT RUN               the harness could not start, or a start's ceiling is pending
-#           NOT THE RELEASE GATE  every start passed under a non-default flag (--standin, --rows-floor,
-#                                 --silence-limit, any --*-ceiling, --prepare-cmd, --no-pci-restart-check,
-#                                 a single --from-version, --engine-jar ...): a development run
+#   exit 1  FAILED                a breach, a failed step, a non-vacuity finding, a surviving postmaster,
+#                                 a wheel build that failed
+#   exit 2  NOT RUN               the harness could not start (no usable Python, an unreadable PyPI listing, a
+#                                 wheel version already published), or a start's ceiling is pending
+#           NOT THE RELEASE GATE  every start passed under any non-default flag (--standin, a single
+#                                 --from-version, --engine-jar or NEXUS_SERVICE_JAR, any --*-ceiling, ...):
+#                                 a development run. --work, the target and --json-out, --keep-work do not count.
 # Only the "GATE:" line counts; the per-start lines never start with it. A run that ends without one
 # is FAILED. Run it in the background: it takes about an hour (see the release skill, Step 6e).
 set -euo pipefail
 
 # shellcheck source=lib/python.sh disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/python.sh"
-e2e_python_resolve || exit 2
+e2e_python_resolve || {
+    echo "UPGRADE REHEARSAL GATE: NOT RUN: no usable Python for the harness (see the message above)"
+    exit 2
+}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KEEP_WORK=0
 DRIVER_ARGS=()
 for arg in "$@"; do
     case "$arg" in
-        --keep-work) KEEP_WORK=1 ;;
+        --keep-work) KEEP_WORK=1; DRIVER_ARGS+=("$arg") ;; # the driver keeps the PG store too
         -h|--help)
             sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
             exit 0

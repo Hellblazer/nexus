@@ -11,13 +11,18 @@ engine or a real PG. Each test pins one joint a reviewer's mutation could cut:
 * ``nx upgrade``'s text reaches the DEFERRED check,
 * a restart still running when ``nx upgrade`` returns is joined before ``doctor`` starts,
 * every setup failure stops the run with its own reason, not the default one,
-* the cleanup runs, and frees the store, whatever the run did.
+* the cleanup runs, and frees the store, whatever the run did (and keeps it under --keep-work, or
+  while a postmaster still runs over it),
+* a SIGTERM landing inside the cleanup is held until the cleanup is done,
+* the write-rate "after" reading is taken before the restart thread is joined.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import signal
 import stat
 import sys
 from pathlib import Path
@@ -67,11 +72,12 @@ S=@S@
 echo "nx $*" >> $S/calls.log
 case "$*" in
   "--version") echo "conexus $(cat "$HOME/.nx_version")" ;;
-  "upgrade") [ -e $S/upgrade.sh ] && . $S/upgrade.sh ;;
+  "upgrade") [ -e $S/upgrade.sh ] && . $S/upgrade.sh; touch $S/upgrade_returned ;;
   "doctor") echo "doctor: all checks passed" ;;
   search*) echo "result: @SENTINEL@" ;;
   "daemon service start") echo "service starting"; [ -e $S/start.sh ] && . $S/start.sh ;;
   "daemon service stop") echo "service stopping" ;;
+  "daemon service stop --with-pg") echo "service stopping"; [ -e $S/cleanup.sh ] && . $S/cleanup.sh ;;
   *) echo "ok" ;;
 esac
 exit 0
@@ -128,6 +134,9 @@ echo "upgrade complete"
 # the second `daemon service start` (the restart; the first is start-old) waits, then logs the adoption
 START_RESTART = """n=$(grep -c '^nx daemon service start' $S/calls.log)
 if [ "$n" -ge 2 ]; then
+  if [ -e $S/wait_for_upgrade ]; then  # the restart outlives nx upgrade by construction, not by timing
+    i=0; while [ ! -e $S/upgrade_returned ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+  fi
   sleep @SLEEP@
   mkdir -p "$NEXUS_CONFIG_DIR/logs"
   echo "event=pci_anchor_adopted index=@INDEX@ reason=missing" >> "$NEXUS_CONFIG_DIR/logs/storage_service_native.log"
@@ -172,8 +181,12 @@ class World:
     def upgrade_does(self, text: str, **subs: str) -> None:
         _script(self.state / "upgrade.sh", text, self.state, **subs)
 
-    def restart_start_does(self, sleep_s: str) -> None:
+    def restart_start_does(
+        self, sleep_s: str, *, after_upgrade_returns: bool = False
+    ) -> None:
         _script(self.state / "start.sh", START_RESTART, self.state, SLEEP=sleep_s)
+        if after_upgrade_returns:
+            self.flag("wait_for_upgrade")
 
     def flag(self, name: str, content: str = "1") -> None:
         (self.state / name).write_text(content)
@@ -361,9 +374,10 @@ def test_a_restart_during_nx_upgrade_runs_to_a_pass_and_the_cleanup_frees_the_st
 def test_a_restart_still_running_when_nx_upgrade_returns_is_joined_before_doctor(
     world: World,
 ) -> None:
-    # nx upgrade lasts 2 s; the restart's start takes 3 s more, so it outlives the step
-    world.upgrade_does(UPGRADE_BUILD, N="4")
-    world.restart_start_does("3")
+    # nx upgrade lasts 4 s, long enough for the watcher to see the build; the restart's start waits
+    # for nx upgrade to return, so it outlives the step whatever the box's load
+    world.upgrade_does(UPGRADE_BUILD, N="8")
+    world.restart_start_does("0.3", after_upgrade_returns=True)
     v = ur.rehearse("7.76.0", world.cfg())
     calls = world.calls()
     assert "start done" in calls
@@ -437,9 +451,9 @@ def test_a_pending_upgrade_ceiling_runs_under_the_hang_guard(
 ) -> None:
     seen = _record_ceilings(monkeypatch)
     world.upgrade_does('echo "quick"\n')
-    # 7.76.0 with the shipped table: the pre-pci entry is None (pending)
+    # the pre-pci entry is None (pending): set here, so a real number in the table breaks nothing
+    monkeypatch.setitem(ur.UPGRADE_CEILINGS_S, "pre-pci", None)
     v = ur.rehearse("7.76.0", world.cfg(upgrade_ceiling_override=None))
-    assert ur.UPGRADE_CEILINGS_S["pre-pci"] is None
     assert seen["upgrade"] == ur.UPGRADE_PENDING_HANG_GUARD_S == 1800.0
     up = _steps(v)["upgrade"]
     assert up["ceiling_pending"] is True and up["ceiling_s"] is None
@@ -449,8 +463,9 @@ def test_a_pending_upgrade_ceiling_runs_under_the_hang_guard(
 def test_a_pending_upgrade_that_outruns_the_hang_guard_is_killed(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(ur, "UPGRADE_PENDING_HANG_GUARD_S", 1.5)
-    world.upgrade_does(UPGRADE_BUILD, N="10")  # 5 s of output: past the 1.5 s guard
+    monkeypatch.setitem(ur.UPGRADE_CEILINGS_S, "pre-pci", None)
+    monkeypatch.setattr(ur, "UPGRADE_PENDING_HANG_GUARD_S", 2.0)
+    world.upgrade_does(UPGRADE_BUILD, N="40")  # 20 s of output: far past the 2 s guard
     # the killed build never finishes: keep the PCI end wait short
     v = ur.rehearse(
         "7.76.0", world.cfg(upgrade_ceiling_override=None, pci_end_bound_s=2.0)
@@ -458,5 +473,102 @@ def test_a_pending_upgrade_that_outruns_the_hang_guard_is_killed(
     up = _steps(v)["upgrade"]
     assert up["status"] == "ceiling", up
     assert "hang guard" in up["reason"] and "PENDING" in up["reason"]
-    assert up["wall_s"] < 4.5  # killed at the guard, not left to run to its end
+    assert up["wall_s"] < 12.0  # killed near the guard, not left to run its 20 s
     assert v["state"] == "FAILED"
+
+
+# --- the cleanup's own rules ------------------------------------------------------------------------
+
+
+@pytest.fixture
+def restore_signal_handlers():
+    saved = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    yield
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
+    ur._EXIT.__init__()
+
+
+def test_a_sigterm_during_the_cleanup_does_not_cut_it_short(
+    world: World, restore_signal_handlers: None
+) -> None:
+    ur.install_exit_handlers()
+    (world.state / "driver.pid").write_text(str(os.getpid()))
+    # the stack stop of the cleanup is where the signal lands
+    (world.state / "cleanup.sh").write_text(
+        "kill -TERM $(cat $S/driver.pid)\nsleep 1\n"
+    )
+    with pytest.raises(SystemExit) as exc:
+        ur.rehearse("8.0.0", world.cfg())
+    assert exc.value.code == 128 + signal.SIGTERM, (
+        "the held signal ends the run once the cleanup is done"
+    )
+    calls = world.calls()
+    stop = _calls_from(calls, "nx daemon service stop --with-pg")
+    assert stop and _calls_from(calls, "nx daemon aspect-worker stop"), (
+        "the worker stop after the signalled stack stop must still run"
+    )
+    run = world.run_dir("8.0.0")
+    assert not (run / "pgdata" / "base").exists(), "and so must the store reclaim"
+
+
+def test_a_sigterm_while_the_run_is_underway_still_unwinds_through_the_cleanup(
+    world: World, restore_signal_handlers: None
+) -> None:
+    ur.install_exit_handlers()
+    (world.state / "driver.pid").write_text(str(os.getpid()))
+    world.upgrade_does("kill -TERM $(cat $S/driver.pid)\nsleep 5\n")
+    with pytest.raises(SystemExit) as exc:
+        ur.rehearse("8.0.0", world.cfg())
+    assert exc.value.code == 128 + signal.SIGTERM
+    calls = world.calls()
+    assert _calls_from(calls, "nx daemon service stop --with-pg")
+    assert not (world.run_dir("8.0.0") / "pgdata" / "base").exists()
+
+
+def test_keep_work_keeps_the_store_the_default_frees(world: World) -> None:
+    v = ur.rehearse("8.0.0", world.cfg(keep_work=True))
+    assert v["state"] == "PASSED"
+    run = world.run_dir("8.0.0")
+    assert (run / "pgdata" / "base" / "file").exists()
+    assert (run / "pgdata" / "pg_wal").is_dir()
+    assert (run / "logs" / "upgrade.log").exists()
+
+
+def test_a_surviving_postmaster_blocks_the_store_reclaim_and_is_a_finding(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    survivor = (
+        "stray postmaster 4242 under x: still running 60s after SIGINT: SIGKILLed"
+    )
+    monkeypatch.setattr(ur, "_reap_postmasters", lambda run_dir: [survivor])
+    v = ur.rehearse("8.0.0", world.cfg())
+    run = world.run_dir("8.0.0")
+    assert (run / "pgdata" / "base" / "file").exists(), (
+        "a store with a postmaster over it is not deleted under it"
+    )
+    assert survivor in v["findings"] and v["state"] == "FAILED"
+
+
+def test_the_write_rate_after_reading_is_taken_before_the_restart_thread_is_joined(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    real_take, real_join = ur.take_counters, ur.PciRestartTrigger.join
+
+    def take(sql):
+        events.append("take")
+        return real_take(sql)
+
+    def join(self, timeout):
+        events.append("join")
+        return real_join(self, timeout)
+
+    monkeypatch.setattr(ur, "take_counters", take)
+    monkeypatch.setattr(ur.PciRestartTrigger, "join", join)
+    world.upgrade_does(UPGRADE_BUILD, N="8")
+    world.restart_start_does("0.3", after_upgrade_returns=True)
+    v = ur.rehearse("7.76.0", world.cfg())
+    assert v["write_rate"] is not None
+    # the reading before nx upgrade, the reading when it returns, then the join of the restart
+    assert events[:3] == ["take", "take", "join"], events

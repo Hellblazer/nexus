@@ -506,8 +506,10 @@ per start, measured on 2026-11-10 on chas lab-m:
   140,000 rows in five collections (2.6 GB). nexus-f3yqd.5 owns the number and sets
   it from a develop run after that fix lands, with its margin and the store size
   stated; no guessed value stands in until then. Until it is set this start cannot
-  pass: it is reported PENDING and the gate line says NOT RUN (exit 2), naming the
-  pending ceiling. A release does not go past 6e on that: Sam decides.
+  pass: its `nx upgrade` runs under a 1800 s hang guard (not a ceiling: it kills a hung
+  step and never makes a pass), the start is reported PENDING, and the gate line says
+  NOT RUN (exit 2), naming the pending ceiling. A release does not go past 6e on that;
+  Sam decides.
 - `nx doctor` 60 s (7.5 s), `nx search` 30 s (2.8 s), package upgrade 120 s (0.4 s).
 
 The margins are not uniform. Doctor, search and the last-7x upgrade sit at about 8 to
@@ -553,18 +555,20 @@ one the wrapper reads (per-start lines say `UPGRADE REHEARSAL START`). The exit 
 says the same:
 
 - exit 0, `PASSED`: every start passed and no non-default setting was used.
-- exit 1, `FAILED`: a breach, a failed step, a non-vacuity finding, or a postmaster
-  that survived the run. A run that ends with no gate line is FAILED too.
-- exit 2, `NOT RUN`: the harness could not start, a start's ceiling is PENDING, or the
-  candidate wheel's version is already published on PyPI (the bump was skipped); or
-  `NOT THE RELEASE GATE`: every start passed but a flag changed what is judged
-  (`--standin`, `--rows-floor`, `--silence-limit`, any `--*-ceiling`, `--prepare-cmd`,
-  `--no-pci-restart-check`, a single `--from-version`, `--engine-jar`).
+- exit 1, `FAILED`: a breach, a failed step, a non-vacuity finding, a postmaster
+  that survived the run, or a wheel build that failed. A run that ends with no gate
+  line is FAILED too.
+- exit 2, `NOT RUN`: the harness could not start (no usable Python, an unreadable PyPI
+  listing, or the candidate wheel's version already published on PyPI because the bump
+  was skipped) or a start's ceiling is PENDING; each prints its own `GATE: NOT RUN`
+  line. Or `NOT THE RELEASE GATE`: every start passed but some option was set to
+  other than its default (any of them, for example `--standin`, a single
+  `--from-version`, `--engine-jar` or `NEXUS_SERVICE_JAR`, any `--*-ceiling`); `--work`,
+  the target, `--json-out` and `--keep-work` do not count.
 
 Only exit 0 clears 6e. A FAILED is a release blocker, never waived here: a silent or
 slow step is what the user sees. NOT RUN and NOT THE RELEASE GATE are not passes
-either, and a release does not proceed on them; while the 7.76.0 ceiling is pending,
-Sam decides what the release does. A failure keeps its step logs and engine and PG
+either, and a release does not proceed on them. A failure keeps its step logs and engine and PG
 logs on chas. Paste each start's step table into the cut bead.
 
 A setup failure is not a judged breach. When a start's install, prepare, engine start
