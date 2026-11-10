@@ -11,9 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.time.Clock;
@@ -68,7 +66,7 @@ class NexusServiceBootWorkWiringTest {
 
     private JsonNode status() throws Exception {
         HttpResponse<String> resp = http.send(
-            HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/status")).GET().build(),
+            TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/status").GET().build(),
             HttpResponse.BodyHandlers.ofString());
         assertThat(resp.statusCode()).isEqualTo(200);
         return MAPPER.readTree(resp.body());
