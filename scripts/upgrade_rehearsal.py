@@ -12,6 +12,7 @@ Two upgrades in a row did a ~20 minute silent rewrite on the first engine boot a
     upgrade           ``nx upgrade``
     doctor            ``nx doctor``
     search            ``nx search`` for a seeded sentinel
+    pci-restart-check (pre-PCI starts only, below)
 
 Every judged step runs under a pty (nx's tty output and progress lines appear), every output
 chunk is timestamped, and a step FAILS when it prints nothing for more than the silence limit,
@@ -21,12 +22,33 @@ and the run stops there; the steps after it are reported as not run.
 Non-vacuity: the prepared store's row count must reach a floor, every judged step must have run,
 doctor must have printed something and no ``✗``, and the search must return the sentinel.
 
+Write rate. Around ``nx upgrade`` the driver reads the install's own PG (its bundled psql and
+``pg_credentials``): ``pg_current_wal_lsn()`` and the ``pg_stat_wal`` / ``pg_stat_io`` write counters,
+before and after. The verdict and the table carry the WAL bytes, the step's seconds and MB/s
+(MB = 2**20 bytes). Extrapolation: the bytes an upgrade writes scale with the store, so at the
+measured MB/s a store of S GB spends about S*1024*r/MBps seconds on that work, r being this run's
+WAL bytes over store bytes (also recorded; r = 1 gives S*1024/MBps). The 2.4 GB fixture bounds only
+itself, and a step of a couple of seconds gives a noisy rate.
+
+PCI keep check (user's-seat proof of the restart fix). A start from a release that predates the
+per-collection indexes (``PRE_PCI_VERSION``, pins engine 0.1.156) has its upgrade boot build every
+``pci_`` index. After the search step the driver waits for one to be IN FLIGHT in
+``pg_stat_progress_create_index`` (none within the bound is a FAILURE: the check would prove
+nothing), restarts the engine the way a user does (``nx daemon service stop`` then ``start``, PG left
+running), waits for every ``pci_`` index to be valid, and judges by backend pid: the in-flight index
+must be finished by the pid it had before the restart, each index built by exactly one pid, every
+index valid at the end, and the engine log free of the three restart-loss events named in
+``PCI_FAILURE_EVENTS``. A rebuild by a new pid is the failure being caught. The fix ships in an engine
+newer than the wheel's pin: pass ``--engine-jar`` (or ``NEXUS_SERVICE_JAR``) to run the check against
+a jar built from the fix; the override applies from ``start-old`` on, never to the old client's stack.
+
 The ceilings are set from the first real-store runs (chas lab-m, 2026-11-10, the f3yqd.1 seeder's
 86,000 rows, 2.4 GB): about eight to ten times the slowest measured step. They bound THIS fixture;
 a much larger store needs its own measurement. The silence limit is Sam's "a few seconds".
 
     upgrade_rehearsal.py --work DIR --target-wheel dist/conexus-X-py3-none-any.whl
     upgrade_rehearsal.py --work DIR --target-release 8.1.0 --from-version 8.0.0
+    upgrade_rehearsal.py --work DIR --target-wheel W --from-version 7.76.0 --engine-jar service/target/nexus-service-X.jar
 
 Exit 0: every run passed. 1: a breach, a step failure or a non-vacuity finding in any run.
 2: the harness could not start (unreachable index, unknown version, bad flags).
@@ -38,6 +60,7 @@ import argparse
 import dataclasses
 import errno
 import fcntl
+import getpass
 import glob
 import json
 import os
@@ -51,6 +74,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -88,6 +112,48 @@ STANDIN_PREPARE_CMD = (
 STANDIN_SENTINEL_QUERY = "kestrel counts copper lanterns harbour"
 STANDIN_SENTINEL_EXPECT = "rehearsal-standin-sentinel"
 STANDIN_ROWS_FLOOR = 100
+
+# --- the write rate and the PCI keep check: every named string and bound, in one place -----------
+MB: int = 2**20  # the "MB" of every figure here; 1 GB = 1024 MB
+#: Last conexus before the per-collection indexes (pins engine 0.1.156); PCI first ships in
+#: 0.1.158 / 7.77.0. Starting from it, the upgrade boot builds every ``pci_`` index.
+PRE_PCI_VERSION: str = "7.76.0"
+PCI_FIRST_VERSION: str = "7.77.0"
+PCI_STEP: str = "pci-restart-check"
+#: A collection builds its own index at or above this row count (NX_SEARCH_PCI_BUILD_MIN_ROWS default).
+PCI_BUILD_MIN_ROWS: int = 20_000
+#: Large collections the pre-PCI prepare seeds (each above the threshold, ~27k rows, one ``pci_``
+#: build each, ~30 s at defaults): five, so a queue exists when the first build is seen.
+PCI_COLLECTIONS_DEFAULT: int = 5
+PRE_PCI_PREPARE_CMD = REAL_PREPARE_CMD + " --no-pci-wait --collections {collections}"
+#: A per-collection index name as ``index_relid::regclass::text`` prints it (PciCatalog.PREFIX + 24 hex).
+PCI_INDEX_RE = re.compile(r"^(?:nexus\.)?(pci_[0-9a-f]{24})$")
+#: Engine log events, as the needles one line must carry together (wren, the reviewed fix commit).
+PCI_FAILURE_EVENTS: dict[str, tuple[str, ...]] = {
+    "pci_index_dropped": ("event=pci_index_dropped", "reason=failed_build"),
+    "pci_index_build_not_done": (
+        "event=pci_index_build_not_done",
+        "outcome=CONNECTION_LOST",
+    ),
+    "pci_ddl_failed": ("event=pci_ddl_failed", "sqlstate=57P01"),
+}
+EVENT_BUILDERS_KEPT: tuple[str, ...] = (
+    "event=pci_builders_kept",
+    "reason=only_run_always_pending",
+)
+#: A surviving build, adopted by the next boot (PciReconciler.java:977): the line carries
+#: ``index=<name>``, which ties it to the build; an adopted survivor logs ``reason=missing``.
+EVENT_INDEX_ADOPTED: tuple[str, ...] = ("event=pci_anchor_adopted",)
+_INDEX_FIELD_RE = re.compile(r"\bindex=(pci_[0-9a-f]{24})\b")
+#: The supervisor's engine child-log stems: native binary first, then a NEXUS_SERVICE_JAR launch.
+ENGINE_LOG_STEMS: tuple[str, ...] = ("storage_service_native", "storage_service_jar")
+PCI_POLL_S: float = 0.5
+PCI_OBSERVE_BOUND_S: float = 300.0  # wait for a build in flight after the search step
+PCI_END_STATE_BOUND_S: float = (
+    900.0  # a killed build's rebuild can wait for a 600 s sweep pass
+)
+PCI_RESTART_CEILING_S: float = 300.0
+PROBE_SNAPSHOT_BOUND_S: float = 30.0
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
@@ -227,6 +293,7 @@ def run_step(
         while True:
             now = clock()
             if ceiling_s is not None and now - start > ceiling_s:
+                longest = max(longest, now - last)
                 status, breach = (
                     "ceiling",
                     f"ran past its ceiling of {ceiling_s:g}s (killed at {now - start:.1f}s)",
@@ -307,6 +374,7 @@ def nonvacuity_findings(
     search_text: str,
     sentinel_expect: str,
     upgrade_text: str = "",
+    required_steps: Sequence[str] = JUDGED_STEPS,
 ) -> list[str]:
     findings: list[str] = []
     if prepare.get("verdict") != "prepared":
@@ -319,7 +387,7 @@ def nonvacuity_findings(
             f"prepared store holds {rows} rows, below the floor of {floor}: the rehearsal would prove nothing"
         )
     by_name = {s.name: s for s in steps}
-    for name in JUDGED_STEPS:
+    for name in required_steps:
         s = by_name.get(name)
         if s is None or s.status == "not-run":
             findings.append(f"step {name} did not run")
@@ -362,7 +430,8 @@ def _vkey(version: str) -> tuple[tuple[int, ...], int] | None:
 def resolve_from_versions(
     spec: str, published: Sequence[str], *, candidate: str
 ) -> list[str]:
-    """``both`` is [newest published below the candidate, last published 7.x], deduplicated."""
+    """``both`` is [newest published below the candidate, last published 7.x, PRE_PCI_VERSION],
+    deduplicated: the third is the start whose upgrade boot builds every pci_ index (the PCI check)."""
     finals = {v: _vkey(v) for v in published}
     finals = {v: k for v, k in finals.items() if k is not None}
     if spec != "both":
@@ -385,6 +454,13 @@ def resolve_from_versions(
     sevens = [v for v in below if finals[v][0][0] == 7]
     if sevens and sevens[-1] not in out:
         out.append(sevens[-1])
+    pre = _vkey(PRE_PCI_VERSION)
+    if pre is not None and pre < ckey and PRE_PCI_VERSION not in out:
+        if PRE_PCI_VERSION not in published:
+            raise RehearsalError(
+                f"{PRE_PCI_VERSION}, the pre-PCI start of the keep check, is not a published conexus version"
+            )
+        out.append(PRE_PCI_VERSION)
     return out
 
 
@@ -405,6 +481,677 @@ def fetch_published_versions(timeout: float = 30.0) -> list[str]:
     ]
 
 
+# --- the install's own PG: credentials, bundled psql, counters --------------------------------
+
+
+class ProbeError(Exception):
+    """The install's PG could not be queried (no credentials, no psql, a SQL error, a timeout)."""
+
+
+def parse_credentials(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip()
+    return out
+
+
+_PG_DOWN = (
+    "could not connect",
+    "Connection refused",
+    "starting up",
+    "shutting down",
+    "server closed the connection",
+    "terminating connection",
+)
+
+
+class PgProbe:
+    """Queries of the install's PG through its own bundled psql and ``pg_credentials``.
+
+    The password travels in PGPASSWORD, never on a command line, and no message built here repeats
+    it. A cluster that is not accepting connections is ``None`` (the caller retries); anything else
+    that fails is a ProbeError.
+    """
+
+    def __init__(self, config_dir: Path, *, timeout: float = 30.0) -> None:
+        self.config_dir = Path(config_dir)
+        self.timeout = timeout
+
+    def _creds(self) -> dict[str, str]:
+        path = self.config_dir / "pg_credentials"
+        try:
+            return parse_credentials(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ProbeError(f"cannot read {path} (pg_credentials): {exc}") from exc
+
+    def sql(self, query: str) -> list[list[str]] | None:
+        c = self._creds()
+        bundle = self.config_dir / "pg-bundle" / "bundle"
+        try:
+            port, url = c["PG_PORT"], c["NX_DB_URL"]
+        except KeyError as exc:
+            raise ProbeError(f"pg_credentials has no {exc.args[0]}") from exc
+        # The cluster superuser where the install recorded its password; installs that predate
+        # PG_SUPERUSER_PASS record only the schema owner, which owns every nexus table.
+        if "PG_SUPERUSER_PASS" in c:
+            user, password = getpass.getuser(), c["PG_SUPERUSER_PASS"]
+        else:
+            try:
+                user, password = c["NX_DB_ADMIN_USER"], c["NX_DB_ADMIN_PASS"]
+            except KeyError as exc:
+                raise ProbeError(f"pg_credentials has no {exc.args[0]}") from exc
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "LD_LIBRARY_PATH": f"{bundle / 'lib'}:{os.environ.get('LD_LIBRARY_PATH', '')}".rstrip(
+                ":"
+            ),
+            "PGPASSWORD": password,
+            "PGCONNECT_TIMEOUT": "3",
+        }
+        dbname = url.rsplit("/", 1)[-1].split("?", 1)[0]
+        argv = [
+            str(bundle / "bin" / "psql"),
+            "-XAtq",
+            "-F",
+            "\t",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            port,
+            "-U",
+            user,
+            "-d",
+            dbname,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            query,
+        ]
+        try:
+            r = subprocess.run(
+                argv, env=env, capture_output=True, text=True, timeout=self.timeout
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ProbeError(f"psql did not run: {type(exc).__name__}: {exc}") from exc
+        if r.returncode != 0:
+            err = r.stderr.replace(password, "***") if password else r.stderr
+            if any(t in err for t in _PG_DOWN):
+                return None
+            raise ProbeError(f"psql failed: {err.strip()[:400]}")
+        return [line.split("\t") for line in r.stdout.splitlines() if line]
+
+
+def lsn_bytes(lsn: str) -> int:
+    hi, lo = lsn.split("/")
+    return (int(hi, 16) << 32) + int(lo, 16)
+
+
+@dataclasses.dataclass(frozen=True)
+class PgCounters:
+    lsn: int  # pg_current_wal_lsn() as a byte position: the figure that cannot be reset
+    wal_bytes: int | None  # pg_stat_wal.wal_bytes
+    io_write_bytes: int | None  # pg_stat_io, summed over every backend and context
+    io_extend_bytes: int | None
+
+
+_IO_SQL_BYTES = "select coalesce(sum(write_bytes),0)::bigint, coalesce(sum(extend_bytes),0)::bigint from pg_stat_io"
+_IO_SQL_OPS = (
+    "select coalesce(sum(writes*op_bytes),0)::bigint, coalesce(sum(extends*op_bytes),0)::bigint "
+    "from pg_stat_io"
+)
+SqlFn = Callable[[str], "list[list[str]] | None"]
+
+
+def read_counters(sql: SqlFn) -> PgCounters | None:
+    """One reading, or None while PG is not accepting connections. The LSN must read; the stat
+    views are best-effort (older PG, a stat that is not there) and come back None."""
+    rows = sql("select pg_current_wal_lsn()::text")
+    if rows is None:
+        return None
+    lsn = lsn_bytes(rows[0][0])
+    wal: int | None = None
+    try:
+        w = sql("select wal_bytes::bigint from pg_stat_wal")
+        wal = int(w[0][0]) if w else None
+    except (ProbeError, ValueError, IndexError):
+        pass
+    io_w = io_e = None
+    for q in (
+        _IO_SQL_BYTES,
+        _IO_SQL_OPS,
+    ):  # PG18 has write_bytes; PG16-17 have op_bytes
+        try:
+            io = sql(q)
+            if io:
+                io_w, io_e = int(io[0][0]), int(io[0][1])
+                break
+        except (ProbeError, ValueError, IndexError):
+            continue
+    return PgCounters(lsn, wal, io_w, io_e)
+
+
+def take_counters(
+    sql: SqlFn,
+    *,
+    bound_s: float = PROBE_SNAPSHOT_BOUND_S,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> PgCounters:
+    """A reading, retried while PG is down (an upgrade can restart it); loud at the bound."""
+    deadline = clock() + bound_s
+    while True:
+        got = read_counters(sql)
+        if got is not None:
+            return got
+        if clock() >= deadline:
+            raise ProbeError(f"PG did not accept connections within {bound_s:g}s")
+        sleep(0.5)
+
+
+def write_rate(
+    before: PgCounters,
+    after: PgCounters,
+    wall_s: float,
+    store_bytes: int | None = None,
+) -> dict:
+    """What PG wrote between two readings. The LSN is the figure; the stat counters reset on a
+    crash, so one that went backwards is dropped (None) rather than reported negative."""
+    wal = after.lsn - before.lsn
+    if wal < 0:
+        raise ProbeError(
+            f"the WAL position went backwards ({before.lsn} to {after.lsn}): not the same cluster"
+        )
+
+    def delta(a: int | None, b: int | None) -> int | None:
+        if a is None or b is None or b < a:
+            return None
+        return b - a
+
+    mb_per_s = (wal / MB) / wall_s if wall_s > 0 else None
+    return {
+        "wal_bytes": wal,
+        "wal_mb": round(wal / MB, 1),
+        "seconds": round(wall_s, 1),
+        "mb_per_s": None if mb_per_s is None else round(mb_per_s, 2),
+        "pg_stat_wal_bytes": delta(before.wal_bytes, after.wal_bytes),
+        "io_write_bytes": delta(before.io_write_bytes, after.io_write_bytes),
+        "io_extend_bytes": delta(before.io_extend_bytes, after.io_extend_bytes),
+        "store_bytes": store_bytes,
+        "wal_per_store_byte": round(wal / store_bytes, 4) if store_bytes else None,
+        "seconds_per_gb_of_wal": round(1024 / mb_per_s, 1) if mb_per_s else None,
+    }
+
+
+# --- the PCI keep check ------------------------------------------------------------------------
+
+
+def is_pre_pci(version: str) -> bool:
+    key, first = _vkey(version), _vkey(PCI_FIRST_VERSION)
+    return key is not None and first is not None and key < first
+
+
+def pci_check_enabled(flag: bool | None, version: str, *, standin: bool) -> bool:
+    """On by default for a pre-PCI start (not with the stand-in prepare, whose store is too small to
+    build any pci_ index); an explicit flag decides otherwise."""
+    if flag is not None:
+        return flag
+    return is_pre_pci(version) and not standin
+
+
+def prepare_template_for(version: str, prepare_cmd: str, *, standin: bool) -> str:
+    """The default real prepare, for a pre-PCI start, asks for N large collections and does not wait
+    for per-collection indexes its engine cannot build. An explicit --prepare-cmd is left alone."""
+    if not standin and prepare_cmd == REAL_PREPARE_CMD and is_pre_pci(version):
+        return PRE_PCI_PREPARE_CMD
+    return prepare_cmd
+
+
+def expected_pci_indexes(prepare: dict) -> int:
+    cols = prepare.get("collections") or {}
+    return sum(1 for v in cols.values() if int(v) >= PCI_BUILD_MIN_ROWS)
+
+
+@dataclasses.dataclass(frozen=True)
+class PciObs:
+    t: float
+    index: str
+    pid: int
+    phase: str
+    blocks_done: int
+    blocks_total: int
+    tuples_done: int
+    tuples_total: int
+
+    def as_dict(self) -> dict:
+        return {
+            "index": self.index,
+            "pid": self.pid,
+            "phase": self.phase,
+            "blocks_done": self.blocks_done,
+            "blocks_total": self.blocks_total,
+            "tuples_done": self.tuples_done,
+            "tuples_total": self.tuples_total,
+            "t_s": round(self.t, 1),
+        }
+
+
+PROGRESS_SQL = (
+    "select index_relid::regclass::text, pid, phase, blocks_done, blocks_total, tuples_done, "
+    "tuples_total from pg_stat_progress_create_index"
+)
+VALIDITY_SQL = (
+    "select c.relname, i.indisvalid from pg_index i join pg_class c on c.oid = i.indexrelid "
+    "where c.relname like 'pci\\_%' escape '\\'"
+)
+
+
+def parse_progress(rows: Sequence[Sequence[str]], t: float) -> list[PciObs]:
+    out: list[PciObs] = []
+    for r in rows:
+        m = PCI_INDEX_RE.match(r[0])
+        if m:
+            out.append(
+                PciObs(t, m.group(1), int(r[1]), r[2], *(int(x or 0) for x in r[3:7]))
+            )
+    return out
+
+
+def parse_validity(rows: Sequence[Sequence[str]]) -> dict[str, bool]:
+    out: dict[str, bool] = {}
+    for name, ok in rows:
+        m = PCI_INDEX_RE.match(name)
+        if m:
+            out[m.group(1)] = ok == "t"
+    return out
+
+
+class PciWatcher:
+    """Polls pg_stat_progress_create_index for pci_ builds and keeps every sighting: the pid history
+    that tells a kept build from a rebuilt one. ``poll_once`` is the unit; ``start`` runs it on a
+    thread every ``poll_s`` until ``stop``."""
+
+    def __init__(
+        self,
+        sql: SqlFn,
+        *,
+        poll_s: float = PCI_POLL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._sql, self._poll_s, self._clock = sql, poll_s, clock
+        self._t0 = clock()
+        self._lock = threading.Lock()
+        self._history: list[PciObs] = []
+        self._latest: list[PciObs] = []
+        self.errors = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def now(self) -> float:
+        return self._clock() - self._t0
+
+    def poll_once(self) -> list[PciObs]:
+        try:
+            rows = self._sql(PROGRESS_SQL)
+        except ProbeError:
+            with self._lock:
+                self.errors += 1
+                self._latest = []
+            return []
+        obs = parse_progress(rows or [], self.now()) if rows is not None else []
+        with self._lock:
+            self._latest = obs
+            self._history.extend(obs)
+        return obs
+
+    def latest(self) -> list[PciObs]:
+        with self._lock:
+            return list(self._latest)
+
+    def history(self) -> list[PciObs]:
+        with self._lock:
+            return list(self._history)
+
+    def start(self) -> None:
+        def loop() -> None:
+            while not self._stop.is_set():
+                self.poll_once()
+                self._stop.wait(self._poll_s)
+
+        self._thread = threading.Thread(target=loop, name="pci-watcher", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=10)
+
+
+class EngineLog:
+    """The engine's child log (both stems), read from a mark. A restart can rotate the file at open:
+    a file now smaller than its mark is the new one (read whole) and its ``.1`` the old one (read from
+    the mark), so a line written during the stop is not lost."""
+
+    def __init__(self, config_dir: Path) -> None:
+        self._dir = Path(config_dir) / "logs"
+
+    def mark(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for stem in ENGINE_LOG_STEMS:
+            try:
+                out[stem] = (self._dir / f"{stem}.log").stat().st_size
+            except OSError:
+                pass
+        return out
+
+    def _read(
+        self, path: Path, offset: int, lines: list[str], files: list[str]
+    ) -> bool:
+        try:
+            with path.open("rb") as f:
+                f.seek(offset)
+                lines.extend(raw.decode("utf-8", "replace") for raw in f)
+        except OSError:
+            return False
+        files.append(path.name)
+        return True
+
+    def lines_since(self, marks: dict[str, int]) -> tuple[list[str], list[str]]:
+        lines: list[str] = []
+        files: list[str] = []
+        for stem in ENGINE_LOG_STEMS:
+            path = self._dir / f"{stem}.log"
+            off = marks.get(stem, 0)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if (
+                size < off
+            ):  # rotated at open: the old file's remainder, then the new file
+                self._read(Path(f"{path}.1"), off, lines, files)
+                off = 0
+            self._read(path, off, lines, files)
+        return lines, files
+
+
+@dataclasses.dataclass
+class PciReport:
+    passed: bool
+    findings: list[str]
+    evidence: dict
+    wall_s: float
+
+
+def _find_events(lines: Sequence[str], needles: tuple[str, ...]) -> list[str]:
+    return [ln.strip()[:300] for ln in lines if all(n in ln for n in needles)]
+
+
+def adopted_indexes(lines: Sequence[str]) -> set[str]:
+    """Indexes the engine log says it adopted (a build kept through the restart)."""
+    out: set[str] = set()
+    for ln in lines:
+        if all(n in ln for n in EVENT_INDEX_ADOPTED):
+            out.update(_INDEX_FIELD_RE.findall(ln))
+    return out
+
+
+def judge_pci(
+    *,
+    in_flight: Sequence[PciObs],
+    history: Sequence[PciObs],
+    valid: dict[str, bool] | None,
+    expected: int,
+    still_building: Sequence[PciObs],
+    failure_events: dict[str, list[str]],
+    log_files: Sequence[str],
+    adopted: set[str] = frozenset(),
+    restart_t: float = 0.0,
+) -> list[str]:
+    """The pass rule. By pid: a build is identified by (index, backend pid); a new pid for the same
+    index is a rebuild (what the restart fix must prevent). The same pid is not enough to call a
+    build kept: it leaves pg_stat_progress_create_index when it finishes AND when the next boot
+    terminates it (0.1-3.4 s in), so a kept build also needs the same (index, pid) seen after the
+    restart, the engine log's adoption line naming the index, and the index valid at the end."""
+    why: list[str] = []
+    pids: dict[str, list[int]] = {}
+    for o in history:
+        if o.pid not in pids.setdefault(o.index, []):
+            pids[o.index].append(o.pid)
+    still = {o.index: o.pid for o in still_building}
+    for o in in_flight:
+        seen = pids.get(o.index, [o.pid])
+        if len(seen) > 1:
+            why.append(
+                f"{o.index} was building under pid {o.pid} at the restart and was then built "
+                f"under pid(s) {[p for p in seen if p != o.pid]}: the restart killed the build "
+                "and it was rebuilt"
+            )
+    for o in in_flight:
+        if not any(
+            h.index == o.index and h.pid == o.pid and h.t > restart_t for h in history
+        ):
+            why.append(
+                f"{o.index} (pid {o.pid}) was not seen building again after the restart: it left the "
+                "progress view during the stop"
+            )
+        if o.index not in adopted:
+            why.append(
+                f"{o.index} (pid {o.pid}) was in flight at the restart but the engine log carries no "
+                f"{' '.join(EVENT_INDEX_ADOPTED)} line with index={o.index}: a build that leaves the "
+                "progress view without an adoption line was ended by the boot (kept, then terminated), "
+                "not kept"
+            )
+    for idx, ps in sorted(pids.items()):
+        if len(ps) > 1 and not any(f"{idx} was building" in w for w in why):
+            why.append(f"{idx} was built by {len(ps)} pids {ps}")
+    v = valid or {}
+    n_valid = sum(1 for ok in v.values() if ok)
+    bad = sorted(i for i, ok in v.items() if not ok)
+    if n_valid < expected or bad:
+        part = (
+            f"only {n_valid} of {expected} expected pci_ indexes were valid at the end"
+        )
+        if bad:
+            part += f"; invalid: {bad}"
+        why.append(part)
+    for o in in_flight:
+        if not v.get(o.index):
+            why.append(
+                f"{o.index}, in flight at the restart under pid {o.pid}, is not valid at the end "
+                f"({'invalid' if o.index in v else 'absent from pg_index'})"
+            )
+        if o.index in still and not v.get(o.index):
+            why.append(
+                f"{o.index} was still building under pid {still[o.index]} at the end of the bound "
+                f"({'its original pid' if still[o.index] == o.pid else 'not its original pid'})"
+            )
+    for name, lines in failure_events.items():
+        if lines:
+            why.append(
+                f"engine log carries {len(lines)} {name} event(s) after the restart, e.g. {lines[0]}"
+            )
+    if not log_files:
+        why.append(
+            "no engine log was readable under logs/ (storage_service_native.log or "
+            "storage_service_jar.log): the event scan proved nothing"
+        )
+    return why
+
+
+def run_pci_check(
+    *,
+    watcher: PciWatcher,
+    sql: SqlFn,
+    restart: Callable[[], str | None],
+    engine_log: EngineLog,
+    expected: int,
+    observe_bound_s: float = PCI_OBSERVE_BOUND_S,
+    end_bound_s: float = PCI_END_STATE_BOUND_S,
+    poll_s: float = PCI_POLL_S,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    note: Callable[[str], None] = lambda _msg: None,
+) -> PciReport:
+    """Wait for a pci_ build in flight, restart the engine, wait for every pci_ index to be valid,
+    judge by pid and by the engine log. ``restart`` returns an error text, or None when the engine
+    stopped and started. ``watcher`` must already be polling (a thread in production)."""
+    start = clock()
+    evidence: dict = {"expected_pci_indexes": expected}
+
+    def done(findings: list[str]) -> PciReport:
+        evidence["builders"] = _builders(watcher.history())
+        evidence["timeline"] = _timeline(watcher.history())
+        evidence["watcher_probe_errors"] = watcher.errors
+        return PciReport(not findings, findings, evidence, round(clock() - start, 1))
+
+    deadline = clock() + observe_bound_s
+    in_flight: list[PciObs] = []
+    while True:
+        in_flight = watcher.latest()
+        if in_flight or clock() >= deadline:
+            break
+        sleep(poll_s)
+    evidence["in_flight_at_restart"] = [o.as_dict() for o in in_flight]
+    if not in_flight:
+        done_builds = sorted({o.index for o in watcher.history()})
+        return done(
+            [
+                f"no pci_ index build was seen in flight within {observe_bound_s:g}s of the search step "
+                f"(builds seen at all: {done_builds or 'none'}): the restart was not exercised; "
+                "the builds may have finished first, so raise --pci-collections"
+            ]
+        )
+    marks = engine_log.mark()
+    evidence["restart_s"] = round(watcher.now(), 1)
+    note(
+        "in flight: "
+        + ", ".join(f"{o.index} pid {o.pid}" for o in in_flight)
+        + "; restarting the engine (PG stays up)"
+    )
+    err = restart()
+    if err:
+        return done([f"the engine restart did not complete: {err}"])
+    evidence["restarted_s"] = round(watcher.now(), 1)
+
+    deadline = clock() + end_bound_s
+    valid: dict[str, bool] | None = None
+    reached = False
+    while True:
+        try:
+            rows = sql(VALIDITY_SQL)
+        except ProbeError:
+            rows = None
+        if rows is not None:
+            valid = parse_validity(rows)
+            if (
+                sum(1 for ok in valid.values() if ok) >= expected
+                and all(valid.values())
+                and not watcher.latest()
+            ):
+                reached = True
+                break
+        if clock() >= deadline:
+            break
+        sleep(poll_s)
+    evidence["end_state_reached"] = reached
+    evidence["end_state_s"] = round(watcher.now(), 1)
+    note(
+        f"end state {'reached' if reached else 'NOT reached'} at {evidence['end_state_s']} s: "
+        f"{sum(1 for ok in (valid or {}).values() if ok)}/{expected} valid"
+    )
+    lines, files = engine_log.lines_since(marks)
+    failure_events = {
+        name: _find_events(lines, needles)
+        for name, needles in PCI_FAILURE_EVENTS.items()
+    }
+    evidence["valid_at_end"] = sorted(i for i, ok in (valid or {}).items() if ok)
+    evidence["invalid_at_end"] = sorted(i for i, ok in (valid or {}).items() if not ok)
+    evidence["log"] = {
+        "files": list(files),
+        "failure_events": [ln for evs in failure_events.values() for ln in evs],
+        "kept": _find_events(lines, EVENT_BUILDERS_KEPT),
+        "adopted": _find_events(lines, EVENT_INDEX_ADOPTED),
+        "adopted_indexes": sorted(adopted_indexes(lines)),
+    }
+    why = judge_pci(
+        in_flight=in_flight,
+        history=watcher.history(),
+        valid=valid,
+        expected=expected,
+        still_building=watcher.latest(),
+        failure_events=failure_events,
+        log_files=files,
+        adopted=adopted_indexes(lines),
+        restart_t=evidence["restart_s"],
+    )
+    return done(why)
+
+
+def _builders(history: Sequence[PciObs]) -> dict[str, list[int]]:
+    out: dict[str, list[int]] = {}
+    for o in history:
+        if o.pid not in out.setdefault(o.index, []):
+            out[o.index].append(o.pid)
+    return out
+
+
+def _timeline(history: Sequence[PciObs]) -> list[dict]:
+    """Each (index, pid) build, first and last sighting and where it had got to."""
+    spans: dict[tuple[str, int], list[PciObs]] = {}
+    for o in history:
+        spans.setdefault((o.index, o.pid), []).append(o)
+    out = []
+    for (idx, pid), xs in sorted(spans.items(), key=lambda kv: kv[1][0].t):
+        last = xs[-1]
+        out.append(
+            {
+                "index": idx,
+                "pid": pid,
+                "first_s": round(xs[0].t, 1),
+                "last_s": round(last.t, 1),
+                "phase": last.phase,
+                "blocks": f"{last.blocks_done}/{last.blocks_total}",
+                "tuples": f"{last.tuples_done}/{last.tuples_total}",
+            }
+        )
+    return out
+
+
+# --- the engine supply override ------------------------------------------------------------------
+
+
+def resolve_engine_jar(value: str | None) -> str | None:
+    """``--engine-jar`` or NEXUS_SERVICE_JAR: a built engine jar to run from the upgrade on."""
+    if not value:
+        return None
+    p = Path(value).expanduser().resolve()
+    if not p.is_file():
+        raise RehearsalError(f"engine jar {value!r} does not exist")
+    return str(p)
+
+
+def _ambient_java_dir() -> str:
+    java = shutil.which("java")
+    return str(Path(java).resolve().parent) if java else ""
+
+
+def engine_env(
+    base: dict[str, str], jar: str | None, *, java_dir: str
+) -> dict[str, str]:
+    """The environment of every step from the old stack's start on: a jar override applies to the
+    new client's engine launches only (never to the old client's stack), and a JVM launch needs java."""
+    if not jar:
+        return dict(base)
+    env = dict(base)
+    env["NEXUS_SERVICE_JAR"] = jar
+    if java_dir:
+        env["PATH"] = f"{java_dir}:{env.get('PATH', '')}".rstrip(":")
+    return env
+
+
 # --- verdict ---------------------------------------------------------------------------------
 
 
@@ -416,6 +1163,9 @@ def build_verdict(
     findings: list[str],
     prepare: dict | None,
     floor: int,
+    write_rate: dict | None = None,
+    pci_check: dict | None = None,
+    engine_jar: str | None = None,
 ) -> dict:
     failed = [s for s in steps if s.status not in ("ok", "not-run")]
     passed = not failed and not findings and bool(steps)
@@ -427,19 +1177,80 @@ def build_verdict(
         "rows_floor": floor,
         "prepared_rows": total_rows(prepare) if prepare else 0,
         "prepare": prepare or {},
+        "engine_jar": engine_jar,
         "steps": [dataclasses.asdict(s) for s in steps],
+        "write_rate": write_rate,
+        "pci_check": pci_check,
     }
+
+
+def _mb(n: int | None) -> str:
+    return "n/a" if n is None else f"{n / MB:.1f} MB"
+
+
+def format_write_rate(wr: dict | None) -> str:
+    """One line: what PG wrote during ``nx upgrade`` and at what rate (MB = 2**20 bytes)."""
+    if not wr:
+        return ""
+    rate = "n/a" if wr.get("mb_per_s") is None else f"{wr['mb_per_s']:.1f} MB/s"
+    ratio = wr.get("wal_per_store_byte")
+    return (
+        f"write rate (nx upgrade): {wr['wal_mb']:.1f} MB WAL in {wr['seconds']:.1f} s = {rate}"
+        f" (MB = 2**20 bytes); pg_stat_wal {_mb(wr.get('pg_stat_wal_bytes'))};"
+        f" pg_stat_io writes {_mb(wr.get('io_write_bytes'))}, extends {_mb(wr.get('io_extend_bytes'))};"
+        f" WAL per store byte {'n/a' if ratio is None else ratio}"
+    )
+
+
+def format_pci(pci: dict | None) -> list[str]:
+    if not pci:
+        return []
+    out: list[str] = []
+    if pci.get("not_run"):
+        for t in pci.get("timeline") or []:
+            out.append(
+                f"pci watch (check not run): {t['index']} pid {t['pid']} seen {t['first_s']}-{t['last_s']} s"
+                f" ({t['phase']}; blocks {t['blocks']}, tuples {t['tuples']})"
+            )
+        return out or ["pci watch (check not run): no pci_ build seen"]
+    for f in pci.get("in_flight_at_restart") or []:
+        out.append(
+            f"pci restart check: in flight at the restart: {f['index']} pid {f['pid']}"
+            f" ({f['phase']}; blocks {f['blocks_done']}/{f['blocks_total']},"
+            f" tuples {f['tuples_done']}/{f['tuples_total']}) at {f['t_s']} s"
+        )
+    if not pci.get("in_flight_at_restart"):
+        out.append("pci restart check: no pci_ build was ever seen in flight")
+    for idx, pids in sorted((pci.get("builders") or {}).items()):
+        out.append(f"pci restart check: {idx} built by pid(s) {pids}")
+    if (
+        "restarted_s" not in pci
+    ):  # the engine was never restarted: nothing after it to report
+        return out
+    log = pci.get("log") or {}
+    out.append(
+        f"pci restart check: valid at end {len(pci.get('valid_at_end') or [])}/{pci.get('expected_pci_indexes')};"
+        f" engine log after restart: failure events {len(log.get('failure_events') or [])},"
+        f" builders_kept {len(log.get('kept') or [])}, index_adopted {len(log.get('adopted') or [])}"
+    )
+    return out
 
 
 def format_table(verdict: dict) -> str:
     head = f"upgrade rehearsal: from {verdict['from_version']} to {verdict['target']}"
-    cols = f"{'step':<16}{'status':<9}{'wall s':>9}{'longest gap s':>15}{'out bytes':>11}{'exit':>6}  note"
+    cols = f"{'step':<19}{'status':<9}{'wall s':>9}{'longest gap s':>15}{'out bytes':>11}{'exit':>6}  note"
     lines = [head, cols, "-" * len(cols)]
     for s in verdict["steps"]:
         lines.append(
-            f"{s['name']:<16}{s['status']:<9}{s['wall_s']:>9.1f}{s['longest_gap_s']:>15.1f}"
+            f"{s['name']:<19}{s['status']:<9}{s['wall_s']:>9.1f}{s['longest_gap_s']:>15.1f}"
             f"{s['output_bytes']:>11}{'' if s['exit_code'] is None else s['exit_code']:>6}  {s['reason']}"
         )
+    wr = format_write_rate(verdict.get("write_rate"))
+    if wr:
+        lines.append(wr)
+    lines.extend(format_pci(verdict.get("pci_check")))
+    if verdict.get("engine_jar"):
+        lines.append(f"engine jar override: {verdict['engine_jar']}")
     for f in verdict["findings"]:
         lines.append(f"finding: {f}")
     return "\n".join(lines)
@@ -492,6 +1303,12 @@ class Config:
     silence_limit_s: float
     ceilings: dict[str, float]
     python: str = "3.12"
+    standin: bool = False
+    engine_jar: str | None = None  # NEXUS_SERVICE_JAR for every step from start-old on
+    pci_check: bool | None = None  # None: on for a pre-PCI start
+    pci_collections: int = PCI_COLLECTIONS_DEFAULT
+    pci_observe_bound_s: float = PCI_OBSERVE_BOUND_S
+    pci_end_bound_s: float = PCI_END_STATE_BOUND_S
 
 
 def _ambient_uv_dir() -> str:
@@ -566,6 +1383,14 @@ def rehearse(from_version: str, cfg: Config) -> dict:
     findings: list[str] = []
     texts: dict[str, str] = {}
     stop = False
+    cur = {
+        "env": env
+    }  # swapped for the engine-override environment once the old stack is up
+    pci_on = pci_check_enabled(cfg.pci_check, from_version, standin=cfg.standin)
+    write_rate_info: dict | None = None
+    pci_evidence: dict | None = None
+    probe = PgProbe(config)
+    watcher: PciWatcher | None = None
 
     def go(
         name: str,
@@ -580,7 +1405,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
         r = run_step(
             name,
             argv,
-            env=env,
+            env=cur["env"],
             cwd=where,
             silence_limit_s=silence,
             ceiling_s=ceiling,
@@ -632,8 +1457,13 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     prev=from_version,
                     json=str(json_path),
                     nx=nx,
+                    collections=cfg.pci_collections,
                 )
-                for t in shlex.split(cfg.prepare_cmd)
+                for t in shlex.split(
+                    prepare_template_for(
+                        from_version, cfg.prepare_cmd, standin=cfg.standin
+                    )
+                )
             ]
             r = go(
                 "prepare",
@@ -667,6 +1497,12 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 judged=False,
             )
             stop = not r.ok
+        # From here the NEW client runs: a jar override applies to it, never to the old stack above.
+        cur["env"] = engine_env(
+            env,
+            cfg.engine_jar,
+            java_dir=_ambient_java_dir() if cfg.engine_jar else "",
+        )
 
         sil = cfg.silence_limit_s
         plan = [
@@ -694,9 +1530,87 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     )
                 )
                 continue
+            before: PgCounters | None = None
+            if name == "upgrade":
+                try:
+                    before = take_counters(probe.sql)
+                except ProbeError as exc:
+                    findings.append(f"write-rate probe failed before nx upgrade: {exc}")
+                if pci_on and before is not None:
+                    # From before the upgrade boot: every sighting of a pci_ build and its pid counts.
+                    watcher = PciWatcher(probe.sql)
+                    watcher.start()
             r = go(name, argv, silence=sil, ceiling=cfg.ceilings[name])
             stop = not r.ok
+            if name == "upgrade" and before is not None:
+                try:
+                    write_rate_info = write_rate(
+                        before,
+                        take_counters(probe.sql),
+                        r.wall_s,
+                        (prepare or {}).get("data_dir_bytes"),
+                    )
+                    say(f"[{from_version}] {format_write_rate(write_rate_info)}")
+                except ProbeError as exc:
+                    findings.append(f"write-rate probe failed after nx upgrade: {exc}")
+        if pci_on:
+            if stop or watcher is None:
+                steps.append(
+                    StepResult(
+                        name=PCI_STEP,
+                        status="not-run",
+                        reason="an earlier step failed"
+                        if stop
+                        else "no PG reading before nx upgrade",
+                    )
+                )
+            else:
+
+                def restart() -> str | None:
+                    for sub in ("stop", "start"):
+                        rr = go(
+                            f"pci-restart-{sub}",
+                            [nx, "daemon", "service", sub],
+                            silence=None,
+                            ceiling=PCI_RESTART_CEILING_S,
+                            judged=False,
+                        )
+                        if not rr.ok:
+                            return f"nx daemon service {sub} {rr.status}: {rr.reason}"
+                    return None
+
+                rep_ = run_pci_check(
+                    watcher=watcher,
+                    sql=probe.sql,
+                    restart=restart,
+                    engine_log=EngineLog(config),
+                    expected=expected_pci_indexes(prepare or {}),
+                    observe_bound_s=cfg.pci_observe_bound_s,
+                    end_bound_s=cfg.pci_end_bound_s,
+                    note=lambda m: say(f"[{from_version}] {PCI_STEP}: {m}"),
+                )
+                pci_evidence = rep_.evidence
+                steps.append(
+                    StepResult(
+                        name=PCI_STEP,
+                        status="ok" if rep_.passed else "failed",
+                        wall_s=rep_.wall_s,
+                        reason="" if rep_.passed else "see findings",
+                    )
+                )
+                findings.extend(f"{PCI_STEP}: {w}" for w in rep_.findings)
     finally:
+        if watcher is not None:
+            watcher.stop()
+            if pci_evidence is None:
+                # The check did not run (an earlier step failed): the builds the watcher saw are still
+                # evidence of what the upgrade left running.
+                hist = watcher.history()
+                pci_evidence = {
+                    "not_run": True,
+                    "builders": _builders(hist),
+                    "timeline": _timeline(hist),
+                }
         if Path(nx).exists():
             go(
                 "cleanup-service",
@@ -726,6 +1640,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 search_text=texts.get("search", ""),
                 sentinel_expect=cfg.sentinel_expect,
                 upgrade_text=texts.get("upgrade", ""),
+                required_steps=JUDGED_STEPS + ((PCI_STEP,) if pci_on else ()),
             )
         )
     verdict = build_verdict(
@@ -735,6 +1650,9 @@ def rehearse(from_version: str, cfg: Config) -> dict:
         findings=findings,
         prepare=prepare,
         floor=cfg.rows_floor,
+        write_rate=write_rate_info,
+        pci_check=pci_evidence,
+        engine_jar=cfg.engine_jar,
     )
     write_verdict(verdict, run_dir / "verdict.json")
     say(format_table(verdict))
@@ -775,9 +1693,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--from-version",
         default="both",
         metavar="X.Y.Z|both",
-        help="previous release to start from. 'both' (the release-gate default) runs the "
-        "newest published version below the candidate and the last published 7.x, "
-        "each in its own work dir with its own table and verdict",
+        help="previous release to start from. 'both' (the release-gate default) runs three starts: "
+        f"the newest published version below the candidate, the last published 7.x and "
+        f"{PRE_PCI_VERSION} (the PCI keep check), each in its own work dir with its own table "
+        "and verdict",
     )
     ap.add_argument(
         "--published-versions",
@@ -811,6 +1730,30 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--doctor-ceiling", type=float, default=DOCTOR_CEILING_S)
     ap.add_argument("--search-ceiling", type=float, default=SEARCH_CEILING_S)
     ap.add_argument(
+        "--engine-jar",
+        default=None,
+        metavar="PATH",
+        help="a built engine jar (NEXUS_SERVICE_JAR) for every step from start-old on, e.g. one "
+        "built from the restart fix; default: the NEXUS_SERVICE_JAR of this process, else the "
+        "wheel's pinned engine",
+    )
+    ap.add_argument(
+        "--pci-restart-check",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=f"the PCI keep check (restart the engine mid-build, judge by pid); default on for a "
+        f"start older than {PCI_FIRST_VERSION}",
+    )
+    ap.add_argument(
+        "--pci-collections",
+        type=int,
+        default=PCI_COLLECTIONS_DEFAULT,
+        help="large collections the pre-PCI prepare seeds (one pci_ build each, ~30 s; "
+        "default %(default)s so a queue exists)",
+    )
+    ap.add_argument("--pci-observe-bound", type=float, default=PCI_OBSERVE_BOUND_S)
+    ap.add_argument("--pci-end-bound", type=float, default=PCI_END_STATE_BOUND_S)
+    ap.add_argument(
         "--json-out",
         type=Path,
         help="combined verdict file (default WORK/verdict.json)",
@@ -837,6 +1780,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"conexus=={args.target_release}",
                 f"conexus {args.target_release}",
             )
+        engine_jar = resolve_engine_jar(
+            args.engine_jar or os.environ.get("NEXUS_SERVICE_JAR")
+        )
         published = (
             args.published_versions.split(",")
             if args.published_versions
@@ -877,9 +1823,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             "doctor": args.doctor_ceiling,
             "search": args.search_ceiling,
         },
+        standin=args.standin,
+        engine_jar=engine_jar,
+        pci_check=args.pci_restart_check,
+        pci_collections=args.pci_collections,
+        pci_observe_bound_s=args.pci_observe_bound,
+        pci_end_bound_s=args.pci_end_bound,
     )
     cfg.work.mkdir(parents=True, exist_ok=True)
     say(f"upgrade rehearsal: candidate {label}; starting from {', '.join(versions)}")
+    if engine_jar:
+        say(f"engine jar override (from start-old on): {engine_jar}")
     verdicts = [rehearse(v, cfg) for v in versions]
     combined = {"passed": all(v["passed"] for v in verdicts), "runs": verdicts}
     write_verdict(combined, args.json_out or cfg.work / "verdict.json")

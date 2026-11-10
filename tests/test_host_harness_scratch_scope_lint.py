@@ -138,6 +138,15 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
         1,
         "nx store put of one note into the gate's self-provisioned scratch engine (fenced HOME, scratch NEXUS_CONFIG_DIR)",
     ),
+    # nexus-f3yqd.5: the upgrade rehearsal's small stand-in prepare (development fixture). The rehearsal
+    # driver runs every step under an allowlisted environment: a throwaway HOME and NEXUS_CONFIG_DIR under
+    # its own work dir, NX_LOCAL=1, no cloud and no Voyage key, so these calls reach only the old client's
+    # engine on that scratch store, never the operator's. Two of the four matches are docstring prose.
+    "scripts/upgrade_rehearsal_standin_prepare.py": (
+        4,
+        "NX_LOCAL+SANDBOX: nx store put / index md / collection list run by the rehearsal driver under a throwaway HOME "
+        "and NEXUS_CONFIG_DIR with NX_LOCAL=1; two of the four matches are prose",
+    ),
     # nexus-cnzei.5: imports nexus.mcp.core only to read each tool's
     # signature and schema for the committed wire snapshot; it calls no tool
     # and writes nothing, so it touches no tenant.

@@ -10,9 +10,12 @@
 # non-zero. The mechanics live in scripts/upgrade_rehearsal.py (offline self-test:
 # tests/test_upgrade_rehearsal_watchdog.py).
 #
-# Two starting points, each in its own work dir with its own step table and verdict line:
-#   the newest published version below the candidate (8.0.0 while 8.1.0 is the candidate), and
-#   the last published 7.x release. `--from-version X.Y.Z` runs one of them alone.
+# Three starting points, each in its own work dir with its own step table and verdict line:
+#   the newest published version below the candidate (8.0.0 while 8.1.0 is the candidate), the
+#   last published 7.x release, and 7.76.0 (before per-collection indexes: its upgrade boot builds
+#   every pci_ index, and the PCI keep check restarts the engine mid-build and judges by pid).
+#   `--from-version X.Y.Z` runs one of them alone. Around `nx upgrade` the driver also records the
+#   WAL bytes and MB/s PG wrote (see the driver's docstring for the extrapolation).
 #
 # Self-provisioning: builds the wheel from THIS checkout (or, with NEXUS_TARGET_RELEASE=X.Y.Z,
 # installs that published version), uses a throwaway HOME and NEXUS_CONFIG_DIR under a work dir,
@@ -23,6 +26,8 @@
 #   --from-version X.Y.Z|both   (default both)
 #   --standin                   small stand-in prepare instead of the real seeder (development)
 #   --rows-floor N, --silence-limit S, --upgrade-ceiling S, ...   see scripts/upgrade_rehearsal.py --help
+#   --engine-jar PATH           run the new client's engine from a built jar (also NEXUS_SERVICE_JAR),
+#                               e.g. one built from the PCI restart fix
 #   --keep-work                 keep the work tree on success too (failure always keeps the logs)
 #
 # Heavy: run it on a lab host, e.g.
@@ -108,8 +113,9 @@ else
         echo "$LAST_LINE" >&2
         exit 1
     fi
-    WHEEL="$(find "$WORK/dist" -maxdepth 1 -name 'conexus-*.whl' | head -n1)"
-    [ -n "$WHEEL" ] || { LAST_LINE="UPGRADE REHEARSAL FAILED: the build produced no wheel"; exit 1; }
+    WHEELS=("$WORK"/dist/conexus-*.whl)
+    WHEEL="${WHEELS[0]}"
+    [ -f "$WHEEL" ] || { LAST_LINE="UPGRADE REHEARSAL FAILED: the build produced no wheel"; exit 1; }
     TARGET_ARGS=(--target-wheel "$WHEEL")
 fi
 

@@ -475,13 +475,15 @@ Run it after Step 3's version bump, in the release worktree, on chas:
 lab-remote -c lab-m -- tests/e2e/upgrade-rehearsal.sh
 ```
 
-It starts from two previous releases, each in its own work dir with its own step
+It starts from three previous releases, each in its own work dir with its own step
 table and verdict line: the newest published version below the candidate (8.0.0 for
-an 8.1.0 cut) and the last published 7.x (7.99.0). For each it:
+an 8.1.0 cut), the last published 7.x (7.99.0), and 7.76.0, the last release before
+per-collection indexes (PCI), whose upgrade boot builds every `pci_` index. For each it:
 
 1. installs that release and builds its local store with the f3yqd.1 seeder
    (`scripts/upgrade_boot_writes.py --prepare-only`: 86,000 knowledge rows, about
-   2.4 GB, about 13 minutes on lab-m), then starts its engine;
+   2.4 GB, about 13 minutes on lab-m; the 7.76.0 start seeds five large collections
+   instead, about 140,000 rows), then starts its engine;
 2. upgrades the package to the candidate wheel built from the worktree
    (`NEXUS_TARGET_RELEASE=X.Y.Z` uses the published version instead);
 3. runs `nx upgrade`, `nx doctor` and `nx search` for the seeder's sentinel note.
@@ -494,11 +496,32 @@ ceilings come from the first real-store runs on 2026-11-10 (slowest: `nx upgrade
 13.9 s from 7.99.0) and bound this fixture's size; they say nothing about a store
 many times larger, where a silent stretch grows with the data.
 
-All four steps must pass from both starts before the release branch is committed.
+Around `nx upgrade` the driver reads the install's own PG (`pg_current_wal_lsn`,
+`pg_stat_wal`, `pg_stat_io`) and records the WAL bytes, seconds and MB/s per start
+(MB = 2**20 bytes) in each table and `verdict.json`. The bytes an upgrade writes
+scale with the store, so at the measured MB/s a store of S GB spends about
+S*1024*r/MBps seconds on that work, r being the run's WAL bytes over store bytes
+(also recorded); the 2.4 GB fixture bounds only itself.
+
+The 7.76.0 start adds the PCI keep check after the search step. It waits for a
+`pci_` build to be in flight (none seen is a failure, not a pass), restarts the
+engine as a user does (`nx daemon service stop`, then `start`, PG left running),
+waits for every `pci_` index to be valid, and judges by backend pid: the in-flight
+build counts as kept only if the same pid is seen building after the restart AND
+the engine log carries a `pci_anchor_adopted` line with that index AND the index
+ends valid (a build also leaves the progress view when the next boot terminates it,
+so pid continuity alone proves nothing); each index is built by exactly one pid,
+every index ends valid, and the engine log carries no
+`pci_index_dropped` (failed_build), `pci_index_build_not_done` (CONNECTION_LOST) or
+`pci_ddl_failed` (57P01) after the restart. A rebuild under a new pid is the failure
+it catches. To run it against an engine newer than the wheel's pin, add
+`--engine-jar PATH` (or set `NEXUS_SERVICE_JAR`).
+
+All steps must pass from all three starts before the release branch is committed.
 The last line is `UPGRADE REHEARSAL PASSED` (exit 0) or `UPGRADE REHEARSAL FAILED`
 (exit 1), and a failure keeps its step logs and engine and PG logs on chas. A
 failure is a release blocker, never waived here: a silent or slow step is what the
-user sees. Paste the two step tables into the cut bead.
+user sees. Paste the three step tables into the cut bead.
 
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 

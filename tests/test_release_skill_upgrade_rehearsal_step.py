@@ -44,4 +44,7 @@ def test_the_step_runs_the_gate_on_a_lab_host_and_blocks() -> None:
     assert "lab-remote -c lab-m -- tests/e2e/upgrade-rehearsal.sh" in step
     assert "UPGRADE REHEARSAL PASSED" in step and "UPGRADE REHEARSAL FAILED" in step
     assert "A failure is a release blocker, never waived here" in step
-    assert "from both starts" in step
+    assert "from all three starts" in step
+    assert "three previous releases" in step and "7.76.0" in step
+    assert "PCI keep check" in step and "`--engine-jar PATH`" in step
+    assert "MB/s" in step and "S*1024*r/MBps" in step

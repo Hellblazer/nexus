@@ -102,6 +102,15 @@ def test_slow_chatty_step_fails_on_ceiling(tmp_path: Path) -> None:
     assert "ceiling" in r.reason
 
 
+def test_a_step_silent_to_its_ceiling_reports_the_gap_it_sat_through(
+    tmp_path: Path,
+) -> None:
+    # silence limit above the ceiling: the ceiling breach must still count the unbroken silence
+    r = _run(tmp_path, "import time\ntime.sleep(30)\n", silence=60.0, ceiling=2.0)
+    assert r.status == "ceiling", r
+    assert r.longest_gap_s >= 2.0
+
+
 def test_failing_step_fails_with_its_exit_code(tmp_path: Path) -> None:
     r = _run(tmp_path, "import sys\nprint('boom')\nsys.exit(3)\n")
     assert r.status == "failed", r
@@ -294,18 +303,24 @@ def test_total_rows_accepts_the_real_seeder_shape() -> None:
 
 # --- version selection ---------------------------------------------------------------------
 
-PUBLISHED = ["7.98.0", "7.99.0", "8.0.0", "8.1.0rc1", "8.0.0.post1"]
+PUBLISHED = ["7.76.0", "7.98.0", "7.99.0", "8.0.0", "8.1.0rc1", "8.0.0.post1"]
 
 
-def test_both_is_newest_below_candidate_and_last_7x() -> None:
+def test_both_is_newest_below_candidate_last_7x_and_the_pre_pci_release() -> None:
     assert ur.resolve_from_versions("both", PUBLISHED, candidate="8.1.0") == [
         "8.0.0.post1",
         "7.99.0",
+        "7.76.0",
     ]
 
 
 def test_both_dedupes_when_the_previous_is_the_last_7x() -> None:
-    assert ur.resolve_from_versions("both", ["7.99.0"], candidate="8.0.0") == ["7.99.0"]
+    assert ur.resolve_from_versions(
+        "both", ["7.76.0", "7.99.0"], candidate="8.0.0"
+    ) == [
+        "7.99.0",
+        "7.76.0",
+    ]
 
 
 def test_explicit_version_is_used_as_given() -> None:
