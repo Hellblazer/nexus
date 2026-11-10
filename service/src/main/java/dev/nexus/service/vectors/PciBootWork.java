@@ -55,14 +55,16 @@ final class PciBootWork {
      * What stopping the engine does to the build in flight, as it is today (nexus-f3yqd): the shutdown hook leaves the
      * builder's backend alone, so an engine-only stop leaves the {@code CREATE INDEX CONCURRENTLY} running in Postgres;
      * its session keeps the builder lock, the next engine reports standby until the build ends, and then finds the
-     * valid index and adopts it. Only stopping Postgres itself ends the build: the half-built index is left INVALID, a
-     * later pass drops it and rebuilds it from the start in the same pass. Pinned by
-     * {@code PciEngineRestartKeepsBuildIntegrationTest} (the engine restart that keeps the build). A change that makes
-     * an engine stop end the build again, or that lets a database stop keep it, turns that test red, and this text must
-     * change with it.
+     * valid index and adopts it. Two things end the build: stopping Postgres itself, and a restart whose migration
+     * has work to do (a non-runAlways changeset pending, or a partition-access drift to repair), because
+     * {@code SchemaMigrator.terminatePciBuilders} ends every builder backend at boot in those cases. Either way the
+     * half-built index is left INVALID, and a later pass drops it and rebuilds it from the start in the same pass.
+     * Pinned by {@code PciEngineRestartKeepsBuildIntegrationTest} (an engine restart that applies no schema change
+     * keeps the build) and {@code PciBuilderTerminationIntegrationTest} (a restart with a pending real changeset
+     * terminates it). A change to either behaviour turns one of those tests red, and this text must change with it.
      */
-    static final String ON_STOP = "the build keeps running in the database and is adopted after a restart; "
-        + "stopping the database as well loses it and it is rebuilt from the start";
+    static final String ON_STOP = "the build keeps running in the database and is adopted after a restart, unless that restart applies a schema change; "
+        + "stopping the database, or a restart that applies a schema change, ends it and it is rebuilt from the start";
     static final String STEP_UNIT_BLOCKS = "blocks";
     static final String STEP_UNIT_TUPLES = "tuples";
 

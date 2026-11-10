@@ -396,8 +396,8 @@ class PciReconcilerBootWorkIntegrationTest {
     // -- tests -------------------------------------------------------------------------------------------------
 
     private static final String ON_STOP_TODAY =
-        "the build keeps running in the database and is adopted after a restart; "
-        + "stopping the database as well loses it and it is rebuilt from the start";
+        "the build keeps running in the database and is adopted after a restart, unless that restart applies a schema change; "
+        + "stopping the database, or a restart that applies a schema change, ends it and it is rebuilt from the start";
 
     @Test
     void aPassWithBuildsInItsLastLeaf_announcesThemWithTheRealTotal_samplesTheBuildersPhase_andLeavesTheListEmpty() throws Exception {
@@ -488,6 +488,76 @@ class PciReconcilerBootWorkIntegrationTest {
 
         assertThat(registry.snapshot()).as("empty once the pass ends").isEmpty();
         assertThat(bootWorkOnTheWire(registry)).isEmpty();
+    }
+
+    /** A SHARE UPDATE EXCLUSIVE holder on the leaf: a DROP INDEX CONCURRENTLY there waits out its lock timeout. */
+    final class DropBlocker implements AutoCloseable {
+        private final Connection conn;
+        private boolean closed;
+
+        DropBlocker(PciCatalog.Leaf leaf) throws Exception {
+            conn = pg.createConnection("");
+            conn.setAutoCommit(false);
+            PgContainerHelper.lockTable(conn, DSL.table(DSL.name(leaf.schema(), leaf.name())),
+                PgContainerHelper.LockMode.SHARE_UPDATE_EXCLUSIVE);
+        }
+
+        @Override
+        public void close() throws Exception {
+            if (!closed) {
+                closed = true;
+                conn.rollback();
+                conn.close();
+            }
+        }
+    }
+
+    /**
+     * The branch where the executor skips a planned build because its failed index could not be dropped
+     * ({@code PciReconciler.execute} calling {@code buildSkipped}): leaf A holds a failed (INVALID) index whose drop
+     * is blocked, leaf B (the pass's last) holds a build, held open. While B's build is in flight, A's skipped build
+     * has been closed out and B's is pending: done 1 of 2.
+     */
+    @Test
+    void aPlannedBuildSkippedForAFailedIndexWhoseDropCannotRun_countsAsEnded_whileTheNextLeafBuilds() throws Exception {
+        String a = newTenantSortingLast("skip-a", false);
+        String b = newTenantSortingLast("skip-b", true);
+        String stuck = name("stuck");
+        collection(a, stuck, B);
+        collection(b, name("y"), B);
+        PciCatalog.Leaf leafA = catalog.read().leaves().stream()
+            .filter(l -> M384.equals(l.model()) && a.equals(l.tenant())).findFirst().orElseThrow();
+        String failed = PciCatalog.indexName(M384, a, stuck);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.createLeafHnswIndex(su, leafA.schema(), leafA.name(), failed, "embedding_384", stuck);
+        }
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.markIndexInvalid(su, leafA.schema(), failed);
+        }
+        assertThat(hasInvalid(a)).as("A holds a failed index").isTrue();
+        BootWorkRegistry registry = new BootWorkRegistry(Clock.systemUTC());
+
+        try (DropBlocker blocker = new DropBlocker(leafA); HeldWrite held = new HeldWrite(b);
+             Watcher watcher = new Watcher(registry)) {
+            CompletableFuture<PassReport> pass = inBackground(reconciler(registry));
+            // B's build is held at "waiting for writers"; A (visited first) has been skipped by then.
+            var entry = awaitValue(() -> only(registry), e -> e != null && e.step() != null,
+                "the entry with B's sampled build");
+
+            assertThat(entry.total()).as("B is the last leaf and has planned: A's build and B's").isEqualTo(2L);
+            assertThat(entry.done()).as("A's skipped build is closed out, B's is pending").isEqualTo(1L);
+
+            // A's drop has given up by now; release both so the rest of the pass is not queued behind A's lock.
+            held.close();
+            blocker.close();
+            PassReport report = pass.get(60, TimeUnit.SECONDS);
+            assertThat(report.drops()).as("A's drop timed out").isZero();
+            assertThat(report.builds()).as("only B's build ran").isEqualTo(1);
+            watcher.close();
+            assertThat(watcher.violations).isEmpty();
+        }
+        assertThat(registry.snapshot()).as("empty once the pass ends").isEmpty();
     }
 
     @Test

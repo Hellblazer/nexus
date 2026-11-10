@@ -101,8 +101,8 @@ class PciBootWorkTest {
     }
 
     private static final String ON_STOP_TODAY =
-        "the build keeps running in the database and is adopted after a restart; "
-        + "stopping the database as well loses it and it is rebuilt from the start";
+        "the build keeps running in the database and is adopted after a restart, unless that restart applies a schema change; "
+        + "stopping the database, or a restart that applies a schema change, ends it and it is rebuilt from the start";
 
     /** Wait on {@code latch} however often the thread is interrupted, then put the interrupt back. */
     private static void awaitUninterruptibly(CountDownLatch latch) {
@@ -136,10 +136,11 @@ class PciBootWorkTest {
     }
 
     @Test
-    void onStopSaysAnEngineStopKeepsTheBuild_andOnlyADatabaseStopLosesIt() {
-        // Pinned beside PciEngineRestartKeepsBuildIntegrationTest (an engine restart leaves the build running in
-        // Postgres and the next engine adopts it): when an engine stop ends the build again, or a database stop
-        // keeps it, that test and this text change together.
+    void onStopSaysAnEngineStopKeepsTheBuild_unlessTheRestartAppliesASchemaChange_andADatabaseStopLosesIt() {
+        // Pinned beside PciEngineRestartKeepsBuildIntegrationTest (an engine restart with no schema change leaves the
+        // build running in Postgres and the next engine adopts it) and PciBuilderTerminationIntegrationTest (a restart
+        // with a pending real changeset terminates it): when either behaviour changes, that test and this text change
+        // together.
         assertThat(PciBootWork.ON_STOP).isEqualTo(ON_STOP_TODAY);
         assertThat(registry.snapshot()).isEmpty();
         PciBootWork work = work();
