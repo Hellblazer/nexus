@@ -1449,7 +1449,7 @@ def test_a_reader_with_no_tombstoned_read_is_not_applicable(world: World) -> Non
                              chash_positions=world.chash_positions, close=lambda: None)
     rung = ManifestSectionLabelsRung(
         reader_factory=lambda: reader, writer_factory=lambda: world, t3_factory=lambda: world,
-        record_fn=lambda: None, stale_zero_fn=lambda: False)
+        record_fn=lambda: None, stale_zero_fn=lambda: False, owed_store=None)
 
     assert rung.detect().applicable is False
     assert rung.converge(Report()).outcome is ConvergeOutcome.DEFERRED

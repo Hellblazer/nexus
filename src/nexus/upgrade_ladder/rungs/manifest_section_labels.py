@@ -633,12 +633,14 @@ class ManifestSectionLabelsRung:
                 "expected": expected_values(now, spans=False),
             })
         written: set[str] = set()
+        asked: set[str] = set()  # every document owed before its request: settled after, written or not
         in_flight: list[str] = []  # the request being sent: a raise after the engine committed it restamped these too
         try:
             for collection, per_doc in sorted(by_collection.items()):
                 for request in self._requests(sorted(per_doc.items())):
                     in_flight = [d for d, _rows in request]
                     self._owed.owe({d: stamps.get(d, "") for d in in_flight})  # before the engine restamps them
+                    asked.update(in_flight)
                     result = writer.append_manifest_many(request, collection=collection)
                     in_flight = []
                     failed = {str(d) for d in (result or {}).get("failed_doc_ids") or []}
@@ -661,7 +663,7 @@ class ManifestSectionLabelsRung:
             # engine without the expected guard raises after that engine wrote the rows unguarded)
             before = len(counts.restore_failed_docs)
             self._restore_batch(writer, sorted(written | set(in_flight)), stamps, counts)
-            self._owed.settle(sorted(written | set(in_flight)), counts.restore_failed_docs[before:])
+            self._owed.settle(sorted(asked), counts.restore_failed_docs[before:])
 
     @classmethod
     def _restore_batch(cls, writer: Any, docs: list[str], stamps: dict[str, str], counts: Counts) -> None:
