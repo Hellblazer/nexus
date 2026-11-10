@@ -151,3 +151,21 @@ def test_the_tally_ignores_other_lines_and_a_broken_stream() -> None:
     clock.now += 60
     tally.tick()
     tally.finish()
+
+
+def test_a_step_line_clears_a_redrawn_meter_line_first(monkeypatch) -> None:
+    """The step heartbeat and the meter share a terminal: the meter's redrawn
+    line is blanked before a step line is written, never glued onto it."""
+    from nexus.progress.step_report import StepReporter, no_ticker
+
+    clock, err = Clock(), io.StringIO()
+    meter = dm.DownloadMeter("engine.txz", 9_000_000, stream=err, tty=True, clock=clock)
+    clock.now += dm.TTY_EVERY_S
+    meter.update(3_000_000)
+    assert dm._ACTIVE is meter
+    drawn = len(err.getvalue())
+    rep = StepReporter(1, echo=lambda _s: None, stream=io.StringIO(), tty=False, clock=clock, ticker=no_ticker)
+    rep.line("  ... 5.0 s elapsed")
+    assert err.getvalue()[drawn:].startswith("\r ") and err.getvalue().endswith("\r")
+    meter.finish()
+    assert dm._ACTIVE is None

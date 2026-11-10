@@ -1194,20 +1194,30 @@ def init_cmd(
 
     reporter = StepReporter(3, name="nx init")
     first = (
-        "on a first run this downloads the engine, its PostgreSQL bundle and the embedding model, "
-        "then starts the service; minutes then"
+        "on a first run this downloads the engine, its PostgreSQL bundle and the embedding model and "
+        "starts the service: a few minutes then"
     )
+    again = "Re-run `nx init`: it keeps what is already in place and goes on from there."
+    no_service = "ended without a running service"
     try:
         if autostart:
             # Self-reporting; handles cloud-internal, activation-error fallback,
             # lease-timeout, and success messaging internally.
-            with reporter.step("Provision the local service and start it through the autostart unit", first):
+            with reporter.step(
+                "Provision the local service and start it through the autostart unit", first, remedy=again,
+            ) as step:
                 lease = _provision_and_autostart_service(embedder)
+                if lease is None:
+                    step.end_note = no_service
             if lease is not None:
                 _finish_local_init(reporter)
+            else:
+                reporter.summary()
             return
-        with reporter.step("Provision and start the local service", first):
+        with reporter.step("Provision and start the local service", first, remedy=again) as step:
             lease = provision_and_start_service(embedder)
+            if lease is None:
+                step.end_note = no_service
     except StorageServiceStartError:
         # No native binary available and none acquirable. PG is provisioned and
         # _ensure_service_binary_step already printed an actionable install
@@ -1230,6 +1240,7 @@ def init_cmd(
             "NX_LOCAL=1 to force a local service, or configure a managed endpoint "
             "with `nx config init`."
         )
+        reporter.summary()
         return
     _finish_local_init(reporter)
     # RDR-157 P4.1 / RDR-174 §3: one command left the user with a running backend.
@@ -1241,7 +1252,10 @@ def _finish_local_init(reporter: StepReporter) -> None:
     # nexus-9xfx5: converge the ladder now that the backend is serving, so the
     # first `nx doctor` on a fresh box is clean (no vacuous pending rung, no
     # missing diag view).
-    with reporter.step("Run the upgrade ladder", "fills new fields; quick on a fresh store"):
+    with reporter.step(
+        "Run the upgrade ladder", "fills new fields; quick on a fresh store",
+        remedy="Run `nx upgrade`: every ladder step is safe to repeat.",
+    ):
         _converge_ladder_best_effort()
     # nexus-e1ti4: seed the builtin plan-template library now that the ladder
     # has converged — a virgin box otherwise pays the inline-planner tax on

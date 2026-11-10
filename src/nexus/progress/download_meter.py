@@ -94,13 +94,24 @@ class DownloadMeter:
             pass
 
     def _redraw(self, text: str) -> None:
+        global _ACTIVE
+        _ACTIVE = self
         """Overwrite the current terminal line with *text*: a carriage return
         and spaces over any longer leftover, no escape sequence (a legacy
         Windows console prints those as text)."""
         self._write("\r" + text.ljust(self._drawn))
         self._drawn = len(text)
 
+    def clear_line(self) -> None:
+        """Blank a redrawn line so another writer's line starts clean."""
+        if self._drawn:
+            self._write("\r" + " " * self._drawn + "\r")
+            self._drawn = 0
+
     def _write_line(self, text: str) -> None:
+        global _ACTIVE
+        if _ACTIVE is self:
+            _ACTIVE = None
         if self._drawn:
             self._write("\r" + " " * self._drawn + "\r")
             self._drawn = 0
@@ -148,9 +159,26 @@ class DownloadMeter:
 
     def abandon(self) -> None:
         """The attempt failed: clear a redrawn line so the error starts clean."""
-        if self._drawn:
-            self._write("\r" + " " * self._drawn + "\r")
-            self._drawn = 0
+        global _ACTIVE
+        if _ACTIVE is self:
+            _ACTIVE = None
+        self.clear_line()
+
+
+#: The meter whose line is redrawn in place right now, if any: another writer
+#: to the terminal (the step reporter's heartbeat) clears it first, or its line
+#: would be glued onto the meter's (review of the nx init steps).
+_ACTIVE: DownloadMeter | None = None
+
+
+def clear_active_line() -> None:
+    """Blank the redrawn meter line, if any. Never raises."""
+    meter = _ACTIVE
+    if meter is not None:
+        try:
+            meter.clear_line()
+        except Exception:  # noqa: BLE001 — cosmetic
+            pass
 
 
 def meter_for(name: str, total: int | None) -> DownloadMeter | None:

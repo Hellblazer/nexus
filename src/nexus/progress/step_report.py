@@ -105,6 +105,9 @@ class Step:
     #: Set by the caller when the step turned out to be nothing (a path that
     #: returned before any work): a lazy step that never announced leaves no trace.
     discard: bool = False
+    #: Set by the caller when the step ended without doing what it set out to
+    #: (e.g. no service came up): the end line says so instead of "done in".
+    end_note: str | None = None
     _last_emit: float = 0.0
     _progress: tuple[float, float | None, str] | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -223,6 +226,7 @@ class StepReporter:
     def line(self, text: str) -> None:
         """One finished line: to the user, or only to the log when quiet."""
         self._clear()
+        _clear_meter()
         if self.quiet:
             self._log_line(text)
             return
@@ -233,6 +237,7 @@ class StepReporter:
         if self.quiet:
             self._log_line(text.strip())
             return
+        _clear_meter()
         if inline:
             # In place only for a step that prints nothing of its own while it
             # runs (doctor's core checks); a step that prints (nx upgrade's,
@@ -317,7 +322,9 @@ class StepReporter:
                     self._announce(step)
                 seconds = step.elapsed()
                 self.records.append(StepRecord(number, what, seconds, True))
-                if not self.compact:
+                if step.end_note:
+                    self.line(f"  {step.end_note} after {format_duration(seconds)}")
+                elif not self.compact:
                     self.line(f"  done in {format_duration(seconds)}")
                 elif seconds >= self.slow_s:
                     # Compact (doctor's many checks): only a slow step gets a line of its own.
@@ -368,6 +375,17 @@ class StepReporter:
         for text in lines:
             self.line(text)
         return lines
+
+
+def _clear_meter() -> None:
+    """A download meter's redrawn line is blanked before a step line is written,
+    so the two never share a line. Never raises."""
+    try:
+        from nexus.progress.download_meter import clear_active_line  # noqa: PLC0415 — stdlib-only
+
+        clear_active_line()
+    except Exception:  # noqa: BLE001 — cosmetic
+        pass
 
 
 def _stderr_line(text: str) -> None:

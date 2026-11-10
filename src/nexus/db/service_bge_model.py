@@ -199,21 +199,37 @@ def _stream_once(url: str, dest: Path, headers: dict[str, str] | None = None) ->
     import httpx  # noqa: PLC0415 — deferred import — heavy ONNX/model dep loaded lazily
 
     tmp = dest.with_suffix(dest.suffix + ".part")
+    meter = None
     # read=300: generous per-chunk gap so a throttled 416 MB transfer survives
     # CDN backpressure, but a genuinely stalled connection (TCP alive, zero
     # throughput) surfaces as a retryable ReadTimeout instead of hanging the
     # install forever — the retry loop above exists precisely to absorb it.
     timeout = httpx.Timeout(timeout=None, connect=30.0, read=300.0)
     try:
+        from nexus.progress.download_meter import meter_for  # noqa: PLC0415 — stdlib-only, deferred
+
+        meter = None
         with httpx.stream(
             "GET", url, headers=headers, follow_redirects=True, timeout=timeout
         ) as resp:
             resp.raise_for_status()
+            # nexus-mjmjl: the model is the largest first-run download; size,
+            # rate and time left on stderr, as for the engine and the bundle.
+            declared = resp.headers.get("Content-Length", "")
+            meter = meter_for(dest.name, int(declared) if declared.isdecimal() else None)
+            written = 0
             with open(tmp, "wb") as fh:
                 for chunk in resp.iter_bytes(chunk_size=1 << 20):
                     fh.write(chunk)
+                    written += len(chunk)
+                    if meter is not None:
+                        meter.update(written)
         os.replace(tmp, dest)
+        if meter is not None:
+            meter.finish()
     except BaseException:
+        if meter is not None:
+            meter.abandon()
         tmp.unlink(missing_ok=True)
         raise
 

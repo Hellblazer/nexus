@@ -80,7 +80,9 @@ def upgrade(
         )
         reporter = StepReporter(len(steps) + (0 if dry_run else 1), quiet=auto_mode, name="nx upgrade")
         for what, detail, run in steps:
-            with reporter.step(what, detail):
+            # Every step is safe to repeat (the ladder records what converged), so
+            # the remedy for any failed one is the same command again.
+            with reporter.step(what, detail, remedy="Run `nx upgrade` again: every step is safe to repeat."):
                 run()
         # nexus-emiky: a lockstep child that lost the upgrade lock left the retry sentinel in the lockstep
         # marker, saying this work (plugin convergence, agents and hooks refresh, the engine install, the
@@ -107,6 +109,7 @@ def upgrade(
             else:
                 with reporter.step(
                     "Restart running services on the new version", "a stale service is cycled; about a minute each",
+                    remedy="Start it by hand with `nx daemon service start`; `nx doctor` says what is running.",
                 ):
                     _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
         if reporter is not None:

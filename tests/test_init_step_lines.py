@@ -49,3 +49,33 @@ def test_a_service_that_cannot_start_says_so_and_exits_non_zero(monkeypatch, ran
     assert "  failed after " in result.stdout and "no native binary" in result.stdout
     assert "Service NOT started" in result.stderr
     assert "Step 2 of 3" not in result.stdout
+
+
+def test_the_autostart_arm_runs_the_same_steps(monkeypatch, ran) -> None:
+    monkeypatch.setattr(init_mod, "_decide_autostart", lambda *_a: True)
+    monkeypatch.setattr(init_mod, "_provision_and_autostart_service", lambda *_a: ran.append("unit") or object())
+    result = CliRunner().invoke(init_mod.init_cmd, [])
+    assert result.exit_code == 0, result.output
+    assert "Step 1 of 3: Provision the local service and start it through the autostart unit" in result.stdout
+    assert "Summary: 3 step(s) in " in result.stdout
+    assert ran == ["unit", "ladder", "seed"]
+
+
+def test_no_service_yet_is_not_reported_as_done(monkeypatch, ran) -> None:
+    monkeypatch.setattr(init_mod, "_decide_autostart", lambda *_a: True)
+    monkeypatch.setattr(init_mod, "_provision_and_autostart_service", lambda *_a: None)
+    result = CliRunner().invoke(init_mod.init_cmd, [])
+    assert result.exit_code == 0, result.output
+    assert "  ended without a running service after " in result.stdout
+    assert "  done in " not in result.stdout
+    assert "Summary: 1 step(s) in " in result.stdout
+
+
+def test_a_failed_first_step_names_the_remedy(monkeypatch, ran) -> None:
+    def boom(*_a):
+        raise RuntimeError("bundle download failed")
+
+    monkeypatch.setattr(init_mod, "provision_and_start_service", boom)
+    result = CliRunner().invoke(init_mod.init_cmd, [])
+    assert result.exit_code != 0
+    assert "  Re-run `nx init`: it keeps what is already in place and goes on from there." in result.stdout
