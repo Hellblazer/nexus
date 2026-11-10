@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from nexus.lua_runtime import verb_types
+from nexus.lua_runtime import transcripts_read as tr
 from nexus.lua_runtime import verbs_transcripts as vt
 from nexus.lua_runtime.verbs import VERB_TABLE
 from nexus.lua_runtime.verb_types import (
@@ -735,7 +736,7 @@ def test_files_without_a_timestamp_are_skipped(root: Path) -> None:
 
 def _ticking(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = iter(range(10_000))
-    monkeypatch.setattr(vt, "_now", lambda: float(next(clock)))
+    monkeypatch.setattr(tr, "_now", lambda: float(next(clock)))
 
 
 def test_the_deadline_is_checked_between_transcript_files(
@@ -794,7 +795,7 @@ def test_the_deadline_is_checked_inside_a_long_file(
 def test_the_deadline_is_checked_by_bytes_read(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(vt, "BYTES_PER_DEADLINE_CHECK", 1000)
+    monkeypatch.setattr(tr, "BYTES_PER_DEADLINE_CHECK", 1000)
     raw = [json.dumps(_user("2026-11-03T10:30:00.000Z", SID, "u" * 900))] * 5
     _write(root / PROJECT / f"{SID}.jsonl", _main_session(), raw=raw)
     _ticking(monkeypatch)
@@ -941,8 +942,8 @@ def test_a_linked_projects_root_is_read(
 def test_a_line_over_the_line_cap_is_skipped(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(vt, "LINE_CHUNK", 64)
-    monkeypatch.setattr(vt, "MAX_LINE_BYTES", 4096)
+    monkeypatch.setattr(tr, "LINE_CHUNK", 64)
+    monkeypatch.setattr(tr, "MAX_LINE_BYTES", 4096)
     long = json.dumps(
         _assistant(
             "2026-11-03T10:00:10.000Z",
@@ -1483,7 +1484,7 @@ def test_a_resolver_value_error_is_the_same_verb_error(
     def not_a_repo(projects_root, repo_root, *, deadline):
         raise ValueError(f"{repo_root} is not a git repository")
 
-    monkeypatch.setattr(vt, "repo_project_dirs", not_a_repo)
+    monkeypatch.setattr(tr, "repo_project_dirs", not_a_repo)
     with pytest.raises(VerbError) as err:
         _sessions(project="repo", ctx=VerbContext(repo_root=tmp_path))
     assert str(err.value) == REPO_NEEDED
@@ -1508,7 +1509,7 @@ def test_project_repo_is_the_union_over_the_resolved_directories(
         calls.append((projects_root, repo_root, deadline))
         return ["-a-proj", "-a-proj-wt-x"]
 
-    monkeypatch.setattr(vt, "repo_project_dirs", fake)
+    monkeypatch.setattr(tr, "repo_project_dirs", fake)
     repo = tmp_path / "repo-root"
     deadline = _deadline()
     out = vt.sessions(
@@ -1538,7 +1539,7 @@ def test_project_repo_with_no_directories_is_an_empty_list(
     root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write(root / PROJECT / f"{SID}.jsonl", _main_session())
-    monkeypatch.setattr(vt, "repo_project_dirs", lambda *a, **k: [])
+    monkeypatch.setattr(tr, "repo_project_dirs", lambda *a, **k: [])
     assert _sessions(project="repo", ctx=VerbContext(repo_root=tmp_path)) == []
 
 
@@ -1550,7 +1551,7 @@ def test_a_resolver_timeout_propagates(
     def late(projects_root, repo_root, *, deadline):
         raise VerbTimeout("late")
 
-    monkeypatch.setattr(vt, "repo_project_dirs", late)
+    monkeypatch.setattr(tr, "repo_project_dirs", late)
     with pytest.raises(VerbTimeout):
         _sessions(project="repo", ctx=VerbContext(repo_root=tmp_path))
 
@@ -1935,7 +1936,7 @@ def test_project_repo_with_an_empty_window_never_asks_the_resolver(
 ) -> None:
     _write(root / PROJECT / f"{SID}.jsonl", _main_session())
     monkeypatch.setattr(
-        vt, "repo_project_dirs", lambda *a, **k: pytest.fail("resolver asked")
+        tr, "repo_project_dirs", lambda *a, **k: pytest.fail("resolver asked")
     )
     ctx = VerbContext(repo_root=tmp_path)
     assert _sessions("2026-11-04", "2026-11-04", "repo", ctx=ctx) == []
@@ -2293,9 +2294,9 @@ def _equivalence_root(root: Path) -> None:
 
 def _ask(monkeypatch: pytest.MonkeyPatch, skip: bool, fields, bodies=None, floor=0):
     """The verb with the skip on or off; ``floor=None`` keeps the real size floor."""
-    monkeypatch.setattr(vt, "_PREPARSE", skip)
+    monkeypatch.setattr(tr, "_PREPARSE", skip)
     if floor is not None:
-        monkeypatch.setattr(vt, "_PREPARSE_MIN", floor)
+        monkeypatch.setattr(tr, "_PREPARSE_MIN", floor)
     return _sessions(project=None, fields=fields, bodies=bodies)
 
 
@@ -2415,7 +2416,7 @@ def test_a_skip_that_loses_the_stamp_is_caught_by_the_comparison(
     _equivalence_root(root)
     fields = ",".join(QUERIES["tools"][0])
     want = _ask(monkeypatch, False, fields)
-    real = vt._inert
+    real = tr._inert
 
     def lossy(raw, s):
         rec = real(raw, s)
@@ -2423,9 +2424,9 @@ def test_a_skip_that_loses_the_stamp_is_caught_by_the_comparison(
             rec.pop("timestamp", None)
         return rec
 
-    monkeypatch.setattr(vt, "_inert", lossy)
+    monkeypatch.setattr(tr, "_inert", lossy)
     assert _ask(monkeypatch, True, fields) != want
-    monkeypatch.setattr(vt, "_inert", real)
+    monkeypatch.setattr(tr, "_inert", real)
     assert _ask(monkeypatch, True, fields) == want
 
 
@@ -2436,7 +2437,7 @@ def test_only_a_line_over_the_size_floor_is_peeked(
         ("type", "api-request-blob"),
         ("sessionId", SID),
         ("timestamp", _t(0)),
-        ("message", {"pad": "x" * vt._PREPARSE_MIN}),
+        ("message", {"pad": "x" * tr._PREPARSE_MIN}),
     )
     small = _c(("type", "pr-link"), ("sessionId", SID), ("timestamp", _t(1)))
     _write(root / PROJECT / f"{SID}.jsonl", [], raw=[big, small])

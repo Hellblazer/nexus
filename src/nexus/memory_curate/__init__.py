@@ -33,7 +33,6 @@ rolled-up row is ever reaped, so old reports sit quarantined. That is accepted (
 """
 from __future__ import annotations
 
-import json
 import math
 import os
 import re
@@ -52,6 +51,7 @@ from nexus._hook_runtime.memory_scan import (
     read_text,
     scan,
 )
+from nexus.memory_curate.sessions import SessionStarts, repo_session_starts, unscanned_note  # noqa: F401 — re-exported: the session listing lives in its own module
 from nexus.tables.audit_tags import audit_tags_of, is_audit_title, split_tags
 
 #: A pair of memory files is a likely near-duplicate when the Jaccard overlap of their name and
@@ -154,8 +154,6 @@ RETENTION_DAYS = 30
 #: Pages a read-count window may take before the loop stops. Each page advances at least an
 #: hour, so a 30-day window needs at most 720; a page that does not advance stops it at once.
 MAX_READ_PAGES = 1000
-#: Lines read from the top of a transcript looking for its first timestamped record.
-_START_SCAN_LINES = 200
 #: Memory-query kinds that count as a read of a memory file: a Read of it, and its loading
 #: into a subagent's instructions. A Write or an Edit is not a read.
 _FILE_READ_KINDS = frozenset({"file_read", "loaded"})
@@ -213,6 +211,8 @@ class ReadCounts:
     truncated_records: int = 0
     #: Main sessions of this repository that started in the window: the sessions counted.
     sessions: int = 0
+    #: Transcripts with no start in the first START_SCAN_BYTES bytes: not counted (printed on the row).
+    unscanned: int = 0
 
 
 @dataclass(frozen=True)
@@ -223,57 +223,17 @@ class ReadsUnavailable:
     reason: str
 
 
-def _session_start(path: Path) -> datetime | None:
-    """A main transcript's start by the verb's own rule (``verbs_transcripts._scan``): the
-    first record that parses as a JSON object, is not a sidechain replay and carries a
-    timestamp ``datetime.fromisoformat`` reads."""
-    try:
-        with path.open("rb") as fh:
-            for _, raw in zip(range(_START_SCAN_LINES), fh, strict=False):
-                try:
-                    rec = json.loads(raw)
-                except (ValueError, RecursionError):
-                    continue
-                if not isinstance(rec, dict) or rec.get("isSidechain") is True:
-                    continue
-                stamp = rec.get("timestamp")
-                if not isinstance(stamp, str) or len(stamp) > 64:
-                    continue
-                try:
-                    t = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-                except ValueError:
-                    continue
-                return t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t
-    except OSError:
-        return None
-    return None
+def hook_reads_note() -> str:
+    """The T2 prefix scan's reads. Its tracked ``get`` stamps last_accessed at every SessionStart and every
+    SubagentStart (``subagent_start._t2_memory_section`` runs the same scan); the client has no untracked
+    single-row read (``get`` and ``resolve_title`` track, ``search(access="silent")`` matches by relevance,
+    ``get_all`` reads the whole namespace), so the report names them, from the hook's own constants."""
+    from nexus.hooks import t2_prefix_scan  # noqa: PLC0415 — deferred: only --cold imports the hook module
 
-
-def repo_session_starts(cwd: Path) -> list[datetime] | str:
-    """The start of every main session of this repository still on disk, or why they could
-    not be listed. The project directories come from the runtime's ``repo_project_dirs``,
-    the rule project ``repo`` uses, and the files are the verb's own: top-level ``*.jsonl``,
-    links excluded. Only the first records are read; this is no transcript scanner."""
-    from nexus.lua_runtime.transcripts_projects import repo_project_dirs  # noqa: PLC0415 — deferred: only a read count pays
-
-    root = Path(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")) / "projects"
-    if not root.is_dir():
-        return f"no Claude Code projects directory at {root}"
-    try:
-        names = repo_project_dirs(root, cwd, deadline=time.monotonic() + 30)
-    except Exception as exc:  # noqa: BLE001 — a failed listing is a reason, never "no reads"
-        return f"the repository's project directories could not be listed: {type(exc).__name__}: {exc}"
-    starts: list[datetime] = []
-    for name in names:
-        if (root / name).is_symlink():
-            continue  # the verb reads plain directories only (verbs_transcripts._plain_dir)
-        for f in sorted((root / name).glob("*.jsonl")):
-            if f.is_symlink() or not f.is_file():
-                continue
-            start = _session_start(f)
-            if start is not None:
-                starts.append(start)
-    return starts
+    return (f"the SessionStart prefix scan does a tracked get on the {t2_prefix_scan._SNIPPET_LIMIT} newest rows of each "
+            f"of up to {t2_prefix_scan._MAX_NAMESPACES} of the repository's namespaces (the most recently written first, "
+            "machine-written ones such as _taxonomy_discover_health skipped) at every session start and every subagent "
+            "start, which stamps last_accessed, so those namespaces read as used and cannot be listed cold")
 
 
 def _unmatchable(directory: Path) -> str | None:
@@ -300,21 +260,21 @@ def load_reads(days: int, now: datetime, directory: Path, cwd: Path | None = Non
     """
     from nexus.memory_curate.cold import query_pages  # noqa: PLC0415 — deferred: only a read count pays for the runtime
 
-    starts = repo_session_starts(cwd or Path.cwd())
-    window = read_window(days, now, min(starts) if isinstance(starts, list) and starts else None)
+    starts = repo_session_starts(cwd or Path.cwd(), now)
+    window = read_window(days, now, min(starts.starts) if isinstance(starts, SessionStarts) and starts.starts else None)
     if isinstance(starts, str):
         return ReadsUnavailable(window, starts)
     blocked = _unmatchable(directory)
     if blocked:
         return ReadsUnavailable(window, blocked)
     lo = datetime.strptime(window.since, _FMT).replace(tzinfo=timezone.utc)
-    counted = sum(1 for s in starts if lo <= s < now)
+    counted = sum(1 for s in starts.starts if lo <= s < now)
     if not counted:
-        return ReadsUnavailable(window, "no session of this repository started in the window")
+        return ReadsUnavailable(window, "no session of this repository started in the window" + (f" ({unscanned_note(starts.unscanned)})" if starts.unscanned else ""))
     result = query_pages("memory", window.since, window.until, MAX_READ_PAGES)
     if isinstance(result, str):
         return ReadsUnavailable(window, result)
-    return ReadCounts(window, result[0], result[1], counted)
+    return ReadCounts(window, result[0], result[1], counted, starts.unscanned)
 
 
 def _same_file(name: str, directory: Path) -> str | None:
@@ -361,8 +321,11 @@ def read_lines(directory: Path, files: list[str], reads: ReadCounts | ReadsUnava
     unread = [f for f in candidates if counts.get(f, 0) == 0]
     started = f"{reads.sessions} session{'' if reads.sessions == 1 else 's'} started in it"
     lines = [f"read counts: {reads.window.describe()}, {started}"]
+    if reads.unscanned:
+        lines.append(f"read counts: {unscanned_note(reads.unscanned)}")
     if reads.truncated_records:
-        lines.append(f"read counts: {reads.truncated_records} records were cut, so these counts are floors")
+        lines.append(f"read counts: {reads.truncated_records} records were cut, so these counts are floors and files "
+                     "used in a cut record may be listed although they were used")
     label = "no Read-tool open or subagent load in any session that started in the window"
     if unread:
         lines.append(f"{label}: {len(unread)} of {len(candidates)} files (index files excluded)")
@@ -758,14 +721,15 @@ def section(title: str, body: Any) -> list[str]:
 def report_title(now: datetime, *, files: bool, t2: bool, agents: bool, cold: bool) -> str:
     """The T2 title the report is stored under.
 
-    A run with --files, --t2 and --agents (the default; --cold may ride along) is the day's full
-    report: ``curation-report-<date>``. A run of fewer sections stores
-    ``curation-report-<date>-<sections>`` (the selected sections in files, t2, agents, cold order,
-    joined with ``-``), so a partial run never replaces the full report that a T2 upsert on
-    (project, title) would otherwise overwrite.
+    A run with --files, --t2 and --agents and no --cold (the default) is the day's full report:
+    ``curation-report-<date>``. Any other run stores ``curation-report-<date>-<sections>`` (the
+    selected sections in files, t2, agents, cold order, joined with ``-``), so a partial run never
+    replaces the full report that a T2 upsert on (project, title) would otherwise overwrite, and
+    neither does a later default run replace the release step's report that carries --cold
+    (``curation-report-<date>-files-t2-agents-cold``).
     """
     base = f"curation-report-{now:%Y-%m-%d}"
-    if files and t2 and agents:
+    if files and t2 and agents and not cold:
         return base
     chosen = [n for n, on in (("files", files), ("t2", t2), ("agents", agents), ("cold", cold)) if on]
     return f"{base}-{'-'.join(chosen)}"

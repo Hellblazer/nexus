@@ -1141,7 +1141,9 @@ def test_report_title_full_run_and_partial_runs() -> None:
     t = mc.report_title
     base = "curation-report-2026-11-03"
     assert t(now, files=True, t2=True, agents=True, cold=False) == base
-    assert t(now, files=True, t2=True, agents=True, cold=True) == base
+    # nexus-qo7ie.27 S1: a cold run never takes the default run's title, so a later default run
+    # cannot overwrite the release step's report.
+    assert t(now, files=True, t2=True, agents=True, cold=True) == f"{base}-files-t2-agents-cold"
     assert t(now, files=True, t2=False, agents=False, cold=False) == f"{base}-files"
     assert t(now, files=False, t2=True, agents=True, cold=False) == f"{base}-t2-agents"
     assert t(now, files=True, t2=True, agents=False, cold=True) == f"{base}-files-t2-cold"

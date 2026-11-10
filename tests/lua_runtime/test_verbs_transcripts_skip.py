@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from nexus.lua_runtime import transcripts_read as tr
 from nexus.lua_runtime import verbs_transcripts as vt
 from tests.lua_runtime.test_verbs_transcripts import (  # noqa: F401  (fixtures)
     BIG,
@@ -311,7 +312,7 @@ def test_a_skip_that_loses_what_the_tail_carries_is_caught_by_the_comparison(
     _q39_root(root, 0)
     fields = ",".join(QUERIES["tools"][0]) + ",agent_id"
     want = _ask(monkeypatch, False, fields)
-    real = vt._inert
+    real = tr._inert
     for lose in ("timestamp", "sessionId", "agentId"):
 
         def lossy(raw, s, lose=lose):
@@ -320,9 +321,9 @@ def test_a_skip_that_loses_what_the_tail_carries_is_caught_by_the_comparison(
                 rec.pop(lose, None)
             return rec
 
-        monkeypatch.setattr(vt, "_inert", lossy)
+        monkeypatch.setattr(tr, "_inert", lossy)
         assert _ask(monkeypatch, True, fields) != want, lose
-    monkeypatch.setattr(vt, "_inert", real)
+    monkeypatch.setattr(tr, "_inert", real)
     assert _ask(monkeypatch, True, fields) == want
 
 
@@ -350,7 +351,7 @@ def test_an_assistant_line_over_the_floor_with_a_full_opening_run_is_decoded(
         ),
         ("uuid", "u-p1"),
     )
-    assert len(asst) >= vt._PREPARSE_MIN
+    assert len(asst) >= tr._PREPARSE_MIN
     _write_bytes(root / PROJECT / f"{sid}.jsonl", [asst.encode()])
     [rec] = _ask(monkeypatch, True, "session_id,tool_calls.name", None, None)
     assert rec["tool_calls"] == [{"name": "Bash"}]

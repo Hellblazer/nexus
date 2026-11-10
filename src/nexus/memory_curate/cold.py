@@ -13,9 +13,10 @@ Use, per kind (Sam's K6 decision, nexus-qo7ie.5; the report header prints these)
   ``file_write`` row or an mtime inside the window. A ``MEMORY.md`` index line counts as used
   when its linked file is read, so the files are what is judged.
 - T2 namespace (the repository's projects, ``<repo>`` and ``<repo>_*``): a ``memory_get`` of
-  one of its titles, a ``memory_search`` naming it (one naming no project credits every project), or a
-  row whose ``last_accessed`` is in the window (the engine stamps it on every get and search, which
-  is the only trace of a Bash ``nx memory`` read); a write is a row timestamp in the window.
+  one of its titles, a ``memory_search`` naming it (one naming no project credits no project: the engine
+  stamps only the rows it returns), or a row whose ``last_accessed`` is in the window (the engine stamps it
+  on every get and search, which is the only trace of a Bash ``nx memory`` read, and of the SessionStart
+  hook's own gets, :func:`nexus.memory_curate.hook_reads_note`); a write is a row timestamp in the window.
 - MCP tool of the ``nexus`` and ``nexus-catalog`` servers: a call. The registry is the servers'
   own (``_tool_manager.list_tools()``), diffed with the called names, so a tool never called is
   listed. Keyed by ``(server, short name)``: ``search`` exists on both servers.
@@ -181,17 +182,18 @@ def query_pages(query: str, since: str, until: str, max_pages: int) -> tuple[lis
 # ── the window and the queries ───────────────────────────────────────────────────────
 
 
-def open_window(days: int, now: datetime, cwd: Path) -> tuple[mc.ReadWindow, int] | mc.ReadsUnavailable:
-    """The window and the number of this repository's sessions that started in it, or why there is none."""
-    starts = mc.repo_session_starts(cwd)
-    window = mc.read_window(days, now, min(starts) if isinstance(starts, list) and starts else None)
+def open_window(days: int, now: datetime, cwd: Path) -> tuple[mc.ReadWindow, int, int] | mc.ReadsUnavailable:
+    """The window, the number of this repository's sessions that started in it and the number of transcripts
+    left uncounted at the scan bound, or why there is none."""
+    starts = mc.repo_session_starts(cwd, now)
+    window = mc.read_window(days, now, min(starts.starts) if isinstance(starts, mc.SessionStarts) and starts.starts else None)
     if isinstance(starts, str):
         return mc.ReadsUnavailable(window, starts)
     lo = datetime.strptime(window.since, mc._FMT).replace(tzinfo=timezone.utc)
-    counted = sum(1 for s in starts if lo <= s < now)
+    counted = sum(1 for s in starts.starts if lo <= s < now)
     if not counted:
-        return mc.ReadsUnavailable(window, "no session of this repository started in the window")
-    return window, counted
+        return mc.ReadsUnavailable(window, "no session of this repository started in the window" + (f" ({mc.unscanned_note(starts.unscanned)})" if starts.unscanned else ""))
+    return window, counted, starts.unscanned
 
 
 class _Queries:
@@ -294,7 +296,8 @@ def _t2(q: _Queries, repo: str, open_db: Callable[[], AbstractContextManager[Any
     searched = _used(rows, "t2_search")
     for project, stamp in searched.items():
         used[project] = _later(used.get(project), stamp)
-    all_search = "(all)" in searched  # a memory_search naming no project reached every project
+    all_search = "(all)" in searched  # a memory_search naming no project: it tracks only its hits, so it credits none
+    used.pop("(all)", None)
     cold: list[ColdRow] = []
     for project in projects:
         written: str | None = None
@@ -303,16 +306,18 @@ def _t2(q: _Queries, repo: str, open_db: Callable[[], AbstractContextManager[Any
                 written = _later(written, r["timestamp"])
             if _in_window(r.get("last_accessed"), since):  # the engine stamps it on every get and search, Bash ones too
                 used[project] = _later(used.get(project), r["last_accessed"])
-        if all_search or project in used or _in_window(written, since):
+        if project in used or _in_window(written, since):
             continue
         n = len(data[project])
         cold.append(ColdRow(project, _show(written, "none"), _NEVER, f"{n} row{'' if n == 1 else 's'}", repo))
     out = _listing(label, cold, len(projects), f" (projects {repo} and {repo}_*)")
     if all_search:
-        out.append("  (a memory_search naming no project counts as a use of every project)")
+        out.append("  (a memory_search naming no project was seen: it is credited to no project, since the engine "
+                   "stamps last_accessed only on the rows it returned, so a project it hit is used only through "
+                   "last_accessed)")
     out.append("  limits: Bash `nx memory` reads are attributed to a project only through last_accessed (the engine "
                "stamps it on every get and search); the repo's own namespace reads as written after the first run, "
-               "since the stored report lands there")
+               "since the stored report lands there; " + mc.hook_reads_note())
     return out
 
 
@@ -617,8 +622,8 @@ def _injected(q: _Queries, root: Path) -> list[str]:
                     size = target.stat().st_size
                 except OSError:
                     size = -1
-                cold.append((size, ColdRow(store + (f" (also {', '.join(others)})" if others else ""), "n/a", _NEVER,
-                                           f"~{size // 4} tokens" if size >= 0 else "n/a", "n/a")))
+                cold.append((size, ColdRow(store + (f" (also {', '.join(others)})" if others else ""), "n/a",
+                                           "never loaded (on demand)", f"{size} bytes" if size >= 0 else "n/a", "n/a")))
     cold.sort(key=lambda t: (-t[0], t[1].store))
     out = _listing(label, [r for _, r in cold], judged, " (nested CLAUDE.md and AGENTS.md, one file when linked)")
     if lone:
@@ -765,11 +770,14 @@ def cold_lines(
     engine, not the transcripts, so it runs whether or not the transcript kinds do.
     """
     tuples = _guarded(TUPLES, lambda: tuple_lines(days, now, open_tuples or _default_tuple_store))
-    opened = open_window(days, now, cwd)
+    try:
+        opened = open_window(days, now, cwd)
+    except Exception as exc:  # noqa: BLE001 — like a failed query: every transcript kind says why, the tuple row stays
+        opened = mc.ReadsUnavailable(mc.read_window(days, now), f"{type(exc).__name__}: {exc}")
     if isinstance(opened, mc.ReadsUnavailable):
         return [f"window: {opened.window.describe()}", *_rules(),
                 *(ln for label in LABELS for ln in _unavailable(label, opened.reason)), *tuples]
-    window, sessions = opened
+    window, sessions, unscanned = opened
     q = _Queries(window, sessions)
     hooks = hook_invoked(
         hooks_dir if hooks_dir is not None else root / "conexus" / "hooks",
@@ -785,5 +793,6 @@ def cold_lines(
     ]
     cuts = [f"{query} query: {n} records were cut, so these counts are floors and stores used in a cut record may "
             "be listed although they were used" for query, n in sorted(q.cut.items())]
-    head = f"window: {window.describe()}, {sessions} session{'' if sessions == 1 else 's'} started in it"
+    head = f"window: {window.describe()}, {sessions} session{'' if sessions == 1 else 's'} started in it" + (
+        f"; {mc.unscanned_note(unscanned)}" if unscanned else "")
     return [head, *_rules(), *cuts, *(ln for block in blocks for ln in block)]

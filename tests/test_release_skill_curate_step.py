@@ -41,6 +41,22 @@ def test_the_curation_step_follows_step_12_and_never_blocks() -> None:
     assert "curation-report-" in step
 
 
+def test_the_curation_step_runs_in_the_background_and_restates_the_stop() -> None:
+    """Critic S5 (nexus-qo7ie.27): the run takes about 5 minutes and a foreground Bash call is cut at 10, so the step
+    says to start it with run_in_background and to read the output after the notice; the 30-minute stop reads
+    "if the notice has not come", and the report's stored title names --cold."""
+    step = " ".join(_section(SKILL.read_text(encoding="utf-8"), "### 12a. ").split())  # line breaks are not the claim
+    assert "Start the command with the Bash tool's `run_in_background`" in step
+    assert "read the file after the completion notice" in step
+    # the redirect wraps the whole group: appended to `cmd || echo`, it would cover only the echo
+    assert ('{ nx memory curate --files --t2 --agents --cold || echo "curation step skipped (exit $?); '
+            'the release goes on"; } > /tmp/curation-report.txt 2>&1') in step
+    assert "Do not run it in the foreground" in step
+    assert "If the notice has not come after 30 minutes, stop it" in step
+    assert "never by pattern" in step
+    assert "curation-report-<date>-files-t2-agents-cold" in step
+
+
 def test_the_step_lists_and_the_plugin_only_lane_name_the_curation_step() -> None:
     text = SKILL.read_text(encoding="utf-8")
     assert re.search(r"11c, 12, 12a\.", text), (

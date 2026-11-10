@@ -158,7 +158,7 @@ tests/hooks/test_stop_wake_guard.py 1298
 tests/hooks/test_version_lockstep_action.py 1893
 tests/hooks/test_version_lockstep_hook.py 1391
 tests/integration/test_rdr223_pdf_journey.py 1608
-tests/lua_runtime/test_verbs_transcripts.py 2762
+tests/lua_runtime/test_verbs_transcripts.py 2642
 tests/lua_runtime/test_worker_process.py 1133
 tests/mcp/test_setup_tools.py 1588
 tests/mcp/test_t1_borrower_remint.py 1171

@@ -11,6 +11,7 @@ a pager that does not advance, the page cap) use a stub procedure. No test mints
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -21,7 +22,10 @@ from click.testing import CliRunner
 import nexus.lua_runtime as lua_runtime
 from nexus import memory_curate as mc
 from nexus.cli import main
-from nexus.lua_runtime import runner
+from nexus.commands import memory as memory_cmd
+from nexus.lua_runtime import header, runner, transcripts_read, verbs_transcripts
+from nexus.lua_runtime.verb_types import VerbContext
+from nexus.memory_curate import cold, sessions
 from tests._module_seam import setattr_in
 from tests.test_memory_curate import _fm, _make_repo, _memdir
 
@@ -87,25 +91,141 @@ def test_the_window_is_capped_at_retention_and_at_the_oldest_session_and_says_wh
     assert mc.read_window(10, _NOW, oldest=_NOW - timedelta(days=20)).covered == 10
 
 
-def test_a_session_start_follows_the_verb_rule(tmp_path: Path) -> None:
-    f = tmp_path / "s.jsonl"
-    f.write_text("\n".join([
-        "not json",
-        json.dumps([1, 2]),  # JSON, not an object
-        json.dumps({"type": "summary"}),  # no timestamp
-        json.dumps({"timestamp": 1730000000}),  # not a string
-        json.dumps({"timestamp": "2026-11-01T00:00:00Z" + " " * 60}),  # over 64 characters
-        json.dumps({"timestamp": "yesterday"}),  # not an ISO time
-        json.dumps({"timestamp": "2026-11-01T00:00:00Z", "isSidechain": True}),  # a replayed sidechain
-        json.dumps({"timestamp": "2026-11-02T03:04:05Z", "type": "user"}),
-    ]) + "\n")
-    assert mc._session_start(f) == datetime(2026, 11, 2, 3, 4, 5, tzinfo=UTC)
-    (tmp_path / "none.jsonl").write_text(json.dumps({"type": "summary"}) + "\n")
-    assert mc._session_start(tmp_path / "none.jsonl") is None
-    naive = tmp_path / "naive.jsonl"
-    naive.write_text(json.dumps({"timestamp": "2026-11-02T03:04:05"}) + "\n")  # no offset: read as UTC
-    assert mc._session_start(naive) == datetime(2026, 11, 2, 3, 4, 5, tzinfo=UTC)
-    assert mc._session_start(tmp_path / "missing.jsonl") is None  # unreadable: no start, never an error
+def _raw(path: Path, records: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+
+def _bytes(path: Path, *lines: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"".join(lines))
+
+
+def _line(rec: dict) -> bytes:
+    return json.dumps(rec).encode() + b"\n"
+
+
+def _utc(stamp: str) -> datetime:
+    t = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    return t.replace(tzinfo=UTC) if t.tzinfo is None else t.astimezone(UTC)
+
+
+def _verb_starts(repo: Path, *, fields: str | None) -> list[datetime]:
+    """The UTC starts of the main records ``transcripts.sessions`` returns over the same look-back."""
+    verb = verbs_transcripts.sessions(
+        (_NOW - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ"), _NOW.strftime("%Y-%m-%dT%H:%M:%SZ"), "repo",
+        fields=fields, deadline=time.monotonic() + 60, ctx=VerbContext(repo_root=header.probe_repo(repo).root))
+    return sorted(_utc(r["start"]) for r in verb if r["main"])
+
+
+def test_the_session_starts_are_the_verbs_on_one_adversarial_fixture(world: dict[str, Path]) -> None:
+    """Critic S1 (TD5, nexus-qo7ie.27): curate's first-record reader is the verb's ``first_start``, and on a fixture
+    of the cases that could split them (framing, the large-line fast path, the sidechain skip, a tail stamp, a
+    constant, a BOM, bad bytes) it agrees with ``transcripts.sessions`` on both the narrow selection and the full
+    one, and with the hand count. A change to the verb's rule turns this red."""
+    project, repo = world["project"], world["repo"]
+    user = {"type": "user", "cwd": str(repo), "message": {"role": "user", "content": "go"}}
+    day = "2026-11-08T"
+    ok = lambda hh, extra="": _line({**user, "timestamp": f"{day}{hh}:00:00{extra or 'Z'}"})  # noqa: E731
+    big = "z" * 5000
+    expected: dict[str, int | None] = {}  # file -> the UTC hour its start must read as (None: no session)
+
+    def case(name: str, hour: int | None, *lines: bytes) -> None:
+        _bytes(project / f"{name}.jsonl", *lines)
+        expected[name] = hour
+
+    case("plain", 10, ok("10"))
+    case("late", 11, *[_line({"type": "summary"})] * 250, ok("11"))  # past the old 200-line scan
+    case("side", 12, _line({**user, "timestamp": "2026-11-01T00:00:00Z", "isSidechain": True}), ok("12"))
+    case("naive", 13, _line({**user, "timestamp": f"{day}13:00:00"}))  # no offset: UTC
+    case("invalid_json_first", 14, b"not json at all\n", ok("14"))
+    case("list_first", 15, b"[1, 2, 3]\n", ok("15"))
+    case("queue_operation_big", 16, _line({"type": "queue-operation", "operation": "enqueue", "sessionId": "q",
+                                           "timestamp": f"{day}16:00:00Z", "content": big}))  # _inert's fast path
+    case("sidechain_big_first", 17, _line({"type": "progress", "isSidechain": True, "timestamp": "2026-11-01T00:00:00Z",
+                                           "content": big}), ok("17"))
+    case("attachment_tail_stamp", 18, _line({"type": "attachment", "attachment": {"type": "x", "content": big},
+                                              "timestamp": f"{day}18:00:00Z"}))
+    case("nan", 19, b'{"type": "user", "timestamp": NaN}\n', ok("19"))
+    case("no_trailing_newline", 20, ok("20").rstrip(b"\n"))
+    case("offset", 16, _line({**user, "timestamp": f"{day}21:00:00+05:00"}))  # 21:00+05:00 is 16:00 UTC
+    case("bom", 22, b"\xef\xbb\xbf" + ok("22"))
+    case("bad_utf8", 23, b'{"type": "user", "timestamp": "\xff\xfe"}\n', ok("23"))
+    case("bad_utf8_big", 9, b'{"type": "progress", "pad": "' + b"\xff" * 5000 + b'", "timestamp": "2026-11-08T09:30:00Z"}\n',
+         ok("09"))
+    case("nostart", None, _line({"type": "summary"}))
+    _bytes(project / "sid" / "subagents" / "agent-x.jsonl", ok("10"))  # a subagent: a record of the verb, not a session
+    hand = sorted(h for h in expected.values() if h is not None)
+    assert len(hand) == 15
+
+    found = mc.repo_session_starts(repo, _NOW)
+    assert isinstance(found, mc.SessionStarts) and found.unscanned == 0, found
+    mine = sorted(s.astimezone(UTC) for s in found.starts)
+    assert [s.hour for s in mine] == hand, mine  # the hand count, by case
+    for fields in ("start", None):  # the narrow selection (the _inert fast path) and the full decode
+        assert _verb_starts(repo, fields=fields) == mine, fields
+    opened = cold.open_window(30, _NOW, repo)
+    assert not isinstance(opened, mc.ReadsUnavailable), opened
+    assert opened[1] == len(hand) and opened[2] == 0
+
+
+def test_a_failing_session_listing_is_a_reason_never_no_sessions(world: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_a: object, **_k: object) -> None:
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(transcripts_read, "_files", boom)
+    starts = mc.repo_session_starts(world["repo"], _NOW)
+    assert starts == "the repository's sessions could not be listed: OSError: disk went away"
+    reads = mc.load_reads(30, _NOW, world["mem"], world["repo"])
+    assert isinstance(reads, mc.ReadsUnavailable) and reads.reason == starts
+
+
+def test_a_file_with_no_timestamp_in_the_scan_bound_is_counted_apart_and_printed(
+    world: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound (START_SCAN_BYTES) is per file: a transcript whose first timestamp lies past it is not a session, a
+    normal one is, a line longer than one read chunk is read whole, and the rows say how many were left out."""
+    repo, project = world["repo"], world["project"]
+    user = {"type": "user", "cwd": str(repo), "message": {"role": "user", "content": "go"}}
+    _raw(project / "ok.jsonl", [{**user, "timestamp": "2026-11-08T10:00:00Z"}])
+    _raw(project / "deep.jsonl", [{"type": "summary", "cwd": str(repo), "pad": "x" * 600}] * 50 + [{**user, "timestamp": "2026-11-08T11:00:00Z"}])
+    _raw(project / "deep2.jsonl", [{"type": "summary", "cwd": str(repo), "pad": "x" * 600}] * 50 + [{**user, "timestamp": "2026-11-08T11:30:00Z"}])
+    _raw(project / "long.jsonl", [{**user, "pad": "y" * 3000, "timestamp": "2026-11-08T12:00:00Z"}])
+    _raw(project / "empty.jsonl", [{"type": "summary", "cwd": str(repo)}])  # no stamp, but inside the bound: not "unscanned"
+    monkeypatch.setattr(sessions, "START_SCAN_BYTES", 4096)
+    monkeypatch.setattr(transcripts_read, "LINE_CHUNK", 1024)  # the 3 KB line spans three chunks
+    found = mc.repo_session_starts(repo, _NOW)
+    assert isinstance(found, mc.SessionStarts)
+    assert sorted(s.hour for s in found.starts) == [10, 12] and found.unscanned == 2, found
+    opened = cold.open_window(30, _NOW, repo)
+    assert not isinstance(opened, mc.ReadsUnavailable) and opened[1:] == (2, 2)
+    reads = mc.load_reads(30, _NOW, world["mem"], repo)  # the real run path, for the row
+    assert isinstance(reads, mc.ReadCounts) and (reads.sessions, reads.unscanned) == (2, 2), reads
+    row = next(ln for ln in mc.files_section(world["mem"], reads) if "had no start in the first" in ln)
+    assert row.startswith("read counts: 2 transcripts had no start in the first ") and row.endswith("were not counted")
+
+
+def test_with_every_transcript_past_the_bound_the_reason_names_them(world: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, project = world["repo"], world["project"]
+    _raw(project / "deep.jsonl", [{"type": "summary", "cwd": str(repo), "pad": "x" * 600}] * 50
+         + [{"type": "user", "cwd": str(repo), "timestamp": "2026-11-08T11:00:00Z"}])
+    monkeypatch.setattr(sessions, "START_SCAN_BYTES", 4096)
+    reads = mc.load_reads(30, _NOW, world["mem"], repo)
+    assert isinstance(reads, mc.ReadsUnavailable)
+    assert reads.reason.startswith("no session of this repository started in the window (1 transcript had no start in the first ")
+
+
+def test_the_default_bound_prints_as_8_mib() -> None:
+    assert sessions.START_SCAN_BYTES == 8 * 1024 * 1024
+    assert sessions.unscanned_note(3) == "3 transcripts had no start in the first 8 MiB and were not counted"
+    assert sessions.unscanned_note(1) == "1 transcript had no start in the first 8 MiB and was not counted"
+    assert sessions.unscanned_note(0) == ""
+
+
+def test_with_no_projects_directory_the_listing_says_so(world: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "nowhere"))
+    starts = mc.repo_session_starts(world["repo"], _NOW)
+    assert starts == f"no Claude Code projects directory at {tmp_path / 'nowhere' / 'projects'}"
 
 
 # ── the real run path ────────────────────────────────────────────────────────────────
@@ -206,6 +326,54 @@ def test_the_command_caps_days_prints_the_span_and_exits_0_without_the_runtime(
     assert "report not stored: not available" in res.output
 
 
+def test_an_unexpected_runtime_error_costs_only_the_read_count_rows(
+    world: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Code review I1 (nexus-qo7ie.27): ``run_script`` can raise outside PROCEDURE_ERRORS (an OSError from a
+    worker spawn). It used to collapse the whole --files block into one line, losing the rows that need no runtime."""
+    _session(world["project"] / "s1.jsonl", "s1", world["repo"], "2026-11-08T10:00:00Z", [("Bash", {"command": "ls"})])
+    (world["mem"] / "stray.md").write_text(_fm("Stray", "in no index"))
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise OSError("worker spawn failed")
+
+    monkeypatch.setattr(lua_runtime, "run_script", boom)
+    with patch("nexus.commands.memory.t2_handle", side_effect=RuntimeError("no store in this test")):
+        res = CliRunner().invoke(main, ["memory", "curate", "--files"])
+    assert res.exit_code == 0, res.output
+    out = res.output
+    assert "unindexed: 1" in out and "  - stray.md" in out, out  # the non-transcript rows survive
+    assert "oversized (over " in out or "oversized: none" in out
+    assert "unread files: not available: OSError: worker spawn failed" in out
+    assert "T2 read counts: not available: OSError: worker spawn failed" in out
+    assert "== --files ==\nnot available:" not in out
+
+
+def test_a_deleted_working_directory_or_a_failing_identity_exits_0_with_a_not_available_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Code review S3 (nexus-qo7ie.27): the docstring promises exit 0 whatever happens; the cwd and the
+    repository identity were read before any section guard."""
+    def no_cwd() -> Path:
+        raise FileNotFoundError("the working directory is gone")
+
+    monkeypatch.setattr(Path, "cwd", staticmethod(no_cwd))
+    res = CliRunner().invoke(main, ["memory", "curate", "--files"])
+    assert res.exit_code == 0, res.output
+    assert "not available: the repository could not be identified: FileNotFoundError: the working directory is gone" in res.output
+    monkeypatch.undo()
+
+    monkeypatch.chdir(tmp_path)
+
+    def no_identity(_cwd: Path) -> tuple[str, str]:
+        raise RuntimeError("git rev-parse did not run")
+
+    monkeypatch.setattr("nexus.repo_identity._repo_identity", no_identity)
+    res = CliRunner().invoke(main, ["memory", "curate", "--files"])
+    assert res.exit_code == 0, res.output
+    assert "not available: the repository could not be identified: RuntimeError: git rev-parse did not run" in res.output
+
+
 def test_pages_are_joined_and_the_count_equals_what_the_fixture_planted(
     world: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -273,7 +441,10 @@ def test_a_same_named_file_in_another_directory_is_not_a_read_of_this_one(tmp_pa
 
 def test_cut_records_are_reported_as_floors(world: dict[str, Path]) -> None:
     reads = mc.ReadCounts(mc.read_window(30, _NOW), [], truncated_records=3)
-    assert "read counts: 3 records were cut, so these counts are floors" in mc.files_section(world["mem"], reads)
+    lines = mc.files_section(world["mem"], reads)
+    # nexus-qo7ie.27 S6: the --cold wording, since a cut record loses the reads that would have cleared a file
+    assert ("read counts: 3 records were cut, so these counts are floors and files used in a cut record may be "
+            "listed although they were used") in lines
 
 
 # ── guards a fixture cannot reach, with a stub procedure ─────────────────────────────
@@ -370,3 +541,10 @@ def test_a_symlinked_project_directory_is_not_counted_as_a_session(world: dict[s
     (world["config"] / "projects" / "-linked").symlink_to(real, target_is_directory=True)
     reads = mc.load_reads(30, _NOW, world["mem"])
     assert isinstance(reads, mc.ReadsUnavailable) and reads.reason == "no session of this repository started in the window"
+
+
+def test_the_command_help_names_the_title_of_every_kind_of_run() -> None:
+    """nexus-qo7ie.27: the help said only that a partial run takes a suffix; a --cold run does too."""
+    doc = " ".join((memory_cmd.curate_cmd.help or "").split())
+    assert "curation-report-<date>-<sections>" in doc and "-files-t2-agents-cold" in doc
+    assert "a default run never replaces a cold one" in doc

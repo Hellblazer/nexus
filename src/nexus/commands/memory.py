@@ -684,9 +684,10 @@ def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days
     """Report what to curate: memory files, T2 rows and reviewer memory.
 
     With no section flag, runs --files, --t2 and --agents. Prints the report and stores
-    it in T2 as <repo>/curation-report-<date> with a 90-day TTL (RDR-238); a run of only
-    some sections stores <repo>/curation-report-<date>-<sections> instead, so it never
-    replaces the day's full report. Report only:
+    it in T2 as <repo>/curation-report-<date> with a 90-day TTL (RDR-238); any other run
+    (fewer sections, or --cold with any) stores <repo>/curation-report-<date>-<sections>
+    instead (-files-t2-agents-cold for all four), so it never replaces the day's default
+    report and a default run never replaces a cold one. Report only:
     it deletes and changes nothing, never blocks, and exits 0 whatever it finds; a section
     that cannot run prints one "not available" line and the others still run.
     """
@@ -696,15 +697,26 @@ def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days
 
     if not (do_files or do_t2 or do_agents or do_cold):
         do_files = do_t2 = do_agents = True
-    cwd = Path.cwd()
-    repo = _repo_identity(cwd)[0]
+    try:
+        cwd = Path.cwd()
+        repo = _repo_identity(cwd)[0]
+    except Exception as exc:  # noqa: BLE001 — a deleted working directory or an identity failure: the docstring's exit 0
+        click.echo(f"not available: the repository could not be identified: {type(exc).__name__}: {exc}"
+                   if str(exc) else f"not available: the repository could not be identified: {type(exc).__name__}")
+        click.echo("report not stored: not available: no repository")
+        return
     now = datetime.now(timezone.utc)
     lines = [f"Curation report {now:%Y-%m-%d} (repo: {repo}, window: {days} days)", ""]
 
     if do_files:
         def _files_lines() -> list[str]:
             directory = memory_dir(cwd)
-            reads = mc.load_reads(days, now, directory) if directory is not None else None
+            reads: mc.ReadCounts | mc.ReadsUnavailable | None = None
+            if directory is not None:
+                try:
+                    reads = mc.load_reads(days, now, directory, cwd)
+                except Exception as exc:  # noqa: BLE001 — only the read-count rows lose; the file rows need no runtime
+                    reads = mc.ReadsUnavailable(mc.read_window(days, now), f"{type(exc).__name__}: {exc}")
             return mc.files_section(directory, reads)
 
         lines += mc.section("--files", _files_lines)

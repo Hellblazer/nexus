@@ -24,10 +24,12 @@ from click.testing import CliRunner
 
 import nexus.lua_runtime as lua_runtime
 from nexus import memory_curate as mc
-from nexus.memory_curate import cold
+from nexus.memory_curate import cold, sessions
+from nexus.memory_curate.cold import TUPLES
 from nexus.cli import main
 from nexus.db.t2.http_tuple_store import HttpTupleStore
 from nexus.db.t2.records import SubspaceCensus
+from nexus.hooks import t2_prefix_scan
 from nexus.lua_runtime import runner
 from tests.test_memory_curate import _fm, _git, _make_repo, _memdir
 from tests._module_seam import setattr_in
@@ -309,7 +311,8 @@ def test_injected_context_lists_the_nested_instruction_file_never_loaded(planted
     assert _stores(lines, "injected context") == ["sub/CLAUDE.md", "tests/AGENTS.md (also tests/CLAUDE.md)"]  # other/ was loaded from another worktree's path,
     # viaitx/ only through an `instructions` attachment, linked/ is the root file: none of them listed
     row = _rows(lines, "injected context")[0]
-    assert "~100 tokens" in row and "last use none in the window" in row
+    # nexus-qo7ie.27: a nested file never loaded costs nothing, so the row says "on demand", not a token cost.
+    assert "last use never loaded (on demand)" in row and "400 bytes" in row and "tokens" not in row
     # docs/AGENTS.md was loaded (its CLAUDE.md link names the same file) and the root pair is not nested.
     assert _head(lines, "injected context").startswith("injected context: 2 cold of 5")
     block = "\n".join(_block(lines, "injected context"))
@@ -542,12 +545,66 @@ def test_a_query_that_succeeds_with_no_rows_for_started_sessions_is_not_availabl
     assert _no_rows(lines)
 
 
-def test_a_memory_search_naming_no_project_counts_as_a_use_of_every_project(world: dict[str, Path], stubbed) -> None:  # noqa: F811
+def test_a_memory_search_naming_no_project_credits_no_project_so_only_last_accessed_judges(world: dict[str, Path], stubbed) -> None:  # noqa: F811
+    """Critic S3 (nexus-qo7ie.27): an all-project search tracks only its hits, so crediting every project made one
+    such call empty the whole row. A project it hit carries last_accessed; the rest are judged as without it."""
     stubbed({"memory": {"rows": [{"kind": "t2_search", "name": "(all)", "count": 1, "last_use": STAMP}]},
              "loads": LOADS, "tools": TOOLS})
     lines = cold.cold_lines(30, _NOW, world["repo"], "coldrepo", world["mem"], world["repo"], _t2(_PROJECTS))
-    assert _head(lines, "T2 namespaces").startswith("T2 namespaces: 0 cold of 8 ")
-    assert "a memory_search naming no project counts as a use of every project" in " ".join(_block(lines, "T2 namespaces"))
+    # nothing but the search was seen: every project with no write and no last_accessed in the window is cold
+    # (_fresh was written and _accessed was read in the window; coldrepo2 is another repo's)
+    assert _stores(lines, "T2 namespaces") == [
+        "coldrepo", "coldrepo_never_read", "coldrepo_old", "coldrepo_searched", "coldrepo_stale_access", "coldrepo_used"]
+    assert _head(lines, "T2 namespaces").startswith("T2 namespaces: 6 cold of 8 ")
+    note = " ".join(_block(lines, "T2 namespaces"))
+    assert "a memory_search naming no project was seen: it is credited to no project" in note
+    assert "counts as a use of every project" not in note
+
+
+def test_the_t2_row_names_the_session_start_scans_own_reads(planted: dict) -> None:
+    """Critic S2 (nexus-qo7ie.27): the SessionStart prefix scan does a tracked get on the top rows of the first
+    namespaces, which stamps last_accessed and reads here as use. The client has no untracked single-row read, so
+    the limits line names the reads, quoting the hook's own constants."""
+    limit = " ".join(_block(planted["lines"], "T2 namespaces"))
+    assert ("the SessionStart prefix scan does a tracked get on the "
+            f"{t2_prefix_scan._SNIPPET_LIMIT} newest rows of each of up to {t2_prefix_scan._MAX_NAMESPACES} of the "
+            "repository's namespaces") in limit
+    assert "at every session start and every subagent start, which stamps last_accessed" in limit
+    assert "machine-written ones such as _taxonomy_discover_health skipped" in limit
+    assert t2_prefix_scan._MACHINE_NAMESPACE_SUFFIXES == ("_taxonomy_discover_health",), "the note names the hook's own filter"
+
+
+def test_a_failing_session_listing_blanks_the_transcript_rows_and_keeps_the_tuple_row(
+    world: dict[str, Path], monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """Code review I1 (nexus-qo7ie.27), the --cold side: an unexpected error listing the sessions is a reason on
+    every transcript kind, not the end of the section."""
+    def boom(*_a: object, **_k: object) -> None:
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(mc, "repo_session_starts", boom)
+    lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
+    for label in TRANSCRIPT_LABELS:
+        assert _head(lines, label) == f"{label}: not available: OSError: disk went away"
+    assert any(ln.startswith(f"{TUPLES}:") for ln in lines)
+
+
+def test_the_head_says_how_many_transcripts_were_left_out_at_the_scan_bound(
+    world: dict[str, Path], stubbed, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """nexus-qo7ie.27: the count never claims more than it read, so the --cold head names the transcripts whose first
+    stamp lies past the bound."""
+    repo = world["repo"]
+    _session(world["project"] / "zz-deep.jsonl", "deep", repo, "2026-11-08T11:00:00Z", [("Bash", {"command": "ls"})])
+    deep = world["project"] / "zz-deep.jsonl"
+    deep.write_text("".join(json.dumps({"type": "summary", "cwd": str(repo), "pad": "x" * 600}) + "\n" for _ in range(50))
+                    + deep.read_text())
+    monkeypatch.setattr(sessions, "START_SCAN_BYTES", 4096)
+    stubbed({"memory": MEM, "loads": LOADS, "tools": TOOLS})
+    lines = cold.cold_lines(30, _NOW, repo, "readrepo", world["mem"], repo, _t2(_PROJECTS))
+    head = lines[0]
+    assert head.startswith("window: ") and "1 session started in it; 1 transcript had no start in the first " in head
+    assert head.endswith("was not counted")
 
 
 def test_the_injected_kind_is_refused_on_windows_like_the_file_kind(

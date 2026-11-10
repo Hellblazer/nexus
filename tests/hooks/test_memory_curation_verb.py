@@ -11,12 +11,15 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from nexus._hook_runtime import memory_dir as md
+from nexus._hook_runtime import memory_scan as ms
 from nexus._hook_runtime.entry import VERB_TABLE
 from nexus.commands import hook as hook_cmd
 from nexus.hooks import memory_curation_check as mcc
@@ -249,7 +252,7 @@ def test_an_exception_inside_the_check_is_silent(tmp_path: Path, monkeypatch: py
     repo = _repo(tmp_path)
     _d, env = _clean_memdir(tmp_path, repo)
 
-    def boom(_directory: Path) -> None:
+    def boom(_directory: Path, **_kw: object) -> None:
         raise RuntimeError("deliberate")
 
     logged: list[str] = []
@@ -398,6 +401,73 @@ def test_a_set_budget_is_read_from_the_memory_block(tmp_path: Path) -> None:
     (d / "MEMORY.md").write_text("- [One](one.md)\n- [Two](two.md)\n" + "x" * 40, encoding="utf-8")
     out = _check(repo, env, tmp_path)
     assert out is not None and "10" in out and "over" in out
+
+
+# ── cost and deadline (nexus-qo7ie.27) ─────────────────────────────────────────────────
+
+def test_the_hook_scan_skips_the_oversize_stat_and_the_report_scan_keeps_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Code review S4: the hook never names a size, so its scan does not stat every file. ``nx memory curate``
+    still lists the oversized files."""
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    (d / "one.md").write_text("---\nname: one\n---\n" + "x" * (ms.OVERSIZE_BYTES + 1), encoding="utf-8")
+    assert [n for n, _ in ms.scan(d).oversized] == ["one.md"], "the default scan lists it"
+    assert ms.scan(d, oversize=False).oversized == []
+    seen: list[dict] = []
+    real = mcc.scan
+
+    def spy(directory: Path, **kw: object):
+        seen.append(kw)
+        return real(directory, **kw)
+
+    monkeypatch.setattr(mcc, "scan", spy)
+    assert _check(repo, env, tmp_path) is None  # clean: the oversized file is no hook line
+    assert seen == [{"oversize": False}], "the hook path must ask the scan to skip the size check"
+
+
+def test_a_check_that_hangs_costs_the_guidance_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Critic S4: a memory directory on a stalled mount must not hold the guidance. The listing seam hangs; past
+    the deadline the guidance is still emitted and the curation line is skipped."""
+    repo = _repo(tmp_path)
+    d, env = _clean_memdir(tmp_path, repo)
+    (d / "stray.md").write_text("x\n", encoding="utf-8")  # a line the check WOULD print, were it not hung
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", env["CLAUDE_CONFIG_DIR"])
+    monkeypatch.setattr(mcc, "DEADLINE_SECONDS", 0.3)
+    release = threading.Event()
+    entered = threading.Event()
+    logged: list[str] = []
+
+    def hang(_directory: Path) -> list[str]:
+        entered.set()
+        release.wait(30)
+        return []
+
+    monkeypatch.setattr(mcc, "_listdir", hang)
+    monkeypatch.setattr(mcc, "_emit", lambda _level, event, **_fields: logged.append(event))
+    monkeypatch.setattr(session_start_verb.hooks, "session_start", lambda **_kw: "GUIDANCE")
+    try:
+        t0 = time.monotonic()
+        out = session_start_verb.run({"cwd": str(repo)}).stdout
+        elapsed = time.monotonic() - t0
+        assert entered.is_set(), "the hung seam was reached"
+        assert out == "GUIDANCE", "the guidance is emitted and the curation line skipped"
+        assert elapsed < 5, f"the deadline did not bound the check: {elapsed:.1f}s"
+        assert "memory_curation_check_timeout" in logged
+    finally:
+        release.set()
+    # the abandoned thread finishes harmlessly once released, and a healthy check still prints its line
+    monkeypatch.undo()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", env["CLAUDE_CONFIG_DIR"])
+    monkeypatch.setattr(session_start_verb.hooks, "session_start", lambda **_kw: "GUIDANCE")
+    out = session_start_verb.run({"cwd": str(repo)}).stdout
+    assert out is not None and out.startswith("GUIDANCE\n\nMemory curation: stray.md")
+
+
+def test_the_deadline_is_documented_as_python_level_only() -> None:
+    """Critic note (nexus-qo7ie.27): a thread stuck in a kernel syscall can still hold the process to the hook's
+    own timeout, so the docstring says what the bound does not cover."""
+    doc = " ".join((mcc._bounded_line.__doc__ or "").split())
+    assert "Python-level stalls only" in doc and "kernel syscall" in doc and "40 s" in doc
 
 
 # ── dispatch ───────────────────────────────────────────────────────────────────────
