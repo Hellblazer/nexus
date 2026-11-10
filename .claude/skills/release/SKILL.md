@@ -141,7 +141,7 @@ release-blocking and deterministic (no service, no sandbox HOME).
 first-run or upgrade UX problem is untriaged.** Every finding lives in T2
 `nexus/first-run-ux-triage`, one line each: `F<n> | <status> | <owner> | <reason>`.
 The cut may proceed only when every line reads `fixed <sha>` or `accepted (Sam
-<date>)`. A `fix-<version>` line is open work for this release, and a
+<date>[, where he gave it])`. A `fix-<version>` line is open work for this release, and a
 `proposed-accept` line is waiting on Sam; either blocks. A first-run finding
 that turns up during the cut is added there before the cut goes on, never
 noted elsewhere. Run it with the preflight:
@@ -150,7 +150,7 @@ noted elsewhere. Run it with the preflight:
 t=$(nx memory get -p nexus -t first-run-ux-triage) || { echo "UNVERIFIED: the triage record could not be read"; exit 2; }
 n=$(printf '%s\n' "$t" | grep -cE '^F[0-9]+ \| ')
 [ "$n" -gt 0 ] || { echo "UNVERIFIED: no finding lines in the triage record"; exit 2; }
-open=$(printf '%s\n' "$t" | grep -E '^F[0-9]+ \| ' | grep -vE '^F[0-9]+ \| (fixed [0-9a-f]{7,}|accepted \(Sam [0-9-]+\)) \|')
+open=$(printf '%s\n' "$t" | grep -E '^F[0-9]+ \| ' | grep -vE '^F[0-9]+ \| (fixed [0-9a-f]{7,}|accepted \(Sam [0-9]{4}-[0-9]{2}-[0-9]{2}(, [^)]*)?\)) \|')
 [ -z "$open" ] && echo "first-run gate clear ($n findings)" || { printf 'CUT BLOCKED, first-run findings not fixed or accepted:\n%s\n' "$open"; exit 1; }
 ```
 
