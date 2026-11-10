@@ -46,7 +46,7 @@ import structlog
 from nexus.redact import redact_credentials
 
 from nexus.upgrade_ladder.completion import derive_ladder_position
-from nexus.upgrade_ladder.deadline import Deadline, active_expired, bound
+from nexus.upgrade_ladder.deadline import Deadline, active_deadline, active_expired, bound
 from nexus.upgrade_ladder.engine_outage import engine_unreachable
 from nexus.upgrade_ladder.protocol import CompletionLedger, ProgressReporter, Rung, RungStatus
 from nexus.upgrade_ladder.registry import LadderRegistry
@@ -56,35 +56,6 @@ _log = structlog.get_logger(__name__)
 #: Ceiling on converge() calls per rung per run — a buggy rung claiming
 #: RESUMABLE forever without progress must fail loudly, not spin.
 DEFAULT_MAX_STEPS_PER_RUNG = 10_000
-
-#: How long one wait for a restarting engine lasts, in seconds (nexus-f3yqd.5). A restart from another shell
-#: was back in 4 s in marlowe's rehearsal; a respawn by the supervisor can take tens of seconds.
-ENGINE_RESTART_WAIT_S: float = 120.0
-
-
-def _engine_may_return() -> bool:
-    """Whether an engine-away error is worth a wait: a managed service is always expected back, and a local
-    engine only when this process has reached it before. An engine that was never there (no supervisor,
-    never started) is not waited for: the step defers at once."""
-    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred, keeps the registry import cheap
-    from nexus.db.service_endpoint import has_ever_resolved_lease  # noqa: PLC0415 — deferred
-
-    return not is_local_mode() or has_ever_resolved_lease()
-
-
-def _wait_for_engine(budget_s: float) -> bool:
-    """Wait up to *budget_s* for a local engine to publish its lease again; True when it did. A managed
-    service has no lease to wait for, so the wait is a pause of a tenth of the budget, then a retry."""
-    import time  # noqa: PLC0415 — stdlib
-
-    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred, keeps the registry import cheap
-    from nexus.db.service_endpoint import discover_lease_with_wait  # noqa: PLC0415 — deferred
-
-    if not is_local_mode():
-        time.sleep(budget_s / 10)
-        return True
-    return discover_lease_with_wait(budget_s=budget_s)[0] is not None
-
 
 def installed_package_version() -> str:
     """The installed ``conexus`` version, stamped on every completion record.
@@ -243,6 +214,7 @@ class LadderRunner:
         deadline: Deadline | None = None,
         engine_wait: Callable[[float], bool] | None = None,
         engine_may_return: Callable[[], bool] | None = None,
+        engine_wait_budget: Callable[[], float] | None = None,
     ) -> None:
         self._registry = registry
         self._store = store
@@ -252,8 +224,13 @@ class LadderRunner:
         )
         self._max_steps_per_rung = max_steps_per_rung
         self._deadline = deadline
-        self._engine_wait = engine_wait if engine_wait is not None else _wait_for_engine
-        self._engine_may_return = engine_may_return if engine_may_return is not None else _engine_may_return
+        # nexus-f3yqd.5: the lease is read only by the preconditions module (the gap-4 two-mechanisms rule).
+        from nexus.upgrade_ladder import preconditions as _pre  # noqa: PLC0415 — deferred, keeps the import light
+
+        self._engine_wait = engine_wait if engine_wait is not None else _pre.wait_for_engine
+        self._engine_may_return = engine_may_return if engine_may_return is not None else _pre.engine_may_return
+        self._engine_wait_budget = engine_wait_budget if engine_wait_budget is not None else _pre.engine_wait_budget
+        self._engine_gone = False  # a wait that ran out: later rungs do not wait again in this walk
 
     # ── read-only surface (nx doctor, P0.4) ─────────────────────────────────
 
@@ -374,20 +351,28 @@ class LadderRunner:
 
     def _riding_out_restarts(self, rung: Rung, call: Callable[[], Any]) -> Any:
         """*call*, run again after a wait each time the engine is away, up to :attr:`ENGINE_RESTART_RETRIES`
-        times (nexus-f3yqd.5). The last engine-away error, or any other error, propagates."""
+        times (nexus-f3yqd.5). The wait is cut to what is left of the ``--auto`` deadline, and once a wait
+        has run out no later rung waits. The last engine-away error, or any other error, propagates."""
         waits = 0
         while True:
             try:
                 return call()
             except Exception as exc:
                 if (
-                    not engine_unreachable(exc) or waits >= self.ENGINE_RESTART_RETRIES or active_expired()
+                    not engine_unreachable(exc) or waits >= self.ENGINE_RESTART_RETRIES or self._engine_gone
                     or not self._engine_may_return()
                 ):
                     raise
+                budget = self._engine_wait_budget()
+                deadline = active_deadline()
+                if deadline is not None:
+                    budget = min(budget, deadline.seconds - deadline.elapsed())
+                if budget <= 0:
+                    raise
                 waits += 1
-                self._reporter.emit("ladder_engine_wait", rung=rung.name, wait_s=ENGINE_RESTART_WAIT_S, error=str(exc))
-                if not self._engine_wait(ENGINE_RESTART_WAIT_S):
+                self._reporter.emit("ladder_engine_wait", rung=rung.name, wait_s=budget, error=str(exc))
+                if not self._engine_wait(budget):
+                    self._engine_gone = True
                     raise
 
     @staticmethod
@@ -395,8 +380,8 @@ class LadderRunner:
         _log.warning("ladder_rung_engine_away", rung=rung.name, where=where, error=str(exc))
         return RungRun(
             rung.name, RungOutcome.DEFERRED,
-            detail=f"the engine stopped answering during this step's {where} ({exc}); nothing is lost, and "
-            "`nx upgrade` again resumes it",
+            detail=f"the engine did not answer during this step's {where} ({exc}); the next `nx upgrade` "
+            "runs the step again and skips what is already done",
         )
 
     def _run_rung(self, rung: Rung) -> RungRun:
@@ -471,11 +456,10 @@ class LadderRunner:
         """Drive converge to completion (resumable batches). Returns a FAILED
         or DEFERRED RungRun on non-completion, None on completion.
 
-        An engine that goes away mid-rung (a restart from another shell, a supervisor respawn) is waited
-        for, up to :data:`ENGINE_RESTART_WAIT_S` a time and :attr:`ENGINE_RESTART_RETRIES` times, and the
-        rung's converge runs again: every rung reads the store's current state, so a repeat resumes where
-        the last one stopped. An engine that does not come back defers the rung; it never fails the
-        upgrade (nexus-f3yqd.5)."""
+        An engine that goes away mid-rung (a restart from another shell) is waited for, and the rung's
+        converge runs again (:meth:`_riding_out_restarts`): it reads the store's current state from the first
+        document and skips rows already done. An engine that does not come back defers the rung; it never
+        fails the upgrade (nexus-f3yqd.5)."""
         for _ in range(self._max_steps_per_rung):
             try:
                 result = self._riding_out_restarts(rung, lambda: rung.converge(self._reporter))
