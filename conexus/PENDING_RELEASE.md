@@ -53,6 +53,10 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   nexus-qo7ie.35: new; the promotion recipe the skill loads on demand (moved out of SKILL.md to fit its context budget).
 - `conexus/skills/orchestration/reference.md`
   nexus-qo7ie.35: the Skill Routing line for `/conexus:writing-nx-skills` says it also covers promoting a memory file.
+- `conexus/launch/nx_setup.py`
+  nexus-mjmjl (first-run F1): a running setup step rewrites its status every 30 s with the time so far and the last setup.log line, so setup_status no longer reads "running: build" for up to an hour.
+- `conexus/launch/nx_standin.py`
+  nexus-mjmjl (first-run F1): the stand-in's build wait text says a build can take up to an hour on a cold machine, equal to setup_tools.py's copy.
 
 ## Deferred to the next client release
 
