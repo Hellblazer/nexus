@@ -1,3 +1,0 @@
-### Fixed
-
-- **`nx doctor` no longer scans every document to decide whether an upgrade step is pending** (nexus-mjmjl). On a local engine, the upgrade-ladder row ran a rung's dry-run scan of the whole catalog (a profile put about 210 s of a 207-239 s doctor run there), and so did the first command after a version change. Both now make only bounded reads, on any engine: a rung answers from its completion record or one engine count, and a rung that cannot is reported "not checked" until an interactive `nx upgrade` reads every document and records it; `nx upgrade --dry-run` makes the same read to show what is pending without recording.

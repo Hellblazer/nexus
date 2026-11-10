@@ -43,18 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v8.0.0)
+## Awaiting the next release (pinned: v8.1.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/skills/writing-nx-skills/SKILL.md`
-  nexus-qo7ie.35: a "Promoting a Memory File" pointer section (RDR-240 Technical Design 9); the description now names promoting a memory file, and the section points at promotion.md. Its script target needs `procedure_run`, which shipped in conexus 8.0.0.
-- `conexus/skills/writing-nx-skills/promotion.md`
-  nexus-qo7ie.35: new; the promotion recipe the skill loads on demand (moved out of SKILL.md to fit its context budget).
-- `conexus/skills/orchestration/reference.md`
-  nexus-qo7ie.35: the Skill Routing line for `/conexus:writing-nx-skills` says it also covers promoting a memory file.
-
 ## Deferred to the next client release
-
-- `conexus/skills/peer-messaging/SKILL.md`
-  nexus-1d6pz.11.6: one bullet on waiting for your push's CI by the wake (a --done subscription with the channel, `nx ci wait <sha>` without it), never a Monitor or a poll (deferred: the notice sha it names is nexus-1d6pz.11.3's src/ change, not in v8.0.0); a peer's sha still matters because window beads close on the tip.

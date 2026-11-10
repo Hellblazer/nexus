@@ -618,5 +618,13 @@ def test_the_docs_describe_cold() -> None:
     assert "three times" not in section
     assert "until Step 3" not in section and "RDR-240's tools, loads" not in section
     assert "K6" in cold.__doc__ and "--cold" in cold.__doc__
-    fragment = (root / "changelog" / "unreleased" / "nexus-qo7ie.19.md").read_text(encoding="utf-8")
-    assert fragment.startswith("### Added") and "--cold" in fragment
+    # The entry lives in its fragment until a release folds it into CHANGELOG.md
+    # (scripts/changelog_fold.py deletes the fragment), so read whichever holds it.
+    frag_path = root / "changelog" / "unreleased" / "nexus-qo7ie.19.md"
+    if frag_path.exists():
+        fragment = frag_path.read_text(encoding="utf-8")
+        assert fragment.startswith("### Added") and "--cold" in fragment
+    else:
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        entry = next(ln for ln in changelog.splitlines() if "(nexus-qo7ie.19," in ln)
+        assert "--cold" in entry
