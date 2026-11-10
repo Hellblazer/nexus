@@ -1800,6 +1800,50 @@ def test_a_step_that_times_out_is_killed_with_everything_it_started(box: Box, mo
     assert "timed out" in box.read_log()
 
 
+
+_TALKER = (
+    "import sys, time\n"
+    "print('resolving 212 packages', flush=True)\n"
+    "sys.stdout.write('downloading torch 10%\\rdownloading torch 90%\\n'); sys.stdout.flush()\n"
+    "print('the secret is ' + sys.stdin.read(), flush=True)\n"
+    "time.sleep(1.5)\n"
+)
+
+
+def test_a_long_step_rewrites_its_status_with_elapsed_time_and_the_last_log_line(
+    box: Box, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-mjmjl F1: a build used to read "running: build" for up to an hour."""
+    mod = _in_process(box, monkeypatch)
+    box.setup.mkdir(parents=True)
+    token = mod.acquire_lock(box.setup)
+    assert token
+    monkeypatch.setattr(mod, "PROGRESS_REFRESH_S", 0.3)
+    run = mod._Run(box.setup, "local", False, mod._Heartbeat(box.setup / "lock", token))
+    run.at("build")
+    seen: list[str] = []
+    real_update = run.update
+
+    def spy(**fields: Any) -> None:
+        if "elapsed_s" in fields:
+            seen.append(fields["message"])
+        real_update(**fields)
+
+    monkeypatch.setattr(run, "update", spy)
+    code, _ = run.cmd([sys.executable, "-c", _TALKER], stdin_text="hunter2")
+    assert code == 0
+    assert seen, "no progress rewrite during a 1.5 s step with a 0.3 s refresh"
+    assert seen[-1].startswith("running: build (") and " so far; last output: the secret is ***)" in seen[-1], seen[-1]
+    assert all("hunter2" not in m for m in seen)
+    assert mod.read_status(box.setup)["elapsed_s"] >= 0
+
+
+def test_the_progress_words() -> None:
+    mod = _load_module()
+    assert [mod._elapsed_words(s) for s in (45, 725, 3720)] == ["45 s", "12 min 05 s", "1 h 02 min"]
+    assert mod._last_line("a\nb 10%\rb 90%\n\n") == "b 90%"
+    assert mod._last_line("") == ""
+
 def test_children_start_without_a_console_window_on_windows(box: Box, monkeypatch: pytest.MonkeyPatch, fake_popen: type[_FakePopen]) -> None:
     mod = _in_process(box, monkeypatch)
     assert mod._child_kwargs(windows=True) == {"creationflags": 0x08000000}

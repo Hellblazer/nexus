@@ -333,6 +333,11 @@ PROBE_TIMEOUT_SECONDS = 60.0
 
 _POLL_SECONDS = 0.25
 _LOG_TAIL_BYTES = 256 * 1024
+#: How often a running step rewrites its status with its elapsed time and the log's last line (nexus-mjmjl, F1):
+#: a build of up to :data:`STEP_TIMEOUT_SECONDS` otherwise read "running: build" from start to end.
+PROGRESS_REFRESH_S = 30.0
+#: The longest last-log line the status carries.
+_PROGRESS_LINE_MAX = 160
 _TMP_MAX_AGE_SECONDS = 60.0
 
 _DETACHED_PROCESS = 0x00000008
@@ -1803,6 +1808,7 @@ class _Run:
         self.slim = slim
         self.heartbeat = heartbeat
         self.log_path = setup / _LOG
+        self._stage_message = ""  # the running step's own message, which progress() extends
         self.data: dict[str, Any] = read_status(setup) or {}
         self.data.update(state=RUNNING, mode=mode, autostart=autostart, log=str(self.log_path), pid=os.getpid())
         if slim:
@@ -1836,7 +1842,16 @@ class _Run:
             fields.update(credentials=state, message=f"{fields['message']}. {note}")
             if follow:
                 fields["next"] = follow
+        self._stage_message = fields["message"]
         self.update(**fields)
+
+    def progress(self, elapsed_s: float, last_line: str) -> None:
+        """Rewrite the status of the running step with how long it has run and the log's last line, so a
+        ``setup_status`` during a long build shows it moving (nexus-mjmjl, F1)."""
+        base = self._stage_message or f"running: {self.stage}"
+        line = last_line if len(last_line) <= _PROGRESS_LINE_MAX else last_line[: _PROGRESS_LINE_MAX - 3] + "..."
+        tail = f"; last output: {line}" if line else ""
+        self.update(message=f"{base} ({_elapsed_words(elapsed_s)} so far{tail})", elapsed_s=round(elapsed_s))
 
     def open_page(self) -> int | None:
         """Start the credentials page (mode cloud). ``None`` when it is serving, else the failed run's exit code:
@@ -2012,7 +2027,9 @@ class _Run:
                         proc.stdin.close()
                     except OSError:  # the child exited without reading it
                         pass
-                deadline = time.monotonic() + limit
+                started = time.monotonic()
+                deadline = started + limit
+                refreshed = started
                 try:
                     while True:
                         try:
@@ -2025,6 +2042,10 @@ class _Run:
                             self.log("--- killed: setup no longer holds the lock\n")
                             raise _LockLost
                         self.sync_page()
+                        now = time.monotonic()
+                        if now - refreshed >= PROGRESS_REFRESH_S:
+                            refreshed = now
+                            self.progress(now - started, shown(_last_line(self._output_since(offset))))
                         if time.monotonic() >= deadline:
                             _kill_tree(proc)
                             text = self._output_since(offset)
@@ -2602,6 +2623,25 @@ def _relay(argv: list[str]) -> int:
     except Exception:  # noqa: BLE001 -- the caller reads only the exit code
         return 1
     return 0
+
+
+def _elapsed_words(seconds: float) -> str:
+    """``45 s``, ``12 min 05 s``, ``1 h 02 min``."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s} s"
+    if s < 3600:
+        return f"{s // 60} min {s % 60:02d} s"
+    return f"{s // 3600} h {s % 3600 // 60:02d} min"
+
+
+def _last_line(text: str) -> str:
+    """The last non-blank line of *text*, with a carriage-return redraw reduced to its last frame."""
+    for raw in reversed(text.splitlines()):
+        line = raw.rsplit("\r", 1)[-1].strip()
+        if line:
+            return line
+    return ""
 
 
 def status_view(setup: Path, *, read_budget_s: float | None = None) -> dict[str, Any]:

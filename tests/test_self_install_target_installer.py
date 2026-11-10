@@ -557,6 +557,17 @@ echo "$NX_TOOLS_DIR/gen-20261024T000000Z"
         assert recorded.endswith("/pkg/nexus/_install/install_generation.sh")
         assert not list(Path(tempfile_root()).glob("nx-target-installer-*"))
 
+    def test_the_builds_output_reaches_the_terminal_as_it_runs(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """nexus-mjmjl F15: the legacy build was captured whole and printed nothing until it ended."""
+        _index_for(tmp_path, monkeypatch, _release_files())
+        install_dir = self._packaged(tmp_path)
+        script = install_dir / "migrate_legacy.sh"
+        script.write_text(self.FAKE_MIGRATE.replace("#!/usr/bin/env bash\n", "#!/usr/bin/env bash\necho 'Building conexus' >&2\n"))
+        assert self_cmd._converge_legacy_install(install_dir, world.tools, version="99.0.0", dry_run=False) is not None
+        assert "Building conexus" in capsys.readouterr().err
+
     def test_with_no_version_the_newest_release_is_fetched(
         self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
