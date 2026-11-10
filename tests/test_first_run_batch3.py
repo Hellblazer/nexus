@@ -5,11 +5,17 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import click
 import pytest
+
+import nexus.upgrade_ladder.registry as ladder_registry
+from nexus.commands.upgrade import _run_ladder
+from nexus.upgrade_ladder.registry import LadderRegistry
 
 from nexus.commands import init as init_mod
 from nexus.daemon import installer
 from nexus.mcp import setup_tools
+from tests.upgrade.test_ladder_surfaces import InMemoryLedger, SurfaceRung, _DeferringRung
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,3 +68,23 @@ def test_a_rerun_with_the_unit_present_says_why_it_exits_zero_and_names_the_logs
     err = " ".join(capsys.readouterr().err.split())
     assert "registered before this run, so it owns bring-up" in err and "exits 0" in err, err
     assert str(tmp_path / "logs" / "storage_service.log") in err and "storage_service_native.log" in err, err
+
+
+# F17: a ladder that did not converge said which step and nothing else; a deferral never said it would be retried.
+def test_a_ladder_that_did_not_converge_says_what_to_do(monkeypatch: pytest.MonkeyPatch) -> None:
+    failing = SurfaceRung("labels", verify_result=False)
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((failing,)))
+    with pytest.raises(click.ClickException) as exc:
+        _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=InMemoryLedger)
+    message = exc.value.message
+    assert message.startswith("upgrade ladder did not converge — labels: verify-failed"), message
+    assert message.endswith("Fix what each step names; `nx upgrade --dry-run` lists the steps still pending."), message
+
+
+@pytest.mark.t2_tenant  # the walk defers, so the deferral log writes its T2 note (nexus-0sm1t)
+def test_a_deferred_step_says_it_runs_again(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((_DeferringRung("census"),)))
+    _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=InMemoryLedger)
+    out = " ".join(capsys.readouterr().out.split())
+    assert "rung 'census' deferred — engine census unavailable. It runs again on the next `nx upgrade`" in out, out
+    assert "`nx doctor` names a step that defers on every run" in out

@@ -657,14 +657,22 @@ def _run_ladder(
             if run.outcome in (RungOutcome.DEFERRED, RungOutcome.VERIFY_FAILED, RungOutcome.FAILED)
         ]
         summary = "; ".join(f"{run.name}: {run.outcome.value} ({run.detail})" for run in failed)
-        raise click.ClickException(f"upgrade ladder did not converge — {summary}")
+        # F17 (nexus-f3yqd.6): say what to do. The step reporter around the ladder prints the retry line.
+        raise click.ClickException(
+            f"upgrade ladder did not converge — {summary}. Fix what each step names; "
+            "`nx upgrade --dry-run` lists the steps still pending."
+        )
     if not report.converged and not auto_mode:
         # Deferred-only: the RDR-142 would-defer class is non-fatal by
         # design (precondition-blocked, retried on a later run) — notice,
         # not failure; nothing was recorded, the position stays pinned.
         for run in report.runs:
             if run.outcome is RungOutcome.DEFERRED:
-                click.echo(f"Upgrade ladder: rung '{run.name}' deferred — {run.detail}")
+                # F17 (nexus-f3yqd.6): a deferral is retried, so say when, and where a stuck one shows.
+                click.echo(
+                    f"Upgrade ladder: rung '{run.name}' deferred — {run.detail}. It runs again on the next "
+                    "`nx upgrade`; `nx doctor` names a step that defers on every run."
+                )
 
 
 
