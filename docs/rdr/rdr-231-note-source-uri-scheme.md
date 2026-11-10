@@ -2,7 +2,8 @@
 title: "Note source_uri scheme: replace chroma:// with nx-note://"
 id: RDR-231
 type: Technical Debt
-status: accepted
+status: closed
+closed_date: 2026-11-10
 priority: low
 author: nexus_8f2
 reviewed-by: self
