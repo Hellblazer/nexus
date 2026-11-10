@@ -501,15 +501,16 @@ per start, measured on 2026-11-10 on chas lab-m:
 
 - `nx upgrade` from the newest release below the candidate: 120 s (2.3 s from 8.0.0).
 - `nx upgrade` from the last 7.x: 120 s (13.9 to 14.2 s from 7.99.0).
-- `nx upgrade` from 7.76.0: **PENDING**. Measured 460 to 662 s on develop d258282c6
-  and 211 s with the rung-scan fix e979863a6 (nexus-mjmjl, in conexus 8.1.1), on
-  140,000 rows in five collections (2.6 GB). nexus-f3yqd.5 owns the number and sets
-  it from a develop run after that fix lands, with its margin and the store size
-  stated; no guessed value stands in until then. Until it is set this start cannot
-  pass: its `nx upgrade` runs under a 1800 s hang guard (not a ceiling: it kills a hung
-  step and never makes a pass), the start is reported PENDING, and the gate line says
-  NOT RUN (exit 2), naming the pending ceiling. A release does not go past 6e on that;
-  Sam decides.
+- `nx upgrade` from 7.76.0: 420 s. Measured 209 to 211 s on chas lab-m with the
+  rung-scan fix (nexus-mjmjl, conexus 8.1.1: 211 s at e979863a6, 209.1 s on develop
+  after 8.1.1) for 140,000 rows in five collections (2.6 GB); 460 to 662 s before that
+  fix. The ceiling is twice the measurement, because the same upgrade varied about 1.45
+  times between hosts, and no more, so the pre-fix 460 to 662 s still fails. Like the
+  others it bounds this fixture, not a larger store. A start whose ceiling is ever unset
+  again (a `None` entry) cannot pass: its `nx upgrade` runs under a 1800 s hang guard
+  (not a ceiling: it kills a hung step and never makes a pass), the start is reported
+  PENDING and the gate line says NOT RUN (exit 2). A release does not go past 6e on
+  that; Sam decides.
 - `nx doctor` 60 s (7.5 s), `nx search` 30 s (2.8 s), package upgrade 120 s (0.4 s).
 
 The margins are not uniform. Doctor, search and the last-7x upgrade sit at about 8 to

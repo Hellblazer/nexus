@@ -53,10 +53,10 @@ override applies from ``start-old`` on, never to the old client's stack.
 The ceilings are per start and come from the first real-store runs (chas lab-m, 2026-11-10; the
 f3yqd.1 seeder's 86,000 rows, 2.4 GB, and for 7.76.0 140,000 rows in five collections, 2.6 GB). ``nx upgrade``
 is 120 s from the newest release below the candidate (2.3 s measured) and from the last 7.x (13.9-14.2 s),
-and PENDING from 7.76.0 (460-662 s on develop d258282c6, 211 s with the rung-scan fix e979863a6,
-nexus-mjmjl, in conexus 8.1.1): nexus-f3yqd.5 owns that number and sets it from a develop run after the fix
-lands, with its margin and store size stated, so until then that start can end PENDING at best and the
-gate NOT RUN. doctor (60 s, 7.5 s measured), search (30 s, 2.8 s) and the last-7x upgrade sit at about 8 to
+and 420 s from 7.76.0: twice the 209-211 s measured on chas lab-m with the rung-scan fix (nexus-mjmjl,
+conexus 8.1.1; 209.1 s on develop after 8.1.1, 211 s at e979863a6) for 140,000 rows in five collections,
+2.6 GB. Twice, because the same upgrade varied about 1.45 times between hosts (365 s on qwent, 531 s on
+chas before the fix), and no more, so the 460-662 s it took before the fix still fails. doctor (60 s, 7.5 s measured), search (30 s, 2.8 s) and the last-7x upgrade sit at about 8 to
 11 times the slowest measured; the newest-below upgrade (about 50 times) and the package upgrade (120 s
 against 0.4 s) are floors against a hang, not margins. All of them bound THIS fixture; a much larger store
 needs its own measurement. The 10 s silence limit is our chosen reading of Sam's "a few seconds", not a
@@ -115,13 +115,14 @@ DEFAULT_SILENCE_LIMIT_S: float = (
 #:   newest-below: 2.3 s from 8.0.0.                      -> 120 s
 #:   last-7x:      13.9-14.2 s from 7.99.0.               -> 120 s
 #:   pre-pci:      460-662 s from 7.76.0 on develop d258282c6 (every pci_ index built inside the
-#:                 upgrade); 211 s with the rung-scan fix e979863a6 (nexus-mjmjl, in conexus 8.1.1).
-#: The pre-pci value is set by nexus-f3yqd.5 from the measurement on develop once that fix has
-#: landed, with its margin and the store size stated; no interim value is guessed here.
+#:                 upgrade); 211 s with the rung-scan fix e979863a6 (nexus-mjmjl, in conexus 8.1.1)
+#:                 and 209.1 s on develop after 8.1.1                 -> 420 s (twice: host spread
+#:                 about 1.45x, 365 s qwent vs 531 s chas before the fix; the 460-662 s still fails)
+#: A None entry would make that start PENDING: never a PASS, only the hang guard bounding it.
 UPGRADE_CEILINGS_S: dict[str, float | None] = {
     "newest-below": 120.0,
     "last-7x": 120.0,
-    "pre-pci": None,
+    "pre-pci": 420.0,
 }
 UPGRADE_CEILING_PENDING_NOTE: str = (
     "upgrade ceiling PENDING (nexus-f3yqd.5 sets it from the develop measurement once nexus-mjmjl's "

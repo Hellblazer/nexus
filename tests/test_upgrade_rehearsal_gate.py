@@ -99,8 +99,16 @@ def test_every_measured_figure_is_recorded_beside_the_ceilings() -> None:
         "nexus-mjmjl",
         "86,000",
         "140,000",
+        "209.1 s",
     ):
         assert figure in src, figure
+
+
+def test_the_pre_pci_ceiling_is_set_from_the_develop_measurement() -> None:
+    # 2 x the 209-211 s measured with the rung-scan fix; the pre-fix 460-662 s must still fail
+    assert ur.UPGRADE_CEILINGS_S["pre-pci"] == 420.0
+    assert ur.upgrade_ceiling_for("7.76.0") == 420.0
+    assert ur.UPGRADE_CEILINGS_S["pre-pci"] < 460.0
 
 
 # --- one start's verdict and the gate's last line ----------------------------------------------------

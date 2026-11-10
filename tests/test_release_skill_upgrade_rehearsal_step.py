@@ -67,15 +67,14 @@ def test_the_step_names_the_gate_line_and_the_exit_codes() -> None:
     assert "NOT RUN and NOT THE RELEASE GATE are not passes" in step
 
 
-def test_the_step_states_the_pending_ceiling_and_who_owns_and_decides_it() -> None:
+def test_the_step_states_the_pre_pci_ceiling_and_what_it_rests_on() -> None:
     step = _step()
-    assert "**PENDING**" in step
-    assert "nexus-f3yqd.5 owns the number" in step
+    assert "`nx upgrade` from 7.76.0: 420 s" in step
+    assert "209 to 211 s" in step and "460 to 662 s" in step
     assert "nexus-mjmjl" in step and "conexus 8.1.1" in step
-    assert "no guessed value stands in" in step
+    assert "twice the measurement" in step and "still fails" in step
+    # an unset ceiling is still a hold for Sam, never a pass
     assert "Sam decides" in step and "does not go past 6e" in step
-    # the measured figures the pending ceiling rests on
-    assert "460 to 662 s" in step and "211 s" in step
 
 
 def test_the_step_is_honest_about_the_limits_and_the_basis() -> None:
