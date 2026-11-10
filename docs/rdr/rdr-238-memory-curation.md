@@ -113,7 +113,7 @@ revision.
 | RDR-207 Summarization at the T2 Expiry Boundary | Beside, no shared path | It owns what expiry may destroy (quarantine, rollup, reap only rolled-up rows). Replacement is not expiry: a writer names a row and the engine deletes it in the same transaction. A quarantined target is refused, as `mergeMemories` refuses a quarantined id (Technical Design 1). |
 | RDR-209 Heat-Based Graduation Between Memory Tiers | Sibling, draft | It owns heat and graduation, and takes the gate-record rollup as an amendment (same date). Its Phase 0b, a read counter that means "a caller read this row", is the signal this RDR's index audit would use for T2; until it lands, the audit counts T2 reads with RDR-240's `memory` transcript query: per title from `memory_get` calls, per project from `memory_search` calls (Technical Design 5). |
 | RDR-240 Procedures as Sandboxed Lua Scripts | Prerequisite of Phase 2 and of `nx memory curate` | Split from this RDR. Its `transcripts` procedure owns transcript scanning; this RDR calls four of its queries and builds no scanner (Technical Design 5). Phase 1 does not depend on it. |
-| RDR-239 The Tuple-Space Dictionary | Accepted; prerequisite of one `--cold` row | Its dictionary view (`writers`, last post time per subspace) is the source of the report's tuple-subspace row; that row waits for it (Technical Design 4). |
+| RDR-239 The Tuple-Space Dictionary | Accepted; prerequisite of one `--cold` row | Its dictionary view (`writers`, last post time per subspace) is the source of the report's tuple-subspace row (Technical Design 4), built by nexus-qo7ie.20 on nexus-mdbds.2.17. |
 | RDR-205 Linda Tuple Space over Postgres | Closed; its ledger template is being retired | Its `ledger/<session_id>` template and 40,785 rows outlived their writer (nexus-onjvw): one of the cases that motivate `--cold`. |
 | RDR-074 Permanence Mode | Deferred, compatible | Permanence guards a row against expiry only. Naming a permanent row in `replaces` deletes it, because explicit deletion is always the project's prerogative (Sam, 2026-10-31: "expiry is the def; explicit del is always our collective prerogative"). |
 | RDR-192 Superseded Note Chunks Outlive Manifest-Less Is-Live | Different layer | It concerns T3 chunks a re-put replaced. This RDR concerns whole T2 rows and memory files a writer replaced. No shared code. |
@@ -487,9 +487,13 @@ them.
    N days. Each row gives the store, its last write where the store has writes, its
    last use, its size and its owner if known:
    - tuple subspaces, from RDR-239's dictionary view (each subspace's last
-     post time and its template's `writers`); a template whose `writers` is
-     empty and that has no live subspace is listed by name. This row waits
-     for that view;
+     post time and its template's `writers`); a template with no verified
+     writer (`writers` absent, empty, or every entry marked `Unverified: `,
+     RDR-239 Technical Design 4) and no subspace in the census, consumed-only
+     subspaces included, is listed by name. The census has no transcript
+     bound, so this row uses `--days` uncapped. On an engine that serves no
+     doc block the row says "not available" and still lists cold subspaces,
+     judging no template;
    - T2 namespaces and memory files, from read and write counts;
    - MCP tools and CLI verbs, from RDR-240's `tools` query; `nx memory
      curate` builds the full list itself (the MCP servers' tool registries
@@ -640,8 +644,8 @@ If the on-demand tier works, this is a refinement of it.
 - [x] A1 verified (Claude Code's loading of `MEMORY.md`; research 1 and 2).
 - [x] RDR-209 amendment for gate records filed (RDR-209 Revision History,
       2026-10-31; this RDR does not depend on it landing).
-- [ ] RDR-239's dictionary view built. Only the `--cold` tuple-subspace row
-      waits for it.
+- [x] RDR-239's dictionary view built (nexus-mdbds.2.17). Only the `--cold`
+      tuple-subspace row waited for it (nexus-qo7ie.20).
 - [ ] RDR-240 Phase 1 Step 1 landed (the runner and the `transcripts`
       procedure). Phase 2 Steps 1 and 3, the transcript-backed rows of
       `nx memory curate` and the release step that runs it wait for it;
@@ -912,3 +916,4 @@ so the rest does not wait for them.
 | 2026-11-01 | Gate round 3: PASSED (0 Critical, 10 Significant, 0 ship-blockers); commit `3f66127f0`; critique `nexus_rdr/238-gate-critique-2026-11-01-r3`. |
 | 2026-11-01 | Accept residual dispositions (gate round 3): K1, K2, K3, K4, K5 -> nexus-qo7ie.3; S-8, S-9 -> nexus-qo7ie.4; S-7, K6, S-10 -> nexus-qo7ie.5. |
 | 2026-11-02 | Sam reversed the 2026-10-31 "supersession becomes deletion" for Phase 1: replace quarantines. A2 was measured (first 20 replacement-type rows: 6 yes, 11 maybe, 3 no by an agent read), which trips Step 3's stop rule; Sam chose quarantine instead of deletion on the A2 read; Alternative 1 was not taken. A replaced row is quarantined with `ttl_days` NULL: the rollup skips it, the engine refuses it as a summary source, and `reap` never deletes it. A later plain put at the old title overwrites the quarantined row in place, and the `replaced_id` the writer was given then names that new live row. Key Discoveries 2026-11-02 rules for Phase 1; decision sections not rewritten (nexus-ov3zi). |
+| 2026-11-09 | Technical Design 4's tuple-subspace row amended to the reviewed nexus-qo7ie.20 code (standing grant 3): writerless means no verified writer, since today's candidates `board/<topic>` and `queue/<name>` carry only `Unverified: ` entries and no template has `writers: []`; a consumed-only subspace counts; `--days` is uncapped; a doc-less engine reads "not available". The Relationships row and the RDR-239 prerequisite now record the view as built. Review: T2 `nexus/rdr-238-p3s3b-review-2026-11-09`. |
