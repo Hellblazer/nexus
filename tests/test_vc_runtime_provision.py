@@ -571,8 +571,9 @@ def test_upgrade_auto_reaches_the_precondition_stage_that_hosts_the_step() -> No
 
     from nexus.commands import upgrade as up
 
-    src = inspect.getsource(up.upgrade.callback)
-    assert "_converge_preconditions(auto_mode=auto_mode" in src
+    # nexus-mjmjl: upgrade() runs the steps _upgrade_steps builds.
+    assert "_upgrade_steps(" in inspect.getsource(up.upgrade.callback)
+    assert "_converge_preconditions(auto_mode=auto_mode" in inspect.getsource(up._upgrade_steps)
     assert "_converge_vc_runtime(auto_mode=auto_mode)" in inspect.getsource(up._converge_preconditions)
 
 
