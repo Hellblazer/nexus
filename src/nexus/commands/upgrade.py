@@ -25,8 +25,17 @@ _log = structlog.get_logger()
 # flags actively mislead. 7.0.0 is a major; scripts passing --force now get
 # Click's no-such-option error, which is the honest outcome.
 @click.option("--auto", "auto_mode", is_flag=True, help="Quiet mode for hook invocation (exit 0 always).")
-@click.option("--skip-t3", is_flag=True, help="Skip T3 upgrade steps (e.g., cross-collection projection backfill). Useful for fast T2-only migrations.")
-@click.option("--yes", "assume_yes", is_flag=True, help="Assume yes to the billed re-embed consent prompt (equivalent to NX_ASSUME_YES=1). Nothing else prompts.")
+@click.option(
+    "--skip-t3", is_flag=True,
+    help="Skips the engine install, the storage-service restart, the PDF "
+    "stack carry-forward, the installer rebuild and the collection-name check. The old service keeps "
+    "running until you run a plain `nx upgrade`. The data steps still run.",
+)
+@click.option(
+    "--yes", "assume_yes", is_flag=True,
+    help="Pre-approve a billed re-embedding of your collections, for an unattended run (same as "
+    "NX_ASSUME_YES=1). Nothing in `nx upgrade` asks for this today, so the flag currently changes nothing.",
+)
 @click.option(
     "--no-beads-prime",
     "no_beads_prime",
@@ -40,7 +49,7 @@ def upgrade(
     dry_run: bool, auto_mode: bool, skip_t3: bool, assume_yes: bool, no_beads_prime: bool
 ) -> None:
     """Run pending database migrations and upgrade steps.
-
+    \f
     ``--yes`` is NOT a general "say yes to everything" switch, and must not
     become one: the only prompt the ladder can raise is the billed Voyage
     re-embed (RDR-185 ## Constraints' third genuine decision; source-gone and

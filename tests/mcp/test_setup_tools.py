@@ -600,7 +600,7 @@ def test_without_nx_setup_script_setup_starts_no_process(
     lowered = text.lower()
     for fragment in _NO_SCRIPT_TEXT[mode]:
         assert fragment in lowered, (mode, fragment, text)
-    assert "not started by the conexus plugin's launcher" in lowered or mode == "cli-only", text
+    assert "setup cannot run from this server" in lowered or mode == "cli-only", text
 
 
 def test_without_nx_setup_script_status_starts_no_process_and_gives_the_commands(monkeypatch: pytest.MonkeyPatch) -> None:
