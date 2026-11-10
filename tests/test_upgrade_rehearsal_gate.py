@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._tmp_root import child_env_with_tmpdir
+
 ROOT = Path(__file__).resolve().parent.parent
 DRIVER = ROOT / "scripts" / "upgrade_rehearsal.py"
 WRAPPER = ROOT / "tests" / "e2e" / "upgrade-rehearsal.sh"
@@ -704,13 +706,15 @@ def _wrapper_tree(tmp_path: Path, driver_body: str) -> tuple[Path, dict[str, str
     (tree / "scripts" / "upgrade_rehearsal.py").write_text(driver_body)
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir()
-    env = {
-        "PATH": os.environ["PATH"],
-        "HOME": str(tmp_path / "home"),
-        "TMPDIR": str(tmpdir),
-        "NEXUS_TARGET_RELEASE": "9.9.9",
-        "NX_E2E_PYTHON": sys.executable,
-    }
+    env = child_env_with_tmpdir(
+        {
+            "PATH": os.environ["PATH"],
+            "HOME": str(tmp_path / "home"),
+            "NEXUS_TARGET_RELEASE": "9.9.9",
+            "NX_E2E_PYTHON": sys.executable,
+        },
+        tmpdir,
+    )
     return tree, env
 
 
