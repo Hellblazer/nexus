@@ -619,3 +619,23 @@ def test_the_marker_pattern_matches_only_that_sleeper() -> None:
     assert not pat.search("sleep 120x4321")  # the dot is literal
     assert not pat.search("sleep 120.43210")  # anchored at the end
     assert not pat.search("pkill -f sleep 120[.]4321$")  # the sweep's own command line
+
+
+@posix_only
+def test_reap_group_on_return_kills_what_a_child_that_exited_left_behind() -> None:
+    """labrun-pex: a child that exits on its own leaves its group alive on POSIX. Windows' default
+    containment kills the job on every return; POSIX killed the group only on a timeout. The doctor's
+    MinerU real-parse probe child left MinerU's render-executor pool running that way (0.28 GB a worker,
+    alive to the end of a test shard). ``reap_group_on_return=True`` kills the group when the child is
+    done. The first call is the premise: without the flag the grandchild survives the return."""
+    kept, reaped = _run_marker(7), _run_marker(8)
+    try:
+        run_bounded(["sh", "-c", f"sleep {kept} >/dev/null 2>&1 & exit 0"], timeout=10,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run_bounded(["sh", "-c", f"sleep {reaped} >/dev/null 2>&1 & exit 0"], timeout=10,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, reap_group_on_return=True)
+        time.sleep(0.3)
+        assert _sleeper_alive(kept), "premise: without the flag the grandchild must outlive the call"
+        assert not _sleeper_alive(reaped), "reap_group_on_return left the child's grandchild running"
+    finally:
+        _sweep(kept, reaped)

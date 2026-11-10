@@ -244,6 +244,7 @@ def run_bounded(
     extra_creationflags: int = 0,
     contained: bool = True,
     kill_on_interrupt: bool = False,
+    reap_group_on_return: bool = False,
 ) -> subprocess.CompletedProcess[Any]:
     """``subprocess.run(capture_output=True, timeout=...)`` that is actually bounded.
 
@@ -301,6 +302,12 @@ def run_bounded(
     comes back as U+FFFD rather than raising ``UnicodeDecodeError`` out of a
     call whose callers catch ``OSError`` and ``TimeoutExpired``. Pass
     ``errors="strict"`` where a malformed byte must fail.
+
+    *reap_group_on_return* (default False) also kills the child's group when the child exits on its
+    own. Windows' default containment already does that on every return; POSIX does it only on a
+    timeout, so a grandchild the child left behind (MinerU's render-executor pool after a doctor
+    real-parse probe, labrun-pex) outlives the call. A caller whose child must not leave anything
+    running passes True. Never pass it for a child that starts a daemon on purpose.
 
     Raises ``subprocess.TimeoutExpired`` on timeout, after the kill and the
     reap, so callers that already handle it keep working unchanged.
@@ -374,6 +381,10 @@ def run_bounded(
             with contextlib.suppress(Exception):
                 proc.communicate(timeout=REAP_TIMEOUT_S)
             raise
+        if reap_group_on_return:
+            # The child exited on its own; kill what it left in its group (POSIX) or job (Windows).
+            kill_child_and_descendants(proc, job)
+            job = None
     finally:
         # nexus-6y4e0 review (CRITICAL): contain()'s handle must close on
         # EVERY outcome, not only the except branch above -- success and a

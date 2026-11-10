@@ -2194,6 +2194,10 @@ def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S
                 stderr=stderr_f,
                 text=False,
                 timeout=timeout_s,
+                # MinerU's render-executor pool outlives the probe child; without this its worker
+                # processes stayed alive after doctor returned (labrun-pex: 0.28 GB each, held to
+                # the end of a test shard).
+                reap_group_on_return=True,
             )
         stderr_text = stderr_path.read_text(errors="replace", encoding="utf-8")
     if proc.returncode != 0:

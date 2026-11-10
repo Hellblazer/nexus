@@ -232,3 +232,22 @@ def test_probe_script_runs_for_real_and_succeeds(
     parse_line = next(ln for ln in out.splitlines() if "MinerU parse" in ln)
     assert "✓" in parse_line
     assert "✗" not in parse_line
+
+
+def test_the_parse_probe_kills_what_its_child_leaves_running(monkeypatch, tmp_path):
+    """labrun-pex: MinerU's render-executor pool outlives the probe child, and on POSIX run_bounded
+    killed the child's group only on a timeout, so the pool stayed alive after doctor returned. The
+    probe asks for the group to be reaped on a normal return too."""
+    import subprocess
+
+    import nexus.commands.doctor as doctor
+
+    seen: dict[str, object] = {}
+
+    def _fake_run_bounded(argv, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(doctor, "run_bounded", _fake_run_bounded)
+    doctor._mineru_parse_fixture_once(timeout_s=5)
+    assert seen.get("reap_group_on_return") is True
