@@ -14,6 +14,7 @@ Windows. The lint keeps captured-pipe ``pg_ctl ... start`` calls out of ``tests/
 from __future__ import annotations
 
 import ast
+import os
 import subprocess
 import sys
 import textwrap
@@ -23,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from tests._child_process import kill_if_identity
+from tests import _pg_ctl
 from tests._pg_ctl import PG_CTL_STDERR, PG_CTL_STDOUT, pg_ctl_start
 
 _TESTS = Path(__file__).resolve().parent
@@ -195,3 +197,75 @@ def test_the_lint_sees_each_captured_form() -> None:
         assert _captured_pg_ctl_starts(sample) == [1], sample
     for sample in good:
         assert _captured_pg_ctl_starts(sample) == [], sample
+
+
+# ── labrun-pex: the -k socket path is checked before pg_ctl runs ────────────────────────────────
+# A postmaster started with ``-k <dir>`` puts its unix socket there; a path past ``sun_path`` makes
+# Postgres refuse to start with only ``pg_ctl: could not start server`` to show for it (one hand-run
+# shard on chas whose tempdir was 71 bytes reported 883 such errors). pg_ctl_start is where every
+# ``-k`` start passes, so the check is there.
+
+_POSIX_SOCKET = pytest.mark.skipif(os.name == "nt", reason="no -k unix socket on Windows")
+
+
+def _recording_pg_ctl(tmp_path: Path) -> tuple[Path, Path]:
+    ran = tmp_path / "pg_ctl-ran"
+    exe = tmp_path / "pg_ctl"
+    exe.write_text(f"#!/bin/sh\ntouch {ran}\nexit 0\n")
+    exe.chmod(0o755)
+    return exe, ran
+
+
+def _socket_pgdata(tmp_path: Path) -> Path:
+    d = tmp_path / "data"
+    d.mkdir()
+    return d
+
+
+@_POSIX_SOCKET
+def test_a_socket_dir_past_sun_path_fails_loud_before_pg_ctl_runs(tmp_path, monkeypatch) -> None:
+    exe, ran = _recording_pg_ctl(tmp_path)
+    pgdata = _socket_pgdata(tmp_path)
+    monkeypatch.setattr(_pg_ctl, "SUN_PATH_MAX", len(os.fsencode(str(pgdata))) + 10)
+    with pytest.raises(ValueError, match="sun_path") as err:
+        _pg_ctl.pg_ctl_start(exe, pgdata, pgdata / "pg.log", f"-p 5555 -k {pgdata}", check=False)
+    assert "TMPDIR" in str(err.value) and "NX_TEST_PG_ROOT" in str(err.value)
+    assert not ran.exists(), "pg_ctl ran for a socket path Postgres would refuse"
+
+
+@_POSIX_SOCKET
+def test_a_socket_dir_that_fits_starts_as_before(tmp_path, monkeypatch) -> None:
+    exe, ran = _recording_pg_ctl(tmp_path)
+    pgdata = _socket_pgdata(tmp_path)
+    monkeypatch.setattr(_pg_ctl, "SUN_PATH_MAX", len(os.fsencode(str(pgdata))) + len("/.s.PGSQL.65535"))
+    proc = _pg_ctl.pg_ctl_start(exe, pgdata, pgdata / "pg.log", f"-k {pgdata}", check=False)
+    assert proc.returncode == 0 and ran.exists()
+
+
+@_POSIX_SOCKET
+def test_a_tcp_only_start_without_k_is_not_checked(tmp_path, monkeypatch) -> None:
+    """``provision()``-style clusters run with no socket; a long data dir is fine for them."""
+    exe, ran = _recording_pg_ctl(tmp_path)
+    pgdata = _socket_pgdata(tmp_path)
+    monkeypatch.setattr(_pg_ctl, "SUN_PATH_MAX", 1)
+    _pg_ctl.pg_ctl_start(exe, pgdata, pgdata / "pg.log", "-p 5555", check=False)
+    assert ran.exists()
+
+
+@_POSIX_SOCKET
+@pytest.mark.parametrize("options", ["-p 1 -k /x/y", "-k/x/y -p 1", "-c a=b -k '/x/y'"])
+def test_the_socket_dir_is_read_from_every_k_spelling(options) -> None:
+    assert _pg_ctl._socket_dir(options) == "/x/y"
+
+
+@_POSIX_SOCKET
+def test_the_limit_counts_bytes_not_characters(monkeypatch) -> None:
+    sock_dir = "/" + "é" * 10  # 21 bytes, 11 characters
+    monkeypatch.setattr(_pg_ctl, "SUN_PATH_MAX", 11 + len("/.s.PGSQL.65535"))
+    with pytest.raises(ValueError, match="sun_path"):
+        _pg_ctl.check_socket_dir(f"-k {sock_dir}")
+
+
+@_POSIX_SOCKET
+def test_the_limit_is_the_platforms() -> None:
+    assert _pg_ctl.SUN_PATH_MAX == (103 if sys.platform == "darwin" else 107)
