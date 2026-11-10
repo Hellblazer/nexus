@@ -564,7 +564,7 @@ def test_an_interrupted_streamed_build_does_not_outlive_nx(monkeypatch: pytest.M
 
             self.stdout = _Out()
 
-    monkeypatch.setattr(self_cmd.subprocess, "Popen", _Interrupted)
+    setattr_in(monkeypatch, self_cmd, "subprocess.Popen", _Interrupted)
     with pytest.raises(KeyboardInterrupt):
         self_cmd._run_build([sys.executable, "-c", "import time; time.sleep(60)"], progress=True)
     (proc,) = started
