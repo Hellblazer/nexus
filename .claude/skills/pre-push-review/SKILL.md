@@ -10,6 +10,10 @@ The fixed checks for a diff come from preflight: `nx run preflight --args-file -
 
 Source: T2 `nexus/qo7ie.36-census-feedback_test_runs_before_push`. Where it and the repo's own docs disagree, the docs win: `docs/agents/test-running.md` § Hand runs and develop CI, and `AGENTS.md` rules 5 and 13.
 
+## Commit messages
+
+Before a push, read `git log --oneline origin/develop..HEAD`. Each subject is 72 characters or fewer and says what changed, as `area: what changed (bead-id)`; the why, the evidence and the numbers go in the body after one blank line (`docs/contributing.md` § Git Workflow). To reword an unpushed subject, use `git commit --amend` for the last commit, or `git reset --soft <base>` and commit again, in your own worktree and never in the primary checkout.
+
 ## Lint remedies
 
 - **BLE001 (blind `except Exception`).** Narrow the catch to the error class the neighbouring code catches. A `# noqa: BLE001` makes a defect that arrives through the same path look like the refusal you meant to handle.

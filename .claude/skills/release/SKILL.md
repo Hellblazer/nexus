@@ -554,8 +554,10 @@ git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md \
 git commit -m "chore(release): conexus X.Y.Z"
 
 git push -u origin release/vX.Y.Z
-gh pr create --base main --title "release: conexus X.Y.Z" --body "<release notes>"
+gh pr create --base main --title "release: conexus X.Y.Z" --body-file <body.md>
 ```
+
+The body follows `docs/contributing.md` § Git Workflow: two or three plain sentences first (what this release changes for a user, and anything a reviewer must check), any `Closes #N` lines, then the full release notes inside `<details><summary>Details</summary> ... </details>`.
 
 A PR body closes an issue only with `Closes #N`, `Fixes #N` or `Resolves #N`, one per line; a plain reference leaves the issue open (PR #254). If the release PR is meant to close issues, write the keyword lines in the `--body`.
 
