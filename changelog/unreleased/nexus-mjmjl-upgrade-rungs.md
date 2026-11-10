@@ -1,0 +1,3 @@
+### Fixed
+
+- **`nx upgrade` scans each data step once, and says how far it is** (nexus-mjmjl). An interactive `nx upgrade` (and `--auto`) used to run a dry-run scan of every document in a rung's check, then the same scan again to fill, with nothing on screen in between. A rung that cannot answer from its completion record or one engine count now reads as pending without a scan, and its fill makes the one scan, printing a line about every 5 s with that batch's counts (documents read, rows filled; on stderr under `--auto`, which the session hook logs). `nx upgrade --dry-run` still makes the full read-only scan; `nx doctor` and the first command after a version change still make none.

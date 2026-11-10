@@ -477,6 +477,42 @@ def _record_deferrals(report: "LadderRunReport", completions: "Callable[[], dict
     guarded("deferral_log_record", _record, None)
 
 
+class _BatchProgress:
+    """The ladder's :class:`~nexus.upgrade_ladder.protocol.ProgressReporter` for ``nx upgrade`` (nexus-mjmjl).
+
+    Every event still goes to structlog. A rung's ``*_batch`` event also prints one line, at most every
+    :attr:`EVERY_S` per rung: ``  manifest span fill: documents 3,200, filled 410, ...`` (the batch's own counts).
+    *clock* is injectable for tests."""
+
+    EVERY_S: float = 5.0
+
+    def __init__(self, *, to_stderr: bool = False, clock: "Callable[[], float] | None" = None) -> None:
+        import time  # noqa: PLC0415 — stdlib
+
+        self._err = to_stderr
+        self._clock = clock or time.monotonic
+        self._last: dict[str, float] = {}
+
+    def emit(self, event: str, **fields: object) -> None:
+        _log.info(event, **fields)
+        if not event.endswith("_batch"):
+            return
+        rung = event.removesuffix("_batch")
+        now = self._clock()
+        if now - self._last.get(rung, float("-inf")) < self.EVERY_S:
+            return
+        self._last[rung] = now
+        shown = ", ".join(
+            f"{key.replace('_', ' ')} {value:,}" if isinstance(value, int) and not isinstance(value, bool)
+            else f"{key.replace('_', ' ')} {value}"
+            for key, value in fields.items()
+        )
+        try:
+            click.echo(f"  {rung.replace('_', ' ')}: {shown}", err=self._err)
+        except Exception:  # noqa: BLE001 — a progress line never fails the walk
+            pass
+
+
 def _run_ladder(
     *,
     dry_run: bool,
@@ -554,7 +590,15 @@ def _run_ladder(
     ledger = _ledger_fn() if _ledger_fn is not None else DeferredLadderLedger()
     try:
         holder = InProcessCompletionHolder(ledger)
-        report = LadderRunner(registry, holder, deadline=deadline).run()
+        # nexus-mjmjl: a rung's detect() answers without a scan (record or bounded count, else PENDING), so its
+        # converge makes the one scan instead of a dry run followed by the same scan; the scan's batch events
+        # become progress lines (stderr under --auto, which the hook logs) instead of INFO events nobody sees.
+        from nexus.upgrade_ladder.unattended import cheap_detect  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        with cheap_detect():
+            report = LadderRunner(
+                registry, holder, deadline=deadline, reporter=_BatchProgress(to_stderr=auto_mode),
+            ).run()
         holder.flush()
         # nexus-0sm1t: count each rung's consecutive deferrals so `nx doctor` can name one that defers on every run,
         # which --auto otherwise leaves silent. Interactive and --auto alike; a log failure never changes the outcome.

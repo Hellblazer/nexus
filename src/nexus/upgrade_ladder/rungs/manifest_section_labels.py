@@ -132,10 +132,13 @@ import structlog
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
     managed_service,
+    CHEAP_PENDING,
+    detect_refuses,
     refuses_managed_unattended,
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
+from nexus.upgrade_ladder.unattended import is_cheap_detect
 from nexus.upgrade_ladder.census_progress import guarded
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.deadline import active_expired
@@ -782,7 +785,7 @@ class ManifestSectionLabelsRung:
                     "section label (the engine's count; `nx upgrade` fills them)"
                 ),
             )
-        if refuses_unbounded_read(self._managed_fn):
+        if detect_refuses(self._managed_fn):
             # nexus-75w5d: no record and the engine cannot count, so the answer is a walk of the whole catalog. On a
             # managed service that is a 15-minute read of shared capacity per session start (19 at once
             # on 2026-10-31), so an unattended run reads nothing. Not applicable, not pending: the walk
@@ -793,6 +796,8 @@ class ManifestSectionLabelsRung:
             )
             _log.info("manifest_section_labels_rung_skipped", reason=reason)
             return RungStatus(applicable=False, converged=False, pending_detail=reason)
+        if is_cheap_detect():
+            return RungStatus(applicable=True, converged=False, pending_detail=CHEAP_PENDING)
         try:
             counts = self._dry_run(honour_deadline=True)
         except RouteAbsent as exc:

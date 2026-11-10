@@ -88,10 +88,13 @@ from nexus.collection_errors import SupersededCollectionWriteError
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
     managed_service,
+    CHEAP_PENDING,
+    detect_refuses,
     refuses_managed_unattended,
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
+from nexus.upgrade_ladder.unattended import is_cheap_detect
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.deadline import active_expired
 from nexus.upgrade_ladder.protocol import (
@@ -564,13 +567,15 @@ class ManifestSpanFillRung:
                     "rule refused are scanned once more (`nx upgrade`)"
                 ),
             )
-        if refuses_unbounded_read(self._managed_fn):
+        if detect_refuses(self._managed_fn):
             reason = (
                 "unattended `nx upgrade --auto` does not scan a managed catalog for manifest rows that lack a span "
                 f"(no completion record, and the engine has no count for it); {INTERACTIVE_REMEDY}"
             )
             _log.info("manifest_span_fill_rung_skipped", reason=reason)
             return RungStatus(applicable=False, converged=False, pending_detail=reason)
+        if is_cheap_detect():
+            return RungStatus(applicable=True, converged=False, pending_detail=CHEAP_PENDING)
         try:
             counts = self._dry_run(honour_deadline=True)
         except RouteAbsent as exc:

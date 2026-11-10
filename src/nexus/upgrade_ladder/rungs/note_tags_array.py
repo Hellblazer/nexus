@@ -42,9 +42,12 @@ from nexus.upgrade_ladder.auto_guard import (
     completion_recorded_at,
     default_completion_record,
     managed_service,
+    CHEAP_PENDING,
+    detect_refuses,
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
+from nexus.upgrade_ladder.unattended import is_cheap_detect
 from nexus.upgrade_ladder.deadline import active_expired
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
@@ -145,7 +148,7 @@ class NoteTagsArrayRung:
     # ── detect ───────────────────────────────────────────────────────────────
 
     def detect(self) -> RungStatus:
-        if refuses_unbounded_read(self._managed_fn):
+        if detect_refuses(self._managed_fn) or is_cheap_detect():
             # nexus-75w5d: the scan lists every note in every knowledge__* collection, on every call.
             # Unattended against a managed service it reads nothing; an interactive `nx upgrade` still scans
             # (`nx doctor` reports the rung as not checked). The one cheaper answer is the completion record:
@@ -159,6 +162,9 @@ class NoteTagsArrayRung:
                 "unattended `nx upgrade --auto` does not list every note of a managed catalog; "
                 f"{INTERACTIVE_REMEDY}"
             )
+            if is_cheap_detect() and not detect_refuses(self._managed_fn):
+                # nexus-mjmjl: an interactive `nx upgrade` lists the notes once, in converge, not twice.
+                return RungStatus(applicable=True, converged=False, pending_detail=CHEAP_PENDING)
             _log.info("note_tags_rung_skipped", reason=reason)
             return RungStatus(applicable=False, converged=False, pending_detail=reason)
         scanned = self._read()
