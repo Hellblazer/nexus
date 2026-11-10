@@ -88,12 +88,34 @@ from pathlib import Path
 
 # --- named limits, from the 2026-11-10 real-store runs (slowest measured in brackets) ---------
 DEFAULT_SILENCE_LIMIT_S: float = (
-    10.0  # [longest gap: 5.7 s doctor; 11.9 s nx upgrade from 7.99.0, a breach]
+    10.0  # the chosen reading of Sam's "a few seconds", not his number
+    # [longest gap: 5.7 s doctor; 11.9 s nx upgrade from 7.99.0 on a build before the heartbeats, a breach]
 )
-UPGRADE_CEILING_S: float = 120.0  # [13.9 s from 7.99.0, 2.3 s from 8.0.0]
+#: ``nx upgrade`` ceiling by kind of start (``start_kind``). ``None`` means PENDING: the value is not
+#: set yet, a run from that start can never be a PASS (verdict PENDING, combined NOT RUN, exit 2) and
+#: only ``UPGRADE_PENDING_HANG_GUARD_S`` bounds it. Measured, 86,000-row store (2.4 GB) for the first
+#: two and 140,000 rows in five collections (2.6 GB) for the third, chas lab-m, 2026-11-10:
+#:   newest-below: 2.3 s from 8.0.0.                      -> 120 s
+#:   last-7x:      13.9-14.2 s from 7.99.0.               -> 120 s
+#:   pre-pci:      460-662 s from 7.76.0 on develop d258282c6 (every pci_ index built inside the
+#:                 upgrade); 211 s with the rung-scan fix e979863a6 (nexus-mjmjl, in conexus 8.1.1).
+#: The pre-pci value is set by nexus-f3yqd.5 from the measurement on develop once that fix has
+#: landed, with its margin and the store size stated; no interim value is guessed here.
+UPGRADE_CEILINGS_S: dict[str, float | None] = {
+    "newest-below": 120.0,
+    "last-7x": 120.0,
+    "pre-pci": None,
+}
+UPGRADE_CEILING_PENDING_NOTE: str = (
+    "upgrade ceiling PENDING (nexus-f3yqd.5 sets it from the develop measurement once nexus-mjmjl's "
+    "rung-scan fix is in conexus 8.1.1)"
+)
+#: A hang guard for a start whose ceiling is pending. It is NOT a ceiling and never makes a PASS.
+UPGRADE_PENDING_HANG_GUARD_S: float = 1800.0
 DOCTOR_CEILING_S: float = 60.0  # [7.5 s]
 SEARCH_CEILING_S: float = 30.0  # [2.8 s]
-PACKAGE_UPGRADE_CEILING_S: float = 120.0  # [0.4 s]
+PACKAGE_UPGRADE_CEILING_S: float = 120.0  # [0.4 s]; a floor, not a margin of 8-10x
+VERSION_CHECK_CEILING_S: float = 60.0
 # Setup steps are not under test: a generous ceiling, no silence limit.
 INSTALL_PREV_CEILING_S: float = 900.0
 PREPARE_CEILING_S: float = 3600.0
@@ -101,6 +123,11 @@ START_OLD_CEILING_S: float = 600.0
 CLEANUP_CEILING_S: float = 120.0
 DEFAULT_ROWS_FLOOR: int = 50_000
 KILL_GRACE_S: float = 3.0
+#: A pty wide enough that rich never wraps a line of ours (the sentinel is matched as text).
+TERM_COLUMNS: int = 250
+TERM_LINES: int = 50
+#: SIGINT (fast shutdown) to a stray postmaster, then this long (bounded) before SIGKILL.
+REAP_GRACE_S: float = 60.0
 
 JUDGED_STEPS: tuple[str, ...] = ("package-upgrade", "upgrade", "doctor", "search")
 
@@ -159,6 +186,10 @@ PCI_POLL_S: float = 0.5
 PCI_TRIGGER_POLL_S: float = 0.1
 #: How long past the end of nx upgrade a restart already under way is given to finish.
 PCI_RESTART_JOIN_S: float = 2 * 300.0 + 30.0
+#: Watcher probe failures (a SQL error, a psql timeout; PG merely not accepting connections is not
+#: one) tolerated before the pid history is called unreliable: the watcher polls twice a second for
+#: the whole upgrade, so ten is under 1% of a ten-minute window.
+PCI_PROBE_ERROR_LIMIT: int = 10
 PCI_END_STATE_BOUND_S: float = (
     900.0  # a killed build's rebuild can wait for a 600 s sweep pass
 )
@@ -196,6 +227,7 @@ class StepResult:
     argv: list[str] = dataclasses.field(default_factory=list)
     silence_limit_s: float | None = None
     ceiling_s: float | None = None
+    ceiling_pending: bool = False  # the step's ceiling is not set yet: never a PASS
 
     @property
     def ok(self) -> bool:
@@ -205,7 +237,7 @@ class StepResult:
 # --- the watchdog ----------------------------------------------------------------------------
 
 
-def _set_winsize(fd: int, rows: int = 40, cols: int = 140) -> None:
+def _set_winsize(fd: int, rows: int = TERM_LINES, cols: int = TERM_COLUMNS) -> None:
     try:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     except OSError:
@@ -308,38 +340,49 @@ def run_step(
             + "\n"
         )
 
+    exited_at: float | None = None
     with open(log_path, "wb") as logf, open(chunks_path, "w") as chunkf:
-        while True:
-            now = clock()
-            if ceiling_s is not None and now - start > ceiling_s:
-                longest = max(longest, now - last)
-                status, breach = (
-                    "ceiling",
-                    f"ran past its ceiling of {ceiling_s:g}s (killed at {now - start:.1f}s)",
-                )
-                break
-            if silence_limit_s is not None and now - last > silence_limit_s:
-                longest = max(longest, now - last)
-                status, breach = (
-                    "silent",
-                    f"silent: printed nothing for {now - last:.1f}s (limit {silence_limit_s:g}s)",
-                )
-                break
-            if proc.poll() is not None:
-                break
-            if eof:
-                time.sleep(0.1)
-                continue
-            ready, _, _ = select.select([master], [], [], 0.1)
-            if ready:
-                try:
-                    data = os.read(master, 65536)
-                except OSError as exc:
-                    data = b"" if exc.errno == errno.EIO else b""
-                if data:
-                    take(data, clock())
-                else:
-                    eof = True
+        try:
+            while True:
+                now = clock()
+                if ceiling_s is not None and now - start > ceiling_s:
+                    longest = max(longest, now - last)
+                    status, breach = (
+                        "ceiling",
+                        f"ran past its ceiling of {ceiling_s:g}s (killed at {now - start:.1f}s)",
+                    )
+                    break
+                if silence_limit_s is not None and now - last > silence_limit_s:
+                    longest = max(longest, now - last)
+                    status, breach = (
+                        "silent",
+                        f"silent: printed nothing for {now - last:.1f}s (limit {silence_limit_s:g}s)",
+                    )
+                    break
+                if proc.poll() is not None:
+                    exited_at = now
+                    break
+                if eof:
+                    time.sleep(0.1)
+                    continue
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        data = os.read(master, 65536)
+                    except OSError as exc:
+                        if exc.errno != errno.EIO:
+                            raise
+                        data = b""  # EIO on a pty master: every slave end closed, end of output
+                    if data:
+                        take(data, clock())
+                    else:
+                        eof = True
+        except BaseException:
+            # A signal turned into SystemExit, or a read error: the step's process group must not
+            # outlive the driver (a stack left running holds the store and a SysV segment).
+            _kill_group(proc)
+            os.close(master)
+            raise
         if status:
             _kill_group(proc)
         else:
@@ -359,7 +402,11 @@ def run_step(
     end = clock()
     os.close(master)
     result.wall_s = round(end - start, 3)
-    result.longest_gap_s = round(max(longest, end - last if not status else longest), 3)
+    # The silence after the last output counts up to the moment the exit was seen, not up to the end
+    # of the drain (whose quiet wait is ours, not the step's).
+    if exited_at is not None:
+        longest = max(longest, exited_at - last)
+    result.longest_gap_s = round(longest, 3)
     result.output_bytes = total
     result.exit_code = proc.returncode
     result.tail = strip_ansi(tail.decode("utf-8", "replace")).strip()[-300:]
@@ -369,10 +416,6 @@ def run_step(
         result.status, result.reason = "failed", f"exit code {proc.returncode}"
     else:
         result.status = "ok"
-        # The final stretch of silence before a clean exit counts against the limit too.
-        if silence_limit_s is not None and result.longest_gap_s > silence_limit_s:
-            result.status = "silent"
-            result.reason = f"silent: printed nothing for {result.longest_gap_s:.1f}s (limit {silence_limit_s:g}s)"
     return result
 
 
@@ -433,6 +476,49 @@ def nonvacuity_findings(
                 f"search did not return the seeded sentinel ({sentinel_expect!r})"
             )
     return findings
+
+
+def store_rows_findings(
+    before: int | None, after: int | None, *, floor: int
+) -> list[str]:
+    """The store's own row count (``nexus.chunks`` read through the install's PG), before and after
+    ``nx upgrade``: a count that cannot be read, one under the floor, or fewer rows after than before
+    is a finding. The prepare JSON is the seeder's claim; this is what PG holds."""
+    out: list[str] = []
+    if before is None:
+        out.append(
+            "the store's rows could not be counted before nx upgrade: nothing was proved"
+        )
+    elif before < floor:
+        out.append(
+            f"PG holds {before} rows before nx upgrade, below the floor of {floor}: the rehearsal would prove nothing"
+        )
+    if after is None:
+        out.append(
+            "the store's rows could not be counted after nx upgrade: data survival is unproven"
+        )
+    else:
+        if after < floor:
+            out.append(
+                f"PG holds {after} rows after nx upgrade, below the floor of {floor}"
+            )
+        if before is not None and after < before:
+            out.append(
+                f"nx upgrade lost rows: {before} before, {after} after ({before - after} fewer)"
+            )
+    return out
+
+
+def version_findings(printed: str, candidate: str) -> list[str]:
+    """``nx --version`` after the package upgrade must name the candidate; anything else means the
+    steps after it exercised some other client."""
+    text = strip_ansi(printed)
+    pat = rf"(?<![\d.]){re.escape(candidate)}(?![\d.])"
+    if re.search(pat, text):
+        return []
+    return [
+        f"after package-upgrade nx --version printed {text.strip()[:120]!r}, not the candidate {candidate}"
+    ]
 
 
 _VER = re.compile(r"(\d+(?:\.\d+)*)(?:\.post(\d+))?")
@@ -603,6 +689,27 @@ class PgProbe:
         return [line.split("\t") for line in r.stdout.splitlines() if line]
 
 
+ROWS_SQL = "select count(*)::bigint from nexus.chunks"
+
+
+def count_rows(
+    sql: SqlFn,
+    *,
+    bound_s: float = PROBE_SNAPSHOT_BOUND_S,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """The store's chunk rows, retried while PG is down (an upgrade can restart it); loud at the bound."""
+    deadline = clock() + bound_s
+    while True:
+        rows = sql(ROWS_SQL)
+        if rows is not None:
+            return int(rows[0][0])
+        if clock() >= deadline:
+            raise ProbeError(f"PG did not accept connections within {bound_s:g}s")
+        sleep(0.5)
+
+
 def lsn_bytes(lsn: str) -> int:
     hi, lo = lsn.split("/")
     return (int(hi, 16) << 32) + int(lo, 16)
@@ -710,6 +817,28 @@ def write_rate(
 def is_pre_pci(version: str) -> bool:
     key, first = _vkey(version), _vkey(PCI_FIRST_VERSION)
     return key is not None and first is not None and key < first
+
+
+def start_kind(version: str) -> str:
+    """Which ``UPGRADE_CEILINGS_S`` entry a start uses: the pre-PCI release, the 7.x line, or any
+    newer start (the newest published version below the candidate)."""
+    if is_pre_pci(version):
+        return "pre-pci"
+    key = _vkey(version)
+    if key is not None and key[0][0] == 7:
+        return "last-7x"
+    return "newest-below"
+
+
+def upgrade_ceiling_for(
+    version: str,
+    table: dict[str, float | None] | None = None,
+    override: float | None = None,
+) -> float | None:
+    """The ``nx upgrade`` ceiling for a start; ``None`` is PENDING. ``override`` is --upgrade-ceiling."""
+    if override is not None:
+        return override
+    return (UPGRADE_CEILINGS_S if table is None else table)[start_kind(version)]
 
 
 def pci_check_enabled(flag: bool | None, version: str, *, standin: bool) -> bool:
@@ -1031,12 +1160,15 @@ def judge_pci(
     log_files: Sequence[str],
     adopted: set[str] = frozenset(),
     restart_t: float = 0.0,
+    probe_errors: int = 0,
 ) -> list[str]:
     """The pass rule. By pid: a build is identified by (index, backend pid); a new pid for the same
     index is a rebuild (what the restart fix must prevent). The same pid is not enough to call a
     build kept: it leaves pg_stat_progress_create_index when it finishes AND when the next boot
     terminates it (0.1-3.4 s in), so a kept build also needs the same (index, pid) seen after the
-    restart, the engine log's adoption line naming the index, and the index valid at the end."""
+    restart, the engine log's adoption line naming the index, and the index valid at the end.
+    ``restart_t`` is when the restart FINISHED (the watcher clock), so "after the restart" is the
+    sightings from then on, not the ones made while ``nx daemon service stop/start`` was still running."""
     why: list[str] = []
     pids: dict[str, list[int]] = {}
     for o in history:
@@ -1099,6 +1231,11 @@ def judge_pci(
         why.append(
             "no engine log was readable under logs/ (storage_service_native.log or "
             "storage_service_jar.log): the event scan proved nothing"
+        )
+    if probe_errors > PCI_PROBE_ERROR_LIMIT:
+        why.append(
+            f"the watcher's PG probe failed {probe_errors} times (limit {PCI_PROBE_ERROR_LIMIT}): "
+            "the pid history has gaps, so a rebuild may have gone unseen"
         )
     return why
 
@@ -1210,7 +1347,8 @@ def run_pci_check(
         failure_events=failure_events,
         log_files=files,
         adopted=adopted_indexes(lines),
-        restart_t=record.t_s,
+        restart_t=record.restarted_s if record.restarted_s is not None else record.t_s,
+        probe_errors=watcher.errors,
     )
     return done(why)
 
@@ -1330,18 +1468,33 @@ def build_verdict(
     write_rate: dict | None = None,
     pci_check: dict | None = None,
     engine_jar: str | None = None,
+    store_rows: dict | None = None,
 ) -> dict:
+    """One start's verdict. ``state`` is FAILED (a breach, a failed step, any finding, or no steps),
+    else PENDING (a step whose ceiling is not set yet: never a pass), else PASSED; ``passed`` is true
+    only for PASSED."""
     failed = [s for s in steps if s.status not in ("ok", "not-run")]
-    passed = not failed and not findings and bool(steps)
+    pending = [s.name for s in steps if s.ceiling_pending]
+    if failed or findings or not steps:
+        state = "FAILED"
+    elif pending:
+        state = "PENDING"
+    else:
+        state = "PASSED"
+    upgrade = next((s for s in steps if s.name == "upgrade"), None)
     return {
         "from_version": from_version,
         "target": target,
-        "passed": passed,
+        "passed": state == "PASSED",
+        "state": state,
+        "pending": pending,
         "findings": list(findings),
         "rows_floor": floor,
         "prepared_rows": total_rows(prepare) if prepare else 0,
+        "store_rows": store_rows,
         "prepare": prepare or {},
         "engine_jar": engine_jar,
+        "upgrade_ceiling_s": None if upgrade is None else upgrade.ceiling_s,
         "steps": [dataclasses.asdict(s) for s in steps],
         "write_rate": write_rate,
         "pci_check": pci_check,
@@ -1430,6 +1583,15 @@ def format_table(verdict: dict) -> str:
             f"{s['name']:<19}{s['status']:<9}{s['wall_s']:>9.1f}{s['longest_gap_s']:>15.1f}"
             f"{s['output_bytes']:>11}{'' if s['exit_code'] is None else s['exit_code']:>6}  {s['reason']}"
         )
+    if verdict.get("pending"):
+        lines.append(f"PENDING: {UPGRADE_CEILING_PENDING_NOTE}")
+    elif verdict.get("upgrade_ceiling_s") is not None:
+        lines.append(f"upgrade ceiling: {verdict['upgrade_ceiling_s']:g} s")
+    sr = verdict.get("store_rows")
+    if sr:
+        lines.append(
+            f"store rows (nexus.chunks): {sr.get('before')} before nx upgrade, {sr.get('after')} after"
+        )
     wr = format_write_rate(verdict.get("write_rate"))
     if wr:
         lines.append(wr)
@@ -1441,29 +1603,76 @@ def format_table(verdict: dict) -> str:
     return "\n".join(lines)
 
 
+START_MARK = "UPGRADE REHEARSAL START"
+GATE_MARK = "UPGRADE REHEARSAL GATE:"
+#: What the wrapper matches: the combined line only, never a per-start line.
+GATE_WORDS: tuple[str, ...] = ("PASSED", "FAILED", "NOT RUN", "NOT THE RELEASE GATE")
+EXIT_PASSED, EXIT_FAILED, EXIT_NOT_RUN = 0, 1, 2
+
+
 def verdict_line(verdict: dict) -> str:
-    word = "PASSED" if verdict["passed"] else "FAILED"
+    """One start's line. It never starts with the gate marker: only ``gate_result`` speaks for the gate."""
+    state = verdict["state"]
     bad = [s["name"] for s in verdict["steps"] if s["status"] not in ("ok", "not-run")]
-    tail = "" if verdict["passed"] else f" at {', '.join(bad) or 'non-vacuity'}"
+    tail = ""
+    if state == "FAILED":
+        tail = f" at {', '.join(bad) or 'non-vacuity'}"
+    elif state == "PENDING":
+        tail = f": {UPGRADE_CEILING_PENDING_NOTE}"
     return (
-        f"UPGRADE REHEARSAL {word}: from {verdict['from_version']} to {verdict['target']}"
+        f"{START_MARK} (from {verdict['from_version']}): {state}: to {verdict['target']}"
         f" ({verdict['prepared_rows']} rows){tail}"
     )
 
 
-def combined_line(verdicts: Sequence[dict]) -> str:
-    """The one line the wrapper ends on: every run passed, or which runs failed and where."""
+def gate_result(
+    verdicts: Sequence[dict], flags: Sequence[str] = ()
+) -> tuple[str, str, int]:
+    """(word, last line, exit code) for the whole gate. Only a run with every start PASSED and no
+    non-default flag is PASSED (exit 0). A real failure outranks a pending ceiling (FAILED, exit 1);
+    a pending ceiling, or a run under non-default flags, is not the release gate (exit 2)."""
     names = ", ".join(v["from_version"] for v in verdicts)
-    if verdicts and all(v["passed"] for v in verdicts):
-        return f"UPGRADE REHEARSAL PASSED: from {names} to {verdicts[0]['target']}"
-    bad = []
-    for v in verdicts:
-        if not v["passed"]:
+    target = verdicts[0]["target"] if verdicts else "?"
+    note = f" (NOT THE RELEASE GATE: {', '.join(flags)})" if flags else ""
+    failed = [v for v in verdicts if v["state"] == "FAILED"]
+    pending = [v for v in verdicts if v["state"] == "PENDING"]
+    if not verdicts or failed:
+        bad = []
+        for v in failed:
             at = [s["name"] for s in v["steps"] if s["status"] not in ("ok", "not-run")]
             bad.append(
                 f"{v['from_version']} ({'at ' + ', '.join(at) if at else 'non-vacuity'})"
             )
-    return f"UPGRADE REHEARSAL FAILED: from {', '.join(bad) or names}"
+        extra = (
+            f"; pending: {', '.join(v['from_version'] for v in pending)}"
+            if pending
+            else ""
+        )
+        return (
+            "FAILED",
+            f"{GATE_MARK} FAILED{note}: from {', '.join(bad) or names}{extra}",
+            EXIT_FAILED,
+        )
+    if pending:
+        who = ", ".join(v["from_version"] for v in pending)
+        return (
+            "NOT RUN",
+            f"{GATE_MARK} NOT RUN{note}: {UPGRADE_CEILING_PENDING_NOTE}; start(s) {who} cannot pass "
+            f"until it is set; passed: {', '.join(v['from_version'] for v in verdicts if v['state'] == 'PASSED') or 'none'}",
+            EXIT_NOT_RUN,
+        )
+    if flags:
+        return (
+            "NOT THE RELEASE GATE",
+            f"{GATE_MARK} NOT THE RELEASE GATE ({', '.join(flags)}): starts {names} passed under "
+            f"non-default settings to {target}",
+            EXIT_NOT_RUN,
+        )
+    return ("PASSED", f"{GATE_MARK} PASSED: from {names} to {target}", EXIT_PASSED)
+
+
+def combined_line(verdicts: Sequence[dict], flags: Sequence[str] = ()) -> str:
+    return gate_result(verdicts, flags)[1]
 
 
 def write_verdict(verdict: dict, path: Path) -> None:
@@ -1509,7 +1718,13 @@ class Config:
     sentinel_query: str
     sentinel_expect: str
     silence_limit_s: float
-    ceilings: dict[str, float]
+    ceilings: dict[
+        str, float
+    ]  # package-upgrade, doctor, search; nx upgrade's is per start
+    upgrade_ceilings: dict[str, float | None] = dataclasses.field(
+        default_factory=lambda: dict(UPGRADE_CEILINGS_S)
+    )
+    upgrade_ceiling_override: float | None = None  # --upgrade-ceiling: every start
     python: str = "3.12"
     standin: bool = False
     engine_jar: str | None = None  # NEXUS_SERVICE_JAR for every step from start-old on
@@ -1540,6 +1755,9 @@ def build_env(home: Path, config: Path) -> dict[str, str]:
         "NEXUS_CONFIG_DIR": str(config),
         "NX_LOCAL": "1",
         "NX_NO_TELEMETRY": "1",
+        # rich wraps at the terminal width; the sentinel is matched as text, so never let it wrap
+        "COLUMNS": str(TERM_COLUMNS),
+        "LINES": str(TERM_LINES),
     }
     # A user's shell always carries its login name; without it getpass and the engine's PG
     # provisioning disagree on the cluster superuser (first measuring run, 2026-11-10).
@@ -1557,23 +1775,150 @@ def build_env(home: Path, config: Path) -> dict[str, str]:
     return env
 
 
-def _reap_postmasters(run_dir: Path) -> list[str]:
-    """Ensure no postmaster outlives the run. Only pids read from OUR work dir's pid files."""
+def cmdline_of(pid: int) -> list[str] | None:
+    """The process's argv: /proc where there is one, else ps; None when it cannot be read."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        return [a for a in raw.decode("utf-8", "replace").split("\0") if a]
+    except OSError:
+        pass
+    try:
+        r = subprocess.run(
+            ["ps", "-o", "args=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.split() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def is_our_postmaster(argv: Sequence[str] | None, run_dir: Path) -> bool:
+    """A postgres whose data directory (``-D``) is under ``run_dir``: the only process this driver
+    ever signals. A pid file can be stale and its pid reused by something else."""
+    if not argv or Path(argv[0]).name not in ("postgres", "postmaster"):
+        return False
+    root = str(run_dir.resolve())
+    for i, a in enumerate(argv):
+        d = (
+            argv[i + 1]
+            if a == "-D" and i + 1 < len(argv)
+            else (a[2:] if a.startswith("-D") and len(a) > 2 else "")
+        )
+        if d and (str(Path(d).resolve()) + os.sep).startswith(root + os.sep):
+            return True
+    return False
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:  # a zombie is gone for our purposes (ps knows; /proc says Z)
+        status = Path(f"/proc/{pid}/status").read_text()
+        if "\nState:\tZ" in status:
+            return False
+    except OSError:
+        pass
+    return True
+
+
+def _reap_postmasters(
+    run_dir: Path,
+    *,
+    grace_s: float = REAP_GRACE_S,
+    cmdline: Callable[[int], list[str] | None] = cmdline_of,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[str]:
+    """Ensure no postmaster outlives the run. Only a pid read from a pid file under OUR run dir whose
+    process is a postgres with its data dir under it is signalled: SIGINT (fast shutdown), then up to
+    ``grace_s`` for it to go, then SIGKILL. Anything else is reported and left alone."""
     notes: list[str] = []
     for pidfile in glob.glob(str(run_dir / "**" / "postmaster.pid"), recursive=True):
         try:
             pid = int(Path(pidfile).read_text().splitlines()[0])
-            os.kill(pid, 0)
         except (OSError, ValueError, IndexError):
             continue
-        for sig in (signal.SIGINT, signal.SIGKILL):
+        if not _pid_alive(pid):
+            continue
+        if not is_our_postmaster(cmdline(pid), run_dir):
+            notes.append(
+                f"pid {pid} from {pidfile} is not a postgres under {run_dir}: left alone"
+            )
+            continue
+        try:
+            os.kill(pid, signal.SIGINT)
+        except ProcessLookupError:
+            continue
+        deadline = clock() + grace_s
+        while _pid_alive(pid) and clock() < deadline:
+            sleep(0.5)
+        how = "ended after SIGINT"
+        if _pid_alive(pid):
             try:
-                os.kill(pid, sig)
+                os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
-                break
-            time.sleep(2)
-        notes.append(f"stray postmaster {pid} under {run_dir} ended")
+                pass
+            for _ in range(20):
+                if not _pid_alive(pid):
+                    break
+                sleep(0.25)
+            how = f"still running {grace_s:g}s after SIGINT: SIGKILLed"
+        notes.append(f"stray postmaster {pid} under {run_dir}: {how}")
     return notes
+
+
+#: The bulk of a PG data dir; what is freed once a start has its verdict (the logs stay as evidence).
+STORE_BULK_DIRS: tuple[str, ...] = ("base", "pg_wal")
+
+
+def reclaim_store(config: Path, run_dir: Path) -> list[str]:
+    """Free a finished start's PG store (its ``base`` and ``pg_wal``) so the disk holds one store at
+    a time. Only the data dir its own ``pg_credentials`` names, only when it is under ``run_dir``,
+    and the caller has already stopped and reaped the cluster."""
+    try:
+        creds = parse_credentials(
+            (config / "pg_credentials").read_text(encoding="utf-8")
+        )
+        data = Path(creds["PG_DATA"]).resolve()
+    except (OSError, KeyError):
+        return []
+    if (
+        not (str(data) + os.sep).startswith(str(run_dir.resolve()) + os.sep)
+        or data == run_dir.resolve()
+    ):
+        return [f"store at {data} is outside {run_dir}: not reclaimed"]
+    freed = []
+    for name in STORE_BULK_DIRS:
+        d = data / name
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+            freed.append(name)
+    return [f"reclaimed {', '.join(freed)} of the store at {data}"] if freed else []
+
+
+class _Terminated(SystemExit):
+    """SIGTERM/SIGHUP, as an exit that lets every ``finally`` (stack stop, reap) run."""
+
+
+def install_exit_handlers() -> None:
+    """SIGTERM and SIGHUP become SystemExit(128+signal) in the main thread, once: a lab-run cancel, a
+    closed ssh session or a wrapper's kill must run the cleanup, not leave a postmaster and a store."""
+    state = {"fired": False}
+
+    def handler(signum: int, _frame: object) -> None:
+        if state["fired"]:
+            return  # the cleanup is already running; a second signal must not cut it short
+        state["fired"] = True
+        raise _Terminated(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, handler)
 
 
 def rehearse(from_version: str, cfg: Config) -> dict:
@@ -1598,7 +1943,11 @@ def rehearse(from_version: str, cfg: Config) -> dict:
     }  # swapped for the engine-override environment once the old stack is up
     pci_on = pci_check_enabled(cfg.pci_check, from_version, standin=cfg.standin)
     write_rate_info: dict | None = None
+    store_rows: dict | None = None
     pci_evidence: dict | None = None
+    why_not_run = (
+        "an earlier step failed"  # the real reason, set where a step stops the run
+    )
     probe = PgProbe(config)
     watcher: PciWatcher | None = None
     trigger: PciRestartTrigger | None = None
@@ -1692,8 +2041,11 @@ def rehearse(from_version: str, cfg: Config) -> dict:
             judged=False,
         )
         stop = not r.ok
-        if not stop and not Path(nx).exists():
+        if stop:
+            why_not_run = f"setup step install-prev {r.status}: {r.reason}"
+        elif not Path(nx).exists():
             findings.append(f"install-prev left no nx at {nx}")
+            why_not_run = f"install-prev left no nx at {nx}"
             stop = True
 
         if not stop:
@@ -1723,16 +2075,20 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 judged=False,
             )
             stop = not r.ok
-            if not stop:
+            if stop:
+                why_not_run = f"setup step prepare {r.status}: {r.reason}"
+            else:
                 try:
                     prepare = json.loads(json_path.read_text())
                 except (OSError, ValueError) as exc:
                     findings.append(
                         f"prepare left no readable JSON at {json_path}: {exc}"
                     )
+                    why_not_run = f"prepare left no readable JSON at {json_path}"
                     stop = True
             if prepare is not None and prepare.get("verdict") != "prepared":
                 findings.append(f"prepare verdict {prepare.get('verdict')!r}")
+                why_not_run = f"prepare verdict {prepare.get('verdict')!r}"
                 stop = True
 
         # The box a user upgrades has its engine running: the old stack comes up on the old data
@@ -1746,6 +2102,8 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 judged=False,
             )
             stop = not r.ok
+            if stop:
+                why_not_run = f"setup step start-old {r.status}: {r.reason}"
         # From here the NEW client runs: a jar override applies to it, never to the old stack above.
         cur["env"] = engine_env(
             env,
@@ -1754,6 +2112,9 @@ def rehearse(from_version: str, cfg: Config) -> dict:
         )
 
         sil = cfg.silence_limit_s
+        upgrade_ceiling = upgrade_ceiling_for(
+            from_version, cfg.upgrade_ceilings, cfg.upgrade_ceiling_override
+        )
         plan = [
             (
                 "package-upgrade",
@@ -1776,12 +2137,11 @@ def rehearse(from_version: str, cfg: Config) -> dict:
             ("doctor", [nx, "doctor"]),
             ("search", [nx, "search", cfg.sentinel_query, "-m", "5"]),
         ]
+        rows_before: int | None = None
         for name, argv in plan:
             if stop:
                 steps.append(
-                    StepResult(
-                        name=name, status="not-run", reason="an earlier step failed"
-                    )
+                    StepResult(name=name, status="not-run", reason=why_not_run)
                 )
                 continue
             before: PgCounters | None = None
@@ -1790,6 +2150,10 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     before = take_counters(probe.sql)
                 except ProbeError as exc:
                     findings.append(f"write-rate probe failed before nx upgrade: {exc}")
+                try:
+                    rows_before = count_rows(probe.sql)
+                except ProbeError as exc:
+                    findings.append(f"row count failed before nx upgrade: {exc}")
                 if pci_on and before is not None:
                     # From before the upgrade boot: every sighting of a pci_ build and its pid counts.
                     watcher = PciWatcher(probe.sql)
@@ -1802,12 +2166,58 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     )
                     trigger.start()
             upgrade_t0 = time.monotonic()
+            pending = name == "upgrade" and upgrade_ceiling is None
+            ceiling = (
+                UPGRADE_PENDING_HANG_GUARD_S
+                if pending
+                else upgrade_ceiling
+                if name == "upgrade"
+                else cfg.ceilings[name]
+            )
             try:
-                r = go(name, argv, silence=sil, ceiling=cfg.ceilings[name])
+                r = go(name, argv, silence=sil, ceiling=ceiling)
             finally:
                 if name == "upgrade":
                     upgrade_done.set()
+            if pending:
+                # Not a ceiling: a hang guard. The step is judged on silence and exit, and this start
+                # can end PENDING at best.
+                r.ceiling_pending = True
+                r.ceiling_s = None
+                if r.ok:
+                    r.reason = UPGRADE_CEILING_PENDING_NOTE
+                elif r.status == "ceiling":
+                    r.reason = (
+                        f"ran past the {UPGRADE_PENDING_HANG_GUARD_S:g}s hang guard; "
+                        + UPGRADE_CEILING_PENDING_NOTE
+                    )
             stop = not r.ok
+            if stop:
+                why_not_run = f"{name} {r.status}: {r.reason}"
+            if name == "upgrade":
+                # The "after" readings come right after nx upgrade returns, not after the trigger's join.
+                if before is not None:
+                    try:
+                        write_rate_info = write_rate(
+                            before,
+                            take_counters(probe.sql),
+                            r.wall_s,
+                            (prepare or {}).get("data_dir_bytes"),
+                        )
+                        say(f"[{from_version}] {format_write_rate(write_rate_info)}")
+                    except ProbeError as exc:
+                        findings.append(
+                            f"write-rate probe failed after nx upgrade: {exc}"
+                        )
+                rows_after: int | None = None
+                try:
+                    rows_after = count_rows(probe.sql)
+                except ProbeError as exc:
+                    findings.append(f"row count failed after nx upgrade: {exc}")
+                store_rows = {"before": rows_before, "after": rows_after}
+                findings.extend(
+                    store_rows_findings(rows_before, rows_after, floor=cfg.rows_floor)
+                )
             if name == "upgrade" and trigger is not None:
                 # A restart that began during nx upgrade is given time to finish before doctor starts.
                 if not trigger.join(PCI_RESTART_JOIN_S):
@@ -1822,17 +2232,21 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                         rec.at_clock - upgrade_t0,
                         rec.done_clock - upgrade_t0,
                     )
-            if name == "upgrade" and before is not None:
-                try:
-                    write_rate_info = write_rate(
-                        before,
-                        take_counters(probe.sql),
-                        r.wall_s,
-                        (prepare or {}).get("data_dir_bytes"),
+            if name == "package-upgrade" and not stop:
+                v = go(
+                    "version-check",
+                    [nx, "--version"],
+                    silence=None,
+                    ceiling=VERSION_CHECK_CEILING_S,
+                    judged=False,
+                )
+                bad = version_findings(texts.get("version-check", ""), cfg.candidate)
+                if not v.ok or bad:
+                    findings.extend(bad)
+                    stop = True
+                    why_not_run = (
+                        bad[0] if bad else f"nx --version {v.status}: {v.reason}"
                     )
-                    say(f"[{from_version}] {format_write_rate(write_rate_info)}")
-                except ProbeError as exc:
-                    findings.append(f"write-rate probe failed after nx upgrade: {exc}")
         if pci_on:
             record = trigger.record if trigger is not None else None
             if watcher is None or (stop and record is None):
@@ -1840,8 +2254,8 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     StepResult(
                         name=PCI_STEP,
                         status="not-run",
-                        reason="an earlier step failed"
-                        if watcher is not None
+                        reason=why_not_run
+                        if watcher is not None or stop
                         else "no PG reading before nx upgrade",
                     )
                 )
@@ -1897,7 +2311,13 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 ceiling=CLEANUP_CEILING_S,
                 judged=False,
             )
-        findings.extend(_reap_postmasters(run_dir))
+        reaped = _reap_postmasters(run_dir)
+        findings.extend(n for n in reaped if n.startswith("stray postmaster"))
+        for n in reaped:
+            say(f"[{from_version}] {n}")
+        if not reaped:  # nothing alive over the store: one store on disk at a time
+            for note in reclaim_store(config, run_dir):
+                say(f"[{from_version}] {note}")
 
     # A setup failure is already in findings; a step breach is in the step. Add non-vacuity only
     # when the prepare produced something to judge.
@@ -1924,6 +2344,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
         write_rate=write_rate_info,
         pci_check=pci_evidence,
         engine_jar=cfg.engine_jar,
+        store_rows=store_rows,
     )
     write_verdict(verdict, run_dir / "verdict.json")
     say(format_table(verdict))
@@ -1997,7 +2418,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--silence-limit", type=float, default=DEFAULT_SILENCE_LIMIT_S)
     ap.add_argument("--package-ceiling", type=float, default=PACKAGE_UPGRADE_CEILING_S)
-    ap.add_argument("--upgrade-ceiling", type=float, default=UPGRADE_CEILING_S)
+    ap.add_argument(
+        "--upgrade-ceiling",
+        type=float,
+        default=None,
+        help="one nx upgrade ceiling for every start (default: the per-start table, "
+        "UPGRADE_CEILINGS_S; a non-default run is not the release gate)",
+    )
     ap.add_argument("--doctor-ceiling", type=float, default=DOCTOR_CEILING_S)
     ap.add_argument("--search-ceiling", type=float, default=SEARCH_CEILING_S)
     ap.add_argument(
@@ -2037,8 +2464,34 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+#: Options that never change what is judged: where the work goes, what the candidate is, where the
+#: combined verdict is written.
+_NEUTRAL_DESTS = frozenset(
+    {"work", "target_wheel", "target_release", "json_out", "help"}
+)
+
+
+def non_default_flags(
+    ap: argparse.ArgumentParser, args: argparse.Namespace
+) -> list[str]:
+    """The options set to anything but their default: each one can relax or change what the gate
+    proves, so a run that used one is not the release gate."""
+    out: list[str] = []
+    for action in ap._actions:
+        if not action.option_strings or action.dest in _NEUTRAL_DESTS:
+            continue
+        value = getattr(args, action.dest, action.default)
+        if value == action.default:
+            continue
+        negated = isinstance(action, argparse.BooleanOptionalAction) and value is False
+        out.append(action.option_strings[1 if negated else 0])
+    return out
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    ap = _build_parser()
+    args = ap.parse_args(argv)
+    install_exit_handlers()
     repo = Path(__file__).resolve().parent.parent
     try:
         if args.target_wheel is not None:
@@ -2064,13 +2517,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.published_versions
             else fetch_published_versions()
         )
+        if args.target_wheel is not None and candidate in published:
+            raise RehearsalError(
+                f"candidate {candidate} is already published on PyPI: the version bump was skipped "
+                "(the rehearsal would upgrade from a release to itself)"
+            )
         versions = resolve_from_versions(
             args.from_version, published, candidate=candidate
         )
     except RehearsalError as exc:
-        say(f"UPGRADE REHEARSAL NOT RUN: {exc}", err=True)
-        return 2
+        say(f"{GATE_MARK} NOT RUN: {exc}", err=True)
+        return EXIT_NOT_RUN
 
+    flags = non_default_flags(ap, args)
+    if engine_jar and "--engine-jar" not in flags:
+        flags.append("--engine-jar")  # NEXUS_SERVICE_JAR in the environment counts too
     if args.standin:
         prepare_cmd = args.prepare_cmd or STANDIN_PREPARE_CMD
         floor = args.rows_floor if args.rows_floor is not None else STANDIN_ROWS_FLOOR
@@ -2095,10 +2556,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         silence_limit_s=args.silence_limit,
         ceilings={
             "package-upgrade": args.package_ceiling,
-            "upgrade": args.upgrade_ceiling,
             "doctor": args.doctor_ceiling,
             "search": args.search_ceiling,
         },
+        upgrade_ceiling_override=args.upgrade_ceiling,
         standin=args.standin,
         engine_jar=engine_jar,
         pci_check=args.pci_restart_check,
@@ -2108,16 +2569,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     cfg.work.mkdir(parents=True, exist_ok=True)
     say(f"upgrade rehearsal: candidate {label}; starting from {', '.join(versions)}")
+    for v in versions:
+        c = upgrade_ceiling_for(v, cfg.upgrade_ceilings, cfg.upgrade_ceiling_override)
+        say(
+            f"upgrade ceiling for {v} ({start_kind(v)}): "
+            + (
+                f"{c:g} s"
+                if c is not None
+                else f"PENDING ({UPGRADE_CEILING_PENDING_NOTE})"
+            )
+        )
+    if flags:
+        say(f"NOT THE RELEASE GATE: non-default settings: {', '.join(flags)}")
     if engine_jar:
         say(f"engine jar override (from start-old on): {engine_jar}")
     verdicts = [rehearse(v, cfg) for v in versions]
-    combined = {"passed": all(v["passed"] for v in verdicts), "runs": verdicts}
-    write_verdict(combined, args.json_out or cfg.work / "verdict.json")
+    word, line, code = gate_result(verdicts, flags)
+    write_verdict(
+        {
+            "passed": word == "PASSED",
+            "result": word,
+            "exit_code": code,
+            "non_default_flags": flags,
+            "runs": verdicts,
+        },
+        args.json_out or cfg.work / "verdict.json",
+    )
     say("== combined ==")
     for v in verdicts:
         say(verdict_line(v))
-    say(combined_line(verdicts))
-    return 0 if combined["passed"] else 1
+    say(line)
+    return code
 
 
 if __name__ == "__main__":

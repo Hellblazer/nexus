@@ -10,12 +10,15 @@
 # non-zero. The mechanics live in scripts/upgrade_rehearsal.py (offline self-test:
 # tests/test_upgrade_rehearsal_watchdog.py).
 #
-# Three starting points, each in its own work dir with its own step table and verdict line:
+# Three starting points, each in its own work dir with its own step table and its own
+# "UPGRADE REHEARSAL START (from X)" line:
 #   the newest published version below the candidate (8.0.0 while 8.1.0 is the candidate), the
 #   last published 7.x release, and 7.76.0 (before per-collection indexes: its upgrade boot builds
 #   every pci_ index, and the PCI keep check restarts the engine mid-build, during nx upgrade, and judges by pid).
-#   `--from-version X.Y.Z` runs one of them alone. Around `nx upgrade` the driver also records the
-#   WAL bytes and MB/s PG wrote (see the driver's docstring for the extrapolation).
+#   `--from-version X.Y.Z` runs one of them alone (and is then not the release gate). Around
+#   `nx upgrade` the driver also records the WAL bytes and MB/s PG wrote (see the driver's docstring
+#   for the extrapolation). The 7.76.0 start's nx upgrade ceiling is PENDING (nexus-f3yqd.5): until it
+#   is set that start cannot pass, and the gate ends NOT RUN (exit 2).
 #
 # Self-provisioning: builds the wheel from THIS checkout (or, with NEXUS_TARGET_RELEASE=X.Y.Z,
 # installs that published version), uses a throwaway HOME and NEXUS_CONFIG_DIR under a work dir,
@@ -32,7 +35,15 @@
 #
 # Heavy: run it on a lab host, e.g.
 #   lab-remote -c lab-m -- tests/e2e/upgrade-rehearsal.sh
-# Last line: "UPGRADE REHEARSAL PASSED ..." (exit 0) or "UPGRADE REHEARSAL FAILED ..." (exit 1).
+# The last line is the gate's own, "UPGRADE REHEARSAL GATE: <word> ...", and the exit says the same:
+#   exit 0  PASSED                every start passed, no non-default setting
+#   exit 1  FAILED                a breach, a failed step, a non-vacuity finding, a surviving postmaster
+#   exit 2  NOT RUN               the harness could not start, or a start's ceiling is pending
+#           NOT THE RELEASE GATE  every start passed under a non-default flag (--standin, --rows-floor,
+#                                 --silence-limit, any --*-ceiling, --prepare-cmd, --no-pci-restart-check,
+#                                 a single --from-version, --engine-jar ...): a development run
+# Only the "GATE:" line counts; the per-start lines never start with it. A run that ends without one
+# is FAILED. Run it in the background: it takes about an hour (see the release skill, Step 6e).
 set -euo pipefail
 
 # shellcheck source=lib/python.sh disable=SC1091
@@ -57,7 +68,8 @@ MVV_TMP="${TMPDIR:-/tmp}"
 MVV_TMP="${MVV_TMP%/}"
 WORK="$(mktemp -d "$MVV_TMP/upgrade-rehearsal-XXXXXX")"
 GATE_OK=0
-LAST_LINE="UPGRADE REHEARSAL FAILED: the harness did not finish"
+GATE_MATCH='^UPGRADE REHEARSAL GATE: (PASSED|FAILED|NOT RUN|NOT THE RELEASE GATE)'
+LAST_LINE="UPGRADE REHEARSAL GATE: FAILED: the harness did not finish"
 
 cleanup() {
     local rc=$?
@@ -69,8 +81,9 @@ cleanup() {
         pid="$(head -n1 "$f" 2>/dev/null || true)"
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             echo "WORK KEPT: $WORK (postmaster $pid from $f is still running; removing the tree would orphan it)" >&2
-            echo "$LAST_LINE"
-            return 0
+            # A run that left a postmaster behind is not a pass, whatever the driver printed.
+            echo "UPGRADE REHEARSAL GATE: FAILED: postmaster $pid from $f survived the run (was: $LAST_LINE)"
+            exit 1
         fi
     done < <(find "$WORK" -name postmaster.pid 2>/dev/null)
     if [ "$GATE_OK" != 1 ] && [ "$KEEP_WORK" != 1 ]; then
@@ -99,9 +112,24 @@ cleanup() {
     echo "$LAST_LINE"
     return "$rc"
 }
+DRIVER_PID=""
+TEE_PID=""
+# A signal must reach the driver, which runs its own cleanup (stack stop, postmaster reap): bash would
+# otherwise hold the trap until a foreground driver ended. The driver runs in the background so that
+# `wait` is interruptible; then this waits for the driver's cleanup before the work dir is judged.
+forward_signal() {
+    local code=$1
+    if [ -n "$DRIVER_PID" ] && kill -0 "$DRIVER_PID" 2>/dev/null; then
+        kill -TERM "$DRIVER_PID" 2>/dev/null || true
+        wait "$DRIVER_PID" 2>/dev/null || true
+    fi
+    if [ -n "$TEE_PID" ]; then wait "$TEE_PID" 2>/dev/null || true; fi
+    exit "$code"
+}
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'forward_signal 130' INT
+trap 'forward_signal 143' TERM
+trap 'forward_signal 129' HUP
 
 if [ -n "${NEXUS_TARGET_RELEASE:-}" ]; then
     TARGET_ARGS=(--target-release "$NEXUS_TARGET_RELEASE")
@@ -109,29 +137,37 @@ if [ -n "${NEXUS_TARGET_RELEASE:-}" ]; then
 else
     echo "── build the wheel under test ──"
     if ! ( cd "$REPO_ROOT" && uv build --wheel -o "$WORK/dist" ) >"$WORK/build.log" 2>&1; then
-        LAST_LINE="UPGRADE REHEARSAL FAILED: wheel build failed (see $WORK/build.log)"
+        LAST_LINE="UPGRADE REHEARSAL GATE: FAILED: wheel build failed (see $WORK/build.log)"
         echo "$LAST_LINE" >&2
         exit 1
     fi
     WHEELS=("$WORK"/dist/conexus-*.whl)
     WHEEL="${WHEELS[0]}"
-    [ -f "$WHEEL" ] || { LAST_LINE="UPGRADE REHEARSAL FAILED: the build produced no wheel"; exit 1; }
+    [ -f "$WHEEL" ] || { LAST_LINE="UPGRADE REHEARSAL GATE: FAILED: the build produced no wheel"; exit 1; }
     TARGET_ARGS=(--target-wheel "$WHEEL")
 fi
 
+mkfifo "$WORK/driver.fifo"
+tee "$WORK/driver.out" <"$WORK/driver.fifo" &
+TEE_PID=$!
 set +e
 "$E2E_PYTHON" -u "$REPO_ROOT/scripts/upgrade_rehearsal.py" \
     --work "$WORK" "${TARGET_ARGS[@]}" "${DRIVER_ARGS[@]+"${DRIVER_ARGS[@]}"}" \
-    2>&1 | tee "$WORK/driver.out"
-rc=${PIPESTATUS[0]}
+    >"$WORK/driver.fifo" 2>&1 &
+DRIVER_PID=$!
+wait "$DRIVER_PID"
+rc=$?
+wait "$TEE_PID"
 set -e
+DRIVER_PID=""
+TEE_PID=""
 
-LAST_LINE="$(grep -E '^UPGRADE REHEARSAL (PASSED|FAILED|NOT RUN)' "$WORK/driver.out" | tail -n1 || true)"
-[ -n "$LAST_LINE" ] || LAST_LINE="UPGRADE REHEARSAL FAILED: the driver ended (exit $rc) without a verdict line"
-if [ "$rc" = 0 ] && [[ "$LAST_LINE" == "UPGRADE REHEARSAL PASSED"* ]]; then
+LAST_LINE="$(grep -E "$GATE_MATCH" "$WORK/driver.out" | tail -n1 || true)"
+[ -n "$LAST_LINE" ] || LAST_LINE="UPGRADE REHEARSAL GATE: FAILED: the driver ended (exit $rc) without a verdict line"
+if [ "$rc" = 0 ] && [[ "$LAST_LINE" == "UPGRADE REHEARSAL GATE: PASSED"* ]]; then
     GATE_OK=1
     exit 0
 fi
-# A driver that exits 0 without a PASSED line, or any non-zero exit, is a failure.
+# A driver that exits 0 without the PASSED gate line, or any non-zero exit, is not a pass.
 [ "$rc" != 0 ] || rc=1
 exit "$rc"

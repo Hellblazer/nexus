@@ -368,7 +368,13 @@ def test_verdict_file_and_table(tmp_path: Path) -> None:
     ur.write_verdict(verdict, out)
     assert json.loads(out.read_text())["steps"][0]["name"]
     line = ur.verdict_line(verdict)
-    assert line.startswith("UPGRADE REHEARSAL FAILED") and "8.0.0" in line
+    assert (
+        line.startswith("UPGRADE REHEARSAL START (from 8.0.0): FAILED")
+        and "upgrade" in line
+    )
+    assert not line.startswith(ur.GATE_MARK), (
+        "only the combined line speaks for the gate"
+    )
 
 
 def test_a_passing_verdict_says_passed() -> None:
@@ -381,7 +387,9 @@ def test_a_passing_verdict_says_passed() -> None:
         floor=1,
     )
     assert verdict["passed"] is True
-    assert ur.verdict_line(verdict).startswith("UPGRADE REHEARSAL PASSED")
+    line = ur.verdict_line(verdict)
+    assert line.startswith("UPGRADE REHEARSAL START (from 7.99.0): PASSED")
+    assert not line.startswith(ur.GATE_MARK)
 
 
 def test_combined_line_names_each_run_and_where_it_failed() -> None:
@@ -403,11 +411,16 @@ def test_combined_line_names_each_run_and_where_it_failed() -> None:
             upgrade=ur.StepResult(name="upgrade", status="ceiling", reason="x")
         ),
     )
-    assert ur.combined_line([ok]) == "UPGRADE REHEARSAL PASSED: from 8.0.0 to wheel"
+    assert (
+        ur.combined_line([ok]) == "UPGRADE REHEARSAL GATE: PASSED: from 8.0.0 to wheel"
+    )
     line = ur.combined_line([ok, bad])
-    assert line.startswith("UPGRADE REHEARSAL FAILED") and "7.99.0 (at upgrade)" in line
+    assert (
+        line.startswith("UPGRADE REHEARSAL GATE: FAILED")
+        and "7.99.0 (at upgrade)" in line
+    )
     assert "8.0.0 (" not in line
-    assert ur.combined_line([]).startswith("UPGRADE REHEARSAL FAILED")
+    assert ur.combined_line([]).startswith("UPGRADE REHEARSAL GATE: FAILED")
 
 
 def test_nonvacuity_deferred_upgrade_is_a_finding() -> None:
