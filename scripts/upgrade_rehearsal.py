@@ -106,6 +106,7 @@ import termios
 import threading
 import time
 import urllib.request
+import zipfile
 from collections.abc import Callable, Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from pathlib import Path
@@ -502,6 +503,47 @@ def nonvacuity_findings(
                 f"search did not return the seeded sentinel ({sentinel_expect!r})"
             )
     return findings
+
+
+#: ``nx doctor``'s convergence row names the engine the install serves (``doctor.py``, engine convergence).
+_SERVING_ENGINE_RE = re.compile(r"Engine convergence: installed engine v(\d+\.\d+\.\d+)")
+#: The pin line in ``nexus/engine_version.py``: ``REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 187)``.
+_PIN_RE = re.compile(r"^REQUIRED_ENGINE_VERSION\b[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", re.M)
+
+
+def engine_pin_of_wheel(path: Path) -> str:
+    """The engine the candidate wheel pins (``REQUIRED_ENGINE_VERSION``), read from the wheel itself:
+    its ``nx upgrade`` installs exactly that engine, so the rehearsal can check it ran (nexus-jh1f2)."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            text = z.read("nexus/engine_version.py").decode("utf-8")
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        raise RehearsalError(f"cannot read REQUIRED_ENGINE_VERSION from {path.name}: {exc}") from exc
+    m = _PIN_RE.search(text)
+    if not m:
+        raise RehearsalError(f"{path.name} has no REQUIRED_ENGINE_VERSION line in nexus/engine_version.py")
+    return ".".join(m.groups())
+
+
+def serving_engine_from_doctor(doctor_text: str) -> str | None:
+    m = _SERVING_ENGINE_RE.search(strip_ansi(doctor_text))
+    return m.group(1) if m else None
+
+
+def engine_identity_findings(
+    doctor_text: str, *, expected: str | None, doctor_ok: bool, engine_jar: str | None
+) -> list[str]:
+    """The engine that served the upgraded install must be the one the candidate pins. Not judged
+    when there is no wheel pin (a published target), when a jar override is declared (the run is
+    already not the release gate), or when doctor failed (that is its own finding)."""
+    if expected is None or engine_jar or not doctor_ok:
+        return []
+    serving = serving_engine_from_doctor(doctor_text)
+    if serving is None:
+        return ["nx doctor did not report the serving engine (no engine convergence row): which engine ran is unproven"]
+    if serving != expected:
+        return [f"the install serves engine v{serving}, but the candidate pins v{expected}: the rehearsal ran the wrong engine"]
+    return []
 
 
 def store_rows_findings(
@@ -1495,6 +1537,7 @@ def build_verdict(
     pci_check: dict | None = None,
     engine_jar: str | None = None,
     store_rows: dict | None = None,
+    engine: str | None = None,
 ) -> dict:
     """One start's verdict. ``state`` is FAILED (a breach, a failed step, any finding, or no steps),
     else PENDING (a step whose ceiling is not set yet: never a pass), else PASSED; ``passed`` is true
@@ -1520,6 +1563,7 @@ def build_verdict(
         "store_rows": store_rows,
         "prepare": prepare or {},
         "engine_jar": engine_jar,
+        "engine": engine,
         "upgrade_ceiling_s": None if upgrade is None else upgrade.ceiling_s,
         "steps": [dataclasses.asdict(s) for s in steps],
         "write_rate": write_rate,
@@ -1647,7 +1691,9 @@ def verdict_line(verdict: dict) -> str:
         tail = f": {UPGRADE_CEILING_PENDING_NOTE}"
     return (
         f"{START_MARK} (from {verdict['from_version']}): {state}: to {verdict['target']}"
-        f" ({verdict['prepared_rows']} rows){tail}"
+        f" ({verdict['prepared_rows']} rows"
+        + (f", engine v{verdict['engine']}" if verdict.get("engine") else "")
+        + f"){tail}"
     )
 
 
@@ -1766,6 +1812,7 @@ class Config:
     keep_work: bool = (
         False  # --keep-work: the PG store (base, pg_wal) stays after each start
     )
+    expected_engine: str | None = None  # the candidate wheel's REQUIRED_ENGINE_VERSION, "0.1.187"
 
 
 def _ambient_uv_dir() -> str:
@@ -2430,6 +2477,15 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 required_steps=JUDGED_STEPS + ((PCI_STEP,) if pci_on else ()),
             )
         )
+    doctor_step = next((s for s in steps if s.name == "doctor"), None)
+    findings.extend(
+        engine_identity_findings(
+            texts.get("doctor", ""),
+            expected=cfg.expected_engine,
+            doctor_ok=doctor_step is not None and doctor_step.ok,
+            engine_jar=cfg.engine_jar,
+        )
+    )
     verdict = build_verdict(
         from_version=from_version,
         target=cfg.target_label,
@@ -2441,6 +2497,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
         pci_check=pci_evidence,
         engine_jar=cfg.engine_jar,
         store_rows=store_rows,
+        engine=serving_engine_from_doctor(texts.get("doctor", "")),
     )
     write_verdict(verdict, run_dir / "verdict.json")
     say(format_table(verdict))
@@ -2634,6 +2691,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         versions = resolve_from_versions(
             args.from_version, published, candidate=candidate
         )
+        # The engine the candidate's nx upgrade installs; each start checks doctor names it.
+        expected_engine = (
+            engine_pin_of_wheel(args.target_wheel.resolve()) if args.target_wheel is not None else None
+        )
     except RehearsalError as exc:
         say(f"{GATE_MARK} NOT RUN: {exc}", err=True)
         return EXIT_NOT_RUN
@@ -2671,6 +2732,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         upgrade_ceiling_override=args.upgrade_ceiling,
         standin=args.standin,
         engine_jar=engine_jar,
+        expected_engine=expected_engine,
         pci_check=args.pci_restart_check,
         pci_collections=args.pci_collections,
         pci_end_bound_s=args.pci_end_bound,
@@ -2680,6 +2742,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     cfg.work.mkdir(parents=True, exist_ok=True)
     say(f"upgrade rehearsal: candidate {label}; starting from {', '.join(versions)}")
+    if expected_engine:
+        say(f"the candidate pins engine v{expected_engine}; each start checks nx doctor names it")
     for v in versions:
         c = upgrade_ceiling_for(v, cfg.upgrade_ceilings, cfg.upgrade_ceiling_override)
         say(

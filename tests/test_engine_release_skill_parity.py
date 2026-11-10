@@ -225,6 +225,8 @@ def test_step_5b1_prescribes_the_user_seat_upgrade_rehearsal() -> None:
     assert "--engine-jar" not in fenced, "5b.1 must drive the published binary, not a jar"
     assert "run.sh --package-upgrade" not in fenced, "5b.1 still runs the retired toy-seed leg"
     assert "REQUIRED_ENGINE_VERSION" in step, "5b.1 must say the tree pins this tag"
+    assert "NEXUS_SERVICE_JAR" in step, "5b.1 must rule out the environment's jar override too"
+    assert "every line must name this tag" in step, "5b.1 must have the operator read the served engine"
 
 
 # ── The one-engine-identity directive, as a test (Hal 2026-07-15) ────────────

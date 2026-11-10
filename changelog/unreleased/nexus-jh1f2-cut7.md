@@ -1,0 +1,3 @@
+### Changed
+
+- **The upgrade rehearsal checks which engine ran, and an engine tag that carries a migration is rehearsed with it** (nexus-jh1f2, audit cut 7, Sam 2026-11-10). `tests/e2e/upgrade-rehearsal.sh` now reads the engine the candidate wheel pins (`REQUIRED_ENGINE_VERSION`) and fails a start whose `nx doctor` names a different engine or none; each `UPGRADE REHEARSAL START` line ends with the engine that served it. The engine-release skill's Step 5b.1, the representative-scale rehearsal for an engine tag carrying schema or data DDL, now runs this rehearsal from a tree that pins the tag, so the upgrade installs the tag's published binary, in place of the `--package-upgrade` leg and its 10-30 document seed.

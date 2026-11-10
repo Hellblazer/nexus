@@ -499,7 +499,9 @@ not newer than it. For each start it:
    (`NEXUS_TARGET_RELEASE=X.Y.Z` uses the published version instead: that is a
    post-publish rerun, never the pre-tag gate), and checks that
    `nx --version` names the candidate;
-3. runs `nx upgrade`, `nx doctor` and `nx search` for the seeder's sentinel note.
+3. runs `nx upgrade`, `nx doctor` and `nx search` for the seeder's sentinel note, and
+   checks that `nx doctor` names the engine the candidate wheel pins
+   (`REQUIRED_ENGINE_VERSION`); the start's line ends with that engine.
 
 Each of those steps runs under a pty and FAILS when it prints nothing for 10 s, runs
 past its ceiling, or exits non-zero. Seven limits are Sam's decision of record
