@@ -25,7 +25,7 @@ neither file.)
 (the upgrade shakeout) and Step 6c (sandbox shakedown) went with the scripts they
 ran. The battery is now the fresh-install MVV, the package-upgrade convergence
 MVV and the local-service gate, behind one preflight. Steps that remain:
-0, 0c, 1, 2, 3, 4, 4a, 5, 6d, 7, 8, 8a, 9, 10, 11, 11b, 11c, 12, 12a.
+0, 0c, 1, 2, 3, 4, 4a, 5, 6d, 6e, 7, 8, 8a, 9, 10, 11, 11b, 11c, 12, 12a.
 
 **RDR-237 prerequisite (the release that first carries MinerU-only extraction).**
 That release (every PDF through MinerU, the old extractor removed, no default-on MinerU
@@ -460,6 +460,45 @@ Trigger: this release carries a schema or data migration — a new `upgrade_ladd
 4. **Post-deploy data-integrity verification, beyond version identity.** Once Step 11c's published-bytes rehearsal lands, verify data integrity beyond a version match: exact row-count reconciliation, not just `/version` naming X.Y.Z — the T2 [22485] pattern ("ROW INVARIANT EXACT: 385,484 pre == post ... ANALYZE fired").
 
 Full rationale and evidence citations: `docs/contributing.md` § Schema/data-migration releases.
+
+### 6e. Upgrade rehearsal from the user's seat (BLOCKING, nexus-f3yqd.5)
+
+Why (Sam, 2026-11-10): two upgrades to 8.0.0 each rewrote the local store for about
+20 minutes at the first engine boot, with nothing on screen, and no gate looked at
+what a user sees. This one takes a real install of the previous release with a
+sizeable local store, upgrades it the way a user does, and times what the user
+waits through.
+
+Run it after Step 3's version bump, in the release worktree, on chas:
+
+```bash
+lab-remote -c lab-m -- tests/e2e/upgrade-rehearsal.sh
+```
+
+It starts from two previous releases, each in its own work dir with its own step
+table and verdict line: the newest published version below the candidate (8.0.0 for
+an 8.1.0 cut) and the last published 7.x (7.99.0). For each it:
+
+1. installs that release and builds its local store with the f3yqd.1 seeder
+   (`scripts/upgrade_boot_writes.py --prepare-only`: 86,000 knowledge rows, about
+   2.4 GB, about 13 minutes on lab-m), then starts its engine;
+2. upgrades the package to the candidate wheel built from the worktree
+   (`NEXUS_TARGET_RELEASE=X.Y.Z` uses the published version instead);
+3. runs `nx upgrade`, `nx doctor` and `nx search` for the seeder's sentinel note.
+
+Each of those steps runs under a pty and FAILS when it prints nothing for 10 s, runs
+past its ceiling (upgrade 120 s, doctor 60 s, search 30 s, package 120 s), or exits
+non-zero. A run also fails when it checked nothing: the store under 50,000 rows, a
+step not run, a cross in doctor, the sentinel not found, or a `DEFERRED` rung. The
+ceilings come from the first real-store runs on 2026-11-10 (slowest: `nx upgrade`
+13.9 s from 7.99.0) and bound this fixture's size; they say nothing about a store
+many times larger, where a silent stretch grows with the data.
+
+All four steps must pass from both starts before the release branch is committed.
+The last line is `UPGRADE REHEARSAL PASSED` (exit 0) or `UPGRADE REHEARSAL FAILED`
+(exit 1), and a failure keeps its step logs and engine and PG logs on chas. A
+failure is a release blocker, never waived here: a silent or slow step is what the
+user sees. Paste the two step tables into the cut bead.
 
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 
