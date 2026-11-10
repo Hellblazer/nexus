@@ -8,7 +8,11 @@ the supervisor's migration record (:mod:`nexus.daemon.migration_status`).
 Each entry: ``id``, ``what``, ``started_at`` (ISO-8601 UTC), ``done``,
 ``total``, ``unit``, an optional ``step`` (``what``, ``done``, ``total``,
 ``unit``) for an inner level of progress, ``safe_to_stop`` and ``on_stop``.
-The engine sends no durations: elapsed, rate and time left are derived here.
+The engine sends no durations: the elapsed time is derived here. ``total``
+can grow during a pass (builds are planned as the pass reaches them), so it
+reads "so far" and no time left is derived from it; a step whose ``done`` is
+null (a waiting phase) shows its phase alone. ``step.what`` names no
+collection (``/v1/status`` is unauthenticated).
 
 :func:`render` turns entries into lines; :class:`Announcer` prints them from
 inside a wait loop, once when the work is first seen and again every
@@ -54,15 +58,16 @@ def _count(n: Any) -> int | None:
     return int(n) if isinstance(n, (int, float)) and not isinstance(n, bool) and math.isfinite(n) else None
 
 
-def _progress(obj: dict[str, Any], elapsed: float | None) -> str:
+def _progress(obj: dict[str, Any], *, so_far: bool) -> str:
+    """``done of total unit``; empty when ``done`` is null (a waiting phase).
+    The engine plans each build when its pass reaches it, so an entry's
+    ``total`` can grow: it reads "so far", and no time left is derived from it."""
     done, total = _count(obj.get("done")), _count(obj.get("total"))
     unit = obj.get("unit") if isinstance(obj.get("unit"), str) else ""
     if done is None:
         return ""
     text = f"{done:,}" + (f" of {total:,}" if total else "") + (f" {unit}" if unit else "")
-    if total and elapsed and elapsed > 0 and 0 < done < total:
-        text += f", about {duration((total - done) * elapsed / done)} left"
-    return text
+    return text + (" so far" if so_far and total else "")
 
 
 def render(entries: Iterable[dict[str, Any]], *, now: float) -> list[str]:
@@ -76,13 +81,13 @@ def render(entries: Iterable[dict[str, Any]], *, now: float) -> list[str]:
             head = f"The engine is {what}" if not what.startswith("The engine") else what
             if elapsed is not None:
                 head += f", running for {duration(elapsed)}"
-            progress = _progress(entry, elapsed)
+            progress = _progress(entry, so_far=True)
             if progress:
                 head += f": {progress}"
             lines.append(head + ".")
             step = entry.get("step")
             if isinstance(step, dict) and step.get("what"):
-                inner = _progress(step, None)
+                inner = _progress(step, so_far=False)
                 lines.append(f"  now: {step['what']}" + (f" ({inner})" if inner else ""))
             on_stop = entry.get("on_stop")
             if isinstance(entry.get("notice"), str) and entry["notice"]:

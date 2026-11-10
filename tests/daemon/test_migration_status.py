@@ -88,15 +88,15 @@ def test_the_engines_boot_work_entries_render_with_progress_and_step() -> None:
     entry = {
         "id": "pci-reconcile", "what": "building search indexes after an upgrade",
         "started_at": "2027-01-15T08:00:00Z", "done": 3, "total": 11, "unit": "indexes",
-        "step": {"what": "building index for collection docs: loading tuples", "done": 41230, "total": 98000, "unit": "blocks"},
+        "step": {"what": "building index: loading tuples", "done": 41230, "total": 98000, "unit": "blocks"},
         "safe_to_stop": True,
         "on_stop": "the index in progress is dropped and rebuilt from the start next boot; finished ones are kept",
     }
     now = boot_work._started(entry) + 90
     assert boot_work.render([entry], now=now) == [
         "The engine is building search indexes after an upgrade, running for 1 m 30 s: "
-        "3 of 11 indexes, about 4 m 00 s left.",
-        "  now: building index for collection docs: loading tuples (41,230 of 98,000 blocks)",
+        "3 of 11 indexes so far.",
+        "  now: building index: loading tuples (41,230 of 98,000 blocks)",
         "  It is safe to stop: the index in progress is dropped and rebuilt from the start next boot; "
         "finished ones are kept.",
     ]
@@ -234,3 +234,15 @@ def test_the_copy_estimate_is_capped_and_refuses_nonsense() -> None:
     assert ms.copy_estimate(1000, 100, 100) == 99
     assert ms.copy_estimate(50, 100, 100) is None
     assert ms.copy_estimate(150, 100, 0) is None
+
+
+def test_a_waiting_phase_shows_the_phase_without_numbers() -> None:
+    entry = {
+        "id": "pci-reconcile", "what": "building search indexes after an upgrade",
+        "started_at": "2027-01-15T08:00:00Z", "done": 1, "total": 2, "unit": "indexes",
+        "step": {"what": "waiting for writers before build", "done": None, "total": None, "unit": "blocks"},
+        "safe_to_stop": True, "on_stop": "x",
+    }
+    lines = boot_work.render([entry], now=boot_work._started(entry) + 5)
+    assert lines[0].endswith(": 1 of 2 indexes so far.")
+    assert lines[1] == "  now: waiting for writers before build"
