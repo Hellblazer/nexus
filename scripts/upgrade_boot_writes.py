@@ -27,7 +27,7 @@ taken as empty), no rows in ``pg_stat_progress_create_index`` or ``pg_stat_progr
 growth under ``--idle-wal-bytes`` over the last ``--idle-window`` seconds; and, unless
 ``--no-reconcile-wait``, a completed PCI reconcile pass in this boot's engine log plus the PCI end state (a
 valid ``pci_`` index for each large seeded collection, none INVALID). The ceiling applies to the total;
-the phases name where a regression is. The ceiling gates WAL only: data-file writes that are not
+the phases name where a regression is (see Bounds below). The ceiling gates WAL only: data-file writes that are not
 WAL-logged (an index build's own heap and index pages beyond WAL, temp files) show in the reported
 ``pg_stat_io`` figures, which are not gated.
 
@@ -49,8 +49,16 @@ restart is a kept build, a new pid is a rebuild. With PG up the pass rule wants 
 built twice and every kept build adopted (``pci_anchor_adopted``); with PG down, each in-flight index
 rebuilt exactly once.
 
-Exit: 0 at or under ``--ceiling`` (or no ceiling given) with the restart rule met; 1 above the ceiling, a
-boot that never reached ready (``boot-failed``) or a broken restart rule (``restart-red``); 2 when the run
+Bounds: ``--ceiling-boot`` gates the upgrade boot's migrate + ready WAL (``boot_wal_bytes``; the release gate
+is 64 MiB, accepted by Sam 2026-11-10), ``--ceiling`` its total through settle (on a ``--restart-mid-queue``
+run, through the restart), and ``--ceiling-reboot`` a plain same-version reboot's migrate + ready
+(``reboot_wal_bytes``; 64 MiB on the release gate's same-version leg). Both limits are Sam's, 2026-11-10, recorded
+on nexus-f3yqd.1. Every boot's ``boot_wal_bytes`` is reported in ``boots[]``. A ``resume`` boot is never gated:
+a PCI build kept across the restart writes its WAL while it migrates.
+
+Exit: 0 within every bound given (or none given) with the restart rule met; 1 above a bound
+(``boot-over-ceiling``, ``reboot-over-ceiling`` or ``over-ceiling``, with ``ceilings_tripped``), a boot that never reached ready
+(``boot-failed``) or a broken restart rule (``restart-red``); 2 when the run
 itself failed (a fixture that did not take, a boot that never reached idle within ``--max-wait``, a step
 that errored). Prints the figures as one JSON object on stdout, and to ``--json`` when given.
 
@@ -61,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import re
 import glob
 import json
@@ -633,6 +642,14 @@ class Report:
     total_io_extend_bytes: int | None = None
     elapsed_s: float = 0.0
     ceiling: int | None = None
+    ceiling_boot: int | None = None
+    ceiling_reboot: int | None = None
+    new_jar_sha256: str | None = None
+    new_jar_commit: str | None = None
+    new_engine_version: dict = field(default_factory=dict)
+    boot_wal_bytes: int = 0
+    reboot_wal_bytes: int = 0
+    ceilings_tripped: list[str] = field(default_factory=list)
     prepare_s: float = 0.0
     data_dir_bytes: int = 0
     verdict: str = ""
@@ -855,7 +872,11 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
             if port and "bind" not in marks and port_open(port):
                 marks["bind"] = s
             if port and "bind" in marks and http_status(port, "/health")[0] == 200:
-                marks["ready"] = s
+                # Sampled again after the 200, so WAL written during the probe counts toward the boot, not settle.
+                marks["ready"] = sample(inst, t0) or s
+                samples.append(marks["ready"])
+                ver = http_status(port, "/version")[1] or {}
+                rec["engine_version"] = {k: ver.get(k) for k in ("release_version", "app_version", "build_ref")}
         rc = proc.poll()
         if rc not in (None, 0):
             start_out.flush()
@@ -999,6 +1020,8 @@ def boot_new(inst: Install, a: argparse.Namespace, env: dict[str, str], rep: Rep
     last = first
     rep.phases = first.get("phases", {})
     rep.total_wal_bytes = first.get("total_wal_bytes", 0)
+    rep.boot_wal_bytes = boot_wal_bytes(first)
+    first["boot_wal_bytes"] = rep.boot_wal_bytes
     rep.total_io_write_bytes = first.get("total_io_write_bytes")
     rep.total_io_extend_bytes = first.get("total_io_extend_bytes")
     rep.elapsed_s = first.get("elapsed_s", first.get("failed_s", 0.0))
@@ -1015,6 +1038,10 @@ def boot_new(inst: Install, a: argparse.Namespace, env: dict[str, str], rep: Rep
             # A failure of the second boot is its own result; it never overwrites the first boot's.
             second = {"label": label, "reached_ready": False, "harness_error": f"second boot could not be measured: {exc}"}
         second.pop("_indexes", None)
+        if second.get("reached_ready") or "phases" in second:
+            second["boot_wal_bytes"] = boot_wal_bytes(second)  # reported; gated only as a plain reboot
+        if label == "reboot" and second.get("reached_ready"):
+            rep.reboot_wal_bytes = second["boot_wal_bytes"]   # the figure --ceiling-reboot gates
         rep.boots.append(second)
         last = second
         if label == "resume":
@@ -1024,6 +1051,66 @@ def boot_new(inst: Install, a: argparse.Namespace, env: dict[str, str], rep: Rep
         second.pop("_adopted_lines", None)
     rep.hnsw_after = last.get("hnsw", 0)
     rep.pci_after = last.get("pci", 0)
+
+
+def jar_identity(jar: Path | None) -> str | None:
+    """sha256 of the engine jar under test, so a verdict names exactly the bytes it ran."""
+    if jar is None or not jar.is_file():
+        return None
+    h = hashlib.sha256()
+    with jar.open("rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def build_commit(build_ref: str | None) -> str | None:
+    """The commit a gate jar was built from: scripts/build-gate-jar.sh stamps build_ref as <git short sha>+<nonce>."""
+    if not build_ref:
+        return None
+    return build_ref.split("+", 1)[0] or None
+
+
+def commit_matches(expected: str, built: str | None) -> bool:
+    """A full or abbreviated expected commit against the short sha the jar carries."""
+    if not built:
+        return False
+    n = min(len(expected), len(built))
+    return n >= 7 and expected[:n].lower() == built[:n].lower()
+
+
+def boot_wal_bytes(boot: dict) -> int:
+    """WAL a boot wrote before it was ready: migrate + ready (PG up to /health 200). A failed boot's figure is
+    its span up to the failure, or 0 when PG never answered (no sample); a failed boot is boot-failed whatever
+    this says."""
+    ph = boot.get("phases") or {}
+    if "until_failure" in ph:
+        return int(ph["until_failure"].get("wal_bytes", 0))
+    if boot.get("reached_ready") and not all("wal_bytes" in (ph.get(k) or {}) for k in ("migrate", "ready")):
+        # A ready boot with no measured span must not read as 0 bytes, a silent green.
+        raise HarnessError(f"boot {boot.get('label')} reached ready but has no migrate/ready WAL figures: {ph}")
+    return sum(int((ph.get(k) or {}).get("wal_bytes", 0)) for k in ("migrate", "ready"))
+
+
+def ceiling_verdict(boot_wal: int, total_wal: int, ceiling: int | None, ceiling_boot: int | None,
+                    reboot_wal: int = 0, ceiling_reboot: int | None = None) -> tuple[str, list[str]]:
+    """The byte bounds, decided by Sam on 2026-11-10 (recorded on nexus-f3yqd.1). ``ceiling_boot`` gates the
+    UPGRADE boot's migrate + ready (64 MiB on the release gate); ``ceiling`` gates that boot's total through
+    settle; ``ceiling_reboot`` gates a plain same-version ``reboot``'s migrate + ready (64 MiB on the release
+    gate's same-version leg). A ``resume`` boot is never gated, because a PCI build kept across the restart
+    writes its WAL while it migrates; ``--ceiling-reboot`` is refused with ``--restart-mid-queue`` for that
+    reason. Returns the verdict and the bounds that tripped."""
+    tripped = [name for name, value, bound in (("boot", boot_wal, ceiling_boot), ("reboot", reboot_wal, ceiling_reboot),
+                                               ("total", total_wal, ceiling))
+               if bound is not None and value > bound]
+    if "boot" in tripped:
+        return "boot-over-ceiling", tripped
+    if "reboot" in tripped:
+        return "reboot-over-ceiling", tripped
+    if tripped:
+        return "over-ceiling", tripped
+    gated = any(b is not None for b in (ceiling, ceiling_boot, ceiling_reboot))
+    return ("under-ceiling" if gated else "measured"), tripped
 
 
 def default_jar() -> Path | None:
@@ -1036,11 +1123,20 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Upgrade-boot write gate (nexus-f3yqd.1).")
     ap.add_argument("--prev-client", default="8.0.0", help="conexus release whose pinned engine builds the old state")
     ap.add_argument("--new-jar", type=Path, default=None, help="engine jar to upgrade to (default service/target)")
+    ap.add_argument("--new-jar-commit", default=None,
+                    help="commit the jar must have been built from: checked against the build_ref the booted engine "
+                         "serves on /version (stamped by scripts/build-gate-jar.sh); a mismatch or no stamp is exit 2")
     ap.add_argument("--collections", type=int, default=3, help="large collections, each above the PCI threshold")
     ap.add_argument("--rows", type=int, default=27_000, help="rows in each large collection")
     ap.add_argument("--control-rows", type=int, default=5_000, help="rows in the control (must stay under the threshold)")
     ap.add_argument("--seed", type=int, default=20261110)
-    ap.add_argument("--ceiling", type=int, default=None, help="fail (exit 1) when total WAL bytes exceed this")
+    ap.add_argument("--ceiling", type=int, default=None,
+                    help="fail (exit 1, over-ceiling) when the upgrade boot's total WAL, through settle, exceeds this")
+    ap.add_argument("--ceiling-boot", type=int, default=None,
+                    help="fail (exit 1, boot-over-ceiling) when the upgrade boot's migrate + ready WAL exceeds this")
+    ap.add_argument("--ceiling-reboot", type=int, default=None,
+                    help="fail (exit 1, reboot-over-ceiling) when the same-version reboot's migrate + ready WAL exceeds "
+                         "this; refused with --restart-mid-queue (a resume boot is never gated) and --no-second-boot")
     ap.add_argument("--max-wait", type=float, default=2400.0, help="seconds each boot may take to reach idle")
     ap.add_argument("--idle-window", type=float, default=60.0)
     ap.add_argument("--idle-wal-bytes", type=int, default=1 << 20)
@@ -1074,6 +1170,9 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(f"unknown rot shape(s) {unknown}; known: {', '.join(ROT_SHAPES)}")
     if a.rot and a.interrupt_build:
         ap.error("--rot and --interrupt-build cannot be combined: the interrupted state is taken before rot is planted")
+    if a.ceiling_reboot is not None and (a.restart_mid_queue or not a.second_boot):
+        ap.error("--ceiling-reboot gates the same-version reboot: it cannot be combined with --restart-mid-queue "
+                 "(that second boot is a resume, which is never gated) or --no-second-boot (there is no reboot)")
     if a.restart_mid_queue and not a.second_boot:
         ap.error("--restart-mid-queue needs the second boot (drop --no-second-boot): the verdict is what it resumed")
     if a.prepare_only and a.work is None:
@@ -1089,7 +1188,9 @@ def main(argv: list[str] | None = None) -> int:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("NX_", "NEXUS_"))}
     env.update({"NEXUS_CONFIG_DIR": str(config), "NX_LOCAL": "1"})
     inst = Install(config)
-    rep = Report(prev_client=a.prev_client, new_jar=str(a.new_jar), rows_per_collection=a.rows, ceiling=a.ceiling)
+    rep = Report(prev_client=a.prev_client, new_jar=str(a.new_jar), rows_per_collection=a.rows, ceiling=a.ceiling,
+                 ceiling_boot=a.ceiling_boot, ceiling_reboot=a.ceiling_reboot,
+                 new_jar_sha256=None if a.prepare_only else jar_identity(a.new_jar))
     rc = 2
     try:
         t_prep = time.monotonic()
@@ -1101,9 +1202,18 @@ def main(argv: list[str] | None = None) -> int:
             rc = 0
             return rc
         boot_new(inst, a, env, rep)
+        rep.new_engine_version = rep.boots[0].get("engine_version") or {}
+        rep.new_jar_commit = build_commit(rep.new_engine_version.get("build_ref"))
+        if a.new_jar_commit and rep.boots[0].get("reached_ready") and not commit_matches(a.new_jar_commit,
+                                                                                         rep.new_jar_commit):
+            raise HarnessError(f"the engine under test reports build_ref {rep.new_engine_version.get('build_ref')!r}, "
+                               f"not commit {a.new_jar_commit}: build the jar on that tree with "
+                               f"scripts/build-gate-jar.sh")
         if a.restart_mid_queue and rep.boots[0].get("reached_ready") and "restarted_mid_queue_s" not in rep.boots[0]:
             raise HarnessError(f"--restart-mid-queue {a.restart_mid_queue} never fired: the upgrade boot showed "
                                f"fewer than {a.restart_mid_queue} pci_ builds, so the restart leg tested nothing")
+        ceiling_name, rep.ceilings_tripped = ceiling_verdict(rep.boot_wal_bytes, rep.total_wal_bytes, a.ceiling,
+                                                             a.ceiling_boot, rep.reboot_wal_bytes, a.ceiling_reboot)
         failed = [b["label"] for b in rep.boots if not b.get("reached_ready") and "harness_error" not in b]
         unmeasured = [b["harness_error"] for b in rep.boots if "harness_error" in b]
         if unmeasured and rep.boots[0].get("reached_ready"):
@@ -1117,9 +1227,8 @@ def main(argv: list[str] | None = None) -> int:
             rep.verdict = "restart-red"
             rc = 1
         else:
-            over = a.ceiling is not None and rep.total_wal_bytes > a.ceiling
-            rep.verdict = "over-ceiling" if over else ("under-ceiling" if a.ceiling is not None else "measured")
-            rc = 1 if over else 0
+            rep.verdict = ceiling_name
+            rc = 1 if rep.ceilings_tripped else 0
     except Exception as exc:  # noqa: BLE001 - every failure to measure is exit 2, never a red or a green
         rc = 2
         rep.verdict = "error"
