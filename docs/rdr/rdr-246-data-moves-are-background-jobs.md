@@ -178,27 +178,45 @@ ranges:
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
 | dml_utils (Hellblazer/dml_utils main as of PR #142) | Yes | Launcher needs pg_background; per-chunk routine does not; no bytea keys |
-| pg_background (vibhorkum/pg_background) | Docs only so far | Runs SQL in a background worker with its own transaction; no shared_preload_libraries needed (to verify in the bundle build) |
-| nexus PG bundle (scripts/build_pg_bundle.sh, build_pg_bundle_windows.py) | Yes | Ships PG, pgvector, contrib; contrib check lists vector and pg_trgm; no pg_background |
+| pg_background (vibhorkum/pg_background) | Yes, v2.0.4 (tag and pinned commit) | Runs SQL in a background worker with its own transaction. No shared_preload_libraries needed (verified on four platforms). Calls POSIX random() (one site, polling jitter). PostgreSQL License |
+| nexus PG bundle (scripts/build_pg_bundle.sh, build_pg_bundle_windows.py) | Yes | Before this RDR: PG, pgvector and contrib, with no pg_background. With Phase 1 Step 2, pg_background v2.0.4 is in every bundle, and the contrib checks fail closed without it |
 
 ### Key Discoveries
 
-- **Verified**: neither the local bundle nor any nexus changeset provides pg_background.
+- **Verified**: before this RDR, no local bundle or nexus changeset provided pg_background. Phase 1 Step 2 adds it to the bundle.
+- **Verified** (bundle code review): the engine substrate in CI downloads the pinned *released* bundle, and the Java suite boots the pgvector/pgvector:pg17 image. Neither has pg_background until a bundle release carries it. So the first changeset that runs `CREATE EXTENSION pg_background` must wait for that bundle release (the pin and floor move), and Java tests of a data move need an image with the extension.
 - **Documented**: the cloud host is self-managed, so installing pg_background
   there is a nexus host-configuration step with no vendor allow-list (bob, 2026-11-10).
 - **Verified**: dml_utils cannot chunk on a bytea key.
 
 ### Critical Assumptions
 
-- [ ] pg_background builds and loads in the relocatable bundle on all four
-  platforms, Windows included — **Status**: Unverified — **Method**: Spike
-  (developer build in progress)
-- [ ] dml_utils with bytea keys chunks a (text, text, bytea) key with each
+- [x] pg_background builds and loads in the relocatable bundle on all four
+  platforms, Windows included — **Status**: Verified 2026-11-10. pg_background
+  v2.0.4 is pinned to its release commit (in both bundle builders) and was built for Linux x86_64 and
+  arm64 (manylinux_2_28), macOS arm64 and Windows x64. On each, a relocated
+  bundle ran `CREATE EXTENSION` and a background worker that returned `SELECT
+  1`, with no shared_preload_libraries. On Windows, v2.0.4 calls POSIX
+  `random()`, which PG 17 does not provide there, so the build compiles with
+  `/Drandom=rand` in place of patching the source. It is used only for
+  polling jitter. Record: T2 nexus/pg_background-bundle-build-notes-nexus-f3yqd.2.
+  — **Method**: Spike
+- [x] dml_utils with bytea keys chunks a (text, text, bytea) key with each
   row in exactly one chunk, independent of bytea_output and
-  standard_conforming_strings — **Status**: Unverified — **Method**: Spike
-  (upstream change in progress)
-- [ ] dml_utils works with a partitioned driving table (PK on the parent) — **Status**:
-  Unverified — **Method**: Spike
+  standard_conforming_strings — **Status**: Verified in the upstream change
+  (Hellblazer/dml_utils, feature/bytea-keys). Its tests cover edge keys
+  0x00/0xff and prefixes of different lengths, resume, and both session
+  settings. Boundary text is bare hex, and chunk literals are
+  `pg_catalog.decode('<hex>','hex')`, a constant the planner folds. Review
+  round 1 is in progress. — **Method**: Spike
+- [x] dml_utils works with a partitioned driving table (PK on the parent) — **Status**:
+  Verified for bytea, non-partition-wise and partition-wise (dml_utils
+  supports partition-wise runs since 1.16), in the same change — **Method**: Spike
+- [ ] dml_utils needs Sam's ddl_utils installed, and the migrating role needs
+  ddl_utils_caller: the bytea change adds the first changeset that calls
+  ddl_utils' constraint helpers, behind a HALT precondition. The engine must
+  therefore install ddl_utils before dml_utils, locally and in the cloud —
+  **Status**: Unverified — **Method**: Source Search, then the engine spike
 - [ ] The cloud host's PostgreSQL loads pg_background and has spare
   max_worker_processes — **Status**: Checked 2026-11-10, NOT available
   today (bob's read-only check on Sam's go, SSM command 60942485, T2
@@ -399,8 +417,10 @@ launcher that upstream does not test.
 ### Prerequisites
 
 - [ ] All Critical Assumptions verified
-- [ ] bytea keys merged in Hellblazer/dml_utils
-- [ ] pg_background in the bundle on all four platforms
+- [ ] bytea keys merged in Hellblazer/dml_utils, and a dml_utils release that nexus pins
+- [ ] pg_background in the bundle on all four platforms, in a released bundle that the engine substrate pins
+- [ ] ddl_utils installed ahead of dml_utils in the engine's schema setup
+- [ ] A Java test image with pg_background for the engine suite's data-move tests
 
 ### Minimum Viable Validation
 
