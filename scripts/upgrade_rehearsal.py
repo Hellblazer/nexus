@@ -287,7 +287,16 @@ def run_step(
         tail = (tail + data)[-600:]
         logf.write(data)
         logf.flush()
-        chunkf.write(json.dumps({"t": round(now - start, 3), "n": len(data)}) + "\n")
+        chunkf.write(
+            json.dumps(
+                {
+                    "t": round(now - start, 3),
+                    "n": len(data),
+                    "s": data[:160].decode("utf-8", "replace"),
+                }
+            )
+            + "\n"
+        )
 
     with open(log_path, "wb") as logf, open(chunks_path, "w") as chunkf:
         while True:
@@ -1289,6 +1298,29 @@ def write_verdict(verdict: dict, path: Path) -> None:
 # --- one rehearsal ---------------------------------------------------------------------------
 
 
+def profiled(logs: Path, argv: list[str]) -> list[str]:
+    """``argv`` under py-spy (diagnosis only): idle frames included and every sample timestamped
+    (chrometrace), so a silent stretch in the chunk log can be matched to what the process was
+    doing. py-spy is the parent of the profiled process, so ptrace_scope 1 allows it."""
+    return [
+        "uvx",
+        "--from",
+        "py-spy",
+        "py-spy",
+        "record",
+        "--idle",
+        "--subprocesses",
+        "--format",
+        "chrometrace",
+        "--rate",
+        "20",
+        "-o",
+        str(logs / "upgrade.pyspy.json"),
+        "--",
+        *argv,
+    ]
+
+
 @dataclasses.dataclass
 class Config:
     work: Path
@@ -1309,6 +1341,9 @@ class Config:
     pci_collections: int = PCI_COLLECTIONS_DEFAULT
     pci_observe_bound_s: float = PCI_OBSERVE_BOUND_S
     pci_end_bound_s: float = PCI_END_STATE_BOUND_S
+    profile_upgrade: bool = (
+        False  # run nx upgrade under py-spy (timestamped samples, diagnosis only)
+    )
 
 
 def _ambient_uv_dir() -> str:
@@ -1518,7 +1553,12 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     cfg.target_spec,
                 ],
             ),
-            ("upgrade", [nx, "upgrade"]),
+            (
+                "upgrade",
+                profiled(logs, [nx, "upgrade"])
+                if cfg.profile_upgrade
+                else [nx, "upgrade"],
+            ),
             ("doctor", [nx, "doctor"]),
             ("search", [nx, "search", cfg.sentinel_query, "-m", "5"]),
         ]
@@ -1745,6 +1785,12 @@ def _build_parser() -> argparse.ArgumentParser:
         f"start older than {PCI_FIRST_VERSION}",
     )
     ap.add_argument(
+        "--profile-upgrade",
+        action="store_true",
+        help="diagnosis only: run nx upgrade under py-spy record --idle --format chrometrace, so each "
+        "silent stretch can be matched to its stack samples (logs/upgrade.pyspy.json)",
+    )
+    ap.add_argument(
         "--pci-collections",
         type=int,
         default=PCI_COLLECTIONS_DEFAULT,
@@ -1829,6 +1875,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         pci_collections=args.pci_collections,
         pci_observe_bound_s=args.pci_observe_bound,
         pci_end_bound_s=args.pci_end_bound,
+        profile_upgrade=args.profile_upgrade,
     )
     cfg.work.mkdir(parents=True, exist_ok=True)
     say(f"upgrade rehearsal: candidate {label}; starting from {', '.join(versions)}")
