@@ -107,7 +107,7 @@ from tests import _signal_fence
 from tests._child_process import kill_group, pid_alive, popen_in_group, stop_group
 from tests._ddl_counter import PROBE_SQL, READY_LABEL, RESTART_LABEL, START_LABEL, log_conf, mark_sql
 from tests._ddl_counter import enabled as ddl_count_enabled
-from tests._pg_ctl import pg_ctl_start
+from tests._pg_ctl import check_socket_dir, pg_ctl_start
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     jar_freshness_skip_reason,
@@ -2410,6 +2410,13 @@ def _boot() -> dict:
             bin_dir, prefix="nexus_t2_substrate_pg_", username=pg_user,
             parent_dir=cluster_parent,
         )
+        # labrun-pex: pg_ctl_start refuses a -k socket past sun_path. Ask here, before the
+        # sidecar and its cluster lock exist, so a refused boot leaves no directory behind.
+        try:
+            check_socket_dir(f"-k {pgdata}")
+        except ValueError:
+            shutil.rmtree(pgdata, ignore_errors=True)
+            raise
         sidecar_started_at = _write_sidecar(
             pgdata, pg_port=pg_port, svc_port=None,
             postmaster_pid=None, engine_pid=None,
