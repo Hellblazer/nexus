@@ -18,7 +18,18 @@ from pathlib import Path
 import pytest
 
 
-pytestmark = pytest.mark.usefixtures("no_mineru_child_probe")  # nexus-vyy65: no real MinerU child import here
+pytestmark = pytest.mark.usefixtures("no_mineru_child_probe", "_no_real_mineru_parse")  # nexus-vyy65, labrun-pex
+
+
+@pytest.fixture()
+def _no_real_mineru_parse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """labrun-pex: these tests are about the server URL line. With MinerU and its weights installed (a
+    CI pool host), ``_run_check_mineru`` also ran the one-page real-parse probe: a ``do_parse`` child of
+    about 1 GB whose render pool outlived it. Report the weights absent, as the sibling doctor tests do,
+    so the parse line is a skip and no model loads."""
+    import nexus.commands.doctor as doctor
+
+    monkeypatch.setattr(doctor, "_mineru_pipeline_model_dir_configured", lambda: False)
 
 
 @pytest.fixture()

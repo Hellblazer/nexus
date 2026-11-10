@@ -83,7 +83,9 @@ def _disable_aspect_worker_autostart() -> None:
     # runs the real PDFExtractor (test_pdf_chunker_integration's multipage_result) therefore autostarted a
     # real mineru-api server (1.04 GB anon) that lived until its xdist worker exited, across the shard's
     # memory peak. Pinned here as well, so no scope can reach the autostart.
-    os.environ.setdefault("NX_MINERU_AUTOSTART", "0")
+    # Assigned, not setdefault: an exported NX_MINERU_AUTOSTART=1 must not reach these scopes either
+    # (the function-scoped pin overwrites it too).
+    os.environ["NX_MINERU_AUTOSTART"] = "0"
 
 
 _disable_aspect_worker_autostart()

@@ -307,7 +307,10 @@ def run_bounded(
     own. Windows' default containment already does that on every return; POSIX does it only on a
     timeout, so a grandchild the child left behind (MinerU's render-executor pool after a doctor
     real-parse probe, labrun-pex) outlives the call. A caller whose child must not leave anything
-    running passes True. Never pass it for a child that starts a daemon on purpose.
+    running passes True. Never pass it for a child that starts a daemon on purpose. It only acts when
+    the call returns on its own: a grandchild holding the default ``PIPE`` stdout keeps
+    ``communicate()`` waiting until the timeout path, so redirect to a file or ``DEVNULL`` (the
+    doctor probe does). On Windows with ``contained=False`` there is no job and it does nothing.
 
     Raises ``subprocess.TimeoutExpired`` on timeout, after the kill and the
     reap, so callers that already handle it keep working unchanged.
@@ -382,8 +385,14 @@ def run_bounded(
                 proc.communicate(timeout=REAP_TIMEOUT_S)
             raise
         if reap_group_on_return:
-            # The child exited on its own; kill what it left in its group (POSIX) or job (Windows).
-            kill_child_and_descendants(proc, job)
+            # The child exited on its own; kill what it left in its group (POSIX) or job (Windows). The
+            # leader is reaped by now, so POSIX goes by the recorded pgid (safe_killpg_group). The call
+            # it was asked to bound has succeeded: a failure here is logged, never raised into it.
+            try:
+                kill_child_and_descendants(proc, job)
+            except Exception as exc:  # noqa: BLE001 — a reap failure must not turn a finished call into an error
+                _log.warning("bounded_subprocess_reap_on_return_failed", argv0=argv[0] if argv else None,
+                             error=f"{type(exc).__name__}: {exc}")
             job = None
     finally:
         # nexus-6y4e0 review (CRITICAL): contain()'s handle must close on
