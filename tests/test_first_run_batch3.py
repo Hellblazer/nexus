@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from nexus.commands import init as init_mod
+from nexus.daemon import installer
 from nexus.mcp import setup_tools
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,3 +46,19 @@ def test_with_no_stderr_the_message_says_only_what_it_knows(monkeypatch: pytest.
     assert str(raised.value) == (
         "The setup process printed something other than JSON. Setup can also be done in a terminal: the user runs `nx init`."
     )
+
+
+# F9: with the autostart unit already registered and no lease yet, `nx init` exits 0 (the unit owns bring-up) where a
+# fresh install in the same state exits 1. The output now says why, and names the logs the fresh branch names.
+def test_a_rerun_with_the_unit_present_says_why_it_exits_zero_and_names_the_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(init_mod, "provision_service_stack", lambda embedder=None: True)
+    monkeypatch.setattr(init_mod, "_poll_service_lease", lambda config_dir, **kw: None)
+    monkeypatch.setattr(
+        installer, "install_autostart",
+        lambda *, tier, force=False: installer.InstallResult(status=installer.InstallStatus.ALREADY_PRESENT, dest=tmp_path / "unit"),
+    )
+    assert init_mod._provision_and_autostart_service(None) is None
+    err = " ".join(capsys.readouterr().err.split())
+    assert "registered before this run, so it owns bring-up" in err and "exits 0" in err, err
+    assert str(tmp_path / "logs" / "storage_service.log") in err and "storage_service_native.log" in err, err
