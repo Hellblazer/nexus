@@ -779,6 +779,26 @@ def _phase(start_lsn: int, start: Sample | None, end: Sample) -> dict:
     return d
 
 
+def engine_alive(inst: Install) -> bool:
+    """The install's engine is still running: the pid its address file names is alive, or (before the supervisor
+    publishes that file, as during a long migration) PG holds a session the engine opened, whose
+    application_name starts with nexus-service (the engine's own pool naming, as BackendReaper logs it), or an
+    advisory lock is held (SchemaMigrator's migration lock)."""
+    engine, _ = inst.addr_pids()
+    if engine:
+        try:
+            os.kill(engine, 0)
+            return True
+        except PermissionError:
+            return True
+        except ProcessLookupError:
+            pass
+    rows = inst.sql("select (select count(*) from pg_stat_activity where application_name like 'nexus-service%') + "
+                    "(select count(*) from pg_locks where locktype = 'advisory' and granted)")
+    # The advisory lock is SchemaMigrator's migration lock, held by Liquibase's own connection through a migration.
+    return bool(rows) and int(rows[0][0]) > 0
+
+
 def first_mark(marks: dict[str, Sample]) -> Sample:
     return marks["pg_up"]
 
@@ -878,11 +898,21 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
                 ver = http_status(port, "/version")[1] or {}
                 rec["engine_version"] = {k: ver.get(k) for k in ("release_version", "app_version", "build_ref")}
         rc = proc.poll()
-        if rc not in (None, 0):
+        if rc not in (None, 0) and "start_returned" not in rec:
             start_out.flush()
             out = start_log.read_text(encoding="utf-8", errors="replace")
-            failure = f"nx daemon service start exited {rc}"
             rec["start_output_tail"] = out[-2000:]
+            # `nx daemon service start` gives up waiting after about 60 s while a long migration keeps running in
+            # the background (its own message says so). That is not a failed boot: keep waiting for /health while
+            # the engine process lives; stopping it here would restart the changeset in flight.
+            if engine_alive(inst):
+                rec["start_returned"] = {"rc": rc, "at_s": round(time.monotonic() - t0, 1)}
+                log(f"{label}: nx daemon service start returned {rc} while the engine is still up; waiting on /health")
+            else:
+                failure = f"nx daemon service start exited {rc}"
+                break
+        elif "start_returned" in rec and not engine_alive(inst):
+            failure = f"the engine exited while booting (nx daemon service start had returned {rc})"
             break
         time.sleep(0.5)
     doctor: dict = {}
