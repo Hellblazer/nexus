@@ -8,7 +8,7 @@ This post goes through the changes one theme at a time. For each change, it says
 
 Since 7.23.0, Nexus does not use SQLite databases at all. Everything is now in Postgres, behind the engine: session scratch, memory, the catalog and the vectors. So you have one store to back up, and one place to ask about your data. If `nx doctor` finds an old `memory.db` or `.catalog.db` file, it tells you that you can safely delete it.
 
-Since 7.74.0, the local cluster also has a password. Before, it trusted every local connection. New clusters use scram-sha-256 with a superuser password. An existing cluster changes to this on its next service start. A local tool that connected to the local Postgres cluster without a password now needs the password that the service keeps.
+Since 7.74.0, the local cluster also has a password. Before, it trusted every local connection. New clusters use scram-sha-256 with a superuser password. An existing cluster changes to this on its next service start. A local tool that connected to the cluster without a password now needs the password that the service keeps.
 
 From 7.95.0, the engine does not start on a PostgreSQL older than 17. If you try, it logs `pg_version_below_floor` and stops before it accesses the schema. If your local data directory came from an older PostgreSQL, use `nx daemon service pg-upgrade --old-bin <bin dir>`, from 7.99.0. It is a dry run until you add `--apply`.
 
