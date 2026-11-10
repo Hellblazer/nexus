@@ -353,9 +353,9 @@ class TenantResetRouteTest {
         String x = "rr-fill-x-" + shortId();
         String y = "rr-fill-y-" + shortId();
         var jobs = on.manifestFillJobsForTests();
-        var mine = jobs.start(x, "manifest-fill:labels", "fp", job -> null,
+        var mine = jobs.start(x, null, "fp", job -> null,
             (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", x)));
-        var theirs = jobs.start(y, "manifest-fill:labels", "fp", job -> null,
+        var theirs = jobs.start(y, null, "fp", job -> null,
             (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", y)));
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
         while (mine.job().state() == dev.nexus.service.http.EngineJobs.State.RUNNING
