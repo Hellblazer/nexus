@@ -388,9 +388,10 @@ uv-tool box recover with `uv tool install --reinstall "conexus[local]"` and then
 generation box `nx self install` rewrites the shims. Never `uv tool uninstall
 conexus` on a generation box.
 
-`nx upgrade` asks you only what it cannot decide: billed re-embedding
-(estimate and confirm; `--yes` or `NX_ASSUME_YES=1` to pre-approve), a source
-collection that has vanished, and rollback, which is always yours to invoke.
+`nx upgrade` decides everything itself. A step that would bill you for
+re-embedding would ask first (`--yes` or `NX_ASSUME_YES=1` pre-approves it); none
+does today. A source collection that has vanished is deferred, not guessed, and
+rollback is always yours to invoke.
 
 After `/plugin update`, run both steps so the CLI matches the plugin.
 

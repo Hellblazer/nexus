@@ -3243,7 +3243,7 @@ nx init --service             # DEPRECATED — plain `nx init` now does this by 
 | Flag | Description |
 |------|-------------|
 | `--embedder [bge-768\|minilm-384]` | Embedder request for the local service step. `minilm-384` only prints an advisory: the service path provisions bge-768 either way, and an existing `voyage-*` `local.embed_model` is kept. |
-| `--yes` / `-y` | Accept the service-autostart registration non-interactively (local mode). The autostart unit is installed as the **sole** starter; `nx init` waits for it to come up rather than also starting a session supervisor. |
+| `--yes` / `-y` | Register the autostart entry without asking: it starts the storage service each time you log in (local mode). The autostart unit is installed as the **sole** starter; `nx init` waits for it to come up rather than also starting a session supervisor. |
 | `--no-autostart` | Do not register the autostart unit; start a session supervisor only (local mode). Takes precedence over `--yes`. |
 | `--service` | **DEPRECATED** (RDR-174 P3.1) — plain `nx init` now provisions the local service backend by default; the flag still works (and prints a deprecation notice) but will be removed in a future release. Provisions the local Postgres + pgvector cluster the RDR-152 service backend uses, stamps the embedder as bge-768 (keeping an existing `voyage-*` `local.embed_model`), acquires + verifies the native service binary, fetches the bge-768 ONNX, and starts the service. Idempotent. The binary + PG bundle are acquired automatically from the wheel's pinned engine tag (override: `NEXUS_SERVICE_TAG` env or a prior `nx daemon service install-binary`). |
 | `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see below. Explicit decline always wins, like `--no-autostart`. For a standing opt-out (every future run, every command) use `nx config set beads_prime.manage false` instead. |
@@ -3907,8 +3907,7 @@ group no longer exists; see [`nx plan repair`](#nx-plan-repair-removed)).
 only fail against a library that is nearly empty — it cannot fail against
 one that is the wrong shape. Beside the floor, the check now compares every
 template shipped on disk against its stored row and fails with the same
-exit 1 (fix: `nx plan reseed`, or `nx plan reseed --force` for a drifted
-row — see [`nx plan reseed`](#nx-plan-reseed)) on:
+exit 1 (fix: `nx plan reseed`, which also rewrites a drifted row — see [`nx plan reseed`](#nx-plan-reseed)) on:
 
 - **missing** — a shipped template with no library row at all;
 - **drifted** — a library row whose content no longer matches its
@@ -5203,23 +5202,23 @@ the stranded-install detector), each rung detecting, converging, and verifying
 before it records completion, resumable and idempotent. There is nothing to
 sequence by hand and no era to know: `nx doctor` reports pending rungs
 read-only, `nx upgrade` walks them, and an install that has been dormant for a
-year converges the same way a current one no-ops. You are asked to decide only
-what the product cannot derive for you — **billed re-embedding** (a cost
-preview before anything charges; silent when nothing bills).
+year converges the same way a current one no-ops. A step that would bill you
+for re-embedding asks first (a cost preview before anything charges); no step
+in the current release bills, so `nx upgrade` asks nothing.
 
 ```
 nx upgrade                        # Converge: preconditions, then every pending rung
 nx upgrade --dry-run              # Report what is pending, read-only — changes nothing
 nx upgrade --auto                 # Quiet mode for hook invocation (exit 0 always)
-nx upgrade --yes                  # Unattended: pre-approve the billed re-embed (=NX_ASSUME_YES=1)
+nx upgrade --yes                  # Unattended: pre-approve a billed re-embed (=NX_ASSUME_YES=1); none is asked today
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Report pending ladder rungs without executing — each rung's read-only `detect()`. Nothing is written; a rung's `detect()` may READ the completion ledger (`rdr192-manifest-backfill` does, and takes no census), so an unreachable engine reports the rung pending with the reason. (`--force` was removed with the local T2 migration chain in RDR-158 P4 Stage 4 — there is no version gate left to reset) |
 | `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always. Stops starting new work at safe points (between census calls, backfill collections and ladder rungs) after `NX_UPGRADE_AUTO_DEADLINE_SECONDS` seconds (default `900`, minimum `60`); the next session resumes. It does not bound a census call in flight (up to its HTTP timeout), one collection's whole backfill once started (it can run well past the limit on a large collection), the finish pass before the upgrade, or the service restart after the ladder (see [configuration](configuration.md)) |
-| `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
-| `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
+| `--skip-t3` | Skips the precondition stage's engine install and process cycle (verdicts are still reported), the storage-service restart, the PDF stack carry-forward, the installer rebuild and the collection-name check. The old service keeps running until you run a plain `nx upgrade`. The data steps still run |
+| `--yes` | Pre-approve a billed re-embedding of your collections, for an unattended run (same as `NX_ASSUME_YES=1`). Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic. Nothing in `nx upgrade` asks for this today, so the flag currently changes nothing |
 | `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see [`nx init`](#nx-init). For a standing opt-out use `nx config set beads_prime.manage false` instead |
 
 **The storage-service restart.** An upgrade restarts a running storage service on the new version. An interactive run prints a line before the restart and one after it. If the new service is still starting (its first start after an upgrade can migrate the database for several minutes), it says so, points at `nx daemon service status`, and the upgrade still succeeds. If the restart fails, the upgrade ends with what failed, the command to run and what `nx daemon service start` said, and exits 1. `--auto` and the lockstep hook's unattended run (`NX_UPGRADE_UNATTENDED=1`) print nothing for it, log it, and exit 0.
