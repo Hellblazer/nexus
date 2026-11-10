@@ -1449,19 +1449,23 @@ def _with_platform_hint(detail: str) -> str:
     return f"{hint}\n\nuv output:\n{detail}" if hint else detail
 
 
-def _run_build(argv: list[str], *, progress: bool) -> "subprocess.CompletedProcess[str]":
+def _run_build(
+    argv: list[str], *, progress: bool, env: dict[str, str] | None = None,
+) -> "subprocess.CompletedProcess[str]":
     """Run one generation build, capturing stdout and stderr. With *progress*
     the builder's stderr is also written through to this process's stderr as it
-    arrives (uv's download progress), so a long fetch is visible."""
+    arrives (uv's download progress), so a long fetch is visible. *env* replaces
+    :func:`_script_env` when given."""
+    env = _script_env() if env is None else env
     if not progress:
         return subprocess.run(  # noqa: S603 — fixed argv, no shell
-            argv_off_cwd(argv), capture_output=True, text=True, encoding="utf-8", check=False, env=_script_env(),
+            argv_off_cwd(argv), capture_output=True, text=True, encoding="utf-8", check=False, env=env,
         )
     import threading  # noqa: PLC0415 — stdlib, only this path
 
     proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
         argv_off_cwd(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
-        env=_script_env(),
+        env=env,
     )
     captured: list[str] = []
     # nexus-mjmjl: uv names large packages as they download but prints no
@@ -2056,9 +2060,9 @@ def _converge_legacy_install(
         env.pop("NX_MIGRATE_BUILD_SCRIPT", None)
         if staged.install_dir is not None:
             env["NX_MIGRATE_BUILD_SCRIPT"] = str(staged.install_dir / "install_generation.sh")
-        r = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            argv_off_cwd(build), capture_output=True, text=True, encoding="utf-8", check=False, env=env,
-        )
+        # nexus-mjmjl F15: the build streams uv's progress as the generation build does, as the Windows twin's
+        # migrate_legacy(progress=True) does; it was captured whole and printed nothing until it ended.
+        r = _run_build(build, progress=True, env=env)
         if r.returncode != 0:
             detail = _with_platform_hint(r.stderr.strip())
             raise click.ClickException(f"legacy migration failed:\n{detail}")

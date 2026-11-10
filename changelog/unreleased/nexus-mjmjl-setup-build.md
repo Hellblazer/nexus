@@ -1,0 +1,3 @@
+### Fixed
+
+- **`/conexus:setup` and the legacy migration show their build moving** (nexus-mjmjl). While the setup launcher runs a step, such as the build of up to an hour, it rewrites its status every 30 s with the time so far and the last line the build printed. Before, `setup_status` read "running: build" from start to end. On a machine still on the old uv-tool layout, the move onto generations (`migrate_legacy.sh`) now streams uv's output as the build runs, as the Windows path already did. Before, it printed nothing until the build ended.
