@@ -149,6 +149,13 @@ def test_after_a_wait_runs_out_no_later_rung_waits_again() -> None:
     assert [r.outcome for r in report.runs][0] is RungOutcome.DEFERRED and len(waits) == 1
 
 
+def _http_status(code: int) -> Exception:
+    import httpx  # noqa: PLC0415 — the catalog client's transport
+
+    request = httpx.Request("POST", "http://127.0.0.1:1/manifest/chash_positions")
+    return httpx.HTTPStatusError(f"HTTP {code}", request=request, response=httpx.Response(code, request=request))
+
+
 @pytest.mark.parametrize(
     ("error", "away"),
     [
@@ -158,6 +165,8 @@ def test_after_a_wait_runs_out_no_later_rung_waits_again() -> None:
         (VectorServiceError("starting", code=503), True),
         (VectorServiceError("bad gateway", code=502), True),
         (ConnectionResetError(54, "reset"), True),
+        (_http_status(503), True),
+        (_http_status(409), False),
     ],
 )
 def test_what_counts_as_the_engine_away(error, away) -> None:
@@ -214,7 +223,7 @@ def test_the_wait_is_cut_to_the_auto_deadline() -> None:
     assert budgets == [10.0]
 
 
-@pytest.mark.parametrize("rung_module", ["manifest_span_fill", "manifest_section_labels"])
+@pytest.mark.parametrize("rung_module", ["manifest_span_fill", "manifest_section_labels", "note_tags_array"])
 def test_a_rungs_verify_lets_an_engine_away_error_through(rung_module) -> None:
     """The verify catch-alls report an unreadable catalog as not reached; an engine that is away is let
     through, so the runner waits and confirms again instead of reporting a failed confirmation."""
@@ -222,7 +231,9 @@ def test_a_rungs_verify_lets_an_engine_away_error_through(rung_module) -> None:
 
     world_mod = importlib.import_module(f"tests.upgrade.test_{rung_module}_rung")
     world = world_mod.World()
-    world.all_documents = lambda: (_ for _ in ()).throw(ConnectionRefusedError(61, "refused"))  # type: ignore[method-assign]
+    refuse = lambda *a, **k: (_ for _ in ()).throw(ConnectionRefusedError(61, "refused"))  # noqa: E731
+    world.all_documents = refuse  # type: ignore[method-assign]
+    world.distinct_doc_collections = refuse  # type: ignore[method-assign]  (note tags lists collections first)
     rung = world.rung()
     with pytest.raises(ConnectionRefusedError):
         rung.verify()

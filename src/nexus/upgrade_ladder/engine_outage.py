@@ -30,6 +30,16 @@ def _transport_away(link: BaseException) -> bool:
     return False
 
 
+def _status_away(link: BaseException) -> bool:
+    """An ``httpx.HTTPStatusError`` (the catalog client's) whose response is a 502, 503 or 504."""
+    import httpx  # noqa: PLC0415 — deferred
+
+    if not isinstance(link, httpx.HTTPStatusError):
+        return False
+    response = getattr(link, "response", None)
+    return getattr(response, "status_code", None) in _AWAY_STATUSES
+
+
 def engine_unreachable(exc: BaseException) -> bool:
     """True when *exc*, or an exception it was raised from, says the engine is away rather than that it
     refused or is slow: an endpoint with no lease, a refused or dropped connection, or a 502/503/504. An
@@ -45,6 +55,8 @@ def engine_unreachable(exc: BaseException) -> bool:
         if isinstance(link, ServiceEndpointUnresolvableError) or _transport_away(link):
             return True
         if isinstance(link, VectorServiceError) and getattr(link, "code", None) in _AWAY_STATUSES:
+            return True
+        if _status_away(link):
             return True
         link = link.__cause__ if link.__cause__ is not None else (None if link.__suppress_context__ else link.__context__)
     return False
