@@ -82,7 +82,7 @@ def changeset_id(changeset: str | None) -> str | None:
     if not changeset:
         return None
     parts = changeset.split("::")
-    return parts[1] if len(parts) >= 3 else parts[0]
+    return parts[1] if len(parts) >= 3 else changeset
 
 
 def status_path(config_dir: Path) -> Path:
