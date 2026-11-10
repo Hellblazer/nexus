@@ -2964,7 +2964,6 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET, *, p
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
         "--check-* diagnostics):"
     )
-    gating_failed = False
     from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
 
     # F30 (nexus-f3yqd.6): the three sensitivity rows share one catalog walk (about 23 s each on a laptop tenant).
