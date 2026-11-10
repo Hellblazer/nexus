@@ -624,7 +624,7 @@ def gc_cmd(
     # listing but is a real target, so a catalog registration counts too.
     from nexus.catalog.membership import collection_is_known as _collection_is_known  # noqa: PLC0415 — command-local import (nexus.catalog.membership)
 
-    in_t3 = collection in {c["name"] for c in t3_db.list_collections(strict=True)}
+    in_t3 = collection in {c["name"] for c in t3_db.list_collections(strict=True, routing=True)}  # names only (nexus-mjmjl)
     if not in_t3 and not _collection_is_known(cat, collection):
         raise click.ClickException(
             f"no collection named {collection!r}; 'nx collection list' shows "
@@ -1796,7 +1796,7 @@ def census_manifest_less_cmd(
             # instead, so exit 3 below can mean "listed zero collections",
             # never "the listing itself failed".
             names = [
-                c["name"] for c in t3_db.list_collections(strict=True)
+                c["name"] for c in t3_db.list_collections(strict=True, routing=True)  # routing rows carry lifecycle_state
                 if c.get("lifecycle_state") != "quarantine"
             ]
         except VectorServiceError as exc:

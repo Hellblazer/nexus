@@ -1283,9 +1283,12 @@ class T3Database:
         ]
 
     def list_collections(
-        self, lifecycle_state: str | None = None, *, strict: bool = False,
+        self, lifecycle_state: str | None = None, *, strict: bool = False, routing: bool = False,
     ) -> list[dict]:
         """Return all T3 collections with their document counts.
+
+        *routing* is accepted for parity with ``HttpVectorClient.list_collections`` and ignored: these rows
+        are already complete, which is what an engine without the routing form answers too.
 
         *lifecycle_state* and *strict* match ``HttpVectorClient.list_collections``'s
         signature (the parity test compares them). This facade has no
