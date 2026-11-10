@@ -79,7 +79,7 @@ def test_the_step_states_the_pre_pci_ceiling_and_what_it_rests_on() -> None:
 
 def test_the_step_is_honest_about_the_limits_and_the_basis() -> None:
     step = _step()
-    assert "our chosen reading of Sam's" in step and "not a number he gave" in step
+    assert "Sam's decision of record" in step and "(Sam 2026-11-10, halcyon)" in step
     assert "300 times its 0.4 s" in step and "floors against a hang" in step
     assert "bound this fixture's size" in step
 

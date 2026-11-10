@@ -59,8 +59,8 @@ conexus 8.1.1; 209.1 s on develop after 8.1.1, 211 s at e979863a6) for 140,000 r
 chas before the fix), and no more, so the 460-662 s it took before the fix still fails. doctor (60 s, 7.5 s measured), search (30 s, 2.8 s) and the last-7x upgrade sit at about 8 to
 11 times the slowest measured; the newest-below upgrade (about 50 times) and the package upgrade (120 s
 against 0.4 s) are floors against a hang, not margins. All of them bound THIS fixture; a much larger store
-needs its own measurement. The 10 s silence limit is our chosen reading of Sam's "a few seconds", not a
-number he gave, pending his confirmation.
+needs its own measurement. Every limit here, the 10 s silence limit included, is Sam's decision of
+record (Sam 2026-11-10, halcyon).
 
     upgrade_rehearsal.py --work DIR --target-wheel dist/conexus-X-py3-none-any.whl
     upgrade_rehearsal.py --work DIR --target-release 8.1.0 --from-version 8.0.0
@@ -105,7 +105,7 @@ from pathlib import Path
 
 # --- named limits, from the 2026-11-10 real-store runs (slowest measured in brackets) ---------
 DEFAULT_SILENCE_LIMIT_S: float = (
-    10.0  # the chosen reading of Sam's "a few seconds", not his number
+    10.0  # Sam's decision of record (Sam 2026-11-10, halcyon)
     # [longest gap: 5.7 s doctor; 11.9 s nx upgrade from 7.99.0 on a build before the heartbeats, a breach]
 )
 #: ``nx upgrade`` ceiling by kind of start (``start_kind``). ``None`` means PENDING: the value is not

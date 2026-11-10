@@ -495,9 +495,10 @@ not newer than it. For each start it:
 3. runs `nx upgrade`, `nx doctor` and `nx search` for the seeder's sentinel note.
 
 Each of those steps runs under a pty and FAILS when it prints nothing for 10 s, runs
-past its ceiling, or exits non-zero. The 10 s is our chosen reading of Sam's "a few
-seconds", not a number he gave; it stands until he confirms it. The ceilings are
-per start, measured on 2026-11-10 on chas lab-m:
+past its ceiling, or exits non-zero. Every limit below is Sam's decision of record
+(Sam 2026-11-10, halcyon): he accepted the 10 s silence limit and the measured
+ceilings, and the 420 s from 7.76.0 separately. The ceilings are per start, measured
+on 2026-11-10 on chas lab-m:
 
 - `nx upgrade` from the newest release below the candidate: 120 s (2.3 s from 8.0.0).
 - `nx upgrade` from the last 7.x: 120 s (13.9 to 14.2 s from 7.99.0).
