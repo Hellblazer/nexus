@@ -102,6 +102,7 @@ def registry(tmp_path: Path) -> RepoRegistry:
 
 def _patch_get(monkeypatch, *, stats_names: set[str], raw_names: set[str]) -> None:
     def fake_get(path: str, *, tenant: str = "default") -> Any:
+        path = path.replace("?fields=routing", "")  # the routing listing gets the full rows, as from an engine that predates it
         if path == STATS_PATH:
             return [
                 {"name": n, "dim": 384, "count": 1, "last_write": "x"}
