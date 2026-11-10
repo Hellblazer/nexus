@@ -221,6 +221,13 @@ class StoreGetLatencyProfileIT {
         report("repo.presentRows (no content, no liveness)",
             time(() -> repo.presentRows(TENANT, COLL, ids, false)));
 
+        // 2b. The listing the client's get_collection makes before every chunk read (list_collections(strict=True)
+        // -> GET /v1/vectors/stats, full form), and the routing form, on this store.
+        report("repo.collectionStats (GET /v1/vectors/stats, full)",
+            time(() -> repo.collectionStats(TENANT, null)));
+        report("repo.collectionRouting (GET /v1/vectors/stats?fields=routing)",
+            time(() -> repo.collectionRouting(TENANT, null)));
+
         // 3. Hand variants of the main statement, as nexus_svc, fully fetched.
         String base = " FROM nexus.chunks c WHERE c.tenant_id = ? AND c.collection = ? AND c.embedding_model = ?"
             + " AND c.chash = ANY(?)";
@@ -262,8 +269,8 @@ class StoreGetLatencyProfileIT {
 
         // 5. Function properties.
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery("SELECT proname, prolang::reglanguage, provolatile, prosecdef, "
-                + "proisstrict, proretset, array_to_string(proconfig, ',') FROM pg_proc WHERE proname IN "
+            var rs = su.createStatement().executeQuery("SELECT proname, (SELECT lanname FROM pg_language l WHERE l.oid = p.prolang), provolatile, prosecdef, "
+                + "proisstrict, proretset, array_to_string(proconfig, ',') FROM pg_proc p WHERE proname IN "
                 + "('chunk_live_owners','chunk_sensitive_many','chunk_sensitive')");
             while (rs.next()) {
                 line("pg_proc: %s lang=%s volatile=%s secdef=%s strict=%s retset=%s config=%s", rs.getString(1),
