@@ -137,6 +137,26 @@ the preflight; Step 0 above runs it by hand.
 Do not let this file grow into a second battery. Admission requires: genuinely
 release-blocking and deterministic (no service, no sandbox HOME).
 
+**The first-run gate (Sam 2026-11-10, nexus-f3yqd.6): no cut while a known
+first-run or upgrade UX problem is untriaged.** Every finding lives in T2
+`nexus/first-run-ux-triage`, one line each: `F<n> | <status> | <owner> | <reason>`.
+The cut may proceed only when every line reads `fixed <sha>` or `accepted (Sam
+<date>)`. A `fix-<version>` line is open work for this release, and a
+`proposed-accept` line is waiting on Sam; either blocks. A first-run finding
+that turns up during the cut is added there before the cut goes on, never
+noted elsewhere. Run it with the preflight:
+
+```bash
+t=$(nx memory get -p nexus -t first-run-ux-triage) || { echo "UNVERIFIED: the triage record could not be read"; exit 2; }
+n=$(printf '%s\n' "$t" | grep -cE '^F[0-9]+ \| ')
+[ "$n" -gt 0 ] || { echo "UNVERIFIED: no finding lines in the triage record"; exit 2; }
+open=$(printf '%s\n' "$t" | grep -E '^F[0-9]+ \| ' | grep -vE '^F[0-9]+ \| (fixed [0-9a-f]{7,}|accepted \(Sam [0-9-]+\)) \|')
+[ -z "$open" ] && echo "first-run gate clear ($n findings)" || { printf 'CUT BLOCKED, first-run findings not fixed or accepted:\n%s\n' "$open"; exit 1; }
+```
+
+The check passes only on the two closed statuses, so a misspelt or new status
+blocks too.
+
 **When this release changes the cut or release machinery itself** (`release.yml`,
 the cut and floor scripts, the battery), rehearse the whole flow end to end in
 isolation before the real run: a fake target (bare origin, fork, container) with
