@@ -171,7 +171,10 @@ class TestRdr206MvvEngineDirect:
 
             reader = threading.Thread(target=_park, daemon=True)
             reader.start()
-            time.sleep(0.5)   # let it reach the park before the reply lands
+            # A dwell, not a settle: the engine shows no per-caller parked-reader signal (its park gauge is
+            # engine-wide). If the reader has not parked when the reply lands, rd reads it at once and the
+            # wake path goes untested, a pass that proves less, never a false failure.
+            time.sleep(0.5)
 
             acked = _post(c, "/v1/tuples/ack", {
                 "claim_id": claim["claim_id"],

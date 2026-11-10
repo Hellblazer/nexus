@@ -13,12 +13,15 @@ work instead: ``settle()`` on what is still pending, or a virtual clock (``tests
 
 Counted: every call of ``time.sleep`` in a tracked ``tests/**/*.py`` file, through ``import time``
 (any alias) or ``from time import sleep`` (any alias), read from the syntax tree. Not counted: a
-sleep inside a string (a child process's script), ``asyncio.sleep``, and a clock object's ``sleep``.
+sleep inside a string (a child process's script), ``asyncio.sleep``, a clock object's ``sleep``,
+``time.sleep`` held as a value and called by another name, ``Event().wait(n)``, and a file that does
+not parse. The count is a floor that guards against drift, not a census of every wait.
 
 ``scripts/sleep-ceiling.txt`` holds one ``tests <ceiling>`` line. With
 ``slack = max(10 calls, 5%)``, the ceiling is written at the count plus one slack, so an ordinary
 edit never touches it; a ceiling more than two slacks above the count fails, so the commit that
-removes sleeps lowers it (``update``) and the ceiling really falls. Headroom, like the file-size
+removes more than about one slack of sleeps lowers it (``update``) and the ceiling really falls.
+``check`` reads only the committed ceiling; a raise is refused by ``update`` and seen in review. Headroom, like the file-size
 ratchet: Sam 2026-11-10, relayed by halcyon.
 """
 
@@ -44,7 +47,7 @@ EXIT_OVER: int = 10
 HEADER: str = """\
 # Sleep-count ceiling (scripts/sleep_ratchet.py, nexus-3ceda.11): the most time.sleep calls the
 # tracked tests/**/*.py files may hold, at today's count plus max(10 calls, 5%) of headroom. It only
-# falls: removing more than two headrooms of sleeps lowers it in the same commit
+# falls: removing more than one headroom of sleeps lowers it in the same commit
 # (`python3 scripts/sleep_ratchet.py update`); raising it needs `update --allow-raise` and a reason.
 """
 
@@ -156,6 +159,11 @@ def check(root: Path) -> Findings:
 
 
 def update(root: Path, *, allow_raise: bool) -> int:
+    if not _git_files(root, TEST_GLOBS):
+        sys.stderr.write(
+            "refused: counted no test files, so a ceiling written now would mean nothing\n"
+        )
+        return EXIT_OVER
     count = sum(count_sleeps(root).values())
     new = ceiling_for(count)
     old = read_ceiling(root)
@@ -170,7 +178,7 @@ def update(root: Path, *, allow_raise: bool) -> int:
     return EXIT_OK
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, root: Path | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Sleep-count ratchet for tests/ (nexus-3ceda.11)."
     )
@@ -179,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     up = sub.add_parser("update")
     up.add_argument("--allow-raise", action="store_true")
     args = parser.parse_args(argv)
-    root = Path(__file__).resolve().parents[1]
+    root = root or Path(__file__).resolve().parents[1]
     if args.cmd == "update":
         return update(root, allow_raise=args.allow_raise)
     f = check(root)

@@ -112,6 +112,20 @@ def test_a_missing_ceiling_file_and_an_empty_tree_are_errors(repo: Path) -> None
     assert any("counted no test files" in e for e in sr.check(repo).errors)
 
 
+def test_update_refuses_an_empty_tree_and_keeps_the_ceiling(repo: Path) -> None:
+    _ceiling(repo, 30)
+    _git(repo, "rm", "-qf", "tests/test_a.py")
+    assert sr.update(repo, allow_raise=True) == sr.EXIT_OVER
+    assert sr.read_ceiling(repo) == 30
+
+
+def test_main_exits_10_on_a_finding_and_0_within_the_ceiling(repo: Path) -> None:
+    _ceiling(repo, 19)
+    assert sr.main(["check"], root=repo) == sr.EXIT_OVER
+    _ceiling(repo, 30)
+    assert sr.main(["check"], root=repo) == sr.EXIT_OK
+
+
 @pytest.mark.lint
 def test_repo_is_within_its_sleep_ceiling() -> None:
     counts = sr.count_sleeps(_REPO)

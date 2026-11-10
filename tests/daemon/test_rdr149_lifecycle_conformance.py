@@ -2460,6 +2460,8 @@ def test_a_stand_in_whose_harness_died_exits_instead_of_polling_forever(tmp_path
         if script == "supervisor":
             settle(lambda: not (tmp_path / "ready.json").exists() and "no ready.json", 30.0, what="the supervisor's start")
             engine_pid = json.loads((tmp_path / "ready.json").read_text(encoding="utf-8"))["engine"]
+        # A dwell on a real process: the stand-in checks harness_gone() every 50 ticks of 20 ms, about
+        # 1 s, and writes nothing a test could settle on, so 1.5 s spans at least one check.
         time.sleep(1.5)
         assert child.poll() is None, "non-vacuity: the stand-in waits while its harness lives"
         harness.kill()

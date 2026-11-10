@@ -343,6 +343,9 @@ class TestNameLease:
             )
             assert len(calls) == 1  # the synchronous first arm
             settle(lambda: len(calls) < 2 and f"{len(calls)} send(s)", what="the background re-send")
+            # the heartbeat decides on time.time(), so no virtual clock: bound the gap by the 2 s TTL,
+            # which a re-send must beat or the row lapses between sends
+            assert calls[1] - calls[0] < 2.0, f"re-sent {calls[1] - calls[0]:.2f} s apart, past the 2 s TTL"
         finally:
             s.shutdown()
 
@@ -857,10 +860,8 @@ class TestWaiterStartArmsTheSessionName:
         core._start_channel_waiter()
         core._channel.register_active_waiter(started[0])
         assert _wait_for(lambda: len(fake.calls) == 1)
-        thread = core._subscriptions._CACHE[_sid]._lease_thread  # noqa: SLF001
         core._start_channel_waiter()
-        # a re-arm stops this thread and starts another, synchronously
-        assert core._subscriptions._CACHE[_sid]._lease_thread is thread  # noqa: SLF001
+        # the live-waiter guard returns before building a second waiter, so nothing waits to be seen
         assert len(started) == 1 and len(fake.calls) == 1
 
     def test_no_registry_entry_still_starts_the_waiter_and_writes_nothing(self, server, tmp_path, monkeypatch) -> None:

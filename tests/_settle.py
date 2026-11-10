@@ -124,7 +124,11 @@ class FakeClock:
     ) -> None:
         """Settle until no thread is still waiting on a timeout the clock has
         already passed (each one released has run its round) and *parked*
-        threads wait on a future time again, or *exited* says the loop ended."""
+        threads wait on a future time again, or *exited* says the loop ended.
+
+        Sound for *parked* threads that all wait on this clock. A released
+        thread leaves the count while its round runs, so with an extra thread
+        parked beyond *parked*, this can return before that round finishes."""
         settle(lambda: self._released_or_short(parked, exited), deadline, what="the clock's waiters")
 
     def _released_or_short(self, parked: int, exited: Callable[[], bool] | None = None) -> str:
