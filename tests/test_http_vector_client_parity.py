@@ -639,7 +639,7 @@ class TestExpire:
 
         monkeypatch.setattr(
             HttpVectorClient, "list_collections",
-            lambda self: [
+            lambda self, *a, **k: [
                 {"name": n, "count": 1, **catalog_row_for_collection_name(n)}
                 for n in collections
             ],
