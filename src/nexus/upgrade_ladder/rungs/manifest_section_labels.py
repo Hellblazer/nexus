@@ -132,6 +132,7 @@ import structlog
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
     managed_service,
+    refuses_managed_unattended,
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
@@ -746,8 +747,9 @@ class ManifestSectionLabelsRung:
         if record is not None:
             # One more pass under the current title rule; pending even when nothing turns out fillable, so that the
             # walk's converge, verify and record rewrite the record with the mark and the next detect reads it as
-            # current. No engine count: an engine from before the rule change counts by the old rule.
-            if refuses_unbounded_read(self._managed_fn):
+            # current. No engine count: an engine from before the rule change counts by the old rule. It reads
+            # nothing, so nx doctor on a local engine still says pending (refuses_managed_unattended).
+            if refuses_managed_unattended(self._managed_fn):
                 reason = (
                     "the completion record predates the current title rule (" + TITLE_RULE_MARK + "); unattended "
                     f"`nx upgrade --auto` does not scan a managed catalog; {INTERACTIVE_REMEDY}"

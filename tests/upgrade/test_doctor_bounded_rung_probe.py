@@ -65,4 +65,18 @@ def test_a_local_doctor_does_not_scan_the_store_and_names_the_full_check(monkeyp
     assert row.ok is False and row.warn is True
     text = f"{row.detail} {' '.join(row.fix_suggestions or [])}"
     assert "not checked" in text.lower()
-    assert "nx upgrade --dry-run" in text
+    assert "nx upgrade --dry-run" in text and "nx upgrade` interactively" in text
+
+
+def test_the_version_transition_callout_is_bounded_too(monkeypatch) -> None:
+    """The first command after a version change asks the same question; it must not scan either."""
+    from nexus import upgrade_finish
+
+    reader = _NoReads()
+    rung = ManifestSpanFillRung(
+        reader_factory=reader, writer_factory=lambda: None, t3_factory=lambda: None,
+        record_fn=lambda: None, managed_fn=lambda: False,
+    )
+    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
+    upgrade_finish.pending_data_rung_callout()
+    assert reader.walks == []

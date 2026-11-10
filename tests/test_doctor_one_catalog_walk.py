@@ -102,7 +102,7 @@ def test_a_managed_doctor_run_walks_the_catalog_once_and_not_through_the_rung(mo
     ladder = rows["Upgrade ladder"]
     assert ladder.warn and not ladder.ok
     assert "not checked" in ladder.detail and RUNG_MANIFEST_SECTION_LABELS in ladder.detail
-    assert any("nx upgrade" in s and "interactive" in s for s in ladder.fix_suggestions), ladder.fix_suggestions
+    assert any("nx upgrade" in s and "interactively" in s for s in ladder.fix_suggestions), ladder.fix_suggestions
     # The three shared rows still answered from the one walk (non-vacuous: they read the list, not skipped).
     assert rows["stale index-run fences"].detail and "skipped" not in rows["stale index-run fences"].detail
     assert "skipped" not in rows["tumbler allocator drift"].detail
@@ -122,8 +122,9 @@ def test_a_failed_shared_walk_is_not_walked_again_by_each_row(monkeypatch) -> No
         assert "skipped" in rows[label].detail, (label, rows[label].detail)
 
 
-def test_a_local_engine_keeps_the_rung_scan_in_doctor(monkeypatch) -> None:
-    """The refusal is the managed rule (auto_guard): a local engine's scan is cheap and doctor still runs it."""
+def test_a_local_engine_does_not_scan_in_doctor_either(monkeypatch) -> None:
+    """nexus-mjmjl: doctor makes only bounded reads, on a local engine too (a 43k-document local store spent
+    minutes in this scan); the rung is reported not checked and nothing is walked."""
     class LocalCatalog(CountingCatalog):
         def get_manifests(self, *_a, **_k):
             return {}
@@ -135,8 +136,8 @@ def test_a_local_engine_keeps_the_rung_scan_in_doctor(monkeypatch) -> None:
     )
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
     (row,) = health._check_pending_rungs()
-    assert cat.calls == 1, "doctor on a local engine still runs the rung's dry-run scan"
-    assert row.ok and "no pending rungs" in row.detail
+    assert cat.calls == 0, "doctor walked the catalog on a local engine"
+    assert row.warn and not row.ok and "not checked" in row.detail
 
 
 @pytest.mark.parametrize("check", ["_check_stale_indexing_runs", "_check_failed_runs_hidden_chunks", "_check_next_seq_drift"])
