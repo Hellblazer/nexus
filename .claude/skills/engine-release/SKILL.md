@@ -170,25 +170,34 @@ under the copy, not tmpfs).
 ```bash
 cd "$TAG_TREE"   # clean, at the commit you will tag
 PREV=8.1.1       # the newest released conexus client (it pins the published engine); re-check at cut time
+TAG=$(git rev-parse HEAD)
 # Leg A: the normal upgrade, then a plain reboot
-lab-remote --host chas -c lab-m --fetch .gate -- bash -c 'scripts/build-gate-jar.sh && \
-  uv run python scripts/upgrade_boot_writes.py --prev-client '"$PREV"' \
-  --ceiling 67108864 --ceiling-reboot 67108864 --json .gate/A.json'
+lab-remote --host chas -c lab-m --fetch output/gate -- bash -c 'mkdir -p output/gate && scripts/build-gate-jar.sh && \
+  uv run python scripts/upgrade_boot_writes.py --prev-client '"$PREV"' --new-jar-commit '"$TAG"' \
+  --ceiling 67108864 --ceiling-boot 67108864 --ceiling-reboot 67108864 --json output/gate/A.json'
 # Leg B: from before per-collection indexes, queued aspect rows, graceful restart mid-queue
-lab-remote --host chas -c lab-m --fetch .gate -- bash -c 'scripts/build-gate-jar.sh && \
-  uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --no-pci-wait \
+lab-remote --host chas -c lab-m --fetch output/gate -- bash -c 'mkdir -p output/gate && scripts/build-gate-jar.sh && \
+  uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
   --collections 7 --rows 30000 --rot pending_aspect_queue \
-  --restart-mid-queue 3 --restart-mode graceful --ceiling-boot 67108864 --json .gate/B.json'
+  --restart-mid-queue 3 --restart-mode graceful --ceiling-boot 67108864 --json output/gate/B.json'
 # Leg C: as Leg B, with a forced kill of the supervisor and engine (PostgreSQL stays up)
-lab-remote --host chas -c lab-m --fetch .gate -- bash -c 'scripts/build-gate-jar.sh && \
-  uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --no-pci-wait \
+lab-remote --host chas -c lab-m --fetch output/gate -- bash -c 'mkdir -p output/gate && scripts/build-gate-jar.sh && \
+  uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
   --collections 7 --rows 30000 --rot pending_aspect_queue \
-  --restart-mid-queue 3 --restart-mode kill --ceiling-boot 67108864 --json .gate/C.json'
+  --restart-mid-queue 3 --restart-mode kill --ceiling-boot 67108864 --json output/gate/C.json'
 ```
 
+Start each leg as a background command (`run_in_background`) with its output
+redirected to a file, as every `lab-remote` run is. `output/` is git-ignored, so
+the fetched reports leave the tag tree clean. The jar must come from
+`scripts/build-gate-jar.sh`, which stamps the build commit the engine serves on
+`/version`; `--new-jar-commit` makes the harness exit 2 when the booted engine
+was built from any other commit, or carries no stamp (a plain `mvnw package`).
+
 - **Leg A** is the normal upgrade, from the release users are on now, then a
-  plain same-version reboot. `--ceiling` bounds total WAL through idle
-  (measured 0.80 MB from 8.0.0); `--ceiling-reboot` bounds the reboot's migrate
+  plain same-version reboot. `--ceiling-boot` bounds the upgrade boot's migrate
+  and ready, `--ceiling` total WAL through idle (measured 0.80 MB from 8.0.0),
+  and `--ceiling-reboot` the reboot's migrate
   and ready (measured 0.45-0.59 MB). Every index is valid before the reboot, so
   nothing legitimate writes in it, and an engine that rewrites data on every
   boot fails here even if its first boot passes.
@@ -206,12 +215,12 @@ lab-remote --host chas -c lab-m --fetch .gate -- bash -c 'scripts/build-gate-jar
 - **Leg C** is Leg B with a forced kill, under the same upgrade-boot bound and the
   restart rule.
 
-Every leg must exit 0. Exit 1 is a red (a bound tripped, or the restart rule
-failed): do not tag. Exit 2 is a harness failure with no measurement: fix the
-run and repeat it, never tag on it. Paste each fetched `.gate/*.json`'s
-`verdict`, `boot_wal_bytes`, `total_wal_bytes`, `ceilings_tripped`, the jar's
-sha256 and build commit, and the `resume` block on the cut bead, and check the
-build commit equals the tag commit. Not covered by this step: background work
+Every leg must exit 0. Exit 1 is a red (a bound tripped, a boot failed, or the
+restart rule failed): do not tag. Exit 2 is a harness failure with no measurement: fix the
+run and repeat it, never tag on it. Paste each fetched `output/gate/*.json`'s
+`verdict`, `boot_wal_bytes`, `reboot_wal_bytes` (Leg A), `total_wal_bytes`,
+`ceilings_tripped`, `new_jar_sha256`, `new_jar_commit` and the `resume` block on
+the cut bead, and check the build commit equals the tag commit. Not covered by this step: background work
 that starts after idle (a later sweep or periodic job), and non-index background
 jobs (their own gate, nexus-f3yqd.2). Reference results: engine-service-v0.1.186
 is red on Leg B (`pci_builders_terminated reason=schema_changesets_pending`,

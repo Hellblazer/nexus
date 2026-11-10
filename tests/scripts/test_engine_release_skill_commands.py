@@ -209,21 +209,72 @@ def _legs() -> dict[str, str]:
     return {k: " ".join(v) for k, v in legs.items()}
 
 
+_FLAGS_WITHOUT_VALUE = frozenset({"--no-pci-wait"})
+
+
+def _leg_parts(leg: str) -> tuple[list[str], list[str], dict[str, str | None]]:
+    """A leg as (lab-remote options, the remote script's steps, the harness's options).
+
+    Tokenised with shlex so a bound with digits appended, or a dropped option, changes
+    an exact comparison instead of passing a substring check."""
+    outer = shlex.split(leg)
+    assert outer[0] == "lab-remote" and "--" in outer, f"not a lab-remote command: {leg}"
+    sep = outer.index("--")
+    remote, rest = outer[1:sep], outer[sep + 1 :]
+    assert rest[:2] == ["bash", "-c"] and len(rest) == 3, f"remote command is not one bash -c script: {rest}"
+    steps = [x.strip() for x in rest[2].split("&&")]
+    argv = shlex.split(steps[-1])
+    assert argv[:3] == ["uv", "run", "python"] and argv[3] == "scripts/upgrade_boot_writes.py", argv
+    opts: dict[str, str | None] = {}
+    toks = argv[4:]
+    i = 0
+    while i < len(toks):
+        flag = toks[i]
+        assert flag.startswith("--") and flag not in opts, f"bad or repeated option {flag!r} in {argv}"
+        if flag in _FLAGS_WITHOUT_VALUE:
+            opts[flag] = None
+            i += 1
+        else:
+            opts[flag] = toks[i + 1]
+            i += 2
+    return remote, steps, opts
+
+
+_BOUND = "67108864"  # 64 MiB, Sam 2026-11-10 (halcyon)
+
+
 def test_step_3h_has_exactly_the_three_legs_each_with_its_own_bound() -> None:
     legs = _legs()
     assert sorted(legs) == ["A", "B", "C"], f"Step 3h legs: {sorted(legs)}"
-    a, b, c = legs["A"], legs["B"], legs["C"]
-    assert "--ceiling 67108864" in a and "--ceiling-reboot 67108864" in a, "Leg A bounds total WAL and the reboot"
-    assert "--restart-mid-queue" not in a, "Leg A is the plain upgrade, no restart"
-    for name, leg, mode in (("B", b, "graceful"), ("C", c, "kill")):
-        assert "--ceiling-boot 67108864" in leg, f"Leg {name} bounds the upgrade boot"
-        assert "--ceiling-reboot" not in leg, f"Leg {name}'s second boot is a resume boot and is not byte-gated"
-        assert f"--restart-mode {mode}" in leg, f"Leg {name} restarts with {mode}"
-        for opt in ("--prev-client 7.76.0", "--no-pci-wait", "--rot pending_aspect_queue", "--restart-mid-queue 3"):
-            assert opt in leg, f"Leg {name} lacks {opt}"
+    old = {
+        "--prev-client": "7.76.0",
+        "--new-jar-commit": "$TAG",
+        "--no-pci-wait": None,
+        "--collections": "7",
+        "--rows": "30000",
+        "--rot": "pending_aspect_queue",
+        "--restart-mid-queue": "3",
+        "--ceiling-boot": _BOUND,
+    }
+    expected = {
+        "A": {
+            "--prev-client": "$PREV",
+            "--new-jar-commit": "$TAG",
+            "--ceiling": _BOUND,
+            "--ceiling-boot": _BOUND,
+            "--ceiling-reboot": _BOUND,
+            "--json": "output/gate/A.json",
+        },
+        "B": {**old, "--restart-mode": "graceful", "--json": "output/gate/B.json"},
+        "C": {**old, "--restart-mode": "kill", "--json": "output/gate/C.json"},
+    }
     for name, leg in legs.items():
-        assert "scripts/build-gate-jar.sh" in leg, f"Leg {name} must build the jar in the tag tree"
-        assert "--new-jar" not in leg, f"Leg {name} must boot the jar it just built (the default), not a path"
+        remote, steps, opts = _leg_parts(leg)
+        assert remote == ["--host", "chas", "-c", "lab-m", "--fetch", "output/gate"], f"Leg {name}: {remote}"
+        assert steps[:2] == ["mkdir -p output/gate", "scripts/build-gate-jar.sh"], (
+            f"Leg {name} must create its report directory and build the stamped jar in the tag tree: {steps}"
+        )
+        assert opts == expected[name], f"Leg {name} harness options differ:\n{opts}\n!=\n{expected[name]}"
 
 
 def test_step_3h_scopes_the_bounds_and_names_what_it_does_not_cover() -> None:
