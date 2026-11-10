@@ -133,9 +133,13 @@ class TestIndexPdfE2E:
                               on_extraction=settled.append)
         method = settled[0]["extraction_method"] if settled else ""
         if method != "mineru":
-            if os.environ.get("MINERU_TOOLS_CONFIG_JSON"):
-                pytest.fail(f"MinerU's weights are primed but the PDF was extracted by {method!r}: {settled}")
-            pytest.skip(f"no MinerU weights in the fenced HOME (MINERU_TOOLS_CONFIG_JSON unset); extracted by {method!r}")
+            # The lab pool's self-hosted runners have the weights (this test parses with MinerU there), so a
+            # fallback there is a failure, never a quiet skip of the suite's one real-MinerU index.
+            expected = os.environ.get("MINERU_TOOLS_CONFIG_JSON") or os.environ.get("RUNNER_ENVIRONMENT") == "self-hosted"
+            if expected:
+                pytest.fail(f"MinerU's weights are expected here but the PDF was extracted by {method!r}: {settled}")
+            pytest.skip(f"no MinerU weights in the fenced HOME (MINERU_TOOLS_CONFIG_JSON unset, not a pool "
+                        f"runner); extracted by {method!r}")
 
         assert count > 0, "Expected at least one chunk indexed"
         results = local_t3.search("hello world test document", ["docs__pdf-e2e-simple__voyage-context-3__v1"], sensitivity="include")
