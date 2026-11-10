@@ -245,6 +245,40 @@ class MainPciWiringTest {
     }
 
     /**
+     * nexus-f3yqd.3: {@code boot_work} on {@code /v1/status}. One registry, built after the service exists, bound to the
+     * status route and handed to the reconciler (the first producer), all as plain statements of {@code main}. A
+     * dropped {@code service.bootWork(...)} leaves the route reporting an empty list for ever; a dropped
+     * {@code .bootWork(...)} on the reconciler leaves the entry empty while a build runs; neither fails any other test.
+     * The reconciler's call takes the registry and nothing else: there is no argument that makes the unauthenticated
+     * route name a collection (the step carries the build phase only).
+     */
+    @Test
+    void theBootWorkRegistryIsBuiltOnce_boundToTheStatusRoute_andHandedToTheReconcilerAlone() throws Exception {
+        String src = code(main());
+        int serviceNew = src.indexOf("var service = new NexusService(");
+        int registryNew = src.indexOf("var bootWork = new BootWorkRegistry(java.time.Clock.systemUTC());");
+        int bind = src.indexOf("service.bootWork(bootWork);");
+        int create = src.indexOf("PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,");
+        int reconcilerStart = src.indexOf("pciReconciler.start();");
+
+        assertThat(serviceNew).isPositive();
+        assertThat(registryNew).as("built from the real clock").isGreaterThan(serviceNew);
+        assertThat(bind).as("bound to the status route after it is built").isGreaterThan(registryNew);
+        assertThat(create).as("the reconciler is built after the registry").isGreaterThan(bind);
+        String call = src.substring(create, src.indexOf(";", create));
+        assertThat(call).as("and is handed that registry, and nothing else, as its boot_work")
+            .containsPattern("\\)\\s*\\.bootWork\\(bootWork\\)$");
+        assertThat(reconcilerStart).as("bound before the reconciler starts").isGreaterThan(create);
+        assertThat(src.indexOf("var bootWork =", registryNew + 1)).as("one registry").isNegative();
+        assertThat(src.indexOf("service.bootWork(", bind + 1)).as("bound once").isNegative();
+        assertThat(src.indexOf(".bootWork(", create + call.length())).as("one producer so far").isNegative();
+
+        int mainDepth = depthAt(src, src.indexOf("var ds = new HikariDataSource(hikari);"));
+        assertThat(depthAt(src, bind)).as("the bind is at main's top level, not in a block").isEqualTo(mainDepth);
+        assertThat(precedingToken(src, bind)).as("it follows a statement, not an if/else/loop head").isIn(";", "}");
+    }
+
+    /**
      * nexus-dxsjc: the leaf bloat sweep behind {@code chunks_leaf_bloat} on {@code /v1/status}. Without the start call
      * the cache never fills and the doctor row reads the object as "reads failing" forever; without the bind the route
      * omits the key and every client reads "cannot tell"; without the stop the daemon thread outlives the pool. None

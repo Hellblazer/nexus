@@ -573,9 +573,14 @@ public final class Main {
         var pciQueryRingExpiry = new dev.nexus.service.vectors.PciQueryRingExpiry(tenantScope, service::ringTenants);
         service.queryRing(pciQueryRing);
         pciQueryRing.start();
+        // nexus-f3yqd.3: GET /v1/status's boot_work, the heavy work this engine is doing. Built here, handed to the
+        // route and to each producer; the PCI reconciler is the first. The entries name no collection, tenant or
+        // index (the route is unauthenticated). Pinned in MainPciWiringTest and NexusServiceBootWorkWiringTest.
+        var bootWork = new BootWorkRegistry(java.time.Clock.systemUTC());
+        service.bootWork(bootWork);
         var pciReconciler = dev.nexus.service.vectors.PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,
                 dev.nexus.service.db.PgSession.startupPciSettings(), pciQueryRingExpiry::expireAll, pgVectorRepo,
-                tenantScope);
+                tenantScope).bootWork(bootWork);
         pciReconciler.start();
         // nexus-43ulx.23: GET /v1/status's per_collection_indexes, served from what the two halves already hold (the
         // sweep's last read, the reconciler's cached status): no catalog query per request. Bound here because the

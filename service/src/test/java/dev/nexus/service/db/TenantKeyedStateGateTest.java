@@ -1037,6 +1037,16 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("PciReconciler.AnchorReads.readings", PCI_OFF);
             notKeyed.put("PciReconciler.AnchorReads.adoptions", PCI_OFF);
             notKeyed.put("PciReconciler.tenantBinder", PCI_OFF);
+            // nexus-f3yqd.3: GET /v1/status's boot_work. The registry lists the heavy work this engine is doing
+            // (an index build, by id), names no tenant, and a process-wide piece of work is not carried across a reset.
+            notKeyed.put("BootWorkRegistry.entries", "the engine's heavy work in flight, by work id (pci-reconcile); "
+                + "names no tenant and is emptied by each piece of work when it ends, so a reset has nothing to clear");
+            notKeyed.put("NexusService.bootWork", "the handle of the one boot-work registry, bound once at boot; "
+                + "the registry keeps no per-tenant state");
+            notKeyed.put("StatusHandler.bootWork", "a supplier of the registry's snapshot, bound once at boot; "
+                + "not keyed by tenant");
+            notKeyed.put("PciReconciler.bootWork", "the reconciler's boot-work reporter, bound once at boot; its "
+                + "counters are this pass's builds planned and finished, reset when the pass ends");
             notKeyed.put("EngineSingletonLock.connection", SINGLETON_LOCK);
             notKeyed.put("EngineSingletonLock.onRegained", SINGLETON_LOCK);
             notKeyed.put("EngineSingletonLock.onFatal", SINGLETON_LOCK);
