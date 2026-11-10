@@ -1171,19 +1171,22 @@ def test_a_failed_init_names_the_cause_not_the_reporters_tail(box: Box) -> None:
         (_INIT_FAILED_OUTPUT, "The last error it printed: Postgres provisioning failed: initdb exited 1"),
         ("Traceback (most recent call last):\n  File \"x.py\", line 3\nValueError: bad value\n",
          "The last error it printed: ValueError: bad value"),
-        ("error: Failed to fetch `x`\nCaused by:\nconnection reset by peer\n",
-         "The last error it printed: connection reset by peer"),
+        ("error: Request failed after 3 retries in 12.0s\n  cause: Failed to fetch: http://127.0.0.1:9/simple/x/\n"
+         "  cause: client error (Connect)\n  cause: Connection refused (os error 61)\n",
+         "The last error it printed: cause: Connection refused (os error 61)"),
         ("Downloading numpy (failed retry 1/3)\nInstalled 40 packages\n", "The last line it printed: Installed 40 packages"),
         ("check failed=0\nFinished with 0 errors\nexit 3\n", "The last line it printed: exit 3"),
         ("Stop the server first\n", "The last line it printed: Stop the server first"),
         ("\x1b[31merror: boom\x1b[0m\r\n", "The last error it printed: error: boom"),
         ("error: GET https://user:s3cret@host/x failed\n", "The last error it printed: error: GET https://***@host/x failed"),
         ("error: refused, bearer abc.def.ghi\n", "The last error it printed: error: refused, bearer ***"),
+        ("error: token=abc123 rejected\n", "The last error it printed: error: token=*** rejected"),
+        ("error: token expired\n", "The last error it printed: error: token expired"),
         ("  failed after 1.0 s\n  Re-run `nx init`\n", None),
         ("", None),
     ],
-    ids=["reporter-tail", "traceback", "uv-caused-by", "retry-progress", "zero-counts", "remedy-word", "ansi-crlf",
-         "url-credentials", "bearer", "only-the-tail", "empty"],
+    ids=["reporter-tail", "traceback", "uv-cause", "retry-progress", "zero-counts", "remedy-word", "ansi-crlf",
+         "url-credentials", "bearer", "token-value", "token-word", "only-the-tail", "empty"],
 )
 def test_the_failure_cause_line(output: str, cause: str | None) -> None:
     assert _load_module()._failure_cause(output) == cause

@@ -1946,7 +1946,7 @@ class _Run:
             message = f"{message} {cause}"
         return self.end(
             FAILED, message,
-            "Read the log for the cause and tell the user what it says. Once the cause is fixed, or if it was brief "
+            "Read the log for the cause and tell the user what it says. Once it is fixed, or when it was brief "
             f"(such as a network drop), if the user agrees, call setup again{' with slim true' if self.slim else ''}: "
             f"it resumes at the {step} step.{FULL_WORDS if self.slim else ''} Log: {self.log_path}",
             failed_step=step,
@@ -2238,18 +2238,22 @@ def pdf_slim_note(output: str) -> str | None:
 
 
 #: The cause a failing command printed (F3, nexus-f3yqd.6). A line that states an error outright wins
-#: (``error: ...``, ``fatal: ...``, a Python exception line such as ``ValueError: bad``, the line after uv's
-#: ``Caused by:``); then a line naming a failure; then the last line. The step reporter's own tail
+#: (``error: ...``, ``fatal: ...``, a Python exception line such as ``ValueError: bad``, uv's deepest
+#: ``cause: ...`` line); then a line naming a failure; then the last line. The step reporter's own tail
 #: (``failed after 2.0 s``, the ``Re-run`` remedy, ``Log:``, ``Summary:``) is never the cause, and a
 #: count such as ``0 errors`` or ``failed=0`` is not a failure.
-_STATED = re.compile(r"^(?:error|fatal)\b\s*[:\[]|^[\w.]*(?:Error|Exception)\b(?:\([^)]*\))?:\s*\S", re.IGNORECASE)
+_STATED = re.compile(
+    r"^(?:error|fatal)\b\s*[:\[]|^(?:caused by|cause):\s*\S|^[\w.]*(?:Error|Exception)\b(?:\([^)]*\))?:\s*\S",
+    re.IGNORECASE,
+)
 _NAMED = re.compile(r"\b(?:error|failed|failure|refused|denied|not found|no such file|permission denied)\b", re.IGNORECASE)
 _NOT_A_FAILURE = re.compile(r"\b(?:0|no|zero)\s+(?:errors?|failures?)\b|\b(?:errors?|failed|failures?)\s*[=:]\s*0\b|\bretry\b", re.IGNORECASE)
 _REPORTER_TAIL = re.compile(r"^(?:failed after\b|re-run\b|run `|log:|summary:|traceback \(most recent call last\))", re.IGNORECASE)
 _CONTROL = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f]")
 _SECRETS = (
     (re.compile(r"(://)[^/\s:@]+:[^/\s@]+@"), r"\1***@"),
-    (re.compile(r"\b(bearer|token|password|secret)(\s*[=:]\s*|\s+)\S+", re.IGNORECASE), r"\1\2***"),
+    (re.compile(r"\b(bearer)\s+\S+", re.IGNORECASE), r"\1 ***"),
+    (re.compile(r"\b(token|password|secret|api[_-]?key)(\s*[=:]\s*)\S+", re.IGNORECASE), r"\1\2***"),
 )
 _CAUSE_CHARS = 300
 
@@ -2265,7 +2269,7 @@ def _failure_cause(output: str, *, timed_out: bool = False) -> str | None:
     if timed_out:
         line, lead = lines[-1], "It stopped at:"
     else:
-        stated = [i for i, line in enumerate(lines) if _STATED.match(line) or (i and lines[i - 1].lower() == "caused by:")]
+        stated = [i for i, line in enumerate(lines) if _STATED.match(line)]
         named = [i for i, line in enumerate(lines) if _NAMED.search(line) and not _NOT_A_FAILURE.search(line)]
         if stated or named:
             line, lead = lines[(stated or named)[-1]], "The last error it printed:"
@@ -2425,7 +2429,8 @@ def _cloud(run: _Run, nx: str) -> int | None:
         for tail, secret, what in steps:
             code, said = run.cmd([nx, "config", *tail], stdin_text=secret)
             if code != 0:
-                return run.fail("credentials", f"{what} failed." if tail[0] == "unset" else f"saving {what} failed.", said)
+                return run.fail("credentials", f"{what} failed." if tail[0] == "unset" else f"saving {what} failed.", said,
+                                timed_out=code is None)
     except OSError as exc:
         return run.fail("credentials", f"nx config could not start: {exc}")
     assert run.page is not None
@@ -2452,14 +2457,14 @@ def _service(run: _Run, nx: str, config: Path) -> int | None:
             except OSError as exc:
                 return run.fail("service-install", f"the login unit could not be registered: {exc}")
             if code != 0:
-                return run.fail("service-install", "registering the login unit failed.", said)
+                return run.fail("service-install", "registering the login unit failed.", said, timed_out=code is None)
         run.at("service-start")
         try:
             code, said = run.cmd([nx, "daemon", "service", "start"])
         except OSError as exc:
             return run.fail("service-start", f"the service could not be started: {exc}")
         if code != 0:
-            return run.fail("service-start", "starting the service failed.", said)
+            return run.fail("service-start", "starting the service failed.", said, timed_out=code is None)
         run.step_done("service")
         return None
     run.at("init")
