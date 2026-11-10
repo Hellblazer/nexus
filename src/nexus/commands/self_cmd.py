@@ -2364,23 +2364,42 @@ def install_cmd(
     migration ladder — they are two commands on purpose (RDR-143 CA-2). A
     fresh install needs no `nx upgrade`: `nx init` converges the ladder.
     """
-    generation = perform_self_install(
-        keep=keep, version=version, dry_run=dry_run, add_extras=extras, bootstrap=bootstrap,
-        progress=True,  # interactive: install.ps1, the setup build and a person at a prompt (nexus-2k66t.4.7)
-    )
+    if dry_run:
+        perform_self_install(
+            keep=keep, version=version, dry_run=True, add_extras=extras, bootstrap=bootstrap, progress=True,
+        )
+        return
+    from nexus.progress.step_report import StepReporter  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+
+    # nexus-mjmjl: each step announced, timed and summarised. The build step is
+    # lazy: a refusal from the checks before any work stays one line on stderr.
+    # A first install has no cache prune (RDR-228), so it is one step.
+    reporter = StepReporter(1 if bootstrap else 2, name="nx self install")
+    # No remedy line: a failure after the flip is not "nothing changed", and
+    # every such failure already says how to finish (review r1).
+    with reporter.step(
+        "Build and install a new generation",
+        "downloads the package and its dependencies; minutes on a cold cache",
+        lazy=True,
+    ) as build:
+        generation = perform_self_install(
+            keep=keep, version=version, dry_run=False, add_extras=extras, bootstrap=bootstrap,
+            progress=True,  # interactive: install.ps1, the setup build and a person at a prompt (nexus-2k66t.4.7)
+        )
+        if generation is None and not build.announced:
+            build.discard = True  # a repair that built nothing: no step line after its own lines
     if generation is None:
         return
     click.echo(f"installed {generation.name}")
     if bootstrap:
         # A first install: no cache prune (RDR-228), and nothing to migrate.
         _record_lockstep_after_bootstrap()
+        reporter.summary()
         click.echo("a fresh install is set up by `nx init`")
         return
-    # nexus-mjmjl: the prune is cleanup after a finished install; say so before
-    # it runs, since it can wait on another uv process (then it moves to the
-    # background rather than block).
-    click.echo(f"pruning uv's package cache (cleanup only; {generation.name} is already in use) ...")
-    click.echo(prune_uv_cache())
+    with reporter.step("Prune uv's package cache", f"cleanup only: {generation.name} is already in use"):
+        click.echo(prune_uv_cache())
+    reporter.summary()
     click.echo(
         "if this upgraded an existing install, run `nx upgrade` for migrations "
         "(a fresh install is set up by `nx init` instead); "

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import contextlib
+
 import click
 import structlog
 
@@ -2926,7 +2928,7 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
 )
 
 
-def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> bool:
+def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET, *, progress: Any = None) -> bool:
     """Run the cheap/read-only opt-in checks promoted into the default
     sweep (see the classification table above). Additive output; it does
     not gate (see the non-gating note above) EXCEPT for the rows named in
@@ -2967,7 +2969,13 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> b
         runner = runners[name]
         click.echo(f"\n--- {name} ---")
         try:
-            if runner() is True and name in _GATING_SUPPLEMENTARY_CHECKS:
+            # nexus-mjmjl: under the sweep's reporter, so a slow one shows its
+            # elapsed time and is listed with the slow checks at the end.
+            # prints=True: these runners echo their own result, so their step line is
+            # a whole line rather than an in-place redraw (review r2).
+            with progress.step(name, prints=True) if progress is not None else contextlib.nullcontext():
+                result = runner()
+            if result is True and name in _GATING_SUPPLEMENTARY_CHECKS:
                 gating_failed = True
         except click.exceptions.Exit:
             # The check already printed its own failure/status detail;
@@ -3001,6 +3009,35 @@ def _say_if_the_engine_is_migrating() -> None:
         return
     for line in lines:
         click.echo(line, err=True)
+
+
+#: Checks at least this slow are listed after the sweep (nexus-mjmjl).
+_DOCTOR_SLOW_LIST_S: float = 1.0
+
+
+def _doctor_progress() -> Any:
+    """The sweep's progress on stderr (nexus-mjmjl): each check's name as it
+    starts (the core checks redrawn in place on a terminal), elapsed time once a check passes
+    3 s, a line for each slow check, and the slow ones listed at the end.
+    stderr keeps ``--json``'s stdout one parseable document."""
+    import sys  # noqa: PLC0415 — stdlib
+
+    from nexus.progress.step_report import StepReporter  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+
+    try:
+        tty = bool(sys.stderr.isatty())
+    except Exception:  # noqa: BLE001 — an odd stream reads as no terminal
+        tty = False
+    # On a terminal each check's name is redrawn in place, with elapsed time
+    # from 3 s. Elsewhere (a pipe, an agent) a check is named only once it has
+    # run a second (lazy), with a heartbeat every 30 s. No error text is
+    # printed: a check's own row says what failed, and an exception can carry
+    # a credential the engine echoed (review r1).
+    return StepReporter(
+        0, echo=lambda text: click.echo(text, err=True), stream=sys.stderr, tty=tty, compact=True,
+        slow_s=3.0, heartbeat_s=3.0 if tty else 30.0, announce="Checking {what}{detail}", name="nx doctor",
+        show_reason=False, lazy=not tty,
+    )
 
 
 @click.command("doctor", epilog=COLLECTIONS_RULES_EPILOG)
@@ -3875,10 +3912,16 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     # One GET /v1/status serves the "Ownerless writes", "Engine reaper" and "Per-collection indexes" rows and the engine-activity block.
     from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    engine_status = fetch_engine_status()
+    progress = _doctor_progress()
+    # nexus-mjmjl: the status read goes through the engine; name it first, so a
+    # busy engine shows where the time goes instead of a silent terminal.
+    with progress.step("the engine's status"):
+        engine_status = fetch_engine_status()
     results, is_local = run_health_checks(
         git_hooks_scope=git_hooks_scope, engine_status=engine_status, verbose=verbose,
+        progress=progress,
     )
+
     output, failed = format_health_for_cli(results, local_mode=is_local)
     supplementary_failed = False
     if json_out:
@@ -3887,7 +3930,8 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         click.echo(format_health_for_json(results, local_mode=is_local))
     else:
         click.echo(output)
-        supplementary_failed = _run_supplementary_checks(engine_status) is True
+        supplementary_failed = _run_supplementary_checks(engine_status, progress=progress) is True
+    progress.summary(min_s=_DOCTOR_SLOW_LIST_S)
 
     # RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv bridge notice is RETIRED
     # here. A pending Chroma→pgvector cutover is reported by the ladder's own

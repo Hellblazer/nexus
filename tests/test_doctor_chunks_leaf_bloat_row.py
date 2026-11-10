@@ -428,13 +428,13 @@ def test_a_body_without_a_leaves_list_is_unreadable_not_a_crash(store) -> None:
 def test_the_doctor_verbose_flag_reaches_the_sweep(monkeypatch) -> None:
     seen: dict = {}
 
-    def fake_run(git_hooks_scope=None, engine_status=None, *, verbose=False):
+    def fake_run(git_hooks_scope=None, engine_status=None, *, verbose=False, progress=None):
         seen["verbose"] = verbose
         return [], True
 
     monkeypatch.setattr("nexus.health.run_health_checks", fake_run)
     monkeypatch.setattr(_FETCH, lambda **kw: None)
-    monkeypatch.setattr("nexus.commands.doctor._run_supplementary_checks", lambda status: None)
+    monkeypatch.setattr("nexus.commands.doctor._run_supplementary_checks", lambda status, progress=None: None)
     runner = CliRunner()
     assert runner.invoke(main, ["doctor"]).exit_code == 0
     assert seen == {"verbose": False}

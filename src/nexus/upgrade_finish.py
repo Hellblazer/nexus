@@ -3436,8 +3436,89 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
     return lines
 
 
+def _announce_finish_pass(seen: str, version: str) -> None:
+    """nexus-mjmjl: the finish pass below can stop and start services and
+    install an engine before the command itself runs, and it used to do that
+    without a word (the user-seat upgrade rehearsal measured 6+ s of silence
+    after a 2.5 s engine boot). Say what is happening first, on stderr so a
+    command's stdout stays its own. Never raises."""
+    try:
+        import click  # noqa: PLC0415 — deferred, keeps the module import light
+
+        click.echo(
+            f"conexus changed from {seen} to {version}: finishing the switch first (processes still "
+            "running the old version are restarted and a local engine is brought to this release's pin; "
+            "this can take a minute or two) ...",
+            err=True,
+        )
+    except Exception:  # noqa: BLE001 — advisory output must never break CLI startup
+        pass
+
+
 def check_version_transition(
     config_dir: Path, *, preview: bool | None = None,
+) -> str | None:
+    """See :func:`_check_version_transition`. This wrapper keeps a heartbeat
+    on stderr while a finish pass that announced itself runs (nexus-mjmjl:
+    the user-seat rehearsal measured an 8 s silent stretch inside it)."""
+    beat = _FinishHeartbeat()
+    ok = False
+    try:
+        result = _check_version_transition(config_dir, preview=preview, _on_announce=beat.start)
+        ok = True
+        return result
+    finally:
+        beat.stop(ok=ok)
+
+
+class _FinishHeartbeat:
+    """``... still finishing the switch: N s`` on stderr every few seconds,
+    from a daemon thread, between :meth:`start` and :meth:`stop`. Never raises."""
+
+    EVERY_S: float = 4.0
+
+    def __init__(self) -> None:
+        import threading  # noqa: PLC0415 — stdlib
+
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started: float | None = None
+
+    def start(self, seen: str, version: str) -> None:
+        import threading  # noqa: PLC0415 — stdlib
+
+        _announce_finish_pass(seen, version)
+        self._started = time.monotonic()
+        self._thread = threading.Thread(target=self._run, name="finish-pass-heartbeat", daemon=True)
+        try:
+            self._thread.start()
+        except RuntimeError:
+            self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.EVERY_S):
+            _echo_err(f"  ... still finishing the switch: {int(time.monotonic() - (self._started or 0))} s")
+
+    def stop(self, *, ok: bool = True) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            took = int(time.monotonic() - (self._started or 0))
+            _echo_err(f"  finished the switch in {took} s" if ok else f"  the switch stopped after {took} s")
+
+
+def _echo_err(text: str) -> None:
+    try:
+        import click  # noqa: PLC0415 — deferred
+
+        click.echo(text, err=True)
+    except Exception:  # noqa: BLE001 — advisory output must never break CLI startup
+        pass
+
+
+def _check_version_transition(
+    config_dir: Path, *, preview: bool | None = None,
+    _on_announce: "Callable[[str, str], None] | None" = None,
 ) -> str | None:
     """Version-stamp auto-trigger. Returns a one-line summary when a
     version transition was detected and the safe finish pass ran; None
@@ -3631,6 +3712,8 @@ def check_version_transition(
     # transition, so the real finish pass would never run automatically.
     if not seen:
         return None  # first-ever run: nothing stale to finish
+    if not preview:
+        (_on_announce or _announce_finish_pass)(seen, version)
     # A real `nx upgrade` run performs the service cycle and the rung walk right after this
     # pass; the lines below say so instead of asking a person for the same work.
     running_upgrade = None if preview else upgrade_invocation()

@@ -7,6 +7,7 @@ RDR-076 (nexus-jda).
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 
 import click
 import structlog
@@ -64,112 +65,23 @@ def upgrade(
     # flight, or the service stop/start cycle in the `finally` below (about
     # 60 s each). An interactive `nx upgrade` has no limit. Built inside the
     # try: `--auto` promises exit 0, so even a failure here is swallowed.
+    # nexus-mjmjl: every step is announced before it runs, heartbeats while
+    # it runs, and reports its duration; the summary lists them all. --auto
+    # is quiet on stdout (its contract) and writes the same lines to the log.
+    from nexus.progress.step_report import StepReporter  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+
+    reporter: StepReporter | None = None
     try:
-        deadline = _auto_deadline() if auto_mode else None
-        _run_upgrade(dry_run=dry_run, auto_mode=auto_mode, skip_t3=skip_t3)
-        # RDR-185 P3.1 (nexus-n7u38.23): the two non-data axes converge as
-        # STATELESS preconditions before the ladder walks — re-derived from
-        # on-disk state each invocation (sidecar/lease/metadata), never
-        # recorded. --auto keeps the engine install with the version-
-        # transition path (hook timeout budget); process freshness stays.
-        # (check_version_transition at the ROOT cli group has already run on
-        # this invocation — on a version transition it converged the engine
-        # inline via the same shared mechanism; this stage's engine step
-        # then no-ops. One mechanism, two triggers: see the P3 decision
-        # addendum nexus_rdr/185-p3-engine-trigger-duality-decision.)
-        if not dry_run:
-            _converge_preconditions(auto_mode=auto_mode, skip_t3=skip_t3)
-        # RDR-185 P0.4 (nexus-n7u38.4): `nx upgrade` is the SINGLE trigger for
-        # the upgrade ladder — every pending rung converges here (dry-run
-        # reports read-only from detect()). The registry is empty until native
-        # rungs land (t2-schema P1, substrate-etl P2), so this is silent today.
-        # RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv substrate-migration
-        # bridge is RETIRED here — the walk above IS the cutover. The bridge
-        # existed because `nx upgrade` and the one-time cutover were two
-        # commands with nothing between them: a local-mode user saw
-        # "migrations complete" and no pointer to the real next step. P4.0
-        # registered the substrate rung and P4.0b made provisioning a
-        # precondition, so by the time control reaches this line the pending
-        # cutover has already converged in THIS invocation. Keeping the
-        # pointer would (a) advertise `nx guided-upgrade` — demoted to an
-        # internal primitive by P4.1, invisible in --help — as the everyday
-        # remedy, breaking "one story, one verb", and (b) re-answer a
-        # DATA-rung question ("is a substrate transition pending?") from an
-        # ad-hoc re-sample instead of the ladder, which is precisely the
-        # third mechanism the Gap-4 criterion bans. Genuine decisions the
-        # walk cannot derive (source-gone, billed re-embed) surface from
-        # INSIDE the rung; pending state is reported by `nx doctor`.
-        # nexus-75w5d: `--auto` is UNATTENDED, whatever the deadline says (the root group also sets this
-        # for NX_UPGRADE_UNATTENDED=1, which a plain `nx upgrade` started by a hook carries).
-        from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
-
-        with _standing_consent(assume_yes), unattended_run(auto_mode):
-            _run_ladder(dry_run=dry_run, auto_mode=auto_mode, deadline=deadline)
-
-        # nexus-g7ijj: an install that converged purely via `nx upgrade`
-        # (never re-running `nx init`) never got install.mode stamped —
-        # is_local_mode() fell through to pg_credentials artifact inference
-        # forever. Backfill it here, on the ladder-succeeded path only
-        # (a hard ladder failure raises before this line); --dry-run must
-        # write nothing.
-        if not dry_run:
-            # nexus-g7ijj fix round: no actual import cycle between
-            # nexus.config and nexus.commands.upgrade — deferred to match
-            # this file's convention of keeping imports off the CLI's
-            # cold-start path, and because backfill_install_mode_record()
-            # is genuinely exception-safe (see its docstring): this call
-            # site does not need its own try/except.
-            from nexus.config import backfill_install_mode_record  # noqa: PLC0415 — deferred, keeps config import off the CLI's cold-start path
-            backfill_install_mode_record()
-
-        # RE-WIRED (Hal decision, 2026-07-30): these three post-upgrade
-        # steps lost their caller when Stage 4 deleted _run_upgrade's
-        # local-SQLite leg — collateral, not a decision. Same gating as
-        # before the deletion; all three are substrate-independent and
-        # best-effort.
-        #
-        # nexus-b03o: post-upgrade advisory — pre-4.32 local-mode installs
-        # wrote 384d MiniLM vectors into collections named for voyage-*
-        # (1024d); mislabeled collections persist until the operator runs
-        # `nx collection rename`. Advisory only — never fails the upgrade.
-        if not auto_mode and not skip_t3:
-            _emit_name_vs_embed_dim_advisory()
-
-        # RDR-137 Phase 5.2 (nexus-tts0d.19): one-shot migration of
-        # ~/.config/nexus/repos.json into the catalog. Idempotent: no-op
-        # when the file is already absent. Safety: refuses to delete on
-        # any catalog-vs-registry disagreement (per OQ-7 lock).
-        if not auto_mode:
-            _migrate_repos_json_to_catalog(dry_run=dry_run)
-
-        # Refresh nexus-managed git hooks across every registered repo so a
-        # stanza change (e.g. a new pgrep guard) lands everywhere in one
-        # upgrade instead of a per-repo `nx hooks update`. Best-effort,
-        # non-auto, non-dry-run; only touches already-managed hooks.
-        if not auto_mode and not dry_run:
-            _refresh_all_git_hooks()
-
-        # nexus-2uwag: the plugin is the third thing an upgrade converges.
-        # RDR-143's SessionStart hook drives wheel+data from a plugin update;
-        # this is the other direction, so `nx upgrade` is one verb for all
-        # three. Not under --auto: that is the budgeted-hook invocation and
-        # this step is a git fetch; the detached lockstep action calls plain
-        # `nx upgrade`, where it runs. Advisory: never fails the upgrade.
-        if not auto_mode:
-            _converge_plugins(dry_run=dry_run)
-
-        # Generated user-scope agents are composed FROM the installed plugins,
-        # so a plugin advance leaves them stale; regenerate right after
-        # lockstep. Opt-in (absent agent = nothing to do), advisory.
-        if not auto_mode:
-            _refresh_generated_agents(dry_run=dry_run)
-
-        # nexus-cnzei.8: install/refresh the user-level beads PRIME.md when
-        # beads is detected. Same gating as the git-hooks refresh above — a
-        # filesystem write, not under --auto, never under --dry-run.
-        if not auto_mode and not dry_run:
-            _install_beads_prime_best_effort(no_beads_prime=no_beads_prime)
-
+        # Built inside the try: `--auto` promises exit 0, so even a failure
+        # here is swallowed.
+        steps = _upgrade_steps(
+            dry_run=dry_run, auto_mode=auto_mode, skip_t3=skip_t3, assume_yes=assume_yes,
+            no_beads_prime=no_beads_prime,
+        )
+        reporter = StepReporter(len(steps) + (0 if dry_run else 1), quiet=auto_mode, name="nx upgrade")
+        for what, detail, run in steps:
+            with reporter.step(what, detail):
+                run()
         # nexus-emiky: a lockstep child that lost the upgrade lock left the retry sentinel in the lockstep
         # marker, saying this work (plugin convergence, agents and hooks refresh, the engine install, the
         # advisory) is owed. A run that did it settles the marker; `--auto` skips that work, `--skip-t3`
@@ -190,7 +102,93 @@ def upgrade(
         # ensure-running is version-aware: no-op on a current daemon,
         # graceful cycle on a stale one. Best-effort, non-dry-run only.
         if not dry_run:
-            _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
+            if reporter is None:
+                _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
+            else:
+                with reporter.step(
+                    "Restart running services on the new version", "a stale service is cycled; about a minute each",
+                ):
+                    _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
+        if reporter is not None:
+            reporter.summary()
+
+
+def _upgrade_steps(
+    *, dry_run: bool, auto_mode: bool, skip_t3: bool, assume_yes: bool, no_beads_prime: bool,
+) -> list[tuple[str, str | None, Callable[[], None]]]:
+    """The steps one `nx upgrade` runs, in order, as (what, detail, run).
+
+    Built up front so every step line can say "of M". The gating of each step
+    is unchanged from the straight-line body it replaced (nexus-mjmjl)."""
+    steps: list[tuple[str, str | None, Callable[[], None]]] = []
+    # nexus-dcbof: the detached SessionStart child stops STARTING new work
+    # after a time limit (default 900 s), at safe points: between census
+    # calls, backfill collections and ladder rungs. The clock starts here, so
+    # the precondition stage counts against it. An interactive `nx upgrade`
+    # has no limit.
+    deadline = _auto_deadline() if auto_mode else None
+    steps.append((
+        "Check for client-side migrations", None,
+        lambda: _run_upgrade(dry_run=dry_run, auto_mode=auto_mode, skip_t3=skip_t3),
+    ))
+    if not dry_run:
+        # RDR-185 P3.1 (nexus-n7u38.23): the non-data axes converge as
+        # STATELESS preconditions before the ladder walks, re-derived from
+        # on-disk state each invocation, never recorded.
+        steps.append((
+            "Bring the engine, the PDF stack and the runtime to this release",
+            "can download the engine and its PostgreSQL bundle, rebuild the PDF stack and restart services "
+            "still on the old version; minutes when it does",
+            lambda: _converge_preconditions(auto_mode=auto_mode, skip_t3=skip_t3),
+        ))
+
+    def _ladder() -> None:
+        # RDR-185 P0.4 (nexus-n7u38.4): `nx upgrade` is the SINGLE trigger for
+        # the upgrade ladder; dry-run reports read-only from detect().
+        # nexus-75w5d: `--auto` is UNATTENDED, whatever the deadline says.
+        from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        with _standing_consent(assume_yes), unattended_run(auto_mode):
+            _run_ladder(dry_run=dry_run, auto_mode=auto_mode, deadline=deadline)
+        # nexus-g7ijj: an install that converged purely via `nx upgrade`
+        # never got install.mode stamped; backfill it on the ladder-succeeded
+        # path only. --dry-run writes nothing.
+        if not dry_run:
+            from nexus.config import backfill_install_mode_record  # noqa: PLC0415 — deferred, keeps config import off the CLI's cold-start path
+
+            backfill_install_mode_record()
+
+    steps.append((
+        "Run the upgrade ladder's data steps",
+        "a pending step can read every document in your store; minutes on a large one",
+        _ladder,
+    ))
+    # nexus-b03o: advisory for collections named for a model whose width
+    # their vectors do not have. Never fails the upgrade.
+    if not auto_mode and not skip_t3:
+        steps.append(("Check collection names against their embedding widths", None, _emit_name_vs_embed_dim_advisory))
+    # RDR-137 Phase 5.2: one-shot migration of repos.json into the catalog; idempotent.
+    if not auto_mode:
+        steps.append(("Move repos.json into the catalog", None, lambda: _migrate_repos_json_to_catalog(dry_run=dry_run)))
+    # Refresh nexus-managed git hooks across every registered repo.
+    if not auto_mode and not dry_run:
+        steps.append(("Refresh the nexus git hooks in registered repos", None, _refresh_all_git_hooks))
+    # nexus-2uwag: the plugin is the third thing an upgrade converges. Not
+    # under --auto (a git fetch inside the budgeted hook). Advisory.
+    if not auto_mode:
+        steps.append((
+            "Update the plugins", "fetches the plugin marketplace",
+            lambda: _converge_plugins(dry_run=dry_run),
+        ))
+        # Generated agents are composed FROM the installed plugins.
+        steps.append(("Refresh the generated agents", None, lambda: _refresh_generated_agents(dry_run=dry_run)))
+    # nexus-cnzei.8: the user-level beads PRIME.md when beads is detected.
+    if not auto_mode and not dry_run:
+        steps.append((
+            "Install the beads PRIME file", None,
+            lambda: _install_beads_prime_best_effort(no_beads_prime=no_beads_prime),
+        ))
+    return steps
 
 
 def _say_if_the_engine_is_migrating(*, auto_mode: bool) -> None:
