@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from nexus.commands.upgrade import _BatchProgress
 from nexus.upgrade_ladder.registry import LadderRegistry
 from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
+from nexus.upgrade_ladder.scan_reuse import VERIFY_REUSE_S, ScanReuse
 from nexus.upgrade_ladder.rungs.manifest_span_fill import TITLE_RULE_MARK
 from nexus.upgrade_ladder.auto_guard import CHEAP_PENDING
 from nexus.upgrade_ladder.rungs.manifest_section_labels import ManifestSectionLabelsRung
@@ -173,3 +174,16 @@ def test_an_interactive_walk_still_fills_and_verify_reads_afresh() -> None:
     assert world.docs["1.1.1"].meta["tags"] == ["a", "b"]
     assert world.listings == 2  # converge's listing, then verify confirms the fill
     assert ledger.verified_rungs()
+
+
+def test_a_held_scan_is_taken_once_and_expires() -> None:
+    now = [0.0]
+    reuse: ScanReuse[str] = ScanReuse(clock=lambda: now[0])
+    reuse.keep("clean")
+    assert reuse.take() == "clean" and reuse.take() is None
+    reuse.keep("clean")
+    now[0] += VERIFY_REUSE_S + 1
+    assert reuse.take() is None
+    reuse.keep("clean")
+    reuse.clear()
+    assert reuse.take() is None
