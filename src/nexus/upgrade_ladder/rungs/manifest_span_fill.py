@@ -94,6 +94,9 @@ from nexus.upgrade_ladder.auto_guard import (
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
+from nexus.upgrade_ladder.engine_outage import engine_unreachable
+from nexus.upgrade_ladder.census_progress import NoteStore, T2NoteStore
+from nexus.upgrade_ladder.owed_restores import OwedRestores
 from nexus.upgrade_ladder.scan_reuse import ScanReuse
 from nexus.upgrade_ladder.unattended import is_cheap_detect
 from nexus.upgrade_ladder.completion import CompletionRecord
@@ -125,6 +128,9 @@ from nexus.upgrade_ladder.rungs.manifest_section_labels import (
 )
 
 _log = structlog.get_logger(__name__)
+
+#: The rung's default owed-restore record: a T2 note (a test passes its own, or None).
+_DEFAULT_OWED_STORE = object()
 
 RUNG_NAME = RUNG_MANIFEST_SPAN_FILL
 
@@ -288,8 +294,14 @@ class ManifestSpanFillRung:
         max_rows: int = MAX_ROWS_PER_REQUEST,
         record_fn: Callable[[], CompletionRecord | None] = _default_record,
         managed_fn: Callable[[], bool] = managed_service,
+        owed_store: "NoteStore | None | object" = _DEFAULT_OWED_STORE,
     ) -> None:
         self._managed_fn = managed_fn
+        # nexus-f3yqd.5: the indexed_at write-backs owed, recorded before each write and kept across runs
+        self._owed = OwedRestores(
+            T2NoteStore(f"owed-restores-{RUNG_NAME}", tags="upgrade-ladder") if owed_store is _DEFAULT_OWED_STORE
+            else owed_store,  # type: ignore[arg-type]
+        )
         self._reader_factory = reader_factory
         self._writer_factory = writer_factory
         self._t3_factory = t3_factory
@@ -465,6 +477,7 @@ class ManifestSpanFillRung:
                 "expected": expected_values(now),
             })
         written: set[str] = set()
+        asked: set[str] = set()  # every document owed before its request: settled after, written or not
         in_flight: list[str] = []  # the request being sent: a raise after the engine committed it restamped these too
         try:
             for collection, per_doc in sorted(by_collection.items()):
@@ -474,6 +487,8 @@ class ManifestSpanFillRung:
                         counts.write_refused_409 += sum(len(rows) for _d, rows in request)
                         continue
                     in_flight = [d for d, _rows in request]
+                    self._owed.owe({d: stamps.get(d, "") for d in in_flight})  # before the engine restamps them
+                    asked.update(in_flight)
                     try:
                         result = writer.append_manifest_many(request, collection=collection)
                     except (SupersededCollectionWriteError, httpx.HTTPStatusError) as exc:
@@ -505,7 +520,9 @@ class ManifestSpanFillRung:
         finally:
             # also when a later request raised: the engine restamped indexed_at on every document an earlier request
             # wrote, and left alone that stamp switches the chunk-newer guard off for the document's other rows
+            before = len(counts.restore_failed_docs)
             ManifestSectionLabelsRung._restore_batch(writer, sorted(written | set(in_flight)), stamps, counts)  # type: ignore[arg-type]  # reads only the restore counters
+            self._owed.settle(sorted(asked), counts.restore_failed_docs[before:])
 
     def _requests(self, docs_rows: list[tuple[str, list[dict]]]) -> list[list[tuple[str, list[dict]]]]:
         """Cut ``(doc_id, rows)`` pairs into requests of at most ``max_rows`` rows and ``doc_batch`` documents; a
@@ -634,6 +651,16 @@ class ManifestSpanFillRung:
         writer = self._writer_factory()
         t3 = self._t3_factory()
         try:
+            unpaid = self._owed.pay(writer)
+            if unpaid:
+                return ConvergeResult(
+                    ConvergeOutcome.DEFERRED,
+                    detail=(
+                        f"indexed_at could not yet be written back on {len(unpaid)} document(s) after an earlier "
+                        f"write ({', '.join(unpaid[:10])}); the write-back is kept and tried again on the next "
+                        "`nx upgrade`, before the step reads the store"
+                    ),
+                )
             try:
                 counts = self._scan(reader, writer=writer, t3=t3, report=report)
             except RouteAbsent as exc:
@@ -690,6 +717,8 @@ class ManifestSpanFillRung:
             # nexus-mjmjl: a confirming walk after a fill prints the same progress lines as the fill.
             counts = self._clean_scan.take() or self._dry_run(report=self._reporter)
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is unknown, and unknown is not reached
+            if engine_unreachable(exc):
+                raise  # the runner waits for a restarting engine and confirms again (nexus-f3yqd.5)
             self._verify_detail = f"could not read the catalog to confirm the fill: {exc}"
             return False
         if counts is None:

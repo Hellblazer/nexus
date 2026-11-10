@@ -111,7 +111,14 @@ def python_wiring_problems(ci_text: str, ceilings_text: str) -> list[str]:
         if not m or int(m.group(1)) != n:
             problems.append(f"pytest-gate: fan-in --shards is {m.group(1) if m else 'missing'} but the matrix has {n} shards")
         runs_on = str(doc["jobs"]["test"].get("runs-on", ""))
-        m_on = re.fullmatch(r"\$\{\{\s*(.+?)\s*&&\s*'ubuntu-latest'\s*\|\|\s*'lab-[\w-]+'\s*\}\}", runs_on)
+        # The pool side is one lab label, or a choice between lab labels (a release PR's
+        # shards take lab-6c18g-release, labrun-9no); either way it is the pool, not hosted.
+        m_on = re.fullmatch(
+            r"\$\{\{\s*(.+?)\s*&&\s*'ubuntu-latest'\s*\|\|\s*"
+            r"(?:'lab-[\w-]+'|\(\s*github\.base_ref\s*==\s*'main'\s*&&\s*'lab-[\w-]+'\s*\|\|\s*'lab-[\w-]+'\s*\))"
+            r"\s*\}\}",
+            runs_on,
+        )
         m_ba = re.search(r"\$\{\{\s*(.+?)\s*&&\s*'--bytes-advisory'\s*\|\|\s*''\s*\}\}", run)
         if not m_on:
             problems.append(f"test: runs-on is not the '<hosted> && ubuntu-latest || lab-*' shape the fan-in mirrors: {runs_on!r}")

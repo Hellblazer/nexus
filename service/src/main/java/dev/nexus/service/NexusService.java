@@ -285,6 +285,13 @@ public final class NexusService {
         perCollectionIndexes;
 
     /**
+     * nexus-f3yqd.3: the heavy work {@code GET /v1/status}'s {@code boot_work} lists. Bound late, by
+     * {@link #bootWork(BootWorkRegistry)}, because the route is registered in the constructor and {@code Main} builds
+     * the registry beside the producers. Null until bound, and the route then reports an empty list.
+     */
+    private volatile BootWorkRegistry bootWork;
+
+    /**
      * RDR-210 Phase 2 Step 4 (bead nexus-un7vj): the boot posture {@code /version} and {@code GET /v1/status}
      * report beside the embedding mode (profile, reranker, degraded-boot description). Bound late, by
      * {@link #embedPosture(dev.nexus.service.http.EmbedPosture)}, because both routes are registered in the
@@ -716,6 +723,7 @@ public final class NexusService {
                                 dataSource, java.time.Clock.systemUTC()),
                         this::perCollectionIndexesStatus, this::chunksLeafBloatStatus)
                         .embedPosture(() -> this.embedPosture)
+                        .bootWork(() -> { var w = this.bootWork; return w == null ? java.util.List.of() : w.snapshot(); })
                         .aspectQueue(() -> this.aspectQueueDrainResult)
                         .testTenantResetRoute(tenantResetRoute));
 
@@ -1200,6 +1208,14 @@ public final class NexusService {
     public void perCollectionIndexes(
             java.util.function.Supplier<dev.nexus.service.http.StatusHandler.PerCollectionIndexes> supplier) {
         this.perCollectionIndexes = supplier;
+    }
+
+    /**
+     * Bind the registry behind {@code GET /v1/status}'s {@code boot_work} (nexus-f3yqd.3). {@code Main} builds one and
+     * hands it here and to the producers; the route reads {@link BootWorkRegistry#snapshot}, memory only.
+     */
+    public void bootWork(BootWorkRegistry registry) {
+        this.bootWork = registry;
     }
 
     /**

@@ -7,6 +7,7 @@ rebuilt by backend pid, adoption required), the rotated-log read, and the rot re
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -158,14 +159,18 @@ def test_with_pg_refuses_two_rebuilds_of_one_index() -> None:
     assert "in-flight index rebuilt more than once: ['pci_c']" in r["resume_why"]
 
 
-@pytest.mark.parametrize("argv", [
-    ["--rot", "dimension_mismatch", "--interrupt-build"],
-    ["--restart-mid-queue", "3", "--no-second-boot"],
+@pytest.mark.parametrize(("argv", "says"), [
+    (["--rot", "dimension_mismatch", "--interrupt-build"], "--rot and --interrupt-build"),
+    (["--restart-mid-queue", "3", "--no-second-boot"], "--restart-mid-queue needs the second boot"),
 ])
-def test_flag_combinations_that_would_test_nothing_are_refused(argv: list[str]) -> None:
+def test_flag_combinations_that_would_test_nothing_are_refused(argv: list[str], says: str, tmp_path: Path,
+                                                                capsys: pytest.CaptureFixture[str]) -> None:
+    jar = tmp_path / "nexus-service.jar"   # a jar exists, so only the combination can refuse the run
+    jar.write_bytes(b"x")
     with pytest.raises(SystemExit) as e:
-        _mod.main(argv)
+        _mod.main([*argv, "--new-jar", str(jar)])
     assert e.value.code == 2
+    assert says in capsys.readouterr().err
 
 
 def test_a_reconcile_pass_that_skipped_every_leaf_does_not_count() -> None:
@@ -193,3 +198,119 @@ def test_logwatch_reads_a_rotated_log_that_grew_past_the_old_offset(tmp_path: Pa
     log.rename(logs / "storage_service_jar.log.1")
     log.write_text("event=pci_anchor_adopted reason=missing index=pci_c\n" + "y" * 200 + "\n", encoding="utf-8")
     assert watch.lines("event=pci_anchor_adopted")
+
+
+_MIB64 = 64 * 1024 * 1024
+
+
+@pytest.mark.parametrize(("boot", "total", "ceiling", "ceiling_boot", "verdict", "tripped"), [
+    (_MIB64 + 1, _MIB64 + 1, None, _MIB64, "boot-over-ceiling", ["boot"]),       # just over the boot bound
+    (_MIB64, 10 * _MIB64, None, _MIB64, "under-ceiling", []),                    # at the bound passes; total ungated
+    (1, _MIB64 + 1, _MIB64, None, "over-ceiling", ["total"]),                    # the total bound alone
+    (_MIB64 + 1, _MIB64 + 1, _MIB64, _MIB64, "boot-over-ceiling", ["boot", "total"]),
+    (1, 1, None, None, "measured", []),                                          # no bound given
+])
+def test_ceiling_verdict(boot: int, total: int, ceiling: int | None, ceiling_boot: int | None, verdict: str,
+                         tripped: list[str]) -> None:
+    # nexus-f3yqd.1 (Sam accepted 2026-11-10): boot writes, migrate + ready of the upgrade boot, at most 64 MiB.
+    assert _mod.ceiling_verdict(boot, total, ceiling, ceiling_boot) == (verdict, tripped)
+
+
+def test_boot_wal_is_migrate_plus_ready_of_the_upgrade_boot() -> None:
+    boots = [{"label": "upgrade", "phases": {"migrate": {"wal_bytes": 3}, "ready": {"wal_bytes": 4},
+                                             "settle": {"wal_bytes": 1000}}},
+             {"label": "resume", "phases": {"migrate": {"wal_bytes": 999_999}, "ready": {"wal_bytes": 0}}}]
+    assert _mod.boot_wal_bytes(boots[0]) == 7
+    assert _mod.boot_wal_bytes({"label": "upgrade", "phases": {"until_failure": {"wal_bytes": 9}}}) == 9
+
+
+def test_the_gate_reads_the_upgrade_boot_not_the_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review of 4891e48bd: on a keep-fix engine the resume boot's migrate phase carries the kept build's WAL;
+    # gating the last boot instead of the first would fail exactly the green the fix proves.
+    def phases(m: int, r: int) -> dict:
+        return {"migrate": {"wal_bytes": m}, "ready": {"wal_bytes": r}, "settle": {"wal_bytes": 1}}
+
+    boots = iter([{"label": "upgrade", "reached_ready": True, "phases": phases(3, 4), "total_wal_bytes": 8},
+                  {"label": "reboot", "reached_ready": True, "phases": phases(10 * _MIB64, 0), "total_wal_bytes": 1}])
+    monkeypatch.setattr(_mod, "measure_boot", lambda *_a, **_k: next(boots))
+
+    class _Inst:
+        def checkpoint_lsn(self) -> str:
+            return "0/0"
+
+    class _A:
+        second_boot = True
+        restart_mode = "graceful"
+        _before: dict = {}
+
+    rep = _mod.Report(prev_client="x", new_jar="j", rows_per_collection=1, checkpoint_lsn="0/0")
+    _mod.boot_new(_Inst(), _A(), {}, rep)
+    assert rep.boot_wal_bytes == 7
+    assert rep.reboot_wal_bytes == 10 * _MIB64   # the plain reboot's own figure, the one --ceiling-reboot gates
+    assert _mod.ceiling_verdict(rep.boot_wal_bytes, rep.total_wal_bytes, None, _MIB64) == ("under-ceiling", [])
+
+
+def test_a_ready_boot_without_its_span_is_an_error_not_zero() -> None:
+    with pytest.raises(_mod.HarnessError, match="no migrate/ready WAL"):
+        _mod.boot_wal_bytes({"label": "upgrade", "reached_ready": True, "phases": {}})
+
+
+def test_the_total_bound_passes_at_equality() -> None:
+    assert _mod.ceiling_verdict(1, _MIB64, _MIB64, None) == ("under-ceiling", [])
+
+
+@pytest.mark.parametrize(("reboot", "ceiling_reboot", "verdict", "tripped"), [
+    (_MIB64 + 1, _MIB64, "reboot-over-ceiling", ["reboot"]),    # a rewrite that repeats on the same-version reboot
+    (_MIB64, _MIB64, "under-ceiling", []),                     # at the bound passes
+    (10 * _MIB64, None, "measured", []),                       # ungated without the flag
+])
+def test_reboot_ceiling(reboot: int, ceiling_reboot: int | None, verdict: str, tripped: list[str]) -> None:
+    # Sam 2026-11-10 (via halcyon and wren): Leg A's plain same-version reboot writes at most 64 MiB over migrate + ready.
+    assert _mod.ceiling_verdict(1, 1, None, None, reboot, ceiling_reboot) == (verdict, tripped)
+
+
+def test_the_boot_bound_wins_over_the_reboot_bound() -> None:
+    assert _mod.ceiling_verdict(_MIB64 + 1, 1, None, _MIB64, _MIB64 + 1, _MIB64) == (
+        "boot-over-ceiling", ["boot", "reboot"])
+
+
+@pytest.mark.parametrize("argv", [
+    ["--ceiling-reboot", "67108864", "--restart-mid-queue", "3"],   # would gate a resume boot
+    ["--ceiling-reboot", "67108864", "--no-second-boot"],           # nothing to gate
+])
+def test_a_reboot_bound_that_cannot_apply_is_refused(argv: list[str], tmp_path: Path,
+                                                     capsys: pytest.CaptureFixture[str]) -> None:
+    jar = tmp_path / "nexus-service.jar"   # a jar exists, so only the combination can refuse the run
+    jar.write_bytes(b"x")
+    with pytest.raises(SystemExit) as e:
+        _mod.main([*argv, "--new-jar", str(jar)])
+    assert e.value.code == 2
+    assert "--ceiling-reboot gates the same-version reboot" in capsys.readouterr().err
+
+
+def test_jar_identity_is_the_sha256_of_the_bytes(tmp_path: Path) -> None:
+    jar = tmp_path / "nexus-service.jar"
+    jar.write_bytes(b"engine bytes")
+    assert _mod.jar_identity(jar) == hashlib.sha256(b"engine bytes").hexdigest()
+    assert _mod.jar_identity(tmp_path / "absent.jar") is None
+
+
+def test_the_build_commit_comes_from_the_gate_jar_stamp() -> None:
+    assert _mod.build_commit("0c6f9e1c5+3f2a") == "0c6f9e1c5"
+    assert _mod.build_commit(None) is None
+    assert _mod.commit_matches("0c6f9e1c5105ea39105b0b2b3febdf44099734a5", "0c6f9e1c5")
+    assert not _mod.commit_matches("0c6f9e1c5105ea39105b0b2b3febdf44099734a5", "e90c46349")
+    assert not _mod.commit_matches("0c6f9e1c5", None)       # an unstamped jar cannot match
+    assert not _mod.commit_matches("0c6f", "0c6f9e1c5")    # too short to mean anything
+
+
+def test_a_cached_gate_jar_with_the_same_engine_tree_is_accepted() -> None:
+    # The 7.72.1 red control (2026-11-10): build-gate-jar.sh reused a jar stamped at an earlier commit whose service/
+    # tree was identical; the engine under test was the right one.
+    trees = {"aaaaaaa1": "t1", "bbbbbbb2": "t1", "ccccccc3": "t2"}
+    tree = trees.get
+    assert _mod.jar_identity_verdict("aaaaaaa1", "aaaaaaa1", tree)["how"] == "same commit"
+    same = _mod.jar_identity_verdict("bbbbbbb2", "aaaaaaa1", tree)
+    assert same["ok"] and same["how"] == "same service/ tree"
+    assert not _mod.jar_identity_verdict("ccccccc3", "aaaaaaa1", tree)["ok"]     # a different engine
+    assert not _mod.jar_identity_verdict("ccccccc3", None, tree)["ok"]           # no stamp

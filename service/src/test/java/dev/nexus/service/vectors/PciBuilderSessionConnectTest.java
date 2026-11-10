@@ -49,6 +49,24 @@ class PciBuilderSessionConnectTest {
             .satisfies(e -> assertThat(e.getMessage()).doesNotContain(secret));
     }
 
+    /**
+     * nexus-f3yqd.3: the progress sampler's connect failure reaches a log line. A driver that echoes the URL ("No suitable
+     * driver found for ...") would carry a password parameter into it, so the message is scrubbed as the builder's
+     * other connect paths are.
+     */
+    @Test
+    void theProgressSamplersConnectFailure_isScrubbed_neverCarryingThePassword() {
+        String secret = "s3cret-" + UUID.randomUUID();
+        var session = new PciBuilderSession("jdbc:nosuchdriver://h/d?user=u&password=" + secret, "u", secret, "n1", ON);
+
+        assertThatThrownBy(session::sampleBuildProgress)
+            .isInstanceOf(java.sql.SQLException.class)
+            .hasMessageContaining("progress read failed")
+            .hasMessageContaining("No suitable driver")
+            .hasMessageContaining("password=***")
+            .satisfies(e -> assertThat(e.getMessage()).doesNotContain(secret));
+    }
+
     /** The whole {@code 08xxx} class and {@code 57P01} end a pass as a lost connection; a failed statement does not. */
     @Test
     void isConnectionLoss_coversTheWholeConnectionExceptionClass_andTheTerminationState() {

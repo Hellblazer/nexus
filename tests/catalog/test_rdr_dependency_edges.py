@@ -33,6 +33,7 @@ import structlog.testing
 import nexus.repo_identity as repo_identity_mod
 from nexus.catalog.link_generator import (
     DryRunLinkWriter,
+    HookLinkInputs,
     ProposedLink,
     bind_rdr_dependency_generator,
     generate_rdr_dependency_links,
@@ -78,12 +79,16 @@ def _write_rdr(tmp_path: Path, name: str, frontmatter: str, body: str = "") -> P
 
 
 class _FakeCat:
-    """Minimal ``CatalogReader`` double: ``all_documents`` + ``resolve_path``.
+    """Minimal ``CatalogReader`` double: ``list_scoped`` + ``resolve_path`` (+ ``resolve_many``).
 
     ``resolve_path`` resolves a tumbler to the on-disk file the matching
     fixture entry's ``file_path`` names, mirroring the real
     ``HttpCatalogClient.resolve_path`` contract closely enough for this
     generator (which only ever calls ``resolve_path`` then reads text).
+
+    RDR-193 Step 7: the generator makes two SCOPED reads (``list_scoped``, the engine's combined
+    owner / content_type / source_uri_prefix filter), counted in ``scoped_reads``. A tenant-wide
+    ``all_documents`` is a failure here: the dependency generator no longer lists the tenant.
     """
 
     def __init__(
@@ -93,12 +98,34 @@ class _FakeCat:
         self._entries = entries
         self._repo_root = repo_root
         self._owners = owners or {}
+        self.scoped_reads = 0
+        self.resolve_many_calls = 0
+
+    @property
+    def listings(self) -> int:
+        """Reads that fetched documents: the scoped listings only."""
+        return self.scoped_reads
 
     def all_documents(self, limit=1000, *, content_type: str = "", offset=0):
-        self.listings = getattr(self, "listings", 0) + 1
-        if content_type:
-            return [e for e in self._entries if e.content_type == content_type]
-        return list(self._entries)
+        raise AssertionError("the dependency generator must not list the tenant (all_documents)")
+
+    def list_scoped(self, *, owner="", content_types=(), source_uri_prefix=""):
+        if not source_uri_prefix and not (owner and content_types):
+            raise ValueError("unscoped list")
+        self.scoped_reads += 1
+        out = list(self._entries)
+        if owner:
+            out = [e for e in out if str(e.tumbler).startswith(f"{owner}.")]
+        if content_types:
+            out = [e for e in out if e.content_type in content_types]
+        if source_uri_prefix:
+            out = [e for e in out if e.source_uri.startswith(source_uri_prefix)]
+        return out
+
+    def resolve_many(self, doc_ids):
+        self.resolve_many_calls += 1
+        wanted = set(doc_ids)
+        return {str(e.tumbler): e for e in self._entries if str(e.tumbler) in wanted}
 
     def resolve_path(self, tumbler: Tumbler) -> Path | None:
         for e in self._entries:
@@ -482,12 +509,17 @@ class TestIncrementalModeAndIdempotency:
 class TestIncrementalSeedIsPathAware:
     """RDR-201 P3.2 round-2 critique (T2 [24077]): content_type="prose" is
     the repo-wide default for ALL general markdown, so the type-level seed
-    check admitted this generator -- and its full RDR listing -- on
-    essentially every ``nx index`` run touching a ``.md``. The seed check
-    now resolves each NEW tumbler and asks ``rdr_key_of``; only an
-    rdr-keyed document can be a source of an edge."""
+    check admitted this generator -- and its RDR reads -- on essentially
+    every ``nx index`` run touching a ``.md``. The seed check asks
+    ``rdr_key_of`` of each NEW tumbler's path; only an rdr-keyed document
+    can be a source of an edge.
 
-    def test_small_prose_batch_with_no_rdr_keyed_tumbler_skips_the_listing(
+    RDR-193 Step 7: the path comes from the index hook's own rows
+    (``HookLinkInputs``), so the check costs no read; without them it costs
+    one ``resolve_many`` for the new tumblers. The per-tumbler probe and the
+    ``_RDR_SEED_LOOKUP_CAP`` crossover are gone."""
+
+    def test_small_prose_batch_with_no_rdr_keyed_tumbler_skips_the_reads(
         self, tmp_path: Path,
     ) -> None:
         _write_rdr(tmp_path, "rdr-015-a.md", 'title: "RDR-015"\nsupersedes: RDR-014')
@@ -500,9 +532,9 @@ class TestIncrementalSeedIsPathAware:
             new_tumblers=[Tumbler.parse("1.1.20")], new_content_types=frozenset({"prose"}),
         )
         assert count == 0
-        assert getattr(cat, "listings", 0) == 0, "the full RDR listing must not run for a batch with no rdr-keyed tumbler"
+        assert cat.scoped_reads == 0, "the RDR reads must not run for a batch with no rdr-keyed tumbler"
 
-    def test_small_batch_with_an_rdr_keyed_tumbler_still_lists_and_links(
+    def test_small_batch_with_an_rdr_keyed_tumbler_still_reads_and_links(
         self, tmp_path: Path,
     ) -> None:
         _write_rdr(tmp_path, "rdr-015-a.md", 'title: "RDR-015"\nsupersedes: RDR-014')
@@ -518,23 +550,37 @@ class TestIncrementalSeedIsPathAware:
             new_content_types=frozenset({"prose", "rdr"}),
         )
         assert count == 1
-        assert getattr(cat, "listings", 0) >= 1
+        assert cat.scoped_reads == 2, "the current owner's rows and the rows under the source prefix"
+        assert cat.resolve_many_calls == 1, "no hook inputs: one resolve_many for the new tumblers, not one probe each"
 
-    def test_a_batch_above_the_lookup_cap_falls_through_to_the_listing(
-        self, tmp_path: Path, monkeypatch,
+    def test_the_hooks_rows_decide_the_seed_check_with_no_read_at_any_batch_size(
+        self, tmp_path: Path,
     ) -> None:
-        import nexus.catalog.link_generator as lg
-
-        guide = _entry("1.1.20", file_path="docs/guide.md", content_type="prose")
-        cat = _FakeCat([guide], repo_root=tmp_path)
-        monkeypatch.setattr(lg, "_RDR_SEED_LOOKUP_CAP", 1)
+        """The cap is gone: a large batch of non-RDR files is decided from the hook's paths."""
+        guides = [_entry(f"1.1.{100 + i}", file_path=f"docs/g{i}.md", content_type="prose") for i in range(50)]
+        cat = _FakeCat(guides, repo_root=tmp_path)
+        inputs = HookLinkInputs(owner="1.1", docs={str(g.tumbler): (g.file_path, "prose") for g in guides})
         count = generate_rdr_dependency_links(
             cat, writer=DryRunLinkWriter(), current_owner=CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX,
-            new_tumblers=[Tumbler.parse("1.1.20"), Tumbler.parse("1.1.21")],
-            new_content_types=frozenset({"prose"}),
+            new_tumblers=[g.tumbler for g in guides], new_content_types=frozenset({"prose"}), inputs=inputs,
         )
         assert count == 0
-        assert getattr(cat, "listings", 0) >= 1, "above the cap the one listing is the cheaper path"
+        assert (cat.scoped_reads, cat.resolve_many_calls) == (0, 0)
+
+    def test_an_rdr_keyed_path_in_the_hooks_rows_runs_the_reads(self, tmp_path: Path) -> None:
+        _write_rdr(tmp_path, "rdr-015-a.md", 'title: "RDR-015"\nsupersedes: RDR-014')
+        _write_rdr(tmp_path, "rdr-014-b.md", 'title: "RDR-014"')
+        source = _entry("1.1.10", file_path="docs/rdr/rdr-015-a.md", source_uri=_source_uri(tmp_path, "rdr-015-a.md"))
+        target = _entry("1.1.11", file_path="docs/rdr/rdr-014-b.md", source_uri=_source_uri(tmp_path, "rdr-014-b.md"))
+        cat = _FakeCat([source, target], repo_root=tmp_path)
+        inputs = HookLinkInputs(owner="1.1", docs={"1.1.10": ("docs/rdr/rdr-015-a.md", "rdr")})
+        w = DryRunLinkWriter()
+        count = generate_rdr_dependency_links(
+            cat, writer=w, current_owner=CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX,
+            new_tumblers=[Tumbler.parse("1.1.10")], new_content_types=frozenset({"rdr"}), inputs=inputs,
+        )
+        assert count == 1
+        assert (cat.scoped_reads, cat.resolve_many_calls) == (2, 0)
 
 
 class TestSelfReferenceGuard:

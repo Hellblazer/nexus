@@ -36,7 +36,7 @@ POST appends the ``compact_summary`` to the same file and logs one INFO line to
 ``<config>/logs/hook.log`` when the summary names none of the session's board title,
 the checkpoint path, or a bead id from the checkpoint. It never appends to a
 checkpoint that already carries a summary (an earlier compaction's post ran on it), or
-one whose ``written:`` stamp is missing or past the prune window: pre did not run for
+one whose ``written:`` stamp is missing or older than seven days: pre did not run for
 this compaction. It archives that file, writes a stub that says so, and logs a
 warning. It has no decision control and prints nothing.
 
@@ -49,7 +49,13 @@ later, and an age window would discard the checkpoint that compaction wrote.
 Inject and post run in either order (live: inject about 6 s before post), so each
 judges use only by its own trace: post by a summary in the file, inject by the
 ``<session>.injected`` sidecar, which holds the ``written:`` stamp it last emitted.
-The limit is the prune window: a checkpoint older than two days is gone.
+The limits (nexus-ct9sv): the prune goes by mtime, the restore by the ``written:`` stamp. A
+checkpoint no compaction has used yet (no summary appended, its stamp not in the sidecar, a usable
+stamp) is pruned only when its mtime is past seven days (``_MAX_AGE_S``), so another session's pre
+does not remove it earlier; inject restores it, and post appends to it, while its stamp is within the
+same seven days. Used checkpoints, archives, sidecars and temp files are pruned when their mtime is
+past two days (``_PRUNE_AFTER_S``). Seven days is a chosen bound, not a measured one: a deferred
+summary used after more than seven days finds nothing to restore.
 
 INJECT prints ``hookSpecificOutput.additionalContext`` with this session's checkpoint
 (capped near 8 KB) and one line naming the full file, then records the checkpoint's
@@ -63,8 +69,8 @@ intro gives the checkpoint's age; an age alone never claims a failed pre. It rea
 writes the sidecar: no network, no ``nx`` call, because
 the same event runs seven other verbs and must stay light (nexus-75w5d). It prints
 nothing for a foreign session id, or for a start that is not a compact one when the stamp is missing or
-past the prune window or the sidecar holds the stamp. When a compact start has no checkpoint to restore
-(no file, a stub post wrote because pre did not run, a stamp that is missing or past the prune window,
+older than seven days or the sidecar holds the stamp. When a compact start has no checkpoint to restore
+(no file, a stub post wrote because pre did not run, a stamp that is missing or older than seven days,
 or a checkpoint whose stamp the sidecar already holds) it prints a short notice instead, saying so and
 pointing at the threads board entry and the working tree (nexus-2v7da). The last case is the commonest
 one: inject runs before post, so a compaction N (N >= 2) whose pre failed finds compaction N-1's
@@ -131,15 +137,17 @@ _GIT_TIMEOUT_S = 3.0
 _TOTAL_BUDGET_S = 32.0
 #: Clock skew tolerated for a ``written:`` stamp that lies in the future.
 _SKEW_S = 300.0
-#: Files older than this are removed from the checkpoint directory on each pre run.
+#: Archives, used checkpoints, sidecars and temp files older than this (by mtime) are removed
+#: from the checkpoint directory on each pre run. A current ``<session>.md`` that no
+#: compaction has used yet is exempt until ``_MAX_AGE_S`` (nexus-ct9sv).
 _PRUNE_AFTER_S = 2 * 24 * 3600.0
 #: A checkpoint whose own ``written:`` stamp is older than this is not injected, and post
-#: does not append to it. It is the prune window, not a freshness window: if a compaction's
-#: summary is used later than it was made (the changelog's deferred idle case, not seen in
-#: the CLI), its checkpoint is restored up to two days later; past that the prune has
-#: removed it. Whether 48 h is the limit or the deferred case needs its own value is open
-#: (nexus-ct9sv, sub-issue 1).
-_MAX_AGE_S = _PRUNE_AFTER_S
+#: does not append to it; an unused current checkpoint is kept by the prune until this age,
+#: so a session idle for days still has its checkpoint when its deferred compaction (the
+#: changelog's idle case, not seen in the CLI) is used. It is a limit on how long a
+#: checkpoint stays restorable, not a freshness window: 7 days, against the 48 h prune that
+#: still applies to used checkpoints and archives (nexus-ct9sv, sub-issue 1).
+_MAX_AGE_S = 7 * 24 * 3600.0
 #: Past this age the inject intro says the state may have changed since it was written.
 _STALE_NOTE_S = 10 * 60.0
 # A second SessionStart(compact) fire for the SAME compaction would find the sidecar the first one just
@@ -346,8 +354,41 @@ def _write_atomic(path: Path, text: str) -> None:
         raise
 
 
+#: A superseded checkpoint's name: ``<session>.<UTC stamp>.md``.
+_ARCHIVE_NAME_RE = re.compile(r"\.\d{8}T\d{6}Z\.md$")
+
+
+def _is_unused_current(path: Path) -> bool:
+    """True for a current ``<session>.md`` no compaction has used yet (nexus-ct9sv).
+
+    Used means post appended a summary, or the ``.injected`` sidecar holds its ``written:``
+    stamp (inject emitted it). A stub, a file with no usable stamp (the test inject applies:
+    ``_written_age``), and one that cannot be read have nothing to restore and are not unused.
+    Archives and temp files are never current.
+    """
+    if path.suffix != ".md" or path.name.startswith(".tmp-") or _ARCHIVE_NAME_RE.search(path.name):
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    written = _written_stamp(text)
+    if _written_age(text) is None or _summarized(text):
+        return False
+    try:
+        injected = path.with_name(f"{path.stem}{_INJECTED_SUFFIX}").read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        injected = ""
+    return injected != written
+
+
 def _archive_and_prune(directory: Path, session_id: str, now: float) -> None:
-    """Keep the last few superseded checkpoints of this session; drop files past two days."""
+    """Keep the last few superseded checkpoints of this session; drop files past two days.
+
+    A current checkpoint no compaction has used yet (of any session) is kept until ``_MAX_AGE_S``
+    instead, so another session's pre cannot delete an idle session's checkpoint before its
+    deferred compaction is used (nexus-ct9sv). This session's own current file was archived
+    above, so it is never the exempt one."""
     current = directory / f"{session_id}.md"
     if current.is_file():
         stamp = datetime.fromtimestamp(current.stat().st_mtime, timezone.utc).strftime(_ARCHIVE_STAMP)
@@ -362,11 +403,23 @@ def _archive_and_prune(directory: Path, session_id: str, now: float) -> None:
             old.unlink()
         except OSError:
             pass
+    # Decide every verdict before deleting anything: a sidecar removed first would make its
+    # checkpoint look unused. A file no older than the short limit is never read.
+    doomed: list[tuple[Path, float]] = []
     for path in directory.iterdir():
         try:
             if path.is_file() and (path.suffix in (".md", _INJECTED_SUFFIX) or path.name.startswith(".tmp-")):
-                if now - path.stat().st_mtime > _PRUNE_AFTER_S:
-                    path.unlink()
+                mtime = path.stat().st_mtime
+                age = now - mtime
+                if age > _PRUNE_AFTER_S and age > (_MAX_AGE_S if _is_unused_current(path) else _PRUNE_AFTER_S):
+                    doomed.append((path, mtime))
+        except OSError:
+            continue
+    for path, mtime in doomed:
+        try:
+            if path.stat().st_mtime != mtime:
+                continue  # rewritten since the verdict (another session's pre or a post): it is not the file judged
+            path.unlink()
         except OSError:
             continue
 
@@ -934,7 +987,7 @@ def run_inject(payload: dict) -> str:
         return "emitted: no restore (stub)"
     if age is None:
         if compact:
-            # An earlier compaction's checkpoint past the prune window: pre did not run for this one.
+            # An earlier compaction's checkpoint older than seven days: pre did not run for this one.
             _log("INFO", f"inject: {path} has no usable written: stamp (older than {_MAX_AGE_S / 3600:.0f} h, "
                          "or missing); emitting the no-restore notice")
             _emit_context(_no_restore_notice(session_id))

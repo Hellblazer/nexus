@@ -56,6 +56,7 @@ def _patch_get(monkeypatch, handler) -> list[str]:
     paths: list[str] = []
 
     def fake_get(path: str, *, tenant: str = "default") -> Any:
+        path = path.replace("?fields=routing", "")  # the routing listing gets the full rows, as from an engine that predates it
         paths.append(path)
         return handler(path)
 

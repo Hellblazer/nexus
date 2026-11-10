@@ -103,7 +103,7 @@ def test_standing_instructions_that_run_the_cloud_gate_name_the_mode_variable() 
 # --------------------------------------------------------------------------- #
 
 S3F = SKILL.split("### 3f.")[1].split("### 3g.")[0]
-S3G = SKILL.split("### 3g.")[1].split("### 4.")[0]
+S3G = SKILL.split("### 3g.")[1].split("### 3h.")[0]
 #: The `gh run list --json` fields gh documents; the skill's command may name only these.
 GH_RUN_LIST_FIELDS = {
     "attempt", "conclusion", "createdAt", "databaseId", "displayTitle", "event", "headBranch", "headSha",
@@ -181,3 +181,116 @@ def test_every_path_in_the_named_windows_surface_exists_and_nothing_windows_is_l
     assert (REPO_ROOT / ".github" / "actions" / "resolve-windows-python").is_dir(), (
         "the premise of the *windows* glob: an action whose name does not START with windows-"
     )
+
+
+# nexus-f3yqd.1: the upgrade-boot write gate (Sam's release criterion, 2026-11-10).
+
+def _step_3h_raw() -> str:
+    assert "### 3h." in SKILL, "the engine-release skill has no Step 3h (the upgrade-boot write gate)"
+    return SKILL.split("### 3h.")[1].split("### 4.")[0]
+
+
+def _step_3h() -> str:
+    return " ".join(_step_3h_raw().split())
+
+
+def _legs() -> dict[str, str]:
+    """Each leg's command (the lines after its `# Leg X` marker), joined with continuations removed."""
+    block = _step_3h_raw().split("```bash")[1].split("```")[0]
+    legs: dict[str, list[str]] = {}
+    cur = None
+    for line in block.splitlines():
+        m = re.match(r"\s*# Leg ([ABC])\b", line)
+        if m:
+            cur = m.group(1)
+            legs[cur] = []
+        elif cur:
+            legs[cur].append(line.rstrip("\\").strip())
+    return {k: " ".join(v) for k, v in legs.items()}
+
+
+_FLAGS_WITHOUT_VALUE = frozenset({"--no-pci-wait"})
+
+
+def _leg_parts(leg: str) -> tuple[list[str], list[str], dict[str, str | None]]:
+    """A leg as (lab-remote options, the remote script's steps, the harness's options).
+
+    Tokenised with shlex so a bound with digits appended, or a dropped option, changes
+    an exact comparison instead of passing a substring check."""
+    outer = shlex.split(leg)
+    assert outer[0] == "lab-remote" and "--" in outer, f"not a lab-remote command: {leg}"
+    sep = outer.index("--")
+    remote, rest = outer[1:sep], outer[sep + 1 :]
+    assert rest[:2] == ["bash", "-c"] and len(rest) == 3, f"remote command is not one bash -c script: {rest}"
+    steps = [x.strip() for x in rest[2].split("&&")]
+    argv = shlex.split(steps[-1])
+    assert argv[:3] == ["uv", "run", "python"] and argv[3] == "scripts/upgrade_boot_writes.py", argv
+    opts: dict[str, str | None] = {}
+    toks = argv[4:]
+    i = 0
+    while i < len(toks):
+        flag = toks[i]
+        assert flag.startswith("--") and flag not in opts, f"bad or repeated option {flag!r} in {argv}"
+        if flag in _FLAGS_WITHOUT_VALUE:
+            opts[flag] = None
+            i += 1
+        else:
+            opts[flag] = toks[i + 1]
+            i += 2
+    return remote, steps, opts
+
+
+_BOUND = "67108864"  # 64 MiB, Sam 2026-11-10 (halcyon)
+
+
+def test_step_3h_has_exactly_the_three_legs_each_with_its_own_bound() -> None:
+    legs = _legs()
+    assert sorted(legs) == ["A", "B", "C"], f"Step 3h legs: {sorted(legs)}"
+    old = {
+        "--prev-client": "7.76.0",
+        "--new-jar-commit": "$TAG",
+        "--no-pci-wait": None,
+        "--collections": "7",
+        "--rows": "30000",
+        "--rot": "pending_aspect_queue",
+        "--restart-mid-queue": "3",
+        "--ceiling-boot": _BOUND,
+    }
+    expected = {
+        "A": {
+            "--prev-client": "$PREV",
+            "--new-jar-commit": "$TAG",
+            "--ceiling": _BOUND,
+            "--ceiling-boot": _BOUND,
+            "--ceiling-reboot": _BOUND,
+            "--json": "output/gate/A.json",
+        },
+        "B": {**old, "--restart-mode": "graceful", "--json": "output/gate/B.json"},
+        "C": {**old, "--restart-mode": "kill", "--json": "output/gate/C.json"},
+    }
+    for name, leg in legs.items():
+        remote, steps, opts = _leg_parts(leg)
+        assert remote == ["--host", "chas", "-c", "lab-m", "--fetch", "output/gate"], f"Leg {name}: {remote}"
+        assert steps[:2] == ["mkdir -p output/gate", "scripts/build-gate-jar.sh"], (
+            f"Leg {name} must create its report directory and build the stamped jar in the tag tree: {steps}"
+        )
+        assert opts == expected[name], f"Leg {name} harness options differ:\n{opts}\n!=\n{expected[name]}"
+
+
+def test_step_3h_scopes_the_bounds_and_names_what_it_does_not_cover() -> None:
+    s = _step_3h()
+    assert "64 MiB" in s and "UPGRADE boot only" in s
+    assert "not gated" in s and "kept build" in s, "say why later boots are reported, not gated"
+    assert "do not tag" in s and "Exit 2" in s, "red stops the tag; a harness failure is rerun, never tagged on"
+    assert "TAG_TREE" in s and "engine tree equals the tag commit's" in s and "new_jar_identity" in s
+
+
+def test_every_harness_flag_step_3h_names_exists_in_the_harness() -> None:
+    harness = (REPO_ROOT / "scripts" / "upgrade_boot_writes.py").read_text()
+    used = set()
+    for leg in _legs().values():
+        cmd = leg.split("upgrade_boot_writes.py", 1)[1]
+        used |= set(re.findall(r"(--[a-z][a-z-]+)", cmd))
+    assert used, "Step 3h names no harness flag"
+    missing = sorted(f for f in used if not re.search(r'add_argument\(\s*"' + re.escape(f) + r'"', harness))
+    assert not missing, f"Step 3h names flags the harness does not define: {missing}"

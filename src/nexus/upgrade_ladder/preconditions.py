@@ -527,3 +527,71 @@ def converge_preconditions(
     # reconciling needs a live service to talk to.
     reports.append(_plan_library_report(_plan_library_fn))
     return reports
+
+
+# ── waiting for a restarting engine (nexus-f3yqd.5) ─────────────────────────────────────────────────────
+
+#: The longest wait for a local engine to come back, in seconds: a restart from another shell was back in
+#: 4 s in marlowe's rehearsal; a respawn by the supervisor can take tens of seconds.
+LOCAL_ENGINE_WAIT_S: float = 120.0
+#: A managed service has no lease to watch: the wait is a pause, then a retry.
+MANAGED_ENGINE_PAUSE_S: float = 15.0
+
+
+def engine_may_return() -> bool:
+    """Whether an engine-away error is worth a wait: a managed service is always expected back, and a local
+    engine only when this process has reached it before (a lease resolved). An engine that was never
+    there is not waited for."""
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred, keeps the registry import cheap
+    from nexus.db.service_endpoint import has_ever_resolved_lease  # noqa: PLC0415 — deferred
+
+    return not is_local_mode() or has_ever_resolved_lease()
+
+
+def engine_wait_budget() -> float:
+    """How long one wait lasts on this install."""
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred
+
+    return LOCAL_ENGINE_WAIT_S if is_local_mode() else MANAGED_ENGINE_PAUSE_S
+
+
+def _engine_healthy(base_url: str, *, timeout_s: float = 2.0) -> bool:
+    """The supervisor's own identity probe on the lease's endpoint: ``/health`` answers 200 with the
+    storage service's body, not merely something on the port."""
+    from urllib.parse import urlsplit  # noqa: PLC0415 — stdlib
+
+    from nexus.daemon.service_registry import _probe_health_identity  # noqa: PLC0415 — the one health probe
+
+    parts = urlsplit(base_url)
+    if not parts.hostname or not parts.port:
+        return False
+    return _probe_health_identity(parts.hostname, parts.port, timeout=timeout_s)
+
+
+def wait_for_engine(
+    budget_s: float, *, clock: Callable[[], float] | None = None, sleep: Callable[[float], None] | None = None,
+    lease: Callable[[], tuple[str | None, str | None]] | None = None,
+    healthy: Callable[[str], bool] = _engine_healthy,
+) -> bool:
+    """Wait up to *budget_s* until the engine serves again; True when it does. A local engine serves when the
+    lease names it AND it answers ``/health``: a dead engine's lease stays fresh for a few seconds after a
+    crash, so a lease alone is not proof. A managed service is paused for, then retried."""
+    import time  # noqa: PLC0415 — stdlib
+
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred
+    from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — deferred
+
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    if not is_local_mode():
+        sleep(budget_s)
+        return True
+    lease = lease or discover_lease
+    deadline = clock() + budget_s
+    while True:
+        url, _token = lease()
+        if url and healthy(url):
+            return True
+        if clock() >= deadline:
+            return False
+        sleep(min(1.0, max(0.0, deadline - clock())))

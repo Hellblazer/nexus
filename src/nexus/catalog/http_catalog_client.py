@@ -168,6 +168,8 @@ from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpo
 # carrying more than 1000 doc_ids with HTTP 400 (bisected: OK at 1000, 400 at
 # 1001). ``get_manifests`` pages at this size and merges the per-page results.
 _MANIFEST_GET_MANY_PAGE = 1000
+#: The engine's cap on edges (``links/upsert_many``) and tumblers (``links/same_content``) per request.
+_LINKS_BATCH_PAGE = 1000
 #: Page size for register_many POSTs — matches the server's MAX_BATCH_DOC_IDS
 #: cap (nexus-9dvqy). ~24 columns/row keeps a full page under PostgreSQL's
 #: 32767 bind-parameter ceiling.
@@ -2515,6 +2517,35 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def by_content_type(self, content_type: str) -> list[CatalogEntry]:
         return self._docs_from(self._get("/list", content_type=content_type))
 
+    def list_scoped(
+        self,
+        *,
+        owner: "Tumbler | str" = "",
+        content_types: "tuple[str, ...] | list[str]" = (),
+        source_uri_prefix: str = "",
+    ) -> list[CatalogEntry]:
+        """The engine's combined list read (RDR-193 Part A4): live documents of one *owner* whose
+        content type is any of *content_types*, and/or whose ``source_uri`` starts with
+        *source_uri_prefix*; every filter given is applied. Unbounded, ordered by tumbler.
+
+        The call must be scoped: an *owner* with at least one content type, or a *source_uri_prefix*.
+        Anything else would reach the engine's tenant-wide or single-filter branches, so it raises
+        here instead of listing the tenant.
+        """
+        if not source_uri_prefix and not (owner and content_types):
+            raise ValueError(
+                "list_scoped needs an owner with content_types, or a source_uri_prefix; "
+                "an unscoped list is all_documents() and is not an index-path read"
+            )
+        params: dict = {}
+        if owner:
+            params["owner"] = str(owner)
+        if content_types:
+            params["content_type"] = list(content_types)
+        if source_uri_prefix:
+            params["source_uri_prefix"] = source_uri_prefix
+        return self._docs_from(self._get("/list", **params))
+
     def by_corpus(self, corpus: str) -> list[CatalogEntry]:
         return self._docs_from(self._get("/list", corpus=corpus))
 
@@ -3054,6 +3085,49 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if meta:
             payload["metadata"] = dict(meta)
         return self._post_link(payload)
+
+    def links_upsert_many(self, edges: list[dict]) -> dict:
+        """RDR-193 Part A4: write many links in one request (``POST /links/upsert_many``), paged at
+        ``_LINKS_BATCH_PAGE`` edges per request.
+
+        Each edge is ``{from, to, link_type, created_by, from_span?, to_span?}`` and each endpoint
+        is ``{tumbler}`` or ``{owner, file_path}`` (a path the engine resolves). There is no
+        metadata and no ``allow_dangling``. An existing link is skipped and keeps its fields.
+        Returns ``{created, skipped, unresolved}`` summed over the pages, each unresolved entry
+        (``{index, side, reason}``, reason ``dangling`` or ``no_path``) carrying its index in
+        *edges*, not in its page. The engine answers a transient database error 503 with nothing
+        written, so the transport's retry of the whole page is safe.
+        """
+        out: dict = {"created": 0, "skipped": 0, "unresolved": []}
+        for start in range(0, len(edges), _LINKS_BATCH_PAGE):
+            result = self._post("/links/upsert_many", {"edges": edges[start:start + _LINKS_BATCH_PAGE]}) or {}
+            out["created"] += int(result.get("created", 0))
+            out["skipped"] += int(result.get("skipped", 0))
+            out["unresolved"].extend(
+                {**u, "index": int(u.get("index", 0)) + start} for u in result.get("unresolved", [])
+            )
+        return out
+
+    def links_same_content(self, tumblers: "list[str] | tuple[str, ...]", *, prune: bool = False) -> dict:
+        """RDR-193 Part A4: the engine's same-content (``same-as``) linker
+        (``POST /links/same_content``), paged at ``_LINKS_BATCH_PAGE`` tumblers per request.
+
+        Groups live ``pdf`` and ``paper`` documents by file-content hash across the tenant and links
+        each given member to its group's anchor (the least tumbler); with *prune*, first retracts
+        the stale dedup links that touch the given tumblers. Returns ``{created, retracted}`` summed
+        over the pages, plus ``refused`` when any page refused to prune (``empty_fetch``).
+        """
+        out: dict = {"created": 0, "retracted": 0}
+        for start in range(0, len(tumblers), _LINKS_BATCH_PAGE):
+            result = self._post(
+                "/links/same_content",
+                {"tumblers": [str(t) for t in tumblers[start:start + _LINKS_BATCH_PAGE]], "prune": bool(prune)},
+            ) or {}
+            out["created"] += int(result.get("created", 0))
+            out["retracted"] += int(result.get("retracted", 0))
+            if result.get("refused"):
+                out["refused"] = result["refused"]
+        return out
 
     def unlink(
         self,

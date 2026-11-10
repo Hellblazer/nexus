@@ -12,8 +12,10 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import time
+import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,8 +24,12 @@ from click.testing import CliRunner
 
 import nexus.lua_runtime as lua_runtime
 from nexus import memory_curate as mc
-from nexus.memory_curate import cold
+from nexus.memory_curate import cold, sessions
+from nexus.memory_curate.cold import TUPLES
 from nexus.cli import main
+from nexus.db.t2.http_tuple_store import HttpTupleStore
+from nexus.db.t2.records import SubspaceCensus
+from nexus.hooks import t2_prefix_scan
 from nexus.lua_runtime import runner
 from tests.test_memory_curate import _fm, _git, _make_repo, _memdir
 from tests._module_seam import setattr_in
@@ -32,7 +38,8 @@ from tests.test_memory_curate_reads import _NOW, _session, world  # noqa: F401 �
 GET = "mcp__plugin_conexus_nexus__memory_get"
 SEARCH = "mcp__plugin_conexus_nexus__memory_search"
 CAT_SEARCH = "mcp__plugin_conexus_nexus-catalog__search"
-LABELS = ("memory files", "T2 namespaces", "MCP tools", "CLI verbs", "injected context")
+LABELS = ("memory files", "T2 namespaces", "MCP tools", "CLI verbs", "injected context", "tuple subspaces")
+TRANSCRIPT_LABELS = LABELS[:5]  # the kinds counted from transcripts; the tuple row reads the engine instead
 OLD = "2026-09-01T00:00:00+00:00"
 EMPTY: dict = {"rows": []}
 STAMP = "2026-11-08T10:00:01Z"
@@ -198,6 +205,18 @@ def _plant(tmp: Path) -> dict[str, Path]:
             "commands": tmp / "commands"}
 
 
+def _no_tuple_engine():
+    raise RuntimeError("no tuple engine in this test")
+
+
+@pytest.fixture(autouse=True)
+def _never_the_ambient_tuple_engine(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test that did not ask for the engine substrate must not reach one: the default tuple store is the
+    configured service, which on a developer's machine is a real tenant."""
+    if "t2_service_env" not in request.fixturenames:
+        monkeypatch.setattr(cold, "_default_tuple_store", _no_tuple_engine)
+
+
 _PROJECTS = {
     "coldrepo": [_row("coldrepo", "a", OLD)],
     "coldrepo_old": [_row("coldrepo_old", "a", OLD), _row("coldrepo_old", "b", "2026-09-02T00:00:00+00:00")],
@@ -221,7 +240,7 @@ def planted(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict]:
         mp.setenv("NX_NO_TELEMETRY", "1")
         w["lines"] = cold.cold_lines(
             30, _NOW, w["repo"], "coldrepo", w["mem"], w["repo"], _t2(_PROJECTS), hooks_dir=w["hooks"],
-            src_hooks_dir=w["srchooks"], commands_dir=w["commands"])
+            src_hooks_dir=w["srchooks"], commands_dir=w["commands"], open_tuples=_no_tuple_engine)
         yield w
 
 
@@ -292,7 +311,8 @@ def test_injected_context_lists_the_nested_instruction_file_never_loaded(planted
     assert _stores(lines, "injected context") == ["sub/CLAUDE.md", "tests/AGENTS.md (also tests/CLAUDE.md)"]  # other/ was loaded from another worktree's path,
     # viaitx/ only through an `instructions` attachment, linked/ is the root file: none of them listed
     row = _rows(lines, "injected context")[0]
-    assert "~100 tokens" in row and "last use none in the window" in row
+    # nexus-qo7ie.27: a nested file never loaded costs nothing, so the row says "on demand", not a token cost.
+    assert "last use never loaded (on demand)" in row and "400 bytes" in row and "tokens" not in row
     # docs/AGENTS.md was loaded (its CLAUDE.md link names the same file) and the root pair is not nested.
     assert _head(lines, "injected context").startswith("injected context: 2 cold of 5")
     block = "\n".join(_block(lines, "injected context"))
@@ -359,7 +379,7 @@ def test_without_the_runtime_every_transcript_row_says_not_available(
     _session(world["project"] / "s1.jsonl", "s1", world["repo"], "2026-11-08T10:00:00Z", [("Bash", {"command": "ls"})])
     monkeypatch.delattr(lua_runtime, "run_script")
     lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
-    for label in LABELS:
+    for label in TRANSCRIPT_LABELS:
         assert _head(lines, label).startswith(f"{label}: not available: unavailable: "), label
     assert _no_rows(lines)
     assert any(ln.startswith("window: covered ") for ln in lines)  # the span prints on failure too
@@ -405,7 +425,7 @@ def test_with_no_session_started_in_the_window_nothing_is_listed(world: dict[str
     _session(world["project"] / "long.jsonl", "long", world["repo"], "2026-10-01T10:00:00Z",
              [("Read", {"file_path": str(world["mem"] / "read_me.md")})], resumed="2026-11-08T10:00:00Z")
     lines = cold.cold_lines(7, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
-    for label in LABELS:
+    for label in TRANSCRIPT_LABELS:
         assert _head(lines, label) == f"{label}: not available: no session of this repository started in the window"
     assert _no_rows(lines)
 
@@ -525,12 +545,66 @@ def test_a_query_that_succeeds_with_no_rows_for_started_sessions_is_not_availabl
     assert _no_rows(lines)
 
 
-def test_a_memory_search_naming_no_project_counts_as_a_use_of_every_project(world: dict[str, Path], stubbed) -> None:  # noqa: F811
+def test_a_memory_search_naming_no_project_credits_no_project_so_only_last_accessed_judges(world: dict[str, Path], stubbed) -> None:  # noqa: F811
+    """Critic S3 (nexus-qo7ie.27): an all-project search tracks only its hits, so crediting every project made one
+    such call empty the whole row. A project it hit carries last_accessed; the rest are judged as without it."""
     stubbed({"memory": {"rows": [{"kind": "t2_search", "name": "(all)", "count": 1, "last_use": STAMP}]},
              "loads": LOADS, "tools": TOOLS})
     lines = cold.cold_lines(30, _NOW, world["repo"], "coldrepo", world["mem"], world["repo"], _t2(_PROJECTS))
-    assert _head(lines, "T2 namespaces").startswith("T2 namespaces: 0 cold of 8 ")
-    assert "a memory_search naming no project counts as a use of every project" in " ".join(_block(lines, "T2 namespaces"))
+    # nothing but the search was seen: every project with no write and no last_accessed in the window is cold
+    # (_fresh was written and _accessed was read in the window; coldrepo2 is another repo's)
+    assert _stores(lines, "T2 namespaces") == [
+        "coldrepo", "coldrepo_never_read", "coldrepo_old", "coldrepo_searched", "coldrepo_stale_access", "coldrepo_used"]
+    assert _head(lines, "T2 namespaces").startswith("T2 namespaces: 6 cold of 8 ")
+    note = " ".join(_block(lines, "T2 namespaces"))
+    assert "a memory_search naming no project was seen: it is credited to no project" in note
+    assert "counts as a use of every project" not in note
+
+
+def test_the_t2_row_names_the_session_start_scans_own_reads(planted: dict) -> None:
+    """Critic S2 (nexus-qo7ie.27): the SessionStart prefix scan does a tracked get on the top rows of the first
+    namespaces, which stamps last_accessed and reads here as use. The client has no untracked single-row read, so
+    the limits line names the reads, quoting the hook's own constants."""
+    limit = " ".join(_block(planted["lines"], "T2 namespaces"))
+    assert ("the SessionStart prefix scan does a tracked get on the "
+            f"{t2_prefix_scan._SNIPPET_LIMIT} newest rows of each of up to {t2_prefix_scan._MAX_NAMESPACES} of the "
+            "repository's namespaces") in limit
+    assert "at every session start and every subagent start, which stamps last_accessed" in limit
+    assert "machine-written ones such as _taxonomy_discover_health skipped" in limit
+    assert t2_prefix_scan._MACHINE_NAMESPACE_SUFFIXES == ("_taxonomy_discover_health",), "the note names the hook's own filter"
+
+
+def test_a_failing_session_listing_blanks_the_transcript_rows_and_keeps_the_tuple_row(
+    world: dict[str, Path], monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """Code review I1 (nexus-qo7ie.27), the --cold side: an unexpected error listing the sessions is a reason on
+    every transcript kind, not the end of the section."""
+    def boom(*_a: object, **_k: object) -> None:
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(mc, "repo_session_starts", boom)
+    lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS))
+    for label in TRANSCRIPT_LABELS:
+        assert _head(lines, label) == f"{label}: not available: OSError: disk went away"
+    assert any(ln.startswith(f"{TUPLES}:") for ln in lines)
+
+
+def test_the_head_says_how_many_transcripts_were_left_out_at_the_scan_bound(
+    world: dict[str, Path], stubbed, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """nexus-qo7ie.27: the count never claims more than it read, so the --cold head names the transcripts whose first
+    stamp lies past the bound."""
+    repo = world["repo"]
+    _session(world["project"] / "zz-deep.jsonl", "deep", repo, "2026-11-08T11:00:00Z", [("Bash", {"command": "ls"})])
+    deep = world["project"] / "zz-deep.jsonl"
+    deep.write_text("".join(json.dumps({"type": "summary", "cwd": str(repo), "pad": "x" * 600}) + "\n" for _ in range(50))
+                    + deep.read_text())
+    monkeypatch.setattr(sessions, "START_SCAN_BYTES", 4096)
+    stubbed({"memory": MEM, "loads": LOADS, "tools": TOOLS})
+    lines = cold.cold_lines(30, _NOW, repo, "readrepo", world["mem"], repo, _t2(_PROJECTS))
+    head = lines[0]
+    assert head.startswith("window: ") and "1 session started in it; 1 transcript had no start in the first " in head
+    assert head.endswith("was not counted")
 
 
 def test_the_injected_kind_is_refused_on_windows_like_the_file_kind(
@@ -603,6 +677,260 @@ def test_only_files_deeper_than_tests_or_under_fixtures_or_e2e_are_fixtures() ->
     assert not fixture("src/nexus/mcp/CLAUDE.md")
 
 
+# ── tuple subspaces (nexus-qo7ie.20, RDR-238 Phase 3 Step 3b) ────────────────────────
+#
+# Two tests mint a tenant (tests/storage_touch_ceiling.toml counts them): one report over a real engine with
+# every scenario planted, and one CLI run. Everything else reads a hand-built registry and census through the
+# ``open_tuples`` seam, which needs no engine. The window of the engine test is moved with ``now`` (the report's
+# clock is a parameter): it is placed between two real posts, using the engine's own stamps.
+
+TUPLES = "tuple subspaces"
+
+
+def _uniq(label: str) -> str:
+    return f"{label}-{uuid.uuid4().hex[:10]}"
+
+
+def _post(subspace: str, key: str, name: str) -> None:
+    """One real post: ``board/ci/<topic>``, ``board/<topic>`` and ``queue/<name>`` all take ``from`` and a nonce."""
+    store = HttpTupleStore()
+    try:
+        store.out(subspace, {key: name}, {"from": "test"}, body="x", nonce=_uniq("n"))
+    finally:
+        store.close()
+
+
+def _consume(subspace: str, key: str, name: str) -> None:
+    """Take the queue row and ack it: the row stays in the census, consumed, no longer live."""
+    store = HttpTupleStore()
+    try:
+        claimed = store.in_(subspace, {key: name}, claimant="curate-test", lease_s=30)
+        assert claimed is not None, "the posted task was not claimable"
+        store.ack(claimed[1], "curate-test")
+    finally:
+        store.close()
+
+
+def _doc_writers(template: str) -> list[str]:
+    store = HttpTupleStore()
+    try:
+        return next(t for t in store.registry(doc=True)["templates"] if t["name"] == template)["doc"]["writers"]
+    finally:
+        store.close()
+
+
+def _stats(subspace: str) -> SubspaceCensus:
+    store = HttpTupleStore()
+    try:
+        return store.subspace_stats(subspace)
+    finally:
+        store.close()
+
+
+def _tuple_section(lines: list[str]) -> list[str]:
+    assert any(ln.startswith(f"{TUPLES}:") for ln in lines), f"no '{TUPLES}' section in the report: {lines}"
+    return _block(lines, TUPLES)
+
+
+def _writerless(lines: list[str]) -> list[str]:
+    """The templates the section lists by name as having no verified writer and no subspace."""
+    out: list[str] = []
+    inside = False
+    for ln in _tuple_section(lines):
+        if ln.startswith("  writerless templates"):
+            inside = True
+        elif ln.startswith("    - ") and inside:
+            out.append(ln.strip()[2:].split(" | ")[0])
+    return out
+
+
+def test_one_engine_report_lists_the_cold_subspace_and_the_writerless_template_and_nothing_else(t2_service_env: str) -> None:
+    # What the writerless check reads: today's board and queue carry writers, every one marked Unverified, so a
+    # test for an EMPTY list alone would examine nothing on this engine.
+    for template in ("board/<topic>", "queue/<name>"):
+        writers = _doc_writers(template)
+        assert writers and all(w.startswith("Unverified: ") for w in writers), template
+    old, new, work = _uniq("example-old"), _uniq("example-new"), _uniq("example-work")
+    cold_sub, fresh_sub, queue_sub = f"board/ci/{old}", f"board/ci/{new}", f"queue/{work}"
+    _post(cold_sub, "topic", old)
+    time.sleep(1.1)  # the engine stamps to the microsecond; a gap makes the window edge unambiguous
+    _post(fresh_sub, "topic", new)
+    _post(queue_sub, "queue", work)
+    _consume(queue_sub, "queue", work)  # one consumed row, no live one: a take-enabled subspace that reads zero live rows
+    queue = _stats(queue_sub)
+    assert (queue.total, queue.consumed) == (0, 1)
+    t_old, t_new = cold._when(_stats(cold_sub).newest_created_at), cold._when(_stats(fresh_sub).newest_created_at)
+    assert t_old is not None and t_new is not None and t_new - t_old >= timedelta(seconds=1)
+    now = t_old + (t_new - t_old) / 2 + timedelta(days=1)  # a one-day window whose edge falls between the two posts
+    lines = cold.tuple_lines(1, now, HttpTupleStore)
+
+    # 1. the subspace with no post in the window is listed, with its last post, its counts and its template's writers
+    assert _stores(lines, TUPLES) == [cold_sub]
+    row = _rows(lines, TUPLES)[0]
+    assert f"last write {cold._show(_stats(cold_sub).newest_created_at, 'n/a')}" in row  # the engine's own stamp
+    assert "last use n/a" in row  # the tuple census records no read time
+    assert "1 available, 0 claimed, 0 consumed, 0 dead" in row
+    writers = _doc_writers("board/ci/<topic>")
+    assert writers and all(w in row for w in writers)  # the template's own list, every entry of it
+    assert _head(lines, TUPLES).startswith(f"{TUPLES}: 1 cold of 3 ")
+    # 2. the subspace posted to inside the window is not listed; nor is the consumed-only queue subspace posted to in it
+    assert fresh_sub not in _stores(lines, TUPLES) and queue_sub not in _stores(lines, TUPLES)
+    # 3. a writerless template with no subspace is listed by name, with what it says; the queue template has a
+    #    subspace (consumed rows only), which still counts, and mailbox, lock, aspects and the rest have a verified writer
+    assert _writerless(lines) == ["board/<topic>"]
+    text = "\n".join(_tuple_section(lines))
+    assert _doc_writers("board/<topic>")[0] in text and "no subspace in the census" in text
+
+
+def test_the_command_reads_the_engine_by_default_and_exits_0(
+    t2_service_env: str, world: dict[str, Path], monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    topic = _uniq("example-branch")
+    _post(f"board/ci/{topic}", "topic", topic)
+    _session(world["project"] / "s1.jsonl", "s1", world["repo"], "2026-11-08T10:00:00Z", [("Bash", {"command": "ls"})])
+    monkeypatch.delattr(lua_runtime, "run_script")  # the transcript kinds are not available; the tuple row does not need them
+    res = CliRunner().invoke(main, ["memory", "curate", "--cold", "--days", "30"])
+    assert res.exit_code == 0, res.output
+    assert "memory files: not available: " in res.output
+    assert f"{TUPLES}: 0 cold of 1 " in res.output  # default store: the engine this test's env points at
+    assert "writerless templates" in res.output and "board/<topic>" in res.output
+
+
+# ── the same row over a hand-built registry and census (no engine, no tenant) ────────
+
+
+class _Tuples:
+    """A tuple-space client over data written by hand: ``registry(doc=True)``, ``subspace_list(None)``, ``close()``."""
+
+    def __init__(self, templates: list[dict], census: list[SubspaceCensus]) -> None:
+        self.templates, self.census, self.closed = templates, census, False
+
+    def registry(self, doc: bool = False) -> dict:
+        return {"digest": "d", "sources": [], "templates": [dict(t) for t in self.templates]}
+
+    def subspace_list(self, prefix: str | None = None, **kw: object) -> list[SubspaceCensus]:
+        return list(self.census)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _tpl(name: str, writers: list[str] | None = None, *, doc: bool = True) -> dict:
+    if not doc:
+        return {"name": name}
+    d: dict = {"summary": f"{name} summary", "example": "x"}
+    if writers is not None:
+        d["writers"] = writers
+    return {"name": name, "doc": d}
+
+
+def _sub(subspace: str, newest: str | None, *, template: str | None = None, known: bool = True,
+         available: int = 1, consumed: int = 0) -> SubspaceCensus:
+    return SubspaceCensus(subspace=subspace, total=available, available=available, claimed=0, dead=0, consumed=consumed,
+                          expired_unpurged=0, oldest_created_at=newest, newest_created_at=newest,
+                          template=template, template_known=known)
+
+
+FAR = datetime(2026, 11, 9, tzinfo=UTC)
+LONG_AGO = "2026-09-01T00:00:00Z"
+RECENT = "2026-11-08T00:00:00Z"
+
+
+def test_an_engine_that_serves_no_doc_says_not_available_and_lists_no_writerless_template() -> None:
+    store = _Tuples([_tpl("board/<topic>", doc=False), _tpl("queue/<name>", doc=False)],
+                    [_sub("board/a", LONG_AGO, template="board/<topic>"), _sub("board/b", RECENT, template="board/<topic>")])
+    lines = cold.tuple_lines(30, FAR, lambda: store)
+    head = _head(lines, TUPLES)
+    assert head.startswith(f"{TUPLES}: not available: ") and "predates the dictionary" in head
+    assert _writerless(lines) == []  # every template would read as writerless: none is judged
+    assert _stores(lines, TUPLES) == ["board/a"]  # the census is still valid: the cold subspace is listed, owner unknown
+    assert "owner unknown" in _rows(lines, TUPLES)[0]
+    assert store.closed
+
+
+def test_a_template_with_no_doc_among_templates_that_have_one_is_not_judged_writerless() -> None:
+    store = _Tuples([_tpl("board/<topic>", ["Unverified: x"]), _tpl("queue/<name>", doc=False)], [])
+    lines = cold.tuple_lines(30, FAR, lambda: store)
+    assert _writerless(lines) == ["board/<topic>"]
+    assert "1 template has no doc block" in "\n".join(_tuple_section(lines))
+
+
+def test_a_template_with_an_empty_or_absent_writers_list_and_no_subspace_is_listed_and_one_with_a_writer_is_not() -> None:
+    store = _Tuples([_tpl("a/<x>", []), _tpl("b/<x>", None), _tpl("c/<x>", ["a real writer"]), _tpl("d/<x>", [])],
+                    [_sub("d/one", RECENT, template="d/<x>")])
+    lines = cold.tuple_lines(30, FAR, lambda: store)
+    assert _writerless(lines) == ["a/<x>", "b/<x>"]  # c has a writer, d has a subspace
+    assert "none declared" in "\n".join(_tuple_section(lines))  # an empty list is shown as such
+
+
+def test_a_census_row_with_no_post_time_is_counted_as_not_judged_and_never_listed_cold() -> None:
+    store = _Tuples([_tpl("board/<topic>", ["w"])],
+                    [_sub("board/none", None, template="board/<topic>"), _sub("board/old", LONG_AGO, template="board/<topic>")])
+    lines = cold.tuple_lines(30, FAR, lambda: store)
+    assert _stores(lines, TUPLES) == ["board/old"]
+    assert _head(lines, TUPLES).startswith(f"{TUPLES}: 1 cold of 2 ")
+    assert "1 subspace in the census with no readable post time: not judged" in "\n".join(_tuple_section(lines))
+
+
+def test_the_owner_is_the_engines_template_when_it_names_one_and_the_resolver_only_when_it_does_not() -> None:
+    templates = [_tpl("queue/<name>", ["the queue writer"]), _tpl("board/<topic>", ["the board writer"])]
+    store = _Tuples(templates, [
+        # the engine says queue/<name> for a name the resolver would give to board/<topic>: the engine wins
+        _sub("board/x", LONG_AGO, template="queue/<name>", known=True),
+        # an engine that predates the field: the shared resolver decides
+        _sub("board/y", LONG_AGO, template=None, known=False),
+        # the engine names no template: no owner, and the resolver is not asked
+        _sub("board/z", LONG_AGO, template=None, known=True),
+    ])
+    rows = {r.split(" | ")[0]: r for r in _rows(cold.tuple_lines(30, FAR, lambda: store), TUPLES)}
+    assert rows["board/x"].endswith("owner the queue writer")
+    assert rows["board/y"].endswith("owner the board writer")
+    assert rows["board/z"].endswith("owner none (no registered template resolves)")
+
+
+@pytest.mark.parametrize(("writers", "writerless"), [
+    ([], True), (None, True), ("", True),
+    (["Unverified: any session"], True), (["Unverified: a", "Unverified: b"], True),
+    (["Unverified: a", "the mailbox_send MCP tool"], False), (["the ci-board-adapter lambda"], False),
+    ("a single string writer", False),
+])
+def test_writerless_reads_the_list_not_its_prefix_alone(writers: object, writerless: bool) -> None:
+    doc = {"summary": "s"} if writers is None else {"summary": "s", "writers": writers}
+    assert cold.has_no_verified_writer(doc) is writerless
+
+
+def test_a_cold_report_on_an_engine_without_doc_exits_0_with_not_available(
+    world: dict[str, Path], monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    _session(world["project"] / "s1.jsonl", "s1", world["repo"], "2026-11-08T10:00:00Z", [("Bash", {"command": "ls"})])
+    monkeypatch.delattr(lua_runtime, "run_script")
+    store = _Tuples([_tpl("board/<topic>", doc=False)], [_sub("board/a", LONG_AGO, template="board/<topic>")])
+    monkeypatch.setattr(cold, "_default_tuple_store", lambda: store)
+    with patch("nexus.commands.memory.t2_handle", side_effect=RuntimeError("no store")):  # no tenant: the report is not stored
+        res = CliRunner().invoke(main, ["memory", "curate", "--cold"])
+    assert res.exit_code == 0, res.output
+    assert f"{TUPLES}: not available: " in res.output and "predates the dictionary" in res.output
+
+
+def test_an_unreachable_tuple_engine_is_not_available_and_blanks_only_the_tuple_row(world: dict[str, Path], stubbed) -> None:  # noqa: F811
+    stubbed({"memory": MEM, "loads": LOADS, "tools": TOOLS})
+    lines = cold.cold_lines(30, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS),
+                            open_tuples=_no_tuple_engine)
+    assert _head(lines, TUPLES) == f"{TUPLES}: not available: RuntimeError: no tuple engine in this test"
+    assert "not available" not in _head(lines, "T2 namespaces")
+
+
+def test_the_tuple_row_does_not_wait_for_the_transcripts(world: dict[str, Path]) -> None:  # noqa: F811
+    """With no session in the window every transcript kind is not available, and the census still reads."""
+    _session(world["project"] / "long.jsonl", "long", world["repo"], "2026-10-01T10:00:00Z",
+             [("Bash", {"command": "ls"})], resumed="2026-11-08T10:00:00Z")
+    store = _Tuples([_tpl("board/<topic>", ["w"])], [_sub("board/a", LONG_AGO, template="board/<topic>")])
+    lines = cold.cold_lines(7, _NOW, world["repo"], "readrepo", world["mem"], world["repo"], _t2(_PROJECTS),
+                            open_tuples=lambda: store)
+    assert "no session of this repository started in the window" in _head(lines, "memory files")
+    assert _stores(lines, TUPLES) == ["board/a"]  # reached, and read, with every transcript kind unavailable
+
+
 # ── the docs match the code ──────────────────────────────────────────────────────────
 
 
@@ -613,10 +941,13 @@ def test_the_docs_describe_cold() -> None:
     bullet = next(ln for ln in section.splitlines() if ln.startswith("- `--cold`"))
     for needle in ("MCP tool", "CLI verb", "nested", "K6", "not available", "Tuple subspaces", "invoked by a hook",
                    "last_accessed", ".claude/rules", "once per section", "no CLAUDE.md", "run by a slash command",
-                   "src/nexus/hooks", "`tests/CLAUDE.md` itself is judged", "tools, memory or loads query"):
+                   "src/nexus/hooks", "`tests/CLAUDE.md` itself is judged", "tools, memory or loads query",
+                   "Six kinds", "`newest_created_at`", "`Unverified: `", "the engine predates the dictionary",
+                   "does not depend on the transcripts"):
         assert needle in bullet, needle
     assert "three times" not in section
     assert "until Step 3" not in section and "RDR-240's tools, loads" not in section
+    assert "not covered yet" not in section and "wait for RDR-239" not in section
     assert "K6" in cold.__doc__ and "--cold" in cold.__doc__
     # The entry lives in its fragment until a release folds it into CHANGELOG.md
     # (scripts/changelog_fold.py deletes the fragment), so read whichever holds it.

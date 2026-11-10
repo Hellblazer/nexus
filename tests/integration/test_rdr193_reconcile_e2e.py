@@ -420,7 +420,7 @@ def test_a_head_bump_hands_no_rdr_to_the_dependency_generator(
     seen: list[list[str]] = []
 
     def bound(cat, repo_path):  # noqa: ANN001, ARG001
-        def gen(cat, *, writer, new_tumblers, new_content_types):  # noqa: ANN001, ARG001
+        def gen(cat, *, writer, new_tumblers, new_content_types, inputs=None):  # noqa: ANN001, ARG001
             seen.append([str(t) for t in new_tumblers])
             return 0
         return "rdr-dependency", gen

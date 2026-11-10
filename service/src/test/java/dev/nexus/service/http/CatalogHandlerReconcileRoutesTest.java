@@ -962,7 +962,8 @@ class CatalogHandlerReconcileRoutesTest {
 
     /**
      * Waits until a backend of this database is blocked on a lock. The only lock the test holds is the one it took,
-     * and pg_stat_activity's query text lags a backend that is already waiting, so the wait is what is counted.
+     * so the wait is what is counted; the helper drops the connection's cached backend-status snapshot on each read
+     * (the connection is inside one transaction, which caches the view until it ends).
      */
     private static void awaitCommitBlockedOnALock(Connection su) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);

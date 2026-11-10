@@ -67,6 +67,87 @@ class TestDryRunLinkWriter:
         DryRunLinkWriter().close()
 
 
+class TestDryRunLinkWriterBatchCalls:
+    """RDR-193 Step 7: the generators write through ``links_upsert_many`` and ``links_same_content``, so
+    the recorder answers those too."""
+
+    @staticmethod
+    def _tumbler_edge(f: str, t: str, lt: str = "relates") -> dict:
+        return {"from": {"tumbler": f}, "to": {"tumbler": t}, "link_type": lt, "created_by": "x"}
+
+    @staticmethod
+    def _path_edge(f: str, owner: str, path: str) -> dict:
+        return {
+            "from": {"tumbler": f}, "to": {"owner": owner, "file_path": path},
+            "link_type": "implements", "created_by": "filepath_extractor",
+        }
+
+    def test_a_tumbler_edge_is_counted_against_the_existing_links_like_link_if_absent(self) -> None:
+        w = DryRunLinkWriter(existing={("1.1.1", "1.1.2", "relates")})
+        result = w.links_upsert_many([
+            self._tumbler_edge("1.1.1", "1.1.2"), self._tumbler_edge("1.1.1", "1.1.3"),
+            self._tumbler_edge("1.1.1", "1.1.3"),
+        ])
+        assert result == {"created": 1, "skipped": 2, "unresolved": []}
+        assert [(p.from_tumbler, p.to_tumbler) for p in w.proposed] == [("1.1.1", "1.1.3")]
+        assert w.path_edges == 0
+
+    def test_a_path_edge_is_recorded_with_its_path_and_counted_as_a_path_edge(self) -> None:
+        w = DryRunLinkWriter()
+        w.links_upsert_many([self._path_edge("1.1.5", "1.1", "src/a.py"), self._tumbler_edge("1.1.5", "1.1.6")])
+        assert [p.to_tumbler for p in w.proposed] == ["path:1.1:src/a.py", "1.1.6"]
+        assert w.path_edges == 1
+
+    def test_the_same_path_edge_twice_counts_once(self) -> None:
+        w = DryRunLinkWriter()
+        edge = self._path_edge("1.1.5", "1.1", "src/a.py")
+        assert w.links_upsert_many([edge, edge])["created"] == 1
+
+    class _Resolver:
+        """Answers ``find_all_by_file_paths`` as the engine's batch route does: a path with no live
+        document is absent."""
+
+        def __init__(self, docs: dict[str, list[str]]) -> None:
+            self.docs, self.calls = docs, []
+
+        def find_all_by_file_paths(self, paths: list[str]) -> dict[str, list[SimpleNamespace]]:
+            self.calls.append(list(paths))
+            return {p: [SimpleNamespace(tumbler=t) for t in self.docs[p]] for p in paths if p in self.docs}
+
+    def test_with_a_resolver_a_path_edge_targets_the_owners_document_and_a_missing_path_is_dropped(self) -> None:
+        resolver = self._Resolver({"src/a.py": ["1.2.7", "1.1.4"], "src/b.py": ["1.2.9"]})
+        w = DryRunLinkWriter(resolver=resolver)
+        result = w.links_upsert_many([
+            self._path_edge("1.1.5", "1.1", "src/a.py"),     # the owner 1.1's document, not 1.2's
+            self._path_edge("1.1.5", "1.1", "src/b.py"),     # only another owner has it
+            self._path_edge("1.1.5", "1.1", "src/gone.py"),  # nobody has it
+        ])
+        assert resolver.calls == [["src/a.py", "src/b.py", "src/gone.py"]], "one batch read"
+        assert result == {"created": 1, "skipped": 0, "unresolved": []}
+        assert [(p.from_tumbler, p.to_tumbler) for p in w.proposed] == [("1.1.5", "1.1.4")]
+        assert w.unresolved_paths == 2 and w.path_edges == 0
+
+    def test_with_a_resolver_a_path_edge_to_an_existing_link_is_skipped(self) -> None:
+        w = DryRunLinkWriter(
+            existing={("1.1.5", "1.1.4", "implements")}, resolver=self._Resolver({"src/a.py": ["1.1.4"]}),
+        )
+        assert w.links_upsert_many([self._path_edge("1.1.5", "1.1", "src/a.py")]) == {
+            "created": 0, "skipped": 1, "unresolved": [],
+        }
+        assert w.proposed == [] and w.unresolved_paths == 0
+
+    def test_a_tumbler_only_batch_makes_no_resolver_read(self) -> None:
+        resolver = self._Resolver({})
+        DryRunLinkWriter(resolver=resolver).links_upsert_many([self._tumbler_edge("1.1.1", "1.1.2")])
+        assert resolver.calls == []
+
+    def test_same_content_counts_what_was_submitted_and_previews_no_link(self) -> None:
+        w = DryRunLinkWriter()
+        assert w.links_same_content(["1.1.1", "1.1.2"], prune=False) == {"created": 0, "retracted": 0}
+        assert w.same_content_sent == 2
+        assert w.proposed == []
+
+
 class _FakeLinkReader:
     """Pages link_query the way HttpCatalogClient does."""
 

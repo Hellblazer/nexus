@@ -504,10 +504,15 @@ jobs:
     # never reaches owned hardware even if its run is approved by mistake.
     # Repo variable NX_CI_POOL=off sends every run back to `ubuntu-latest`
     # (the pool host is down and this is a required check).
+    # A pull request into `main` (a release PR) takes `lab-6c18g-release`, a scale
+    # set of the same class that the lab places ahead of the develop shards, so a
+    # release's shards are not queued behind develop's (Sam, labrun capacity
+    # report 2026-11-10, labrun-9no). Every other run, a push to develop included
+    # (`github.base_ref` is empty there), stays on `lab-6c18g`.
     # The pool's $HOME outlives the job and is shared with the sibling shards,
     # so the steps below skip the Actions cache for $HOME paths there.
     name: pytest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
-    runs-on: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'lab-6c18g' }}
+    runs-on: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || (github.base_ref == 'main' && 'lab-6c18g-release' || 'lab-6c18g') }}
     # nexus-eqxxh: the engine-substrate tests need the shaded jar. One build,
     # shared by every matrix leg (see the service-jar job's cost note).
     # nexus-n0ful: also needs `changes` directly (not just transitively via

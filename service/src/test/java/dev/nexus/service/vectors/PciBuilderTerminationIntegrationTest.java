@@ -7,6 +7,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.BackendReaper;
 import dev.nexus.service.db.PgSession.PciSettings;
@@ -14,6 +15,7 @@ import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.vectors.PciBuilderSession.DdlOutcome;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
@@ -544,6 +546,192 @@ class PciBuilderTerminationIntegrationTest {
             assertThat(build.get(30, TimeUnit.SECONDS)).isEqualTo(DdlOutcome.CONNECTION_LOST);
             awaitBuilderGone(builderName);
             writer.close();
+        }
+    }
+
+    // -- a self-retrying changeset is not schema work (nexus-f3yqd.3) -------------------------------------
+
+    static final String RETIRE_CHANGESET = "aspects-005-2";
+    static final String QUEUE_COLLECTION = "pcitrm-queue-coll";
+    static final String QUEUE_DOC = "pcitrm.1";
+
+    static final String RETIRE_CHANGELOG = "db/changelog/aspects-005-retire-aspect-queue-table.xml";
+    static final Table<?> QUEUE_TABLE = DSL.table(DSL.name("nexus", "aspect_extraction_queue"));
+
+    /**
+     * aspects-005-2 as a store with leftover aspect-queue rows has it: the table is back with one row and the counting
+     * helper exists (both from the changelog's own text: the rollback of aspects-005-2 recreates the empty table and
+     * the helper, aspects-005-1 swaps the foreign key), and the changeset is not recorded, so it is pending on every
+     * boot (its precondition fails, onFail CONTINUE, and a body that ran would raise with failOnError false; neither
+     * records it).
+     */
+    void stageRetireChangesetPending() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.replayChangesetRollback(su, RETIRE_CHANGELOG, RETIRE_CHANGESET);
+            PgContainerHelper.replayChangeset(su, RETIRE_CHANGELOG, "aspects-005-1");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, T1, QUEUE_COLLECTION);
+            PgContainerHelper.insertCatalogDocument(ctx, T1, QUEUE_DOC);
+            ctx.insertInto(QUEUE_TABLE, DSL.field(DSL.name("tenant_id"), String.class),
+                    DSL.field(DSL.name("collection"), String.class), DSL.field(DSL.name("source_path"), String.class),
+                    DSL.field(DSL.name("doc_id"), String.class),
+                    DSL.field(DSL.name("enqueued_at"), java.time.OffsetDateTime.class))
+                .values(T1, QUEUE_COLLECTION, "/legacy/one.pdf", QUEUE_DOC, java.time.OffsetDateTime.now())
+                .execute();
+            ctx.deleteFrom(DSL.table(DSL.name("public", "databasechangelog")))
+                .where(DSL.field(DSL.name("id"), String.class).eq(RETIRE_CHANGESET)).execute();
+        }
+        assertThat(changesetRecorded(RETIRE_CHANGESET)).as("%s is pending", RETIRE_CHANGESET).isFalse();
+    }
+
+    boolean changesetRecorded(String id) throws Exception {
+        return asSuperuser(pg, ctx -> ctx.fetchExists(DSL.selectOne()
+            .from(DSL.table(DSL.name("public", "databasechangelog")))
+            .where(DSL.field(DSL.name("id"), String.class).eq(id))));
+    }
+
+    /**
+     * The drain has emptied the queue: the next walk drops the table and records the changeset, the state every
+     * other test in this class assumes. Also the cleanup when a test fails after staging.
+     */
+    void drainAndRetireTheStagedQueue(HikariDataSource ds) throws Exception {
+        asSuperuser(pg, ctx -> {
+            if (PgCatalogProbes.tableExists(ctx, "nexus", "aspect_extraction_queue")) {
+                ctx.deleteFrom(QUEUE_TABLE).execute();
+            }
+            return null;
+        });
+        migrateWithin(ds, 120);
+        assertThat(changesetRecorded(RETIRE_CHANGESET)).as("the retry recorded %s", RETIRE_CHANGESET).isTrue();
+        boolean tableLeft = asSuperuser(pg, ctx -> PgCatalogProbes.tableExists(ctx, "nexus", "aspect_extraction_queue"));
+        assertThat(tableLeft).as("the retired table is gone").isFalse();
+    }
+
+    /**
+     * nexus-f3yqd.3: aspects-005-2 holds the unrun set non-empty on every boot of a store whose aspect queue still has
+     * rows, and its body touches no chunk leaf, so it cannot conflict with a build. A boot with only it pending keeps
+     * the in-flight build and says why.
+     */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void migrate_withOnlyASelfRetryingChangesetPending_keepsAnInFlightBuilder() throws Exception {
+        String nonce = "c0ffee04";
+        String builderName = PciBuilderSession.builderApplicationName(nonce);
+        String coll = "code__pcitrm-retry__voyage-code-3__v1";
+        String index = PciCatalog.indexName(M1024, T1, coll);
+        PciCatalog.Leaf leaf = leaf();
+
+        try (HikariDataSource migrationDs = migrationPool()) {
+            try {
+                stageRetireChangesetPending();
+                try (PciBuilderSession.Pass pass = builderSession(nonce).open();
+                     LeafWriter writer = new LeafWriter(leaf)) {
+                    var build = startHeldBuild(pass, leaf, coll);
+
+                    List<String> logs = captureLogs(SchemaMigrator.class, () -> migrateWithin(migrationDs, 120));
+
+                    assertThat(logs).noneMatch(l -> l.contains("event=pci_builders_terminated"));
+                    assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("count=1")
+                        && l.contains("retrying=1"));
+                    assertThat(logs).as("the keep line is one event, the excluded changeset another")
+                        .filteredOn(l -> l.contains("event=pci_builders_kept")).hasSize(1);
+                    assertThat(logs).anyMatch(l -> l.contains("event=pci_build_kept_for_retrying")
+                        && l.contains("aspects-005-retire-aspect-queue-table.xml::aspects-005-2")
+                        && l.contains("reason=self_retrying_precondition"));
+                    assertThat(changesetRecorded(RETIRE_CHANGESET)).as("still unrecorded: it retries").isFalse();
+                    assertThat(backendsNamed(builderName)).as("the builder's backend is still there").isEqualTo(1);
+                    assertThat(holdersOf(PciBuilderSession.PCI_BUILDER_ADVISORY_LOCK_KEY)).isEqualTo(1);
+                    assertThat(build.isDone()).as("and still building").isFalse();
+
+                    writer.close();
+                    assertThat(build.get(60, TimeUnit.SECONDS)).isEqualTo(DdlOutcome.DONE);
+                    assertThat(indexValid(index)).as("the build ran to its end").isTrue();
+                }
+            } finally {
+                drainAndRetireTheStagedQueue(migrationDs);
+            }
+        }
+    }
+
+    /**
+     * The transition boot (nexus-f3yqd.3, critic S1): the queue has drained since the last boot, so aspects-005-2's
+     * precondition passes and its body runs ({@code DROP TABLE nexus.aspect_extraction_queue}, ACCESS EXCLUSIVE on the
+     * queue and, for its two foreign keys, on catalog_documents and catalog_collections) while a build is held mid
+     * {@code CREATE INDEX CONCURRENTLY}. The changeset was pending when the walk started, so the build is kept; the
+     * walk must not queue behind it and the build must not queue behind the walk. A lock cycle ends this test by its
+     * timeouts (the walk's 120 s bound, then the class's per-test one) instead of hanging the fork.
+     */
+    @Test
+    @Timeout(value = 240, unit = TimeUnit.SECONDS)
+    void migrate_whenTheSelfRetryingChangesetRunsItsBody_keepsTheBuilder_andTheBuildEnds() throws Exception {
+        String nonce = "c0ffee06";
+        String builderName = PciBuilderSession.builderApplicationName(nonce);
+        String coll = "code__pcitrm-retrydrop__voyage-code-3__v1";
+        String index = PciCatalog.indexName(M1024, T1, coll);
+        PciCatalog.Leaf leaf = leaf();
+
+        try (HikariDataSource migrationDs = migrationPool()) {
+            try {
+                stageRetireChangesetPending();
+                // The drain: the queue is empty now, so the precondition passes and the body drops the table.
+                asSuperuser(pg, ctx -> ctx.deleteFrom(QUEUE_TABLE).execute());
+                try (PciBuilderSession.Pass pass = builderSession(nonce).open();
+                     LeafWriter writer = new LeafWriter(leaf)) {
+                    var build = startHeldBuild(pass, leaf, coll);
+
+                    List<String> logs = captureLogs(SchemaMigrator.class, () -> migrateWithin(migrationDs, 120));
+
+                    assertThat(logs).noneMatch(l -> l.contains("event=pci_builders_terminated"));
+                    assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("count=1")
+                        && l.contains("retrying=1"));
+                    assertThat(changesetRecorded(RETIRE_CHANGESET)).as("the body ran and %s is recorded", RETIRE_CHANGESET)
+                        .isTrue();
+                    boolean tableLeft = asSuperuser(pg, ctx -> PgCatalogProbes.tableExists(ctx, "nexus", "aspect_extraction_queue"));
+                    assertThat(tableLeft).as("the retired table is gone").isFalse();
+                    assertThat(backendsNamed(builderName)).as("the builder's backend is still there").isEqualTo(1);
+                    assertThat(holdersOf(PciBuilderSession.PCI_BUILDER_ADVISORY_LOCK_KEY)).isEqualTo(1);
+                    assertThat(build.isDone()).as("and still building").isFalse();
+
+                    writer.close();
+                    assertThat(build.get(60, TimeUnit.SECONDS)).isEqualTo(DdlOutcome.DONE);
+                    assertThat(indexValid(index)).as("the build ran to its end, a valid index").isTrue();
+                }
+            } finally {
+                drainAndRetireTheStagedQueue(migrationDs);
+            }
+        }
+    }
+
+    /** The control: the same staged changeset plus a real pending one still ends the build, and counts only the real one. */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void migrate_withASelfRetryingAndARealChangesetPending_endsTheBuilder_countingOnlyTheRealOne() throws Exception {
+        String nonce = "c0ffee05";
+        String builderName = PciBuilderSession.builderApplicationName(nonce);
+        String coll = "code__pcitrm-retryend__voyage-code-3__v1";
+        PciCatalog.Leaf leaf = leaf();
+
+        try (HikariDataSource migrationDs = migrationPool()) {
+            try {
+                stageRetireChangesetPending();
+                try (PciBuilderSession.Pass pass = builderSession(nonce).open();
+                     LeafWriter writer = new LeafWriter(leaf)) {
+                    var build = startHeldBuild(pass, leaf, coll);
+                    forgetAChangeset();
+
+                    List<String> logs = captureLogs(SchemaMigrator.class, () -> migrateWithin(migrationDs, 120));
+
+                    assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_terminated") && l.contains("count=1")
+                        && l.contains("reason=schema_changesets_pending") && l.contains("n=1"));
+                    assertThat(logs).noneMatch(l -> l.contains("event=pci_builders_kept"));
+                    assertThat(build.get(30, TimeUnit.SECONDS)).isEqualTo(DdlOutcome.CONNECTION_LOST);
+                    awaitBuilderGone(builderName);
+                    writer.close();
+                }
+            } finally {
+                drainAndRetireTheStagedQueue(migrationDs);
+            }
         }
     }
 

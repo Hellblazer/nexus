@@ -949,21 +949,27 @@ nx --version                 # must print X.Y.Z
 Once Step 12's restart has every session on the new version, run the curation report
 in one session, with the reinstalled `nx`. With no other session live, run it as soon as
 `nx --version` prints X.Y.Z. If Sam defers the restart, skip the step and say so in the
-ship record: a long foreground run would hold a session at `shell` through the restart
-round.
+ship record: a long run would hold a session at `shell` through the restart round.
+
+Start the command with the Bash tool's `run_in_background`, with the redirect around the
+whole group so the `|| echo` line lands in the file too, and read the file after the
+completion notice. Do not run it in the foreground: a foreground Bash call is cut at 10
+minutes (2 by default) and the run takes about 5, so the tool would end it or hold the session.
 
 ```bash
-nx memory curate --files --t2 --agents --cold || echo "curation step skipped (exit $?); the release goes on"
+{ nx memory curate --files --t2 --agents --cold || echo "curation step skipped (exit $?); the release goes on"; } > /tmp/curation-report.txt 2>&1
 ```
 
-It prints the report and stores it in T2 as `<repo>/curation-report-<date>` (90-day
-TTL): memory files that are unindexed, oversized or dangling, T2 rows and reviewer
+It prints the report and stores it in T2 as `<repo>/curation-report-<date>-files-t2-agents-cold`
+(90-day TTL; the `-cold` title keeps a later default run from replacing it): memory files that
+are unindexed, oversized or dangling, T2 rows and reviewer
 memory to look at, and (`--cold`) memory files, T2 namespaces, MCP tools, CLI verbs
 and nested CLAUDE.md files with no write and no use in 30 days. With `--files` and
 `--cold` together it reads every transcript of the window four times (`--files` once
 for read counts, `--cold` three times), so it takes a while: 305 s on the laptop
-on 2026-11-09, over a 30-day window. If it is still running after 30 minutes, stop it
-(the one pid you started), say so in the ship record and finish the release.
+on 2026-11-09, over a 30-day window. If the notice has not come
+after 30 minutes, stop it (kill the one pid you started and checked with `ps`, never by
+pattern), say so in the ship record and finish the release.
 
 This step never blocks the release. The command exits 0 whatever it finds, and a
 section that cannot run prints a "not available" line (`--cold` prints one per kind)

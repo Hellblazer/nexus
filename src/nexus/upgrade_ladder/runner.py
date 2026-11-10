@@ -39,13 +39,15 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 import structlog
 
 from nexus.redact import redact_credentials
 
 from nexus.upgrade_ladder.completion import derive_ladder_position
-from nexus.upgrade_ladder.deadline import Deadline, bound
+from nexus.upgrade_ladder.deadline import Deadline, active_deadline, active_expired, bound
+from nexus.upgrade_ladder.engine_outage import engine_unreachable
 from nexus.upgrade_ladder.protocol import CompletionLedger, ProgressReporter, Rung, RungStatus
 from nexus.upgrade_ladder.registry import LadderRegistry
 
@@ -54,7 +56,6 @@ _log = structlog.get_logger(__name__)
 #: Ceiling on converge() calls per rung per run — a buggy rung claiming
 #: RESUMABLE forever without progress must fail loudly, not spin.
 DEFAULT_MAX_STEPS_PER_RUNG = 10_000
-
 
 def installed_package_version() -> str:
     """The installed ``conexus`` version, stamped on every completion record.
@@ -199,6 +200,9 @@ class LadderRunner:
     reporter, and the package-version probe are all seams.
     """
 
+    #: How many times one rung waits for a restarting engine before it defers (nexus-f3yqd.5).
+    ENGINE_RESTART_RETRIES: int = 3
+
     def __init__(
         self,
         registry: LadderRegistry,
@@ -208,6 +212,9 @@ class LadderRunner:
         package_version_fn: Callable[[], str] | None = None,
         max_steps_per_rung: int = DEFAULT_MAX_STEPS_PER_RUNG,
         deadline: Deadline | None = None,
+        engine_wait: Callable[[float], bool] | None = None,
+        engine_may_return: Callable[[], bool] | None = None,
+        engine_wait_budget: Callable[[], float] | None = None,
     ) -> None:
         self._registry = registry
         self._store = store
@@ -217,6 +224,13 @@ class LadderRunner:
         )
         self._max_steps_per_rung = max_steps_per_rung
         self._deadline = deadline
+        # nexus-f3yqd.5: the lease is read only by the preconditions module (the gap-4 two-mechanisms rule).
+        from nexus.upgrade_ladder import preconditions as _pre  # noqa: PLC0415 — deferred, keeps the import light
+
+        self._engine_wait = engine_wait if engine_wait is not None else _pre.wait_for_engine
+        self._engine_may_return = engine_may_return if engine_may_return is not None else _pre.engine_may_return
+        self._engine_wait_budget = engine_wait_budget if engine_wait_budget is not None else _pre.engine_wait_budget
+        self._engine_gone = False  # a wait that ran out: later rungs do not wait again in this walk
 
     # ── read-only surface (nx doctor, P0.4) ─────────────────────────────────
 
@@ -335,10 +349,47 @@ class LadderRunner:
         )
         return [deferred, *later]
 
+    def _riding_out_restarts(self, rung: Rung, call: Callable[[], Any]) -> Any:
+        """*call*, run again after a wait each time the engine is away, up to :attr:`ENGINE_RESTART_RETRIES`
+        times (nexus-f3yqd.5). The wait is cut to what is left of the ``--auto`` deadline, and once a wait
+        has run out no later rung waits. The last engine-away error, or any other error, propagates."""
+        waits = 0
+        while True:
+            try:
+                return call()
+            except Exception as exc:
+                if (
+                    not engine_unreachable(exc) or waits >= self.ENGINE_RESTART_RETRIES or self._engine_gone
+                    or not self._engine_may_return()
+                ):
+                    raise
+                budget = self._engine_wait_budget()
+                deadline = active_deadline()
+                if deadline is not None:
+                    budget = min(budget, deadline.seconds - deadline.elapsed())
+                if budget <= 0:
+                    raise
+                waits += 1
+                self._reporter.emit("ladder_engine_wait", rung=rung.name, wait_s=budget, error=str(exc))
+                if not self._engine_wait(budget):
+                    self._engine_gone = True
+                    raise
+
+    @staticmethod
+    def _engine_away(rung: Rung, exc: BaseException, where: str) -> RungRun:
+        _log.warning("ladder_rung_engine_away", rung=rung.name, where=where, error=str(exc))
+        return RungRun(
+            rung.name, RungOutcome.DEFERRED,
+            detail=f"the engine did not answer during this step's {where} ({exc}); the next `nx upgrade` "
+            "runs the step again and skips what is already done",
+        )
+
     def _run_rung(self, rung: Rung) -> RungRun:
         try:
-            status = rung.detect()
+            status = self._riding_out_restarts(rung, rung.detect)
         except Exception as exc:  # noqa: BLE001 — a rung's detect failure must become a reported walk stop, not a crash of the single upgrade trigger
+            if engine_unreachable(exc):
+                return self._engine_away(rung, exc, "check")
             _log.warning("ladder_rung_detect_failed", rung=rung.name, error=str(exc))
             return RungRun(rung.name, RungOutcome.FAILED, detail=f"detect raised: {exc}")
 
@@ -356,7 +407,13 @@ class LadderRunner:
 
         # Converged (either just now or found converged-but-unrecorded after a
         # crash): the RDR-142 guard — record ONLY on a passing verify.
-        if not rung.verify():
+        try:
+            verified = self._riding_out_restarts(rung, rung.verify)
+        except Exception as exc:  # noqa: BLE001 — only an engine-away error reaches here: rungs catch the rest themselves
+            if engine_unreachable(exc):
+                return self._engine_away(rung, exc, "confirmation")
+            raise
+        if not verified:
             # nexus-hdumg: a refusing verify() may carry WHY. Without this the
             # only text distinguishing "poison rows remain" from "the
             # conformance diagnostic could not run at all" lived in a log
@@ -397,11 +454,18 @@ class LadderRunner:
 
     def _converge(self, rung: Rung) -> RungRun | None:
         """Drive converge to completion (resumable batches). Returns a FAILED
-        or DEFERRED RungRun on non-completion, None on completion."""
+        or DEFERRED RungRun on non-completion, None on completion.
+
+        An engine that goes away mid-rung (a restart from another shell) is waited for, and the rung's
+        converge runs again (:meth:`_riding_out_restarts`): it reads the store's current state from the first
+        document and skips rows already done. An engine that does not come back defers the rung; it never
+        fails the upgrade (nexus-f3yqd.5)."""
         for _ in range(self._max_steps_per_rung):
             try:
-                result = rung.converge(self._reporter)
+                result = self._riding_out_restarts(rung, lambda: rung.converge(self._reporter))
             except Exception as exc:  # noqa: BLE001 — any converge failure stops the walk with a reported outcome; the rung resumes from its persisted floor next run
+                if engine_unreachable(exc):
+                    return self._engine_away(rung, exc, "fill")
                 _log.warning("ladder_rung_converge_failed", rung=rung.name, error=str(exc))
                 return RungRun(rung.name, RungOutcome.FAILED, detail=f"converge raised: {exc}")
             if result.deferred:

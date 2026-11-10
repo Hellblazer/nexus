@@ -136,6 +136,17 @@ def test_progress_shows_done_of_total() -> None:
     assert beats[1].startswith("  ... 120 of 400 rows, ")
 
 
+def test_progress_note_carries_the_callers_words_after_the_size() -> None:
+    """nx backup (nexus-f3yqd.4): the caller owns the words after the size (what was written, the rate), so
+    a step with no meaningful total says only what it knows and the reporter adds no fraction."""
+    rep, clock, lines, _ = _reporter(1)
+    with rep.step("Write the backup") as step:
+        clock.now += PLAIN_HEARTBEAT_S
+        step.progress(40e6, None, "bytes", note="written, 8.0 MB/s")
+    beats = [line for line in lines if "elapsed" in line]
+    assert beats[0].startswith("  ... 40.0 MB written, 8.0 MB/s, ")
+
+
 def test_a_failure_says_how_long_it_ran_and_the_remedy_and_propagates() -> None:
     rep, clock, lines, _ = _reporter(1)
     with pytest.raises(RuntimeError), rep.step("Update the plugins", remedy="Run `nx upgrade` again once online."):

@@ -241,6 +241,7 @@ _COLLECTIONS_PATH = "/v1/vectors/collections"
 
 def _patch_stats_and_raw(monkeypatch, *, stats_names: set[str], raw_names: set[str]) -> None:
     def fake_get(path: str, *, tenant: str = "default") -> _Any:
+        path = path.replace("?fields=routing", "")  # the full rows, as from an engine that predates routing
         if path == _STATS_PATH:
             return [
                 {"name": n, "dim": 384, "count": 1, "last_write": "x"}

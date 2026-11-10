@@ -85,15 +85,32 @@ import json
 import math
 import os
 import re
-import stat
-import time
-from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from nexus.lua_runtime import verb_types
-from nexus.lua_runtime.transcripts_projects import repo_project_dirs
+from nexus.lua_runtime.transcripts_read import (  # noqa: F401 -- the public names stay importable from here
+    BYTES_PER_DEADLINE_CHECK,
+    LINE_CHUNK,
+    LINES_PER_DEADLINE_CHECK,
+    MAX_LINE_BYTES,
+    REPO_NEEDED,
+    REPO_PROJECT,
+    START_SCAN_BYTES,
+    VERB,
+    _check,
+    _decode,
+    _files,
+    _lines,
+    _readable_since,
+    _replayed,
+    _stamp,
+    _text,
+    first_start,
+    projects_root,
+    repo_main_transcripts,
+)
 from nexus.lua_runtime.verb_types import (
     JSONValue,
     ParamSpec,
@@ -101,19 +118,11 @@ from nexus.lua_runtime.verb_types import (
     VerbContext,
     VerbError,
     VerbSpec,
-    VerbTimeout,
 )
 
-VERB = "transcripts.sessions"
-REPO_PROJECT = "repo"
-REPO_NEEDED = (
-    f'{VERB}: project "{REPO_PROJECT}" needs a repository (the run started outside one)'
-)
 TOO_LARGE = "result-too-large"
 RECORD_TOO_LARGE = "record-too-large"
 RECORD_CAP_BYTES = 1024 * 1024
-LINES_PER_DEADLINE_CHECK = 2000
-BYTES_PER_DEADLINE_CHECK = 8 * 1024 * 1024
 INPUT_STRING_CAP = 256 * 1024  # one string of a tool-call input, as read
 _CUT_STEPS = (65536, 16384, 4096, 1024, 256)
 _LAST_CUTS = (64, 0)
@@ -128,32 +137,15 @@ _MAX_DEPTH = 64
 _MAX_MODELS = 64
 _MAX_DEFERRED = 4096
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_SURROGATE = re.compile("[\ud800-\udfff]")
 # A slash command is a user prompt the harness wrote: it starts with one of
 # these tags, and its name is a command name, never free text.
 _COMMAND_STARTS = ("<command-name>", "<command-message>")
 _COMMAND = re.compile(r"<command-name>/?([A-Za-z0-9_:.\-/]{1,64})</command-name>")
 _COMMAND_HEAD = 512
-MAX_LINE_BYTES = 64 * 1024 * 1024  # a longer line is skipped, never held
-LINE_CHUNK = 1024 * 1024
 _LUA_INT_MAX = 2**63 - 1
-
-_now = time.monotonic
 
 
 # ---- values ----------------------------------------------------------------
-
-
-def _text(value: Any, limit: int) -> str | None:
-    """``value`` as valid UTF-8 cut to ``limit`` characters, or None."""
-    if not isinstance(value, str):
-        return None
-    value = value[:limit]
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError:
-        value = _SURROGATE.sub("\ufffd", value)
-    return value
 
 
 def _count(value: Any) -> int:
@@ -223,21 +215,6 @@ def _bound(value: str, name: str) -> datetime:
             f"{VERB}: {name} {shown!r} is not a UTC date or timestamp"
         ) from None
     return t.replace(tzinfo=UTC) if t.tzinfo is None else t.astimezone(UTC)
-
-
-def _stamp(value: Any) -> tuple[str, datetime] | None:
-    if not isinstance(value, str) or len(value) > 64:
-        return None
-    try:
-        t = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return value, (t.replace(tzinfo=UTC) if t.tzinfo is None else t)
-
-
-def _check(deadline: float) -> None:
-    if _now() >= deadline:
-        raise VerbTimeout(f"{VERB}: the run's time budget ran out reading transcripts")
 
 
 # ---- fields ------------------------------------------------------------------
@@ -392,71 +369,6 @@ def _parse_fields(fields: str | None, bodies: bool) -> _Fields:
         frozenset(exact),
         tuple(sorted(suffix)),
     )
-
-
-# ---- files -----------------------------------------------------------------
-
-
-def _projects_root() -> Path:
-    base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-    return Path(base) / "projects"
-
-
-def _plain_dir(p: Path) -> bool:
-    try:
-        return stat.S_ISDIR(p.lstat().st_mode)
-    except OSError:
-        return False
-
-
-def _linked(path: Path, top: Path) -> bool:
-    """Whether ``path`` or a directory between it and ``top`` is a link."""
-    p = path
-    while p != top and p != p.parent:
-        if p.is_symlink():
-            return True
-        p = p.parent
-    return False
-
-
-def _files(
-    root: Path, project: str | None, deadline: float, repo_root: Path | None
-) -> Iterator[tuple[str, Path, bool]]:
-    """Transcript files under ``root`` (which may itself be a link), links below it excluded."""
-    if project == REPO_PROJECT and repo_root is None:
-        raise VerbError(REPO_NEEDED)
-    if not root.is_dir():
-        raise VerbError(f"{VERB}: no Claude Code projects directory at {root}")
-    if project is None or project == "all":
-        dirs = sorted(p for p in root.iterdir() if _plain_dir(p))
-    elif project == REPO_PROJECT:
-        try:
-            names = repo_project_dirs(root, repo_root, deadline=deadline)
-        except ValueError:
-            raise VerbError(REPO_NEEDED) from None
-        dirs = sorted(d for d in (root / n for n in names) if _plain_dir(d))
-    else:
-        if (
-            project in ("", ".", "..")
-            or len(project) > 255
-            or any(c in project for c in "/\\:\x00")
-        ):
-            raise VerbError(
-                f"{VERB}: project {project[:64]!r} is not a project directory name"
-            )
-        d = root / project
-        if d.parent != root or not _plain_dir(d):
-            raise VerbError(f"{VERB}: no project {project!r} under {root}")
-        dirs = [d]
-    for d in dirs:
-        _check(deadline)
-        name = _text(d.name, 255) or ""
-        for main in sorted(d.glob("*.jsonl")):
-            if not _linked(main, d):
-                yield name, main, True
-        for sub in sorted(d.glob("*/subagents/**/*.jsonl")):
-            if not _linked(sub, d):
-                yield name, sub, False
 
 
 # ---- one transcript ----------------------------------------------------------
@@ -708,193 +620,6 @@ class _Session:
         )
 
 
-# ---- lines no selected field needs -------------------------------------------
-#
-# ``json.loads`` is a third to a half of a scan. Most of the bytes of a
-# transcript are lines that add nothing to the record but a stamp and ids:
-# ``api-request``, ``api-request-blob``, ``api-request-shape``,
-# ``queue-operation`` and the like, whose type is not ``user``, ``assistant`` or
-# ``attachment``. Such a line still counts for four things: its timestamp (the
-# first stamped line decides the window, the last sets ``end``), its
-# ``isSidechain`` (a main file drops such a line), and its ``sessionId`` and
-# ``agentId`` (the first of each wins). ``_inert`` reads those from the raw
-# text and returns them in place of the decoded record.
-#
-# The run is consumed member by member from the opening brace (``_RUN``). Its
-# string pattern bans ``"`` and ``\``, so a member is a whole ``"key":scalar``
-# and the run holds no nested value: each member in it is a member of the
-# top-level object. The first byte that does not continue the run ends it, and
-# ``_NEXT`` demands a plain-key member (or the closing brace) there, so an
-# unreadable member does not hide an escaped key right after the run. The type
-# and each wanted key must be in the run, or the wanted key's quoted name must
-# occur nowhere in the line; otherwise the line is decoded. A line must end in
-# a newline, so the torn last write of a live file is decoded (and dropped) as
-# before; a complete last line without one is decoded too.
-#
-# What the text does not prove, and why it is assumed: the harness writes
-# ``JSON.stringify`` output, which has no repeated key, no ``\u`` escape on an
-# ASCII character of a key, and, once a torn write is excluded, no malformed
-# interior. A repeated or ``\u``-spelled key past the run, or a malformed
-# interior with a newline, would be taken as valid; so would a line nested
-# deeper than ``RecursionError`` allows, or holding an integer past the
-# interpreter's digit limit, which ``json.loads`` drops. One of these can come
-# from the harness: a session that crashes mid-write and resumes appends its
-# next record to the torn line, and the skip keeps the torn head's type and
-# stamp where the decode drops the whole line, so that transcript's start or
-# end can move to the torn event's time. For an attachment line the type, stamp
-# and ids come from the resumed record's tail, and the torn record is lost
-# either way. Sam accepted this residual for harness-written transcripts (ask
-# baton/q37-residual, 2026-11-08).
-#
-# An assistant or user line is never skipped. An attachment line is skipped only
-# while no selected field reads it (``_Session.inert_kinds``), and its type or
-# stamp then often follows the nested ``attachment`` object, out of the opening
-# run's reach. ``_tail`` reads the members after the last nested value: text of
-# nothing but ``,"key":scalar`` members from the last ``}`` or ``]`` to the
-# closing brace. In well-formed JSON those are members of the top-level object
-# (a string there has no ``"`` or ``\``, so each ``,"`` is a member boundary),
-# the same trust the run has; the line is decoded when a key is in both the run
-# and the tail. What it cannot reach is a stamp before a nested value that ends
-# the line: Claude Code writes ``rendered`` (an array) after an attachment's
-# stamp, so those lines are decoded. Finding where the attachment object ends
-# by an anchor in its own text (``},"uuid":"``) would reach them, and would
-# assume no nested object is ever followed by such a key: that is not proven
-# here, and the regexes that walk the object itself ran slower than
-# ``json.loads`` on its string content.
-
-_PREPARSE = True  # a test seam: the tests switch it off to compare
-_PREPARSE_MIN = 4096  # bytes; under it json.loads is as cheap as the scan
-_ACTING = frozenset({"user", "assistant", "attachment"})
-
-_VALUE = rb'(?:"[^"\\\x00-\x1f]{0,512}"|-?[0-9][0-9.eE+\-]{0,31}|true|false|null)'
-_PAIR = re.compile(rb'"([A-Za-z0-9_]+)":(' + _VALUE + rb")")
-_MEMBER = rb'"[A-Za-z0-9_]+":' + _VALUE
-_RUN = re.compile(rb"(?:" + _MEMBER + rb"(?:," + _MEMBER + rb")*+)?+")
-_NEXT = re.compile(rb',"[A-Za-z0-9_]+":|[ \t\r\n]*\}[ \t\r\n]*\Z')
-_TAIL = re.compile(rb"(?:," + _MEMBER + rb")++")
-
-
-def _inert(raw: bytes, s: _Session) -> dict[str, Any] | None:
-    """The stamp and ids of a line that adds nothing else, or None to decode it.
-
-    The result stands in for the decoded record: ``type``, and where the line
-    has them as top-level strings, ``timestamp``, ``sessionId`` and
-    ``agentId``, and ``isSidechain`` when true. ``s`` only widens what must be
-    proven: ``isSidechain`` for a main file, and an id while ``s`` still lacks
-    one (a line that names such a key outside what is read is decoded).
-
-    A flat line is read from its opening run. An attachment line that
-    ``s.inert_kinds`` names may have its type or stamp after the nested
-    attachment object, so the members after the last nested value (``_tail``)
-    are read too.
-    """
-    n = len(raw)
-    if not _PREPARSE or n < _PREPARSE_MIN or raw[:1] != b"{":
-        return None
-    end = _RUN.match(raw, 1).end()  # type: ignore[union-attr]  # always matches
-    found: dict[bytes, bytes] = {}
-    for key, value in _PAIR.findall(raw, 1, end):
-        if key in found:
-            return None
-        found[key] = value
-    if _NEXT.match(raw, end) is None:
-        return None
-    kind = _plain(found.get(b"type"))
-    acting = kind is None or kind in _ACTING
-    if acting and (
-        not s.inert_kinds or (kind is not None and kind not in s.inert_kinds)
-    ):
-        return None
-    if not raw.endswith(b"\n"):
-        return None  # a torn last write, or a last line the decode reads
-    if not raw[-8:].rstrip(b" \t\r\n").endswith(b"}"):
-        return None  # cut short
-    need = [b"timestamp"]
-    if s.main:
-        need.append(b"isSidechain")
-    if s.session_id is None:
-        need.append(b"sessionId")
-    if not s.main and s.agent_id is None:
-        need.append(b"agentId")
-    missing = [k for k in need if k not in found]
-    if acting:
-        # A stamp the opening run lacks must be in the tail (a line with none is
-        # decoded); any other key is looked for there only if the line names it.
-        want = [k for k in missing if k == b"timestamp"] or [
-            k for k in missing if b'"' + k + b'"' in raw
-        ]
-        if kind is None:
-            want.append(b"type")
-    if acting and want:
-        tail = _tail(raw, end, want)
-        if tail is None or found.keys() & tail.keys():
-            return None  # no flat tail, or a key twice: the decode keeps the last
-        found.update(tail)
-        kind = _plain(found.get(b"type"))
-        if kind not in s.inert_kinds:
-            return None
-        missing = [k for k in missing if k not in found]
-    for key in missing:
-        if b'"' + key + b'"' in raw:
-            return None  # named in the line, but not where read: it may be top-level
-    if not raw.isascii():
-        try:
-            raw.decode("utf-8", "surrogatepass")
-        except UnicodeDecodeError:
-            return None
-    rec: dict[str, Any] = {"type": kind}
-    if found.get(b"isSidechain") == b"true":
-        rec["isSidechain"] = True
-    for key in (b"timestamp", b"sessionId", b"agentId"):
-        token = found.get(key)
-        if token is None or token[:1] != b'"':
-            continue  # absent, or not a string: the decoded record reads it as None
-        value = _plain(token)
-        if value is None:
-            return None
-        rec[key.decode()] = value
-    return rec
-
-
-def _tail(raw: bytes, start: int, want: list[bytes]) -> dict[bytes, bytes] | None:
-    """The members after the last nested value of a line's top-level object.
-
-    The text after the last ``}`` or ``]`` before the closing brace must be
-    nothing but ``,"key":scalar`` members up to that brace, and must follow
-    ``start`` (the end of the opening run). Each is then a member of the
-    top-level object: a string there is quote-delimited with no escape, so a
-    ``,"`` is a member boundary and never string content, and the closer before
-    the run ends a nested value. A closer inside a string of the tail leaves a
-    remainder that does not match, and the line is decoded. A closer inside a
-    nested string cannot be followed by ``,"KEY":``: the quote after the comma
-    would close that string, and a bare ``KEY"`` after it is not well-formed
-    JSON. None when that does not hold, when a key of ``want`` is not in the
-    text, or when a key repeats.
-    """
-    stop = len(raw) - 8 + len(raw[-8:].rstrip(b" \t\r\n")) - 1  # the closing brace
-    at = max(raw.rfind(b"}", start, stop), raw.rfind(b"]", start, stop))
-    if at < 0 or any(raw.find(b'"' + k + b'":', at, stop) < 0 for k in want):
-        return None  # no tail, or it cannot hold what is wanted: a cheap way out
-    if (m := _TAIL.match(raw, at + 1, stop)) is None or m.end() != stop:
-        return None
-    found: dict[bytes, bytes] = {}
-    for key, value in _PAIR.findall(raw, at + 1, stop):
-        if key in found:
-            return None
-        found[key] = value
-    return found
-
-
-def _plain(token: bytes | None) -> str | None:
-    """A JSON string token with no escape in it, as text; None otherwise."""
-    if token is None or token[:1] != b'"' or token[-1:] != b'"' or len(token) < 2:
-        return None
-    try:
-        return token[1:-1].decode("utf-8", "surrogatepass")
-    except UnicodeDecodeError:
-        return None
-
-
 def _scan(
     path: Path,
     project: str,
@@ -907,8 +632,6 @@ def _scan(
     """The transcript's start and record, or None when it starts outside the window."""
     s = _Session(main, f)
     lines = 0
-    read = 0
-    next_bytes = BYTES_PER_DEADLINE_CHECK
     try:
         fh = path.open("rb")
     except OSError:
@@ -918,41 +641,15 @@ def _scan(
             size = os.fstat(fh.fileno()).st_size
         except OSError:
             return None
-        while True:
-            raw = fh.readline(LINE_CHUNK)
-            if not raw:
-                break
-            whole = raw.endswith(b"\n") or len(raw) < LINE_CHUNK
+        for raw in _lines(fh, deadline):
             lines += 1
-            read += len(raw)
-            long_line = False
-            while not whole:  # a line longer than one chunk
-                if read >= next_bytes:
-                    _check(deadline)
-                    next_bytes = read + BYTES_PER_DEADLINE_CHECK
-                more = fh.readline(LINE_CHUNK)
-                read += len(more)
-                if len(raw) + len(more) > MAX_LINE_BYTES:
-                    long_line = True
-                    raw = b""
-                if not long_line:
-                    raw += more
-                whole = not more or more.endswith(b"\n") or len(more) < LINE_CHUNK
-            if lines % LINES_PER_DEADLINE_CHECK == 0 or read >= next_bytes:
-                _check(deadline)
-                next_bytes = read + BYTES_PER_DEADLINE_CHECK
-            if long_line or not raw.strip():
+            if not raw.strip():
                 continue
-            rec = _inert(raw, s)
-            if rec is None:
-                try:
-                    rec = json.loads(raw, parse_constant=lambda _c: None)
-                except (ValueError, RecursionError):
-                    continue
+            rec = _decode(raw, s)
             if not isinstance(rec, dict):
                 continue
-            if main and rec.get("isSidechain") is True:
-                continue  # subagent traffic replayed into the session file
+            if _replayed(rec, main):
+                continue
             stamped = _stamp(rec.get("timestamp"))
             stamp = stamped[0] if stamped else None
             if s.start is None:
@@ -1089,7 +786,7 @@ def sessions(
         if ctx.repo_root is None:
             raise VerbError(REPO_NEEDED)
         return []  # an empty window asks the resolver nothing
-    root = _projects_root()
+    root = projects_root()
     files = list(_files(root, project, deadline, ctx.repo_root))
     if lo >= hi:
         return []
@@ -1099,11 +796,7 @@ def sessions(
     total = 1  # "[" now; each record brings its "," or the closing "]"
     for proj, path, main in files:
         _check(deadline)
-        try:
-            st = path.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(st.st_mode) or st.st_mtime < floor:
+        if not _readable_since(path, floor):
             continue  # not a plain file, or last written before the window opened
         got = _scan(path, proj, main, lo, hi, f, deadline)
         if got is None:

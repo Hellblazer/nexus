@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -22,9 +23,13 @@ from nexus.catalog.rdr_canonical import (
     group_rdr_candidates,
     is_in_repo,
     rdr_key_of,
+    rdr_key_of_path,
     rdr_source_prefix,
     resolve_all,
 )
+# Re-exported: the dry-run recorder and the hook's inputs live in their own modules (size ceiling).
+from nexus.catalog.link_dry_run import DryRunLinkWriter, ProposedLink, load_existing_link_keys
+from nexus.catalog.link_hook_inputs import HookLinkInputs, hook_link_inputs
 from nexus.catalog.tumbler import Tumbler
 from nexus.md_chunker import parse_frontmatter
 
@@ -46,18 +51,157 @@ def _all_entries(cat: CatalogReader) -> list[CatalogEntry]:
 
 
 def _entries_of_type(cat: CatalogReader, content_type: str) -> list[CatalogEntry]:
-    """Fetch entries of exactly one content type via a single round trip.
+    """Fetch entries of exactly one content type, tenant-wide, via a single round trip.
 
     ``CatalogReader.all_documents(content_type=...)`` is server-filtered
     (``HttpCatalogClient`` sends one unbounded ``/list?content_type=``
     request — see its docstring) rather than the unfiltered branch's
-    page=1000 pagination loop over the WHOLE tenant catalog. The
-    filepath/pdf linkers below only ever match a small, fixed set of
-    content types (their own source type(s), plus "code" as the link
-    target); fetching everything just to filter it client-side pays for
-    documents that can never match.
+    page=1000 pagination loop over the WHOLE tenant catalog.
+
+    RDR-193 Step 7 (nexus-u5m5g.8): this is a BULK-JOB read. The index path never calls it:
+    the generators take their new documents from the hook (:class:`HookLinkInputs`). Only the
+    full pass (``nx catalog generate-links``, a generator run with no ``new_tumblers``) lists
+    its source documents this way, and ``generate_citation_links`` has its own full scan.
     """
     return cat.all_documents(content_type=content_type)
+
+
+@dataclass(frozen=True)
+class _Doc:
+    """A seed document as the generators read it: from the hook (``owner`` set) or the catalog."""
+
+    tumbler: str
+    file_path: str
+    content_type: str
+    source_uri: str = ""
+    owner: str | None = None
+
+
+def _seed_docs(
+    cat: CatalogReader, new_tumblers: list[Tumbler], inputs: HookLinkInputs | None,
+) -> list[_Doc]:
+    """The documents of *new_tumblers*, in order. Those the hook holds come from *inputs* (no
+    read); the rest cost one ``resolve_many`` (a probe bounded by the seeds, never a listing).
+    With *inputs* every one of them is a document of the hook's run, so each names ``inputs.owner``
+    whether or not the hook held its row."""
+    held = inputs.docs if inputs is not None else {}
+    missing = sorted({str(t) for t in new_tumblers if str(t) not in held})
+    resolved = cat.resolve_many(missing) if missing else {}
+    out: list[_Doc] = []
+    for t in new_tumblers:
+        key = str(t)
+        if key in held:
+            file_path, content_type = held[key]
+            out.append(_Doc(key, file_path, content_type, owner=inputs.owner if inputs is not None else None))
+        elif key in resolved:
+            e = resolved[key]
+            out.append(_Doc(
+                key, e.file_path, e.content_type, e.source_uri,
+                owner=inputs.owner if inputs is not None else None,
+            ))
+    return out
+
+
+def _entry_docs(cat: CatalogReader, content_types: tuple[str, ...]) -> list[_Doc]:
+    """The full pass's source documents: one tenant-wide listing per type (a BULK-JOB read)."""
+    return [
+        _Doc(str(e.tumbler), e.file_path, e.content_type, e.source_uri)
+        for content_type in content_types
+        for e in _entries_of_type(cat, content_type)
+    ]
+
+
+def _repo_owner_roots(cat: CatalogReader) -> list[tuple[str, str]]:
+    """``(normalised repo_root, owner prefix)`` of every repository owner, longest root first."""
+    roots = [
+        (os.path.normpath(o["repo_root"]), str(o["tumbler_prefix"]))
+        for o in cat.list_owners()
+        if o.get("repo_root") and o.get("tumbler_prefix") and o.get("owner_type", "repo") == "repo"
+    ]
+    return sorted(roots, key=lambda r: len(r[0]), reverse=True)
+
+
+def _repository_owner(doc: _Doc, roots: list[tuple[str, str]]) -> str:
+    """The owner of the repository *doc* sits in: the owner whose ``repo_root`` contains the
+    document's ``source_uri`` (RDR-193 Step 7, residual 7). About 150 RDRs are registered under a
+    stale owner, and a path edge must name the repository that holds the target, not whichever
+    owner registered the source. A document no root contains keeps its own owner."""
+    if doc.owner is not None:
+        return doc.owner
+    uri = doc.source_uri
+    if uri.startswith("file://"):
+        path = uri[len("file://"):]
+        for root, prefix in roots:
+            if path == root or path.startswith(root + os.sep):
+                return prefix
+    return str(Tumbler.parse(doc.tumbler).owner_address())
+
+
+def _path_sources(
+    cat: CatalogReader,
+    content_types: tuple[str, ...],
+    new_tumblers: list[Tumbler] | None,
+    inputs: HookLinkInputs | None,
+) -> list[_Doc]:
+    """The documents a file-path linker scans: the seeds of the given types (incremental), or
+    every document of those types (the full pass)."""
+    if new_tumblers is None:
+        docs = _entry_docs(cat, content_types)
+    else:
+        docs = _seed_docs(cat, new_tumblers, inputs)
+    return [d for d in docs if d.content_type in content_types and d.file_path]
+
+
+def _path_edges(
+    cat: CatalogReader, sources: list[_Doc], pattern: re.Pattern[str],
+) -> list[dict]:
+    """One ``implements`` edge per file path *pattern* finds in each source's text.
+
+    The path is not looked up: the engine resolves ``{owner, file_path}`` to the document of that
+    repository at that path, or reports it unresolved. This is what replaces the tenant-wide
+    ``path_to_code`` dict.
+    """
+    roots: list[tuple[str, str]] | None = None
+    edges: list[dict] = []
+    for src in sources:
+        resolved = cat.resolve_path(Tumbler.parse(src.tumbler))
+        if resolved is None or not resolved.is_file():
+            continue
+        try:
+            text = resolved.read_text(errors="replace", encoding="utf-8")
+        except OSError:
+            continue
+        if src.owner is None and roots is None:
+            roots = _repo_owner_roots(cat)
+        owner = _repository_owner(src, roots or [])
+        seen: set[str] = set()
+        for match in pattern.finditer(text):
+            fpath = match.group(0)
+            if fpath in seen or fpath == src.file_path:
+                continue
+            seen.add(fpath)
+            edges.append({
+                "from": {"tumbler": src.tumbler},
+                "to": {"owner": owner, "file_path": fpath},
+                "link_type": "implements",
+                "created_by": "filepath_extractor",
+            })
+    return edges
+
+
+def _upsert_edges(w: object, edges: list[dict], kind: str) -> int:
+    """Send *edges* through ``links_upsert_many`` and return the number the engine created."""
+    if not edges:
+        return 0
+    result = w.links_upsert_many(edges)  # type: ignore[attr-defined]
+    unresolved = result.get("unresolved", [])
+    _log.debug(
+        "links_upserted", kind=kind, edges=len(edges), created=result.get("created", 0),
+        skipped=result.get("skipped", 0), unresolved=len(unresolved),
+        no_path=sum(1 for u in unresolved if u.get("reason") == "no_path"),
+        dangling=sum(1 for u in unresolved if u.get("reason") == "dangling"),
+    )
+    return int(result.get("created", 0))
 
 
 def _no_qualifying_seed(
@@ -227,13 +371,19 @@ _FILE_PATH_RE = re.compile(
 # ``.claude/`` profiles) that the RDR anchor list misses entirely.
 # The prose regex requires AT LEAST ONE ``/`` (so a bare
 # ``foo.py`` mention doesn't match) plus a recognised source
-# extension. The match is then checked against catalog code
-# entries by exact ``file_path`` so non-existent-in-catalog
-# strings fall through silently.
+# extension. The engine resolves each match by ``file_path`` inside the
+# repository, so a path that names no document falls through silently.
+#
+# No ``md`` arm (RDR-193 Step 7 fix round 1): the engine resolves a path to
+# a document of ANY content type, where the old client's ``path_to_code``
+# dict held only ``code`` documents, so a ``.md`` match never linked. A
+# ``.md`` arm would now link a prose file to every prose or RDR document it
+# names (820 such edges against 2048 to code on this repository), a change
+# RDR-193 does not declare.
 _PROSE_PATH_RE = re.compile(
     r"(?:[\w.-]+/)+"                              # at least one dir segment
     r"[\w.-]+"                                    # filename
-    r"\.(?:py|java|go|rs|ts|tsx|js|jsx|c|cpp|h|rb|php|swift|kt|scala|md)"
+    r"\.(?:py|java|go|rs|ts|tsx|js|jsx|c|cpp|h|rb|php|swift|kt|scala)"
 )
 
 
@@ -243,27 +393,41 @@ def generate_rdr_filepath_links(
     writer: CatalogWriter | None = None,
     new_tumblers: list[Tumbler] | None = None,
     new_content_types: frozenset[str] | set[str] | None = None,
+    inputs: HookLinkInputs | None = None,
 ) -> int:
-    """Extract file paths from RDR content and link to matching code entries.
+    """Extract file paths from RDR content and link to the matching documents of the repository.
 
     Scans each RDR's file on disk for source file paths (e.g.,
-    ``src/nexus/catalog/catalog.py``). Matches against catalog code entries
-    by file_path. Creates ``implements`` links (RDR → code).
-    created_by='filepath_extractor'.
+    ``src/nexus/catalog/catalog.py``) and sends one ``implements`` edge
+    (RDR -> the document at that path) per path through ONE
+    ``links_upsert_many`` call (paged at 1000 edges by the client),
+    created_by='filepath_extractor'. The path is not looked up here: the
+    engine resolves ``{owner, file_path}`` (RDR-193 Part A4) to the document
+    of the named repository at that path, by the file's identity first, and
+    reports a path it cannot resolve; so there is no tenant-wide listing of
+    code documents (the old ``path_to_code`` dict is gone) and no read at all
+    on the index path.
 
     SOURCE content_type (the side that must be new for a link to be
-    possible) is "rdr"; TARGET is "code" — an RDR can only newly link to
-    code that already exists, but a run whose new_tumblers are all "code"
-    produces no new RDR->code links no matter how many RDRs exist.
+    possible) is "rdr"; a run whose new_tumblers are all "code" produces no
+    new RDR->code links no matter how many RDRs exist.
 
-    When *new_tumblers* is provided, only those entries are scanned (incremental
-    mode). Pass ``None`` (default) for the full-scan behavior.
+    *new_tumblers*, when provided, are the only documents scanned
+    (incremental mode); ``None`` (default) is the full pass, which lists the
+    "rdr" documents (a BULK-JOB read) and names, for each, the owner of the
+    repository its ``source_uri`` sits in (residual 7: a stale-owner RDR
+    still links into the repository that holds it).
+
+    *inputs* is what the index hook holds for this run (RDR-193 residual 6):
+    each new tumbler's path and content type, and the repository owner the
+    path edges name. With it the generator reads nothing from the catalog
+    but each source's own file (``resolve_path``); without it, it costs one
+    ``resolve_many`` for the new tumblers.
 
     *new_content_types*, when supplied alongside *new_tumblers*, is the set
     of content_type values present among *new_tumblers*; it lets this
-    generator skip its catalog fetches entirely when none of the new
-    tumblers are "rdr" (see :func:`_no_qualifying_seed`). Optional and
-    additive — omitting it preserves the exact pre-existing behavior.
+    generator skip entirely when none of the new tumblers are "rdr" (see
+    :func:`_no_qualifying_seed`). Optional and additive.
     """
     if new_tumblers is not None and len(new_tumblers) == 0:
         return 0
@@ -274,54 +438,10 @@ def generate_rdr_filepath_links(
         )
         return 0
 
-    rdr_entries = [e for e in _entries_of_type(cat, "rdr") if e.file_path]
-    code_entries = [e for e in _entries_of_type(cat, "code") if e.file_path]
-
-    if new_tumblers is not None:
-        new_set = {str(t) for t in new_tumblers}
-        rdr_entries = [e for e in rdr_entries if str(e.tumbler) in new_set]
-
-    # Index: file_path → tumbler (code entries)
-    path_to_code: dict[str, Tumbler] = {}
-    for code in code_entries:
-        path_to_code[code.file_path] = code.tumbler
-
-    count = 0
-    for rdr in rdr_entries:
-        resolved = cat.resolve_path(rdr.tumbler)
-        if resolved is None or not resolved.is_file():
-            continue
-        try:
-            text = resolved.read_text(errors="replace", encoding="utf-8")
-        except OSError:
-            continue
-
-        # Find all file paths in the RDR text
-        seen_targets: set[str] = set()
-        for match in _FILE_PATH_RE.finditer(text):
-            fpath = match.group(0)
-            if fpath in seen_targets:
-                continue
-            seen_targets.add(fpath)
-            code_tumbler = path_to_code.get(fpath)
-            if code_tumbler is None:
-                continue
-            try:
-                created = (writer if writer is not None else cat).link_if_absent(
-                    rdr.tumbler, code_tumbler, "implements",
-                    created_by="filepath_extractor",
-                )
-            except ValueError:
-                continue
-            if created:
-                count += 1
-                _log.debug(
-                    "rdr_filepath_link_created",
-                    rdr=str(rdr.tumbler), code=str(code_tumbler),
-                    path=fpath,
-                )
-
-    return count
+    sources = _path_sources(cat, ("rdr",), new_tumblers, inputs)
+    return _upsert_edges(
+        writer if writer is not None else cat, _path_edges(cat, sources, _FILE_PATH_RE), "rdr-filepath",
+    )
 
 
 # ── RDR-to-RDR dependency edges (RDR-201 Phase 3.2, nexus-j9z30.21) ─────────
@@ -495,39 +615,37 @@ def _numeric_id_index(
     return result
 
 
-#: Above this many new tumblers the generator lists instead of probing.
-#: The listing is len(RDR_CONTENT_TYPES) == 2 round trips carrying ~530 rows
-#: on this repo; each probe is one single-row round trip, serialized under
-#: the service catalog lock. The crossover is NOT measured (this box is a
-#: production install and cannot be timed from a dev session): 4 keeps the
-#: one-to-few-file `nx index md` case -- the reported regression -- at
-#: fewer round trips than the listing, and anything larger takes the
-#: listing as before. Measure before moving it.
-_RDR_SEED_LOOKUP_CAP = 4
-
-
-def _any_new_tumbler_is_rdr_keyed(cat: CatalogReader, new_tumblers: list[Tumbler]) -> bool:
-    """Incremental-mode seed check, one ``resolve`` per NEW tumbler.
+def _any_new_tumbler_is_rdr_keyed(
+    cat: CatalogReader, new_tumblers: list[Tumbler], inputs: HookLinkInputs | None,
+) -> bool:
+    """Incremental-mode seed check: is any NEW tumbler an RDR document?
 
     The content-type check (:func:`_no_qualifying_seed`) admits this
     generator for any batch carrying ``"prose"`` -- but ``prose`` is the
     repo-wide default for ALL general markdown, so it admits essentially
-    every ``nx index`` run that touches a ``.md`` file and the full
-    RDR listing (~530 rows on this repo) fires on each (RDR-201 P3.2
+    every ``nx index`` run that touches a ``.md`` file (RDR-201 P3.2
     round-2 critique, T2 [24077]). Only a document :func:`rdr_key_of`
     recognises -- a ``rdr-*.md`` file directly under a ``rdr/`` directory
-    -- can be a SOURCE of a dependency edge, so a small batch with no such
-    tumbler can skip the listing exactly. Batches above
-    :data:`_RDR_SEED_LOOKUP_CAP` fall through (``True``) rather than trade
-    one listing for more lookups than it holds.
+    -- can be a SOURCE of a dependency edge, so a batch with no such
+    tumbler skips the two reads exactly.
+
+    RDR-193 Step 7: the answer comes from the paths the index hook holds
+    (*inputs*), so it costs no read. A tumbler the hook holds no row for is
+    resolved with one ``resolve_many`` for the missing ones (a probe bounded
+    by the seeds); the per-tumbler probes and the ``_RDR_SEED_LOOKUP_CAP``
+    crossover they needed are gone.
     """
-    if len(new_tumblers) > _RDR_SEED_LOOKUP_CAP:
-        return True
+    held = inputs.docs if inputs is not None else {}
+    missing: list[str] = []
     for tumbler in new_tumblers:
-        entry = cat.resolve(tumbler)
-        if entry is not None and rdr_key_of(entry) is not None:
+        key = str(tumbler)
+        if key not in held:
+            missing.append(key)
+        elif held[key][0] and rdr_key_of_path(held[key][0]) is not None:
             return True
-    return False
+    if not missing:
+        return False
+    return any(rdr_key_of(e) is not None for e in cat.resolve_many(sorted(missing)).values())
 
 
 def rdr_resolution(
@@ -538,19 +656,27 @@ def rdr_resolution(
 
     The ONE place the dependency generator and ``nx rdr set-status``
     (RDR-201 P3.3, nexus-j9z30.22) both derive "which catalog tumbler IS
-    RDR-<n>" from -- one listing, one in-repo admission
+    RDR-<n>" from -- one pair of reads, one in-repo admission
     (:func:`nexus.catalog.rdr_canonical.is_in_repo`), one canonical
     resolution (:func:`nexus.catalog.rdr_canonical.resolve_all`), one
     number disambiguation (:func:`_numeric_id_index`). A caller that
     re-derived any of those steps would be the second, narrower copy of
     an admission test this arc keeps finding and deleting.
+
+    RDR-193 Step 7: two SCOPED reads, not a tenant-wide listing per type.
+    The first is the current owner's ``rdr`` and ``prose`` rows (every
+    markdown document of one repository, bounded by the repository). The
+    second is the rows under *repo_source_prefix*: ``is_in_repo``'s other
+    admission arm, which finds the ~150 RDRs registered under a stale
+    owner whose ``source_uri`` is still this repository's own
+    ``docs/rdr/``. A row both reads return is kept once.
     """
-    entries = [
-        e
-        for content_type in RDR_CONTENT_TYPES
-        for e in _entries_of_type(cat, content_type)
-    ]
-    in_repo_entries = [e for e in entries if is_in_repo(e, current_owner, repo_source_prefix)]
+    types = sorted(RDR_CONTENT_TYPES)
+    entries = {str(e.tumbler): e for e in cat.list_scoped(owner=current_owner, content_types=types)}
+    if repo_source_prefix:
+        for e in cat.list_scoped(source_uri_prefix=repo_source_prefix, content_types=types):
+            entries.setdefault(str(e.tumbler), e)
+    in_repo_entries = [e for e in entries.values() if is_in_repo(e, current_owner, repo_source_prefix)]
     in_repo_groups = group_rdr_candidates(in_repo_entries)
     resolved = resolve_all(in_repo_entries, current_owner, repo_source_prefix=repo_source_prefix)
     return resolved, _numeric_id_index(cat, in_repo_groups)
@@ -564,6 +690,7 @@ def generate_rdr_dependency_links(
     repo_source_prefix: str,
     new_tumblers: list[Tumbler] | None = None,
     new_content_types: frozenset[str] | set[str] | None = None,
+    inputs: HookLinkInputs | None = None,
 ) -> int:
     """Seed RDR-to-RDR catalog links from existing frontmatter.
 
@@ -590,8 +717,14 @@ def generate_rdr_dependency_links(
     as the other generators in this module (see
     :func:`generate_rdr_filepath_links`) -- when supplied, only entries
     whose CANONICAL tumbler is in *new_tumblers* are scanned as sources;
-    target resolution always considers the full catalog, since a newly
+    target resolution always considers the repository's RDRs, since a newly
     indexed RDR can reference an RDR that already existed.
+
+    RDR-193 Step 7: the candidates are :func:`rdr_resolution`'s two scoped
+    reads, the frontmatter reads stay on the client (they need the file),
+    and every edge goes through ONE ``links_upsert_many`` call as a tumbler
+    pair. *inputs* spares the seed check its probe (see
+    :func:`_any_new_tumbler_is_rdr_keyed`).
     """
     if new_tumblers is not None and len(new_tumblers) == 0:
         return 0
@@ -601,7 +734,7 @@ def generate_rdr_dependency_links(
             new_content_types=sorted(new_content_types) if new_content_types else [],
         )
         return 0
-    if new_tumblers is not None and not _any_new_tumbler_is_rdr_keyed(cat, new_tumblers):
+    if new_tumblers is not None and not _any_new_tumbler_is_rdr_keyed(cat, new_tumblers, inputs):
         _log.debug("rdr_dependency_links_skipped_no_rdr_keyed_seed", new_count=len(new_tumblers))
         return 0
 
@@ -615,8 +748,8 @@ def generate_rdr_dependency_links(
     else:
         source_keys = [k for k, t in resolved.items() if t is not None]
 
-    w = writer if writer is not None else cat
-    count = 0
+    edges: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
     for source_key in source_keys:
         source_tumbler = resolved[source_key]
         fm = _reads_frontmatter(cat, source_tumbler)
@@ -648,21 +781,15 @@ def generate_rdr_dependency_links(
                     (source_tumbler, target_tumbler) if source_is_from
                     else (target_tumbler, source_tumbler)
                 )
-                try:
-                    created = w.link_if_absent(
-                        from_t, to_t, link_type,
-                        created_by="rdr_dependency_extractor",
-                    )
-                except ValueError:
+                edge_key = (str(from_t), str(to_t), link_type)
+                if edge_key in seen:
                     continue
-                if created:
-                    count += 1
-                    _log.debug(
-                        "rdr_dependency_link_created",
-                        from_t=str(from_t), to_t=str(to_t), link_type=link_type,
-                        field=field,
-                    )
-    return count
+                seen.add(edge_key)
+                edges.append({
+                    "from": {"tumbler": str(from_t)}, "to": {"tumbler": str(to_t)},
+                    "link_type": link_type, "created_by": "rdr_dependency_extractor",
+                })
+    return _upsert_edges(writer if writer is not None else cat, edges, "rdr-dependency")
 
 
 def bind_rdr_dependency_generator(
@@ -709,9 +836,10 @@ def generate_prose_filepath_links(
     writer: CatalogWriter | None = None,
     new_tumblers: list[Tumbler] | None = None,
     new_content_types: frozenset[str] | set[str] | None = None,
+    inputs: HookLinkInputs | None = None,
 ) -> int:
     """nexus-sob9: extract file paths from prose / markdown content
-    and link to matching code entries.
+    and link to the matching documents of the repository.
 
     Same shape as ``generate_rdr_filepath_links`` but with two
     contracts widened so prose docs (the original RDR-only filter
@@ -726,22 +854,26 @@ def generate_prose_filepath_links(
       Disambiguates against bare-filename mentions in prose by
       requiring the directory segment.
 
-    Match is then checked against catalog code entries by exact
-    ``file_path`` so non-existent strings fall through silently.
-    Creates ``implements`` links (prose -> code) with
+    Creates ``implements`` links (prose -> the document at that path) with
     ``created_by="filepath_extractor"`` for parity with the RDR
-    linker.
+    linker. RDR-193 Step 7: the edges go through ONE ``links_upsert_many``
+    call as ``{owner, file_path}`` path edges the engine resolves, so a
+    path that names no document of the repository is reported unresolved
+    and writes nothing, and the tenant-wide ``path_to_code`` dict is gone.
+    The engine matches a document of any content type at that path, where
+    the old client dict held only ``code`` documents; ``_PROSE_PATH_RE``
+    therefore has no ``.md`` arm, so the only paths sent are source-file
+    paths and the set of targets matches the old client's.
 
-    SOURCE content_type(s) are ``{"prose", "markdown", "docs"}``;
-    TARGET is "code" — same reasoning as the RDR linker: a run whose
-    new_tumblers are all "code" produces no new links here either.
+    SOURCE content_type(s) are ``{"prose", "markdown", "docs"}``; a run
+    whose new_tumblers are all "code" produces no new links here either.
 
     Closes prose=0.1% catalog auto-link coverage gap from the
     2026-05-08 prod shakeout (4.29.0: 23,378 docs / 23,575 links).
 
     *new_content_types*: see :func:`generate_rdr_filepath_links` — same
-    optional, additive fetch-skip contract, checked against
-    ``{"prose", "markdown", "docs"}``.
+    optional, additive skip contract, checked against
+    ``{"prose", "markdown", "docs"}``. *inputs*: see the same function.
     """
     if new_tumblers is not None and len(new_tumblers) == 0:
         return 0
@@ -752,60 +884,10 @@ def generate_prose_filepath_links(
         )
         return 0
 
-    prose_entries = [
-        e
-        for content_type in ("prose", "markdown", "docs")
-        for e in _entries_of_type(cat, content_type)
-        if e.file_path
-    ]
-    code_entries = [e for e in _entries_of_type(cat, "code") if e.file_path]
-
-    if new_tumblers is not None:
-        new_set = {str(t) for t in new_tumblers}
-        prose_entries = [
-            e for e in prose_entries if str(e.tumbler) in new_set
-        ]
-
-    path_to_code: dict[str, Tumbler] = {
-        code.file_path: code.tumbler for code in code_entries
-    }
-
-    count = 0
-    for prose in prose_entries:
-        resolved = cat.resolve_path(prose.tumbler)
-        if resolved is None or not resolved.is_file():
-            continue
-        try:
-            text = resolved.read_text(errors="replace", encoding="utf-8")
-        except OSError:
-            continue
-
-        seen_targets: set[str] = set()
-        for match in _PROSE_PATH_RE.finditer(text):
-            fpath = match.group(0)
-            if fpath in seen_targets:
-                continue
-            seen_targets.add(fpath)
-            code_tumbler = path_to_code.get(fpath)
-            if code_tumbler is None:
-                continue
-            try:
-                created = (writer if writer is not None else cat).link_if_absent(
-                    prose.tumbler, code_tumbler, "implements",
-                    created_by="filepath_extractor",
-                )
-            except ValueError:
-                continue
-            if created:
-                count += 1
-                _log.debug(
-                    "prose_filepath_link_created",
-                    prose=str(prose.tumbler),
-                    code=str(code_tumbler),
-                    path=fpath,
-                )
-
-    return count
+    sources = _path_sources(cat, ("prose", "markdown", "docs"), new_tumblers, inputs)
+    return _upsert_edges(
+        writer if writer is not None else cat, _path_edges(cat, sources, _PROSE_PATH_RE), "prose-filepath",
+    )
 
 
 def generate_pdf_corpus_links(
@@ -814,6 +896,7 @@ def generate_pdf_corpus_links(
     writer: CatalogWriter | None = None,
     new_tumblers: list[Tumbler] | None = None,
     new_content_types: frozenset[str] | set[str] | None = None,
+    inputs: HookLinkInputs | None = None,
 ) -> int:
     """nexus-sob9: link PDFs that share a content_hash via ``same-as``.
 
@@ -823,37 +906,32 @@ def generate_pdf_corpus_links(
     surface that fact so cross-corpus retrieval can collapse them
     to one logical document.
 
-    Algorithm:
-    1. Group catalog PDF entries (``content_type in {"pdf",
-       "paper"}``) by :func:`_pdf_content_hash`: the sha256 of the
-       file's bytes the indexer stamps as ``index_content_hash``, or
-       ``meta.content_hash`` on rows that predate the fence. Never
-       ``head_hash``: for a repo-indexed file that is the git commit,
-       shared by every file indexed at it (nexus-utkop joined seven
-       distinct PDFs that way).
-    2. For each group with >= 2 entries, create ``same-as`` links
-       from every member to the lexicographically-first member
-       (the canonical anchor). Avoids O(N^2) pairwise links;
-       everyone links to one anchor and traversal goes through it.
+    RDR-193 Step 7: the rule runs in the engine (``links_same_content``,
+    ``prune=False``), tenant-wide and in one transaction. It groups live
+    ``pdf`` and ``paper`` documents by ``index_content_hash``, else
+    ``metadata.content_hash`` (never ``head_hash``: for a repo-indexed
+    file that is the git commit, shared by every file indexed at it,
+    nexus-utkop), anchors a group on its least tumbler, and links each
+    given member to the anchor; when the anchor itself is given, every
+    member of its group links to it (nexus-h0uy7). Idempotent: an existing
+    link is left as it is.
 
-    Idempotent via ``link_if_absent``. Incremental when
-    ``new_tumblers`` is supplied: only the new pdf entries emit
-    links FROM them; the anchor side may be a pre-existing
-    tumbler (that's the desired join point). When the anchor itself is
-    new, every member of its group links to it (nexus-h0uy7).
+    Incremental when ``new_tumblers`` is supplied: only the new pdf/paper
+    documents are sent (the type comes from *inputs*, the hook's own rows;
+    a tumbler the hook holds no row for costs one ``resolve_many``), so a
+    run of code files sends nothing. ``None`` is the full pass: it lists
+    the pdf and paper documents (a BULK-JOB read) and sends them all.
 
     SOURCE and TARGET are the same content_type set here,
-    ``{"pdf", "paper"}`` — unlike the filepath linkers, this generator
-    only ever matches within its own fetched population (anchor +
-    members are both drawn from ``pdf_entries``), so a run whose
-    new_tumblers contain no pdf/paper document cannot produce a link
-    regardless of how many other pdf/paper documents exist.
+    ``{"pdf", "paper"}``: a run whose new_tumblers contain no pdf/paper
+    document cannot produce a link regardless of how many other pdf/paper
+    documents exist.
 
     Closes pdf=0% catalog auto-link coverage gap from the
     2026-05-08 prod shakeout.
 
     *new_content_types*: see :func:`generate_rdr_filepath_links` — same
-    optional, additive fetch-skip contract, checked against
+    optional, additive skip contract, checked against
     ``{"pdf", "paper"}``.
     """
     if new_tumblers is not None and len(new_tumblers) == 0:
@@ -865,53 +943,19 @@ def generate_pdf_corpus_links(
         )
         return 0
 
-    pdf_entries = [
-        e
-        for content_type in ("pdf", "paper")
-        for e in _entries_of_type(cat, content_type)
-        if _pdf_content_hash(e)
-    ]
-
-    by_hash: dict[str, list[CatalogEntry]] = {}
-    for e in pdf_entries:
-        by_hash.setdefault(_pdf_content_hash(e), []).append(e)
-
-    new_set: set[str] | None
-    if new_tumblers is not None:
-        new_set = {str(t) for t in new_tumblers}
+    if new_tumblers is None:
+        tumblers = [d.tumbler for d in _entry_docs(cat, ("pdf", "paper"))]
     else:
-        new_set = None
-
-    count = 0
-    for hash_value, group in by_hash.items():
-        if len(group) < 2:
-            continue
-        anchor = min(group, key=lambda e: str(e.tumbler))
-        # nexus-h0uy7: a seeded anchor (new, or re-indexed into this group)
-        # has no links pointing at it yet, so every member links to it.
-        anchor_seeded = new_set is not None and str(anchor.tumbler) in new_set
-        for member in group:
-            if member.tumbler == anchor.tumbler:
-                continue
-            if new_set is not None and not anchor_seeded and str(member.tumbler) not in new_set:
-                continue
-            try:
-                created = (writer if writer is not None else cat).link_if_absent(
-                    member.tumbler, anchor.tumbler, "same-as",
-                    created_by="content_hash_dedup",
-                )
-            except ValueError:
-                continue
-            if created:
-                count += 1
-                _log.debug(
-                    "pdf_same_as_link_created",
-                    member=str(member.tumbler),
-                    anchor=str(anchor.tumbler),
-                    content_hash=hash_value[:16],
-                )
-
-    return count
+        tumblers = [
+            d.tumbler for d in _seed_docs(cat, new_tumblers, inputs)
+            if d.content_type in _PDF_CORPUS_SOURCE_TYPES
+        ]
+    if not tumblers:
+        return 0
+    w = writer if writer is not None else cat
+    result = w.links_same_content(tumblers, prune=False)  # type: ignore[attr-defined]
+    _log.debug("pdf_same_as_linked", sent=len(tumblers), created=result.get("created", 0))
+    return int(result.get("created", 0))
 
 
 def prune_stale_same_as_links(
@@ -928,7 +972,13 @@ def prune_stale_same_as_links(
     ``begin_index_run`` overwrites ``index_content_hash`` on a re-index, so
     a PDF whose bytes changed kept a same-as link to a document it no
     longer duplicates. Run this AFTER the index run's fence has stamped
-    the new keys; :func:`relink_changed_pdfs` is the index-time caller.
+    the new keys.
+
+    RDR-193 Step 7: the index path no longer calls this. It prunes in the
+    engine (``links_same_content(prune=True)``, :func:`relink_changed_pdfs`),
+    by the same rule. This client copy remains for the ``nx catalog
+    generate-links`` maintenance verb, whose ``--dry-run`` reports the
+    retractions it would make by recording them (``DryRunLinkWriter``).
 
     A link is stale when an endpoint is no longer a pdf/paper document
     (deleted, or retyped), or when both endpoints have a key and the keys
@@ -1001,30 +1051,23 @@ def relink_changed_pdfs(
     """Index-time same-as maintenance for the documents a run changed
     (nexus-h0uy7), called once the run's fence has stamped their keys.
 
-    Prunes stale dedup links touching *changed*, then links *changed*
-    plus the from-side of every retracted link, so a member whose anchor
-    was re-indexed with new bytes re-joins the next anchor of its group.
+    RDR-193 Step 7: one ``links_same_content(changed, prune=True)`` call
+    per 1000 tumblers. The engine retracts the stale dedup links touching
+    *changed* (an endpoint no longer a live pdf/paper document, or both
+    endpoints with a settled key and the keys differ; a link another
+    creator also asserted is kept), then links *changed* plus the from-side
+    of every retracted link, so a member whose anchor was re-indexed with
+    new bytes re-joins the next anchor of its group. A document that is not
+    a pdf or paper seeds nothing, so a code-only run costs the call and no
+    read. *cat* is unused and kept so the caller's shape does not change.
     Returns ``(retracted, created)``.
     """
     if not changed:
         return (0, 0)
-    # The prune scans only the dedup links (cheap) and fetches documents
-    # only when one touches the run, so it runs on every changed set; a
-    # PDF retyped to prose this run is caught here too.
-    retracted = prune_stale_same_as_links(cat, writer=writer, scope=changed)
-    # Linking fetches every pdf/paper document, so it runs only when the
-    # run changed one: a code-only run pays one resolve_many, not that.
-    entries = cat.resolve_many(sorted(changed))
-    seed = {
-        t for t, e in entries.items() if e.content_type in _PDF_CORPUS_SOURCE_TYPES
-    } | {src for src, _ in retracted}
-    if not seed:
-        return (len(retracted), 0)
-    created = generate_pdf_corpus_links(
-        cat, writer=writer, new_tumblers=[Tumbler.parse(t) for t in sorted(seed)],
-        new_content_types=frozenset(_PDF_CORPUS_SOURCE_TYPES),
-    )
-    return (len(retracted), created)
+    result = writer.links_same_content(sorted(changed), prune=True)  # type: ignore[attr-defined]
+    if result.get("refused"):
+        _log.warning("pdf_same_as_prune_refused_empty_fetch", reason=result["refused"], changed=len(changed))
+    return (int(result.get("retracted", 0)), int(result.get("created", 0)))
 
 
 def _pdf_content_hash(entry: CatalogEntry) -> str:
@@ -1044,132 +1087,3 @@ def _settled_pdf_key(entry: CatalogEntry) -> str:
     if entry.index_content_hash and meta_key and entry.index_content_hash != meta_key:
         return ""
     return _pdf_content_hash(entry)
-
-
-
-
-# ── Dry-run preview (nexus-glivh) ────────────────────────────────────────────
-#
-# `nx catalog generate-links --dry-run` previously printed "dry-run mode not
-# yet supported for link preview" and previewed nothing, so the only way to
-# learn what a pass would do was to let it write to a live catalog. That is
-# the wrong order for a generator whose failure mode is VOLUME: the
-# implements-heuristic flood (nexus-ybj1b) had to be disabled at engine
-# v0.1.57 after exactly that kind of unmeasured pass.
-
-@dataclass(frozen=True)
-class ProposedLink:
-    """One link a dry run would have created."""
-    from_tumbler: str
-    to_tumbler: str
-    link_type: str
-    created_by: str
-
-
-class DryRunLinkWriter:
-    """A ``CatalogWriter``-shaped recorder that writes nothing.
-
-    Composes with the generators UNCHANGED: they already take a ``writer=``,
-    so a dry run is the real code path with the writes swapped out. A preview
-    computed by a separate path is a preview of the wrong thing.
-
-    ``link_if_absent`` returns True only when a link is genuinely new, so a
-    count means "would create" and never "would attempt". Pre-existing links
-    are supplied up front via :func:`load_existing_link_keys` rather than
-    probed one at a time, which would be thousands of round trips.
-    """
-
-    def __init__(self, existing: set[tuple[str, str, str]] | None = None) -> None:
-        self._existing: set[tuple[str, str, str]] = existing or set()
-        self._seen: set[tuple[str, str, str]] = set()
-        self._proposed: list[ProposedLink] = []
-        self._retracted: list[ProposedLink] = []
-
-    def link_if_absent(
-        self, from_t: object, to_t: object, link_type: str,
-        created_by: str = "", **_meta: object,
-    ) -> bool:
-        key = (str(from_t), str(to_t), str(link_type))
-        # Dedupe within the run as well as against the catalog: a generator
-        # that proposes the same edge twice must not be counted twice, or the
-        # projected volume is inflated by its own repetition.
-        if key in self._existing or key in self._seen:
-            return False
-        self._seen.add(key)
-        self._proposed.append(
-            ProposedLink(str(from_t), str(to_t), str(link_type), str(created_by))
-        )
-        return True
-
-    # The generators only ever call link_if_absent, but a writer that silently
-    # accepted a direct link() would write nothing while reporting nothing —
-    # fail loud instead of previewing a lie.
-    def link(self, *_args: object, **_kwargs: object) -> None:
-        raise NotImplementedError(
-            "DryRunLinkWriter received a direct link() call. Dry-run preview "
-            "only models link_if_absent; a generator using link() would write "
-            "unconditionally and its volume would not appear in this preview."
-        )
-
-    def unlink(self, from_t: object, to_t: object, link_type: str = "") -> int:
-        """Record a retraction (nexus-h0uy7's same-as prune); delete nothing."""
-        self._retracted.append(
-            ProposedLink(str(from_t), str(to_t), str(link_type), created_by="")
-        )
-        return 1
-
-    def close(self) -> None:
-        return None
-
-    @property
-    def proposed(self) -> list[ProposedLink]:
-        return list(self._proposed)
-
-    @property
-    def retracted(self) -> list[ProposedLink]:
-        return list(self._retracted)
-
-    def count_by_link_type(self) -> dict[str, int]:
-        out: dict[str, int] = {}
-        for p in self._proposed:
-            out[p.link_type] = out.get(p.link_type, 0) + 1
-        return out
-
-    def count_by_creator(self) -> dict[str, int]:
-        out: dict[str, int] = {}
-        for p in self._proposed:
-            out[p.created_by] = out.get(p.created_by, 0) + 1
-        return out
-
-    def fan_out(self) -> dict[str, int]:
-        """Proposed out-degree per source document.
-
-        The number that decides whether a pass is a fix or a flood: total
-        count hides a single document proposing thousands of edges.
-        """
-        out: dict[str, int] = {}
-        for p in self._proposed:
-            out[p.from_tumbler] = out.get(p.from_tumbler, 0) + 1
-        return out
-
-
-def load_existing_link_keys(cat: CatalogReader, *, page: int = 200) -> set[tuple[str, str, str]]:
-    """Every ``(from, to, link_type)`` already in the catalog.
-
-    Paged; the whole link set is small enough to hold in memory (order 1e3 on
-    a real corpus). Raises rather than returning a partial set, because a
-    short read would silently inflate the "would create" count with links that
-    already exist.
-    """
-    keys: set[tuple[str, str, str]] = set()
-    offset = 0
-    while True:
-        batch = cat.link_query(limit=page, offset=offset)
-        if not batch:
-            break
-        for link in batch:
-            keys.add((str(link.from_tumbler), str(link.to_tumbler), str(link.link_type)))
-        if len(batch) < page:
-            break
-        offset += page
-    return keys

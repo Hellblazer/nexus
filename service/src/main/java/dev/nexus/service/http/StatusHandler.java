@@ -148,6 +148,25 @@ public final class StatusHandler implements HttpHandler {
         return this;
     }
 
+    private volatile Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.Entry>> bootWork;   // null: always []
+
+    /**
+     * Bead nexus-f3yqd.3, [additive]: bind the source of {@code boot_work}, the heavy work this engine is doing, one
+     * entry each: {@code id}, {@code what}, {@code started_at} (ISO-8601 UTC), {@code done}, {@code total},
+     * {@code unit}, {@code safe_to_stop}, {@code on_stop} and {@code step} (null, or {@code what}, {@code done},
+     * {@code total}, {@code unit}). Always present on an engine that carries it: an empty list is idle, so a client
+     * tells "idle" from "an engine that predates the field" (no key). The engine sends no durations; the client
+     * derives rate and time left. A {@code total} of null means "not known yet" (a producer that cannot
+     * count its work up front sends no total until it can). Entries name no collection, tenant or index: this route
+     * is unauthenticated (see {@link dev.nexus.service.vectors.PciReconciler#bootWork}). A supplier must answer from
+     * memory ({@link dev.nexus.service.BootWorkRegistry#snapshot}), with no query per request. Unbound, the list is
+     * empty.
+     */
+    public StatusHandler bootWork(Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.Entry>> bootWork) {
+        this.bootWork = bootWork;
+        return this;
+    }
+
     private volatile boolean testTenantResetRoute;
 
     /**
@@ -610,6 +629,9 @@ public final class StatusHandler implements HttpHandler {
             }
         }
 
+        // nexus-f3yqd.3, [additive]: the heavy work in flight; [] when idle. Always present.
+        appendBootWork(body, bootWork == null ? java.util.List.of() : bootWork.get());
+
         // nexus-wbfpw.48, [additive]: false when a permissive policy other than tenant_isolation on
         // nexus.chunks applies to the role this engine serves traffic as (it would read or write every tenant's
         // chunks), or when row security on nexus.chunks is not enabled and forced or tenant_isolation is gone.
@@ -649,6 +671,38 @@ public final class StatusHandler implements HttpHandler {
 
         body.append('}');
         HttpUtil.send(exchange, 200, body.toString());
+    }
+
+    private static void appendBootWork(StringBuilder body,
+                                       java.util.List<dev.nexus.service.BootWorkRegistry.Entry> work) {
+        body.append(",\"boot_work\":[");
+        boolean first = true;
+        for (var e : work == null ? java.util.List.<dev.nexus.service.BootWorkRegistry.Entry>of() : work) {
+            if (!first) body.append(',');
+            first = false;
+            body.append("{\"id\":").append(HttpUtil.jsonString(e.id()))
+                .append(",\"what\":").append(HttpUtil.jsonString(e.what()))
+                .append(",\"started_at\":");
+            appendSeconds(body, e.startedAt());
+            body.append(",\"done\":").append(e.done())
+                .append(",\"total\":").append(e.total())
+                .append(",\"unit\":").append(e.unit() == null ? "null" : HttpUtil.jsonString(e.unit()))
+                .append(",\"safe_to_stop\":").append(e.safeToStop())
+                .append(",\"on_stop\":").append(HttpUtil.jsonString(e.onStop()))
+                .append(",\"step\":");
+            var st = e.step();
+            if (st == null) {
+                body.append("null");
+            } else {
+                body.append("{\"what\":").append(HttpUtil.jsonString(st.what()))
+                    .append(",\"done\":").append(st.done())
+                    .append(",\"total\":").append(st.total())
+                    .append(",\"unit\":").append(st.unit() == null ? "null" : HttpUtil.jsonString(st.unit()))
+                    .append('}');
+            }
+            body.append('}');
+        }
+        body.append(']');
     }
 
     private static void appendPerCollectionIndexes(StringBuilder body, PerCollectionIndexes p) {

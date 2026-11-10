@@ -742,8 +742,9 @@ def generate_links_cmd(
             for r in retracted[:sample]:
                 click.echo(f"      - {r.from_tumbler} -> {r.to_tumbler} ({r.link_type})")
         grand = 0
+        same_content_unpreviewed = 0
         for name, fn in selected:
-            recorder = DryRunLinkWriter(existing=existing)
+            recorder = DryRunLinkWriter(existing=existing, resolver=cat)
             try:
                 fn(cat, writer=recorder)
             except Exception as exc:  # noqa: BLE001 — one generator's failure must not read as zero
@@ -751,9 +752,24 @@ def generate_links_cmd(
                 click.echo("    A failed preview is UNKNOWN volume, not zero. Do not run the")
                 click.echo("    write pass on the strength of the generators that did preview.")
                 continue
+            if recorder.same_content_sent:
+                # RDR-193 Step 7: the same-as grouping runs in the engine, so the links it would
+                # create cannot be counted here; a preview of 0 would read as "nothing to do".
+                same_content_unpreviewed += recorder.same_content_sent
+                click.echo(
+                    f"  {name}: {recorder.same_content_sent} document(s) would go to the engine's "
+                    "same-content linker; the links it would create are computed there and are NOT previewed"
+                )
+                continue
             proposals = recorder.proposed
             grand += len(proposals)
             click.echo(f"  {name}: would create {len(proposals)} link(s)")
+            if recorder.unresolved_paths:
+                click.echo(
+                    f"    {recorder.unresolved_paths} path reference(s) name no document at that path under the "
+                    "repository's owner and are not counted (the engine reports them unresolved; it can "
+                    "also match a file registered under another owner, so this is a close estimate)"
+                )
             if not proposals:
                 continue
             by_type = recorder.count_by_link_type()
@@ -777,6 +793,8 @@ def generate_links_cmd(
             f"Catalog link count would go {len(existing)} -> "
             f"{len(existing) + grand - retracted_total}"
         )
+        if same_content_unpreviewed:
+            click.echo("  (the same-content linker's links are not in that total: they are not previewed)")
         return
 
     writer = _cat_cmd._get_catalog_writer()

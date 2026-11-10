@@ -14,7 +14,7 @@ Follow in order. The releaser is **Sam**: AI preps + validates; Sam pushes the t
 **Removed in cleanup step 11 (nexus-0r1uz), numbering left as it was:** Step 3
 (the local-candidate `--shakeout` gate and the `--candidate-migration` populated-store
 rehearsal) and Step 3c (the published-client write leg) went with the scripts and
-harness modes they ran. Steps that remain: 1, 2, 3b, 3e, 3f, 4, 5, 5b, 5c, 6, 6.1, 7, 8.
+harness modes they ran. Steps that remain: 1, 2, 3b, 3e, 3f, 3g, 3h, 4, 5, 5b, 5c, 6, 6.1, 7, 8.
 
 ### 1. Decide whether a cut is needed (drift check)
 
@@ -153,6 +153,85 @@ uv run python scripts/check_release_holds.py --root "$TAG_TREE"   # exit 0 = REL
 ```
 
 `scripts/release-holds.txt` lists changesets that have landed on develop ahead of their release gates; a tag from develop would ship them to the cloud and, through the pin, to every local install. Exit 1 names each held changeset and its bead: do not tag. Either cut from a commit without the changeset, or release it by deleting its line in a reviewed commit once its bead says it may ship (for `vectors-030-1`: RDR-225's .19 closed, the PITR-fork rehearsal recorded, and Sam's go). The release workflow's `create-release` job runs the same check on the tagged tree and refuses to create the release, so a tag pushed past this step builds nothing.
+
+### 3h. PRE-TAG check: an upgrade does not rewrite user data at boot (nexus-f3yqd.1)
+
+Sam's release criterion of 2026-11-10 (halcyon): an upgrade's first engine boot
+writes at most 64 MiB over its migrate and ready phases; on the normal upgrade, a
+plain same-version reboot writes at most 64 MiB over the same phases; and an
+engine restart during a background index build never throws the build away. Run
+the three legs of `scripts/upgrade_boot_writes.py` from INSIDE a clean worktree
+at the exact commit you will tag (`TAG_TREE`, as in Step 3g). Each leg builds the
+gate jar in that tree and the harness boots it (`--new-jar` left at its default,
+the service jar the same tree just built), so the jar under test is
+the tag commit's. Run on chas, whose disk is real (the harness's work dir is
+under the copy, not tmpfs).
+
+```bash
+cd "$TAG_TREE"   # clean, at the commit you will tag
+PREV=8.1.1       # the newest released conexus client (it pins the published engine); re-check at cut time
+TAG=$(git rev-parse HEAD)
+# Leg A: the normal upgrade, then a plain reboot
+lab-remote --host chas -c lab-m --fetch output/gate -- bash -c 'mkdir -p output/gate && scripts/build-gate-jar.sh && \
+  uv run python scripts/upgrade_boot_writes.py --prev-client '"$PREV"' --new-jar-commit '"$TAG"' \
+  --ceiling 67108864 --ceiling-boot 67108864 --ceiling-reboot 67108864 --json output/gate/A.json'
+# Leg B: from before per-collection indexes, queued aspect rows, graceful restart mid-queue
+lab-remote --host chas -c lab-m --fetch output/gate -- bash -c 'mkdir -p output/gate && scripts/build-gate-jar.sh && \
+  uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
+  --collections 7 --rows 30000 --rot pending_aspect_queue \
+  --restart-mid-queue 3 --restart-mode graceful --ceiling-boot 67108864 --json output/gate/B.json'
+# Leg C: as Leg B, with a forced kill of the supervisor and engine (PostgreSQL stays up)
+lab-remote --host chas -c lab-m --fetch output/gate -- bash -c 'mkdir -p output/gate && scripts/build-gate-jar.sh && \
+  uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
+  --collections 7 --rows 30000 --rot pending_aspect_queue \
+  --restart-mid-queue 3 --restart-mode kill --ceiling-boot 67108864 --json output/gate/C.json'
+```
+
+Start each leg as a background command (`run_in_background`) with its output
+redirected to a file, as every `lab-remote` run is. `output/` is git-ignored, so
+the fetched reports leave the tag tree clean. The jar must come from
+`scripts/build-gate-jar.sh`, which stamps the build commit the engine serves on
+`/version`. The script reuses a cached jar while `service/` is unchanged, so the
+stamp can name an older commit with the same engine tree: `--new-jar-commit`
+accepts that and records how it matched in `new_jar_identity`, and exits 2 when
+the booted engine's `service/` tree differs from the tag's, or it carries no
+stamp (a plain `mvnw package`).
+
+- **Leg A** is the normal upgrade, from the release users are on now, then a
+  plain same-version reboot. `--ceiling-boot` bounds the upgrade boot's migrate
+  and ready, `--ceiling` total WAL through idle (measured 0.80 MB from 8.0.0),
+  and `--ceiling-reboot` the reboot's migrate
+  and ready (measured 0.45-0.59 MB). Every index is valid before the reboot, so
+  nothing legitimate writes in it, and an engine that rewrites data on every
+  boot fails here even if its first boot passes.
+- **Leg B** starts from 7.76.0, the newest release before per-collection
+  indexes (`--no-pci-wait`: the old engine builds none), with rows left in the
+  retired aspect queue, and restarts the engine while the third index build
+  runs. `--ceiling-boot` bounds the UPGRADE boot only, over migrate and ready
+  (measured 2.95 MB). The index builds after ready are expected work and carry
+  no byte bound on this leg. Later boots are reported in `boots[]`, not gated:
+  on an engine that keeps builds across restarts, the kept build finishes while
+  the next boot migrates, so that boot's migrate phase can carry about 100 MB of
+  the build's WAL. That is the fix working. What the later boots must get
+  right is the restart rule: the build in flight survives (same backend pid), is
+  adopted (`pci_anchor_adopted`), is never rebuilt, and no index is built twice.
+- **Leg C** is Leg B with a forced kill, under the same upgrade-boot bound and the
+  restart rule.
+
+Every leg must exit 0. Exit 1 is a red (a bound tripped, a boot failed, or the
+restart rule failed): do not tag. Exit 2 is a harness failure with no measurement: fix the
+run and repeat it, never tag on it. Paste each fetched `output/gate/*.json`'s
+`verdict`, `boot_wal_bytes`, `reboot_wal_bytes` (Leg A), `total_wal_bytes`,
+`ceilings_tripped`, `new_jar_sha256`, `new_jar_commit`, `new_jar_identity` and the
+`resume` block on the cut bead, and check that `new_jar_identity` shows the jar's
+engine tree equals the tag commit's. Not covered by this step: background work
+that starts after idle (a later sweep or periodic job), and non-index background
+jobs (their own gate, nexus-f3yqd.2). Reference results: engine-service-v0.1.186
+is red on Leg B (`pci_builders_terminated reason=schema_changesets_pending`,
+then a rebuild); the 0.1.187 candidate (0c6f9e1c5) is green on Legs B and C. A
+red control in Leg A's shape from 7.72.1 (engine 0.1.149, before the vectors-030
+walk) exits 1 with `boot-over-ceiling`: 846,283,216 bytes over migrate, 12.6
+times the bound (marginalia, on nexus-f3yqd.1).
 
 ### 4. Push the tag (Sam, or the AI on Sam's go for the release)
 

@@ -309,7 +309,7 @@ class _Recorder:
         self.calls = {}
 
     def gen(self, kind: str):
-        def _gen(cat, *, writer, new_tumblers, new_content_types):  # noqa: ARG001 — the generators' shared shape
+        def _gen(cat, *, writer, new_tumblers, new_content_types, inputs=None):  # noqa: ARG001 — the generators' shared shape
             self.calls.setdefault(kind, []).append(sorted(str(t) for t in new_tumblers))
             return 0
         return _gen

@@ -259,6 +259,7 @@ class World:
     def rung(self, **kw) -> ManifestSectionLabelsRung:
         kw.setdefault("record_fn", lambda: None)  # no completion on file: the default would ask the engine's ledger
         kw.setdefault("stale_zero_fn", lambda: False)  # no deferral on file: the default would read the T2 note
+        kw.setdefault("owed_store", None)  # owed write-backs in memory: the default is a T2 note
         return ManifestSectionLabelsRung(
             reader_factory=lambda: None if self.no_catalog else self,
             writer_factory=lambda: self, t3_factory=lambda: self, **kw)
@@ -1448,7 +1449,7 @@ def test_a_reader_with_no_tombstoned_read_is_not_applicable(world: World) -> Non
                              chash_positions=world.chash_positions, close=lambda: None)
     rung = ManifestSectionLabelsRung(
         reader_factory=lambda: reader, writer_factory=lambda: world, t3_factory=lambda: world,
-        record_fn=lambda: None, stale_zero_fn=lambda: False)
+        record_fn=lambda: None, stale_zero_fn=lambda: False, owed_store=None)
 
     assert rung.detect().applicable is False
     assert rung.converge(Report()).outcome is ConvergeOutcome.DEFERRED

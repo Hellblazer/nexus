@@ -76,6 +76,22 @@ _RDR_ID_RE = re.compile(r"rdr-(\d{3,})", re.IGNORECASE)
 UNRESOLVABLE_EVENT = "rdr_tumbler_unresolvable"
 
 
+def rdr_key_of_path(file_path: str) -> str | None:
+    """The RDR identity key of a ``file_path`` alone: the lower-cased basename (extension stripped)
+    of a ``rdr-*.md`` file directly inside a ``rdr/`` directory, else ``None``. The path branch of
+    :func:`rdr_key_of` (which explains why it is this narrow); the index hook, which holds each
+    new document's path but no catalog entry, asks it without a catalog read (RDR-193 Step 7)."""
+    path = PurePosixPath(file_path)
+    name = path.name
+    if (
+        path.parent.name.lower() == "rdr"
+        and name.lower().startswith("rdr-")
+        and name.lower().endswith(".md")
+    ):
+        return name[: -len(".md")].lower()
+    return None
+
+
 def rdr_key_of(entry: CatalogEntry) -> str | None:
     """Extract the RDR identity key *entry* belongs to.
 
@@ -117,15 +133,7 @@ def rdr_key_of(entry: CatalogEntry) -> str | None:
     """
     fp = entry.file_path
     if fp:
-        path = PurePosixPath(fp)
-        name = path.name
-        if (
-            path.parent.name.lower() == "rdr"
-            and name.lower().startswith("rdr-")
-            and name.lower().endswith(".md")
-        ):
-            return name[: -len(".md")].lower()
-        return None
+        return rdr_key_of_path(fp)
     title = entry.title
     if title:
         m = _RDR_ID_RE.search(title)

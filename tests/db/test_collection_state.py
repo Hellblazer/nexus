@@ -25,7 +25,8 @@ def _patch_get(monkeypatch, handler) -> list[str]:
 
     def fake_get(path: str, *, tenant: str = "default") -> Any:
         paths.append(path)
-        return handler(path)
+        # ?fields=routing (nexus-mjmjl) is answered as an engine that predates it does: with the full rows.
+        return handler(path.replace("?fields=routing", ""))
 
     monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
     return paths

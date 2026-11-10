@@ -99,7 +99,7 @@ run, moved to their own RDR on 2026-10-31 (nexus-qo7ie.2): they become
 sandboxed Lua scripts on a Lua runtime (nexus-mdbds.1), not new Python verbs
 or MCP tools. That RDR is now RDR-240, and it is a prerequisite of this
 one's Phase 2 and of `nx memory curate` in Phase 3: its `transcripts`
-procedure is the one transcript scanner both use (Technical Design 5).
+procedure is the one transcript scanner both use (Technical Design 5). One exception, stated in full in Technical Design 5 item 5: to count sessions started in the window, curate reads each main transcript of the repository only as far as the first record `sessions()` would start on, to an 8 MiB bound per file; curate reads transcripts nowhere else.
 RDR-240 in turn waits on the Lua runtime RDR (nexus-mdbds.1), not yet
 filed. The removed text stays in the history of branch
 `feature/nexus-qo7ie-memory-curation-rdr`, in the draft as filed before this
@@ -112,8 +112,8 @@ revision.
 | RDR-057 Progressive Formalization Across Memory Tiers | Origin of the tier model | Its "graduation" idea is the T2 to T3 case. This RDR is the curation case beside it: replacement and admission to context. |
 | RDR-207 Summarization at the T2 Expiry Boundary | Beside, no shared path | It owns what expiry may destroy (quarantine, rollup, reap only rolled-up rows). Replacement is not expiry: a writer names a row and the engine deletes it in the same transaction. A quarantined target is refused, as `mergeMemories` refuses a quarantined id (Technical Design 1). |
 | RDR-209 Heat-Based Graduation Between Memory Tiers | Sibling, draft | It owns heat and graduation, and takes the gate-record rollup as an amendment (same date). Its Phase 0b, a read counter that means "a caller read this row", is the signal this RDR's index audit would use for T2; until it lands, the audit counts T2 reads with RDR-240's `memory` transcript query: per title from `memory_get` calls, per project from `memory_search` calls (Technical Design 5). |
-| RDR-240 Procedures as Sandboxed Lua Scripts | Prerequisite of Phase 2 and of `nx memory curate` | Split from this RDR. Its `transcripts` procedure owns transcript scanning; this RDR calls four of its queries and builds no scanner (Technical Design 5). Phase 1 does not depend on it. |
-| RDR-239 The Tuple-Space Dictionary | Accepted; prerequisite of one `--cold` row | Its dictionary view (`writers`, last post time per subspace) is the source of the report's tuple-subspace row; that row waits for it (Technical Design 4). |
+| RDR-240 Procedures as Sandboxed Lua Scripts | Prerequisite of Phase 2 and of `nx memory curate` | Split from this RDR. Its `transcripts` procedure owns transcript scanning; this RDR calls four of its queries and builds no scanner, with one exception: to count sessions it reads each main transcript only to its first start, to an 8 MiB bound, through the transcripts verb's own `first_start` (Technical Design 5, item 5). Phase 1 does not depend on it. |
+| RDR-239 The Tuple-Space Dictionary | Accepted; prerequisite of one `--cold` row | Its dictionary view (`writers`, last post time per subspace) is the source of the report's tuple-subspace row (Technical Design 4), built by nexus-qo7ie.20 on nexus-mdbds.2.17. |
 | RDR-205 Linda Tuple Space over Postgres | Closed; its ledger template is being retired | Its `ledger/<session_id>` template and 40,785 rows outlived their writer (nexus-onjvw): one of the cases that motivate `--cold`. |
 | RDR-074 Permanence Mode | Deferred, compatible | Permanence guards a row against expiry only. Naming a permanent row in `replaces` deletes it, because explicit deletion is always the project's prerogative (Sam, 2026-10-31: "expiry is the def; explicit del is always our collective prerogative"). |
 | RDR-192 Superseded Note Chunks Outlive Manifest-Less Is-Live | Different layer | It concerns T3 chunks a re-put replaced. This RDR concerns whole T2 rows and memory files a writer replaced. No shared code. |
@@ -356,7 +356,8 @@ here are the ones each pass found on a named page or table.
 - **2026-11-06, the report title of a partial run (nexus-qo7ie.30).** As
   built, a run that selects fewer than all three of `--files`, `--t2` and
   `--agents` (a `--cold`-only run included) stores its report as `<repo>/curation-report-<date>-<sections>`, so it never
-  replaces that day's full report. `docs/cli-reference.md`, the command's help
+  replaces that day's full report; since 2026-11-10 a run that adds `--cold` to all three does too
+  (`-files-t2-agents-cold`), so a later default run does not replace it. `docs/cli-reference.md`, the command's help
   and `report_title` said so; TD4 item 4 is amended to match.
 
 ### Critical Assumptions
@@ -463,9 +464,10 @@ them.
 4. **Curation report.** `nx memory curate [--files] [--t2] [--agents]
    [--cold] [--days N]`, printed to stdout and stored in T2 as
    `<repo>/curation-report-<date>` with a 90-day TTL; a run that selects fewer
-   than all three of `--files`, `--t2` and `--agents` stores
-   `<repo>/curation-report-<date>-<sections>` (for example `-files`), so a
-   partial run never replaces the day's full report. `--days N` (default 30)
+   than all three of `--files`, `--t2` and `--agents`, or that adds `--cold`,
+   stores `<repo>/curation-report-<date>-<sections>` (for example `-files`, or
+   `-files-t2-agents-cold` for all four), so a partial run never replaces the
+   day's default report and a default run never replaces one that carries `--cold`. `--days N` (default 30)
    sets the window for `--files` and `--cold`; for counts read from
    transcripts, which are kept about 30 days (inferred from file dates,
    research 9), N is capped at that span and the report prints the span it
@@ -487,9 +489,13 @@ them.
    N days. Each row gives the store, its last write where the store has writes, its
    last use, its size and its owner if known:
    - tuple subspaces, from RDR-239's dictionary view (each subspace's last
-     post time and its template's `writers`); a template whose `writers` is
-     empty and that has no live subspace is listed by name. This row waits
-     for that view;
+     post time and its template's `writers`); a template with no verified
+     writer (`writers` absent, empty, or every entry marked `Unverified: `,
+     RDR-239 Technical Design 4) and no subspace in the census, consumed-only
+     subspaces included, is listed by name. The census has no transcript
+     bound, so this row uses `--days` uncapped. On an engine that serves no
+     doc block the row says "not available" and still lists cold subspaces,
+     judging no template;
    - T2 namespaces and memory files, from read and write counts;
    - MCP tools and CLI verbs, from RDR-240's `tools` query; `nx memory
      curate` builds the full list itself (the MCP servers' tool registries
@@ -504,7 +510,18 @@ them.
    The report runs at a release step after the release skill's Step 12, once
    the local tool carries the release (Phase 3), so waste shows while it is small. It never blocks a release.
 5. **Transcript queries (the interface to RDR-240).** This RDR builds no
-   transcript scanner. RDR-240's `transcripts` procedure is the one owner,
+   transcript scanner, with one exception. To count the sessions started in
+   the window, curate reads each main transcript of the repository (looking
+   back 365 days, for the window's oldest-session cap) only as far as the
+   first record `sessions()` would start on, through the transcripts verb's
+   own `first_start` and file listing (`lua_runtime/transcripts_read.py`, which
+   the verb's `_scan` also uses), to an 8 MiB bound per file. A file with no
+   start inside the bound is counted apart and named in the report, never
+   counted as a session. Agreement with `sessions()` is pinned by a parity test
+   on one adversarial fixture, for files within the bound. Curate reads
+   transcripts nowhere else. Calling `sessions()` itself instead measured
+   0.4 s → 25 s on 255 sessions.
+   RDR-240's `transcripts` procedure is the one owner,
    and this RDR calls it through `run_procedure("transcripts", {query, since,
    until, project})` from Python, so `nx memory curate` adds no Lua. It uses four
    queries:
@@ -640,8 +657,8 @@ If the on-demand tier works, this is a refinement of it.
 - [x] A1 verified (Claude Code's loading of `MEMORY.md`; research 1 and 2).
 - [x] RDR-209 amendment for gate records filed (RDR-209 Revision History,
       2026-10-31; this RDR does not depend on it landing).
-- [ ] RDR-239's dictionary view built. Only the `--cold` tuple-subspace row
-      waits for it.
+- [x] RDR-239's dictionary view built (nexus-mdbds.2.17). Only the `--cold`
+      tuple-subspace row waited for it (nexus-qo7ie.20).
 - [ ] RDR-240 Phase 1 Step 1 landed (the runner and the `transcripts`
       procedure). Phase 2 Steps 1 and 3, the transcript-backed rows of
       `nx memory curate` and the release step that runs it wait for it;
@@ -847,7 +864,7 @@ SessionStart check, Step 2 `--files`, `--t2` and `--agents`, Step 3
 second paragraph, the drift beyond memory that Sam asked the report to
 watch. Phase 2 Steps 1 and 3 and the transcript-backed report rows need
 RDR-240's `transcripts` procedure, a prerequisite, and the `--cold`
-tuple-subspace row needs RDR-239's dictionary view, so this RDR builds no transcript scanner. Procedures
+tuple-subspace row needs RDR-239's dictionary view, so this RDR builds no transcript scanner beyond one exception (Technical Design 5, item 5: each main transcript read only to its first start, to an 8 MiB bound, through the verb's own function). Procedures
 and promotion are out of scope (RDR-240), and so is the gate-record
 rollup (RDR-209 Amendment A1). Retiring a cold store is out of scope too:
 the report lists it, and any deletion of data rides its own change.
@@ -912,3 +929,5 @@ so the rest does not wait for them.
 | 2026-11-01 | Gate round 3: PASSED (0 Critical, 10 Significant, 0 ship-blockers); commit `3f66127f0`; critique `nexus_rdr/238-gate-critique-2026-11-01-r3`. |
 | 2026-11-01 | Accept residual dispositions (gate round 3): K1, K2, K3, K4, K5 -> nexus-qo7ie.3; S-8, S-9 -> nexus-qo7ie.4; S-7, K6, S-10 -> nexus-qo7ie.5. |
 | 2026-11-02 | Sam reversed the 2026-10-31 "supersession becomes deletion" for Phase 1: replace quarantines. A2 was measured (first 20 replacement-type rows: 6 yes, 11 maybe, 3 no by an agent read), which trips Step 3's stop rule; Sam chose quarantine instead of deletion on the A2 read; Alternative 1 was not taken. A replaced row is quarantined with `ttl_days` NULL: the rollup skips it, the engine refuses it as a summary source, and `reap` never deletes it. A later plain put at the old title overwrites the quarantined row in place, and the `replaced_id` the writer was given then names that new live row. Key Discoveries 2026-11-02 rules for Phase 1; decision sections not rewritten (nexus-ov3zi). |
+| 2026-11-09 | Technical Design 4's tuple-subspace row amended to the reviewed nexus-qo7ie.20 code (standing grant 3): writerless means no verified writer, since today's candidates `board/<topic>` and `queue/<name>` carry only `Unverified: ` entries and no template has `writers: []`; a consumed-only subspace counts; `--days` is uncapped; a doc-less engine reads "not available". The Relationships row and the RDR-239 prerequisite now record the view as built. Review: T2 `nexus/rdr-238-p3s3b-review-2026-11-09`. |
+| 2026-11-10 | Technical Design 5 and its restatements amended to code (standing grant 3; Sam approved in session elsinore, nexus-qo7ie.27; sites: Gap 3, Relationship to Prior RDRs, Scope Verification): the "no transcript scanner" sentence names one exception, curate's read of each main transcript's first start (looking back 365 days, to an 8 MiB bound per file; a file with no start in the bound is counted apart and named) to count sessions, through the transcripts verb's own first-record function and file listing (`first_start`, `repo_main_transcripts`), pinned by a parity test against `sessions()` for files within the bound; calling `sessions()` itself measured 0.4 s to 25 s on 255 sessions. Technical Design 4's report-title text covers a `--cold` run (`-files-t2-agents-cold`), so a later default run does not replace it. |

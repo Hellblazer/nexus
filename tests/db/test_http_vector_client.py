@@ -533,8 +533,22 @@ class TestServiceCollectionStubGetWithIds:
         path, body = calls[0]
         assert path == "/v1/vectors/store-get"
         assert body["ids"] == ["id1"]
+        assert body["include"] == ["metadatas"], "nexus-mjmjl: the projection the caller asked for reaches the engine"
         assert result["ids"] == ["id1"]
         assert result["metadatas"] == [{"k": "v"}]
+
+    def test_ids_without_include_sends_none(self, monkeypatch):
+        """No include asked, no include sent: the engine keeps its full answer (nexus-mjmjl)."""
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            return {"ids": ["id1"], "documents": ["text"], "metadatas": [{"k": "v"}]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        stub.get(ids=["id1"], sensitivity="include")
+        stub.get(ids=["id1"], include=[], sensitivity="include")  # empty, as the where branch: not "ids only"
+        assert [("include" in body) for _path, body in calls] == [False, False]
 
     def test_where_routes_to_get(self, monkeypatch):
         from nexus.db.http_vector_client import _ServiceCollectionStub

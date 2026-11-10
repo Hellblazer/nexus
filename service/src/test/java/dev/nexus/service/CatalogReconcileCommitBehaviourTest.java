@@ -969,7 +969,7 @@ class CatalogReconcileCommitBehaviourTest extends CatalogReconcileTestBase {
             holdRunHeader(su, t, "race");
             var one = pool.submit(() -> repo.reconcileCommit(t, OWNER, "race", COMMIT_TIMEOUT));
             var two = pool.submit(() -> repo.reconcileCommit(t, OWNER, "race", COMMIT_TIMEOUT));
-            awaitCommitsBlocked(su, 2);
+            awaitCommitsBlocked(su, 2, one, two);
             su.rollback();
             first = one.get(60, java.util.concurrent.TimeUnit.SECONDS);
             second = two.get(60, java.util.concurrent.TimeUnit.SECONDS);

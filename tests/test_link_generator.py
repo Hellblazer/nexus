@@ -264,7 +264,7 @@ class TestProseFilepathLinks:
         repo.mkdir()
         prose_file = repo / "docs" / "guide.md"
         prose_file.parent.mkdir(parents=True)
-        prose_file.write_text("See ``conexus/skills/foo.md`` for usage.\n")
+        prose_file.write_text("See ``conexus/hooks/foo.py`` for usage.\n")
 
         cat = self._make_catalog(tmp_path)
         owner = cat.register_owner(
@@ -275,8 +275,8 @@ class TestProseFilepathLinks:
             file_path="docs/guide.md",
         )
         code_tumbler = cat.register(
-            owner, "foo.md", content_type="code",
-            file_path="conexus/skills/foo.md",
+            owner, "foo.py", content_type="code",
+            file_path="conexus/hooks/foo.py",
         )
 
         count = generate_prose_filepath_links(cat)

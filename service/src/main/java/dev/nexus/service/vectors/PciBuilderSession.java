@@ -302,8 +302,76 @@ public final class PciBuilderSession {
         }
     }
 
+    /**
+     * What {@code pg_stat_progress_create_index} says about the builder's backend (nexus-f3yqd.3): the phase and the
+     * block and tuple counts of the statement it is running. A count the phase does not use is 0.
+     */
+    public record BuildProgress(String phase, long blocksDone, long blocksTotal, long tuplesDone, long tuplesTotal) { }
+
+    /** The probe's connection name: not the builder's, so the probe never matches its own query. */
+    private static final String PROGRESS_SUFFIX = "/progress";
+
+    /** Bounds on the probe's connection, so a stalled read cannot hold the sampler for the build's socket timeout. */
+    private static final int PROGRESS_TIMEOUT_SECONDS = 10;
+
+    /**
+     * Read the progress of the build this session's backend is running, on a short connection of its own (the
+     * builder's connection is busy in {@code CREATE INDEX CONCURRENTLY} and cannot be asked), as the same role, so
+     * PostgreSQL shows it the backend's counts. Empty when the backend is running no index build (none started yet, or
+     * it has ended). The connection is opened and closed here: nothing is held between calls.
+     *
+     * @throws SQLException when the connection or the read fails; the caller keeps its last value and tries again
+     */
+    public java.util.Optional<BuildProgress> sampleBuildProgress() throws SQLException {
+        Properties props = connectionProperties();
+        props.setProperty("ApplicationName", applicationName + PROGRESS_SUFFIX);
+        props.setProperty("socketTimeout", Integer.toString(PROGRESS_TIMEOUT_SECONDS));
+        props.setProperty("loginTimeout", Integer.toString(PROGRESS_TIMEOUT_SECONDS));
+        Connection opened;
+        try {
+            opened = connect(props);
+        } catch (SQLException e) {
+            // The driver's message can echo the URL (and so a password parameter): scrub it as every other connect
+            // path of this class does, because the sampler logs it.
+            throw new SQLException("progress read failed: sqlstate=" + e.getSQLState() + " cause=\""
+                + scrub(e.getMessage()) + "\"", e.getSQLState(), e);
+        }
+        try (Connection conn = opened) {
+            var p = DSL.table(DSL.name("pg_catalog", "pg_stat_progress_create_index")).as("p");
+            var a = DSL.table(DSL.name("pg_catalog", "pg_stat_activity")).as("a");
+            var row = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(DSL.field(DSL.name("p", "phase"), String.class),
+                    DSL.field(DSL.name("p", "blocks_done"), Long.class),
+                    DSL.field(DSL.name("p", "blocks_total"), Long.class),
+                    DSL.field(DSL.name("p", "tuples_done"), Long.class),
+                    DSL.field(DSL.name("p", "tuples_total"), Long.class))
+                .from(p).join(a).on(DSL.field(DSL.name("a", "pid"), Integer.class)
+                    .eq(DSL.field(DSL.name("p", "pid"), Integer.class)))
+                .where(DSL.field(DSL.name("a", "application_name"), String.class).eq(applicationName))
+                .limit(1)
+                .fetchOne();
+            if (row == null) {
+                return java.util.Optional.empty();
+            }
+            return java.util.Optional.of(new BuildProgress(row.value1(), nz(row.value2()), nz(row.value3()),
+                nz(row.value4()), nz(row.value5())));
+        } catch (DataAccessException e) {
+            throw new SQLException("progress read failed: sqlstate=" + e.sqlState() + " cause=\"" + scrub(e.getMessage())
+                + "\"", e.sqlState(), e);
+        }
+    }
+
+    private static long nz(Long v) {
+        return v == null ? 0L : v;
+    }
+
     private Connection connect() throws SQLException {
-        Connection conn = DriverManager.getConnection(url, connectionProperties());
+        return connect(connectionProperties());
+    }
+
+    /** The one place this class opens a connection (the egress census allows one site), with the caller's properties. */
+    private Connection connect(Properties props) throws SQLException {
+        Connection conn = DriverManager.getConnection(url, props);
         try {
             conn.setAutoCommit(true);
         } catch (SQLException | RuntimeException e) {

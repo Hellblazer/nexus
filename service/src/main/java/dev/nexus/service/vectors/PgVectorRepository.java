@@ -3910,8 +3910,10 @@ public final class PgVectorRepository {
      * ranked with a NULL distance. For the dense-gate branch this is verified not to defeat
      * the FULL HNSW bind, same as {@link #searchWithTokens} ({@code
      * PgVectorRepositoryRawSqlPlanShapeTest}'s guarded-shape EXPLAIN proof); the
-     * selective-gate branch never binds HNSW by design (see its own comment below), so
-     * its guard is pure correctness with no plan-shape risk to prove.
+     * selective-gate branch ranks with index scans off (hybridRank, nexus-f3yqd.8), so it
+     * never binds HNSW and its guard is pure correctness. That exactness comes from the
+     * setting, not the SQL: HybridSelectiveRankIndexScanTest shows the rank plans through
+     * the leaf HNSW without it.
      */
     private List<Map<String, Object>> hybridSearch(String tenant, String queryText,
                                            List<String> collectionNames,
@@ -4096,19 +4098,21 @@ public final class PgVectorRepository {
             for (int i = 0; i < probeResult.size(); i++) {
                 chashes[i] = probeResult.get(i).get(0, byte[].class);
             }
-            // nexus-p89h4: with a manifest predicate the same exact rank also tests the EXISTS, so the cut that
-            // follows never sees a chunk no owner of which passes.
+            // nexus-p89h4, nexus-f3yqd.8: the candidate set is already materialised (at most selectiveGateMax
+            // chashes), so the rank is made exact outright, with or without a manifest predicate. Left to the
+            // planner, a table whose statistics say the chash set is a large share of the leaf takes the leaf's
+            // HNSW index for ORDER BY ... LIMIT n; without hnsw.iterative_scan (this branch sets none) that scan
+            // yields ef_search candidates nearest the query, the chash = ANY(...) filter (and the manifest
+            // EXISTS, when there is one) rejects every one when the gated rows lie far from the query, and the
+            // statement returns EMPTY (HybridSelectiveRankIndexScanTest: 0 of 10 rows on 2000 gated of 4000).
+            // Whether it does depends on the table statistics (an analysed table does, a fresh one does not),
+            // which is how a green class went red once the full suite ran it after others. Bitmap scans stay
+            // on, so the chash = ANY(...) key lookup and the EXISTS probes still use the primary keys. The
+            // setting is transaction-local and this branch returns after the rank, so nothing later inherits it.
+            PgSession.disableIndexScanForExactFallback(ctx);
             if (wherePlan.manifest() != null) {
-                // nexus-p89h4: the candidate set is already materialised (at most selectiveGateMax chashes), so
-                // the rank is made exact outright. Left to the planner, a table whose statistics say the chash set
-                // is most of the collection and the EXISTS usually true takes the HNSW index for ORDER BY ...
-                // LIMIT n; without hnsw.iterative_scan (this branch sets none) that scan yields ef_search
-                // candidates, the EXISTS rejects every one of a rare label's nearest, and the statement returns
-                // EMPTY. Whether it does depends on the table statistics (an analysed table does, a fresh one
-                // does not), which is how a green class went red once the full suite ran it after others.
-                // Bitmap scans stay on, so the chash = ANY(...) key lookup and the EXISTS probes still use the
-                // primary keys.
-                PgSession.disableIndexScanForExactFallback(ctx);
+                // nexus-p89h4: with a manifest predicate the same exact rank also tests the EXISTS, so the cut
+                // that follows never sees a chunk no owner of which passes.
                 return ctx.selectFrom(
                     manifestSearchFn(dim, queryVec, null, chashes, colls, wherePlan, nResults, model, tenant)).fetch();
             }
@@ -4156,8 +4160,8 @@ public final class PgVectorRepository {
         };
         // nexus-bq06h: exactOnUnderReturn wraps ONLY the HNSW-first branch, exactly
         // as it wrapped the retired raw-SQL HNSW-first branch -- the selective branch
-        // is already exact (ranks the complete materialized gate), so it never needed
-        // the fallback.
+        // ranks the complete materialized gate with index scans off (nexus-f3yqd.8,
+        // above), so it is exact and needs no fallback.
         return exactSelectFrom(ctx, nResults, hnswFirstFn, rebind ? statementTimeoutMs : null);
     }
 

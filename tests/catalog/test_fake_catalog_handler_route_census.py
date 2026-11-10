@@ -219,17 +219,19 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "Java-side by CatalogHandlerSetAspectsEnabledTest"
     ),
     "/links/upsert_many": (
-        "RDR-193 Part A4 (nexus-u5m5g.4): DELIBERATELY engine-only until the linking client "
-        "(Step 7, which adds HttpCatalogClient.links_upsert_many and drops this entry): no "
-        "Catalog or HttpCatalogClient method exists yet, so the route is outside the "
-        "shared-surface parity gate by construction. Its wire shape is validated Java-side by "
-        "CatalogHandlerLinksBatchRoutesTest and the SQL by CatalogLinksUpsertManyTest. The "
-        "census checks both directions, so this entry must go when the fake gains the route"
+        "RDR-193 Part A4 (nexus-u5m5g.4, client nexus-u5m5g.8): backs HttpCatalogClient.links_upsert_many(), a "
+        "_SERVICE_ONLY_WRITE_OPS entry with no canonical Catalog counterpart, so it is outside the shared-surface "
+        "parity gate by construction. FakeCatalogHandler does not serve it: the client method and the generators that "
+        "ride it are driven against the purpose-built fake in tests/catalog/_link_engine_fake.py (wire-faithful to "
+        "CatalogLinksHandler.java; tests/catalog/test_http_catalog_client_links.py, test_link_generator_scoped_reads.py) "
+        "and the real engine (tests/integration/test_rdr193_linking_e2e.py). The wire shape is validated Java-side by "
+        "CatalogHandlerLinksBatchRoutesTest and the SQL by CatalogLinksUpsertManyTest"
     ),
     "/links/same_content": (
-        "RDR-193 Part A4 (nexus-u5m5g.4): engine-only until the linking client (Step 7) for the "
-        "same reason as /links/upsert_many above; validated Java-side by "
-        "CatalogHandlerLinksBatchRoutesTest and CatalogLinkSameContentTest"
+        "RDR-193 Part A4 (nexus-u5m5g.4, client nexus-u5m5g.8): backs HttpCatalogClient.links_same_content(), outside "
+        "the shared-surface parity gate for the same reason as /links/upsert_many above, and exercised by the same "
+        "fake and the real engine; validated Java-side by CatalogHandlerLinksBatchRoutesTest and "
+        "CatalogLinkSameContentTest"
     ),
     "/reconcile/stage": (
         "RDR-193 Part A1 (nexus-u5m5g.3): DELIBERATELY engine-only until the client switch "

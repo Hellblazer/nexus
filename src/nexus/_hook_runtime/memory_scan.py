@@ -119,8 +119,12 @@ class MemoryScan:
     replaced_present: list[tuple[str, str, str]] = field(default_factory=list)
 
 
-def scan(directory: Path) -> MemoryScan:
-    """Scan *directory* per the module docstring. Raises ``OSError`` only if it cannot be listed."""
+def scan(directory: Path, *, oversize: bool = True) -> MemoryScan:
+    """Scan *directory* per the module docstring. Raises ``OSError`` only if it cannot be listed.
+
+    *oversize* False skips the per-file size check and leaves ``oversized`` empty: the SessionStart
+    hook never reports a size (nexus-qo7ie.27), so it does not pay one ``stat`` per file on every start.
+    """
     present = sorted(p.name for p in directory.iterdir() if p.is_file() and p.suffix == ".md")
     index_files = sorted(n for n in present if n in INDEX_FILES)
     files = [n for n in present if n not in INDEX_FILES]
@@ -140,7 +144,7 @@ def scan(directory: Path) -> MemoryScan:
                            if "/" not in t.removeprefix("./")}
     unindexed = [n for n in files if n not in mentioned and n not in hub_linked]
     oversized = []
-    for n in files:
+    for n in files if oversize else ():
         size = (directory / n).stat().st_size
         if size > OVERSIZE_BYTES:
             oversized.append((n, size))

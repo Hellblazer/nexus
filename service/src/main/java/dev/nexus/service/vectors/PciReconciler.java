@@ -276,6 +276,8 @@ public final class PciReconciler {
     private final Map<LeafKey, IndexReading> readings = new ConcurrentHashMap<>();
     private final AtomicReference<String> building = new AtomicReference<>();
     private final AtomicInteger passes = new AtomicInteger();
+    /** nexus-f3yqd.3: the {@code boot_work} entry; null until {@link #bootWork} binds a registry. */
+    private volatile PciBootWork bootWork;
     private volatile boolean holder;
     private volatile Instant lastDdlPassAt;
     private volatile Instant passStartedAt;
@@ -437,6 +439,24 @@ public final class PciReconciler {
         return readings.get(new LeafKey(leafId(leaf), indexName));
     }
 
+    /**
+     * Report this reconciler's pass to {@code GET /v1/status}'s {@code boot_work} (nexus-f3yqd.3): a
+     * {@code pci-reconcile} entry while a pass that plans builds runs, with a {@code step} sampled from the builder
+     * backend's {@code pg_stat_progress_create_index} (see {@link PciBootWork}). Call before {@link #start()}; without
+     * it the reconciler reports nothing. Only the engine that holds the builder lock plans builds, so a standby
+     * reports none. {@code GET /v1/status} is unauthenticated, and by Sam's rulings of 2026-10-19 and 2026-11-06 it
+     * names no collection, tenant or index: the step carries the build phase only, and no argument changes that.
+     */
+    public PciReconciler bootWork(dev.nexus.service.BootWorkRegistry registry) {
+        return bootWork(registry, PciBootWork.SAMPLE_EVERY);
+    }
+
+    /** As above with the sampling period injected (tests). */
+    PciReconciler bootWork(dev.nexus.service.BootWorkRegistry registry, Duration sampleEvery) {
+        this.bootWork = new PciBootWork(registry, builder::sampleBuildProgress, sampleEvery);
+        return this;
+    }
+
     /** Collections with a failure entry (any count), for tests; {@link #status()} reports only the failing ones. */
     int trackedFailures() {
         return failures.size();
@@ -563,6 +583,7 @@ public final class PciReconciler {
                 return PassReport.inactive(state);
             }
             Tally tally = new Tally();
+            tally.lastPlannable = lastPlannable(snapshot.leaves());
             for (Leaf leaf : snapshot.leaves()) {
                 if (!pass.live() || Thread.currentThread().isInterrupted()) {
                     break;
@@ -591,6 +612,10 @@ public final class PciReconciler {
         } finally {
             building.set(null);
             passStartedAt = null;
+            PciBootWork work = bootWork;
+            if (work != null) {
+                work.endPass();
+            }
         }
     }
 
@@ -676,6 +701,11 @@ public final class PciReconciler {
 
     private static final class Tally {
         int leaves;
+        /**
+         * The last leaf of the snapshot that can plan a build (its model and tenant parsed), or null when none can:
+         * the {@code boot_work} total is not known before the pass has reached it (nexus-f3yqd.3).
+         */
+        Leaf lastPlannable;
         /** Leaves that were counted and planned (not skipped); the pass counts as done only if there was one. */
         int processedLeaves;
         int drops;
@@ -688,6 +718,28 @@ public final class PciReconciler {
         /** Indexes this pass dropped, and those it built (for the canary, which runs after both). */
         final Set<String> droppedIndexes = new HashSet<>();
         final List<PciCanary.Target> builtTargets = new java.util.ArrayList<>();
+    }
+
+    /** The last leaf with a parsed model and tenant: the one whose plan completes the pass's count of builds. */
+    static Leaf lastPlannable(List<Leaf> leaves) {
+        Leaf last = null;
+        for (Leaf leaf : leaves) {
+            if (leaf.model() != null && leaf.tenant() != null) {
+                last = leaf;
+            }
+        }
+        return last;
+    }
+
+    /**
+     * The pass has dealt with {@code leaf}, which planned {@code builds} builds (0 for a leaf that was skipped or has
+     * nothing to build): tell {@code boot_work}, which fixes its total once the last plannable leaf is in.
+     */
+    private void noteLeaf(Leaf leaf, Tally tally, int builds) {
+        PciBootWork work = bootWork;
+        if (work != null) {
+            work.planned(builds, leaf != tally.lastPlannable);
+        }
     }
 
     private static String leafId(Leaf leaf) {
@@ -718,6 +770,7 @@ public final class PciReconciler {
             planned = pass.transaction(tx -> countAndPlan(tx, leaf));
         } catch (DataAccessException e) {
             tally.skippedLeaves++;
+            noteLeaf(leaf, tally, 0);
             if (QUERY_CANCELED.equals(e.sqlState())) {
                 log.warn("event=pci_count_timeout leaf={} timeout_ms={}", leafId(leaf), countTimeout.toMillis());
             } else {
@@ -728,6 +781,7 @@ public final class PciReconciler {
         }
         if (planned == null) {
             tally.skippedLeaves++;
+            noteLeaf(leaf, tally, 0);
             return true;
         }
         tally.processedLeaves++;
@@ -735,6 +789,7 @@ public final class PciReconciler {
         tally.maxCountMillis = Math.max(tally.maxCountMillis, planned.countMillis());
         applyReadings(leaf, planned.anchors());
         observeForCanary(leaf, planned);
+        noteLeaf(leaf, tally, (int) planned.actions().stream().filter(a -> a instanceof Build).count());
         execute(pass, leaf, planned.dimension(), planned.anchors().adoptions(), planned.actions(), tally);
         return true;
     }
@@ -958,9 +1013,16 @@ public final class PciReconciler {
                     + "detail=\"a live, indexed collection counted zero rows: a counting failure, never acted on\"",
                     leafId(leaf), s.collection());
                 case Drop d -> drop(pass, leaf, d, tally);
-                case Build b when failedDrops.contains(b.name()) && !tally.droppedIndexes.contains(b.name()) ->
+                case Build b when failedDrops.contains(b.name()) && !tally.droppedIndexes.contains(b.name()) -> {
                     log.info("event=pci_build_skipped reason=failed_index_not_dropped leaf={} index={} "
                         + "detail=\"the next pass drops it again and builds\"", leafId(leaf), b.name());
+                    // nexus-f3yqd.3: noteLeaf counted this build when the plan was made; it will not run, so it is
+                    // no longer pending for boot_work's done (the total, counted from the plan, does not move).
+                    PciBootWork work = bootWork;
+                    if (work != null) {
+                        work.buildSkipped();
+                    }
+                }
                 case Build b -> build(pass, leaf, dim, b, tally);
             }
         }
@@ -1062,11 +1124,16 @@ public final class PciReconciler {
     private void build(PciBuilderSession.Pass pass, Leaf leaf, int dim, Build build, Tally tally) {
         LeafKey key = new LeafKey(leafId(leaf), build.collection());
         building.set(build.name());
+        PciBootWork work = bootWork;
+        PciBootWork.Watch watch = work == null ? null : work.watchBuild();
         DdlOutcome outcome;
         try {
             outcome = pass.build(leaf, dim, build.collection());
         } finally {
             building.set(null);
+            if (watch != null) {
+                watch.close();
+            }
         }
         switch (outcome) {
             case DONE -> {

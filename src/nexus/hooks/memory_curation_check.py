@@ -25,6 +25,12 @@ failure here must never cost the guidance it is appended to, so every entry poin
   line, because a hook cannot import a YAML parser. Flow style (``memory: {...}``), a quoted key
   and anything else the scan does not recognise mean :data:`DEFAULT_BUDGET_TOKENS`, as do a
   missing, non-integer or non-positive value.
+* **Deadline.** :func:`with_curation_line` waits for the check at most :data:`DEADLINE_SECONDS` (a daemon
+  thread and a join timeout); past it the guidance is returned as it is and the curation line is skipped.
+  The scan skips the oversize ``stat`` (``scan(..., oversize=False)``): the line never names a size.
+* **Repeats.** The line is printed on every SessionStart source (startup, resume, clear, compact): it is one
+  line, silent when the directory is clean, and a resumed session is exactly where an unindexed file may still be
+  unaddressed, so it is kept as it is (nexus-qo7ie.27 disposition of the code review's S5).
 * **Never blocks.** A missing directory means silence. An unreadable directory or index, or any
   exception, means silence plus a ``hook.log`` line.
 
@@ -35,6 +41,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -45,6 +52,9 @@ from nexus._hook_runtime.memory_scan import scan
 DEFAULT_BUDGET_TOKENS = 1500
 ONDEMAND_INDEX = "MEMORY-ondemand.md"
 MAX_NAME_CHARS = 80
+#: The wall-clock bound of the check inside the session-start process (nexus-qo7ie.27): a memory directory on a
+#: stalled mount must not hold the guidance the check is appended to until the hook's own timeout kills the verb.
+DEADLINE_SECONDS = 2.0
 _REMEDY = "run `nx memory curate --files`"
 
 
@@ -119,7 +129,7 @@ def check(cwd: Path, *, env: Mapping[str, str] | None = None, home: Path | None 
             (directory / ONDEMAND_INDEX).read_bytes()
             index = directory / "MEMORY.md"
             index_bytes = len(index.read_bytes()) if index.exists() else 0
-            result = scan(directory)
+            result = scan(directory, oversize=False)  # the line never names a size: skip one stat per file
         except OSError as exc:
             _emit("warning", "memory_curation_check_unreadable", directory=str(directory), error=str(exc))
             return None
@@ -156,12 +166,37 @@ def curation_line(payload: dict | None) -> str | None:
         return None
 
 
+def _bounded_line(payload: dict | None) -> str | None:
+    """:func:`curation_line` run in a daemon thread and waited for at most :data:`DEADLINE_SECONDS`; None on a
+    timeout (the thread is abandoned, never waited for at exit) or on any failure.
+
+    The bound covers Python-level stalls only (a slow or blocked read the interpreter can step away from). A
+    thread stuck in a kernel syscall on a dead mount can still hold the process at exit until the hook's own
+    40 s timeout ends it; the deadline keeps the guidance from waiting on the check, not the process from waiting
+    on the thread."""
+    box: list[str | None] = []
+
+    def work() -> None:
+        try:
+            box.append(curation_line(payload))
+        except Exception:  # noqa: BLE001 — curation_line swallows already; this guards a replaced one
+            pass
+
+    worker = threading.Thread(target=work, name="memory-curation-check", daemon=True)
+    worker.start()
+    worker.join(DEADLINE_SECONDS)
+    if worker.is_alive():
+        _emit("warning", "memory_curation_check_timeout", seconds=DEADLINE_SECONDS)
+        return None
+    return box[0] if box else None
+
+
 def with_curation_line(output: str | None, payload: dict | None) -> str | None:
-    """*output* with the curation line appended after a blank line: what both session-start tiers print."""
-    try:
-        line = curation_line(payload)
-    except Exception:  # noqa: BLE001 — curation_line swallows already; this guards a replaced one
-        return output
+    """*output* with the curation line appended after a blank line: what both session-start tiers print.
+
+    The check runs under a deadline (:data:`DEADLINE_SECONDS`): past it the guidance is still returned and the
+    curation line is skipped."""
+    line = _bounded_line(payload)
     if not line:
         return output
     return f"{output}\n\n{line}" if output else line

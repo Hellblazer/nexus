@@ -422,11 +422,16 @@ def make_catalog_writer(
 #: nexus-u5m5g.7 (RDR-193 Step 6): ``reconcile_stage`` / ``reconcile_commit`` (the catalog reconcile the engine runs
 #: as a job) and ``resolve_or_register`` (one request in place of the lookup-then-register of the document indexers
 #: and the store hook) are engine-side set operations with no canonical ``Catalog`` counterpart.
+#:
+#: nexus-u5m5g.8 (RDR-193 Step 7): ``links_upsert_many`` and ``links_same_content`` are the index-time linking calls
+#: (a batch link upsert whose path endpoints the engine resolves, and the same-as linker). The per-link
+#: ``link_if_absent`` loop they replace is the canonical shape, and neither has a canonical counterpart.
 _SERVICE_ONLY_WRITE_OPS: frozenset[str] = frozenset({
     "update_many", "delete_many", "purge_trash",
     "delete_collection", "restore_document", "ghost_sweep",
     "set_collection_aspects_enabled", "repair_stale_note_uris",
     "reconcile_stage", "reconcile_commit", "resolve_or_register",
+    "links_upsert_many", "links_same_content",
 })
 
 

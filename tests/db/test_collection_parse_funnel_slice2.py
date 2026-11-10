@@ -202,7 +202,7 @@ class TestHttpVectorClientExpireCollectionFilter:
         monkeypatch.setattr(
             client,
             "list_collections",
-            lambda: [
+            lambda *a, **k: [
                 {"name": "code__myrepo", "count": 3, "content_type": "code"},
                 {"name": "docs__papers", "count": 5, "content_type": "docs"},
                 {"name": "knowledge__sec", "count": 2, "content_type": "knowledge"},

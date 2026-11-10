@@ -669,8 +669,10 @@ def _supersedes_neighbours(
     SUPERSEDES -- its predecessors, the targets of its outgoing
     ``supersedes`` edges -- resolved through the same canonical-tumbler
     chain the dependency generator used to create those edges
-    (:func:`nexus.catalog.link_generator.rdr_resolution` -- one listing, one
-    admission, one resolution; never a second copy here). One direction
+    (:func:`nexus.catalog.link_generator.rdr_resolution` -- two scoped reads
+    (the current owner's rdr and prose rows, the rows under the repo's
+    ``docs/rdr/``; RDR-193 Step 7), one admission, one resolution; never a
+    second copy here). One direction
     only (Sam's ruling 2026-09-02: successor -> predecessor): a successor's
     status changing leaves its predecessor's ``superseded`` verdict stale;
     a predecessor's own flip marks nobody. Returns
