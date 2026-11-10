@@ -138,7 +138,10 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
         # un-bootable service. Surface it as a hard error; re-run when online
         # (idempotent — PG provisioning is skipped on the retry).
         _log.warning("service_bge_provision_failed", error=str(exc))
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(
+            f"Could not download the service's bge-768 model: {exc}. Check the network connection; "
+            "the storage service cannot start without this file."
+        ) from exc
 
     _provision_service_crossencoder_step()
 
@@ -340,16 +343,21 @@ def _start_service_step(config_dir: Path):  # noqa: ANN201 — returns LeaseReco
     from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     click.echo("\nStarting the storage service …")
+    # F11 (nexus-f3yqd.6): name the log the cause is in; `nx daemon status` lists the rest.
+    log_hint = (
+        f"\n  Log: {config_dir / 'logs' / 'storage_service.log'} "
+        "(`nx daemon status` lists the engine and PostgreSQL logs too)"
+    )
     try:
         lease = ensure_storage_supervisor(config_dir)
     except StorageServiceStartError as exc:
         # StorageServiceStartError messages already carry a remedy (build/install
         # the artifact, re-run init, etc.); relay verbatim, fail fatal.
-        click.echo(f"\nStorage service failed to start: {exc}", err=True)
+        click.echo(f"\nStorage service failed to start: {exc}{log_hint}", err=True)
         raise SystemExit(1)
     except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
         _log.error("service_start_failed", error=str(exc))
-        click.echo(f"\nStorage service failed to start: {exc}", err=True)
+        click.echo(f"\nStorage service failed to start: {exc}{log_hint}", err=True)
         raise SystemExit(1)
 
     ep = lease.endpoint
@@ -648,7 +656,11 @@ def _acquire_pg_bundle_step(config_dir: Path) -> Path:
         # A verified download that fails to EXTRACT (disk full, permissions,
         # corrupt-on-disk) must not escape as a traceback (code-review High).
         _log.error("pg_bundle_extract_failed", tag=tag, error=str(exc))
-        click.echo(f"\nDownloaded PG bundle could not be extracted: {exc}", err=True)
+        click.echo(
+            f"\nDownloaded PG bundle could not be extracted: {exc}\n"
+            f"  Check free disk space and the permissions on {config_dir}.",
+            err=True,
+        )
         raise SystemExit(1)
     if bin_dir is None:  # defensive: archive just placed, selection must resolve
         click.echo(
@@ -707,7 +719,11 @@ def _provision_postgres_step() -> None:
         bundle_bin = _select_bundled_pg(config_dir)
     except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
         _log.error("pg_bundle_extract_failed", error=str(exc))
-        click.echo(f"\nBundled PostgreSQL extraction failed: {exc}", err=True)
+        click.echo(
+            f"\nBundled PostgreSQL extraction failed: {exc}\n"
+            f"  Check free disk space and the permissions on {config_dir}.",
+            err=True,
+        )
         raise SystemExit(1)
 
     if bundle_bin is not None:
@@ -726,7 +742,7 @@ def _provision_postgres_step() -> None:
         raise SystemExit(1)
     except Exception as exc:  # noqa: BLE001 — user-facing
         _log.error("pg_provision_failed", error=str(exc))
-        click.echo(f"\nPostgres provisioning failed: {exc}", err=True)
+        click.echo(f"\nPostgres provisioning failed: {exc}\n  Log: {config_dir / 'postgres' / 'pg.log'}", err=True)
         raise SystemExit(1)
 
     if result.already_provisioned:

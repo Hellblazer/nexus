@@ -1,0 +1,3 @@
+### Fixed
+
+- **`nx init` failures say what to fix and where the log is** (nexus-f3yqd.6, F11). Five failures printed only the exception text. A failed download of the service's embedding model now says to check the network connection. A storage service that fails to start names `logs/storage_service.log` (and `nx daemon status` for the engine and PostgreSQL logs). A PostgreSQL bundle that cannot be extracted says to check free disk space and the permissions on the config directory. Failed PostgreSQL provisioning names `postgres/pg.log`. `nx init` still prints its "Re-run `nx init`" line under the failed step.
