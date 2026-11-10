@@ -305,6 +305,17 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
     "scripts/bundle_sandbox_probe.py": (
         1, "READ-ONLY: operator_extract/operator_summarize only (lines 98-113).",
     ),
+    "scripts/measure_search_per_collection.py": (
+        2, "READ-ONLY: both hits name nexus.mcp.core for the MCP tool's per_collection_k_cap constant "
+           "(a docstring line and the comment on the lazy import); the script only searches and lists "
+           "collections, writes nothing, and runs on the live cloud only in an announced window "
+           "(nexus-tu8wp.3).",
+    ),
+    "scripts/search_page_parity.py": (
+        2, "READ-ONLY: lazy imports of nexus.mcp.core's search signature (its default corpora, read by "
+           "inspect.signature, never called) and _MCP_PER_COLLECTION_K; no store_put, index or collection "
+           "write path (nexus-tu8wp.3).",
+    ),
     "scripts/spikes/bench_rdr089_sql_fast_path.py": (
         3, "READ-ONLY: operator_filter/operator_groupby/operator_aggregate imports.",
     ),
