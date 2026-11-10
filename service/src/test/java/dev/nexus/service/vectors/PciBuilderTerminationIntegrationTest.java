@@ -634,7 +634,9 @@ class PciBuilderTerminationIntegrationTest {
                     assertThat(logs).noneMatch(l -> l.contains("event=pci_builders_terminated"));
                     assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("count=1")
                         && l.contains("retrying=1"));
-                    assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept_despite")
+                    assertThat(logs).as("the keep line is one event, the excluded changeset another")
+                        .filteredOn(l -> l.contains("event=pci_builders_kept")).hasSize(1);
+                    assertThat(logs).anyMatch(l -> l.contains("event=pci_build_kept_for_retrying")
                         && l.contains("aspects-005-retire-aspect-queue-table.xml::aspects-005-2")
                         && l.contains("reason=self_retrying_precondition"));
                     assertThat(changesetRecorded(RETIRE_CHANGESET)).as("still unrecorded: it retries").isFalse();
@@ -645,6 +647,55 @@ class PciBuilderTerminationIntegrationTest {
                     writer.close();
                     assertThat(build.get(60, TimeUnit.SECONDS)).isEqualTo(DdlOutcome.DONE);
                     assertThat(indexValid(index)).as("the build ran to its end").isTrue();
+                }
+            } finally {
+                drainAndRetireTheStagedQueue(migrationDs);
+            }
+        }
+    }
+
+    /**
+     * The transition boot (nexus-f3yqd.3, critic S1): the queue has drained since the last boot, so aspects-005-2's
+     * precondition passes and its body runs ({@code DROP TABLE nexus.aspect_extraction_queue}, ACCESS EXCLUSIVE on the
+     * queue and, for its two foreign keys, on catalog_documents and catalog_collections) while a build is held mid
+     * {@code CREATE INDEX CONCURRENTLY}. The changeset was pending when the walk started, so the build is kept; the
+     * walk must not queue behind it and the build must not queue behind the walk. A lock cycle ends this test by its
+     * timeouts (the walk's 120 s bound, then the class's per-test one) instead of hanging the fork.
+     */
+    @Test
+    @Timeout(value = 240, unit = TimeUnit.SECONDS)
+    void migrate_whenTheSelfRetryingChangesetRunsItsBody_keepsTheBuilder_andTheBuildEnds() throws Exception {
+        String nonce = "c0ffee06";
+        String builderName = PciBuilderSession.builderApplicationName(nonce);
+        String coll = "code__pcitrm-retrydrop__voyage-code-3__v1";
+        String index = PciCatalog.indexName(M1024, T1, coll);
+        PciCatalog.Leaf leaf = leaf();
+
+        try (HikariDataSource migrationDs = migrationPool()) {
+            try {
+                stageRetireChangesetPending();
+                // The drain: the queue is empty now, so the precondition passes and the body drops the table.
+                asSuperuser(pg, ctx -> ctx.deleteFrom(QUEUE_TABLE).execute());
+                try (PciBuilderSession.Pass pass = builderSession(nonce).open();
+                     LeafWriter writer = new LeafWriter(leaf)) {
+                    var build = startHeldBuild(pass, leaf, coll);
+
+                    List<String> logs = captureLogs(SchemaMigrator.class, () -> migrateWithin(migrationDs, 120));
+
+                    assertThat(logs).noneMatch(l -> l.contains("event=pci_builders_terminated"));
+                    assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("count=1")
+                        && l.contains("retrying=1"));
+                    assertThat(changesetRecorded(RETIRE_CHANGESET)).as("the body ran and %s is recorded", RETIRE_CHANGESET)
+                        .isTrue();
+                    boolean tableLeft = asSuperuser(pg, ctx -> PgCatalogProbes.tableExists(ctx, "nexus", "aspect_extraction_queue"));
+                    assertThat(tableLeft).as("the retired table is gone").isFalse();
+                    assertThat(backendsNamed(builderName)).as("the builder's backend is still there").isEqualTo(1);
+                    assertThat(holdersOf(PciBuilderSession.PCI_BUILDER_ADVISORY_LOCK_KEY)).isEqualTo(1);
+                    assertThat(build.isDone()).as("and still building").isFalse();
+
+                    writer.close();
+                    assertThat(build.get(60, TimeUnit.SECONDS)).isEqualTo(DdlOutcome.DONE);
+                    assertThat(indexValid(index)).as("the build ran to its end, a valid index").isTrue();
                 }
             } finally {
                 drainAndRetireTheStagedQueue(migrationDs);

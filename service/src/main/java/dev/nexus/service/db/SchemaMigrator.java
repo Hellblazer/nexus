@@ -909,7 +909,7 @@ public final class SchemaMigrator {
                 .fetchOne(0, Integer.class);
             log.info("event=pci_builders_kept count={} reason=only_run_always_pending retrying={}", count, retrying.size());
             for (ChangeSet cs : retrying) {
-                log.info("event=pci_builders_kept_despite id={} reason=self_retrying_precondition",
+                log.info("event=pci_build_kept_for_retrying id={} reason=self_retrying_precondition",
                     RetryingChangesets.describe(cs));
             }
         } catch (DataAccessException e) {

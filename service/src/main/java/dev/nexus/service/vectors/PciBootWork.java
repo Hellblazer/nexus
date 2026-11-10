@@ -56,7 +56,7 @@ final class PciBootWork {
      * builder's backend alone, so an engine-only stop leaves the {@code CREATE INDEX CONCURRENTLY} running in Postgres;
      * its session keeps the builder lock, the next engine reports standby until the build ends, and then finds the
      * valid index and adopts it. Two things end the build: stopping Postgres itself, and a restart whose migration
-     * has work to do (a non-runAlways changeset pending, or a partition-access drift to repair), because
+     * has work to do (a pending changeset that is neither runAlways nor self-retrying, or a partition-access drift to repair), because
      * {@code SchemaMigrator.terminatePciBuilders} ends every builder backend at boot in those cases. Either way the
      * half-built index is left INVALID, and a later pass drops it and rebuilds it from the start in the same pass.
      * Pinned by {@code PciEngineRestartKeepsBuildIntegrationTest} (an engine restart that applies no schema change
