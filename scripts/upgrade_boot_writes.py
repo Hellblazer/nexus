@@ -647,6 +647,7 @@ class Report:
     new_jar_sha256: str | None = None
     new_jar_commit: str | None = None
     new_engine_version: dict = field(default_factory=dict)
+    new_jar_identity: dict = field(default_factory=dict)
     boot_wal_bytes: int = 0
     reboot_wal_bytes: int = 0
     ceilings_tripped: list[str] = field(default_factory=list)
@@ -1109,6 +1110,25 @@ def commit_matches(expected: str, built: str | None) -> bool:
     return n >= 7 and expected[:n].lower() == built[:n].lower()
 
 
+def service_tree(commit: str) -> str | None:
+    """The git tree id of service/ at ``commit`` (the engine's whole source), or None when git cannot say."""
+    r = subprocess.run(["git", "-C", str(REPO), "rev-parse", f"{commit}:service"], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def jar_identity_verdict(expected: str, built: str | None, tree_of) -> dict:
+    """Whether the jar under test is the engine of ``expected``: built from it, or from a commit whose service/ tree
+    is the same (scripts/build-gate-jar.sh reuses a cached jar while service/ is unchanged, so its stamp can name an
+    earlier commit with identical engine sources)."""
+    if commit_matches(expected, built):
+        return {"ok": True, "how": "same commit", "expected": expected, "built": built}
+    if built:
+        want, have = tree_of(expected), tree_of(built)
+        if want and want == have:
+            return {"ok": True, "how": "same service/ tree", "expected": expected, "built": built, "service_tree": want}
+    return {"ok": False, "how": "different engine", "expected": expected, "built": built}
+
+
 def boot_wal_bytes(boot: dict) -> int:
     """WAL a boot wrote before it was ready: migrate + ready (PG up to /health 200). A failed boot's figure is
     its span up to the failure, or 0 when PG never answered (no sample); a failed boot is boot-failed whatever
@@ -1155,7 +1175,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--new-jar", type=Path, default=None, help="engine jar to upgrade to (default service/target)")
     ap.add_argument("--new-jar-commit", default=None,
                     help="commit the jar must have been built from: checked against the build_ref the booted engine "
-                         "serves on /version (stamped by scripts/build-gate-jar.sh); a mismatch or no stamp is exit 2")
+                         "serves on /version (stamped by scripts/build-gate-jar.sh), or a commit with the same service/ tree (a cached gate "
+                         "jar); a different engine or no stamp is exit 2")
     ap.add_argument("--collections", type=int, default=3, help="large collections, each above the PCI threshold")
     ap.add_argument("--rows", type=int, default=27_000, help="rows in each large collection")
     ap.add_argument("--control-rows", type=int, default=5_000, help="rows in the control (must stay under the threshold)")
@@ -1234,11 +1255,13 @@ def main(argv: list[str] | None = None) -> int:
         boot_new(inst, a, env, rep)
         rep.new_engine_version = rep.boots[0].get("engine_version") or {}
         rep.new_jar_commit = build_commit(rep.new_engine_version.get("build_ref"))
-        if a.new_jar_commit and rep.boots[0].get("reached_ready") and not commit_matches(a.new_jar_commit,
-                                                                                         rep.new_jar_commit):
-            raise HarnessError(f"the engine under test reports build_ref {rep.new_engine_version.get('build_ref')!r}, "
-                               f"not commit {a.new_jar_commit}: build the jar on that tree with "
-                               f"scripts/build-gate-jar.sh")
+        if a.new_jar_commit and rep.boots[0].get("reached_ready"):
+            rep.new_jar_identity = jar_identity_verdict(a.new_jar_commit, rep.new_jar_commit, service_tree)
+            if not rep.new_jar_identity["ok"]:
+                raise HarnessError(f"the engine under test reports build_ref "
+                                   f"{rep.new_engine_version.get('build_ref')!r}, not commit {a.new_jar_commit} or "
+                                   f"one with the same service/ tree: build the jar on that tree with "
+                                   f"scripts/build-gate-jar.sh")
         if a.restart_mid_queue and rep.boots[0].get("reached_ready") and "restarted_mid_queue_s" not in rep.boots[0]:
             raise HarnessError(f"--restart-mid-queue {a.restart_mid_queue} never fired: the upgrade boot showed "
                                f"fewer than {a.restart_mid_queue} pci_ builds, so the restart leg tested nothing")

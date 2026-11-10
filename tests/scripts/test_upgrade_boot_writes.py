@@ -302,3 +302,15 @@ def test_the_build_commit_comes_from_the_gate_jar_stamp() -> None:
     assert not _mod.commit_matches("0c6f9e1c5105ea39105b0b2b3febdf44099734a5", "e90c46349")
     assert not _mod.commit_matches("0c6f9e1c5", None)       # an unstamped jar cannot match
     assert not _mod.commit_matches("0c6f", "0c6f9e1c5")    # too short to mean anything
+
+
+def test_a_cached_gate_jar_with_the_same_engine_tree_is_accepted() -> None:
+    # The 7.72.1 red control (2026-11-10): build-gate-jar.sh reused a jar stamped at an earlier commit whose service/
+    # tree was identical; the engine under test was the right one.
+    trees = {"aaaaaaa1": "t1", "bbbbbbb2": "t1", "ccccccc3": "t2"}
+    tree = trees.get
+    assert _mod.jar_identity_verdict("aaaaaaa1", "aaaaaaa1", tree)["how"] == "same commit"
+    same = _mod.jar_identity_verdict("bbbbbbb2", "aaaaaaa1", tree)
+    assert same["ok"] and same["how"] == "same service/ tree"
+    assert not _mod.jar_identity_verdict("ccccccc3", "aaaaaaa1", tree)["ok"]     # a different engine
+    assert not _mod.jar_identity_verdict("ccccccc3", None, tree)["ok"]           # no stamp
