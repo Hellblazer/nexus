@@ -252,7 +252,7 @@ def test_the_section_label_rung_counts_its_reads_too() -> None:
 
     world = World()
     _mixed(world)
-    rung = world.rung()
+    rung = world.rung(doc_batch=1)  # two batches over one collection: one lookup only with the scan's memo
     rung.converge(Report())
     c = rung._partial
-    assert c.collection_lookups == 1 and c.chunk_gets >= 1 and c.owner_reads >= 2, (c.collection_lookups, c.chunk_gets, c.owner_reads)
+    assert c.collection_lookups == 1 and c.chunk_gets >= 2 and c.owner_reads >= 2, (c.collection_lookups, c.chunk_gets, c.owner_reads)
