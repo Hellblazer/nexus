@@ -833,10 +833,16 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     logs_dir = config_dir / "logs"
     supervisor_log = logs_dir / "storage_service.log"
     deadline = time.monotonic() + 60.0
+    # nexus-mjmjl: a first boot after an upgrade can migrate for 20 minutes
+    # with nothing answering; say so while waiting, on stderr.
+    from nexus.progress.boot_work import Announcer, local_entries  # noqa: PLC0415 — stdlib-only, deferred
+
+    announcer = Announcer(lambda line: click.echo(line, err=True), lambda: local_entries(config_dir))
     while time.monotonic() < deadline:
         existing = _service_endpoint.discover_storage_service_lease(registry, scope)
         if existing is not None:
             return existing
+        announcer.poll()
         # nexus-qk6p6: a supervisor that has exited will never publish. An
         # engine that refuses to start takes it down within a second, and
         # polling for a lease alone waited out the full minute before saying
@@ -870,6 +876,13 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     engine_logs = [path for path in engine_marks if path.exists()] or [
         next(iter(engine_marks))
     ]
+    if local_entries(config_dir):
+        raise StorageServiceStartError(
+            "The storage service is still migrating its database after 60s; the migration keeps going "
+            "in the background. Run this command again once it finishes (`nx doctor` says whether it "
+            f"is still running). Progress is in {supervisor_log}.",
+            still_starting=True,
+        )
     raise StorageServiceStartError(
         "Storage service supervisor did not become ready within 60s. "
         f"Check {supervisor_log} (supervisor) and "

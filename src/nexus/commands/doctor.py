@@ -2989,6 +2989,20 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> b
     return gating_failed
 
 
+def _say_if_the_engine_is_migrating() -> None:
+    """nexus-mjmjl: a check that needs the engine waits while it migrates; say
+    so first, on stderr so ``--json`` stays clean. Never raises."""
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+        from nexus.progress.boot_work import notice  # noqa: PLC0415 — stdlib-only, deferred as above
+
+        lines = notice(nexus_config_dir())
+    except Exception:  # noqa: BLE001 — advisory: a doctor run never fails on it
+        return
+    for line in lines:
+        click.echo(line, err=True)
+
+
 @click.command("doctor", epilog=COLLECTIONS_RULES_EPILOG)
 @click.option(
     "--clean-checkpoints",
@@ -3491,6 +3505,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                expect_host: str | None,
                git_hooks_scope: str | None) -> None:
     """Verify that all required services and credentials are available."""
+    _say_if_the_engine_is_migrating()
     if json_out:
         # nexus-0vycz: --json is honored by the main sweep (no mode flag)
         # plus --check-search / --check-quotas / --check-mcp-logs. Every

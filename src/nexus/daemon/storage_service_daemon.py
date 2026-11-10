@@ -2371,8 +2371,15 @@ class StorageServiceSupervisor:
         log_reader = self._build_log_tailer()
         last_progress_log_at = 0.0
 
+        from nexus.daemon import migration_status  # noqa: PLC0415 — stdlib-only, deferred like the module's other helpers
+
+        # nexus-mjmjl: every other command reads this record and says a
+        # migration is running instead of sitting silent.
+        recorder = migration_status.Recorder(self._config_dir)
+
         def on_tick(result: readiness.TickResult) -> None:
             nonlocal last_progress_log_at
+            recorder.tick(migrating=result.migration_active, changeset=result.changeset, pending=result.pending)
             if result.migration_active:
                 now = time.monotonic()
                 if now - last_progress_log_at >= _MIGRATION_PROGRESS_LOG_INTERVAL:
@@ -2399,13 +2406,16 @@ class StorageServiceSupervisor:
         )
 
         try:
-            monitor.wait_ready(
-                poll_interval=_READY_POLL_INTERVAL,
-                on_tick=on_tick,
-                stop_check=(
-                    stop_requested.is_set if stop_requested is not None else None
-                ),
-            )
+            try:
+                monitor.wait_ready(
+                    poll_interval=_READY_POLL_INTERVAL,
+                    on_tick=on_tick,
+                    stop_check=(
+                        stop_requested.is_set if stop_requested is not None else None
+                    ),
+                )
+            finally:
+                recorder.close()
         except readiness.ReadinessStopRequestedError:
             # nexus-cd1k0.19: a SIGTERM/SIGINT arrived while still waiting
             # for readiness (a real migration can leave /health unreachable

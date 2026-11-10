@@ -412,6 +412,10 @@ def _poll_service_lease(config_dir: Path, *, timeout: float = 60.0):  # noqa: AN
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = service_identity()
     deadline = time.monotonic() + timeout
+    # nexus-mjmjl: say so while the engine migrates instead of waiting silent.
+    from nexus.progress.boot_work import Announcer, local_entries  # noqa: PLC0415 — stdlib-only, deferred
+
+    announcer = Announcer(lambda line: click.echo(line, err=True), lambda: local_entries(config_dir))
     while time.monotonic() < deadline:
         # nexus-jw44t: route through the shared discover-and-mark seam — this
         # is the default `nx init --service --yes` autostart path on any host
@@ -420,6 +424,7 @@ def _poll_service_lease(config_dir: Path, *, timeout: float = 60.0):  # noqa: AN
         rec = _service_endpoint.discover_storage_service_lease(registry, scope)
         if rec is not None:
             return rec
+        announcer.poll()
         time.sleep(0.5)
     return None
 

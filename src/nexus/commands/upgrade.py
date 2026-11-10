@@ -48,6 +48,7 @@ def upgrade(
     a consent channel, making the cost gate actually fire (nexus-k1m2f) traded a
     silent bill for a silent hang on a `click.confirm` no hook can answer.
     """
+    _say_if_the_engine_is_migrating(auto_mode=auto_mode)
     # NO pre-migration daemon quiesce: RDR-128 P2 stopped the T2 daemon here so
     # it released its serving connections before the migration DDL ran. The
     # daemon is retired (nexus-i711w Stage 2 sub-stage B), so there are no
@@ -190,6 +191,23 @@ def upgrade(
         # graceful cycle on a stale one. Best-effort, non-dry-run only.
         if not dry_run:
             _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
+
+
+def _say_if_the_engine_is_migrating(*, auto_mode: bool) -> None:
+    """nexus-mjmjl: the steps below wait on the engine while it migrates; say
+    so first (to the log under ``--auto``, whose stdout stays quiet). Never raises."""
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+        from nexus.progress.boot_work import notice  # noqa: PLC0415 — stdlib-only, deferred as above
+
+        lines = notice(nexus_config_dir())
+    except Exception:  # noqa: BLE001 — advisory: the upgrade never fails on it
+        return
+    for line in lines:
+        if auto_mode:
+            _log.info("upgrade_engine_migrating", line=line)
+        else:
+            click.echo(line)
 
 
 def _auto_deadline() -> "Deadline":  # noqa: F821 — lazy import (module keeps cold-start cheap)

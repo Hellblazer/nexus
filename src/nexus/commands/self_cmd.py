@@ -1464,22 +1464,42 @@ def _run_build(argv: list[str], *, progress: bool) -> "subprocess.CompletedProce
         env=_script_env(),
     )
     captured: list[str] = []
+    # nexus-mjmjl: uv names large packages as they download but prints no
+    # totals, rate or time left when piped; the tally adds them, and says the
+    # build is still running while uv prints nothing.
+    from nexus.progress.download_meter import UvBuildTally  # noqa: PLC0415 — stdlib-only, deferred
+
+    tally = UvBuildTally()
+    stop = threading.Event()
 
     def _pump() -> None:
         assert proc.stderr is not None
         for chunk in iter(lambda: proc.stderr.readline(), ""):
             captured.append(chunk)
+            tally.feed(chunk)
             try:
                 sys.stderr.write(chunk)
                 sys.stderr.flush()
             except (OSError, ValueError, AttributeError):
                 pass  # a dead stderr must not stop this drain: uv would block on a full pipe
 
+    def _ticker() -> None:
+        while not stop.wait(1.0):
+            tally.tick()
+
     pump = threading.Thread(target=_pump, daemon=True)
+    ticker = threading.Thread(target=_ticker, daemon=True)
     pump.start()
-    out = proc.stdout.read() if proc.stdout is not None else ""
-    proc.wait()
-    pump.join(timeout=5)
+    ticker.start()
+    try:
+        out = proc.stdout.read() if proc.stdout is not None else ""
+        proc.wait()
+        pump.join(timeout=5)
+    finally:
+        stop.set()
+        ticker.join(timeout=2)
+    if proc.returncode == 0:
+        tally.finish()
     return subprocess.CompletedProcess(argv, proc.returncode, out, "".join(captured))
 
 
@@ -2296,17 +2316,17 @@ def prune_uv_cache() -> str:
     ever removed them (82 GB measured on a box that had been upgrading for
     months). Best-effort and never raises; returns one line for the
     operator. ``uv`` is looked up on PATH exactly as the generation build
-    does."""
+    does. When another uv process holds the cache the prune moves to the
+    background instead of waiting (nexus-mjmjl, :mod:`nexus.progress.uv_cache_prune`)."""
+    from nexus.progress import uv_cache_prune  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+
     try:
-        r = run_bounded(  # noqa: S603 — fixed argv
-            ["uv", "cache", "prune"], timeout=600,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, as above
+
+        config_dir = nexus_config_dir()
+    except Exception as exc:  # noqa: BLE001 — never raises: this is cleanup after a finished install
         return f"uv cache prune skipped: {exc}"
-    if r.returncode != 0:
-        return f"uv cache prune failed (rc={r.returncode}): {r.stderr.strip()[:200]}"
-    tail = (r.stderr.strip() or r.stdout.strip()).splitlines()
-    return "uv cache prune: " + (tail[-1] if tail else "done")
+    return uv_cache_prune.prune(run=run_bounded, spawn=uv_cache_prune.spawn_detached, config_dir=config_dir)
 
 
 @click.group("self")
@@ -2356,6 +2376,10 @@ def install_cmd(
         _record_lockstep_after_bootstrap()
         click.echo("a fresh install is set up by `nx init`")
         return
+    # nexus-mjmjl: the prune is cleanup after a finished install; say so before
+    # it runs, since it can wait on another uv process (then it moves to the
+    # background rather than block).
+    click.echo(f"pruning uv's package cache (cleanup only; {generation.name} is already in use) ...")
     click.echo(prune_uv_cache())
     click.echo(
         "if this upgraded an existing install, run `nx upgrade` for migrations "
@@ -2386,4 +2410,5 @@ def gc_cmd(keep: int, dry_run: bool, prune_cache: bool) -> None:
     if not lines:
         click.echo("nothing to reap")
     if prune_cache and not dry_run:
+        click.echo("pruning uv's package cache ...")
         click.echo(prune_uv_cache())
