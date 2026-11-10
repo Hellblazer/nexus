@@ -64,6 +64,10 @@ def _server() -> MCPServer:
     def marked(value: str = "") -> str:
         return fail(f"Error: no such thing {value}")
 
+    @server.tool(description="fails only for 'bad'")
+    def flaky(value: str = "") -> str:
+        return fail("Error: bad value") if value == "bad" else "fine"
+
     @server.tool(description="raises ToolError")
     def raises(value: str = "") -> str:
         raise ToolError(f"refused {value}")
@@ -120,19 +124,46 @@ def test_the_next_call_after_an_error_is_logged_once_with_same_tool_and_seconds(
     errors = _of(logs, "mcp_tool_error")
     assert [(e["streak"], e["calls"], e["superseded"]) for e in errors] == [(1, 1, False), (2, 2, False), (3, 3, False)]
     assert {e["schema"] for e in errors + after} == {_tool_call_log.FAILURE_SCHEMA}
-    assert _SECRET not in repr(after) and "'a'" not in repr(after), "same_args is a bool; arguments never logged"
+    assert "'a'" not in repr(after) and "'b'" not in repr(after), "same_args is a bool; arguments never logged"
 
 
-def test_a_success_resets_the_streak(now: list[float]) -> None:
+def test_a_success_of_the_same_tool_resets_its_streak_and_another_tools_does_not(now: list[float]) -> None:
     server = _server()
     with capture_logs() as logs:
-        call_tool(server, "marked")
-        call_tool(server, "marked")
-        call_tool(server, "ok")  # ok's success does not touch marked's streak
-        call_tool(server, "crashes")
-    assert [(e["tool"], e["streak"]) for e in _of(logs, "mcp_tool_error")] == [
-        ("marked", 1), ("marked", 2), ("crashes", 1),
-    ]
+        call_tool(server, "flaky", {"value": "bad"})
+        call_tool(server, "flaky", {"value": "bad"})
+        call_tool(server, "ok")  # another tool's success: flaky's streak stays
+        call_tool(server, "flaky", {"value": "bad"})
+        call_tool(server, "flaky", {"value": "good"})  # flaky succeeds: its streak resets
+        call_tool(server, "flaky", {"value": "bad"})
+    assert [e["streak"] for e in _of(logs, "mcp_tool_error")] == [1, 2, 3, 1]
+
+
+def test_the_streak_table_is_bounded(now: list[float]) -> None:
+    with capture_logs() as logs:
+        for i in range(_tool_call_log._MAX_KEYSETS + 5):
+            _tool_call_log._note_outcome({"name": f"t{i}", "arguments": {}}, True)
+            _tool_call_log._note_outcome({"name": f"t{i}", "arguments": {}}, True)
+    assert len(_tool_call_log._streaks) == _tool_call_log._MAX_KEYSETS
+    streaks = [e["streak"] for e in _of(logs, "mcp_tool_error")]
+    assert streaks[-2:] == [1, 1], "a name past the bound is not tracked: it logs streak=1 every time"
+
+
+def test_omitted_arguments_equal_empty_ones_and_an_undigestable_argument_loses_no_line(
+    now: list[float], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with capture_logs() as logs:
+        _tool_call_log._note_outcome({"name": "a"}, True)
+        _tool_call_log._note_next_call({"name": "a", "arguments": {}})
+
+        def _broken(_p):
+            raise RuntimeError("cannot digest")
+
+        monkeypatch.setattr(_tool_call_log, "_args_digest", _broken)
+        _tool_call_log._note_outcome({"name": "a", "arguments": {}}, True)
+        _tool_call_log._note_next_call({"name": "a", "arguments": {}})
+    assert len(_of(logs, "mcp_tool_error")) == 2
+    assert [a["same_args"] for a in _of(logs, "mcp_tool_after_error")] == [True, False]
 
 
 def test_a_failure_while_another_is_pending_says_superseded(now: list[float]) -> None:

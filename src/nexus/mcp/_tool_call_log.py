@@ -39,8 +39,8 @@ line per call, so it cannot say how often an agent retries after an error. Two
 more INFO events can: ``mcp_tool_error`` for every ``tools/call`` whose result
 is ``isError`` or that raised (a marked failure, a ``ToolError``, a crash, an
 unknown tool), with ``streak`` (consecutive failures of that tool), ``calls``
-(the process's tools/call count so far) and ``superseded`` (it replaced a
-failure no call had followed yet); and ``mcp_tool_after_error`` for the next
+(the process's tools/call count so far) and ``superseded`` (it replaced an
+older failure no call had followed yet; the older one's follow-up is lost); and ``mcp_tool_after_error`` for the next
 call that process makes, with ``failed_tool``, ``same_tool``, ``same_args``
 (compared through a per-process keyed digest held in memory, never logged) and
 ``seconds`` since the failure. Both carry ``schema``. A blind retry is
@@ -94,8 +94,11 @@ FAILURE_SCHEMA = 1
 #: agent did after it (nexus-3ceda.7). One slot: a failure while another is
 #: still pending replaces it, and its error line says ``superseded=True``. Same
 #: single-thread reasoning as ``_seen_keysets``.
-_last_failure: tuple[str | None, float, bytes] | None = None
-#: Consecutive failures per tool in this process, bounded like ``_seen_keysets``.
+_last_failure: tuple[str | None, float, bytes | None] | None = None
+#: Failures of each tool since that tool last succeeded in this process (other
+#: tools' calls do not reset it, and there is no time bound). Bounded like
+#: ``_seen_keysets``: past 64 distinct failing names a new name always logs
+#: ``streak=1``, so ``streak=1`` is not proof of a first failure.
 _streaks: dict[str, int] = {}
 #: ``tools/call`` requests this process has seen, for errors per call.
 _calls = 0
@@ -165,11 +168,22 @@ def _tool_name(params: Any) -> str | None:
 def _args_digest(params: Any) -> bytes:
     """A keyed digest of the call's arguments, compared in memory and never logged."""
     args = params.get("arguments") if isinstance(params, Mapping) else None
+    if args is None:
+        args = {}  # an omitted arguments object is the empty one
     try:
         text = json.dumps(args, sort_keys=True, default=repr)
     except (TypeError, ValueError):
         text = repr(args)
     return hashlib.blake2b(text.encode("utf-8", "replace"), key=_ARGS_KEY, digest_size=16).digest()
+
+
+def _same_args(params: Any, failed_args: bytes | None) -> bool:
+    if failed_args is None:
+        return False
+    try:
+        return _args_digest(params) == failed_args
+    except Exception:  # noqa: BLE001 — an undigestable argument reads as "not the same", never a lost line
+        return False
 
 
 def _note_next_call(params: Any) -> None:
@@ -187,7 +201,7 @@ def _note_next_call(params: Any) -> None:
     same_tool = tool is not None and tool == failed_tool
     structlog.get_logger(__name__).info(
         "mcp_tool_after_error", tool=tool, failed_tool=failed_tool, same_tool=same_tool,
-        same_args=same_tool and _args_digest(params) == failed_args,
+        same_args=same_tool and _same_args(params, failed_args),
         seconds=round(_clock() - at, 1), schema=FAILURE_SCHEMA, pid=os.getpid(),
     )
 
@@ -211,7 +225,11 @@ def _note_outcome(params: Any, failed: bool) -> None:
     if tool is not None and (tool in _streaks or len(_streaks) < _MAX_KEYSETS):
         _streaks[tool] = streak
     superseded = _last_failure is not None
-    _last_failure = (tool, _clock(), _args_digest(params))
+    try:
+        digest: bytes | None = _args_digest(params)
+    except Exception:  # noqa: BLE001 — an undigestable argument must not cost the error line
+        digest = None
+    _last_failure = (tool, _clock(), digest)
     structlog.get_logger(__name__).info(
         "mcp_tool_error", tool=tool, streak=streak, calls=_calls, superseded=superseded,
         schema=FAILURE_SCHEMA, pid=os.getpid(),
