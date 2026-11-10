@@ -64,6 +64,8 @@ from typing import Any
 
 import structlog
 
+from nexus.clock import SYSTEM, Clock
+from nexus.clock import wait as clock_wait
 from nexus.db.t2.http_tuple_store import SchemaViolationError
 from nexus.tuple_templates import resolve_tuple_template
 
@@ -301,6 +303,7 @@ def _lease_loop(
     *,
     immediate: bool = False,
     retarget: Callable[[threading.Event, str | None, _DirectoryLease | None], tuple[str | None, _DirectoryLease | None]] | None = None,
+    clock: Clock = SYSTEM,
 ) -> None:
     """Background re-send loop for one leased name's directory
     lease. *store_factory* is called on every tick (never held across
@@ -320,10 +323,13 @@ def _lease_loop(
     :data:`NAME_RESOLVE_INTERVAL_S` and returns the (name, lease) to use
     from then on; it is how a rename, or a name the startup read missed,
     reaches this thread without a second one. *name* and *lease* are None
-    while no name has been found yet: the loop then only retargets."""
+    while no name has been found yet: the loop then only retargets.
+
+    *clock* times the polls and the resolve interval (:mod:`nexus.clock`): a
+    test passes a virtual clock and drives the rounds instead of sleeping."""
     wait_s = 0.0 if immediate else poll_s
-    next_resolve = time.monotonic() + NAME_RESOLVE_INTERVAL_S
-    while not stop.wait(wait_s):
+    next_resolve = clock() + NAME_RESOLVE_INTERVAL_S
+    while not clock_wait(clock, stop, wait_s):
         wait_s = poll_s
         if name is not None and lease is not None:
             try:
@@ -334,8 +340,8 @@ def _lease_loop(
                     )
             except Exception as e:  # noqa: BLE001 — background thread boundary; must never die silently OR crash the process
                 _log.warning("subscriptions_lease_tick_failed", name=name, error=str(e))
-        if retarget is not None and time.monotonic() >= next_resolve:
-            next_resolve = time.monotonic() + NAME_RESOLVE_INTERVAL_S
+        if retarget is not None and clock() >= next_resolve:
+            next_resolve = clock() + NAME_RESOLVE_INTERVAL_S
             try:
                 name, lease = retarget(stop, name, lease)
             except Exception as e:  # noqa: BLE001 — background thread boundary, as above
@@ -417,6 +423,8 @@ class SubscriptionSet:
     _name_resolver: Callable[[], str | None] | None = field(default=None, repr=False, compare=False)
     #: Guards the lease fields the lease thread swaps on a rename.
     _lease_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    #: Times the lease thread's polls and resolve interval (nexus-3ceda.11).
+    clock: Clock = field(default=SYSTEM, repr=False, compare=False)
 
     @property
     def session_mailbox(self) -> str:
@@ -701,7 +709,10 @@ class SubscriptionSet:
         thread = threading.Thread(
             target=_lease_loop,
             args=(stop, store_factory, name, self.session_id, lease, ttl_s, heartbeat_s, poll_s),
-            kwargs={"immediate": first_send_in_thread, "retarget": _retarget if resolve is not None else None},
+            kwargs={
+                "immediate": first_send_in_thread, "retarget": _retarget if resolve is not None else None,
+                "clock": self.clock,
+            },
             name=f"rdr211-directory-lease-{name or 'pending'}",
             daemon=True,
         )
