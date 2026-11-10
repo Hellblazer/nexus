@@ -163,7 +163,7 @@ engine restart during a background index build never throws the build away. Run
 the three legs of `scripts/upgrade_boot_writes.py` from INSIDE a clean worktree
 at the exact commit you will tag (`TAG_TREE`, as in Step 3g). Each leg builds the
 gate jar in that tree and the harness boots it (`--new-jar` left at its default,
-`service/target/nexus-service-*.jar` of the same tree), so the jar under test is
+the service jar the same tree just built), so the jar under test is
 the tag commit's. Run on chas, whose disk is real (the harness's work dir is
 under the copy, not tmpfs).
 
