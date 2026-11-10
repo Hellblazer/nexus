@@ -955,6 +955,7 @@ class ManifestSectionLabelsRung:
             counts = self._clean_scan.take() or self._dry_run(report=self._reporter)
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is unknown, and unknown is not reached
             if engine_unreachable(exc):
+                self._from_engine = from_engine  # the retried verify classifies as this one would have
                 raise  # the runner waits for a restarting engine and confirms again (nexus-f3yqd.5)
             self._verify_detail = f"could not read the catalog to confirm the fill: {exc}"
             return False
