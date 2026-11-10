@@ -7012,8 +7012,8 @@ def _batched_get_by_ids(
          batched.
 
     Uses ``get_or_create_collection`` rather than ``get_collection`` on
-    purpose: the latter does its own existence pre-check via a full
-    ``list_collections()`` round trip before returning the stub, which
+    purpose: the latter does its own existence pre-check via a
+    ``list_collections(routing=True)`` round trip before returning the stub, which
     would tax exactly the fan-out this fix removes (one extra call per
     candidate collection per hydration request). ``get_by_id``, the path
     this replaces on the happy path, never pre-checked existence either —
