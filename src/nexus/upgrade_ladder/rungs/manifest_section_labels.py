@@ -139,6 +139,8 @@ from nexus.upgrade_ladder.auto_guard import (
     unattended_verify_refusal,
 )
 from nexus.upgrade_ladder.engine_outage import engine_unreachable
+from nexus.upgrade_ladder.census_progress import NoteStore, T2NoteStore
+from nexus.upgrade_ladder.owed_restores import OwedRestores
 from nexus.upgrade_ladder.scan_reuse import ScanReuse
 from nexus.upgrade_ladder.unattended import is_cheap_detect
 from nexus.upgrade_ladder.census_progress import guarded
@@ -153,6 +155,9 @@ from nexus.upgrade_ladder.protocol import (
 from nexus.upgrade_ladder.registry import RUNG_MANIFEST_SECTION_LABELS
 
 _log = structlog.get_logger(__name__)
+
+#: The rung's default owed-restore record: a T2 note (a test passes its own, or None).
+_DEFAULT_OWED_STORE = object()
 
 RUNG_NAME = RUNG_MANIFEST_SECTION_LABELS
 
@@ -452,9 +457,15 @@ class ManifestSectionLabelsRung:
         max_rows: int = MAX_ROWS_PER_REQUEST,
         record_fn: Callable[[], CompletionRecord | None] = _default_record,
         managed_fn: Callable[[], bool] = managed_service,
+        owed_store: "NoteStore | None | object" = _DEFAULT_OWED_STORE,
         stale_zero_fn: Callable[[], bool] = _default_stale_zero,
     ) -> None:
         self._managed_fn = managed_fn
+        # nexus-f3yqd.5: the indexed_at write-backs owed, recorded before each write and kept across runs
+        self._owed = OwedRestores(
+            T2NoteStore(f"owed-restores-{RUNG_NAME}", tags="upgrade-ladder") if owed_store is _DEFAULT_OWED_STORE
+            else owed_store,  # type: ignore[arg-type]
+        )
         self._stale_zero_fn = stale_zero_fn
         self._reader_factory = reader_factory
         self._writer_factory = writer_factory
@@ -469,9 +480,6 @@ class ManifestSectionLabelsRung:
         self._verify_detail = ""
         self._record_detail = ""
         self._clean_scan: ScanReuse[Counts] = ScanReuse()  # converge's walk that found nothing to fill
-        #: tumbler -> the indexed_at to write back: a restore the engine refused (it died after the write)
-        #: and that a converge raising past it would otherwise forget; paid before the next scan
-        self._owed_restores: dict[str, str] = {}
         self._reporter: ProgressReporter | None = None  # converge's, so verify's walk reports too
         self._partial = Counts()
 
@@ -630,6 +638,7 @@ class ManifestSectionLabelsRung:
             for collection, per_doc in sorted(by_collection.items()):
                 for request in self._requests(sorted(per_doc.items())):
                     in_flight = [d for d, _rows in request]
+                    self._owed.owe({d: stamps.get(d, "") for d in in_flight})  # before the engine restamps them
                     result = writer.append_manifest_many(request, collection=collection)
                     in_flight = []
                     failed = {str(d) for d in (result or {}).get("failed_doc_ids") or []}
@@ -652,7 +661,7 @@ class ManifestSectionLabelsRung:
             # engine without the expected guard raises after that engine wrote the rows unguarded)
             before = len(counts.restore_failed_docs)
             self._restore_batch(writer, sorted(written | set(in_flight)), stamps, counts)
-            self._owe(sorted(written | set(in_flight)), counts.restore_failed_docs[before:], stamps)
+            self._owed.settle(sorted(written | set(in_flight)), counts.restore_failed_docs[before:])
 
     @classmethod
     def _restore_batch(cls, writer: Any, docs: list[str], stamps: dict[str, str], counts: Counts) -> None:
@@ -876,25 +885,6 @@ class ManifestSectionLabelsRung:
             ),
         )
 
-    def _owe(self, attempted: list[str], failed: list[str], stamps: dict[str, str]) -> None:
-        """Record the restores *failed* this write, and clear any *attempted* one that now went through."""
-        for doc_id in attempted:
-            self._owed_restores.pop(doc_id, None)
-        for doc_id in failed:
-            self._owed_restores[doc_id] = stamps.get(doc_id, "")
-
-    def _pay_owed_restores(self, writer: Any) -> list[str]:
-        """Write back the stamps a dead engine refused before this converge scans again (nexus-f3yqd.5): the
-        scan would otherwise read the engine's run-time stamp as the document's own, which switches off the
-        chunk-newer guard for its other rows. Returns the documents still unpaid."""
-        if not self._owed_restores:
-            return []
-        owed = dict(self._owed_restores)
-        tally = Counts()
-        self._restore_batch(writer, sorted(owed), owed, tally)  # type: ignore[arg-type]
-        self._owe(sorted(owed), tally.restore_failed_docs, owed)
-        return sorted(self._owed_restores)
-
     # ── converge ─────────────────────────────────────────────────────────────
 
     def converge(self, report: ProgressReporter) -> ConvergeResult:
@@ -917,13 +907,14 @@ class ManifestSectionLabelsRung:
         writer = self._writer_factory()
         t3 = self._t3_factory()
         try:
-            unpaid = self._pay_owed_restores(writer)
+            unpaid = self._owed.pay(writer)
             if unpaid:
                 return ConvergeResult(
                     ConvergeOutcome.DEFERRED,
                     detail=(
                         f"indexed_at could not yet be written back on {len(unpaid)} document(s) after an earlier "
-                        f"write ({', '.join(unpaid[:10])}); the step runs again on the next `nx upgrade`"
+                        f"write ({', '.join(unpaid[:10])}); the write-back is kept and tried again on the next "
+                        "`nx upgrade`, before the step reads the store"
                     ),
                 )
             try:
