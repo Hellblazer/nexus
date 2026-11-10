@@ -1130,6 +1130,36 @@ def test_a_stale_heartbeat_is_removed_and_the_run_resumes(box: Box) -> None:
     assert [a for a in box.argvs() if a[1:2] == ["init"]], "the run resumed"
 
 
+def test_a_failed_build_names_its_cause_and_says_read_the_log_before_retrying(box: Box) -> None:
+    """F3 (nexus-f3yqd.6): the failure carries the last error the build printed, and the next step reads the log
+    before it retries, so a retry is not advised blind."""
+    rule = box.uv_builds_nx(exit=2)
+    rule["out"] = "Resolved 214 packages\nerror: Failed to download `onnxruntime==1.24.2`: connection reset\n\n"
+    box.behave([rule])
+    box.start("cli-only")
+    failed = box.wait_terminal()
+    assert failed["failed_step"] == "build"
+    assert failed["message"].startswith("the build exited 2."), failed["message"]
+    assert "error: Failed to download `onnxruntime==1.24.2`: connection reset" in failed["message"], failed["message"]
+    assert failed["next"].startswith("Read the log for the cause"), failed["next"]
+    assert failed["next"].index("Read the log") < failed["next"].index("call setup again"), failed["next"]
+    assert "resumes at the build step" in failed["next"] and failed["log"] in failed["next"]
+
+
+def test_a_failed_init_without_an_error_word_names_its_last_line(box: Box) -> None:
+    box.behave([box.uv_builds_nx(), {"prog": "nx", "match": ["init"], "exit": 1, "out": "Provisioning\nboom\n"}])
+    box.start("local")
+    failed = box.wait_terminal()
+    assert failed["failed_step"] == "init"
+    assert failed["message"] == "nx init exited 1. The last line it printed: boom", failed["message"]
+
+
+def test_a_failure_with_no_output_keeps_the_bare_message(box: Box) -> None:
+    box.behave([box.uv_builds_nx(), {"prog": "nx", "match": ["init"], "exit": 1, "out": ""}])
+    box.start("local")
+    assert box.wait_terminal()["message"] == "nx init exited 1."
+
+
 def test_after_a_failure_the_next_run_resumes_at_the_failed_step(box: Box) -> None:
     box.behave([
         box.uv_builds_nx(),
