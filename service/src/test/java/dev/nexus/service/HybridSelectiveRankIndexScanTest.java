@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -133,7 +134,7 @@ class HybridSelectiveRankIndexScanTest {
         Table<?> rank = TEXT_GATED_SEARCH_BY_CHASH_1024.call(
             queryVector(), chashes, new String[] {COLL}, null, null, N, "voyage-context-3", TENANT, false);
         String plan = tenantScope.withTenant(TENANT, ctx -> {
-            ctx.execute("SET LOCAL plan_cache_mode = force_custom_plan");
+            PgSession.setSearchPlanCacheMode(ctx);   // the plan mode hybridRank sets before this rank
             return PgContainerHelper.explainPlan(ctx, ctx.selectFrom(rank));
         });
         assertThat(plan)
