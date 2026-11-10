@@ -240,9 +240,9 @@ class CatalogSensitiveListRouteTest {
 
     @Test
     void aReadThatOutlastsItsStatementBoundAnswers503WithNoPartialBody_andTheNextReadAnswers() throws Exception {
-        // Deterministic: another session holds ACCESS EXCLUSIVE on the documents table, so the first statement waits on
-        // the lock until its statement_timeout fires (a lock wait is bounded by statement_timeout too). The timeout
-        // and the transaction are shared by both statements, so neither can answer a part.
+        // Deterministic: another session holds ACCESS EXCLUSIVE on the documents table, so the statement waits on
+        // the lock until its statement_timeout fires (a lock wait is bounded by statement_timeout too); nothing is
+        // answered in part.
         String d = sensitiveDoc(COLL_A);
         System.setProperty(CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, "300");
         try (Connection holder = pg.createConnection("")) {
@@ -266,13 +266,15 @@ class CatalogSensitiveListRouteTest {
     // ── the plan ────────────────────────────────────────────────────────────
 
     /**
-     * Both statements are eligible for the partial index idx_catalog_documents_sensitive_live (catalog-047-1): its
-     * predicate (sensitive AND deleted_at IS NULL) is implied by the route's WHERE, and its leading column is the
-     * tenant. On a fixture this small the planner prefers a sequential scan, so that is switched off to show the
-     * index is USABLE by these exact statements; the production plan on a large table is the planner's choice.
+     * The route is ONE statement: the list and the total come from the same snapshot (count(*) OVER () beside each
+     * row), so a document flagged or tombstoned between two statements cannot make count and documents disagree
+     * under READ COMMITTED. The statement is eligible for the partial index idx_catalog_documents_sensitive_live
+     * (catalog-047-1): its predicate (sensitive AND deleted_at IS NULL) is implied by the route's WHERE, and its leading
+     * column is the tenant. On a fixture this small the planner prefers a sequential scan, so that is switched off to
+     * show the index is USABLE by this exact statement; the production plan on a large table is the planner's choice.
      */
     @Test
-    void bothStatementsCanUseThePartialSensitiveIndex() throws Exception {
+    void theOneStatementCanUseThePartialSensitiveIndex_andCarriesTheTotalAsAWindowCount() throws Exception {
         for (int i = 0; i < 12; i++) sensitiveDoc(i % 2 == 0 ? COLL_A : COLL_B);
         for (int i = 0; i < 40; i++) doc(TOKEN, TENANT, COLL_A, false);
         try (Connection su = pg.createConnection("")) {
@@ -280,12 +282,22 @@ class CatalogSensitiveListRouteTest {
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
             PgContainerHelper.setPlannerGuc(su, "enable_seqscan", "off", false);
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
-            String listPlan = PgContainerHelper.explainPlanInlined(ctx, CatalogSensitiveReads.listQuery(ctx, TENANT, 11));
-            String countPlan = PgContainerHelper.explainPlanInlined(ctx, CatalogSensitiveReads.countQuery(ctx, TENANT));
-            System.out.println("EXPLAIN list:\n" + listPlan + "\nEXPLAIN count:\n" + countPlan);
-            assertThat(listPlan).contains("idx_catalog_documents_sensitive_live");
-            assertThat(countPlan).contains("idx_catalog_documents_sensitive_live");
+            var statement = CatalogSensitiveReads.listQuery(ctx, TENANT, 11);
+            String plan = PgContainerHelper.explainPlanInlined(ctx, statement);
+            System.out.println("EXPLAIN list (one statement):\n" + plan);
+            assertThat(plan).contains("idx_catalog_documents_sensitive_live").contains("WindowAgg");
+            assertThat(ctx.renderInlined(statement).toLowerCase()).contains("count(*) over ()");
         }
+    }
+
+    /** The window count is taken before the LIMIT: a page of 2 of 12 still reports 12, and an empty tenant reports 0. */
+    @Test
+    void theTotalIsTheWholeSetNotThePage() throws Exception {
+        for (int i = 0; i < 12; i++) sensitiveDoc(COLL_A);
+        var page = list("?limit=2");
+        assertThat(page).containsEntry("count", 12).containsEntry("capped", true);
+        assertThat(documents(page)).hasSize(2);
+        for (var d : documents(page)) assertThat(d.get("physical_collection")).isEqualTo(COLL_A);
     }
 
     // ── http ────────────────────────────────────────────────────────────────

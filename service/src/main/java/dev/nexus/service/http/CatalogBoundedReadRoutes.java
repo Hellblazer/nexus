@@ -75,14 +75,25 @@ final class CatalogBoundedReadRoutes {
 
     /**
      * GET /v1/catalog/manifest/fillable?kind=labels|spans&limit=N:
-     * {@code {kind, fillable, limit, capped, rule:"title rule 2", stamp:"strict"}}.
+     * {@code {kind, fillable, limit, capped, rule:"title rule 2", stamp:"strict", edge}}.
      *
      * <p>The strict, bounded count of the manifest rows the two upgrade rungs would fill ({@link ManifestFillableCount}
      * has the predicate). {@code kind} is required and exact ({@code labels} or {@code spans}); {@code limit} is 1 to
      * {@link ManifestFillableCount#MAX_LIMIT} (default {@link ManifestFillableCount#DEFAULT_LIMIT}); anything else is a
-     * 400. {@code capped} is true when the count stopped at {@code limit}, so {@code fillable} then means "at least".
+     * 400. The scan stops at {@code limit} candidate rows (rows that pass every guard but the edges below, strict or not);
+     * {@code capped} is true when it did, and then BOTH {@code fillable} and {@code edge} are lower bounds ("at least
+     * these") and a client MUST read capped as pending whatever the numbers say (capped with {@code fillable} 0 and
+     * {@code edge} equal to {@code limit} included). Only an uncapped answer is exact.
      * The older {@code /manifest/section_label_fillable} stays for old clients; it counts a chunk stamp it cannot read,
      * this route does not ({@code stamp:"strict"}).
+     *
+     * <p>{@code edge} is informational: the count (cut at {@code limit} too) of rows that pass every guard of
+     * {@code fillable} EXCEPT an edge where the SQL form cannot say what the Python rung says: a chunk stamp the strict
+     * form rejects but {@code fromisoformat} may read, or a label or page value that is not a string, null or integer
+     * (including falsy non-strings Python turns into the empty label) or does not fit INTEGER. Every such row is one the
+     * strict {@code fillable} leaves out, so {@code fillable == 0} alone can be a false "converged". A client reads
+     * {@code fillable == 0 && edge > 0} (uncapped) as "scan once to see" (the scan's completion record then ends it) and
+     * uncapped {@code fillable == 0 && edge == 0} as converged; {@code fillable > 0} is pending whatever {@code edge} says.
      */
     void fillable(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -110,6 +121,7 @@ final class CatalogBoundedReadRoutes {
         body.put("capped", result.capped());
         body.put("rule", ManifestFillableCount.RULE);
         body.put("stamp", ManifestFillableCount.STAMP);
+        body.put("edge", result.edge());
         send(exchange, 200, body);
     }
 
