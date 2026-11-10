@@ -126,7 +126,7 @@ def test_before_any_record_every_refused_rung_is_named_with_a_remedy_that_clears
     assert install.scan_reads == [], "doctor read no whole catalog or table"
     # The remedy is the interactive run. What makes it true is below: it records each rung it verifies,
     # and the same row then answers from those records.
-    assert any("interactive" in s and "records" in s for s in row.fix_suggestions), row.fix_suggestions
+    assert any("interactively" in s and "records" in s for s in row.fix_suggestions), row.fix_suggestions
 
 
 def test_the_interactive_run_the_remedy_names_clears_every_not_checked_entry(install: _Install) -> None:

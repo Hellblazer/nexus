@@ -9941,7 +9941,7 @@ def _check_pending_rungs() -> list[HealthResult]:
         # manifest-section-labels dry run lists every document and reads manifests and T3 per batch) must not
         # do that for a doctor row against a managed service: 43.7k documents did not finish in 30 minutes.
         # The same refusal `nx upgrade --auto` gets applies (auto_guard: managed service, no completion
-        # record, and an engine that cannot count the fillable rows in one read); a local engine keeps its scan. A refused rung is reported below
+        # record, and an engine that cannot count the fillable rows in one read). A refused rung is reported below
         # as NOT CHECKED, never as converged.
         # nexus-mjmjl: and against a local engine too, doctor makes no read that grows with the store
         # (bounded_reads): a 43k-document local store spent minutes in one rung's dry-run scan here.
@@ -10020,13 +10020,13 @@ def _check_pending_rungs() -> list[HealthResult]:
         parts.append(f"no pending rungs among those checked ({len(statuses) - len(not_checked)} of {len(statuses)})")
     if not_checked:
         parts.append(
-            f"not checked: {', '.join(not_checked)} (each answers only from a read of the whole catalog or a "
-            "whole table, which `nx doctor` does not make, or from what an earlier interactive run recorded)"
+            f"not checked: {', '.join(not_checked)} (each answers only from a read of every document, which "
+            "`nx doctor` does not make, or from what an earlier interactive `nx upgrade` recorded)"
         )
         fixes.append(
-            "Run `nx upgrade --dry-run` to check them (a read of every document: minutes on a large store), "
-            "or `nx upgrade` to check and fill; once `nx upgrade` records a rung, this row answers from the "
-            "record without a read"
+            "Run `nx upgrade` interactively: it reads every document (minutes on a large store), fills what is "
+            "pending and records each rung it verifies, and this row then answers from the record without a read. "
+            "`nx upgrade --dry-run` makes the same read to show what is pending but records nothing"
         )
     if record_note:
         parts.append(record_note)

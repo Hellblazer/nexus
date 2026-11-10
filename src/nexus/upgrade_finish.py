@@ -3406,14 +3406,15 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
     # nexus-75w5d: this callout needs a CHEAP "is it pending?", not a scan. It runs in the root group
     # of whichever `nx` command wins the one-shot version-transition claim (a plain `nx search` on a
     # managed box included), so every detect() here runs as an UNATTENDED run: a rung that would walk a
-    # managed catalog or table reports itself not applicable instead (`nx doctor` and an interactive
-    # `nx upgrade` still scan, and say so).
-    from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — deferred, CLI startup cost
+    # managed catalog or table reports itself not applicable instead (an interactive `nx upgrade` still
+    # scans). nexus-mjmjl: and bounded on a local engine too, as in `nx doctor`: the first command after a
+    # version change must not spend minutes in one rung's dry-run scan of a large local store.
+    from nexus.upgrade_ladder.unattended import bounded_reads, unattended_run  # noqa: PLC0415 — deferred, CLI startup cost
 
     lines: list[str] = []
     for rung in rungs:
         try:
-            with unattended_run():
+            with unattended_run(), bounded_reads():
                 status = rung.detect()
         except Exception as exc:  # noqa: BLE001 — must surface, not silently drop
             lines.append(
