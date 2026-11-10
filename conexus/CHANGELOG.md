@@ -1,5 +1,12 @@
 # Changelog
 
+## [8.1.1] - 2026-11-10
+
+Plugin version aligned with conexus 8.1.1. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- `conexus/launch/nx_setup.py`: nexus-mjmjl (first-run F1): a running setup step rewrites its status every 30 s with the time so far and the last setup.log line, so setup_status no longer reads "running: build" for up to an hour.
+- `conexus/launch/nx_standin.py`: nexus-mjmjl (first-run F1): the stand-in's build wait text says a build can take up to an hour on a cold machine.
+
 ## [8.1.0] - 2026-11-10
 
 Plugin version aligned with conexus 8.1.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
