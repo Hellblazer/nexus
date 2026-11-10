@@ -78,7 +78,7 @@ def test_pins_from_env_overrides_and_falls_back() -> None:
 def test_cache_key_has_the_shape_of_the_other_bundles() -> None:
     key = bw.cache_key(bw.Pins("17.5", "v0.8.2"), "qwentescence", "ab" * 32)
     assert key == (
-        "pg-bundle-windows-x64-qwentescence-pg17.5-pgvectorv0.8.2-img-native-" + "ab" * 32
+        "pg-bundle-windows-x64-qwentescence-pg17.5-pgvectorv0.8.2-pgbgv2.0.4-img-native-" + "ab" * 32
     )
 
 
@@ -87,10 +87,11 @@ def test_cache_key_has_the_shape_of_the_other_bundles() -> None:
     [
         lambda p, r, h: (bw.Pins("17.6", p.pgvector_version), r, h),
         lambda p, r, h: (bw.Pins(p.pg_version, "v0.9.0"), r, h),
+        lambda p, r, h: (bw.Pins(p.pg_version, p.pgvector_version, "v2.0.5"), r, h),
         lambda p, r, h: (p, "windows-latest", h),
         lambda p, r, h: (p, r, "cd" * 32),
     ],
-    ids=["pg-pin", "pgvector-pin", "runner", "script-hash"],
+    ids=["pg-pin", "pgvector-pin", "pg-background-pin", "runner", "script-hash"],
 )
 def test_every_input_changes_the_key(mutate) -> None:
     base = (bw.Pins("17.5", "v0.8.2"), "qwentescence", "ab" * 32)
@@ -110,7 +111,7 @@ def test_cache_key_cli_hashes_this_very_script(capsys: pytest.CaptureFixture[str
     assert rc == 0
     digest = hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
     assert capsys.readouterr().out.strip() == (
-        f"pg-bundle-windows-x64-qwentescence-pg17.5-pgvectorv0.8.2-img-native-{digest}"
+        f"pg-bundle-windows-x64-qwentescence-pg17.5-pgvectorv0.8.2-pgbgv2.0.4-img-native-{digest}"
     )
 
 
@@ -362,7 +363,8 @@ def stage_bundle(prefix: Path, *, runtime: bool = True, build_only: bool = False
         (prefix / "bin" / f"{b}.exe").write_bytes(b"MZ")
     (prefix / "bin" / "libpq.dll").write_bytes(b"MZ")
     (prefix / "lib" / "postgresql" / "vector.dll").write_bytes(b"MZ")
-    for ctl in ("vector", "pg_trgm"):
+    (prefix / "lib" / "postgresql" / "pg_background.dll").write_bytes(b"MZ")
+    for ctl in ("vector", "pg_trgm", "pg_background"):
         (prefix / "share" / "postgresql" / "extension" / f"{ctl}.control").write_text("x")
     (prefix / ".build_prefix").write_text("C:\\build\\bundle\n")
     if runtime:
@@ -382,6 +384,8 @@ def test_a_complete_tree_verifies_clean(tmp_path: Path) -> None:
         ("bin/initdb.exe", "initdb.exe"), ("bin/pg_ctl.exe", "pg_ctl.exe"),
         ("bin/postgres.exe", "postgres.exe"), ("bin/libpq.dll", "libpq.dll"),
         ("lib/postgresql/vector.dll", "vector.dll"),
+        ("lib/postgresql/pg_background.dll", "pg_background.dll"),
+        ("share/postgresql/extension/pg_background.control", "pg_background.control"),
         ("share/postgresql/extension/vector.control", "vector.control"),
         ("share/postgresql/extension/pg_trgm.control", "pg_trgm.control"),
         (".build_prefix", ".build_prefix"),
@@ -427,13 +431,17 @@ def test_package_refuses_an_incomplete_bundle(tmp_path: Path) -> None:
 
 
 PGVECTOR_COMMIT = "cab9da72c04353f143bb06b42ab70a403daac64a"
+PG_BACKGROUND_COMMIT = "c1db2540408ce4626ea21bc97572ff43b1a19ff3"
 FAKE_PG_BODY = b"pg tarball"
 
 
 class FakeBuildRunner(bw.Runner):
-    def __init__(self, prefix: Path, *, pgvector_head: str = PGVECTOR_COMMIT) -> None:
+    def __init__(
+        self, prefix: Path, *, pgvector_head: str = PGVECTOR_COMMIT, pg_background_head: str = PG_BACKGROUND_COMMIT
+    ) -> None:
         self.prefix = prefix
         self.pgvector_head = pgvector_head
+        self.pg_background_head = pg_background_head
         self.calls: list[tuple[str, list[str], dict[str, str]]] = []
 
     def run(self, argv, *, cwd, env, log):  # type: ignore[override]
@@ -442,10 +450,21 @@ class FakeBuildRunner(bw.Runner):
         if argv[0] == "ninja" and argv[-1] == "install":
             stage_bundle(self.prefix, runtime=False, build_only=True)
             (self.prefix / ".build_prefix").unlink()
+            # pg_background is built after ninja install: only the cl step may leave it behind.
+            (self.prefix / "lib" / "postgresql" / "pg_background.dll").unlink()
+            (self.prefix / "share" / "postgresql" / "extension" / "pg_background.control").unlink()
         if argv[0] == "git":
             dest = Path(argv[-1])
             dest.mkdir(parents=True)
-            (dest / "LICENSE").write_text("pgvector license")
+            if dest.name == "pg_background":
+                (dest / "LICENSE").write_text("pg_background license")
+                (dest / "pg_background.control").write_text("c")
+                (dest / "extension").mkdir()
+                (dest / "extension" / "pg_background--2.0.sql").write_text("s")
+            else:
+                (dest / "LICENSE").write_text("pgvector license")
+        if argv[0] == "cl":
+            Path(next(a for a in argv if a.startswith("/Fe"))[3:]).write_bytes(b"MZ")
         if argv[0] == "nmake" and argv[-1] == "install":
             (self.prefix / "lib" / "postgresql" / "vector.dll").write_bytes(b"MZ")
 
@@ -455,8 +474,9 @@ class FakeBuildRunner(bw.Runner):
         if argv[0] == "ninja":
             return NOISE + LISTING_20
         if argv[0] == "git" and argv[-2:] == ["rev-parse", "HEAD"]:
-            return self.pgvector_head + "\n"
-        return PG_DIRS[argv[-1].removeprefix("--")] + "\r\n"
+            head = self.pg_background_head if Path(argv[2]).name == "pg_background" else self.pgvector_head
+            return head + "\n"
+        return str(self.prefix / PG_DIRS[argv[-1].removeprefix("--")].removeprefix("C:/b/")) + "\r\n"
 
 
 def _host(runner: FakeBuildRunner, *, corrupt: bool = False, pg_pin: str | None = None) -> bw.Host:
@@ -478,6 +498,7 @@ def _host(runner: FakeBuildRunner, *, corrupt: bool = False, pg_pin: str | None 
         runner=runner, fetch=fetch, unpack=unpack,
         pg_sha256_pins={"17.5": pg_pin or hashlib.sha256(body).hexdigest()},
         pgvector_commit_pins={"v0.8.2": PGVECTOR_COMMIT},
+        pg_background_commit_pins={"v2.0.4": PG_BACKGROUND_COMMIT},
     )
 
 
@@ -499,7 +520,10 @@ def _build(tmp_path: Path, **kw):
     work = tmp_path / "work"
     vs_env, flex = _toolchain(tmp_path)
     redist = bw.find_redist(_vs_tree(tmp_path / "vs"))
-    runner = FakeBuildRunner(prefix, pgvector_head=kw.get("pgvector_head", PGVECTOR_COMMIT))
+    runner = FakeBuildRunner(
+        prefix, pgvector_head=kw.get("pgvector_head", PGVECTOR_COMMIT),
+        pg_background_head=kw.get("pg_background_head", PG_BACKGROUND_COMMIT),
+    )
     kw.get("runners", []).append(runner)
     bw.build(
         prefix=kw.get("prefix", prefix), work=work, pins=kw.get("pins", bw.Pins("17.5", "v0.8.2")), jobs=6,
@@ -519,6 +543,8 @@ def _shape(call: tuple[str, list[str], dict[str, str]]) -> str:
         return "ninja-install" if argv[-1] == "install" else "ninja-build"
     if argv[0] == "nmake":
         return "nmake-install" if argv[-1] == "install" else "nmake-build"
+    if argv[0] == "cl":
+        return "cl-pg_background"
     return f"{kind}:{Path(argv[0]).stem}"
 
 
@@ -530,7 +556,8 @@ def test_build_runs_the_steps_in_the_order_the_hazards_demand(tmp_path: Path) ->
     assert len(gen) == 20 and gen == list(range(2, 22)), "20 serial generations right after listing"
     assert shapes[22:26] == ["ninja-build", "ninja-install", "run:git", "capture:git"]
     assert shapes.count("capture:pg_config") == 5  # pg_config asked, not guessed
-    assert shapes[-2:] == ["nmake-build", "nmake-install"]
+    # pgvector, then pg_background (cl), both before the prune that removes postgres.lib.
+    assert shapes[-5:] == ["nmake-build", "nmake-install", "run:git", "capture:git", "cl-pg_background"]
     # The parallel build is the capped one, and it comes after every generation.
     build_call = next(c for c in runner.calls if _shape(c) == "ninja-build")
     assert "-j6" in build_call[1]
@@ -540,6 +567,9 @@ def test_build_runs_the_steps_in_the_order_the_hazards_demand(tmp_path: Path) ->
     assert not (prefix / "lib" / "postgresql" / "pgxs").exists()
     assert not list((prefix / "lib").rglob("*.lib"))
     assert (prefix / "lib" / "postgresql" / "vector.dll").is_file()
+    assert (prefix / "lib" / "postgresql" / "pg_background.dll").is_file()
+    assert (prefix / "share" / "postgresql" / "extension" / "pg_background--2.0.sql").is_file()
+    assert (prefix / "licenses" / "pg_background-LICENSE.txt").is_file()
     assert (prefix / "bin" / "libpq.dll").is_file() and (prefix / "bin" / "pg_config.exe").is_file()
     assert (prefix / "licenses" / "postgresql-COPYRIGHT.txt").is_file()
     assert (prefix / "licenses" / "pgvector-LICENSE.txt").is_file()
@@ -554,10 +584,10 @@ def test_flex_bison_dir_leads_path_for_every_step_and_cc_is_cl(tmp_path: Path) -
 
 
 def test_pgvector_receives_pg_configs_directories(tmp_path: Path) -> None:
-    _, runner, _ = _build(tmp_path)
+    prefix, runner, _ = _build(tmp_path)
     nmake = next(c[1] for c in runner.calls if _shape(c) == "nmake-build")
-    assert f"PKGLIBDIR={PG_DIRS['pkglibdir']}" in nmake
-    assert f"INCLUDEDIR_SERVER={PG_DIRS['includedir-server']}" in nmake
+    assert f"PKGLIBDIR={prefix / 'lib' / 'postgresql'}" in nmake
+    assert f"INCLUDEDIR_SERVER={prefix / 'include' / 'postgresql' / 'server'}" in nmake
 
 
 def test_a_tarball_that_misses_its_published_sha256_stops_before_meson(tmp_path: Path) -> None:
@@ -660,8 +690,9 @@ def test_a_failing_step_surfaces_the_log_tail(tmp_path: Path) -> None:
 class FakeSmokeRunner(sm.Runner):
     def __init__(self, *, vector: str = "0.8.2", plan: str = "Index Scan using smoke_hnsw",
                  rows: str = "1\n2\n3\n4\n5", modules: list[str] | None = None,
-                 fail_query: str | None = None) -> None:
+                 fail_query: str | None = None, bg_result: str = "1") -> None:
         self.vector, self.plan, self.rows, self.modules = vector, plan, rows, modules or []
+        self.bg_result = bg_result
         self.fail_query = fail_query
         self.events: list[str] = []
         self.to_file_calls: list[tuple[list[str], Path]] = []
@@ -694,6 +725,10 @@ class FakeSmokeRunner(sm.Runner):
             return 0, self.vector
         if "extname='pg_trgm'" in q:
             return 0, "1.6"
+        if "extname='pg_background'" in q:
+            return 0, "2.0"
+        if "pg_background_launch" in q:
+            return 0, self.bg_result
         if "similarity" in q:
             return 0, "t"
         if "EXPLAIN" in q:
@@ -773,6 +808,15 @@ def test_stop_runs_even_when_a_query_fails(tmp_path: Path) -> None:
 def test_wrong_vector_version_fails(tmp_path: Path) -> None:
     with pytest.raises(sm.SmokeError, match="0.8.1.*0.8.2"):
         _smoke(tmp_path, FakeSmokeRunner(vector="0.8.1"), windows=False)
+
+
+def test_the_smoke_runs_a_pg_background_worker_and_refuses_a_wrong_answer(tmp_path: Path) -> None:
+    out = _smoke(tmp_path / "a", FakeSmokeRunner(), windows=False)
+    assert any(line.startswith("SMOKE pg_background: 2.0, worker returned 1") for line in out)
+    with pytest.raises(sm.SmokeError, match="pg_background worker returned '0'"):
+        _smoke(tmp_path / "b", FakeSmokeRunner(bg_result="0"), windows=False)
+    with pytest.raises(sm.SmokeError, match="pg_background"):
+        _smoke(tmp_path / "c", FakeSmokeRunner(fail_query="CREATE EXTENSION pg_background"), windows=False)
 
 
 def test_a_plan_that_skips_the_hnsw_index_fails(tmp_path: Path) -> None:
@@ -1143,6 +1187,11 @@ def test_a_tarball_that_agrees_with_the_hosts_file_but_not_with_the_pin_is_refus
 def test_a_postgresql_version_without_a_pin_is_refused_before_meson(tmp_path: Path) -> None:
     with pytest.raises(bw.BuildError, match="no pinned sha256 for PostgreSQL 17.6"):
         _build(tmp_path, pins=bw.Pins("17.6", "v0.8.2"))
+
+
+def test_pg_background_must_resolve_to_the_pinned_commit(tmp_path: Path) -> None:
+    with pytest.raises(bw.BuildError, match="pg_background v2.0.4 resolved to commit f{40}.*the pin is c1db"):
+        _build(tmp_path, pg_background_head="f" * 40)
 
 
 def test_pgvector_must_resolve_to_the_pinned_commit(tmp_path: Path) -> None:

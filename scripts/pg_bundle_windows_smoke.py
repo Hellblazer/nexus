@@ -5,8 +5,9 @@
 The gate, as on the other platforms: take the bundle (the EXACT archive about
 to be signed, or a staged tree), put it in a fresh directory that has no
 relationship to the build prefix, and prove it works from there: initdb,
-pg_ctl start, CREATE EXTENSION vector (expect 0.8.2) and pg_trgm, an HNSW
-index that a query actually uses and that returns rows, pg_ctl stop.
+pg_ctl start, CREATE EXTENSION vector (expect 0.8.2), pg_trgm and pg_background
+(a launched worker returns SELECT 1), an HNSW index that a query actually uses
+and that returns rows, pg_ctl stop.
 
 Hazards it is built around:
 
@@ -344,6 +345,16 @@ def smoke(
         if sql("SELECT similarity('night','nacht') > 0") != "t":
             raise SmokeError("pg_trgm similarity() did not return a positive score")
         step("pg_trgm", trgm)
+
+        # nexus-f3yqd.2: a background worker really runs. CREATE EXTENSION loads the DLL; the
+        # launch starts a dynamic bgworker (no shared_preload_libraries) whose SELECT 1 comes back.
+        sql("CREATE EXTENSION pg_background")
+        bg = sql("SELECT extversion FROM pg_extension WHERE extname='pg_background'")
+        one = sql("SELECT r.x FROM pg_background_launch('SELECT 1') AS h "
+                  "CROSS JOIN LATERAL pg_background_result(h.pid, h.cookie) AS r(x int)")
+        if one != "1":
+            raise SmokeError(f"pg_background worker returned {one!r} for SELECT 1, expected '1'")
+        step("pg_background", f"{bg}, worker returned {one}")
 
         sql("CREATE TABLE smoke_items (id int PRIMARY KEY, embedding vector(3))")
         sql("INSERT INTO smoke_items SELECT i, ARRAY[i::real, (i%7)::real, (i%13)::real]::vector "

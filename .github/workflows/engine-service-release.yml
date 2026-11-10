@@ -1084,7 +1084,7 @@ jobs:
           # and vector but lost pg_trgm would otherwise sign + ship broken
           # (RDR-155 needs pg_trgm). Mirror verify_and_mark here.
           sharedir="$("$bundle/bin/pg_config" --sharedir)"
-          for ctl in vector pg_trgm; do
+          for ctl in vector pg_trgm pg_background; do
             if [ ! -f "$sharedir/extension/$ctl.control" ]; then
               echo "::error::$ctl.control missing from bundle — contrib set incomplete (cache corruption or build regression)"
               exit 1
@@ -1162,6 +1162,11 @@ jobs:
           # cache-hit path has no other executable proof of the contrib set.
           env -u LD_LIBRARY_PATH "$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -c \
             "CREATE EXTENSION IF NOT EXISTS pg_trgm" >/dev/null
+          # nexus-f3yqd.2: the same for pg_background (dml_utils runs its chunks in a
+          # background worker). CREATE FUNCTION ... LANGUAGE C dlopens the module, so
+          # this fails on a missing or unloadable pg_background library.
+          env -u LD_LIBRARY_PATH "$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -c \
+            "CREATE EXTENSION IF NOT EXISTS pg_background" >/dev/null
           out="$(env -u LD_LIBRARY_PATH "$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -tAc \
             "SELECT extname FROM pg_extension WHERE extname='vector'")"
           if [ "$out" != "vector" ]; then

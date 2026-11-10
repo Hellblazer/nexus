@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Build the Windows x64 PostgreSQL + pgvector + pg_trgm bundle (RDR-224 P2.1,
-bead nexus-f9bgu.12). The Windows counterpart of ``scripts/build_pg_bundle.sh``.
+"""Build the Windows x64 PostgreSQL + pgvector + pg_trgm + pg_background bundle
+(RDR-224 P2.1, bead nexus-f9bgu.12; pg_background nexus-f3yqd.2). The Windows counterpart of ``scripts/build_pg_bundle.sh``.
 
 Why a separate script, and why Python. The autoconf / make / patchelf /
 install_name_tool toolchain of the shell script shares nothing with meson +
@@ -21,16 +21,16 @@ by the release workflow, as for the other platforms.
 
 Subcommands::
 
-    build            compile PG + pgvector into --prefix, add the VC++ runtime
+    build            compile PG + pgvector + pg_background into --prefix, add the VC++ runtime
     refresh-runtime  re-copy the five VC++ DLLs + notice into an existing
                      (e.g. cache-restored) prefix from the CURRENT redist
     verify           assert the prefix holds the complete bundle layout
     package          prefix -> nexus-pg-windows-x64.txz (+ .sha256)
     cache-key        print the exact-input cache key
 
-Cache key = version pins + the sha256 of this file, same shape as the other
-bundles' ``pg-bundle-<arch>-<runner>-pg<V>-pgvector<V>-img-<image|native>-<hash>``
-(no ``macfloor`` segment: nothing here reads MACOSX_DEPLOYMENT_TARGET). The
+Cache key = version pins + the sha256 of this file, the other bundles' shape
+``pg-bundle-<arch>-<runner>-pg<V>-pgvector<V>-img-<image|native>-<hash>`` with a
+``-pgbg<V>`` segment after the pgvector one (no ``macfloor`` segment: nothing here reads MACOSX_DEPLOYMENT_TARGET). The
 VC++ runtime DLLs are NOT a key input: they come from the host's Visual Studio
 at build time, and the P0.6 terms (T2 nexus_rdr/224-vcruntime-terms, condition
 8) require them refreshed from the current redist on every release. A
@@ -46,21 +46,27 @@ Hazards found by the spike, each handled below:
     the prefix lacks "postgres", and pgvector's ``Makefile.win`` assumes a flat
     layout: INCLUDEDIR, INCLUDEDIR_SERVER, PKGLIBDIR, SHAREDIR and LIBDIR come
     from ``pg_config``.
+  * pg_background has no nmake or meson recipe that runs headless (its Windows files
+    are Visual Studio projects), and PGXS does not exist for MSVC: one ``cl /LD``
+    command compiles and links its two C files against pg_config's include
+    directories and ``postgres.lib``, with the defines PG's own meson build passes,
+    and the DLL, control file and SQL scripts are copied into pg_config's pkglibdir
+    and sharedir (:func:`pg_background_cl_cmd`, :func:`pg_background_install`).
   * postgres.exe and initdb.exe exit 0xC0000135 on a machine without the VC++
     runtime: the five DLLs ship in ``bin``, unmodified, from the released
     toolset's redist folder (the fifth, ``msvcp140_atomic_wait.dll``, is what torch
     2.13 imports, nexus-vyy65).
 
 Environment (flags win): BUNDLE_PREFIX, PG_VERSION, PGVECTOR_VERSION,
-WORK_DIR, PG_BUNDLE_RUNNER, VS_INSTALL_PATH, WIN_FLEX_BISON_DIR, RUNNER_TEMP.
+PG_BACKGROUND_VERSION, WORK_DIR, PG_BUNDLE_RUNNER, VS_INSTALL_PATH, WIN_FLEX_BISON_DIR, RUNNER_TEMP.
 
 The build's work directory (PG tarball, source tree, meson build tree: gigabytes) is a
 temporary one under RUNNER_TEMP unless WORK_DIR / --work-dir names one, and is removed
 when the build ends, passed or failed, unless --keep-work-dir; a directory the caller
 named is the caller's and is never removed (nexus-f9bgu.27). Every shipped VC++ DLL must
 carry a Valid Authenticode signature from Microsoft Corporation, the PG tarball must match
-the sha256 pinned in this file and pgvector the pinned commit (PINNED_PG_SHA256,
-PINNED_PGVECTOR_COMMITS).
+the sha256 pinned in this file and pgvector and pg_background the pinned commit
+(PINNED_PG_SHA256, PINNED_PGVECTOR_COMMITS, PINNED_PG_BACKGROUND_COMMITS).
 """
 from __future__ import annotations
 
@@ -85,6 +91,7 @@ from pathlib import Path
 #: tests/test_pg_bundle_windows.py pins all three together.
 DEFAULT_PG_VERSION = "17.5"
 DEFAULT_PGVECTOR_VERSION = "v0.8.2"
+DEFAULT_PG_BACKGROUND_VERSION = "v2.0.4"
 
 #: Literal pins (nexus-f9bgu.27, code review m5). ftp.postgresql.org publishes the
 #: tarball and its .sha256 side by side, so the published file proves integrity but
@@ -99,6 +106,11 @@ PINNED_PG_SHA256: dict[str, str] = {
 }
 PINNED_PGVECTOR_COMMITS: dict[str, str] = {
     "v0.8.2": "cab9da72c04353f143bb06b42ab70a403daac64a",
+}
+#: ``git ls-remote https://github.com/vibhorkum/pg_background refs/tags/v2.0.4`` on 2026-11-10
+#: (release published 2026-09-28; scripts/build_pg_bundle.sh pins the same commit).
+PINNED_PG_BACKGROUND_COMMITS: dict[str, str] = {
+    "v2.0.4": "c1db2540408ce4626ea21bc97572ff43b1a19ff3",
 }
 
 ARCH = "windows-x64"
@@ -160,6 +172,19 @@ REQUIRED_BINARIES: tuple[str, ...] = (
 
 PG_SOURCE_URL = "https://ftp.postgresql.org/pub/source/v{v}/postgresql-{v}.tar.bz2"
 PGVECTOR_REPO = "https://github.com/pgvector/pgvector.git"
+PG_BACKGROUND_REPO = "https://github.com/vibhorkum/pg_background.git"
+#: The C files of pg_background's Makefile OBJS (``src/*.o``), and the preprocessor defines PG's own
+#: meson build passes on MSVC; ``windows/pg_background_win.h`` (found through the ``/I`` below) carries
+#: the PGDLLEXPORT declarations the DLL needs and is included under ``#ifdef WIN32``.
+PG_BACKGROUND_SOURCES: tuple[str, ...] = ("src/pg_background.c", "src/pg_background_worker.c")
+#: ``/Drandom=rand``: v2.0.4's poll backoff calls POSIX ``random()`` for timing jitter, which PG 17's port layer
+#: does not provide on Windows (the link fails with an unresolved ``random``, found on a native Windows build 2026-11-09);
+#: the MSVC CRT's ``rand()`` does the same job there (0..32767, enough to decorrelate a backoff) without patching
+#: the pinned source. Drop it when a pinned release stops calling ``random()``.
+PG_BACKGROUND_DEFINES: tuple[str, ...] = (
+    "/DWIN32", "/D_WINDOWS", "/D__WINDOWS__", "/D__WIN32__",
+    "/D_CRT_SECURE_NO_DEPRECATE", "/D_CRT_NONSTDC_NO_DEPRECATE", "/Drandom=rand",
+)
 
 
 class BuildError(RuntimeError):
@@ -175,12 +200,14 @@ class BuildError(RuntimeError):
 class Pins:
     pg_version: str
     pgvector_version: str
+    pg_background_version: str = DEFAULT_PG_BACKGROUND_VERSION
 
 
 def pins_from_env(env: Mapping[str, str]) -> Pins:
     return Pins(
         pg_version=env.get("PG_VERSION") or DEFAULT_PG_VERSION,
         pgvector_version=env.get("PGVECTOR_VERSION") or DEFAULT_PGVECTOR_VERSION,
+        pg_background_version=env.get("PG_BACKGROUND_VERSION") or DEFAULT_PG_BACKGROUND_VERSION,
     )
 
 
@@ -193,10 +220,10 @@ def file_sha256(path: Path) -> str:
 
 
 def cache_key(pins: Pins, runner: str, script_sha256: str) -> str:
-    """Exact-input cache key: version pins + this script's hash.
+    """Exact-input cache key: version pins (PG, pgvector, pg_background) + this script's hash.
 
     The runner is the resolved runner LABEL, as in the other bundles' keys.
-    Nothing outside these four values may change the bundle without changing
+    Nothing outside these inputs may change the bundle without changing
     the key, except the VC++ runtime DLLs, which ``refresh-runtime`` re-copies
     after every restore.
     """
@@ -204,7 +231,7 @@ def cache_key(pins: Pins, runner: str, script_sha256: str) -> str:
         raise BuildError(f"runner label {runner!r} is empty or not [A-Za-z0-9._-]")
     return (
         f"pg-bundle-{ARCH}-{runner}-pg{pins.pg_version}"
-        f"-pgvector{pins.pgvector_version}-img-native-{script_sha256}"
+        f"-pgvector{pins.pgvector_version}-pgbg{pins.pg_background_version}-img-native-{script_sha256}"
     )
 
 
@@ -415,6 +442,7 @@ def notice_text(redist: Redist, digests: Mapping[str, str], pins: Pins) -> str:
 
 2. PostgreSQL {pins.pg_version}: PostgreSQL License, see licenses/postgresql-COPYRIGHT.txt.
 3. pgvector {pins.pgvector_version}: PostgreSQL License, see licenses/pgvector-LICENSE.txt.
+4. pg_background {pins.pg_background_version}: PostgreSQL License, see licenses/pg_background-LICENSE.txt.
 """
 
 
@@ -592,6 +620,41 @@ def pgvector_make_cmds(bundle: Path, dirs: Mapping[str, str]) -> list[list[str]]
 PG_CONFIG_KEYS = ("includedir", "includedir-server", "pkglibdir", "sharedir", "libdir")
 
 
+def pg_background_cl_cmd(src: Path, dirs: Mapping[str, str]) -> list[str]:
+    """The one ``cl`` command that builds ``pg_background.dll`` in *src* (cwd = *src*): compile and
+    link, /MD to match PG's dynamic CRT, include directories and ``postgres.lib`` from pg_config's
+    answers. Builds before the prune: ``postgres.lib`` is a build-only file."""
+    server = dirs["includedir-server"]
+    return [
+        "cl", "/nologo", "/LD", "/MD", "/O2", *PG_BACKGROUND_DEFINES,
+        f"/I{src / 'src'}", f"/I{src / 'windows'}",
+        f"/I{server}\\port\\win32_msvc", f"/I{server}\\port\\win32", f"/I{server}", f"/I{dirs['includedir']}",
+        *(str(src / rel) for rel in PG_BACKGROUND_SOURCES),
+        f"/Fe{src / 'pg_background.dll'}",
+        "/link", f"{dirs['libdir']}\\postgres.lib",
+    ]
+
+
+def pg_background_install(src: Path, dirs: Mapping[str, str]) -> list[Path]:
+    """Copy the built DLL into pkglibdir and the control file and every ``extension/*.sql`` script
+    into ``<sharedir>/extension`` (what PGXS ``make install`` does); returns the files written."""
+    ext = Path(dirs["sharedir"]) / "extension"
+    ext.mkdir(parents=True, exist_ok=True)
+    pairs = [(src / "pg_background.dll", Path(dirs["pkglibdir"]) / "pg_background.dll"),
+             (src / "pg_background.control", ext / "pg_background.control")]
+    pairs += [(f, ext / f.name) for f in sorted((src / "extension").glob("*.sql"))]
+    written: list[Path] = []
+    for from_, to in pairs:
+        if not from_.is_file():
+            raise BuildError(f"pg_background build left no {from_.name} at {from_}")
+        to.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(from_, to)
+        written.append(to)
+    if not any(w.name == "pg_background--2.0.sql" for w in written):
+        raise BuildError("pg_background's extension/pg_background--2.0.sql (the default_version script) was not installed")
+    return written
+
+
 # --------------------------------------------------------------------------- #
 # Layout verification and packaging
 # --------------------------------------------------------------------------- #
@@ -616,7 +679,9 @@ def verify_layout(bundle: Path, *, runtime: bool = True) -> list[str]:
         problems.append("missing bin/libpq.dll")
     if not any((bundle / "lib").rglob("vector.dll")):
         problems.append("missing vector.dll under lib/")
-    for ctl in ("vector", "pg_trgm"):
+    if not any((bundle / "lib").rglob("pg_background.dll")):
+        problems.append("missing pg_background.dll under lib/")
+    for ctl in ("vector", "pg_trgm", "pg_background"):
         if not any((bundle / "share").rglob(f"extension/{ctl}.control")):
             problems.append(f"missing {ctl}.control under share/**/extension")
     if not (bundle / ".build_prefix").is_file():
@@ -705,6 +770,9 @@ class Host:
     signature_reader: SignatureReader | None = None
     pg_sha256_pins: Mapping[str, str] = field(default_factory=lambda: dict(PINNED_PG_SHA256))
     pgvector_commit_pins: Mapping[str, str] = field(default_factory=lambda: dict(PINNED_PGVECTOR_COMMITS))
+    pg_background_commit_pins: Mapping[str, str] = field(
+        default_factory=lambda: dict(PINNED_PG_BACKGROUND_COMMITS)
+    )
 
 
 def remove_tree(path: Path) -> None:
@@ -818,6 +886,27 @@ def build(
     for cmd in pgvector_make_cmds(prefix, dirs):
         r.run(cmd, cwd=pgv_src, env=run_env, log=logs / "pgvector.log")
 
+    _log(f"pg_background {pins.pg_background_version} against pg_config")
+    pgbg_src = work / "pg_background"
+    pgbg_commit = host.pg_background_commit_pins.get(pins.pg_background_version)
+    if pgbg_commit is None:
+        raise BuildError(
+            f"no pinned commit for pg_background {pins.pg_background_version}: add it to "
+            "PINNED_PG_BACKGROUND_COMMITS (a tag can be moved; a commit cannot)"
+        )
+    r.run(
+        ["git", "clone", "--depth", "1", "--branch", pins.pg_background_version, PG_BACKGROUND_REPO, str(pgbg_src)],
+        cwd=work, env=run_env, log=logs / "pg_background-clone.log",
+    )
+    head = r.capture(["git", "-C", str(pgbg_src), "rev-parse", "HEAD"], cwd=None, env=run_env).strip().lower()
+    if head != pgbg_commit:
+        raise BuildError(
+            f"pg_background {pins.pg_background_version} resolved to commit {head}, the pin is {pgbg_commit}: "
+            "the tag moved, or the clone is not what was reviewed"
+        )
+    r.run(pg_background_cl_cmd(pgbg_src, dirs), cwd=pgbg_src, env=run_env, log=logs / "pg_background.log")
+    pg_background_install(pgbg_src, dirs)
+
     _log("prune build-only files (headers, static and import libraries, pgxs, pkgconfig)")
     for rel in prune_build_only(prefix):
         print(f"  removed {rel}", flush=True)
@@ -829,6 +918,10 @@ def build(
     for name in ("LICENSE", "LICENSE.txt"):
         if (pgv_src / name).is_file():
             shutil.copyfile(pgv_src / name, lic / "pgvector-LICENSE.txt")
+            break
+    for name in ("LICENSE", "LICENSE.txt"):
+        if (pgbg_src / name).is_file():
+            shutil.copyfile(pgbg_src / name, lic / "pg_background-LICENSE.txt")
             break
     copy_runtime(prefix, redist, pins, signature_reader=host.signature_reader)
     (prefix / ".build_prefix").write_text(os.path.realpath(prefix) + "\n")
@@ -856,6 +949,7 @@ def _parser() -> argparse.ArgumentParser:
     def common(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--pg-version")
         sp.add_argument("--pgvector-version")
+        sp.add_argument("--pg-background-version")
 
     b = sub.add_parser("build")
     common(b)
@@ -892,6 +986,7 @@ def main(
     pins = Pins(
         getattr(args, "pg_version", None) or pins_from_env(env).pg_version,
         getattr(args, "pgvector_version", None) or pins_from_env(env).pgvector_version,
+        getattr(args, "pg_background_version", None) or pins_from_env(env).pg_background_version,
     )
     prefix_arg = getattr(args, "prefix", None) or (
         Path(env["BUNDLE_PREFIX"]) if env.get("BUNDLE_PREFIX") else None
