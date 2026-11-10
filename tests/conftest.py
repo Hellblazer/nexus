@@ -1601,7 +1601,15 @@ def _read_upgrade_lock(config_dir: Path) -> bytes | None:
     try:
         if not path.is_file() or path.is_symlink() or path.stat().st_size > 64:
             return None
-        return path.read_bytes()
+        # As nexus.util.upgrade_auto_lock.read_holder_text reads it (the guard imports nothing
+        # from nexus): from byte 0, and past it when that read fails, which it does on Windows
+        # while a live host holds the lock (msvcrt locks byte 0; the pid starts at byte 1).
+        with open(path, "rb") as fh:
+            try:
+                return fh.read()
+            except OSError:
+                fh.seek(1)
+                return fh.read()
     except OSError:
         return None
 

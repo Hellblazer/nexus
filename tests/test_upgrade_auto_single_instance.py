@@ -714,3 +714,23 @@ def test_a_held_lock_on_windows_reads_past_the_locked_byte(config_dir: Path, mon
 
     monkeypatch.setattr(lock_mod, "open", lambda p, mode: _LockedAtZero(real_open(p, mode)), raising=False)
     assert lock_mod.read_holder_text(path) == "48213"
+
+
+
+def test_a_windows_spawn_the_job_refuses_retries_once_without_breakaway(monkeypatch) -> None:
+    """A job that forbids breakaway refuses CREATE_BREAKAWAY_FROM_JOB; the hook starts the child
+    without it, once (review r1 of the Windows lock fix: the retry had no test)."""
+    calls: list[int] = []
+    child = object()
+
+    def fake_popen(argv, *, creationflags=0, **_kw):
+        calls.append(creationflags)
+        if creationflags & upgrade_auto._CREATE_BREAKAWAY_FROM_JOB:
+            raise OSError("breakaway refused")
+        return child
+
+    monkeypatch.setattr(upgrade_auto, "_IS_WINDOWS", True)
+    setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", fake_popen)
+    assert upgrade_auto._spawn_detached(["nx", "upgrade", "--auto"]) is child
+    base = upgrade_auto._CREATE_NO_WINDOW | upgrade_auto._CREATE_NEW_PROCESS_GROUP
+    assert calls == [base | upgrade_auto._CREATE_BREAKAWAY_FROM_JOB, base], "one refused try, one spawn"

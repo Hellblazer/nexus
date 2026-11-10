@@ -142,3 +142,35 @@ def test_the_guard_passes_a_live_host_s_take(tmp_path, monkeypatch) -> None:
 def test_the_guard_fails_a_test_s_take(tmp_path, monkeypatch, capsys) -> None:
     assert _run_guard(monkeypatch, tmp_path, b"48213 pytest") == 1
     assert "upgrade-auto.lock" in capsys.readouterr().out
+
+
+
+def test_the_guard_reads_a_held_windows_lock_past_its_locked_byte(tmp_path, monkeypatch) -> None:
+    """On Windows a live host's held lock refuses a read of byte 0; the guard reads from byte 1,
+    so the take still classes as benign instead of an unreadable state mutation."""
+    (tmp_path / REL).write_bytes(b" 48213")
+    real_open = open
+
+    class _LockedAtZero:
+        def __init__(self, fh):
+            self._fh, self._pos = fh, 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._fh.close()
+
+        def seek(self, offset):
+            self._pos = offset
+            self._fh.seek(offset)
+
+        def read(self):
+            if self._pos == 0:
+                raise PermissionError(13, "Permission denied")
+            return self._fh.read()
+
+    monkeypatch.setattr(conftest_module, "open", lambda p, mode: _LockedAtZero(real_open(p, mode)), raising=False)
+    content = conftest_module._read_upgrade_lock(tmp_path)
+    assert content == b"48213"
+    assert _split(content) == ([], CHANGED)
