@@ -30,10 +30,11 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -339,15 +340,16 @@ def run_dump(
     proc: subprocess.Popen[bytes] | None = None
     job: int | None = None
     try:
-        try:
-            proc = subprocess.Popen(  # noqa: S603 - argv is a list built from resolved paths
-                argv_off_cwd(argv), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors,
-                env=_client_env(target, target.pg_dump), cwd=parent,  # the destination's folder: it exists, and a deleted worktree is not the cwd
-                **isolation_popen_kwargs(),
-            )
-        except OSError as exc:
-            raise BackupFailed(f"could not start {target.pg_dump}: {exc}") from None
-        job = contain(proc)
+        with _interrupts_held():
+            try:
+                proc = subprocess.Popen(  # noqa: S603 - argv is a list built from resolved paths
+                    argv_off_cwd(argv), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors,
+                    env=_client_env(target, target.pg_dump), cwd=parent,  # the destination's folder: it exists, and a deleted worktree is not the cwd
+                    **isolation_popen_kwargs(),
+                )
+            except OSError as exc:
+                raise BackupFailed(f"could not start {target.pg_dump}: {exc}") from None
+            job = contain(proc)
         while True:
             returncode = proc.poll()
             if on_progress is not None:
@@ -380,6 +382,30 @@ def run_dump(
         errors.close()
         with contextlib.suppress(OSError):
             tmp.unlink()  # gone after a publish; the partial after anything else
+
+
+#: The signals the verb turns into KeyboardInterrupt (backup_cmd): held while pg_dump is spawned.
+_HELD_SIGNALS: frozenset[int] = frozenset(
+    getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name)
+)
+
+
+@contextlib.contextmanager
+def _interrupts_held() -> Iterator[None]:
+    """Hold SIGINT, SIGTERM and SIGHUP from the moment pg_dump is spawned until ``proc`` and its
+    containment exist. A signal that lands inside ``Popen`` would raise KeyboardInterrupt before ``proc``
+    is assigned, so the cleanup could not kill pg_dump and it would run on, orphaned (nexus-f3yqd.4: a
+    stand-in that signals its parent at once did exactly this on a fast CI worker). A held signal is
+    delivered when the block ends, with ``proc`` set. POSIX only: Windows has no signal mask."""
+    mask = getattr(signal, "pthread_sigmask", None)
+    if mask is None or not _HELD_SIGNALS:
+        yield
+        return
+    previous = mask(signal.SIG_BLOCK, _HELD_SIGNALS)
+    try:
+        yield
+    finally:
+        mask(signal.SIG_SETMASK, previous)
 
 
 def is_lock_timeout(detail: str) -> bool:

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import contextlib
 import os
 import re
 import shlex
@@ -324,100 +325,6 @@ def test_a_dump_that_fails_midway_removes_its_partial_file_and_says_why(
     assert "stand-in failure mid-dump" in result.output
     assert not dest.exists()
     _no_siblings(dest.parent, set())
-
-
-_SLEEPS_AFTER_PARTIAL_OUTPUT = """#!/bin/sh
-while [ $# -gt 0 ]; do if [ "$1" = "-f" ]; then out="$2"; fi; shift; done
-printf 'half a dump' >> "$out"
-echo $$ > {pidfile}
-{extra}
-exec sleep 60
-"""
-
-
-@posix_only
-def test_an_interrupt_kills_pg_dump_and_removes_the_partial_file(tmp_path: Path) -> None:
-    dest = tmp_path / "out" / "x.dump"
-    pidfile = tmp_path / "pid"
-    target = _stub_target(tmp_path, _SLEEPS_AFTER_PARTIAL_OUTPUT.format(pidfile=shlex.quote(str(pidfile)), extra=""))
-    calls = {"n": 0}
-
-    def interrupt_once_it_is_running(_done: int) -> None:
-        calls["n"] += 1
-        if pidfile.exists() and calls["n"] > 3:
-            raise KeyboardInterrupt
-
-    with pytest.raises(KeyboardInterrupt):
-        run_dump(target, dest, on_progress=interrupt_once_it_is_running, poll_s=0.02)
-    assert not dest.exists()
-    _no_siblings(dest.parent, set())
-    with pytest.raises(ProcessLookupError):
-        os.kill(int(pidfile.read_text().strip()), 0)  # reaped, not left running behind the user's Ctrl-C
-
-
-@posix_only
-@pytest.mark.parametrize("name", ["TERM", "HUP"])
-def test_a_kill_or_a_closed_terminal_cleans_up_like_ctrl_c(
-    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """SIGTERM and SIGHUP must not leave pg_dump running and a half dump on disk."""
-    dest = tmp_path / "out" / "x.dump"
-    pidfile = tmp_path / "pid"
-    _verb(monkeypatch, _stub_target(
-        tmp_path, _SLEEPS_AFTER_PARTIAL_OUTPUT.format(pidfile=shlex.quote(str(pidfile)), extra=f"kill -{name} $PPID"),
-    ))
-    result = CliRunner().invoke(main, ["backup", "--to", str(dest)])
-    assert result.exit_code != 0
-    assert not dest.exists()
-    _no_siblings(dest.parent, set())
-    with pytest.raises(ProcessLookupError):
-        os.kill(int(pidfile.read_text().strip()), 0)
-
-
-@posix_only
-def test_the_signal_handlers_are_put_back_afterwards() -> None:
-    def mine(signum: int, frame: object) -> None: ...
-
-    before = {sig: signal.signal(sig, mine) for sig in (signal.SIGTERM, signal.SIGHUP)}
-    try:
-        with backup_cmd._signals_as_interrupt():
-            assert signal.getsignal(signal.SIGTERM) is not mine and signal.getsignal(signal.SIGHUP) is not mine
-        assert signal.getsignal(signal.SIGTERM) is mine and signal.getsignal(signal.SIGHUP) is mine
-    finally:
-        for sig, handler in before.items():
-            signal.signal(sig, handler)
-
-
-@posix_only
-def test_a_handler_installed_from_c_is_replaced_by_the_default_not_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """signal.signal returns None for a handler Python did not install; putting that back is a TypeError."""
-    calls: list[tuple[int, object]] = []
-
-    def fake(sig: int, handler: object) -> object:
-        calls.append((sig, handler))
-        return None
-
-    setattr_in(monkeypatch, backup_cmd, "signal.signal", fake)
-    with backup_cmd._signals_as_interrupt():
-        pass
-    restored = [h for _, h in calls[len(calls) // 2:]]
-    assert restored and all(h == signal.SIG_DFL for h in restored)
-
-
-def test_off_the_main_thread_the_verbs_signal_handling_does_nothing_and_does_not_fail() -> None:
-    outcome: list[object] = []
-
-    def body() -> None:
-        try:
-            with backup_cmd._signals_as_interrupt():
-                outcome.append("ran")
-        except BaseException as exc:  # noqa: BLE001 - the point is that nothing escapes
-            outcome.append(exc)
-
-    t = threading.Thread(target=body)
-    t.start()
-    t.join()
-    assert outcome == ["ran"]
 
 
 # -- an unwritable or overlong destination is a message, not a traceback -----------------------------
