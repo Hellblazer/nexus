@@ -22,6 +22,11 @@ BUSY = (
 )
 
 
+def _is_prune(argv) -> bool:
+    """``uv cache prune``, with the head bare or resolved off the cwd (Windows)."""
+    return Path(argv[0]).stem.lower() == "uv" and list(argv[1:]) == ["cache", "prune"]
+
+
 def _done(rc: int, stderr: str = "", stdout: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(["uv"], rc, stdout, stderr)
 
@@ -34,7 +39,7 @@ def test_the_foreground_prune_waits_only_briefly_for_the_lock(tmp_path: Path) ->
         return _done(0, "Removed 12 files (3.4MiB)")
 
     line = uv_cache_prune.prune(run=run, spawn=None, config_dir=tmp_path, environ={"PATH": "/bin"})
-    assert seen["argv"] == ["uv", "cache", "prune"]
+    assert _is_prune(seen["argv"])
     assert seen["env"]["UV_LOCK_TIMEOUT"] == str(uv_cache_prune.LOCK_WAIT_S)
     assert seen["env"]["PATH"] == "/bin"
     assert line == "uv cache prune: Removed 12 files (3.4MiB)"
@@ -44,11 +49,11 @@ def test_a_busy_cache_moves_the_prune_to_the_background_and_says_where_it_logs(t
     spawned: list = []
 
     def spawn(argv, env, log):
-        spawned.append((argv, env["UV_LOCK_TIMEOUT"], Path(log.name)))
+        spawned.append((_is_prune(argv), env["UV_LOCK_TIMEOUT"], Path(log.name)))
 
     line = uv_cache_prune.prune(run=lambda *a, **k: _done(2, BUSY), spawn=spawn, config_dir=tmp_path, environ={})
     log = tmp_path / "logs" / "uv-cache-prune.log"
-    assert spawned == [(["uv", "cache", "prune"], str(uv_cache_prune.BACKGROUND_LOCK_WAIT_S), log)]
+    assert spawned == [(True, str(uv_cache_prune.BACKGROUND_LOCK_WAIT_S), log)]
     assert "another uv process is using uv's cache" in line
     assert "continues in the background" in line and str(log) in line
 
@@ -107,14 +112,14 @@ def test_a_real_uv_holding_the_cache_makes_the_prune_return_in_seconds(tmp_path:
         spawned: list = []
         started = time.monotonic()
         line = uv_cache_prune.prune(
-            run=run_bounded, spawn=lambda argv, e, log: spawned.append(argv), config_dir=tmp_path, environ=env,
+            run=run_bounded, spawn=lambda argv, e, log: spawned.append(_is_prune(argv)), config_dir=tmp_path, environ=env,
         )
         took = time.monotonic() - started
     finally:
         holder.kill()
         holder.wait(timeout=10)
     assert took < 20, took
-    assert spawned == [["uv", "cache", "prune"]], line
+    assert spawned == [True], line
     assert "continues in the background" in line
 
 
