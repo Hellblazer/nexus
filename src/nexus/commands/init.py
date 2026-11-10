@@ -139,8 +139,8 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
         # (idempotent — PG provisioning is skipped on the retry).
         _log.warning("service_bge_provision_failed", error=str(exc))
         raise click.ClickException(
-            f"Could not download the service's bge-768 model: {exc}. Check the network connection; "
-            "the storage service cannot start without this file."
+            f"Could not download the service's bge-768 model: {exc}. Check the network connection and free "
+            "disk space; the local storage service reads this file when it starts."
         ) from exc
 
     _provision_service_crossencoder_step()
@@ -343,21 +343,25 @@ def _start_service_step(config_dir: Path):  # noqa: ANN201 — returns LeaseReco
     from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     click.echo("\nStarting the storage service …")
-    # F11 (nexus-f3yqd.6): name the log the cause is in; `nx daemon status` lists the rest.
-    log_hint = (
-        f"\n  Log: {config_dir / 'logs' / 'storage_service.log'} "
-        "(`nx daemon status` lists the engine and PostgreSQL logs too)"
-    )
     try:
         lease = ensure_storage_supervisor(config_dir)
     except StorageServiceStartError as exc:
         # StorageServiceStartError messages already carry a remedy (build/install
-        # the artifact, re-run init, etc.); relay verbatim, fail fatal.
-        click.echo(f"\nStorage service failed to start: {exc}{log_hint}", err=True)
+        # the artifact, re-run init, etc.) and name the supervisor or engine log;
+        # relay verbatim, fail fatal.
+        click.echo(f"\nStorage service failed to start: {exc}", err=True)
         raise SystemExit(1)
     except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
         _log.error("service_start_failed", error=str(exc))
-        click.echo(f"\nStorage service failed to start: {exc}{log_hint}", err=True)
+        # F11 (nexus-f3yqd.6): name the logs the cause is in. A failed start leaves no lease, so
+        # `nx daemon service status` cannot list them here.
+        logs = config_dir / "logs"
+        click.echo(
+            f"\nStorage service failed to start: {exc}\n"
+            f"  Logs: {logs / 'storage_service.log'} (the engine's log is in the same folder)"
+            + _pg_log_hint(config_dir, ", and"),
+            err=True,
+        )
         raise SystemExit(1)
 
     ep = lease.endpoint
@@ -673,6 +677,13 @@ def _acquire_pg_bundle_step(config_dir: Path) -> Path:
     return bin_dir
 
 
+def _pg_log_hint(config_dir: Path, lead: str) -> str:
+    """`` <lead> <config>/postgres/pg.log`` when PostgreSQL has written it, else nothing: the file exists only
+    once ``pg_ctl start`` ran, so an initdb failure has none (F11, nexus-f3yqd.6)."""
+    pg_log = config_dir / "postgres" / "pg.log"
+    return f"{lead} {pg_log}" if pg_log.is_file() else ""
+
+
 def _provision_postgres_step() -> None:
     """Provision (or verify) the nx-managed local Postgres cluster.
 
@@ -742,7 +753,7 @@ def _provision_postgres_step() -> None:
         raise SystemExit(1)
     except Exception as exc:  # noqa: BLE001 — user-facing
         _log.error("pg_provision_failed", error=str(exc))
-        click.echo(f"\nPostgres provisioning failed: {exc}\n  Log: {config_dir / 'postgres' / 'pg.log'}", err=True)
+        click.echo(f"\nPostgres provisioning failed: {exc}" + _pg_log_hint(config_dir, "\n  Log:"), err=True)
         raise SystemExit(1)
 
     if result.already_provisioned:

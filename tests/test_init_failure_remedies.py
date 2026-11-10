@@ -4,7 +4,7 @@
 Five failures printed only the exception text: the bge model download, the storage-service start, the two
 PostgreSQL bundle extractions and PostgreSQL provisioning. A first-run user saw the error and nothing to do.
 The retry is not repeated here: `nx init`'s step reporter prints "Re-run `nx init` ..." under any failed
-step, and the same steps also run from `nx upgrade`, where that line would be wrong.
+step, so the messages carry only what that line does not.
 """
 from __future__ import annotations
 
@@ -20,12 +20,19 @@ from nexus.db import pg_provision
 NOT_HERE = "re-run `nx init`"  # the step reporter owns the retry line
 
 
+def _pg_log(config_dir: Path) -> Path:
+    pg_log = config_dir / "postgres" / "pg.log"
+    pg_log.parent.mkdir(parents=True, exist_ok=True)
+    pg_log.write_text("FATAL: could not bind\n")
+    return pg_log
+
+
 def _no_platform_guards(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pg_provision, "refuse_root", lambda: None)
     monkeypatch.setattr(pg_provision, "refuse_smart_app_control", lambda: None)
 
 
-def test_the_bge_download_failure_says_check_the_network_and_rerun(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_bge_download_failure_says_check_the_network_and_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr("nexus.commands.init._provision_postgres_step", lambda: None)
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
@@ -40,10 +47,10 @@ def test_the_bge_download_failure_says_check_the_network_and_rerun(tmp_path: Pat
     assert result.exit_code != 0
     out = " ".join(result.output.split())
     assert "Temporary failure in name resolution" in out
-    assert "Check the network connection" in out, out
+    assert "Check the network connection and free disk space" in out, out
 
 
-def test_the_service_start_failure_names_the_log_and_the_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_service_start_failure_names_its_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     def _boom(_cd: Path) -> object:
         raise RuntimeError("address already in use")
 
@@ -53,9 +60,23 @@ def test_the_service_start_failure_names_the_log_and_the_retry(tmp_path: Path, m
     err = capsys.readouterr().err
     assert "address already in use" in err
     assert str(tmp_path / "logs" / "storage_service.log") in err and NOT_HERE not in err.lower(), err
+    assert "pg.log" not in err, "no pg.log is named before PostgreSQL wrote one"
+    assert "nx daemon status" not in err, "no such command"
 
 
-def test_the_downloaded_bundle_extraction_failure_names_the_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_service_start_failure_names_pg_log_once_it_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    pg_log = _pg_log(tmp_path)
+
+    def _boom(_cd: Path) -> object:
+        raise RuntimeError("address already in use")
+
+    monkeypatch.setattr("nexus.commands.daemon.ensure_storage_supervisor", _boom)
+    with pytest.raises(SystemExit):
+        init_mod._start_service_step(tmp_path)
+    assert str(pg_log) in capsys.readouterr().err
+
+
+def test_the_downloaded_bundle_extraction_failure_names_the_fix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
 
     def _fake_corrupt(tag: str, config_dir: Path, *, installed_by: str = "") -> tuple[Path, dict[str, str]]:
@@ -71,7 +92,7 @@ def test_the_downloaded_bundle_extraction_failure_names_the_retry(tmp_path: Path
     assert "could not be extracted" in err and "free disk space" in err and str(tmp_path) in err, err
 
 
-def test_the_bundled_postgres_extraction_failure_names_the_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_bundled_postgres_extraction_failure_names_the_fix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     _no_platform_guards(monkeypatch)
 
@@ -85,7 +106,7 @@ def test_the_bundled_postgres_extraction_failure_names_the_retry(tmp_path: Path,
     assert "No space left on device" in err and "free disk space" in err and str(tmp_path) in err, err
 
 
-def test_the_postgres_provisioning_failure_names_pg_log_and_the_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_postgres_provisioning_failure_names_pg_log_when_it_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("NEXUS_PG_BIN", str(tmp_path / "pgbin"))  # an explicit override skips the download
     _no_platform_guards(monkeypatch)
@@ -98,5 +119,9 @@ def test_the_postgres_provisioning_failure_names_pg_log_and_the_retry(tmp_path: 
     with pytest.raises(SystemExit):
         init_mod._provision_postgres_step()
     err = capsys.readouterr().err
-    assert "initdb exited 1" in err
-    assert str(tmp_path / "postgres" / "pg.log") in err and NOT_HERE not in err.lower(), err
+    assert "initdb exited 1" in err and "pg.log" not in err, "initdb failed before PostgreSQL wrote a log"
+    pg_log = _pg_log(tmp_path)
+    with pytest.raises(SystemExit):
+        init_mod._provision_postgres_step()
+    err = capsys.readouterr().err
+    assert f"Log: {pg_log}" in err and NOT_HERE not in err.lower(), err

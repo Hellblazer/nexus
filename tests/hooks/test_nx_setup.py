@@ -1146,12 +1146,56 @@ def test_a_failed_build_names_its_cause_and_says_read_the_log_before_retrying(bo
     assert "resumes at the build step" in failed["next"] and failed["log"] in failed["next"]
 
 
-def test_a_failed_init_without_an_error_word_names_its_last_line(box: Box) -> None:
-    box.behave([box.uv_builds_nx(), {"prog": "nx", "match": ["init"], "exit": 1, "out": "Provisioning\nboom\n"}])
+#: What a real `nx init` prints when a step fails: the cause, then the step reporter's own tail (nexus-mjmjl).
+_INIT_FAILED_OUTPUT = (
+    "[1/3] Provision and start the local service\n"
+    "Postgres provisioning failed: initdb exited 1\n"
+    "  failed after 2.0 s\n"
+    "  Re-run `nx init`: it keeps what is already in place and goes on from there.\n"
+)
+
+
+def test_a_failed_init_names_the_cause_not_the_reporters_tail(box: Box) -> None:
+    box.behave([box.uv_builds_nx(), {"prog": "nx", "match": ["init"], "exit": 1, "out": _INIT_FAILED_OUTPUT}])
     box.start("local")
     failed = box.wait_terminal()
     assert failed["failed_step"] == "init"
-    assert failed["message"] == "nx init exited 1. The last line it printed: boom", failed["message"]
+    assert failed["message"] == (
+        "nx init exited 1. The last error it printed: Postgres provisioning failed: initdb exited 1"
+    ), failed["message"]
+
+
+@pytest.mark.parametrize(
+    ("output", "cause"),
+    [
+        (_INIT_FAILED_OUTPUT, "The last error it printed: Postgres provisioning failed: initdb exited 1"),
+        ("Traceback (most recent call last):\n  File \"x.py\", line 3\nValueError: bad value\n",
+         "The last error it printed: ValueError: bad value"),
+        ("error: Failed to fetch `x`\nCaused by:\nconnection reset by peer\n",
+         "The last error it printed: connection reset by peer"),
+        ("Downloading numpy (failed retry 1/3)\nInstalled 40 packages\n", "The last line it printed: Installed 40 packages"),
+        ("check failed=0\nFinished with 0 errors\nexit 3\n", "The last line it printed: exit 3"),
+        ("Stop the server first\n", "The last line it printed: Stop the server first"),
+        ("\x1b[31merror: boom\x1b[0m\r\n", "The last error it printed: error: boom"),
+        ("error: GET https://user:s3cret@host/x failed\n", "The last error it printed: error: GET https://***@host/x failed"),
+        ("error: refused, bearer abc.def.ghi\n", "The last error it printed: error: refused, bearer ***"),
+        ("  failed after 1.0 s\n  Re-run `nx init`\n", None),
+        ("", None),
+    ],
+    ids=["reporter-tail", "traceback", "uv-caused-by", "retry-progress", "zero-counts", "remedy-word", "ansi-crlf",
+         "url-credentials", "bearer", "only-the-tail", "empty"],
+)
+def test_the_failure_cause_line(output: str, cause: str | None) -> None:
+    assert _load_module()._failure_cause(output) == cause
+
+
+def test_after_a_timeout_the_cause_is_where_it_stopped() -> None:
+    assert _load_module()._failure_cause("error: old retry\nbuilding wheel\n", timed_out=True) == "It stopped at: building wheel"
+
+
+def test_a_long_cause_is_cut() -> None:
+    cause = _load_module()._failure_cause("error: " + "x" * 5000)
+    assert cause is not None and len(cause) == len("The last error it printed: ") + 300 and cause.endswith("...")
 
 
 def test_a_failure_with_no_output_keeps_the_bare_message(box: Box) -> None:
