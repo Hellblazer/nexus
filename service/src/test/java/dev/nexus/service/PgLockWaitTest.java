@@ -2,6 +2,12 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -16,17 +22,22 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@link PgLockWait} (nexus-u5m5g.9): a second session that queues on a lock after the holder's connection has already
  * read {@code pg_stat_activity} is seen, and a commit that ends while it should be queued fails the wait at once with the
  * lock state. The queued sessions here are plain connections on a plain table, so nothing but the wait's own reads can
- * refresh the holder's cached view of the activity table: before the fix the second wait never saw its second session.
+ * refresh the holder's cached view of the activity table, and each queued session opens its connection after the holder's
+ * first read: before the fix the second wait never saw its second session.
  */
 class PgLockWaitTest extends CatalogReconcileTestBase {
+
+    private static final Table<?> T = DSL.table(DSL.name("lockwait_t"));
+    private static final Field<Integer> ID = DSL.field(DSL.name("id"), Integer.class);
 
     @BeforeAll
     void boot() throws Exception {
         migrate();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, "svc_lockwait", "svc_lockwait_pass");
-            su.createStatement().execute("create table lockwait_t(id int primary key)");
-            su.createStatement().execute("insert into lockwait_t values (1)");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.createTable(T).column(ID, SQLDataType.INTEGER.notNull()).primaryKey(ID).execute();
+            ctx.insertInto(T, ID).values(1).execute();
         }
         connect("svc_lockwait", "svc_lockwait_pass");
     }
@@ -35,7 +46,7 @@ class PgLockWaitTest extends CatalogReconcileTestBase {
     private Future<?> queuedOnRow(java.util.concurrent.ExecutorService queue) {
         return queue.submit(() -> {
             try (Connection c = pg.createConnection("")) {
-                c.createStatement().execute("select 1 from lockwait_t where id = 1 for update");
+                lockRow(c);
             }
             return null;
         });
@@ -44,8 +55,13 @@ class PgLockWaitTest extends CatalogReconcileTestBase {
     private Connection holdRow() throws Exception {
         Connection su = pg.createConnection("");
         su.setAutoCommit(false);
-        su.createStatement().execute("select 1 from lockwait_t where id = 1 for update");
+        lockRow(su);
         return su;
+    }
+
+    /** Takes, or queues for, the row lock on the table's one row. */
+    private static void lockRow(Connection c) {
+        DSL.using(c, SQLDialect.POSTGRES).select(ID).from(T).where(ID.eq(1)).forUpdate().fetch();
     }
 
     @Test

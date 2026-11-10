@@ -2919,7 +2919,7 @@ public final class PgContainerHelper {
      * view's text can lag a backend that is already waiting and still show its previous statement.
      */
     public static int backendsBlockedOnLocks(DSLContext ctx) {
-        PgLockWait.clearSnapshot(ctx);   // a held-lock test reads from inside one transaction: the view is cached until it ends (u5m5g.9)
+        PgLockWait.clearSnapshot(ctx);   // a held-lock test reads from inside one transaction: the backend set is cached until it ends (u5m5g.9)
         return ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")),
             DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")
                 .and(DSL.field(DSL.name("pid"), Integer.class).ne(DSL.function("pg_backend_pid", Integer.class)))

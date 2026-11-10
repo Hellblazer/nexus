@@ -414,5 +414,4 @@ abstract class CatalogReconcileTestBase {
     void awaitCommitsBlocked(Connection su, int n, java.util.concurrent.Future<?>... commits) throws Exception {
         PgLockWait.awaitBlocked(su, n, commits);
     }
-
 }

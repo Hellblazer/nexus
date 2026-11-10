@@ -12,13 +12,13 @@ import java.util.concurrent.TimeUnit;
 /**
  * Waits for sessions to queue behind a lock a test holds on its own connection (nexus-u5m5g.9).
  *
- * <p>The connection that holds the lock is inside one long transaction, and PostgreSQL caches
- * {@code pg_stat_activity}'s backend-status snapshot for the length of the reader's transaction: a poll of the view
- * from that connection returns the state of its first read until the transaction ends or
- * {@code pg_stat_clear_snapshot()} is called. A wait that polled the view without clearing it saw "one blocked" for
- * the whole bound whenever a second session queued after the first read, and its failure dump showed the same stale
- * single row. So every read here clears the snapshot first. {@code pg_locks} is computed live and carries no such
- * cache, so the wait on a specific queued lock reads it instead.
+ * <p>The connection that holds the lock is inside one long transaction. PostgreSQL caches the set of backends
+ * {@code pg_stat_activity} shows, with their state and query text, from the first read in a transaction until the
+ * transaction ends or {@code pg_stat_clear_snapshot()} is called; the wait-event columns of a backend in that set are
+ * read live. So a backend whose connection opened after the first read (a pool connection created late) is invisible
+ * to the holder's polls: a wait that polled without clearing saw "one blocked" for its whole bound, and its failure
+ * dump showed the same single row. Every read here clears the snapshot first. {@code pg_locks} is computed live and
+ * carries no such cache, so the wait on a specific queued lock reads it instead.
  *
  * <p>The bound is progress-based, not a short fixed poll: the wait ends at once when a commit it watches has finished
  * (it was meant to be queued) and otherwise gives up only after {@link #BOUND_SECONDS}, with every non-idle backend and
@@ -53,7 +53,7 @@ final class PgLockWait {
     }
 
     /**
-     * Waits until some backend has requested an advisory lock it has not been granted. The reconcile commit's owner lock
+     * Waits until some backend of this database has requested an advisory lock it has not been granted. The reconcile commit's owner lock
      * is the only advisory lock a test of it holds, so this is the second run of an owner queued on the first
      * ({@code wait_event_type = 'Lock'} with {@code wait_event = 'advisory'} in {@code pg_stat_activity}).
      */
@@ -71,11 +71,15 @@ final class PgLockWait {
         }
     }
 
-    /** How many lock requests are advisory and not granted, read live from {@code pg_locks}. */
+    /** How many advisory lock requests in this database are not granted, read live from {@code pg_locks}. */
     static int advisoryWaiters(DSLContext ctx) {
+        var thisDatabase = DSL.select(DSL.field(DSL.name("oid"), Long.class))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_database")))
+            .where(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class)));
         return ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
             DSL.field(DSL.name("locktype"), String.class).eq("advisory")
-                .and(DSL.field(DSL.name("granted"), Boolean.class).eq(false)));
+                .and(DSL.field(DSL.name("granted"), Boolean.class).eq(false))
+                .and(DSL.field(DSL.name("database"), Long.class).eq(DSL.field(thisDatabase))));
     }
 
     private static void failIfEnded(DSLContext ctx, String waitingFor, Future<?>[] commits) {
