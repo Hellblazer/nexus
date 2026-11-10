@@ -51,5 +51,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   nexus-mjmjl (first-run F1): a running setup step rewrites its status every 30 s with the time so far and the last setup.log line, so setup_status no longer reads "running: build" for up to an hour.
 - `conexus/launch/nx_standin.py`
   nexus-mjmjl (first-run F1): the stand-in's build wait text says a build can take up to an hour on a cold machine, equal to setup_tools.py's copy.
+- `conexus/hooks/scripts/compact_checkpoint.py`
+  nexus-ct9sv: another session's pre no longer prunes an idle session's unused checkpoint at 48 h; it keeps it until a 7-day limit, which is also inject's restore limit.
 
 ## Deferred to the next client release
