@@ -2965,6 +2965,20 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET, *, p
         "--check-* diagnostics):"
     )
     gating_failed = False
+    from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
+
+    # F30 (nexus-f3yqd.6): the three sensitivity rows share one catalog walk (about 23 s each on a laptop tenant).
+    with sd.one_walk():
+        gating_failed = _run_supplementary_rows(runners, progress)
+    click.echo(
+        "\nRemaining opt-in-only checks (not run above; invoke explicitly): "
+        + ", ".join(_OPT_IN_ONLY_CHECKS)
+    )
+    return gating_failed
+
+
+def _run_supplementary_rows(runners: dict[str, Any], progress: Any) -> bool:
+    gating_failed = False
     for name in _SUPPLEMENTARY_CHECK_NAMES:
         runner = runners[name]
         click.echo(f"\n--- {name} ---")
@@ -2990,10 +3004,6 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET, *, p
                 "doctor_supplementary_check_failed", check=name,
                 error=_exc_detail(exc),
             )
-    click.echo(
-        "\nRemaining opt-in-only checks (not run above; invoke explicitly): "
-        + ", ".join(_OPT_IN_ONLY_CHECKS)
-    )
     return gating_failed
 
 

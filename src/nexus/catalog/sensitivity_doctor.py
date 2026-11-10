@@ -33,7 +33,9 @@ no sensitive filter on ``/list``), which a person running a doctor verb has aske
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
+import contextvars
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import structlog
@@ -58,28 +60,60 @@ def _report(name: str, status: str, reason: str = "", total: int = 0, findings: 
             "findings": findings or []}
 
 
+#: The walk shared inside :func:`one_walk`: ``(documents, not-applicable reason)``, or unset outside one.
+_SHARED: contextvars.ContextVar[dict[str, tuple[list[Any], str | None]] | None] = contextvars.ContextVar(
+    "sensitivity_doctor_shared_walk", default=None,
+)
+
+
+@contextlib.contextmanager
+def one_walk() -> Iterator[None]:
+    """Inside this scope the rows that find their own catalog share one walk (F30, nexus-f3yqd.6).
+
+    Each row walks the whole catalog (``all_documents(limit=0)``) to find the sensitive documents; measured on a
+    laptop tenant that was about 23 s a row, three rows in a row in ``nx doctor``. A row given its own *reader*
+    still walks it alone. The result lives only for the scope, so a later run sees a fresh catalog."""
+    token = _SHARED.set({})
+    try:
+        yield
+    finally:
+        _SHARED.reset(token)
+
+
 def _sensitive_documents(name: str, reader: Any) -> tuple[list[Any], dict | None]:
     """``(documents, None)`` or ``([], a not-applicable report)``."""
+    shared = _SHARED.get() if reader is None else None
+    if shared is not None and "walk" in shared:
+        documents, reason = shared["walk"]
+        return (documents, None) if reason is None else ([], _report(name, NOT_APPLICABLE, reason))
+    documents, reason = _walk_sensitive(name, reader)
+    if shared is not None:
+        shared["walk"] = (documents, reason)
+    return (documents, None) if reason is None else ([], _report(name, NOT_APPLICABLE, reason))
+
+
+def _walk_sensitive(name: str, reader: Any) -> tuple[list[Any], str | None]:
+    """The sensitive documents, or the reason the rows are not applicable."""
     try:
         if reader is None:
             from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred, factory has a heavy import graph
 
             reader = make_catalog_reader()
         if reader is None:
-            return [], _report(name, NOT_APPLICABLE, "no catalog is available")
+            return [], "no catalog is available"
         probe = getattr(reader, "catalog_sensitivity_probe", None)
         if callable(probe):
             supported, version = probe()
             if supported is not True:
                 what = f"engine {version} does not advertise catalog_sensitivity_supported" if version else \
                     "the engine's capabilities could not be read"
-                return [], _report(name, NOT_APPLICABLE, what)
+                return [], what
         documents = [e for e in reader.all_documents(limit=0) if getattr(e, "sensitive", False) is True]
     except Exception as exc:  # noqa: BLE001 — an unreadable catalog is not a finding; the row is not applicable, never red
         _log.warning("sensitivity_doctor_catalog_unreadable", check=name, error=str(exc))
-        return [], _report(name, NOT_APPLICABLE, f"the catalog could not be read ({type(exc).__name__}: {exc})")
+        return [], f"the catalog could not be read ({type(exc).__name__}: {exc})"
     if not documents:
-        return [], _report(name, NOT_APPLICABLE, "no sensitive documents in this catalog")
+        return [], "no sensitive documents in this catalog"
     return documents, None
 
 
