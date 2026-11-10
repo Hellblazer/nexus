@@ -111,7 +111,7 @@ def test_a_deferred_step_says_it_runs_again(monkeypatch: pytest.MonkeyPatch, cap
     _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=InMemoryLedger)
     out = " ".join(capsys.readouterr().out.split())
     assert "rung 'census' deferred — engine census unavailable. It runs again on the next `nx upgrade`" in out, out
-    assert "`nx doctor` names a step that defers on every run" in out
+    assert "`nx doctor` names a step that has deferred on three runs over a day or more" in out
 
 
 # F23: `nx self install` closed with "if this upgraded an existing install, run nx upgrade (a fresh install is set up by

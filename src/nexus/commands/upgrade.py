@@ -674,7 +674,7 @@ def _run_ladder(
                 # F17 (nexus-f3yqd.6): a deferral is retried, so say when, and where a stuck one shows.
                 click.echo(
                     f"Upgrade ladder: rung '{run.name}' deferred — {run.detail}. It runs again on the next "
-                    "`nx upgrade`; `nx doctor` names a step that defers on every run."
+                    "`nx upgrade`; `nx doctor` names a step that has deferred on three runs over a day or more."
                 )
 
 
