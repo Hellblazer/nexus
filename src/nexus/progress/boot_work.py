@@ -13,7 +13,7 @@ The engine sends no durations: the elapsed time is derived here. A top-level
 no time left is derived from it; a step whose ``done`` is null (a waiting
 phase) shows its phase alone; ``safe_to_stop`` never renders bare, always with
 ``on_stop``; an empty list does not mean idle. ``step.what`` names no
-collection (``/v1/status`` is unauthenticated).
+collection: the engine answers ``/v1/status`` with no tenant check (the managed edge still asks for a token).
 
 :func:`render` turns entries into lines; :class:`Announcer` prints them from
 inside a wait loop, once when the work is first seen and again every
@@ -76,8 +76,10 @@ def _progress(obj: dict[str, Any], *, top: bool) -> str:
     return f"{done:,} of {total:,}" + (f" {unit}" if unit else "")
 
 
-def render(entries: Iterable[dict[str, Any]], *, now: float) -> list[str]:
-    """Lines for the entries, never raising on a malformed one."""
+def render(entries: Iterable[dict[str, Any]], *, now: float, waiting: bool = True) -> list[str]:
+    """Lines for the entries, never raising on a malformed one. *waiting* False is for a command that waits on
+    nothing (``nx daemon service status``): it says what stopping the service costs, not what interrupting
+    this command does."""
     lines: list[str] = []
     for entry in entries:
         try:
@@ -98,6 +100,9 @@ def render(entries: Iterable[dict[str, Any]], *, now: float) -> list[str]:
             on_stop = entry.get("on_stop")
             if isinstance(entry.get("notice"), str) and entry["notice"]:
                 lines.append(f"  {entry['notice']}")
+            elif not waiting:
+                if on_stop:
+                    lines.append(f"  Stopping the service now: {on_stop}.")
             elif entry.get("safe_to_stop") is True:
                 # Never a bare "safe to stop" (engine review S3): say what stopping costs.
                 lines.append(
@@ -133,7 +138,7 @@ def _fetch_if_an_engine_is_there(*, timeout: float) -> dict[str, Any] | None:
 
     if is_local_mode() and discover_lease()[0] is None:
         return None
-    return fetch_engine_status(timeout=timeout)
+    return fetch_engine_status(timeout=timeout, mint_deadline_s=timeout)  # advisory: never a long mint
 
 
 def engine_entries(*, fetch: Callable[..., dict[str, Any] | None] | None = None) -> list[dict[str, Any]]:

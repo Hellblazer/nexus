@@ -226,7 +226,7 @@ class StepReporter:
         #: *work_every_s*, so a long wait on a busy engine shows its progress and not only the elapsed time
         self._work = work
         self._work_every_s = work_every_s
-        self._last_work: float | None = None
+        self._last_work: float | None = clock()  # the command's own start notice already said it
         self._count = 0
         self._started = clock()
         self._dirty = False

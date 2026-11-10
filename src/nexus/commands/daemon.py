@@ -1912,6 +1912,20 @@ def _nx_major_gap_note(installed_by: str) -> str | None:
     return None
 
 
+def _engine_status_at(host: str, port: int, token: str | None, *, timeout: float) -> dict | None:
+    """``GET /v1/status`` on the engine a lease names, or None. Never raises."""
+    import httpx  # noqa: PLC0415 — deferred import — only the status subcommand path
+
+    try:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        resp = httpx.get(f"http://{host}:{port}/v1/status", headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception:  # noqa: BLE001 — advisory: an unreadable status shows no work
+        return None
+    return body if isinstance(body, dict) else None
+
+
 @service_group.command("status")
 @click.option(
     "--config-dir",
@@ -2063,7 +2077,10 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # nexus-f3yqd.3: the heavy work the engine is doing (a PCI build, a migration), from its own /v1/status.
     from nexus.progress import boot_work as _boot_work  # noqa: PLC0415 — deferred import — only this subcommand path
 
-    work = _boot_work.current_entries(config_dir)
+    # The engine this lease names (nexus-f3yqd.3 review): with --config-dir the ambient resolver could name another.
+    work = _boot_work.local_entries(config_dir) or _boot_work.engine_entries(
+        fetch=lambda **kw: _engine_status_at(host, port, ep.get("token"), timeout=kw.get("timeout", 2.0)),
+    )
     if as_json:
         click.echo(_json.dumps({**data, "boot_work": work}, indent=2))
         return
@@ -2073,7 +2090,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         # Lists (embedding_models) stay arrays in --json; join for humans.
         display = ", ".join(value) if isinstance(value, list) else value
         click.echo(f"  {key}: {display}")
-    for line in _boot_work.render(work, now=time.time()):
+    for line in _boot_work.render(work, now=time.time(), waiting=False):
         click.echo(line)
     if stale_warning:
         click.echo(f"warning: {stale_warning}", err=True)
