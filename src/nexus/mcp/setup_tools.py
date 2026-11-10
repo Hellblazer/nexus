@@ -123,7 +123,7 @@ SLIM_DESCRIPTION: str = (
 #: stage name ``nx_setup.py`` reports.
 STAGE_WAITS: dict[str, tuple[int, str]] = {
     "starting": (10, "a few seconds"),
-    "build": (60, "usually 1 to 3 minutes, up to an hour on a cold machine; the message shows the time so far"),
+    "build": (60, "1 to 3 minutes, up to an hour on a cold machine; the message shows the time so far"),
     "service": (10, "a few seconds"),
     "service-install": (10, "a few seconds"),
     "service-start": (15, "under a minute"),

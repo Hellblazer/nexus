@@ -757,7 +757,7 @@ def test_setup_returns_the_stage_and_how_long_it_usually_takes(monkeypatch: pyte
     _service(monkeypatch, False)
     text = _call("setup", mode="local")
     assert "Setup started" in text and "build" in text
-    assert "1 to 3 minutes" in text
+    assert "1 to 3 minutes" in text and "usually takes usually" not in text, text
     assert re.search(r"no (less|sooner) than 60 seconds", text), text
     assert "/cfg/setup/setup.log" in text
     recorder.views(status=NONE, start={**RUNNING_BUILD, "stage": "init"}, **{"not-now": NONE})
