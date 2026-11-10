@@ -257,10 +257,16 @@ _PLANTED = (
     "    parent = fence._stat(int(os.environ[fence.ROOT_ENV]))[0]\n"
     "    os.kill(parent, signal.SIGTERM)\n"
 )
+# Popen returns once exec has closed the child's error pipe, before the new image's argv and environment are
+# readable in /proc; a signal sent in that window reads unclassified (_imageless), so the inner test waits for the
+# argv first (develop shard 4 at f4808454c read own=0 unclassified=1).
 _OWN_ONLY = (
-    "import os, signal, subprocess, sys\n"
+    "import os, signal, subprocess, sys, time\n"
     "def test_signals_its_own_child():\n"
     "    p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+    "    deadline = time.monotonic() + 10\n"
+    "    while not open(f'/proc/{p.pid}/cmdline', 'rb').read() and time.monotonic() < deadline:\n"
+    "        time.sleep(0.01)\n"
     "    os.kill(p.pid, signal.SIGTERM)\n"
     "    p.wait()\n"
 )
