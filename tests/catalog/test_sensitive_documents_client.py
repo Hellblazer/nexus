@@ -81,3 +81,12 @@ def test_a_document_with_no_collection_is_read_as_an_empty_collection(monkeypatc
     c, _calls = _client(monkeypatch, get=body)
     assert c.sensitive_documents() == {"count": 1, "capped": False,
                                        "documents": [{"tumbler": "1.2.3", "physical_collection": ""}]}
+
+
+@pytest.mark.parametrize("exc", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow")])
+def test_a_transport_error_is_cannot_say(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
+    def fail(path, **kw):
+        raise exc
+
+    c, _calls = _client(monkeypatch, get=fail)
+    assert c.sensitive_documents() is None

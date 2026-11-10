@@ -308,7 +308,9 @@ def test_substrate_set_and_clear_round_trip_with_an_alias(t2_service_env) -> Non
         assert listed is not None, "the gate-jar engine advertises catalog_sensitive_list_supported"
         assert listed["capped"] is False and listed["count"] == len(listed["documents"]) >= 1
         assert canonical in {d["tumbler"] for d in listed["documents"]}
-        assert dup not in {d["tumbler"] for d in listed["documents"]}, "an alias is not a live sensitive document"
+        assert dup not in {d["tumbler"] for d in listed["documents"]}, "the flag landed on the canonical only"
+        walked = {str(e.tumbler) for e in cat.all_documents(limit=0) if e.sensitive is True}
+        assert walked == {d["tumbler"] for d in listed["documents"]}, "the route and the walk find the same set"
         row = sensitivity_doctor.check_sensitive_in_external_embedder(reader=cat)
         assert row["sensitive_documents"] == listed["count"], row
 

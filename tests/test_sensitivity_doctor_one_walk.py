@@ -171,3 +171,14 @@ def test_the_route_is_asked_for_the_engines_maximum(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Recording([], _ONE))
     sd.check_sensitive_in_external_embedder()
     assert asked == [10_000]
+
+
+def test_the_gating_row_fails_on_a_route_built_document(monkeypatch: pytest.MonkeyPatch) -> None:
+    """sensitive-with-aspects (the row that gates nx doctor's exit) reaches FAIL from the bounded list."""
+    r = _RouteReader([], _ONE)
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: r)
+    with_row = type("Aspects", (), {"get_by_doc_id": lambda self, t: {"doc_id": t} if t == "1.9.9" else None})()
+    report = sd.check_sensitive_with_aspects(aspects=with_row, queue=object(), queued_doc_ids=lambda _q: set())
+    assert r.walks == 0
+    assert report["status"] == sd.FAIL, report
+    assert report["findings"][0]["tumbler"] == "1.9.9", report
