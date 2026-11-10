@@ -234,6 +234,25 @@ ROT_SHAPES: dict[str, RotShape] = {s.name: s for s in (
                  "WHERE r.name LIKE 'knowledge\\_\\_bootw-a\\_\\_%' ESCAPE '\\' AND c.embedding_1024 IS NOT NULL"),
     ),
     RotShape(
+        name="pending_aspect_queue",
+        doc=("Rows still waiting in nexus.aspect_extraction_queue when the upgrade starts, as on a store whose "
+             "aspect worker never drained its queue. aspects-005-2 (retire the queue table) is guarded by a "
+             "precondition that the table is empty, with onFail=CONTINUE and failOnError=false, so on the first "
+             "upgrade boot it is skipped and NOT recorded; the new engine drains the queue, and on the next boot "
+             "it runs as a real pending changeset, which makes SchemaMigrator terminate a PCI build kept across a "
+             "restart (event=pci_builders_terminated reason=schema_changesets_pending). Three pending rows for "
+             "real seeded documents (doc_id references catalog_documents). Pair with --restart-mid-queue K "
+             "--restart-mode graceful. Source: the e90c46349 kill-leg diagnosis, 2026-11-10 (wren, "
+             "nexus-f3yqd.1)."),
+        plant=("INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, doc_id, content, "
+               "enqueued_at) SELECT d.tenant_id, d.physical_collection, 'nx-seed://rot/aspect-queue/' || d.tumbler, "
+               "d.tumbler, 'aspect extraction left pending for the upgrade gate', now() "
+               "FROM nexus.catalog_documents d WHERE d.physical_collection LIKE 'knowledge\\_\\_bootw-a\\_\\_%' "
+               "ESCAPE '\\' ORDER BY d.tumbler LIMIT 3"),
+        present=("SELECT count(*) FROM nexus.aspect_extraction_queue "
+                 "WHERE source_path LIKE 'nx-seed://rot/aspect-queue/%'"),
+    ),
+    RotShape(
         name="disputed_fallback_model",
         doc=("hygiene-002's attribute walk registered a collection it could not attribute under a fallback "
              "embedding_model (bge-base-en-v1.5, 768) with lifecycle_state 'disputed', while every vector the "
