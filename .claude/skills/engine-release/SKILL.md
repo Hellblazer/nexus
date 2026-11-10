@@ -191,8 +191,11 @@ Start each leg as a background command (`run_in_background`) with its output
 redirected to a file, as every `lab-remote` run is. `output/` is git-ignored, so
 the fetched reports leave the tag tree clean. The jar must come from
 `scripts/build-gate-jar.sh`, which stamps the build commit the engine serves on
-`/version`; `--new-jar-commit` makes the harness exit 2 when the booted engine
-was built from any other commit, or carries no stamp (a plain `mvnw package`).
+`/version`. The script reuses a cached jar while `service/` is unchanged, so the
+stamp can name an older commit with the same engine tree: `--new-jar-commit`
+accepts that and records how it matched in `new_jar_identity`, and exits 2 when
+the booted engine's `service/` tree differs from the tag's, or it carries no
+stamp (a plain `mvnw package`).
 
 - **Leg A** is the normal upgrade, from the release users are on now, then a
   plain same-version reboot. `--ceiling-boot` bounds the upgrade boot's migrate
@@ -219,12 +222,16 @@ Every leg must exit 0. Exit 1 is a red (a bound tripped, a boot failed, or the
 restart rule failed): do not tag. Exit 2 is a harness failure with no measurement: fix the
 run and repeat it, never tag on it. Paste each fetched `output/gate/*.json`'s
 `verdict`, `boot_wal_bytes`, `reboot_wal_bytes` (Leg A), `total_wal_bytes`,
-`ceilings_tripped`, `new_jar_sha256`, `new_jar_commit` and the `resume` block on
-the cut bead, and check the build commit equals the tag commit. Not covered by this step: background work
+`ceilings_tripped`, `new_jar_sha256`, `new_jar_commit`, `new_jar_identity` and the
+`resume` block on the cut bead, and check that `new_jar_identity` shows the jar's
+engine tree equals the tag commit's. Not covered by this step: background work
 that starts after idle (a later sweep or periodic job), and non-index background
 jobs (their own gate, nexus-f3yqd.2). Reference results: engine-service-v0.1.186
 is red on Leg B (`pci_builders_terminated reason=schema_changesets_pending`,
-then a rebuild); the 0.1.187 candidate (0c6f9e1c5) is green on Legs B and C.
+then a rebuild); the 0.1.187 candidate (0c6f9e1c5) is green on Legs B and C. A
+red control in Leg A's shape from 7.72.1 (engine 0.1.149, before the vectors-030
+walk) exits 1 with `boot-over-ceiling`: 846,283,216 bytes over migrate, 12.6
+times the bound (marginalia, on nexus-f3yqd.1).
 
 ### 4. Push the tag (Sam, or the AI on Sam's go for the release)
 

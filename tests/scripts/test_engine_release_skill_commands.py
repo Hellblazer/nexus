@@ -282,7 +282,7 @@ def test_step_3h_scopes_the_bounds_and_names_what_it_does_not_cover() -> None:
     assert "64 MiB" in s and "UPGRADE boot only" in s
     assert "not gated" in s and "kept build" in s, "say why later boots are reported, not gated"
     assert "do not tag" in s and "Exit 2" in s, "red stops the tag; a harness failure is rerun, never tagged on"
-    assert "TAG_TREE" in s and "build commit equals the tag commit" in s
+    assert "TAG_TREE" in s and "engine tree equals the tag commit's" in s and "new_jar_identity" in s
 
 
 def test_every_harness_flag_step_3h_names_exists_in_the_harness() -> None:
