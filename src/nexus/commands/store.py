@@ -298,7 +298,7 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
     if reapable:
         scope = t3_collection_names_for_read(collection, t3=db)
     else:
-        scope, rows = _store_scope(collection, db)
+        scope, rows = _store_scope(collection, db, counts=True)
         if len(scope) > 1 and collection.strip() == "knowledge":
             counts = {r["name"]: r.get("count", "?") for r in rows if isinstance(r, dict) and "name" in r}
             click.echo(f"{len(scope)} knowledge collections (pass one as --collection to list its entries):")
@@ -547,13 +547,15 @@ def _list_documents(db: T3Database, col_name: str, *, also: str = "") -> None:
 
 
 
-def _store_scope(collection: str, db: T3Database) -> tuple[list[str], list]:
+def _store_scope(collection: str, db: T3Database, *, counts: bool = False) -> tuple[list[str], list]:
     """The collections a ``nx store`` read looks in, by the rule the MCP store
     tools use (:func:`nexus.corpus.store_read_scope`, nexus-2y8yw), and the live
     rows listed for it (empty unless the bare ``knowledge`` asked for them).
 
     The names come from the verb's own T3 handle, one listing, so the scope and
-    the counts printed beside it are the client the verb reads through.
+    the counts printed beside it are the client the verb reads through. Only a
+    caller that prints *counts* asks for the full listing; the others read the
+    routing one, which has the same collections without counting chunks (nexus-mjmjl).
     """
     from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — deferred: heavy module
 
@@ -562,7 +564,7 @@ def _store_scope(collection: str, db: T3Database) -> tuple[list[str], list]:
     def _knowledge() -> list[str]:
         # A stopped service raises what the CLI group already turns into its
         # "did not answer" / "nx daemon service start" message (nexus-sis0m.1).
-        rows = db.list_collections()
+        rows = db.list_collections(routing=not counts)
         listed.extend(
             r for r in rows
             if isinstance(r, dict) and "name" in r and is_live_collection_row(r)

@@ -209,7 +209,7 @@ def test_a_stub_with_no_gate_refuses_exclude_and_still_serves_include(monkeypatc
 
 
 def test_the_collection_handles_a_client_returns_carry_its_gate(client, monkeypatch):
-    monkeypatch.setattr(client, "list_collections", lambda strict=False: [{"name": "c"}])
+    monkeypatch.setattr(client, "list_collections", lambda strict=False, routing=False: [{"name": "c"}])
     wire = _Wire(monkeypatch, version={})
     for handle in (client.get_collection("c"), client.get_or_create_collection("c")):
         with pytest.raises(hvc.SensitivityExcludeUnavailable):

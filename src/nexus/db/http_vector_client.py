@@ -6349,11 +6349,11 @@ class HttpVectorClient:
         """True if *name* holds at least one LIVE chunk (no create side-effect).
 
         T3Database parity (RDR-155 P4a.2): on the pgvector path a collection
-        is a column value, so existence == "has rows for this tenant".
-        Since RDR-156 P3 this reads the tombstone-filtered stats view via
-        :meth:`list_collections`: a collection whose every chunk belongs to
-        trashed documents reads as absent — the Decision 6 single-enforcement
-        -point semantics (consumers see live state only).
+        is a column value, so existence == "has rows for this tenant". It reads
+        the routing listing (nexus-mjmjl), the registered collections that
+        physically hold a chunk, the same population as the full listing
+        without its per-collection chunk counts (55 ms against 469 ms at 140k
+        rows).
 
         This conflates TOMBSTONED with truly ABSENT under one boolean. Callers
         that must tell the two apart (rename/migration collision guards) use
@@ -6362,7 +6362,7 @@ class HttpVectorClient:
         degrades cleanly for non-HttpVectorClient backends — instead of this
         method alone (nexus-9n485).
         """
-        return any(c.get("name") == name for c in self.list_collections())
+        return any(c.get("name") == name for c in self.list_collections(routing=True))
 
     def collection_exists_raw(self, name: str) -> bool:
         """True if *name* has ANY physical chunk row for this tenant — LIVE or TOMBSTONED.
@@ -6593,7 +6593,7 @@ class HttpVectorClient:
         for the frecency-only loop.  The loop catches the missing-collection
         error and skips collections that have not yet been indexed.
 
-        Checks existence via the service's ``/v1/vectors/collections`` list.
+        Checks existence via the routing listing (``/v1/vectors/stats?fields=routing``, nexus-mjmjl).
         A missing collection raises the substrate-neutral
         :class:`nexus.errors.CollectionNotFoundError` (RDR-155 P4b P0c — the
         successor to ``chromadb.errors.NotFoundError``; catchers tolerate
@@ -7249,7 +7249,7 @@ class HttpVectorClient:
             return reader_box[0]
 
         try:
-            for entry in self.list_collections():
+            for entry in self.list_collections(routing=True):  # reads name and content_type only (nexus-mjmjl)
                 name = entry.get("name", "")
                 # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): `entry`
                 # already carries `content_type` when a catalog row backs this
