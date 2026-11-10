@@ -1836,6 +1836,8 @@ def test_a_long_step_rewrites_its_status_with_elapsed_time_and_the_last_log_line
     assert seen[-1].startswith("running: build (") and " so far; last output: the secret is ***)" in seen[-1], seen[-1]
     assert all("hunter2" not in m for m in seen)
     assert mod.read_status(box.setup)["elapsed_s"] >= 0
+    run.at("verify")
+    assert "elapsed_s" not in mod.read_status(box.setup), "a new step drops the last one's time so far"
 
 
 def test_the_progress_words() -> None:

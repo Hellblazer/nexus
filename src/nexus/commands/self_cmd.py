@@ -1499,6 +1499,11 @@ def _run_build(
         out = proc.stdout.read() if proc.stdout is not None else ""
         proc.wait()
         pump.join(timeout=5)
+    except BaseException:
+        # Ctrl-C or SIGTERM to nx: the build must not outlive it, as subprocess.run's would not.
+        if proc.poll() is None:
+            proc.kill()
+        raise
     finally:
         stop.set()
         ticker.join(timeout=2)
@@ -2064,8 +2069,12 @@ def _converge_legacy_install(
         # migrate_legacy(progress=True) does; it was captured whole and printed nothing until it ended.
         r = _run_build(build, progress=True, env=env)
         if r.returncode != 0:
-            detail = _with_platform_hint(r.stderr.strip())
-            raise click.ClickException(f"legacy migration failed:\n{detail}")
+            # The build streamed uv's output already: repeat only its tail, as the generation build does. The
+            # platform hint still reads the whole output.
+            full = r.stderr.strip()
+            hint = platform_failure_hint(full)
+            shown = f"uv output (last lines; the full output is above):\n{_tail(full)}"
+            raise click.ClickException(f"legacy migration failed:\n{hint}\n\n{shown}" if hint else f"legacy migration failed:\n{shown}")
         _echo_build_warnings(r.stderr)
 
         out = r.stdout.strip()

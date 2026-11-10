@@ -1843,6 +1843,7 @@ class _Run:
             if follow:
                 fields["next"] = follow
         self._stage_message = fields["message"]
+        self.data.pop("elapsed_s", None)  # a new step: the last one's time so far no longer applies
         self.update(**fields)
 
     def progress(self, elapsed_s: float, last_line: str) -> None:
@@ -1851,7 +1852,8 @@ class _Run:
         base = self._stage_message or f"running: {self.stage}"
         line = last_line if len(last_line) <= _PROGRESS_LINE_MAX else last_line[: _PROGRESS_LINE_MAX - 3] + "..."
         tail = f"; last output: {line}" if line else ""
-        self.update(message=f"{base} ({_elapsed_words(elapsed_s)} so far{tail})", elapsed_s=round(elapsed_s))
+        with contextlib.suppress(OSError):  # a full disk must not end a build that is running; _LockLost still raises
+            self.update(message=f"{base} ({_elapsed_words(elapsed_s)} so far{tail})", elapsed_s=round(elapsed_s))
 
     def open_page(self) -> int | None:
         """Start the credentials page (mode cloud). ``None`` when it is serving, else the failed run's exit code:
@@ -2636,9 +2638,9 @@ def _elapsed_words(seconds: float) -> str:
 
 
 def _last_line(text: str) -> str:
-    """The last non-blank line of *text*, with a carriage-return redraw reduced to its last frame."""
+    """The last non-blank line of *text*; ``splitlines`` also splits a carriage-return redraw into its frames."""
     for raw in reversed(text.splitlines()):
-        line = raw.rsplit("\r", 1)[-1].strip()
+        line = raw.strip()
         if line:
             return line
     return ""
