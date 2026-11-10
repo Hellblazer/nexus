@@ -410,6 +410,20 @@ def _set_site_kind(monkeypatch, *, packaged: bool) -> None:
     monkeypatch.setattr(uf, "running_from_tool_install", lambda: packaged)
 
 
+def _builds_through_patched_run(monkeypatch) -> None:
+    """The legacy build runs through ``self_cmd._run_build``, which streams uv's output (nexus-mjmjl F15)
+    by ``Popen``. These tests fake the build at ``subprocess.run``, so the build is routed to whatever
+    ``subprocess.run`` is patched to, and every assertion on its argv and result stays as it was."""
+    from nexus.commands import self_cmd  # noqa: PLC0415 — the module under test
+
+    monkeypatch.setattr(
+        self_cmd, "_run_build",
+        lambda argv, *, progress, env=None: self_cmd.subprocess.run(
+            argv, capture_output=True, text=True, encoding="utf-8", check=False, env=env,
+        ),
+    )
+
+
 def test_a_packaged_uv_tool_install_converges_instead_of_refusing(
     bed, monkeypatch, tmp_path,
 ) -> None:
@@ -429,6 +443,7 @@ def test_a_packaged_uv_tool_install_converges_instead_of_refusing(
         )
 
     setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run", _fake_run)
+    _builds_through_patched_run(monkeypatch)
     result = _run_self_install()
 
     assert result is not None, "converge returned nothing"
@@ -451,6 +466,7 @@ def test_converge_does_not_thread_extras_itself(bed, monkeypatch, tmp_path) -> N
         return subprocess.CompletedProcess(argv, 0, stdout="/t/gen-x\n", stderr="")
 
     setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run", _fake_run)
+    _builds_through_patched_run(monkeypatch)
     _run_self_install()
     assert "--extras" not in seen["argv"], seen["argv"]
 
@@ -467,6 +483,7 @@ def test_converge_never_reaps_in_the_same_pass(bed, monkeypatch, tmp_path) -> No
         return subprocess.CompletedProcess(argv, 0, stdout="/t/gen-x\n", stderr="")
 
     setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run", _fake_run)
+    _builds_through_patched_run(monkeypatch)
     _run_self_install()
     assert not any("nx_gc_generations" in c for c in calls), calls
 
@@ -507,6 +524,7 @@ def test_converge_failure_surfaces_stderr(bed, monkeypatch, tmp_path) -> None:
         lambda argv, **kw: subprocess.CompletedProcess(
             argv, 64, stdout="", stderr="migrate_legacy: uv not resolvable"),
     )
+    _builds_through_patched_run(monkeypatch)
 
     with pytest.raises(click.ClickException) as exc:
         _run_self_install()
@@ -532,6 +550,7 @@ def test_converge_re_echoes_the_builders_warning_on_success(
             argv, 0, stdout=f"{tools}/gen-20260827T000000Z\n",
             stderr=f"Resolved 12 packages in 3ms\n{warning}\nInstalled 12 packages\n"),
     )
+    _builds_through_patched_run(monkeypatch)
     assert _run_self_install() is not None
     err = capsys.readouterr().err
     assert warning in err
@@ -550,6 +569,7 @@ def test_converge_failure_on_macos_names_the_floor(bed, monkeypatch, tmp_path) -
                 "error: onnxruntime==1.24.2 has no wheels with a matching platform tag "
                 "(e.g., `macosx_13_0_arm64`)")),
     )
+    _builds_through_patched_run(monkeypatch)
     with pytest.raises(click.ClickException) as exc:
         _run_self_install()
     assert "macOS 14 or later on Apple Silicon" in str(exc.value)
