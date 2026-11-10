@@ -103,6 +103,8 @@ def test_a_killed_holder_does_not_wedge_the_lock(config_dir: Path) -> None:
         # The holder's own pid, not Popen's: on Windows a venv's python.exe is a launcher that
         # runs the interpreter as its child, so Popen.pid is the launcher's.
         assert lock_mod.read_holder_text(config_dir / lock_mod.LOCK_NAME) == f"{pid} pytest"  # inherits PYTEST_CURRENT_TEST
+        # Across processes, which is the read Windows refused while the text sat on byte 0.
+        assert lock_mod.AutoLock(fd=None, held_by_other=True, path=config_dir / lock_mod.LOCK_NAME).holder_pid() == int(pid)
     finally:
         holder.kill()
         holder.wait(timeout=10)
@@ -671,3 +673,44 @@ def test_the_plain_wait_outlasts_the_auto_ceiling_with_room_for_what_the_ceiling
     from nexus.upgrade_ladder.deadline import DEFAULT_AUTO_DEADLINE_S
 
     assert lock_mod.PLAIN_WAIT_S >= DEFAULT_AUTO_DEADLINE_S + 2 * 60
+
+
+
+def test_the_text_sits_behind_the_locked_byte(config_dir: Path) -> None:
+    """Byte 0 is the byte msvcrt locks; the pid starts at byte 1, so it reads on Windows too."""
+    lock = acquire_auto_lock()
+    try:
+        raw = (config_dir / lock_mod.LOCK_NAME).read_bytes()
+    finally:
+        lock.release()
+    assert raw[:1] == b" " and raw[1:].split()[0] == str(os.getpid()).encode()
+
+
+def test_a_held_lock_on_windows_reads_past_the_locked_byte(config_dir: Path, monkeypatch) -> None:
+    """A read of byte 0 fails on Windows while the lock is held; the text is read from byte 1."""
+    path = config_dir / lock_mod.LOCK_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b" 48213")
+    real_open = open
+
+    class _LockedAtZero:
+        def __init__(self, fh):
+            self._fh, self._pos = fh, 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._fh.close()
+
+        def seek(self, offset):
+            self._pos = offset
+            self._fh.seek(offset)
+
+        def read(self):
+            if self._pos == 0:
+                raise PermissionError(13, "Permission denied")
+            return self._fh.read()
+
+    monkeypatch.setattr(lock_mod, "open", lambda p, mode: _LockedAtZero(real_open(p, mode)), raising=False)
+    assert lock_mod.read_holder_text(path) == "48213"

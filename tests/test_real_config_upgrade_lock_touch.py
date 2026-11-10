@@ -10,7 +10,8 @@ selector floor test's child session failed the same way (nexus-iox43).
 
 The lock's bytes change on every take, so the mint lock's unchanged-bytes rule cannot apply.
 The rule is writer-based instead: a taker under pytest (``PYTEST_CURRENT_TEST`` set, which a
-test's subprocesses inherit) writes ``<pid> pytest``, a live host writes the pid alone. A lock
+test's subprocesses inherit) writes ``<pid> pytest``, a live host writes the pid alone, each
+behind one space (byte 0 is the byte Windows locks; nexus.util.upgrade_auto_lock). A lock
 that existed at session start and ends holding a bare pid is benign; one ending with the pytest
 mark, created, removed or holding anything else stays a state mutation. The last writer decides:
 a live take after a test's take hides the test's, as a later live mint would.
@@ -37,12 +38,15 @@ def _split(content: bytes | None, changed=CHANGED, before=BEFORE, after=AFTER):
     return _split_appends_from_state(changed, before, after, upgrade_lock_content=content)
 
 
-def test_a_live_takers_pid_is_benign() -> None:
-    assert _split(b"48213") == ([], CHANGED)
+@pytest.mark.parametrize("content", [b"48213", b" 48213"], ids=["older-client", "behind-the-locked-byte"])
+def test_a_live_takers_pid_is_benign(content: bytes) -> None:
+    """The pid sits behind one space now (byte 0 is the byte Windows locks); an older client
+    writes it at byte 0. Either is a live host's take."""
+    assert _split(content) == ([], CHANGED)
 
 
-@pytest.mark.parametrize("content", [b"48213 pytest", b"", b"not a pid", b"48213\n{}"],
-                         ids=["pytest-mark", "empty", "text", "extra-line"])
+@pytest.mark.parametrize("content", [b"48213 pytest", b" 48213 pytest", b"", b" ", b"not a pid", b"48213\n{}"],
+                         ids=["pytest-mark", "pytest-mark-behind-the-byte", "empty", "space", "text", "extra-line"])
 def test_anything_but_a_bare_pid_is_a_state_mutation(content: bytes) -> None:
     assert _split(content) == (CHANGED, [])
 
@@ -72,7 +76,7 @@ def test_a_taker_under_pytest_marks_the_lock(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/x.py::y (call)")
     lock = lock_mod.acquire_auto_lock(tmp_path)
     try:
-        assert (tmp_path / REL).read_bytes() == f"{os.getpid()} pytest".encode()
+        assert (tmp_path / REL).read_bytes() == f" {os.getpid()} pytest".encode()  # byte 0 is the locked byte
     finally:
         lock.release()
 
@@ -81,13 +85,14 @@ def test_a_live_taker_writes_the_bare_pid(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     lock = lock_mod.acquire_auto_lock(tmp_path)
     try:
-        assert (tmp_path / REL).read_bytes() == str(os.getpid()).encode()
+        assert (tmp_path / REL).read_bytes() == f" {os.getpid()}".encode()  # byte 0 is the locked byte
     finally:
         lock.release()
 
 
-@pytest.mark.parametrize("text", ["48213", "48213 pytest"])
+@pytest.mark.parametrize("text", ["48213", "48213 pytest", " 48213", " 48213 pytest"])
 def test_holder_pid_reads_either_form(tmp_path, text: str) -> None:
+    """The new layout (behind one space) and an older client's (pid at byte 0) both read whole."""
     (tmp_path / REL).write_text(text, encoding="utf-8")
     assert lock_mod.AutoLock(fd=None, held_by_other=True, path=tmp_path / REL).holder_pid() == 48213
 
