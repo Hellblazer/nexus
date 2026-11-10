@@ -444,7 +444,7 @@ class TestWindowsTargetCore:
                 staged.install_dir, self_cmd._RegistryReceipt(source=str(wheel)),
                 version=None, extras=[], core=staged.core,
             )
-            with pytest.raises(click.ClickException, match="generation build failed:\nthe target core failed"):
+            with pytest.raises(click.ClickException, match=r"(?s)^generation build failed:\n.*\n\nuv output:\nthe target core failed"):
                 self_cmd._windows_build_flip_shims(build, tools=tmp_path, bin_dir=tmp_path / "bin")
         assert flipped == []
 

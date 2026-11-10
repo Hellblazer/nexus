@@ -1030,6 +1030,15 @@ def _build_argv(
 #: The failures a target installer can be blamed for: the build step's own messages.
 _BUILD_FAILURE_PREFIXES = ("generation build failed", "legacy migration failed")
 
+#: The advice for a build failure none of the specific hints recognises (F22, nexus-f3yqd.6). It keeps the
+#: ``<advice>\n\nuv output:`` shape :func:`split_build_failure` reads, and names no network or TLS words, so
+#: ``pdf_stack``'s classifier reads the message as it read uv's output alone.
+_UNRECOGNISED_BUILD_HINT = (
+    "nexus does not recognise this build failure; uv's first `error:` line below names the cause. "
+    "Adding --dry-run to the same `nx self install` command prints the build command, to run by hand "
+    "and read its whole output."
+)
+
 
 def _target_installer(
     source: str, *, version: str | None, extras: list[str] | bool,
@@ -1594,12 +1603,10 @@ def _build_flip_shims(
                 index_failure_hint(detail, bootstrap=bootstrap), platform_failure_hint(detail),
                 torch_backend_hint(detail),
             ) if h
-        )
+        ) or _UNRECOGNISED_BUILD_HINT
         # A streamed build already showed uv's output: repeat only its tail.
         shown = _tail(detail) if progress else detail
         label = "uv output (last lines; the full output is above)" if progress else "uv output"
-        if not hint:
-            raise click.ClickException(f"generation build failed:\n{shown}")
         raise click.ClickException(
             f"generation build failed:\n{hint}\n\n{label}:\n{shown}"
         )
@@ -1748,9 +1755,7 @@ def _windows_build_flip_shims(
         )
     except core.GenerationError as exc:
         detail = str(exc)
-        hint = index_failure_hint(detail, bootstrap=bootstrap)
-        if hint is None:
-            raise click.ClickException(f"generation build failed:\n{detail}") from exc
+        hint = index_failure_hint(detail, bootstrap=bootstrap) or _UNRECOGNISED_BUILD_HINT
         raise click.ClickException(
             f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
         ) from exc

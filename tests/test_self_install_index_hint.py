@@ -249,9 +249,15 @@ class TestTheBuildFailureMessage:
         assert message.index("not changed") < message.index("uv output:")
         assert message.index("uv output:") < message.index("Request failed after 3 retries")
 
-    def test_a_non_network_failure_keeps_the_original_shape(self, tmp_path, monkeypatch):
+    def test_an_unrecognised_failure_gets_the_generic_advice_above_uvs_output(self, tmp_path, monkeypatch):
+        """F22 (nexus-f3yqd.6): it used to be uv's raw output alone, with nothing to do."""
         message = self._fail(tmp_path, _RESOLVER_FAILURE, monkeypatch)
-        assert message == f"generation build failed:\n{_RESOLVER_FAILURE.strip()}"
+        assert message == (
+            f"generation build failed:\n{self_cmd._UNRECOGNISED_BUILD_HINT}\n\nuv output:\n{_RESOLVER_FAILURE.strip()}"
+        )
+        assert self_cmd.split_build_failure(message) == (self_cmd._UNRECOGNISED_BUILD_HINT, _RESOLVER_FAILURE.strip())
+        assert not self_cmd._NETWORK_FAILURE_RE.search(self_cmd._UNRECOGNISED_BUILD_HINT)
+        assert not self_cmd._TLS_FAILURE_RE.search(self_cmd._UNRECOGNISED_BUILD_HINT)
 
     def test_an_unparseable_url_still_ends_in_a_click_exception(self, tmp_path, monkeypatch):
         stderr = "  Failed to fetch: `https://[abc/simple/`\n  dns error: failed to lookup address\n"
