@@ -1,0 +1,3 @@
+### Fixed
+
+- **An engine that dies right after a manifest write no longer costs a document its timestamp** (nexus-f3yqd.5). The engine restamps a document's `indexed_at` on every manifest write, and the two manifest data steps write the old value back after each write. When the engine died between the write and the write-back, and the step then ran again once the engine was back, the document kept the run-time stamp. That turned off the guard that skips rows whose chunk is newer than the document. The steps now remember the write-backs they owe and make them before they read the store again; one that still fails defers the step and names the document.
