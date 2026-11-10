@@ -147,3 +147,17 @@ def test_the_finish_heartbeat_ticks_until_stopped(capsys) -> None:
     beat._started = 0.0
     beat._run()
     assert capsys.readouterr().err.count("... still finishing the switch: ") == 2
+
+
+def test_skip_t3_announces_no_restart_it_does_not_do(ran) -> None:
+    """nexus-f3yqd.6: under --skip-t3 the restart is a no-op (``_cycle_supervised_daemons_to_current`` returns at
+    once), so the run must not print "Restart running services", and the precondition step must not promise
+    downloads or restarts it skips."""
+    result = CliRunner().invoke(up.upgrade, ["--skip-t3"])
+    assert result.exit_code == 0, result.output
+    out = result.stdout
+    assert "Restart running services" not in out, out
+    assert "_cycle_supervised_daemons_to_current" not in ran
+    pre = next(line for line in out.splitlines() if "Bring the engine, the PDF stack and the runtime" in line)
+    assert "restart" not in pre and "download" not in pre, pre
+    assert "--skip-t3" in pre, pre

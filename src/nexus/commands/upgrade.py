@@ -83,7 +83,8 @@ def upgrade(
 
     # P0 (nexus-f3yqd): --auto (the SessionStart hook) and the lockstep hook's unattended
     # run never restart the storage service; only a person's own `nx upgrade` does.
-    restarts = not dry_run and not auto_mode and not env_unattended()
+    # nexus-f3yqd.6: nor does --skip-t3, whose restart is a no-op, so its step line is not printed either.
+    restarts = not dry_run and not auto_mode and not env_unattended() and not skip_t3
     # A restart that could not finish is reported at the end and fails an interactive
     # run (nexus-mjmjl item 14); the precondition stage records its failure here.
     failures: list[str] = []
@@ -167,6 +168,7 @@ def _upgrade_steps(
         # on-disk state each invocation, never recorded.
         steps.append((
             "Bring the engine, the PDF stack and the runtime to this release",
+            "checks only, under --skip-t3: it installs and cycles nothing" if skip_t3 else
             "can download the engine and its PostgreSQL bundle, rebuild the PDF stack and restart services "
             "still on the old version; minutes when it does",
             lambda: _note_failure(failures, _converge_preconditions(auto_mode=auto_mode, skip_t3=skip_t3)),
