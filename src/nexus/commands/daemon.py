@@ -2060,8 +2060,12 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
                 stale_warning = note
                 data["installed_by_outdated"] = True
 
+    # nexus-f3yqd.3: the heavy work the engine is doing (a PCI build, a migration), from its own /v1/status.
+    from nexus.progress import boot_work as _boot_work  # noqa: PLC0415 — deferred import — only this subcommand path
+
+    work = _boot_work.current_entries(config_dir)
     if as_json:
-        click.echo(_json.dumps(data, indent=2))
+        click.echo(_json.dumps({**data, "boot_work": work}, indent=2))
         return
     click.echo("Storage Service Status")
     click.echo("-" * 40)
@@ -2069,6 +2073,8 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         # Lists (embedding_models) stay arrays in --json; join for humans.
         display = ", ".join(value) if isinstance(value, list) else value
         click.echo(f"  {key}: {display}")
+    for line in _boot_work.render(work, now=time.time()):
+        click.echo(line)
     if stale_warning:
         click.echo(f"warning: {stale_warning}", err=True)
 
