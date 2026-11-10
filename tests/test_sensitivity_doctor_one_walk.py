@@ -20,6 +20,7 @@ class _Doc:
     def __init__(self, sensitive: bool) -> None:
         self.sensitive = sensitive
         self.collection = "knowledge__c__voyage-context-3__v1"
+        self.physical_collection = self.collection
         self.tumbler = "1.1.1"
         self.title = "t"
 
@@ -97,3 +98,51 @@ def test_a_failed_walk_is_shared_too(monkeypatch: pytest.MonkeyPatch) -> None:
         reports = _three()
     assert len(calls) == 1
     assert all(r["status"] == sd.NOT_APPLICABLE and "engine gone" in r["reason"] for r in reports)
+
+
+class _RouteReader(_Reader):
+    """An engine with ``GET /sensitive`` (0.1.188): the rows read the bounded list, not the catalog."""
+
+    def __init__(self, docs: list[_Doc], answer: dict | None) -> None:
+        super().__init__(docs)
+        self.answer = answer
+        self.route_calls = 0
+
+    def sensitive_documents(self, limit: int = 1000) -> dict | None:
+        self.route_calls += 1
+        return self.answer
+
+
+_ONE = {"count": 1, "capped": False,
+        "documents": [{"tumbler": "1.9.9", "physical_collection": "knowledge__c__voyage-context-3__v1"}]}
+
+
+def test_the_bounded_route_replaces_the_walk(monkeypatch: pytest.MonkeyPatch) -> None:
+    r = _RouteReader([_Doc(False)], _ONE)
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: r)
+    with sd.one_walk():
+        no_aspects = type("NoAspects", (), {"list_by_collection": lambda self, _c, limit=1: []})()
+        reports = [
+            sd.check_sensitive_in_external_embedder(),
+            sd.check_sensitive_in_aspect_eligible(aspects=no_aspects, select=lambda _c: None),
+        ]
+    assert r.walks == 0 and r.route_calls == 1
+    assert all(rep["sensitive_documents"] == 1 for rep in reports), reports
+    assert reports[0]["status"] == sd.WARN, reports[0]  # a voyage collection is an external embedder
+
+
+@pytest.mark.parametrize("answer", [None, {"count": 1001, "capped": True, "documents": _ONE["documents"]}])
+def test_no_route_or_a_capped_list_walks_as_before(monkeypatch: pytest.MonkeyPatch, answer: dict | None) -> None:
+    r = _RouteReader([_Doc(True), _Doc(False)], answer)
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: r)
+    report = sd.check_sensitive_in_external_embedder()
+    assert r.route_calls == 1 and r.walks == 1
+    assert report["sensitive_documents"] == 1
+
+
+def test_an_empty_route_answer_is_not_applicable_without_a_walk(monkeypatch: pytest.MonkeyPatch) -> None:
+    r = _RouteReader([_Doc(True)], {"count": 0, "capped": False, "documents": []})
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: r)
+    report = sd.check_sensitive_with_aspects()
+    assert r.walks == 0
+    assert report["status"] == sd.NOT_APPLICABLE and report["reason"] == "no sensitive documents in this catalog"

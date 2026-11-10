@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+from types import SimpleNamespace
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -59,6 +60,9 @@ def _report(name: str, status: str, reason: str = "", total: int = 0, findings: 
     return {"name": name, "status": status, "reason": reason, "sensitive_documents": total,
             "findings": findings or []}
 
+
+#: The most sensitive documents the bounded route is asked for; a tenant with more walks the catalog instead.
+_SENSITIVE_LIST_LIMIT = 1000
 
 #: The walk shared inside :func:`one_walk`: ``(documents, not-applicable reason)``, or unset outside one.
 _SHARED: contextvars.ContextVar[dict[str, tuple[list[Any], str | None]] | None] = contextvars.ContextVar(
@@ -108,7 +112,17 @@ def _walk_sensitive(name: str, reader: Any) -> tuple[list[Any], str | None]:
                 what = f"engine {version} does not advertise catalog_sensitivity_supported" if version else \
                     "the engine's capabilities could not be read"
                 return [], what
-        documents = [e for e in reader.all_documents(limit=0) if getattr(e, "sensitive", False) is True]
+        # F30 (nexus-f3yqd.6): an engine with the bounded route (0.1.188) answers in one indexed read; on
+        # ``None`` (an older engine, a 404 or 503) or a capped list, the rows walk the catalog as before.
+        bounded = getattr(reader, "sensitive_documents", None)
+        answer = bounded(limit=_SENSITIVE_LIST_LIMIT) if callable(bounded) else None
+        if isinstance(answer, dict) and answer.get("capped") is False:
+            documents = [
+                SimpleNamespace(tumbler=d["tumbler"], physical_collection=d["physical_collection"], sensitive=True)
+                for d in answer.get("documents", [])
+            ]
+        else:
+            documents = [e for e in reader.all_documents(limit=0) if getattr(e, "sensitive", False) is True]
     except Exception as exc:  # noqa: BLE001 — an unreadable catalog is not a finding; the row is not applicable, never red
         _log.warning("sensitivity_doctor_catalog_unreadable", check=name, error=str(exc))
         return [], f"the catalog could not be read ({type(exc).__name__}: {exc})"
