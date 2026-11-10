@@ -678,11 +678,8 @@ def test_the_plain_wait_outlasts_the_auto_ceiling_with_room_for_what_the_ceiling
 
 def test_the_text_sits_behind_the_locked_byte(config_dir: Path) -> None:
     """Byte 0 is the byte msvcrt locks; the pid starts at byte 1, so it reads on Windows too."""
-    lock = acquire_auto_lock()
-    try:
-        raw = (config_dir / lock_mod.LOCK_NAME).read_bytes()
-    finally:
-        lock.release()
+    acquire_auto_lock().release()  # read after the release: Windows refuses byte 0 while held
+    raw = (config_dir / lock_mod.LOCK_NAME).read_bytes()
     assert raw[:1] == b" " and raw[1:].split()[0] == str(os.getpid()).encode()
 
 

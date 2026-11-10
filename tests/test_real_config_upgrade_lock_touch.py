@@ -74,20 +74,14 @@ def test_a_lock_of_that_name_below_the_root_is_not_exempt() -> None:
 def test_a_taker_under_pytest_marks_the_lock(tmp_path, monkeypatch) -> None:
     """The writer half of the rule: the mark is what keeps a test's take from passing."""
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/x.py::y (call)")
-    lock = lock_mod.acquire_auto_lock(tmp_path)
-    try:
-        assert (tmp_path / REL).read_bytes() == f" {os.getpid()} pytest".encode()  # byte 0 is the locked byte
-    finally:
-        lock.release()
+    lock_mod.acquire_auto_lock(tmp_path).release()  # read after the release: Windows refuses byte 0 while held
+    assert (tmp_path / REL).read_bytes() == f" {os.getpid()} pytest".encode()  # byte 0 is the locked byte
 
 
 def test_a_live_taker_writes_the_bare_pid(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    lock = lock_mod.acquire_auto_lock(tmp_path)
-    try:
-        assert (tmp_path / REL).read_bytes() == f" {os.getpid()}".encode()  # byte 0 is the locked byte
-    finally:
-        lock.release()
+    lock_mod.acquire_auto_lock(tmp_path).release()  # read after the release: Windows refuses byte 0 while held
+    assert (tmp_path / REL).read_bytes() == f" {os.getpid()}".encode()  # byte 0 is the locked byte
 
 
 @pytest.mark.parametrize("text", ["48213", "48213 pytest", " 48213", " 48213 pytest"])
