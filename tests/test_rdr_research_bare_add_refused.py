@@ -31,6 +31,8 @@ ADD_FORMS = [
     ),
     pytest.param(("add 240 a finding; with a semicolon",), id="one-element"),
     pytest.param(("ADD", "240", "x"), id="upper-case-verb"),
+    pytest.param(("add",), id="verb-only"),
+    pytest.param(("add 240",), id="one-element-id-only"),
 ]
 
 
@@ -58,20 +60,19 @@ def test_the_cli_writer_is_gone() -> None:
 
 
 def test_no_shipped_source_sends_a_caller_to_the_bare_add() -> None:
-    out = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(ROOT),
-            "grep",
-            "-n",
-            "rdr-research -- add",
-            "--",
-            "src",
-            "conexus",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    hits = [ln for ln in out.stdout.splitlines() if "CHANGELOG" not in ln]
+    def grep(*pattern: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(ROOT), "grep", "-n", "-E", *pattern, "--", "src", "conexus"],
+            capture_output=True,
+            text=True,
+        )
+
+    # Non-vacuity (nexus-moht0): the scan must see the tree, so a pattern every tree holds matches.
+    seen = grep("-e", "preamble_rdr_research")
+    assert seen.returncode == 0 and seen.stdout, f"git grep saw nothing: {seen.stderr}"
+    out = grep("-e", r"rdr-research (-- )?add")
+    assert out.returncode in (0, 1), out.stderr
+    hits = [
+        ln for ln in out.stdout.splitlines() if "CHANGELOG" not in ln and "/conexus:rdr-research add" not in ln
+    ]
     assert hits == [], hits

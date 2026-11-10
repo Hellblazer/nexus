@@ -16,7 +16,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import click
 import lupa.lua54 as lua54
 import pytest
 

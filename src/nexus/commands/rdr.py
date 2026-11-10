@@ -3285,16 +3285,19 @@ def _rdr_research_add_retired() -> str:
     from nexus.tables import rdr_research_vocab as vocab  # noqa: PLC0415 - deferred: only the refused add needs it
 
     return (
-        "rdr-research add: this form is retired (RDR-240): a finding passed as shell words is split "
+        "nx rdr preamble rdr-research: the add verb is retired (RDR-240): a finding passed as shell words is split "
         "by the shell. Record a finding with `/conexus:rdr-research add <id>`, which runs the "
-        "`research_add` procedure and writes the record it returns with `memory_put`:\n"
-        "  1. mcp__plugin_conexus_nexus__procedure_run(name=\"research_add\", args={\"rdr\": <id>, "
+        "`research_add` procedure and writes the record it returns with `memory_put`. If that skill "
+        "still sends you to this add verb, the conexus plugin is older than 8.0.0: "
+        "update it. The read form is `nx rdr preamble rdr-research -- <id>`. The steps:\n"
+        "  1. mcp__plugin_conexus_nexus__procedure_run(name=\"research_add\", args={\"rdr\": <id as an integer>, "
         f"\"classification\": <{'|'.join(vocab.CLASSIFICATIONS)}>, \"method\": <{'|'.join(vocab.METHODS)}>, "
         "\"finding\": \"<one line>\"})  (from a shell: `nx run research_add --args-file <json>`)\n"
-        "  2. memory_get the returned title: an entry with exactly that title means the number is "
-        "taken, so run step 1 again\n"
+        "  2. memory_get the returned title (`nx memory get -p <project> -t <title>` from a shell): an "
+        "entry with exactly that title means the number is taken, so run step 1 again\n"
         "  3. mcp__plugin_conexus_nexus__memory_put(project, title, content, tags) with the four "
-        "returned fields unchanged (`nx memory put - -p <project> -t <title> --tags <tags>` from a shell)"
+        "returned fields unchanged. From a shell, `nx run` prints JSON: decode `content` so its `\\n` "
+        "are real line breaks (`jq -r .content`), then `nx memory put - -p <project> -t <title> --tags <tags>`"
     )
 
 

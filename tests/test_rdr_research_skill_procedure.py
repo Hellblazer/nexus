@@ -5,8 +5,8 @@ nexus-qo7ie.33).
 
 The order is: the package ships the procedure, this plugin change moves the
 skill onto ``procedure_run``, and a later package release refuses the
-bare-argument ``nx rdr preamble rdr-research -- add``. These pins hold the
-middle step: the skill passes every returned field, reads the title back
+bare-argument CLI add (done: tests/test_rdr_research_bare_add_refused.py). These
+pins hold the middle step: the skill passes every returned field, reads the title back
 before it writes, spells the vocabulary as the table does, and no plugin file
 still sends a caller to the form the refusal will remove.
 """
