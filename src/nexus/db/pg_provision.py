@@ -378,8 +378,8 @@ def _install_hint() -> str:
 #:
 #: Why they had to go, beyond policy tidiness: those legs silently substitute a
 #: DIFFERENT PostgreSQL for the one nexus builds. The shipped bundle carries
-#: exactly ``pg_trgm``, ``plpgsql`` and ``vector``; a host install carries the
-#: full distro contrib set and may carry no pgvector at all. Resolving to it
+#: exactly ``pg_trgm``, ``plpgsql``, ``vector`` and ``pg_background``; a host install
+#: carries the full distro contrib set and may carry no pgvector at all. Resolving to it
 #: turns a missing-bundle error into a late, confusing failure at
 #: ``CREATE EXTENSION vector`` or a green test run against a substrate no user
 #: has. It also made every skip gate in the test suite answer "does this BOX

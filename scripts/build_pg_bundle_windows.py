@@ -132,6 +132,11 @@ VC_RUNTIME_DLLS: tuple[str, ...] = (
 )
 NOTICE_NAME = "THIRD-PARTY-NOTICES.txt"
 LICENSES_DIR = "licenses"
+#: The licence files ``licenses/`` must hold (the PostgreSQL License needs its notice in every copy);
+#: build_pg_bundle.sh's ``install_licenses`` ships the same three names.
+LICENSE_FILES: tuple[str, ...] = (
+    "postgresql-COPYRIGHT.txt", "pgvector-LICENSE.txt", "pg_background-LICENSE.txt",
+)
 
 #: PG 17.5's generated grammar/scanner targets (bead step 3). A different count
 #: means the filter drifted from what meson generates: fail, do not build on.
@@ -180,7 +185,9 @@ PG_BACKGROUND_SOURCES: tuple[str, ...] = ("src/pg_background.c", "src/pg_backgro
 #: ``/Drandom=rand``: v2.0.4's poll backoff calls POSIX ``random()`` for timing jitter, which PG 17's port layer
 #: does not provide on Windows (the link fails with an unresolved ``random``, found on a native Windows build 2026-11-09);
 #: the MSVC CRT's ``rand()`` does the same job there (0..32767, enough to decorrelate a backoff) without patching
-#: the pinned source. Drop it when a pinned release stops calling ``random()``.
+#: the pinned source. MSVC's ``rand()`` is unseeded in every process, so each backend draws the same jitter
+#: sequence (timing only: no security use, and the cookies come from ``pg_strong_random``). Drop it when a
+#: pinned release stops calling ``random()``.
 PG_BACKGROUND_DEFINES: tuple[str, ...] = (
     "/DWIN32", "/D_WINDOWS", "/D__WINDOWS__", "/D__WIN32__",
     "/D_CRT_SECURE_NO_DEPRECATE", "/D_CRT_NONSTDC_NO_DEPRECATE", "/Drandom=rand",
@@ -635,14 +642,49 @@ def pg_background_cl_cmd(src: Path, dirs: Mapping[str, str]) -> list[str]:
     ]
 
 
+_MAKEFILE_DATA_RE = re.compile(r"^DATA\s*=\s*((?:[^\n]*\\\n)*[^\n]*)", re.MULTILINE)
+_DEFAULT_VERSION_RE = re.compile(r"^\s*default_version\s*=\s*'([^']*)'", re.MULTILINE)
+
+
+def makefile_data_files(makefile_text: str) -> list[str]:
+    """The files of the Makefile's ``DATA =`` list (backslash-continued, as PGXS installs them into
+    ``<sharedir>/extension``). pg_background's Makefile leaves the pre-2.0 base scripts out on purpose
+    (their C functions no longer exist), so installing the list, not ``extension/*.sql``, follows it."""
+    match = _MAKEFILE_DATA_RE.search(makefile_text)
+    if not match:
+        raise BuildError("no DATA = list in the Makefile")
+    files = [tok for tok in match.group(1).replace("\\\n", " ").split() if tok]
+    if not files:
+        raise BuildError("the Makefile's DATA list is empty")
+    return files
+
+
+def control_default_version(control_text: str) -> str | None:
+    """The ``default_version`` a ``.control`` file names; CREATE EXTENSION reads
+    ``<name>--<default_version>.sql``. None when it names none."""
+    match = _DEFAULT_VERSION_RE.search(control_text)
+    return match.group(1) if match and match.group(1) else None
+
+
+def default_script_present(ext_dir: Path, name: str, version: str) -> bool:
+    """CREATE EXTENSION can reach *version* from a script in *ext_dir*: a full ``<name>--<version>.sql``,
+    or an upgrade script ``<name>--<from>--<version>.sql`` ending at it (PostgreSQL's pg_trgm ships a base
+    script plus upgrade scripts and no ``pg_trgm--<default_version>.sql``)."""
+    return (ext_dir / f"{name}--{version}.sql").is_file() or any(ext_dir.glob(f"{name}--*--{version}.sql"))
+
+
 def pg_background_install(src: Path, dirs: Mapping[str, str]) -> list[Path]:
-    """Copy the built DLL into pkglibdir and the control file and every ``extension/*.sql`` script
-    into ``<sharedir>/extension`` (what PGXS ``make install`` does); returns the files written."""
+    """Copy the built DLL into pkglibdir, the control file and exactly the Makefile's ``DATA`` scripts
+    into ``<sharedir>/extension`` (the files PGXS ``make install`` installs); returns the files written."""
     ext = Path(dirs["sharedir"]) / "extension"
     ext.mkdir(parents=True, exist_ok=True)
+    makefile = src / "Makefile"
+    if not makefile.is_file():
+        raise BuildError(f"pg_background has no Makefile at {makefile}: its DATA list says what to install")
+    data = makefile_data_files(makefile.read_text(encoding="utf-8"))
     pairs = [(src / "pg_background.dll", Path(dirs["pkglibdir"]) / "pg_background.dll"),
              (src / "pg_background.control", ext / "pg_background.control")]
-    pairs += [(f, ext / f.name) for f in sorted((src / "extension").glob("*.sql"))]
+    pairs += [(src / rel, ext / Path(rel).name) for rel in data]
     written: list[Path] = []
     for from_, to in pairs:
         if not from_.is_file():
@@ -650,9 +692,23 @@ def pg_background_install(src: Path, dirs: Mapping[str, str]) -> list[Path]:
         to.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(from_, to)
         written.append(to)
-    if not any(w.name == "pg_background--2.0.sql" for w in written):
-        raise BuildError("pg_background's extension/pg_background--2.0.sql (the default_version script) was not installed")
+    version = control_default_version((ext / "pg_background.control").read_text(encoding="utf-8"))
+    if version is None or not default_script_present(ext, "pg_background", version):
+        raise BuildError(
+            f"pg_background.control's default_version script (pg_background--{version}.sql) is not "
+            "among the Makefile's DATA files"
+        )
     return written
+
+
+def copy_license(src_dir: Path, names: Sequence[str], dest: Path, label: str) -> None:
+    """Copy the first of *names* found in *src_dir* to *dest*; raise when none exists, so a component
+    never ships without its notice."""
+    for name in names:
+        if (src_dir / name).is_file():
+            shutil.copyfile(src_dir / name, dest)
+            return
+    raise BuildError(f"{label}: none of {', '.join(names)} in {src_dir}; refusing to ship it without its licence")
 
 
 # --------------------------------------------------------------------------- #
@@ -682,8 +738,20 @@ def verify_layout(bundle: Path, *, runtime: bool = True) -> list[str]:
     if not any((bundle / "lib").rglob("pg_background.dll")):
         problems.append("missing pg_background.dll under lib/")
     for ctl in ("vector", "pg_trgm", "pg_background"):
-        if not any((bundle / "share").rglob(f"extension/{ctl}.control")):
+        control = next(iter(sorted((bundle / "share").rglob(f"extension/{ctl}.control"))), None)
+        if control is None:
             problems.append(f"missing {ctl}.control under share/**/extension")
+            continue
+        version = control_default_version(control.read_text(encoding="utf-8", errors="replace"))
+        if version is None:
+            problems.append(f"{ctl}.control names no default_version")
+        elif not default_script_present(control.parent, ctl, version):
+            problems.append(
+                f"missing {ctl}--{version}.sql (or {ctl}--*--{version}.sql) beside {ctl}.control (its default_version script)"
+            )
+    for name in LICENSE_FILES:
+        if not (bundle / LICENSES_DIR / name).is_file():
+            problems.append(f"missing {LICENSES_DIR}/{name} (the PostgreSQL License needs its notice in every copy)")
     if not (bundle / ".build_prefix").is_file():
         problems.append("missing .build_prefix")
     if runtime:
@@ -914,15 +982,9 @@ def build(
     _log("licenses, VC++ runtime, notice, .build_prefix")
     lic = prefix / LICENSES_DIR
     lic.mkdir(exist_ok=True)
-    shutil.copyfile(pg_src / "COPYRIGHT", lic / "postgresql-COPYRIGHT.txt")
-    for name in ("LICENSE", "LICENSE.txt"):
-        if (pgv_src / name).is_file():
-            shutil.copyfile(pgv_src / name, lic / "pgvector-LICENSE.txt")
-            break
-    for name in ("LICENSE", "LICENSE.txt"):
-        if (pgbg_src / name).is_file():
-            shutil.copyfile(pgbg_src / name, lic / "pg_background-LICENSE.txt")
-            break
+    copy_license(pg_src, ("COPYRIGHT",), lic / "postgresql-COPYRIGHT.txt", "PostgreSQL")
+    copy_license(pgv_src, ("LICENSE", "LICENSE.txt"), lic / "pgvector-LICENSE.txt", "pgvector")
+    copy_license(pgbg_src, ("LICENSE", "LICENSE.txt"), lic / "pg_background-LICENSE.txt", "pg_background")
     copy_runtime(prefix, redist, pins, signature_reader=host.signature_reader)
     (prefix / ".build_prefix").write_text(os.path.realpath(prefix) + "\n")
 

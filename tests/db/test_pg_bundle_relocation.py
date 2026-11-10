@@ -305,6 +305,14 @@ class TestRelocatedBundleComplete:
         for f in (pkglibdir / _PGBG_LIB, extdir / "pg_background.control", extdir / "pg_background--2.0.sql"):
             assert f.is_file(), f"{f.name} not found under relocated root at {f.parent} — lost in packaging/extraction"
 
+    def test_licence_notices_survive_extraction(self):
+        """The PostgreSQL License needs its notice in every copy: licenses/ and the notices file
+        ship in the bundle root on every platform and survive packaging."""
+        assert _ROOT is not None
+        for rel in ("licenses/postgresql-COPYRIGHT.txt", "licenses/pgvector-LICENSE.txt",
+                    "licenses/pg_background-LICENSE.txt", "THIRD-PARTY-NOTICES.txt"):
+            assert (_ROOT / rel).is_file(), f"{rel} missing from the relocated bundle"
+
     def test_preflight_passes_after_relocation(self, bins):
         """check_pgvector_available must re-anchor and find vector.control under
         the relocated root despite pg_config's stale sharedir."""

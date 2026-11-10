@@ -350,11 +350,16 @@ def smoke(
         # launch starts a dynamic bgworker (no shared_preload_libraries) whose SELECT 1 comes back.
         sql("CREATE EXTENSION pg_background")
         bg = sql("SELECT extversion FROM pg_extension WHERE extname='pg_background'")
+        preload = sql("SHOW shared_preload_libraries")
+        if "pg_background" in preload:
+            raise SmokeError(
+                f"shared_preload_libraries holds pg_background ({preload!r}): the worker must run without preloading it"
+            )
         one = sql("SELECT r.x FROM pg_background_launch('SELECT 1') AS h "
                   "CROSS JOIN LATERAL pg_background_result(h.pid, h.cookie) AS r(x int)")
         if one != "1":
             raise SmokeError(f"pg_background worker returned {one!r} for SELECT 1, expected '1'")
-        step("pg_background", f"{bg}, worker returned {one}")
+        step("pg_background", f"{bg}, not preloaded, worker returned {one}")
 
         sql("CREATE TABLE smoke_items (id int PRIMARY KEY, embedding vector(3))")
         sql("INSERT INTO smoke_items SELECT i, ARRAY[i::real, (i%7)::real, (i%13)::real]::vector "

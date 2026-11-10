@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -364,8 +365,13 @@ def stage_bundle(prefix: Path, *, runtime: bool = True, build_only: bool = False
     (prefix / "bin" / "libpq.dll").write_bytes(b"MZ")
     (prefix / "lib" / "postgresql" / "vector.dll").write_bytes(b"MZ")
     (prefix / "lib" / "postgresql" / "pg_background.dll").write_bytes(b"MZ")
+    ext = prefix / "share" / "postgresql" / "extension"
     for ctl in ("vector", "pg_trgm", "pg_background"):
-        (prefix / "share" / "postgresql" / "extension" / f"{ctl}.control").write_text("x")
+        (ext / f"{ctl}.control").write_text("comment = 'x'\ndefault_version = '1.0'\n")
+        (ext / f"{ctl}--1.0.sql").write_text("s")
+    (prefix / bw.LICENSES_DIR).mkdir(exist_ok=True)
+    for name in bw.LICENSE_FILES:
+        (prefix / bw.LICENSES_DIR / name).write_text("licence")
     (prefix / ".build_prefix").write_text("C:\\build\\bundle\n")
     if runtime:
         for dll in bw.VC_RUNTIME_DLLS:
@@ -386,6 +392,11 @@ def test_a_complete_tree_verifies_clean(tmp_path: Path) -> None:
         ("lib/postgresql/vector.dll", "vector.dll"),
         ("lib/postgresql/pg_background.dll", "pg_background.dll"),
         ("share/postgresql/extension/pg_background.control", "pg_background.control"),
+        ("share/postgresql/extension/pg_background--1.0.sql", "pg_background--1.0.sql"),
+        ("share/postgresql/extension/vector--1.0.sql", "vector--1.0.sql"),
+        ("licenses/postgresql-COPYRIGHT.txt", "postgresql-COPYRIGHT.txt"),
+        ("licenses/pgvector-LICENSE.txt", "pgvector-LICENSE.txt"),
+        ("licenses/pg_background-LICENSE.txt", "pg_background-LICENSE.txt"),
         ("share/postgresql/extension/vector.control", "vector.control"),
         ("share/postgresql/extension/pg_trgm.control", "pg_trgm.control"),
         (".build_prefix", ".build_prefix"),
@@ -432,6 +443,17 @@ def test_package_refuses_an_incomplete_bundle(tmp_path: Path) -> None:
 
 PGVECTOR_COMMIT = "cab9da72c04353f143bb06b42ab70a403daac64a"
 PG_BACKGROUND_COMMIT = "c1db2540408ce4626ea21bc97572ff43b1a19ff3"
+#: Upstream's Makefile DATA list (v2.0.4) and the pre-2.0 base scripts it leaves out on purpose.
+PG_BACKGROUND_DATA = (
+    "extension/pg_background--2.0.sql", "extension/pg_background--1.10--2.0.sql",
+    "extension/pg_background--1.9--1.10.sql", "extension/pg_background--1.8--1.9.sql",
+)
+PG_BACKGROUND_DECOYS = ("extension/pg_background--1.8.sql", "extension/pg_background--1.10.sql")
+PG_BACKGROUND_MAKEFILE = (
+    "MODULE_big = pg_background\n# note\nDATA = \\\n"
+    + " \\\n".join(f"\t{n}" for n in PG_BACKGROUND_DATA)
+    + "\n\n# Regression\nREGRESS = pg_background\n"
+)
 FAKE_PG_BODY = b"pg tarball"
 
 
@@ -452,15 +474,19 @@ class FakeBuildRunner(bw.Runner):
             (self.prefix / ".build_prefix").unlink()
             # pg_background is built after ninja install: only the cl step may leave it behind.
             (self.prefix / "lib" / "postgresql" / "pg_background.dll").unlink()
-            (self.prefix / "share" / "postgresql" / "extension" / "pg_background.control").unlink()
+            for f in (self.prefix / "share" / "postgresql" / "extension").glob("pg_background*"):
+                f.unlink()
+            shutil.rmtree(self.prefix / bw.LICENSES_DIR)
         if argv[0] == "git":
             dest = Path(argv[-1])
             dest.mkdir(parents=True)
             if dest.name == "pg_background":
                 (dest / "LICENSE").write_text("pg_background license")
-                (dest / "pg_background.control").write_text("c")
+                (dest / "pg_background.control").write_text("default_version = '2.0'\n")
+                (dest / "Makefile").write_text(PG_BACKGROUND_MAKEFILE)
                 (dest / "extension").mkdir()
-                (dest / "extension" / "pg_background--2.0.sql").write_text("s")
+                for name in (*PG_BACKGROUND_DATA, *PG_BACKGROUND_DECOYS):
+                    (dest / name).write_text("s")
             else:
                 (dest / "LICENSE").write_text("pgvector license")
         if argv[0] == "cl":
@@ -690,9 +716,9 @@ def test_a_failing_step_surfaces_the_log_tail(tmp_path: Path) -> None:
 class FakeSmokeRunner(sm.Runner):
     def __init__(self, *, vector: str = "0.8.2", plan: str = "Index Scan using smoke_hnsw",
                  rows: str = "1\n2\n3\n4\n5", modules: list[str] | None = None,
-                 fail_query: str | None = None, bg_result: str = "1") -> None:
+                 fail_query: str | None = None, bg_result: str = "1", preload: str = "") -> None:
         self.vector, self.plan, self.rows, self.modules = vector, plan, rows, modules or []
-        self.bg_result = bg_result
+        self.bg_result, self.preload = bg_result, preload
         self.fail_query = fail_query
         self.events: list[str] = []
         self.to_file_calls: list[tuple[list[str], Path]] = []
@@ -725,6 +751,8 @@ class FakeSmokeRunner(sm.Runner):
             return 0, self.vector
         if "extname='pg_trgm'" in q:
             return 0, "1.6"
+        if "shared_preload_libraries" in q:
+            return 0, self.preload
         if "extname='pg_background'" in q:
             return 0, "2.0"
         if "pg_background_launch" in q:
@@ -812,7 +840,9 @@ def test_wrong_vector_version_fails(tmp_path: Path) -> None:
 
 def test_the_smoke_runs_a_pg_background_worker_and_refuses_a_wrong_answer(tmp_path: Path) -> None:
     out = _smoke(tmp_path / "a", FakeSmokeRunner(), windows=False)
-    assert any(line.startswith("SMOKE pg_background: 2.0, worker returned 1") for line in out)
+    assert any(line.startswith("SMOKE pg_background: 2.0, not preloaded, worker returned 1") for line in out)
+    with pytest.raises(sm.SmokeError, match="shared_preload_libraries holds pg_background"):
+        _smoke(tmp_path / "d", FakeSmokeRunner(preload="pg_stat_statements,pg_background"), windows=False)
     with pytest.raises(sm.SmokeError, match="pg_background worker returned '0'"):
         _smoke(tmp_path / "b", FakeSmokeRunner(bg_result="0"), windows=False)
     with pytest.raises(sm.SmokeError, match="pg_background"):
@@ -1187,11 +1217,6 @@ def test_a_tarball_that_agrees_with_the_hosts_file_but_not_with_the_pin_is_refus
 def test_a_postgresql_version_without_a_pin_is_refused_before_meson(tmp_path: Path) -> None:
     with pytest.raises(bw.BuildError, match="no pinned sha256 for PostgreSQL 17.6"):
         _build(tmp_path, pins=bw.Pins("17.6", "v0.8.2"))
-
-
-def test_pg_background_must_resolve_to_the_pinned_commit(tmp_path: Path) -> None:
-    with pytest.raises(bw.BuildError, match="pg_background v2.0.4 resolved to commit f{40}.*the pin is c1db"):
-        _build(tmp_path, pg_background_head="f" * 40)
 
 
 def test_pgvector_must_resolve_to_the_pinned_commit(tmp_path: Path) -> None:

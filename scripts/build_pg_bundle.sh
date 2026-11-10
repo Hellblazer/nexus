@@ -202,6 +202,45 @@ build_pg_background() {
     make -s PG_CONFIG="${BUNDLE_PREFIX}/bin/pg_config" install
 }
 
+copy_license() {
+    # A component whose licence file is missing fails the build: the PostgreSQL License
+    # requires its notice in every copy, so a bundle never ships without it.
+    [ -f "$1" ] || { echo "FATAL: licence file $1 is missing; cannot ship $2 without its notice" >&2; exit 1; }
+    cp "$1" "${BUNDLE_PREFIX}/licenses/$2"
+}
+
+install_licenses() {
+    # licenses/ + THIRD-PARTY-NOTICES.txt, the layout the Windows bundle ships
+    # (build_pg_bundle_windows.py). All three components are under the PostgreSQL
+    # License; verify_and_mark requires every file.
+    log "install licences (PostgreSQL, pgvector, pg_background)"
+    mkdir -p "${BUNDLE_PREFIX}/licenses"
+    copy_license "${WORK_DIR}/postgresql-${PG_VERSION}/COPYRIGHT" postgresql-COPYRIGHT.txt
+    copy_license "${WORK_DIR}/pgvector/LICENSE" pgvector-LICENSE.txt
+    copy_license "${WORK_DIR}/pg_background/LICENSE" pg_background-LICENSE.txt
+    cat > "${BUNDLE_PREFIX}/THIRD-PARTY-NOTICES.txt" <<NOTICE
+THIRD-PARTY NOTICES for the nexus PostgreSQL bundle
+
+1. PostgreSQL ${PG_VERSION}: PostgreSQL License, see licenses/postgresql-COPYRIGHT.txt.
+2. pgvector ${PGVECTOR_VERSION}: PostgreSQL License, see licenses/pgvector-LICENSE.txt.
+3. pg_background ${PG_BACKGROUND_VERSION}: PostgreSQL License, see licenses/pg_background-LICENSE.txt.
+NOTICE
+}
+
+# The default_version a control file names ('' when it names none): CREATE EXTENSION reads
+# <name>--<default_version>.sql, so the checks below derive the script name from the control
+# file itself instead of hardcoding a version.
+control_default_version() {
+    awk -F"'" '/^[[:space:]]*default_version[[:space:]]*=/ { print $2; exit }' "$1"
+}
+
+# True when CREATE EXTENSION can reach <ctl>'s default_version from a script in <dir>: a full
+# <ctl>--<ver>.sql, or an upgrade script <ctl>--<from>--<ver>.sql ending at it (PostgreSQL's own
+# pg_trgm ships a base script plus upgrade scripts and no <ctl>--<default_version>.sql).
+has_default_script() {
+    compgen -G "$1/$2--$3.sql" >/dev/null || compgen -G "$1/$2--*--$3.sql" >/dev/null
+}
+
 prune_build_only() {
     # Files used only to BUILD against this PostgreSQL (pgvector and pg_background
     # are already built above), never at runtime: headers, static archives, PGXS, pkg-config. Paths
@@ -355,7 +394,7 @@ fixup_linux_relocatability() {
 
 verify_and_mark() {
     log "verify complete tool set + injected extension"
-    local b vector_lib pgbg_lib pkglib sharedir ctl
+    local b vector_lib pgbg_lib pkglib sharedir ctl lic
     for b in initdb pg_ctl postgres psql createdb pg_config; do
         test -x "${BUNDLE_PREFIX}/bin/${b}" || { echo "missing ${BUNDLE_PREFIX}/bin/${b}"; exit 1; }
     done
@@ -368,13 +407,20 @@ verify_and_mark() {
     sharedir="$("${BUNDLE_PREFIX}/bin/pg_config" --sharedir)"
     test -f "${pkglib}/${vector_lib}" || { ls -la "${pkglib}"; exit 1; }
     test -f "${pkglib}/${pgbg_lib}" || { echo "missing ${pkglib}/${pgbg_lib}"; ls -la "${pkglib}"; exit 1; }
-    # Contrib completeness: a bundle without any of these controls is refused
-    # (the workflows mirror this list; tests/test_pg_bundle_contrib_set.py pins them together).
+    # Contrib completeness: a bundle without any of these controls, or without the default_version
+    # script a control names, is refused (the workflows mirror this list;
+    # tests/test_pg_bundle_contrib_set.py pins them together).
+    local ver
     for ctl in vector pg_trgm pg_background; do
         test -f "${sharedir}/extension/${ctl}.control" || { echo "missing ${sharedir}/extension/${ctl}.control"; ls -la "${sharedir}/extension"; exit 1; }
+        ver="$(control_default_version "${sharedir}/extension/${ctl}.control")"
+        test -n "$ver" || { echo "${ctl}.control names no default_version"; exit 1; }
+        has_default_script "${sharedir}/extension" "$ctl" "$ver" || { echo "missing a ${ctl}--${ver}.sql (or ${ctl}--*--${ver}.sql) script in ${sharedir}/extension"; ls -la "${sharedir}/extension"; exit 1; }
     done
-    # The default_version script CREATE EXTENSION reads (pg_background.control: default_version '2.0').
-    test -f "${sharedir}/extension/pg_background--2.0.sql" || { echo "missing pg_background--2.0.sql"; ls -la "${sharedir}/extension"; exit 1; }
+    # Licence notices (install_licenses): the PostgreSQL License needs one in every copy.
+    for lic in licenses/postgresql-COPYRIGHT.txt licenses/pgvector-LICENSE.txt licenses/pg_background-LICENSE.txt THIRD-PARTY-NOTICES.txt; do
+        test -f "${BUNDLE_PREFIX}/${lic}" || { echo "missing ${BUNDLE_PREFIX}/${lic}"; exit 1; }
+    done
     # prune_build_only took effect (a later edit that reorders it after a step
     # that re-installs headers must fail here, not ship 10 MB back).
     local libdir stray
@@ -400,6 +446,7 @@ install_prereqs
 build_pg
 build_pgvector
 build_pg_background
+install_licenses
 prune_build_only
 fixup_macos_relocatability
 fixup_linux_relocatability

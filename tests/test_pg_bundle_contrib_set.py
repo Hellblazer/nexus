@@ -24,11 +24,16 @@ from pathlib import Path
 import pytest
 
 import build_pg_bundle_windows as bw
+from tests.test_pg_bundle_windows import stage_bundle
 
 REPO = Path(__file__).resolve().parent.parent
 SH = REPO / "scripts" / "build_pg_bundle.sh"
 WORKFLOWS = REPO / ".github" / "workflows"
 CONTRIB = {"vector", "pg_trgm", "pg_background"}
+LICENSES = (
+    "licenses/postgresql-COPYRIGHT.txt", "licenses/pgvector-LICENSE.txt",
+    "licenses/pg_background-LICENSE.txt", "THIRD-PARTY-NOTICES.txt",
+)
 CHECKED_WORKFLOWS = ("engine-service-release.yml", "pg-bundle-cache-seed.yml")
 
 _needs_bash = pytest.mark.skipif(
@@ -65,8 +70,11 @@ def _stage(root: Path) -> Path:
         (root / "lib" / "postgresql" / f"{lib}.{ext}").write_bytes(b"x")
     extdir = root / "share" / "postgresql" / "extension"
     for ctl in sorted(CONTRIB):
-        (extdir / f"{ctl}.control").write_text("x")
-    (extdir / "pg_background--2.0.sql").write_text("x")
+        (extdir / f"{ctl}.control").write_text("comment = 'x'\ndefault_version = '3.1'\n")
+        (extdir / f"{ctl}--3.1.sql").write_text("x")
+    for lic in LICENSES:
+        (root / lic).parent.mkdir(exist_ok=True)
+        (root / lic).write_text("licence")
     return root
 
 
@@ -74,6 +82,8 @@ def _verify(root: Path) -> subprocess.CompletedProcess[str]:
     script = (
         "set -euo pipefail\n"
         f'BUNDLE_PREFIX="{root}"\nuname_s="$(uname -s)"\nlog() {{ echo "=== $* ==="; }}\n'
+        + _function(SH.read_text(), "control_default_version")
+        + _function(SH.read_text(), "has_default_script")
         + _function(SH.read_text(), "verify_and_mark")
         + "verify_and_mark\n"
     )
@@ -98,17 +108,31 @@ def test_verify_and_mark_refuses_a_bundle_without_each_control_file(tmp_path: Pa
 
 
 @_needs_bash
-@pytest.mark.parametrize("victim", ["lib/postgresql/pg_background.*", "share/postgresql/extension/pg_background--2.0.sql"])
-def test_verify_and_mark_refuses_a_bundle_without_the_pg_background_library_or_script(
-    tmp_path: Path, victim: str
-) -> None:
+@pytest.mark.parametrize(
+    "victim",
+    ["lib/postgresql/pg_background.*", "share/postgresql/extension/pg_background--3.1.sql",
+     "share/postgresql/extension/vector--3.1.sql", "share/postgresql/extension/pg_trgm--3.1.sql", *LICENSES],
+)
+def test_verify_and_mark_refuses_a_bundle_missing_a_library_script_or_licence(tmp_path: Path, victim: str) -> None:
     root = _stage(tmp_path / "bundle")
     gone = list(root.glob(victim))
     assert len(gone) == 1, f"non-vacuity: the staged tree holds {victim}"
     gone[0].unlink()
     proc = _verify(root)
     assert proc.returncode != 0
-    assert "pg_background" in proc.stdout + proc.stderr
+    assert Path(victim).name.split(".")[0] in proc.stdout + proc.stderr
+
+
+@_needs_bash
+def test_verify_and_mark_takes_the_script_name_from_the_control_file(tmp_path: Path) -> None:
+    root = _stage(tmp_path / "bundle")
+    control = root / "share" / "postgresql" / "extension" / "pg_background.control"
+    control.write_text("comment = 'x'\ndefault_version = '4.2'\n")
+    proc = _verify(root)
+    assert proc.returncode != 0 and "pg_background--4.2.sql" in proc.stdout
+    control.write_text("comment = 'x'\n")
+    proc = _verify(root)
+    assert proc.returncode != 0 and "names no default_version" in proc.stdout
 
 
 def _ctl_loops(text: str) -> list[set[str]]:
@@ -122,28 +146,13 @@ def test_the_workflow_contrib_checks_list_all_three_extensions(workflow: str) ->
     assert all(loop == CONTRIB for loop in loops), (workflow, loops)
 
 
-def test_the_build_script_and_the_windows_builder_list_the_same_three() -> None:
+def test_the_build_script_and_the_windows_builder_list_the_same_three(tmp_path: Path) -> None:
     assert _ctl_loops(SH.read_text()) == [CONTRIB]
-    for ctl in CONTRIB:
-        gone = bw.verify_layout(_windows_tree_without(ctl), runtime=False)
+    for ctl in sorted(CONTRIB):
+        bundle = stage_bundle(tmp_path / ctl)
+        (bundle / "share" / "postgresql" / "extension" / f"{ctl}.control").unlink()
+        gone = bw.verify_layout(bundle, runtime=False)
         assert any(f"{ctl}.control" in p for p in gone), (ctl, gone)
-
-
-def _windows_tree_without(ctl: str) -> Path:
-    import tempfile
-
-    root = Path(tempfile.mkdtemp(prefix="pgbg-contrib-")) / "bundle"
-    for d in ("bin", "lib/postgresql", "share/postgresql/extension"):
-        (root / d).mkdir(parents=True)
-    for b in bw.REQUIRED_BINARIES:
-        (root / "bin" / f"{b}.exe").write_bytes(b"MZ")
-    (root / "bin" / "libpq.dll").write_bytes(b"MZ")
-    for dll in ("vector", "pg_background"):
-        (root / "lib" / "postgresql" / f"{dll}.dll").write_bytes(b"MZ")
-    for c in CONTRIB - {ctl}:
-        (root / "share" / "postgresql" / "extension" / f"{c}.control").write_text("x")
-    (root / ".build_prefix").write_text("x\n")
-    return root
 
 
 def test_the_pg_background_pin_is_one_value_in_both_builders() -> None:
@@ -171,7 +180,7 @@ def test_no_workflow_overrides_the_pg_background_pin() -> None:
     assert all("hashFiles('scripts/build_pg_bundle.sh')" in k for k in keyed), keyed
 
 
-def test_a_cache_restored_prefix_without_pg_background_is_refused_by_the_windows_key_and_check() -> None:
+def test_the_windows_cache_key_moves_with_the_pg_background_version() -> None:
     old = bw.cache_key(bw.Pins("17.5", "v0.8.2", "v2.0.3"), "r", "ab" * 32)
     new = bw.cache_key(bw.Pins("17.5", "v0.8.2"), "r", "ab" * 32)
     assert old != new and "-pgbgv2.0.4-" in new
@@ -184,3 +193,59 @@ def test_the_windows_pg_background_command_compiles_both_files_with_the_random_s
     assert cmd[0] == "cl" and "/LD" in cmd and "/Drandom=rand" in cmd and "/DWIN32" in cmd
     assert [Path(a).name for a in cmd if a.endswith(".c")] == ["pg_background.c", "pg_background_worker.c"]
     assert cmd[-2:] == ["/link", "L\\postgres.lib"]
+
+
+def _run_build_pg_background(tmp_path: Path, version: str, head: str) -> subprocess.CompletedProcess[str]:
+    """build_pg_background for real, with the VCS and make commands replaced by shell functions."""
+    text = SH.read_text()
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    script = (
+        "set -euo pipefail\n"
+        f'BUNDLE_PREFIX="{tmp_path}/bundle"\nWORK_DIR="{work}"\nPG_BACKGROUND_VERSION="{version}"\n'
+        'log() { echo "=== $* ==="; }\n'
+        'git() { case "$1" in clone) mkdir -p pg_background ;; rev-parse) echo "$FAKE_HEAD" ;; esac; }\n'
+        'make() { echo "MAKE-CALLED $*"; }\n'
+        + _function(text, "pg_background_pinned_commit")
+        + _function(text, "build_pg_background")
+        + "build_pg_background\n"
+    )
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=60,
+        env={"PATH": "/usr/bin:/bin", "FAKE_HEAD": head},
+    )
+
+
+PINNED_HEAD = "c1db2540408ce4626ea21bc97572ff43b1a19ff3"
+
+
+@_needs_bash
+def test_the_pinned_commit_builds_and_installs(tmp_path: Path) -> None:
+    proc = _run_build_pg_background(tmp_path, "v2.0.4", PINNED_HEAD)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.count("MAKE-CALLED") == 2 and "install" in proc.stdout  # build, then install
+
+
+@_needs_bash
+def test_a_tag_that_resolves_to_another_commit_is_refused_before_make(tmp_path: Path) -> None:
+    proc = _run_build_pg_background(tmp_path, "v2.0.4", "f" * 40)
+    assert proc.returncode == 1
+    assert "resolved to commit " + "f" * 40 in proc.stderr and "the pin is " + PINNED_HEAD in proc.stderr
+    assert "MAKE-CALLED" not in proc.stdout
+
+
+@_needs_bash
+def test_a_version_without_a_pin_is_refused_before_it_is_cloned(tmp_path: Path) -> None:
+    proc = _run_build_pg_background(tmp_path, "v2.0.5", PINNED_HEAD)
+    assert proc.returncode == 1 and "no pinned commit for pg_background v2.0.5" in proc.stderr
+    assert not (tmp_path / "work" / "pg_background").exists(), "nothing was cloned"
+
+
+@_needs_bash
+def test_an_upgrade_script_ending_at_the_default_version_is_enough(tmp_path: Path) -> None:
+    """PostgreSQL's own pg_trgm ships a base script plus upgrade scripts and no <ext>--<default_version>.sql."""
+    root = _stage(tmp_path / "bundle")
+    ext = root / "share" / "postgresql" / "extension"
+    (ext / "pg_trgm--3.1.sql").rename(ext / "pg_trgm--3.0--3.1.sql")
+    proc = _verify(root)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
