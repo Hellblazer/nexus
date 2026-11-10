@@ -89,8 +89,8 @@ class ManifestWriteRetryGateTest {
         "CatalogRepository#rehomeCollection",
         "CatalogRepository#purgeTrash",
         "ChashRepository#renameCollection",
-        // nexus-f3yqd (R2): the manifest fill job's batch, one UPDATE of labels and spans, retried like the other writers
-        "ManifestFill#batch"));
+        // nexus-f3yqd (R2): the manifest fill job's batch attempt (normal, and skip mode), one UPDATE of labels and spans, retried like the other writers
+        "ManifestFill#once"));
 
     /** Files that mention the table without writing it, each with the reason. A pinned allowlist. */
     private static final Map<String, String> READ_ONLY_REFERENCES = new TreeMap<>(Map.ofEntries(

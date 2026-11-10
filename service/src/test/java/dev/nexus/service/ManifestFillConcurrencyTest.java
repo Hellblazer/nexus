@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.ManifestFill;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
@@ -22,14 +25,30 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <ul>
  *   <li>the UPDATE's {@code labels_written = false} re-check removed: {@code aLabelWrittenAfterThePick_isNotOverwritten};</li>
  *   <li>the UPDATE's spans re-check removed: {@code aSpanWrittenAfterThePick_stopsTheWholeRow};</li>
+ *   <li>the UPDATE's {@code chash} re-check removed ({@code sameRow}): {@code aRowRePointedAfterThePick_...} for each
+ *       kind (the row would take the labels or spans of the chunk it no longer names);</li>
+ *   <li>the 55P03 fallback removed (skip mode never runs): {@code aRowHeldPastTheLockTimeout_...} for each kind (the job
+ *       fails {@code transient_db_error}); skip mode without {@code SKIP LOCKED}: the same tests (the rerun waits on the
+ *       row, so the job outlasts the test's bound);</li>
  *   <li>the stop check before each batch removed: {@code aStoppedJob_keepsEveryCommittedBatch_andANewJobResumes};</li>
  *   <li>the shared sweep gate not taken before the UPDATE: {@code aBatchWaitsForTheSweepGateOfItsCollection};</li>
  *   <li>the fingerprint dropped from the start (a different {@code dry_run} joins): {@code aSecondStart_joinsTheRunningJob...};</li>
- *   <li>the kind dropped from the scope (a spans start conflicts with a running labels job): the same test.</li>
+ *   <li>the kind put back in the scope (a spans start runs beside a labels job): the same test.</li>
  * </ul>
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ManifestFillConcurrencyTest extends ManifestFillTestBase {
+
+    /** The race tests hold a row for as long as they need to; the lock-timeout tests set their own, short one. */
+    @BeforeEach
+    void aLongLockTimeout() {
+        System.setProperty(ManifestFill.LOCK_TIMEOUT_PROPERTY, "60000");
+    }
+
+    @AfterEach
+    void clearTheLockTimeout() {
+        System.clearProperty(ManifestFill.LOCK_TIMEOUT_PROPERTY);
+    }
 
     /** One document with {@code n} fillable label rows (and a recorded line start each), positions 0..n-1. */
     private String rows(int n) throws Exception {
@@ -81,6 +100,75 @@ class ManifestFillConcurrencyTest extends ManifestFillTestBase {
             .isEqualTo(new Row(false, null, null, null, 99, null, null, null));
     }
 
+    /**
+     * A re-index re-points the row's position at another chunk between the UPDATE's read and its lock. The row's labels
+     * and spans must not be taken from the chunk it no longer names: the UPDATE re-checks {@code chash} on the row it
+     * locks. (The re-point is the only change; {@code labels_written} and every span column are as the pick saw them.)
+     */
+    private void assertARePointedRowIsNotFilledFromItsOldChunk(String kind) throws Exception {
+        String d = rows(3);
+        chunk(TENANT, h(0x70), "{\"section_title\":\"Other\",\"line_start\":77,\"indexed_at\":\"" + OK_AT + "\"}");
+        try (var writer = new RowLock(d, 1)) {
+            String job = (String) start(kind, false, 1000).get("job_id");
+            awaitBlockedUpdate();
+            writer.chash(h(0x70)).commit();
+
+            var status = awaitEnd(job);
+
+            assertThat(status).containsEntry("state", "done").containsEntry("filled", 2);
+            assertThat(counts(status)).containsEntry("fillable", 3).containsEntry("skipped_changed", 1);
+        }
+        assertThat(row(d, 1)).as("the re-pointed row takes nothing from the chunk it named at the pick").isEqualTo(LEGACY);
+        assertThat(row(d, 0).written() || row(d, 0).lineStart() != null).as("its neighbours were filled").isTrue();
+        assertThat(row(d, 2).written() || row(d, 2).lineStart() != null).as("its neighbours were filled").isTrue();
+    }
+
+    @Test
+    void aRowRePointedAfterThePick_isNotFilledFromItsOldChunk_labels() throws Exception {
+        assertARePointedRowIsNotFilledFromItsOldChunk("labels");
+    }
+
+    @Test
+    void aRowRePointedAfterThePick_isNotFilledFromItsOldChunk_spans() throws Exception {
+        assertARePointedRowIsNotFilledFromItsOldChunk("spans");
+    }
+
+    /**
+     * A writer holds a row of the batch and never lets go within the lock timeout (a long reconcile commit). The job
+     * does not wait the batch's statement timeout and does not fail: the batch runs again skipping the held row, the
+     * job finishes, and the held row is counted as skipped. A later start, with the lock gone, fills it.
+     */
+    private void assertAHeldRowIsSkippedAndTheJobFinishes(String kind) throws Exception {
+        String d = rows(3);
+        withProperty(ManifestFill.LOCK_TIMEOUT_PROPERTY, "300", () -> {
+            try (var writer = new RowLock(d, 1)) {
+                long t0 = System.nanoTime();
+
+                var status = runFill(kind, false, 1000);
+
+                assertThat(java.util.concurrent.TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - t0))
+                    .as("nowhere near the 120 s batch timeout").isLessThan(30);
+                assertThat(status).containsEntry("state", "done").containsEntry("done_rows", 3).containsEntry("filled", 2);
+                assertThat(counts(status)).containsEntry("fillable", 3).containsEntry("skipped_changed", 1);
+                assertThat(row(d, 1)).as("the held row was not written, and not waited for").isEqualTo(LEGACY);
+            }
+        });
+        var again = runFill(kind, false, 1000);
+        assertThat(again).as("the next start takes the row the writer held").containsEntry("state", "done")
+            .containsEntry("done_rows", 1).containsEntry("filled", 1);
+        assertThat(fillable(kind)).isZero();
+    }
+
+    @Test
+    void aRowHeldPastTheLockTimeout_isSkippedAndTheJobFinishes_labels() throws Exception {
+        assertAHeldRowIsSkippedAndTheJobFinishes("labels");
+    }
+
+    @Test
+    void aRowHeldPastTheLockTimeout_isSkippedAndTheJobFinishes_spans() throws Exception {
+        assertAHeldRowIsSkippedAndTheJobFinishes("spans");
+    }
+
     @Test
     void aBatchWaitsForTheSweepGateOfItsCollection() throws Exception {
         String d = rows(2);
@@ -97,7 +185,7 @@ class ManifestFillConcurrencyTest extends ManifestFillTestBase {
     }
 
     @Test
-    void aSecondStart_joinsTheRunningJob_andAnotherDryRunOrAnotherTenantDoesNot() throws Exception {
+    void aSecondStart_joinsTheRunningJob_andAnotherKindOrDryRunOrTenantDoesNot() throws Exception {
         String d = rows(2);
         try (var writer = new RowLock(d, 1)) {
             var first = start("labels", false, 1000);
@@ -105,9 +193,11 @@ class ManifestFillConcurrencyTest extends ManifestFillTestBase {
             assertThat(first).containsEntry("created", true);
             awaitBlockedUpdate();
 
-            // the same request, as a later box would send it: handed the running job
+            // the same request, as a later box would send it: handed the running job (its batch size and cursor are ignored)
             var again = start("labels", false, 500);
             assertThat(again).containsEntry("job_id", id).containsEntry("created", false);
+            var withCursor = startAfter("labels", false, 500, Map.of("doc_id", d, "position", 1));
+            assertThat(withCursor).containsEntry("job_id", id).containsEntry("created", false);
             assertThat(poll(id)).containsEntry("state", "running").containsEntry("stage", "filling");
 
             // the other fingerprint: a dry run is not the running real run
@@ -115,10 +205,11 @@ class ManifestFillConcurrencyTest extends ManifestFillTestBase {
             assertThat(conflict.statusCode()).as(conflict.body()).isEqualTo(409);
             assertThat(mapper.readValue(conflict.body(), MAP_T)).containsEntry("job_id", id);
 
-            // the other kind of the same tenant runs beside it
-            var spans = start("spans", false, 1000);
-            assertThat(spans).containsEntry("created", true);
-            assertThat(spans.get("job_id")).isNotEqualTo(id);
+            // one job per tenant: the other kind is a 409 naming the running job and what it is
+            var spans = post(TOKEN, TENANT, "/v1/catalog/manifest/fill", fillBody("spans", false, 1000));
+            assertThat(spans.statusCode()).as(spans.body()).isEqualTo(409);
+            assertThat(mapper.readValue(spans.body(), MAP_T)).containsEntry("job_id", id)
+                .containsEntry("kind", "labels").containsEntry("dry_run", false);
 
             // another tenant has its own scope: a job of its own, and it cannot see this one
             var other = post(TOKEN_B, TENANT_B, "/v1/catalog/manifest/fill", fillBody("labels", false, 1000));
@@ -130,9 +221,9 @@ class ManifestFillConcurrencyTest extends ManifestFillTestBase {
 
             writer.rollback();
             assertThat(awaitEnd(id)).containsEntry("state", "done").containsEntry("filled", 2);
-            // the spans job also waited on the writer's row; it ends once the lock is gone
-            assertThat(awaitEnd((String) spans.get("job_id"))).containsEntry("state", "done");
         }
+        // the scope is free once the job has ended: the other kind starts
+        assertThat(start("spans", false, 1000)).containsEntry("created", true);
     }
 
     @Test
@@ -153,7 +244,7 @@ class ManifestFillConcurrencyTest extends ManifestFillTestBase {
             // batch 2 was in flight and commits; the job stops at the boundary after it, before batch 3
             assertThat(stopped).containsEntry("state", "failed").containsEntry("reason", "job_stopped")
                 .containsEntry("http_status", 500).containsEntry("filled", 2).containsEntry("safe_to_stop", true);
-            assertThat((String) stopped.get("error")).contains("restart-test").contains("start the fill again to resume");
+            assertThat((String) stopped.get("error")).contains("restart-test").contains("a new start re-reads from the beginning, or from the cursor passed");
         }
         assertThat(row(d, 0).written()).isTrue();
         assertThat(row(d, 1).written()).isTrue();

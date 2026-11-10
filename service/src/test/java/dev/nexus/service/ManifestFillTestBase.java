@@ -7,6 +7,7 @@ import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 
 import java.sql.Connection;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -56,7 +57,44 @@ abstract class ManifestFillTestBase extends ManifestFillableTestBase {
         return d;
     }
 
+    /** The body of a test that runs with a system property set (the engine reads the fill's knobs on every batch). */
+    @FunctionalInterface
+    protected interface Body {
+        void run() throws Exception;
+    }
+
+    /** Runs {@code body} with the system property {@code name} set to {@code value}, and puts the old value back. */
+    protected static void withProperty(String name, String value, Body body) throws Exception {
+        String old = System.getProperty(name);
+        System.setProperty(name, value);
+        try {
+            body.run();
+        } finally {
+            if (old == null) System.clearProperty(name); else System.setProperty(name, old);
+        }
+    }
+
+    /** Backdates the {@code last_written_at} of every chunk row, past the one-hour guard of the orphan-stamping triggers. */
+    protected void ageChunks(Duration age) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+                .set(CHUNKS.LAST_WRITTEN_AT, OffsetDateTime.now().minus(age)).execute();
+        }
+    }
+
     // ── the job ─────────────────────────────────────────────────────────────
+
+    /** One document of {@code n} fillable rows, positions 0..n-1: a section title and a line start each. */
+    protected String docOfRows(int n) throws Exception {
+        String d = doc("many rows");
+        String[] hashes = new String[n];
+        for (int i = 0; i < n; i++) {
+            hashes[i] = h(0x40 + i);
+            chunk(TENANT, hashes[i], "{\"section_title\":\"S" + i + "\",\"line_start\":" + (i + 1) + ",\"indexed_at\":\"" + OK_AT + "\"}");
+        }
+        manifest(d, hashes);
+        return d;
+    }
 
     protected static String fillBody(String kind, boolean dryRun, int batchRows) {
         return "{\"kind\":\"" + kind + "\",\"dry_run\":" + dryRun + ",\"batch_rows\":" + batchRows + "}";
@@ -65,6 +103,22 @@ abstract class ManifestFillTestBase extends ManifestFillableTestBase {
     /** POST /manifest/fill as the default tenant, expecting the 202; returns the body. */
     protected Map<String, Object> start(String kind, boolean dryRun, int batchRows) throws Exception {
         var resp = post(TOKEN, TENANT, "/v1/catalog/manifest/fill", fillBody(kind, dryRun, batchRows));
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(202);
+        return mapper.readValue(resp.body(), MAP_T);
+    }
+
+    /** The body of a start that resumes {@code after} a manifest key, as a poll's {@code cursor} reads. */
+    protected static String fillBodyAfter(String kind, boolean dryRun, int batchRows, String docId, int position) {
+        return fillBody(kind, dryRun, batchRows).replaceAll("}$", ",\"after\":{\"doc_id\":\"" + docId
+            + "\",\"position\":" + position + "}}");
+    }
+
+    /** POST /manifest/fill with {@code after}, expecting the 202; returns the body. */
+    protected Map<String, Object> startAfter(String kind, boolean dryRun, int batchRows, Object cursor) throws Exception {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> c = (Map<String, Object>) cursor;
+        var resp = post(TOKEN, TENANT, "/v1/catalog/manifest/fill",
+            fillBodyAfter(kind, dryRun, batchRows, (String) c.get("doc_id"), ((Number) c.get("position")).intValue()));
         assertThat(resp.statusCode()).as(resp.body()).isEqualTo(202);
         return mapper.readValue(resp.body(), MAP_T);
     }
@@ -175,6 +229,16 @@ abstract class ManifestFillTestBase extends ManifestFillableTestBase {
 
         RowLock lineStart(int value) {
             int n = dsl.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.LINE_START, value)
+                .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId).and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(position)))
+                .execute();
+            assertThat(n).isEqualTo(1);
+            return this;
+        }
+
+        /** The writer re-points the row at another chunk (a re-index that rekeyed the position), inside its open transaction. */
+        RowLock chash(String chashHex) {
+            int n = dsl.update(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
                 .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId).and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(position)))
                 .execute();
             assertThat(n).isEqualTo(1);

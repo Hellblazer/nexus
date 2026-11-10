@@ -45,10 +45,11 @@ class ManifestFillRoutesTest extends ManifestFillTestBase {
         var status = awaitEnd((String) body.get("job_id"));
 
         assertThat(status.keySet()).containsExactly("job_id", "kind", "dry_run", "state", "stage", "elapsed_ms",
-            "done_rows", "total_rows", "filled", "cursor", "counts", "safe_to_stop", "on_stop");
+            "done_rows", "total_rows", "scanned_rows", "manifest_rows_estimate", "filled", "cursor", "counts", "safe_to_stop", "on_stop");
         assertThat(status).containsEntry("job_id", body.get("job_id")).containsEntry("kind", "spans")
             .containsEntry("dry_run", false).containsEntry("state", "done").containsEntry("stage", "done")
             .containsEntry("done_rows", 0).containsEntry("total_rows", 0).containsEntry("filled", 0)
+            .containsEntry("scanned_rows", 0).containsEntry("manifest_rows_estimate", 0)
             .containsEntry("safe_to_stop", true);
         assertThat(status.get("cursor")).isNull();
         assertThat(counts(status)).containsOnly(Map.entry("fillable", 0), Map.entry("edge", 0), Map.entry("skipped_changed", 0));

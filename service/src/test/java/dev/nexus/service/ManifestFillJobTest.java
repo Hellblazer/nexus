@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.http.ManifestFillJobs;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
@@ -74,7 +75,8 @@ class ManifestFillJobTest extends ManifestFillTestBase {
         assertThat(status).containsEntry("state", "done").containsEntry("stage", "done").containsEntry("kind", "labels")
             .containsEntry("dry_run", false).containsEntry("done_rows", 3).containsEntry("total_rows", 3)
             .containsEntry("filled", 3).containsEntry("safe_to_stop", true)
-            .containsEntry("on_stop", "resumes from the last committed batch");
+            .containsEntry("on_stop", ManifestFillJobs.ON_STOP)
+            .containsEntry("scanned_rows", 6).containsEntry("manifest_rows_estimate", 6);
         assertThat(counts(status)).containsEntry("fillable", 3).containsEntry("edge", 2).containsEntry("skipped_changed", 0);
         assertThat(status.get("cursor")).isNotNull();
         // spec section 3: title/type are the chunk's string, or the empty label; page is the integer, NULL for 0
@@ -125,7 +127,8 @@ class ManifestFillJobTest extends ManifestFillTestBase {
         var status = runFill("spans");
 
         assertThat(status).containsEntry("state", "done").containsEntry("kind", "spans").containsEntry("done_rows", 3)
-            .containsEntry("total_rows", 3).containsEntry("filled", 3);
+            .containsEntry("total_rows", 3).containsEntry("filled", 3)
+            .containsEntry("scanned_rows", 6).containsEntry("manifest_rows_estimate", 6);
         assertThat(counts(status)).containsEntry("fillable", 3).containsEntry("edge", 1).containsEntry("skipped_changed", 0);
         assertThat(row(fresh, 0)).isEqualTo(new Row(false, null, null, null, 5, null, 10, 20));
         assertThat(row(partial, 0)).as("COALESCE: the row's own line_end stays, the NULL char_end is filled")
@@ -168,7 +171,20 @@ class ManifestFillJobTest extends ManifestFillTestBase {
         chunk(TENANT, h(0x21), both(OK_AT));
         chunk(TENANT, h(0x22), both(OK_AT));
         manifest(d, h(0x21), h(0x22));
+        // Past the triggers' one-hour guard, so a manifest UPDATE that dropped a key WOULD stamp the chunk as orphaned (a
+        // chunk written within the hour is never stamped, whatever the statement does). The witness proves the guard is
+        // live for these rows: a manifest row deleted outright does stamp its aged chunk.
+        String witness = doc("witness doc");
+        chunk(TENANT, h(0x23), both(OK_AT));
+        manifest(witness, h(0x23));
+        ageChunks(java.time.Duration.ofHours(2));
+        try (Connection su = pg.createConnection("")) {
+            int n = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES).deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(witness)).execute();
+            assertThat(n).isEqualTo(1);
+        }
         var before = untouched();
+        assertThat(before.orphanRows()).as("the witness: an aged chunk IS stamped when its manifest key goes").isEqualTo(1);
         var stampBefore = indexedAt(d);
         assertThat(stampBefore).isEqualTo(java.time.OffsetDateTime.parse(DOC_AT));
 

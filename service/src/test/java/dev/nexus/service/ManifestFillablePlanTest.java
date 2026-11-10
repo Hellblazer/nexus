@@ -196,7 +196,7 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
                     .contains("Limit").doesNotContain("Sort");
                 var end = rows.get(rows.size() - 1);
                 var last = new ManifestFill.Cursor(end.value1(), end.value2());
-                var count = ManifestFill.fillableInRange(ctx, TENANT, kind, after, last);
+                var count = ManifestFill.fillableByCollection(ctx, TENANT, kind, after, last);
                 String countPlan = PgContainerHelper.explainPlanInlined(ctx, count);
                 System.out.println("plan of the fill count over the window range, " + kind.wire() + ":\n" + countPlan);
                 System.out.println("plan with ANALYZE and BUFFERS of the fill count, " + kind.wire() + ":\n"
@@ -204,7 +204,7 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
                 assertThat(manifestScanNode(countPlan)).as(kind.wire() + ": the manifest scan is bounded by the window's range")
                     .contains("doc_id").contains("position");
                 // the seeded chunks carry labels and no spans the manifest lacks, so only the labels kind has rows to fill
-                assertThat(count.fetchOne().value1()).as(kind.wire() + ": the window's fillable rows")
+                assertThat(count.fetch().stream().mapToInt(r -> r.value2()).sum()).as(kind.wire() + ": the window's fillable rows")
                     .isEqualTo(kind == ManifestFillableCount.Kind.LABELS ? 87 : 0);
             }
         }

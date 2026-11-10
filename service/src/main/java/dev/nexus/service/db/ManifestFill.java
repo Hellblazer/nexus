@@ -8,12 +8,14 @@ import dev.nexus.service.jooq.nexus.tables.CatalogDocuments;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
-import org.jooq.Record1;
 import org.jooq.Record2;
 import org.jooq.Result;
 import org.jooq.Select;
 import org.jooq.Table;
+import org.jooq.Update;
 import org.jooq.impl.DSL;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
@@ -32,16 +34,35 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *
  * <p><b>One batch, one transaction</b> ({@link #batch}), under {@code tenantScope.withTenant}. A batch is a WINDOW of
  * the next {@code batchRows} manifest rows after the keyset cursor {@code (doc_id, position)} that the kind's
- * manifest-only prefilter admits ({@code labels_written = false}; a NULL span column), in key order: a bounded range
- * scan of the manifest alone. Everything else is evaluated over that key range and no wider, so a batch costs the
- * window, whatever the size of the tenant, and the whole fill is one pass: the rows of the window that are fillable
- * are counted, and (when not a dry run) written by ONE {@code UPDATE ... FROM (the strict predicate over the key range)}.
- * The UPDATE's own WHERE re-checks the TARGET row against the values the subquery read from the chunk row (labels:
- * {@code labels_written = false}; spans: {@link ManifestFillableCount#spansFillable} over the recorded values: a NULL
- * column the chunk records and no column it contradicts), so a row a concurrent writer changed between the read and the
- * write (a re-index, a label or span write that landed first) is skipped, never overwritten: PostgreSQL re-evaluates
- * that WHERE against the row's newest committed version when the UPDATE waited on its lock. The write is a COALESCE per
- * NULL column for spans, so a column a writer filled meanwhile keeps its value.
+ * manifest-only prefilter admits ({@code labels_written = false}; a NULL span column), in key order: a range scan of the
+ * manifest on its primary key that stops when it has admitted {@code batchRows} rows. Everything else is evaluated over
+ * that key range and no wider, and the whole fill is one pass: the fillable rows of the window are counted (grouped by
+ * collection, so one read gives the count and the collections to gate) and, when not a dry run, written by ONE
+ * {@code UPDATE ... FROM (the strict predicate over the key range)}.
+ *
+ * <p><b>Cost.</b> A batch costs the manifest rows its window SCANS to admit {@code batchRows}, which is the window
+ * itself only while the admitted rows are dense. There is no partial index on the prefilter (an index build on an
+ * existing store is boot-time heavy work nexus-f3yqd rules out), so a sparse admitted set (most rows already filled)
+ * scans many rows per admitted one, inside the batch's one statement timeout; and for spans the converged case, where
+ * every row whose chunk records no span stays NULL for good, walks every such row on every start. The cost of a whole
+ * fill is therefore the manifest rows of the tenant past the cursor, not the fillable ones;
+ * {@code ManifestFillScaleMeasurementTest} measures it.
+ *
+ * <p><b>Concurrent writers.</b> The UPDATE's own WHERE re-checks the TARGET row against the values the subquery read from
+ * the chunk row (labels: {@code labels_written = false} and the same {@code (doc_id, position, chash)}; spans:
+ * {@link ManifestFillableCount#spansFillable} over the recorded values, a NULL column the chunk records and no column it
+ * contradicts), so a row a writer changed between the read and the write (a re-index, a label or span write that landed
+ * first) is skipped, never overwritten: PostgreSQL re-evaluates that WHERE against the row's newest committed version
+ * when the UPDATE waited on its lock. The write is a COALESCE per NULL column for spans, so a column a writer filled
+ * meanwhile keeps its value.
+ *
+ * <p>The wait is bounded. The UPDATE runs under a {@code lock_timeout} ({@value #DEFAULT_LOCK_TIMEOUT_MS} ms, or the
+ * system property {@link #LOCK_TIMEOUT_PROPERTY}) set after the sweep gates are taken, so a gate wait keeps the
+ * batch's statement timeout. A writer that holds a row of the batch longer (a long reconcile commit) ends the attempt
+ * with SQLSTATE 55P03, the transaction is rolled back, and the SAME window is run again in skip mode: the subquery picks
+ * its target rows {@code FOR UPDATE OF cand SKIP LOCKED}, so a row somebody holds is not waited for and not written.
+ * Such a row is in {@code picked} and not in {@code filled}, so the job reports it as {@code skipped_changed}, and the
+ * next start fills it. The job therefore finishes whatever a writer holds.
  *
  * <p><b>Values</b> (spec section 3). Labels: {@code section_title} and {@code section_type} are the chunk's string, or
  * the empty label for an absent key or a JSON null; {@code page_number} is the chunk's integer, NULL for absent, null or
@@ -54,7 +75,9 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  * not exist here. {@code ManifestFillJobTest} proves both.
  *
  * <p><b>Resume.</b> Fill-only: a filled row leaves the predicate, so a restart reruns from the start and the rows
- * already filled drop out. The cursor is progress, never state a restart needs.
+ * already filled drop out; the walk still passes over every row the prefilter admits that is not fillable (see Cost).
+ * A restart may instead pass the cursor a poll showed as {@code after}, and the walk begins there. The cursor is
+ * progress a client may hand back, never state a restart needs.
  */
 public final class ManifestFill {
 
@@ -69,6 +92,17 @@ public final class ManifestFill {
      * and ends the job failed with what it had committed; a new job resumes by construction.
      */
     public static final long BATCH_TIMEOUT_MS = 120_000L;
+
+    /** The longest the UPDATE of a batch waits for a row another transaction holds, before the batch runs again in skip mode. */
+    public static final long DEFAULT_LOCK_TIMEOUT_MS = 5_000L;
+
+    /** System property that replaces {@link #DEFAULT_LOCK_TIMEOUT_MS} (read on every batch); the test hook, and an operator's knob. */
+    public static final String LOCK_TIMEOUT_PROPERTY = "nexus.manifest.fill.lock_timeout_ms";
+
+    /** SQLSTATE of a lock wait that ran out ({@code lock_not_available}). */
+    static final String LOCK_NOT_AVAILABLE = "55P03";
+
+    private static final Logger log = LoggerFactory.getLogger(ManifestFill.class);
 
     /** A keyset position in the manifest: the last key of the window a batch scanned. */
     public record Cursor(String docId, int position) { }
@@ -88,7 +122,8 @@ public final class ManifestFill {
     }
 
     /**
-     * Runs one batch for {@code tenant}.
+     * Runs one batch for {@code tenant}: normally, and in skip mode when a row of the batch stayed locked past the lock
+     * timeout (see the class comment).
      *
      * @param after     the keyset cursor to continue after, or null for the start
      * @param batchRows 1 to {@link #MAX_BATCH_ROWS}
@@ -99,8 +134,21 @@ public final class ManifestFill {
         if (batchRows < 1 || batchRows > MAX_BATCH_ROWS) {
             throw new IllegalArgumentException("batch_rows must be 1.." + MAX_BATCH_ROWS);
         }
-        // The one transaction of the batch, under the manifest writers' deadlock belt (ManifestWriteRetryGateTest): the
-        // UPDATE locks manifest rows in its own order, and a concurrent manifest writer may lock some in another.
+        try {
+            return once(tenant, kind, after, batchRows, dryRun, false);
+        } catch (RuntimeException e) {
+            if (!hasSqlState(e, LOCK_NOT_AVAILABLE)) throw e;
+            log.info("event=manifest_fill_lock_wait_exceeded tenant={} kind={} after={} action=rerun_skipping_locked_rows",
+                tenant, kind.wire(), after);
+            return once(tenant, kind, after, batchRows, dryRun, true);
+        }
+    }
+
+    /**
+     * One attempt, in its own transaction, under the manifest writers' deadlock belt (ManifestWriteRetryGateTest): the
+     * UPDATE locks manifest rows in its own order, and a concurrent manifest writer may lock some in another.
+     */
+    private Batch once(String tenant, Kind kind, Cursor after, int batchRows, boolean dryRun, boolean skipLocked) {
         return DeadlockRetry.run("manifest.fill " + kind.wire(), () -> repo.tenantScope().withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", Long.toString(BATCH_TIMEOUT_MS));
             Result<Record2<String, Integer>> window = windowQuery(ctx, tenant, kind, after, batchRows).fetch();
@@ -109,10 +157,45 @@ public final class ManifestFill {
             }
             var end = window.get(window.size() - 1);
             Cursor last = new Cursor(end.value1(), end.value2());
-            int picked = fillableInRange(ctx, tenant, kind, after, last).fetchOne().value1();
-            int filled = dryRun || picked == 0 ? 0 : apply(ctx, tenant, kind, after, last);
+            // one read: the fillable rows of the window per collection, whose sum is the pick and whose keys are the gates
+            var perCollection = fillableByCollection(ctx, tenant, kind, after, last).fetch();
+            int picked = 0;
+            for (var r : perCollection) picked += r.value2();
+            int filled = dryRun || picked == 0 ? 0
+                : apply(ctx, tenant, kind, after, last, perCollection.getValues(0, String.class), skipLocked);
             return new Batch(window.size(), picked, filled, last);
         }));
+    }
+
+    /**
+     * How many manifest rows of {@code tenant} after {@code after} the kind's prefilter admits: the rows a walk from
+     * there scans (every window row is one), so {@code scanned_rows / admittedRows} is the fraction of the walk done.
+     * A tenant-scoped count on the manifest's primary key range, under the fillable count's statement timeout; null when
+     * it ran past it (the answer then stays unknown; the fill does not depend on it).
+     */
+    public Long admittedRows(String tenant, Kind kind, Cursor after) {
+        var row = CATALOG_DOCUMENT_CHUNKS;
+        try {
+            return repo.tenantScope().withTenant(tenant, ctx -> {
+                PgSession.setLocal(ctx, "statement_timeout", Integer.toString(Integer.getInteger(
+                    CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS)));
+                return ctx.selectCount().from(row)
+                    .where(row.TENANT_ID.eq(tenant).and(ManifestFillableCount.manifestPrefilter(row, kind))
+                        .and(after(row, after)))
+                    .fetchOne(0, Long.class);
+            });
+        } catch (RuntimeException e) {
+            if (hasSqlState(e, CatalogRepository.QUERY_CANCELED)) return null;
+            throw e;
+        }
+    }
+
+    private static boolean hasSqlState(Throwable e, String state) {
+        int depth = 0;
+        for (Throwable t = e; t != null && depth < 32; t = t.getCause(), depth++) {
+            if (t instanceof java.sql.SQLException se && state.equals(se.getSQLState())) return true;
+        }
+        return false;
     }
 
     /**
@@ -132,18 +215,22 @@ public final class ManifestFill {
     }
 
     /**
-     * How many rows of the key range {@code (after, last]} are fillable: the strict candidates of
-     * {@link ManifestFillableCount}. Public so a plan-shape test can explain the exact statement.
+     * The fillable rows of the key range {@code (after, last]}, counted per collection and in collection order: the
+     * strict candidates of {@link ManifestFillableCount}. Their sum is the batch's pick and their collections are the
+     * ones the batch gates (a collection with no fillable row in the window is never waited for). Public so a
+     * plan-shape test can explain the exact statement.
      */
-    public static Select<Record1<Integer>> fillableInRange(DSLContext ctx, String tenant, Kind kind, Cursor after,
-                                                            Cursor last) {
+    public static Select<Record2<String, Integer>> fillableByCollection(DSLContext ctx, String tenant, Kind kind,
+                                                                        Cursor after, Cursor last) {
         var row = CATALOG_DOCUMENT_CHUNKS;
         var doc = CATALOG_DOCUMENTS;
-        return ctx.select(DSL.count())
+        return ctx.select(row.COLLECTION, DSL.count())
             .from(ManifestFillableCount.joined(row, doc))
             .where(ManifestFillableCount.candidates(ctx, tenant, kind, row, doc)
                 .and(ManifestFillableCount.strict(kind, doc))
-                .and(after(row, after)).and(through(row, last)));
+                .and(after(row, after)).and(through(row, last)))
+            .groupBy(row.COLLECTION)
+            .orderBy(row.COLLECTION);
     }
 
     /** The rows strictly after {@code after} in key order; no condition for the start. */
@@ -158,10 +245,33 @@ public final class ManifestFill {
     }
 
     /**
-     * The one UPDATE of a batch over the key range {@code (after, last]}: the fillable rows of that range, read once
-     * from the chunk rows in the subquery {@code b}, written to the manifest rows they came from.
+     * The one UPDATE of a batch over the key range {@code (after, last]}: gates first, then the statement
+     * ({@link #updateStatement}) under the lock timeout.
      */
-    private static int apply(DSLContext ctx, String tenant, Kind kind, Cursor after, Cursor last) {
+    private static int apply(DSLContext ctx, String tenant, Kind kind, Cursor after, Cursor last,
+                             List<String> collections, boolean skipLocked) {
+        // Every manifest writer holds the sweep gate SHARED for each collection it writes, before its row locks (the
+        // retire-orphans sweep takes it EXCLUSIVE; ManifestInsertGateTest). This UPDATE re-points and re-homes nothing, but
+        // it joins the rule instead of arguing an exemption. The collections are those of the rows the pick found, in
+        // name order; shared holders never wait on each other. A row re-homed after that read is written under the gate
+        // of its old collection: the UPDATE adds no key and writes no collection, so it cannot interleave with the
+        // sweep's retirement of either.
+        for (String collection : collections) {
+            CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
+        }
+        // After the gates, so a gate wait keeps the statement timeout; 0 turns the limit off in skip mode, which waits on no row.
+        PgSession.setLocal(ctx, "lock_timeout", Long.toString(skipLocked ? 0L : lockTimeoutMs()));
+        return updateStatement(ctx, tenant, kind, after, last, skipLocked).execute();
+    }
+
+    /**
+     * The UPDATE of a batch, unexecuted: the fillable rows of the key range {@code (after, last]}, read once from the
+     * chunk rows in the subquery {@code b}, written to the manifest rows they came from. With {@code skipLocked} the
+     * subquery locks its target rows {@code FOR UPDATE OF cand SKIP LOCKED}, so a row another transaction holds is left
+     * out of {@code b} and not written. Public so a measurement can explain the exact statement.
+     */
+    public static Update<?> updateStatement(DSLContext ctx, String tenant, Kind kind, Cursor after, Cursor last,
+                                            boolean skipLocked) {
         var cand = CATALOG_DOCUMENT_CHUNKS.as("cand");
         CatalogDocuments candDoc = CATALOG_DOCUMENTS.as("cand_doc");
         var t = CATALOG_DOCUMENT_CHUNKS;
@@ -172,25 +282,21 @@ public final class ManifestFill {
         Condition fillable = ManifestFillableCount.candidates(ctx, tenant, kind, cand, candDoc)
             .and(ManifestFillableCount.strict(kind, candDoc)).and(inRange);
         Table<?> from = ManifestFillableCount.joined(cand, candDoc);
-        // Every manifest writer holds the sweep gate SHARED for each collection it writes, before its row locks (the
-        // retire-orphans sweep takes it EXCLUSIVE; ManifestInsertGateTest). This UPDATE re-points and re-homes nothing, but
-        // it joins the rule instead of arguing an exemption. Collections in key order; shared holders never wait on each other.
-        for (String collection : collectionsInRange(ctx, tenant, kind, after, last)) {
-            CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
-        }
         return kind == Kind.LABELS
-            ? applyLabels(ctx, tenant, t, from, fillable, bDoc, bPos, bChash)
-            : applySpans(ctx, tenant, t, from, fillable, bDoc, bPos, bChash);
+            ? applyLabels(ctx, tenant, t, from, fillable, cand, skipLocked, bDoc, bPos, bChash)
+            : applySpans(ctx, tenant, t, from, fillable, cand, skipLocked, bDoc, bPos, bChash);
     }
 
-    /** The distinct collections of the key range {@code (after, last]} that the kind's prefilter admits, in name order. */
-    private static List<String> collectionsInRange(DSLContext ctx, String tenant, Kind kind, Cursor after, Cursor last) {
-        var row = CATALOG_DOCUMENT_CHUNKS;
-        return ctx.selectDistinct(row.COLLECTION).from(row)
-            .where(row.TENANT_ID.eq(tenant).and(ManifestFillableCount.manifestPrefilter(row, kind))
-                .and(row.COLLECTION.isNotNull()).and(after(row, after)).and(through(row, last)))
-            .orderBy(row.COLLECTION)
-            .fetch(row.COLLECTION);
+    private static long lockTimeoutMs() {
+        return Long.getLong(LOCK_TIMEOUT_PROPERTY, DEFAULT_LOCK_TIMEOUT_MS);
+    }
+
+    /** The subquery {@code b}: the picked rows with the values to write, locked {@code SKIP LOCKED} in skip mode. */
+    private static Table<?> picked(DSLContext ctx, Table<?> from, Condition fillable, CatalogDocumentChunks cand,
+                                   boolean skipLocked, Field<?>... columns) {
+        var pick = ctx.select(columns).from(from).where(fillable);
+        Select<?> chosen = skipLocked ? pick.forUpdate().of(cand).skipLocked() : pick;
+        return chosen.asTable("b");
     }
 
     private static Condition sameRow(CatalogDocumentChunks t, String tenant, Table<?> b, Field<String> bDoc,
@@ -201,13 +307,14 @@ public final class ManifestFill {
             .and(t.CHASH.eq(b.field(bChash)));
     }
 
-    private static int applyLabels(DSLContext ctx, String tenant, CatalogDocumentChunks t, Table<?> from,
-                                   Condition fillable, Field<String> bDoc, Field<Integer> bPos, Field<byte[]> bChash) {
+    private static Update<?> applyLabels(DSLContext ctx, String tenant, CatalogDocumentChunks t, Table<?> from,
+                                   Condition fillable, CatalogDocumentChunks cand, boolean skipLocked,
+                                   Field<String> bDoc, Field<Integer> bPos, Field<byte[]> bChash) {
         Field<String> title = labelText("section_title").as("b_title");
         Field<String> type = labelText("section_type").as("b_type");
         Field<Integer> page = DSL.when(ManifestFillableCount.anyInt("page_number"),
             DSL.nullif(ManifestFillableCount.asInt("page_number"), 0)).as("b_page");
-        Table<?> b = ctx.select(bDoc, bPos, bChash, title, type, page).from(from).where(fillable).asTable("b");
+        Table<?> b = picked(ctx, from, fillable, cand, skipLocked, bDoc, bPos, bChash, title, type, page);
         return ctx.update(CATALOG_DOCUMENT_CHUNKS)
             .set(t.SECTION_TITLE, b.field(title))
             .set(t.SECTION_TYPE, b.field(type))
@@ -215,8 +322,7 @@ public final class ManifestFill {
             .set(t.LABELS_WRITTEN, true)
             .from(b)
             // the target row's own guard: a row a concurrent writer already labelled is not written over
-            .where(sameRow(t, tenant, b, bDoc, bPos, bChash).and(t.LABELS_WRITTEN.isFalse()))
-            .execute();
+            .where(sameRow(t, tenant, b, bDoc, bPos, bChash).and(t.LABELS_WRITTEN.isFalse()));
     }
 
     /** A label key's value: the chunk's string, or the empty label for an absent key or a JSON null (the rung's {@code or ""}). */
@@ -225,13 +331,14 @@ public final class ManifestFill {
             .otherwise(DSL.inline(""));
     }
 
-    private static int applySpans(DSLContext ctx, String tenant, CatalogDocumentChunks t, Table<?> from,
-                                  Condition fillable, Field<String> bDoc, Field<Integer> bPos, Field<byte[]> bChash) {
+    private static Update<?> applySpans(DSLContext ctx, String tenant, CatalogDocumentChunks t, Table<?> from,
+                                  Condition fillable, CatalogDocumentChunks cand, boolean skipLocked,
+                                  Field<String> bDoc, Field<Integer> bPos, Field<byte[]> bChash) {
         Field<Integer> ls = ManifestFillableCount.recordedLineStart().as("b_ls");
         Field<Integer> le = ManifestFillableCount.recordedLineEnd().as("b_le");
         Field<Integer> cs = ManifestFillableCount.recordedCharStart().as("b_cs");
         Field<Integer> ce = ManifestFillableCount.recordedCharEnd().as("b_ce");
-        Table<?> b = ctx.select(bDoc, bPos, bChash, ls, le, cs, ce).from(from).where(fillable).asTable("b");
+        Table<?> b = picked(ctx, from, fillable, cand, skipLocked, bDoc, bPos, bChash, ls, le, cs, ce);
         Field<Integer> rls = b.field(ls), rle = b.field(le), rcs = b.field(cs), rce = b.field(ce);
         return ctx.update(CATALOG_DOCUMENT_CHUNKS)
             .set(t.LINE_START, DSL.coalesce(t.LINE_START, rls))
@@ -241,7 +348,6 @@ public final class ManifestFill {
             .from(b)
             // the target row's own guard: a NULL column the chunk records and no column it contradicts, now
             .where(sameRow(t, tenant, b, bDoc, bPos, bChash)
-                .and(ManifestFillableCount.spansFillable(t, rls, rle, rcs, rce)))
-            .execute();
+                .and(ManifestFillableCount.spansFillable(t, rls, rle, rcs, rce)));
     }
 }
