@@ -21,6 +21,7 @@ from click.testing import CliRunner
 from nexus.catalog.factory import _SERVICE_ONLY_WRITE_OPS, _ServiceCatalogWriter
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
+from nexus.session import _CLAUDE_CODE_ENV_MARKERS
 
 
 # ── HttpCatalogClient wire contract ─────────────────────────────────────────
@@ -171,6 +172,13 @@ def _patch_writer(monkeypatch, writer):
 
 
 class TestTrashCmd:
+    @pytest.fixture(autouse=True)
+    def _as_a_terminal(self, monkeypatch):
+        # The listing withholds every row that carries no flag under Claude Code
+        # (nexus-rfvyy.9); a suite run from inside Claude Code carries its markers.
+        for name in _CLAUDE_CODE_ENV_MARKERS:
+            monkeypatch.delenv(name, raising=False)
+
     def test_empty_trash_prints_message(self, monkeypatch):
         _patch_reader(monkeypatch, _FakeReader([]))
         result = CliRunner().invoke(main, ["catalog", "trash"])
