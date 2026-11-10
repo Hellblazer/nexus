@@ -149,6 +149,12 @@ def engine_entries(*, fetch: Callable[..., dict[str, Any] | None] | None = None)
     return [entry for entry in work if isinstance(entry, dict)] if isinstance(work, list) else []
 
 
+def engine_lines() -> list[str]:
+    """Lines for the engine's own ``boot_work`` now: a step reporter's ``work`` source, so a long wait on a
+    busy engine repeats its progress (nexus-f3yqd.3). Empty when idle or unreachable."""
+    return render(engine_entries(), now=time.time())
+
+
 def current_entries(
     config_dir: Path, *, clock: Callable[[], float] = time.time,
     fetch: Callable[..., dict[str, Any] | None] | None = None,

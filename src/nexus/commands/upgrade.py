@@ -97,7 +97,12 @@ def upgrade(
             dry_run=dry_run, auto_mode=auto_mode, skip_t3=skip_t3, assume_yes=assume_yes,
             no_beads_prime=no_beads_prime, failures=failures,
         )
-        reporter = StepReporter(len(steps) + (1 if restarts else 0), quiet=auto_mode, name="nx upgrade")
+        from nexus.progress.boot_work import engine_lines  # noqa: PLC0415 — deferred, keeps the cold start light
+
+        # nexus-f3yqd.3: a long step on a busy engine repeats what the engine is doing, every 30 s.
+        reporter = StepReporter(
+            len(steps) + (1 if restarts else 0), quiet=auto_mode, name="nx upgrade", work=engine_lines,
+        )
         for what, detail, run in steps:
             # Every step is safe to repeat (the ladder records what converged), so
             # the remedy for any failed one is the same command again.

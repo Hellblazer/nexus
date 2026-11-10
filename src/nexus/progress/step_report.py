@@ -155,6 +155,7 @@ class Step:
             elapsed = f"{self._progress_text()}{format_duration(now - self.started)} elapsed"
             text = f"{self.announce} ... {elapsed}" if self.inline else f"  ... {elapsed}"
         self.reporter._heartbeat(text, inline=self.inline)
+        self.reporter._say_work()
 
 
 class StepReporter:
@@ -185,6 +186,8 @@ class StepReporter:
         announce: str = "Step {number} of {total}: {what}{detail}",
         show_reason: bool = True,
         lazy: bool = False,
+        work: Callable[[], list[str]] | None = None,
+        work_every_s: float = 30.0,
     ) -> None:
         import sys  # noqa: PLC0415 — stdlib, here so a test's capsys sees the live stdout
 
@@ -219,6 +222,11 @@ class StepReporter:
         self._log_line = log if log is not None else _stderr_line
         self.show_reason = show_reason
         self.lazy_default = lazy
+        #: nexus-f3yqd.3: lines saying what the engine is busy with, printed at a heartbeat at most every
+        #: *work_every_s*, so a long wait on a busy engine shows its progress and not only the elapsed time
+        self._work = work
+        self._work_every_s = work_every_s
+        self._last_work: float | None = None
         self._count = 0
         self._started = clock()
         self._dirty = False
@@ -234,6 +242,21 @@ class StepReporter:
             return
         _log.debug("step_line", command=self._name, line=text)
         self._echo(text)
+
+    def _say_work(self) -> None:
+        """At a heartbeat, the engine's work lines, at most every ``work_every_s``. Never raises."""
+        if self._work is None:
+            return
+        now = self.clock()
+        if self._last_work is not None and now - self._last_work < self._work_every_s:
+            return
+        self._last_work = now
+        try:
+            lines = self._work()
+        except Exception:  # noqa: BLE001 — advisory, as the heartbeat is
+            return
+        for text in lines:
+            self.line(text)
 
     def _heartbeat(self, text: str, *, inline: bool = False) -> None:
         if self.quiet:

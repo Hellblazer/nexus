@@ -3047,8 +3047,15 @@ def _doctor_progress() -> Any:
     return StepReporter(
         0, echo=lambda text: click.echo(text, err=True), stream=sys.stderr, tty=tty, compact=True,
         slow_s=3.0, heartbeat_s=3.0 if tty else 30.0, announce="Checking {what}{detail}", name="nx doctor",
-        show_reason=False, lazy=not tty,
+        show_reason=False, lazy=not tty, work=_engine_work_lines,
     )
+
+
+def _engine_work_lines() -> list[str]:
+    """nexus-f3yqd.3: what the engine is busy with, repeated during a long check."""
+    from nexus.progress.boot_work import engine_lines  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+
+    return engine_lines()
 
 
 @click.command("doctor", epilog=COLLECTIONS_RULES_EPILOG)
