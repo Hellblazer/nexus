@@ -1808,9 +1808,9 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         _PAGE = 250
         for i in range(0, len(doc_ids), _PAGE):
             batch = doc_ids[i:i + _PAGE]
-            # The service store-get path ignores `include` and always returns
-            # the full {ids, documents, metadatas} envelope (VectorHandler P4a.2,
-            # nexus-1k8s1); we pass include for intent only.
+            # The client sends `include` to store-get (nexus-mjmjl). An engine before
+            # the projection ignores it and returns the full envelope; one that projects
+            # returns only documents here, which is all this split reads.
             # RDR-243 Phase 3 (nexus-rfvyy.8.6): split computes terms the way discover does, so a sensitive
             # member is left out of the texts. split_topic's conservation guard then sees fewer fetched ids
             # than members and refuses the split, leaving the parent topic untouched (see below).

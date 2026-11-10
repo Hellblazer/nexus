@@ -545,9 +545,10 @@ class TestServiceCollectionStubGetWithIds:
             calls.append((path, body))
             return {"ids": ["id1"], "documents": ["text"], "metadatas": [{"k": "v"}]}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        _ServiceCollectionStub("col__test__m__v1").get(ids=["id1"], sensitivity="include")
-        (_path, body), = calls
-        assert "include" not in body
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        stub.get(ids=["id1"], sensitivity="include")
+        stub.get(ids=["id1"], include=[], sensitivity="include")  # empty, as the where branch: not "ids only"
+        assert [("include" in body) for _path, body in calls] == [False, False]
 
     def test_where_routes_to_get(self, monkeypatch):
         from nexus.db.http_vector_client import _ServiceCollectionStub
