@@ -78,6 +78,12 @@ def _disable_aspect_worker_autostart() -> None:
     # nexus-h5olw: the MCP lifespan fires the anonymous install ping on a
     # daemon thread; the suite must never beacon the managed service.
     os.environ.setdefault("NX_NO_TELEMETRY", "1")
+    # labrun-pex: the MinerU kill switch (_pin_mineru_autostart_off, nexus-1qdb9) is a function-scoped
+    # monkeypatch, which pytest sets up AFTER any module- or session-scoped fixture. A module fixture that
+    # runs the real PDFExtractor (test_pdf_chunker_integration's multipage_result) therefore autostarted a
+    # real mineru-api server (1.04 GB anon) that lived until its xdist worker exited, across the shard's
+    # memory peak. Pinned here as well, so no scope can reach the autostart.
+    os.environ.setdefault("NX_MINERU_AUTOSTART", "0")
 
 
 _disable_aspect_worker_autostart()
