@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd: GRANT SELECT on every nexus.chunks column EXCEPT chunk_text to ${role}, in Liquibase XML instead
+    of a Java SQL string (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ's grant(..)
+    takes a table, never a column list.
+
+    StoreGetIncludeColumnPrivilegeTest revokes the table-level SELECT through jOOQ first, so this column-level
+    grant leaves a read that names chunk_text failing with "permission denied",
+    while a read that never names it carries on. That is the behavioural proof that a metadata-only store-get
+    does not read the chunk text in the statement it runs. The column list is every column of nexus.chunks at
+    this schema; a column added later is simply not granted, which only matters to a read that names it.
+    Run by that test directly; runAlways, bookkeeping in its own table. ${role} is a fixed test literal, never
+    input.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="chunks-text-column-select" author="nexus-f3yqd" runAlways="true">
+        <sql>
+            GRANT SELECT (tenant_id, collection, chash, embedding_384, embedding_768, embedding_1024, chunk_tsv,
+                          metadata, created_at, retention, last_written_at, embedding_model)
+                ON nexus.chunks TO ${role}
+        </sql>
+    </changeSet>
+</databaseChangeLog>
