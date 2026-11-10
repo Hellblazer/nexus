@@ -1,5 +1,14 @@
 # Changelog
 
+## [8.1.0] - 2026-11-10
+
+Plugin version aligned with conexus 8.1.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- `conexus/skills/writing-nx-skills/SKILL.md`: nexus-qo7ie.35: a "Promoting a Memory File" pointer section (RDR-240 Technical Design 9).
+- `conexus/skills/writing-nx-skills/promotion.md`: nexus-qo7ie.35: new; the promotion recipe the skill loads on demand.
+- `conexus/skills/orchestration/reference.md`: nexus-qo7ie.35: the Skill Routing line for `/conexus:writing-nx-skills` also covers promoting a memory file.
+- `conexus/skills/peer-messaging/SKILL.md`: nexus-1d6pz.11.6: waiting for your push's CI by the wake, never a Monitor or a poll.
+
 ## [8.0.0] - 2026-11-09
 
 Plugin version aligned with conexus 8.0.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
