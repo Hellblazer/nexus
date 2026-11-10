@@ -118,7 +118,7 @@ def test_the_announcer_speaks_on_first_sight_then_every_repeat_and_once_when_don
     entries.clear()
     ann.poll()
     ann.poll()
-    assert said[-1] == "The engine finished that work." and said.count("The engine finished that work.") == 1
+    assert said[-1] == "The engine is no longer doing that work." and said.count("The engine is no longer doing that work.") == 1
 
 
 def test_the_announcer_never_raises() -> None:
@@ -162,3 +162,11 @@ def test_nx_inits_lease_wait_says_so_while_it_waits(tmp_path: Path, capsys) -> N
     assert _poll_service_lease(tmp_path, timeout=0.6) is None
     err = capsys.readouterr().err
     assert err.startswith("The engine is migrating its database schema (at vectors-058, 2 changeset(s) left)")
+
+
+def test_a_lease_wait_that_gives_up_mid_migration_says_it_is_still_running(tmp_path: Path) -> None:
+    from nexus.commands.daemon import still_migrating_message
+
+    text = still_migrating_message(60.0, tmp_path)
+    assert text.startswith("The storage service is still migrating its database after 60s")
+    assert "Run this command again once it finishes" in text and str(tmp_path / "logs") in text

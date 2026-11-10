@@ -136,7 +136,7 @@ class Announcer:
             if not entries:
                 if self._last is not None:
                     self._last = None
-                    self._echo("The engine finished that work.")
+                    self._echo("The engine is no longer doing that work.")
                 return
             if self._last is not None and now - self._last < self._repeat:
                 return
