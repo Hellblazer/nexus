@@ -851,7 +851,7 @@ indentation and colons in values. A new `kind` would need an engine release
 
 ## Implementation Plan
 
-### Phase 1
+### Phase 1 (CLOSED, 2026-11-09): asks, the nx ask commands, the asks skill, the drain-hook frame and the board convention
 
 #### Step 0: Measure the hook's GET
 

@@ -262,7 +262,7 @@ def test_skip_t3_suppresses_converge_actions_but_still_reports(
     reports = converge_preconditions(
         config_dir=tmp_path,
         allow_engine_install=False,   # what --skip-t3 (and --auto) passes
-        allow_process_cycle=False,    # what --skip-t3 passes
+        allow_process_cycle=False,    # what --skip-t3, --auto and the unattended child pass (nexus-f3yqd)
         _engine_detect_fn=lambda: _EngineStatus(),
         _engine_converge_fn=_engine_converge,
         _lease_fn=lambda: _Lease(version="6.10.0"),
@@ -400,7 +400,12 @@ def test_unreadable_package_metadata_is_loud(tmp_path: pathlib.Path) -> None:
 def test_upgrade_trigger_wires_preconditions_before_the_walk() -> None:
     """Wiring pin: nx upgrade converges preconditions BEFORE _run_ladder
     (source-order inspection, matching the P0 wiring-pin style)."""
-    source = inspect.getsource(upgrade.callback)
+    # nexus-mjmjl: upgrade() runs, in order, the steps _upgrade_steps builds;
+    # both calls live there, preconditions first.
+    import nexus.commands.upgrade as _upgrade_mod
+
+    assert "_upgrade_steps(" in inspect.getsource(upgrade.callback)
+    source = inspect.getsource(_upgrade_mod._upgrade_steps)
     assert "_converge_preconditions(" in source
     assert source.index("_converge_preconditions(") < source.index("_run_ladder(")
 

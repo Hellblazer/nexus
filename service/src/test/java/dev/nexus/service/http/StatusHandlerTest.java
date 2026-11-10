@@ -240,6 +240,77 @@ class StatusHandlerTest {
     }
 
     @Test
+    void chunkMetadataKeyWouldRefuseTotal_topLevelFieldCountsAnOffendingWriteOnce_notACleanOne() throws Exception {
+        // RDR-236 Phase 4 Step 2a (bead nexus-6pfgb.66), [additive]: delta discipline, driven through the check.
+        start(new StatusHandler(null));
+        long before = get().get("chunk_metadata_key_would_refuse_total").asLong();
+        var check = new dev.nexus.service.vectors.ChunkKeyAllowlistCheck();
+        var clean = java.util.Map.of("chunk_text_hash", "h", "embedding_model", "m");
+        var offending = java.util.Map.of("chunk_text_hash", "h", "title", "t", "doc_id", "d");
+
+        check.observe("t", "knowledge-collection", "upsert-chunks", java.util.List.of(clean), 1, null, null);
+        assertThat(get().get("chunk_metadata_key_would_refuse_total").asLong()).as("a clean write").isEqualTo(before);
+
+        check.observe("t", "knowledge-collection", "upsert-chunks", java.util.List.of(clean, offending, offending), 3,
+            null, null);
+        assertThat(get().get("chunk_metadata_key_would_refuse_total").asLong() - before)
+            .as("one request counts once, however many chunks or keys offend").isEqualTo(1L);
+    }
+
+    @Test
+    void chunkMetadataKeyWouldRefuse_routeClassViewNamesOnlyEngineFixedLabels() throws Exception {
+        // The route-and-class view: an array of {route, key_class, count}. Its labels are route names and the four
+        // key classes, all fixed by the engine, so it is safe on the status route, which has no tenant scope.
+        dev.nexus.service.vectors.ChunkKeyAllowlistActivity.resetForTests();
+        start(new StatusHandler(null));
+        var check = new dev.nexus.service.vectors.ChunkKeyAllowlistCheck();
+        var meta = java.util.Map.<String, Object>of("title", "t", "doc_id", "d", "zz_unknown_key", 1);
+        check.observe("t", "knowledge-collection", "update-metadata", java.util.List.of(meta), 1, "nx-agent/3", "7.9.0");
+        check.observe("t", "knowledge-collection", "update-metadata", java.util.List.of(meta), 1, "nx-agent/3", "7.9.0");
+
+        var s = get();
+        assertThat(s.get("chunk_metadata_key_would_refuse_total").asLong()).isEqualTo(2);
+
+        var routeClass = s.get("chunk_metadata_key_would_refuse_by_route_class");
+        assertThat(routeClass.isArray()).isTrue();
+        assertThat(routeClass).hasSize(3);
+        java.util.Set<String> classes = new java.util.TreeSet<>();
+        for (var e : routeClass) {
+            assertThat(e.get("route").asText()).isEqualTo("update-metadata");
+            assertThat(e.get("count").asLong()).isEqualTo(2);
+            classes.add(e.get("key_class").asText());
+        }
+        assertThat(classes).containsExactly("document", "legacy", "other");
+    }
+
+    @Test
+    void chunkMetadataKeyWouldRefuse_statusNeverCarriesAClientSuppliedKeyNameOrUserAgent() throws Exception {
+        // GET /v1/status has no tenant scope: any caller sees the whole engine's status. A key name, a User-Agent or
+        // a client version comes from one tenant's client, so it must not appear anywhere in the body, whatever the
+        // field. The per-tenant detail lives in the rate-limited would-refuse log line.
+        dev.nexus.service.vectors.ChunkKeyAllowlistActivity.resetForTests();
+        start(new StatusHandler(null));
+        var check = new dev.nexus.service.vectors.ChunkKeyAllowlistCheck();
+        String secretKey = "tenant_a_secret_key_zq7";
+        String secretAgent = "tenant-a-secret-agent-zq7/9";
+        String secretVersion = "9.8.7-zq7";
+        var meta = java.util.Map.<String, Object>of("title", "t", secretKey, 1);
+        check.observe("tenant-a", "knowledge-collection", "upsert-chunks", java.util.List.of(meta), 1, secretAgent,
+            secretVersion);
+        assertThat(get().get("chunk_metadata_key_would_refuse_total").asLong()).as("the write was counted").isEqualTo(1);
+
+        HttpResponse<String> resp = http.send(
+                dev.nexus.service.TestHttp.request(baseUrl + "/v1/status").GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.body())
+            .as("no client-supplied key name, user agent or client version in the status body")
+            .doesNotContain(secretKey).doesNotContain("zq7")
+            .doesNotContain("chunk_metadata_key_would_refuse_by_key")
+            .doesNotContain("chunk_metadata_key_would_refuse_by_client");
+    }
+
+    @Test
     void testTenantResetRoute_isAlwaysPresent_falseUnlessTheRouteIsRegistered() throws Exception {
         // nexus-0bl77, [additive]. On /v1/status and not /version: the conexus image smoke fails on any /version
         // key outside the public contract.

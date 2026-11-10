@@ -57,12 +57,16 @@
 # and drop --advisory from its step in service-ci.yml in the same commit (a lint checks they agree).
 
 [python_unit]
-measured_on = "CI 39402256114 (7e245451d), 39403221114 (15f3dbd3b), 39405019761 (0e3d81da9)"
+measured_on = "CI 39402256114 (7e245451d), 39403221114 (15f3dbd3b), 39405019761 (0e3d81da9); migration_wal_bytes_per_worker re-measured CI 42718089205 (84d80e554)"
 bytes_tolerance = 0.10
 ddl_tolerance = 0.05
 wal_bytes_per_test = 18450
 ddl_per_test = 1.013
-migration_wal_bytes_per_worker = 11038000
+# 11038000 -> 12143000 (2026-11-10, Sam, ask wal-ceiling-058 option 1): re-measured from develop CI 42718089205
+# (84d80e554), which read 12142933 at 2413 migration DDL. The 11038000 ceiling was measured at 2101 DDL; changesets
+# since took the migration to 2400 DDL and 12111445 (0e80c6819, 99.7% of the band), and vectors-058 (nexus-bbtc2,
+# 13 function replacements) added 31.5 KB more, over the band by 1133 bytes. The re-measure restores the 10% band.
+migration_wal_bytes_per_worker = 12143000
 # 2101 -> 2103 (2026-10-21): 62949fa41 (nexus-1579m, bounded expire-quarantine) added a Liquibase changeset
 # without the bump; CI 39617797428 at f9e267297 counted 2103 on every worker.
 # 2103 -> 2105 (2026-10-21): vectors-036-1 (nexus-3wh8d.22, drop of the retired pre-walk tables) adds two DDL
@@ -198,7 +202,13 @@ migration_wal_bytes_per_worker = 11038000
 # Counted from the changesets' statements (6) and measured: chas lab-m via lab-remote, 2026-11-09, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-u5m5g.4 tree (stacked on 43fd276d9), ddl: migration=2394.
 # 2394 -> 2396 (2026-11-09, nexus-u5m5g.4 review r1 fix round): catalog-048-5 also adds nexus.catalog_link_lock_endpoints, the lock pass the batch upsert and the same-content linker share: 1 CREATE FUNCTION and its GRANT EXECUTE to nexus_svc, no table.
 # Counted from the changeset's statements (2) and measured: chas lab-m via lab-remote, 2026-11-09, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-u5m5g.4 tree (r1 fix round, gate jar rebuilt), ddl: migration=2396.
-migration_ddl_per_worker = 2396
+# 2396 -> 2397 (2026-11-09, nexus-u5m5g.5, RDR-193 Phase 1 gate seam fix): catalog-048-7 is a CREATE OR REPLACE of nexus.catalog_link_write (an alias of a dead canonical answers dangling): 1 CREATE FUNCTION statement, no new grant (the 048-4 grant stands), no table.
+# Counted from the changeset's statements (1) and measured: chas lab-m via lab-remote, 2026-11-09, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-u5m5g.5 tree (gate jar rebuilt), ddl: migration=2397.
+# 2397 -> 2400 (2026-11-09, nexus-seo4k): vectors-057-1 redefines nexus.text_gate_probe_384, _768 and _1024 (the long-lexical switch): 3 CREATE OR REPLACE FUNCTION, no grant (CREATE OR REPLACE keeps the ACL), no table.
+# Counted from the changeset's statements (3) and measured: chas lab-m via lab-remote, 2026-11-09, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-seo4k tree, gate jar rebuilt, ddl: migration=2399.
+# 2400 -> 2413 (2026-11-09, nexus-bbtc2): vectors-058-1 redefines nexus.text_gate_probe_384, _768 and _1024 (the substring branch) and vectors-058-2 redefines the ten LANGUAGE sql row gates (text_gated_search_hnsw_first, text_gated_search_allowed, manifest_search at 384/768/1024, manifest_qualifying_hits): 13 CREATE OR REPLACE FUNCTION, no grant (CREATE OR REPLACE keeps the ACL), no table.
+# Counted from the changesets' statements (13) and measured: chas lab-m via lab-remote, 2026-11-09, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-bbtc2 tree, gate jar rebuilt, ddl: migration=2413.
+migration_ddl_per_worker = 2413
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

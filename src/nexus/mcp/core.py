@@ -2883,6 +2883,11 @@ mcp = MCPServer("nexus", version=_server_version(), lifespan=_t1_lifespan)
 from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call_log  # noqa: E402 — needs the constructed server
 
 _SDK_PATCH_RESULTS["tool_call_log"] = _install_tool_call_log(mcp)
+# nexus-3ceda.3: opt-in stack sampling of a slow tools/call (NX_MCP_SLOW_CALL_S); "off" when unset.
+from nexus.mcp._slow_call_watchdog import install_slow_call_watchdog as _install_slow_call_watchdog  # noqa: E402
+
+if (_slow_status := _install_slow_call_watchdog(mcp)) != "off":  # off reports nothing, not "not applied"
+    _SDK_PATCH_RESULTS["slow_call_watchdog"] = _slow_status
 
 # RDR-215: register any ported hook_<name> tool-tier tools -- see
 # nexus/mcp/hooks.py for the registration table (HOOK_TOOLS).
@@ -16841,14 +16846,18 @@ def main():
 
     # nexus-4xgfy (critique 38b7db3d C1): the dominant post-upgrade path is
     # a Claude session spawning THIS process with no bare `nx` invocation in
-    # between — the finish trigger must fire here too. Report-safe: the MCP
-    # host never kills anything from its own startup; the transition stamp +
-    # safe restarts are handled identically to the CLI trigger.
+    # between — the finish trigger must fire here too. It is not report-only:
+    # the finish pass stops stale worker processes it can respawn (the aspect
+    # worker, MinerU), names the rest for a person, and can repair PG grants.
+    # It never installs or restarts the engine or the storage service from here
+    # (engine_report_only, P0 nexus-f3yqd): a Claude session starting must not
+    # bounce the engine under the person's feet. It consumes the version stamp,
+    # so a stale engine then waits for `nx upgrade`; `nx doctor` names it.
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import
         from nexus.upgrade_finish import check_version_transition  # noqa: PLC0415 — deferred import
 
-        _summary = check_version_transition(nexus_config_dir())
+        _summary = check_version_transition(nexus_config_dir(), engine_report_only=True)
         if _summary:
             import structlog as _sl  # noqa: PLC0415 — deferred import
 

@@ -236,16 +236,21 @@ def effective_cap() -> int | None:
 #: (8 cores, 16 GB) at ``-n 8`` peaked 14.5 GB = 1.81 GB per worker. Those were
 #: subsets. The FULL suite (2026-10-21, bb434ac96, labrun sampler hand-ad6cd21f) at
 #: ``-n auto`` = 16 workers on lab-l peaked 47,795 MiB of the 49,152 MiB grant,
-#: 2,987 MiB a worker, 1,357 MiB from an OOM kill (exit 137). The budget is 3264
-#: MiB (about 3.2 GiB), so lab-l runs 15 workers (about 44,800 MiB at that peak,
-#: about 4.2 GiB free) and lab-m 5. The per-worker model is kept: the 10-19 subset
+#: 2,987 MiB a worker, 1,357 MiB from an OOM kill (exit 137). That set 3264 MiB,
+#: 15 workers on lab-l, and the suite outgrew it: two lab-l full suites at 15 hit
+#: the 48 GB cap with OOM kills (hand-37ce7746 at d98fec1fd, anon peak 48,302 MB,
+#: 7,284 limit hits; f906dc080 on 2026-11-09, anon peak 48,504 MB, 2 OOM kills).
+#: Measured on lab-xl at ``-n 15`` (2026-11-09, 147395072, hand-1a68e126, rc 0):
+#: peak 52,370 MB, anon 50,966 MB, 0 limit hits, about 3,490 MB a worker. The
+#: budget is 4096 MiB (about 17% over that), so lab-l runs 12 workers (about
+#: 41.9 GB at that rate, 15% under the cap), lab-m 4 and lab-xl 24. The per-worker model is kept: the 10-19 subset
 #: points fit no positive fixed cost, so per-worker cost grows with the run. Without this a grant fills as workers grow, the run used to fall
 #: back to disk for later clusters (3.9 GB written in 4 minutes); the session now
 #: never does, so the worker count has to keep the grant from filling. Per class,
-#: from the grant alone: lab-s (4 GiB) 1, lab-m (16) 5, lab-6c18g (18) 5 (CI's
-#: shards run -n 4), lab-l (48) 15, lab-xl (96) 30; on hellmini lab-mac-s (4) 1
-#: and lab-mac-m (10) 3 (nexus-pnyfq).
-BYTES_PER_WORKER = 3264 * 1024**2
+#: from the grant alone: lab-s (4 GiB) 1, lab-m (16) 4, lab-6c18g (18) 4 (CI's
+#: shards run -n 4), lab-l (48) 12, lab-xl (96) 24; on hellmini lab-mac-s (4) 1
+#: and lab-mac-m (10) 2 (nexus-pnyfq).
+BYTES_PER_WORKER = 4096 * 1024**2
 
 
 def _lab_mem_bytes(env: Mapping[str, str]) -> int | None:

@@ -1699,7 +1699,7 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch, mock_t3, voy
 def test_register_or_lookup_doc_id_returns_empty_when_writer_register_raises(
     sample_pdf, monkeypatch,
 ):
-    """Direct proof of the swallow itself: ``writer.register`` raising
+    """Direct proof of the swallow itself: ``writer.resolve_or_register`` raising
     inside ``_register_or_lookup_doc_id`` is caught by the broad
     ``except Exception`` (nexus-h9f1w / GH #1350 Fix C) and the function
     returns ``""`` rather than propagating — this is the documented,
@@ -1713,7 +1713,8 @@ def test_register_or_lookup_doc_id_returns_empty_when_writer_register_raises(
     reader.by_file_path.return_value = None
     reader.curator_owner_tumbler_by_name.return_value = "1.99"
     writer = MagicMock()
-    writer.register.side_effect = RuntimeError("engine unreachable")
+    # RDR-193 Step 6 (nexus-u5m5g.7): a curator pre-flight registers through resolve_or_register
+    writer.resolve_or_register.side_effect = RuntimeError("engine unreachable")
 
     with patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
          patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
@@ -1722,7 +1723,7 @@ def test_register_or_lookup_doc_id_returns_empty_when_writer_register_raises(
             content_type="paper", physical_collection="docs__mybook",
         )
     assert doc_id == ""
-    writer.register.assert_called_once()
+    writer.resolve_or_register.assert_called_once()
 
 
 def test_preflight_register_failure_feeds_identity_drop_collector(
@@ -1764,7 +1765,7 @@ def test_preflight_register_failure_feeds_identity_drop_collector(
     reader.by_file_path.return_value = None
     reader.curator_owner_tumbler_by_name.return_value = "1.99"
     writer = MagicMock()
-    writer.register.side_effect = RuntimeError("engine unreachable")
+    writer.resolve_or_register.side_effect = RuntimeError("engine unreachable")  # RDR-193 Step 6: the mint call
 
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \

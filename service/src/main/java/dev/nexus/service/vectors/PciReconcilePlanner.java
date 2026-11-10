@@ -53,7 +53,8 @@ import java.util.TreeSet;
  * <ul>
  *   <li>Build a collection that is {@code lifecycle_state = 'live'} (exactly that string; null, empty and every other
  *       state never build), has an empty {@code superseded_by}, counts {@code >= B}, has no parsed {@code pci_} index
- *       on the leaf under ANY name or validity, and is not backed off.</li>
+ *       on the leaf that survives this plan (a valid one, or the holder's in-flight build; a failed one is dropped by
+ *       the same plan), and is not backed off.</li>
  *   <li>Drop a valid index when the registry does not list its collection, or its {@code superseded_by} is set, or
  *       {@code count * 2 < B}. Between B/2 and B the index stays and nothing builds. The state alone never drops an
  *       index: an existing index on a quarantine, dormant or disputed collection drops only by these rules.</li>
@@ -64,10 +65,13 @@ import java.util.TreeSet;
  *       a few pages) until the registry removes or supersedes it. A zero for a non-live collection is not suspect
  *       (quarantine moves rows, so a zero is expected) and the count rule drops it.</li>
  *   <li>An invalid index that is not this holder's in-flight build is a failed build: {@link DropReason#FAILED_BUILD},
- *       whatever the registry says. The collection is NOT rebuilt in the same plan: the build is
- *       {@code CREATE INDEX CONCURRENTLY IF NOT EXISTS}, which would be a silent no-op against a failed index whose
- *       drop timed out. The rebuild is the next pass, once the name is free. The holder's own in-flight index is left
- *       alone whatever the rules say; the next pass judges it once it is valid.</li>
+ *       whatever the registry says. Its collection is rebuilt in the same plan when the build rules allow it (live, not
+ *       superseded, at least B rows, not backed off, a slot free), since the drop frees the name and the slot
+ *       (nexus-f3yqd): waiting a sweep period for the rebuild lost that long after every restart that ended a build.
+ *       The build is {@code CREATE INDEX CONCURRENTLY IF NOT EXISTS}, which would be a silent no-op against a failed
+ *       index whose drop timed out, so the executor runs a build that follows such a drop only when the drop
+ *       happened. The holder's own in-flight index is left alone whatever the rules say; the next pass judges it once
+ *       it is valid.</li>
  *   <li>An unparsed index ({@link Index#parsed()} false) is never touched (decision 4), with ONE carve-out (Sam,
  *       2026-10-18, T2 {@code nexus_rdr/227-decision-4-amendment-reindex-leftovers}, nexus-rn1yd): a REINDEX
  *       CONCURRENTLY <i>leftover</i> ({@link Index#leftover()}: an INVALID {@code pci_<hash>_ccnew}/{@code _ccold[N]}
@@ -204,15 +208,18 @@ public final class PciReconcilePlanner {
                 continue;
             }
             String collection = index.collection();
-            served.add(collection);
             if (!index.valid()) {
                 if (index.name().equals(inFlightIndex)) {
+                    served.add(collection);
                     kept++;
                 } else {
+                    // nexus-f3yqd (F): not served. The drop frees the name and the slot, so this plan may build the
+                    // collection again; the executor skips that build when the drop did not happen.
                     drops.put(index.name(), new Drop(index.name(), collection, DropReason.FAILED_BUILD));
                 }
                 continue;
             }
+            served.add(collection);
             RegistryRow row = rows.get(collection);
             long count = counts.getOrDefault(collection, 0);
             if (row == null) {

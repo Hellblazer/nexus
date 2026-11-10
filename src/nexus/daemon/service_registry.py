@@ -56,7 +56,7 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Protocol, TypeVar
 
@@ -70,6 +70,7 @@ from nexus._winsec import (  # the SID lookup and the user-directory grant live 
     open_private,
 )
 from nexus.bounded_subprocess import run_bounded
+from nexus.daemon.footprint import FootprintGauge
 from nexus.util import win_console
 from nexus.util.process_group import KILL_SIGNAL
 from nexus.util.stable_cwd import (  # noqa: F401 — re-exported: the detached-daemon cwd rule (nexus-x3m8e); stdlib-only so the hooks can share it, re-exported here as its home
@@ -1196,8 +1197,13 @@ class ServiceSupervisor:
         payload: Optional[dict[str, Any]] = None,
         owner_token: Optional[str] = None,
         stand_down_when_dir_gone: bool = False,
+        footprint: Optional[FootprintGauge] = None,
     ) -> None:
         self._registry = registry
+        #: nexus-3ceda.3: this process's own memory, CPU and threads, carried in
+        #: the lease payload under ``footprint`` on each heartbeat (the gauge
+        #: samples at most every 30 s) and read back by ``nx doctor``.
+        self._footprint = footprint if footprint is not None else FootprintGauge(scope_key)
         self._scope_key = scope_key
         self._version = version
         self._endpoint_provider = endpoint_provider
@@ -1259,8 +1265,15 @@ class ServiceSupervisor:
                         hint="the lease directory is gone; standing down instead of re-creating it",
                     )
                 return
+        # The footprint rides on the record we stamp, never on the one we hold: a
+        # busy election or a fence leaves the held lease exactly as it was.
+        stamped = self._record
         try:
-            self._record = self._registry.heartbeat(self._record)
+            stamped = replace(self._record, payload={**self._record.payload, "footprint": self._footprint.read()})
+        except Exception as exc:  # noqa: BLE001 -- a gauge must never cost a heartbeat
+            _log.debug("service_supervisor_footprint_failed", scope=self._scope_key, error=str(exc))
+        try:
+            self._record = self._registry.heartbeat(stamped)
         except StaleOwnerError:
             self.fenced = True
             _log.info(

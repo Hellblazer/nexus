@@ -85,6 +85,7 @@ conexus/skills/tumbler-footnotes/SKILL.md 4404
 conexus/skills/upgrade/SKILL.md 12220
 conexus/skills/why-was-this-written/SKILL.md 4212
 conexus/skills/writing-nx-skills/SKILL.md 8341
+conexus/skills/writing-nx-skills/promotion.md 4847
 prose-edit/agents/line-editor.md 12468
 prose-edit/skills/prose-cut/SKILL.md 10832
 prose-edit/skills/prose-edit/SKILL.md 40041

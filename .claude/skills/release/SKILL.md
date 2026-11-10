@@ -25,7 +25,7 @@ neither file.)
 (the upgrade shakeout) and Step 6c (sandbox shakedown) went with the scripts they
 ran. The battery is now the fresh-install MVV, the package-upgrade convergence
 MVV and the local-service gate, behind one preflight. Steps that remain:
-0, 0c, 1, 2, 3, 4, 4a, 5, 6d, 7, 8, 8a, 9, 10, 11, 11b, 11c, 12.
+0, 0c, 1, 2, 3, 4, 4a, 5, 6d, 7, 8, 8a, 9, 10, 11, 11b, 11c, 12, 12a.
 
 **RDR-237 prerequisite (the release that first carries MinerU-only extraction).**
 That release (every PDF through MinerU, the old extractor removed, no default-on MinerU
@@ -109,7 +109,10 @@ surfaces the whole fix list. The checks:
   release must pin an engine that can hold `nx-note://`; the floor leads the pin
   on develop, which no develop run checks), and when it is below
   `SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION` (RDR-243 Phase 2: a release must pin an
-  engine with vectors-055, or every `nx_answer` search step is refused);
+  engine with vectors-055, or every `nx_answer` search step is refused), and when it
+  is below `RESOLVE_SENSITIVE_MIN_ENGINE_VERSION` (RDR-193 Step 6: a release must pin
+  an engine whose `resolve_or_register` accepts `sensitive`, or every sensitive titled
+  put and curator register is refused with a 400);
 - `ci-evidence-contexts` -- the required-context drift tests, run with `-m ""` so
   the integration-marked live branch-protection check actually executes;
 - `mandatory-pins` -- the GitHub-backed `mandatory_regression_pin` tests under
@@ -133,6 +136,26 @@ the preflight; Step 0 above runs it by hand.
 
 Do not let this file grow into a second battery. Admission requires: genuinely
 release-blocking and deterministic (no service, no sandbox HOME).
+
+**The first-run gate (Sam 2026-11-10, nexus-f3yqd.6): no cut while a known
+first-run or upgrade UX problem is untriaged.** Every finding lives in T2
+`nexus/first-run-ux-triage`, one line each: `F<n> | <status> | <owner> | <reason>`.
+The cut may proceed only when every line reads `fixed <sha>` or `accepted (Sam
+<date>[, where he gave it])`. A `fix-<version>` line is open work for this release, and a
+`proposed-accept` line is waiting on Sam; either blocks. A first-run finding
+that turns up during the cut is added there before the cut goes on, never
+noted elsewhere. Run it with the preflight:
+
+```bash
+t=$(nx memory get -p nexus -t first-run-ux-triage) || { echo "UNVERIFIED: the triage record could not be read"; exit 2; }
+n=$(printf '%s\n' "$t" | grep -cE '^F[0-9]+ \| ')
+[ "$n" -gt 0 ] || { echo "UNVERIFIED: no finding lines in the triage record"; exit 2; }
+open=$(printf '%s\n' "$t" | grep -E '^F[0-9]+ \| ' | grep -vE '^F[0-9]+ \| (fixed [0-9a-f]{7,}|accepted \(Sam [0-9]{4}-[0-9]{2}-[0-9]{2}(, [^)]*)?\)) \|')
+[ -z "$open" ] && echo "first-run gate clear ($n findings)" || { printf 'CUT BLOCKED, first-run findings not fixed or accepted:\n%s\n' "$open"; exit 1; }
+```
+
+The check passes only on the two closed statuses, so a misspelt or new status
+blocks too.
 
 **When this release changes the cut or release machinery itself** (`release.yml`,
 the cut and floor scripts, the battery), rehearse the whole flow end to end in
@@ -191,6 +214,12 @@ the evidence gate's borrowed-parent path, `local-service-gate.sh` under
 `NEXUS_GATE_NO_VOYAGE=1`). `grep -c 'GATE PASSED-BY-DEFAULT:'` over the
 battery output; a non-zero count is not a failure, it is the list of greens
 that rest on a default, and each one is named in the ship record.
+
+**Battery rounds** (Sam, 2026-09-06, after a day of one stale pin per hour-long
+gate; source: T2 `nexus/qo7ie.36-census-feedback_test_runs_before_push`). Run the
+whole battery to completion and collect every red, fix once, then rerun only the
+reds. Each leg is its own background job, so a red at minute 25 is triaged while
+the rest run.
 
 **`fresh-install-mvv.sh` — the virgin-journey gate (nexus-nolqs, 2026-07-21).**
 Every other E2E gate starts from a POPULATED install and tests the upgrade
@@ -445,7 +474,10 @@ every substrate-backed test fails at setup. On 2026-10-08, 7.75.0's PR CI
 (12 shards) and a hellmini full suite (25,636 setup errors) both ran while
 engine-service-v0.1.154 was still building. The suite's session-start
 preflight now refuses such a run in seconds, but a refused CI run is still a
-wasted round: check first.
+wasted round: check first. Opening a PR, or pushing to a branch that has one, IS
+a long run for this reason: PR #1597 (7.75.0) was opened before its pinned
+engine-service-v0.1.154 existed and all 12 test shards failed on the PG-bundle
+download.
 
 **A paired release whose engine range carries a data-effecting changeset needs
 its relay attestation in THIS branch's tree.** Run
@@ -522,10 +554,12 @@ git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md \
 git commit -m "chore(release): conexus X.Y.Z"
 
 git push -u origin release/vX.Y.Z
-gh pr create --base main --title "release: conexus X.Y.Z" --body "<release notes>"
+gh pr create --base main --title "release: conexus X.Y.Z" --body-file <body.md>
 ```
 
-A PR body closes an issue only with `Closes #N`, `Fixes #N` or `Resolves #N`, one per line; a plain reference leaves the issue open (PR #254). If the release PR is meant to close issues, write the keyword lines in the `--body`.
+The body follows `docs/contributing.md` § Git Workflow: two or three plain sentences first (what this release changes for a user, and anything a reviewer must check), any `Closes #N` lines, then the full release notes inside `<details><summary>Details</summary> ... </details>`.
+
+A PR body closes an issue only with `Closes #N`, `Fixes #N` or `Resolves #N`, one per line; a plain reference leaves the issue open (PR #254). If the release PR is meant to close issues, write the keyword lines in the opening lines of the body file.
 
 Wait for CI green, then merge:
 
@@ -910,6 +944,35 @@ nx --version                 # must print X.Y.Z
 
 `pyproject.toml` bumps the project version, but the local `nx` shim does not point at a wheel: it resolves `<tools>/current` at spawn time and execs the generation that pointer names, so until this step flips `current` every new spawn still lands in the old generation (and existing holders keep running from theirs afterwards). Caught on v4.9.11: `nx --version` reported 4.9.10 even after PyPI showed 4.9.11.
 
+### 12a. Memory curation report (RDR-238; report only, never blocks)
+
+Once Step 12's restart has every session on the new version, run the curation report
+in one session, with the reinstalled `nx`. With no other session live, run it as soon as
+`nx --version` prints X.Y.Z. If Sam defers the restart, skip the step and say so in the
+ship record: a long foreground run would hold a session at `shell` through the restart
+round.
+
+```bash
+nx memory curate --files --t2 --agents --cold || echo "curation step skipped (exit $?); the release goes on"
+```
+
+It prints the report and stores it in T2 as `<repo>/curation-report-<date>` (90-day
+TTL): memory files that are unindexed, oversized or dangling, T2 rows and reviewer
+memory to look at, and (`--cold`) memory files, T2 namespaces, MCP tools, CLI verbs
+and nested CLAUDE.md files with no write and no use in 30 days. With `--files` and
+`--cold` together it reads every transcript of the window four times (`--files` once
+for read counts, `--cold` three times), so it takes a while: 305 s on the laptop
+on 2026-11-09, over a 30-day window. If it is still running after 30 minutes, stop it
+(the one pid you started), say so in the ship record and finish the release.
+
+This step never blocks the release. The command exits 0 whatever it finds, and a
+section that cannot run prints a "not available" line (`--cold` prints one per kind)
+while the others still run. A last line "report not stored" means the T2 write failed:
+there is nothing to link, so say that in the ship record. A non-zero exit or "No such command" (in the plugin-only lane the local `nx` can
+predate the verb) is reported in the ship record, and the release is still done.
+The report changes nothing: retiring what it lists is a person's decision and rides
+its own change, so link the report from the ship record and leave the list to Sam.
+
 ## Plugin-only fast lane
 
 A patch release that ships plugin-surface content (`conexus/`, `sn/`,
@@ -1048,7 +1111,7 @@ greps, unchanged.
 **6. Publish.** The normal flow, with the same human gates, except at Step 7: the
 branch from item 2 already exists and is built off the tag, so skip Step 7's
 branch-creation and pre-merge lines and run only its push and
-`gh pr create --base main` from that branch. Before Step 9, re-run the
+`gh pr create --base main` from that branch (body shape as in Step 9: short opening, keywords, then `<details>`). Before Step 9, re-run the
 eligibility script on the exact PR head (`git rev-parse HEAD` equals
 `git rev-parse origin/release/vX.Y.N`; a later push re-opens items 4 and 5).
 Then merge (never squash), Sam's "tag and push" (Step 9; its paired-release
@@ -1100,6 +1163,8 @@ script is exempt from idle only), and checks again after the install and before
 each session's exit. Name the mode: after a `--fresh` run a bare restart is
 refused until you pass `--fresh` or `--resume`. `--force` overrides the round.
 No Windows guest leg.
+After the restart, run Step 12a (the curation report); it tolerates a local `nx`
+that predates the verb.
 
 For the first real use of this lane, paste the eligibility output, the battery
 table and the delivery-proof verdict into bead nexus-rbmja.13.
@@ -1110,6 +1175,7 @@ push its tags once their gates are green (engine-release skill Step 4 states the
 
 ## Common Mistakes
 
+- **Holding a release on the curation report (Step 12a).** The report never blocks: a red section, a non-zero exit or a missing verb goes in the ship record and the release is done. Acting on what it lists is Sam's decision, not a release step.
 - **Freehanding a version surface or a tag from memory of AGENTS.md instead of invoking this skill.** It skips the pre-push and post-publish verification that catches a failed publish (v4.32.13: the tag's workflow failed, PyPI was skipped, and the release was declared done anyway). Invoke `release` (or `engine-release`) before touching either.
 - **Bumping only `pyproject.toml` and missing the four plugin manifests.** CI parity check catches this late. Run the Step 8 pre-push check.
 - **Skipping the integration suite.** Unit-only is what CI runs; integration is your last gate against keyed-API regressions before tag-push.

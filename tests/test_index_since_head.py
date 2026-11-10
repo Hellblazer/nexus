@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -241,33 +240,52 @@ def test_since_head_ignored_with_force(git_repo, monkeypatch):
 # ── the mass-delete hazard pin ──────────────────────────────────────────────
 
 
-def test_catalog_hook_skip_housekeeping_flag():
-    """The load-bearing safety pin, BEHAVIORAL (nexus-4kh95, upgraded from a
-    source-text grep): skip_housekeeping=True must NEVER reach
-    _run_housekeeping — a miss-count sweep against a delta-filtered walk
-    marks every unvisited doc as gone (mass delete after two runs). The
-    gate lives in the extracted _maybe_run_housekeeping seam, exercised
-    here by CALLING it both ways."""
+def test_catalog_hook_walk_reaches_the_commit_unchanged(tmp_path, monkeypatch):
+    """The load-bearing safety pin, BEHAVIORAL, rewritten for RDR-193 Step 6 (nexus-u5m5g.7): a delta walk must
+    never reach the engine's commit as a complete one, because a miss-count sweep against a delta-filtered walk marks
+    every unvisited doc as gone (mass delete after two runs, nexus-fltb4). The gate was the ``skip_housekeeping`` flag
+    of the deleted ``_maybe_run_housekeeping`` seam (this test used to call it both ways, nexus-4kh95); it is now the
+    ``walk`` the hook stages the run with. The hook is driven here with a recording writer, so what is pinned is the
+    ``walk`` of the stage request, ``partial`` for a delta and ``complete`` for the full walk, and that ``deleted``
+    rows and ``keep`` rows ride the same run.
+
+    Covered against the real engine by ``tests/test_catalog_hook_reconcile_contract.py``
+    (``test_a_partial_walk_touches_no_row_it_did_not_visit``, ``test_a_complete_walk_counts_a_missing_file_and_a_kept_one_is_not_counted``);
+    that ``index_repository`` passes ``walk="partial"`` exactly for a delta is
+    ``tests/test_pdf_stack_index_repo_hold.py::test_a_delta_run_stages_a_partial_walk_with_its_deletions_and_a_full_run_a_complete_one``."""
     from nexus import indexer as idx
+    import nexus.catalog.factory as factory
 
-    called: list[bool] = []
-    with patch.object(idx, "_run_housekeeping",
-                      side_effect=lambda *a, **k: called.append(True)):
-        idx._maybe_run_housekeeping(
-            object(), object(), [], Path("/tmp"),
-            writer=None, skip_housekeeping=True,
+    staged: list[dict] = []
+
+    class _Reader:
+        def owner_for_repo(self, repo_hash):
+            return "1.7"
+
+        def close(self):
+            pass
+
+    class _Writer:
+        def reconcile_stage(self, owner, run_id, walk, expected_rows, rows):
+            staged.append({"owner": owner, "walk": walk, "expected": expected_rows, "rows": rows})
+            return len(rows)
+
+        def reconcile_commit(self, owner, run_id):
+            return {"rows": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(factory, "make_catalog_reader", lambda **kw: _Reader())
+    monkeypatch.setattr(factory, "make_catalog_writer", lambda **kw: _Writer())
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\n")
+    pdf = tmp_path / "held.pdf"
+    for walk in ("partial", "complete"):
+        idx._catalog_hook(
+            repo=tmp_path, repo_name="r", repo_hash="abcd1234", head_hash="h",
+            indexed_files=[(f, "code", "code__r")], walk=walk, keep_paths=[pdf], deleted_relpaths=["gone.py"],
         )
-        assert called == [], "partial-walk housekeeping must be gated OFF"
-
-        idx._maybe_run_housekeeping(
-            object(), object(), [], Path("/tmp"),
-            writer=None, skip_housekeeping=False,
-        )
-        assert called == [True], "full-walk housekeeping must still run"
-
-    # The hook must actually route through the tested seam — otherwise the
-    # behavioral test above pins a helper nobody calls.
-    import inspect
-
-    hook_src = inspect.getsource(idx._catalog_hook)
-    assert "_maybe_run_housekeeping(" in hook_src
+    assert [(c["walk"], c["expected"]) for c in staged] == [("partial", 3), ("complete", 3)]
+    assert [r["kind"] for r in staged[0]["rows"]] == ["present", "keep", "deleted"]
+    assert [r["file_path"] for r in staged[0]["rows"]] == ["a.py", "held.pdf", "gone.py"]

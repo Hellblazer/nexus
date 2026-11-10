@@ -6,8 +6,11 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.Vectors057RollbackIntegrationTest;
+import dev.nexus.service.Vectors058RollbackIntegrationTest;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChunksIsolationCheck;
+import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TenantScope;
 import liquibase.Contexts;
@@ -216,6 +219,129 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
             .getValues(0, byte[].class).stream().map(b -> HexFormat.of().formatHex(b)).toList());
         assertThat(fromB).as("the probe stamped B, naming both collections: B's chunks only")
             .containsExactlyInAnyOrderElementsOf(idsB);
+    }
+
+    /**
+     * nexus-seo4k (vectors-057), the invoker posture: migrated as nexus_svc the probes are SECURITY INVOKER, and
+     * vectors-057 keeps that and moves them from LANGUAGE sql to plpgsql so one function can hold the FTS-only
+     * statement beside today's. With {@code nexus.lexical_trgm} unset a typo'd token passes the probe by its
+     * trigram half; with it {@code off} the same call returns nothing (the FTS half misses the typo), and the exact
+     * token still passes under both.
+     */
+    @Test
+    void migratedAsTheServiceRole_theInvokerProbesAreNowPlpgsql_andHonourTheTrigramSwitch() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var probes = PgCatalogProbes.functionDefinitionsIn(DSL.using(su, SQLDialect.POSTGRES), "nexus")
+                .values().stream().filter(f -> f.identity().startsWith("text_gate_probe_")).toList();
+            assertThat(probes).as("the three probes, one signature each").hasSize(3);
+            for (var f : probes) {
+                assertThat(f.securityDefiner()).as("%s stays SECURITY INVOKER", f.identity()).isFalse();
+                assertThat(f.language()).as("%s is plpgsql since vectors-057", f.identity()).isEqualTo("plpgsql");
+                assertThat(f.owner()).as("%s keeps its owner", f.identity()).isEqualTo(SVC);
+                assertThat(f.acl()).as("%s keeps nexus_svc's EXECUTE", f.identity()).contains("nexus_svc=X/");
+            }
+        }
+        String typoToken = "qzvkwz";   // one letter from TOKEN: a trigram hit (about 0.7), an FTS miss
+        var typoProbe = TEXT_GATE_PROBE_384.call(typoToken, new String[] {COLL_A}, null, null, 10_000, MODEL, TENANT_A);
+        var exactProbe = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A}, null, null, 10_000, MODEL, TENANT_A);
+        List<String> typoUnset = tenantScope.withTenant(TENANT_A, ctx -> ctx.selectFrom(typoProbe).fetch()
+            .getValues(0, byte[].class).stream().map(b -> HexFormat.of().formatHex(b)).toList());
+        assertThat(typoUnset).as("switch unset: the trigram half passes the typo'd token").containsExactlyInAnyOrderElementsOf(idsA);
+        List<String> typoOff = tenantScope.withTenant(TENANT_A, ctx -> {
+            PgSession.setLocal(ctx, "nexus.lexical_trgm", "off");
+            return ctx.selectFrom(typoProbe).fetch().getValues(0, byte[].class).stream()
+                .map(b -> HexFormat.of().formatHex(b)).toList();
+        });
+        assertThat(typoOff).as("switch off: the FTS half alone, the typo'd token passes nothing").isEmpty();
+        List<String> exactOff = tenantScope.withTenant(TENANT_A, ctx -> {
+            PgSession.setLocal(ctx, "nexus.lexical_trgm", "off");
+            return ctx.selectFrom(exactProbe).fetch().getValues(0, byte[].class).stream()
+                .map(b -> HexFormat.of().formatHex(b)).toList();
+        });
+        assertThat(exactOff).as("switch off: the exact token still passes by its FTS half, A's rows only")
+            .containsExactlyInAnyOrderElementsOf(idsA);
+    }
+
+    /**
+     * nexus-seo4k (vectors-057), the invoker posture's ROLLBACK: migrated as nexus_svc itself vectors-031-2 left the
+     * probes SECURITY INVOKER and LANGUAGE sql, and vectors-057 moved them to plpgsql. Rolling back vectors-057-1
+     * alone must put the LANGUAGE sql invoker bodies back, with no SET clause, and leave every other function in
+     * schema nexus as a database that never saw vectors-057 has it. The comparison lives in
+     * {@link Vectors057RollbackIntegrationTest} beside the definer posture; this class hosts the invoker call
+     * because it is the one class that creates nexus_svc as the owner, on containers of their own (nexus_svc owning
+     * the schema is cluster state the shared cluster must not hold, and {@code TestRoleUniquenessScanTest} allows a
+     * second creator of one role only if each declares it exclusive on the shared cluster, which nexus_svc cannot
+     * be). Two more containers: the rolled-back database and the baseline walked to vectors-057-1's predecessor.
+     */
+    @Test
+    void vectors057Rollback_restoresTheInvokerProbes_asVectors031Left_languageSqlAgain() throws Exception {
+        PostgreSQLContainer<?> rolledPg = null;
+        PostgreSQLContainer<?> baselinePg = null;
+        try {
+            rolledPg = PgContainerHelper.startDedicated();
+            baselinePg = PgContainerHelper.startDedicated();
+            try (Connection su = rolledPg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, SVC, PgContainerHelper.SVC_PASSWORD);
+            }
+            try (Connection su = baselinePg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, SVC, PgContainerHelper.SVC_PASSWORD);
+            }
+            Vectors057RollbackIntegrationTest.assertRollbackRestoresVectors031Probes(rolledPg, baselinePg,
+                (c, name) -> {
+                    var cfg = new HikariConfig();
+                    cfg.setJdbcUrl(c.getJdbcUrl());
+                    cfg.setUsername(SVC);
+                    cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
+                    cfg.setMaximumPoolSize(2);
+                    cfg.setPoolName(name);
+                    return new HikariDataSource(cfg);
+                }, false, SVC);
+        } finally {
+            try {
+                if (baselinePg != null) baselinePg.stop();
+            } finally {
+                if (rolledPg != null) rolledPg.stop();
+            }
+        }
+    }
+
+    /**
+     * nexus-bbtc2 (vectors-058), the invoker posture's ROLLBACK: rolling back vectors-058-1 (and vectors-058-2 after it)
+     * must leave the invoker probes as vectors-057 left them and the ten row gates as before vectors-058, every other
+     * function as a database migrated only to vectors-057 has it. The comparison lives in
+     * {@link Vectors058RollbackIntegrationTest} beside the definer posture; this class hosts the invoker call for the
+     * reason the vectors-057 test above gives.
+     */
+    @Test
+    void vectors058Rollback_restoresVectors057sGate_inTheInvokerPosture() throws Exception {
+        PostgreSQLContainer<?> rolledPg = null;
+        PostgreSQLContainer<?> baselinePg = null;
+        try {
+            rolledPg = PgContainerHelper.startDedicated();
+            baselinePg = PgContainerHelper.startDedicated();
+            try (Connection su = rolledPg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, SVC, PgContainerHelper.SVC_PASSWORD);
+            }
+            try (Connection su = baselinePg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, SVC, PgContainerHelper.SVC_PASSWORD);
+            }
+            Vectors058RollbackIntegrationTest.assertRollbackRestoresVectors057Gate(rolledPg, baselinePg,
+                (c, name) -> {
+                    var cfg = new HikariConfig();
+                    cfg.setJdbcUrl(c.getJdbcUrl());
+                    cfg.setUsername(SVC);
+                    cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
+                    cfg.setMaximumPoolSize(2);
+                    cfg.setPoolName(name);
+                    return new HikariDataSource(cfg);
+                }, false, SVC);
+        } finally {
+            try {
+                if (baselinePg != null) baselinePg.stop();
+            } finally {
+                if (rolledPg != null) rolledPg.stop();
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------------------

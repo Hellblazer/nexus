@@ -48,6 +48,13 @@ def test_init_really_converges_the_ladder_so_the_hint_is_true() -> None:
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
         and n.func.id == "_converge_ladder_best_effort"
     ]
-    assert len(calls) >= 2, (
-        "nx init must call the ladder convergence on its service paths"
-    )
+    # nexus-mjmjl: both service paths reach it through _finish_local_init.
+    assert len(calls) >= 1, "nx init must call the ladder convergence"
+    finishes = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_finish_local_init"
+    ]
+    assert len(finishes) >= 2, "both nx init service paths must finish through _finish_local_init"
+    import inspect
+
+    assert "_converge_ladder_best_effort()" in inspect.getsource(init._finish_local_init)

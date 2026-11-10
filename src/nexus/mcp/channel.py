@@ -133,6 +133,7 @@ import httpx
 import structlog
 
 from nexus.db.limits import MAX_QUERY_RESULTS
+from nexus.mcp.ci_notice import ci_done_sha
 from nexus.db.t2.http_tuple_store import SchemaViolationError
 from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
 from nexus.tuple_sender import (
@@ -1644,6 +1645,9 @@ class ChannelWaiter:
             for key in ("from", "kind"):
                 if row.dims.get(key):
                     meta[key] = row.dims[key]
+            sha = ci_done_sha(subspace, row)
+            if sha:
+                meta["sha"] = sha
             case = _row_case(row)
             _label_meta(meta, row, case)
             content = _board_notification_content(
@@ -1668,6 +1672,10 @@ class ChannelWaiter:
                 # account for each post without a second read
                 "tuple_ids": ",".join(row.id for row in kept),
             }
+            row_shas = [ci_done_sha(subspace, row) for row in kept]
+            if any(row_shas):
+                # aligned with tuple_ids; "-" where no sha could be vouched for
+                meta["shas"] = ",".join(sha or "-" for sha in row_shas)
             if kinds:
                 meta["kinds"] = ",".join(f"{k}={n}" for k, n in sorted(kinds.items()))
             if senders:

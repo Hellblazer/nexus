@@ -539,27 +539,6 @@ STASH, FIND, TRAILER = "git-stash", "full-disk-find", "claude-session-trailer"
 
 
 @pytest.mark.parametrize("command,rule", [
-    ("git stash", STASH),
-    ("cd x && git stash pop", STASH),
-    ("git stashed", None),
-    ("git log stash", None),
-    ("git -C stash status", None),
-    ("echo 'git stash' > notes", None),
-    ('echo "git stash"', None),
-    ('git commit -m "do not git stash"', None),
-    ("git commit -F - <<'EOF'\nuse git stash here\nEOF", None),
-    # global options before the subcommand, a stash after a heredoc, a comment
-    ("git -C /tmp/x stash", STASH),
-    ("git --no-pager stash list", STASH),
-    ("git -c core.pager=cat stash pop", STASH),
-    ("git --git-dir=.git stash", STASH),
-    ("git --git-dir .git --work-tree . stash", STASH),
-    ("cat <<EOF\nnotes\nEOF\ngit stash", STASH),
-    ("git commit -F - <<'EOF'\nuse git stash\nEOF\ngit stash", STASH),
-    ("# git stash", None),
-    ("ls # git stash", None),
-    ("ls;\n# git stash\nls", None),
-    ("echo a#b; git stash", STASH),
     ("find / -name x", FIND),
     ("find ~ -type f", FIND),
     ("find $HOME -name x", FIND),

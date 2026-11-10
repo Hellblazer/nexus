@@ -744,7 +744,7 @@ from __future__ import annotations
 #: text (rerank_sensitive_exclusion_supported). SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION
 #: is 0.1.182, so the pin rises with it. The eleven wire-ledger entries this
 #: release ships are all additive.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 184)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 186)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
@@ -837,6 +837,18 @@ NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 167)
 #: leads the pin until the paired client release (nexus-rfvyy.7.15) bumps the pin to the engine tag
 #: (nexus-rfvyy.7.14); set it to that tag when it is cut if the tag is not v0.1.182. ``(0, 0, 0)`` means unset.
 SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 182)
+
+#: The first engine whose ``POST /v1/catalog/doc/resolve_or_register`` accepts ``"sensitive": true`` (engine-service-v0.1.185,
+#: Liquibase ``catalog-048-7``; RDR-193 Step 6, nexus-u5m5g.7). The client sends the key when a sensitive titled
+#: ``nx store put`` or a sensitive curator register mints a row; an older engine (v0.1.184 and below) answers that
+#: request 400 (``'sensitive' is not supported by resolve_or_register yet``), so the client raises
+#: ``CatalogReconcileError(reason="engine_too_old")`` naming this floor
+#: (:meth:`nexus.catalog.reconcile_client.ReconcileClient.resolve_or_register`). Only the sensitive call needs it. A release
+#: must not pin an older engine (``scripts/check_engine_release_floor.py`` fails ``--ledger-only`` and the tag-time forms
+#: while :data:`REQUIRED_ENGINE_VERSION` is below it), and every script that stamps the gate jar stamps the max of the
+#: pin and this floor, so the gate jar is never refused. On develop it leads the pin until the release commit moves
+#: the pin to v0.1.185. ``(0, 0, 0)`` means unset.
+RESOLVE_SENSITIVE_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 185)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

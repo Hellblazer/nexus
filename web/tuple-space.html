@@ -163,11 +163,11 @@ figure.fig .arrow{fill:currentColor;stroke:none}
     <li><a href="#limits">Limits and health</a></li>
     <li><a href="#reference">Reference</a></li>
   </ol>
-  <div class="meta"><a href="./">← Install guide</a><br><a href="getting-started.html">← Getting started</a><br><a href="rdr.html">← Working with RDRs</a><br><a href="research.html">← Research with Nexus</a><br><a href="research-in-nexus.html">← Research in Nexus</a><br><a href="coordination.html">Coordination →</a><br><a href="how-agents-ship.html">How agents ship →</a></div>
+  <div class="meta"><a href="./">← Install guide</a><br><a href="getting-started.html">← Getting started</a><br><a href="rdr.html">← Working with RDRs</a><br><a href="research.html">← Research with Nexus</a><br><a href="research-in-nexus.html">← Research in Nexus</a><br><a href="journey-from-7-6-1.html">← From 7.6.1 to 8.0.0</a><br><a href="coordination.html">Coordination →</a><br><a href="how-agents-ship.html">How agents ship →</a></div>
 </nav>
 
 <main>
-<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · coordination</span><a href="research-in-nexus.html">← Research in Nexus</a></div>
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · coordination</span><a href="research-in-nexus.html">← Research in Nexus</a><a href="journey-from-7-6-1.html">← From 7.6.1 to 8.0.0</a></div>
 <h1>The Nexus Tuple Space</h1>
 <p class="lede">The tuple space is a shared set of small records in the engine's Postgres database. Sessions, agents, hooks, and CI leave records there for each other. Any participant can add a record, read it, or take it. A take is exclusive: when two participants reach for the same record, one gets it. A reader can also wait for a record that has not arrived yet. A task queue, a lock, a board, and a mailbox are the same operations on different record shapes.</p>
 <p class="note">The reference, with the exact parameters of every operation, is <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md">docs/tuple-space.md</a>. The <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space-walkthroughs.md">walkthroughs</a> draw each use as a sequence. <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a> records the design, and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/linda-in-nexus.md">Linda in Nexus</a> explains what was borrowed, what was left out, and why.</p>

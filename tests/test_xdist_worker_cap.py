@@ -261,20 +261,20 @@ class TestMemoryCap:
 
     @pytest.mark.parametrize(
         "cls,grant_gib,workers",
-        [("lab-s", 4, 1), ("lab-m", 16, 5), ("lab-6c18g", 18, 5), ("lab-l", 48, 15), ("lab-xl", 96, 30)],
+        [("lab-s", 4, 1), ("lab-m", 16, 4), ("lab-6c18g", 18, 4), ("lab-l", 48, 12), ("lab-xl", 96, 24)],
     )
     def test_cap_per_lab_class(self, cls: str, grant_gib: int, workers: int) -> None:
         from tests._xdist_cap import cap_from_memory
 
         assert cap_from_memory(grant_bytes=grant_gib * self.GIB) == workers
 
-    def test_lab_l_runs_fifteen_workers_and_lab_m_five(self) -> None:
+    def test_lab_l_runs_twelve_workers_and_lab_m_four(self) -> None:
         from tests._xdist_cap import cap_from_memory
 
-        assert clamp_numprocesses(requested=16, cap=cap_from_memory(grant_bytes=48 * self.GIB))[0] == 15
-        assert clamp_numprocesses(requested=8, cap=cap_from_memory(grant_bytes=16 * self.GIB))[0] == 5
+        assert clamp_numprocesses(requested=16, cap=cap_from_memory(grant_bytes=48 * self.GIB))[0] == 12
+        assert clamp_numprocesses(requested=8, cap=cap_from_memory(grant_bytes=16 * self.GIB))[0] == 4
 
-    @pytest.mark.parametrize(("cls", "grant_gib", "workers"), [("lab-mac-s", 4, 1), ("lab-mac-m", 10, 3)])
+    @pytest.mark.parametrize(("cls", "grant_gib", "workers"), [("lab-mac-s", 4, 1), ("lab-mac-m", 10, 2)])
     def test_cap_per_mac_lab_class(self, cls: str, grant_gib: int, workers: int) -> None:
         from tests._xdist_cap import cap_from_memory
 
@@ -323,7 +323,7 @@ class TestMemoryCap:
 
         monkeypatch.setenv("LAB_MEM_MB", str(16 * 1024))
         monkeypatch.setattr(sub, "cgroup_memory_limit", lambda: None)
-        assert mod.effective_memory_cap() == 5
+        assert mod.effective_memory_cap() == 4
         monkeypatch.setenv(mod.NO_CAP_ENV, "1")
         assert mod.effective_memory_cap() is None
 
@@ -465,10 +465,10 @@ class TestClampsReallyReduceWorkers:
     xdist run can. Each asserts the worker count xdist actually created."""
 
     def test_the_memory_cap_creates_fewer_workers(self, tmp_path) -> None:
-        # 6600 MiB grant / 3264 MiB per worker = 2 workers (a tighter cgroup can
+        # 9000 MiB grant / 4096 MiB per worker = 2 workers (a tighter cgroup can
         # only lower it).
         created, total, out = _run_real_xdist(
-            tmp_path, setup="", env_extra={"LAB_MEM_MB": "6600"}, n=4,
+            tmp_path, setup="", env_extra={"LAB_MEM_MB": "9000"}, n=4,
         )
         assert "clamped 4 ->" in out
         assert 1 <= created <= 2 and created == total

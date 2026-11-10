@@ -60,8 +60,9 @@ ledger read, for release-branch PR CI.
 **Note-URI floor** (RDR-231, nexus-bivz3.15/.16): ``--ledger-only`` and the bare/auto-paired forms
 also fail when ``REQUIRED_ENGINE_VERSION`` is below ``NOTE_URI_MIN_ENGINE_VERSION``
 (:func:`check_note_uri_floor_vs_pin`), and when it is below ``SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION``
-(RDR-243 Phase 2, :func:`check_sensitivity_exclude_floor_vs_pin`). Develop pushes run neither mode, so the floor leading the pin
-there is not flagged.
+(RDR-243 Phase 2, :func:`check_sensitivity_exclude_floor_vs_pin`), and when it is below
+``RESOLVE_SENSITIVE_MIN_ENGINE_VERSION`` (RDR-193 Step 6, :func:`check_resolve_sensitive_floor_vs_pin`). Develop pushes run
+neither mode, so the floor leading the pin there is not flagged.
 
 **Client-precondition mode** (``--client-precondition [TAG]``, nexus-9ssih):
 the mirror image, gating an engine DEPLOY rather than a PyPI release -- are
@@ -529,10 +530,28 @@ def check_sensitivity_exclude_floor_vs_pin() -> int:
     )
 
 
+def check_resolve_sensitive_floor_vs_pin() -> int:
+    """A release must pin an engine whose ``resolve_or_register`` accepts ``sensitive`` (RDR-193 Step 6, nexus-u5m5g.7).
+
+    The client sends ``"sensitive": true`` on a sensitive titled store put and a sensitive curator register;
+    engine v0.1.184 and older answer that request 400, so every such write would fail. Same shape and the same callers
+    as :func:`check_note_uri_floor_vs_pin`: the floor leads the pin on develop and only the release-gated modes compare
+    them. Returns ``0`` (unset floor, or pin >= floor) or ``1``.
+    """
+    return _floor_vs_pin(
+        "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION", _engine_version.RESOLVE_SENSITIVE_MIN_ENGINE_VERSION,
+        "resolve-sensitive", "RESOLVE SENSITIVE",
+        "This client sends sensitive=true on resolve_or_register, which an engine below that version refuses "
+        "with a 400, so a release pinning v{pin} would converge every local install to an engine on which every "
+        "sensitive titled put and curator register fails.",
+    )
+
+
 def check_feature_floors_vs_pin() -> int:
-    """Every feature floor a release pin must meet (note-URI, sensitivity-exclude). Runs them all, so one
-    run names every failing floor; returns ``1`` when any fails."""
-    rcs = [check_note_uri_floor_vs_pin(), check_sensitivity_exclude_floor_vs_pin()]
+    """Every feature floor a release pin must meet (note-URI, sensitivity-exclude, resolve-sensitive). Runs them
+    all, so one run names every failing floor; returns ``1`` when any fails."""
+    rcs = [check_note_uri_floor_vs_pin(), check_sensitivity_exclude_floor_vs_pin(),
+           check_resolve_sensitive_floor_vs_pin()]
     return 1 if any(rcs) else 0
 
 

@@ -134,8 +134,8 @@ _CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
 #: The child's stderr log is rotated to ``<name>.1`` when a new child starts
 #: and finds it at this size, so the pair holds at most twice this plus one
-#: run's output. Stderr under ``--auto`` carries warnings and tracebacks, not
-#: progress, so a run writes little.
+#: run's output. Stderr under ``--auto`` carries warnings, tracebacks and the
+#: step lines (nexus-mjmjl: a few dozen short lines a run), so a run writes little.
 _CHILD_LOG_MAX_BYTES = 1024 * 1024
 
 

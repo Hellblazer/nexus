@@ -161,22 +161,48 @@ def _record(monkeypatch: pytest.MonkeyPatch, log: list[tuple[str, int]]):
     monkeypatch.setattr(factory, "make_catalog_writer", lambda *a, **k: _RecordingWriter(real_make(*a, **k), log))
 
 
+def _capture_actions(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """The action each row of every reconcile commit got (RDR-193 Step 6: the commit is the one writer of the hook's
+    documents, so what it did to each row is the observable that ``register_many`` / ``update_many`` request counts were)."""
+    from nexus.catalog import reconcile_run  # noqa: PLC0415 — deliberate function-scoped import
+
+    runs: list[list[str]] = []
+    real = reconcile_run.stage_and_commit
+
+    def capture(*a, **kw):  # noqa: ANN002, ANN003
+        out = real(*a, **kw)
+        runs.append([r["action"] for r in out["rows"]])
+        return out
+
+    monkeypatch.setattr(reconcile_run, "stage_and_commit", capture)
+    return runs
+
+
 def test_the_stamp_costs_no_request_of_its_own_and_a_warm_run_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Rewritten for RDR-193 Step 6 (nexus-u5m5g.7): this pinned one ``register_many`` page carrying every document and
+    # its meta, and no ``update`` behind it. Now one commit creates every document with its stamp, no single write
+    # rides beside it, and a warm run's commit leaves every row ``unchanged``. The row-level parity of the stamp rules
+    # (tags and category fill-only, source_format re-stamped) is ``tests/integration/test_rdr193_reconcile_parity.py``.
     files = _write_repo(tmp_path)
     cold: list[tuple[str, int]] = []
     with monkeypatch.context() as m:
         _record(m, cold)
+        runs = _capture_actions(m)
         _hook(tmp_path, files)
-    # one register_many page carries every document and its meta: no update rides behind it
-    assert cold == [("register_many", len(files))], cold
+    assert cold == [], f"no single write beside the commit: {cold}"
+    assert runs == [["created"] * len(files)], runs
+    for rel, (tags, category, fmt) in EXPECTED.items():
+        meta = _meta(ActiveCatalog(), rel)
+        assert (meta["tags"], meta["category"], meta["source_format"]) == (tags, category, fmt), "the stamp rode the commit"
 
     warm: list[tuple[str, int]] = []
     with monkeypatch.context() as m:
         _record(m, warm)
+        runs = _capture_actions(m)
         _hook(tmp_path, files)
-    assert warm == [], "a stamped, unchanged document is not rewritten on a warm run"
+    assert warm == [] and runs == [["unchanged"] * len(files)], "a stamped, unchanged document is not rewritten on a warm run"
 
 
 def test_a_registration_that_predates_the_stamp_is_filled_once_in_one_batch(
@@ -194,8 +220,10 @@ def test_a_registration_that_predates_the_stamp_is_filled_once_in_one_batch(
     filled: list[tuple[str, int]] = []
     with monkeypatch.context() as m:
         _record(m, filled)
+        runs = _capture_actions(m)
         _hook(tmp_path, files)  # content and HEAD unchanged: only the missing stamp can move the document
-    assert filled == [("update_many", len(files))], "every document is filled by ONE batched update, none by a per-file one"
+    # Rewritten for Step 6: was ``[("update_many", len(files))]``. Now every document is filled by the ONE commit.
+    assert filled == [] and runs == [["updated"] * len(files)], (filled, runs)
     for rel, (tags, category, fmt) in EXPECTED.items():
         meta = _meta(cat, rel)
         assert (meta["tags"], meta["category"], meta["source_format"]) == (tags, category, fmt)
@@ -203,8 +231,9 @@ def test_a_registration_that_predates_the_stamp_is_filled_once_in_one_batch(
     again: list[tuple[str, int]] = []
     with monkeypatch.context() as m:
         _record(m, again)
+        runs = _capture_actions(m)
         _hook(tmp_path, files)
-    assert again == []
+    assert again == [] and runs == [["unchanged"] * len(files)]
 
 
 # ── the single-file entry points ──────────────────────────────────────────────────────────────

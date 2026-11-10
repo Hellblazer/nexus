@@ -90,7 +90,10 @@ def session_start_cmd() -> None:
         src = payload.get("source")
         source = src if isinstance(src, str) and src else None
     output = hooks.session_start(claude_session_id=claude_session_id, source=source)
-    click.echo(output)
+    # The same call as nexus.hooks.session_start_verb, so the two entries stay identical (nexus-qo7ie.16).
+    from nexus.hooks.session_start_verb import with_curation  # noqa: PLC0415 -- only this command needs it
+
+    click.echo(with_curation(output, payload))
 
 
 @hook_group.command("mailbox-arm")
@@ -381,3 +384,60 @@ def routing_stats_cmd(
     if active is None:
         click.echo("Note: no hooks.json found — registration cross-check skipped.")
     click.echo(f"Source: {source_label}")
+
+
+@hook_group.command("failures")
+@click.option("--json", "as_json", is_flag=True, default=False, help="One JSON object per entry.")
+def failures_cmd(as_json: bool) -> None:
+    """List the saved inputs of swallowed hook crashes, newest first (nexus-3ceda.3)."""
+    from nexus._hook_runtime import failure_ring  # noqa: PLC0415 -- operator verb, not a hook path
+
+    found = list(reversed(failure_ring.entries()))
+    if not found:
+        click.echo(f"No saved hook failures under {failure_ring.ring_dir()}.")
+        return
+    for path in found:
+        try:
+            entry = failure_ring.load(path)
+        except (OSError, ValueError) as exc:
+            click.echo(f"{path}  unreadable: {exc}", err=True)
+            continue
+        if as_json:
+            click.echo(json.dumps({"path": str(path), "hook": entry["hook"], "module": entry.get("module"),
+                                   "recorded_at": entry.get("recorded_at"),
+                                   "error_type": entry.get("error_type"), "error": entry.get("error")}))
+        else:
+            click.echo(f"{entry.get('recorded_at')}  {entry['hook']}  {entry.get('error_type')}: "
+                       f"{entry.get('error')}\n    {path}")
+
+
+@hook_group.command("replay")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=str))
+@click.option("--recorded-env", is_flag=True, default=False,
+              help="Also apply the entry's recorded environment flags and working directory. "
+                   "Only for an entry you recorded yourself.")
+def replay_cmd(path: str, recorded_env: bool) -> None:
+    """Run a saved hook failure's verb on its saved input, outside the never-fail
+    boundary, so the crash raises with its traceback. The verb runs for real,
+    side effects included."""
+    from pathlib import Path  # noqa: PLC0415
+
+    from nexus._hook_runtime import failure_ring  # noqa: PLC0415 -- operator verb, not a hook path
+
+    try:
+        entry = failure_ring.load(Path(path))
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Replaying {entry['hook']} ({entry.get('module')}) recorded {entry.get('recorded_at')}"
+               + (", with its recorded environment flags and working directory." if recorded_env else "."),
+               err=True)
+    if entry.get("truncated"):
+        click.echo("Warning: this entry was cut to fit the ring; a crash that depended on the cut part "
+                   "may not come back.", err=True)
+    try:
+        result = failure_ring.replay(Path(path), recorded_env=recorded_env)
+    except failure_ring.ReplayRefused as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("No crash this time; the verb returned:", err=True)
+    if result.stdout is not None:
+        click.echo(result.stdout)

@@ -68,7 +68,8 @@ def test_a_second_acquire_finds_the_lock_held_and_a_release_frees_it(config_dir:
     first = acquire_auto_lock()
     try:
         assert first.held_by_other is False and first.fd is not None
-        assert (config_dir / lock_mod.LOCK_NAME).read_text(encoding="utf-8") == f"{os.getpid()} pytest"  # a test's take is marked (nexus-iox43)
+        # read past the locked byte: Windows refuses a read of it from any other handle
+        assert lock_mod.read_holder_text(config_dir / lock_mod.LOCK_NAME) == f"{os.getpid()} pytest"  # a test's take is marked (nexus-iox43)
         second = acquire_auto_lock()
         assert second.held_by_other is True and second.fd is None
         assert second.holder_pid() == os.getpid()
@@ -85,20 +86,25 @@ def test_a_killed_holder_does_not_wedge_the_lock(config_dir: Path) -> None:
     """Stale-pid tolerance: the pid in the file is for a human. The OS drops the lock with the process."""
     holder = subprocess.Popen(  # noqa: S603 — argv list, the test's own interpreter
         [sys.executable, "-c", textwrap.dedent(f"""
-            import sys, time
+            import os, sys, time
             from pathlib import Path
             from nexus.util.upgrade_auto_lock import acquire_auto_lock
             lock = acquire_auto_lock(Path({str(config_dir)!r}))
             assert not lock.held_by_other
-            print("held", flush=True)
+            print("held", os.getpid(), flush=True)
             time.sleep(60)
         """)],
         stdout=subprocess.PIPE, text=True,
     )
     try:
-        assert holder.stdout.readline().strip() == "held"
+        word, pid = holder.stdout.readline().split()
+        assert word == "held"
         assert auto_lock_held() is True, "a live holder in ANOTHER process blocks"
-        assert (config_dir / lock_mod.LOCK_NAME).read_text(encoding="utf-8") == f"{holder.pid} pytest"  # inherits PYTEST_CURRENT_TEST
+        # The holder's own pid, not Popen's: on Windows a venv's python.exe is a launcher that
+        # runs the interpreter as its child, so Popen.pid is the launcher's.
+        assert lock_mod.read_holder_text(config_dir / lock_mod.LOCK_NAME) == f"{pid} pytest"  # inherits PYTEST_CURRENT_TEST
+        # Across processes, which is the read Windows refused while the text sat on byte 0.
+        assert lock_mod.AutoLock(fd=None, held_by_other=True, path=config_dir / lock_mod.LOCK_NAME).holder_pid() == int(pid)
     finally:
         holder.kill()
         holder.wait(timeout=10)
@@ -245,7 +251,10 @@ def hook(monkeypatch, config_dir: Path) -> _Hook:
 
     def _record(*a, **k):
         seen.spawned.append(a)
-        raise OSError("recorded, not spawned")
+        # ValueError, not OSError: on Windows the hook retries a spawn that raises OSError
+        # without the job-breakaway flag, so one spawn would record twice. The hook's caller
+        # catches ValueError the same way (upgrade_auto.run), so the path is the same.
+        raise ValueError("recorded, not spawned")
 
     setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", _record)
     monkeypatch.setattr(upgrade_auto, "_emit", lambda level, event, **f: seen.events.append(event))
@@ -604,13 +613,16 @@ def test_the_callout_asks_every_rung_detect_as_an_unattended_run_so_a_managed_ca
     assert is_unattended() is False, "and the signal is gone after the callout"
 
 
-def test_the_callout_on_a_local_engine_still_detects(monkeypatch) -> None:
-    """Positive control: local, the same rung reads (cheap there) and reports its state."""
+def test_the_callout_on_a_local_engine_does_not_scan_either(monkeypatch) -> None:
+    """nexus-mjmjl: the first command after a version change asks a bounded question on a local engine too (a large
+    local store spent minutes in a rung's scan there); with no completion record the rung reads nothing."""
     _CountingReader.reads = []
-    rung = NoteTagsArrayRung(reader_factory=_CountingReader, writer_factory=lambda: None, managed_fn=lambda: False)
+    rung = NoteTagsArrayRung(
+        reader_factory=_CountingReader, writer_factory=lambda: None, managed_fn=lambda: False, record_fn=lambda: None,
+    )
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
     upgrade_finish.pending_data_rung_callout()
-    assert _CountingReader.reads == ["collections"]
+    assert _CountingReader.reads == []
 
 
 # ── B1: the hook's probe ─────────────────────────────────────────────────────
@@ -664,3 +676,61 @@ def test_the_plain_wait_outlasts_the_auto_ceiling_with_room_for_what_the_ceiling
     from nexus.upgrade_ladder.deadline import DEFAULT_AUTO_DEADLINE_S
 
     assert lock_mod.PLAIN_WAIT_S >= DEFAULT_AUTO_DEADLINE_S + 2 * 60
+
+
+
+def test_the_text_sits_behind_the_locked_byte(config_dir: Path) -> None:
+    """Byte 0 is the byte msvcrt locks; the pid starts at byte 1, so it reads on Windows too."""
+    acquire_auto_lock().release()  # read after the release: Windows refuses byte 0 while held
+    raw = (config_dir / lock_mod.LOCK_NAME).read_bytes()
+    assert raw[:1] == b" " and raw[1:].split()[0] == str(os.getpid()).encode()
+
+
+def test_a_held_lock_on_windows_reads_past_the_locked_byte(config_dir: Path, monkeypatch) -> None:
+    """A read of byte 0 fails on Windows while the lock is held; the text is read from byte 1."""
+    path = config_dir / lock_mod.LOCK_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b" 48213")
+    real_open = open
+
+    class _LockedAtZero:
+        def __init__(self, fh):
+            self._fh, self._pos = fh, 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._fh.close()
+
+        def seek(self, offset):
+            self._pos = offset
+            self._fh.seek(offset)
+
+        def read(self):
+            if self._pos == 0:
+                raise PermissionError(13, "Permission denied")
+            return self._fh.read()
+
+    monkeypatch.setattr(lock_mod, "open", lambda p, mode: _LockedAtZero(real_open(p, mode)), raising=False)
+    assert lock_mod.read_holder_text(path) == "48213"
+
+
+
+def test_a_windows_spawn_the_job_refuses_retries_once_without_breakaway(monkeypatch) -> None:
+    """A job that forbids breakaway refuses CREATE_BREAKAWAY_FROM_JOB; the hook starts the child
+    without it, once (review r1 of the Windows lock fix: the retry had no test)."""
+    calls: list[int] = []
+    child = object()
+
+    def fake_popen(argv, *, creationflags=0, **_kw):
+        calls.append(creationflags)
+        if creationflags & upgrade_auto._CREATE_BREAKAWAY_FROM_JOB:
+            raise OSError("breakaway refused")
+        return child
+
+    monkeypatch.setattr(upgrade_auto, "_IS_WINDOWS", True)
+    setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", fake_popen)
+    assert upgrade_auto._spawn_detached(["nx", "upgrade", "--auto"]) is child
+    base = upgrade_auto._CREATE_NO_WINDOW | upgrade_auto._CREATE_NEW_PROCESS_GROUP
+    assert calls == [base | upgrade_auto._CREATE_BREAKAWAY_FROM_JOB, base], "one refused try, one spawn"

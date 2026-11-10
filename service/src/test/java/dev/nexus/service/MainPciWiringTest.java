@@ -40,7 +40,7 @@ class MainPciWiringTest {
         int sweepStart = src.indexOf("pciSweep.start();");
         int hook = shutdownSteps(src);
         int listenerStop = src.indexOf("service.stop();", hook);
-        // nexus-43ulx.17: the pool's reaper and the builder's run together inside terminateAtShutdown.
+        // nexus-f3yqd: terminateAtShutdown reaps the pool's backends only.
         int reaper = src.indexOf("BackendReaper.terminateAtShutdown(", hook);
         int sweepStop = src.indexOf("pciSweep.stop();", hook);
         int poolClose = src.indexOf("ds.close();", hook);
@@ -136,8 +136,8 @@ class MainPciWiringTest {
             .doesNotContain("awaitTermination");
         String reconciler = code(Files.readString(
             Path.of("src/main/java/dev/nexus/service/vectors/PciReconciler.java")));
-        assertThat(reconciler).as("an in-flight CREATE INDEX CONCURRENTLY ignores the interrupt; the builder reaper"
-            + " ends it, so the hook must not wait for the pass").doesNotContain("awaitTermination");
+        assertThat(reconciler).as("an in-flight CREATE INDEX CONCURRENTLY ignores the interrupt and is left to"
+            + " finish in Postgres (nexus-f3yqd), so the hook must not wait for the pass").doesNotContain("awaitTermination");
         String leafBloat = code(Files.readString(Path.of("src/main/java/dev/nexus/service/vectors/LeafBloatSweep.java")));
         assertThat(leafBloat).as("the same holds for the leaf bloat read: it may sit on a silent socket")
             .doesNotContain("awaitTermination");
@@ -145,7 +145,7 @@ class MainPciWiringTest {
 
     /**
      * nexus-43ulx.19: the DDL half is built with the admin values and the boot nonce, starts after the service and
-     * after the read half, and stops in the hook right after the listener and BEFORE the builder reaper, so a pass
+     * after the read half, and stops in the hook right after the listener and BEFORE the pool's reaper, so a pass
      * cannot open a new builder connection after the reaper has ended the old one.
      */
     @Test
@@ -168,7 +168,7 @@ class MainPciWiringTest {
         assertThat(stopBinding).as("the hook's stop is the reconciler's own stop()").isPositive().isLessThan(hook);
         assertThat(listenerStop).isGreaterThan(hook);
         assertThat(reconcilerStop).as("stopped right after the listener").isGreaterThan(listenerStop);
-        assertThat(reaper).as("and before the builder reaper").isGreaterThan(reconcilerStop);
+        assertThat(reaper).as("and before the pool's reaper").isGreaterThan(reconcilerStop);
         assertThat(src.indexOf("pciReconciler.start();", reconcilerStart + 1)).as("started once").isNegative();
         assertThat(src.indexOf("stopPciReconciler.run();", reconcilerStop + 1)).as("stopped once").isNegative();
         assertThat(src).as("the placeholder no-op is gone").doesNotContain("stopPciReconciler = () -> { }");
@@ -299,50 +299,41 @@ class MainPciWiringTest {
     }
 
     /**
-     * nexus-43ulx.17 fix round: the shutdown hook's call has to carry the admin values and THIS boot's builder name,
-     * not only appear in the right place. A call with the pool's own values would compile, run, and reach nothing
-     * (the application role cannot signal the admin role's backend); a name from a second nonce would match no
-     * backend. Pinned on the arguments, since {@code main} cannot run in a test.
+     * nexus-f3yqd: the shutdown hook ends the POOL's backends and nothing of the index builder's. The call takes the
+     * pool's values only; Main no longer names the builder's {@code application_name}, so a build in flight finishes in
+     * Postgres and the next engine adopts it. Pinned on the arguments, since {@code main} cannot run in a test.
      */
     @Test
-    void theShutdownReaperIsHandedTheAdminValuesAndThisBootsBuilderName() throws Exception {
+    void theShutdownReaperIsHandedThePoolValuesOnly_andMainNamesNoBuilderBackend() throws Exception {
         String src = code(main());
         int hook = shutdownSteps(src);
 
-        assertThat(src.substring(hook)).as("inside the hook, the one seven-argument call")
+        assertThat(src.substring(hook)).as("inside the hook, the one five-argument call")
             .containsPattern("BackendReaper\\.terminateAtShutdown\\(\\s*dbUrl,\\s*dbUser,\\s*dbPass,\\s*"
-                + "applicationName,\\s*ds\\.getHikariPoolMXBean\\(\\)\\.getActiveConnections\\(\\),\\s*"
-                + "adminConnection,\\s*pciBuilderApplicationName\\)");
+                + "applicationName,\\s*ds\\.getHikariPoolMXBean\\(\\)\\.getActiveConnections\\(\\)\\)");
+        assertThat(src).as("Main holds no builder application name to reap")
+            .doesNotContain("pciBuilderApplicationName").doesNotContain("builderApplicationName");
         assertThat(src).as("the admin values are the ones resolved from NX_DB_ADMIN_* once, at boot")
             .containsPattern("var adminConnection = dev\\.nexus\\.service\\.db\\.AdminConnection\\.resolve\\("
                 + "System::getenv,\\s*dbUrl,\\s*dbUser,\\s*dbPass\\);");
-        assertThat(src).as("the builder's name is the one PciBuilderSession gives backends, from the boot nonce")
-            .containsPattern("pciBuilderApplicationName\\s*=\\s*dev\\.nexus\\.service\\.vectors\\."
-                + "PciBuilderSession\\.builderApplicationName\\(\\s*pciBootNonce\\);");
         assertThat(src).as("and the nonce is the pool name's own last segment, the one the reconciler is built with")
             .containsPattern("pciBootNonce\\s*=\\s*dev\\.nexus\\.service\\.db\\.BackendReaper\\."
                 + "bootNonce\\(applicationName\\);")
             .containsPattern("PciReconciler\\.create\\(ds,\\s*adminConnection,\\s*pciBootNonce,");
         assertThat(src.indexOf("adminConnection =", src.indexOf("adminConnection =") + 1))
             .as("adminConnection is assigned once").isNegative();
-        assertThat(src.indexOf("pciBuilderApplicationName =", src.indexOf("pciBuilderApplicationName =") + 1))
-            .as("and so is the builder name").isNegative();
     }
 
-    /** {@code terminateAtShutdown}'s seven-argument form, the one {@code main} calls, runs under the shared budget. */
+    /** {@code terminateAtShutdown} is the pool's reap alone: it takes no admin values and no builder name. */
     @Test
-    void theSevenArgumentShutdownReapRunsUnderTheSharedBudget() throws Exception {
+    void theShutdownReapTakesNoAdminValuesAndNoBuilderName() throws Exception {
         String reaper = code(Files.readString(Path.of("src/main/java/dev/nexus/service/db/BackendReaper.java")));
-        assertThat(reaper).containsPattern("public static ShutdownReap terminateAtShutdown\\([^)]*\\)\\s*\\{\\s*"
-            + "return terminateAtShutdown\\(poolUrl,\\s*poolUser,\\s*poolPassword,\\s*poolApplicationName,\\s*"
-            + "poolActive,\\s*admin,\\s*builderApplicationName,\\s*SHUTDOWN_BUDGET_MILLIS\\);");
-        assertThat(reaper).as("the budgeted form hands the same budget to the concurrent join")
-            .containsPattern("builderApplicationName\\)\\),\\s*budgetMillis\\);");
-        assertThat(reaper).as("the pool's call and the builder's call are the two it runs together")
-            .containsPattern("terminateOwnBackends\\(poolUrl,\\s*poolUser,\\s*poolPassword,\\s*"
-                + "poolApplicationName,\\s*poolActive\\)")
-            .containsPattern("terminateOwnBackends\\(admin\\.url\\(\\),\\s*admin\\.user\\(\\),\\s*"
-                + "admin\\.password\\(\\),\\s*builderApplicationName\\)");
+        assertThat(reaper).containsPattern("public static int terminateAtShutdown\\(String poolUrl,\\s*String poolUser,\\s*"
+            + "String poolPassword,\\s*String poolApplicationName,\\s*int poolActive\\)\\s*\\{\\s*"
+            + "return terminateOwnBackends\\(poolUrl,\\s*poolUser,\\s*poolPassword,\\s*poolApplicationName,\\s*"
+            + "poolActive\\);");
+        assertThat(reaper).as("nothing in the reaper reaches the builder's backend")
+            .doesNotContain("AdminConnection").doesNotContain("builderApplicationName");
     }
 
     @Test

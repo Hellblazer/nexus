@@ -7,6 +7,7 @@ RDR-076 (nexus-jda).
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 
 import click
 import structlog
@@ -48,6 +49,7 @@ def upgrade(
     a consent channel, making the cost gate actually fire (nexus-k1m2f) traded a
     silent bill for a silent hang on a `click.confirm` no hook can answer.
     """
+    _say_if_the_engine_is_migrating(auto_mode=auto_mode)
     # NO pre-migration daemon quiesce: RDR-128 P2 stopped the T2 daemon here so
     # it released its serving connections before the migration DDL ran. The
     # daemon is retired (nexus-i711w Stage 2 sub-stage B), so there are no
@@ -63,112 +65,34 @@ def upgrade(
     # flight, or the service stop/start cycle in the `finally` below (about
     # 60 s each). An interactive `nx upgrade` has no limit. Built inside the
     # try: `--auto` promises exit 0, so even a failure here is swallowed.
+    # nexus-mjmjl: every step is announced before it runs, heartbeats while
+    # it runs, and reports its duration; the summary lists them all. --auto
+    # is quiet on stdout (its contract) and writes the same lines to the log.
+    from nexus.progress.step_report import StepReporter  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+
+    from nexus.upgrade_ladder.unattended import env_unattended  # noqa: PLC0415 — deferred, keeps the cold start light
+
+    # P0 (nexus-f3yqd): --auto (the SessionStart hook) and the lockstep hook's unattended
+    # run never restart the storage service; only a person's own `nx upgrade` does.
+    restarts = not dry_run and not auto_mode and not env_unattended()
+    # A restart that could not finish is reported at the end and fails an interactive
+    # run (nexus-mjmjl item 14); the precondition stage records its failure here.
+    failures: list[str] = []
+    restart_failure: str | None = None
+    reporter: StepReporter | None = None
     try:
-        deadline = _auto_deadline() if auto_mode else None
-        _run_upgrade(dry_run=dry_run, auto_mode=auto_mode, skip_t3=skip_t3)
-        # RDR-185 P3.1 (nexus-n7u38.23): the two non-data axes converge as
-        # STATELESS preconditions before the ladder walks — re-derived from
-        # on-disk state each invocation (sidecar/lease/metadata), never
-        # recorded. --auto keeps the engine install with the version-
-        # transition path (hook timeout budget); process freshness stays.
-        # (check_version_transition at the ROOT cli group has already run on
-        # this invocation — on a version transition it converged the engine
-        # inline via the same shared mechanism; this stage's engine step
-        # then no-ops. One mechanism, two triggers: see the P3 decision
-        # addendum nexus_rdr/185-p3-engine-trigger-duality-decision.)
-        if not dry_run:
-            _converge_preconditions(auto_mode=auto_mode, skip_t3=skip_t3)
-        # RDR-185 P0.4 (nexus-n7u38.4): `nx upgrade` is the SINGLE trigger for
-        # the upgrade ladder — every pending rung converges here (dry-run
-        # reports read-only from detect()). The registry is empty until native
-        # rungs land (t2-schema P1, substrate-etl P2), so this is silent today.
-        # RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv substrate-migration
-        # bridge is RETIRED here — the walk above IS the cutover. The bridge
-        # existed because `nx upgrade` and the one-time cutover were two
-        # commands with nothing between them: a local-mode user saw
-        # "migrations complete" and no pointer to the real next step. P4.0
-        # registered the substrate rung and P4.0b made provisioning a
-        # precondition, so by the time control reaches this line the pending
-        # cutover has already converged in THIS invocation. Keeping the
-        # pointer would (a) advertise `nx guided-upgrade` — demoted to an
-        # internal primitive by P4.1, invisible in --help — as the everyday
-        # remedy, breaking "one story, one verb", and (b) re-answer a
-        # DATA-rung question ("is a substrate transition pending?") from an
-        # ad-hoc re-sample instead of the ladder, which is precisely the
-        # third mechanism the Gap-4 criterion bans. Genuine decisions the
-        # walk cannot derive (source-gone, billed re-embed) surface from
-        # INSIDE the rung; pending state is reported by `nx doctor`.
-        # nexus-75w5d: `--auto` is UNATTENDED, whatever the deadline says (the root group also sets this
-        # for NX_UPGRADE_UNATTENDED=1, which a plain `nx upgrade` started by a hook carries).
-        from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
-
-        with _standing_consent(assume_yes), unattended_run(auto_mode):
-            _run_ladder(dry_run=dry_run, auto_mode=auto_mode, deadline=deadline)
-
-        # nexus-g7ijj: an install that converged purely via `nx upgrade`
-        # (never re-running `nx init`) never got install.mode stamped —
-        # is_local_mode() fell through to pg_credentials artifact inference
-        # forever. Backfill it here, on the ladder-succeeded path only
-        # (a hard ladder failure raises before this line); --dry-run must
-        # write nothing.
-        if not dry_run:
-            # nexus-g7ijj fix round: no actual import cycle between
-            # nexus.config and nexus.commands.upgrade — deferred to match
-            # this file's convention of keeping imports off the CLI's
-            # cold-start path, and because backfill_install_mode_record()
-            # is genuinely exception-safe (see its docstring): this call
-            # site does not need its own try/except.
-            from nexus.config import backfill_install_mode_record  # noqa: PLC0415 — deferred, keeps config import off the CLI's cold-start path
-            backfill_install_mode_record()
-
-        # RE-WIRED (Hal decision, 2026-07-30): these three post-upgrade
-        # steps lost their caller when Stage 4 deleted _run_upgrade's
-        # local-SQLite leg — collateral, not a decision. Same gating as
-        # before the deletion; all three are substrate-independent and
-        # best-effort.
-        #
-        # nexus-b03o: post-upgrade advisory — pre-4.32 local-mode installs
-        # wrote 384d MiniLM vectors into collections named for voyage-*
-        # (1024d); mislabeled collections persist until the operator runs
-        # `nx collection rename`. Advisory only — never fails the upgrade.
-        if not auto_mode and not skip_t3:
-            _emit_name_vs_embed_dim_advisory()
-
-        # RDR-137 Phase 5.2 (nexus-tts0d.19): one-shot migration of
-        # ~/.config/nexus/repos.json into the catalog. Idempotent: no-op
-        # when the file is already absent. Safety: refuses to delete on
-        # any catalog-vs-registry disagreement (per OQ-7 lock).
-        if not auto_mode:
-            _migrate_repos_json_to_catalog(dry_run=dry_run)
-
-        # Refresh nexus-managed git hooks across every registered repo so a
-        # stanza change (e.g. a new pgrep guard) lands everywhere in one
-        # upgrade instead of a per-repo `nx hooks update`. Best-effort,
-        # non-auto, non-dry-run; only touches already-managed hooks.
-        if not auto_mode and not dry_run:
-            _refresh_all_git_hooks()
-
-        # nexus-2uwag: the plugin is the third thing an upgrade converges.
-        # RDR-143's SessionStart hook drives wheel+data from a plugin update;
-        # this is the other direction, so `nx upgrade` is one verb for all
-        # three. Not under --auto: that is the budgeted-hook invocation and
-        # this step is a git fetch; the detached lockstep action calls plain
-        # `nx upgrade`, where it runs. Advisory: never fails the upgrade.
-        if not auto_mode:
-            _converge_plugins(dry_run=dry_run)
-
-        # Generated user-scope agents are composed FROM the installed plugins,
-        # so a plugin advance leaves them stale; regenerate right after
-        # lockstep. Opt-in (absent agent = nothing to do), advisory.
-        if not auto_mode:
-            _refresh_generated_agents(dry_run=dry_run)
-
-        # nexus-cnzei.8: install/refresh the user-level beads PRIME.md when
-        # beads is detected. Same gating as the git-hooks refresh above — a
-        # filesystem write, not under --auto, never under --dry-run.
-        if not auto_mode and not dry_run:
-            _install_beads_prime_best_effort(no_beads_prime=no_beads_prime)
-
+        # Built inside the try: `--auto` promises exit 0, so even a failure
+        # here is swallowed.
+        steps = _upgrade_steps(
+            dry_run=dry_run, auto_mode=auto_mode, skip_t3=skip_t3, assume_yes=assume_yes,
+            no_beads_prime=no_beads_prime, failures=failures,
+        )
+        reporter = StepReporter(len(steps) + (1 if restarts else 0), quiet=auto_mode, name="nx upgrade")
+        for what, detail, run in steps:
+            # Every step is safe to repeat (the ladder records what converged), so
+            # the remedy for any failed one is the same command again.
+            with reporter.step(what, detail, remedy="Run `nx upgrade` again: every step is safe to repeat."):
+                run()
         # nexus-emiky: a lockstep child that lost the upgrade lock left the retry sentinel in the lockstep
         # marker, saying this work (plugin convergence, agents and hooks refresh, the engine install, the
         # advisory) is owed. A run that did it settles the marker; `--auto` skips that work, `--skip-t3`
@@ -188,8 +112,127 @@ def upgrade(
         # the upgrade is live rather than pending a manual daemon restart.
         # ensure-running is version-aware: no-op on a current daemon,
         # graceful cycle on a stale one. Best-effort, non-dry-run only.
+        if restarts:
+            if reporter is None:
+                restart_failure = _cycle_supervised_daemons_to_current(skip_t3=skip_t3, auto_mode=auto_mode)
+            else:
+                with reporter.step(
+                    "Restart running services on the new version", "a stale service is cycled; about a minute each",
+                    remedy="Start it by hand with `nx daemon service start`; `nx doctor` says what is running.",
+                ):
+                    restart_failure = _cycle_supervised_daemons_to_current(skip_t3=skip_t3, auto_mode=auto_mode)
+        if reporter is not None:
+            reporter.summary()
+    # Reached only when the body finished: a failed restart is the last thing an
+    # interactive upgrade says, and it fails the command, since the service may be
+    # left stopped. Under --auto, and in the lockstep hook's unattended child
+    # (NX_UPGRADE_UNATTENDED, whose exit the hook counts as a failed upgrade), it is
+    # logged and the run stays silent and succeeds.
+    failure = next((f for f in (*failures, restart_failure) if isinstance(f, str)), None)
+    if failure is not None and not auto_mode and not env_unattended():
+        raise click.ClickException(failure)
+
+
+def _upgrade_steps(
+    *, dry_run: bool, auto_mode: bool, skip_t3: bool, assume_yes: bool, no_beads_prime: bool,
+    failures: list[str] | None = None,
+) -> list[tuple[str, str | None, Callable[[], None]]]:
+    """The steps one `nx upgrade` runs, in order, as (what, detail, run).
+
+    Built up front so every step line can say "of M". The gating of each step
+    is unchanged from the straight-line body it replaced (nexus-mjmjl)."""
+    steps: list[tuple[str, str | None, Callable[[], None]]] = []
+    # nexus-dcbof: the detached SessionStart child stops STARTING new work
+    # after a time limit (default 900 s), at safe points: between census
+    # calls, backfill collections and ladder rungs. The clock starts here, so
+    # the precondition stage counts against it. An interactive `nx upgrade`
+    # has no limit.
+    deadline = _auto_deadline() if auto_mode else None
+    steps.append((
+        "Check for client-side migrations", None,
+        lambda: _run_upgrade(dry_run=dry_run, auto_mode=auto_mode, skip_t3=skip_t3),
+    ))
+    if not dry_run:
+        # RDR-185 P3.1 (nexus-n7u38.23): the non-data axes converge as
+        # STATELESS preconditions before the ladder walks, re-derived from
+        # on-disk state each invocation, never recorded.
+        steps.append((
+            "Bring the engine, the PDF stack and the runtime to this release",
+            "can download the engine and its PostgreSQL bundle, rebuild the PDF stack and restart services "
+            "still on the old version; minutes when it does",
+            lambda: _note_failure(failures, _converge_preconditions(auto_mode=auto_mode, skip_t3=skip_t3)),
+        ))
+
+    def _ladder() -> None:
+        # RDR-185 P0.4 (nexus-n7u38.4): `nx upgrade` is the SINGLE trigger for
+        # the upgrade ladder; dry-run reports read-only from detect().
+        # nexus-75w5d: `--auto` is UNATTENDED, whatever the deadline says.
+        from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        with _standing_consent(assume_yes), unattended_run(auto_mode):
+            _run_ladder(dry_run=dry_run, auto_mode=auto_mode, deadline=deadline)
+        # nexus-g7ijj: an install that converged purely via `nx upgrade`
+        # never got install.mode stamped; backfill it on the ladder-succeeded
+        # path only. --dry-run writes nothing.
         if not dry_run:
-            _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
+            from nexus.config import backfill_install_mode_record  # noqa: PLC0415 — deferred, keeps config import off the CLI's cold-start path
+
+            backfill_install_mode_record()
+
+    steps.append((
+        "Run the upgrade ladder's data steps",
+        "a pending step can read every document in your store; minutes on a large one",
+        _ladder,
+    ))
+    # nexus-b03o: advisory for collections named for a model whose width
+    # their vectors do not have. Never fails the upgrade.
+    if not auto_mode and not skip_t3:
+        steps.append(("Check collection names against their embedding widths", None, _emit_name_vs_embed_dim_advisory))
+    # RDR-137 Phase 5.2: one-shot migration of repos.json into the catalog; idempotent.
+    if not auto_mode:
+        steps.append(("Move repos.json into the catalog", None, lambda: _migrate_repos_json_to_catalog(dry_run=dry_run)))
+    # Refresh nexus-managed git hooks across every registered repo.
+    if not auto_mode and not dry_run:
+        steps.append(("Refresh the nexus git hooks in registered repos", None, _refresh_all_git_hooks))
+    # nexus-2uwag: the plugin is the third thing an upgrade converges. Not
+    # under --auto (a git fetch inside the budgeted hook). Advisory.
+    if not auto_mode:
+        steps.append((
+            "Update the plugins", "fetches the plugin marketplace",
+            lambda: _converge_plugins(dry_run=dry_run),
+        ))
+        # Generated agents are composed FROM the installed plugins.
+        steps.append(("Refresh the generated agents", None, lambda: _refresh_generated_agents(dry_run=dry_run)))
+    # nexus-cnzei.8: the user-level beads PRIME.md when beads is detected.
+    if not auto_mode and not dry_run:
+        steps.append((
+            "Install the beads PRIME file", None,
+            lambda: _install_beads_prime_best_effort(no_beads_prime=no_beads_prime),
+        ))
+    return steps
+
+
+def _note_failure(failures: list[str] | None, failure: object) -> None:
+    """Keep a step's failure sentence for the end of the run (a stub that returns a mock is not one)."""
+    if failures is not None and isinstance(failure, str):
+        failures.append(failure)
+
+
+def _say_if_the_engine_is_migrating(*, auto_mode: bool) -> None:
+    """nexus-mjmjl: the steps below wait on the engine while it migrates; say
+    so first (to the log under ``--auto``, whose stdout stays quiet). Never raises."""
+    try:
+        import nexus.config as _config  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+        from nexus.progress.boot_work import notice  # noqa: PLC0415 — stdlib-only, deferred as above
+
+        lines = notice(_config.nexus_config_dir())
+    except Exception:  # noqa: BLE001 — advisory: the upgrade never fails on it
+        return
+    for line in lines:
+        if auto_mode:
+            _log.info("upgrade_engine_migrating", line=line)
+        else:
+            click.echo(line)
 
 
 def _auto_deadline() -> "Deadline":  # noqa: F821 — lazy import (module keeps cold-start cheap)
@@ -234,7 +277,7 @@ def _standing_consent(assume_yes: bool):
             os.environ["NX_ASSUME_YES"] = prior
 
 
-def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
+def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> str | None:
     """RDR-185 P3.1: converge the non-data axes before the ladder walk.
 
     Best-effort at the trigger level (a precondition failure is reported,
@@ -285,10 +328,23 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         from nexus.upgrade_ladder.preconditions import converge_preconditions  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
 
+        from nexus.upgrade_ladder.unattended import env_unattended  # noqa: PLC0415 — deferred, keeps the cold start light
+
+        # The lockstep hook's detached plain `nx upgrade` (NX_UPGRADE_UNATTENDED) is as
+        # unattended as --auto for the process: it never restarts the service on a client
+        # version string. It keeps its engine install (the real post-upgrade acquisition),
+        # and installing a new engine does restart the service.
+        unattended = auto_mode or env_unattended()
+        # P0 (nexus-f3yqd): --auto is the SessionStart hook, spawned on every Claude session
+        # start. Under version skew (two clients installed, the lease written by the other one)
+        # the process axis saw a mismatch every time and cycled a healthy storage service, which
+        # threw away the engine's index build. Under --auto the process axis is report-only, the
+        # posture converge_engine(unattended=True) takes; a person's `nx upgrade` restarts it.
         reports = converge_preconditions(
             config_dir=nexus_config_dir(),
             allow_engine_install=not auto_mode and not skip_t3,
-            allow_process_cycle=not skip_t3,
+            allow_process_cycle=not unattended and not skip_t3,
+            auto_mode=auto_mode,
         )
         for report in reports:
             for line in report.actions:
@@ -298,8 +354,10 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
                     click.echo(f"Precondition [{report.name}]: {line}")
             if not report.current and not auto_mode:
                 click.echo(f"Precondition [{report.name}] pending: {report.detail}")
+        return next((r.failure for r in reports if isinstance(getattr(r, "failure", None), str)), None)
     except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; the walk and T2 migration must not be blocked by a precondition probe failure
         _log.warning("upgrade_preconditions_failed", error=str(exc))
+        return None
 
 
 def _converge_pdf_stack(*, auto_mode: bool, skip_t3: bool) -> None:
@@ -549,14 +607,27 @@ def _run_ladder(
 
 def _cycle_storage_service_to_current(
     *,
+    auto_mode: bool = True,
     _discover_fn=None,
     _run_fn=None,
     _nx_bin_fn=None,
     _installed_version_fn=None,
-) -> None:
+) -> str | None:
     """Bring a stale supervised storage service to the just-installed version
     (best-effort). RDR-149 P5.1 (nexus-gmiaf.30): the version-skew cycle
     for the Java storage-service + Postgres.
+
+    Returns None when there was nothing to do, the restart worked, or the new
+    service is still starting; else the user's text: what failed, what to run, and
+    what ``nx daemon service start`` itself said (first-run audit item 14,
+    nexus-mjmjl). A start that exits non-zero for a dead supervisor, or cannot be
+    spawned, is a failure: the service may be left stopped. A start that reports the
+    service is up but not ready yet, or outlives our own timeout, is still starting
+    (the first start after an upgrade can be a long database migration), which is
+    said and is not a failure. A stop that fails before a start that works is a
+    failure only if the old version still serves. Interactive runs (``auto_mode``
+    False) print a line before the restart and one after it; under ``--auto``
+    nothing is printed and a failure is logged.
 
     The supervisor starts the Java JAR with the nexus Python code from the
     same Python install, so a nexus upgrade requires a supervisor restart to
@@ -565,11 +636,13 @@ def _cycle_storage_service_to_current(
 
     Version-gated (nexus-f0pmd, RDR-183 candidate 0 / GH #1405): a live
     supervisor whose lease ``version`` equals the installed package version
-    is already current and is left alone — this function runs from
+    is already current and is left alone — this function used to run from
     ``nx upgrade --auto``'s finally block on EVERY SessionStart hook firing
     (startup|resume|clear|compact), and the ungated form stop+started a
     current supervisor on each one (20 ``stop_requested`` exits/day, a
-    5-10s lease gap each). Match/mismatch semantics mirror the
+    5-10s lease gap each). Since P0 (nexus-f3yqd) neither ``--auto`` nor the
+    lockstep hook's unattended run calls it, and a lease NEWER than this client
+    (another installed client started the service) is never cycled. Match/mismatch semantics mirror the
     version-aware T2 sibling (``ensure-running``); the undeterminable-
     installed-version case DELIBERATELY diverges (review): T2 treats
     ``not installed`` as already-current (skip), this gate fails TOWARD
@@ -599,7 +672,7 @@ def _cycle_storage_service_to_current(
             live = _discover_fn()
 
         if live is None:
-            return  # nothing running to cycle
+            return None  # nothing running to cycle
 
         if _installed_version_fn is None:
             def _installed_version_fn() -> str:
@@ -616,7 +689,13 @@ def _cycle_storage_service_to_current(
                 "upgrade_storage_service_current_skip",
                 version=installed,
             )
-            return  # supervisor already runs the installed version
+            return None  # supervisor already runs the installed version
+        from nexus.upgrade_ladder.preconditions import lease_is_newer  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        if live_version and installed and lease_is_newer(live_version, installed):
+            # P0 (nexus-f3yqd): another, newer client started it; never downgrade it.
+            _log.info("upgrade_storage_service_newer_skip", live_version=live_version, installed=installed)
+            return None
         _log.info(
             "upgrade_storage_service_stale_cycle",
             live_version=live_version,
@@ -625,33 +704,135 @@ def _cycle_storage_service_to_current(
 
         from nexus.commands.daemon import _resolve_nx_bin as _real_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         nx = _nx_bin_fn() if _nx_bin_fn is not None else _real_nx_bin()
-        # nexus-t10nc: stdout= plus timeout= is the watched shape, and an
-        # aliased spawner hides it from the lint's AST scan exactly as
-        # plugin_lockstep's injected Runner did. Both streams are DEVNULL, so
-        # there is nothing to decode and text= would say nothing.
+        discover = _discover_fn if _discover_fn is not None else (lambda: registry.discover(scope))
         _run = _run_fn if _run_fn is not None else run_bounded
-        _run(
+        return _restart(nx, _run, discover, installed, auto_mode=auto_mode)
+    except Exception as exc:  # noqa: BLE001 — best-effort storage-service cycle; never raises, the caller reports
+        return _restart_failed(f"{type(exc).__name__}: {exc}", "", auto_mode=auto_mode)
+
+
+#: Above ``nx daemon service start``'s own 60 s wait for the lease plus its spawn and the
+#: PG start, so a slow start reaches us as start's own verdict, not as our timeout.
+_START_TIMEOUT_S = 150
+
+#: What ``nx daemon service start`` says when the service has not published a lease in time.
+#: Both cases exit 2, so the text decides, following the rule ``start`` itself uses for
+#: StorageServiceStartError(still_starting=...) in nexus/commands/daemon.py: the detached
+#: supervisor timing out, and an autostart unit whose supervisor reported nothing, are still
+#: starting (a first boot can migrate for many minutes); a supervisor that exited, or that
+#: reported an error (a crash loop, a halted migration), is a failure.
+_STILL_STARTING = ("did not become ready within", "may still be migrating")
+_FAILED_START = ("The supervisor reported:", "exited with code")
+
+
+def _restart(nx, run, discover, installed: str, *, auto_mode: bool) -> str | None:
+    """Stop the stale service and start it on the installed version; see
+    :func:`_cycle_storage_service_to_current` for what it returns and prints."""
+    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
+
+    if not auto_mode:
+        # halcyon 2026-11-10: a person's own upgrade restarts a supervisor whose client
+        # changed (stale supervisor code is a real bug), and says so in these words.
+        click.echo(
+            f"Restarting the storage service so it runs conexus {installed or 'the installed version'}"
+            " (background index builds continue)"
+        )
+    stop_problem = None
+    try:
+        # nexus-t10nc: stdout= plus timeout= is the watched shape; an aliased spawner
+        # hides it from the lint's AST scan, so the streams are named here.
+        stopped = run(
             [*nx, "daemon", "service", "stop"],
             timeout=60,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        _run(
+        if stopped.returncode != 0:
+            stop_problem = f"stopping the old service exited {stopped.returncode}"
+    except subprocess.TimeoutExpired:
+        stop_problem = "stopping the old service did not finish within 60 s"
+    except Exception as exc:  # noqa: BLE001 — a stop that cannot be spawned is reported; the start still runs
+        stop_problem = f"stopping the old service failed ({type(exc).__name__}: {exc})"
+    try:
+        started = run(
             [*nx, "daemon", "service", "start"],
-            timeout=60,  # service start waits for PG + JVM
+            timeout=_START_TIMEOUT_S,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
             # nexus-9pc2f: `start` detach-spawns the supervisor, which must outlive
             # this call. Contained, the child sits in a kill-on-close Windows job that
             # run_bounded closes on return, and that kills the new supervisor and its
             # engine. `stop` stays contained: nothing it starts is meant to survive.
             contained=False,
         )
-    except Exception as exc:  # noqa: BLE001 — best-effort storage-service cycle; failure logged via _log.warning and upgrade continues
-        _log.warning("upgrade_storage_service_cycle_failed", error=str(exc))
+    except subprocess.TimeoutExpired:
+        # The supervisor is detached and survives our timeout: still starting, not dead.
+        return _still_starting(installed, auto_mode=auto_mode)
+    except Exception as exc:  # noqa: BLE001 — a start that cannot be spawned is a failed restart
+        return _restart_failed(_join(stop_problem, f"starting it failed ({type(exc).__name__}: {exc})"), "",
+                               auto_mode=auto_mode)
+    said = (getattr(started, "stderr", "") or "").strip()
+    if started.returncode != 0:
+        if any(m in said for m in _STILL_STARTING) and not any(m in said for m in _FAILED_START):
+            return _still_starting(installed, auto_mode=auto_mode)
+        return _restart_failed(_join(stop_problem, f"starting it exited {started.returncode}"), said,
+                               auto_mode=auto_mode)
+    if stop_problem:
+        # `start` exits 0 on an already-live lease, so a stop that failed can leave the old
+        # service serving: the restart worked only if the lease now names the new version.
+        live = discover()
+        version = str(getattr(live, "version", "") or "")
+        if live is None or (installed and version and version != installed):
+            return _restart_failed(
+                _join(stop_problem, f"the service still runs {version or 'an unknown version'}"),
+                "", auto_mode=auto_mode, remedy="`nx daemon service stop`, then `nx daemon service start`",
+            )
+        _log.warning("upgrade_storage_service_stop_nonzero", problem=stop_problem)
+    if not auto_mode:
+        click.echo("Storage service restarted.")
+    return None
 
 
-def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False) -> None:
+def _join(first: str | None, second: str) -> str:
+    return f"{first}, then {second}" if first else second
+
+
+def _still_starting(installed: str, *, auto_mode: bool) -> None:
+    """The service is up but not answering yet: say so and do not fail the upgrade."""
+    _log.info("upgrade_storage_service_still_starting", installed=installed)
+    if not auto_mode:
+        click.echo(
+            "The storage service is still starting on the new version. The first start after an"
+            " upgrade can migrate its database, which can take several minutes; nexus commands"
+            " wait for it. Check on it with `nx daemon service status`."
+        )
+    return None
+
+
+def _restart_failed(problem: str, said: str, *, auto_mode: bool,
+                    remedy: str = "`nx daemon service start`") -> str:
+    """Log a failed storage-service restart and return what the user is told: what failed,
+    what to run, and what ``nx daemon service start`` itself said (it names the logs)."""
+    _log.warning("upgrade_storage_service_cycle_failed", error=problem, auto_mode=auto_mode)
+    text = (
+        f"The storage service did not restart after the upgrade: {problem}. It may be stopped;"
+        f" run {remedy}."
+    )
+    if said:
+        text += "\n`nx daemon service start` said:\n" + said
+    else:
+        try:
+            from nexus import config as _config  # noqa: PLC0415 — deferred; a module import keeps the by-value import census where it is
+
+            logs = _config.nexus_config_dir() / "logs"
+            text += f" The service's logs are {logs / 'storage_service.log'} and {logs / 'storage_service.crash.log'}."
+        except Exception:  # noqa: BLE001 — the paths are advisory
+            pass
+    return text
+
+
+def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False, auto_mode: bool = True) -> str | None:
     """Cycle every supervised storage daemon to the just-installed version.
 
     RDR-149 P3 (#1112 root cause): the bug class arose because version-skew
@@ -672,7 +853,8 @@ def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False) -> None:
     if not skip_t3:
         # RDR-155 P4b: the supervised Chroma T3 daemon is retired — the Java
         # storage service serves T3 in every mode.
-        _cycle_storage_service_to_current()  # Java storage service + Postgres (P5.1)
+        return _cycle_storage_service_to_current(auto_mode=auto_mode)  # Java storage service + Postgres (P5.1)
+    return None
 
 
 def _run_upgrade(*, dry_run: bool, auto_mode: bool, skip_t3: bool = False) -> None:

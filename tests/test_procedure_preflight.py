@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The preflight procedure (RDR-240 Technical Design 8, nexus-qo7ie.32).
 
-Most of this file runs the script in a test-local harness (class ``_Run``)
+Most of this file runs the script in a test-local harness (class ``_Run``, in tests/_preflight_harness.py)
 shaped like RDR-242 Technical Design 7's environment: the static check's own
 allowlists (the base functions; string without dump, its metatable's __index
 the reduced table; table, math, utf8), the two granted verbs and nothing else,
@@ -31,12 +31,10 @@ drift-ledger workflow's watched paths.
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import lupa.lua54 as lua54
@@ -50,212 +48,41 @@ from nexus.lua_runtime import header as hd
 from nexus.lua_runtime import library
 from nexus.lua_runtime import run as run_mod
 from nexus.lua_runtime import static_check as sc
-from nexus.lua_runtime import supervisor, verbs_git
+from nexus.lua_runtime import supervisor
 from nexus.lua_runtime.errors import ScriptError
 from nexus.lua_runtime.runner import run_procedure
-from nexus.lua_runtime.verb_types import VerbContext
 from nexus.mcp import core
 from tests._module_seam import setattr_in
+from tests._preflight_harness import (
+    _SHELLS,
+    BASH,
+    BEAD_MANIFEST,
+    CI,
+    DRIFT,
+    EVERYTHING,
+    FOLD_CHECK,
+    MARK,
+    REPO_ROOT,
+    SCRIPT,
+    SOURCE,
+    UNTRACKED,
+    _args,
+    _bare,
+    _change,
+    _ci_ruff,
+    _class_names,
+    _command,
+    _commands,
+    _git,
+    _inner,
+    _operands,
+    _rows,
+    _Run,
+    _shell,
+    repo,  # noqa: F401  (fixture)
+    stubs,  # noqa: F401  (fixture)
+)
 
-REPO_ROOT = Path(hd.__file__).resolve().parents[3]
-SCRIPT = REPO_ROOT / ".nexus" / "procedures" / "preflight.lua"
-SOURCE = SCRIPT.read_bytes()
-CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-DRIFT = REPO_ROOT / ".github" / "workflows" / "plugin-drift-ledger.yml"
-BASH = shutil.which("bash")
-ZSH = shutil.which("zsh")
-MARK = "'integration and not lived_in and not keyed_voyage and not mandatory_regression_pin'"
-
-
-def _env() -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env["LC_ALL"] = "C"
-    return env
-
-
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo), *args], check=True, capture_output=True, env=_env()
-    )
-
-
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    r = tmp_path / "repo"
-    r.mkdir()
-    _git(r, "init", "-q", "-b", "main")
-    _git(r, "config", "user.email", "t@example.invalid")
-    _git(r, "config", "user.name", "t")
-    _git(r, "config", "commit.gpgsign", "false")
-    (r / "README.md").write_text("r\n", encoding="utf-8")
-    _git(r, "add", "README.md")
-    _git(r, "commit", "-q", "-m", "base")
-    _git(r, "tag", "base")
-    return r
-
-
-def _change(repo: Path, files: dict[str, str | None]) -> None:
-    """Write each file (None deletes it) and commit."""
-    for name, text in files.items():
-        path = repo / name
-        if text is None:
-            _git(repo, "rm", "-q", "--", name)
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        _git(repo, "add", "--", name)
-    _git(repo, "commit", "-q", "-m", "change")
-
-
-def _py(value: object) -> object:
-    """A lupa table as Python: a list when its keys are 1..n, else a dict."""
-    if lua54.lua_type(value) != "table":
-        return value
-    items = dict(value.items())  # type: ignore[attr-defined]
-    if (
-        items
-        and all(isinstance(k, int) for k in items)
-        and sorted(items) == list(range(1, len(items) + 1))
-    ):
-        return [_py(items[i]) for i in range(1, len(items) + 1)]
-    return {k: _py(v) for k, v in items.items()}
-
-
-class _Run:
-    """One run in a sandbox-shaped environment holding only the two git verbs."""
-
-    def __init__(self, repo: Path, source: bytes = SOURCE) -> None:
-        self.ctx = VerbContext(repo_root=repo)
-        self.source = source
-        self.calls: list[str] = []
-        self.rt = lua54.LuaRuntime(
-            register_eval=False, register_builtins=False, unpack_returned_tuples=False
-        )
-
-    def _verb(self, name: str):
-        fn = {"diff_names": verbs_git.diff_names, "diff_stat": verbs_git.diff_stat}[
-            name
-        ]
-
-        def call(base: str) -> object:
-            # As the dispatcher: a verb failure reaches the script as a Lua
-            # error carrying the message, never as a Python exception.
-            self.calls.append(f"git.{name}")
-            try:
-                value = fn(base, deadline=time.monotonic() + 30, ctx=self.ctx)
-            except Exception as exc:  # noqa: BLE001 -- the dispatcher's own catch-all
-                return self.rt.table_from({"ok": False, "error": str(exc)})
-            return self.rt.table_from(
-                {"ok": True, "value": self.rt.table_from(value, recursive=True)}
-            )
-
-        return call
-
-    def _env(self):
-        rt = self.rt
-        build = rt.execute(
-            """
-            return function(base, libs, diff_names, diff_stat)
-            local env = {}
-            for _, name in ipairs(base) do env[name] = _G[name] end
-            for lib, members in pairs(libs) do
-              local t = {}
-              for _, m in ipairs(members) do t[m] = _G[lib][m] end
-              env[lib] = t
-            end
-            getmetatable("").__index = env.string
-            local function verb(f)
-              return function(b)
-                local r = f(b)
-                if not r.ok then error(r.error, 2) end
-                return r.value
-              end
-            end
-            env.git = {diff_names = verb(diff_names), diff_stat = verb(diff_stat)}
-            return env
-            end
-            """
-        )
-        return build(  # type: ignore[operator]
-            rt.table_from(sorted(sc.BASE_FUNCTIONS)),
-            rt.table_from(
-                {lib: rt.table_from(sorted(m)) for lib, m in sc.LIB_MEMBERS.items()}
-            ),
-            self._verb("diff_names"),
-            self._verb("diff_stat"),
-        )
-
-    def __call__(self, base: str = "base") -> dict:
-        load = self.rt.eval("load")
-        loaded = load(self.source.decode("ascii"), "=preflight", "t", self._env())  # type: ignore[operator]
-        fn, err = loaded if isinstance(loaded, tuple) else (loaded, None)
-        assert fn is not None, err
-        out = _py(fn(self.rt.table_from({"base": base})))
-        assert isinstance(out, dict)
-        return out
-
-
-def _commands(out: dict) -> dict[str, list[str]]:
-    by: dict[str, list[str]] = {}
-    for c in out["checks"] or []:
-        by.setdefault(c["class"], []).append(c["command"])
-    return by
-
-
-def _command(out: dict, check_prefix: str) -> str:
-    [cmd] = [c["command"] for c in out["checks"] if c["check"].startswith(check_prefix)]
-    return cmd
-
-
-def _class_names(out: dict) -> list[str]:
-    return [c["name"] for c in out["classes"] or []]
-
-
-# ---- running an emitted command with stub tools ----------------------------------
-
-
-@pytest.fixture
-def stubs(tmp_path: Path) -> Path:
-    """A PATH directory whose uv, uvx, actionlint and lab-remote print their arguments."""
-    d = tmp_path / "stubs"
-    d.mkdir()
-    for tool in ("uv", "uvx", "actionlint", "lab-remote"):
-        stub = d / tool
-        stub.write_text(
-            "#!/bin/sh\n"
-            # A selector prints its file list on one line, as the real ones do.
-            'case "$*" in *select_*_tests.py*) echo "tests/a.py tests/b c.py"; exit 0;; esac\n'
-            f'printf "%s\\n" "{tool}"\n'
-            'for a in "$@"; do printf "<%s>\\n" "$a"; done\n',
-            encoding="utf-8",
-        )
-        stub.chmod(0o755)
-    return d
-
-
-def _shell(
-    repo: Path, stubs: Path, command: str, shell: str | None = BASH
-) -> list[str]:
-    assert shell is not None
-    env = _env()
-    env["PATH"] = f"{stubs}{os.pathsep}{env.get('PATH', '')}"
-    proc = subprocess.run(
-        [shell, "-c", command],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout.splitlines()
-
-
-def _operands(lines: list[str]) -> list[str]:
-    """The arguments a stub saw after its `--`."""
-    args = [line[1:-1] for line in lines if line.startswith("<") and line.endswith(">")]
-    return args[args.index("--") + 1 :] if "--" in args else []
 
 
 # ---- the header and the static check -------------------------------------------
@@ -295,22 +122,31 @@ def test_a_python_change_gets_ruff_its_tests_and_the_standing_checks(
     out = _Run(repo)()
     assert out["code"] is True
     assert _class_names(out) == ["python"]
-    assert _commands(out)["python"] == [
-        "git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
-        "':(glob)src/**/*.py' | xargs -0 -r uvx ruff@0.15.18 check --force-exclude --",
-        "git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
-        "':(glob)tests/**/test_*.py' | xargs -0 -r uv run pytest -q -p no:randomly --",
+    assert _bare(_commands(out)["python"]) == [
+        # pipefail, so a diff git cannot read fails the step instead of running nothing.
+        "( set -o pipefail; git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
+        "':(glob)src/**/*.py' | xargs -0 -r uvx ruff@0.15.18 check --force-exclude -- )",
+        # R13: the default-loop guard that judges only what its invocation collected
+        # rides in the same invocation as the changed tests; NOT_SLOW so a changed lint- or
+        # slow-marked file is collected, not deselected.
+        "( set -o pipefail; { git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
+        "':(glob)tests/**/test_*.py' && printf '%s\\0' "
+        "tests/test_mode_declarations_are_explicit.py; } | "
+        "xargs -0 -r uv run pytest -q -rf -p no:randomly --color=no -m 'not integration and not slow' -- )",
     ]
-    assert _commands(out)["code"] == [
+    assert _bare(_commands(out)["code"]) == [
         "scripts/build-gate-jar.sh",
-        "lab-remote -- bash -c 'scripts/build-gate-jar.sh && uv run pytest -q -p no:randomly -m lint -n auto'",
-        "uv run pytest -q -p no:randomly tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py",
+        UNTRACKED,
+        "lab-remote -- bash -c 'scripts/build-gate-jar.sh && uv run pytest -q -rf -p no:randomly --color=no -m lint -n auto'",
+        "uv run pytest -q -rf -p no:randomly --color=no tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py",
         "uv run scripts/tenant_delta.py --strict --base=base",
         "uv run scripts/windows_hand_test.py --check",
-        "f=$(git diff --no-renames --name-only base...HEAD | uv run python "
+        "f=$(set -o pipefail; git diff --no-renames --name-only base...HEAD | uv run python "
         "scripts/select_affected_integration_tests.py --repo .) && "
-        '{ [ -z "$f" ] || printf \'%s\\n\' "$f" | xargs lab-remote -- uv run pytest -q -p no:randomly'
-        f" -o addopts= -m {MARK}; }}",
+        '{ if [ -z "$f" ]; then echo \'nothing selected\'; else '
+        "printf '%s\\n' \"$f\" | xargs lab-remote -- bash -c 'scripts/build-gate-jar.sh && exec \"$@\"' preflight"
+        " uv run pytest -q -rf -p no:randomly --color=no"
+        f" -o addopts= -m {MARK}; fi; }}",
     ]
 
 
@@ -355,17 +191,29 @@ def test_a_changeset_is_engine_and_schema(repo: Path) -> None:
     _change(repo, {"service/src/main/resources/db/changelog/x-001.xml": "<x/>\n"})
     out = _Run(repo)()
     assert _class_names(out) == ["engine", "schema"]
-    assert _commands(out)["schema"] == [
-        "uv run pytest -q -p no:randomly -m lint tests/test_changelog_validate_precondition_lint.py"
+    # The validation test is not lint-marked: a `-m lint` here deselected all 32 of its tests and
+    # exited 0 (wren). The parity test reads the changelogs against COLLECTION_SCOPED_TABLES
+    # through a live engine substrate, so it is heavy and comes after the gate jar.
+    # The health test and the DDL-ceiling advisory sit between them
+    # (tests/test_procedure_preflight_enumerations.py).
+    assert _bare(_commands(out)["schema"]) == [
+        "uv run pytest -q -rf -p no:randomly --color=no tests/test_changelog_validate_precondition_lint.py",
+        "uv run pytest -q -rf -p no:randomly --color=no tests/test_health_service_checks.py",
+        "grep -n '^migration_ddl_per_worker = ' tests/ddl_ceiling.toml",
+        "uv run pytest -q -rf -p no:randomly --color=no tests/catalog/test_collection_scoped_tables_schema_parity.py",
     ]
+    parity = _rows(out, "the collection-scoped tables schema parity test")[0]
+    assert parity["heavy"] is True
+    names = [c["check"] for c in out["checks"]]
+    assert names[0].startswith("build the gate jar") and names.index(parity["check"]) > 0
 
 
 def test_a_hook_change_gets_the_hook_tests_and_other_plugin_paths_add_none(
     repo: Path,
 ) -> None:
     _change(repo, {"conexus/hooks/x.py": "x\n"})
-    assert _commands(_Run(repo)())["plugin"] == [
-        "uv run pytest -q -p no:randomly tests/hooks"
+    assert _bare(_commands(_Run(repo)())["plugin"]) == [
+        "uv run pytest -q -rf -p no:randomly --color=no tests/hooks"
     ]
     _change(repo, {"conexus/skills/x/SKILL.md": "x\n"})
     _git(repo, "tag", "after-hook")
@@ -384,9 +232,9 @@ def test_a_workflow_change_gets_actionlint(repo: Path) -> None:
     out = _Run(repo)()
     assert _class_names(out) == ["workflow"]
     assert _commands(out)["workflow"] == [
-        "git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
+        "( set -o pipefail; git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
         "':(glob).github/workflows/*.yml' ':(glob).github/workflows/*.yaml'"
-        " | xargs -0 -r actionlint --"
+        " | xargs -0 -r actionlint -- )"
     ]
 
 
@@ -398,13 +246,16 @@ def test_a_docs_only_change_gets_the_docs_readers_and_no_code_checks(
     )
     out = _Run(repo)()
     assert out["code"] is False
-    assert _commands(out) == {
-        "code": ["scripts/build-gate-jar.sh"],
-        "docs": [
-            "f=$(uv run python scripts/select_docs_reader_tests.py --repo .)"
-            " && printf '%s\\n' \"$f\" | xargs uv run pytest -q -p no:randomly"
-        ],
-    }
+    assert _bare(_commands(out)["code"]) == ["scripts/build-gate-jar.sh"]
+    assert _bare(_commands(out)["docs"]) == [
+        "f=$(uv run python scripts/select_docs_reader_tests.py --repo .)"
+        # CI's docs lane: -o addopts= so lint-marked docs scans run too, integration and slow stay out.
+        " && printf '%s\\n' \"$f\" | xargs uv run pytest -q -rf -p no:randomly --color=no"
+        " -o addopts= -m 'not integration and not slow'",
+        BEAD_MANIFEST,
+        FOLD_CHECK,  # CHANGELOG.md changed
+    ]
+    assert set(_commands(out)) == {"code", "docs"}
 
 
 def test_docs_beside_code_still_get_the_docs_readers(repo: Path) -> None:
@@ -465,6 +316,12 @@ _CORPUS = [
     "src/nexus/x.py",
     "data/x",
     "tests/AGENTS.md",
+    # Changelog fragments (nexus-3ceda.2): prose one level deep, code below that.
+    "changelog/unreleased/nexus-x.md",
+    "changelog/unreleased/README.md",
+    "changelog/unreleased/sub/nexus-x.md",
+    "changelog/unreleased/nexus-x.txt",
+    "changelog/other.md",
 ]
 
 
@@ -543,7 +400,11 @@ def test_a_deleted_test_file_never_reaches_pytest(repo: Path, stubs: Path) -> No
     _git(repo, "tag", "-f", "base")
     _change(repo, {"tests/test_gone.py": None, "tests/deep/test_new.py": "x\n"})
     lines = _shell(repo, stubs, _command(_Run(repo)(), "the changed test files"))
-    assert _operands(lines) == ["tests/deep/test_new.py"]
+    # R13: the default-loop guard rides along in the same invocation.
+    assert _operands(lines) == [
+        "tests/deep/test_new.py",
+        "tests/test_mode_declarations_are_explicit.py",
+    ]
 
 
 @pytest.mark.skipif(BASH is None, reason="needs bash")
@@ -607,18 +468,6 @@ def test_each_single_file_row_names_its_class(repo: Path, path: str, cls: str) -
     assert _class_names(_Run(repo)()) == [cls]
 
 
-_SHELLS = [
-    pytest.param(
-        BASH, id="bash", marks=pytest.mark.skipif(BASH is None, reason="no bash")
-    ),
-    pytest.param(ZSH, id="zsh", marks=pytest.mark.skipif(ZSH is None, reason="no zsh")),
-]
-
-
-def _args(lines: list[str]) -> list[str]:
-    return [line[1:-1] for line in lines if line.startswith("<") and line.endswith(">")]
-
-
 @pytest.mark.parametrize("shell", _SHELLS)
 def test_the_docs_selection_reaches_pytest_as_separate_files(
     repo: Path, stubs: Path, shell: str
@@ -663,22 +512,24 @@ def test_a_change_to_the_selector_selects_every_integration_file(
     repo: Path, script: str
 ) -> None:
     _change(repo, {script: "x\n"})
-    cmd = _command(_Run(repo)(), "the integration tests the change affects")
+    cmd = _inner(_command(_Run(repo)(), "the integration tests the change affects"))
     assert cmd.startswith(
-        "f=$(uv run python scripts/select_affected_integration_tests.py --repo . --all) && "
+        "f=$(set -o pipefail; uv run python scripts/select_affected_integration_tests.py --repo . --all) && "
     )
-
-
-def _ci_ruff() -> str:
-    """The ruff pin of ci.yml's lint job, ``ruff@<version>``."""
-    m = re.search(r"uvx (ruff@[0-9.]+) check src/", CI.read_text(encoding="utf-8"))
-    assert m is not None, "ci.yml's ruff lint job moved"
-    return m.group(1)
 
 
 def test_ruff_is_the_version_ci_pins() -> None:
     assert f'local RUFF = "{_ci_ruff()}"' in SOURCE.decode("ascii")
 
+
+def test_the_real_run_equals_the_harness_for_every_row(
+    root_on: Path, workers: list[str]
+) -> None:
+    _change(root_on, EVERYTHING)
+    real = run_procedure("preflight", {"base": "base"})
+    assert real == _Run(root_on)()
+    assert isinstance(real, dict)
+    assert len(real["checks"]) >= 20
 
 # ---- through the real run path (run_script, the worker, the library root) -----------
 #
@@ -702,8 +553,8 @@ CASES: dict[str, dict[str, str | None]] = {
 CLASSES: dict[str, list[str]] = {"code": ["python"], "docs-only": ["docs"], "empty": []}
 
 RUFF_ON_SRC = (
-    "git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
-    f"':(glob)src/**/*.py' | xargs -0 -r uvx {_ci_ruff()} check --force-exclude --"
+    "( set -o pipefail; git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
+    f"':(glob)src/**/*.py' | xargs -0 -r uvx {_ci_ruff()} check --force-exclude -- )"
 )
 
 #: Every git a preflight run spawns, in order: the repo probe, then git.diff_names and

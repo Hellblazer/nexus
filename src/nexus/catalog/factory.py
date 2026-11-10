@@ -418,10 +418,15 @@ def make_catalog_writer(
 #: nexus-bivz3.24: ``repair_stale_note_uris`` joins this set for the same reason as ``ghost_sweep``: a
 #: service-only op (the census and the three-table rewrite are engine-side SQL in one transaction) whose
 #: dry-run census is itself an engine-side read behind the write surface. No SQLite/daemon-mode equivalent.
+#:
+#: nexus-u5m5g.7 (RDR-193 Step 6): ``reconcile_stage`` / ``reconcile_commit`` (the catalog reconcile the engine runs
+#: as a job) and ``resolve_or_register`` (one request in place of the lookup-then-register of the document indexers
+#: and the store hook) are engine-side set operations with no canonical ``Catalog`` counterpart.
 _SERVICE_ONLY_WRITE_OPS: frozenset[str] = frozenset({
     "update_many", "delete_many", "purge_trash",
     "delete_collection", "restore_document", "ghost_sweep",
     "set_collection_aspects_enabled", "repair_stale_note_uris",
+    "reconcile_stage", "reconcile_commit", "resolve_or_register",
 })
 
 

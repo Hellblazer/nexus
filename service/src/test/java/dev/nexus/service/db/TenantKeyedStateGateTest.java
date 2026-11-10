@@ -466,6 +466,9 @@ public class TenantKeyedStateGateTest {
             + "exception) built for one request or one pass and dropped with it; no long-lived structure holds it";
         private static final String COUNTER = "a process-wide counter or flag since boot, or a pass counter; not keyed "
             + "by tenant, and a data reset does not reset counters";
+        private static final String COUNT_VIEW = "a bounded since-boot count view by route and key class: both "
+            + "labels are fixed by the engine (route names and four classes), no key name or client text is kept, and "
+            + "a request's tenant is never recorded in it, so a tenant reset has nothing to drop";
         private static final String TEST_HOOK = "a test-only hook, null in production";
         private static final String CONFIG = "process configuration set at boot or swapped as a whole; not keyed by "
             + "tenant";
@@ -705,13 +708,14 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, CONFIG);
             }
-            // COUNTER (46)
+            // COUNTER (47)
             for (String f : List.of(
                 "Bge768Embedder.onnxInvocationCount",
                 "CatalogRepository.vacuumInProgress",
                 "CceEmbedder.callEwmaNanos",
                 "CceEmbedder.waitingBatches",
                 "NexusService.consecutiveDataSweepFailures",
+                "ChunkKeyAllowlistActivity.WOULD_REFUSE",
                 "ChunkReaper.censusBackoffTotal",
                 "ChunkReaper.censusTimedOutTotal",
                 "ChunkReaper.failedPassesTotal",
@@ -756,6 +760,12 @@ public class TenantKeyedStateGateTest {
                 "VoyageEmbedder.voyageRequestCount"
             )) {
                 notKeyed.put(f, COUNTER);
+            }
+            // COUNT_VIEW (1): the bounded by-route-and-class view of the allow-list's would-refuse count
+            for (String f : List.of(
+                "ChunkKeyAllowlistActivity.BY_ROUTE_CLASS"
+            )) {
+                notKeyed.put(f, COUNT_VIEW);
             }
             // TEST_HOOK (23)
             for (String f : List.of(

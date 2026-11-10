@@ -1122,6 +1122,11 @@ public final class CatalogRepository {
      * {@code created} contract (nexus-vfef0).
      */
     public RegisterOutcome registerDocumentWithOutcome(String tenant, String ownerPrefix, Map<String, Object> fields) {
+        return registerDocumentWithOutcome(tenant, ownerPrefix, fields, false);
+    }
+
+    /** As above; {@code bornOnly} (set by resolve_or_register alone, never by a request body) makes the flag one that only a NEW row takes. */
+    public RegisterOutcome registerDocumentWithOutcome(String tenant, String ownerPrefix, Map<String, Object> fields, boolean bornOnly) {
         if (TenantConstants.isWildcard(tenant)) {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
@@ -1131,6 +1136,7 @@ public final class CatalogRepository {
         // other fields, so the flag is raised on the matched row explicitly (raiseSensitivity), and a request
         // that carries no flag, or false, never lowers it.
         final boolean requestedSensitive = sensitiveFlag(fields);
+        final boolean raiseOnMatch = requestedSensitive && !bornOnly;   // resolve_or_register: only a NEW row takes the flag
         return UniqueRaceRetry.run("registerDocument", OWNER_NON_ARBITRATED, () ->
         tenantScope.withTenant(tenant, ctx -> {
             // Ensure owner row exists. Resolve-first (nexus-0ehwe arbiter class): the
@@ -1161,7 +1167,7 @@ public final class CatalogRepository {
                                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                                   .fetchOne();
                 if (existing != null) {
-                    if (requestedSensitive) raiseSensitivity(ctx, tenant, List.of(existing.value1()), SENS_REASON_REGISTER_RAISE);
+                    if (raiseOnMatch) raiseSensitivity(ctx, tenant, List.of(existing.value1()), SENS_REASON_REGISTER_RAISE);
                     return new RegisterOutcome(existing.value1(), false);
                 }
             }
@@ -1174,7 +1180,7 @@ public final class CatalogRepository {
                                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                                   .fetchOne();
                 if (existing != null) {
-                    if (requestedSensitive) raiseSensitivity(ctx, tenant, List.of(existing.value1()), SENS_REASON_REGISTER_RAISE);
+                    if (raiseOnMatch) raiseSensitivity(ctx, tenant, List.of(existing.value1()), SENS_REASON_REGISTER_RAISE);
                     return new RegisterOutcome(existing.value1(), false);
                 }
             }
@@ -1269,7 +1275,7 @@ public final class CatalogRepository {
                 log.info("event=register_document_race_lost tenant={} source_uri={} winner={}",
                     tenant, srcUri, winner.value1());
                 // The winner is a live row we did not write: a flagged request still raises it.
-                if (requestedSensitive) raiseSensitivity(ctx, tenant, List.of(winner.value1()), SENS_REASON_REGISTER_RAISE);
+                if (raiseOnMatch) raiseSensitivity(ctx, tenant, List.of(winner.value1()), SENS_REASON_REGISTER_RAISE);
                 return new RegisterOutcome(winner.value1(), false);
             }
             // nexus-rfvyy.6.23 (Sam 2026-11-05): a fresh row born flagged is audited too, so a later clear shows
@@ -14081,6 +14087,7 @@ public final class CatalogRepository {
         }
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", String.valueOf(statementTimeout.toMillis()));
+            ReconcileOwnerLock.acquire(ctx, tenant, owner);   // one owner's commits serialize across engines, the wait bounded by the timeout above
             JSONB out;
             try {
                 out = ctx.select(dev.nexus.service.jooq.nexus.Routines.catalogReconcileCommit(owner, runId))
@@ -14154,7 +14161,9 @@ public final class CatalogRepository {
      *
      * <p>The ephemeral-worktree guard stays on the client. Request: {@code owner_name} or {@code curator},
      * {@code source_uri} or an absolute {@code file_path}, {@code title}, and optionally {@code year},
-     * {@code title_fallback}, {@code source_mtime}, {@code content_type}, {@code physical_collection}. A value of the
+     * {@code title_fallback}, {@code source_mtime}, {@code content_type}, {@code physical_collection}, {@code sensitive}
+     * (a boolean, applied only when this call registers a new row, which is then born flagged and audited
+     * {@code register_set}; a row that is found keeps its sensitivity, whatever the request says). A value of the
      * wrong type is refused, never read as absent.
      */
     public ResolveOutcome resolveOrRegister(String tenant, Map<String, Object> req) {
@@ -14179,12 +14188,7 @@ public final class CatalogRepository {
             throw new IllegalArgumentException(
                 "a 'source_uri', or an absolute 'file_path' to derive one from, is required: it is the document's identity");
         }
-        // Step 6 implements the flag (born flagged, audited, inherited); until then a request that carries it is refused
-        // rather than answered as if it had been honoured
-        if (req.get("sensitive") != null) {
-            throw new IllegalArgumentException("'sensitive' is not supported by resolve_or_register yet "
-                + "(RDR-193 Step 6): register the document, then raise the flag through the audited route");
-        }
+        final boolean sensitive = sensitiveFlag(req);   // a non-boolean is a 400 naming the field; it applies to a NEW row only
         final String ownerPrefix = curatorOwnerPrefix(tenant, ownerName);
         final String ownerDot = ownerPrefix + ".";
 
@@ -14224,7 +14228,8 @@ public final class CatalogRepository {
         if (sourceMtime != null) fields.put("source_mtime", sourceMtime);
         if (contentType != null) fields.put("content_type", contentType);
         if (physicalCollection != null) fields.put("physical_collection", physicalCollection);
-        RegisterOutcome minted = registerDocumentWithOutcome(tenant, ownerPrefix, fields);
+        if (sensitive) fields.put("sensitive", true);   // born flagged and audited (register_set) by the register
+        RegisterOutcome minted = registerDocumentWithOutcome(tenant, ownerPrefix, fields, sensitive);
         // a concurrent registration of the same source_uri under another owner wins the unique index: the answer is theirs
         return new ResolveOutcome(minted.tumbler(), minted.created(), !minted.tumbler().startsWith(ownerDot));
     }

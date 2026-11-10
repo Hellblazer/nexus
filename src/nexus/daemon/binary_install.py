@@ -600,26 +600,41 @@ class _LocalWriteError(Exception):
 
 
 def _write_body(resp: http.client.HTTPResponse, dest: Path) -> None:
-    """Stream *resp* to *dest*, truncating what an earlier attempt left."""
+    """Stream *resp* to *dest*, truncating what an earlier attempt left.
+
+    A file of a megabyte or more reports its size, rate and time left on
+    stderr while it streams (nexus-mjmjl, :mod:`nexus.progress.download_meter`)."""
+    from nexus.progress.download_meter import meter_for  # noqa: PLC0415 — stdlib-only, deferred like the module's other helpers
+
     try:
         out = dest.open("wb")
     except OSError as exc:
         raise _LocalWriteError(str(exc)) from exc
-    written = 0
-    with out:
-        for block in iter(lambda: resp.read(_HASH_BLOCK), b""):
-            try:
-                out.write(block)
-            except OSError as exc:
-                raise _LocalWriteError(str(exc)) from exc
-            written += len(block)
-    # A chunked read() returns what arrived when the peer closes early, with
-    # no error; a body shorter than its Content-Length is a transport failure
-    # to retry, not bytes for the verifier to reject.
     declared = resp.headers.get("Content-Length")
     chunked = resp.headers.get("Transfer-Encoding") is not None  # length is the chunks'
-    if not chunked and declared is not None and declared.isdigit() and written < int(declared):
-        raise http.client.IncompleteRead(b"", int(declared) - written)
+    total = int(declared) if declared is not None and declared.isdigit() and not chunked else None
+    meter = meter_for(dest.name, total)
+    written = 0
+    finished = False
+    try:
+        with out:
+            for block in iter(lambda: resp.read(_HASH_BLOCK), b""):
+                try:
+                    out.write(block)
+                except OSError as exc:
+                    raise _LocalWriteError(str(exc)) from exc
+                written += len(block)
+                if meter is not None:
+                    meter.update(written)
+        # A chunked read() returns what arrived when the peer closes early, with
+        # no error; a body shorter than its Content-Length is a transport failure
+        # to retry, not bytes for the verifier to reject.
+        if total is not None and written < total:
+            raise http.client.IncompleteRead(b"", total - written)
+        finished = True
+    finally:
+        if meter is not None:
+            meter.finish() if finished else meter.abandon()
 
 
 def _fetch_once(req: urllib.request.Request, dest: Path, timeout: float) -> None:

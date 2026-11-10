@@ -3706,6 +3706,14 @@ nexus-f2ufy
 nexus-f39s8
 nexus-f3b7
 nexus-f3tyz
+nexus-f3yqd
+nexus-f3yqd.1
+nexus-f3yqd.2
+nexus-f3yqd.3
+nexus-f3yqd.4
+nexus-f3yqd.5
+nexus-f3yqd.6
+nexus-f3yqd.7
 nexus-f3yxx
 nexus-f3yxx.1
 nexus-f4apk
@@ -5603,6 +5611,7 @@ nexus-mjc9l.3
 nexus-mjc9l.4
 nexus-mjhwk
 nexus-mjikf
+nexus-mjmjl
 nexus-mjudo
 nexus-mk3tw
 nexus-mk73z
@@ -9164,6 +9173,7 @@ nexus-z6sr
 nexus-z6y58
 nexus-z6yvk
 nexus-z70w
+nexus-z7can
 nexus-z7ddd
 nexus-z7f7r
 nexus-z7hf
@@ -9276,6 +9286,7 @@ nexus-ztwp4
 nexus-zu1q0
 nexus-zu4ma
 nexus-zu4ma.1
+nexus-zu8rq
 nexus-zu9ln
 nexus-zuuno
 nexus-zv8i7

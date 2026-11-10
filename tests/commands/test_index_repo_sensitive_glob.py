@@ -224,7 +224,7 @@ def _hook(repo: Path, files: list[Path], globs: tuple[str, ...], *, head: str = 
     ids = _catalog_hook(
         repo=repo, repo_name=repo.name, repo_hash="rfvyy88000", head_hash=head,
         indexed_files=[(f, "code", "code__rfvyy88") for f in files],
-        skip_housekeeping=True, sensitive_globs=globs, sensitive_wanted=wanted, sensitive_confirmed=confirmed,
+        walk="partial", sensitive_globs=globs, sensitive_wanted=wanted, sensitive_confirmed=confirmed,
     )
     return ids, wanted, confirmed
 

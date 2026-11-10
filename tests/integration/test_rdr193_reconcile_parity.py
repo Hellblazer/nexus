@@ -1,40 +1,31 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-193 Step 2 Part D (nexus-u5m5g.3): the parity fixture for the engine's reconcile stage and commit.
+"""RDR-193 Step 2 Part D / Step 6 (nexus-u5m5g.3, nexus-u5m5g.7): the parity fixture of the reconcile commit.
 
-The bar of Part A1 is parity: after a commit, every catalog row and link is exactly what today's client path
-leaves. This module measures that. One fixture (``FILES``) is seeded TWICE, into two owners of one tenant that
-differ only in their repo root. On copy ``old`` the client path runs: ``indexer._catalog_hook`` (``register_many``,
-``update_many``, ``_maybe_run_housekeeping`` -> ``_run_housekeeping``) followed by
-``indexer._delete_docs_for_paths``. On copy ``new`` the same files are staged and committed over the engine's
-``/v1/catalog/reconcile`` routes (the staged rows are built with the hook's own helpers, so they carry what the
-Step 6 client will send). Both end states are read back from Postgres, every column of every row, and compared.
+The bar of Part A1 is parity: after a commit, every catalog row and link is exactly what the client path left before
+Step 6 deleted it (``register_many``, ``update_many``, ``_run_housekeeping``, ``_delete_docs_for_paths``). That path's end
+state is the golden file ``tests/fixtures/rdr193_reconcile_parity_expected.json``, written from it while it still ran
+(``NX_PARITY_REGEN_GOLDEN=1`` rewrites the file from THIS run, and is for a reviewed, deliberate change of the rules only).
+This module seeds one fixture repository, runs ``indexer._catalog_hook`` (the Step 6 client: stage, commit, poll) over it
+twice, and compares the end state it reads back from Postgres, every column of every row, with the golden file.
 
 What the comparison normalises, and nothing else:
 
-* Tumblers. The two copies have different owner prefixes, so a tumbler is compared as ``<owner label>.<seq>`` (the
-  main owner is ``M``, the one other owner of each copy is ``X``). Rows are keyed by ``(owner, file_path, ordinal)``
-  and a tumbler-valued column (``alias_of``, a link endpoint, an audit row's tumbler) is compared through that key,
-  so a difference in minting never hides a difference in another column. The tumbler literal each row got is
+* Tumblers. The repository's owner is ``M`` and the one other owner ``X``. Rows are keyed by ``(owner, file_path,
+  ordinal)`` and a tumbler-valued column (``alias_of``, a link endpoint, an audit row's tumbler) is compared through that
+  key, so a difference in minting never hides a difference in another column. The tumbler literal each row got is
   compared on its own, in the ``minted`` section.
-* Time. A ``*_at`` column is compared as set or null. ``indexed_at`` is compared as ``moved`` (differs from the
-  value the row held just before the run, or the row is new) or ``kept``: the rule it follows is "moves only when
-  head_hash changes" (nexus-927mo), not a clock value.
-* The repo root, which is the only thing the two copies differ in: it reads ``@ROOT`` wherever it appears.
+* Time. A ``*_at`` column is compared as set or null. ``indexed_at`` is compared as ``moved`` (differs from the value the
+  row held just before the run, or the row is new) or ``kept``: the rule it follows is "moves only when head_hash
+  changes" (nexus-927mo), not a clock value.
+* The repo root, which reads ``@ROOT`` wherever it appears.
 * Link ``id`` and the generated ``fts_vector``, which carry no information of their own.
 
-The link generators (``generate_*_links``) are replaced by recorders for the whole test: they belong to Part A4,
-and a recorder lets the test see which tumblers the hook handed them (the ``new_tumblers`` and relink lists).
+The link generators (``generate_*_links``) are replaced by recorders for the whole test: they belong to Part A4, and a
+recorder lets the test see which tumblers the hook handed them (the ``new_tumblers`` and relink lists). The commit's
+outcome is captured from ``reconcile_run.stage_and_commit`` so each case can be shown to have reached the arm it is for.
 
-Each fixture case lives under its own top-level directory; a difference is attributed to the case of its row.
-``KNOWN_DIVERGENCES`` pins, per case, the difference the RDR deliberately keeps or is silent on, with its reason;
-the comparison for such a case asserts exactly that difference, so it fails if the difference goes away or
-changes. Every other case must match. There are none at present: the one the first round pinned (a rename move
-does not follow ``alias_of``) was closed in fix round r1 by the engine's shared ``catalog_link_write``, so every
-case matches in both walks and the partial-walk test compares every case too.
-
-The old path's end state is also the golden file ``tests/fixtures/rdr193_reconcile_parity_expected.json``, which
-Step 6 keeps when it deletes the client path. ``NX_PARITY_REGEN_GOLDEN=1`` rewrites it from the old path; without
-it the old path is checked against the file and the commit is checked against the file.
+Each fixture case lives under its own top-level directory; a difference is attributed to the case of its row. Every
+case must match.
 
 Run: ``scripts/build-gate-jar.sh`` then ``uv run pytest -m integration tests/integration/test_rdr193_reconcile_parity.py -p no:randomly``.
 """
@@ -45,8 +36,6 @@ import json
 import os
 import re
 import subprocess
-import time
-import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,10 +44,9 @@ from typing import Any
 import pytest
 
 from nexus import indexer
-from nexus.catalog import link_generator
+from nexus.catalog import link_generator, reconcile_run
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.repo_identity import _repo_identity
-from nexus.sensitive_write import SENSITIVE_REASON, sensitive_glob_matches
 from tests._engine_substrate import ensure_engine
 from tests._tenant_pool import psql
 
@@ -212,12 +200,6 @@ EXPECTED_ACTIONS = {
     "id_deleted_foreign/held.txt": "deleted", "del_dup/dup.txt": "deleted",
 }
 
-#: case -> (reason, the RDR line, the exact differences ``(section, key, column, old, new)``). A case that is not
-#: here must match. Empty since fix round r1: the engine's ``catalog_link_write`` makes a rename move follow
-#: ``alias_of`` as today's ``POST /link`` does, which closed the one divergence the first round pinned.
-KNOWN_DIVERGENCES: dict[str, tuple[str, str, list[tuple]]] = {}
-
-
 # ── plumbing: raw SQL against the tenant ─────────────────────────────────────────────────────────────────────────
 
 def _psql(sql: str, tenant: str, **variables: str) -> str:
@@ -252,7 +234,7 @@ def _update_doc(tenant: str, tumbler: str, set_clause: str) -> None:
     assert got == 1, f"expected to update exactly one row of {tumbler}, updated {got}"
 
 
-# ── the two copies ───────────────────────────────────────────────────────────────────────────────────────────────
+# ── the copy ───────────────────────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class Copy:
@@ -336,11 +318,12 @@ class _Recorder:
         return (self.calls.get(kind) or [[]])[-1]
 
 
-# ── the old path ─────────────────────────────────────────────────────────────────────────────────────────────────
+# ── the hook ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
-def _run_old(c: Copy, offered: list[F], *, head: str, complete: bool, keep: list[str], deleted: list[str],
-             globs: tuple[str, ...] = SENSITIVE_GLOBS) -> dict:
-    """Today's client path, exactly as ``index_repository`` drives it: the catalog hook, then the deletions."""
+def _run_hook(c: Copy, offered: list[F], *, head: str, complete: bool, keep: list[str], deleted: list[str],
+              globs: tuple[str, ...] = SENSITIVE_GLOBS, captured: list | None = None) -> dict:
+    """The catalog hook, exactly as ``index_repository`` drives it: one reconcile run (stage, commit, poll) over the
+    files, the held-back files as ``keep`` rows and the paths git reported gone as ``deleted`` rows."""
     stale: set[str] = set()
     cdh: dict[str, str] = {}
     fence: dict[str, tuple[str, str]] = {}
@@ -350,84 +333,15 @@ def _run_old(c: Copy, offered: list[F], *, head: str, complete: bool, keep: list
     file_to_doc = indexer._catalog_hook(
         repo=c.repo, repo_name=c.name, repo_hash=c.hash, head_hash=head,
         indexed_files=[(c.path(f.rel), f.ctype, COLLECTIONS[f.ctype]) for f in offered],
-        skip_housekeeping=not complete,
+        walk="complete" if complete else "partial",
         stale_fence_doc_ids=stale, complete_doc_hashes=cdh, needs_fence=fence, unregistered=unreg,
-        housekeeping_keep=[c.path(r) for r in keep] or None,
+        keep_paths=[c.path(r) for r in keep] or None, deleted_relpaths=list(deleted) or None,
         sensitive_globs=globs, sensitive_wanted=wanted, sensitive_confirmed=confirmed,
     )
-    if deleted:
-        indexer._delete_docs_for_paths(c.repo, list(deleted))
-    assert not unreg, f"the old path left files unregistered: {unreg}"
+    assert not unreg, f"the hook left files unregistered: {unreg}"
     return {"file_to_doc": {str(p.relative_to(c.repo)): t for p, t in file_to_doc.items()},
-            "stale": stale, "cdh": cdh, "fence": fence, "confirmed": {str(p.relative_to(c.repo)) for p in confirmed}}
-
-
-# ── the new path ─────────────────────────────────────────────────────────────────────────────────────────────────
-
-def _stage_row(c: Copy, f: F, head: str, seq: int) -> dict:
-    """One ``present`` landing row: what ``_catalog_hook`` computes per file before it talks to the catalog."""
-    abs_path = c.path(f.rel)
-    try:
-        mtime = abs_path.stat().st_mtime
-    except OSError:
-        mtime = 0.0
-    try:
-        raw = abs_path.read_bytes()
-        file_hash = hashlib.sha256(raw).hexdigest()
-    except OSError:
-        raw, file_hash = None, ""
-    stamp = {**indexer._rdr_register_stamp(f.ctype, raw), **indexer.document_register_meta(f.ctype, f.rel)}
-    return {
-        "kind": "present", "seq": seq, "file_path": f.rel, "content_type": f.ctype, "title": abs_path.name,
-        "physical_collection": COLLECTIONS[f.ctype], "head_hash": head, "source_mtime": mtime,
-        "content_hash": file_hash,
-        "base_metadata": indexer._register_time_meta(f.rel, file_hash) or {},
-        "stamp": stamp,
-        "sensitive": bool(sensitive_glob_matches(f.rel, SENSITIVE_GLOBS)),
-    }
-
-
-def _run_new(cat: HttpCatalogClient, c: Copy, offered: list[F], *, head: str, complete: bool, keep: list[str],
-             deleted: list[str]) -> dict:
-    """Stage, commit and poll over the engine's routes."""
-    rows = [_stage_row(c, f, head, i) for i, f in enumerate(offered)]
-    seq = len(rows)
-    for rel in keep:
-        rows.append({"kind": "keep", "seq": seq, "file_path": rel})
-        seq += 1
-    for rel in deleted:
-        rows.append({"kind": "deleted", "seq": seq, "file_path": rel})
-        seq += 1
-    run_id = f"parity-{uuid.uuid4()}"
-    walk = "complete" if complete else "partial"
-    for start in range(0, len(rows), 1000):
-        staged = cat._post("/reconcile/stage", {"owner": c.owner, "run_id": run_id, "walk": walk,
-                                                "expected_rows": len(rows), "rows": rows[start:start + 1000]})
-        assert staged["staged"] == len(rows[start:start + 1000])
-    job = cat._post("/reconcile/commit", {"owner": c.owner, "run_id": run_id})["job_id"]
-    deadline = time.monotonic() + 180
-    while True:
-        status = cat._get(f"/reconcile/{job}")
-        if status["status"] != "running":
-            break
-        assert time.monotonic() < deadline, f"the commit job {job} is still running after 180 s"
-        time.sleep(0.2)
-    assert status["status"] == "succeeded", f"the commit failed: {status}"
-    outcome = status["outcome"]
-    # the same run committed twice returns the stored outcome and writes nothing (guard of the function)
-    again = cat._post("/reconcile/commit", {"owner": c.owner, "run_id": run_id})["job_id"]
-    for _ in range(300):
-        s2 = cat._get(f"/reconcile/{again}")
-        if s2["status"] != "running":
-            break
-        time.sleep(0.2)
-    assert s2["status"] == "succeeded" and s2["outcome"] == outcome, "a second commit of the run changed the outcome"
-    # the upsert never flags an existing document: the client raises the pending ones through the audited route,
-    # with the reason the hook uses today (RDR-193 Part A1, 'Sensitivity on existing rows')
-    pending = list(outcome["sensitivity_pending"])
-    if pending:
-        cat.set_sensitivity(pending, True, reason=f"{SENSITIVE_REASON}: nx index repo --sensitive-glob")
-    return {"outcome": outcome, "raised": set(pending), "staged": {r["file_path"]: r for r in rows}, "ctype": {f.rel: f.ctype for f in offered}}
+            "stale": stale, "cdh": cdh, "fence": fence, "confirmed": {str(p.relative_to(c.repo)) for p in confirmed},
+            "outcome": (captured or [None])[-1]}
 
 
 # ── the snapshot: one copy's end state, normalised ───────────────────────────────────────────────────────────────
@@ -550,7 +464,7 @@ def _case_of_diff(d: tuple) -> str:
 
 # ── the structures the hook's callers read ───────────────────────────────────────────────────────────────────────
 
-def _old_structures(snap: Snapshot, run: dict, rec: _Recorder) -> None:
+def _structures(snap: Snapshot, run: dict, rec: _Recorder) -> None:
     key = snap.key_of
     snap.add_structure("file_to_doc_id", {rel: key[t] for rel, t in run["file_to_doc"].items()})
     snap.add_structure("needs_fence", {key[t]: [h, coll] for t, (h, coll) in run["fence"].items()})
@@ -561,35 +475,6 @@ def _old_structures(snap: Snapshot, run: dict, rec: _Recorder) -> None:
     snap.add_structure("rdr_dependency_seed", {key[t]: True for t in rec.last("rdr-dependency")})
 
 
-def _new_structures(snap: Snapshot, run: dict) -> None:
-    """The caller-side structures, rebuilt from the outcome's rows by the rules of RDR-193 Part A2."""
-    key = snap.key_of
-    rows = run["outcome"]["rows"]
-    staged = run["staged"]
-    placed = [r for r in rows if r["action"] in ("created", "updated", "unchanged", "same_owner_by_uri", "foreign_owner")]
-    snap.add_structure("file_to_doc_id", {r["file_path"]: key[r["tumbler"]] for r in placed})
-    fence, stale, cdh = {}, {}, {}
-    for r in rows:
-        s = staged[r["file_path"]]
-        if r["action"] == "created" or (r["action"] == "updated" and r["content_hash_changed"]):
-            fence[key[r["tumbler"]]] = [s["content_hash"], s["physical_collection"]]
-        if r["action"] in ("updated", "unchanged"):
-            if r["index_state"] in ("indexing", "failed"):
-                stale[key[r["tumbler"]]] = True
-            if r["index_state"] == "complete" and r["index_content_hash"]:
-                cdh[key[r["tumbler"]]] = r["index_content_hash"]
-    snap.add_structure("needs_fence", fence)
-    snap.add_structure("stale_fence_doc_ids", stale)
-    snap.add_structure("complete_doc_hashes", cdh)
-    snap.add_structure("sensitive_confirmed", {r["file_path"]: True for r in rows
-                                               if (r["sensitive"] or r["tumbler"] in run["raised"]) and r["action"] != "deleted"})
-    created = {key[r["tumbler"]]: True for r in rows if r["action"] == "created"}
-    relink = {key[r["tumbler"]]: True for r in rows
-              if run["ctype"].get(r["file_path"]) == "rdr" and r["content_hash_changed"]}
-    snap.add_structure("new_tumblers", created)
-    snap.add_structure("rdr_dependency_seed", {**created, **relink})
-
-
 # ── the scenario ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 class Scenario:
@@ -597,7 +482,16 @@ class Scenario:
         self.tenant = tenant
         self.rec = _Recorder()
         self.cat = HttpCatalogClient()
-        self.copies = {label: Copy(label, (tmp_path / f"parity_{label}").resolve(), files=list(FILES)) for label in ("old", "new")}
+        self.copy = Copy("run", (tmp_path / "parity_run").resolve(), files=list(FILES))
+        self.captured: list[dict] = []
+        real = reconcile_run.stage_and_commit
+
+        def capture(*a, **kw):  # noqa: ANN002, ANN003
+            out = real(*a, **kw)
+            self.captured.append(out)
+            return out
+
+        monkeypatch.setattr(reconcile_run, "stage_and_commit", capture)
         monkeypatch.setattr(link_generator, "generate_rdr_filepath_links", self.rec.gen("rdr"))
         monkeypatch.setattr(link_generator, "generate_prose_filepath_links", self.rec.gen("prose"))
         monkeypatch.setattr(link_generator, "generate_pdf_corpus_links", self.rec.gen("pdf"))
@@ -616,7 +510,7 @@ class Scenario:
             c.name, "repo", repo_hash=c.hash, repo_root=str(c.repo.resolve()), description=f"Git repository: {c.name}"))
         c.other = str(self.cat.register_owner(f"parity_other_{c.label}", "curator"))
         _write_seed(c)
-        _run_old(c, _present_at_seed(c), head=SEED_HEAD, complete=True, keep=[], deleted=[], globs=())  # no glob: the existing sensitive row is born unflagged
+        _run_hook(c, _present_at_seed(c), head=SEED_HEAD, complete=True, keep=[], deleted=[], globs=())  # no glob: the existing sensitive row is born unflagged
         for rel, seq in (("ren_shared_hash/p1.txt", "9"), ("ren_shared_hash/p2.txt", "10")):
             assert self.t(c, rel).endswith("." + seq), f"{rel} must be document {seq} of the owner, got {self.t(c, rel)}"
 
@@ -697,16 +591,11 @@ class Scenario:
         before = {d["tumbler"]: d["indexed_at"] for d in pre}
         was_trashed = {d["tumbler"] for d in pre if d["deleted_at"] is not None}
         self.rec.reset()
-        if c.label == "old":
-            run = _run_old(c, offered, head=SEED_HEAD, complete=complete, keep=keep, deleted=deleted)
-        else:
-            run = _run_new(self.cat, c, offered, head=SEED_HEAD, complete=complete, keep=keep, deleted=deleted)
+        self.captured.clear()
+        run = _run_hook(c, offered, head=SEED_HEAD, complete=complete, keep=keep, deleted=deleted, captured=self.captured)
         dump = _dump(self.tenant)
         snap = Snapshot(c, dump, before)
-        if c.label == "old":
-            _old_structures(snap, run, self.rec)
-        else:
-            _new_structures(snap, run)
+        _structures(snap, run, self.rec)
         run["trashed_now"] = {d["tumbler"] for d in dump["docs"]
                               if d["deleted_at"] is not None and snap._owns(d["tumbler"])} - was_trashed
         return snap, run
@@ -718,45 +607,31 @@ def _present_at_seed(c: Copy) -> list[F]:
 
 # ── the report and the assertions ────────────────────────────────────────────────────────────────────────────────
 
-def _verdicts(old: dict, new: dict) -> tuple[dict[str, list[tuple]], dict[str, int]]:
-    diffs = _diff(old, new)
-    rows: Counter = Counter()
-    for section in set(old) | set(new):
-        for key in set(old.get(section, {})) | set(new.get(section, {})):
-            rows[key.split("::", 1)[0]] += 1
-    by_case: dict[str, list[tuple]] = {case: [] for case in rows}
-    for d in diffs:
-        by_case.setdefault(_case_of_diff(d), []).append(d)
-    return by_case, dict(rows)
-
-
 def _fmt(d: tuple) -> str:
-    return f"{d[0]} {d[1]} [{d[2]}]: old={d[3]!r} new={d[4]!r}"
+    return f"{d[0]} {d[1]} [{d[2]}]: golden={d[3]!r} now={d[4]!r}"
 
 
 def _golden_of(snap: Snapshot) -> dict:
     return json.loads(json.dumps(snap.sections, sort_keys=True))
 
 
-def test_the_commit_leaves_what_the_client_path_leaves(tmp_path: Path, t2_tenant: str,
-                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_hook_leaves_what_the_client_path_left(tmp_path: Path, t2_tenant: str,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
     sc = Scenario(tmp_path, t2_tenant, monkeypatch)
     try:
-        old, new = sc.copies["old"], sc.copies["new"]
-        sc.seed(old)
-        sc.seed(new)
-        for c in (old, new):
-            sc.prepare(c)
-            _write_run2(c)
-        snap_old, _ = sc.run(old)
-        snap_new, run_new = sc.run(new)
-        outcome = run_new["outcome"]
+        c = sc.copy
+        sc.seed(c)
+        sc.prepare(c)
+        _write_run2(c)
+        snap, run = sc.run(c)
+        outcome = run["outcome"]
+        assert outcome is not None, "the hook did not stage and commit through reconcile_run"
 
         # ── the cases reached the arms they are for ──
         actions = {r["file_path"]: r["action"] for r in outcome["rows"]}
         wrong = {rel: (want, actions.get(rel)) for rel, want in EXPECTED_ACTIONS.items() if actions.get(rel) != want}
         assert not wrong, f"fixture paths that did not reach their arm (want, got): {wrong}"
-        key = snap_new.key_of
+        key = snap.key_of
         renamed_olds = {key[r["old"]] for r in outcome["renamed"]}
         for rel in ("ren_single/a.txt", "ren_onto_earlier/a.txt", "ren_two_onto_one/m1.txt", "ren_two_onto_one/m2.txt",
                     "ren_link_between/a.txt", "ren_link_between/b.txt", "ren_self_link/a.txt", "ren_link_swept/a.txt",
@@ -764,60 +639,40 @@ def test_the_commit_leaves_what_the_client_path_leaves(tmp_path: Path, t2_tenant
             assert f"M:{rel}#0" in renamed_olds, f"{rel} was not renamed: {sorted(renamed_olds)}"
         assert f"M:ren_link_swept/s.txt#0" in {key[t] for t in outcome["swept"]}, outcome["swept"]
         assert "id_duplicate/dup.txt" in {d["file_path"] for d in outcome["duplicate_path"]}, outcome["duplicate_path"]
-        # the deleted duplicate: the commit trashes the lower tumbler (the old path's row) and reports the other
         dup_rows = [d for d in outcome["duplicate_path"] if d["file_path"] == "del_dup/dup.txt"]
         assert len(dup_rows) == 1, outcome["duplicate_path"]
         trashed_dup = next(r["tumbler"] for r in outcome["rows"] if r["file_path"] == "del_dup/dup.txt")
         assert trashed_dup in outcome["trashed"] and dup_rows[0]["tumbler"] not in outcome["trashed"], outcome["trashed"]
         assert key[trashed_dup] == "M:del_dup/dup.txt#0" and key[dup_rows[0]["tumbler"]] == "M:del_dup/dup.txt#1"
         assert "id_deleted_foreign/held.txt" in {d["file_path"] for d in outcome["deleted_skipped_foreign_owner"]}
-        assert outcome["sensitivity_pending"] == [sc.t(new, "misc/sens_existing.txt")], outcome["sensitivity_pending"]
-        assert set(outcome["trashed"]) == run_new["trashed_now"], (outcome["trashed"], run_new["trashed_now"])
+        assert outcome["sensitivity_pending"] == [sc.t(c, "misc/sens_existing.txt")], outcome["sensitivity_pending"]
+        assert set(outcome["trashed"]) == run["trashed_now"], (outcome["trashed"], run["trashed_now"])
 
-        # ── old path against new path, and both against the golden file ──
-        by_case, row_counts = _verdicts(snap_old.sections, snap_new.sections)
-        golden_now = _golden_of(snap_old)
+        # ── the end state against the golden file ──
+        now = _golden_of(snap)
         if os.environ.get("NX_PARITY_REGEN_GOLDEN") == "1":
             GOLDEN.parent.mkdir(parents=True, exist_ok=True)
-            GOLDEN.write_text(json.dumps(golden_now, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+            GOLDEN.write_text(json.dumps(now, indent=1, sort_keys=True) + "\n", encoding="utf-8")
         assert GOLDEN.exists(), f"{GOLDEN} is missing: run once with NX_PARITY_REGEN_GOLDEN=1"
         golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
-        old_vs_golden = _diff(golden, golden_now)
-        new_vs_golden = _diff(golden, _golden_of(snap_new))
-        golden_by_case: dict[str, list[tuple]] = {}
-        for d in new_vs_golden:
-            golden_by_case.setdefault(_case_of_diff(d), []).append(d)
-
+        diffs = _diff(golden, now)
+        rows: Counter = Counter()
+        for section in set(golden) | set(now):
+            for k in set(golden.get(section, {})) | set(now.get(section, {})):
+                rows[k.split("::", 1)[0]] += 1
+        by_case: dict[str, list[tuple]] = {case: [] for case in rows}
+        for d in diffs:
+            by_case.setdefault(_case_of_diff(d), []).append(d)
         lines = [f"{'case':<24}{'rows':>6}  verdict"]
-        failures: list[str] = []
-        for case in sorted(row_counts):
+        for case in sorted(rows):
             got = by_case.get(case, [])
-            known = KNOWN_DIVERGENCES.get(case)
-            if known is None:
-                verdict = "match" if not got else f"DIVERGES ({len(got)})"
-                if got:
-                    failures += [f"{case}: {_fmt(d)}" for d in got]
-                if golden_by_case.get(case, []) != got:
-                    failures.append(f"{case}: the golden file and the commit disagree differently from the old path")
-            else:
-                reason, rdr_line, pinned = known
-                verdict = f"divergence (RDR {rdr_line}): {reason}"
-                if golden_by_case.get(case, []) != pinned:
-                    failures.append(f"{case}: the golden file and the commit differ other than as pinned")
-                if got != pinned:
-                    failures += [f"{case}: pinned divergence changed: {_fmt(d)}" for d in got if d not in pinned]
-                    failures += [f"{case}: pinned divergence gone: {_fmt(d)}" for d in pinned if d not in got]
-            lines.append(f"{case:<24}{row_counts[case]:>6}  {verdict}")
-        known_unseen = sorted(set(KNOWN_DIVERGENCES) - set(row_counts))
-        failures += [f"{c}: a known divergence for a case the fixture does not have" for c in known_unseen]
-        failures += [f"old path against the golden file: {_fmt(d)}" for d in old_vs_golden]
-        total = sum(row_counts.values())
-        lines.append(f"cases examined {len(row_counts)}, rows compared {total}, "
-                     f"documents {len(snap_old.sections['documents'])}, links {len(snap_old.sections['links'])}, "
-                     f"structures {len(snap_old.sections['structures'])}, skipped 0")
+            lines.append(f"{case:<24}{rows[case]:>6}  {'match' if not got else f'DIVERGES ({len(got)})'}")
+        lines.append(f"cases examined {len(rows)}, rows compared {sum(rows.values())}, "
+                     f"documents {len(now['documents'])}, links {len(now['links'])}, "
+                     f"structures {len(now['structures'])}, skipped 0")
         print("\n".join(lines))  # noqa: T201 — the verdict table is the first-run record; read it with -s
-        assert len(snap_old.sections["links"]) >= 5 and len(snap_old.sections["documents"]) >= 60, "the fixture is vacuous"
-        assert not failures, "\n".join(lines) + "\n\n" + "\n".join(failures)
+        assert len(now["links"]) >= 5 and len(now["documents"]) >= 60, "the fixture is vacuous"
+        assert not diffs, "\n".join(lines) + "\n\n" + "\n".join(_fmt(d) for d in diffs)
     finally:
         sc.close()
 
@@ -828,26 +683,25 @@ def test_a_partial_walk_commit_touches_no_unvisited_row(tmp_path: Path, t2_tenan
     explicit deletion is trashed with no link move (RDR-193 Part A1, 'Partial walk' and 'Explicit deletions')."""
     sc = Scenario(tmp_path, t2_tenant, monkeypatch)
     try:
-        old, new = sc.copies["old"], sc.copies["new"]
-        sc.seed(old)
-        sc.seed(new)
-        for c in (old, new):
-            sc.prepare(c)
-            _write_run2(c)
+        c = sc.copy
+        sc.seed(c)
+        sc.prepare(c)
+        _write_run2(c)
         visited = ["fill/f01.py", "ch_content/doc.txt", "ch_fence/changed.txt", "ch_fence/new.txt", "ren_single/b.txt"]
         # misc/del.txt has one live row; del_dup/dup.txt has two, and only the old path's row (the first in text order) goes
         deleted = ["misc/del.txt", "del_dup/dup.txt"]
-        snap_old, _ = sc.run(old, complete=False, rels=visited, keep=[], deleted=deleted)
-        snap_new, run_new = sc.run(new, complete=False, rels=visited, keep=[], deleted=deleted)
-        outcome = run_new["outcome"]
+        before = {d["tumbler"]: d for d in _dump(sc.tenant)["docs"]}
+        _snap, run = sc.run(c, complete=False, rels=visited, keep=[], deleted=deleted)
+        outcome = run["outcome"]
         assert outcome["renamed"] == [] and outcome["swept"] == [], "a partial walk must not rename or sweep"
-        assert len(outcome["trashed"]) == 2 and set(outcome["trashed"]) == run_new["trashed_now"], outcome["trashed"]
-        by_case, row_counts = _verdicts(snap_old.sections, snap_new.sections)
-        # every case is compared, including any a complete walk pins: nothing is skipped here
-        failures = [f"{c}: {_fmt(d)}" for c, ds in by_case.items() for d in ds]
-        print(  # noqa: T201 — first-run record, read with -s
-            f"partial walk: cases examined {len(row_counts)}, rows compared {sum(row_counts.values())}, "
-              f"differences {sum(len(v) for v in by_case.values())}")
-        assert not failures, "\n".join(failures)
+        assert len(outcome["trashed"]) == 2 and set(outcome["trashed"]) == run["trashed_now"], outcome["trashed"]
+        after = {d["tumbler"]: d for d in _dump(sc.tenant)["docs"]}
+        touched = {r["tumbler"] for r in outcome["rows"] if r["tumbler"]} | set(outcome["trashed"])
+        untouched = [t for t in before if t not in touched and before[t].get("file_path", "").startswith("")
+                     and t.rpartition(".")[0] == c.owner]
+        changed = [t for t in untouched if after.get(t) != before[t]]
+        print(f"partial walk: rows examined {len(untouched)}, rows the walk touched {len(touched)}, changed {len(changed)}")  # noqa: T201 — first-run record, read with -s
+        assert len(untouched) >= 50, "the check is vacuous: too few unvisited rows"
+        assert not changed, f"rows the partial walk did not visit were written: {changed}"
     finally:
         sc.close()

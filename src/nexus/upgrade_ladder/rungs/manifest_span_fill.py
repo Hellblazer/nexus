@@ -88,6 +88,7 @@ from nexus.collection_errors import SupersededCollectionWriteError
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
     managed_service,
+    refuses_managed_unattended,
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
@@ -553,7 +554,7 @@ class ManifestSpanFillRung:
         record = self._record()
         if record is not None and TITLE_RULE_MARK in (getattr(record, "detail", "") or ""):
             return RungStatus(applicable=True, converged=True)
-        if record is not None and not refuses_unbounded_read(self._managed_fn):
+        if record is not None and not refuses_managed_unattended(self._managed_fn):
             # Written before the title rule stripped the document title's suffix (nexus-l8o33): pending once, so the
             # walk's converge, verify and record rewrite it with the mark even when nothing turns out fillable.
             return RungStatus(

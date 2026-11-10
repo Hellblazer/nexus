@@ -129,7 +129,7 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * {@link #FAILING_AFTER} consecutive failures it counts as <i>failing</i>. A restart forgets all of it, so a build
  * that always fails is retried at once after each boot and then backs off again. A success clears the entry, and so
  * does a collection leaving the registry, being superseded or quarantined, or gaining a valid index. A build ended
- * by the connection being terminated (a schema migration, the engine's shutdown) or lost is not a failure of the
+ * by the connection being terminated (a schema migration) or lost is not a failure of the
  * build and is not charged.
  *
  * <p><b>With more than one engine the backoff is bounded, not exponential.</b> The builder lock serialises passes,
@@ -496,8 +496,8 @@ public final class PciReconciler {
 
     /**
      * End the task. A pass in flight is interrupted, and this does not wait for it: an in-flight
-     * {@code CREATE INDEX CONCURRENTLY} ignores the interrupt, and the shutdown hook ends the builder's backend with
-     * {@code BackendReaper.terminateAtShutdown} instead. Harmless when never started or already stopped.
+     * {@code CREATE INDEX CONCURRENTLY} ignores the interrupt, and the shutdown hook leaves the builder's backend
+     * running so the build finishes in Postgres (nexus-f3yqd). Harmless when never started or already stopped.
      */
     public void stop() {
         ScheduledExecutorService toStop;
@@ -942,6 +942,13 @@ public final class PciReconciler {
             }
             adopt(pass, leaf, adoption);
         }
+        // nexus-f3yqd (F): a build that follows the drop of its failed index runs only if that drop happened.
+        Set<String> failedDrops = new HashSet<>();
+        for (Action action : actions) {
+            if (action instanceof Drop d && d.reason() == PciReconcilePlanner.DropReason.FAILED_BUILD) {
+                failedDrops.add(d.name());
+            }
+        }
         for (Action action : actions) {
             if (!pass.live() || Thread.currentThread().isInterrupted()) {
                 return;
@@ -951,6 +958,9 @@ public final class PciReconciler {
                     + "detail=\"a live, indexed collection counted zero rows: a counting failure, never acted on\"",
                     leafId(leaf), s.collection());
                 case Drop d -> drop(pass, leaf, d, tally);
+                case Build b when failedDrops.contains(b.name()) && !tally.droppedIndexes.contains(b.name()) ->
+                    log.info("event=pci_build_skipped reason=failed_index_not_dropped leaf={} index={} "
+                        + "detail=\"the next pass drops it again and builds\"", leafId(leaf), b.name());
                 case Build b -> build(pass, leaf, dim, b, tally);
             }
         }
@@ -1079,7 +1089,7 @@ public final class PciReconciler {
                 recordFailure(key, build.name());
             }
             // The pass ended before the statement went out (a migration, a privilege error), or the backend was ended
-            // under it (a migration walk or the shutdown terminated it; the network dropped): not this collection's fault.
+            // under it (a migration walk terminated it; the network dropped): not this collection's fault.
             default -> log.info("event=pci_index_build_not_done leaf={} index={} outcome={}", leafId(leaf),
                 build.name(), outcome);
         }

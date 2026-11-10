@@ -1977,6 +1977,21 @@ def index_repo_cmd(
         # stops MinerU work only, like the stop of nexus-tr1rj.13).
         _bounds_failure = _report_mineru_bounds_hold(stats or {})
         _run_failure = _run_failure or _bounds_failure
+        # RDR-193 Step 6 (nexus-u5m5g.7, r1): the engine commit of the catalog reconcile failed. Nothing of the run was
+        # registered, and a delta run of only deletions names no file, so the identity-drop summary below cannot be what
+        # fails it. Named first: it is the cause of every dropped file the run lists.
+        _catalog_hook_failed = (stats or {}).get("catalog_hook_failed", 0)
+        if _catalog_hook_failed:
+            click.echo(
+                "Warning: the catalog reconcile step failed (RDR-193), so no chunk of this run was written. If the "
+                "failure came before the commit, nothing was registered or removed. See the catalog_hook_failed log "
+                "line above.",
+                err=True,
+            )
+            _run_failure = _run_failure or click.ClickException(
+                "the catalog reconcile step failed, so this run wrote no chunks (nexus-u5m5g.7). The --since-head "
+                "base was not advanced. Re-run 'nx index repo' once the catalog service is healthy."
+            )
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
             # nexus-wbfpw.29 round 3 (round 6: same VERIFIED set the

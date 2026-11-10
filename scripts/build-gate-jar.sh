@@ -24,11 +24,14 @@
 # This script is that same step for a developer's machine, so a local run proves
 # what CI proves.
 #
-# The stamp is max(REQUIRED_ENGINE_VERSION, NOTE_URI_MIN_ENGINE_VERSION) from
+# The stamp is max(REQUIRED_ENGINE_VERSION, NOTE_URI_MIN_ENGINE_VERSION,
+# RESOLVE_SENSITIVE_MIN_ENGINE_VERSION) from
 # src/nexus/engine_version.py, so it cannot drift when the pin bumps, and the gate jar is never
 # below the note-write floor (RDR-231, nexus-bivz3.13: a note write against an engine under
-# NOTE_URI_MIN_ENGINE_VERSION is refused, and the gate jar must stay writable). The floor is
-# (0, 0, 0) while unset, so until the landing bead sets it the stamp is REQUIRED_ENGINE_VERSION.
+# NOTE_URI_MIN_ENGINE_VERSION is refused, and the gate jar must stay writable) nor below the
+# resolve_or_register `sensitive` floor (RDR-193 Step 6, nexus-u5m5g.7: a sensitive titled put against an
+# engine under RESOLVE_SENSITIVE_MIN_ENGINE_VERSION is refused). A floor is (0, 0, 0) while unset, so
+# until a landing bead sets it the stamp is REQUIRED_ENGINE_VERSION.
 #
 # ALSO stamps build_ref (nexus-308ph): a per-run artifact-identity
 # discriminator, <git short sha>+<per-run nonce>. release_version alone
@@ -160,7 +163,7 @@ def floor(name):
     m = re.search(r'^' + name + r'[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', s, re.M)
     assert m, name + ' not parseable — fix the regex before stamping'
     return tuple(int(g) for g in m.groups())
-print('.'.join(map(str, max(floor('REQUIRED_ENGINE_VERSION'), floor('NOTE_URI_MIN_ENGINE_VERSION')))))
+print('.'.join(map(str, max(floor('REQUIRED_ENGINE_VERSION'), floor('NOTE_URI_MIN_ENGINE_VERSION'), floor('RESOLVE_SENSITIVE_MIN_ENGINE_VERSION')))))
 ")
 
 # nexus-308ph: git short sha + a per-build nonce (epoch seconds + PID) —

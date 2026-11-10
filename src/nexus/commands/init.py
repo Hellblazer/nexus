@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 import structlog
@@ -34,6 +35,9 @@ import nexus.config as _config
 from nexus.commands._help_links import VOYAGE_LOCAL_MODE_EPILOG
 from nexus.config import set_config_value
 from nexus.db.local_ef import _TIER1_MODEL
+
+if TYPE_CHECKING:
+    from nexus.progress.step_report import StepReporter
 
 _log = structlog.get_logger(__name__)
 
@@ -412,6 +416,10 @@ def _poll_service_lease(config_dir: Path, *, timeout: float = 60.0):  # noqa: AN
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = service_identity()
     deadline = time.monotonic() + timeout
+    # nexus-mjmjl: say so while the engine migrates instead of waiting silent.
+    from nexus.progress.boot_work import Announcer, local_entries  # noqa: PLC0415 — stdlib-only, deferred
+
+    announcer = Announcer(lambda line: click.echo(line, err=True), lambda: local_entries(config_dir))
     while time.monotonic() < deadline:
         # nexus-jw44t: route through the shared discover-and-mark seam — this
         # is the default `nx init --service --yes` autostart path on any host
@@ -420,6 +428,7 @@ def _poll_service_lease(config_dir: Path, *, timeout: float = 60.0):  # noqa: AN
         rec = _service_endpoint.discover_storage_service_lease(registry, scope)
         if rec is not None:
             return rec
+        announcer.poll()
         time.sleep(0.5)
     return None
 
@@ -1178,16 +1187,37 @@ def init_cmd(
     from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     autostart = _decide_autostart(assume_yes, no_autostart)
+    # nexus-mjmjl: the first-run path a new user hits says what it is doing:
+    # each step announced, a heartbeat while the downloads and the first boot
+    # run, done in or failed after, and a summary (the shared step reporter).
+    from nexus.progress.step_report import StepReporter  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+
+    reporter = StepReporter(3, name="nx init")
+    first = (
+        "on a first run this downloads the engine, its PostgreSQL bundle and the embedding model and "
+        "starts the service: a few minutes then"
+    )
+    again = "Re-run `nx init`: it keeps what is already in place and goes on from there."
+    no_service = "ended without a running service"
     try:
         if autostart:
             # Self-reporting; handles cloud-internal, activation-error fallback,
             # lease-timeout, and success messaging internally.
-            lease = _provision_and_autostart_service(embedder)
+            with reporter.step(
+                "Provision the local service and start it through the autostart unit", first, remedy=again,
+            ) as step:
+                lease = _provision_and_autostart_service(embedder)
+                if lease is None:
+                    step.end_note = no_service
             if lease is not None:
-                _converge_ladder_best_effort()
-                _seed_builtin_plans_best_effort()
+                _finish_local_init(reporter)
+            else:
+                reporter.summary()
             return
-        lease = provision_and_start_service(embedder)
+        with reporter.step("Provision and start the local service", first, remedy=again) as step:
+            lease = provision_and_start_service(embedder)
+            if lease is None:
+                step.end_note = no_service
     except StorageServiceStartError:
         # No native binary available and none acquirable. PG is provisioned and
         # _ensure_service_binary_step already printed an actionable install
@@ -1210,14 +1240,26 @@ def init_cmd(
             "NX_LOCAL=1 to force a local service, or configure a managed endpoint "
             "with `nx config init`."
         )
+        reporter.summary()
         return
+    _finish_local_init(reporter)
+    # RDR-157 P4.1 / RDR-174 §3: one command left the user with a running backend.
+    return
+
+
+def _finish_local_init(reporter: StepReporter) -> None:
+    """The two steps after the service is serving, then the summary."""
     # nexus-9xfx5: converge the ladder now that the backend is serving, so the
     # first `nx doctor` on a fresh box is clean (no vacuous pending rung, no
     # missing diag view).
-    _converge_ladder_best_effort()
+    with reporter.step(
+        "Run the upgrade ladder", "fills new fields; quick on a fresh store",
+        remedy="Run `nx upgrade`: every ladder step is safe to repeat.",
+    ):
+        _converge_ladder_best_effort()
     # nexus-e1ti4: seed the builtin plan-template library now that the ladder
     # has converged — a virgin box otherwise pays the inline-planner tax on
     # every nx_answer call until someone runs `nx plan reseed` by hand.
-    _seed_builtin_plans_best_effort()
-    # RDR-157 P4.1 / RDR-174 §3: one command left the user with a running backend.
-    return
+    with reporter.step("Seed the builtin plan library"):
+        _seed_builtin_plans_best_effort()
+    reporter.summary()

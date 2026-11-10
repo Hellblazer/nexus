@@ -932,7 +932,8 @@ class TestPipelineIndexPdf:
         reader.by_source_uri.return_value = None
         reader.curator_owner_tumbler_by_name.return_value = "1.99"
         cat_writer = MagicMock()
-        cat_writer.register.side_effect = RuntimeError("integrity constraint violation")
+        # RDR-193 Step 6 (nexus-u5m5g.7): the curator pre-flight registers through resolve_or_register
+        cat_writer.resolve_or_register.side_effect = RuntimeError("integrity constraint violation")
 
         fake_result = _er(2)
         fake_chunks = _tc(
@@ -955,9 +956,9 @@ class TestPipelineIndexPdf:
         mock_t3.upsert_chunks_with_embeddings.assert_not_called()
         assert writer.instances == []
         assert db.get_pipeline_state("streamregfail1") is None
-        # cat_writer.register was reached (the pre-flight call in pipeline_index_pdf) --
+        # cat_writer.resolve_or_register was reached (the pre-flight call in pipeline_index_pdf) --
         # confirms the broken double was actually on the path, not bypassed.
-        cat_writer.register.assert_called()
+        cat_writer.resolve_or_register.assert_called()
 
         drops = get_manifest_identity_drops()
         assert drops and all(d.get("written") is False for d in drops), (

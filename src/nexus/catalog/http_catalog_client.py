@@ -97,6 +97,7 @@ from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+from nexus.catalog.reconcile_client import CatalogReconcileError, ReconcileClient, ResolveOutcome  # noqa: F401 - re-exported: the public names the callers import from here
 from nexus.catalog.write_outcome import PreSendArgumentError
 from nexus.errors import CombinedWriteEmbedTimeoutError, EngineOlderThanClientError, IndexRunVerifyRefused
 
@@ -1886,6 +1887,16 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             idempotent=False,
         )
         return dict(result or {})
+
+    # RDR-193 Step 6 (nexus-u5m5g.7): the reconcile client, its contract and its docstrings are in reconcile_client.py
+    def reconcile_stage(self, owner: str, run_id: str, walk: str, expected_rows: int, rows: list[dict]) -> int:
+        return ReconcileClient(self._post, self._get).stage(owner, run_id, walk, expected_rows, rows)
+
+    def reconcile_commit(self, owner: str, run_id: str) -> dict:
+        return ReconcileClient(self._post, self._get).commit(owner, run_id)
+
+    def resolve_or_register(self, owner_name: str, **kwargs: Any) -> ResolveOutcome:
+        return ReconcileClient(self._post, self._get).resolve_or_register(owner_name, **kwargs)
 
     def update_many(self, updates: list[dict]) -> list[int]:
         """Batch-update N documents' fields; returns per-entry update counts

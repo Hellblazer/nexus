@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import contextlib
+
 import click
 import structlog
 
@@ -2926,7 +2928,7 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
 )
 
 
-def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> bool:
+def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET, *, progress: Any = None) -> bool:
     """Run the cheap/read-only opt-in checks promoted into the default
     sweep (see the classification table above). Additive output; it does
     not gate (see the non-gating note above) EXCEPT for the rows named in
@@ -2967,7 +2969,13 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> b
         runner = runners[name]
         click.echo(f"\n--- {name} ---")
         try:
-            if runner() is True and name in _GATING_SUPPLEMENTARY_CHECKS:
+            # nexus-mjmjl: under the sweep's reporter, so a slow one shows its
+            # elapsed time and is listed with the slow checks at the end.
+            # prints=True: these runners echo their own result, so their step line is
+            # a whole line rather than an in-place redraw (review r2).
+            with progress.step(name, prints=True) if progress is not None else contextlib.nullcontext():
+                result = runner()
+            if result is True and name in _GATING_SUPPLEMENTARY_CHECKS:
                 gating_failed = True
         except click.exceptions.Exit:
             # The check already printed its own failure/status detail;
@@ -2989,6 +2997,49 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> b
     return gating_failed
 
 
+def _say_if_the_engine_is_migrating() -> None:
+    """nexus-mjmjl: a check that needs the engine waits while it migrates; say
+    so first, on stderr so ``--json`` stays clean. Never raises."""
+    try:
+        import nexus.config as _config  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+        from nexus.progress.boot_work import notice  # noqa: PLC0415 — stdlib-only, deferred as above
+
+        lines = notice(_config.nexus_config_dir())
+    except Exception:  # noqa: BLE001 — advisory: a doctor run never fails on it
+        return
+    for line in lines:
+        click.echo(line, err=True)
+
+
+#: Checks at least this slow are listed after the sweep (nexus-mjmjl).
+_DOCTOR_SLOW_LIST_S: float = 1.0
+
+
+def _doctor_progress() -> Any:
+    """The sweep's progress on stderr (nexus-mjmjl): each check's name as it
+    starts (the core checks redrawn in place on a terminal), elapsed time once a check passes
+    3 s, a line for each slow check, and the slow ones listed at the end.
+    stderr keeps ``--json``'s stdout one parseable document."""
+    import sys  # noqa: PLC0415 — stdlib
+
+    from nexus.progress.step_report import StepReporter  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+
+    try:
+        tty = bool(sys.stderr.isatty())
+    except Exception:  # noqa: BLE001 — an odd stream reads as no terminal
+        tty = False
+    # On a terminal each check's name is redrawn in place, with elapsed time
+    # from 3 s. Elsewhere (a pipe, an agent) a check is named only once it has
+    # run a second (lazy), with a heartbeat every 30 s. No error text is
+    # printed: a check's own row says what failed, and an exception can carry
+    # a credential the engine echoed (review r1).
+    return StepReporter(
+        0, echo=lambda text: click.echo(text, err=True), stream=sys.stderr, tty=tty, compact=True,
+        slow_s=3.0, heartbeat_s=3.0 if tty else 30.0, announce="Checking {what}{detail}", name="nx doctor",
+        show_reason=False, lazy=not tty,
+    )
+
+
 @click.command("doctor", epilog=COLLECTIONS_RULES_EPILOG)
 @click.option(
     "--clean-checkpoints",
@@ -3006,8 +3057,9 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> b
     "--fix",
     is_flag=True,
     default=False,
-    help="Reclaim catalog garbage (orphaned links, tombstones past 1 day); "
-         "then HNSW ef tuning on local collections (local mode only).",
+    help="DELETE catalog garbage, permanently: orphaned links, tombstoned documents "
+         "past 1 day and their stranded chunks (no undo; preview the counts with "
+         "--fix --dry-run). Then HNSW ef tuning on local collections (local mode only).",
 )
 @click.option(
     "--fix-paths",
@@ -3020,7 +3072,7 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> b
     is_flag=True,
     default=False,
     help="Report affected entries without writing changes "
-         "(use with --fix-paths or --trim-telemetry).",
+         "(use with --fix, --fix-paths or --trim-telemetry).",
 )
 @click.option(
     "--check-schema",
@@ -3491,6 +3543,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                expect_host: str | None,
                git_hooks_scope: str | None) -> None:
     """Verify that all required services and credentials are available."""
+    _say_if_the_engine_is_migrating()
     if json_out:
         # nexus-0vycz: --json is honored by the main sweep (no mode flag)
         # plus --check-search / --check-quotas / --check-mcp-logs. Every
@@ -3684,6 +3737,25 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         _run_probe_edge(expect_host=expect_host)
         return
 
+    if fix and dry_run:
+        # First-run audit item 27 (nexus-mjmjl): --fix deletes for good, so the row
+        # that suggests it also offers this preview, which counts exactly what --fix
+        # would delete (the same reads catalog_garbage makes) and writes nothing.
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.garbage import TRASH_MAX_AGE_DAYS, catalog_garbage  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        preview = catalog_garbage(make_catalog_reader())
+        if preview.error:
+            raise click.ClickException(
+                f"could not count catalog garbage: {preview.error.rstrip('. ')}. Check the engine with `nx doctor`."
+            )
+        click.echo(
+            f"--fix would delete, permanently: {preview.orphaned_links} orphaned link(s) (links whose"
+            f" document no longer exists), {preview.trash_documents} document(s) deleted more than"
+            f" {TRASH_MAX_AGE_DAYS} day ago, and the {preview.stranded_chunks} chunk(s) those documents"
+            " left behind. Nothing was deleted; run `nx doctor --fix` to delete them."
+        )
+        return
+
     if fix:
         # The garbage sweep's reclaim half (nexus.garbage, Sam 2026-09-05):
         # the main sweep counts catalog litter on every run; this is the
@@ -3860,10 +3932,16 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     # One GET /v1/status serves the "Ownerless writes", "Engine reaper" and "Per-collection indexes" rows and the engine-activity block.
     from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    engine_status = fetch_engine_status()
+    progress = _doctor_progress()
+    # nexus-mjmjl: the status read goes through the engine; name it first, so a
+    # busy engine shows where the time goes instead of a silent terminal.
+    with progress.step("the engine's status"):
+        engine_status = fetch_engine_status()
     results, is_local = run_health_checks(
         git_hooks_scope=git_hooks_scope, engine_status=engine_status, verbose=verbose,
+        progress=progress,
     )
+
     output, failed = format_health_for_cli(results, local_mode=is_local)
     supplementary_failed = False
     if json_out:
@@ -3872,7 +3950,8 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         click.echo(format_health_for_json(results, local_mode=is_local))
     else:
         click.echo(output)
-        supplementary_failed = _run_supplementary_checks(engine_status) is True
+        supplementary_failed = _run_supplementary_checks(engine_status, progress=progress) is True
+    progress.summary(min_s=_DOCTOR_SLOW_LIST_S)
 
     # RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv bridge notice is RETIRED
     # here. A pending Chroma→pgvector cutover is reported by the ladder's own

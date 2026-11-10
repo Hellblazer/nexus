@@ -1068,7 +1068,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: None,  # no live lease
-            _run_fn=lambda cmd, **kw: subprocess_calls.append(cmd),
+            _run_fn=lambda cmd, **kw: (subprocess_calls.append(cmd), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
         )
 
@@ -1091,7 +1091,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,  # live lease
-            _run_fn=lambda cmd, **kw: subprocess_calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (subprocess_calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
         )
 
@@ -1131,7 +1131,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,
-            _run_fn=lambda cmd, **kw: subprocess_calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (subprocess_calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
             _installed_version_fn=lambda: "9.9.9",
         )
@@ -1152,7 +1152,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,
-            _run_fn=lambda cmd, **kw: subprocess_calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (subprocess_calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
             _installed_version_fn=lambda: "9.9.9",
         )
@@ -1171,7 +1171,7 @@ class TestCycleStorageServiceToCurrent:
             calls: list[list[str]] = []
             _cycle_storage_service_to_current(
                 _discover_fn=lambda lease=lease: lease,
-                _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+                _run_fn=lambda cmd, **kw: (calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
                 _nx_bin_fn=lambda: ["nx"],
                 _installed_version_fn=lambda: "9.9.9",
             )
@@ -1197,7 +1197,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,
-            _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
         )
         assert calls == [], "default _installed_version_fn must drive the skip"
@@ -1223,7 +1223,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,
-            _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
         )
         assert len(calls) == 2, (
@@ -1243,7 +1243,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=lambda: fake_record,
-            _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
             _installed_version_fn=lambda: "",
         )
@@ -1283,7 +1283,7 @@ class TestCycleStorageServiceToCurrent:
 
         _cycle_storage_service_to_current(
             _discover_fn=_real_discover,
-            _run_fn=lambda cmd, **kw: subprocess_calls.append(list(cmd)),
+            _run_fn=lambda cmd, **kw: (subprocess_calls.append(list(cmd)), subprocess.CompletedProcess(cmd, 0))[1],
             _nx_bin_fn=lambda: ["nx"],
         )
 
@@ -5249,6 +5249,70 @@ class TestWaitForServiceReadyMigrationAware:
                 sup._wait_for_service_ready(fake_proc, 19999, timeout=60.0)
 
         assert "readiness_timeout" in cleanup_calls
+
+    def test_a_running_migration_is_recorded_for_other_commands_and_cleared_when_ready(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """nexus-mjmjl: while the engine migrates, the supervisor writes the
+        record that ``nx doctor`` and ``nx upgrade`` read to say a migration
+        is running; once the engine answers, the record is gone."""
+        import nexus.daemon.readiness as readiness
+        from nexus.daemon import migration_status
+        from nexus.progress import boot_work
+
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=51010)
+        log_lines = iter([["event=schema_migration_start"]])
+        seen_during: list[str | None] = []
+
+        def health(_port: int) -> HealthProbe:
+            if len(seen_during) < 3:
+                lines = boot_work.notice(config_dir)
+                seen_during.append(lines[0] if lines else None)
+                return HealthProbe.UNKNOWN
+            return HealthProbe.OK
+
+        with (
+            patch.object(sup, "_probe_service_health", side_effect=health),
+            patch.object(sup, "_build_log_tailer", return_value=lambda: next(log_lines, [])),
+            patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.EXECUTING),
+        ):
+            sup._wait_for_service_ready(fake_proc, 19999, timeout=60.0)
+
+        assert any(line and line.startswith("The engine is migrating its database") for line in seen_during)
+        assert boot_work.notice(config_dir) == []
+        assert not migration_status.status_path(config_dir).exists()
+
+    def test_a_migration_that_ends_in_a_crash_leaves_no_record(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """nexus-mjmjl: the record is cleared on every way the wait ends, not
+        only on success: here the engine exits mid-migration."""
+        import nexus.daemon.readiness as readiness
+        from nexus.daemon import migration_status
+
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=51011)
+        log_lines = iter([["event=schema_migration_start"]])
+        polls = {"n": 0}
+
+        def poll() -> int | None:
+            polls["n"] += 1
+            if polls["n"] == 3:
+                assert migration_status.status_path(config_dir).exists(), "recorded while migrating"
+            return 137 if polls["n"] >= 3 else None
+
+        fake_proc.poll = poll  # type: ignore[method-assign]
+        with (
+            patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN),
+            patch.object(sup, "_build_log_tailer", return_value=lambda: next(log_lines, [])),
+            patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.EXECUTING),
+            patch.object(sup, "_release_stale_changelog_lock"),
+        ):
+            with pytest.raises(StorageServiceStartError, match="exited with code 137"):
+                sup._wait_for_service_ready(fake_proc, 19999, timeout=60.0)
+        assert polls["n"] >= 3
+        assert not migration_status.status_path(config_dir).exists()
 
     def test_waiting_for_lock_never_triggers_cleanup_on_its_own(
         self, config_dir: Path, clock: _FakeClock

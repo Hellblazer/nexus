@@ -8,7 +8,6 @@ import ch.qos.logback.core.read.ListAppender;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
-import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.BackendReaper;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.db.SchemaMigrator;
@@ -39,16 +38,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * RDR-227 Step 2 (nexus-43ulx.17): both ways the engine ends the per-collection index builder's backend.
  *
- * <p><b>Shutdown.</b> The builder is a separate admin session named {@code nexus-pci-builder-<nonce>}.
- * {@code BackendReaper.terminateOwnBackends} matches by equality and runs as the pool's role, which cannot signal
- * the admin role's backend, so the hook needs a second call with the admin values. The shutdown test runs a
- * long statement on a builder-named admin session and on a pool-named service session and checks that one call to
- * {@link BackendReaper#terminateAtShutdown} ends both.
+ * <p><b>Shutdown</b> (nexus-f3yqd). {@code BackendReaper.terminateAtShutdown} ends the pool's backends and leaves the
+ * builder's, a long statement on a builder-named admin session, running with its advisory lock: the build finishes in
+ * Postgres and the next engine adopts it.
  *
  * <p><b>Migration.</b> {@code SchemaMigrator.migrate} ends every builder backend of its database once it holds
- * its lock, so a {@code CREATE INDEX CONCURRENTLY} cannot deadlock a changeset on the same leaf. Terminated, not
- * cancelled: the session ends and takes the builder's lock with it, and the pass reports closed and starts no
- * later build.
+ * its lock, but only when the walk has a schema changeset to run (or a partition repair to make): with only runAlways
+ * changesets pending it leaves them be, because their bodies take no lock that conflicts with a build. When it does end
+ * a build it terminates, never cancels: the session ends and takes the builder's lock with it, and the pass reports
+ * closed and starts no later build.
  *
  * <p>The builder's admin credentials are the container superuser (it owns the leaves, as {@code nexus_admin} does
  * in production). Long statements are {@code pg_sleep}: they hold a backend the way a build does, and the
@@ -252,14 +250,124 @@ class PciBuilderTerminationIntegrationTest {
         return appender.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
     }
 
+    /**
+     * An open transaction holding ROW EXCLUSIVE on the leaf. A {@code CREATE INDEX CONCURRENTLY} on that leaf has by
+     * then committed its invalid catalog entry and waits for this transaction to end: a build held open mid-flight.
+     */
+    final class LeafWriter implements AutoCloseable {
+        private final Connection conn;
+        private boolean closed;
+
+        LeafWriter(PciCatalog.Leaf leaf) throws Exception {
+            conn = pg.createConnection("");
+            conn.setAutoCommit(false);
+            PgContainerHelper.lockTable(conn, DSL.table(DSL.name(leaf.schema(), leaf.name())),
+                PgContainerHelper.LockMode.ROW_EXCLUSIVE);
+        }
+
+        @Override
+        public void close() throws Exception {
+            if (!closed) {
+                closed = true;
+                conn.rollback();
+                conn.close();
+            }
+        }
+    }
+
+    /**
+     * An open REPEATABLE READ transaction that has taken a snapshot and holds no lock on the leaf: a {@code CREATE INDEX
+     * CONCURRENTLY} finishes its builds and then waits for it (older snapshots), still holding its
+     * ShareUpdateExclusiveLock on the leaf.
+     */
+    final class SnapshotHolder implements AutoCloseable {
+        private final Connection conn;
+        private boolean closed;
+
+        SnapshotHolder() throws Exception {
+            conn = pg.createConnection("");
+            conn.setAutoCommit(false);
+            conn.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            DSL.using(conn, SQLDialect.POSTGRES).selectCount()
+                .from(DSL.table(DSL.name("pg_catalog", "pg_class"))).fetchOne();
+        }
+
+        @Override
+        public void close() throws Exception {
+            if (!closed) {
+                closed = true;
+                conn.rollback();
+                conn.close();
+            }
+        }
+    }
+
+    /** A build of {@code collection} on its own thread, returned once its invalid index is in the catalog. */
+    CompletableFuture<DdlOutcome> startHeldBuild(PciBuilderSession.Pass pass, PciCatalog.Leaf leaf, String collection)
+            throws Exception {
+        String index = PciCatalog.indexName(M1024, T1, collection);
+        var build = CompletableFuture.supplyAsync(() -> pass.build(leaf, 1024, collection));
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (System.nanoTime() < deadline && !indexExists(index)) {
+            Thread.sleep(50);
+        }
+        assertThat(indexExists(index)).as("the build's invalid index is in the catalog").isTrue();
+        assertThat(build.isDone()).as("the build is waiting, not finished").isFalse();
+        return build;
+    }
+
+    boolean indexValid(String name) {
+        return leaf().indexes().stream().anyMatch(i -> name.equals(i.name()) && i.valid());
+    }
+
+    /**
+     * Forget one applied, idempotent, non-runAlways changeset (vectors-058-1 is a CREATE OR REPLACE of functions), so
+     * that the next walk has a real schema changeset pending.
+     */
+    void forgetAChangeset() throws Exception {
+        int deleted = asSuperuser(pg, ctx -> ctx.deleteFrom(DSL.table(DSL.name("public", "databasechangelog")))
+            .where(DSL.field(DSL.name("id"), String.class).eq("vectors-058-1")).execute());
+        assertThat(deleted).as("vectors-058-1 was applied").isEqualTo(1);
+    }
+
+    /**
+     * {@code SchemaMigrator.migrate}, bounded: a walk that queues behind a build the test holds open is a failing test
+     * with its cause named, not a hung fork (a JDBC read blocked in the test thread ignores the timeout's interrupt).
+     * The caller releases what holds the build in a {@code finally}, which lets a stuck walk end.
+     */
+    void migrateWithin(HikariDataSource ds, long seconds) {
+        var walk = CompletableFuture.runAsync(() -> SchemaMigrator.migrate(ds));
+        try {
+            walk.get(seconds, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            throw new AssertionError("the walk did not end within " + seconds + " s: it is queued behind a build", e);
+        } catch (Exception e) {
+            throw new AssertionError("the walk failed: " + e, e);
+        }
+    }
+
+    HikariDataSource migrationPool() {
+        var cfg = new HikariConfig();
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(pg.getUsername());
+        cfg.setPassword(pg.getPassword());
+        cfg.setMaximumPoolSize(1);
+        cfg.setAutoCommit(true);
+        return new HikariDataSource(cfg);
+    }
+
     // -- shutdown ----------------------------------------------------------------------------------------
 
+    /**
+     * nexus-f3yqd: the shutdown reap ends the pool's backends and NOT the builder's. A build in flight keeps running in
+     * Postgres, with the builder's session advisory lock, so the next engine neither rebuilds it nor starts a parallel
+     * one (its pass reports standby until the build is over).
+     */
     @Test
     @Timeout(value = 120, unit = TimeUnit.SECONDS)
-    void shutdown_endsABuilderStatementTheAppRoleCannotReach_andThePoolsOwnBackendToo() throws Exception {
+    void shutdown_reapsThePoolsBackend_butLeavesTheBuilderBackendAndItsLockRunning() throws Exception {
         String poolName = BackendReaper.newApplicationName("test");
         String builderName = PciBuilderSession.builderApplicationName(BackendReaper.bootNonce(poolName));
-        assertThat(builderName).startsWith("nexus-pci-builder-");
 
         try (Sleeper pool = new Sleeper(pg.getJdbcUrl(), SVC_ROLE, SVC_PASS, poolName);
              Sleeper builder = new Sleeper(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword(), builderName);
@@ -267,56 +375,29 @@ class PciBuilderTerminationIntegrationTest {
             assertThat(backendsNamed(builderName)).as("the builder statement and the pass").isEqualTo(2);
             assertThat(holdersOf(PciBuilderSession.PCI_BUILDER_ADVISORY_LOCK_KEY)).isEqualTo(1);
 
-            // Control: today's call, with the application's credentials and the builder's name, cannot end it.
-            int appRoleResult = BackendReaper.terminateOwnBackends(
-                pg.getJdbcUrl(), SVC_ROLE, SVC_PASS, builderName);
-            assertThat(appRoleResult).as("the app role may not signal the admin role's backend").isLessThanOrEqualTo(0);
-            assertThat(backendExists(pg, builder.pid)).as("still running after the app-role call").isTrue();
+            int reaped = BackendReaper.terminateAtShutdown(pg.getJdbcUrl(), SVC_ROLE, SVC_PASS, poolName, 1);
 
-            var admin = new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword());
-            var reaped = BackendReaper.terminateAtShutdown(
-                pg.getJdbcUrl(), SVC_ROLE, SVC_PASS, poolName, 1, admin, builderName);
-
-            assertThat(reaped.pool()).isEqualTo(1);
-            assertThat(reaped.builder()).as("the statement and the pass").isEqualTo(2);
-            assertThat(builder.sqlState.get(10, TimeUnit.SECONDS)).isEqualTo(ADMIN_SHUTDOWN);
+            assertThat(reaped).as("the pool's backend is reaped as before").isEqualTo(1);
             assertThat(pool.sqlState.get(10, TimeUnit.SECONDS)).isEqualTo(ADMIN_SHUTDOWN);
-            awaitGone(builder.pid);
             awaitGone(pool.pid);
-            awaitBuilderGone(builderName);
+            assertThat(backendExists(pg, builder.pid)).as("the builder's statement is left running").isTrue();
+            assertThat(builder.sqlState.isDone()).as("it was not signalled").isFalse();
+            assertThat(backendsNamed(builderName)).as("both builder backends remain").isEqualTo(2);
+            assertThat(holdersOf(PciBuilderSession.PCI_BUILDER_ADVISORY_LOCK_KEY))
+                .as("and the builder's lock with them: a new engine's builder cannot start a parallel build").isEqualTo(1);
         }
     }
 
+    /** The other backends of the engine are still reaped as before, with a builder backend alongside. */
     @Test
     @Timeout(value = 60, unit = TimeUnit.SECONDS)
-    void shutdown_withNoBuilderBackend_reportsZero_andStillReapsThePool() throws Exception {
+    void shutdown_withNoBuilderBackend_stillReapsThePool() throws Exception {
         String poolName = BackendReaper.newApplicationName("test");
-        String builderName = PciBuilderSession.builderApplicationName(BackendReaper.bootNonce(poolName));
 
         try (Sleeper pool = new Sleeper(pg.getJdbcUrl(), SVC_ROLE, SVC_PASS, poolName)) {
-            var admin = new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword());
-            var reaped = BackendReaper.terminateAtShutdown(
-                pg.getJdbcUrl(), SVC_ROLE, SVC_PASS, poolName, 1, admin, builderName);
+            int reaped = BackendReaper.terminateAtShutdown(pg.getJdbcUrl(), SVC_ROLE, SVC_PASS, poolName, 1);
 
-            assertThat(reaped.builder()).isZero();
-            assertThat(reaped.pool()).isEqualTo(1);
-            assertThat(pool.sqlState.get(10, TimeUnit.SECONDS)).isEqualTo(ADMIN_SHUTDOWN);
-        }
-    }
-
-    @Test
-    @Timeout(value = 60, unit = TimeUnit.SECONDS)
-    void shutdown_withAnUnreachableAdminUrl_stillReapsThePool_andReportsTheBuilderCallFailed() throws Exception {
-        String poolName = BackendReaper.newApplicationName("test");
-        String builderName = PciBuilderSession.builderApplicationName(BackendReaper.bootNonce(poolName));
-
-        try (Sleeper pool = new Sleeper(pg.getJdbcUrl(), SVC_ROLE, SVC_PASS, poolName)) {
-            var admin = new AdminConnection("jdbc:postgresql://127.0.0.1:1/nowhere", "x", "x");
-            var reaped = BackendReaper.terminateAtShutdown(
-                pg.getJdbcUrl(), SVC_ROLE, SVC_PASS, poolName, 1, admin, builderName);
-
-            assertThat(reaped.builder()).isEqualTo(BackendReaper.FAILED);
-            assertThat(reaped.pool()).isEqualTo(1);
+            assertThat(reaped).isEqualTo(1);
             assertThat(pool.sqlState.get(10, TimeUnit.SECONDS)).isEqualTo(ADMIN_SHUTDOWN);
         }
     }
@@ -359,10 +440,12 @@ class PciBuilderTerminationIntegrationTest {
             int elsewherePid = DSL.using(elsewhere, SQLDialect.POSTGRES)
                 .select(DSL.function("pg_backend_pid", SQLDataType.INTEGER)).fetchOne(0, Integer.class);
 
-            List<String> logs = captureLogs(SchemaMigrator.class, () -> SchemaMigrator.migrate(migrationDs));
+            forgetAChangeset();
+            List<String> logs = captureLogs(SchemaMigrator.class, () -> migrateWithin(migrationDs, 120));
 
             assertThat(logs).as("the migrator ended exactly the two builder backends of this database")
-                .anyMatch(l -> l.contains("event=pci_builders_terminated") && l.contains("count=2"));
+                .anyMatch(l -> l.contains("event=pci_builders_terminated") && l.contains("count=2")
+                    && l.contains("reason=schema_changesets_pending") && l.contains("n=1"));
             assertThat(building.sqlState.get(10, TimeUnit.SECONDS)).as("terminated, not cancelled")
                 .isEqualTo(ADMIN_SHUTDOWN);
             awaitGone(building.pid);
@@ -397,16 +480,112 @@ class PciBuilderTerminationIntegrationTest {
     @Test
     @Timeout(value = 300, unit = TimeUnit.SECONDS)
     void migrate_withNoBuilderBackend_logsZero() throws Exception {
-        var cfg = new HikariConfig();
-        cfg.setJdbcUrl(pg.getJdbcUrl());
-        cfg.setUsername(pg.getUsername());
-        cfg.setPassword(pg.getPassword());
-        cfg.setMaximumPoolSize(1);
-        cfg.setAutoCommit(true);
-        try (HikariDataSource migrationDs = new HikariDataSource(cfg)) {
-            List<String> logs = captureLogs(SchemaMigrator.class, () -> SchemaMigrator.migrate(migrationDs));
+        try (HikariDataSource migrationDs = migrationPool()) {
+            List<String> logs = captureLogs(SchemaMigrator.class, () -> migrateWithin(migrationDs, 120));
 
-            assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_terminated") && l.contains("count=0"));
+            assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("count=0"));
+        }
+    }
+
+    /**
+     * nexus-f3yqd: a boot with nothing but {@code runAlways} changesets pending (every boot of an unchanged release)
+     * leaves a build in flight alone. The runAlways bodies take no lock that conflicts with the build's (grants take no
+     * relation lock; vectors-034-2 bounds its wait at 5 s and skips a busy leaf), so there is nothing to settle.
+     */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void migrate_withOnlyRunAlwaysPending_keepsAnInFlightBuilder_andTheBuildCompletesValid() throws Exception {
+        String nonce = "c0ffee01";
+        String builderName = PciBuilderSession.builderApplicationName(nonce);
+        String coll = "code__pcitrm-keep__voyage-code-3__v1";
+        String index = PciCatalog.indexName(M1024, T1, coll);
+        PciCatalog.Leaf leaf = leaf();
+
+        try (HikariDataSource migrationDs = migrationPool();
+             PciBuilderSession.Pass pass = builderSession(nonce).open();
+             LeafWriter writer = new LeafWriter(leaf)) {
+            var build = startHeldBuild(pass, leaf, coll);
+
+            List<String> logs = captureLogs(SchemaMigrator.class, () -> migrateWithin(migrationDs, 120));
+
+            assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("count=1")
+                && l.contains("reason=only_run_always_pending"));
+            assertThat(logs).noneMatch(l -> l.contains("event=pci_builders_terminated"));
+            assertThat(backendsNamed(builderName)).as("the builder's backend is still there").isEqualTo(1);
+            assertThat(holdersOf(PciBuilderSession.PCI_BUILDER_ADVISORY_LOCK_KEY)).isEqualTo(1);
+            assertThat(build.isDone()).as("and still building").isFalse();
+
+            writer.close();
+            assertThat(build.get(60, TimeUnit.SECONDS)).isEqualTo(DdlOutcome.DONE);
+            assertThat(indexValid(index)).as("the build ran to its end").isTrue();
+        }
+    }
+
+    /** The other direction, and the control for the one above: a real changeset pending ends the build as before. */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void migrate_withARealChangesetPending_endsAnInFlightBuilder() throws Exception {
+        String nonce = "c0ffee02";
+        String builderName = PciBuilderSession.builderApplicationName(nonce);
+        String coll = "code__pcitrm-end__voyage-code-3__v1";
+        PciCatalog.Leaf leaf = leaf();
+
+        try (HikariDataSource migrationDs = migrationPool();
+             PciBuilderSession.Pass pass = builderSession(nonce).open();
+             LeafWriter writer = new LeafWriter(leaf)) {
+            var build = startHeldBuild(pass, leaf, coll);
+            forgetAChangeset();
+
+            List<String> logs = captureLogs(SchemaMigrator.class, () -> migrateWithin(migrationDs, 120));
+
+            assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_terminated") && l.contains("count=1")
+                && l.contains("reason=schema_changesets_pending") && l.contains("n=1"));
+            assertThat(logs).noneMatch(l -> l.contains("event=pci_builders_kept"));
+            assertThat(build.get(30, TimeUnit.SECONDS)).isEqualTo(DdlOutcome.CONNECTION_LOST);
+            awaitBuilderGone(builderName);
+            writer.close();
+        }
+    }
+
+    /**
+     * The one non-runAlways step that follows the walk: the partition access repair runs {@code ALTER TABLE ... ENABLE
+     * ROW LEVEL SECURITY} on a leaf (ACCESS EXCLUSIVE), which waits behind a build's ShareUpdateExclusiveLock while the
+     * build waits for the repair's snapshot. A boot that keeps the builder must still end it before such a repair.
+     */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void migrate_withOnlyRunAlwaysPending_butAccessDriftToRepair_endsTheBuilderBeforeTheRepair() throws Exception {
+        String nonce = "c0ffee03";
+        String builderName = PciBuilderSession.builderApplicationName(nonce);
+        String coll = "code__pcitrm-drift__voyage-code-3__v1";
+        PciCatalog.Leaf leaf = leaf();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.setRowSecurity(su, DSL.table(DSL.name(leaf.schema(), leaf.name())),
+                PgContainerHelper.RowSecurityMode.DISABLE);
+        }
+
+        try (HikariDataSource migrationDs = migrationPool();
+             PciBuilderSession.Pass pass = builderSession(nonce).open();
+             SnapshotHolder writer = new SnapshotHolder()) {
+            var build = startHeldBuild(pass, leaf, coll);
+
+            List<String> logs = captureLogs(SchemaMigrator.class, () -> migrateWithin(migrationDs, 120));
+
+            assertThat(logs).anyMatch(l -> l.contains("event=partition_access_drift_repaired"));
+            assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_terminated") && l.contains("count=1")
+                && l.contains("reason=partition_access_drift"));
+            assertThat(build.get(30, TimeUnit.SECONDS)).isEqualTo(DdlOutcome.CONNECTION_LOST);
+            awaitBuilderGone(builderName);
+            Boolean rls = asSuperuser(pg, ctx -> ctx.select(DSL.field(DSL.name("c", "relrowsecurity"), Boolean.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(leaf.schema()))
+                .and(DSL.field(DSL.name("c", "relname"), String.class).eq(leaf.name()))
+                .fetchOne(0, Boolean.class));
+            assertThat(rls).as("the repair ran").isTrue();
+            writer.close();
         }
     }
 }

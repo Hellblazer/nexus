@@ -16,7 +16,8 @@ callout) against a managed service. It reports itself NOT APPLICABLE, with a rea
 happens: an interactive ``nx upgrade``. A bounded engine count lets such a ``detect()`` answer (``manifest-section-labels``,
 nexus-l4hds), but only as a REPORT: the same rung's ``converge()`` is the whole-catalog scan with writes, so it
 checks :func:`refuses_unbounded_read` too and is DEFERRED unattended; an interactive ``nx upgrade`` fills. Interactive ``nx upgrade`` runs and local engines keep their
-walk; ``nx doctor`` runs its sweep as unattended (nexus-mq980) and reports a refused rung as not checked.
+walk, except under ``nx doctor``, which runs its sweep as unattended (nexus-mq980) and with bounded reads only, on any
+engine (nexus-mjmjl), and reports a refused rung as not checked.
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ from collections.abc import Callable
 
 import structlog
 
-from nexus.upgrade_ladder.unattended import is_unattended
+from nexus.upgrade_ladder.unattended import is_bounded, is_unattended
 
 _log = structlog.get_logger(__name__)
 
@@ -43,7 +44,15 @@ def managed_service() -> bool:
 
 def refuses_unbounded_read(managed_fn: Callable[[], bool] = managed_service) -> bool:
     """True when this run is unattended (``--auto``, ``NX_UPGRADE_UNATTENDED=1``, the version-transition
-    callout) against a managed service. Keyed on the explicit signal, never on a bound deadline."""
+    callout) against a managed service, or when it makes only bounded reads (``nx doctor``, any engine:
+    nexus-mjmjl). Keyed on the explicit signal, never on a bound deadline."""
+    return is_bounded() or (is_unattended() and managed_fn())
+
+
+def refuses_managed_unattended(managed_fn: Callable[[], bool] = managed_service) -> bool:
+    """The managed rule alone, without ``nx doctor``'s bounded-reads mode: for an answer that reads nothing
+    (a completion record that predates the current rule says pending without a read), so doctor on a local
+    engine still gives it (nexus-mjmjl review)."""
     return is_unattended() and managed_fn()
 
 

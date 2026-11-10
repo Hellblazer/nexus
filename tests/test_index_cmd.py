@@ -2459,11 +2459,15 @@ class TestPdfMdIdentityDropRegisterThrow:
         reader.find_by_file_path.return_value = MagicMock(tumbler="1.99.1")
         writer = MagicMock()
         if register_raises:
-            writer.register.side_effect = RuntimeError(
+            # RDR-193 Step 6 (nexus-u5m5g.7): the curator pre-flight and the markdown hook register through
+            # one resolve_or_register request
+            writer.resolve_or_register.side_effect = RuntimeError(
                 "integrity constraint violation",
             )
         else:
-            writer.register.return_value = "1.99.1"
+            from nexus.catalog.http_catalog_client import ResolveOutcome
+
+            writer.resolve_or_register.return_value = ResolveOutcome("1.99.1", True, False)
         return reader, writer
 
     def test_md_register_throw_exits_nonzero_names_file(

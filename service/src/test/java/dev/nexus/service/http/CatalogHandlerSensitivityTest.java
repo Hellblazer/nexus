@@ -234,6 +234,25 @@ class CatalogHandlerSensitivityTest {
     }
 
     @Test
+    void aSensitiveBornOnlyKeyInTheRegisterBody_isIgnored_theExistingRowIsRaisedAsBefore() throws Exception {
+        String t = tenant();
+        var f = new LinkedHashMap<String, Object>();
+        f.put("title", "bo");
+        f.put("source_uri", "nx-note://c1/bo");
+        String doc = repo.registerDocument(t, "49.1", f);
+        assertThat(flag(t, doc)).isFalse();
+
+        Resp r = call(t, "POST", "/v1/catalog/doc/register",
+            "{\"owner_prefix\":\"49.1\",\"title\":\"bo\",\"source_uri\":\"nx-note://c1/bo\","
+                + "\"sensitive\":true,\"sensitive_born_only\":true}", null);
+
+        assertThat(r.status).as(r.body).isEqualTo(200);
+        assertThat(r.json().get("tumbler").asText()).isEqualTo(doc);
+        assertThat(flag(t, doc)).as("a client cannot ask for the resolve-only behaviour").isTrue();
+        assertThat(audit(t)).containsExactly(doc + "|false|true|register_raise|engine");
+    }
+
+    @Test
     void aNonBooleanSensitive_onRegisterWithAnOwnerPrefix_writesNeitherTheOwnerNorTheDocument() throws Exception {
         String t = tenant();
         for (String bad : List.of("1", "\"yes\"", "[true]")) {

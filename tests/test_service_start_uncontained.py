@@ -38,6 +38,7 @@ def test_upgrade_cycle_starts_uncontained_and_stops_contained() -> None:
 
     def _run(argv, **kwargs):
         seen.append((argv[-1], kwargs))
+        return MagicMock(returncode=0)  # the cycle reads the exit code (nexus-mjmjl item 14)
 
     _cycle_storage_service_to_current(
         _discover_fn=lambda: object(), _run_fn=_run, _nx_bin_fn=lambda: ["nx"],

@@ -296,6 +296,13 @@ class _RaceLoserWriter:
             return tumbler, False
         return result
 
+    def resolve_or_register(self, *args, **kwargs):
+        # RDR-193 Step 6 (nexus-u5m5g.7): a titled put registers through resolve_or_register, whose ``created`` is
+        # the same wire signal ``register(with_created=True)`` carried; the loser's answer is the same row, not minted.
+        from dataclasses import replace
+
+        return replace(self._inner.resolve_or_register(*args, **kwargs), created=False)
+
 
 class TestVfef0RaceLoserSkipsRollback:
     def test_race_loser_created_false_never_triggers_rollback(

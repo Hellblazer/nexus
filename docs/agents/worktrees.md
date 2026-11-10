@@ -120,19 +120,23 @@ things to avoid carefully; they are impossible.
    `gh run watch` and never a polling loop: several concurrent watch loops on
    one token tripped GitHub's secondary rate limit on 2026-09-26 and every
    Actions call 403'd (T2 `nexus/github-api-usage-research-2026-09-26`). The
-   conexus-hosted adapter still posts one tuple per run and job state change
-   to `board/ci/nexus-develop`; subscribe once per session with
-   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")` for
-   pings instead of polling. A `kind=run` row is the adapter's run-level post,
+   conexus-hosted adapter also posts one tuple per run and job state change
+   to `board/ci/nexus-develop`; subscribe to it
+   (`mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`)
+   only if you want those per-run pings: the wake for your own push is the
+   `--done` topic below, and the Stop hook counts only a `--done`
+   subscription. A `kind=run` row is the adapter's run-level post,
    carrying the sha, the run, its state and its conclusion; its `conclusion`
    for your sha is the verdict to read (Sam, 2026-11-08, ask qo36-conflicts).
    The single `gh api` call above is the fallback. Nothing in this repo folds
    the job-level posts into a verdict, so do not read one as a verdict.
 
-   To watch your own develop push, subscribe after pushing and read the
-   conclusion on your sha's `kind=run` row; one `gh api` read of its check
-   runs is the fallback. Never arm a Monitor or loop that polls check runs
-   per push (Sam, 2026-11-08, ask qo36-conflicts).
+   To watch your own develop push, take the wake described under "The wake
+   for your own push" below (the `--done` topic with the channel, `nx ci wait`
+   without it); its row carries the same GitHub conclusions a `kind=run` row
+   does, one per run. One `gh api` read of the sha's check runs is the
+   fallback. Never arm a Monitor or loop that polls check runs per push (Sam,
+   2026-11-08, ask qo36-conflicts).
 
    To be woken when a develop sha's push runs have all completed, subscribe to
    `board/ci/nexus-develop--done`
@@ -156,8 +160,37 @@ things to avoid carefully; they are impossible.
    its one re-read, so a missing wake is not a signal; if it has not come when
    you expect the run to be done, read the check runs once. A redelivered
    webhook for the same run set posts nothing new; a rerun (a new attempt)
-   posts a new row (conexus-5wjs, nexus-1d6pz.2; the per-push wake is being
-   reworked under nexus-1d6pz.11).
+   posts a new row (conexus-5wjs, nexus-1d6pz.2).
+
+   The wake for your own push, end to end (nexus-1d6pz.11). After `PUSH_OK`,
+   `scripts/git-push-develop.sh` prints two `PUSH_WAIT` lines on stderr, one
+   per way to be woken; pick by how the session was launched, and never arm a
+   Monitor or a poll per push:
+   - With the conexus channel: subscribe once per session to
+     `board/ci/nexus-develop--done`. Each notice for it carries the row's sha
+     in its meta when the row names one (`sha`, or `shas` aligned with `tuple_ids` on a batch;
+     nexus-1d6pz.11.3), and its text prints the exact `tuple_rd` read that
+     returns the announced row (nexus-1d6pz.11.2). The row's `outcome` dim is
+     the reduced result of GitHub's conclusions and its `runs` the
+     per-workflow ones; required checks and flake judgment stay yours, and a
+     docs-only tip's green says nothing about code (push-train rule 4). A notice for another
+     sha is not to be ignored on that alone: in a push window the beads close
+     on the window tip's result, which is often a peer's sha.
+   - Without the channel: run `nx ci wait <sha> --branch develop` as a
+     background command (nexus-1d6pz.11.4). Its exit is the wake and its one
+     line is the result: 0 success, 1 failure, 3 cancelled or stale, 2 timeout,
+     4 a conclusion it could not read (including a capped row whose missing
+     runs GitHub could not supply), 5 the wait could not run. At the deadline
+     it reads the sha's push runs from GitHub once (a full sha only, and never
+     with `--fresh`), so a dropped wake still
+     reports finished runs. For a rerun of the same sha, add `--fresh`, which
+     counts only a row that arrives after the wait starts.
+
+   The Stop hook's wake guard counts a fresh, live channel waiter with a
+   `board/ci/*--done` subscription and the channel flag as an armed wake for a
+   develop-CI wait, and a running background command such as `nx ci wait`
+   counts as armed too; with nothing armed, a turn that ends on a CI wait is
+   blocked with a message naming `nx ci wait <sha>` (nexus-1d6pz.11.5).
 
    Treat the develop run as part of the push. Before stacking more work on a
    develop sha, or cutting a release branch on it, read that sha's check-run
@@ -314,8 +347,9 @@ things to avoid carefully; they are impossible.
     14fb28184: the Python suite in about 11 min, `scripts/mvnw-leased.sh
     test` in 9 min. Since the lab-run grants (2026-10-17) a full suite runs
     inside a grant and `-n auto` follows it, clamped to the grant's memory
-    (`tests/_xdist_cap.py`): lab-l runs 15 workers, 28,085 tests in 1317 s
-    on 7.82.0. Detach a long
+    (`tests/_xdist_cap.py`): lab-l ran 15 workers, 28,085 tests in 1317 s
+    on 7.82.0; since 2026-11-09 it runs 12 (4 GiB a worker), and a full
+    suite at 15 measured 52 GB on lab-xl in 31 min. Detach a long
     run with `setsid -f`, not `nohup ... &`: a backgrounded process inherits
     SIGINT ignored, and one test reads that (nexus-jo8za). Details: T2
     `nexus/chas-test-host-howto`.

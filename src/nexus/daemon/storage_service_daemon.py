@@ -1331,6 +1331,18 @@ def _acquire_spawn_lock(
             sleep(_SPAWN_LOCK_POLL_S)
 
 
+def _parse_migration_probe(out: str) -> tuple[str | None, int | None, int | None]:
+    """``<db size>|<source size>|<statement head>`` from the migration probe."""
+    line = out.strip().splitlines()[0] if out.strip() else ""
+    db, _, rest = line.partition("|")
+    source, _, statement = rest.partition("|")
+
+    def _int(text: str) -> int | None:
+        return int(text) if text.strip().isdecimal() else None
+
+    return (statement.strip() or None), _int(db), _int(source)
+
+
 class StorageServiceSupervisor:
     """RDR-149 P5.1: the long-lived storage-service supervisor.
 
@@ -2133,6 +2145,44 @@ class StorageServiceSupervisor:
         except Exception:  # noqa: BLE001 — best-effort probe; unavailable is a valid, expected outcome
             return readiness.PgActivity.UNAVAILABLE
 
+    def _migration_active_statement(self) -> tuple[str | None, int | None, int | None]:
+        """For the migration record (nexus-mjmjl): the head of the statement
+        the migrating admin backend is executing, the database's size and the
+        source chunk table's size (heap, TOAST and indexes, from pg_class, so no
+        relation lock is taken); ``(None, None, None)`` when they cannot be
+        read. Same guard, binary and bound as :meth:`_migration_pg_probe`."""
+        nothing: tuple[str | None, int | None, int | None] = (None, None, None)
+        if not self._creds.get("PG_DATA", "").strip():
+            return nothing
+        try:
+            from nexus.db.pg_provision import discover_pg_binaries  # noqa: PLC0415 — deferred import
+            from nexus.health import _run_psql  # noqa: PLC0415 — deferred import, reuse rather than duplicate
+
+            sql = (
+                "SELECT pg_database_size(current_database()) || '|' || "
+                # The source's size from pg_class, never pg_total_relation_size: that opens
+                # the relation, and the walk holds ACCESS EXCLUSIVE on nexus.chunks for the
+                # whole copy, so the probe would wait out its bound every time. relpages is
+                # as of the last VACUUM/ANALYZE: an estimate, which is all this is.
+                "(SELECT coalesce(sum(c.relpages), 0)::bigint * current_setting('block_size')::bigint "
+                "FROM pg_class c WHERE c.oid = to_regclass('nexus.chunks') "
+                "OR c.oid = (SELECT reltoastrelid FROM pg_class WHERE oid = to_regclass('nexus.chunks')) "
+                "OR c.oid IN (SELECT indexrelid FROM pg_index WHERE indrelid = to_regclass('nexus.chunks'))) || '|' || "
+                "coalesce((SELECT left(regexp_replace(query, '\\s+', ' ', 'g'), 200) FROM pg_stat_activity "
+                "WHERE datname = current_database() AND usename = current_user AND state = 'active' "
+                "AND pid != pg_backend_pid() ORDER BY query_start LIMIT 1), '');"
+            )
+            proc = _run_psql(
+                discover_pg_binaries().psql, _SERVICE_HOST, self._pg_port, _admin_dbname(self._creds),
+                self._creds.get("NX_DB_ADMIN_USER", "nexus_admin"), self._creds.get("NX_DB_ADMIN_PASS", ""),
+                sql, timeout=_PG_PROBE_TIMEOUT,
+            )
+        except Exception:  # noqa: BLE001 — advisory: the record simply has no inner step
+            return nothing
+        if proc.returncode != 0:
+            return nothing
+        return _parse_migration_probe(proc.stdout or "")
+
     def _release_stale_changelog_lock(self, *, reason: str) -> None:
         """Best-effort: terminate orphaned admin backends and release a
         stuck ``databasechangeloglock`` row (nexus-8vp0i / GH #1486).
@@ -2371,8 +2421,15 @@ class StorageServiceSupervisor:
         log_reader = self._build_log_tailer()
         last_progress_log_at = 0.0
 
+        from nexus.daemon import migration_status  # noqa: PLC0415 — stdlib-only, deferred like the module's other helpers
+
+        # nexus-mjmjl: every other command reads this record and says a
+        # migration is running instead of sitting silent.
+        recorder = migration_status.Recorder(self._config_dir, statement_probe=self._migration_active_statement)
+
         def on_tick(result: readiness.TickResult) -> None:
             nonlocal last_progress_log_at
+            recorder.tick(migrating=result.migration_active, changeset=result.changeset, pending=result.pending)
             if result.migration_active:
                 now = time.monotonic()
                 if now - last_progress_log_at >= _MIGRATION_PROGRESS_LOG_INTERVAL:
@@ -2399,13 +2456,16 @@ class StorageServiceSupervisor:
         )
 
         try:
-            monitor.wait_ready(
-                poll_interval=_READY_POLL_INTERVAL,
-                on_tick=on_tick,
-                stop_check=(
-                    stop_requested.is_set if stop_requested is not None else None
-                ),
-            )
+            try:
+                monitor.wait_ready(
+                    poll_interval=_READY_POLL_INTERVAL,
+                    on_tick=on_tick,
+                    stop_check=(
+                        stop_requested.is_set if stop_requested is not None else None
+                    ),
+                )
+            finally:
+                recorder.close()
         except readiness.ReadinessStopRequestedError:
             # nexus-cd1k0.19: a SIGTERM/SIGINT arrived while still waiting
             # for readiness (a real migration can leave /health unreachable

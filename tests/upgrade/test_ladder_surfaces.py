@@ -455,7 +455,10 @@ def test_upgrade_command_is_wired_to_the_ladder() -> None:
     """Wiring pin: the single trigger (`nx upgrade`) walks the ladder.
 
     """
-    assert "_run_ladder(" in inspect.getsource(upgrade.callback)
+    # nexus-mjmjl: upgrade() runs the steps _upgrade_steps builds; the ladder
+    # call lives there now, and upgrade() must still run what it returns.
+    assert "_upgrade_steps(" in inspect.getsource(upgrade.callback)
+    assert "_run_ladder(" in inspect.getsource(upgrade_mod._upgrade_steps)
 
 
 def test_run_ladder_flushes_owed_records_after_the_walk(

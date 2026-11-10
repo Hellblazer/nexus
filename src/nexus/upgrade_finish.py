@@ -331,6 +331,12 @@ class UpgradeInvocation:
     auto: bool = False  # the unattended `--auto` run: the finish pass must not detect() a rung (nexus-75w5d)
 
 
+def _env_unattended() -> bool:
+    from nexus.util.upgrade_auto_lock import env_unattended  # noqa: PLC0415 — stdlib-only, deferred
+
+    return env_unattended()
+
+
 def upgrade_invocation(argv: list[str] | None = None) -> UpgradeInvocation | None:
     """What THIS process's ``nx upgrade`` run will do after the finish pass, or ``None``
     when the process is not a real ``nx upgrade`` run.
@@ -359,7 +365,10 @@ def upgrade_invocation(argv: list[str] | None = None) -> UpgradeInvocation | Non
     if PREVIEW_ARGV_FLAG in args or "--help" in args or "-h" in args:
         return None
     return UpgradeInvocation(
-        walks_ladder=True, cycles_service="--skip-t3" not in args, auto="--auto" in args,
+        walks_ladder=True,
+        # P0 (nexus-f3yqd): --auto and the lockstep hook's unattended run never cycle it.
+        cycles_service="--skip-t3" not in args and "--auto" not in args and not _env_unattended(),
+        auto="--auto" in args,
     )
 
 
@@ -2220,7 +2229,7 @@ _ENGINE_INSTALL_FAILURES: dict[tuple[str, str], str] = {}
 
 
 def converge_engine(
-    config_dir: Path, *, dry_run: bool = False, unattended: bool = False,
+    config_dir: Path, *, dry_run: bool = False, unattended: bool = False, acquire: bool = True,
 ) -> list[str]:
     """Install the release-dependency engine and cycle the service on a
     mismatch. Returns human-readable action lines.
@@ -2246,6 +2255,12 @@ def converge_engine(
     (GH #1419 Issue 3b), so that disruption is reserved for a human who
     explicitly asked for convergence. The unattended pass reports the same
     facts and names the manual verb. Hal decision, 2026-07-24.
+
+    ``acquire`` False makes the whole function report-only: a version mismatch is
+    reported, never installed, and nothing is restarted, on every branch. An MCP
+    server's start and an ``nx upgrade --auto`` run the finish pass this way (P0,
+    nexus-f3yqd): a Claude session starting must never install or restart the engine
+    under the person's feet.
     """
     status = detect_engine_convergence(config_dir)
     if not status.applicable:
@@ -2288,7 +2303,7 @@ def converge_engine(
 
         if running.version is not None and running.version < status.required_version:
             got_run = ".".join(str(p) for p in running.version)
-            if unattended:
+            if unattended or not acquire:
                 return [
                     f"NOTE: the on-disk engine is v{req_s} but the RUNNING "
                     f"service is still v{got_run}. Not restarting it here — "
@@ -2467,6 +2482,18 @@ def converge_engine(
         return [
             f"would converge engine ({got_s} -> {req_s}): install the "
             f"pinned tag and restart the storage service{why}"
+        ]
+    if not acquire:
+        have = ".".join(str(p) for p in status.installed_version) if status.installed_version else "unknown"
+        if integrity is not None and not integrity.ok:
+            state = f"the installed storage engine is missing or damaged ({integrity.reason})"
+        else:
+            state = f"the storage engine is out of date (installed {have}, this release needs {req_s})"
+        return [
+            f"NOTE: {state}."
+            " Nothing was changed. Run `nx upgrade` when you can spare a few minutes: it installs"
+            " the new engine and restarts the storage service, and the first start may migrate"
+            " your data. `nx doctor` shows this too."
         ]
 
     from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred, CLI startup cost
@@ -3406,14 +3433,15 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
     # nexus-75w5d: this callout needs a CHEAP "is it pending?", not a scan. It runs in the root group
     # of whichever `nx` command wins the one-shot version-transition claim (a plain `nx search` on a
     # managed box included), so every detect() here runs as an UNATTENDED run: a rung that would walk a
-    # managed catalog or table reports itself not applicable instead (`nx doctor` and an interactive
-    # `nx upgrade` still scan, and say so).
-    from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — deferred, CLI startup cost
+    # managed catalog or table reports itself not applicable instead (an interactive `nx upgrade` still
+    # scans). nexus-mjmjl: and bounded on a local engine too, as in `nx doctor`: the first command after a
+    # version change must not spend minutes in one rung's dry-run scan of a large local store.
+    from nexus.upgrade_ladder.unattended import bounded_reads, unattended_run  # noqa: PLC0415 — deferred, CLI startup cost
 
     lines: list[str] = []
     for rung in rungs:
         try:
-            with unattended_run():
+            with unattended_run(), bounded_reads():
                 status = rung.detect()
         except Exception as exc:  # noqa: BLE001 — must surface, not silently drop
             lines.append(
@@ -3436,8 +3464,91 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
     return lines
 
 
+def _announce_finish_pass(seen: str, version: str) -> None:
+    """nexus-mjmjl: the finish pass below can stop and start services and
+    install an engine before the command itself runs, and it used to do that
+    without a word (the user-seat upgrade rehearsal measured 6+ s of silence
+    after a 2.5 s engine boot). Say what is happening first, on stderr so a
+    command's stdout stays its own. Never raises."""
+    try:
+        import click  # noqa: PLC0415 — deferred, keeps the module import light
+
+        click.echo(
+            f"conexus changed from {seen} to {version}: finishing the switch first (processes still "
+            "running the old version are restarted and a local engine is brought to this release's pin; "
+            "this can take a minute or two) ...",
+            err=True,
+        )
+    except Exception:  # noqa: BLE001 — advisory output must never break CLI startup
+        pass
+
+
 def check_version_transition(
-    config_dir: Path, *, preview: bool | None = None,
+    config_dir: Path, *, preview: bool | None = None, engine_report_only: bool = False,
+) -> str | None:
+    """See :func:`_check_version_transition`. This wrapper keeps a heartbeat
+    on stderr while a finish pass that announced itself runs (nexus-mjmjl:
+    the user-seat rehearsal measured an 8 s silent stretch inside it)."""
+    beat = _FinishHeartbeat()
+    ok = False
+    try:
+        result = _check_version_transition(
+            config_dir, preview=preview, engine_report_only=engine_report_only, _on_announce=beat.start,
+        )
+        ok = True
+        return result
+    finally:
+        beat.stop(ok=ok)
+
+
+class _FinishHeartbeat:
+    """``... still finishing the switch: N s`` on stderr every few seconds,
+    from a daemon thread, between :meth:`start` and :meth:`stop`. Never raises."""
+
+    EVERY_S: float = 4.0
+
+    def __init__(self) -> None:
+        import threading  # noqa: PLC0415 — stdlib
+
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started: float | None = None
+
+    def start(self, seen: str, version: str) -> None:
+        import threading  # noqa: PLC0415 — stdlib
+
+        _announce_finish_pass(seen, version)
+        self._started = time.monotonic()
+        self._thread = threading.Thread(target=self._run, name="finish-pass-heartbeat", daemon=True)
+        try:
+            self._thread.start()
+        except RuntimeError:
+            self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.EVERY_S):
+            _echo_err(f"  ... still finishing the switch: {int(time.monotonic() - (self._started or 0))} s")
+
+    def stop(self, *, ok: bool = True) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            took = int(time.monotonic() - (self._started or 0))
+            _echo_err(f"  finished the switch in {took} s" if ok else f"  the switch stopped after {took} s")
+
+
+def _echo_err(text: str) -> None:
+    try:
+        import click  # noqa: PLC0415 — deferred
+
+        click.echo(text, err=True)
+    except Exception:  # noqa: BLE001 — advisory output must never break CLI startup
+        pass
+
+
+def _check_version_transition(
+    config_dir: Path, *, preview: bool | None = None, engine_report_only: bool = False,
+    _on_announce: "Callable[[str, str], None] | None" = None,
 ) -> str | None:
     """Version-stamp auto-trigger. Returns a one-line summary when a
     version transition was detected and the safe finish pass ran; None
@@ -3631,6 +3742,8 @@ def check_version_transition(
     # transition, so the real finish pass would never run automatically.
     if not seen:
         return None  # first-ever run: nothing stale to finish
+    if not preview:
+        (_on_announce or _announce_finish_pass)(seen, version)
     # A real `nx upgrade` run performs the service cycle and the rung walk right after this
     # pass; the lines below say so instead of asking a person for the same work.
     running_upgrade = None if preview else upgrade_invocation()
@@ -3657,8 +3770,11 @@ def check_version_transition(
     # one leg's failure never swallows the actions already computed by the
     # others.
     try:
+        # P0 (nexus-f3yqd): an MCP server's start and `nx upgrade --auto` only report
+        # engine convergence. This pass consumes the version stamp either way, so nothing
+        # later finishes it automatically: `nx upgrade` does it, and `nx doctor` names it.
         actions = actions + converge_engine(
-            config_dir, unattended=True, dry_run=preview,
+            config_dir, unattended=True, dry_run=preview, acquire=not engine_report_only,
         )
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("engine_convergence_failed", exc_info=True)

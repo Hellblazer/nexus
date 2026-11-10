@@ -353,6 +353,20 @@ class PciReconcilerIntegrationTest {
             .fetch());
     }
 
+    /** True while the builder's backend is executing a {@code CREATE INDEX} (nexus-f3yqd: a failed index may pre-exist). */
+    boolean builderRunningCreateIndex() {
+        try {
+            return asSuperuser(su -> su.fetchExists(DSL.selectOne()
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(DSL.field(DSL.name("application_name"), String.class)
+                    .eq(PciBuilderSession.builderApplicationName(NONCE)))
+                .and(DSL.field(DSL.name("state"), String.class).eq("active"))
+                .and(DSL.field(DSL.name("query"), String.class).likeIgnoreCase("CREATE INDEX%"))));
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     long builderBackends() throws Exception {
         return asSuperuser(su -> su.selectCount().from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
             .where(DSL.field(DSL.name("application_name"), String.class)
@@ -371,7 +385,7 @@ class PciReconcilerIntegrationTest {
     PassReport failOneBuild(String tenant, PciReconciler r) throws Exception {
         try (HeldWrite held = new HeldWrite(tenant)) {
             CompletableFuture<PassReport> pass = inBackground(r);
-            await(() -> hasInvalid(tenant), "the concurrent build's invalid index");
+            await(() -> builderRunningCreateIndex(), "the builder's CREATE INDEX CONCURRENTLY");
             cancelBuilder();
             held.close();
             return pass.get(60, TimeUnit.SECONDS);
@@ -883,7 +897,7 @@ class PciReconcilerIntegrationTest {
     // -- failed builds -----------------------------------------------------------------------------------
 
     @Test
-    void aFailedConcurrentBuild_leavesAnInvalidIndexRoutingIgnores_theNextPassDropsItByName_andTheOneAfterRebuilds()
+    void aFailedConcurrentBuild_leavesAnInvalidIndexRoutingIgnores_theNextPassDropsItByName_andRebuildsInTheSamePass()
             throws Exception {
         String tenant = newTenant("inv");
         collection(tenant, name("victim"), 300);
@@ -901,13 +915,9 @@ class PciReconcilerIntegrationTest {
         assertThat(sweep.hasValidIndex(M384, tenant, name("victim"))).as("routing ignores it").isFalse();
 
         clock.advance(Duration.ofMinutes(11));                  // past the first retry
-        PassReport drop = r.reconcileOnce();
-        assertThat(drop.drops()).isEqualTo(1);
-        assertThat(drop.builds()).as("the rebuild is the pass after the drop").isZero();
-        assertThat(leaf(tenant).indexes()).isEmpty();
-
         PassReport rebuild = r.reconcileOnce();
-        assertThat(rebuild.builds()).isEqualTo(1);
+        assertThat(rebuild.drops()).isEqualTo(1);
+        assertThat(rebuild.builds()).as("nexus-f3yqd: the drop frees the name, so the same pass rebuilds").isEqualTo(1);
         assertThat(validIndexed(tenant)).containsExactly(name("victim"));
         assertThat(sweep.hasValidIndex(M384, tenant, name("victim"))).isTrue();
     }
@@ -1633,8 +1643,9 @@ class PciReconcilerIntegrationTest {
         assertThat(hasInvalid(tenant)).as("the terminated CIC left its invalid index").isTrue();
         assertThat(logs()).anyMatch(l -> l.contains("event=pci_index_build_not_done") && l.contains("CONNECTION_LOST"));
 
-        assertThat(r.reconcileOnce().drops()).as("the next pass drops it").isEqualTo(1);
-        assertThat(r.reconcileOnce().builds()).as("and rebuilds with no backoff to wait out").isEqualTo(1);
+        PassReport next = r.reconcileOnce();
+        assertThat(next.drops()).as("the next pass drops it").isEqualTo(1);
+        assertThat(next.builds()).as("and rebuilds it in the same pass, with no backoff to wait out").isEqualTo(1);
         assertThat(validIndexed(tenant)).containsExactly(name("victim"));
     }
 
@@ -1644,7 +1655,7 @@ class PciReconcilerIntegrationTest {
      */
     @Test
     @Timeout(value = 600, unit = TimeUnit.SECONDS)
-    void aRealMigrationWalk_terminatesARealBuild_theBuildIsNotCharged_andTheWalkCompletes() throws Exception {
+    void aRealMigrationWalkWithASchemaChangeset_terminatesARealBuild_theBuildIsNotCharged_andTheWalkCompletes() throws Exception {
         String tenant = newTenant("walk");
         collection(tenant, name("victim"), 300);
         PciSettings s = settings(16);
@@ -1657,6 +1668,11 @@ class PciReconcilerIntegrationTest {
             CompletableFuture<PassReport> pass = inBackground(r);
             await(() -> hasInvalid(tenant), "the real concurrent build's invalid index");
             assertThat(builderBackends()).as("a live builder session, mid-CIC").isEqualTo(1);
+            // nexus-f3yqd: a walk with only runAlways changesets pending leaves a build alone; one with a real
+            // changeset to run ends it. vectors-058-1 is an applied, idempotent CREATE OR REPLACE of functions.
+            int forgotten = asSuperuser(su -> su.deleteFrom(DSL.table(DSL.name("public", "databasechangelog")))
+                .where(DSL.field(DSL.name("id"), String.class).eq("vectors-058-1")).execute());
+            assertThat(forgotten).as("vectors-058-1 was applied").isEqualTo(1);
 
             CompletableFuture<Void> walk = CompletableFuture.runAsync(() -> SchemaMigrator.migrate(adminDs), async);
             PassReport ended = pass.get(120, TimeUnit.SECONDS);             // the walk's first act ends the builder
@@ -1670,11 +1686,13 @@ class PciReconcilerIntegrationTest {
             migrator.detachAppender(migratorLogs);
         }
         assertThat(migratorLogs.list.stream().map(ILoggingEvent::getFormattedMessage))
-            .anyMatch(l -> l.contains("event=pci_builders_terminated") && !l.contains("count=0"));
+            .anyMatch(l -> l.contains("event=pci_builders_terminated") && !l.contains("count=0")
+                && l.contains("reason=schema_changesets_pending"));
         assertThat(builderBackends()).as("the builder session is gone and so is its lock").isZero();
         assertThat(r.trackedFailures()).isZero();
-        assertThat(r.reconcileOnce().drops()).as("the invalid index goes").isEqualTo(1);
-        assertThat(r.reconcileOnce().builds()).as("the rebuild needs no backoff to lapse").isEqualTo(1);
+        PassReport next = r.reconcileOnce();
+        assertThat(next.drops()).as("the invalid index goes").isEqualTo(1);
+        assertThat(next.builds()).as("and is rebuilt in the same pass, needing no backoff to lapse").isEqualTo(1);
         assertThat(validIndexed(tenant)).containsExactly(name("victim"));
     }
 
@@ -2135,19 +2153,22 @@ class PciReconcilerIntegrationTest {
         MutableClock clock = new MutableClock();
         PciReconciler failing = reconciler(s, sweep, clock);
 
+        // A pass inside the backoff drops the invalid index and builds nothing (nexus-f3yqd: outside it, the same pass
+        // would drop and rebuild); the clock then moves past the retry and the next build fails in turn.
         failOneBuild(tenant, failing);
-        clock.advance(Duration.ofMinutes(11));
         failing.reconcileOnce();                                              // drops the invalid index
+        clock.advance(Duration.ofMinutes(11));
         failOneBuild(tenant, failing);
-        clock.advance(Duration.ofMinutes(21));
         failing.reconcileOnce();
+        clock.advance(Duration.ofMinutes(21));
         failOneBuild(tenant, failing);
         assertThat(failing.status().failing()).as("three in a row").isEqualTo(1);
 
         // A peer with no failure history drops the invalid index and builds the collection.
         PciReconciler peer = reconciler(s, sweep, new MutableClock());
-        peer.reconcileOnce();
-        assertThat(peer.reconcileOnce().builds()).isEqualTo(1);
+        PassReport peerPass = peer.reconcileOnce();                           // drops it and builds, in one pass
+        assertThat(peerPass.drops()).isEqualTo(1);
+        assertThat(peerPass.builds()).isEqualTo(1);
         assertThat(validIndexed(tenant)).containsExactly(name("stubborn"));
 
         failing.reconcileOnce();                                              // still inside its own 40 minute backoff

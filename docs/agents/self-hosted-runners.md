@@ -55,8 +55,8 @@ differ from a GitHub-hosted runner:
   `lab-run -c <class> -- <command>`: it queues behind CI, then runs the
   command in place with the class's cores and memory cap, and `-n auto`
   resolves to the grant.
-  The suite also caps its own workers to the grant's memory (grant / 3.2 GiB
-  each, a full suite's measured peak, nexus-vo9qn): `-n auto` runs 15 on `lab-l` and 5 on `lab-m` (8 -> 5 workers, a
+  The suite also caps its own workers to the grant's memory (grant / 4 GiB
+  each, a full suite's measured peak plus headroom, nexus-vo9qn): `-n auto` runs 12 on `lab-l` and 4 on `lab-m` (8 -> 4 workers, a
   longer wall clock, in exchange for staying on tmpfs and clear of the grant's OOM kill).
   Substrate clusters go on `/dev/shm` for the whole run (decided once, at the
   start) rather than on the NVMe, and the pytest summary says
@@ -86,7 +86,7 @@ differ from a GitHub-hosted runner:
   If `SubstrateRootExhausted` trips, the floor is 512 MiB of tmpfs space or cgroup
   headroom after a 45 s wait: read the cause in the exception, the summary line and
   the `cluster_root` events (`--log-level=INFO`), then run fewer workers (`-n` =
-  headroom / 3.2 GiB) or a larger class, then `NX_TEST_PG_ROOT=<dir>`
+  headroom / 4 GiB) or a larger class, then `NX_TEST_PG_ROOT=<dir>`
   (`tests/AGENTS.md` has the full paragraph).
   An engine build inverts the order: `scripts/mvnw-leased.sh --lab-run <class>
   ...` takes the build lease first and then the grant, so waiting for another

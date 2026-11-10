@@ -280,27 +280,51 @@ def test_the_gate_unwinds_to_the_cli_after_an_install(monkeypatch, tmp_path) -> 
         _hold_pdfs_without_stack([tmp_path / "a.pdf"], tmp_path)
 
 
-def test_a_held_pdf_still_counts_as_present_for_the_orphan_sweep(tmp_path) -> None:
-    """Housekeeping deletes a catalog row whose file is absent from the walk
-    after two runs. A refused run must not age a PDF's row toward that."""
-    from nexus import indexer as idx
+def test_a_held_pdf_still_counts_as_present_for_the_orphan_sweep(tmp_path, monkeypatch) -> None:
+    """The reconcile commit sweeps a catalog row whose file is absent from a complete walk after two runs. A refused run
+    must not age a PDF's row toward that, so the held PDF is staged as a ``keep`` row.
 
-    seen: list[set[str]] = []
+    Rewritten for RDR-193 Step 6 (nexus-u5m5g.7): this called the deleted ``_maybe_run_housekeeping`` with ``keep=[pdf]``.
+    It now drives ``_catalog_hook`` with ``keep_paths`` and reads the staged rows. The engine's treatment of a ``keep``
+    row (counted present, its miss count reset, never swept) is
+    ``tests/test_catalog_hook_reconcile_contract.py::test_a_complete_walk_counts_a_missing_file_and_a_kept_one_is_not_counted``."""
+    from nexus import indexer as idx
+    import nexus.catalog.factory as factory
+
+    staged: list[list[tuple[str, str]]] = []
+
+    class _Reader:
+        def owner_for_repo(self, repo_hash):
+            return "1.7"
+
+        def close(self):
+            pass
+
+    class _Writer:
+        def reconcile_stage(self, owner, run_id, walk, expected_rows, rows):
+            staged.append([(r["kind"], r["file_path"]) for r in rows])
+            return len(rows)
+
+        def reconcile_commit(self, owner, run_id):
+            return {"rows": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(factory, "make_catalog_reader", lambda **kw: _Reader())
+    monkeypatch.setattr(factory, "make_catalog_writer", lambda **kw: _Writer())
     pdf = tmp_path / "held.pdf"
     code = tmp_path / "a.py"
-    with patch.object(idx, "_run_housekeeping", side_effect=lambda cat, owner, indexed, **kw: seen.append(set(indexed))):
-        idx._maybe_run_housekeeping(
-            object(), object(), [(code, "code", "code__x")], tmp_path,
-            writer=None, skip_housekeeping=False, keep=[pdf],
+    code.write_text("x = 1\n")
+    for keep in ([pdf], None):
+        idx._catalog_hook(
+            repo=tmp_path, repo_name="r", repo_hash="abcd1234", head_hash="h",
+            indexed_files=[(code, "code", "code__x")], walk="complete", keep_paths=keep,
         )
-        idx._maybe_run_housekeeping(
-            object(), object(), [(code, "code", "code__x")], tmp_path,
-            writer=None, skip_housekeeping=False,
-        )
-    assert seen == [{"a.py", "held.pdf"}, {"a.py"}]
+    assert staged == [[("present", "a.py"), ("keep", "held.pdf")], [("present", "a.py")]]
 
 
-# The hold's wiring (keep= to housekeeping, pdf_stack_held in the stats, the
+# The hold's wiring (keep_paths to the reconcile run, pdf_stack_held in the stats, the
 # since-head base staying put, the exit 69) is pinned by behaviour in
 # tests/test_pdf_stack_index_repo_hold.py; source-text greps here let three
 # mutations through.

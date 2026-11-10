@@ -1326,7 +1326,8 @@ def _split_appends_from_state(
     creates the lock (ADDED) and is exempt after that. A created, rewritten or
     removed lock stays state. (5) nexus-iox43, the root-level
     ``upgrade-auto.lock`` that existed at session start and ends holding a
-    bare pid (*upgrade_lock_content*): every take of it rewrites the taker's
+    bare pid, behind one space (*upgrade_lock_content*; byte 0 is the byte
+    Windows locks): every take of it rewrites the taker's
     pid, the SessionStart hook's probe included, so a session starting
     anywhere on the box modifies it. A taker under pytest writes ``<pid>
     pytest`` and stays state, as does a created or removed lock or any other
@@ -1417,7 +1418,8 @@ def _split_appends_from_state(
             rel == _UPGRADE_LOCK_NAME
             and _verb == "MODIFIED"
             and upgrade_lock_content is not None
-            and upgrade_lock_content.isdigit()
+            # the pid sits behind one space (byte 0 is the byte Windows locks)
+            and upgrade_lock_content.strip().isdigit()
         ):
             # A live host took the auto-upgrade lock; see (5).
             appends.append(entry)
@@ -1599,7 +1601,15 @@ def _read_upgrade_lock(config_dir: Path) -> bytes | None:
     try:
         if not path.is_file() or path.is_symlink() or path.stat().st_size > 64:
             return None
-        return path.read_bytes()
+        # As nexus.util.upgrade_auto_lock.read_holder_text reads it (the guard imports nothing
+        # from nexus): from byte 0, and past it when that read fails, which it does on Windows
+        # while a live host holds the lock (msvcrt locks byte 0; the pid starts at byte 1).
+        with open(path, "rb") as fh:
+            try:
+                return fh.read()
+            except OSError:
+                fh.seek(1)
+                return fh.read()
     except OSError:
         return None
 

@@ -441,7 +441,8 @@ them.
 2. **File-memory frontmatter.** An optional `replaces: [name, ...]`. The
    index check (3) reads it.
 3. **SessionStart curation check.** A conexus hook verb (stdlib only, under
-   its existing SessionStart budget) that reads the repo's memory directory
+   its existing SessionStart budget; as built it runs inside the `session-start`
+   verb, so `hooks.json` gains no entry and no process, nexus-qo7ie.16) that reads the repo's memory directory
    and prints at most one line: over budget, an unindexed file, a file named
    in another file's `replaces` that still exists, or an index entry naming a
    missing file. Silent when clean. It is opt-in per repo: it runs only where
@@ -453,7 +454,7 @@ them.
    Key Discoveries 2026-11-05); the two index files are not themselves
    checked. The check calls `nexus._hook_runtime.memory_scan.scan`, the
    function `nx memory curate --files` uses, so the two cannot disagree. Size is `MEMORY.md`'s bytes
-   divided by 4, against `memory.index_budget_tokens` in `.nexus.yml`
+   divided by 4, against `memory.index_budget_tokens` in the primary checkout's `.nexus.yml`
    (default 1500), read by a stdlib line scan for that one key under a
    top-level `memory:` block, since the hook cannot import a YAML parser; a
    missing, non-integer or non-positive value means the default. Claude Code already reminds a writer near its own
@@ -692,7 +693,11 @@ The measured domain is five rules: the em dash rule, which has the volume
 for a 14-day window, and four rare rules (`git stash`, full-disk `find`, the
 Claude-Session trailer, backticks in quoted arguments), pooled into one rate
 over 30 days, the most transcripts keep (about 30 days, inferred; research
-9). Each count is stored in T2 when it is taken.
+9). Each count is stored in T2 when it is taken. The `git stash` rule counts only a
+stash that changes state: `git stash list`, `show` and `create` touch neither
+`refs/stash` nor the working tree and are not counted (Sam, 2026-11-09, ask
+q12-stash-scope; over 14 days the detector found 31 of 78 main sessions with
+any stash command and 4 with one that changes state).
 
 #### Step 2: Split
 

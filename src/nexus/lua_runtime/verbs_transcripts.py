@@ -51,10 +51,12 @@ The record:
 file is parsed: an unselected field, above all a tool call's input, is never
 cleaned or kept, and ``bodies`` true without ``assistant_text`` collects no
 text. That cuts the result's size and the memory a scan retains; it does not
-cut the read or, by itself, the decode. The decode is cut whatever ``fields``
-says, and only for a line of 4 KB or more whose type is not ``user``,
-``assistant`` or ``attachment`` (``_inert``); those three types are always
-decoded. See ``_parse_fields`` for the grammar. ``project`` may also be
+cut the read. It cuts the decode of a line of 4 KB or more only where no
+selected field reads the line (``_inert``): a line whose type is not ``user``,
+``assistant`` or ``attachment``, whatever ``fields`` says; an ``attachment``
+while ``instruction_loads``, ``deferred_tools`` and ``deferred_tools_dropped``
+are all unselected; never a ``user`` or an ``assistant`` line. See ``_parse_fields`` for the
+grammar. ``project`` may also be
 the reserved value ``repo``: every project directory holding the sessions of
 the repository the run started in (``transcripts_projects``); a project
 directory literally named ``repo`` cannot be asked for by name.
@@ -499,6 +501,14 @@ class _Session:
             self.call_keys & {"result_time", "is_error"}
         )
         self.want_deferred = bool(f.top & {"deferred_tools", "deferred_tools_dropped"})
+        # The acting lines no selected field reads (``_inert`` may stand in for
+        # them): an attachment is read only for its instruction files and
+        # deferred tools. A user line is always decoded.
+        self.inert_kinds = (
+            frozenset({"attachment"})
+            if self.load_keys is None and not self.want_deferred
+            else frozenset()
+        )
         self.call_count = 0
         self.start: str | None = None
         self.end: str | None = None
@@ -731,13 +741,26 @@ class _Session:
 # from the harness: a session that crashes mid-write and resumes appends its
 # next record to the torn line, and the skip keeps the torn head's type and
 # stamp where the decode drops the whole line, so that transcript's start or
-# end can move to the torn event's time. Sam accepted this residual for
-# harness-written transcripts (ask baton/q37-residual, 2026-11-08).
+# end can move to the torn event's time. For an attachment line the type, stamp
+# and ids come from the resumed record's tail, and the torn record is lost
+# either way. Sam accepted this residual for harness-written transcripts (ask
+# baton/q37-residual, 2026-11-08).
 #
-# User, assistant and attachment lines are never skipped: measured on real transcripts,
-# the regexes that prove a tool_result or a prompt line's shape run slower than
-# ``json.loads`` on its string content, and an attachment's stamp sits behind a
-# nested object that only a full parse can step over.
+# An assistant or user line is never skipped. An attachment line is skipped only
+# while no selected field reads it (``_Session.inert_kinds``), and its type or
+# stamp then often follows the nested ``attachment`` object, out of the opening
+# run's reach. ``_tail`` reads the members after the last nested value: text of
+# nothing but ``,"key":scalar`` members from the last ``}`` or ``]`` to the
+# closing brace. In well-formed JSON those are members of the top-level object
+# (a string there has no ``"`` or ``\``, so each ``,"`` is a member boundary),
+# the same trust the run has; the line is decoded when a key is in both the run
+# and the tail. What it cannot reach is a stamp before a nested value that ends
+# the line: Claude Code writes ``rendered`` (an array) after an attachment's
+# stamp, so those lines are decoded. Finding where the attachment object ends
+# by an anchor in its own text (``},"uuid":"``) would reach them, and would
+# assume no nested object is ever followed by such a key: that is not proven
+# here, and the regexes that walk the object itself ran slower than
+# ``json.loads`` on its string content.
 
 _PREPARSE = True  # a test seam: the tests switch it off to compare
 _PREPARSE_MIN = 4096  # bytes; under it json.loads is as cheap as the scan
@@ -748,6 +771,7 @@ _PAIR = re.compile(rb'"([A-Za-z0-9_]+)":(' + _VALUE + rb")")
 _MEMBER = rb'"[A-Za-z0-9_]+":' + _VALUE
 _RUN = re.compile(rb"(?:" + _MEMBER + rb"(?:," + _MEMBER + rb")*+)?+")
 _NEXT = re.compile(rb',"[A-Za-z0-9_]+":|[ \t\r\n]*\}[ \t\r\n]*\Z')
+_TAIL = re.compile(rb"(?:," + _MEMBER + rb")++")
 
 
 def _inert(raw: bytes, s: _Session) -> dict[str, Any] | None:
@@ -757,7 +781,12 @@ def _inert(raw: bytes, s: _Session) -> dict[str, Any] | None:
     has them as top-level strings, ``timestamp``, ``sessionId`` and
     ``agentId``, and ``isSidechain`` when true. ``s`` only widens what must be
     proven: ``isSidechain`` for a main file, and an id while ``s`` still lacks
-    one (a line that names such a key outside the run is decoded).
+    one (a line that names such a key outside what is read is decoded).
+
+    A flat line is read from its opening run. An attachment line that
+    ``s.inert_kinds`` names may have its type or stamp after the nested
+    attachment object, so the members after the last nested value (``_tail``)
+    are read too.
     """
     n = len(raw)
     if not _PREPARSE or n < _PREPARSE_MIN or raw[:1] != b"{":
@@ -768,8 +797,13 @@ def _inert(raw: bytes, s: _Session) -> dict[str, Any] | None:
         if key in found:
             return None
         found[key] = value
+    if _NEXT.match(raw, end) is None:
+        return None
     kind = _plain(found.get(b"type"))
-    if kind is None or kind in _ACTING or _NEXT.match(raw, end) is None:
+    acting = kind is None or kind in _ACTING
+    if acting and (
+        not s.inert_kinds or (kind is not None and kind not in s.inert_kinds)
+    ):
         return None
     if not raw.endswith(b"\n"):
         return None  # a torn last write, or a last line the decode reads
@@ -782,9 +816,27 @@ def _inert(raw: bytes, s: _Session) -> dict[str, Any] | None:
         need.append(b"sessionId")
     if not s.main and s.agent_id is None:
         need.append(b"agentId")
-    for key in need:
-        if key not in found and b'"' + key + b'"' in raw:
-            return None  # named in the line, but not in the run: it may be top-level
+    missing = [k for k in need if k not in found]
+    if acting:
+        # A stamp the opening run lacks must be in the tail (a line with none is
+        # decoded); any other key is looked for there only if the line names it.
+        want = [k for k in missing if k == b"timestamp"] or [
+            k for k in missing if b'"' + k + b'"' in raw
+        ]
+        if kind is None:
+            want.append(b"type")
+    if acting and want:
+        tail = _tail(raw, end, want)
+        if tail is None or found.keys() & tail.keys():
+            return None  # no flat tail, or a key twice: the decode keeps the last
+        found.update(tail)
+        kind = _plain(found.get(b"type"))
+        if kind not in s.inert_kinds:
+            return None
+        missing = [k for k in missing if k not in found]
+    for key in missing:
+        if b'"' + key + b'"' in raw:
+            return None  # named in the line, but not where read: it may be top-level
     if not raw.isascii():
         try:
             raw.decode("utf-8", "surrogatepass")
@@ -802,6 +854,35 @@ def _inert(raw: bytes, s: _Session) -> dict[str, Any] | None:
             return None
         rec[key.decode()] = value
     return rec
+
+
+def _tail(raw: bytes, start: int, want: list[bytes]) -> dict[bytes, bytes] | None:
+    """The members after the last nested value of a line's top-level object.
+
+    The text after the last ``}`` or ``]`` before the closing brace must be
+    nothing but ``,"key":scalar`` members up to that brace, and must follow
+    ``start`` (the end of the opening run). Each is then a member of the
+    top-level object: a string there is quote-delimited with no escape, so a
+    ``,"`` is a member boundary and never string content, and the closer before
+    the run ends a nested value. A closer inside a string of the tail leaves a
+    remainder that does not match, and the line is decoded. A closer inside a
+    nested string cannot be followed by ``,"KEY":``: the quote after the comma
+    would close that string, and a bare ``KEY"`` after it is not well-formed
+    JSON. None when that does not hold, when a key of ``want`` is not in the
+    text, or when a key repeats.
+    """
+    stop = len(raw) - 8 + len(raw[-8:].rstrip(b" \t\r\n")) - 1  # the closing brace
+    at = max(raw.rfind(b"}", start, stop), raw.rfind(b"]", start, stop))
+    if at < 0 or any(raw.find(b'"' + k + b'":', at, stop) < 0 for k in want):
+        return None  # no tail, or it cannot hold what is wanted: a cheap way out
+    if (m := _TAIL.match(raw, at + 1, stop)) is None or m.end() != stop:
+        return None
+    found: dict[bytes, bytes] = {}
+    for key, value in _PAIR.findall(raw, at + 1, stop):
+        if key in found:
+            return None
+        found[key] = value
+    return found
 
 
 def _plain(token: bytes | None) -> str | None:

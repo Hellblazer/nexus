@@ -589,19 +589,24 @@ def test_run_index_prunes_stored_doc_for_now_excluded_rdr_basename(tmp_path, mon
     docs/rdr/README.md under the pre-#1524 rule survives on disk untouched
     by the new basename exclusion above — it is never RE-discovered, but
     the stored catalog row is never told either. Without the fix, the only
-    reclaim path is ``_run_housekeeping``'s two-run miss-count sweep (this
-    run's ``indexed_set`` simply omits the path); THIS run must also feed
-    it into the same ``delta_deleted`` -> ``_delete_docs_for_paths`` prune
-    the --since-head path uses for a real git deletion, so a FULL run
-    reclaims it immediately, exactly like a git deletion would.
+    reclaim path is the reconcile commit's two-run miss-count sweep (this
+    run's walk simply omits the path); THIS run must also feed
+    it into the same ``delta_deleted`` the --since-head path uses for a real
+    VCS deletion, so a FULL run reclaims it immediately, exactly like a
+    deletion would. RDR-193 Step 6 (nexus-u5m5g.7): ``delta_deleted`` now
+    rides ``_catalog_hook(deleted_relpaths=...)`` as ``deleted`` rows of the
+    reconcile run (``_delete_docs_for_paths`` is gone), so the wiring pinned
+    here is that the hook is handed the paths; the commit's trash of a
+    ``deleted`` row is ``tests/test_catalog_hook_reconcile_contract.py::
+    test_deleted_relpaths_are_trashed_by_the_commit_with_no_single_delete``.
 
     ``_stored_paths_among`` (round 2: the batched "is it still stored"
     confirmation gate) has its own dedicated unit test
     (``test_stored_paths_among_filters_to_live_documents_only``); here it
     is short-circuited to "yes, everything present is still stored" so
     THIS test stays focused on the wiring one layer up — a path
-    confirmed stored rides ``delta_deleted`` into a same-run
-    ``_delete_docs_for_paths`` call."""
+    confirmed stored rides ``delta_deleted`` into the same run's
+    ``deleted_relpaths``."""
     from nexus.indexer import _run_index
     repo = tmp_path / "repo"; repo.mkdir()
     rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
@@ -615,18 +620,20 @@ def test_run_index_prunes_stored_doc_for_now_excluded_rdr_basename(tmp_path, mon
         lambda _repo, candidates: set(candidates),
     )
 
+    def _hook(**kw):
+        deleted_calls.append(list(kw.get("deleted_relpaths") or []))
+        return {}
+
     with _patches(db, extra={
         "nexus.indexer._index_prose_file": {"return_value": 1},
-        "nexus.indexer._delete_docs_for_paths": {
-            "side_effect": lambda _repo, paths: deleted_calls.append(list(paths)),
-        },
+        "nexus.indexer._catalog_hook": {"side_effect": _hook},
     }):
         _run_index(repo, _reg())
 
-    assert deleted_calls, (
+    assert deleted_calls and deleted_calls[0], (
         "an excluded-but-present RDR basename confirmed still stored must "
-        "trigger a same-run _delete_docs_for_paths call, not wait on the "
-        "two-run housekeeping miss-count sweep"
+        "ride the run's deleted_relpaths, not wait on the "
+        "two-run miss-count sweep"
     )
     got = set(deleted_calls[0])
     assert str(Path("docs/rdr/README.md")) in got
@@ -694,10 +701,12 @@ def test_since_head_run_with_nothing_stored_at_excluded_paths_skips_the_sweep(tm
     head-regression-2026-09-09): docs/rdr/README.md and AGENTS.md are
     PERMANENT — present on disk every run. Once there is nothing left to
     reclaim at those paths (never stored, or already reclaimed by a prior
-    run — the steady state), a --since-head run with no git deletions must
-    NOT call ``_delete_docs_for_paths`` and must hit the "no deletions in
-    delta" skip phase, not silently pay the full per-collection orphan
-    sweep on every incremental run forever."""
+    run — the steady state), a --since-head run with no deletions must
+    hand the reconcile run NO ``deleted_relpaths`` and must hit the "no
+    deletions in delta" skip phase, not silently pay the full per-collection
+    orphan sweep on every incremental run forever. (RDR-193 Step 6,
+    nexus-u5m5g.7: it used to assert ``_delete_docs_for_paths`` was not
+    called; the same wiring is now the hook's ``deleted_relpaths``.)"""
     from nexus import indexer as idx
 
     repo = tmp_path / "repo"; repo.mkdir()
@@ -713,17 +722,20 @@ def test_since_head_run_with_nothing_stored_at_excluded_paths_skips_the_sweep(tm
     deleted_calls: list[list[str]] = []
     phases: list[str] = []
     db, _, _ = _tracking_db()
+
+    def _hook(**kw):
+        deleted_calls.append(list(kw.get("deleted_relpaths") or []))
+        return {}
+
     with _patches(db, extra={
         "nexus.indexer._index_prose_file": {"return_value": 1},
-        "nexus.indexer._delete_docs_for_paths": {
-            "side_effect": lambda _repo, paths: deleted_calls.append(list(paths)),
-        },
+        "nexus.indexer._catalog_hook": {"side_effect": _hook},
     }):
         idx._run_index(repo, _reg(), since_head=True, on_phase=phases.append)
 
-    assert deleted_calls == [], (
+    assert deleted_calls == [[]], (
         "nothing confirmed stored at the excluded paths — delta_deleted "
-        "must stay empty and _delete_docs_for_paths must not fire"
+        "must stay empty, so the hook is handed no deleted_relpaths"
     )
     assert any("no deletions in delta" in p for p in phases), phases
 

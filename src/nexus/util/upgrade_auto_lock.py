@@ -102,12 +102,38 @@ class AutoLock:
             pass
 
     def holder_pid(self) -> int | None:
-        """The pid the holder wrote, or ``None`` (unreadable, or this process holds it)."""
+        """The pid the holder wrote, or ``None`` when the file cannot be read."""
         try:
-            first = (self.path.read_text(encoding="utf-8").split() or [""])[0]
+            first = (read_holder_text(self.path).split() or [""])[0]
             return int(first) if first.isdigit() else None
         except (OSError, ValueError):
             return None
+
+
+#: Where the holder's text starts. Windows locks a byte range (msvcrt.locking, one byte at the
+#: file position) and no other handle may read a locked byte, the same process included, so a
+#: pid written over the locked byte 0 could not be read while the lock was held (holder_pid
+#: answered None there). The lock stays on byte 0, which the lockstep hook's copy of the probe
+#: (conexus/hooks/scripts/version_lockstep_action.py) also takes; the text starts at byte 1,
+#: behind one space.
+_TEXT_OFFSET = 1
+
+
+def read_holder_text(path: Path) -> str:
+    """The holder's ``<pid>[ pytest]`` text.
+
+    Read from byte 0 wherever that is readable: on POSIX always, and on Windows whenever the
+    lock is free. That reads a file an older client wrote (pid at byte 0) correctly too. Only a
+    Windows read of a held lock fails there, and then the text is read from byte 1. One edge is
+    left: an older client holding the lock on Windows, read by a newer one, loses its first digit;
+    the pid is only ever logged for a person."""
+    with open(path, "rb") as fh:
+        try:
+            raw = fh.read()
+        except OSError:
+            fh.seek(_TEXT_OFFSET)
+            raw = fh.read()
+    return raw.decode("utf-8", errors="replace").strip()
 
 
 def acquire_auto_lock(config_dir: Path | None = None) -> AutoLock:
@@ -136,7 +162,7 @@ def acquire_auto_lock(config_dir: Path | None = None) -> AutoLock:
     try:
         os.ftruncate(fd, 0)
         mark = " pytest" if os.environ.get("PYTEST_CURRENT_TEST") else ""
-        os.write(fd, f"{os.getpid()}{mark}".encode("ascii"))
+        os.write(fd, f" {os.getpid()}{mark}".encode("ascii"))  # byte 0 is the locked byte
         os.lseek(fd, 0, os.SEEK_SET)  # msvcrt unlocks from the current position
     except OSError:
         pass  # the pid is for a human; the lock is what counts

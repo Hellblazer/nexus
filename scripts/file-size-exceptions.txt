@@ -104,7 +104,7 @@ src/nexus/db/t3.py 2072
 src/nexus/doc_indexer.py 4776
 src/nexus/exporter.py 2308
 src/nexus/health.py 13887
-src/nexus/indexer.py 8743
+src/nexus/indexer.py 7806
 src/nexus/indexer_utils.py 1935
 src/nexus/mcp/channel.py 1793
 src/nexus/mcp/core.py 17804
@@ -181,7 +181,7 @@ tests/test_aspect_readers_staleness.py 1289
 tests/test_aspect_worker.py 2679
 tests/test_b6enc_store_put_ghost_compensation.py 1621
 tests/test_catalog_cli.py 4085
-tests/test_catalog_indexer_hook.py 2184
+tests/test_catalog_indexer_hook.py 1524
 tests/test_catalog_manifest_read_api.py 1235
 tests/test_catalog_reconcile_stale.py 1521
 tests/test_cc_validation_plugin_install.py 1900
@@ -293,7 +293,6 @@ tests/test_vector_retry.py 1165
 tests/test_vw594_fence_coverage_gate.py 1217
 tests/test_wbfpw18_t3_gc_wire.py 1101
 tests/test_windows_gate_driver.py 1860
-tests/test_yzij1_cross_owner_path_writers.py 1127
 tests/test_z0o2p12_note_write.py 1605
 tests/test_z0o2p19_nxexp_import_combined_write.py 1601
 tests/upgrade/test_census_progress.py 1235

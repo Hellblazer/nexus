@@ -1,6 +1,6 @@
 ---
 name: writing-nx-skills
-description: Use when creating new conexus plugin skills, editing existing skills, or verifying skill quality before committing
+description: Use when creating new conexus plugin skills, editing existing skills, verifying skill quality before committing, or promoting a memory file into a skill, script or hook
 effort: low
 ---
 
@@ -93,6 +93,10 @@ After creating a skill, update [conexus/registry.yaml](https://github.com/Hellbl
 ### Routing a new skill
 
 Add it to [conexus/skills/orchestration/reference.md](https://github.com/Hellblazer/nexus/blob/main/conexus/skills/orchestration/reference.md) § Skill Routing so it is discoverable. The SessionStart text (`GUIDANCE_IMPERATIVE` in [src/nexus/session_start_guidance.py](https://github.com/Hellblazer/nexus/blob/main/src/nexus/session_start_guidance.py), PyPI wheel) names only the situations and the handful of skills and agents that answer them; it is not a menu. Add a skill there only when it answers a situation the imperative already lists, and mind its byte budget ([tests/test_session_start_guidance.py](https://github.com/Hellblazer/nexus/blob/main/tests/test_session_start_guidance.py), [tests/hooks/test_session_start_combined_budget.py](https://github.com/Hellblazer/nexus/blob/main/tests/hooks/test_session_start_combined_budget.py)). Wrapper skills that only dispatch an agent the model already dispatches directly do not earn a place: the six that did (code-review, debugging, development, test-validation, query, using-nx-skills) were retired with zero model loads in 30 days (nexus-dg7i6.6).
+
+## Promoting a Memory File
+
+When a memory file's "How to apply" is a procedure, ordered steps, over about 8 KB, or a bright line, promote it: read `promotion.md` in this skill's directory for the criterion, the target table, citing sources, the loss check and the empty-list rule.
 
 ## Known Pitfalls
 

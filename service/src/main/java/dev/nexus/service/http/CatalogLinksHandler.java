@@ -25,9 +25,6 @@ final class CatalogLinksHandler {
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
-    /** At most this many edges, or tumblers, in one call (the batch bind bound every sibling batch route shares). */
-    static final int MAX_BATCH_DOC_IDS = 1000;
-
     private final CatalogLinksRepository links;
 
     CatalogLinksHandler(CatalogLinksRepository links) {
@@ -52,7 +49,8 @@ final class CatalogLinksHandler {
 
     /**
      * A deadlock, a serialization failure or a lock wait that ran out ended the call and nothing was written: 503 with
-     * reason {@code transient_db_error}, the retryable answer the reconcile commit's poll gives, never a 500.
+     * reason {@code transient_db_error}, never a 500. A failed reconcile commit reports the same reason in its poll
+     * ({@code {status: failed, reason: transient_db_error, http_status: 503}}), because the poll route itself answers 200.
      */
     private static void transientFailure(HttpExchange exchange, CatalogLinksRepository.TransientDbException e) throws IOException {
         send(exchange, 503, "{\"error\":" + CatalogHandler.MAPPER.writeValueAsString(e.getMessage())
@@ -63,7 +61,7 @@ final class CatalogLinksHandler {
      * POST /v1/catalog/links/upsert_many — the batch link upsert, one transaction. Body: {@code {"edges": [{"from": E,
      * "to": E, "link_type": "...", "created_by": "...", "from_span"?: "...", "to_span"?: "..."}, ...]}} where an
      * endpoint {@code E} is {@code {"tumbler": "..."}} or {@code {"owner": "...", "file_path": "..."}}. At most
-     * {@value #MAX_BATCH_DOC_IDS} edges; more is a 400, as is an edge of the wrong shape (the 400 names its index).
+     * {@value CatalogHandler#MAX_BATCH_DOC_IDS} edges; more is a 400, as is an edge of the wrong shape (the 400 names its index).
      * There is no metadata and no allow_dangling.
      *
      * <p>Response: {@code {"created": N, "skipped": N, "unresolved": [{"index", "side", "reason"}]}}; {@code reason} is
@@ -79,8 +77,8 @@ final class CatalogLinksHandler {
         if (!(body.get("edges") instanceof List<?> edges)) {
             error(exchange, 400, "'edges' must be a list"); return;
         }
-        if (edges.size() > MAX_BATCH_DOC_IDS) {
-            error(exchange, 400, "too many edges (max " + MAX_BATCH_DOC_IDS + ")"); return;
+        if (edges.size() > CatalogHandler.MAX_BATCH_DOC_IDS) {
+            error(exchange, 400, "too many edges (max " + CatalogHandler.MAX_BATCH_DOC_IDS + ")"); return;
         }
         List<Map<String, Object>> checked = new ArrayList<>(edges.size());
         for (int i = 0; i < edges.size(); i++) {
@@ -118,7 +116,7 @@ final class CatalogLinksHandler {
 
     /**
      * POST /v1/catalog/links/same_content — the same-content (same-as) linker. Body: {@code {"tumblers": [...],
-     * "prune": true|false}} ({@code prune} defaults to false; at most {@value #MAX_BATCH_DOC_IDS} tumblers). Response:
+     * "prune": true|false}} ({@code prune} defaults to false; at most {@value CatalogHandler#MAX_BATCH_DOC_IDS} tumblers). Response:
      * {@code {"created": N, "retracted": N}}, plus {@code "refused": "empty_fetch"} when the prune found candidate links
      * and the tenant has no live pdf or paper.
      */
@@ -131,8 +129,8 @@ final class CatalogLinksHandler {
         if (l.stream().anyMatch(o -> !(o instanceof String s) || s.isBlank())) {
             error(exchange, 400, "every 'tumblers' element must be a non-blank string"); return;
         }
-        if (l.size() > MAX_BATCH_DOC_IDS) {
-            error(exchange, 400, "too many tumblers (max " + MAX_BATCH_DOC_IDS + ")"); return;
+        if (l.size() > CatalogHandler.MAX_BATCH_DOC_IDS) {
+            error(exchange, 400, "too many tumblers (max " + CatalogHandler.MAX_BATCH_DOC_IDS + ")"); return;
         }
         Object rawPrune = body.get("prune");
         if (rawPrune != null && !(rawPrune instanceof Boolean)) {

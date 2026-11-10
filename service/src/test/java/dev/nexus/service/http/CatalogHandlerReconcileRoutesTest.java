@@ -288,6 +288,7 @@ class CatalogHandlerReconcileRoutesTest {
 
         JsonNode end = awaitEnd(t, jobId);
         assertThat(end.get("status").asText()).as(end.toString()).isEqualTo("succeeded");
+        assertThat(end.get("http_status").asInt()).as("the poll carries the status the commit ended with").isEqualTo(200);
         JsonNode rows = end.get("outcome").get("rows");
         assertThat(rows).hasSize(2);
         assertThat(rows.get(0).get("action").asText()).isEqualTo("created");
@@ -416,6 +417,46 @@ class CatalogHandlerReconcileRoutesTest {
         assertThat(end.get("status").asText()).isEqualTo("failed");
         assertThat(end.get("reason").asText()).isEqualTo("run_not_found");
         assertThat(end.get("error").asText()).contains("never-staged");
+    }
+
+    /**
+     * nexus-u5m5g.5: a deadlock, serialization failure or lock wait that ran out is retryable, and the poll is how a
+     * client learns it: the poll itself answers 200, so the job's 503 rides as {@code http_status}. A real 40P01 is raised
+     * by a trigger while the commit trashes the victim row (the repository test of the same name pins the exception).
+     */
+    @Test
+    void poll_aDeadlockDuringTheCommit_endsFailedTransientDbError_with503_andAResubmitSucceeds() throws Exception {
+        String t = tenantWithOwner();
+        repo.registerDocument(t, OWNER, Map.of("title", "victim.py", "file_path", "victim.py",
+            "content_type", "code", "physical_collection", "code__seed", "head_hash", "H0"));
+        assertThat(stage(t, "dl", "partial", 1, List.of(row(0, "deleted", "victim.py"))).status).isEqualTo(200);
+        JsonNode end;
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.installDeadlockOnTrash(su, "victim.py");
+            try {
+                end = awaitEnd(t, commit(t, "dl").json().get("job_id").asText());
+            } finally {
+                PgContainerHelper.removeDeadlockOnTrash(su);
+            }
+        }
+        assertThat(end.get("status").asText()).as(end.toString()).isEqualTo("failed");
+        assertThat(end.get("reason").asText()).isEqualTo("transient_db_error");
+        assertThat(end.get("http_status").asInt()).as("the retryable status, not the 422 of a commit that fails again").isEqualTo(503);
+        assertThat(end.get("error").asText()).contains("submit the commit again");
+        assertThat(runState(t, "dl")).as("nothing written, the run stays staged").isEqualTo("staged");
+        assertThat(liveDocs(t)).isEqualTo(1);
+
+        JsonNode again = awaitEnd(t, commit(t, "dl").json().get("job_id").asText());
+        assertThat(again.get("status").asText()).as(again.toString()).isEqualTo("succeeded");
+        assertThat(again.get("http_status").asInt()).isEqualTo(200);
+    }
+
+    @Test
+    void poll_aRunNeverStaged_endsFailedWith422() throws Exception {
+        String t = tenantWithOwner();
+        JsonNode end = awaitEnd(t, commit(t, "never-staged-422").json().get("job_id").asText());
+        assertThat(end.get("http_status").asInt()).as("a failure the commit names is not retryable").isEqualTo(422);
     }
 
     @Test
@@ -872,16 +913,23 @@ class CatalogHandlerReconcileRoutesTest {
         assertThat(same.json().get("created").asBoolean()).isFalse();
     }
 
+    /** RDR-193 Step 6: sensitive is a boolean; true on a new row flags it (the repository tests pin the audit and the found row). */
     @Test
-    void resolve_refusesASensitiveField_untilTheStepThatImplementsIt() throws Exception {
+    void resolve_sensitiveIsABoolean_aNonBooleanIs400NamingTheField_trueFlagsANewRow() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        for (Object flag : List.of(true, false)) {
-            Resp r = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/sens-" + flag, "title", "S",
-                "sensitive", flag));
-            assertThat(r.status).as("sensitive=" + flag + " -> " + r.body).isEqualTo(400);
-            assertThat(r.json().get("error").asText()).contains("sensitive");
+        for (Object bad : List.of("true", "yes", 1, List.of(true))) {
+            Resp r = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/sens-bad", "title", "S", "sensitive", bad));
+            assertThat(r.status).as("sensitive=" + bad + " -> " + r.body).isEqualTo(400);
+            assertThat(r.json().get("error").asText()).contains("'sensitive' must be a boolean");
         }
         assertThat(docCount(t)).as("nothing was written for a refused request").isZero();
+        Resp plain = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/sens-f", "title", "F", "sensitive", false));
+        assertThat(plain.status).as(plain.body).isEqualTo(200);
+        assertThat(docBy(t, plain.json().get("tumbler").asText()).get(CATALOG_DOCUMENTS.SENSITIVE)).isFalse();
+        Resp flagged = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/sens-t", "title", "T", "sensitive", true));
+        assertThat(flagged.status).as(flagged.body).isEqualTo(200);
+        assertThat(flagged.json().get("created").asBoolean()).isTrue();
+        assertThat(docBy(t, flagged.json().get("tumbler").asText()).get(CATALOG_DOCUMENTS.SENSITIVE)).isTrue();
     }
 
     @Test

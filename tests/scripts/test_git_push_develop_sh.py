@@ -130,7 +130,8 @@ class TestHappyPath:
         proc = _run(work, a)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert proc.stdout.strip() == f"PUSH_OK n=1 tip={a}"
-        assert 'PUSH_WAIT channel: tuple_subscribe("board/ci/nexus-develop--done")' in proc.stderr
+        assert f'PUSH_WAIT channel: tuple_subscribe("board/ci/nexus-develop--done"); a wake for this push carries sha="{a}"' \
+            in proc.stderr
         assert f"PUSH_WAIT no channel: run as a background command: nx ci wait {a} --branch develop" in proc.stderr
 
     def test_pushes_develop_from_a_detached_worktree(self, repos, tmp_path) -> None:

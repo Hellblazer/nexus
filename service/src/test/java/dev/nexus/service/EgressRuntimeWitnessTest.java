@@ -52,6 +52,11 @@ import static org.assertj.core.api.Assertions.fail;
  * library does network I/O that a URL factory cannot see), and the GraalVM native image the engine ships as
  * (this runs on a JVM). {@code EgressGuardCensus} scans only the engine's own sources and does not close
  * these gaps. A child, because the factory can be set once per JVM.
+ *
+ * <p>The offline switch itself is witnessed too (nexus-4lqi7): the {@code startup-offline} child runs
+ * {@code Main.goOfflineAtStartup()}, the step {@code Main.main} calls, and then builds a DJL tokenizer
+ * directly, so the switch's effect at process start is what the check sees and not the second application in
+ * {@code LocalTokenizers.build}.
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class EgressRuntimeWitnessTest {
@@ -91,6 +96,18 @@ class EgressRuntimeWitnessTest {
             switch (mode) {
                 case "tokenizer" -> {
                     try (HuggingFaceTokenizer t = LocalTokenizers.build(tok.toString(), 16)) {
+                        System.out.println("TOKENS " + t.encode("hello").getTokens().length);
+                    }
+                }
+                // nexus-4lqi7 item 7: the step Main.main runs first, then a RAW DJL build (not LocalTokenizers.build,
+                // which re-applies the switch). The switch's own effect at process start is what keeps it quiet.
+                case "startup-offline" -> {
+                    Main.goOfflineAtStartup();
+                    System.out.println("PROP " + LocalTokenizers.OPT_OUT_PROPERTY + "="
+                        + System.getProperty(LocalTokenizers.OPT_OUT_PROPERTY));
+                    System.out.println("PROP " + LocalTokenizers.OFFLINE_PROPERTY + "="
+                        + System.getProperty(LocalTokenizers.OFFLINE_PROPERTY));
+                    try (HuggingFaceTokenizer t = HuggingFaceTokenizer.builder().optTokenizerPath(tok).build()) {
                         System.out.println("TOKENS " + t.encode("hello").getTokens().length);
                     }
                 }
@@ -163,6 +180,22 @@ class EgressRuntimeWitnessTest {
     void theTokenizerBuildTheEnginesShareOpensNothingOutbound() throws Exception {
         List<String> lines = run("tokenizer");
         assertThat(lines).as("non-vacuity: the tokenizer was built and used").contains("TOKENS 1");
+        assertNoOutboundOpen(lines);
+    }
+
+    /**
+     * nexus-4lqi7 item 7: the offline switch's own effect at process start. The child runs {@code Main}'s startup
+     * step (the one method {@code Main.main} calls before any DJL class loads), then builds a DJL tokenizer
+     * directly, so nothing but that step stands between DJL and the network. The properties are read straight
+     * after the step, and the raw build opens nothing outbound. The unguarded twin of this build is
+     * {@link #fixture_aTokenizerBuildThatOpensAnHttpStreamFailsTheWitness}, which does reach for the network.
+     */
+    @Test
+    void theStartupOfflineStepMainRunsKeepsARawDjlBuildOffTheNetwork() throws Exception {
+        List<String> lines = run("startup-offline");
+        assertThat(lines).as("the step set both switches in the child").contains(
+            "PROP " + LocalTokenizers.OPT_OUT_PROPERTY + "=true", "PROP " + LocalTokenizers.OFFLINE_PROPERTY + "=true");
+        assertThat(lines).as("non-vacuity: a DJL tokenizer was built and used after the step").contains("TOKENS 1");
         assertNoOutboundOpen(lines);
     }
 

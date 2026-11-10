@@ -64,6 +64,13 @@
                    transaction. It locks every member and anchor it will link (catalog_link_lock_endpoints) and then
                    writes through catalog_link_write(if_absent), link_if_absent as it is today.
 
+    catalog-048-7  (nexus-u5m5g.5, the Phase 1 gate seam fix) CREATE OR REPLACE of nexus.catalog_link_write: an endpoint
+                   whose alias walk ends on a row that is tombstoned, missing or still an alias answers 'dangling' and
+                   writes nothing (the 048-4 body wrote the link to the alias row). A tombstoned or missing canonical is
+                   dangling on POST /link too; a cycle fails that call (500) and a chain past 16 hops is re-seeded
+                   there, so those two are safer here than on the route. The rollback restores the 048-4 body. 048-1 to -6 are on
+                   develop and are not edited.
+
     Placed after vectors-056-gc-quarantine-expires-at.xml (the tail when this landed) and before the grants-nexus-svc.xml
     runAlways block (the established late-append convention): the grants loop gives nexus_svc DML on both tables. The
     functions are granted explicitly. nexus_diag gets nothing on the tables in the view era (the reembed tables
@@ -1409,6 +1416,194 @@ GRANT EXECUTE ON FUNCTION nexus.catalog_link_same_content(text[], boolean) TO ne
                 REVOKE EXECUTE ON FUNCTION nexus.catalog_link_same_content(text[], boolean) FROM nexus_svc;
                 DROP FUNCTION IF EXISTS nexus.catalog_link_same_content(text[], boolean);
             </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-048-7" author="nexus-u5m5g.5">
+        <comment>nexus.catalog_link_write(p_from, p_to, p_link_type, p_from_span, p_to_span, p_created_by, p_if_absent) RETURNS text (RDR-193 Phase 1 gate seam fix, nexus-u5m5g.5): CREATE OR REPLACE of the catalog-048-4 function so that an endpoint whose alias walk ends on a row that is tombstoned, missing or still an alias answers 'dangling' and writes nothing, where the 048-4 body wrote the link to the alias row. A tombstoned or missing canonical is dangling on POST /link too; a cycle fails that call (500) and a chain past 16 hops is re-seeded there, so those two are safer here than on the route. The signature and the grant are unchanged. A function definition; no data effect at migration time. The rollback restores the catalog-048-4 body.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_link_write(
+    p_from text, p_to text, p_link_type text, p_from_span text, p_to_span text, p_created_by text,
+    p_if_absent boolean DEFAULT false)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant  text := current_setting('nexus.tenant', true);
+    v_ends    text[] := ARRAY[p_from, p_to];
+    v_res     text[] := ARRAY[NULL, NULL]::text[];
+    v_k       integer;
+    v_hop     integer;
+    v_cur     text;
+    v_next    text;
+    v_seen    text[];
+    v_created boolean;
+BEGIN
+    -- What upsertLink does, in this order. Returns 'self' (nothing written), 'exists' (nothing written),
+    -- 'dangling' (nothing written), 'created' or 'merged'.
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION 'catalog_link_write no_tenant: nexus.tenant is not set';
+    END IF;
+
+    -- a link from a document to itself, as the client names it, is not written (checked before alias resolution, as the
+    -- client path checks it before it calls POST /link)
+    IF p_from = p_to THEN
+        RETURN 'self';
+    END IF;
+
+    -- link_if_absent: the edge the client names, unresolved, is already there, so nothing is touched
+    IF p_if_absent AND EXISTS (SELECT 1 FROM nexus.catalog_links l
+                                WHERE l.tenant_id = v_tenant AND l.from_tumbler = p_from AND l.to_tumbler = p_to
+                                  AND l.link_type = p_link_type) THEN
+        RETURN 'exists';
+    END IF;
+
+    -- alias resolution on both endpoints (resolveAliasTarget): follow alias_of to the canonical row, at most 16 hops;
+    -- stop on a cycle, and stop on the last row that exists when a pointer names a row that is gone or tombstoned
+    FOR v_k IN 1..2 LOOP
+        v_cur := v_ends[v_k];
+        v_seen := ARRAY[v_cur];
+        FOR v_hop IN 1..16 LOOP
+            SELECT d.alias_of INTO v_next FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.tumbler = v_cur AND d.deleted_at IS NULL;
+            EXIT WHEN v_next IS NULL OR v_next = '' OR v_next = ANY (v_seen);
+            PERFORM 1 FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.tumbler = v_next AND d.deleted_at IS NULL;
+            EXIT WHEN NOT FOUND;
+            v_seen := v_seen || v_next;
+            v_cur := v_next;
+        END LOOP;
+        v_res[v_k] := v_cur;
+    END LOOP;
+
+    -- both resolved endpoints must be live documents of this tenant, and canonical: the walk above also ends on a row
+    -- that is still an alias (its canonical is tombstoned or gone, the chain is a cycle, or it is longer than 16 hops).
+    -- Such an endpoint names no live document, so it is 'dangling' here and no link is written to the alias row. A
+    -- tombstoned or missing canonical matches POST /link (resolveAndLockLinkEndpoints reports it dangling); a cycle
+    -- fails that call (500) and a chain past 16 hops is re-seeded there, so those two are safer here than on the route.
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d
+                    WHERE d.tenant_id = v_tenant AND d.tumbler = v_res[1] AND d.deleted_at IS NULL
+                      AND coalesce(d.alias_of, '') = '')
+       OR NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d
+                       WHERE d.tenant_id = v_tenant AND d.tumbler = v_res[2] AND d.deleted_at IS NULL
+                         AND coalesce(d.alias_of, '') = '') THEN
+        RETURN 'dangling';
+    END IF;
+
+    -- the upsert: an existing edge keeps its creator, takes the new spans, and folds the new creator into
+    -- metadata.co_discovered_by (the LNK_META_FOLD rule of upsertLink)
+    INSERT INTO nexus.catalog_links AS l (tenant_id, from_tumbler, to_tumbler, link_type, from_span, to_span, created_by)
+    VALUES (v_tenant, v_res[1], v_res[2], p_link_type, coalesce(p_from_span, ''), coalesce(p_to_span, ''), p_created_by)
+    ON CONFLICT (tenant_id, from_tumbler, to_tumbler, link_type) DO UPDATE
+       SET from_span = EXCLUDED.from_span,
+           to_span = EXCLUDED.to_span,
+           metadata = coalesce(l.metadata, jsonb_build_object())
+                      || jsonb_build_object('co_discovered_by',
+                           CASE WHEN jsonb_typeof(coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by') = 'array'
+                                THEN coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by'
+                                ELSE jsonb_build_array() END
+                           || CASE WHEN EXCLUDED.created_by <> '' AND EXCLUDED.created_by IS DISTINCT FROM l.created_by
+                                        AND NOT (CASE WHEN jsonb_typeof(coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by') = 'array'
+                                                      THEN coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by'
+                                                      ELSE jsonb_build_array() END) @> to_jsonb(EXCLUDED.created_by)
+                                   THEN jsonb_build_array(EXCLUDED.created_by)
+                                   ELSE jsonb_build_array() END)
+    RETURNING (l.xmax = 0) INTO v_created;
+    RETURN CASE WHEN v_created THEN 'created' ELSE 'merged' END;
+END;
+$fn$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_link_write(
+    p_from text, p_to text, p_link_type text, p_from_span text, p_to_span text, p_created_by text,
+    p_if_absent boolean DEFAULT false)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant  text := current_setting('nexus.tenant', true);
+    v_ends    text[] := ARRAY[p_from, p_to];
+    v_res     text[] := ARRAY[NULL, NULL]::text[];
+    v_k       integer;
+    v_hop     integer;
+    v_cur     text;
+    v_next    text;
+    v_seen    text[];
+    v_created boolean;
+BEGIN
+    -- What upsertLink does, in this order. Returns 'self' (nothing written), 'exists' (nothing written),
+    -- 'dangling' (nothing written), 'created' or 'merged'.
+    IF v_tenant IS NULL OR v_tenant = '' THEN
+        RAISE EXCEPTION 'catalog_link_write no_tenant: nexus.tenant is not set';
+    END IF;
+
+    -- a link from a document to itself, as the client names it, is not written (checked before alias resolution, as the
+    -- client path checks it before it calls POST /link)
+    IF p_from = p_to THEN
+        RETURN 'self';
+    END IF;
+
+    -- link_if_absent: the edge the client names, unresolved, is already there, so nothing is touched
+    IF p_if_absent AND EXISTS (SELECT 1 FROM nexus.catalog_links l
+                                WHERE l.tenant_id = v_tenant AND l.from_tumbler = p_from AND l.to_tumbler = p_to
+                                  AND l.link_type = p_link_type) THEN
+        RETURN 'exists';
+    END IF;
+
+    -- alias resolution on both endpoints (resolveAliasTarget): follow alias_of to the canonical row, at most 16 hops;
+    -- stop on a cycle, and stop on the last row that exists when a pointer names a row that is gone or tombstoned
+    FOR v_k IN 1..2 LOOP
+        v_cur := v_ends[v_k];
+        v_seen := ARRAY[v_cur];
+        FOR v_hop IN 1..16 LOOP
+            SELECT d.alias_of INTO v_next FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.tumbler = v_cur AND d.deleted_at IS NULL;
+            EXIT WHEN v_next IS NULL OR v_next = '' OR v_next = ANY (v_seen);
+            PERFORM 1 FROM nexus.catalog_documents d
+             WHERE d.tenant_id = v_tenant AND d.tumbler = v_next AND d.deleted_at IS NULL;
+            EXIT WHEN NOT FOUND;
+            v_seen := v_seen || v_next;
+            v_cur := v_next;
+        END LOOP;
+        v_res[v_k] := v_cur;
+    END LOOP;
+
+    -- both resolved endpoints must be live documents of this tenant
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d
+                    WHERE d.tenant_id = v_tenant AND d.tumbler = v_res[1] AND d.deleted_at IS NULL)
+       OR NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d
+                       WHERE d.tenant_id = v_tenant AND d.tumbler = v_res[2] AND d.deleted_at IS NULL) THEN
+        RETURN 'dangling';
+    END IF;
+
+    -- the upsert: an existing edge keeps its creator, takes the new spans, and folds the new creator into
+    -- metadata.co_discovered_by (the LNK_META_FOLD rule of upsertLink)
+    INSERT INTO nexus.catalog_links AS l (tenant_id, from_tumbler, to_tumbler, link_type, from_span, to_span, created_by)
+    VALUES (v_tenant, v_res[1], v_res[2], p_link_type, coalesce(p_from_span, ''), coalesce(p_to_span, ''), p_created_by)
+    ON CONFLICT (tenant_id, from_tumbler, to_tumbler, link_type) DO UPDATE
+       SET from_span = EXCLUDED.from_span,
+           to_span = EXCLUDED.to_span,
+           metadata = coalesce(l.metadata, jsonb_build_object())
+                      || jsonb_build_object('co_discovered_by',
+                           CASE WHEN jsonb_typeof(coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by') = 'array'
+                                THEN coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by'
+                                ELSE jsonb_build_array() END
+                           || CASE WHEN EXCLUDED.created_by <> '' AND EXCLUDED.created_by IS DISTINCT FROM l.created_by
+                                        AND NOT (CASE WHEN jsonb_typeof(coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by') = 'array'
+                                                      THEN coalesce(l.metadata, jsonb_build_object()) -> 'co_discovered_by'
+                                                      ELSE jsonb_build_array() END) @> to_jsonb(EXCLUDED.created_by)
+                                   THEN jsonb_build_array(EXCLUDED.created_by)
+                                   ELSE jsonb_build_array() END)
+    RETURNING (l.xmax = 0) INTO v_created;
+    RETURN CASE WHEN v_created THEN 'created' ELSE 'merged' END;
+END;
+$fn$;
+]]></sql>
         </rollback>
     </changeSet>
 

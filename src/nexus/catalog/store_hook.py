@@ -781,53 +781,6 @@ def resolve_knowledge_doc_for_chash(
     return candidates[0] if candidates else None
 
 
-def _find_ghost_by_title(reader, owner, title: str):
-    """Return an existing GHOST catalog entry under *owner* whose title
-    exactly matches *title*, or ``None``.
-
-    GH #1370 Defect 4a: a pre-existing catalog entry with the same
-    title (e.g. a ghost with ``chunk_count=0`` and empty ``head_hash``,
-    left behind by a pre-migration catalog or an earlier failed index)
-    is invisible to :func:`resolve_knowledge_doc_for_chash` — that entry's
-    ``meta.doc_id`` predates this content's hash. Without this lookup,
-    ``catalog_store_hook``
-    mints a brand-new document with a fresh tumbler and the ghost is
-    never reconciled.
-
-    The reader answers an exact-title, owner-scoped lookup itself
-    (``find_by_title_exact(..., owner=owner, chunk_count=0)``, nexus-gacz0): one
-    engine request for the byte-for-byte title matches among *owner*'s ghosts.
-    Against an engine without that route the reader falls back to filtering
-    the full-text results, which use token matching, not substring matching;
-    the owner-prefix check below stays so both paths hold the same contract
-    (the "knowledge" curator owner; content_type="knowledge" alone is not
-    owner-specific).
-
-    Restricted to GHOST entries (``chunk_count == 0``): reconciling
-    onto a non-ghost entry would silently repoint an already-populated
-    document's ``meta.doc_id`` / ``physical_collection`` at unrelated
-    new content, orphaning its existing ``document_chunks`` manifest
-    rows — a worse outcome than the duplicate-entry bug being fixed
-    here. A same-titled non-ghost match therefore falls through to
-    ``register()`` exactly as before.
-
-    Skipped (returns ``None`` immediately) when *title* is empty — an
-    empty title must never match arbitrary same-titled ("") entries.
-    """
-    if not title:
-        return None
-    # Every exact-title match, not find()'s first 50: a ghost past row 50
-    # went unmatched and register() minted a duplicate (nexus-3bafq sibling).
-    # chunk_count=0 asks the reader for ghosts only (the engine filters it); the checks
-    # below stay as the guard, so a reader that ignores either filter cannot widen a match.
-    for entry in reader.find_by_title_exact(
-        title, content_type="knowledge", owner=owner, chunk_count=0,
-    ):
-        if entry.chunk_count == 0 and owner.is_prefix_of(entry.tumbler):
-            return entry
-    return None
-
-
 #: The note keys that have no catalog column, kept in the document's ``meta`` (nexus-6pfgb.5). The
 #: chunk row carries them too, but a chunk shared by two notes carries only the last writer's.
 #: ``put_at`` (nexus-6pfgb.15) is the time of the note's last put: the clock its own ``ttl_days``
@@ -1006,7 +959,9 @@ def catalog_store_hook_tracked(
     identity (nexus-sdp0u; non-empty *title* only, see below) reconciles
     a RE-PUT of the same (collection, title) onto its existing row
     regardless of chunk_count. When that also misses, a third,
-    title-scoped lookup (:func:`_find_ghost_by_title`) reuses a
+    title-scoped fallback (the engine's ``resolve_or_register`` with
+    ``title_fallback``, RDR-193 Step 6; the second and third lookups are
+    that ONE request) reuses a
     pre-existing GHOST entry's tumbler instead of minting a duplicate
     (GH #1370 Defect 4a). A legacy row registered before that fix carries
     ``source_uri=""``, which the second lookup cannot see: the first
@@ -1199,142 +1154,62 @@ def catalog_store_hook_tracked(
             )
             return str(existing.tumbler), False
 
-        # Get or create "knowledge" curator owner, filtered on owner_type so
-        # a same-named REPO owner cannot shadow the intended curator (same
-        # bug shape as the doc_indexer family fix). Via the protocol method
-        # (nexus-qnp5s, implemented on BOTH backends), NOT raw reader._db
-        # SQL: HttpCatalogClient._db raises RuntimeError in service mode,
-        # and the raw-SQL version of this lookup made the outer best-effort
-        # except swallow that — turning this entire hook into a silent
-        # no-op for every service-mode store_put (GH #1370 review finding).
-        owner_t = reader.curator_owner_tumbler_by_name("knowledge")
         writer = make_catalog_writer()
-        owner = owner_t if owner_t is not None else writer.register_owner(
-            "knowledge", "curator"
-        )
-
-        # nexus-sdp0u: reconcile a RE-PUT of the same (collection, title)
-        # identity onto its existing LIVE row — regardless of chunk_count,
-        # unlike the ghost-by-title fallback below — instead of minting a
-        # sibling. by_source_uri is an exact-identity lookup (the URI
-        # already encodes the exact collection+title pair store_put /
-        # memory-promote register under), so unlike _find_ghost_by_title's
-        # FTS token match it needs no owner-prefix post-filter.
-        #
-        # This precheck (rather than letting the engine's own leg-1
-        # idempotency SELECT inside registerDocument silently return the
-        # existing tumbler from writer.register) is what lets this
-        # function keep created=True meaning "genuinely minted": get that
-        # wrong and a later t3.put failure would run
-        # rollback_minted_catalog_entry against a live, already-populated
-        # document instead of the row this call actually minted
-        # (nexus-b6enc C2 firing on the wrong row).
-        if source_uri is not None:
-            existing_by_uri = reader.by_source_uri(source_uri)
-            if existing_by_uri is not None:
-                # nexus-k54nk fix-round 1 (T2 nexus/critique-k54nk Critical 1):
-                # pinned now by b6enc's TestZ0o2p12McpFailedReput::
-                # test_a_failed_reput_leaves_the_old_note_whole_and_restores_the_stamp.
-                # THIS branch is the mainline note-edit path and fires on
-                # ANY re-put of an existing title, regardless of whether
-                # content changed — capture the row's meta.doc_id AS IT
-                # STOOD before the writer.update below overwrites it to
-                # doc_id (this call's NEW, not-yet-manifested chash).
-                if pre_call_doc_id_out is not None:
-                    pre_call_doc_id_out["doc_id"] = (
-                        existing_by_uri.meta or {}
-                    ).get("doc_id", "")
-                writer.update(
-                    existing_by_uri.tumbler,
-                    physical_collection=collection_name,
-                    meta=stamp_for(existing_by_uri),
-                )
-                _log.debug(
-                    "catalog_store_hook_reput",
-                    tumbler=str(existing_by_uri.tumbler), source_uri=source_uri,
-                )
-                return str(existing_by_uri.tumbler), False
-
-        # GH #1370 Defect 4a: reconcile onto a pre-existing ghost with the
-        # same title (under the knowledge curator owner) instead of minting
-        # a near-duplicate. See _find_ghost_by_title for the ghost-only
-        # restriction rationale.
-        #
-        # nexus-sdp0u fix-round (round-1 critique CRITICAL): this branch
-        # MUST also stamp source_uri, not just physical_collection/meta.
-        # A legacy ghost carries source_uri="" (pre-dates this fix); if the
-        # reconcile below left it "", the row's manifest gets populated
-        # right after (chunk_count becomes > 0) and it falls out of BOTH
-        # identity checks on the NEXT re-put — by_source_uri misses on ""
-        # and _find_ghost_by_title requires chunk_count == 0 — so that
-        # very next re-put would mint a fresh duplicate, reproducing this
-        # bead's own bug for the entire RDR-145 ghost population. Passing
-        # source_uri here is what lets the SECOND-and-later re-put reach
-        # this document via the by_source_uri lookup above instead.
-        ghost = _find_ghost_by_title(reader, owner, title)
-        if ghost is not None:
-            # nexus-k54nk fix-round 1: same capture as the two reconcile
-            # branches above, for symmetry — a ghost's meta.doc_id is
-            # normally empty (chunk_count == 0), but capture whatever it
-            # actually held before this call's own writer.update below.
-            if pre_call_doc_id_out is not None:
-                pre_call_doc_id_out["doc_id"] = (
-                    ghost.meta or {}
-                ).get("doc_id", "")
-            writer.update(
-                ghost.tumbler,
+        if source_uri is None:
+            # An UNTITLED put has no identity to resolve by: a title-less ``nx-note://<collection>/`` URI would
+            # collapse every untitled document under one identity (see the docstring), so it is minted as before.
+            # Get or create the "knowledge" curator owner, filtered on owner_type so a same-named REPO owner
+            # cannot shadow the intended curator (same bug shape as the doc_indexer family fix), through the
+            # protocol method (nexus-qnp5s), NOT raw reader._db SQL (GH #1370 review finding).
+            owner_t = reader.curator_owner_tumbler_by_name("knowledge")
+            owner = owner_t if owner_t is not None else writer.register_owner("knowledge", "curator")
+            tumbler, created = writer.register(
+                owner=owner, title=title, content_type="knowledge",
                 physical_collection=collection_name,
-                meta=stamp_for(ghost),
-                source_uri=source_uri or "",
+                meta=stamp_for(None),
+                source_uri="",
+                with_created=True,
+                **({"sensitive": True} if sensitive else {}),
             )
-            _log.debug(
-                "catalog_store_hook_deduped",
-                deduped_by="title", tumbler=str(ghost.tumbler),
-            )
-            return str(ghost.tumbler), False
+            return str(tumbler), created
 
-        # KNOWN RESIDUAL (nexus-n90xg): a legacy NON-ghost row (chunk_count
-        # > 0, source_uri="" — populated before nexus-sdp0u) whose chash is
-        # no longer its put's chash (the row's meta.doc_id is stale, e.g. the
-        # note's text changed, or a pre-Phase-4 16-char id) is unreachable by
-        # all three lookups above, so its first post-fix re-put falls
-        # through here and mints ONE bounded duplicate. A legacy row whose
-        # meta.doc_id still is the text's chash IS reached, by the first
-        # lookup, under its own title (nexus-6pfgb.31). The new document
-        # carries the synthesized source_uri, so the second-and-later
-        # re-puts converge onto it via by_source_uri. The legacy row itself
-        # is collapsed by the nexus-n90xg one-shot backfill sweep, not here.
-        #
-        # nexus-vfef0: this is also the ONLY leg exposed to the genuinely
-        # CONCURRENT first-put race the three prechecks above cannot close
-        # (two callers both miss all three lookups and both reach here for
-        # a brand-new (collection, title)). ``with_created=True`` surfaces
-        # the engine's created-vs-matched wire signal so the race LOSER
-        # reports ``created=False`` (its own tumbler-shaped return is
-        # actually the WINNER's row) instead of the previously-hardcoded
-        # ``True`` — the exact gap rollback_minted_catalog_entry's KNOWN
-        # RESIDUAL documented.
-        #
-        # nexus-r1tnx round 2 (code-review finding): this call requests
-        # ``with_created`` but deliberately does NOT run
-        # ``find_cross_owner_conflict``/``announce_cross_owner_mint``
-        # (path_ambiguity.py) the way the four file_path-keyed mint
-        # branches do. Not applicable here: a knowledge doc's identity is
-        # ``title`` + ``source_uri`` (this call passes no ``file_path`` at
-        # all — it defaults to ``""`` on the wire), and
-        # ``find_cross_owner_conflict`` is keyed on
-        # ``find_all_by_file_path``, which has nothing to search for
-        # against an empty path. There is no cross-OWNER file_path
-        # collision this call site could ever mint a second document over.
-        tumbler, created = writer.register(
-            owner=owner, title=title, content_type="knowledge",
-            physical_collection=collection_name,
-            meta=stamp_for(None),
-            source_uri=source_uri or "",
-            with_created=True,
-            **({"sensitive": True} if sensitive else {}),
+        # RDR-193 Step 6 (nexus-u5m5g.7): ONE ``resolve_or_register`` request in place of the owner lookup, the
+        # by_source_uri read, the ghost-by-title read and the register this function made one after another. The
+        # engine resolves the (collection, title) identity by its source_uri (nexus-sdp0u: a RE-PUT reconciles onto
+        # its live row regardless of chunk_count), falls back to a GHOST of the knowledge owner with exactly this
+        # title (GH #1370 Defect 4a: a ghost is reused instead of a near-duplicate minted, and takes the source_uri,
+        # which is what lets the second-and-later re-put reach it by identity), and otherwise registers the
+        # document, born flagged when ``sensitive`` (RDR-243, nexus-rfvyy.6.9). ``created`` is True only when THIS
+        # call minted the row, which is what keeps the nexus-b6enc C2 compensation off a row the put deduped onto,
+        # and what the genuinely concurrent first-put race (nexus-vfef0) reports as False for its loser.
+        resolved = writer.resolve_or_register(
+            "knowledge", source_uri=source_uri, title=title, title_fallback=True,
+            content_type="knowledge", physical_collection=collection_name, sensitive=sensitive,
         )
-        return str(tumbler), created
+        tumbler = str(resolved.tumbler)
+        if resolved.created:
+            # The route carries no ``meta``: the identity stamp and the note keys follow in one update. A failure
+            # here leaves a row this call minted without its stamp, so it is rolled back before the failure
+            # propagates (the caller's compensation never sees a ``created`` it was not told about).
+            try:
+                writer.update(tumbler, meta=stamp_for(None))
+            except Exception:
+                rollback_minted_catalog_entry(tumbler, original_error="the note's meta stamp could not be written")
+                raise
+            return tumbler, True
+
+        # An existing row: a re-put (any owner holding this URI is reconciled onto, as before), or a ghost.
+        # nexus-k54nk fix-round 1 (T2 nexus/critique-k54nk Critical 1): capture the row's meta.doc_id AS IT STOOD
+        # before the update below overwrites it to doc_id (this call's NEW, not-yet-manifested chash), so
+        # restore_pre_call_stamp can put it back if the put fails; pinned by b6enc's
+        # TestZ0o2p12McpFailedReput::test_a_failed_reput_leaves_the_old_note_whole_and_restores_the_stamp. This
+        # is the mainline note-edit path: it fires on ANY re-put of an existing title.
+        prior = reader.resolve(tumbler)
+        if pre_call_doc_id_out is not None:
+            pre_call_doc_id_out["doc_id"] = ((getattr(prior, "meta", None) or {})).get("doc_id", "")
+        writer.update(tumbler, physical_collection=collection_name, meta=stamp_for(prior))
+        _log.debug("catalog_store_hook_reput", tumbler=tumbler, source_uri=source_uri)
+        return tumbler, False
     except Exception as exc:  # noqa: BLE001 - best-effort post-store catalog hook must not crash caller; logged + audited
         # nexus-ou4tb: the "" return is indistinguishable from "no tumbler
         # assigned", so at DEBUG this was a silent non-registration. WARNING +

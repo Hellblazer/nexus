@@ -380,6 +380,7 @@ def test_progress_goes_to_stderr_and_stdout_keeps_the_json_it_always_had(monkeyp
         "applied", "documents_examined", "documents_notes", "documents_complete", "documents_all_shared",
         "documents_to_stamp", "documents_written", "lookups_failed", "writes_failed",
         "tags_legacy_strings_left_for_the_array_rung", "keys",
+        "repo_owners",  # nexus-6pfgb.43: always present, 0 when the repo-collection tags rule saw no repo owner
     }, "an uninterrupted run adds nothing to the report"
 
 
@@ -835,3 +836,19 @@ def test_the_help_names_the_guard_and_the_runbook_note():
                    "re-reads", "Exit codes:"):
         assert needle in text or needle.replace("re-reads", "reads the chunk rows of most documents again") in text, needle
     assert "a few requests per round" not in text and "2.5 requests/s" not in text
+
+
+def test_the_cli_reports_a_failed_owner_listing_in_the_text_and_the_json(monkeypatch):
+    def _down(include_deactivated=False):
+        raise RuntimeError("owners route down")
+
+    w = _catalog()
+    w.list_owners = _down
+    result, _ = _invoke(monkeypatch, w)
+    assert result.exit_code == 0, result.output
+    assert "listing FAILED, so the rule was off" in result.stdout
+    w = _catalog()
+    w.list_owners = _down
+    result, _ = _invoke(monkeypatch, w, "--json")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["repo_listing_failed"] is True

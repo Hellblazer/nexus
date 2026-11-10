@@ -181,6 +181,9 @@ class EgressGuardCensusTest {
         m.put("static import of an outbound member", "import static java.net.http.HttpClient.newBuilder; class Q {}");
         m.put("ProxySelector.of/setDefault/getDefault", "Object o = ProxySelector.of(a);");
         m.put("http(s) URL literal", "Object o = \"https://rogue.example/x\";");
+        m.put("new HikariConfig(", "Object o = new HikariConfig();");
+        m.put("setJdbcUrl(", "cfg.setJdbcUrl(u);");
+        m.put("new HikariDataSource(", "Object o = new HikariDataSource(c);");
         return java.util.Collections.unmodifiableMap(m);
     }
 
@@ -322,6 +325,195 @@ class EgressGuardCensusTest {
         assertThat(rr.sitesFound()).isEqualTo(2);
         assertThat(rr.problems())
             .anyMatch(p -> p.contains("BackendReaper.java") && p.contains("exactly 1") && p.contains("shows 2"));
+    }
+
+    // ---- nexus-4lqi7 item 2: the JDBC pool sites -----------------------------------------------------
+
+    private static final String MAIN_JAVA = "dev/nexus/service/Main.java";
+
+    /** Two pools, the way Main builds them: the application pool from NX_DB_URL and the migration pool from the admin URL. */
+    private static final String TWO_POOL_MAIN = """
+        package dev.nexus.service;
+        import com.zaxxer.hikari.HikariConfig;
+        import com.zaxxer.hikari.HikariDataSource;
+        final class Main {
+            static Object app() {
+                String dbUrl = requireEnv("NX_DB_URL");
+                var hikari = new HikariConfig();
+                hikari.setJdbcUrl(dbUrl);
+                return new HikariDataSource(hikari);
+            }
+            static Object migration(dev.nexus.service.db.AdminConnection admin) {
+                String url = admin.url();
+                var cfg = new HikariConfig();
+                cfg.setJdbcUrl(url);
+                return new HikariDataSource(cfg);
+            }
+            static String requireEnv(String n) { return System.getenv(n); }
+        }
+        """;
+
+    private static final Map<String, EgressGuardCensus.Allow> TWO_POOLS = Map.of(MAIN_JAVA,
+        EgressGuardCensus.Allow.pinned(Map.of("new HikariConfig(", 2, "setJdbcUrl(", 2, "new HikariDataSource(", 2),
+            "fixture"));
+
+    @Test
+    void liveMain_theTwoPoolsAreTheOnlyJdbcPoolSites_andTheirUrlsComeFromTheTwoSanctionedLookups() throws IOException {
+        EgressGuardCensus.Report r =
+            EgressGuardCensus.scan(MAIN, EgressGuardCensus.ALLOWLIST, EgressGuardCensus.VOYAGE_CLASSES);
+        assertThat(r.problems()).isEmpty();
+        assertThat(r.sitesByConstruct().get(MAIN_JAVA)).as("the pool sites of Main, and no other file has any")
+            .containsEntry("new HikariConfig(", 2).containsEntry("setJdbcUrl(", 2)
+            .containsEntry("new HikariDataSource(", 2);
+        assertThat(r.sitesByConstruct().entrySet().stream()
+            .filter(e -> e.getValue().containsKey("setJdbcUrl(") || e.getValue().containsKey("new HikariConfig(")
+                || e.getValue().containsKey("new HikariDataSource("))
+            .map(Map.Entry::getKey).toList()).containsExactly(MAIN_JAVA);
+        assertThat(EgressGuardCensus.jdbcUrlSites(MAIN)).as("non-vacuity: the URL-source rule examined both calls")
+            .isEqualTo(2);
+    }
+
+    @Test
+    void fixture_theTwoPoolShapeMainHasPasses() throws IOException {
+        plant(MAIN_JAVA, TWO_POOL_MAIN);
+        EgressGuardCensus.Report r = EgressGuardCensus.scan(dir, TWO_POOLS, List.of());
+        assertThat(r.problems()).isEmpty();
+        assertThat(r.sitesFound()).isEqualTo(6);
+    }
+
+    @Test
+    void fixture_aThirdPoolInAnAllowlistedFileFails() throws IOException {
+        plant(MAIN_JAVA, TWO_POOL_MAIN.replace("static String requireEnv", """
+            static Object extra() {
+                String dbUrl = requireEnv("NX_DB_URL");
+                var c = new HikariConfig();
+                c.setJdbcUrl(dbUrl);
+                return new HikariDataSource(c);
+            }
+            static String requireEnv"""));
+        EgressGuardCensus.Report r = EgressGuardCensus.scan(dir, TWO_POOLS, List.of());
+        assertThat(r.problems()).as("the pin is exact, so a third pool is a reviewed change")
+            .anyMatch(p -> p.contains("Main.java") && p.contains("swapped") && p.contains("shows"))
+            .anyMatch(p -> p.contains("exactly 6") && p.contains("shows 9"));
+    }
+
+    @Test
+    void fixture_aPoolInAnyOtherFileFails() throws IOException {
+        plant(MAIN_JAVA, TWO_POOL_MAIN);
+        plant("dev/nexus/service/db/Rogue.java", """
+            package dev.nexus.service.db;
+            final class Rogue {
+                Object p() { var c = new com.zaxxer.hikari.HikariConfig(); return new com.zaxxer.hikari.HikariDataSource(c); }
+            }
+            """);
+        assertThat(EgressGuardCensus.scan(dir, TWO_POOLS, List.of()).problems())
+            .anyMatch(p -> p.contains("Rogue.java") && p.contains("not on the egress allowlist"));
+    }
+
+    @Test
+    void fixture_aSetJdbcUrlFromALiteralOrAnUnsanctionedVariableFails() throws IOException {
+        // Counts stay at the pinned totals, so only the URL-source rule can object.
+        plant(MAIN_JAVA, TWO_POOL_MAIN.replace("hikari.setJdbcUrl(dbUrl);",
+            "hikari.setJdbcUrl(\"jdbc:postgresql://db.example/x\");"));
+        assertThat(EgressGuardCensus.scan(dir, TWO_POOLS, List.of()).problems())
+            .as("a literal").anyMatch(p -> p.contains("Main.java") && p.contains("setJdbcUrl")
+                && p.contains("plain variable"));
+
+        plant(MAIN_JAVA, TWO_POOL_MAIN.replace("String dbUrl = requireEnv(\"NX_DB_URL\");",
+            "String dbUrl = requireEnv(\"SOME_OTHER_URL\");"));
+        assertThat(EgressGuardCensus.scan(dir, TWO_POOLS, List.of()).problems())
+            .as("a variable read from another environment name").anyMatch(p -> p.contains("Main.java")
+                && p.contains("dbUrl") && p.contains("NX_DB_URL"));
+
+        plant(MAIN_JAVA, TWO_POOL_MAIN.replace("String url = admin.url();", "String url = other.url();"));
+        assertThat(EgressGuardCensus.scan(dir, TWO_POOLS, List.of()).problems())
+            .as("a url() on something that is not an AdminConnection").anyMatch(p -> p.contains("Main.java")
+                && p.contains("url") && p.contains("AdminConnection"));
+
+        plant(MAIN_JAVA, TWO_POOL_MAIN.replace("cfg.setJdbcUrl(url);", "cfg.setJdbcUrl(url + \"?x=1\");"));
+        assertThat(EgressGuardCensus.scan(dir, TWO_POOLS, List.of()).problems())
+            .as("an expression, not a variable").anyMatch(p -> p.contains("plain variable"));
+
+        plant(MAIN_JAVA, TWO_POOL_MAIN.replace("String dbUrl = requireEnv(\"NX_DB_URL\");", ""));
+        assertThat(EgressGuardCensus.scan(dir, TWO_POOLS, List.of()).problems())
+            .as("a variable with no declaration in the file").anyMatch(p -> p.contains("dbUrl")
+                && p.contains("no declaration"));
+    }
+
+    /** A pool method, as Main writes it, with the URL lines and the parameter list left to each case. */
+    private static String poolMethod(String params, String body) {
+        return "final class Main {\n static String requireEnv(String n) { return System.getenv(n); }\n"
+            + " static Object m(" + params + ") {\n" + body + "\n  var c = new HikariConfig();\n"
+            + "  c.setJdbcUrl(dbUrl);\n  return new HikariDataSource(c);\n }\n}\n";
+    }
+
+    private static final String GOOD_URL = "String dbUrl = requireEnv(\"NX_DB_URL\");";
+
+    @Test
+    void fixture_theUrlSourceRuleAcceptsTheSanctionedShapes_includingASameNamedParameterInAnotherMethod() {
+        assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java", poolMethod("", GOOD_URL))).isEmpty();
+        assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java",
+            poolMethod("", "String dbUrl = System.getenv(\"NX_DB_URL\");"))).isEmpty();
+        // Another method takes a parameter of the same name: it is that method's, not the pool method's.
+        assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java", poolMethod("", GOOD_URL).replace("}\n}\n",
+            "}\n static void other(String dbUrl, String u) { }\n}\n"))).isEmpty();
+        // A local resolved through AdminConnection.resolve, and an AdminConnection parameter.
+        assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java", poolMethod("",
+            "AdminConnection a = AdminConnection.resolve(System::getenv, \"u\", \"u\", \"p\");\n"
+            + "String dbUrl = a.url();"))).isEmpty();
+        assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java", poolMethod("dev.nexus.service.db.AdminConnection a",
+            "String dbUrl = a.url();"))).isEmpty();
+    }
+
+    /** Each bypass the first review probed: every one returned no problem before the rule read assignments and scopes. */
+    @Test
+    void fixture_eachBypassOfTheUrlSourceRuleFails() {
+        record Bypass(String what, String source, String mentions) { }
+        List<Bypass> bypasses = List.of(
+            new Bypass("a reassignment after the declaration",
+                poolMethod("", GOOD_URL + "\ndbUrl = \"jdbc:postgresql://remote/x\";"), "dbUrl"),
+            new Bypass("a reassignment inside an if",
+                poolMethod("", GOOD_URL + "\nif (dbUrl.isEmpty()) { dbUrl = \"jdbc:remote\"; }"), "dbUrl"),
+            new Bypass("a compound assignment",
+                poolMethod("", GOOD_URL + "\ndbUrl += \"?host=remote\";"), "dbUrl"),
+            new Bypass("a field mutated in another method, the pool reading the field",
+                "final class Main {\n static String dbUrl;\n static void set() { dbUrl = \"jdbc:remote\"; }\n"
+                + poolMethod("", "").replace("final class Main {\n", ""), "no declaration"),
+            new Bypass("a method parameter of the same name",
+                poolMethod("String dbUrl", ""), "dbUrl"),
+            new Bypass("a parameter of the same name, a good declaration sitting in another method",
+                poolMethod("String dbUrl", "").replace("}\n}\n",
+                    "}\n static void ok() { " + GOOD_URL + " }\n}\n"), "dbUrl"),
+            new Bypass("a lambda parameter of the same name",
+                poolMethod("", GOOD_URL + "\njava.util.List.of(\"x\").forEach(dbUrl -> { });"), "dbUrl"),
+            new Bypass("a parenthesised lambda parameter of the same name",
+                poolMethod("", GOOD_URL + "\njava.util.Map.of().forEach((k, dbUrl) -> { });"), "dbUrl"),
+            new Bypass("a var shadow beside the good declaration",
+                poolMethod("", GOOD_URL + "\n{ var dbUrl = \"jdbc:remote\"; }"), "dbUrl"),
+            new Bypass("a second String declaration in a nested block",
+                poolMethod("", GOOD_URL + "\n{ String dbUrl = \"jdbc:remote\"; }"), "dbUrl"),
+            new Bypass("an AdminConnection built with a literal URL",
+                poolMethod("", "var a = new AdminConnection(\"jdbc:evil\", \"u\", \"p\");\nString dbUrl = a.url();"),
+                "AdminConnection"),
+            new Bypass("an AdminConnection local typed so but built with a literal",
+                poolMethod("", "AdminConnection a = new AdminConnection(\"jdbc:evil\", \"u\", \"p\");\n"
+                    + "String dbUrl = a.url();"), "AdminConnection"),
+            new Bypass("an AdminConnection parameter reassigned to a literal-built one",
+                poolMethod("AdminConnection a", "a = new AdminConnection(\"jdbc:evil\", \"u\", \"p\");\n"
+                    + "String dbUrl = a.url();"), "AdminConnection"),
+            new Bypass("a setJdbcUrl outside any method",
+                "final class Main {\n static { var c = new HikariConfig(); String dbUrl = requireEnv(\"NX_DB_URL\");"
+                + " c.setJdbcUrl(dbUrl); }\n static String requireEnv(String n) { return n; }\n}\n", "enclosing method"));
+        for (Bypass b : bypasses) {
+            assertThat(EgressGuardCensus.jdbcUrlProblems("Main.java", b.source()))
+                .as(b.what()).isNotEmpty().anyMatch(p -> p.contains(b.mentions()));
+        }
+    }
+
+    @Test
+    void fixture_theUrlSourceRuleCountsTheSitesItExamined() throws IOException {
+        plant(MAIN_JAVA, TWO_POOL_MAIN);
+        assertThat(EgressGuardCensus.jdbcUrlSites(dir)).isEqualTo(2);
     }
 
     @Test

@@ -11,7 +11,7 @@ Default local dev loop: `uv run pytest -n auto`. `pytest-xdist` is a `dev`-group
 **`-n auto` is capped twice** (`tests/_xdist_cap.py`; `NX_XDIST_NO_CAP=1` opts out of both):
 
 - *Shared memory* (nexus-6qp25). Every worker boots its own Postgres cluster, each holding one SysV segment against `kern.sysv.shmmni`, a budget shared with every other cluster on the box (a gate, a peer's suite, a cluster orphaned by a killed battery). When it runs out, `initdb` dies with `shmget: No space left on device` and EVERY substrate-backed test errors at setup: thousands of errors that look like a catastrophic regression and are contention. Diagnose with `ipcs -m` before suspecting the code. The cap does nothing on a quiet machine.
-- *Memory grant* (nexus-vo9qn). Workers <= min(`LAB_MEM_MB`, cgroup `memory.max`) / 3264 MiB (about 3.2 GiB, the measured per-worker peak of a FULL suite). So `-n auto` runs 15 on lab-l and 5 on lab-m, and the clamp prints its reason. Nothing applies without a visible limit (a laptop).
+- *Memory grant* (nexus-vo9qn). Workers <= min(`LAB_MEM_MB`, cgroup `memory.max`) / 4096 MiB (4 GiB: a FULL suite measured about 3.5 GB a worker on 2026-11-09, plus headroom). So `-n auto` runs 12 on lab-l and 4 on lab-m, and the clamp prints its reason. Nothing applies without a visible limit (a laptop).
 
 Both caps rewrite xdist's `option.tx` as well as `numprocesses` (`set_worker_count`): setting the count alone prints "clamped" and still spawns every worker (`TestClampsReallyReduceWorkers` runs real xdist). Measurements and the cost on lab-m: [test-running](../docs/agents/test-running.md) § Worker caps.
 
@@ -33,7 +33,7 @@ not a code failure: do not rerun hoping it passes.
   events (info level, so rerun with `--log-level=INFO`) give each start's root and
   the headroom the decision saw.
 - Remedies, in order: (1) fewer workers or a larger `lab-run` class: `-n` =
-  headroom / 3.2 GiB (a 16 GB grant carries 5), which is also what the memory cap
+  headroom / 4 GiB (a 16 GB grant carries 4), which is also what the memory cap
   computes unless `NX_XDIST_NO_CAP=1` overrode it; (2) `NX_TEST_PG_ROOT=<dir>`
   puts every cluster under a directory you choose (a disk you accept writing to);
   (3) `NX_TEST_PG_ROOT=default` puts every cluster back on the tempdir, which is
@@ -133,6 +133,7 @@ Distilled from the 2026-08 compression arc (design records in T2: `nexus/test-su
 
 - **A test that pins a changelog entry's wording reads `tests._changelog.changelog_text()`**, which is `CHANGELOG.md` plus every `changelog/unreleased/` fragment: an entry lives in a fragment until the release folds it (nexus-3ceda.2), so reading `CHANGELOG.md` alone goes red the day the entry is written.
 
+- **A fixture that depends on a serving constant gets a `...ForTests` seam, not a resized fixture.** A value that search or write paths read has as consumers every fixture sized against it, and no name filter finds them: raising `PgSession.DEFAULT_EF_SEARCH_FLOOR` from 200 to 600 passed every named run and turned develop red on a roughly 320-row fixture that only starved an HNSW walk below ef 320 (2026-10-07). Give the owner a test-only override (the `...ForTests` fields of `NexusService` are the pattern) and have the fixture pin the value it needs, so a change to the constant cannot invalidate a fixture silently. A change to such a constant runs the whole engine suite.
 - **Scenario-merge vs parametrize:** checks that share one journey/state
   progression belong in one scenario test (multi-assert, with messages).
   Independent inputs/signals get a parametrize table so each keeps its own
@@ -216,6 +217,8 @@ deselects them, so no census has said which of them touch storage.
   never refused (nexus-xxuvz): a `NOTE:` line names one that hides no count, a `WARNING:` line one that
   does (skipped at head with a count at the merge base, or the reverse; `--strict` fails on it). One skipped
   on both sides is a `NOTE:` and silent under `--quiet-if-zero`.
+- **Consolidate first; a raise beyond the ruling is Sam's call.** Prefer a tenant-free test: patch `nexus.mcp_infra.get_collection_row` or the catalog seam. When a test cannot be tenant-free (the index paths reach the catalog in many places), keep only the case that fails on the defect. Raise `provisioned_tests` only after consolidating to the minimum. Sam's ruling of 2026-10-25 (RDR-232 Phase 1) allowed a same-commit raise with a reason per test for about five irreducible tenant tests; it is not a standing permission. A raise beyond that goes to Sam as an ask, as the 2026-11-09 entry in `tests/storage_touch_ceiling.toml` did ("accepted by Sam"). That file's header requires a reviewed reason in the commit message, and its entries carry the reason as a comment line above the new value.
+- **What the count sees.** Every parametrized case counts. A module-level `pytestmark = pytest.mark.t2_tenant` makes every test later added to that file mint a tenant, pure unit tests included (`tests/test_catalog_pdf_hook.py` went from 11 to 32 that way): compare the `mode=... provisioned=N` line the guard prints for the file before and after. In a file that mixes tenant and pure tests, mark the class or the test that needs the tenant, never the module. Put a new engine-backed test straight into `tests/integration/` with `pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]`; the python_unit leg does not count integration-marked files, so a live-catalog test that sits in the default selection moves there.
 - A guard test that asserts a nested session or child process FAILED goes through
   `assert_session_failed_for(result, "<reason>")` / `assert_exit_failed_for(code, output, "<reason>")`
   (`tests/test_storage_touch_guard.py`), never a bare `ret != 0` or `== 1`: under the default
@@ -301,6 +304,17 @@ The counter turns fully off for a same-sha A/B (nexus-3cwsw): `-Dnexus.ddl.count
 Clusters other than the substrate's are not counted. `tests/ddl_uncounted_clusters.toml` lists the cluster start sites a static scan finds, and `tests/test_ddl_uncounted_clusters_lint.py` keeps the list equal to the scan, so a new start site must be read through the counter or listed on purpose. The terminal line's `<n> uncounted cluster start sites` is a census of call sites, not clusters; `tests/_ddl_cluster_sites.py` lists what the scan does not cover.
 
 Which Java test classes may build their own schema is a checked table (nexus-0ty8z): a schema-only class takes a clone of the migrated template (`PgContainerHelper.start()`, or `startMigratedByOwner()` for production's ownership shape). A class that calls `startEmptyDatabase`, `startDedicated` or `newContainer` is listed in `service/src/test/resources/db-start-classification.tsv` with a kind and a reason, and `DbStartClassificationGateTest` fails on an unlisted caller or a stale row. The Java report's buckets and the first-`applyProductSchema`-is-a-no-op edge: [test-running](../docs/agents/test-running.md) § DDL counter, uncounted clusters and Java buckets.
+
+## A changeset: the lists nothing derives
+
+A Liquibase change touches lists that no test of the changed code reads, and each miss is a CI-only or out-of-selection red that a targeted local run cannot reach. Preflight's schema class (`nx run preflight`) runs the tests it can name from a path. A path list does not show what a changeset contains, so the instructions below are yours to apply; the list and its incidents are in T2 `nexus/qo7ie.36-census-feedback_hand_kept_enumerations`.
+
+- **DDL, however the changeset spells it:** the ceiling counts every DDL statement a fresh migration runs: CREATE TABLE, CREATE FUNCTION and its GRANT, ALTER TABLE, CREATE INDEX, CREATE TRIGGER, a REVOKE, ENABLE and FORCE ROW LEVEL SECURITY on a new table, CREATE POLICY, a DROP, a NO FORCE and FORCE ROW LEVEL SECURITY pair, and DDL a function runs (`aspects-005`'s counting helper ran a nested pair twice). A changeset that adds, removes or changes any of them moves `migration_ddl_per_worker` in `tests/ddl_ceiling.toml` (tolerance 0) in the same commit, with the commit and the measurement on the comment line above. A DROP is itself counted, but a dropped table also removes its runAlways table grant (-1, -2 with a sequence), so the net can go down; then lower the ceiling with it. The number is measured, not counted, on a tree rebased onto current develop (a peer's changeset moves the base): take it from a scoped substrate run (`lab-remote -- uv run pytest tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued`) and read the `ddl: migration=N` summary line. A new table adds the runAlways grants loop's table grant (+1, +2 with a sequence), which the changeset does not show; `tests/ddl_ceiling.toml` lists each earlier bump by kind. The fan-in that enforces it (`scripts/ddl_ratchet.py`) runs only in CI's pytest-gate.
+- **A table, view or RETURNS TABLE function:** bump `EXPECTED_RECORD_TYPES` in `service/src/test/java/dev/nexus/service/nativeimage/JooqRecordReflectionFeatureTest.java`, with one comment line naming the changeset and the Record class. The engine suite runs the test; the edit is yours.
+- **A tenant table:** the Liquibase schema test (`TuplesBaselineSchemaLiquibaseTest` or the family's equivalent); `_RLS_TENANT_TABLES` in `src/nexus/health.py` and the mirrored list in `tests/test_health_service_checks.py`.
+- **A column that holds a collection name:** `COLLECTION_SCOPED_TABLES` in `service/src/main/java/dev/nexus/service/db/CatalogRepository.java`, or an exclusion with its reason in `tests/catalog/test_collection_scoped_tables_schema_parity.py`. The gate matches any column that denormalizes a collection name, `physical_collection` included, not only one called `collection`. The test needs the engine substrate, so run it on chas through `lab-remote`.
+- **Row DML on a FORCE-RLS table, or a NO FORCE toggle:** seed it and assert its effect in the data leg of `SchemaUpgradeRehearsalIntegrationTest` (the Java `integration` group, which the engine class runs). Nothing checks that a seed was added. Seed after `migrateUpTo(adminDs, "<changeset-id>")`, not against the old tag, when the corrected shape arises only from a runtime call, or when an earlier changeset in the hop would already fix an old-tag seed; `tuples-003-2` and `pipeline-002-2` in that test are the idiom.
+- **Before the first local run of a new-table change:** grep a sibling table's quoted name (`"nexus.tuple_claim_log"`) in the Python and Java trees and update every hit. Then edit the ceiling and run the record guard class (`JooqRecordReflectionFeatureTest`, the generated jOOQ record count a new table bumps by hand), `tests/test_health_service_checks.py`, the touched Java classes and the integration group.
 
 ## Seeding a chunk that has no owner (RDR-223 Phase 3)
 
@@ -476,6 +490,8 @@ Decide:
 2. **Does the test actually exercise cloud-mode behavior** (real Voyage embedder, `_has_credentials()` gated path, managed-service routing)? → add `cloud_mode` to the test's fixture list, or `pytestmark = pytest.mark.usefixtures("cloud_mode")` at module scope.
 
 If the lint fails on a CI run after your edit, the failure message lists the offending nodeids and the two options above.
+
+**Run the census before the push when a test names a voyage model.** The regex reads the test's source, comments included, so a `voyage-context-3` literal in a comment trips it. It judges only the tests its own invocation collected: the census file alone collects nothing to scan and passes vacuously. Preflight's changed-test step runs it together with the changed test files, which covers those files. The whole check is the full-corpus run, which needs no substrate: `NX_CENSUS_ONLY_JOB=1 NX_TEST_T2_SUBSTRATE=none uv run pytest tests/ -q`. The census is deliberately not lint-marked, so `-m lint` does not run it.
 
 ## CI's pytest jar is UNSTAMPED — deliberately
 

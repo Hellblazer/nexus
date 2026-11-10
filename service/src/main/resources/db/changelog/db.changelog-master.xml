@@ -2107,10 +2107,32 @@
         nexus.catalog_reconcile_commit(p_owner, p_run_id), the one-transaction commit of a staged run; catalog-048-3
         creates nexus.catalog_reconcile_reap(p_interval); catalog-048-4 to -6 (nexus-u5m5g.3 and .4) add the link functions
         catalog_link_write, catalog_link_endpoint, catalog_link_lock_endpoints, catalog_links_upsert_many and
-        catalog_link_same_content; see the included file's own header. Two tables, seven functions and their grants, no
+        catalog_link_same_content; catalog-048-7 (nexus-u5m5g.5) replaces catalog_link_write so an alias of a dead
+        canonical answers dangling; see the included file's own header. Two tables, seven functions and their grants, no
         DATA EFFECT. After vectors-056, before the grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/catalog-048-reconcile.xml"/>
+
+    <!--
+        Bead nexus-seo4k: a long lexical query skips the trigram half of the text gate. vectors-057-1 gives
+        nexus.text_gate_probe_384/768/1024 two statements and a choice between them by the caller's transaction-local GUC
+        nexus.lexical_trgm: 'off' gates on the FTS half alone (the engine sets it for a gate text of more than 8 words),
+        anything else runs today's FTS-or-trigram statement; see the included file's own header. Same signatures, owner,
+        grants and security posture; function definitions only, no DATA EFFECT. After catalog-048, before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-057-long-lexical-skips-trigram-gate.xml"/>
+
+    <!--
+        Bead nexus-bbtc2: a single-token lexical query gates on an exact substring. vectors-058-1 gives
+        nexus.text_gate_probe_384/768/1024 a third statement for nexus.lexical_trgm = 'substring' (the engine sets it for a
+        one-token gate text): the FTS half OR a case-insensitive substring match the trigram GIN prunes, in place of
+        word_similarity. vectors-058-2 makes the ten LANGUAGE sql functions that gate rows another scan produced read
+        'substring' the same way, so every branch admits the same rows for a one-token gate text; see the included file's own header. Same signatures, owner,
+        grants and security posture; function definitions only, no DATA EFFECT. After vectors-057, before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-058-short-lexical-substring-gate.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

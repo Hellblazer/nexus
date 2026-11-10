@@ -1,6 +1,6 @@
 # RDR-210 Post-Mortem: One Local Engine Serves Both Embedders
 
-**Closed** 2026-10-26 · **Accepted** 2026-10-18 · **Epic** nexus-ddmfg (24 step beads and the accept-time residuals, all closed; nexus-4lqi7 open on purpose) · **Shipped** engine-service-v0.1.161 (dual embedder behind a version fence), v0.1.164 (Phase 6 routes and the cutover), v0.1.165 (nexus-6zchp, nexus-3va7p); client 7.83.0 onward
+**Closed** 2026-10-26 · **Accepted** 2026-10-18 · **Epic** nexus-ddmfg (24 step beads and the accept-time residuals, all closed; nexus-4lqi7, the deferred egress item, closed 2026-11-09) · **Shipped** engine-service-v0.1.161 (dual embedder behind a version fence), v0.1.164 (Phase 6 routes and the cutover), v0.1.165 (nexus-6zchp, nexus-3va7p); client 7.83.0 onward
 
 ## What the RDR set out to do
 
@@ -20,7 +20,7 @@ The dual router and the supervisor's key and profile plumbing, the row-tuple res
 
 1. **Phase 6 shipped inside v0.1.164, not in its own paired tag.** The RDR said the client half would be paired with a dedicated engine tag. The routes went out with the cutover, and the client needed nothing past that tag. `REQUIRED_ENGINE_VERSION` moves to v0.1.165 with the client release after the next engine cut (nexus-j67ix). Closed: the RDR text now says so.
 2. **The Rdr204 journey test still uses a fake local member** (nexus-9nndg). It never drives a production Voyage embed through the router. The dual gate script covers the live path. Open as a known limit.
-3. **Egress guard: JDBC and Hikari pool URLs, and the effect of `Main.goOffline`, are not covered.** Sam deferred both on 2026-10-25 (nexus-2ykf1) to nexus-4lqi7. Open.
+3. **Egress guard: what the JDBC check still does not prove.** Sam deferred the JDBC and Hikari pool URLs and the effect of `Main.goOffline` on 2026-10-25 (nexus-2ykf1) to nexus-4lqi7, which closed both on 2026-11-09: the pool sites and their URL sources are pinned, and the witness runs Main's startup offline step. Still not covered: the value of `NX_DB_URL` or `NX_DB_ADMIN_URL`, the inputs to `AdminConnection`, and the URL sources at the six `DriverManager.getConnection` sites (amended 2026-11-09, ask elsinore/rdr210-egress-wording).
 4. **The register-at-first-batch cleanup was withdrawn** after review showed it was a data-loss path, and re-filed as nexus-6zchp with a transactional emptiness check. It ships in v0.1.165.
 5. **The privacy policy's stop-Voyage remedy was wrong.** It said setting `local.embed_model` back to bge stops Voyage traffic. Under the dual engine the supervisor passes the key whatever that setting says; only removing the key stops it. Found by the close critique, fixed in `docs/privacy-policy.md`.
 6. **The RDR body trailed the code.** Fourth versus fifth battery leg, citations to a removed rename branch (nexus-avjrb), bead states, and the egress test counts. Fixed at close.

@@ -52,8 +52,8 @@ import java.util.Properties;
  * logs {@code event=pci_ddl_skipped reason=migration_in_progress} and closes. A migration that starts between the
  * check and the statement terminates the builder backend once it holds its lock ({@code SchemaMigrator.migrate},
  * nexus-43ulx.17): the next statement fails with {@code 57P01} or {@code 08xxx}, which ends the pass
- * ({@link DdlOutcome#FAILED}), so no later build in it starts. The shutdown hook ends the backend the same way
- * ({@link BackendReaper#terminateAtShutdown}).
+ * ({@link DdlOutcome#FAILED}), so no later build in it starts. The shutdown hook does not end the backend
+ * (nexus-f3yqd): a build in flight finishes in Postgres, and its session keeps the builder lock until it does.
  *
  * <p><b>State.</b> {@link BuilderState} is what the status object reports as {@code builder_state}.
  */
@@ -72,7 +72,7 @@ public final class PciBuilderSession {
 
     /**
      * The builder backend's {@code application_name} for this boot: {@link #APPLICATION_NAME_PREFIX} plus the nonce
-     * from {@link BackendReaper#bootNonce}. The shutdown hook ends the backend by this name.
+     * from {@link BackendReaper#bootNonce}. The name tells an engine's builder backends apart from the pool's.
      */
     public static String builderApplicationName(String bootNonce) {
         return APPLICATION_NAME_PREFIX + bootNonce;
@@ -82,8 +82,19 @@ public final class PciBuilderSession {
     public static final int BUILD_M = 16;
     public static final int BUILD_EF_CONSTRUCTION = 64;
 
-    /** Above the 30-minute statement timeout, so the server gives up on a build before the socket does. */
-    static final int SOCKET_TIMEOUT_SECONDS = 35 * 60;
+    /**
+     * {@code statement_timeout} of a {@code CREATE INDEX CONCURRENTLY}: long enough that a build of a very large
+     * collection finishes (a build the timeout cancels is dropped and rebuilt from zero after the failure backoff,
+     * which can loop forever), and finite because it is also the bound on how long an orphaned, stalled build holds
+     * the builder lock and so keeps every later engine in {@link BuilderState#STANDBY} (nexus-f3yqd).
+     */
+    static final java.time.Duration BUILD_STATEMENT_TIMEOUT = java.time.Duration.ofHours(6);
+
+    /** {@code statement_timeout} of the builder's other statements (drop, comment). */
+    static final java.time.Duration OTHER_STATEMENT_TIMEOUT = java.time.Duration.ofMinutes(30);
+
+    /** Above {@link #BUILD_STATEMENT_TIMEOUT}, so the server gives up on a build before the socket does. */
+    static final int SOCKET_TIMEOUT_SECONDS = (int) BUILD_STATEMENT_TIMEOUT.toSeconds() + 5 * 60;
 
     /**
      * pgjdbc {@code loginTimeout}: the whole connect-and-authenticate handshake. {@code connectTimeout} bounds only
@@ -92,7 +103,6 @@ public final class PciBuilderSession {
     static final int LOGIN_TIMEOUT_SECONDS = 30;
 
     private static final String BUILD_LOCK_TIMEOUT = "0";
-    private static final String BUILD_STATEMENT_TIMEOUT = "30min";
     private static final String DROP_LOCK_TIMEOUT = "5s";
     private static final String COMMENT_LOCK_TIMEOUT = "5s";
 
@@ -155,8 +165,8 @@ public final class PciBuilderSession {
         /** The statement, or a check before it, failed; see the log. A failed build may leave an INVALID index. */
         FAILED,
         /**
-         * The builder's backend was ended or the connection was lost ({@code 57P01}: a schema migration or the
-         * engine's shutdown terminated it; {@code 08xxx}: the network). The pass is over. Unlike {@link #FAILED} this
+         * The builder's backend was ended or the connection was lost ({@code 57P01}: a schema migration terminated
+         * it; {@code 08xxx}: the network, or the engine's process going away). The pass is over. Unlike {@link #FAILED} this
          * says nothing about the statement: the same build may succeed on the next pass, so a caller that backs off
          * failing builds must not charge it.
          */
@@ -168,6 +178,12 @@ public final class PciBuilderSession {
     private final String password;
     private final String applicationName;
     private final PciSettings settings;
+    /** nexus-f3yqd (E): the builder session's maintenance_work_mem in MB; empty keeps Postgres's own setting. */
+    private final java.util.OptionalInt buildMemoryMb;
+    /** {@code statement_timeout} of a build: {@link #BUILD_STATEMENT_TIMEOUT}, shorter only in a test. */
+    private final java.time.Duration buildStatementTimeout;
+    /** Set once a parallel build ran out of shared memory (see {@code Pass#build}): later builds run serially. */
+    private volatile boolean serialBuilds;
     private volatile BuilderState state = BuilderState.OK;
     private volatile boolean noPrivilegeLogged;
 
@@ -179,6 +195,19 @@ public final class PciBuilderSession {
      * @param settings the {@code NX_SEARCH_PCI*} settings, resolved at boot
      */
     public PciBuilderSession(String url, String user, String password, String bootNonce, PciSettings settings) {
+        this(url, user, password, bootNonce, settings, PciBuildMemory.hostRamBytes());
+    }
+
+    /** As above with the RAM of this machine injected (tests): the build's memory bound reads it. */
+    PciBuilderSession(String url, String user, String password, String bootNonce, PciSettings settings,
+                      java.util.function.LongSupplier totalRamBytes) {
+        this(url, user, password, bootNonce, settings, totalRamBytes, BUILD_STATEMENT_TIMEOUT);
+    }
+
+    /** As above with the build's statement timeout injected (tests): a build past it is cancelled. */
+    PciBuilderSession(String url, String user, String password, String bootNonce, PciSettings settings,
+                      java.util.function.LongSupplier totalRamBytes, java.time.Duration buildStatementTimeout) {
+        this.buildStatementTimeout = Objects.requireNonNull(buildStatementTimeout, "buildStatementTimeout");
         this.url = Objects.requireNonNull(url, "url");
         this.user = Objects.requireNonNull(user, "user");
         this.password = Objects.requireNonNull(password, "password");
@@ -187,6 +216,30 @@ public final class PciBuilderSession {
         }
         this.applicationName = builderApplicationName(bootNonce);
         this.settings = Objects.requireNonNull(settings, "settings");
+        this.buildMemoryMb = PciBuildMemory.resolve(settings.buildMemMb(), PciBuildMemory.pgOnThisHost(url),
+            Objects.requireNonNull(totalRamBytes, "totalRamBytes"));
+        if (settings.enabled()) {
+            log.info("event=pci_build_memory maintenance_work_mem_mb={} source={}",
+                buildMemoryMb.isPresent() ? Integer.toString(buildMemoryMb.getAsInt()) : "postgres_default",
+                settings.buildMemMb() != null ? "NX_SEARCH_PCI_BUILD_MEM_MB"
+                    : buildMemoryMb.isPresent() ? "ram_fraction" : "postgres_setting_kept");
+        }
+    }
+
+    /**
+     * A failed dynamic shared memory resize ("could not resize shared memory segment ..."), SQLSTATE {@code disk_full}
+     * (ENOSPC) or {@code out_of_memory}. The message must name the segment: a full lock table is also 53200 and says
+     * "out of shared memory", and a serial build does not help it.
+     */
+    static boolean sharedMemoryShort(SQLException e) {
+        String state = e.getSQLState();
+        return ("53100".equals(state) || "53200".equals(state)) && e.getMessage() != null
+            && e.getMessage().contains("shared memory segment");
+    }
+
+    /** The maintenance_work_mem, in MB, the builder session sets before each build; empty when it sets none. */
+    java.util.OptionalInt buildMemoryMb() {
+        return buildMemoryMb;
     }
 
     /** The state the most recent pass ended in; {@link BuilderState#OK} before the first. */
@@ -269,7 +322,7 @@ public final class PciBuilderSession {
         props.setProperty("connectTimeout", Integer.toString(BackendReaper.CONNECT_TIMEOUT_SECONDS));
         props.setProperty("loginTimeout", Integer.toString(LOGIN_TIMEOUT_SECONDS));
         props.setProperty("socketTimeout", Integer.toString(SOCKET_TIMEOUT_SECONDS));
-        // A build holds this socket idle-looking for up to 30 minutes: let the OS notice a peer that vanished.
+        // A build holds this socket idle-looking for up to its statement timeout (hours): let the OS notice a peer that vanished.
         props.setProperty("tcpKeepAlive", "true");
         return props;
     }
@@ -472,9 +525,33 @@ public final class PciBuilderSession {
                 log.warn("event=pci_ddl_rejected op=build reason=name_shape name={}", name);
                 return DdlOutcome.REJECTED;
             }
-            return run("build", BUILD_LOCK_TIMEOUT, name, leaf, () -> {
+            return run("build", BUILD_LOCK_TIMEOUT, owner.buildStatementTimeout, name, leaf, () -> {
                 String sql = render(BUILD_TEMPLATE, name, leaf.schema(), leaf.name(), column, collection);
-                runBuild(sql);
+                // nexus-f3yqd (E): CREATE INDEX CONCURRENTLY cannot run in a transaction block, so SET LOCAL has no
+                // transaction to bind to; the setting is the session's, and this session is the builder's alone.
+                owner.buildMemoryMb.ifPresent(mb -> setSession("maintenance_work_mem", mb + "MB"));
+                if (owner.serialBuilds) {
+                    setSession("max_parallel_maintenance_workers", "0");
+                }
+                try {
+                    runBuild(sql);
+                } catch (SQLException e) {
+                    if (owner.buildMemoryMb.isEmpty() || owner.serialBuilds || !sharedMemoryShort(e)) {
+                        throw e;
+                    }
+                    // A parallel HNSW build keeps its graph in ONE shared-memory area sized by maintenance_work_mem,
+                    // which does not fit where /dev/shm is small (a container's default is 64 MB). The failed CREATE
+                    // INDEX CONCURRENTLY left an INVALID index, which the retry's IF NOT EXISTS would no-op against, so
+                    // it goes first; the build then runs serially, with its graph in private memory. Every later build
+                    // of this engine starts serial: the shortage does not go away.
+                    log.warn("event=pci_build_shared_memory_short index={} leaf={}.{} sqlstate={} "
+                        + "detail=\"retrying the build serially; later builds start serial\"", name, leaf.schema(),
+                        leaf.name(), e.getSQLState());
+                    owner.serialBuilds = true;
+                    setSession("max_parallel_maintenance_workers", "0");
+                    runDrop(render(DROP_TEMPLATE, leaf.schema(), name));
+                    runBuild(sql);
+                }
             });
         }
 
@@ -507,7 +584,7 @@ public final class PciBuilderSession {
             }
             java.util.function.Supplier<DdlOutcome> recheck = index.leftover()
                 ? () -> staleLeftover(leaf, index.name()) : () -> null;
-            return run("drop", DROP_LOCK_TIMEOUT, index.name(), leaf, recheck, () -> {
+            return run("drop", DROP_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, index.name(), leaf, recheck, () -> {
                 String sql = render(DROP_TEMPLATE, leaf.schema(), index.name());
                 runDrop(sql);
             });
@@ -544,7 +621,7 @@ public final class PciBuilderSession {
                 log.warn("event=pci_ddl_rejected op=comment reason=anchor cause=\"{}\"", e.getMessage());
                 return DdlOutcome.REJECTED;
             }
-            return run("comment", COMMENT_LOCK_TIMEOUT, index.name(), leaf, () -> {
+            return run("comment", COMMENT_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, index.name(), leaf, () -> {
                 String sql = render(COMMENT_TEMPLATE, leaf.schema(), index.name(), text);
                 runComment(sql);
             });
@@ -591,14 +668,15 @@ public final class PciBuilderSession {
             void execute() throws SQLException;
         }
 
-        private DdlOutcome run(String op, String lockTimeout, String indexName, PciCatalog.Leaf leaf,
-                               Ddl statement) {
-            return run(op, lockTimeout, indexName, leaf, () -> null, statement);
+        private DdlOutcome run(String op, String lockTimeout, java.time.Duration statementTimeout, String indexName,
+                               PciCatalog.Leaf leaf, Ddl statement) {
+            return run(op, lockTimeout, statementTimeout, indexName, leaf, () -> null, statement);
         }
 
         /** As above; {@code precheck} runs on this session just before the statement and returns non-null to veto it. */
-        private DdlOutcome run(String op, String lockTimeout, String indexName, PciCatalog.Leaf leaf,
-                               java.util.function.Supplier<DdlOutcome> precheck, Ddl statement) {
+        private DdlOutcome run(String op, String lockTimeout, java.time.Duration statementTimeout, String indexName,
+                               PciCatalog.Leaf leaf, java.util.function.Supplier<DdlOutcome> precheck,
+                               Ddl statement) {
             long startedNanos = System.nanoTime();
             try {
                 if (migrationHolds()) {
@@ -606,7 +684,7 @@ public final class PciBuilderSession {
                     return ended;
                 }
                 setSession("lock_timeout", lockTimeout);
-                setSession("statement_timeout", BUILD_STATEMENT_TIMEOUT);
+                setSession("statement_timeout", statementTimeout.toMillis() + "ms");
                 DdlOutcome veto = precheck.get();
                 if (veto != null) {
                     return veto;
@@ -640,7 +718,7 @@ public final class PciBuilderSession {
             }
             log.warn("event=pci_ddl_failed op={} index={} leaf={}.{} sqlstate={} cause=\"{}\"", op, indexName,
                 leaf.schema(), leaf.name(), sqlState, e.getMessage());
-            // If the connection is gone (network, or terminated by the migrator or shutdown) nothing more can run,
+            // If the connection is gone (network, or terminated by the migrator) nothing more can run,
             // and the statement is not at fault.
             return connectionLost(sqlState) ? DdlOutcome.CONNECTION_LOST : DdlOutcome.FAILED;
         }

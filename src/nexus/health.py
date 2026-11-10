@@ -799,6 +799,17 @@ def _format_bytes(n: int) -> str:
     return f"{n} B"
 
 
+def _check_process_footprint() -> list[HealthResult]:
+    """Each running supervised daemon's own memory (nexus-3ceda.3); see
+    :func:`nexus.daemon.footprint.doctor_rows`."""
+    try:
+        from nexus.daemon.footprint import doctor_rows  # noqa: PLC0415 — deferred to avoid circular import
+
+        return doctor_rows()
+    except Exception as exc:  # noqa: BLE001 — a doctor row must not crash the sweep
+        return [HealthResult(label="Process footprint", ok=False, warn=True, detail=f"could not read: {exc}")]
+
+
 def _check_process_skew() -> list[HealthResult]:
     """nexus-4xgfy: the disk can be upgraded while every running process
     still executes the old code from memory — three live incidents
@@ -2620,7 +2631,11 @@ def _check_garbage() -> list[HealthResult]:
                 f"{garbage.trash_documents} tombstoned document(s) and "
                 f"{garbage.stranded_chunks} stranded chunk(s) past 1 day"
             ),
-            fix_suggestions=["nx doctor --fix"],
+            # --fix deletes for good: the preview comes first (nexus-mjmjl item 27).
+            fix_suggestions=[
+                "nx doctor --fix --dry-run (shows what would be deleted; deletes nothing)",
+                "nx doctor --fix (deletes them permanently)",
+            ],
         ))
     else:
         results.append(HealthResult(label="Catalog garbage", ok=True, detail="none"))
@@ -9924,15 +9939,17 @@ def _check_pending_rungs() -> list[HealthResult]:
         from nexus.upgrade_ladder import registry as _ladder_registry  # noqa: PLC0415 — deferred to avoid module-load cost
         from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY  # noqa: PLC0415 — deferred to avoid module-load cost
         from nexus.upgrade_ladder.runner import pending_rungs  # noqa: PLC0415 — deferred to avoid module-load cost
-        from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — deferred to avoid module-load cost
+        from nexus.upgrade_ladder.unattended import bounded_reads, unattended_run  # noqa: PLC0415 — deferred to avoid module-load cost
 
         # Shakedown 7.94.0 class A (nexus-mq980): a rung whose detect() walks the whole catalog (the
         # manifest-section-labels dry run lists every document and reads manifests and T3 per batch) must not
         # do that for a doctor row against a managed service: 43.7k documents did not finish in 30 minutes.
         # The same refusal `nx upgrade --auto` gets applies (auto_guard: managed service, no completion
-        # record, and an engine that cannot count the fillable rows in one read); a local engine keeps its scan. A refused rung is reported below
+        # record, and an engine that cannot count the fillable rows in one read). A refused rung is reported below
         # as NOT CHECKED, never as converged.
-        with unattended_run():
+        # nexus-mjmjl: and against a local engine too, doctor makes no read that grows with the store
+        # (bounded_reads): a 43k-document local store spent minutes in one rung's dry-run scan here.
+        with unattended_run(), bounded_reads():
             statuses = pending_rungs(_ladder_registry.default_registry())
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.warning("doctor_pending_rungs_check_failed", error=str(exc))
@@ -10007,13 +10024,13 @@ def _check_pending_rungs() -> list[HealthResult]:
         parts.append(f"no pending rungs among those checked ({len(statuses) - len(not_checked)} of {len(statuses)})")
     if not_checked:
         parts.append(
-            f"not checked: {', '.join(not_checked)} (each answers only from a read of a whole managed "
-            "catalog or table, which `nx doctor` does not make, or from what an earlier interactive run recorded)"
+            f"not checked: {', '.join(not_checked)} (each answers only from a read of every document, which "
+            "`nx doctor` does not make, or from what an earlier interactive `nx upgrade` recorded)"
         )
         fixes.append(
-            "Run `nx upgrade` interactively (not --auto): it makes that read and records each rung it verifies "
-            "and this row then answers from the "
-            "record without a read"
+            "Run `nx upgrade` interactively: it reads every document (minutes on a large store), fills what is "
+            "pending and records each rung it verifies, and this row then answers from the record without a read. "
+            "`nx upgrade --dry-run` makes the same read to show what is pending but records nothing"
         )
     if record_note:
         parts.append(record_note)
@@ -12977,11 +12994,33 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
     )]
 
 
+def _row_label(name: str) -> str:
+    """``_check_t3_local`` -> ``t3 local``: the check's name as a person reads it."""
+    return name.removeprefix("_check_").replace("_", " ")
+
+
+def _row_stepper(progress: Any) -> Callable[[str, Callable[[], list[HealthResult]]], list[HealthResult]]:
+    """Run one check under *progress* (a ``StepReporter``) when there is one.
+    The check's own exceptions propagate exactly as before."""
+    def _plain(_name: str, run: Callable[[], list[HealthResult]]) -> list[HealthResult]:
+        return run()
+
+    if progress is None:
+        return _plain
+
+    def _reported(name: str, run: Callable[[], list[HealthResult]]) -> list[HealthResult]:
+        with progress.step(_row_label(name)):
+            return run()
+
+    return _reported
+
+
 def run_health_checks(
     git_hooks_scope: str | Path | None = None,
     engine_status: object = _ENGINE_STATUS_UNSET,
     *,
     verbose: bool = False,
+    progress: Any = None,
 ) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -12998,53 +13037,60 @@ def run_health_checks(
     ``verbose``: ``nx doctor --verbose``. The "Chunks leaf bloat" row then names the leaves it counts, read from the
     engine's operator-only admin route (nexus-i827c). Off, the sweep reads no admin route.
 
+    ``progress``: a :class:`nexus.progress.step_report.StepReporter` (nexus-mjmjl);
+    each check runs as one of its steps. ``None`` runs them plainly.
+
     Returns (results, is_local_mode).
     """
     from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
+    # nexus-mjmjl: each check is announced as it starts and timed; doctor's
+    # reporter prints the slow ones. Without a reporter this is a plain call.
+    _step = _row_stepper(progress)
 
-    results.extend(_check_python())
-    results.extend(_check_cli_version())
-    results.extend(_check_generation_layout())
-    results.extend(_check_process_skew())
-    results.extend(_check_plugin_name())
-    results.extend(_check_worktree_developer_agent())
-    results.extend(_check_credential_persistence())
-    results.extend(_check_llm_backend())  # nexus-2k66t.3 P2
-    results.extend(_check_llm_key_persistence())  # nexus-2k66t.3 P2
-    results.extend(_check_answer_kind_extraction())  # nexus-jypmj.16
-    results.extend(_check_mint_token())
-    results.extend(_check_static_service_token())  # nexus-xzeml
+    results.extend(_step("_check_python", lambda: _check_python()))
+    results.extend(_step("_check_cli_version", lambda: _check_cli_version()))
+    results.extend(_step("_check_generation_layout", lambda: _check_generation_layout()))
+    results.extend(_step("_check_process_skew", lambda: _check_process_skew()))
+    results.extend(_step("_check_process_footprint", lambda: _check_process_footprint()))
+    results.extend(_step("_check_plugin_name", lambda: _check_plugin_name()))
+    results.extend(_step("_check_worktree_developer_agent", lambda: _check_worktree_developer_agent()))
+    results.extend(_step("_check_credential_persistence", lambda: _check_credential_persistence()))
+    results.extend(_step("_check_llm_backend", lambda: _check_llm_backend()))  # nexus-2k66t.3 P2
+    results.extend(_step("_check_llm_key_persistence", lambda: _check_llm_key_persistence()))  # nexus-2k66t.3 P2
+    results.extend(_step("_check_answer_kind_extraction", lambda: _check_answer_kind_extraction()))  # nexus-jypmj.16
+    results.extend(_step("_check_mint_token", lambda: _check_mint_token()))
+    results.extend(_step("_check_static_service_token", lambda: _check_static_service_token()))  # nexus-xzeml
 
     # nexus-qqoak: one collection listing per run, shared by the T3 collection count and the prose-index row. None
     # means the fetch raised; each row then degrades as it did when it fetched for itself.
     try:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
-        _collections: list | None = make_t3().list_collections()
+        _collections: list | None = _row_stepper(progress)("_check_collections_listing", lambda: make_t3().list_collections())  # type: ignore[arg-type, return-value]
     except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
         _log.debug("doctor_collection_listing_failed", error=str(exc))
         _collections = None
 
     _local = is_local_mode()
     if _local:
-        results.extend(_check_t3_local(_collections))
-        results.extend(_check_service_bge_model())
-        results.extend(_check_service_crossencoder_model())
+        results.extend(_step("_check_t3_local", lambda: _check_t3_local(_collections)))
+        results.extend(_step("_check_service_bge_model", lambda: _check_service_bge_model()))
+        results.extend(_step("_check_service_crossencoder_model", lambda: _check_service_crossencoder_model()))
     else:
-        results.extend(_check_t3_cloud())
-    results.extend(_check_smart_app_control(local=_local))  # nexus-f9bgu.57
+        results.extend(_step("_check_t3_cloud", lambda: _check_t3_cloud()))
+    results.extend(_step("_check_smart_app_control", lambda: _check_smart_app_control(local=_local)))  # nexus-f9bgu.57
 
     # nexus-9tsdf (GH #1113 AC2): name dimension-orphaned collections and
     # point at `nx collection prune`. Applies in both modes; degrades
     # internally.
-    results.extend(_check_dimension_orphans())
+    results.extend(_step("_check_dimension_orphans", lambda: _check_dimension_orphans()))
     # RDR-204 Day 2 (nexus-ft04v.31): the engine's embedding profile, the
     # client's intent against it, and the collection population by
     # lifecycle state. Both modes; degrades internally.
-    results.extend(_check_embedding_profile())
+    results.extend(_step("_check_embedding_profile", lambda: _check_embedding_profile()))
     # nexus-s08oe (RDR-210 Phase 6 Step 5): re-embed jobs in flight or failed. Local mode only; degrades internally.
-    results.extend(_check_reembed_jobs())
+    results.extend(_step("_check_reembed_jobs", lambda: _check_reembed_jobs()))
     # _check_dangling_manifests (nexus-5xn3k AC5) RETIRED here (RDR-191
     # Phase 6, nexus-o8dil.33) — the manifest-chunk FK makes the dangling
     # state it detected (a POPULATED manifest whose chashes no longer
@@ -13053,7 +13099,7 @@ def run_health_checks(
     # population the FK does not cover (MATCH SIMPLE exempts it) — reported
     # explicitly, EXPLICITLY NOT RETIRED (RDR-191 Decision item 4's own
     # carve-out; see the check's own docstring).
-    results.extend(_check_manifest_null_collection())
+    results.extend(_step("_check_manifest_null_collection", lambda: _check_manifest_null_collection()))
     # RDR-180 (bead nexus-du2dw): managed/cloud-mode chash width-conformance
     # coverage via the engine route — the local nexus_diag psql probe inside
     # _check_migration_state (above) is LOCAL-ONLY by design (nexus-y3wuu)
@@ -13061,11 +13107,11 @@ def run_health_checks(
     # Runs ALONGSIDE the local check (distinct label, tenant-scoped, never
     # fed into the install-binary/convergence gates — see the check's own
     # docstring for the scoping rationale).
-    results.extend(_check_chash_conformance_report())
+    results.extend(_step("_check_chash_conformance_report", lambda: _check_chash_conformance_report()))
     # nexus-sybbh: independent local evidence a purge-trash ran recently,
     # cross-referenced against the engine's gc_audit table — degrades to a
     # named skip when there is no local evidence, never a false clean pass.
-    results.extend(_check_gc_audit_non_empty_after_purge())
+    results.extend(_step("_check_gc_audit_non_empty_after_purge", lambda: _check_gc_audit_non_empty_after_purge()))
     # nexus-5xn3k.6 (bead-text amendment): a document's fence never
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).
@@ -13074,57 +13120,60 @@ def run_health_checks(
     # failed walk here passes None and each check walks, and degrades, alone.
     # Shakedown 7.94.0 class A: the allocator-drift row below reads the same list, so ONE walk feeds all
     # three rows (it walked on its own before).
-    _index_run_docs: list[Any] | _WalkFailed | None = _walk_documents_for_doctor()
+    # nexus-mjmjl: the corpus walk is the sweep's longest stretch on a big tenant; a named step.
+    _index_run_docs: list[Any] | _WalkFailed | None = _row_stepper(progress)(  # type: ignore[assignment]
+        "_check_catalog_document_walk", _walk_documents_for_doctor,  # type: ignore[arg-type]
+    )
     if _index_run_docs is None:
         _index_run_docs = _WALK_FAILED
-    results.extend(_check_stale_indexing_runs(_index_run_docs))
+    results.extend(_step("_check_stale_indexing_runs", lambda: _check_stale_indexing_runs(_index_run_docs)))
     # nexus-0ntxj: a failed run's chunks stored with no manifest owner are
     # hidden by live(c). Degrades internally.
-    results.extend(_check_failed_runs_hidden_chunks(_index_run_docs))
+    results.extend(_step("_check_failed_runs_hidden_chunks", lambda: _check_failed_runs_hidden_chunks(_index_run_docs)))
     # nexus-rte90: PDF chunks left with the upload placeholder metadata
     # (nexus-w94eo). Degrades internally.
-    results.extend(_check_pdf_stub_metadata())
+    results.extend(_step("_check_pdf_stub_metadata", lambda: _check_pdf_stub_metadata()))
     # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
     # their own children. Self-healing is silent, so the blast radius must
     # be reportable rather than guessed.
-    results.extend(_check_next_seq_drift(_index_run_docs))
+    results.extend(_step("_check_next_seq_drift", lambda: _check_next_seq_drift(_index_run_docs)))
     # nexus-c0g6e (GH #1529): topics whose cached doc_count disagrees with
     # the real topic_assignments count (6.18.1-era import drift, predating
     # taxonomy-013's recompute triggers). Self-heals on the engine's next
     # restart (hygiene-007-1); silent until then, so reportable here.
-    results.extend(_check_topics_doc_count_drift())
+    results.extend(_step("_check_topics_doc_count_drift", lambda: _check_topics_doc_count_drift()))
     # nexus-du6d0 (qgc4b residual staleness): a collection whose taxonomy
     # already has topics gets no self-heal retry on a no-change index run,
     # so a discover backend that starts failing after an earlier success
     # is invisible on a repo whose files stopped changing. Degrades
     # internally (not-applicable with no recorded attempts).
-    results.extend(_check_taxonomy_discover_health())
+    results.extend(_step("_check_taxonomy_discover_health", lambda: _check_taxonomy_discover_health()))
 
-    results.extend(_check_tools())
-    results.extend(_check_mcp_entry_points())
-    results.extend(_check_git_hooks(repo_scope=git_hooks_scope))
-    results.extend(_check_index_log())
-    results.extend(_check_orphan_t1_lease())
-    results.extend(_check_orphan_t1_handoff())
-    results.extend(_check_garbage())
-    results.extend(_check_orphan_checkpoints())
-    results.extend(_check_orphan_pipelines())
-    results.extend(_check_pdf_support())
-    results.extend(_check_leftover_docling_cache())  # RDR-237; not applicable without a cache
-    results.extend(_check_installer_rebuild())
-    results.extend(_check_mineru_server())
-    results.extend(_check_pdf_config())  # RDR-237; not applicable unless a [pdf] setting is unusable
-    results.extend(_check_t2_schema_applied())
-    results.extend(_check_t2_dropped_writes())
+    results.extend(_step("_check_tools", lambda: _check_tools()))
+    results.extend(_step("_check_mcp_entry_points", lambda: _check_mcp_entry_points()))
+    results.extend(_step("_check_git_hooks", lambda: _check_git_hooks(repo_scope=git_hooks_scope)))
+    results.extend(_step("_check_index_log", lambda: _check_index_log()))
+    results.extend(_step("_check_orphan_t1_lease", lambda: _check_orphan_t1_lease()))
+    results.extend(_step("_check_orphan_t1_handoff", lambda: _check_orphan_t1_handoff()))
+    results.extend(_step("_check_garbage", lambda: _check_garbage()))
+    results.extend(_step("_check_orphan_checkpoints", lambda: _check_orphan_checkpoints()))
+    results.extend(_step("_check_orphan_pipelines", lambda: _check_orphan_pipelines()))
+    results.extend(_step("_check_pdf_support", lambda: _check_pdf_support()))
+    results.extend(_step("_check_leftover_docling_cache", lambda: _check_leftover_docling_cache()))  # RDR-237; not applicable without a cache
+    results.extend(_step("_check_installer_rebuild", lambda: _check_installer_rebuild()))
+    results.extend(_step("_check_mineru_server", lambda: _check_mineru_server()))
+    results.extend(_step("_check_pdf_config", lambda: _check_pdf_config()))  # RDR-237; not applicable unless a [pdf] setting is unusable
+    results.extend(_step("_check_t2_schema_applied", lambda: _check_t2_schema_applied()))
+    results.extend(_step("_check_t2_dropped_writes", lambda: _check_t2_dropped_writes()))
     # RDR-207 (bead nexus-l3yuc.10): informational; not applicable where no
     # engine-backed T2 exists, unread on an engine older than RDR-207.
-    results.extend(_check_memory_quarantine())
+    results.extend(_step("_check_memory_quarantine", lambda: _check_memory_quarantine()))
 
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
     from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid circular import
     _cat_path = catalog_path()
     try:
-        _cat = make_catalog_reader()
+        _cat = _row_stepper(progress)("_check_catalog_reader", lambda: make_catalog_reader())  # type: ignore[arg-type, return-value]
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         # Discovered via the upgrade shakeout (10/12 FAIL) during the 6.1.0
         # release gate: unlike every sibling check in this function (chroma
@@ -13137,62 +13186,62 @@ def run_health_checks(
         # already knows how to (cat=None -> "not initialized").
         _log.warning("doctor_catalog_reader_unavailable", error=str(exc))
         _cat = None
-    results.extend(_check_catalog(_cat, _cat_path))
+    results.extend(_step("_check_catalog", lambda: _check_catalog(_cat, _cat_path)))
 
     # RDR-152 / bead nexus-gmiaf.33: storage-service checks.
     # All three are gated internally on pg_credentials being present; they emit
     # a single soft-warn-and-skip result when service/PG mode is not configured,
     # so they are always safe to run.
-    results.extend(_check_storage_service_health())
-    results.extend(_check_engine_convergence())
-    results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
-    results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
-    results.extend(_check_per_collection_indexes(engine_status))  # nexus-43ulx.24
-    results.extend(_check_chunks_leaf_bloat(engine_status, verbose=verbose))  # nexus-dxsjc, nexus-i827c
-    results.extend(_check_reranker(engine_status))  # nexus-yuh4a
-    results.extend(_check_embedding_family())  # nexus-wypwq
-    results.extend(_check_prose_index_recall(_collections))  # nexus-qqoak
-    results.extend(_check_chunks_tenant_isolation(engine_status))  # nexus-wbfpw.48
-    results.extend(_check_t2_launchagent_stray())
-    results.extend(_check_service_launchagent_stray())
-    results.extend(_check_service_autostart_drift())
-    results.extend(_check_config_dir_user_access())  # nexus-f9bgu.50
-    results.extend(_check_setup_status())  # nexus-sv2wx.19; not applicable where no setup has run
-    results.extend(_check_local_pg_auth())  # nexus-ja4pq
-    results.extend(_check_local_pg_version())  # nexus-90flw
-    results.extend(_check_vc_runtime())  # nexus-lqjll; [] off Windows
-    results.extend(_check_migration_state())
-    results.extend(_check_rls_present())
+    results.extend(_step("_check_storage_service_health", lambda: _check_storage_service_health()))
+    results.extend(_step("_check_engine_convergence", lambda: _check_engine_convergence()))
+    results.extend(_step("_check_ownerless_writes", lambda: _check_ownerless_writes(engine_status)))  # nexus-20onx
+    results.extend(_step("_check_engine_reaper", lambda: _check_engine_reaper(engine_status)))  # nexus-wbfpw.56
+    results.extend(_step("_check_per_collection_indexes", lambda: _check_per_collection_indexes(engine_status)))  # nexus-43ulx.24
+    results.extend(_step("_check_chunks_leaf_bloat", lambda: _check_chunks_leaf_bloat(engine_status, verbose=verbose)))  # nexus-dxsjc, nexus-i827c
+    results.extend(_step("_check_reranker", lambda: _check_reranker(engine_status)))  # nexus-yuh4a
+    results.extend(_step("_check_embedding_family", lambda: _check_embedding_family()))  # nexus-wypwq
+    results.extend(_step("_check_prose_index_recall", lambda: _check_prose_index_recall(_collections)))  # nexus-qqoak
+    results.extend(_step("_check_chunks_tenant_isolation", lambda: _check_chunks_tenant_isolation(engine_status)))  # nexus-wbfpw.48
+    results.extend(_step("_check_t2_launchagent_stray", lambda: _check_t2_launchagent_stray()))
+    results.extend(_step("_check_service_launchagent_stray", lambda: _check_service_launchagent_stray()))
+    results.extend(_step("_check_service_autostart_drift", lambda: _check_service_autostart_drift()))
+    results.extend(_step("_check_config_dir_user_access", lambda: _check_config_dir_user_access()))  # nexus-f9bgu.50
+    results.extend(_step("_check_setup_status", lambda: _check_setup_status()))  # nexus-sv2wx.19; not applicable where no setup has run
+    results.extend(_step("_check_local_pg_auth", lambda: _check_local_pg_auth()))  # nexus-ja4pq
+    results.extend(_step("_check_local_pg_version", lambda: _check_local_pg_version()))  # nexus-90flw
+    results.extend(_step("_check_vc_runtime", lambda: _check_vc_runtime()))  # nexus-lqjll; [] off Windows
+    results.extend(_step("_check_migration_state", lambda: _check_migration_state()))
+    results.extend(_step("_check_rls_present", lambda: _check_rls_present()))
     # RDR-225 Day 2 (bead nexus-3wh8d.16): token tenants against leaves, embedding_models against model
     # partitions, and the leaf count. Not applicable (never a warning) where there is nothing to compare.
-    results.extend(_check_tenant_model_partitions())
+    results.extend(_step("_check_tenant_model_partitions", lambda: _check_tenant_model_partitions()))
     # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10): the Linda tuple space's
     # three doctor rows. All three degrade internally (route_predates_floor
     # gate; managed/local-not-configured skip on the two psql-backed rows).
-    results.extend(_check_tuple_unclaimed_age())
+    results.extend(_step("_check_tuple_unclaimed_age", lambda: _check_tuple_unclaimed_age()))
     # nexus-sis0m.7: a lock claim renewed without end; not applicable
     # (never reaches psql) when no lock is held.
-    results.extend(_check_tuple_lock_held())
-    results.extend(_check_tuple_table_bloat())
-    results.extend(_check_tuple_sweep_freshness())
+    results.extend(_step("_check_tuple_lock_held", lambda: _check_tuple_lock_held()))
+    results.extend(_step("_check_tuple_table_bloat", lambda: _check_tuple_table_bloat()))
+    results.extend(_step("_check_tuple_sweep_freshness", lambda: _check_tuple_sweep_freshness()))
     # RDR-211 Phase 1 Step 3 (bead nexus-rplay.12): park-slot use and queue
     # depth. Both degrade internally: park_slots via the route's own
     # first-serving-engine gate (informational until that engine is cut and
     # pinned); queue_depth via the nexus-7zhag not-applicable doctrine when
     # the tenant has no queue subspace.
-    results.extend(_check_tuple_park_slots())
-    results.extend(_check_tuple_queue_depth())
+    results.extend(_step("_check_tuple_park_slots", lambda: _check_tuple_park_slots()))
+    results.extend(_step("_check_tuple_queue_depth", lambda: _check_tuple_queue_depth()))
     # bead nexus-rplay.13: the channel-delivery waiter's own status for
     # this session, read from the per-session on-disk record the waiter
     # publishes (no engine call). Degrades internally to informational
     # whenever no session, or no record, is resolvable.
-    results.extend(_check_tuple_channel_delivery())
-    results.extend(_check_claude_code_mcp_connection())  # nexus-w4l00: the client side of the handshake fallback
+    results.extend(_step("_check_tuple_channel_delivery", lambda: _check_tuple_channel_delivery()))
+    results.extend(_step("_check_claude_code_mcp_connection", lambda: _check_claude_code_mcp_connection()))  # nexus-w4l00: the client side of the handshake fallback
     # nexus-cnzei.8: read-only informational row; [] when beads is not
     # detected on this machine at all.
-    results.extend(_check_beads_prime())
+    results.extend(_step("_check_beads_prime", lambda: _check_beads_prime()))
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
-    results.extend(_check_pending_rungs())
+    results.extend(_step("_check_pending_rungs", lambda: _check_pending_rungs()))
 
     # RDR-155 P4b: the legacy chunk-id census, migration-report, and
     # migration-divergence doctor rows died with the migration machinery;
@@ -13204,7 +13253,7 @@ def run_health_checks(
     # failure surfaces as a WARN, not a silent ok: this is the
     # data-loss-shaped class (no silent fallbacks for correctness).
     try:
-        results.extend(_check_stranded_install())
+        results.extend(_step("_check_stranded_install", lambda: _check_stranded_install()))
     except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degraded to WARN, never silent-ok
         _log.warning("doctor_stranded_install_check_failed", error=str(exc))
         results.append(HealthResult(
@@ -13218,7 +13267,7 @@ def run_health_checks(
     # a human restoring from a stale-but-plausible store, so "could not
     # check" must never render as "nothing to see".
     try:
-        results.extend(_check_catalog_legacy_file())
+        results.extend(_step("_check_catalog_legacy_file", lambda: _check_catalog_legacy_file()))
     except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degraded to WARN, never silent-ok
         _log.warning("doctor_catalog_legacy_check_failed", error=str(exc))
         results.append(HealthResult(
@@ -13228,7 +13277,7 @@ def run_health_checks(
 
     # nexus-qocnk: a retired plugin still installed keeps its own hooks.
     try:
-        results.extend(_check_retired_plugin_installed())
+        results.extend(_step("_check_retired_plugin_installed", lambda: _check_retired_plugin_installed()))
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.warning("doctor_retired_plugin_check_failed", error=str(exc))
         results.append(HealthResult(

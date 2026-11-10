@@ -694,8 +694,11 @@ every job client:
 - `404`: log `engine_job_lost` and resubmit once.
 - `503` (registry full): wait and resubmit, at most three times with
   backoff, then fail loud.
-- `failed`: surface the error and exit non-zero; never continue the run as
-  if the job succeeded.
+- `failed` with `reason: transient_db_error` (`http_status` 503): nothing was
+  written and the run is still staged, so the caller may submit the commit
+  again, at most three times with backoff, then fail loud.
+- any other `failed`: surface the error and exit non-zero; never continue the
+  run as if the job succeeded.
 
 `ReembedJobRepository` (PG-persisted rows) is the other precedent and was
 not chosen: these jobs are short and idempotent, and a persisted job table
@@ -868,6 +871,9 @@ set P is the `file_path` of every `present` and `keep` row.
   link_type)` is absent, copying `created_by`, `from_span` and `to_span`
   but not the link's metadata; then trash the old row. Several missing rows
   may rename onto one target, and a rename does not wait for a second miss.
+  A link whose endpoint is an alias of a tombstoned, missing or cyclic
+  canonical is skipped, where the old client path aborted the whole
+  housekeeping step on it.
 - Every other missing row gets `miss_count + 1`, or is trashed with
   `nexus.document_trash` at 2.
 - Links move before the trash, so the `catalog-032` cascade, which fires
@@ -915,9 +921,9 @@ Routes (`CatalogHandler` and `CatalogRepository`):
 | Route | Body | Returns |
 | --- | --- | --- |
 | `POST /v1/catalog/reconcile/stage` | `{owner, run_id, walk, expected_rows, rows[≤1000]}` (`walk` and `expected_rows` must match the header on later pages) | `{staged}`; 400 naming a duplicate `file_path` |
-| `POST /v1/catalog/reconcile/commit` | `{owner, run_id}` | `202 {job_id}`; the same `{owner, run_id}` while its commit runs gets the running job; `409 {job_id}` when another run of the owner is committing; `503` when the registry is full |
-| `GET /v1/catalog/reconcile/{job_id}` | none | `{status: running}`, or `{status: succeeded, outcome}` (below), or `{status: failed, error}`; 404 for an unknown id |
-| `POST /v1/catalog/doc/resolve_or_register` | `{owner_name or curator, source_uri or file_path, title, year?, title_fallback?}` | `{tumbler, created}` or `{tumbler, foreign_owner: true}`; title and year backfilled with `COALESCE` on empty; ghost-only title match when `title_fallback` |
+| `POST /v1/catalog/reconcile/commit` | `{owner, run_id}` | `202 {job_id}`; the same `{owner, run_id}` while its commit runs gets the running job; `409 {job_id}` when another run of the owner is committing (the 409 holds within one engine; across engines a second run of the owner waits on the per-owner advisory lock up to the statement timeout, then ends `commit_timeout`); `503` when the registry is full |
+| `GET /v1/catalog/reconcile/{job_id}` | none | `{status: running}`, or `{status: succeeded, outcome, http_status}` (below), or `{status: failed, error, reason, http_status}`; the poll itself answers 200, `http_status` is the status the commit ended with (the chunk-keys poll's field of that name); a deadlock, serialization failure or lock wait that ran out reads `{status: failed, reason: transient_db_error, http_status: 503}`, nothing written, the run still staged; 404 for an unknown id |
+| `POST /v1/catalog/doc/resolve_or_register` | `{owner_name or curator, source_uri or file_path, title, year?, title_fallback?, sensitive?}` | `{tumbler, created}` or `{tumbler, foreign_owner: true}`; title and year backfilled with `COALESCE` on empty; ghost-only title match when `title_fallback`; `sensitive` (boolean, a non-boolean is a 400 naming the field) applies only when the call registers a new row, which is born flagged and audited by the same write the reconcile commit uses for a row it inserts flagged (reason `register_set`, actor `engine`), and a new row inherits the flag from a flagged tombstoned predecessor as `POST /v1/catalog/doc/register` does (`register_inherit`); a row the call finds keeps its sensitivity, whatever the request says |
 
 The outcome carries:
 
@@ -977,7 +983,13 @@ stage calls, one commit, and polls.
 - `doc_indexer.py` `_register_or_lookup_doc_id` and `_catalog_markdown_hook`
   collapse to one `resolve_or_register` carrying title, year and
   `source_mtime` (`chunk_count` is already folded into `write_manifest_many`
-  through `EX_DOC_CHUNKS`); `store_hook.py` the same.
+  through `EX_DOC_CHUNKS`); `store_hook.py` the same, its born-flagged
+  registration (`register(sensitive=True)`, RDR-243) riding the route's
+  `sensitive` field: a new row is born flagged and audited (`register_set`,
+  actor `engine`, the reconcile insert's reason; `register_inherit` when a
+  flagged tombstoned predecessor passes the flag on, as `POST /register`
+  does), a found row is never raised or lowered by the request (Sam, ask
+  rdr193-resolve-sensitive, option 1).
 - No fallback to the old path.
 
 #### Part A4: index-time linking (Gap 4, changeset `catalog-048-reconcile.xml`)
@@ -1005,11 +1017,16 @@ stage calls, one commit, and polls.
      An endpoint that is not live after resolution, including an alias
      whose canonical is tombstoned or gone, a cycle and a chain past 16
      hops, is returned in `unresolved` as `dangling` and not written; the
-     rest of the batch still writes. Each entry is `{index, side, reason}`
-     and names the first failing side of the edge. A call whose endpoints
-     do not settle in 8 lock rounds, and a deadlock, serialization failure
-     or lock timeout, answers 503 `transient_db_error`, as the reconcile
-     poll does.
+     rest of the batch still writes. A tombstoned or missing canonical
+     matches `POST /link`; a cycle fails that call (500) and a chain past 16
+     hops is re-seeded there, so those two are safer here than on the route.
+     Each entry is `{index, side, reason}` and names the first failing side
+     of the edge. A call whose endpoints do not settle in 8 lock rounds, and a deadlock, serialization failure
+     or lock timeout, answers 503 `transient_db_error` on the route itself
+     (the lock wait is bounded by a 5 s `lock_timeout` set on the call). A
+     failed reconcile commit reports the same reason in its poll as
+     `{status: failed, reason: transient_db_error, http_status: 503}`, since
+     the poll route answers 200.
    - The insert is `ON CONFLICT DO NOTHING` on `(tenant_id, from_tumbler,
      to_tumbler, link_type)` of the resolved pair, so an existing link
      keeps its fields. Self-links are not refused; `upsertLink` accepts
@@ -1482,7 +1499,9 @@ sensitive document; a duplicate label inside one batch resolves without a
 
 #### Step 5: Wire ledger and engine cut 1
 
-Record the routes in `docs/wire-contract-pending.md` as `[additive]`. Cut
+Record the routes in `docs/wire-contract-pending.md`, each `[additive]` except
+the `GET /list` owner-with-`content_type` filter, which is `[not-additive]`
+(it now honours `owner`; no released client sends the pair). Cut
 the engine through the `engine-release` skill and its current gates: Step 2
 (engine suite and native build green on the exact commit), 3g (no held
 changeset), 4 (the tag, Sam's), 5 (`--acquire` against the published
@@ -1671,7 +1690,8 @@ The Minimum Viable Validation is in scope and runs at the end of Phase 2
 ### Cross-Cutting Concerns
 
 - **Versioning**: paired releases; floor bumps with each engine cut;
-  routes recorded as `[additive]` in the wire ledger.
+  routes recorded in the wire ledger, `[additive]` except the `GET /list`
+  owner-with-`content_type` filter (`[not-additive]`).
 - **Build tool compatibility**: pure Java, native-image safe; Liquibase
   changesets follow the per-dimension and GRANT re-issue shape.
 - **Licensing**: N/A (no new dependency).

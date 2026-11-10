@@ -241,6 +241,6 @@ def test_a_failing_probe_or_comparison_warns_on_all_three_rows(tmp_path):
 
 def test_the_rows_are_registered_after_the_rls_canary():
     src = inspect.getsource(h)
-    assert src.index("results.extend(_check_rls_present())") < src.index(
-        "results.extend(_check_tenant_model_partitions())"
+    assert src.index("lambda: _check_rls_present()") < src.index(
+        "lambda: _check_tenant_model_partitions()"
     )

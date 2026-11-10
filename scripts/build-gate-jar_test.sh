@@ -43,7 +43,8 @@ cp "$HERE/lib/build-lease.sh" "$HERE/lib/release-props-lease.sh" "$HERE/lib/gate
 chmod +x "$repo/scripts/build-gate-jar.sh"
 printf 'release_version=\nbuild_ref=\nname=nexus\n' > "$repo/$props_rel"
 printf '%s\n' 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 107)' \
-    'NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 0, 0)' > "$repo/src/nexus/engine_version.py"
+    'NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 0, 0)' \
+    'RESOLVE_SENSITIVE_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 0, 0)' > "$repo/src/nexus/engine_version.py"
 echo 'class A {}' > "$repo/service/src/main/A.java"
 printf 'service/target/\nservice/.build-lease/\n' > "$repo/.gitignore"
 # Fake mvnw: MVNW_FAIL=1 fails; otherwise writes a real jar whose payload
@@ -512,13 +513,14 @@ for help_args in "--help" "-h" "--lab-run lab-m --help" "-Dx=1 -h"; do
     [[ ! -e "$repo/service/.build-lease" || -z "$(ls -A "$repo/service/.build-lease" 2>/dev/null)" ]] && ok "'$help_args' took no lease" || bad "'$help_args' left a lease"
 done
 
-echo "Test 13 (nexus-bivz3.13): the stamp is max(REQUIRED_ENGINE_VERSION, NOTE_URI_MIN_ENGINE_VERSION); an unparseable floor is fatal"
+echo "Test 13 (nexus-bivz3.13, nexus-u5m5g.7): the stamp is max(REQUIRED_ENGINE_VERSION, NOTE_URI_MIN_ENGINE_VERSION, RESOLVE_SENSITIVE_MIN_ENGINE_VERSION); an unparseable floor is fatal"
 ev_file="$repo/src/nexus/engine_version.py"
 ev_original="$(cat "$ev_file")"
-_stamp_with_floor() {  # _stamp_with_floor <required tuple body> <floor tuple body or "-" for no constant>
+_stamp_with_floor() {  # _stamp_with_floor <required tuple body> <note-URI floor body or "-" for no constant> [<resolve floor body or "-", default unset (0, 0, 0)>]
     {
         printf 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (%s)\n' "$1"
         [[ "$2" == "-" ]] || printf 'NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (%s)\n' "$2"
+        [[ "${3:-0, 0, 0}" == "-" ]] || printf 'RESOLVE_SENSITIVE_MIN_ENGINE_VERSION: tuple[int, int, int] = (%s)\n' "${3:-0, 0, 0}"
     } > "$ev_file"
     (cd "$repo" && scripts/build-gate-jar.sh 2>&1)
 }
@@ -542,6 +544,15 @@ out13d="$(_stamp_with_floor "0, 1, 200" "0, 1, 1000")"
 # The floor constant missing is fatal, never a silent fall back to the pin.
 out13e="$(_stamp_with_floor "0, 1, 107" "-")"; rc13e=$?
 [[ $rc13e -ne 0 && "$out13e" == *"NOTE_URI_MIN_ENGINE_VERSION not parseable"* ]] && ok "a missing floor constant is fatal and named (rc $rc13e)" || bad "missing floor constant rc $rc13e: $out13e"
+# nexus-u5m5g.7: the resolve_or_register `sensitive` floor is the second stamped floor, same rules.
+out13f="$(_stamp_with_floor "0, 1, 107" "0, 0, 0" "0, 1, 185")"
+[[ "$out13f" == *"stamped release_version=0.1.185"* ]] && ok "a resolve floor above the pin stamps the floor" || bad "resolve floor above the pin: $out13f"
+out13g="$(_stamp_with_floor "0, 1, 300" "0, 1, 167" "0, 1, 185")"
+[[ "$out13g" == *"stamped release_version=0.1.300"* ]] && ok "a resolve floor below the pin stamps the pin" || bad "resolve floor below the pin: $out13g"
+out13h="$(_stamp_with_floor "0, 1, 107" "0, 1, 167" "0, 1, 185")"
+[[ "$out13h" == *"stamped release_version=0.1.185"* ]] && ok "the max over the pin and both floors is taken" || bad "max over both floors: $out13h"
+out13i="$(_stamp_with_floor "0, 1, 107" "0, 0, 0" "-")"; rc13i=$?
+[[ $rc13i -ne 0 && "$out13i" == *"RESOLVE_SENSITIVE_MIN_ENGINE_VERSION not parseable"* ]] && ok "a missing resolve floor constant is fatal and named (rc $rc13i)" || bad "missing resolve floor constant rc $rc13i: $out13i"
 [[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "release.properties restored after the floor cases" || bad "props dirty after the floor cases"
 printf '%s\n' "$ev_original" > "$ev_file"
 

@@ -10,7 +10,8 @@ selector floor test's child session failed the same way (nexus-iox43).
 
 The lock's bytes change on every take, so the mint lock's unchanged-bytes rule cannot apply.
 The rule is writer-based instead: a taker under pytest (``PYTEST_CURRENT_TEST`` set, which a
-test's subprocesses inherit) writes ``<pid> pytest``, a live host writes the pid alone. A lock
+test's subprocesses inherit) writes ``<pid> pytest``, a live host writes the pid alone, each
+behind one space (byte 0 is the byte Windows locks; nexus.util.upgrade_auto_lock). A lock
 that existed at session start and ends holding a bare pid is benign; one ending with the pytest
 mark, created, removed or holding anything else stays a state mutation. The last writer decides:
 a live take after a test's take hides the test's, as a later live mint would.
@@ -37,12 +38,15 @@ def _split(content: bytes | None, changed=CHANGED, before=BEFORE, after=AFTER):
     return _split_appends_from_state(changed, before, after, upgrade_lock_content=content)
 
 
-def test_a_live_takers_pid_is_benign() -> None:
-    assert _split(b"48213") == ([], CHANGED)
+@pytest.mark.parametrize("content", [b"48213", b" 48213"], ids=["older-client", "behind-the-locked-byte"])
+def test_a_live_takers_pid_is_benign(content: bytes) -> None:
+    """The pid sits behind one space now (byte 0 is the byte Windows locks); an older client
+    writes it at byte 0. Either is a live host's take."""
+    assert _split(content) == ([], CHANGED)
 
 
-@pytest.mark.parametrize("content", [b"48213 pytest", b"", b"not a pid", b"48213\n{}"],
-                         ids=["pytest-mark", "empty", "text", "extra-line"])
+@pytest.mark.parametrize("content", [b"48213 pytest", b" 48213 pytest", b"", b" ", b"not a pid", b"48213\n{}"],
+                         ids=["pytest-mark", "pytest-mark-behind-the-byte", "empty", "space", "text", "extra-line"])
 def test_anything_but_a_bare_pid_is_a_state_mutation(content: bytes) -> None:
     assert _split(content) == (CHANGED, [])
 
@@ -70,24 +74,19 @@ def test_a_lock_of_that_name_below_the_root_is_not_exempt() -> None:
 def test_a_taker_under_pytest_marks_the_lock(tmp_path, monkeypatch) -> None:
     """The writer half of the rule: the mark is what keeps a test's take from passing."""
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/x.py::y (call)")
-    lock = lock_mod.acquire_auto_lock(tmp_path)
-    try:
-        assert (tmp_path / REL).read_bytes() == f"{os.getpid()} pytest".encode()
-    finally:
-        lock.release()
+    lock_mod.acquire_auto_lock(tmp_path).release()  # read after the release: Windows refuses byte 0 while held
+    assert (tmp_path / REL).read_bytes() == f" {os.getpid()} pytest".encode()  # byte 0 is the locked byte
 
 
 def test_a_live_taker_writes_the_bare_pid(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    lock = lock_mod.acquire_auto_lock(tmp_path)
-    try:
-        assert (tmp_path / REL).read_bytes() == str(os.getpid()).encode()
-    finally:
-        lock.release()
+    lock_mod.acquire_auto_lock(tmp_path).release()  # read after the release: Windows refuses byte 0 while held
+    assert (tmp_path / REL).read_bytes() == f" {os.getpid()}".encode()  # byte 0 is the locked byte
 
 
-@pytest.mark.parametrize("text", ["48213", "48213 pytest"])
+@pytest.mark.parametrize("text", ["48213", "48213 pytest", " 48213", " 48213 pytest"])
 def test_holder_pid_reads_either_form(tmp_path, text: str) -> None:
+    """The new layout (behind one space) and an older client's (pid at byte 0) both read whole."""
     (tmp_path / REL).write_text(text, encoding="utf-8")
     assert lock_mod.AutoLock(fd=None, held_by_other=True, path=tmp_path / REL).holder_pid() == 48213
 
@@ -137,3 +136,35 @@ def test_the_guard_passes_a_live_host_s_take(tmp_path, monkeypatch) -> None:
 def test_the_guard_fails_a_test_s_take(tmp_path, monkeypatch, capsys) -> None:
     assert _run_guard(monkeypatch, tmp_path, b"48213 pytest") == 1
     assert "upgrade-auto.lock" in capsys.readouterr().out
+
+
+
+def test_the_guard_reads_a_held_windows_lock_past_its_locked_byte(tmp_path, monkeypatch) -> None:
+    """On Windows a live host's held lock refuses a read of byte 0; the guard reads from byte 1,
+    so the take still classes as benign instead of an unreadable state mutation."""
+    (tmp_path / REL).write_bytes(b" 48213")
+    real_open = open
+
+    class _LockedAtZero:
+        def __init__(self, fh):
+            self._fh, self._pos = fh, 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._fh.close()
+
+        def seek(self, offset):
+            self._pos = offset
+            self._fh.seek(offset)
+
+        def read(self):
+            if self._pos == 0:
+                raise PermissionError(13, "Permission denied")
+            return self._fh.read()
+
+    monkeypatch.setattr(conftest_module, "open", lambda p, mode: _LockedAtZero(real_open(p, mode)), raising=False)
+    content = conftest_module._read_upgrade_lock(tmp_path)
+    assert content == b"48213"
+    assert _split(content) == ([], CHANGED)
