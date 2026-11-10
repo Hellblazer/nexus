@@ -3910,8 +3910,10 @@ public final class PgVectorRepository {
      * ranked with a NULL distance. For the dense-gate branch this is verified not to defeat
      * the FULL HNSW bind, same as {@link #searchWithTokens} ({@code
      * PgVectorRepositoryRawSqlPlanShapeTest}'s guarded-shape EXPLAIN proof); the
-     * selective-gate branch never binds HNSW by design (see its own comment below), so
-     * its guard is pure correctness with no plan-shape risk to prove.
+     * selective-gate branch ranks with index scans off (hybridRank, nexus-f3yqd.8), so it
+     * never binds HNSW and its guard is pure correctness. That exactness comes from the
+     * setting, not the SQL: HybridSelectiveRankIndexScanTest shows the rank plans through
+     * the leaf HNSW without it.
      */
     private List<Map<String, Object>> hybridSearch(String tenant, String queryText,
                                            List<String> collectionNames,
@@ -4158,8 +4160,8 @@ public final class PgVectorRepository {
         };
         // nexus-bq06h: exactOnUnderReturn wraps ONLY the HNSW-first branch, exactly
         // as it wrapped the retired raw-SQL HNSW-first branch -- the selective branch
-        // is already exact (ranks the complete materialized gate), so it never needed
-        // the fallback.
+        // ranks the complete materialized gate with index scans off (nexus-f3yqd.8,
+        // above), so it is exact and needs no fallback.
         return exactSelectFrom(ctx, nResults, hnswFirstFn, rebind ? statementTimeoutMs : null);
     }
 

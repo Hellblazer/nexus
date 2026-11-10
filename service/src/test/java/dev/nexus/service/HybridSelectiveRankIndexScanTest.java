@@ -139,7 +139,7 @@ class HybridSelectiveRankIndexScanTest {
         assertThat(plan)
             .as("non-vacuity: with index scans allowed the planner walks the leaf HNSW for this fixed-set rank, "
                 + "so the test below exercises the hazard. Plan was:%n%s", plan)
-            .contains("embedding_1024_idx");
+            .containsPattern("Index Scan using \"?\\S*embedding_1024_idx");
     }
 
     @Test

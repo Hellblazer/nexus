@@ -172,7 +172,8 @@ class HybridSelectiveGateTest {
     // xr7.8.9 gate (per the bead). What IS deterministic here is the PLAN SHAPE: the
     // retired plan ranks via the HNSW index (idx_chunks_embedding_1024) with the gate as
     // a filter (→ starvable); the text-first plan gates via the GIN indexes and sorts the
-    // materialized set, never touching the HNSW index (→ unstarvable).
+    // materialized set. Its rank stays off the HNSW index only because hybridRank turns
+    // index scans off for it (nexus-f3yqd.8; HybridSelectiveRankIndexScanTest).
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
@@ -212,10 +213,13 @@ class HybridSelectiveGateTest {
         Table<?> rankFn = TEXT_GATED_SEARCH_BY_CHASH_1024.call(
             queryVector(), chashes, new String[] {COLL}, null, null, 50, "voyage-context-3", TENANT, false);
         String rankPlan = explain(rankFn);
-        // The rank filters by chash (PK) and sorts by exact distance — the ORDER BY embedding
-        // can never be pushed into an HNSW index scan (which is what hnsw.max_scan_tuples
-        // starves). Scale-independent structural core of the lcogi fix; the production-scale
-        // recall collapse only manifests at >20k rows (the conexus xr7.8.9 gate owns that).
+        // The rank filters by chash (PK) and sorts by exact distance. This explain() runs with
+        // enable_indexscan off (see the helper), which is also what production now sets before
+        // this rank (PgVectorRepository.hybridRank, disableIndexScanForExactFallback, nexus-f3yqd.8),
+        // so the two assertions below pin the plan production runs. They cannot show that the SQL
+        // alone avoids HNSW: with index scans allowed, a gated set that is a large share of the leaf
+        // DOES plan through the leaf HNSW and filters its candidates to nothing.
+        // HybridSelectiveRankIndexScanTest is the test that proves the setting is needed.
         assertThat(rankPlan)
             .as("rank MUST NOT route through the HNSW index — that is what made the retired "
                 + "plan starvable by hnsw.max_scan_tuples. Plan was:%n%s", rankPlan)
