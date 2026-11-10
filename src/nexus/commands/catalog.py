@@ -525,7 +525,8 @@ def _show_owner_card(cat: "CatalogReader", owner_tumbler: Tumbler, raw_value: st
 def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
     """Show everything about a document: metadata, collection, and all links.
 
-    Accepts a tumbler (1.9.14) or a title/filename. Use --json for machine-readable output.
+    Accepts a tumbler (1.9.14), a source URI (x-devonthink-item://<uuid>) or a bare
+    DEVONthink UUID, or a title/filename. Use --json for machine-readable output.
     """
     cat = _get_catalog()
     # nexus-v3w9n: catalog-034 grammar makes tumbler depth unambiguous — an
@@ -668,7 +669,7 @@ def _show_document(cat: "CatalogReader", entry, as_json: bool) -> None:
 @click.option("--offset", default=0)
 @click.option("--json", "as_json", is_flag=True)
 def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
-    """Find documents by title, author, corpus, or file path.
+    """Find documents by title, author, corpus, file path, or source URI.
 
     Uses full-text search across document metadata. Faster than T3 semantic
     search for exact metadata lookups. Returns tumbler, type, and title.
@@ -676,7 +677,11 @@ def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
     cat = _get_catalog()
     # nexus-3bafq: an explicit limit, or the engine's 50-row default cut
     # every page past the 50th match and hid the "Next page" hint.
-    fetched = cat.find(query, limit=offset + limit + 1)
+    from nexus.catalog import entry_for_source_uri  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    # A source URI names one document; full-text search cannot match it.
+    by_uri = entry_for_source_uri(cat, query)
+    fetched = [by_uri] if by_uri is not None else cat.find(query, limit=offset + limit + 1)
     results = fetched[offset:offset + limit]
     total = len(fetched)
     presented = _present_cli_rows(cat, results)
