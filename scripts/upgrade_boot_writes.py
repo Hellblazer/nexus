@@ -906,11 +906,18 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
             r = subprocess.run(["uv", "run", "--project", str(REPO), "nx", "daemon", "service", "stop"],
                                env=new_env, cwd=REPO, capture_output=True, text=True, timeout=300)
             how = f"nx daemon service stop (rc {r.returncode})"
-        time.sleep(2.0)
-        survivors = [] if a.restart_mode == "with-pg" else inst.sql(
+        def _index_backends() -> list[list[str]]:
+            return [] if a.restart_mode == "with-pg" else (inst.sql(
             "select pid, state, left(regexp_replace(query, '\\s+', ' ', 'g'), 200), coalesce(wait_event_type, ''), "
             "coalesce(wait_event, ''), backend_start::text, backend_type "
-            "from pg_stat_activity where pid <> pg_backend_pid() and query ilike '%create index%'") or []
+            "from pg_stat_activity where pid <> pg_backend_pid() and query ilike '%create index%'") or [])
+
+        # Read right after the stop and again 2 s later: a kept build that finishes inside the wait would
+        # otherwise leave no trace and read as killed.
+        seen = {x[0]: x for x in _index_backends()}
+        time.sleep(2.0)
+        seen.update({x[0]: x for x in _index_backends()})
+        survivors = list(seen.values())
         restart_lsn = ("" if a.restart_mode == "with-pg"
                        else (inst.sql("select pg_current_wal_lsn()::text") or [[""]])[0][0])
         log(f"restarted mid-queue at {last.t:.0f}s ({a.restart_mode}): {how}; "
@@ -987,7 +994,7 @@ def boot_new(inst: Install, a: argparse.Namespace, env: dict[str, str], rep: Rep
             second = measure_boot(inst, a, env, label, base)
         except HarnessError as exc:
             # A failure of the second boot is its own result; it never overwrites the first boot's.
-            second = {"label": label, "reached_ready": False, "failure": f"second boot could not run: {exc}"}
+            second = {"label": label, "reached_ready": False, "harness_error": f"second boot could not be measured: {exc}"}
         second.pop("_indexes", None)
         rep.boots.append(second)
         last = second
@@ -1075,10 +1082,14 @@ def main(argv: list[str] | None = None) -> int:
             rc = 0
             return rc
         boot_new(inst, a, env, rep)
-        if a.restart_mid_queue and "restarted_mid_queue_s" not in rep.boots[0]:
+        if a.restart_mid_queue and rep.boots[0].get("reached_ready") and "restarted_mid_queue_s" not in rep.boots[0]:
             raise HarnessError(f"--restart-mid-queue {a.restart_mid_queue} never fired: the upgrade boot showed "
                                f"fewer than {a.restart_mid_queue} pci_ builds, so the restart leg tested nothing")
-        failed = [b["label"] for b in rep.boots if not b.get("reached_ready")]
+        failed = [b["label"] for b in rep.boots if not b.get("reached_ready") and "harness_error" not in b]
+        unmeasured = [b["harness_error"] for b in rep.boots if "harness_error" in b]
+        if unmeasured and rep.boots[0].get("reached_ready"):
+            # A good upgrade whose second boot could not be measured is a harness failure, not a red.
+            raise HarnessError("; ".join(unmeasured))
         if failed:
             rep.verdict = "boot-failed"
             rep.error = f"boots that never reached ready: {failed}"
