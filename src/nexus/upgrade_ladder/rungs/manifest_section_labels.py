@@ -155,8 +155,9 @@ _log = structlog.get_logger(__name__)
 
 RUNG_NAME = RUNG_MANIFEST_SECTION_LABELS
 
-#: Documents read, planned and written per step. A document's manifest can hold thousands of rows, so
-#: this bounds the rows in memory and the size of one ``chash_positions`` / chunk read.
+#: Documents read, planned and written per step: it bounds the rows a batch holds in memory. Every read pages
+#: itself (chunk gets at ``QUOTAS.MAX_RECORDS_PER_WRITE`` ids, ``chash_positions`` and manifests at 1000), so a
+#: larger batch only merges small reads (nexus-mjmjl: 50 made most chunk gets a fraction of a page).
 DOC_BATCH = 200
 
 #: Manifest rows in one ``append_manifest_many`` request (the engine runs each document of a request in its
@@ -250,8 +251,9 @@ class Counts:
     raced: int = 0                      # became written, moved, or gained a co-owner before the write
     write_failed: int = 0
     restore_failed: int = 0             # documents whose indexed_at could not be written back after the fill
-    chunk_gets: int = 0                 # engine chunk-metadata reads (nexus-mjmjl: the call counter)
-    owner_reads: int = 0                # chash_positions reads
+    collection_lookups: int = 0         # engine reads, nexus-mjmjl's call counter: collection lookups (stats listings)
+    chunk_gets: int = 0                 # chunk-metadata pages
+    owner_reads: int = 0                # chash_positions pages
     restore_failed_docs: list[str] = field(default_factory=list)
     by_collection: Counter = field(default_factory=Counter)
 
@@ -376,23 +378,45 @@ def _labels_from_chunk_row(metadata: dict, doc: Any) -> tuple[dict[str, Any] | N
     }, ""
 
 
+class CollectionMemo:
+    """One scan's collection lookups (nexus-mjmjl). ``HttpVectorClient.get_collection`` lists every collection
+    (one ``/v1/vectors/stats`` read) on each call, and a scan asked once per batch and collection. A failed
+    lookup is not kept, so an absent collection is asked again."""
+
+    def __init__(self, t3: Any) -> None:
+        self._t3 = t3
+        self._held: dict[str, Any] = {}
+
+    def holds(self, name: str) -> bool:
+        return name in self._held
+
+    def get_collection(self, name: str) -> Any:
+        if name not in self._held:
+            self._held[name] = self._t3.get_collection(name)
+        return self._held[name]
+
+
 def _chunk_metadatas(t3: Any, collection: str, chashes: list[str], counts: Any = None) -> dict[str, dict]:
     """``chash -> chunk row metadata`` for the live chunks of *collection*; a collection the engine does
-    not have holds none. *counts*, when given, gains the engine reads it costs in ``chunk_gets`` (the client
-    pages ids at ``QUOTAS.MAX_RECORDS_PER_WRITE``)."""
+    not have holds none. *counts*, when given, gains the engine reads it makes: ``collection_lookups`` for a
+    lookup *t3* did not already hold, and ``chunk_gets`` for the pages of ids (the client pages at
+    ``QUOTAS.MAX_RECORDS_PER_WRITE``)."""
     from nexus.db.limits import QUOTAS  # noqa: PLC0415 — deferred, keeps the registry import cheap
     from nexus.errors import collection_not_found_errors  # noqa: PLC0415 — deferred, imports back into the catalog
 
     if not chashes:
         return {}
-    if counts is not None:
-        counts.chunk_gets += -(-len(chashes) // QUOTAS.MAX_RECORDS_PER_WRITE)
+    looked_up = not (isinstance(t3, CollectionMemo) and t3.holds(collection))
+    if counts is not None and looked_up:
+        counts.collection_lookups += 1
     try:
         col = t3.get_collection(collection)
     except collection_not_found_errors() as exc:
         if getattr(exc, "__cause__", None) is not None:
             raise  # a service that could not be asked is not "the collection is absent"
         return {}
+    if counts is not None:
+        counts.chunk_gets += -(-len(chashes) // QUOTAS.MAX_RECORDS_PER_WRITE)
     result = col.get(ids=list(chashes), include=["metadatas"], sensitivity="include")
     ids: list[str] = result.get("ids") or []
     metas: list[Any] = result.get("metadatas") or []
@@ -461,6 +485,7 @@ class ManifestSectionLabelsRung:
         counts = Counts()
         self._partial = counts
         self._cut = False
+        t3 = CollectionMemo(t3) if t3 is not None else None
         entries = sorted(
             (e for e in reader.all_documents() if not getattr(e, "alias_of", "")),
             key=lambda e: str(e.tumbler),
@@ -554,8 +579,10 @@ class ManifestSectionLabelsRung:
         when it cannot list the tombstoned holders: neither is 'nobody holds it'."""
         read = getattr(reader, "chash_positions_with_tombstoned", None)
         got = read(chashes) if read is not None else None
-        if counts is not None:
-            counts.owner_reads += 1
+        if counts is not None and read is not None:
+            from nexus.catalog.http_catalog_client import _DOCS_FOR_CHASHES_PAGE  # noqa: PLC0415 — the client's own page
+
+            counts.owner_reads += max(1, -(-len(set(chashes)) // _DOCS_FOR_CHASHES_PAGE))
         if got is None:
             raise RouteAbsent("the engine has no /manifest/chash_positions route (with tombstoned holders)")
         rows, tombstoned = got

@@ -189,20 +189,70 @@ def test_a_held_scan_is_taken_once_and_expires() -> None:
     assert reuse.take() is None
 
 
-def test_the_fill_counts_its_engine_reads_and_a_bigger_batch_takes_fewer() -> None:
-    """nexus-mjmjl: the call counter the rehearsal reads; 120 one-row documents are one chunk read at the
-    default batch and three at the old 50."""
-    from tests.upgrade.test_manifest_span_fill_rung import SPAN, Report, World, h  # noqa: PLC0415 — that file's fixture world
 
-    def reads(doc_batch: int) -> tuple[int, int]:
+def _counted(world, *, doc_batch: int = DOC_BATCH):
+    """The span-fill rung's counts after one converge, and the stats listings the world served."""
+    from tests.upgrade.test_manifest_span_fill_rung import Report  # noqa: PLC0415 — that file's fixture
+
+    lookups = [0]
+    inner = world.get_collection
+
+    def get_collection(name):
+        lookups[0] += 1
+        return inner(name)
+
+    world.get_collection = get_collection
+    rung = world.rung(doc_batch=doc_batch)
+    rung.converge(Report())
+    return rung._partial, lookups[0]
+
+
+def test_the_fill_counts_its_engine_reads_and_a_bigger_batch_takes_fewer() -> None:
+    """nexus-mjmjl's call counter: 120 one-row documents in one collection. The collection is looked up once
+    per scan at any batch size; the chunk and owner reads merge at the larger batch."""
+    from tests.upgrade.test_manifest_span_fill_rung import SPAN, World, h  # noqa: PLC0415 — that file's fixture world
+
+    def world_of_120():
         world = World()
         for n in range(120):
             d = world.doc(f"1.1.{n + 1}")
             world.row(d, 0, h(n + 1))
             world.chunk(h(n + 1), **SPAN)
-        rung = world.rung(doc_batch=doc_batch)
-        rung.converge(Report())
-        return rung._partial.chunk_gets, rung._partial.owner_reads
+        return world
 
-    assert reads(DOC_BATCH) == (1, 2)  # one plan read, one re-read before the write
-    assert reads(50) == (3, 6)
+    big, served = _counted(world_of_120())
+    assert (big.collection_lookups, big.chunk_gets, big.owner_reads, served) == (1, 1, 2, 1)
+    small, served = _counted(world_of_120(), doc_batch=50)
+    assert (small.collection_lookups, small.chunk_gets, small.owner_reads, served) == (1, 3, 6, 1)
+
+
+def test_the_counter_counts_pages_not_calls() -> None:
+    """A read past one page costs one engine read per page: 350 chunk ids are two gets, and 1,500 chashes
+    are two chash_positions pages."""
+    from types import SimpleNamespace as NS  # noqa: PLC0415 — stdlib
+
+    from tests.upgrade.test_manifest_span_fill_rung import SPAN, World, h  # noqa: PLC0415 — that file's fixture world
+
+    world = World()
+    d = world.doc("1.1.1")
+    for n in range(350):
+        world.row(d, n, h(n + 1))
+        world.chunk(h(n + 1), **SPAN)
+    counts, _ = _counted(world)
+    assert counts.chunk_gets == 2 and counts.collection_lookups == 1
+
+    tally = NS(owner_reads=0)
+    reader = NS(chash_positions_with_tombstoned=lambda chashes: ([], []))
+    ManifestSectionLabelsRung._owner_rows(reader, [f"{n:064x}" for n in range(1500)], tally)
+    assert tally.owner_reads == 2
+
+
+def test_the_section_label_rung_counts_its_reads_too() -> None:
+    from tests.upgrade.test_manifest_section_labels_rung import Report, World, _mixed  # noqa: PLC0415 — that file's fixture
+
+    world = World()
+    _mixed(world)
+    rung = world.rung()
+    rung.converge(Report())
+    c = rung._partial
+    assert c.collection_lookups == 1 and c.chunk_gets >= 1 and c.owner_reads >= 2, (c.collection_lookups, c.chunk_gets, c.owner_reads)

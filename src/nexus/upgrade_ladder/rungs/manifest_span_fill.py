@@ -111,6 +111,7 @@ from nexus.upgrade_ladder.rungs.manifest_section_labels import (
     TITLE_RULE_MARK,
     ManifestSectionLabelsRung,
     RouteAbsent,
+    CollectionMemo,
     _chunk_metadatas,
     _close,
     _default_reader,
@@ -184,8 +185,9 @@ class Counts:
     write_failed: int = 0
     write_refused_409: int = 0           # the engine answered 409 to the request (a superseded collection)
     restore_failed: int = 0              # documents whose indexed_at could not be written back after the fill
-    chunk_gets: int = 0                  # engine chunk-metadata reads (nexus-mjmjl: the call counter)
-    owner_reads: int = 0                 # chash_positions reads
+    collection_lookups: int = 0          # engine reads, nexus-mjmjl's call counter: collection lookups (stats listings)
+    chunk_gets: int = 0                  # chunk-metadata pages
+    owner_reads: int = 0                 # chash_positions pages
     restore_failed_docs: list[str] = field(default_factory=list)
     by_collection: Counter = field(default_factory=Counter)
 
@@ -313,6 +315,7 @@ class ManifestSpanFillRung:
         counts = Counts()
         self._partial = counts
         self._cut = False
+        t3 = CollectionMemo(t3) if t3 is not None else None
         entries = sorted(
             (e for e in reader.all_documents() if not getattr(e, "alias_of", "")),
             key=lambda e: str(e.tumbler),
