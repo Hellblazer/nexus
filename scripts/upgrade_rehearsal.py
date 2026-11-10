@@ -21,8 +21,9 @@ and the run stops there; the steps after it are reported as not run.
 Non-vacuity: the prepared store's row count must reach a floor, every judged step must have run,
 doctor must have printed something and no ``✗``, and the search must return the sentinel.
 
-The ceilings and the silence limit below are generous starting points, PENDING A MEASURED RUN
-(nexus-f3yqd.5): tighten them from the first green runs.
+The ceilings are set from the first real-store runs (chas lab-m, 2026-11-10, the f3yqd.1 seeder's
+86,000 rows, 2.4 GB): about eight to ten times the slowest measured step. They bound THIS fixture;
+a much larger store needs its own measurement. The silence limit is Sam's "a few seconds".
 
     upgrade_rehearsal.py --work DIR --target-wheel dist/conexus-X-py3-none-any.whl
     upgrade_rehearsal.py --work DIR --target-release 8.1.0 --from-version 8.0.0
@@ -55,12 +56,14 @@ import urllib.request
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-# --- named limits: generous, pending a measured run ------------------------------------------
-DEFAULT_SILENCE_LIMIT_S: float = 10.0
-UPGRADE_CEILING_S: float = 900.0
-DOCTOR_CEILING_S: float = 120.0
-SEARCH_CEILING_S: float = 60.0
-PACKAGE_UPGRADE_CEILING_S: float = 600.0
+# --- named limits, from the 2026-11-10 real-store runs (slowest measured in brackets) ---------
+DEFAULT_SILENCE_LIMIT_S: float = (
+    10.0  # [longest gap: 5.7 s doctor; 11.9 s nx upgrade from 7.99.0, a breach]
+)
+UPGRADE_CEILING_S: float = 120.0  # [13.9 s from 7.99.0, 2.3 s from 8.0.0]
+DOCTOR_CEILING_S: float = 60.0  # [7.5 s]
+SEARCH_CEILING_S: float = 30.0  # [2.8 s]
+PACKAGE_UPGRADE_CEILING_S: float = 120.0  # [0.4 s]
 # Setup steps are not under test: a generous ceiling, no silence limit.
 INSTALL_PREV_CEILING_S: float = 900.0
 PREPARE_CEILING_S: float = 3600.0
