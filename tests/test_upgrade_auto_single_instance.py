@@ -604,13 +604,16 @@ def test_the_callout_asks_every_rung_detect_as_an_unattended_run_so_a_managed_ca
     assert is_unattended() is False, "and the signal is gone after the callout"
 
 
-def test_the_callout_on_a_local_engine_still_detects(monkeypatch) -> None:
-    """Positive control: local, the same rung reads (cheap there) and reports its state."""
+def test_the_callout_on_a_local_engine_does_not_scan_either(monkeypatch) -> None:
+    """nexus-mjmjl: the first command after a version change asks a bounded question on a local engine too (a large
+    local store spent minutes in a rung's scan there); with no completion record the rung reads nothing."""
     _CountingReader.reads = []
-    rung = NoteTagsArrayRung(reader_factory=_CountingReader, writer_factory=lambda: None, managed_fn=lambda: False)
+    rung = NoteTagsArrayRung(
+        reader_factory=_CountingReader, writer_factory=lambda: None, managed_fn=lambda: False, record_fn=lambda: None,
+    )
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
     upgrade_finish.pending_data_rung_callout()
-    assert _CountingReader.reads == ["collections"]
+    assert _CountingReader.reads == []
 
 
 # ── B1: the hook's probe ─────────────────────────────────────────────────────
