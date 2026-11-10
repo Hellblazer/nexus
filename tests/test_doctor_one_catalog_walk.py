@@ -68,7 +68,8 @@ class _NoCollections:
 KEEP = ("_check_stale_indexing_runs", "_check_failed_runs_hidden_chunks", "_check_next_seq_drift", "_check_pending_rungs")
 
 
-def _doctor_over(monkeypatch: pytest.MonkeyPatch, cat: CountingCatalog, *, managed: bool, rung_reads: list):
+def _doctor_over(monkeypatch: pytest.MonkeyPatch, cat: CountingCatalog, *, managed: bool, rung_reads: list,
+                 index_runs: bool = True):
     """Run ``run_health_checks`` with only the catalog-reading rows live, over *cat*."""
     for name in dir(health):
         if name.startswith("_check_") and name not in KEEP and callable(getattr(health, name)):
@@ -85,8 +86,19 @@ def _doctor_over(monkeypatch: pytest.MonkeyPatch, cat: CountingCatalog, *, manag
         record_fn=lambda: None, managed_fn=lambda: managed, stale_zero_fn=lambda: False,
     )
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
-    results, _local = health.run_health_checks()
+    # The walk runs only when the index-run rows are asked for (`nx doctor --check-index-runs`, F30).
+    results, _local = health.run_health_checks(index_runs=index_runs)
     return {r.label: r for r in results}
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_a_default_doctor_run_does_not_walk_the_catalog(monkeypatch) -> None:
+    """F30 (nexus-f3yqd.6): the default sweep names --check-index-runs instead of reading every document."""
+    cat = CountingCatalog()
+    rows = _doctor_over(monkeypatch, cat, managed=True, rung_reads=[], index_runs=False)
+    assert cat.calls == 0, f"{cat.calls} full catalog walks in a default doctor run"
+    for label in ("stale index-run fences", "failed index runs with hidden chunks", "tumbler allocator drift"):
+        assert rows[label].ok is True and "nx doctor --check-index-runs" in rows[label].detail, rows[label]
 
 
 @pytest.mark.usefixtures("cloud_mode")
