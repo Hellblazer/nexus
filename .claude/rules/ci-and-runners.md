@@ -35,7 +35,7 @@ Each was earned by one burn. Source: memory `feedback_release_and_develop_ci` §
 
 Full text (runner inventory, lab pool, hellmini, win-release): [self-hosted-runners](../../docs/agents/self-hosted-runners.md).
 
-- CI runs on GitHub-hosted runners except two lab-pool jobs (Service CI Java on `lab-16c16g`, pytest shards on `lab-6c18g`) and the release legs on `hellmini` / `win-release`. **A pull request from a fork never runs on those:** a new pool job must carry the same `runs-on` expression that sends fork PRs to `ubuntu-latest`. Repo variable `NX_CI_POOL=off` sends every run back to `ubuntu-latest`.
+- CI runs on GitHub-hosted runners except two lab-pool jobs (Service CI Java on `lab-16c16g`, pytest shards on `lab-6c18g`, or `lab-6c18g-release` for a pull request into `main`) and the release legs on `hellmini` / `win-release`. **A pull request from a fork never runs on those:** a new pool job must carry the same `runs-on` expression that sends fork PRs to `ubuntu-latest`. Repo variable `NX_CI_POOL=off` sends every run back to `ubuntu-latest`.
 - Pool runners share a persistent `$HOME`: a step that writes a fixed path under it must be safe against a sibling job. No sudo; hard memory cap (exit 137 = over it).
 - **Before approving a fork-PR run, read its diff for:** anything under `.github/`; any `runs-on` naming a self-hosted label (`self-hosted`, `hellmini`, `win-release`, a `lab-*` label, `hellmini-ci`, `qwen-linux`, `gtr-windows`); any change to the `runs-on` expression that routes forks to `ubuntu-latest`.
 - **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even holding the owner's `gh` token. Report the run id and stop; the click is Sam's.

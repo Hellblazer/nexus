@@ -25,9 +25,11 @@ macOS-specific runs, and the overflow when chas is busy. The T2 how-tos
 
 **The lab pool** (Sam, 2026-10-10, nexus-480wm; T2 `homelab/labrun-pool-howto`)
 is a set of single-use runners that a scheduler on chas starts per job, with
-labels `lab-s`, `lab-m`, `lab-6c18g`, `lab-16c16g`, `lab-l`, `lab-xl` (Linux) and `lab-mac-s`, `lab-mac-m`
+labels `lab-s`, `lab-m`, `lab-6c18g`, `lab-6c18g-release`, `lab-16c16g`, `lab-l`, `lab-xl` (Linux) and `lab-mac-s`, `lab-mac-m`
 (macOS on hellmini). Two CI jobs use it: the Service CI Java job on `lab-16c16g` (16 cores, 16 GB) and the
-pytest shard matrix on `lab-6c18g` (6 cores, 18 GB; six fit on chas at once),
+pytest shard matrix on `lab-6c18g` (6 cores, 18 GB; six fit on chas at once;
+a pull request into `main` takes `lab-6c18g-release`, the same class placed
+ahead of the develop shards, labrun-9no),
 with 4 xdist workers inside each shard (not `-n auto`: each worker also runs
 an engine JVM and a Postgres).
 The mac-arm64 release legs use the macOS classes (below, § Engine-service
