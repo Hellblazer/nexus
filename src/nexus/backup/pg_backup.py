@@ -33,11 +33,13 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -392,20 +394,34 @@ _HELD_SIGNALS: frozenset[int] = frozenset(
 
 @contextlib.contextmanager
 def _interrupts_held() -> Iterator[None]:
-    """Hold SIGINT, SIGTERM and SIGHUP from the moment pg_dump is spawned until ``proc`` and its
-    containment exist. A signal that lands inside ``Popen`` would raise KeyboardInterrupt before ``proc``
-    is assigned, so the cleanup could not kill pg_dump and it would run on, orphaned (nexus-f3yqd.4: a
-    stand-in that signals its parent at once did exactly this on a fast CI worker). A held signal is
-    delivered when the block ends, with ``proc`` set. POSIX only: Windows has no signal mask."""
-    mask = getattr(signal, "pthread_sigmask", None)
-    if mask is None or not _HELD_SIGNALS:
+    """Defer SIGINT, SIGTERM and SIGHUP from the moment pg_dump is spawned until ``proc`` and its
+    containment exist. A signal whose handler ran inside ``Popen`` raised KeyboardInterrupt before ``proc``
+    was assigned, so the cleanup could not kill pg_dump and it ran on, orphaned (nexus-f3yqd.4, develop CI).
+    A thread signal mask does not close that window: the mask is per thread, the kernel gives a
+    process-directed signal to a thread that does not block it (an xdist worker has execnet's), and CPython
+    still runs the Python handler in the main thread at its next bytecode. So the handlers themselves are
+    swapped for ones that only record the signal; afterwards the previous handlers come back and each
+    recorded signal is raised again, with ``proc`` set. Python handlers run only in the main thread, which
+    is also the only thread that may install them, so off it this does nothing (the verb installs no
+    handlers there either)."""
+    if threading.current_thread() is not threading.main_thread() or not _HELD_SIGNALS:
         yield
         return
-    previous = mask(signal.SIG_BLOCK, _HELD_SIGNALS)
+    seen: list[int] = []
+
+    def _record(signum: int, frame: object) -> None:
+        seen.append(signum)
+
+    previous: dict[int, Any] = {}
     try:
+        for sig in sorted(_HELD_SIGNALS):
+            previous[sig] = signal.signal(sig, _record)
         yield
     finally:
-        mask(signal.SIG_SETMASK, previous)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+        for sig in dict.fromkeys(seen):  # once each, in arrival order
+            signal.raise_signal(sig)
 
 
 def is_lock_timeout(detail: str) -> bool:

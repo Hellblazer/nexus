@@ -10,6 +10,7 @@ import shlex
 import signal
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,54 @@ def test_a_kill_that_lands_while_pg_dump_is_being_spawned_still_reaps_it(
         with pytest.raises(ProcessLookupError):
             os.kill(spawned[0], 0)  # killed and reaped, not left running behind the kill
     finally:
+        for pid in spawned:  # an orphan from a red run must not outlive the test
+            with contextlib.suppress(ProcessLookupError, ChildProcessError):
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+
+
+@posix_only
+@pytest.mark.parametrize("name", ["TERM", "HUP"])
+def test_a_kill_delivered_to_another_thread_during_the_spawn_still_reaps_pg_dump(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signal mask is per thread. In a process with a second thread (an xdist worker has execnet's), the
+    kernel hands a process-directed signal to a thread that does not block it, and CPython still runs the
+    Python handler in the main thread at its next bytecode: inside ``Popen`` (chas shard on 03f059863, the
+    [HUP] case, after the mask fix). Here the signal goes to a helper thread while the spawn is under way."""
+    sig = getattr(signal, f"SIG{name}")
+    dest = tmp_path / "out" / "x.dump"
+    pidfile = tmp_path / "pid"
+    _verb(monkeypatch, _stub_target(
+        tmp_path, _SLEEPS_AFTER_PARTIAL_OUTPUT.format(pidfile=shlex.quote(str(pidfile)), extra=""),
+    ))
+    stop = threading.Event()
+    helper = threading.Thread(target=stop.wait, daemon=True)
+    helper.start()
+    real_popen = subprocess.Popen
+    spawned: list[int] = []
+
+    def signal_another_thread_inside_the_spawn(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        proc = real_popen(*args, **kwargs)  # type: ignore[call-overload]
+        spawned.append(proc.pid)
+        assert helper.ident is not None
+        signal.pthread_kill(helper.ident, sig)
+        for _ in range(200):  # bytecode boundaries in the main thread, still inside the spawn
+            time.sleep(0.001)
+        return proc
+
+    setattr_in(monkeypatch, pg_backup, "subprocess.Popen", signal_another_thread_inside_the_spawn)
+    try:
+        result = CliRunner().invoke(main, ["backup", "--to", str(dest)])
+        assert result.exit_code != 0, result.output
+        assert spawned, "the stand-in was never spawned"
+        assert not dest.exists()
+        _no_siblings(dest.parent, set())
+        with pytest.raises(ProcessLookupError):
+            os.kill(spawned[0], 0)  # killed and reaped, not left running behind the kill
+    finally:
+        stop.set()
+        helper.join(5)
         for pid in spawned:  # an orphan from a red run must not outlive the test
             with contextlib.suppress(ProcessLookupError, ChildProcessError):
                 os.kill(pid, signal.SIGKILL)
