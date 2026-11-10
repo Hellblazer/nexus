@@ -45,7 +45,7 @@ class _SiblingT3:
     def collection_exists(self, name: str) -> bool:
         return name in self.docs
 
-    def list_collections(self) -> list[dict]:
+    def list_collections(self, *_a, **_k) -> list[dict]:
         return [dict(r) for r in self.rows]
 
     def collection_info(self, name: str) -> dict:

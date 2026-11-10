@@ -186,7 +186,7 @@ class _World:
         self.store_get_count: int | None = None   # when set, the store-get response reports this count
         self.get_wheres: list[dict] = []
         self.reaped_chashes: list[str] = []
-        monkeypatch.setattr(HttpVectorClient, "list_collections", lambda self: [
+        monkeypatch.setattr(HttpVectorClient, "list_collections", lambda self, *a, **k: [
             {"name": _COLLECTION, "count": 1, "content_type": "knowledge"}])
         monkeypatch.setattr("nexus.db.http_vector_client._post", self._post(rows))
         monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: catalog)
