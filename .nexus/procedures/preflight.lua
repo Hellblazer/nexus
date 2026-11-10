@@ -69,6 +69,12 @@ end
 
 local RUFF = "ruff@0.15.18"
 
+-- Said on every row that builds the gate jar inside a lab-remote run (inside its grant): there a
+-- held build lease refuses at once with 75, and the script's own hint (--lab-run, outside
+-- lab-run) is one lab-remote cannot follow.
+local JAR_75 = " An exit 75 from the gate jar build means another build holds the host's build lease:"
+  .. " rerun; the script's --lab-run hint does not apply under lab-remote."
+
 local function step(check, command, heavy)
   return {check = check, command = command, heavy = heavy}
 end
@@ -76,8 +82,10 @@ end
 -- Each row below says the failure it exists for. The incidents behind them are in the
 -- maintainer's memory files promoted by nexus-qo7ie.36, kept whole in T2 as
 -- nexus/qo7ie.36-file1-source-before-shrink (test runs before a push) and
--- nexus/qo7ie.36-file3-source-before-shrink (hand-kept enumerations); the tests that pin
--- the rows still carry that census's rule numbers in their names.
+-- nexus/qo7ie.36-file3-source-before-shrink (hand-kept enumerations). The tests that pin
+-- the rows still carry rule numbers in their names (test_r37_..., "R44"): they are the
+-- numbered rules of the two censuses, T2 nexus/qo7ie.36-census-feedback_test_runs_before_push
+-- and nexus/qo7ie.36-census-feedback_hand_kept_enumerations.
 
 -- The result contract on every pytest command this procedure emits. A run's output
 -- goes to a log with -rf, so a red names itself, and the command passes only when
@@ -112,7 +120,7 @@ local function gated(command, may_select_nothing)
   -- fails says so, instead of reaching the red branch with no log to show.
   return "log=$(mktemp \"${TMPDIR:-/tmp}/preflight.XXXXXX\") && { { " .. command .. "; } >\"$log\" 2>&1; rc=$?;"
     .. " s=$(grep -aE '" .. SUMMARY_AT .. "' \"$log\" | tail -n 1);"
-    .. " [ \"$rc\" -eq 0 ] && " .. ok .. " && printf '%s\\n' \"${s:-" .. NOTHING .. "}\" && rm -f \"$log\"; }"
+    .. " [ \"$rc\" -eq 0 ] && " .. ok .. " && printf '%s\\n' \"${s:-" .. NOTHING .. "}\" && { rm -f \"$log\"; true; }; }"
     .. " || { if [ -z \"${log:-}\" ]; then echo \"preflight: mktemp could not make a log under ${TMPDIR:-/tmp}\"; else"
     .. " tail -n 30 \"$log\"; echo \"red, or no clean pytest summary line; full log: $log\"; fi; false; }"
 end
@@ -303,11 +311,12 @@ local CLASSES = {
     -- directory is about 1700 tests, so it is heavy and runs through lab-remote, the gate
     -- jar built first there as in the lint bucket.
     name = "daemon",
-    patterns = {"^src/nexus/daemon/"},
+    -- Python only: the two prose files there (AGENTS.md, CLAUDE.md) are read by no test.
+    patterns = {"^src/nexus/daemon/.*%.py$"},
     checks = function()
       return {
         step("the daemon tests, the whole tests/daemon directory (a daemon module's tests are spread over"
-          .. " several files, and the one named for it is not all of them)",
+          .. " several files, and the one named for it is not all of them)." .. JAR_75,
           gated("lab-remote -- bash -c 'scripts/build-gate-jar.sh && " .. PYTEST
             .. " -m \"not integration and not slow\" -n auto tests/daemon'"), true),
       }
@@ -470,11 +479,11 @@ local function standing(select_all)
     -- The gate jar is built inside the lab-remote run, so inside its lab-run grant,
     -- where AGENTS.md rule 13 would have engine builds take the build lease first
     -- (--lab-run). lab-remote has no way to run a command outside a grant, so the build
-    -- stays here: a cache hit takes no build at all, a lease another build holds
-    -- refuses at once with exit 75 inside a grant (never a wait that holds the grant),
-    -- and a miss builds within the grant's cores and memory. A 75 here means: rerun.
-    step("the whole lint bucket (an exit 75 from the gate jar build means another build holds the host's"
-      .. " build lease: rerun)",
+    -- stays here: the script takes the build lease before it looks in the cache, so
+    -- while another build holds the lease even a cache hit refuses at once with exit 75
+    -- inside a grant (never a wait that holds the grant); a miss builds within the
+    -- grant's cores and memory. A 75 here means: rerun.
+    step("the whole lint bucket." .. JAR_75,
       gated("lab-remote -- bash -c 'scripts/build-gate-jar.sh && " .. PYTEST .. " -m lint -n auto'"), true),
     -- The ledger test reads COMMITTED trees (it diffs ref..HEAD against the pinned
     -- tag), so it is run after the commit: an uncommitted conexus/ edit is invisible
@@ -493,7 +502,7 @@ local function standing(select_all)
     -- change to the selector selects every integration file. The remote copy builds
     -- the gate jar first, as the lint bucket does: a copy without one reds every
     -- substrate test. The files come after the script's own argv ("$@").
-    step("the integration tests the change affects",
+    step("the integration tests the change affects." .. JAR_75,
       gated("f=$(set -o pipefail; " .. sel .. ")"
         .. " && { if [ -z \"$f\" ]; then echo '" .. NOTHING .. "'; else printf '%s\\n' \"$f\" | xargs lab-remote --"
         .. " bash -c 'scripts/build-gate-jar.sh && exec \"$@\"' preflight " .. PYTEST .. " -o addopts= -m " .. MARK .. "; fi; }", true),
@@ -600,7 +609,7 @@ local TRIPWIRES = {
     end,
     step = step("the full Python suite on this tree, once per tree: SKIP it when this tree (this sha, clean)"
       .. " already has a green full run, whoever ran it, or develop CI already has the verdict; announce it with"
-      .. " its change class, the sha and 'no green full run of this tree exists' (AGENTS.md rule 13)",
+      .. " its change class, the sha and 'no green full run of this tree exists' (AGENTS.md rule 13)." .. JAR_75,
       gated("lab-remote -c lab-l --fetch full-suite-status.json -- bash -c 'scripts/build-gate-jar.sh && "
         .. "python3 scripts/watched_pytest.py --stall 180 --status full-suite-status.json --log full-suite.log -- "
         .. "uv run pytest -rf -p no:randomly --color=no -n auto; rc=$?; tail -n 40 full-suite.log; exit $rc'"),

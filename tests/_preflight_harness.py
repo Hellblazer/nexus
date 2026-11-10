@@ -48,7 +48,7 @@ BEAD_MANIFEST = (
     " -k 'cited_bead_ids_resolve or bead_id_manifest_is_fresh_where_bd_is' tests/test_docs_reference_rot.py"
 )
 #: What a gated command runs after a clean summary: its log is not kept.
-PASSING_LOG_REMOVAL = ' && rm -f "$log"'
+PASSING_LOG_REMOVAL = ' && { rm -f "$log"; true; }'
 #: CI's docs lane runs this when a fragment or a changelog changed (nexus-3ceda.2).
 FOLD_CHECK = "uv run python scripts/changelog_fold.py check"
 #: R33: the precondition of the lint bucket (feedback_test_runs_before_push, Third recurrence).

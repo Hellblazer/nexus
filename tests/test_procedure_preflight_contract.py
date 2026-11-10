@@ -45,7 +45,7 @@ from tests._preflight_harness import (
 _PYTEST_AT = re.compile(r"uv run pytest (.*?)(?: \)$|; fi; \}|'$|$)", re.S)
 _NAMED = re.compile(r"tests/[A-Za-z0-9_./*?\[\]-]+\.py")
 #: A directory a step names whole (the hook tests, the daemon tests): a bare tests/<dir> word.
-_NAMED_DIR = re.compile(r"(?<![\w/.-])(tests/[A-Za-z0-9_/-]+?)/?(?=[\s'\"]|$)")
+_NAMED_DIR = re.compile(r"(?<![\w/.-])(tests/[A-Za-z0-9_/-]+?)/?(?=[\s'\";)}|&]|$)")
 _PRINTF = re.compile(r"printf '%s\\0' ([^;]*);")
 
 
@@ -72,7 +72,11 @@ def _collected(argv: str, appended: list[str]) -> list[str]:
     proc = subprocess.run(
         ["bash", "-c", f"{sys.executable} -m pytest --collect-only -q -p no:cacheprovider {argv} {' '.join(appended)}"],
         cwd=REPO_ROOT,
-        env={**_env(), "NX_TEST_T2_SUBSTRATE": "none"},
+        # No PYTEST_* from this run: a collect-only listing runs no test, and an inherited
+        # PYTEST_CURRENT_TEST would charge what the collected modules construct at import (a
+        # parametrize list of ManagedService* errors in tests/scripts) to the test calling this,
+        # which in-process collection is never charged with.
+        env={**{k: v for k, v in _env().items() if not k.startswith("PYTEST_")}, "NX_TEST_T2_SUBSTRATE": "none"},
         capture_output=True,
         text=True,
         encoding="utf-8",

@@ -487,6 +487,7 @@ def test_the_changed_tests_step_follows_test_files_only(repo: Path, path: str, f
         ("src/nexus/daemon/service_registry.py", True),
         ("src/nexus/daemon/sub/x.py", True),
         ("src/nexus/daemonx.py", False),
+        ("src/nexus/daemon/AGENTS.md", False),  # prose no test reads: not a heavy run
         ("src/nexus/x_daemon/y.py", False),
         ("tests/daemon/test_x.py", False),
     ],
@@ -504,3 +505,15 @@ def test_a_daemon_change_runs_the_whole_daemon_directory(repo: Path, path: str, 
             ' --color=no -m "not integration and not slow" -n auto tests/daemon\''
         )
         assert "daemon" in _class_names(_Run(repo)())
+
+
+def test_every_row_that_builds_the_jar_under_lab_remote_says_what_75_means(repo: Path) -> None:
+    """Inside lab-remote's grant a held build lease exits 75 at once, and the script's own hint
+    (--lab-run, outside lab-run) is one lab-remote cannot follow (preflight review r1)."""
+    _change(repo, {**EVERYTHING, "src/nexus/daemon/x.py": "x = 1\n"})
+    rows = [c for c in _Run(repo)()["checks"]
+            if "lab-remote" in c["command"] and "build-gate-jar.sh" in c["command"]]
+    names = sorted(c["check"].split(".")[0] for c in rows)
+    assert len(rows) == 4, names  # lint bucket, integration, daemon, full suite
+    for c in rows:
+        assert "exit 75 from the gate jar build" in c["check"] and "rerun" in c["check"], c["check"]

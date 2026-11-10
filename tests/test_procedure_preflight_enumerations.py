@@ -386,3 +386,13 @@ def test_each_new_pytest_step_is_gated_and_runs_under_the_shell(
     rc, lines = _run(repo, stubs, row["command"], shell)
     assert rc == 0, lines
     assert "1 passed in 0.01s" in lines
+
+
+def test_the_mcp_check_text_names_every_field_the_wire_snapshot_holds(repo: Path) -> None:
+    """The snapshot holds a tool's qualname, module, is_async and parameters (with required),
+    so a change to any of them moves it; a description does not (preflight critique r1)."""
+    [row] = _fires(repo, ["src/nexus/mcp/core.py"], MCP)
+    text = row["check"]
+    for field in ("qualname", "module", "is_async", "required"):
+        assert field in text, field
+    assert "a description is not in the snapshot" in text
