@@ -47,4 +47,7 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/compact_checkpoint.py`
+  nexus-ct9sv: another session's pre no longer prunes an idle session's unused checkpoint at 48 h; it keeps it until a 7-day limit, which is also inject's restore limit.
+
 ## Deferred to the next client release

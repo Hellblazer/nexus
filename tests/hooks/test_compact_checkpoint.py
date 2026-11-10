@@ -11,7 +11,7 @@ in front of the model. The contract these tests pin:
 - ``post`` appends and logs a warning when the summary names none of the pointers; it
   never appends to, or refreshes, a checkpoint an earlier compaction already used.
 - ``inject`` emits the capped ``additionalContext`` for THIS session only, once, and
-  nothing for a used, foreign or past-the-prune-window one (by its ``written:`` stamp,
+  nothing for a used, foreign or past-``_MAX_AGE_S`` (7 days) one (by its ``written:`` stamp,
   not its mtime), and starts no process.
 - pairing is by use, not age: an idle compaction's checkpoint, written when the
   session went idle and used later (the deferred case), is appended to and injected with
@@ -636,7 +636,10 @@ class TestPre:
     def test_keeps_the_last_three_superseded_checkpoints_and_prunes_old_files(self, mod, env, monkeypatch) -> None:
         env.checkpoints.mkdir(parents=True)
         old = env.checkpoints / f"{OTHER_SID}.md"
-        old.write_text("someone else, three days old", encoding="utf-8")
+        # A USED checkpoint (a post appended a summary): an unused one is kept for seven days (nexus-ct9sv).
+        old.write_text("# Compaction checkpoint\n\n- written: 2026-01-01T00:00:00+00:00\n\n"
+                       "## Compact summary (2026-01-01T00:00:01+00:00)\n\nsomeone else, three days old\n",
+                       encoding="utf-8")
         three_days = time.time() - 3 * 86400
         os.utime(old, (three_days, three_days))
         fresh_other = env.checkpoints / f"{OTHER_SID}.20260101T000000Z.md"
@@ -651,7 +654,7 @@ class TestPre:
         mine = [n for n in names if n.startswith(SID)]
         assert f"{SID}.md" in mine and len(mine) == 4, names  # current + 3 archives
         assert "- trigger: t5" in (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
-        assert not old.exists(), "a file older than two days survived the prune"
+        assert not old.exists(), "a used checkpoint older than two days survived the prune"
         assert fresh_other.exists(), "another session's recent file must be left alone"
 
 
@@ -866,11 +869,11 @@ class TestInject:
         assert (code, out) == (0, "")
         assert "could not be read" in env.hook_log.read_text(encoding="utf-8")
 
-    def test_a_compact_start_with_a_checkpoint_past_the_prune_window_gets_the_notice(
+    def test_a_compact_start_with_a_checkpoint_past_the_seven_day_limit_gets_the_notice(
         self, mod, env, monkeypatch
     ) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
-        restamp(env.checkpoints / f"{SID}.md", 3 * 24 * 3600)
+        restamp(env.checkpoints / f"{SID}.md", 8 * 24 * 3600)  # was 3 days while _MAX_AGE_S was 48 h (nexus-ct9sv)
         code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
         ctx = self._ctx(out)
         assert code == 0 and "no working-state checkpoint" in ctx and "state: building" not in ctx
