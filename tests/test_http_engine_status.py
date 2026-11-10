@@ -103,7 +103,7 @@ def test_fetch_engine_status_mints_a_data_token_when_the_resolver_returns_none()
     ), patch("nexus.db.http_engine_status.httpx.get", return_value=resp) as mock_get:
         status = fetch_engine_status()
     assert status == {"ownerless_write_mode": "log-only"}
-    manager.bearer_for.assert_called_once_with("https://edge.example", "default")
+    manager.bearer_for.assert_called_once_with("https://edge.example", "default", deadline_s=None)
     assert mock_get.call_args.kwargs["headers"] == {"Authorization": "Bearer minted-data-token"}
 
 

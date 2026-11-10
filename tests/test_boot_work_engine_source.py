@@ -112,8 +112,12 @@ def test_a_managed_install_is_asked_with_a_bounded_mint(monkeypatch) -> None:
     seen: list[dict] = []
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
     monkeypatch.setattr(status, "fetch_engine_status", lambda **kw: seen.append(kw) or {"boot_work": [PCI]})
+    monkeypatch.setattr("nexus.config.get_credential", lambda name: "https://edge.example" if name == "service_url" else "")
     assert boot_work.engine_entries() == [PCI]
     assert seen == [{"timeout": 2.0, "mint_deadline_s": 2.0}]
+    # managed with no service_url (a test that only flips the mode): nothing to resolve, so nothing is asked
+    monkeypatch.setattr("nexus.config.get_credential", lambda name: "")
+    assert boot_work.engine_entries() == [] and len(seen) == 1
 
 
 def test_the_service_status_view_says_what_stopping_costs_not_what_interrupting_does() -> None:
@@ -162,14 +166,14 @@ def test_service_status_shows_the_lease_engines_work_and_json_carries_it(tmp_pat
     assert "The engine is building per-collection vector indexes" in shown.output
     assert "Interrupting" not in shown.output
     as_json = invoke("--json")
-    assert json.loads(as_json.output)["boot_work"] == [PCI]
+    assert json.loads(as_json.stdout)["boot_work"] == [PCI]
     assert asked == [("127.0.0.1", 5999)] * 2  # the engine this lease names, not the ambient resolver's
 
 
 def test_the_status_request_goes_to_the_lease_engine_with_its_token(monkeypatch) -> None:
     import httpx  # noqa: PLC0415 — the transport patched
 
-    from nexus.commands.daemon import _engine_status_at  # noqa: PLC0415 — the helper under test
+    from nexus.commands.daemon import _engine_status_at  # noqa: PLC0415 — the helper under test (it delegates)
 
     seen: list[tuple] = []
 

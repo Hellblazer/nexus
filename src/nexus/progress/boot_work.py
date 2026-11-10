@@ -128,16 +128,19 @@ def local_entries(config_dir: Path, *, clock: Callable[[], float] = time.time) -
 
 
 def _fetch_if_an_engine_is_there(*, timeout: float) -> dict[str, Any] | None:
-    """``/v1/status``, asked only when there is an engine to ask: a managed service, or a local install whose
-    supervisor has published a lease. A local install with no lease (stopped, never started) is not
+    """``/v1/status``, asked only when there is an engine to ask: a managed service with a ``service_url``, or a
+    local install whose supervisor has published a lease. A local install with no lease (stopped, never started) is not
     resolved at all, so a command that only wants to say what the engine is doing never trips the
     endpoint resolver's not-running error."""
-    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred, not stdlib
+    from nexus.config import get_credential, is_local_mode  # noqa: PLC0415 — deferred, not stdlib
     from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred, not stdlib
     from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — deferred, not stdlib
 
-    if is_local_mode() and discover_lease()[0] is None:
-        return None
+    if is_local_mode():
+        if discover_lease()[0] is None:
+            return None
+    elif not (get_credential("service_url") or "").strip():
+        return None  # managed with no service_url: nothing to resolve, so the resolver's error is never raised
     return fetch_engine_status(timeout=timeout, mint_deadline_s=timeout)  # advisory: never a long mint
 
 

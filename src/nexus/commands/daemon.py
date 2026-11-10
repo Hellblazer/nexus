@@ -1914,16 +1914,9 @@ def _nx_major_gap_note(installed_by: str) -> str | None:
 
 def _engine_status_at(host: str, port: int, token: str | None, *, timeout: float) -> dict | None:
     """``GET /v1/status`` on the engine a lease names, or None. Never raises."""
-    import httpx  # noqa: PLC0415 — deferred import — only the status subcommand path
+    from nexus.db.http_engine_status import fetch_engine_status_at  # noqa: PLC0415 — deferred import — only the status subcommand path
 
-    try:
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        resp = httpx.get(f"http://{host}:{port}/v1/status", headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        body = resp.json()
-    except Exception:  # noqa: BLE001 — advisory: an unreadable status shows no work
-        return None
-    return body if isinstance(body, dict) else None
+    return fetch_engine_status_at(f"http://{host}:{port}", token, timeout=timeout)
 
 
 @service_group.command("status")

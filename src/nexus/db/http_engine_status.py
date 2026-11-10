@@ -85,6 +85,20 @@ def fetch_engine_status(*, timeout: float = 5.0, mint_deadline_s: float | None =
     return body
 
 
+def fetch_engine_status_at(base_url: str, token: str | None, *, timeout: float = 2.0) -> dict | None:
+    """``GET /v1/status`` on an engine named by its own address (a lease the caller already holds), with no
+    endpoint resolution, or ``None`` on any failure. Never raises (nexus-f3yqd.3)."""
+    try:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 — advisory: an unreadable status is nothing to report
+        _log.debug("engine_status_probe_failed", error=scrub_transport_error(exc, base_url))
+        return None
+    return body if isinstance(body, dict) else None
+
+
 def _format_activity_fields(activity: dict) -> list[str]:
     """Shared field-formatting for one activity dict (the ``local_embed_activity``
     shape, or one value out of ``embedder_activity``) — both carry the identical
