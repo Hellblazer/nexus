@@ -9,6 +9,7 @@ import click
 import pytest
 
 import nexus.upgrade_ladder.registry as ladder_registry
+import nexus.commands.upgrade as upgrade_mod
 from nexus.commands.upgrade import _run_ladder
 from nexus.upgrade_ladder.registry import LadderRegistry
 
@@ -103,8 +104,9 @@ def test_a_ladder_that_did_not_converge_says_what_to_do(monkeypatch: pytest.Monk
     ), message
 
 
-@pytest.mark.t2_tenant  # the walk defers, so the deferral log writes its T2 note (nexus-0sm1t)
 def test_a_deferred_step_says_it_runs_again(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # The deferral log's T2 note is the only storage this walk touches; it is not what this test is about.
+    monkeypatch.setattr(upgrade_mod, "_record_deferrals", lambda *_a, **_k: None)
     monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((_DeferringRung("census"),)))
     _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=InMemoryLedger)
     out = " ".join(capsys.readouterr().out.split())
