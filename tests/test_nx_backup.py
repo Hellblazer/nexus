@@ -53,11 +53,11 @@ from nexus.backup.pg_backup import (
     tool_path,
 )
 from tests._module_seam import setattr_in
+from tests._changelog_entry import changelog_entry
 
 REPO = Path(__file__).resolve().parent.parent
 RUNBOOK = REPO / "docs" / "operations" / "backup-restore.md"
 CLI_REFERENCE = REPO / "docs" / "cli-reference.md"
-FRAGMENT = REPO / "changelog" / "unreleased" / "nexus-f3yqd.4.md"
 
 #: The tools PgBinaries resolves (initdb, pg_ctl, psql, createdb), read from the class so a fifth is covered
 #: the day it is added; named here and not typed out as a list of names, which is not an argv.
@@ -573,10 +573,10 @@ def test_the_help_the_reference_the_changelog_and_the_runbook_all_say_there_is_n
     for name, text in (
         ("cli-reference", CLI_REFERENCE.read_text(encoding="utf-8")),
         ("runbook", RUNBOOK.read_text(encoding="utf-8")),
-        ("changelog", FRAGMENT.read_text(encoding="utf-8")),
+        ("changelog", changelog_entry("nexus-f3yqd.4.md", "nexus-f3yqd.4")),
     ):
         assert ONLY_COPY_SENTENCE in _flat(text), f"{name} lacks the only-copy sentence"
-    for name, text in (("runbook", RUNBOOK.read_text(encoding="utf-8")), ("changelog", FRAGMENT.read_text(encoding="utf-8"))):
+    for name, text in (("runbook", RUNBOOK.read_text(encoding="utf-8")), ("changelog", changelog_entry("nexus-f3yqd.4.md", "nexus-f3yqd.4"))):
         assert "dump is compressed" not in text and "an estimate" not in text, f"{name} still says the dump is compressed"
 
 
