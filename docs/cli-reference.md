@@ -5347,6 +5347,24 @@ remains a separate, independently consented act.
 
 ---
 
+## nx backup
+
+```
+nx backup [--to PATH]
+```
+
+An explicit, user-run backup of the local engine's database: one `pg_dump -Fc` file (nexus-f3yqd.4). **Nothing runs it for you.** `nx upgrade`, `nx doctor`, `nx init`, `nx self`, the hooks and the daemons never call it; a test fails on a Python import, a subprocess command line, or a hook or script line under the repository's code directories that would (it cannot see a command assembled at run time).
+
+There is no automatic backup; this file is the only copy besides the live database. Copy it to another disk or machine.
+
+It dumps with the bundled Postgres binaries the engine runs (`NEXUS_PG_BIN`, then the extracted bundle; `.exe` on Windows; never a host Postgres) against the running local cluster, as the cluster's superuser with the password in `pg_credentials`. The snapshot is online and consistent, and holds every tenant. The engine keeps serving. The bundle is built without zlib, so **the dump is not compressed**: expect a file about the size of the database.
+
+- `--to PATH`: where to write the dump. The default is `~/nexus-backups/nexus-<UTC yyyymmddThhmmssZ>.dump`, outside the engine's data directory on purpose. The file is created owner-only (on Windows with an owner-only ACL, through the helper the credentials files use); a parent directory it creates is owner-only on macOS and Linux, and on Windows takes the parent folder's ACL. **An existing file is refused, never overwritten**, and the bytes there stay as they were. The dump goes to a `.partial` file beside the destination and is checked with the bundled `pg_restore -l`, then moved into place; a failure, a file that does not verify, Ctrl-C, SIGTERM or SIGHUP removes it. An unwritable or too-long destination is a one-line refusal.
+- Output: first the database's size on disk (tables, indexes and bloat; indexes are not dumped, so the file can be smaller or larger), then the bytes written and the rate through the shared step reporter (redrawn on a terminal, plain lines every 30 s otherwise). It warns, and carries on, if the destination disk has less free space than the database occupies. `pg_dump` waits at most 60 s for a table lock; when it gives up, the verb fails saying something holds locks, most likely a schema migration, and to run it again afterwards. At the end it prints the path, the size, the exact restore commands for this machine, and the runbook's path in the repository.
+- Refusals (exit 1, nothing written): managed (cloud) mode, because cloud backups are on the conexus side; no `pg_credentials` (run `nx init`); Postgres not accepting connections (start it with `nx daemon service start`); a bundle without `pg_dump` or `pg_restore`; an existing destination.
+
+There is no `nx restore`: a restore over a live database is destructive. [docs/operations/backup-restore.md](operations/backup-restore.md) is the runbook: back the live database up first, stop the engine, `pg_restore` into a fresh database with the bundled binaries (macOS, Linux and Windows commands), check for connections, swap names in one transaction, start the engine, and how to undo. It says what each step overwrites (only the last, the optional drop of the replaced database, deletes anything), and that the restore rebuilds every index without progress and that the first boot after restoring an older backup runs migrations; neither should be interrupted.
+
 ## nx uninstall
 
 First-class agent teardown (RDR-165). See

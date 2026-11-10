@@ -109,29 +109,31 @@ class Step:
     #: (e.g. no service came up): the end line says so instead of "done in".
     end_note: str | None = None
     _last_emit: float = 0.0
-    _progress: tuple[float, float | None, str] | None = None
+    _progress: tuple[float, float | None, str, str] | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def elapsed(self) -> float:
         return self.reporter.clock() - self.started
 
-    def progress(self, done: float, total: float | None = None, unit: str = "") -> None:
+    def progress(self, done: float, total: float | None = None, unit: str = "", note: str = "") -> None:
         """Record how far the step is; shown at the next heartbeat. *unit*
-        ``"bytes"`` formats as sizes, anything else is a count label."""
+        ``"bytes"`` formats as sizes, anything else is a count label. *note*
+        is the caller's own words after the figure (a rate, a time left, what
+        the total is an estimate of)."""
         with self._lock:
-            self._progress = (done, total, unit)
+            self._progress = (done, total, unit, note)
         self.tick()
 
     def _progress_text(self) -> str:
         if self._progress is None:
             return ""
-        done, total, unit = self._progress
+        done, total, unit, note = self._progress
         if unit == "bytes":
             text = format_bytes(done) + (f" of {format_bytes(total)}" if total else "")
         else:
             label = f" {unit}" if unit else ""
             text = f"{int(done)}" + (f" of {int(total)}" if total else "") + label
-        return text + ", "
+        return text + (f" {note}" if note else "") + ", "
 
     def tick(self) -> None:
         """Emit a heartbeat when one is due (a lazy step first announces
