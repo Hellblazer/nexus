@@ -36,6 +36,7 @@ from nexus.daemon.service_registry import service_identity
 from nexus.db.t2.http_tuple_store import _MAX_CLAIMANT_BYTES
 from tests._module_seam import setattr_in
 from tests._platform import make_group_readable
+from tests._settle import settle
 from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 #: ``-m`` rather than the installed ``nx-hook`` console script, so these run
@@ -1068,11 +1069,11 @@ class TestPartialFailureNeverLosesDeliveredMail:
             proc.stdin.write(_payload().encode("utf-8"))
             proc.stdin.close()
             proc.stdin = None  # closed: communicate() below must not flush it
-            deadline = time.monotonic() + 120
-            while eng.paths().count("/v1/tuples/in") < 2:
+            def _not_parked() -> bool:
                 assert proc.poll() is None, "the drain exited before reaching the parked claim"
-                assert time.monotonic() < deadline, "the drain never reached the parked claim"
-                time.sleep(0.02)
+                return eng.paths().count("/v1/tuples/in") < 2
+
+            settle(_not_parked, deadline=120.0, interval=0.02, what="the drain's parked claim")
             # SIGKILL on POSIX, TerminateProcess (exit status 1) on Windows:
             # both end the process with no chance to flush or clean up.
             proc.kill()

@@ -1468,18 +1468,17 @@ def _spawn_unreaped_zombie() -> "subprocess.Popen[bytes]":
         [sys.executable, "-c", "import time; time.sleep(120)"],
     )
     os.kill(proc.pid, KILL_SIGNAL)
-    deadline = time.monotonic() + 30.0
-    while time.monotonic() < deadline:
-        if process_state(proc.pid) == "Z":
-            return proc
-        time.sleep(0.02)
-    with contextlib.suppress(ChildProcessError, OSError):
-        proc.wait(timeout=5)
-    pytest.fail(
-        f"could not drive pid {proc.pid} into a zombie state within 30s — "
-        "this platform reaps differently and the fixture needs revisiting",
-    )
-    raise AssertionError("unreachable")  # pragma: no cover
+    try:
+        settle(
+            lambda: process_state(proc.pid) != "Z" and f"state {process_state(proc.pid)!r}", 30.0,
+            interval=0.02,
+            what=f"pid {proc.pid} as a zombie (if this platform reaps differently, the fixture needs revisiting):",
+        )
+    except BaseException:
+        with contextlib.suppress(ChildProcessError, OSError):
+            proc.wait(timeout=5)
+        raise
+    return proc
 
 
 class TestDeadOwnerReclaimOnTheStopPath:
@@ -2508,24 +2507,28 @@ class _Stack:
             **_OWN_GROUP,
         )
         ready = directory / "ready.json"
-        deadline = time.monotonic() + 60.0
-        while not ready.exists():
-            if time.monotonic() > deadline or self.proc.poll() is not None:
-                self.close()
-                pytest.fail("the stand-in stack did not come up")
-            time.sleep(0.05)
-        # os.replace is atomic, but on Windows a read that lands while the rename is still
-        # settling can be refused with a sharing violation (PermissionError, develop CI
-        # win-release 2026-10-29): retry the read inside the same deadline.
-        while True:
+        read: list[dict] = []
+
+        def _not_up() -> str:
+            if self.proc.poll() is not None:
+                pytest.fail(f"the stand-in supervisor exited {self.proc.returncode} before it came up")
+            # os.replace is atomic, but on Windows a read that lands while the rename is still
+            # settling can be refused with a sharing violation (PermissionError, develop CI
+            # win-release 2026-10-29): retry the read inside the same deadline.
             try:
-                info = json.loads(ready.read_text(encoding="utf-8"))
-                break
+                read.append(json.loads(ready.read_text(encoding="utf-8")))
+            except FileNotFoundError:
+                return "no ready.json"
             except (PermissionError, json.JSONDecodeError):
-                if time.monotonic() > deadline:
-                    self.close()
-                    pytest.fail("the stand-in stack's ready.json never became readable")
-                time.sleep(0.05)
+                return "ready.json not readable yet"
+            return ""
+
+        try:
+            settle(_not_up, 60.0, interval=0.05, what="the stand-in stack")
+        except BaseException:
+            self.close()
+            raise
+        info = read[-1]
         self.supervisor: int = info["supervisor"]
         self.engine: int = info["engine"]
 
@@ -2672,11 +2675,9 @@ class TestStopReturnsAfterBothProcessesExit:
                 config_dir=directory, platform="win32", console_api=api,
             )
             assert pid_running(stack.supervisor) is False
-            deadline = time.monotonic() + 10.0
-            while pid_running(stack.engine) and time.monotonic() < deadline:
-                time.sleep(0.05)
-            assert pid_running(stack.engine) is False, (
-                "the job engine outlived its hard-killed supervisor: KILL_ON_JOB_CLOSE did not fire"
+            settle(
+                lambda: pid_running(stack.engine) and "engine alive", 10.0, interval=0.05,
+                what="the job engine after its supervisor's hard kill (KILL_ON_JOB_CLOSE):",
             )
             assert outcome.stubborn == ()
         finally:

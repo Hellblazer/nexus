@@ -36,6 +36,7 @@ from nexus.db.t2 import T2Database
 
 from tests._catalog_fixture_ops import register_real_doc_id
 from tests._module_seam import patch_time
+from tests._settle import settle
 
 
 # hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
@@ -494,19 +495,11 @@ class TestWorkerDrainIntegration:
             with T2Database(queue_path) as db:
                 db.aspect_queue.enqueue("knowledge__test", "/new.pdf", doc_id=_shared_doc_id())
 
-            # Poll until the aspects census has no live task (claimed and
-            # acked) or 3 seconds pass.
-            deadline = time.monotonic() + 3.0
-            drained = False
-            while time.monotonic() < deadline:
-                time.sleep(0.05)
-                if _aspects_live() == 0:
-                    drained = True
-                    break
-
-            assert drained, (
-                "worker restarted after drain must claim and process the new row "
-                "within 3 seconds"
+            # The restarted worker claims and acks the new row: the aspects
+            # census reaches no live task (available + claimed).
+            settle(
+                _aspects_live, 3.0, interval=0.05,
+                what="the restarted worker's claim of the new row (live aspects tasks):",
             )
         finally:
             infra_mod.t2_ctx = original_t2_ctx
