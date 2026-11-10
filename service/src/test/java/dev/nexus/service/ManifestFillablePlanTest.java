@@ -172,41 +172,80 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
         assertSpanTestAtTheManifestScan(planAndScanNode(ManifestFillableCount.Kind.SPANS, "3200 manifest rows, prose-heavy, converged"));
     }
 
-    /**
-     * nexus-f3yqd, route R2: the two read statements of a fill batch over a pending legacy store (every row of the labels
-     * kind unwritten, every chunk carrying a label): the WINDOW (the next manifest keys in key order after a keyset
-     * cursor) and the count of fillable rows in the window's key range. The plans are printed for the record; the
-     * assertions are the ones that keep a batch at the cost of its window: the window is an ordered scan of the manifest
-     * that STOPS at its LIMIT (no sort of the tenant), and the count's manifest scan carries the key range.
-     */
-    @Test
-    void aFillBatchCostsItsWindow_notTheTenant() throws Exception {
-        seed(MIXED_FULL_ROWS, false);
+    /** The plan text of {@code statement} in a transaction that is rolled back, under the batch's planner pins or the planner's own choice. */
+    private String planOf(boolean pinned, boolean window, java.util.function.Function<DSLContext, org.jooq.Query> statement) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
+            su.setAutoCommit(false);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            var after = new ManifestFill.Cursor("9.100.1", 3);
-            for (var kind : ManifestFillableCount.Kind.values()) {
-                var window = ManifestFill.windowQuery(ctx, TENANT, kind, after, 100);
-                String windowPlan = PgContainerHelper.explainPlanInlined(ctx, window);
-                System.out.println("plan of the fill window, " + kind.wire() + ", after (9.100.1, 3):\n" + windowPlan);
-                var rows = window.fetch();
-                assertThat(rows.size()).as(kind.wire() + ": a full window").isEqualTo(100);
-                assertThat(windowPlan).as(kind.wire() + ": an ordered scan that stops at the LIMIT, no sort")
-                    .contains("Limit").doesNotContain("Sort");
-                var end = rows.get(rows.size() - 1);
-                var last = new ManifestFill.Cursor(end.value1(), end.value2());
-                var count = ManifestFill.fillableByCollection(ctx, TENANT, kind, after, last);
-                String countPlan = PgContainerHelper.explainPlanInlined(ctx, count);
-                System.out.println("plan of the fill count over the window range, " + kind.wire() + ":\n" + countPlan);
-                System.out.println("plan with ANALYZE and BUFFERS of the fill count, " + kind.wire() + ":\n"
-                    + PgContainerHelper.explainPlanWith(ctx, count, PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS));
-                assertThat(manifestScanNode(countPlan)).as(kind.wire() + ": the manifest scan is bounded by the window's range")
-                    .contains("doc_id").contains("position");
-                // the seeded chunks carry labels and no spans the manifest lacks, so only the labels kind has rows to fill
-                assertThat(count.fetch().stream().mapToInt(r -> r.value2()).sum()).as(kind.wire() + ": the window's fillable rows")
-                    .isEqualTo(kind == ManifestFillableCount.Kind.LABELS ? 87 : 0);
+            if (pinned) ManifestFill.pinPlanner(ctx);
+            if (pinned && window) ManifestFill.pinWindow(ctx, true);
+            String plan = PgContainerHelper.explainPlanInlined(ctx, statement.apply(ctx));
+            su.rollback();
+            return plan;
+        }
+    }
+
+    /** The last key of the window {@code after} the cursor, as the batch reads it (under the pins, as the batch does). */
+    private ManifestFill.Cursor windowEnd(ManifestFillableCount.Kind kind, ManifestFill.Cursor after, int limit) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ManifestFill.pinPlanner(ctx);
+            ManifestFill.pinWindow(ctx, true);
+            var rows = ManifestFill.windowQuery(ctx, TENANT, kind, after, limit).fetch();
+            su.rollback();
+            assertThat(rows.size()).as(kind.wire() + ": a full window").isEqualTo(limit);
+            var end = rows.get(rows.size() - 1);
+            return new ManifestFill.Cursor(end.value1(), end.value2());
+        }
+    }
+
+    /**
+     * nexus-f3yqd, route R2: the three statements of a fill batch under the batch's planner pins
+     * ({@link ManifestFill#pinPlanner}), over statistics from an explicit ANALYZE (the seed analyses its tables), at the
+     * start of the manifest and after a keyset cursor, for each kind and for a store whose labels are all pending and
+     * one whose labels are mostly written. Deterministic, not a stats guess:
+     * <ul>
+     *   <li>the WINDOW is a Limit over an ordered index scan of the manifest, no sequential scan and no sort of the tenant;</li>
+     *   <li>the COUNT and the UPDATE are nested loops of index probes: the co-owners ({@code other_holder}) and tombstoned
+     *       holders ({@code deleted_holder}) are tested on {@code idx_catalog_chunks_chash}, never by reading the manifest's
+     *       rows, and no table is read by a sequential scan; no hash, no merge.</li>
+     * </ul>
+     * Non-vacuity: with the pins off the same seed gives the planner's own plan, which hashes the whole manifest for the
+     * co-owner test (a sequential scan of {@code other_holder}), so the assert above is about the pins.
+     */
+    private void assertTheBatchStatementsAreIndexProbes(boolean labelsWritten) throws Exception {
+        seed(MIXED_FULL_ROWS, labelsWritten);
+        boolean sawTheUnpinnedHash = false;
+        for (var kind : ManifestFillableCount.Kind.values()) {
+            for (ManifestFill.Cursor after : new ManifestFill.Cursor[] {null, new ManifestFill.Cursor("9.100.1", 3)}) {
+                String what = kind.wire() + (labelsWritten ? ", labels mostly written" : ", labels pending") + ", after " + after;
+                String window = planOf(true, true, ctx -> ManifestFill.windowQuery(ctx, TENANT, kind, after, 100));
+                assertThat(window).as(what + ": the window\n" + window).contains("Limit").contains("Index Scan")
+                    .doesNotContain("Seq Scan").doesNotContain("Sort");
+                var last = windowEnd(kind, after, 100);
+                String count = planOf(true, false, ctx -> ManifestFill.fillableByCollection(ctx, TENANT, kind, after, last));
+                String update = planOf(true, false, ctx -> ManifestFill.updateStatement(ctx, TENANT, kind, after, last, false));
+                for (String plan : List.of(count, update)) {
+                    assertThat(plan).as(what + ": the co-owner test is an index probe\n" + plan)
+                        .contains("idx_catalog_chunks_chash")
+                        .doesNotContain("Seq Scan")
+                        .doesNotContain("Hash ").doesNotContain("Merge ");
+                }
+                String own = planOf(false, false, ctx -> ManifestFill.fillableByCollection(ctx, TENANT, kind, after, last));
+                sawTheUnpinnedHash |= Pattern.compile("Seq Scan on catalog_document_chunks\\s+other_holder").matcher(own).find();
             }
         }
+        assertThat(sawTheUnpinnedHash).as("the seed is one where the planner's own plan hashes the manifest").isTrue();
+    }
+
+    @Test
+    void aBatchUnderThePins_probesTheChashIndexAndStopsItsWindow_labelsPending() throws Exception {
+        assertTheBatchStatementsAreIndexProbes(false);
+    }
+
+    @Test
+    void aBatchUnderThePins_probesTheChashIndexAndStopsItsWindow_labelsMostlyWritten() throws Exception {
+        assertTheBatchStatementsAreIndexProbes(true);
     }
 }

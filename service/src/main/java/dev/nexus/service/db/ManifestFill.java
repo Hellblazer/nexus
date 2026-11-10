@@ -151,7 +151,10 @@ public final class ManifestFill {
     private Batch once(String tenant, Kind kind, Cursor after, int batchRows, boolean dryRun, boolean skipLocked) {
         return DeadlockRetry.run("manifest.fill " + kind.wire(), () -> repo.tenantScope().withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", Long.toString(BATCH_TIMEOUT_MS));
+            pinPlanner(ctx);
+            pinWindow(ctx, true);
             Result<Record2<String, Integer>> window = windowQuery(ctx, tenant, kind, after, batchRows).fetch();
+            pinWindow(ctx, false);
             if (window.isEmpty()) {
                 return new Batch(0, 0, 0, null);
             }
@@ -165,6 +168,39 @@ public final class ManifestFill {
                 : apply(ctx, tenant, kind, after, last, perCollection.getValues(0, String.class), skipLocked);
             return new Batch(window.size(), picked, filled, last);
         }));
+    }
+
+    /**
+     * The planner settings of the batch transaction, and of nothing else ({@code SET LOCAL}, so they end with it): no
+     * hash join, no merge join and no sequential scan, so every join of the count and the UPDATE is a nested loop of index
+     * probes: the co-owner and tombstoned-holder {@code NOT EXISTS} tests of
+     * {@link ManifestFillablePredicates#soleLiveOwner} probe {@code idx_catalog_chunks_chash} per window row, and the
+     * document and chunk joins probe their primary keys. Left to itself the planner estimates the window at about two
+     * thousand rows, finds hashing the tenant's whole manifest cheaper than that many probes, and every batch then reads
+     * every manifest row of the tenant (measured at 200,000 rows: 18 to 20 ms of a 35 ms count and an 80 ms UPDATE; it
+     * grows with the tenant, not the batch). Hash and merge joins off alone is not enough: the document join then falls
+     * to a sequential scan of {@code catalog_documents} per window row (measured: UPDATE 176 ms), hence the third setting.
+     * The whole-tenant count of {@link ManifestFillableCount} is not under this pin: there the hash anti-join is the right
+     * plan. Public so a plan-shape test explains the statements under the same settings.
+     *
+     * <p>Sorts stay ON for the count and the UPDATE: the statement trigger of the manifest
+     * ({@code trg_catalog_chunks_stamp_on_update}) plans its own queries under the transaction's settings, and with sorts
+     * off it took 155 ms against 2 ms. They are off for the window alone, {@link #pinWindow}.
+     */
+    public static void pinPlanner(DSLContext ctx) {
+        PgSession.setLocal(ctx, "enable_hashjoin", "off");
+        PgSession.setLocal(ctx, "enable_mergejoin", "off");
+        PgSession.setLocal(ctx, "enable_seqscan", "off");
+    }
+
+    /**
+     * The window's own planner setting: no sort and no incremental sort ({@code off}), so the window stays an ordered scan
+     * of the manifest's primary key that stops at its LIMIT, where a sparse admitted set would otherwise pick a parallel
+     * sequential scan and a sort of every pending row; and back on ({@code !off}) before the count and the UPDATE.
+     */
+    public static void pinWindow(DSLContext ctx, boolean off) {
+        PgSession.setLocal(ctx, "enable_sort", off ? "off" : "on");
+        PgSession.setLocal(ctx, "enable_incremental_sort", off ? "off" : "on");
     }
 
     /**

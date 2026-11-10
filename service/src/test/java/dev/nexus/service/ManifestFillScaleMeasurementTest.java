@@ -142,10 +142,13 @@ class ManifestFillScaleMeasurementTest extends ManifestFillTestBase {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ManifestFill.pinPlanner(ctx);   // the batch's own planner settings; the job below runs under them too
+            ManifestFill.pinWindow(ctx, true);
             var window = ManifestFill.windowQuery(ctx, TENANT, kind, null, BATCH_ROWS);
             System.out.println("F3YQD " + shape + " " + kind.wire() + " WINDOW plan (analyze, buffers):\n"
                 + PgContainerHelper.explainPlanWith(ctx, window, PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS));
             var rows = window.fetch();
+            ManifestFill.pinWindow(ctx, false);
             var end = rows.get(rows.size() - 1);
             var last = new ManifestFill.Cursor(end.value1(), end.value2());
             var count = ManifestFill.fillableByCollection(ctx, TENANT, kind, null, last);
