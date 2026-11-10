@@ -2,11 +2,14 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocuments;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record3;
 import org.jooq.Select;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 
@@ -118,11 +121,11 @@ public final class ManifestFillableCount {
 
     // ── the predicates of one kind ──────────────────────────────────────────
 
-    private static Field<String> metaText(String key) {
+    static Field<String> metaText(String key) {
         return DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, key);
     }
 
-    private static Field<String> metaType(String key) {
+    static Field<String> metaType(String key) {
         return DSL.function("jsonb_typeof", SQLDataType.VARCHAR, DSL.jsonbGetAttribute(CHUNKS.METADATA, key));
     }
 
@@ -142,16 +145,16 @@ public final class ManifestFillableCount {
     }
 
     /** A JSON integer from one to 2147483647 ({@code manifest_span} records it): it fits INTEGER. */
-    private static Condition positiveInt(String key) {
+    static Condition positiveInt(String key) {
         return intIn(key, "^[1-9][0-9]{0,9}$", 1, INT4_MAX);
     }
 
     /** A JSON integer of either sign that fits INTEGER. */
-    private static Condition anyInt(String key) {
+    static Condition anyInt(String key) {
         return intIn(key, "^-?[0-9]{1,10}$", INT4_MIN, INT4_MAX);
     }
 
-    private static Field<Integer> asInt(String key) {
+    static Field<Integer> asInt(String key) {
         return DSL.cast(metaText(key), SQLDataType.INTEGER);
     }
 
@@ -162,7 +165,7 @@ public final class ManifestFillableCount {
      * fraction where a page goes) is left alone: the client sends it as found and the engine coerces it, which SQL does
      * not guess at (bucket {@code label_value_not_scalar}).
      */
-    private static Condition labelValuesAreScalar() {
+    static Condition labelValuesAreScalar() {
         Condition title = metaType("section_title").isNull().or(metaType("section_title").in("string", "null"));
         Condition type = metaType("section_type").isNull().or(metaType("section_type").in("string", "null"));
         Condition page = metaType("page_number").isNull().or(metaType("page_number").eq("null"))
@@ -182,13 +185,17 @@ public final class ManifestFillableCount {
      * least one column the chunk records, and no column holds a value the chunk contradicts (a chunk row that
      * describes another position is not trusted for any column).
      */
-    private static Condition spansFillable(dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks row) {
-        Field<Integer> recLineStart = DSL.when(positiveInt("line_start"), asInt("line_start"));
-        Field<Integer> recLineEnd = DSL.when(positiveInt("line_end"), asInt("line_end"));
-        Field<Integer> recCharEnd = DSL.when(positiveInt("chunk_end_char"), asInt("chunk_end_char"));
-        Field<Integer> recCharStart = DSL.when(
-            positiveInt("chunk_start_char").or(anyInt("chunk_start_char").and(positiveInt("chunk_end_char"))),
-            asInt("chunk_start_char"));
+    private static Condition spansFillable(CatalogDocumentChunks row) {
+        return spansFillable(row, recordedLineStart(), recordedLineEnd(), recordedCharStart(), recordedCharEnd());
+    }
+
+    /**
+     * {@link #spansFillable(CatalogDocumentChunks)} over the four recorded values given: the chunk's own
+     * ({@link #recordedLineStart} and the rest), or the values the fill job's batch subquery already read from it, so
+     * the job's recheck of a target row (nexus-f3yqd, R2) is this predicate and not a second copy of it.
+     */
+    static Condition spansFillable(CatalogDocumentChunks row, Field<Integer> recLineStart, Field<Integer> recLineEnd,
+                                   Field<Integer> recCharStart, Field<Integer> recCharEnd) {
         Condition fills = row.LINE_START.isNull().and(recLineStart.isNotNull())
             .or(row.LINE_END.isNull().and(recLineEnd.isNotNull()))
             .or(row.CHAR_START.isNull().and(recCharStart.isNotNull()))
@@ -201,11 +208,73 @@ public final class ManifestFillableCount {
         return fills.and(DSL.not(disagrees));
     }
 
+    /** The line start the chunk records ({@code manifest_span}: a positive integer), or NULL. */
+    static Field<Integer> recordedLineStart() {
+        return DSL.when(positiveInt("line_start"), asInt("line_start"));
+    }
+
+    /** The line end the chunk records (a positive integer), or NULL. */
+    static Field<Integer> recordedLineEnd() {
+        return DSL.when(positiveInt("line_end"), asInt("line_end"));
+    }
+
+    /** The char end the chunk records (a positive integer), or NULL. */
+    static Field<Integer> recordedCharEnd() {
+        return DSL.when(positiveInt("chunk_end_char"), asInt("chunk_end_char"));
+    }
+
+    /** The char start the chunk records (a positive integer, or an integer beside a recorded end), or NULL. */
+    static Field<Integer> recordedCharStart() {
+        return DSL.when(
+            positiveInt("chunk_start_char").or(anyInt("chunk_start_char").and(positiveInt("chunk_end_char"))),
+            asInt("chunk_start_char"));
+    }
+
     /** The manifest-only prefilter of a kind: redundant with the guards below, but a conjunct on the manifest row alone, so the planner can apply it at the manifest scan. */
-    private static Condition manifestPrefilter(dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks row, Kind kind) {
+    static Condition manifestPrefilter(CatalogDocumentChunks row, Kind kind) {
         return kind == Kind.LABELS
             ? row.LABELS_WRITTEN.isFalse()
             : row.LINE_START.isNull().or(row.LINE_END.isNull()).or(row.CHAR_START.isNull()).or(row.CHAR_END.isNull());
+    }
+
+    /**
+     * The manifest row, its document and its chunk row, joined as the count and the fill job both read them: the
+     * document by tumbler, the chunk row at the manifest row's own collection and embedding model and chash.
+     */
+    static Table<?> joined(CatalogDocumentChunks row, CatalogDocuments doc) {
+        return row.join(doc).on(doc.TENANT_ID.eq(row.TENANT_ID).and(doc.TUMBLER.eq(row.DOC_ID)))
+            .join(CHUNKS).on(CHUNKS.TENANT_ID.eq(row.TENANT_ID)
+                .and(CHUNKS.EMBEDDING_MODEL.eq(row.EMBEDDING_MODEL))
+                .and(CHUNKS.COLLECTION.eq(row.COLLECTION)).and(CHUNKS.CHASH.eq(row.CHASH)));
+    }
+
+    /**
+     * The RELAXED candidate rows of {@code kind} for {@code tenant} over {@link #joined}: every guard but the two edges
+     * (the lenient stamp, no value-form check). The count and the fill job's pick both start here, and {@link #strict}
+     * says which of these a fill writes.
+     */
+    static Condition candidates(DSLContext ctx, String tenant, Kind kind, CatalogDocumentChunks row,
+                                CatalogDocuments doc) {
+        return row.TENANT_ID.eq(tenant)
+            .and(CHUNKS.TENANT_ID.eq(tenant))
+            .and(manifestPrefilter(row, kind))
+            .and(row.CHASH.isNotNull())
+            .and(ManifestFillablePredicates.liveOwnDocument(doc))
+            .and(ManifestFillablePredicates.attributableLenient(doc))
+            .and(ManifestFillablePredicates.namesDocument(doc))
+            .and(kind == Kind.LABELS ? labelsPending() : spansFillable(row))
+            .and(ManifestFillablePredicates.soleLiveOwner(ctx, tenant, row));
+    }
+
+    /**
+     * The strict form: the relaxed candidates that also pass the strict stamp and, for labels, the scalar value forms.
+     * These are the rows {@code fillable} counts and the fill job writes. NULL-safe: a row whose strict form is NULL is
+     * not strict, so it is an edge row and never in neither count.
+     */
+    static Condition strict(Kind kind, CatalogDocuments doc) {
+        return DSL.condition(DSL.coalesce(DSL.field(
+            ManifestFillablePredicates.attributableStrict(doc)
+                .and(kind == Kind.LABELS ? labelValuesAreScalar() : DSL.trueCondition())), DSL.inline(false)));
     }
 
     /**
@@ -217,25 +286,9 @@ public final class ManifestFillableCount {
     public static Select<Record3<Integer, Integer, Integer>> query(DSLContext ctx, String tenant, Kind kind, int limit) {
         var row = CATALOG_DOCUMENT_CHUNKS;
         var doc = CATALOG_DOCUMENTS;
-        // NULL-safe: a row whose strict form is NULL is not strict, so it is an edge row and never in neither count.
-        Condition strict = DSL.condition(DSL.coalesce(DSL.field(
-            ManifestFillablePredicates.attributableStrict(doc)
-                .and(kind == Kind.LABELS ? labelValuesAreScalar() : DSL.trueCondition())), DSL.inline(false)));
-        var candidates = ctx.select(DSL.field(strict).as("strict_ok"))
-            .from(row)
-            .join(doc).on(doc.TENANT_ID.eq(row.TENANT_ID).and(doc.TUMBLER.eq(row.DOC_ID)))
-            .join(CHUNKS).on(CHUNKS.TENANT_ID.eq(row.TENANT_ID)
-                .and(CHUNKS.EMBEDDING_MODEL.eq(row.EMBEDDING_MODEL))
-                .and(CHUNKS.COLLECTION.eq(row.COLLECTION)).and(CHUNKS.CHASH.eq(row.CHASH)))
-            .where(row.TENANT_ID.eq(tenant)
-                .and(CHUNKS.TENANT_ID.eq(tenant))
-                .and(manifestPrefilter(row, kind))
-                .and(row.CHASH.isNotNull())
-                .and(ManifestFillablePredicates.liveOwnDocument(doc))
-                .and(ManifestFillablePredicates.attributableLenient(doc))
-                .and(ManifestFillablePredicates.namesDocument(doc))
-                .and(kind == Kind.LABELS ? labelsPending() : spansFillable(row))
-                .and(ManifestFillablePredicates.soleLiveOwner(ctx, tenant, row)))
+        var candidates = ctx.select(DSL.field(strict(kind, doc)).as("strict_ok"))
+            .from(joined(row, doc))
+            .where(candidates(ctx, tenant, kind, row, doc))
             .limit(limit)
             .asTable("candidates");
         Condition ok = DSL.condition(candidates.field("strict_ok", Boolean.class));

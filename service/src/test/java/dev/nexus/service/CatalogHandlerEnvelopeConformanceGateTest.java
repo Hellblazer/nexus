@@ -305,6 +305,9 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         collectionExempt("/sensitive", "handleSensitiveList", BOUNDED_READ_DELEGATE),
         // nexus-f3yqd: a scalar {kind, fillable, limit, capped, rule, stamp} bounded count, not a JSON array.
         neither("/manifest/fillable", "handleManifestFillable"),
+        // nexus-f3yqd (R2): a POST that starts a background job and answers {job_id, created}, not a JSON array; the poll,
+        // GET /manifest/fill/{job_id}, carries its id in the path and is dispatched from the default branch.
+        neither("/manifest/fill", "handleManifestFill"),
         collectionOk("/links/orphaned", "handleLinksOrphaned"),
 
         // ── Chash conformance (RDR-180, nexus-du2dw) ────────────────────────

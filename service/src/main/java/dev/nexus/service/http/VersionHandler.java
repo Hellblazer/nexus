@@ -578,6 +578,18 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-f3yqd capability advertisement: does {@code POST /v1/catalog/manifest/fill} (and its poll, {@code GET
+     * /v1/catalog/manifest/fill/{job_id}}) fill, as a background job, exactly the manifest rows {@code GET
+     * /v1/catalog/manifest/fillable} counts as fillable? Always present, always {@code true} on an engine carrying the
+     * change; a client that finds it absent (or a 404 on the route) walks the catalog itself. Cloud clients see it only
+     * once the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff;
+     * engine-release pre-tag check 3e).
+     */
+    static void appendCatalogManifestFillJobCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_manifest_fill_job_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -784,6 +796,8 @@ public final class VersionHandler implements HttpHandler {
         // nexus-f3yqd: GET /v1/catalog/sensitive, and GET /v1/catalog/manifest/fillable (the strict bounded count).
         appendCatalogSensitiveListCapabilityField(body);
         appendCatalogManifestFillableCapabilityField(body);
+        // nexus-f3yqd (R2): POST /v1/catalog/manifest/fill, the engine-side fill job.
+        appendCatalogManifestFillJobCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

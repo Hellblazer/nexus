@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.ManifestFill;
 import dev.nexus.service.db.ManifestFillableCount;
 import org.jooq.DSLContext;
 import org.jooq.JSONB;
@@ -49,6 +50,11 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
 
     /** DOCS documents of ROWS_PER_DOC manifest rows each, all converged: nothing for either rung to fill. */
     private void seedConverged(int fullRows) throws Exception {
+        seed(fullRows, true);
+    }
+
+    /** As {@link #seedConverged}; with {@code labelsWritten} false every row of the labels kind is PENDING (a legacy store). */
+    private void seed(int fullRows, boolean labelsWritten) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext dsl = DSL.using(su, SQLDialect.POSTGRES);
@@ -84,7 +90,7 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
                         .set(CATALOG_DOCUMENT_CHUNKS.POSITION, r).set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, r)
                         .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash(d, r))
                         .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLL).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
-                        .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, r != fullRows);
+                        .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, labelsWritten && r != fullRows);
                     manifest.add(r < fullRows
                         ? m.set(CATALOG_DOCUMENT_CHUNKS.LINE_START, r * 10 + 1).set(CATALOG_DOCUMENT_CHUNKS.LINE_END, r * 10 + 9)
                             .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START, 0).set(CATALOG_DOCUMENT_CHUNKS.CHAR_END, 80)
@@ -164,5 +170,43 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
     void theManifestOnlyPrefilterReachesTheManifestScan_proseHeavyTenant() throws Exception {
         seedConverged(PROSE_FULL_ROWS);
         assertSpanTestAtTheManifestScan(planAndScanNode(ManifestFillableCount.Kind.SPANS, "3200 manifest rows, prose-heavy, converged"));
+    }
+
+    /**
+     * nexus-f3yqd, route R2: the two read statements of a fill batch over a pending legacy store (every row of the labels
+     * kind unwritten, every chunk carrying a label): the WINDOW (the next manifest keys in key order after a keyset
+     * cursor) and the count of fillable rows in the window's key range. The plans are printed for the record; the
+     * assertions are the ones that keep a batch at the cost of its window: the window is an ordered scan of the manifest
+     * that STOPS at its LIMIT (no sort of the tenant), and the count's manifest scan carries the key range.
+     */
+    @Test
+    void aFillBatchCostsItsWindow_notTheTenant() throws Exception {
+        seed(MIXED_FULL_ROWS, false);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var after = new ManifestFill.Cursor("9.100.1", 3);
+            for (var kind : ManifestFillableCount.Kind.values()) {
+                var window = ManifestFill.windowQuery(ctx, TENANT, kind, after, 100);
+                String windowPlan = PgContainerHelper.explainPlanInlined(ctx, window);
+                System.out.println("plan of the fill window, " + kind.wire() + ", after (9.100.1, 3):\n" + windowPlan);
+                var rows = window.fetch();
+                assertThat(rows.size()).as(kind.wire() + ": a full window").isEqualTo(100);
+                assertThat(windowPlan).as(kind.wire() + ": an ordered scan that stops at the LIMIT, no sort")
+                    .contains("Limit").doesNotContain("Sort");
+                var end = rows.get(rows.size() - 1);
+                var last = new ManifestFill.Cursor(end.value1(), end.value2());
+                var count = ManifestFill.fillableInRange(ctx, TENANT, kind, after, last);
+                String countPlan = PgContainerHelper.explainPlanInlined(ctx, count);
+                System.out.println("plan of the fill count over the window range, " + kind.wire() + ":\n" + countPlan);
+                System.out.println("plan with ANALYZE and BUFFERS of the fill count, " + kind.wire() + ":\n"
+                    + PgContainerHelper.explainPlanWith(ctx, count, PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS));
+                assertThat(manifestScanNode(countPlan)).as(kind.wire() + ": the manifest scan is bounded by the window's range")
+                    .contains("doc_id").contains("position");
+                // the seeded chunks carry labels and no spans the manifest lacks, so only the labels kind has rows to fill
+                assertThat(count.fetchOne().value1()).as(kind.wire() + ": the window's fillable rows")
+                    .isEqualTo(kind == ManifestFillableCount.Kind.LABELS ? 87 : 0);
+            }
+        }
     }
 }

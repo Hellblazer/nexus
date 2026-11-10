@@ -74,7 +74,7 @@ class ManifestWriteRetryGateTest {
 
     private static final Path MAIN = Path.of("src", "main", "java");
     private static final Path DB = MAIN.resolve(Path.of("dev", "nexus", "service", "db"));
-    private static final List<String> SCANNED = List.of("CatalogRepository", "ChashRepository");
+    private static final List<String> SCANNED = List.of("CatalogRepository", "ChashRepository", "ManifestFill");
 
     /** Retried manifest-writing methods, as {@code File#method}. */
     private static final TreeSet<String> EXPECTED_RETRIED = new TreeSet<>(List.of(
@@ -88,7 +88,9 @@ class ManifestWriteRetryGateTest {
         "CatalogRepository#renameCollectionTxn",
         "CatalogRepository#rehomeCollection",
         "CatalogRepository#purgeTrash",
-        "ChashRepository#renameCollection"));
+        "ChashRepository#renameCollection",
+        // nexus-f3yqd (R2): the manifest fill job's batch, one UPDATE of labels and spans, retried like the other writers
+        "ManifestFill#batch"));
 
     /** Files that mention the table without writing it, each with the reason. A pinned allowlist. */
     private static final Map<String, String> READ_ONLY_REFERENCES = new TreeMap<>(Map.ofEntries(

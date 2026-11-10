@@ -344,6 +344,33 @@ class TenantResetRouteTest {
         assertThat(jobs.find(theirs.job().id(), y)).as("y's is untouched").isNotNull();
     }
 
+    /**
+     * nexus-f3yqd (R2): the name "EngineJobs.manifestFill" is bound to this service's own manifest fill registry: a reset
+     * through the route drops the tenant's fill jobs and leaves another tenant's.
+     */
+    @Test
+    void aResetDropsTheTenantsManifestFillJobs_onTheServicesOwnInstance() throws Exception {
+        String x = "rr-fill-x-" + shortId();
+        String y = "rr-fill-y-" + shortId();
+        var jobs = on.manifestFillJobsForTests();
+        var mine = jobs.start(x, "manifest-fill:labels", "fp", job -> null,
+            (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", x)));
+        var theirs = jobs.start(y, "manifest-fill:labels", "fp", job -> null,
+            (job, stage) -> new dev.nexus.service.http.EngineJobs.Outcome(200, Map.of("tenant", y)));
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (mine.job().state() == dev.nexus.service.http.EngineJobs.State.RUNNING
+                || theirs.job().state() == dev.nexus.service.http.EngineJobs.State.RUNNING) {
+            assertThat(System.nanoTime()).as("both jobs end").isLessThan(deadline);
+            Thread.sleep(5);
+        }
+
+        var resp = post(on, PATH, ROOT, "{\"tenant\":\"" + x + "\"}");
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        assertThat(MAPPER.readTree(resp.body()).get("evicted").get("EngineJobs.manifestFill").asInt()).isEqualTo(1);
+        assertThat(jobs.find(mine.job().id(), x)).as("x's fill job is gone").isNull();
+        assertThat(jobs.find(theirs.job().id(), y)).as("y's is untouched").isNotNull();
+    }
+
     @Test
     void aResetClearsTenantXAndLeavesTenantY() throws Exception {
         String x = "rr-x-" + shortId();

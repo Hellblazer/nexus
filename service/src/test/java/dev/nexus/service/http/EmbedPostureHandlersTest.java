@@ -388,6 +388,7 @@ class EmbedPostureHandlersTest {
                 router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
         assertThat(body.get("catalog_sensitive_list_supported").asBoolean()).isTrue();
         assertThat(body.get("catalog_manifest_fillable_supported").asBoolean()).isTrue();
+        assertThat(body.get("catalog_manifest_fill_job_supported").asBoolean()).isTrue();
     }
 
     @Test

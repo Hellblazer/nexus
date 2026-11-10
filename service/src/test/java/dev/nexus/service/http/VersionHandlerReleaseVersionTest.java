@@ -250,6 +250,13 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"catalog_manifest_fillable_supported\":true");
     }
 
+    @Test
+    void versionAdvertisesTheManifestFillJobAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogManifestFillJobCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_manifest_fill_job_supported\":true");
+    }
+
     // ── nexus-jypmj (RDR-232): the chash_allow restriction on the vector search routes ──
 
     @Test

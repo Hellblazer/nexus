@@ -451,6 +451,7 @@ public class TenantKeyedStateGateTest {
         private static final String DATA_SWEEP = "NexusService.dataSweepFailuresByTenant";
         private static final String CHUNK_KEYS_JOBS = "ChunkKeysSweepJobs";
         private static final String RECONCILE_JOBS = "EngineJobs.reconcile";
+        private static final String MANIFEST_FILL_JOBS = "EngineJobs.manifestFill";
 
         private static final String HANDLE =
             "a TenantScope handle: it holds the DataSource wrapper only, the tenant is a per-call argument";
@@ -532,6 +533,9 @@ public class TenantKeyedStateGateTest {
             keyed.put("EngineJobs.Job.tenant", RECONCILE_JOBS);   // the value of jobs
             keyed.put("EngineJobs.Job.outcome", RECONCILE_JOBS);   // the value of jobs: the tenant's result
             keyed.put("EngineJobs.Outcome.body", RECONCILE_JOBS);   // the result, held by the job's outcome
+            // The manifest fill instance (nexus-f3yqd, R2) is a third EngineJobs instance, evicted as EngineJobs.manifestFill:
+            // what its jobs keep on each job is the job's progress, a latest-snapshot slot the work replaces whole.
+            keyed.put("ManifestFillJobs.Progress.snapshot", MANIFEST_FILL_JOBS);   // a job's progress: counts and a cursor
 
             // Not keyed: each with the reason it holds nothing a reset must clear.
             notKeyed.put("EngineJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
