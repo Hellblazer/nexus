@@ -903,7 +903,7 @@ def journey_b_pruned_generation(box: Sandbox, proxy: RefusingProxy | None) -> No
         expect(not stand_in_claim(conn.server_name) and REAL_TOOL_NAMES <= conn.tools, f"B: server {conn.server_name!r} is not the real one")
         expect(marker.is_file(), f"B: setup mode not-now through the real server left no marker at {marker}: the real server did not "
                                  f"start the setup script (NX_SETUP_SCRIPT not handed over?). It said: {answers[0][:300]!r}")
-        expect("not started by the conexus plugin's launcher" not in answers[0], f"B: the real server says it has no setup script: {answers[0][:300]!r}")
+        expect("Setup cannot run from this server" not in answers[0], f"B: the real server says it has no setup script: {answers[0][:300]!r}")
         check_no_lockstep_action_ran(box)
 
 

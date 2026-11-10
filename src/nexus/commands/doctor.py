@@ -908,7 +908,7 @@ def _run_check_plan_library() -> None:
                 f"match their template: {_summarise(parity.drifted)}",
                 err=True,
             )
-            click.echo("    Fix: run `nx plan reseed --force`.", err=True)
+            click.echo("    Fix: run `nx plan reseed`.", err=True)
         if parity.orphaned:
             click.echo(
                 f"  WARN: {len(parity.orphaned)} builtin row(s) have no "

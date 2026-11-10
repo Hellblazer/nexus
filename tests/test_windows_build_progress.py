@@ -542,3 +542,30 @@ def test_a_failed_streamed_build_repeats_only_the_tail_of_uv_output(progress: bo
     message = ei.value.message
     assert "uv line 39" in message
     assert ("uv line 0\n" in message) is (not progress), message
+
+
+def test_an_interrupted_streamed_build_does_not_outlive_nx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-mjmjl review: Ctrl-C or SIGTERM to nx kills the streamed build, as subprocess.run's capture did."""
+    started: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    class _Interrupted(real_popen):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            started.append(self)
+            real_read = self.stdout.read
+
+            class _Out:
+                def read(self_inner) -> str:
+                    raise KeyboardInterrupt
+
+                def __getattr__(self_inner, name):
+                    return getattr(real_read.__self__, name)
+
+            self.stdout = _Out()
+
+    setattr_in(monkeypatch, self_cmd, "subprocess.Popen", _Interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        self_cmd._run_build([sys.executable, "-c", "import time; time.sleep(60)"], progress=True)
+    (proc,) = started
+    assert proc.wait(timeout=10) is not None, "the build was left running"

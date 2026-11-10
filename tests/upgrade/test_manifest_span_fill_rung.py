@@ -954,3 +954,20 @@ def test_a_refused_row_in_one_request_does_not_stall_the_collections_later_reque
     assert (c.raced, c.filled, c.write_refused_409) == (1, 6, 0), c.summary()
     assert world.spans(d)[0] == (0, None, None, None, None), "the re-indexed row is not written"
     assert all(None not in span for _p, *span in world.spans(d)[1:]), world.spans(d)
+
+
+def _count_walks(world: World) -> list[int]:
+    walks = [0]
+    inner = world.all_documents
+    world.all_documents = lambda: walks.__setitem__(0, walks[0] + 1) or inner()  # type: ignore[method-assign]
+    return walks
+
+
+def test_verify_reuses_a_fill_walk_that_found_nothing_and_rereads_after_a_fill(world: World) -> None:
+    """nexus-mjmjl: a walk that wrote nothing is verify's dry run; a walk that filled is confirmed afresh."""
+    _mixed(world)
+    walks = _count_walks(world)
+    rung, _ = _fill(world)
+    assert rung.verify() is True and walks[0] == 2  # the fill, then verify's own read
+    again, _ = _fill(world)
+    assert again.verify() is True and walks[0] == 3  # nothing to fill: verify reused that walk

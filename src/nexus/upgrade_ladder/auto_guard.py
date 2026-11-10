@@ -15,9 +15,10 @@ cheaper to answer from (a completion record, a bounded engine count), does not r
 callout) against a managed service. It reports itself NOT APPLICABLE, with a reason naming where the first scan
 happens: an interactive ``nx upgrade``. A bounded engine count lets such a ``detect()`` answer (``manifest-section-labels``,
 nexus-l4hds), but only as a REPORT: the same rung's ``converge()`` is the whole-catalog scan with writes, so it
-checks :func:`refuses_unbounded_read` too and is DEFERRED unattended; an interactive ``nx upgrade`` fills. Interactive ``nx upgrade`` runs and local engines keep their
-walk, except under ``nx doctor``, which runs its sweep as unattended (nexus-mq980) and with bounded reads only, on any
-engine (nexus-mjmjl), and reports a refused rung as not checked.
+checks :func:`refuses_unbounded_read` too and is DEFERRED unattended; an interactive ``nx upgrade`` fills. Under ``nx doctor``, which runs its sweep as unattended (nexus-mq980) and with bounded reads only, on any
+engine (nexus-mjmjl), a refused rung is reported as not checked. A ``nx upgrade`` that may fill (not ``--dry-run``)
+runs detect under ``cheap_detect``: a data rung with no record answers pending without its scan, and the
+fill's own walk is the one read (:data:`CHEAP_PENDING`, nexus-mjmjl).
 """
 from __future__ import annotations
 
@@ -43,10 +44,20 @@ def managed_service() -> bool:
 
 
 def refuses_unbounded_read(managed_fn: Callable[[], bool] = managed_service) -> bool:
-    """True when this run is unattended (``--auto``, ``NX_UPGRADE_UNATTENDED=1``, the version-transition
-    callout) against a managed service, or when it makes only bounded reads (``nx doctor``, any engine:
-    nexus-mjmjl). Keyed on the explicit signal, never on a bound deadline."""
-    return is_bounded() or (is_unattended() and managed_fn())
+    """For ``converge()`` and ``verify()``: True when this run is unattended (``--auto``,
+    ``NX_UPGRADE_UNATTENDED=1``, the version-transition callout) against a managed service. Keyed on the
+    explicit signal, never on a bound deadline."""
+    return is_unattended() and managed_fn()
+
+
+def detect_refuses(managed_fn: Callable[[], bool] = managed_service) -> bool:
+    """For ``detect()``: the managed rule above, or a run that makes only bounded reads (``nx doctor`` and the
+    version-change callout, any engine: nexus-mjmjl). A refusing detect reports the rung NOT CHECKED."""
+    return is_bounded() or refuses_unbounded_read(managed_fn)
+
+
+#: The ``pending_detail`` of a rung an interactive ``nx upgrade`` did not scan in detect (nexus-mjmjl).
+CHEAP_PENDING = "not checked before this run: its fill step scans every document and fills what it finds"
 
 
 def refuses_managed_unattended(managed_fn: Callable[[], bool] = managed_service) -> bool:

@@ -328,6 +328,18 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
             "closing the gap the substantive-critic review flagged rather than "
             "relying on invoker discipline alone.",
     ),
+    "scripts/upgrade_boot_seed.py": (
+        2, "NX_LOCAL+SANDBOX: run only by scripts/upgrade_boot_writes.py, which strips every NX_/NEXUS_ "
+           "variable and sets NEXUS_CONFIG_DIR to its own temp work dir plus NX_LOCAL=1, so `nx store put` "
+           "writes to the throwaway install that run provisioned (nexus-f3yqd.1). One of the two sites is "
+           "a docstring mention.",
+    ),
+    "scripts/upgrade_boot_writes.py": (
+        2, "NX_LOCAL+SANDBOX: main() strips every NX_/NEXUS_ variable and sets NEXUS_CONFIG_DIR to its own "
+           "temp work dir plus NX_LOCAL=1 before `nx index repo` on a synthetic repo it creates, so the "
+           "write lands in the throwaway install it provisioned (nexus-f3yqd.1). One of the two sites is "
+           "a docstring mention.",
+    ),
     "scripts/validate/05-plugin-wiring.py": (
         1, "READ-ONLY: ._tool_manager.list_tools() introspection only (lines 70-79), "
            "never a tool invocation.",

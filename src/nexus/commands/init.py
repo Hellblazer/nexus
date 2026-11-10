@@ -239,10 +239,12 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
     if not tag:
         click.echo(
             "\n  No native service binary is installed and no service tag is "
-            "pinned for this build.\n"
-            "  Install one explicitly, then re-run `nx init`:\n"
-            "    nx daemon service install-binary engine-service-vX.Y.Z\n"
-            "  (or set NEXUS_SERVICE_TAG=engine-service-vX.Y.Z)."
+            "pinned for this build: a released conexus always pins one, so this is a "
+            "source or development build.\n"
+            "  Install the engine it was built against, then re-run `nx init`:\n"
+            "    nx daemon service install-binary <tag>\n"
+            "  (or set NEXUS_SERVICE_TAG=<tag>). The engine releases are the "
+            "engine-service-v* tags of github.com/Hellblazer/nexus."
         )
         return False
 
@@ -389,7 +391,8 @@ def _decide_autostart(assume_yes: bool, no_autostart: bool) -> bool:
     if not _stdin_is_interactive():
         click.echo(
             "[non-interactive: skipping service autostart registration — "
-            "re-run with --yes to register it, or `nx daemon service install "
+            "re-run with --yes to register it (the storage service then "
+            "starts each time you log in), or `nx daemon service install "
             "--autostart` later]",
             err=True,
         )
@@ -488,9 +491,11 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
         # a pre-existing unit with different content). Do NOT session-fall-back
         # (the user must resolve the conflict); fail loud + actionable.
         click.echo(
-            f"\nCould not install the autostart unit ({exc}). Re-run "
-            "`nx daemon service install --autostart --force` to overwrite, or "
-            "`nx init --no-autostart` to start a session supervisor instead.",
+            f"\nCould not install the autostart unit ({exc}). If it says the unit file "
+            "differs, re-run `nx daemon service install --autostart --force`, which "
+            "replaces the autostart unit file already installed (any edits to it are lost). "
+            "Otherwise fix what it names, or run `nx init --no-autostart` to start a "
+            "session supervisor instead.",
             err=True,
         )
         raise SystemExit(1)
@@ -613,7 +618,8 @@ def _acquire_pg_bundle_step(config_dir: Path) -> Path:
         click.echo(
             "\nNo engine-service tag is pinned for this build, so the bundled "
             "PostgreSQL cannot be acquired.\n"
-            "Either set NEXUS_SERVICE_TAG=engine-service-vX.Y.Z, pre-stage the "
+            "Either set NEXUS_SERVICE_TAG=<tag> (an engine-service-v* tag of "
+            "github.com/Hellblazer/nexus), pre-stage the "
             "bundle with `nx daemon service install-binary <tag>`, or point "
             "NEXUS_PG_BIN at a pgvector-capable PostgreSQL bin/ directory.",
             err=True,
@@ -1036,7 +1042,8 @@ def _converge_ladder_best_effort() -> None:
     "-y",
     "assume_yes",
     is_flag=True,
-    help="Accept the service-autostart registration non-interactively (local mode).",
+    help="Register the autostart entry without asking: it starts the storage service "
+    "each time you log in (local mode).",
 )
 @click.option(
     "--no-autostart",
@@ -1225,8 +1232,8 @@ def init_cmd(
         # starting without a binary fails loud, CRE C1). Exit non-zero so the
         # incomplete setup is not mistaken for serving.
         click.echo(
-            "\nService NOT started: no native binary available. Install one "
-            "(see above), then re-run `nx init` to finish.",
+            "\nService NOT started: no native binary available. Install one with "
+            "`nx daemon service install-binary <tag>`, then re-run `nx init` to finish.",
             err=True,
         )
         raise SystemExit(1)

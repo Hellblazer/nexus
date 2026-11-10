@@ -1583,3 +1583,17 @@ def test_a_request_that_raises_after_an_earlier_one_wrote_still_restores_the_wri
     assert world.docs[docs[0]].indexed_at == DOC_STAMP, "the document the first request wrote has its stamp back"
     assert (docs[0], {"indexed_at": DOC_STAMP}) in world.updates
     assert world.docs[docs[1]].indexed_at == DOC_STAMP, "the second document was never written"
+
+
+def test_verify_reuses_a_fill_walk_that_found_nothing_and_rereads_after_a_fill(world: World) -> None:
+    """nexus-mjmjl: a walk that wrote nothing is verify's dry run; a walk that filled is confirmed afresh."""
+    _mixed(world)
+    walks = [0]
+    inner = world.all_documents
+    world.all_documents = lambda: walks.__setitem__(0, walks[0] + 1) or inner()  # type: ignore[method-assign]
+    rung = world.rung()
+    rung.converge(Report())
+    assert rung.verify() is True and walks[0] == 2  # the fill, then verify's own read
+    again = world.rung()
+    again.converge(Report())
+    assert again.verify() is True and walks[0] == 3  # nothing to fill: verify reused that walk

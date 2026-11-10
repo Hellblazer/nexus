@@ -132,10 +132,14 @@ import structlog
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
     managed_service,
+    CHEAP_PENDING,
+    detect_refuses,
     refuses_managed_unattended,
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
+from nexus.upgrade_ladder.scan_reuse import ScanReuse
+from nexus.upgrade_ladder.unattended import is_cheap_detect
 from nexus.upgrade_ladder.census_progress import guarded
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.deadline import active_expired
@@ -151,9 +155,10 @@ _log = structlog.get_logger(__name__)
 
 RUNG_NAME = RUNG_MANIFEST_SECTION_LABELS
 
-#: Documents read, planned and written per step. A document's manifest can hold thousands of rows, so
-#: this bounds the rows in memory and the size of one ``chash_positions`` / chunk read.
-DOC_BATCH = 50
+#: Documents read, planned and written per step: it bounds the rows a batch holds in memory. Every read pages
+#: itself (chunk gets at ``QUOTAS.MAX_RECORDS_PER_WRITE`` ids, ``chash_positions`` and manifests at 1000), so a
+#: larger batch only merges small reads (nexus-mjmjl: 50 made most chunk gets a fraction of a page).
+DOC_BATCH = 200
 
 #: Manifest rows in one ``append_manifest_many`` request (the engine runs each document of a request in its
 #: own transaction, and the sibling writers cut at 300). A document's rows spill into the next request.
@@ -246,6 +251,9 @@ class Counts:
     raced: int = 0                      # became written, moved, or gained a co-owner before the write
     write_failed: int = 0
     restore_failed: int = 0             # documents whose indexed_at could not be written back after the fill
+    collection_lookups: int = 0         # engine reads, nexus-mjmjl's call counter: collection lookups (stats listings)
+    chunk_gets: int = 0                 # chunk-metadata pages
+    owner_reads: int = 0                # chash_positions pages
     restore_failed_docs: list[str] = field(default_factory=list)
     by_collection: Counter = field(default_factory=Counter)
 
@@ -370,19 +378,45 @@ def _labels_from_chunk_row(metadata: dict, doc: Any) -> tuple[dict[str, Any] | N
     }, ""
 
 
-def _chunk_metadatas(t3: Any, collection: str, chashes: list[str]) -> dict[str, dict]:
+class CollectionMemo:
+    """One scan's collection lookups (nexus-mjmjl). ``HttpVectorClient.get_collection`` lists every collection
+    (one ``/v1/vectors/stats`` read) on each call, and a scan asked once per batch and collection. A failed
+    lookup is not kept, so an absent collection is asked again."""
+
+    def __init__(self, t3: Any) -> None:
+        self._t3 = t3
+        self._held: dict[str, Any] = {}
+
+    def holds(self, name: str) -> bool:
+        return name in self._held
+
+    def get_collection(self, name: str) -> Any:
+        if name not in self._held:
+            self._held[name] = self._t3.get_collection(name)
+        return self._held[name]
+
+
+def _chunk_metadatas(t3: Any, collection: str, chashes: list[str], counts: Any = None) -> dict[str, dict]:
     """``chash -> chunk row metadata`` for the live chunks of *collection*; a collection the engine does
-    not have holds none."""
+    not have holds none. *counts*, when given, gains the engine reads it makes: ``collection_lookups`` for a
+    lookup *t3* did not already hold, and ``chunk_gets`` for the pages of ids (the client pages at
+    ``QUOTAS.MAX_RECORDS_PER_WRITE``)."""
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — deferred, keeps the registry import cheap
     from nexus.errors import collection_not_found_errors  # noqa: PLC0415 — deferred, imports back into the catalog
 
     if not chashes:
         return {}
+    looked_up = not (isinstance(t3, CollectionMemo) and t3.holds(collection))
+    if counts is not None and looked_up:
+        counts.collection_lookups += 1
     try:
         col = t3.get_collection(collection)
     except collection_not_found_errors() as exc:
         if getattr(exc, "__cause__", None) is not None:
             raise  # a service that could not be asked is not "the collection is absent"
         return {}
+    if counts is not None:
+        counts.chunk_gets += -(-len(chashes) // QUOTAS.MAX_RECORDS_PER_WRITE)
     result = col.get(ids=list(chashes), include=["metadatas"], sensitivity="include")
     ids: list[str] = result.get("ids") or []
     metas: list[Any] = result.get("metadatas") or []
@@ -433,13 +467,15 @@ class ManifestSectionLabelsRung:
         self._filled = 0
         self._verify_detail = ""
         self._record_detail = ""
+        self._clean_scan: ScanReuse[Counts] = ScanReuse()  # converge's walk that found nothing to fill
+        self._reporter: ProgressReporter | None = None  # converge's, so verify's walk reports too
         self._partial = Counts()
 
     # ── the scan ─────────────────────────────────────────────────────────────
 
     def _scan(
         self, reader: Any, *, writer: Any | None, t3: Any, report: ProgressReporter | None = None,
-        honour_deadline: bool = False,
+        honour_deadline: bool = False, event: str = "manifest_section_labels_batch",
     ) -> Counts | None:
         """One pass over every live document. Writes when *writer* is given, else a dry run. Returns the
         counts, or ``None`` when the ``nx upgrade --auto`` limit passed between batches (the counts so
@@ -450,6 +486,7 @@ class ManifestSectionLabelsRung:
         counts = Counts()
         self._partial = counts
         self._cut = False
+        t3 = CollectionMemo(t3) if t3 is not None else None
         entries = sorted(
             (e for e in reader.all_documents() if not getattr(e, "alias_of", "")),
             key=lambda e: str(e.tumbler),
@@ -460,7 +497,7 @@ class ManifestSectionLabelsRung:
                 return None
             self._batch(reader, writer, t3, entries[start:start + self._doc_batch], counts)
             if report is not None:
-                report.emit("manifest_section_labels_batch", **counts.as_dict())
+                report.emit(event, **counts.as_dict())
         return counts
 
     def _batch(self, reader: Any, writer: Any | None, t3: Any, docs: list[Any], counts: Counts) -> None:
@@ -481,7 +518,7 @@ class ManifestSectionLabelsRung:
                     legacy.append((doc, row))
         if not legacy:
             return
-        owners, deleted = self._owner_rows(reader, sorted({r.chash for _d, r in legacy}))
+        owners, deleted = self._owner_rows(reader, sorted({r.chash for _d, r in legacy}), counts)
 
         single: list[tuple[Any, Any]] = []
         for doc, row in legacy:
@@ -505,7 +542,7 @@ class ManifestSectionLabelsRung:
             wanted.setdefault(_row_collection(row, doc), []).append(row.chash)
         chunk_metas: dict[tuple[str, str], dict] = {}
         for collection, chashes in wanted.items():
-            for chash, meta in _chunk_metadatas(t3, collection, sorted(set(chashes))).items():
+            for chash, meta in _chunk_metadatas(t3, collection, sorted(set(chashes)), counts).items():
                 chunk_metas[(collection, chash)] = meta
 
         plan: list[tuple[Any, Any, str, dict[str, Any]]] = []  # (document, row, collection, labels)
@@ -535,12 +572,18 @@ class ManifestSectionLabelsRung:
         self._write(reader, writer, plan, counts)
 
     @staticmethod
-    def _owner_rows(reader: Any, chashes: list[str]) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    def _owner_rows(
+        reader: Any, chashes: list[str], counts: Any = None,
+    ) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
         """``(live, deleted)``: the live manifest rows holding each chash, and the rows of tombstoned documents
         holding it. Raises :class:`RouteAbsent` when the engine has no route, :class:`TombstonedHoldersUnreadable`
         when it cannot list the tombstoned holders: neither is 'nobody holds it'."""
         read = getattr(reader, "chash_positions_with_tombstoned", None)
         got = read(chashes) if read is not None else None
+        if counts is not None and read is not None:
+            from nexus.catalog.http_catalog_client import _DOCS_FOR_CHASHES_PAGE  # noqa: PLC0415 — the client's own page
+
+            counts.owner_reads += max(1, -(-len(set(chashes)) // _DOCS_FOR_CHASHES_PAGE))
         if got is None:
             raise RouteAbsent("the engine has no /manifest/chash_positions route (with tombstoned holders)")
         rows, tombstoned = got
@@ -562,7 +605,7 @@ class ManifestSectionLabelsRung:
         stamps = {str(d.tumbler): getattr(d, "indexed_at", "") for d, _r, _c, _l in plan}  # as read at scan
         fresh = reader.get_manifests(docs) or {}
         fresh_rows = {t: {r.position: r for r in rows} for t, rows in fresh.items()}  # one index for the batch
-        again, again_deleted = self._owner_rows(reader, sorted({r.chash for _d, r, _c, _l in plan}))
+        again, again_deleted = self._owner_rows(reader, sorted({r.chash for _d, r, _c, _l in plan}), counts)
         by_collection: dict[str, dict[str, list[dict]]] = {}
         for doc, row, collection, labels in plan:
             tumbler = str(doc.tumbler)
@@ -663,7 +706,7 @@ class ManifestSectionLabelsRung:
 
     # ── reading with the lifecycle of the collaborators ──────────────────────
 
-    def _dry_run(self, *, honour_deadline: bool = False) -> Counts | None:
+    def _dry_run(self, *, honour_deadline: bool = False, report: ProgressReporter | None = None) -> Counts | None:
         """The counts of a read-only scan, or ``None`` when no catalog is available (or, with
         *honour_deadline*, when the time limit stopped it: ``self._cut``). Past the limit nothing is read,
         the ``/stats`` read included."""
@@ -676,7 +719,9 @@ class ManifestSectionLabelsRung:
             return None
         t3 = self._t3_factory()
         try:
-            return self._scan(reader, writer=None, t3=t3, honour_deadline=honour_deadline)
+            return self._scan(
+                reader, writer=None, t3=t3, honour_deadline=honour_deadline, report=report, event="manifest_section_labels_confirm_batch",
+            )
         finally:
             _close(t3)
             _close(reader)
@@ -782,7 +827,7 @@ class ManifestSectionLabelsRung:
                     "section label (the engine's count; `nx upgrade` fills them)"
                 ),
             )
-        if refuses_unbounded_read(self._managed_fn):
+        if detect_refuses(self._managed_fn):
             # nexus-75w5d: no record and the engine cannot count, so the answer is a walk of the whole catalog. On a
             # managed service that is a 15-minute read of shared capacity per session start (19 at once
             # on 2026-10-31), so an unattended run reads nothing. Not applicable, not pending: the walk
@@ -793,6 +838,8 @@ class ManifestSectionLabelsRung:
             )
             _log.info("manifest_section_labels_rung_skipped", reason=reason)
             return RungStatus(applicable=False, converged=False, pending_detail=reason)
+        if is_cheap_detect():
+            return RungStatus(applicable=True, converged=False, pending_detail=CHEAP_PENDING)
         try:
             counts = self._dry_run(honour_deadline=True)
         except RouteAbsent as exc:
@@ -837,6 +884,8 @@ class ManifestSectionLabelsRung:
             )
             _log.info("manifest_section_labels_converge_skipped", reason=reason)
             return ConvergeResult(ConvergeOutcome.DEFERRED, detail=reason)
+        self._clean_scan.clear()
+        self._reporter = report
         reader = self._reader_factory()
         if reader is None:
             return ConvergeResult(ConvergeOutcome.DEFERRED, detail="no catalog is available")
@@ -876,6 +925,9 @@ class ManifestSectionLabelsRung:
                     f"remaining legacy rows ({counts.summary()})"
                 ),
             )
+        if not counts.fillable:
+            # Nothing to fill means nothing written: this walk is the dry run verify would take next.
+            self._clean_scan.keep(counts)
         return ConvergeResult(ConvergeOutcome.COMPLETED, detail=counts.summary())
 
     # ── verify ───────────────────────────────────────────────────────────────
@@ -898,7 +950,8 @@ class ManifestSectionLabelsRung:
             self._verify_detail = unattended_verify_refusal("every document and manifest")
             return False
         try:
-            counts = self._dry_run()
+            # nexus-mjmjl: a confirming walk after a fill prints the same progress lines as the fill.
+            counts = self._clean_scan.take() or self._dry_run(report=self._reporter)
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is unknown, and unknown is not reached
             self._verify_detail = f"could not read the catalog to confirm the fill: {exc}"
             return False

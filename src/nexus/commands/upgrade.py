@@ -25,8 +25,17 @@ _log = structlog.get_logger()
 # flags actively mislead. 7.0.0 is a major; scripts passing --force now get
 # Click's no-such-option error, which is the honest outcome.
 @click.option("--auto", "auto_mode", is_flag=True, help="Quiet mode for hook invocation (exit 0 always).")
-@click.option("--skip-t3", is_flag=True, help="Skip T3 upgrade steps (e.g., cross-collection projection backfill). Useful for fast T2-only migrations.")
-@click.option("--yes", "assume_yes", is_flag=True, help="Assume yes to the billed re-embed consent prompt (equivalent to NX_ASSUME_YES=1). Nothing else prompts.")
+@click.option(
+    "--skip-t3", is_flag=True,
+    help="Skips the engine install, the storage-service restart, the PDF "
+    "stack carry-forward, the installer rebuild and the collection-name check. The old service keeps "
+    "running until you run a plain `nx upgrade`. The data steps still run.",
+)
+@click.option(
+    "--yes", "assume_yes", is_flag=True,
+    help="Pre-approve a billed re-embedding of your collections, for an unattended run (same as "
+    "NX_ASSUME_YES=1). Nothing in `nx upgrade` asks for this today, so the flag currently changes nothing.",
+)
 @click.option(
     "--no-beads-prime",
     "no_beads_prime",
@@ -40,7 +49,7 @@ def upgrade(
     dry_run: bool, auto_mode: bool, skip_t3: bool, assume_yes: bool, no_beads_prime: bool
 ) -> None:
     """Run pending database migrations and upgrade steps.
-
+    \f
     ``--yes`` is NOT a general "say yes to everything" switch, and must not
     become one: the only prompt the ladder can raise is the billed Voyage
     re-embed (RDR-185 ## Constraints' third genuine decision; source-gone and
@@ -477,6 +486,50 @@ def _record_deferrals(report: "LadderRunReport", completions: "Callable[[], dict
     guarded("deferral_log_record", _record, None)
 
 
+class _BatchProgress:
+    """The ladder's :class:`~nexus.upgrade_ladder.protocol.ProgressReporter` for ``nx upgrade`` (nexus-mjmjl).
+
+    Every event still goes to structlog. A rung's progress event (``*_batch``, ``*_collection_done``) also prints
+    one line, at most every :attr:`EVERY_S` per rung, with the running counts named in :attr:`SHOWN`:
+    ``  manifest span fill: documents 3,200, rows 9,870, fillable 410, filled 410``. *clock* is injectable."""
+
+    EVERY_S: float = 5.0
+    #: The fields a line shows, in this order; a rung's other counters stay in the structlog event.
+    SHOWN: tuple[str, ...] = (
+        "collection", "documents", "rows", "fillable", "filled", "examined", "converted", "remaining",
+        "manifest_rows_written",
+    )
+    _SUFFIXES: tuple[str, ...] = ("_batch", "_collection_done")
+
+    def __init__(self, *, to_stderr: bool = False, clock: "Callable[[], float] | None" = None) -> None:
+        import time  # noqa: PLC0415 — stdlib
+
+        self._err = to_stderr
+        self._clock = clock or time.monotonic
+        self._last: dict[str, float] = {}
+
+    def emit(self, event: str, **fields: object) -> None:
+        _log.info(event, **fields)
+        suffix = next((s for s in self._SUFFIXES if event.endswith(s)), None)
+        if suffix is None:
+            return
+        rung = event.removesuffix(suffix).removesuffix("_rung")
+        label = rung.removesuffix("_confirm").replace("_", " ") + (" (confirming)" if rung.endswith("_confirm") else "")
+        now = self._clock()
+        if now - self._last.get(rung, float("-inf")) < self.EVERY_S:
+            return
+        self._last[rung] = now
+        shown = ", ".join(
+            f"{key.replace('_', ' ')} {value:,}" if isinstance(value, int) and not isinstance(value, bool)
+            else f"{key.replace('_', ' ')} {value}"
+            for key in self.SHOWN if (value := fields.get(key)) is not None
+        )
+        try:
+            click.echo(f"  {label}: {shown}", err=self._err)
+        except Exception:  # noqa: BLE001 — a progress line never fails the walk
+            pass
+
+
 def _run_ladder(
     *,
     dry_run: bool,
@@ -554,7 +607,15 @@ def _run_ladder(
     ledger = _ledger_fn() if _ledger_fn is not None else DeferredLadderLedger()
     try:
         holder = InProcessCompletionHolder(ledger)
-        report = LadderRunner(registry, holder, deadline=deadline).run()
+        # nexus-mjmjl: a rung's detect() answers without a scan (record or bounded count, else PENDING), so its
+        # converge makes the one scan instead of a dry run followed by the same scan; the scan's batch events
+        # become progress lines (stderr under --auto, which the hook logs) instead of INFO events nobody sees.
+        from nexus.upgrade_ladder.unattended import cheap_detect  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        with cheap_detect():
+            report = LadderRunner(
+                registry, holder, deadline=deadline, reporter=_BatchProgress(to_stderr=auto_mode),
+            ).run()
         holder.flush()
         # nexus-0sm1t: count each rung's consecutive deferrals so `nx doctor` can name one that defers on every run,
         # which --auto otherwise leaves silent. Interactive and --auto alike; a log failure never changes the outcome.

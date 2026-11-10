@@ -600,7 +600,7 @@ def test_without_nx_setup_script_setup_starts_no_process(
     lowered = text.lower()
     for fragment in _NO_SCRIPT_TEXT[mode]:
         assert fragment in lowered, (mode, fragment, text)
-    assert "not started by the conexus plugin's launcher" in lowered or mode == "cli-only", text
+    assert "setup cannot run from this server" in lowered or mode == "cli-only", text
 
 
 def test_without_nx_setup_script_status_starts_no_process_and_gives_the_commands(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -757,7 +757,7 @@ def test_setup_returns_the_stage_and_how_long_it_usually_takes(monkeypatch: pyte
     _service(monkeypatch, False)
     text = _call("setup", mode="local")
     assert "Setup started" in text and "build" in text
-    assert "1 to 3 minutes" in text
+    assert "1 to 3 minutes" in text and "usually takes usually" not in text, text
     assert re.search(r"no (less|sooner) than 60 seconds", text), text
     assert "/cfg/setup/setup.log" in text
     recorder.views(status=NONE, start={**RUNNING_BUILD, "stage": "init"}, **{"not-now": NONE})

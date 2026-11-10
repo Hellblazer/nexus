@@ -123,7 +123,7 @@ SLIM_DESCRIPTION: str = (
 #: stage name ``nx_setup.py`` reports.
 STAGE_WAITS: dict[str, tuple[int, str]] = {
     "starting": (10, "a few seconds"),
-    "build": (60, "1 to 3 minutes"),
+    "build": (60, "1 to 3 minutes, up to an hour on a cold machine; the message shows the time so far"),
     "service": (10, "a few seconds"),
     "service-install": (10, "a few seconds"),
     "service-start": (15, "under a minute"),
@@ -323,22 +323,19 @@ def terminal_commands(mode: str) -> str:
     the setup process."""
     if mode == "local":
         return (
-            "Setup cannot be started from this server (it was not started by the conexus plugin's launcher), "
-            "so nothing was started. In a terminal the user runs `nx init`, which downloads and starts the local "
+            "Setup cannot run from this server, so nothing was started. In a terminal the user runs `nx init`, which downloads and starts the local "
             "service and asks whether to start it at login; if the service is already set up and only stopped, "
             "`nx daemon service start` starts it."
         )
     if mode == "cloud":
         return (
-            "Setup cannot be started from this server (it was not started by the conexus plugin's launcher), "
-            "so nothing was started. In a terminal the user runs `nx config init`, which asks for the service "
+            "Setup cannot run from this server, so nothing was started. In a terminal the user runs `nx config init`, which asks for the service "
             "address, the token and, for a mint credential, the tenant, and saves them."
         )
     if mode == "cli-only":
         return "The Nexus CLI is already installed (this server is part of it). There is nothing to install."
     return (
-        "Setup cannot be started from this server (it was not started by the conexus plugin's launcher), "
-        "so nothing was recorded. Do not ask the user again in this conversation."
+        "Setup cannot run from this server, so nothing was recorded. Do not ask the user again in this conversation."
     )
 
 

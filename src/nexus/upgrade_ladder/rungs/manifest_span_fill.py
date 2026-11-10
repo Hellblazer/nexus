@@ -88,10 +88,14 @@ from nexus.collection_errors import SupersededCollectionWriteError
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
     managed_service,
+    CHEAP_PENDING,
+    detect_refuses,
     refuses_managed_unattended,
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
+from nexus.upgrade_ladder.scan_reuse import ScanReuse
+from nexus.upgrade_ladder.unattended import is_cheap_detect
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.deadline import active_expired
 from nexus.upgrade_ladder.protocol import (
@@ -107,6 +111,7 @@ from nexus.upgrade_ladder.rungs.manifest_section_labels import (
     TITLE_RULE_MARK,
     ManifestSectionLabelsRung,
     RouteAbsent,
+    CollectionMemo,
     _chunk_metadatas,
     _close,
     _default_reader,
@@ -180,6 +185,9 @@ class Counts:
     write_failed: int = 0
     write_refused_409: int = 0           # the engine answered 409 to the request (a superseded collection)
     restore_failed: int = 0              # documents whose indexed_at could not be written back after the fill
+    collection_lookups: int = 0          # engine reads, nexus-mjmjl's call counter: collection lookups (stats listings)
+    chunk_gets: int = 0                  # chunk-metadata pages
+    owner_reads: int = 0                 # chash_positions pages
     restore_failed_docs: list[str] = field(default_factory=list)
     by_collection: Counter = field(default_factory=Counter)
 
@@ -293,19 +301,22 @@ class ManifestSpanFillRung:
         self._filled = 0
         self._verify_detail = ""
         self._record_detail = ""
+        self._clean_scan: ScanReuse[Counts] = ScanReuse()  # converge's walk that found nothing to fill
+        self._reporter: ProgressReporter | None = None  # converge's, so verify's walk reports too
         self._partial = Counts()
 
     # ── the scan ─────────────────────────────────────────────────────────────
 
     def _scan(
         self, reader: Any, *, writer: Any | None, t3: Any, report: ProgressReporter | None = None,
-        honour_deadline: bool = False,
+        honour_deadline: bool = False, event: str = "manifest_span_fill_batch",
     ) -> Counts | None:
         """One pass over every live document; writes when *writer* is given. Returns the counts, or ``None`` when
         the ``nx upgrade --auto`` limit passed between batches (``self._cut`` is set). A failed read propagates."""
         counts = Counts()
         self._partial = counts
         self._cut = False
+        t3 = CollectionMemo(t3) if t3 is not None else None
         entries = sorted(
             (e for e in reader.all_documents() if not getattr(e, "alias_of", "")),
             key=lambda e: str(e.tumbler),
@@ -316,7 +327,7 @@ class ManifestSpanFillRung:
                 return None
             self._batch(reader, writer, t3, entries[start:start + self._doc_batch], counts)
             if report is not None:
-                report.emit("manifest_span_fill_batch", **counts.as_dict())
+                report.emit(event, **counts.as_dict())
         return counts
 
     @staticmethod
@@ -345,7 +356,7 @@ class ManifestSpanFillRung:
         # Ownership first (no chunk read needed to decide it); the verdict is a bucket name, or None for a single owner.
         live = [(doc, row) for doc, row, _n in candidates if not minted_by_orphan_backfill(doc)]
         owners, deleted = (
-            ManifestSectionLabelsRung._owner_rows(reader, sorted({r.chash for _d, r in live})) if live else ({}, {})
+            ManifestSectionLabelsRung._owner_rows(reader, sorted({r.chash for _d, r in live}), counts) if live else ({}, {})
         )
         verdict: dict[int, str | None] = {}
         for i, (doc, row, _n) in enumerate(candidates):
@@ -368,7 +379,7 @@ class ManifestSpanFillRung:
             wanted.setdefault(_row_collection(row, doc), []).append(row.chash)
         chunk_metas: dict[tuple[str, str], dict] = {}
         for collection, chashes in wanted.items():
-            for chash, meta in _chunk_metadatas(t3, collection, sorted(set(chashes))).items():
+            for chash, meta in _chunk_metadatas(t3, collection, sorted(set(chashes)), counts).items():
                 chunk_metas[(collection, chash)] = meta
 
         # (document, row, collection, columns to fill)
@@ -424,7 +435,9 @@ class ManifestSpanFillRung:
         stamps = {str(d.tumbler): getattr(d, "indexed_at", "") for d, _r, _c, _s in plan}  # as read at scan
         fresh = reader.get_manifests(docs) or {}
         fresh_rows = {t: {r.position: r for r in rows} for t, rows in fresh.items()}
-        again, again_deleted = ManifestSectionLabelsRung._owner_rows(reader, sorted({r.chash for _d, r, _c, _s in plan}))
+        again, again_deleted = ManifestSectionLabelsRung._owner_rows(
+            reader, sorted({r.chash for _d, r, _c, _s in plan}), counts,
+        )
         by_collection: dict[str, dict[str, list[dict]]] = {}
         for doc, row, collection, span in plan:
             tumbler = str(doc.tumbler)
@@ -513,7 +526,7 @@ class ManifestSpanFillRung:
 
     # ── reading with the lifecycle of the collaborators ──────────────────────
 
-    def _dry_run(self, *, honour_deadline: bool = False) -> Counts | None:
+    def _dry_run(self, *, honour_deadline: bool = False, report: ProgressReporter | None = None) -> Counts | None:
         """The counts of a read-only scan, or ``None`` when no catalog is available (or, with *honour_deadline*,
         when the time limit stopped it: ``self._cut``)."""
         self._cut = False
@@ -525,7 +538,9 @@ class ManifestSpanFillRung:
             return None
         t3 = self._t3_factory()
         try:
-            return self._scan(reader, writer=None, t3=t3, honour_deadline=honour_deadline)
+            return self._scan(
+                reader, writer=None, t3=t3, honour_deadline=honour_deadline, report=report, event="manifest_span_fill_confirm_batch",
+            )
         finally:
             _close(t3)
             _close(reader)
@@ -564,13 +579,15 @@ class ManifestSpanFillRung:
                     "rule refused are scanned once more (`nx upgrade`)"
                 ),
             )
-        if refuses_unbounded_read(self._managed_fn):
+        if detect_refuses(self._managed_fn):
             reason = (
                 "unattended `nx upgrade --auto` does not scan a managed catalog for manifest rows that lack a span "
                 f"(no completion record, and the engine has no count for it); {INTERACTIVE_REMEDY}"
             )
             _log.info("manifest_span_fill_rung_skipped", reason=reason)
             return RungStatus(applicable=False, converged=False, pending_detail=reason)
+        if is_cheap_detect():
+            return RungStatus(applicable=True, converged=False, pending_detail=CHEAP_PENDING)
         try:
             counts = self._dry_run(honour_deadline=True)
         except RouteAbsent as exc:
@@ -609,6 +626,8 @@ class ManifestSpanFillRung:
             )
             _log.info("manifest_span_fill_converge_skipped", reason=reason)
             return ConvergeResult(ConvergeOutcome.DEFERRED, detail=reason)
+        self._clean_scan.clear()
+        self._reporter = report
         reader = self._reader_factory()
         if reader is None:
             return ConvergeResult(ConvergeOutcome.DEFERRED, detail="no catalog is available")
@@ -651,6 +670,9 @@ class ManifestSpanFillRung:
                     f"remaining NULL-span rows ({counts.summary()})"
                 ),
             )
+        if not counts.fillable:
+            # Nothing to fill means nothing written: this walk is the dry run verify would take next.
+            self._clean_scan.keep(counts)
         return ConvergeResult(ConvergeOutcome.COMPLETED, detail=counts.summary())
 
     # ── verify ───────────────────────────────────────────────────────────────
@@ -665,7 +687,8 @@ class ManifestSpanFillRung:
             self._verify_detail = unattended_verify_refusal("every document and manifest")
             return False
         try:
-            counts = self._dry_run()
+            # nexus-mjmjl: a confirming walk after a fill prints the same progress lines as the fill.
+            counts = self._clean_scan.take() or self._dry_run(report=self._reporter)
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is unknown, and unknown is not reached
             self._verify_detail = f"could not read the catalog to confirm the fill: {exc}"
             return False

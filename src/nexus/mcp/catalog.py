@@ -191,7 +191,7 @@ def catalog_search(
     author: Annotated[str, Field(description="Author substring filter, case-insensitive.")] = "",
     corpus: Annotated[str, Field(description="Exact corpus filter.")] = "",
     owner: Annotated[str, Field(description="Owner tumbler or registered owner name.")] = "",
-    file_path: Annotated[str, Field(description="File path filter (absolute or repo-relative; both forms match).")] = "",
+    file_path: Annotated[str, Field(description="File path filter (absolute or repo-relative; both forms match), or a source URI such as \"x-devonthink-item://<uuid>\".")] = "",
     limit: Annotated[int, Field(description="Page size.")] = 20,
     offset: Annotated[int, Field(description="Entries to skip, for pagination.")] = 0,
 ) -> list[dict]:
@@ -216,9 +216,14 @@ def catalog_search(
     if err:
         return _fail([{"error": err}])
     try:
+        from nexus.catalog import entry_for_source_uri  # noqa: PLC0415 — function-local import avoids catalog import at module load
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
 
         owner_prefix = f"{_parse_user_tumbler(owner, 'owner')}." if owner else ""
+        # A URI in file_path names its document by source_uri (a DEVONthink
+        # record's file_path is the package path, never the URI).
+        by_path_uri = entry_for_source_uri(cat, file_path) if file_path else None
+        path_uri_tumbler = str(by_path_uri.tumbler) if by_path_uri is not None else ""
 
         def _keep(e) -> bool:
             # Every filter, applied to every candidate regardless of which
@@ -229,7 +234,9 @@ def catalog_search(
                 return False
             if content_type and e.content_type != content_type:
                 return False
-            if file_path and not _file_path_matches(e.file_path, file_path):
+            if file_path and not (
+                _file_path_matches(e.file_path, file_path) or str(e.tumbler) == path_uri_tumbler
+            ):
                 return False
             if author and author.lower() not in (e.author or "").lower():
                 return False
@@ -240,7 +247,12 @@ def catalog_search(
             # is empty with matches present), which would make the empty-page
             # note below claim something false.
             return _fail([{"error": f"limit must be >= 1 and offset >= 0 (got limit={limit}, offset={offset})"}])
-        if query.strip():
+        by_query_uri = entry_for_source_uri(cat, query) if query.strip() else None
+        if by_query_uri is not None:
+            # Exact identity: a source URI names one document, and full-text
+            # search tokenizes the URI into nothing useful.
+            matches = [by_query_uri] if _keep(by_query_uri) else []
+        elif query.strip():
             if owner or corpus or file_path or author:
                 # Post-filtering a capped page reports absence for matches
                 # past the cap, so take every full-text match first.
@@ -262,6 +274,8 @@ def catalog_search(
                 candidates = cat.by_content_type(content_type)
             elif file_path:
                 candidates = _file_path_candidates(cat, file_path)
+                if by_path_uri is not None and all(str(c.tumbler) != path_uri_tumbler for c in candidates):
+                    candidates = [by_path_uri, *candidates]
             else:
                 # author alone: the engine has no author filter.
                 candidates = cat.all_documents()
@@ -300,8 +314,8 @@ def catalog_search(
     structured_output=False,
 )
 def catalog_show(
-    tumbler: Annotated[str, Field(description="Document or owner tumbler (e.g. \"1.2.5\" or \"1.2\").")] = "",
-    title: Annotated[str, Field(description="Exact or best-matching document title. Ignored when tumbler is set.")] = "",
+    tumbler: Annotated[str, Field(description="Document or owner tumbler (e.g. \"1.2.5\" or \"1.2\"), or a document's source URI.")] = "",
+    title: Annotated[str, Field(description="Exact or best-matching document title, or the document's source URI (e.g. \"x-devonthink-item://<uuid>\"). Ignored when tumbler is set.")] = "",
 ) -> dict:
     """Show one catalog entry's full metadata and its links to/from other entries.
 
@@ -318,7 +332,12 @@ def catalog_show(
     try:
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deliberate function-local import
 
+        from nexus.catalog import entry_for_source_uri, looks_like_source_uri  # noqa: PLC0415 — function-local import avoids catalog import at module load
+
         entry = None
+        if tumbler and looks_like_source_uri(tumbler):
+            # A source URI in the first parameter is the common call shape.
+            title, tumbler = tumbler, ""
         if tumbler:
             t = _parse_user_tumbler(tumbler, "tumbler")
             # nexus-v3w9n: catalog-034 grammar makes tumbler depth
@@ -340,8 +359,10 @@ def catalog_show(
                 return d
             entry = cat.resolve(t)
         elif title:
-            results = cat.find(title)
-            entry = results[0] if results else None
+            entry = entry_for_source_uri(cat, title)
+            if entry is None and not looks_like_source_uri(title):
+                results = cat.find(title)
+                entry = results[0] if results else None
 
         if entry is None:
             return _fail({"error": f"Not found: {tumbler or title}"})
@@ -806,7 +827,7 @@ def catalog_link_query(
     structured_output=False,
 )
 def catalog_resolve(
-    tumbler: Annotated[str, Field(description="Document tumbler, dotted form (e.g. \"1.2.3\").")] = "",
+    tumbler: Annotated[str, Field(description="Document tumbler, dotted form (e.g. \"1.2.3\"), or a document's source URI.")] = "",
     owner: Annotated[str, Field(description="Owner tumbler or registered owner name, dotted form (e.g. \"1.2\").")] = "",
     corpus: Annotated[str, Field(description="Corpus label.")] = "",
 ) -> list[str]:
@@ -830,7 +851,12 @@ def catalog_resolve(
         # surface an actionable diagnostic instead.
         collections: set[str] = set()
         if tumbler:
-            entry = cat.resolve(_parse_user_tumbler(tumbler, "tumbler"))
+            from nexus.catalog import entry_for_source_uri, looks_like_source_uri  # noqa: PLC0415 — function-local import avoids catalog import at module load
+
+            if looks_like_source_uri(tumbler):
+                entry = entry_for_source_uri(cat, tumbler)
+            else:
+                entry = cat.resolve(_parse_user_tumbler(tumbler, "tumbler"))
             if entry and entry.physical_collection:
                 collections.add(entry.physical_collection)
         if owner:

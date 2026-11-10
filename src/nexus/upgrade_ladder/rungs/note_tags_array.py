@@ -42,9 +42,13 @@ from nexus.upgrade_ladder.auto_guard import (
     completion_recorded_at,
     default_completion_record,
     managed_service,
+    CHEAP_PENDING,
+    detect_refuses,
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
+from nexus.upgrade_ladder.scan_reuse import ScanReuse
+from nexus.upgrade_ladder.unattended import is_cheap_detect
 from nexus.upgrade_ladder.deadline import active_expired
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
@@ -111,6 +115,7 @@ class NoteTagsArrayRung:
         self._writer_factory = writer_factory
         self._batch_limit = batch_limit
         self._converted = 0
+        self._clean_scan: ScanReuse[tuple[int, list]] = ScanReuse()  # converge's listing that found no string
         self._verify_detail = ""
         self._record_detail = ""
 
@@ -145,14 +150,14 @@ class NoteTagsArrayRung:
     # ── detect ───────────────────────────────────────────────────────────────
 
     def detect(self) -> RungStatus:
-        if refuses_unbounded_read(self._managed_fn):
-            # nexus-75w5d: the scan lists every note in every knowledge__* collection, on every call.
-            # Unattended against a managed service it reads nothing; an interactive `nx upgrade` still scans
-            # (`nx doctor` reports the rung as not checked). The one cheaper answer is the completion record:
-            # the interactive run that scanned, converged and verified wrote it, and the tags a current client
-            # writes are arrays already, so a recorded rung is converged without a read (nexus-mq980: the
-            # remedy `nx doctor` names has to be able to clear its row).
-            recorded_at = completion_recorded_at(self._record_fn, RUNG_NAME)
+        refuses = detect_refuses(self._managed_fn)
+        recorded_at = completion_recorded_at(self._record_fn, RUNG_NAME) if refuses or is_cheap_detect() else None
+        if refuses:
+            # nexus-75w5d: the scan lists every note in every knowledge__* collection, on every call. Unattended
+            # against a managed service, and under `nx doctor`'s bounded probe, it reads nothing. The one cheaper
+            # answer is the completion record: the interactive run that scanned, converged and verified wrote it,
+            # and the tags a current client writes are arrays already, so a recorded rung is converged without a
+            # read (nexus-mq980: the remedy `nx doctor` names has to be able to clear its row).
             if recorded_at is not None:
                 return RungStatus(applicable=True, converged=True, from_record=recorded_at)
             reason = (
@@ -161,6 +166,10 @@ class NoteTagsArrayRung:
             )
             _log.info("note_tags_rung_skipped", reason=reason)
             return RungStatus(applicable=False, converged=False, pending_detail=reason)
+        if is_cheap_detect() and recorded_at is None:
+            # nexus-mjmjl: with no record, an interactive `nx upgrade` lists the notes once, in converge. With a
+            # record it still lists them here, so strings an older client wrote since are found and rewritten.
+            return RungStatus(applicable=True, converged=False, pending_detail=CHEAP_PENDING)
         scanned = self._read()
         if scanned is None:
             reason = "no catalog is available"
@@ -183,12 +192,16 @@ class NoteTagsArrayRung:
     def converge(self, report: ProgressReporter) -> ConvergeResult:
         from nexus.catalog.store_hook import split_note_tags  # noqa: PLC0415 — deferred: store_hook has a heavy import graph
 
+        self._clean_scan.clear()
         reader = self._reader_factory()
         if reader is None:
             return ConvergeResult(ConvergeOutcome.DEFERRED, detail="no catalog is available")
         writer = None
         try:
             examined, pending = self._scan(reader)
+            if not pending:
+                # No string found means nothing written: this listing is the read verify would take next.
+                self._clean_scan.keep((examined, pending))
             batch = pending[: self._batch_limit]
             skipped = 0
             for i, (tumbler, _stale) in enumerate(batch):
@@ -241,7 +254,7 @@ class NoteTagsArrayRung:
             self._verify_detail = unattended_verify_refusal("every note")
             return False
         try:
-            scanned = self._read()
+            scanned = self._clean_scan.take() or self._read()
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is unknown, and unknown is not reached
             self._verify_detail = f"could not read the catalog to confirm the conversion: {exc}"
             return False
