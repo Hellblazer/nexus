@@ -94,11 +94,11 @@ class DownloadMeter:
             pass
 
     def _redraw(self, text: str) -> None:
-        global _ACTIVE
-        _ACTIVE = self
         """Overwrite the current terminal line with *text*: a carriage return
         and spaces over any longer leftover, no escape sequence (a legacy
         Windows console prints those as text)."""
+        global _ACTIVE
+        _ACTIVE = self
         self._write("\r" + text.ljust(self._drawn))
         self._drawn = len(text)
 
