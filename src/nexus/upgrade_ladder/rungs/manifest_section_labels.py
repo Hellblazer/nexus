@@ -468,13 +468,14 @@ class ManifestSectionLabelsRung:
         self._verify_detail = ""
         self._record_detail = ""
         self._clean_scan: ScanReuse[Counts] = ScanReuse()  # converge's walk that found nothing to fill
+        self._reporter: ProgressReporter | None = None  # converge's, so verify's walk reports too
         self._partial = Counts()
 
     # ── the scan ─────────────────────────────────────────────────────────────
 
     def _scan(
         self, reader: Any, *, writer: Any | None, t3: Any, report: ProgressReporter | None = None,
-        honour_deadline: bool = False,
+        honour_deadline: bool = False, event: str = "manifest_section_labels_batch",
     ) -> Counts | None:
         """One pass over every live document. Writes when *writer* is given, else a dry run. Returns the
         counts, or ``None`` when the ``nx upgrade --auto`` limit passed between batches (the counts so
@@ -496,7 +497,7 @@ class ManifestSectionLabelsRung:
                 return None
             self._batch(reader, writer, t3, entries[start:start + self._doc_batch], counts)
             if report is not None:
-                report.emit("manifest_section_labels_batch", **counts.as_dict())
+                report.emit(event, **counts.as_dict())
         return counts
 
     def _batch(self, reader: Any, writer: Any | None, t3: Any, docs: list[Any], counts: Counts) -> None:
@@ -705,7 +706,7 @@ class ManifestSectionLabelsRung:
 
     # ── reading with the lifecycle of the collaborators ──────────────────────
 
-    def _dry_run(self, *, honour_deadline: bool = False) -> Counts | None:
+    def _dry_run(self, *, honour_deadline: bool = False, report: ProgressReporter | None = None) -> Counts | None:
         """The counts of a read-only scan, or ``None`` when no catalog is available (or, with
         *honour_deadline*, when the time limit stopped it: ``self._cut``). Past the limit nothing is read,
         the ``/stats`` read included."""
@@ -718,7 +719,9 @@ class ManifestSectionLabelsRung:
             return None
         t3 = self._t3_factory()
         try:
-            return self._scan(reader, writer=None, t3=t3, honour_deadline=honour_deadline)
+            return self._scan(
+                reader, writer=None, t3=t3, honour_deadline=honour_deadline, report=report, event="manifest_section_labels_confirm_batch",
+            )
         finally:
             _close(t3)
             _close(reader)
@@ -882,6 +885,7 @@ class ManifestSectionLabelsRung:
             _log.info("manifest_section_labels_converge_skipped", reason=reason)
             return ConvergeResult(ConvergeOutcome.DEFERRED, detail=reason)
         self._clean_scan.clear()
+        self._reporter = report
         reader = self._reader_factory()
         if reader is None:
             return ConvergeResult(ConvergeOutcome.DEFERRED, detail="no catalog is available")
@@ -946,7 +950,8 @@ class ManifestSectionLabelsRung:
             self._verify_detail = unattended_verify_refusal("every document and manifest")
             return False
         try:
-            counts = self._clean_scan.take() or self._dry_run()
+            # nexus-mjmjl: a confirming walk after a fill prints the same progress lines as the fill.
+            counts = self._clean_scan.take() or self._dry_run(report=self._reporter)
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is unknown, and unknown is not reached
             self._verify_detail = f"could not read the catalog to confirm the fill: {exc}"
             return False

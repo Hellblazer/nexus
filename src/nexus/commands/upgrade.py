@@ -505,6 +505,7 @@ class _BatchProgress:
         if suffix is None:
             return
         rung = event.removesuffix(suffix).removesuffix("_rung")
+        label = rung.removesuffix("_confirm").replace("_", " ") + (" (confirming)" if rung.endswith("_confirm") else "")
         now = self._clock()
         if now - self._last.get(rung, float("-inf")) < self.EVERY_S:
             return
@@ -515,7 +516,7 @@ class _BatchProgress:
             for key in self.SHOWN if (value := fields.get(key)) is not None
         )
         try:
-            click.echo(f"  {rung.replace('_', ' ')}: {shown}", err=self._err)
+            click.echo(f"  {label}: {shown}", err=self._err)
         except Exception:  # noqa: BLE001 — a progress line never fails the walk
             pass
 

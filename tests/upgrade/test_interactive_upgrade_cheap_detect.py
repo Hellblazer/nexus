@@ -256,3 +256,22 @@ def test_the_section_label_rung_counts_its_reads_too() -> None:
     rung.converge(Report())
     c = rung._partial
     assert c.collection_lookups == 1 and c.chunk_gets >= 2 and c.owner_reads >= 2, (c.collection_lookups, c.chunk_gets, c.owner_reads)
+
+
+def test_a_confirming_walk_after_a_fill_reports_progress_too(capsys) -> None:
+    """marginalia's chas run: after a fill that wrote rows, verify's second walk printed nothing for 196 s."""
+    from tests.upgrade.test_manifest_span_fill_rung import SPAN, Report, World, h  # noqa: PLC0415 — that file's fixture world
+
+    world = World()
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+    rung = world.rung()
+    report = Report()
+    rung.converge(report)
+    assert rung.verify() is True
+    events = [name for name, _fields in report.events]
+    assert "manifest_span_fill_batch" in events and "manifest_span_fill_confirm_batch" in events, events
+
+    _BatchProgress(clock=lambda: 0.0).emit("manifest_span_fill_confirm_batch", documents=10, rows=40, fillable=0)
+    assert capsys.readouterr().out == "  manifest span fill (confirming): documents 10, rows 40, fillable 0\n"
