@@ -65,7 +65,7 @@ def _report(name: str, status: str, reason: str = "", total: int = 0, findings: 
 #: The most sensitive documents the bounded route is asked for: the engine's own maximum (CatalogSensitiveReads.
 #: MAX_LIMIT). The route reads the whole sensitive set from its index whatever the limit, so asking for fewer
 #: saves nothing. A tenant with more walks the catalog, which keeps the gating row's coverage; past that size the
-#: rows' own per-document reads dominate anyway.
+#: with-aspects row's own per-document reads dominate anyway.
 _SENSITIVE_LIST_LIMIT = 10_000
 
 #: The walk shared inside :func:`one_walk`: ``(documents, not-applicable reason)``, or unset outside one.
