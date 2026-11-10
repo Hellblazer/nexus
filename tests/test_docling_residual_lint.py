@@ -41,7 +41,7 @@ ALLOWED: dict[str, str] = {
     "docs/wire-contract-pending.md": "the wire-contract ledger quotes past commit subjects",
     "CHANGELOG.md": "release history, and the entry that removed Docling",
     "conexus/CHANGELOG.md": "plugin release history",
-    "docs/exploration/journey-from-7-6-1.md": "the 7.6.1-to-8.0.0 essay says MinerU replaced Docling in 7.89.0",
+    "docs/exploration/journey-from-7-6-1.md": "the 7.6.1-to-8.1.2 essay says MinerU replaced Docling in 7.89.0",
     "web/journey-from-7-6-1.html": "the site twin of that essay, same text",
     "service/src/main/resources/db/changelog/pipeline-001-baseline.xml": "a shipped Liquibase changeset; never edited",
     "service/src/test/": "test fixtures: docling is sample extraction_method data in catalog rows",

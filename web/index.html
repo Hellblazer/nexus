@@ -120,7 +120,7 @@ td:first-child{font-weight:500;white-space:nowrap}
 <h1>Installing Nexus</h1>
 <img class="dome" src="assets/a-stately-pleasure-dome.png" alt="A brass-ribbed crystal dome on a hilltop at dusk" width="1024" height="571">
 <p class="lede">Nexus gives Claude a permanent memory and search by meaning. It runs on your computer, so you need no API key, no account, and no separate database install.</p>
-<p class="note" style="border-left:3px solid var(--brass,#b08d3c);padding-left:10px"><span style="font-weight:600">Known issue in 8.0.0: after an engine restart, nexus can spend 20 minutes or more rebuilding search indexes.</span> On a large store the engine builds its search indexes in the background, with heavy disk writes, and <code>nx doctor</code> or <code>nx upgrade</code> shows no progress while it runs. A restart of the engine stops the build in progress, and the next start builds that index again from the beginning. Leave the engine running so the builds can finish, and avoid <code>nx upgrade</code> and <code>nx daemon restart-stale</code> until the fix ships. Your data is not lost when this happens. Engine 0.1.186 fixes this.</p>
+<p class="note" style="border-left:3px solid var(--brass,#b08d3c);padding-left:10px"><span style="font-weight:600">Fixed in 8.1.0: on 8.0.0, an engine restart could make nexus spend 20 minutes or more rebuilding search indexes.</span> Engine 0.1.186 and later keep an index build that is in progress across a restart that changes no schema, and <code>nx upgrade</code> and <code>nx doctor</code> show the build while it runs. If you are on 8.0.0, upgrade to the current release.</p>
 
 <p class="choose-label">How do you use Claude?</p>
 <div class="choose" role="group" aria-label="Surface">
