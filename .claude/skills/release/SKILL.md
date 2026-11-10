@@ -559,7 +559,7 @@ gh pr create --base main --title "release: conexus X.Y.Z" --body-file <body.md>
 
 The body follows `docs/contributing.md` § Git Workflow: two or three plain sentences first (what this release changes for a user, and anything a reviewer must check), any `Closes #N` lines, then the full release notes inside `<details><summary>Details</summary> ... </details>`.
 
-A PR body closes an issue only with `Closes #N`, `Fixes #N` or `Resolves #N`, one per line; a plain reference leaves the issue open (PR #254). If the release PR is meant to close issues, write the keyword lines in the `--body`.
+A PR body closes an issue only with `Closes #N`, `Fixes #N` or `Resolves #N`, one per line; a plain reference leaves the issue open (PR #254). If the release PR is meant to close issues, write the keyword lines in the opening lines of the body file.
 
 Wait for CI green, then merge:
 
@@ -1111,7 +1111,7 @@ greps, unchanged.
 **6. Publish.** The normal flow, with the same human gates, except at Step 7: the
 branch from item 2 already exists and is built off the tag, so skip Step 7's
 branch-creation and pre-merge lines and run only its push and
-`gh pr create --base main` from that branch. Before Step 9, re-run the
+`gh pr create --base main` from that branch (body shape as in Step 9: short opening, keywords, then `<details>`). Before Step 9, re-run the
 eligibility script on the exact PR head (`git rev-parse HEAD` equals
 `git rev-parse origin/release/vX.Y.N`; a later push re-opens items 4 and 5).
 Then merge (never squash), Sam's "tag and push" (Step 9; its paired-release

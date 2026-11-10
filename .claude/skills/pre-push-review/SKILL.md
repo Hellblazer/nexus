@@ -12,7 +12,7 @@ Source: T2 `nexus/qo7ie.36-census-feedback_test_runs_before_push`. Where it and 
 
 ## Commit messages
 
-Before a push, read `git log --oneline origin/develop..HEAD`. Each subject is 72 characters or fewer and says what changed, as `area: what changed (bead-id)`; the why, the evidence and the numbers go in the body after one blank line (`docs/contributing.md` § Git Workflow). To reword an unpushed subject, use `git commit --amend` for the last commit, or `git reset --soft <base>` and commit again, in your own worktree and never in the primary checkout.
+Before a push, run `git fetch origin develop` and read `git log --oneline origin/develop..HEAD`. Each subject is 72 characters or fewer and says what changed, as `type(scope): what changed (bead-id)`, with the bead id left out only when no bead exists (a release bump such as `chore(release): conexus X.Y.Z`); the why, the evidence and the numbers go in the body after one blank line (`docs/contributing.md` § Git Workflow). To reword an unpushed subject, work in your own worktree, never the primary checkout. For the last commit, use `git commit --amend`. For an earlier one, rebuild the stack and keep its split: note the shas, `git reset --hard <base>`, then `git cherry-pick` each sha in order, running `git commit --amend` right after the one to reword. Then name the new shas to the push script.
 
 ## Lint remedies
 
