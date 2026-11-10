@@ -32,15 +32,21 @@ itself, and a step of a couple of seconds gives a noisy rate.
 
 PCI keep check (user's-seat proof of the restart fix). A start from a release that predates the
 per-collection indexes (``PRE_PCI_VERSION``, pins engine 0.1.156) has its upgrade boot build every
-``pci_`` index. After the search step the driver waits for one to be IN FLIGHT in
-``pg_stat_progress_create_index`` (none within the bound is a FAILURE: the check would prove
-nothing), restarts the engine the way a user does (``nx daemon service stop`` then ``start``, PG left
-running), waits for every ``pci_`` index to be valid, and judges by backend pid: the in-flight index
-must be finished by the pid it had before the restart, each index built by exactly one pid, every
-index valid at the end, and the engine log free of the three restart-loss events named in
-``PCI_FAILURE_EVENTS``. A rebuild by a new pid is the failure being caught. The fix ships in an engine
-newer than the wheel's pin: pass ``--engine-jar`` (or ``NEXUS_SERVICE_JAR``) to run the check against
-a jar built from the fix; the override applies from ``start-old`` on, never to the old client's stack.
+``pci_`` index, and ``nx upgrade`` waits for every build before it returns, so a restart AFTER it
+proves nothing. Sam's case is a restart while the long upgrade is still running. A watcher polls
+``pg_stat_progress_create_index`` from before ``nx upgrade``; the first time it shows a ``pci_``
+build in flight while ``nx upgrade`` is still running, a second thread restarts the engine the way
+a user in a second shell does (``nx daemon service stop`` then ``start``, same HOME and environment,
+no ``--with-pg``) and records the (index, pid, progress) at that moment, the restart's own outputs
+and exit codes, and what ``nx upgrade`` did after it (its exit code and output are judged by its own
+step rules). After the search step the driver waits (bounded) for every ``pci_`` index to be valid
+and judges by backend pid: the in-flight build is kept only if the same (index, pid) is seen building
+after the restart, the engine log carries ``event=pci_anchor_adopted`` for the index, and it ends
+valid; a new pid, a ``failed_build`` drop, ``CONNECTION_LOST`` or ``57P01`` after the restart is the
+failure (``PCI_FAILURE_EVENTS``). Never having seen a build in flight during ``nx upgrade`` is a
+FAILURE (vacuous), not a pass. The fix ships in an engine newer than the wheel's pin: pass
+``--engine-jar`` (or ``NEXUS_SERVICE_JAR``) to run the check against a jar built from the fix; the
+override applies from ``start-old`` on, never to the old client's stack.
 
 The ceilings are set from the first real-store runs (chas lab-m, 2026-11-10, the f3yqd.1 seeder's
 86,000 rows, 2.4 GB): about eight to ten times the slowest measured step. They bound THIS fixture;
@@ -148,7 +154,11 @@ _INDEX_FIELD_RE = re.compile(r"\bindex=(pci_[0-9a-f]{24})\b")
 #: The supervisor's engine child-log stems: native binary first, then a NEXUS_SERVICE_JAR launch.
 ENGINE_LOG_STEMS: tuple[str, ...] = ("storage_service_native", "storage_service_jar")
 PCI_POLL_S: float = 0.5
-PCI_OBSERVE_BOUND_S: float = 300.0  # wait for a build in flight after the search step
+#: The restart trigger looks at the watcher's latest sighting this often (the watcher itself polls
+#: every ``PCI_POLL_S``; the trigger only adds this to the delay between a build starting and the stop).
+PCI_TRIGGER_POLL_S: float = 0.1
+#: How long past the end of nx upgrade a restart already under way is given to finish.
+PCI_RESTART_JOIN_S: float = 2 * 300.0 + 30.0
 PCI_END_STATE_BOUND_S: float = (
     900.0  # a killed build's rebuild can wait for a 600 s sweep pass
 )
@@ -838,6 +848,109 @@ class PciWatcher:
             self._thread.join(timeout=10)
 
 
+@dataclasses.dataclass
+class RestartOutcome:
+    """What the restart did: ``error`` is None when the engine stopped and started; ``steps`` carries
+    each command's own status, exit code, wall time and output tail."""
+
+    error: str | None
+    steps: list[dict] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class RestartRecord:
+    """The restart the trigger made: what was in flight at the first sighting, when (watcher clock and
+    trigger clock), whether nx upgrade was still running at the start and at the end, the engine-log
+    marks taken before the stop, and the restart's own outcome."""
+
+    in_flight: list[PciObs]
+    t_s: float
+    at_clock: float
+    upgrade_running_at_start: bool
+    marks: dict
+    outcome: RestartOutcome | None = None
+    restarted_s: float | None = None
+    done_clock: float | None = None
+    upgrade_running_after: bool | None = None
+
+
+class PciRestartTrigger:
+    """The second shell. The watcher polls from before nx upgrade; the first time it shows a pci_
+    build in flight while nx upgrade is still running, this restarts the engine the way a user would
+    (``restart`` runs nx daemon service stop, then start) and records what was in flight and what the
+    restart printed. It fires once. ``poll_once`` is the unit (True when finished: fired, or nx
+    upgrade ended with nothing in flight); ``start`` runs it on a thread."""
+
+    def __init__(
+        self,
+        watcher: PciWatcher,
+        restart: Callable[[], RestartOutcome],
+        upgrade_running: Callable[[], bool],
+        engine_log: EngineLog,
+        *,
+        poll_s: float = PCI_TRIGGER_POLL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._watcher, self._restart, self._running = watcher, restart, upgrade_running
+        self._log, self._poll_s, self._clock = engine_log, poll_s, clock
+        self.record: RestartRecord | None = None
+        self.finished = False
+        self._cancel = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def poll_once(self) -> bool:
+        if self.finished:
+            return True
+        if not self._running():
+            self.finished = (
+                True  # nx upgrade is over; a later sighting is not "during" it
+            )
+            return True
+        obs = self._watcher.latest()
+        if not obs:
+            return False
+        rec = RestartRecord(
+            in_flight=obs,
+            t_s=self._watcher.now(),
+            at_clock=self._clock(),
+            upgrade_running_at_start=True,
+            marks=self._log.mark(),
+        )
+        self.record = rec
+        try:
+            rec.outcome = self._restart()
+        except (
+            OSError,
+            RehearsalError,
+        ) as exc:  # the restart itself broke: evidence, not a crash
+            rec.outcome = RestartOutcome(
+                f"the restart raised {type(exc).__name__}: {exc}"
+            )
+        rec.restarted_s = self._watcher.now()
+        rec.done_clock = self._clock()
+        rec.upgrade_running_after = self._running()
+        self.finished = True
+        return True
+
+    def start(self) -> None:
+        def loop() -> None:
+            while not self._cancel.is_set() and not self.poll_once():
+                self._cancel.wait(self._poll_s)
+
+        self._thread = threading.Thread(target=loop, name="pci-restart", daemon=True)
+        self._thread.start()
+
+    def join(self, timeout: float) -> bool:
+        """Wait for the thread; False when a restart is still under way at the timeout."""
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+            return not self._thread.is_alive()
+        return True
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+
 class EngineLog:
     """The engine's child log (both stems), read from a mark. A restart can rotate the file at open:
     a file now smaller than its mark is the new one (read whole) and its ``.1`` the old one (read from
@@ -994,21 +1107,25 @@ def run_pci_check(
     *,
     watcher: PciWatcher,
     sql: SqlFn,
-    restart: Callable[[], str | None],
+    record: RestartRecord | None,
     engine_log: EngineLog,
     expected: int,
-    observe_bound_s: float = PCI_OBSERVE_BOUND_S,
     end_bound_s: float = PCI_END_STATE_BOUND_S,
     poll_s: float = PCI_POLL_S,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     note: Callable[[str], None] = lambda _msg: None,
+    upgrade: dict | None = None,
 ) -> PciReport:
-    """Wait for a pci_ build in flight, restart the engine, wait for every pci_ index to be valid,
-    judge by pid and by the engine log. ``restart`` returns an error text, or None when the engine
-    stopped and started. ``watcher`` must already be polling (a thread in production)."""
+    """Judge a restart made DURING nx upgrade. ``record`` is what the trigger did (None: it never saw
+    a build in flight while nx upgrade ran, a vacuous FAILURE). After a restart, wait for every pci_
+    index to be valid, then judge by pid and by the engine log. ``watcher`` must still be polling (a
+    thread in production). ``upgrade`` is nx upgrade's own outcome after the restart, recorded as
+    evidence (the step's own rules judge it)."""
     start = clock()
     evidence: dict = {"expected_pci_indexes": expected}
+    if upgrade is not None:
+        evidence["nx_upgrade"] = upgrade
 
     def done(findings: list[str]) -> PciReport:
         evidence["builders"] = _builders(watcher.history())
@@ -1016,34 +1133,33 @@ def run_pci_check(
         evidence["watcher_probe_errors"] = watcher.errors
         return PciReport(not findings, findings, evidence, round(clock() - start, 1))
 
-    deadline = clock() + observe_bound_s
-    in_flight: list[PciObs] = []
-    while True:
-        in_flight = watcher.latest()
-        if in_flight or clock() >= deadline:
-            break
-        sleep(poll_s)
-    evidence["in_flight_at_restart"] = [o.as_dict() for o in in_flight]
-    if not in_flight:
-        done_builds = sorted({o.index for o in watcher.history()})
+    if record is None:
+        evidence["in_flight_at_restart"] = []
+        seen = sorted({o.index for o in watcher.history()})
         return done(
             [
-                f"no pci_ index build was seen in flight within {observe_bound_s:g}s of the search step "
-                f"(builds seen at all: {done_builds or 'none'}): the restart was not exercised; "
-                "the builds may have finished first, so raise --pci-collections"
+                "no pci_ index build was seen in flight while nx upgrade was running "
+                f"(builds seen at any time, including after it returned: {seen or 'none'}): "
+                "the restart was not exercised, so nothing was proved; the builds may have "
+                "finished first or never started, so raise --pci-collections"
             ]
         )
-    marks = engine_log.mark()
-    evidence["restart_s"] = round(watcher.now(), 1)
+    in_flight = record.in_flight
+    evidence["in_flight_at_restart"] = [o.as_dict() for o in in_flight]
+    evidence["restart_s"] = round(record.t_s, 1)
+    evidence["restart"] = {
+        "upgrade_running_at_start": record.upgrade_running_at_start,
+        "upgrade_running_after": record.upgrade_running_after,
+        "steps": list(record.outcome.steps) if record.outcome else [],
+    }
     note(
-        "in flight: "
+        "restarted during nx upgrade with in flight: "
         + ", ".join(f"{o.index} pid {o.pid}" for o in in_flight)
-        + "; restarting the engine (PG stays up)"
     )
-    err = restart()
-    if err:
+    if record.outcome is None or record.outcome.error:
+        err = record.outcome.error if record.outcome else "the restart never finished"
         return done([f"the engine restart did not complete: {err}"])
-    evidence["restarted_s"] = round(watcher.now(), 1)
+    evidence["restarted_s"] = round(record.restarted_s or 0.0, 1)
 
     deadline = clock() + end_bound_s
     valid: dict[str, bool] | None = None
@@ -1071,7 +1187,7 @@ def run_pci_check(
         f"end state {'reached' if reached else 'NOT reached'} at {evidence['end_state_s']} s: "
         f"{sum(1 for ok in (valid or {}).values() if ok)}/{expected} valid"
     )
-    lines, files = engine_log.lines_since(marks)
+    lines, files = engine_log.lines_since(record.marks)
     failure_events = {
         name: _find_events(lines, needles)
         for name, needles in PCI_FAILURE_EVENTS.items()
@@ -1094,9 +1210,48 @@ def run_pci_check(
         failure_events=failure_events,
         log_files=files,
         adopted=adopted_indexes(lines),
-        restart_t=evidence["restart_s"],
+        restart_t=record.t_s,
     )
     return done(why)
+
+
+def output_after(chunks_path: Path, t_s: float, *, limit: int = 12) -> list[str]:
+    """The last ``limit`` printable output chunks a step logged at or after ``t_s`` seconds into it
+    (``<step>.chunks.jsonl``: one {"t", "n", "s"} per read, ``s`` its first 160 bytes)."""
+    out: list[str] = []
+    try:
+        raw = chunks_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return out
+    for line in raw:
+        try:
+            c = json.loads(line)
+        except ValueError:
+            continue
+        if float(c.get("t", 0.0)) < t_s:
+            continue
+        text = " ".join(strip_ansi(str(c.get("s", ""))).replace("\r", " ").split())
+        if text and (not out or out[-1] != text):
+            out.append(text[:160])
+    return out[-limit:]
+
+
+def upgrade_after_restart(
+    step: StepResult, chunks_path: Path, restart_at_s: float, restarted_at_s: float
+) -> dict:
+    """What nx upgrade did after the second shell restarted the engine under it: its own status,
+    exit code, how long it ran on, and the output it printed from the restart on."""
+    return {
+        "status": step.status,
+        "exit_code": step.exit_code,
+        "reason": step.reason,
+        "wall_s": round(step.wall_s, 1),
+        "restart_at_s": round(restart_at_s, 1),
+        "restart_done_at_s": round(restarted_at_s, 1),
+        "ran_on_after_restart_s": round(max(0.0, step.wall_s - restarted_at_s), 1),
+        "ended_during_restart": step.wall_s < restarted_at_s,
+        "output_after_restart": output_after(chunks_path, restart_at_s),
+    }
 
 
 def _builders(history: Sequence[PciObs]) -> dict[str, list[int]]:
@@ -1222,16 +1377,37 @@ def format_pci(pci: dict | None) -> list[str]:
                 f" ({t['phase']}; blocks {t['blocks']}, tuples {t['tuples']})"
             )
         return out or ["pci watch (check not run): no pci_ build seen"]
+    rs = pci.get("restart") or {}
     for f in pci.get("in_flight_at_restart") or []:
         out.append(
-            f"pci restart check: in flight at the restart: {f['index']} pid {f['pid']}"
+            f"pci restart check: in flight at the restart (nx upgrade still running: "
+            f"{rs.get('upgrade_running_at_start')}): {f['index']} pid {f['pid']}"
             f" ({f['phase']}; blocks {f['blocks_done']}/{f['blocks_total']},"
             f" tuples {f['tuples_done']}/{f['tuples_total']}) at {f['t_s']} s"
         )
     if not pci.get("in_flight_at_restart"):
-        out.append("pci restart check: no pci_ build was ever seen in flight")
+        out.append(
+            "pci restart check: no pci_ build was in flight while nx upgrade ran "
+            "(the restart was not exercised)"
+        )
+    if rs.get("steps"):
+        out.append(
+            "pci restart check: restart: "
+            + "; ".join(
+                f"{x['name']} {x['status']} exit {x['exit_code']} in {x['wall_s']:.1f} s"
+                for x in rs["steps"]
+            )
+        )
+    up = pci.get("nx_upgrade")
+    if up:
+        out.append(
+            f"pci restart check: nx upgrade after the restart (at {up['restart_at_s']} s of "
+            f"{up['wall_s']} s): {up['status']} exit {up['exit_code']}, ran on "
+            f"{up['ran_on_after_restart_s']} s; output after it: "
+            + (" | ".join(up.get("output_after_restart") or []) or "none")
+        )
     for idx, pids in sorted((pci.get("builders") or {}).items()):
-        out.append(f"pci restart check: {idx} built by pid(s) {pids}")
+        out.append(f"pci restart check: {idx} seen building under pid(s) {pids}")
     if (
         "restarted_s" not in pci
     ):  # the engine was never restarted: nothing after it to report
@@ -1339,7 +1515,6 @@ class Config:
     engine_jar: str | None = None  # NEXUS_SERVICE_JAR for every step from start-old on
     pci_check: bool | None = None  # None: on for a pre-PCI start
     pci_collections: int = PCI_COLLECTIONS_DEFAULT
-    pci_observe_bound_s: float = PCI_OBSERVE_BOUND_S
     pci_end_bound_s: float = PCI_END_STATE_BOUND_S
     profile_upgrade: bool = (
         False  # run nx upgrade under py-spy (timestamped samples, diagnosis only)
@@ -1426,6 +1601,9 @@ def rehearse(from_version: str, cfg: Config) -> dict:
     pci_evidence: dict | None = None
     probe = PgProbe(config)
     watcher: PciWatcher | None = None
+    trigger: PciRestartTrigger | None = None
+    upgrade_done = threading.Event()
+    upgrade_info: dict | None = None
 
     def go(
         name: str,
@@ -1461,6 +1639,42 @@ def rehearse(from_version: str, cfg: Config) -> dict:
             else ""
         )
         return r
+
+    def restart_engine() -> RestartOutcome:
+        """A second shell: nx daemon service stop, then start (no --with-pg), same HOME and env."""
+        done: list[dict] = []
+        for sub in ("stop", "start"):
+            argv = [nx, "daemon", "service", sub]
+            say(
+                f"[{from_version}] pci-restart-{sub}: {' '.join(argv)} (nx upgrade still running)"
+            )
+            rr = run_step(
+                f"pci-restart-{sub}",
+                argv,
+                env=cur["env"],
+                cwd=cwd,
+                silence_limit_s=None,
+                ceiling_s=PCI_RESTART_CEILING_S,
+                log_dir=logs,
+            )
+            say(
+                f"[{from_version}] pci-restart-{sub}: {rr.status} exit {rr.exit_code} in {rr.wall_s:.1f}s {rr.reason}"
+            )
+            done.append(
+                {
+                    "name": f"nx daemon service {sub}",
+                    "status": rr.status,
+                    "exit_code": rr.exit_code,
+                    "wall_s": round(rr.wall_s, 1),
+                    "reason": rr.reason,
+                    "tail": strip_ansi(rr.tail)[-300:],
+                }
+            )
+            if not rr.ok:
+                return RestartOutcome(
+                    f"nx daemon service {sub} {rr.status}: {rr.reason}", done
+                )
+        return RestartOutcome(None, done)
 
     try:
         r = go(
@@ -1580,8 +1794,34 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     # From before the upgrade boot: every sighting of a pci_ build and its pid counts.
                     watcher = PciWatcher(probe.sql)
                     watcher.start()
-            r = go(name, argv, silence=sil, ceiling=cfg.ceilings[name])
+                    trigger = PciRestartTrigger(
+                        watcher,
+                        restart_engine,
+                        lambda: not upgrade_done.is_set(),
+                        EngineLog(config),
+                    )
+                    trigger.start()
+            upgrade_t0 = time.monotonic()
+            try:
+                r = go(name, argv, silence=sil, ceiling=cfg.ceilings[name])
+            finally:
+                if name == "upgrade":
+                    upgrade_done.set()
             stop = not r.ok
+            if name == "upgrade" and trigger is not None:
+                # A restart that began during nx upgrade is given time to finish before doctor starts.
+                if not trigger.join(PCI_RESTART_JOIN_S):
+                    findings.append(
+                        "the PCI restart was still running long after nx upgrade ended"
+                    )
+                rec = trigger.record
+                if rec is not None and rec.done_clock is not None:
+                    upgrade_info = upgrade_after_restart(
+                        r,
+                        logs / "upgrade.chunks.jsonl",
+                        rec.at_clock - upgrade_t0,
+                        rec.done_clock - upgrade_t0,
+                    )
             if name == "upgrade" and before is not None:
                 try:
                     write_rate_info = write_rate(
@@ -1594,40 +1834,27 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 except ProbeError as exc:
                     findings.append(f"write-rate probe failed after nx upgrade: {exc}")
         if pci_on:
-            if stop or watcher is None:
+            record = trigger.record if trigger is not None else None
+            if watcher is None or (stop and record is None):
                 steps.append(
                     StepResult(
                         name=PCI_STEP,
                         status="not-run",
                         reason="an earlier step failed"
-                        if stop
+                        if watcher is not None
                         else "no PG reading before nx upgrade",
                     )
                 )
             else:
-
-                def restart() -> str | None:
-                    for sub in ("stop", "start"):
-                        rr = go(
-                            f"pci-restart-{sub}",
-                            [nx, "daemon", "service", sub],
-                            silence=None,
-                            ceiling=PCI_RESTART_CEILING_S,
-                            judged=False,
-                        )
-                        if not rr.ok:
-                            return f"nx daemon service {sub} {rr.status}: {rr.reason}"
-                    return None
-
                 rep_ = run_pci_check(
                     watcher=watcher,
                     sql=probe.sql,
-                    restart=restart,
+                    record=record,
                     engine_log=EngineLog(config),
                     expected=expected_pci_indexes(prepare or {}),
-                    observe_bound_s=cfg.pci_observe_bound_s,
                     end_bound_s=cfg.pci_end_bound_s,
                     note=lambda m: say(f"[{from_version}] {PCI_STEP}: {m}"),
+                    upgrade=upgrade_info,
                 )
                 pci_evidence = rep_.evidence
                 steps.append(
@@ -1640,6 +1867,10 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 )
                 findings.extend(f"{PCI_STEP}: {w}" for w in rep_.findings)
     finally:
+        upgrade_done.set()
+        if trigger is not None:
+            trigger.cancel()
+            trigger.join(PCI_RESTART_JOIN_S)
         if watcher is not None:
             watcher.stop()
             if pci_evidence is None:
@@ -1797,7 +2028,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="large collections the pre-PCI prepare seeds (one pci_ build each, ~30 s; "
         "default %(default)s so a queue exists)",
     )
-    ap.add_argument("--pci-observe-bound", type=float, default=PCI_OBSERVE_BOUND_S)
     ap.add_argument("--pci-end-bound", type=float, default=PCI_END_STATE_BOUND_S)
     ap.add_argument(
         "--json-out",
@@ -1873,7 +2103,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         engine_jar=engine_jar,
         pci_check=args.pci_restart_check,
         pci_collections=args.pci_collections,
-        pci_observe_bound_s=args.pci_observe_bound,
         pci_end_bound_s=args.pci_end_bound,
         profile_upgrade=args.profile_upgrade,
     )

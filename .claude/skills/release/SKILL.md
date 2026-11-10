@@ -503,19 +503,24 @@ scale with the store, so at the measured MB/s a store of S GB spends about
 S*1024*r/MBps seconds on that work, r being the run's WAL bytes over store bytes
 (also recorded); the 2.4 GB fixture bounds only itself.
 
-The 7.76.0 start adds the PCI keep check after the search step. It waits for a
-`pci_` build to be in flight (none seen is a failure, not a pass), restarts the
-engine as a user does (`nx daemon service stop`, then `start`, PG left running),
-waits for every `pci_` index to be valid, and judges by backend pid: the in-flight
-build counts as kept only if the same pid is seen building after the restart AND
-the engine log carries a `pci_anchor_adopted` line with that index AND the index
-ends valid (a build also leaves the progress view when the next boot terminates it,
-so pid continuity alone proves nothing); each index is built by exactly one pid,
-every index ends valid, and the engine log carries no
-`pci_index_dropped` (failed_build), `pci_index_build_not_done` (CONNECTION_LOST) or
-`pci_ddl_failed` (57P01) after the restart. A rebuild under a new pid is the failure
-it catches. To run it against an engine newer than the wheel's pin, add
-`--engine-jar PATH` (or set `NEXUS_SERVICE_JAR`).
+The 7.76.0 start adds the PCI keep check, made DURING `nx upgrade` (which waits
+for every `pci_` build before it returns, so a restart after it proves nothing).
+A watcher polls from before the upgrade; on the first `pci_` build in flight while
+`nx upgrade` still runs, a second thread restarts the engine as a user in a second
+shell does (`nx daemon service stop`, then `start`, PG left running) and records the
+(index, pid, progress), the restart's outputs and exit codes, and what `nx upgrade`
+did afterwards (judged by its own step rules). Never seeing a build in flight during
+`nx upgrade` is a failure, not a pass. After the search step the driver waits for
+every `pci_` index to be valid and judges by backend pid: the in-flight build counts
+as kept only if the same pid is seen building after the restart AND the engine log
+carries a `pci_anchor_adopted` line with that index AND the index ends valid (a build
+also leaves the progress view when the next boot terminates it, so pid continuity
+alone proves nothing); each index is built by exactly one pid, every index ends
+valid, and the engine log carries no `pci_index_dropped` (failed_build),
+`pci_index_build_not_done` (CONNECTION_LOST) or `pci_ddl_failed` (57P01) after the
+restart. A rebuild under a new pid is the failure it catches. To run it against an
+engine newer than the wheel's pin, add `--engine-jar PATH` (or set
+`NEXUS_SERVICE_JAR`).
 
 All steps must pass from all three starts before the release branch is committed.
 The last line is `UPGRADE REHEARSAL PASSED` (exit 0) or `UPGRADE REHEARSAL FAILED`

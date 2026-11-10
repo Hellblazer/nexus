@@ -13,7 +13,7 @@
 # Three starting points, each in its own work dir with its own step table and verdict line:
 #   the newest published version below the candidate (8.0.0 while 8.1.0 is the candidate), the
 #   last published 7.x release, and 7.76.0 (before per-collection indexes: its upgrade boot builds
-#   every pci_ index, and the PCI keep check restarts the engine mid-build and judges by pid).
+#   every pci_ index, and the PCI keep check restarts the engine mid-build, during nx upgrade, and judges by pid).
 #   `--from-version X.Y.Z` runs one of them alone. Around `nx upgrade` the driver also records the
 #   WAL bytes and MB/s PG wrote (see the driver's docstring for the extrapolation).
 #

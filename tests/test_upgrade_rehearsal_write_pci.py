@@ -14,6 +14,8 @@ import json
 import os
 import stat
 import sys
+import threading
+import time as real_time
 from pathlib import Path
 
 import pytest
@@ -367,16 +369,6 @@ class FakeCluster:
         return any(i == index and s <= self.now for i, _, s, _ in self.builds)
 
 
-def _watcher_and_sleep(cluster: FakeCluster):
-    w = ur.PciWatcher(cluster.sql, clock=cluster.clock)
-
-    def sleep(dt: float) -> None:
-        cluster.now += dt
-        w.poll_once()
-
-    return w, sleep
-
-
 class FakeLog:
     def __init__(self, lines=None, readable=True):
         self.lines = lines or []
@@ -397,25 +389,83 @@ class FakeLog:
         )
 
 
-def _check(cluster, *, expected, log=None, restart=None, observe=300.0, end=900.0):
-    w, sleep = _watcher_and_sleep(cluster)
-    restarted = {}
+def _outcome(ok: bool = True):
+    steps = [
+        {
+            "name": f"nx daemon service {sub}",
+            "status": "ok",
+            "exit_code": 0,
+            "wall_s": 1.0,
+            "reason": "",
+            "tail": "",
+        }
+        for sub in ("stop", "start")
+    ]
+    return ur.RestartOutcome(None, steps)
+
+
+def _run(
+    cluster,
+    *,
+    expected,
+    log=None,
+    restart=None,
+    end=900.0,
+    upgrade_end=100.0,
+    restart_takes=0.0,
+):
+    """nx upgrade runs 0..upgrade_end on the fake clock with the watcher polling every 0.5 s and the
+    trigger looking after each poll; then the post phase (the check) runs, as after the search step."""
+    w = ur.PciWatcher(cluster.sql, clock=cluster.clock)
+    log = log or FakeLog()
+    restarted: dict = {}
 
     def default_restart():
         restarted["t"] = cluster.now
-        return None
+        restarted["upgrade_running"] = cluster.now < upgrade_end
+        t_end = cluster.now + restart_takes
+        while cluster.now < t_end:
+            cluster.now += 0.5
+            w.poll_once()
+        return _outcome()
+
+    trig = ur.PciRestartTrigger(
+        w,
+        restart or default_restart,
+        lambda: cluster.now < upgrade_end,
+        log,
+        clock=cluster.clock,
+    )
+    while cluster.now < upgrade_end:
+        cluster.now += 0.5
+        w.poll_once()
+        trig.poll_once()
+    trig.poll_once()  # nx upgrade has returned
+    while (
+        cluster.now < upgrade_end + 60.0
+    ):  # doctor and search: the watcher thread keeps polling
+        cluster.now += 0.5
+        w.poll_once()
+
+    def sleep(dt: float) -> None:
+        cluster.now += dt
+        w.poll_once()
 
     rep = ur.run_pci_check(
         watcher=w,
         sql=cluster.sql,
-        restart=restart or default_restart,
-        engine_log=log or FakeLog(),
+        record=trig.record,
+        engine_log=log,
         expected=expected,
-        observe_bound_s=observe,
         end_bound_s=end,
         clock=cluster.clock,
         sleep=sleep,
     )
+    return rep, restarted, trig
+
+
+def _check(cluster, **kw):
+    rep, restarted, _ = _run(cluster, **kw)
     return rep, restarted
 
 
@@ -476,17 +526,36 @@ def test_a_connection_lost_build_and_a_57p01_ddl_failure_are_findings() -> None:
 
 def test_no_build_ever_in_flight_is_a_vacuous_failure_not_a_pass() -> None:
     cluster = FakeCluster([], {})
-    rep, restarted = _check(cluster, expected=0, observe=20.0)
+    rep, restarted = _check(cluster, expected=0)
     assert not rep.passed
     assert restarted == {}, "nothing was in flight: the engine must not be restarted"
-    assert any("no pci_ index build" in f and "20" in f for f in rep.findings)
+    assert any("no pci_ index build" in f and "nx upgrade" in f for f in rep.findings)
+    assert rep.evidence["in_flight_at_restart"] == []
 
 
-def test_builds_that_finished_before_the_restart_could_land_say_so() -> None:
+def test_builds_that_finished_before_the_trigger_could_see_them_say_so() -> None:
     cluster = FakeCluster([(A, 11, 0.0, 0.2)], {A: 0.2})
-    rep, restarted = _check(cluster, expected=1, observe=20.0)
+    rep, restarted = _check(cluster, expected=1)
     assert not rep.passed and restarted == {}
     assert any("pci-collections" in f for f in rep.findings)
+
+
+def test_a_build_seen_only_after_nx_upgrade_returned_does_not_count_and_is_named() -> (
+    None
+):
+    # The oddity of the 2026-11-10 run: the check said "never seen in flight" while listing builders.
+    # A build that starts after nx upgrade ended is not a restart-during-upgrade proof: vacuous, no
+    # restart, and the message says the builds WERE seen, after nx upgrade.
+    cluster = FakeCluster([(A, 11, 120.0, 150.0)], {A: 150.0})
+    rep, restarted, trig = _run(cluster, expected=1, upgrade_end=100.0)
+    assert not rep.passed and restarted == {} and trig.record is None
+    text = " ".join(rep.findings)
+    assert "while nx upgrade was running" in text and A in text
+    assert "after it returned" in text
+    assert rep.evidence["builders"] == {A: [11]}
+    lines = " ".join(ur.format_pci(rep.evidence))
+    assert "no pci_ build was in flight while nx upgrade ran" in lines
+    assert "was ever seen" not in lines and "never seen" not in lines
 
 
 def test_an_index_that_never_turns_valid_fails_at_the_bound() -> None:
@@ -524,10 +593,17 @@ def test_an_unreadable_engine_log_is_a_finding_not_a_clean_scan() -> None:
 def test_a_failed_restart_is_a_finding_and_stops_the_check() -> None:
     cluster = FakeCluster([(A, 11, 10.0, 40.0)], {A: 40.0})
     rep, _ = _check(
-        cluster, expected=1, restart=lambda: "nx daemon service stop failed: exit 1"
+        cluster,
+        expected=1,
+        restart=lambda: ur.RestartOutcome(
+            "nx daemon service stop failed: exit 1",
+            [{"name": "nx daemon service stop", "status": "failed", "exit_code": 1}],
+        ),
     )
     assert not rep.passed
     assert any("restart" in f and "exit 1" in f for f in rep.findings)
+    assert "end_state_reached" not in rep.evidence, "a failed restart ends the check"
+    assert rep.evidence["restart"]["steps"][0]["exit_code"] == 1
 
 
 def test_a_build_still_running_under_its_original_pid_at_the_bound_is_named() -> None:
@@ -536,6 +612,172 @@ def test_a_build_still_running_under_its_original_pid_at_the_bound_is_named() ->
     assert not rep.passed
     text = " ".join(rep.findings)
     assert "still building" in text and "11" in text
+
+
+# --- the restart trigger: the second shell, during nx upgrade --------------------------------------------
+
+
+def test_the_restart_fires_on_the_first_sighting_while_nx_upgrade_is_still_running() -> (
+    None
+):
+    # A builds 10..40 (pid 11), B 40..70 (pid 12); nx upgrade runs to t=100.
+    cluster = FakeCluster(
+        [(A, 11, 10.0, 40.0), (B, 12, 40.0, 70.0)], {A: 40.0, B: 70.0}
+    )
+    rep, restarted, trig = _run(cluster, expected=2, restart_takes=5.0)
+    assert restarted["upgrade_running"] is True, (
+        "the restart began while nx upgrade ran"
+    )
+    assert 10.0 <= restarted["t"] <= 10.6, "on the first sighting, not later"
+    rec = trig.record
+    assert rec is not None and trig.finished
+    assert [(o.index, o.pid) for o in rec.in_flight] == [(A, 11)]
+    assert rec.upgrade_running_at_start is True
+    assert rec.upgrade_running_after is True, (
+        "nx upgrade is still going when the restart ends"
+    )
+    assert rec.outcome is not None and rec.outcome.error is None
+    assert [x["name"] for x in rec.outcome.steps] == [
+        "nx daemon service stop",
+        "nx daemon service start",
+    ]
+    ev = rep.evidence
+    assert ev["restart"]["upgrade_running_at_start"] is True
+    assert ev["restart"]["upgrade_running_after"] is True
+    assert [x["exit_code"] for x in ev["restart"]["steps"]] == [0, 0]
+    assert ev["in_flight_at_restart"][0]["index"] == A
+    json.dumps(ev)
+
+
+def test_the_restart_fires_once_even_though_a_later_build_is_also_in_flight() -> None:
+    cluster = FakeCluster(
+        [(A, 11, 10.0, 40.0), (B, 12, 40.0, 70.0)], {A: 40.0, B: 70.0}
+    )
+    calls = []
+
+    def once():
+        calls.append(cluster.now)
+        return _outcome()
+
+    _run(cluster, expected=2, restart=once)
+    assert len(calls) == 1
+
+
+def test_a_restart_never_starts_after_nx_upgrade_has_returned() -> None:
+    cluster = FakeCluster([(A, 11, 120.0, 150.0)], {A: 150.0})
+    calls = []
+    rep, _, trig = _run(
+        cluster,
+        expected=1,
+        upgrade_end=100.0,
+        restart=lambda: calls.append(1) or _outcome(),
+    )
+    assert calls == [] and trig.record is None and trig.finished
+    assert not rep.passed
+
+
+def test_a_nx_upgrade_that_ends_during_the_restart_is_recorded_not_hidden() -> None:
+    cluster = FakeCluster([(A, 11, 95.0, 130.0)], {A: 130.0})
+    rep, restarted, trig = _run(
+        cluster, expected=1, upgrade_end=100.0, restart_takes=10.0
+    )
+    assert restarted["upgrade_running"] is True
+    assert trig.record.upgrade_running_after is False
+    assert rep.evidence["restart"]["upgrade_running_after"] is False
+
+
+def test_a_restart_that_raises_is_a_finding_not_a_crash() -> None:
+    cluster = FakeCluster([(A, 11, 10.0, 40.0)], {A: 40.0})
+
+    def boom():
+        raise OSError("no such nx")
+
+    rep, _, trig = _run(cluster, expected=1, restart=boom)
+    assert not rep.passed
+    assert any("OSError" in f and "no such nx" in f for f in rep.findings)
+
+
+def test_the_trigger_thread_restarts_on_a_sighting_and_stops_cleanly() -> None:
+    rows = {"v": []}
+
+    def sql(q: str):
+        return rows["v"]
+
+    w = ur.PciWatcher(sql, poll_s=0.01)
+    running = threading.Event()
+    running.set()
+    fired = threading.Event()
+
+    def restart():
+        assert running.is_set(), "nx upgrade must still be running at the restart"
+        fired.set()
+        return _outcome()
+
+    trig = ur.PciRestartTrigger(w, restart, running.is_set, FakeLog(), poll_s=0.01)
+    w.start()
+    trig.start()
+    real_time.sleep(0.1)
+    assert not fired.is_set(), "no build in flight: no restart"
+    rows["v"] = [["nexus." + A, "11", "building index", "1", "2", "0", "0"]]
+    assert fired.wait(5.0)
+    assert trig.join(5.0)
+    assert trig.record is not None and trig.record.in_flight[0].pid == 11
+    w.stop()
+
+    # a trigger that never sees a build ends when nx upgrade does
+    w2 = ur.PciWatcher(lambda q: [], poll_s=0.01)
+    up = threading.Event()
+    up.set()
+    t2 = ur.PciRestartTrigger(w2, restart, up.is_set, FakeLog(), poll_s=0.01)
+    t2.start()
+    up.clear()
+    assert t2.join(5.0) and t2.record is None and t2.finished
+
+
+def _chunks(tmp_path: Path, rows) -> Path:
+    f = tmp_path / "upgrade.chunks.jsonl"
+    f.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return f
+
+
+def test_output_after_keeps_what_the_step_printed_from_the_restart_on(
+    tmp_path: Path,
+) -> None:
+    f = _chunks(
+        tmp_path,
+        [
+            {"t": 1.0, "n": 9, "s": "before"},
+            {"t": 20.0, "n": 30, "s": "\x1b[2mWaiting for engine\x1b[0m\r"},
+            {"t": 21.0, "n": 30, "s": "\x1b[2mWaiting for engine\x1b[0m\r"},
+            {"t": 30.0, "n": 9, "s": "Done."},
+        ],
+    )
+    assert ur.output_after(f, 10.0) == ["Waiting for engine", "Done."]
+    assert ur.output_after(tmp_path / "missing.jsonl", 0.0) == []
+
+
+def test_upgrade_after_restart_says_what_nx_upgrade_did_next(tmp_path: Path) -> None:
+    f = _chunks(tmp_path, [{"t": 50.0, "n": 5, "s": "step 2 failed"}])
+    step = ur.StepResult(name="upgrade", status="failed", exit_code=1, wall_s=60.0)
+    info = ur.upgrade_after_restart(step, f, 40.0, 48.0)
+    assert info["status"] == "failed" and info["exit_code"] == 1
+    assert (
+        info["ran_on_after_restart_s"] == 12.0 and info["ended_during_restart"] is False
+    )
+    assert info["output_after_restart"] == ["step 2 failed"]
+    line = " ".join(
+        ur.format_pci(
+            {
+                "in_flight_at_restart": [],
+                "nx_upgrade": info,
+                "restart": {},
+                "restarted_s": 48.0,
+                "expected_pci_indexes": 1,
+            }
+        )
+    )
+    assert "nx upgrade after the restart" in line and "exit 1" in line
+    assert "step 2 failed" in line
 
 
 def test_the_watcher_records_a_pid_for_every_poll_and_survives_pg_going_down() -> None:

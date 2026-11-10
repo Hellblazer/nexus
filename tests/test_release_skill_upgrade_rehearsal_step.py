@@ -47,4 +47,9 @@ def test_the_step_runs_the_gate_on_a_lab_host_and_blocks() -> None:
     assert "from all three starts" in step
     assert "three previous releases" in step and "7.76.0" in step
     assert "PCI keep check" in step and "`--engine-jar PATH`" in step
+    assert "DURING `nx upgrade`" in step and "second shell" in step
+    assert (
+        "never seeing a build in flight during `nx upgrade` is a failure".lower()
+        in step.lower()
+    )
     assert "MB/s" in step and "S*1024*r/MBps" in step
