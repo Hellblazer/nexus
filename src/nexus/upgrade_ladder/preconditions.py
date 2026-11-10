@@ -556,13 +556,16 @@ def engine_wait_budget() -> float:
 
 
 def _engine_healthy(base_url: str, *, timeout_s: float = 2.0) -> bool:
-    import urllib.request  # noqa: PLC0415 — stdlib
+    """The supervisor's own identity probe on the lease's endpoint: ``/health`` answers 200 with the
+    storage service's body, not merely something on the port."""
+    from urllib.parse import urlsplit  # noqa: PLC0415 — stdlib
 
-    try:
-        with urllib.request.urlopen(base_url.rstrip("/") + "/health", timeout=timeout_s) as resp:  # noqa: S310 — the lease's own loopback URL
-            return 200 <= resp.status < 300
-    except Exception:  # noqa: BLE001 — any failure is "not serving yet"
+    from nexus.daemon.service_registry import _probe_health_identity  # noqa: PLC0415 — the one health probe
+
+    parts = urlsplit(base_url)
+    if not parts.hostname or not parts.port:
         return False
+    return _probe_health_identity(parts.hostname, parts.port, timeout=timeout_s)
 
 
 def wait_for_engine(
