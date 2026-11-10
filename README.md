@@ -2,6 +2,8 @@
 
 **Permanent memory and search by meaning for Claude.** Nexus runs on your computer. Search and storage need no API key, no account, and no separate database install. What Claude learns in one session is there in the next. The steps that call a language model (the `nx_answer` operators, aspect extraction, topic labels) use the Claude Code CLI when it is installed, and otherwise an Anthropic API key you set with `nx config set anthropic_api_key`.
 
+> **Known issue in 8.0.0: the first start after an upgrade can take a long time.** If you upgrade an existing install to conexus 8.0.0, the engine updates your stored data the first time it starts. On a large store this can take 20 minutes or more, with heavy disk writes, and `nx doctor` or `nx upgrade` shows no progress while it runs. Let it finish. Do not stop the engine, and do not run `nx upgrade` again while it runs: if the move is stopped, the next start does it again from the beginning. Your data is not lost when this happens. A new install is not affected. Version 8.1.0 fixes this.
+
 [![CI](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml/badge.svg)](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/conexus)](https://pypi.org/project/conexus/)
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
