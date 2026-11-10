@@ -2914,11 +2914,12 @@ public final class PgContainerHelper {
 
     /**
      * How many OTHER backends of this database are blocked on a lock right now ({@code pg_stat_activity.wait_event_type
-     * = 'Lock'}), read through typed DSL on {@code ctx}'s connection (nexus-u5m5g.3). A test that holds a lock and needs
+     * = 'Lock'}), read through typed DSL on {@code ctx}'s connection (nexus-u5m5g.3); the connection's cached backend-status snapshot is dropped first (nexus-u5m5g.9, {@link PgLockWait}). A test that holds a lock and needs
      * N sessions queued behind it waits on this. The wait itself is counted, not a backend's query text: the activity
      * view's text can lag a backend that is already waiting and still show its previous statement.
      */
     public static int backendsBlockedOnLocks(DSLContext ctx) {
+        PgLockWait.clearSnapshot(ctx);   // a held-lock test reads from inside one transaction: the view is cached until it ends (u5m5g.9)
         return ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")),
             DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")
                 .and(DSL.field(DSL.name("pid"), Integer.class).ne(DSL.function("pg_backend_pid", Integer.class)))
@@ -2927,6 +2928,7 @@ public final class PgContainerHelper {
 
     /** The other backends of this database as a table (pid, state, wait event, the start of the query), for a failure message. */
     public static String backendActivity(DSLContext ctx) {
+        PgLockWait.clearSnapshot(ctx);
         return ctx.select(DSL.field(DSL.name("pid"), Integer.class), DSL.field(DSL.name("state"), String.class),
                 DSL.field(DSL.name("wait_event_type"), String.class), DSL.field(DSL.name("wait_event"), String.class),
                 DSL.left(DSL.field(DSL.name("query"), String.class), 90).as("query"))

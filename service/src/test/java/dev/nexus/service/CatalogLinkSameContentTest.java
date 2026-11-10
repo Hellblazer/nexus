@@ -265,7 +265,7 @@ class CatalogLinkSameContentTest extends CatalogReconcileTestBase {
             suCtx(su).selectOne().from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.20.2"))).forUpdate().fetch();
             var call = pool.submit(() -> run(t, false, "1.20.2"));
-            awaitCommitsBlocked(su, 1);   // without the lock pass the linker would not wait for the merge at all
+            awaitCommitsBlocked(su, 1, call);   // without the lock pass the linker would not wait for the merge at all
             assertThat(call.isDone()).as("the linker waits for the row lock").isFalse();
             suCtx(su).update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, "1.20.9")
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.20.2"))).execute();

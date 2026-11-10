@@ -360,7 +360,7 @@ class CatalogLinksUpsertManyTest extends CatalogReconcileTestBase {
             suCtx(su).selectOne().from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(c))).forUpdate().fetch();
             var call = pool.submit(() -> upsert(t, edge(tum(a), tum(c), "cites", "gen")));
-            awaitCommitsBlocked(su, 1);   // the batch resolved c unaliased and is now waiting for its FOR KEY SHARE lock
+            awaitCommitsBlocked(su, 1, call);   // the batch resolved c unaliased and is now waiting for its FOR KEY SHARE lock
             assertThat(call.isDone()).as("the batch waits for the merge").isFalse();
             suCtx(su).update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, b)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(c))).execute();
@@ -388,7 +388,7 @@ class CatalogLinksUpsertManyTest extends CatalogReconcileTestBase {
             suCtx(su).selectOne().from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(c))).forUpdate().fetch();
             var call = pool.submit(() -> upsert(t, edge(tum(a), tum(c), "cites", "gen"), edge(tum(a), tum(b), "cites", "gen")));
-            awaitCommitsBlocked(su, 1);
+            awaitCommitsBlocked(su, 1, call);
             suCtx(su).update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now())
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(c))).execute();
             su.commit();

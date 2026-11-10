@@ -133,9 +133,10 @@ class CatalogReconcileCommitSeamsTest extends CatalogReconcileTestBase {
             su.setAutoCommit(false);
             holdRunHeader(su, t, "runA");
             var a = pool.submit(() -> repo.reconcileCommit(t, OWNER, "runA", COMMIT_TIMEOUT));
-            awaitCommitsBlocked(su, 1);                       // A holds the owner lock and waits on its header
+            awaitCommitsBlocked(su, 1, a);                    // A holds the owner lock and waits on its header
             var b = pool.submit(() -> repo.reconcileCommit(t, OWNER, "runB", COMMIT_TIMEOUT));
-            awaitCommitsBlocked(su, 2);                       // B waits on the owner lock (without it B would be done)
+            PgLockWait.awaitAdvisoryWaiter(su, a, b);         // B itself waits on the owner lock (without it B would be done)
+            awaitCommitsBlocked(su, 2, a, b);                 // and A is still parked on its header
             assertThat(b.isDone()).as("the second run of the owner waits for the first").isFalse();
             assertThat(runState(t, "runB")).as("and has written nothing").isEqualTo("staged");
             assertThat(liveCount(t, OWNER)).as("no document of B or A yet").isZero();
