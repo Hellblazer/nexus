@@ -85,7 +85,9 @@ def render(entries: Iterable[dict[str, Any]], *, now: float) -> list[str]:
                 inner = _progress(step, None)
                 lines.append(f"  now: {step['what']}" + (f" ({inner})" if inner else ""))
             on_stop = entry.get("on_stop")
-            if entry.get("safe_to_stop") is True:
+            if isinstance(entry.get("notice"), str) and entry["notice"]:
+                lines.append(f"  {entry['notice']}")
+            elif entry.get("safe_to_stop") is True:
                 lines.append(f"  It is safe to stop" + (f": {on_stop}." if on_stop else "."))
             else:
                 lines.append(

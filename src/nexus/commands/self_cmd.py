@@ -2321,9 +2321,9 @@ def prune_uv_cache() -> str:
     from nexus.progress import uv_cache_prune  # noqa: PLC0415 — deferred, keeps the CLI cold start light
 
     try:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, as above
+        import nexus.config as _config  # noqa: PLC0415 — deferred, as above
 
-        config_dir = nexus_config_dir()
+        config_dir = _config.nexus_config_dir()
     except Exception as exc:  # noqa: BLE001 — never raises: this is cleanup after a finished install
         return f"uv cache prune skipped: {exc}"
     return uv_cache_prune.prune(run=run_bounded, spawn=uv_cache_prune.spawn_detached, config_dir=config_dir)

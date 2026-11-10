@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import os
 import time
 from collections.abc import Callable
@@ -35,6 +36,53 @@ WRITE_EVERY_S: float = 5.0
 FILE_NAME = "migration-status.json"
 
 ON_STOP = "the changeset in progress starts over at the next start; finished changesets are kept"
+#: Changesets whose interruption costs the most (a long copy that restarts
+#: from its first row): the notice says so in so many words (Sam lost hours
+#: not knowing that stopping made it worse; wording agreed with the engine side).
+DO_NOT_STOP_IDS: frozenset[str] = frozenset({"vectors-030-1"})
+DO_NOT_STOP = "Do not stop nexus: stopping restarts this step from the beginning. Your data is safe."
+#: The active statement and the sizes are read at most this often while migrating.
+STEP_EVERY_S: float = 30.0
+#: The walk steps of vectors-030-1, by the dollar tag of its top-level DO
+#: block (pg_stat_activity shows the block, not the statement inside it);
+#: wording from the engine side. Any other statement reads "finishing up".
+WALK_STEPS: dict[str, str] = {
+    "w0": "preparing",
+    "w2": "creating the new per-model tables",
+    "w3": "copying chunks into the per-model tables",
+    "w5": "building the new tables' indexes",
+    "w6": "checking the copy row by row",
+    "w71": "swapping the new tables in",
+    "w72": "swapping the new tables in",
+    "w75": "renaming constraints and indexes",
+    "w77": "recreating views, policies and grants",
+}
+#: The copy step, the only one whose database growth estimates progress.
+COPY_STEP = "w3"
+_TAG = re.compile(r"\$(w\d+)\$")
+
+
+def walk_step(statement: str | None) -> tuple[str | None, str]:
+    """(tag, plain words) for the executing statement of a walked changeset."""
+    m = _TAG.search(statement or "")
+    tag = m.group(1) if m else None
+    return tag, WALK_STEPS.get(tag or "", "finishing up")
+
+
+def copy_estimate(db_now: int, db_base: int, source: int) -> int | None:
+    """Percent copied, from database growth since the step's first sample
+    over the source table's size, capped at 99 until the changeset ends."""
+    if source <= 0 or db_now < db_base:
+        return None
+    return min(99, int(100 * (db_now - db_base) / source))
+
+
+def changeset_id(changeset: str | None) -> str | None:
+    """``db/changelog/x.xml::vectors-030-1::author`` -> ``vectors-030-1``; a bare id stays."""
+    if not changeset:
+        return None
+    parts = changeset.split("::")
+    return parts[1] if len(parts) >= 3 else parts[0]
 
 
 def status_path(config_dir: Path) -> Path:
@@ -45,11 +93,15 @@ def iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def entry(*, changeset: str | None, pending: int | None, started: float, updated: float) -> dict[str, Any]:
-    """The migration as one ``boot_work`` entry."""
+def entry(
+    *, changeset: str | None, pending: int | None, started: float, updated: float, step: str | None = None,
+) -> dict[str, Any]:
+    """The migration as one ``boot_work`` entry. *statement* is the head of the
+    SQL the migrating backend is executing (``pg_stat_activity``), shown as the
+    inner step. *step* is the inner step's line, already in plain words."""
     where = []
     if changeset:
-        where.append(f"at {changeset}")
+        where.append(f"at {changeset_id(changeset)}")
     if isinstance(pending, int):
         where.append(f"{pending} changeset(s) left")
     suffix = f" ({', '.join(where)})" if where else ""
@@ -60,9 +112,12 @@ def entry(*, changeset: str | None, pending: int | None, started: float, updated
         "done": None,
         "total": None,
         "unit": None,
-        "step": None,
+        "step": {"what": step} if step else None,
         "safe_to_stop": False,
         "on_stop": ON_STOP,
+        # Client-only field (the file source): a fixed line shown in place of
+        # the generic stop advice.
+        "notice": DO_NOT_STOP if changeset_id(changeset) in DO_NOT_STOP_IDS else None,
         "updated": updated,
     }
 
@@ -110,9 +165,18 @@ class Recorder:
     ends. Tracks when MIGRATING began, throttles writes, clears the record as
     soon as the phase is left."""
 
-    def __init__(self, config_dir: Path, *, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self, config_dir: Path, *, clock: Callable[[], float] = time.time,
+        statement_probe: Callable[[], tuple[str | None, int | None, int | None]] | None = None,
+    ) -> None:
+        """*statement_probe* returns (executing statement head, database size,
+        source table size); any part may be ``None``."""
         self._dir = config_dir
         self._clock = clock
+        self._probe = statement_probe
+        self._step: str | None = None
+        self._last_probe = -math.inf
+        self._base: tuple[str | None, int] | None = None  # (changeset, db size at its first sample)
         self._started: float | None = None
         self._last_write = -math.inf
         self._last_key: tuple[Any, ...] | None = None
@@ -130,8 +194,31 @@ class Recorder:
         key = (changeset, pending)
         if key == self._last_key and now - self._last_write < WRITE_EVERY_S:
             return
+        if self._probe is not None and changeset_id(changeset) in DO_NOT_STOP_IDS and (
+            now - self._last_probe >= STEP_EVERY_S or key != self._last_key
+        ):
+            self._last_probe = now
+            self._step = self._walk_step(changeset)
+        elif changeset_id(changeset) not in DO_NOT_STOP_IDS:
+            self._step = None
         self._last_key, self._last_write = key, now
-        write(self._dir, entry(changeset=changeset, pending=pending, started=self._started, updated=now))
+        write(self._dir, entry(
+            changeset=changeset, pending=pending, started=self._started, updated=now, step=self._step,
+        ))
+
+    def _walk_step(self, changeset: str | None) -> str | None:
+        try:
+            statement, db_size, source = self._probe()  # type: ignore[misc]
+        except Exception:  # noqa: BLE001 — the probe is advisory
+            return None
+        tag, words = walk_step(statement)
+        if isinstance(db_size, int) and (self._base is None or self._base[0] != changeset):
+            self._base = (changeset, db_size)
+        if tag == COPY_STEP and isinstance(db_size, int) and isinstance(source, int) and self._base:
+            pct = copy_estimate(db_size, self._base[1], source)
+            if pct is not None:
+                return f"{words}: about {pct}% copied (estimate)"
+        return words
 
     def close(self) -> None:
         self._started = None

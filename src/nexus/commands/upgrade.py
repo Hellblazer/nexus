@@ -197,10 +197,10 @@ def _say_if_the_engine_is_migrating(*, auto_mode: bool) -> None:
     """nexus-mjmjl: the steps below wait on the engine while it migrates; say
     so first (to the log under ``--auto``, whose stdout stays quiet). Never raises."""
     try:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+        import nexus.config as _config  # noqa: PLC0415 — deferred, keeps the CLI cold start light
         from nexus.progress.boot_work import notice  # noqa: PLC0415 — stdlib-only, deferred as above
 
-        lines = notice(nexus_config_dir())
+        lines = notice(_config.nexus_config_dir())
     except Exception:  # noqa: BLE001 — advisory: the upgrade never fails on it
         return
     for line in lines:

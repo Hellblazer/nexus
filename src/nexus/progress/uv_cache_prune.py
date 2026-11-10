@@ -23,6 +23,8 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import IO, Any
 
+from nexus.util.nx_argv import argv_off_cwd
+
 #: Seconds the foreground prune waits for uv's cache lock (``UV_LOCK_TIMEOUT``).
 LOCK_WAIT_S: int = 15
 #: Seconds the background prune waits for the lock: it finishes once the uv
@@ -30,9 +32,6 @@ LOCK_WAIT_S: int = 15
 BACKGROUND_LOCK_WAIT_S: int = 6 * 3600
 #: The foreground prune's own bound once it holds the lock.
 PRUNE_TIMEOUT_S: int = 600
-
-ARGV: tuple[str, ...] = ("uv", "cache", "prune")
-
 
 def cache_busy(stderr: str) -> bool:
     """True when uv refused because another uv process holds the cache.
@@ -87,7 +86,7 @@ def prune(
     env = dict(os.environ if environ is None else environ)
     env["UV_LOCK_TIMEOUT"] = str(LOCK_WAIT_S)
     try:
-        r = run(list(ARGV), timeout=PRUNE_TIMEOUT_S, env=env)
+        r = run(argv_off_cwd(["uv", "cache", "prune"]), timeout=PRUNE_TIMEOUT_S, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return f"uv cache prune skipped: {exc}"
     if r.returncode == 0:
@@ -113,7 +112,7 @@ def prune(
         bg_env = dict(env)
         bg_env["UV_LOCK_TIMEOUT"] = str(BACKGROUND_LOCK_WAIT_S)
         with path.open("ab") as fh:
-            child = spawn(list(ARGV), bg_env, fh)
+            child = spawn(argv_off_cwd(["uv", "cache", "prune"]), bg_env, fh)
         pid = getattr(child, "pid", None)
         if isinstance(pid, int):
             pid_path(config_dir).write_text(str(pid), encoding="utf-8")
@@ -131,24 +130,31 @@ def prune(
 
 def spawn_detached(argv: Sequence[str], env: Mapping[str, str], log: IO[bytes]) -> subprocess.Popen[bytes]:
     """Start *argv* outside this process's session (POSIX) or process group and
-    console (Windows), in a stable directory, stdout and stderr to *log*."""
+    console (Windows), in a stable directory, stdout and stderr to *log*. The
+    head is resolved off the working directory (a planted ``uv.exe`` in the
+    user's clone must not run). Bytes mode: nothing is decoded here."""
     from nexus.util.stable_cwd import detached_spawn_kwargs  # noqa: PLC0415 — stdlib-only helper, deferred
 
-    kwargs: dict[str, Any] = {
-        "stdin": subprocess.DEVNULL, "stdout": log, "stderr": log, "close_fds": True,
-        **detached_spawn_kwargs(env),
-    }
-    kwargs["env"] = {**kwargs.get("env", env)}
+    placed = detached_spawn_kwargs(env)
+    cwd = placed["cwd"]
+    child_env = dict(placed.get("env", env))
     if os.name != "nt":
-        return subprocess.Popen(list(argv), start_new_session=True, **kwargs)  # noqa: S603 — fixed argv
+        return subprocess.Popen(  # noqa: S603 — fixed argv, resolved head
+            argv_off_cwd(list(argv)), stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True, cwd=cwd, env=child_env,
+            start_new_session=True,
+        )
     # CREATE_BREAKAWAY_FROM_JOB so a job the caller runs in (an installer, a CI
     # shell) does not end the prune with it; a job that forbids breakaway
     # refuses the flag, and then it starts without (as the session-end
     # launcher does).
     create_no_window, new_group, breakaway = 0x08000000, 0x00000200, 0x01000000
     try:
-        return subprocess.Popen(  # noqa: S603 — fixed argv
-            list(argv), creationflags=create_no_window | new_group | breakaway, **kwargs,
+        return subprocess.Popen(  # noqa: S603 — fixed argv, resolved head
+            argv_off_cwd(list(argv)), stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True, cwd=cwd, env=child_env,
+            creationflags=create_no_window | new_group | breakaway,
         )
     except OSError:
-        return subprocess.Popen(list(argv), creationflags=create_no_window | new_group, **kwargs)  # noqa: S603 — fixed argv
+        return subprocess.Popen(  # noqa: S603 — fixed argv, resolved head
+            argv_off_cwd(list(argv)), stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True, cwd=cwd, env=child_env,
+            creationflags=create_no_window | new_group,
+        )

@@ -40,12 +40,12 @@ def test_writes_are_throttled_unless_the_changeset_moves(tmp_path: Path) -> None
     clock = Clock()
     rec = ms.Recorder(tmp_path, clock=clock)
     rec.tick(migrating=True, changeset="a", pending=2)
-    first = ms.status_path(tmp_path).read_text()
+    first = ms.status_path(tmp_path).read_text(encoding="utf-8")
     clock.now += 1
     rec.tick(migrating=True, changeset="a", pending=2)
-    assert ms.status_path(tmp_path).read_text() == first  # within WRITE_EVERY_S, nothing new
+    assert ms.status_path(tmp_path).read_text(encoding="utf-8") == first  # within WRITE_EVERY_S, nothing new
     rec.tick(migrating=True, changeset="b", pending=1)
-    assert '"at b, 1 changeset(s) left"' not in first and "at b" in ms.status_path(tmp_path).read_text()
+    assert '"at b, 1 changeset(s) left"' not in first and "at b" in ms.status_path(tmp_path).read_text(encoding="utf-8")
 
 
 def test_leaving_the_migrating_phase_clears_the_record_at_once(tmp_path: Path) -> None:
@@ -170,3 +170,67 @@ def test_a_lease_wait_that_gives_up_mid_migration_says_it_is_still_running(tmp_p
     text = still_migrating_message(60.0, tmp_path)
     assert text.startswith("The storage service is still migrating its database after 60s")
     assert "Run this command again once it finishes" in text and str(tmp_path / "logs") in text
+
+
+CS_030 = "db/changelog/vectors-030-model-tenant-partition-functions.xml::vectors-030-1::nexus-3wh8d.7"
+
+
+def test_the_per_model_copy_says_its_step_its_estimate_and_not_to_stop(tmp_path: Path) -> None:
+    """vectors-030-1 runs inside Liquibase before HTTP binds: the record is the
+    only channel. Wording agreed with the engine side."""
+    clock = Clock()
+    samples = iter([
+        ("DO $w3$ BEGIN INSERT INTO nexus.chunks_new ...", 10_000, 4_000),  # first sample: the baseline
+        ("DO $w3$ BEGIN INSERT INTO nexus.chunks_new ...", 11_680, 4_000),  # +1680 of 4000: 42%
+        ("DO $w3$ ...", 99_000, 4_000),                                     # capped below 100
+        ("DO $w6$ BEGIN ...", 99_000, 4_000),                               # past the copy: no estimate
+        ("ANALYZE nexus.chunks", 99_000, 4_000),
+    ])
+    rec = ms.Recorder(tmp_path, clock=clock, statement_probe=lambda: next(samples))
+    rec.tick(migrating=True, changeset=CS_030, pending=4)
+    lines = boot_work.notice(tmp_path, clock=clock)
+    assert lines[0].startswith("The engine is migrating its database schema (at vectors-030-1, 4 changeset(s) left)")
+    assert lines[1] == "  now: copying chunks into the per-model tables: about 0% copied (estimate)"
+    assert lines[2] == "  Do not stop nexus: stopping restarts this step from the beginning. Your data is safe."
+    seen = []
+    for _ in range(4):
+        clock.now += ms.STEP_EVERY_S
+        rec.tick(migrating=True, changeset=CS_030, pending=4)
+        seen.append(boot_work.notice(tmp_path, clock=clock)[1])
+    assert seen == [
+        "  now: copying chunks into the per-model tables: about 42% copied (estimate)",
+        "  now: copying chunks into the per-model tables: about 99% copied (estimate)",
+        "  now: checking the copy row by row",
+        "  now: finishing up",
+    ]
+
+
+def test_another_changeset_gets_no_step_and_the_generic_stop_line(tmp_path: Path) -> None:
+    calls: list[int] = []
+
+    def probe():
+        calls.append(1)
+        return ("CREATE INDEX ...", 1, 1)
+
+    clock = Clock()
+    ms.Recorder(tmp_path, clock=clock, statement_probe=probe).tick(
+        migrating=True, changeset="db/changelog/vectors-058.xml::vectors-058-1::x", pending=1,
+    )
+    lines = boot_work.notice(tmp_path, clock=clock)
+    assert len(lines) == 2 and "interrupting this command does not stop it" in lines[1]
+    assert calls == []  # the probe runs only for the walked changeset
+
+
+def test_the_probe_output_parses_and_a_bad_line_reads_as_unknown() -> None:
+    from nexus.daemon.storage_service_daemon import _parse_migration_probe
+
+    assert _parse_migration_probe("123|45|DO $w3$ a|b\n") == ("DO $w3$ a|b", 123, 45)
+    assert _parse_migration_probe("") == (None, None, None)
+    assert _parse_migration_probe("x|²|") == (None, None, None)
+
+
+def test_the_copy_estimate_is_capped_and_refuses_nonsense() -> None:
+    assert ms.copy_estimate(150, 100, 100) == 50
+    assert ms.copy_estimate(1000, 100, 100) == 99
+    assert ms.copy_estimate(50, 100, 100) is None
+    assert ms.copy_estimate(150, 100, 0) is None
