@@ -19,8 +19,10 @@ chunk is timestamped, and a step FAILS when it prints nothing for more than the 
 runs past its ceiling, or exits non-zero. A breached step is killed with its whole process group
 and the run stops there; the steps after it are reported as not run.
 
-Non-vacuity: the prepared store's row count must reach a floor, every judged step must have run,
-doctor must have printed something and no ``✗``, and the search must return the sentinel.
+Non-vacuity: the prepared store's row count must reach a floor (PG's own count, read before and after
+``nx upgrade``, must too and must not fall), ``nx --version`` after the package upgrade must name the
+candidate, every judged step must have run, ``nx upgrade`` must not report DEFERRED work, doctor must
+have printed something and no ``✗``, and the search must return the sentinel.
 
 Write rate. Around ``nx upgrade`` the driver reads the install's own PG (its bundled psql and
 ``pg_credentials``): ``pg_current_wal_lsn()`` and the ``pg_stat_wal`` / ``pg_stat_io`` write counters,
@@ -48,16 +50,29 @@ FAILURE (vacuous), not a pass. The fix ships in an engine newer than the wheel's
 ``--engine-jar`` (or ``NEXUS_SERVICE_JAR``) to run the check against a jar built from the fix; the
 override applies from ``start-old`` on, never to the old client's stack.
 
-The ceilings are set from the first real-store runs (chas lab-m, 2026-11-10, the f3yqd.1 seeder's
-86,000 rows, 2.4 GB): about eight to ten times the slowest measured step. They bound THIS fixture;
-a much larger store needs its own measurement. The silence limit is Sam's "a few seconds".
+The ceilings are per start and come from the first real-store runs (chas lab-m, 2026-11-10; the
+f3yqd.1 seeder's 86,000 rows, 2.4 GB, and for 7.76.0 140,000 rows in five collections, 2.6 GB). ``nx upgrade``
+is 120 s from the newest release below the candidate (2.3 s measured) and from the last 7.x (13.9-14.2 s),
+and PENDING from 7.76.0 (460-662 s on develop d258282c6, 211 s with the rung-scan fix e979863a6,
+nexus-mjmjl, in conexus 8.1.1): nexus-f3yqd.5 owns that number and sets it from a develop run after the fix
+lands, with its margin and store size stated, so until then that start can end PENDING at best and the
+gate NOT RUN. doctor (60 s, 7.5 s measured), search (30 s, 2.8 s) and the last-7x upgrade sit at about 8 to
+11 times the slowest measured; the newest-below upgrade (about 50 times) and the package upgrade (120 s
+against 0.4 s) are floors against a hang, not margins. All of them bound THIS fixture; a much larger store
+needs its own measurement. The 10 s silence limit is our chosen reading of Sam's "a few seconds", not a
+number he gave, pending his confirmation.
 
     upgrade_rehearsal.py --work DIR --target-wheel dist/conexus-X-py3-none-any.whl
     upgrade_rehearsal.py --work DIR --target-release 8.1.0 --from-version 8.0.0
     upgrade_rehearsal.py --work DIR --target-wheel W --from-version 7.76.0 --engine-jar service/target/nexus-service-X.jar
 
-Exit 0: every run passed. 1: a breach, a step failure or a non-vacuity finding in any run.
-2: the harness could not start (unreachable index, unknown version, bad flags).
+The last line is ``UPGRADE REHEARSAL GATE: <word> ...`` (the per-start lines say ``UPGRADE REHEARSAL START``)
+and the exit code says the same word. Exit 0 PASSED: every start passed and no non-default flag was used.
+1 FAILED: a breach, a step failure or a non-vacuity finding in any start (a failure outranks a pending
+ceiling). 2 NOT RUN (the harness could not start: unreachable index, unknown version, bad flags, a wheel
+whose version is already on PyPI; or a start's ceiling is pending) or NOT THE RELEASE GATE (every start
+passed under a flag that changes what is judged: --standin, --rows-floor, --silence-limit, a --*-ceiling,
+--prepare-cmd, --no-pci-restart-check, a single --from-version, --engine-jar).
 """
 
 from __future__ import annotations
@@ -84,6 +99,7 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable, Sequence
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 
 # --- named limits, from the 2026-11-10 real-store runs (slowest measured in brackets) ---------
@@ -1158,7 +1174,7 @@ def judge_pci(
     still_building: Sequence[PciObs],
     failure_events: dict[str, list[str]],
     log_files: Sequence[str],
-    adopted: set[str] = frozenset(),
+    adopted: AbstractSet[str] = frozenset(),
     restart_t: float = 0.0,
     probe_errors: int = 0,
 ) -> list[str]:
@@ -2167,13 +2183,12 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     trigger.start()
             upgrade_t0 = time.monotonic()
             pending = name == "upgrade" and upgrade_ceiling is None
-            ceiling = (
-                UPGRADE_PENDING_HANG_GUARD_S
-                if pending
-                else upgrade_ceiling
-                if name == "upgrade"
-                else cfg.ceilings[name]
-            )
+            if name != "upgrade":
+                ceiling = cfg.ceilings[name]
+            elif upgrade_ceiling is None:
+                ceiling = UPGRADE_PENDING_HANG_GUARD_S  # never "no limit": see the pending note
+            else:
+                ceiling = upgrade_ceiling
             try:
                 r = go(name, argv, silence=sil, ceiling=ceiling)
             finally:

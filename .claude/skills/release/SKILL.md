@@ -469,39 +469,65 @@ what a user sees. This one takes a real install of the previous release with a
 sizeable local store, upgrades it the way a user does, and times what the user
 waits through.
 
-Run it after Step 3's version bump, in the release worktree, on chas:
+Run it after Step 3's version bump, in the release worktree, on chas. It outruns a
+10-minute foreground call, so start it as a background command with its output in a
+file, and read the file when the notice comes (never poll):
 
 ```bash
-lab-remote -c lab-m -- tests/e2e/upgrade-rehearsal.sh
+lab-remote -c lab-m -- tests/e2e/upgrade-rehearsal.sh > /tmp/upgrade-rehearsal-X.Y.Z.out 2>&1   # run_in_background
 ```
 
-It starts from three previous releases, each in its own work dir with its own step
-table and verdict line: the newest published version below the candidate (8.0.0 for
-an 8.1.0 cut), the last published 7.x (7.99.0), and 7.76.0, the last release before
-per-collection indexes (PCI), whose upgrade boot builds every `pci_` index. For each it:
+It starts from two or three previous releases, each in its own work dir with its own
+step table and its own `UPGRADE REHEARSAL START (from X)` line: the newest published
+version below the candidate (8.0.0 for an 8.1.0 cut), the last published 7.x (7.99.0),
+and 7.76.0, the last release before per-collection indexes (PCI), whose upgrade boot
+builds every `pci_` index. The first two are one start when they are the same release
+(an 8.0.0 cut starts from 7.99.0 once), and 7.76.0 is left out when the candidate is
+not newer than it. For each start it:
 
 1. installs that release and builds its local store with the f3yqd.1 seeder
    (`scripts/upgrade_boot_writes.py --prepare-only`: 86,000 knowledge rows, about
-   2.4 GB, about 13 minutes on lab-m; the 7.76.0 start seeds five large collections
-   instead, about 140,000 rows), then starts its engine;
+   2.4 GB; the 7.76.0 start seeds five large collections instead, about 140,000
+   rows), then starts its engine;
 2. upgrades the package to the candidate wheel built from the worktree
-   (`NEXUS_TARGET_RELEASE=X.Y.Z` uses the published version instead);
+   (`NEXUS_TARGET_RELEASE=X.Y.Z` uses the published version instead), and checks that
+   `nx --version` names the candidate;
 3. runs `nx upgrade`, `nx doctor` and `nx search` for the seeder's sentinel note.
 
 Each of those steps runs under a pty and FAILS when it prints nothing for 10 s, runs
-past its ceiling (upgrade 120 s, doctor 60 s, search 30 s, package 120 s), or exits
-non-zero. A run also fails when it checked nothing: the store under 50,000 rows, a
-step not run, a cross in doctor, the sentinel not found, or a `DEFERRED` rung. The
-ceilings come from the first real-store runs on 2026-11-10 (slowest: `nx upgrade`
-13.9 s from 7.99.0) and bound this fixture's size; they say nothing about a store
-many times larger, where a silent stretch grows with the data.
+past its ceiling, or exits non-zero. The 10 s is our chosen reading of Sam's "a few
+seconds", not a number he gave; it stands until he confirms it. The ceilings are
+per start, measured on 2026-11-10 on chas lab-m:
+
+- `nx upgrade` from the newest release below the candidate: 120 s (2.3 s from 8.0.0).
+- `nx upgrade` from the last 7.x: 120 s (13.9 to 14.2 s from 7.99.0).
+- `nx upgrade` from 7.76.0: **PENDING**. Measured 460 to 662 s on develop d258282c6
+  and 211 s with the rung-scan fix e979863a6 (nexus-mjmjl, in conexus 8.1.1), on
+  140,000 rows in five collections (2.6 GB). nexus-f3yqd.5 owns the number and sets
+  it from a develop run after that fix lands, with its margin and the store size
+  stated; no guessed value stands in until then. Until it is set this start cannot
+  pass: it is reported PENDING and the gate line says NOT RUN (exit 2), naming the
+  pending ceiling. A release does not go past 6e on that: Sam decides.
+- `nx doctor` 60 s (7.5 s), `nx search` 30 s (2.8 s), package upgrade 120 s (0.4 s).
+
+The margins are not uniform. Doctor, search and the last-7x upgrade sit at about 8 to
+11 times the slowest measured; the newest-below upgrade ceiling is about 50 times its
+2.3 s and the package ceiling is 300 times its 0.4 s, so those two are floors against
+a hang, not tight margins. All of them bound this fixture's size and say nothing about
+a store many times larger, where a silent stretch grows with the data.
+
+A run also fails when it checked nothing: PG's own row count (read through the
+install's psql) under 50,000 before or after `nx upgrade`, or fewer rows after than
+before; a step not run; a cross in doctor; the sentinel not found; a `DEFERRED` rung;
+or a PCI watcher whose PG probe failed more than ten times.
 
 Around `nx upgrade` the driver reads the install's own PG (`pg_current_wal_lsn`,
-`pg_stat_wal`, `pg_stat_io`) and records the WAL bytes, seconds and MB/s per start
-(MB = 2**20 bytes) in each table and `verdict.json`. The bytes an upgrade writes
-scale with the store, so at the measured MB/s a store of S GB spends about
-S*1024*r/MBps seconds on that work, r being the run's WAL bytes over store bytes
-(also recorded); the 2.4 GB fixture bounds only itself.
+`pg_stat_wal`, `pg_stat_io`) and records the WAL bytes, seconds and MB/s per start,
+the second reading taken when `nx upgrade` returns (MB = 2**20 bytes), in each table
+and `verdict.json`. The bytes an upgrade writes scale with the store, so at the
+measured MB/s a store of S GB spends about S*1024*r/MBps seconds on that work, r being
+the run's WAL bytes over store bytes (also recorded); the 2.4 GB fixture bounds only
+itself.
 
 The 7.76.0 start adds the PCI keep check, made DURING `nx upgrade` (which waits
 for every `pci_` build before it returns, so a restart after it proves nothing).
@@ -510,23 +536,54 @@ A watcher polls from before the upgrade; on the first `pci_` build in flight whi
 shell does (`nx daemon service stop`, then `start`, PG left running) and records the
 (index, pid, progress), the restart's outputs and exit codes, and what `nx upgrade`
 did afterwards (judged by its own step rules). Never seeing a build in flight during
-`nx upgrade` is a failure, not a pass. After the search step the driver waits for
-every `pci_` index to be valid and judges by backend pid: the in-flight build counts
-as kept only if the same pid is seen building after the restart AND the engine log
-carries a `pci_anchor_adopted` line with that index AND the index ends valid (a build
-also leaves the progress view when the next boot terminates it, so pid continuity
-alone proves nothing); each index is built by exactly one pid, every index ends
-valid, and the engine log carries no `pci_index_dropped` (failed_build),
-`pci_index_build_not_done` (CONNECTION_LOST) or `pci_ddl_failed` (57P01) after the
-restart. A rebuild under a new pid is the failure it catches. To run it against an
-engine newer than the wheel's pin, add `--engine-jar PATH` (or set
-`NEXUS_SERVICE_JAR`).
+`nx upgrade` is a failure, not a pass. After the search step the driver waits (up to
+900 s) for every `pci_` index to be valid and judges by backend pid, from the moment
+the restart finished: the in-flight build counts as kept only if the same pid is seen
+building after the restart AND the engine log carries a `pci_anchor_adopted` line with
+that index AND the index ends valid (a build also leaves the progress view when the
+next boot terminates it, so pid continuity alone proves nothing); each index is built
+by exactly one pid, every index ends valid, and the engine log carries no
+`pci_index_dropped` (failed_build), `pci_index_build_not_done` (CONNECTION_LOST) or
+`pci_ddl_failed` (57P01) after the restart. A rebuild under a new pid is the failure
+it catches. To run it against an engine newer than the wheel's pin, add
+`--engine-jar PATH` (or set `NEXUS_SERVICE_JAR`); that run is not the release gate.
 
-All steps must pass from all three starts before the release branch is committed.
-The last line is `UPGRADE REHEARSAL PASSED` (exit 0) or `UPGRADE REHEARSAL FAILED`
-(exit 1), and a failure keeps its step logs and engine and PG logs on chas. A
-failure is a release blocker, never waived here: a silent or slow step is what the
-user sees. Paste the three step tables into the cut bead.
+The last line is the gate's own, `UPGRADE REHEARSAL GATE: <word> ...`, and the only
+one the wrapper reads (per-start lines say `UPGRADE REHEARSAL START`). The exit code
+says the same:
+
+- exit 0, `PASSED`: every start passed and no non-default setting was used.
+- exit 1, `FAILED`: a breach, a failed step, a non-vacuity finding, or a postmaster
+  that survived the run. A run that ends with no gate line is FAILED too.
+- exit 2, `NOT RUN`: the harness could not start, a start's ceiling is PENDING, or the
+  candidate wheel's version is already published on PyPI (the bump was skipped); or
+  `NOT THE RELEASE GATE`: every start passed but a flag changed what is judged
+  (`--standin`, `--rows-floor`, `--silence-limit`, any `--*-ceiling`, `--prepare-cmd`,
+  `--no-pci-restart-check`, a single `--from-version`, `--engine-jar`).
+
+Only exit 0 clears 6e. A FAILED is a release blocker, never waived here: a silent or
+slow step is what the user sees. NOT RUN and NOT THE RELEASE GATE are not passes
+either, and a release does not proceed on them; while the 7.76.0 ceiling is pending,
+Sam decides what the release does. A failure keeps its step logs and engine and PG
+logs on chas. Paste each start's step table into the cut bead.
+
+A setup failure is not a judged breach. When a start's install, prepare, engine start
+or version check fails (the network, PyPI, a stuck download), the start reports a
+`setup step ... failed` finding and every later step carries that reason; the gate
+line is FAILED (exit 1) but nothing about the candidate was judged. Rerun the gate;
+the same setup failure twice is a blocker to run down before the cut. A judged breach
+is a `package-upgrade`, `upgrade`, `doctor` or `search` step that says silent, ceiling
+or failed, or a non-vacuity or PCI finding: that is the candidate, and rerunning
+without a fix proves nothing.
+
+Wall time, from the measured parts: about 50 to 75 minutes. Preparing the store takes
+about 13 minutes for each 86,000-row start and about 20 minutes for the five-collection
+7.76.0 start; `nx upgrade` takes 2 to 14 s from the other starts and 211 to 660 s from
+7.76.0; the PCI end wait adds up to 900 s; installs and the wheel build come on top.
+
+The plugin-only fast lane does not run it: that lane builds off the base tag, whose
+tree has no gate, and ships a wheel and engine that are the base tag's but for the
+version.
 
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 
@@ -1057,7 +1114,8 @@ T2 `nexus/design-plugin-only-fast-lane.md`.
 
 Base tag is vX.Y.Z (the last client tag), the new release is vX.Y.N with N = Z+1.
 Steps 0 (beyond the floor check in item 4 below) and 6d do not apply: the engine
-pin does not move and no migration ships.
+pin does not move and no migration ships. Step 6e does not run either (its last
+paragraph says why).
 
 **1. When to use it.** The plugin fixes waiting in `conexus/PENDING_RELEASE.md`
 are worth shipping now, and there is no open release PR (a release PR already in

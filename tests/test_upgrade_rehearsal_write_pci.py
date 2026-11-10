@@ -125,6 +125,35 @@ def test_probe_raises_on_a_real_sql_error_and_on_missing_credentials(
         ur.PgProbe(tmp_path / "nowhere").sql("select 1")
 
 
+@pytest.mark.parametrize("creds_has_superuser", [True, False])
+def test_probe_error_text_never_carries_the_password(
+    tmp_path: Path, creds_has_superuser: bool
+) -> None:
+    """A psql that echoes its connection string on failure (it can, on an authentication error) must
+    not leak the password through the ProbeError the driver prints and writes to verdict.json."""
+    creds = (
+        CREDS
+        if creds_has_superuser
+        else "\n".join(
+            ln for ln in CREDS.splitlines() if not ln.startswith("PG_SUPERUSER_PASS")
+        )
+    )
+    password = "s3cret" if creds_has_superuser else "adm1n"
+    config = _fake_install(tmp_path, creds=creds)
+    psql = config / "pg-bundle" / "bundle" / "bin" / "psql"
+    psql.write_text(
+        "#!/bin/sh\n"
+        f'echo "psql: error: FATAL: password authentication failed (password={password}) '
+        f'conninfo postgresql://u:{password}@127.0.0.1/db" >&2\n'
+        "exit 2\n"
+    )
+    with pytest.raises(ur.ProbeError) as err:
+        ur.PgProbe(config).sql("select 1")
+    text = str(err.value)
+    assert password not in text
+    assert "password authentication failed" in text and "***" in text
+
+
 # --- WAL counters and the write rate ------------------------------------------------------------
 
 
