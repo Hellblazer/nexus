@@ -103,7 +103,7 @@ def test_standing_instructions_that_run_the_cloud_gate_name_the_mode_variable() 
 # --------------------------------------------------------------------------- #
 
 S3F = SKILL.split("### 3f.")[1].split("### 3g.")[0]
-S3G = SKILL.split("### 3g.")[1].split("### 4.")[0]
+S3G = SKILL.split("### 3g.")[1].split("### 3h.")[0]
 #: The `gh run list --json` fields gh documents; the skill's command may name only these.
 GH_RUN_LIST_FIELDS = {
     "attempt", "conclusion", "createdAt", "databaseId", "displayTitle", "event", "headBranch", "headSha",
@@ -181,3 +181,38 @@ def test_every_path_in_the_named_windows_surface_exists_and_nothing_windows_is_l
     assert (REPO_ROOT / ".github" / "actions" / "resolve-windows-python").is_dir(), (
         "the premise of the *windows* glob: an action whose name does not START with windows-"
     )
+
+
+# nexus-f3yqd.1: the upgrade-boot write gate (Sam's release criterion, 2026-11-10).
+
+def _step_3h() -> str:
+    assert "### 3h." in SKILL, "the engine-release skill has no Step 3h (the upgrade-boot write gate)"
+    return " ".join(SKILL.split("### 3h.")[1].split("### 4.")[0].split())
+
+
+def test_step_3h_runs_three_legs_of_the_harness_on_the_tag_commit_and_stops_on_any_failure() -> None:
+    s = _step_3h()
+    assert "scripts/upgrade_boot_writes.py" in s
+    for leg in ("Leg A", "Leg B", "Leg C"):
+        assert leg in s, f"{leg} is not in Step 3h"
+    assert "--prev-client 7.76.0" in s, "Legs B and C start before per-collection indexes"
+    assert "--rot pending_aspect_queue" in s and "--restart-mid-queue 3" in s
+    assert "--restart-mode graceful" in s and "--restart-mode kill" in s
+    assert "do not tag" in s
+
+
+def test_step_3h_bounds_the_upgrade_boot_at_64_mib_and_says_why_later_boots_are_not_gated() -> None:
+    s = _step_3h()
+    assert "67108864" in s and "64 MiB" in s
+    assert "UPGRADE boot only" in s
+    assert "not gated" in s, "Step 3h must say later boots are reported, not gated"
+    assert "kept build" in s, "and why: the kept build's WAL lands in the next boot's migrate phase"
+
+
+def test_every_harness_flag_step_3h_names_exists_in_the_harness() -> None:
+    s = _step_3h()
+    harness = (REPO_ROOT / "scripts" / "upgrade_boot_writes.py").read_text()
+    flags = sorted(set(re.findall(r"(--[a-z][a-z-]+)", s)) - {"--with-pg"})
+    assert flags, "Step 3h names no harness flag"
+    missing = [f for f in flags if f'"{f}"' not in harness]
+    assert not missing, f"Step 3h names flags the harness does not define: {missing}"

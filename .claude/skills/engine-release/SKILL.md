@@ -14,7 +14,7 @@ Follow in order. The releaser is **Sam**: AI preps + validates; Sam pushes the t
 **Removed in cleanup step 11 (nexus-0r1uz), numbering left as it was:** Step 3
 (the local-candidate `--shakeout` gate and the `--candidate-migration` populated-store
 rehearsal) and Step 3c (the published-client write leg) went with the scripts and
-harness modes they ran. Steps that remain: 1, 2, 3b, 3e, 3f, 4, 5, 5b, 5c, 6, 6.1, 7, 8.
+harness modes they ran. Steps that remain: 1, 2, 3b, 3e, 3f, 3g, 3h, 4, 5, 5b, 5c, 6, 6.1, 7, 8.
 
 ### 1. Decide whether a cut is needed (drift check)
 
@@ -153,6 +153,50 @@ uv run python scripts/check_release_holds.py --root "$TAG_TREE"   # exit 0 = REL
 ```
 
 `scripts/release-holds.txt` lists changesets that have landed on develop ahead of their release gates; a tag from develop would ship them to the cloud and, through the pin, to every local install. Exit 1 names each held changeset and its bead: do not tag. Either cut from a commit without the changeset, or release it by deleting its line in a reviewed commit once its bead says it may ship (for `vectors-030-1`: RDR-225's .19 closed, the PITR-fork rehearsal recorded, and Sam's go). The release workflow's `create-release` job runs the same check on the tagged tree and refuses to create the release, so a tag pushed past this step builds nothing.
+
+### 3h. PRE-TAG check: an upgrade does not rewrite user data at boot (nexus-f3yqd.1)
+
+Sam's release criterion of 2026-11-10: an upgrade's first engine boot writes at
+most 64 MiB over its migrate and ready phases, and an engine restart during a
+background index build never throws the build away. Run the three legs of
+`scripts/upgrade_boot_writes.py` against a jar built from the exact commit you
+will tag, on chas (a real disk under `$HOME/tmp`, never tmpfs):
+
+```bash
+JAR=/path/to/engine-jar-from-the-tag-commit
+PREV=<the conexus release whose pin is the currently published engine>
+lab-remote -c lab-m -- uv run python scripts/upgrade_boot_writes.py \
+  --prev-client "$PREV" --new-jar "$JAR" --ceiling 67108864 --json /tmp/gate-A.json   # Leg A
+lab-remote -c lab-m -- uv run python scripts/upgrade_boot_writes.py \
+  --prev-client 7.76.0 --new-jar "$JAR" --collections 7 --rows 30000 \
+  --rot pending_aspect_queue --restart-mid-queue 3 --restart-mode graceful \
+  --ceiling-boot 67108864 --json /tmp/gate-B.json                                     # Leg B
+lab-remote -c lab-m -- uv run python scripts/upgrade_boot_writes.py \
+  --prev-client 7.76.0 --new-jar "$JAR" --collections 7 --rows 30000 \
+  --rot pending_aspect_queue --restart-mid-queue 3 --restart-mode kill \
+  --json /tmp/gate-C.json                                                             # Leg C
+```
+
+- **Leg A** is the normal upgrade, from the release users are on now. Its bound
+  is on total WAL through idle (measured 0.80 MB from 8.0.0).
+- **Leg B** starts from 7.76.0, the newest release before per-collection
+  indexes, with rows left in the retired aspect queue, and restarts the engine
+  while the third index build runs. Its 64 MiB bound applies to the UPGRADE
+  boot only (measured 2.95 MB). Later boots are reported in `boots[]`, not
+  gated: on an engine that keeps builds across restarts, the kept build
+  finishes while the next boot migrates, so a later boot's migrate phase can
+  carry about 100 MB of that build's WAL. That is the fix working. What the
+  later boots must get right is the restart rule: the build in flight survives
+  (same backend pid), is adopted (`pci_anchor_adopted`), is never rebuilt, and
+  no index is built twice.
+- **Leg C** is Leg B with a forced kill of the supervisor and engine (PostgreSQL
+  stays up), under the restart rule only.
+
+Every leg must exit 0. Paste each JSON's `verdict`, `boot_wal_bytes`,
+`total_wal_bytes`, `ceilings_tripped` and `resume` block on the cut bead. Any
+other exit is a stop: do not tag. Reference results: engine-service-v0.1.186
+is red on Leg B (`pci_builders_terminated reason=schema_changesets_pending`,
+then a rebuild); the 0.1.187 candidate (0c6f9e1c5) is green on Legs B and C.
 
 ### 4. Push the tag (Sam, or the AI on Sam's go for the release)
 
