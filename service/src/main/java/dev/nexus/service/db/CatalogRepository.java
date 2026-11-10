@@ -43,7 +43,6 @@ import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.RacedEmbedActivity;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
-import org.jooq.DatePart;
 import org.jooq.DeleteConditionStep;
 import org.jooq.Field;
 import org.jooq.JSONB;
@@ -9181,48 +9180,6 @@ public final class CatalogRepository {
         });
     }
 
-    /**
-     * A chunk row's {@code indexed_at} text with an explicit offset ({@code Z}, {@code +05:30}, {@code -0800}).
-     * PYTHON TWIN: {@code nexus.catalog.note_ttl.parse_iso} ({@code datetime.fromisoformat}), which the rung's scan
-     * reads the stamp with; this is the subset of its forms that PostgreSQL reads the same way. A stamp outside it
-     * is counted, never judged (see {@link #manifestSectionLabelFillable}).
-     */
-    private static final String STAMP_WITH_OFFSET =
-        "^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)$";
-
-    /**
-     * A chunk row's {@code indexed_at} text with no offset: read as UTC, as {@code nexus.catalog.note_ttl.parse_iso} does.
-     * PYTHON TWIN: the same function, see {@link #STAMP_WITH_OFFSET}.
-     */
-    private static final String STAMP_NAIVE =
-        "^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?$";
-
-    /**
-     * The per-chunk suffix an indexer appends to a chunk row's title ({@code :12-30}, {@code :chunk-3}, {@code :page-2}).
-     * PYTHON TWIN: {@code _CHUNK_TITLE_SUFFIX} in {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
-     */
-    private static final String CHUNK_TITLE_SUFFIX = ":(chunk-[0-9]+|[0-9]+-[0-9]+|page-[0-9]+)$";
-
-    /**
-     * Everything up to the last slash: what {@code os.path.basename} drops.
-     * PYTHON TWIN: {@code os.path.basename} in {@code _title_names_document} of
-     * {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
-     */
-    private static final String FILE_NAME_PREFIX = "^.*/";
-
-    /**
-     * How long after a document a chunk row may be stamped and still be its own.
-     * PYTHON TWIN: {@code nexus.catalog.note_ttl.PUT_SKEW} (five minutes), applied in {@code _labels_from_chunk_row}
-     * of {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
-     */
-    private static final int SECTION_LABEL_SKEW_SECONDS = 300;
-
-    /**
-     * The {@code metadata.backfill_from} value of a document the orphan backfill minted.
-     * PYTHON TWIN: {@code ORPHAN_BACKFILL_MARKER} in {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
-     */
-    private static final String ORPHAN_BACKFILL_VALUE = "t3_orphan";
-
     /** The most rows {@link #manifestSectionLabelFillable} counts in one call. */
     public static final int FILLABLE_COUNT_MAX_LIMIT = 10_000;
 
@@ -9243,10 +9200,6 @@ public final class CatalogRepository {
     public static final String QUERY_CANCELED = "57014";
 
 
-    /** {@code pg_input_is_valid(text, 'timestamptz')} as a typed condition: true when the cast would not raise. */
-    private static Condition validTimestamptz(Field<String> text) {
-        return DSL.condition(DSL.function(DSL.name("pg_input_is_valid"), SQLDataType.BOOLEAN, text, DSL.val("timestamptz")));
-    }
     /**
      * How many manifest rows the manifest-section-labels rung could still fill, counted up to {@code limit}
      * (nexus-l4hds): one bounded, tenant-scoped, read-only query in place of the rung's client-side walk of
@@ -9296,54 +9249,8 @@ public final class CatalogRepository {
                 FILLABLE_COUNT_TIMEOUT_PROPERTY, FILLABLE_COUNT_TIMEOUT_MS)));
             var row = CATALOG_DOCUMENT_CHUNKS;
             var doc = CATALOG_DOCUMENTS;
-            var other = CATALOG_DOCUMENT_CHUNKS.as("other_holder");
-            var otherDoc = CATALOG_DOCUMENTS.as("other_holder_doc");
-            var gone = CATALOG_DOCUMENT_CHUNKS.as("deleted_holder");
-            var goneDoc = CATALOG_DOCUMENTS.as("deleted_holder_doc");
-
-            // The chunk row's own keys. metadata is NULL on a row written without any, which fails every test below.
-            Field<String> chunkTitle = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "title");
-            Field<String> chunkStamp = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "indexed_at");
-            // "metadata -> key IS NOT NULL" is key presence: a key whose value is JSON null reads as the jsonb value null, not SQL NULL.
-            Condition hasLabelKey = DSL.jsonbGetAttribute(CHUNKS.METADATA, "section_title").isNotNull()
-                .or(DSL.jsonbGetAttribute(CHUNKS.METADATA, "section_type").isNotNull())
-                .or(DSL.jsonbGetAttribute(CHUNKS.METADATA, "page_number").isNotNull());
-
-            // The stamp as an instant, NULL when it is not in a shape this reads (then the row is counted, see above).
-            // A stamp with no offset is read as UTC, as parse_iso does.
-            // pg_input_is_valid (PostgreSQL 16+; the floor is 17) says whether the cast would raise, so month 13 is
-            // 'cannot read' (NULL, counted) and never an error for the whole tenant. CASE evaluates in order, so the
-            // cast of an invalid stamp is not reached.
-            Field<String> naiveAsUtc = DSL.concat(chunkStamp, DSL.inline("+00"));
-            Field<OffsetDateTime> stampAt = DSL.when(chunkStamp.likeRegex(STAMP_WITH_OFFSET)
-                        .and(validTimestamptz(chunkStamp)),
-                    DSL.cast(chunkStamp, SQLDataType.TIMESTAMPWITHTIMEZONE))
-                .when(chunkStamp.likeRegex(STAMP_NAIVE)
-                        .and(validTimestamptz(naiveAsUtc)),
-                    DSL.cast(naiveAsUtc, SQLDataType.TIMESTAMPWITHTIMEZONE));
-            // chunk - document <= 5 minutes (note_ttl.PUT_SKEW), compared as epoch seconds.
-            Condition withinSkew = DSL.extract(stampAt, DatePart.EPOCH)
-                .minus(DSL.extract(doc.INDEXED_AT, DatePart.EPOCH)).le(DSL.val(SECTION_LABEL_SKEW_SECONDS));
-            Condition attributable = chunkStamp.isNotNull().and(chunkStamp.ne(""))
-                .and(doc.INDEXED_AT.isNotNull())
-                .and(stampAt.isNull().or(withinSkew));
-
-            // _title_names_document: no title is not contradicted; else the title, the title without its per-chunk
-            // suffix, or that one's file name, equals the document's title (with or without ITS per-chunk suffix: an ETL
-            // import can title a document after one of its chunks, nexus-l8o33), file path or file name. Empty names do
-            // not count.
-            Field<String> unsuffixed = DSL.regexpReplaceAll(chunkTitle, CHUNK_TITLE_SUFFIX, "");
-            Field<String> unsuffixedName = DSL.regexpReplaceAll(unsuffixed, FILE_NAME_PREFIX, "");
-            Field<String> ownTitle = DSL.nullif(doc.TITLE, "");
-            Field<String> ownTitleUnsuffixed = DSL.nullif(DSL.regexpReplaceAll(doc.TITLE, CHUNK_TITLE_SUFFIX, ""), "");
-            Field<String> ownPath = DSL.nullif(doc.FILE_PATH, "");
-            Field<String> ownName = DSL.nullif(DSL.regexpReplaceAll(doc.FILE_PATH, FILE_NAME_PREFIX, ""), "");
-            Condition namesDocument = chunkTitle.isNull().or(chunkTitle.eq(""));
-            for (Field<String> candidate : List.of(chunkTitle, unsuffixed, unsuffixedName)) {
-                namesDocument = namesDocument.or(candidate.eq(ownTitle)).or(candidate.eq(ownTitleUnsuffixed))
-                    .or(candidate.eq(ownPath)).or(candidate.eq(ownName));
-            }
-
+            // The guards are ManifestFillablePredicates', shared with the strict count (ManifestFillableCount); this
+            // route keeps the lenient attribution form (a chunk stamp it cannot read is counted).
             var matching = ctx.selectOne()
                 .from(row)
                 .join(doc).on(doc.TENANT_ID.eq(row.TENANT_ID).and(doc.TUMBLER.eq(row.DOC_ID)))
@@ -9354,23 +9261,11 @@ public final class CatalogRepository {
                     .and(CHUNKS.TENANT_ID.eq(tenant))
                     .and(row.LABELS_WRITTEN.isFalse())
                     .and(row.CHASH.isNotNull())
-                    .and(doc.DELETED_AT.isNull())
-                    .and(doc.ALIAS_OF.eq(""))
-                    .and(DSL.jsonbGetAttributeAsText(doc.METADATA, "backfill_from").isDistinctFrom(ORPHAN_BACKFILL_VALUE))
-                    .and(hasLabelKey)
-                    .and(attributable)
-                    .and(namesDocument)
-                    // exactly one live holder of the chash: this row
-                    .andNotExists(ctx.selectOne().from(other)
-                        .join(otherDoc).on(otherDoc.TENANT_ID.eq(other.TENANT_ID)
-                            .and(otherDoc.TUMBLER.eq(other.DOC_ID)).and(otherDoc.DELETED_AT.isNull()))
-                        .where(other.TENANT_ID.eq(tenant).and(other.CHASH.eq(row.CHASH))
-                            .and(other.DOC_ID.ne(row.DOC_ID).or(other.POSITION.ne(row.POSITION)))))
-                    // and no tombstoned document holds it either
-                    .andNotExists(ctx.selectOne().from(gone)
-                        .join(goneDoc).on(goneDoc.TENANT_ID.eq(gone.TENANT_ID)
-                            .and(goneDoc.TUMBLER.eq(gone.DOC_ID)).and(goneDoc.DELETED_AT.isNotNull()))
-                        .where(gone.TENANT_ID.eq(tenant).and(gone.CHASH.eq(row.CHASH)))))
+                    .and(ManifestFillablePredicates.liveOwnDocument(doc))
+                    .and(ManifestFillablePredicates.hasLabelKey())
+                    .and(ManifestFillablePredicates.attributableLenient(doc))
+                    .and(ManifestFillablePredicates.namesDocument(doc))
+                    .and(ManifestFillablePredicates.soleLiveOwner(ctx, tenant, row)))
                 .limit(limit);
             return ctx.fetchCount(matching);
         });

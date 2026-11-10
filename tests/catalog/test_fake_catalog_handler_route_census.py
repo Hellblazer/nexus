@@ -171,6 +171,35 @@ def _extract_fake_routes(source: str) -> set[str]:
 #: live fake server, delete the entry (the completeness gate below refuses a
 #: stale one).
 ROUTE_EXCLUSIONS: dict[str, str] = {
+    "/sensitive": (
+        "nexus-f3yqd: DELIBERATELY engine-only for now (engine 0.1.188) — the "
+        "client half (an HttpCatalogClient method behind the doctor's bounded "
+        "reads) is a separate change, so there is no Catalog or "
+        "HttpCatalogClient method to fake yet; adding the Python half here "
+        "would make this commit a both-halves wire-contract commit "
+        "(docs/wire-contract-pending.md). Its wire shape — count, limit, "
+        "capped, and documents of {tumbler, physical_collection}, the 400 on "
+        "a limit outside 1..10000 and the 503 on a statement timeout — is "
+        "validated Java-side by CatalogSensitiveListRouteTest. When the "
+        "client method lands, DELETE this entry and fake the route instead; "
+        "the census checks both directions, so a stale exclusion here fails "
+        "just as loudly as a missing one"
+    ),
+    "/manifest/fillable": (
+        "nexus-f3yqd: DELIBERATELY engine-only for now (engine 0.1.188, route "
+        "R1 of T2 nexus/rung-detect-route-spec-2026-11-10) — the client half "
+        "(the rungs' _engine_fillable slot) is a separate change, so there is "
+        "no HttpCatalogClient method to fake yet; adding the Python half "
+        "here would make this commit a both-halves wire-contract commit "
+        "(docs/wire-contract-pending.md). Its wire shape — kind, fillable, "
+        "limit, capped, rule and stamp, the 400 on a bad kind or limit and "
+        "the 503 on a statement timeout — is validated Java-side by "
+        "ManifestFillableRouteTest. The older /manifest/section_label_fillable "
+        "stays faked for old clients. When the client method lands, DELETE "
+        "this entry and fake the route instead; the census checks both "
+        "directions, so a stale exclusion here fails just as loudly as a "
+        "missing one"
+    ),
     "/collections/rehome/status": (
         "nexus-wsx4l: the pollable half of the engine-only re-home below, and "
         "excluded for the same reason. It exists as a separate route because a "

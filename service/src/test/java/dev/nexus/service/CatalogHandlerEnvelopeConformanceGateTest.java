@@ -159,6 +159,11 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         + "tumblers with a 400 before any lookup; CatalogHandlerLinksBatchRoutesTest pins 1000 accepted and 1001 refused "
         + "for both routes";
 
+    private static final String BOUNDED_READ_DELEGATE =
+        "the handler method delegates to CatalogBoundedReadRoutes, whose response carries count (the exact total), "
+        + "limit and capped, and which refuses a limit above 10,000 with a 400; CatalogSensitiveListRouteTest pins "
+        + "the envelope, the cap edges and the 400";
+
     // ── Route table (rationale-as-data, pinned classification) ─────────────
 
     record RouteSpec(String route, String handler, boolean collectionReturning,
@@ -294,6 +299,12 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/manifest/null_collection", "handleManifestNullCollection"),
         // nexus-l4hds: scalar {fillable, limit, capped}, a bounded count, not a JSON array.
         neither("/manifest/section_label_fillable", "handleManifestSectionLabelFillable"),
+        // nexus-f3yqd: the list's body lives in CatalogBoundedReadRoutes (CatalogHandler is over the file-size cap) and the
+        // handler method here only delegates, so the "count" key is not in the body this gate scans; it is pinned, with
+        // count/limit/capped and the 10,000 cap, by CatalogSensitiveListRouteTest.
+        collectionExempt("/sensitive", "handleSensitiveList", BOUNDED_READ_DELEGATE),
+        // nexus-f3yqd: a scalar {kind, fillable, limit, capped, rule, stamp} bounded count, not a JSON array.
+        neither("/manifest/fillable", "handleManifestFillable"),
         collectionOk("/links/orphaned", "handleLinksOrphaned"),
 
         // ── Chash conformance (RDR-180, nexus-du2dw) ────────────────────────

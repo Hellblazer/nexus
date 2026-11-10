@@ -234,6 +234,22 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"route_c_manifest_keys_supported\":true");
     }
 
+    // ── nexus-f3yqd: the two bounded catalog reads of engine 0.1.188 ──
+
+    @Test
+    void versionAdvertisesTheSensitiveListAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogSensitiveListCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_sensitive_list_supported\":true");
+    }
+
+    @Test
+    void versionAdvertisesTheStrictFillableCountAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogManifestFillableCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_manifest_fillable_supported\":true");
+    }
+
     // ── nexus-jypmj (RDR-232): the chash_allow restriction on the vector search routes ──
 
     @Test

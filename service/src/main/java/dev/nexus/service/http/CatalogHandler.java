@@ -60,6 +60,8 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
+ *   GET   /v1/catalog/manifest/fillable?kind=labels|spans&limit=N  strict bounded count of the manifest rows the two upgrade rungs would fill (nexus-f3yqd)
+ *   GET   /v1/catalog/sensitive?limit=N  the tenant's live sensitive documents, listed up to N, with the total (nexus-f3yqd)
  *   GET   /v1/catalog/manifest/section_label_fillable?limit=N  bounded count of legacy manifest rows the manifest-section-labels rung could still fill (nexus-l4hds)
  *   GET   /v1/catalog/manifest/null_collection  read-only count of pre-backfill (collection IS NULL) manifest rows (T2 nexus/chroma-residue-plan-2026-08-10 §C2)
  *   GET   /v1/catalog/chash/conformance   per-table chash width-conformance report (tenant-scoped, RDR-180 nexus-du2dw)
@@ -133,6 +135,8 @@ public final class CatalogHandler implements HttpHandler {
     private final ChunkKeyAllowlistCheck chunkKeyCheck;
     /** RDR-193 Part A4 (nexus-u5m5g.4): the link batch routes and the combined list read. */
     private final CatalogLinksHandler linkRoutes;
+    /** nexus-f3yqd: the bounded read routes of engine 0.1.188 (the sensitive list, the strict fillable count). */
+    private final CatalogBoundedReadRoutes boundedReads;
     /** The statement timeout a reconcile commit runs under: the reconcile instance's maximum runtime, never more. */
     private final java.time.Duration reconcileStatementTimeout;
 
@@ -202,6 +206,8 @@ public final class CatalogHandler implements HttpHandler {
         this.chunkKeyCheck = java.util.Objects.requireNonNull(chunkKeyCheck, "chunkKeyCheck");
         this.repo = repo;
         this.linkRoutes = new CatalogLinksHandler(new dev.nexus.service.db.CatalogLinksRepository(repo));
+        this.boundedReads = new CatalogBoundedReadRoutes(
+            new dev.nexus.service.db.CatalogSensitiveReads(repo), new dev.nexus.service.db.ManifestFillableCount(repo));
         this.combinedWriteService = combinedWriteService;
         this.reconcileJobs = reconcileJobs;
         this.reconcileStatementTimeout = reconcileStatementTimeout;
@@ -269,6 +275,8 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
                 case "/manifest/null_collection" -> handleManifestNullCollection(exchange, tenant, method);
                 case "/manifest/section_label_fillable" -> handleManifestSectionLabelFillable(exchange, tenant, method);
+                case "/manifest/fillable"     -> handleManifestFillable(exchange, tenant, method);
+                case "/sensitive"             -> handleSensitiveList(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /docs/orphaned already
                 // existed; links had no equivalent, which is why the client
@@ -3627,7 +3635,7 @@ public final class CatalogHandler implements HttpHandler {
     }
 
     /** True when {@code t} or a cause (depth-bounded) is a {@link java.sql.SQLException} with SQLSTATE {@code state}. */
-    private static boolean hasSqlState(Throwable t, String state) {
+    static boolean hasSqlState(Throwable t, String state) {
         int depth = 0;
         for (Throwable c = t; c != null && depth < 32; c = c.getCause(), depth++) {
             if (c instanceof java.sql.SQLException sql && state.equals(sql.getSQLState())) return true;
@@ -3675,6 +3683,16 @@ public final class CatalogHandler implements HttpHandler {
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("fillable", fillable, "limit", limit, "capped", fillable >= limit)));
+    }
+
+    /** GET /v1/catalog/manifest/fillable?kind=..&limit=N (nexus-f3yqd): the body is {@link CatalogBoundedReadRoutes#fillable}. */
+    private void handleManifestFillable(HttpExchange exchange, String tenant, String method) throws IOException {
+        boundedReads.fillable(exchange, tenant, method);
+    }
+
+    /** GET /v1/catalog/sensitive?limit=N (nexus-f3yqd): the body is {@link CatalogBoundedReadRoutes#sensitive}. */
+    private void handleSensitiveList(HttpExchange exchange, String tenant, String method) throws IOException {
+        boundedReads.sensitive(exchange, tenant, method);
     }
 
     /**

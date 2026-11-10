@@ -381,6 +381,16 @@ class EmbedPostureHandlersTest {
     }
 
     @Test
+    void version_throughTheRealHandler_advertisesTheTwoBoundedCatalogReads() throws Exception {
+        // nexus-f3yqd: the fragment methods are unit-tested in VersionHandlerReleaseVersionTest; this proves the
+        // handler's body actually calls them, and that each flag is its own.
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("catalog_sensitive_list_supported").asBoolean()).isTrue();
+        assertThat(body.get("catalog_manifest_fillable_supported").asBoolean()).isTrue();
+    }
+
+    @Test
     void version_throughTheRealHandler_advertisesTheChashAllowCapability() throws Exception {
         // nexus-jypmj: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves the
         // handler's body actually calls it.
