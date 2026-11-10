@@ -72,4 +72,40 @@ class PciBuilderSessionConnectTest {
         assertThat(out).contains("password=***&ssl=true").contains("password authentication failed for user 'u'");
         assertThat(session.scrub(null)).isEmpty();
     }
+
+    /**
+     * Only a failed dynamic shared memory resize (its message names the segment) switches the builder to serial
+     * builds for the engine's lifetime. A lock-table exhaustion is the same SQLSTATE, 53200, and its message also says
+     * "shared memory", but running serially does not help it.
+     */
+    @Test
+    void sharedMemoryShort_matchesTheSegmentResizeFailure_andNotALockTableShortage() throws Exception {
+        assertThat(PciBuilderSession.sharedMemoryShort(new java.sql.SQLException(
+            "ERROR: could not resize shared memory segment \"/PostgreSQL.1\" to 2147483648 bytes: No space left on device",
+            "53100"))).as("ENOSPC on /dev/shm").isTrue();
+        assertThat(PciBuilderSession.sharedMemoryShort(new java.sql.SQLException(
+            "ERROR: could not resize shared memory segment \"/PostgreSQL.1\" to 2147483648 bytes: Cannot allocate memory",
+            "53200"))).as("out_of_memory on /dev/shm").isTrue();
+        assertThat(PciBuilderSession.sharedMemoryShort(new java.sql.SQLException(
+            "ERROR: out of shared memory\n  Hint: You might need to increase max_locks_per_transaction.", "53200")))
+            .as("the lock table is full").isFalse();
+        assertThat(PciBuilderSession.sharedMemoryShort(new java.sql.SQLException(
+            "ERROR: could not resize shared memory segment \"/PostgreSQL.1\"", "42501")))
+            .as("not a resource SQLSTATE").isFalse();
+        assertThat(PciBuilderSession.sharedMemoryShort(new java.sql.SQLException(null, "53100"))).isFalse();
+    }
+
+    /**
+     * nexus-f3yqd: a build runs under its own, long statement timeout, finite because it is also the bound on how long
+     * an orphaned stalled build holds the builder lock; the client socket must outlast it, or the client would cut a
+     * build the server still allows.
+     */
+    @Test
+    void theBuildStatementTimeout_isSixHours_andTheSocketOutlastsIt() {
+        assertThat(PciBuilderSession.BUILD_STATEMENT_TIMEOUT).isEqualTo(java.time.Duration.ofHours(6));
+        assertThat(PciBuilderSession.OTHER_STATEMENT_TIMEOUT).as("drops and comments keep the short bound")
+            .isEqualTo(java.time.Duration.ofMinutes(30));
+        assertThat(java.time.Duration.ofSeconds(PciBuilderSession.SOCKET_TIMEOUT_SECONDS))
+            .isGreaterThan(PciBuilderSession.BUILD_STATEMENT_TIMEOUT);
+    }
 }

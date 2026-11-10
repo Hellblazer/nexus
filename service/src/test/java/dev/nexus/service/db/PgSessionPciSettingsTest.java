@@ -246,11 +246,12 @@ class PgSessionPciSettingsTest {
     @Test
     void buildMemMb_takesTheBounds_andRefusesOnePast() {
         assertThat(PgSession.SEARCH_PCI_BUILD_MEM_MB_MIN).isEqualTo(16);
-        assertThat(PgSession.SEARCH_PCI_BUILD_MEM_MB_MAX).isEqualTo(65_536);
+        // 2047 MB: PostgreSQL on Windows rejects a maintenance_work_mem above it, and every build would then fail.
+        assertThat(PgSession.SEARCH_PCI_BUILD_MEM_MB_MAX).isEqualTo(2_047);
         assertThat(PgSession.searchPciBuildMemMb("16")).isEqualTo(16);
         assertThat(PgSession.searchPciBuildMemMb(" 1024 ")).isEqualTo(1024);
-        assertThat(PgSession.searchPciBuildMemMb("65536")).isEqualTo(65_536);
-        for (String bad : new String[] {"15", "0", "-1", "65537", "1GB", "1.5", "abc"}) {
+        assertThat(PgSession.searchPciBuildMemMb("2047")).isEqualTo(2_047);
+        for (String bad : new String[] {"15", "0", "-1", "2048", "65536", "1GB", "1.5", "abc"}) {
             assertThatThrownBy(() -> PgSession.searchPciBuildMemMb(bad))
                 .as("value %s", bad)
                 .isInstanceOf(IllegalArgumentException.class)

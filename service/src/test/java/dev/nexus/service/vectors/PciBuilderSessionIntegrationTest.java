@@ -296,7 +296,7 @@ class PciBuilderSessionIntegrationTest {
     }
 
     @Test
-    void theBuildTakesNoLockTimeoutAndThirtyMinutes_theDropFiveSeconds() throws Exception {
+    void theBuildTakesNoLockTimeoutAndSixHours_theDropFiveSecondsAndThirtyMinutes() throws Exception {
         String collection = collectionName("settings");
         String name = PciCatalog.indexName(M1024, T1, collection);
         PciCatalog.Leaf leaf = leaf(M1024, T1);
@@ -304,10 +304,11 @@ class PciBuilderSessionIntegrationTest {
         try (PciBuilderSession.Pass pass = adminSession().open()) {
             assertThat(pass.build(leaf, 1024, collection)).isEqualTo(DdlOutcome.DONE);
             assertThat(pass.currentSetting("lock_timeout")).isEqualTo("0");
-            assertThat(pass.currentSetting("statement_timeout")).isEqualTo("30min");
+            assertThat(pass.currentSetting("statement_timeout")).isEqualTo("6h");
             PciCatalog.Index built = indexOn(M1024, T1, name).orElseThrow();
             assertThat(pass.drop(leaf, built)).isEqualTo(DdlOutcome.DONE);
             assertThat(pass.currentSetting("lock_timeout")).isEqualTo("5s");
+            assertThat(pass.currentSetting("statement_timeout")).isEqualTo("30min");
         }
         assertThat(indexOn(M1024, T1, name)).as("dropped").isEmpty();
     }

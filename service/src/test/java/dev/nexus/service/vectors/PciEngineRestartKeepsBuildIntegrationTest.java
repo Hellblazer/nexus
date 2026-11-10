@@ -423,4 +423,50 @@ class PciEngineRestartKeepsBuildIntegrationTest {
         assertThat(index(bigIndex).comment()).as("the anchor is as the build wrote it").isEqualTo(comment);
         assertThat(logged("event=pci_anchor_adopted")).isZero();
     }
+
+    /**
+     * nexus-f3yqd: a build runs under its own statement timeout, longer than the 30 minutes the builder's other
+     * statements keep, so a build of a very large collection is not cancelled and rebuilt from zero. The timeout is
+     * injected short here: a build held open for 3 s is cancelled under 1 s and completes under the production value;
+     * and the statement timeout in force after a build is 6 h, after a drop 30 min.
+     */
+    @Test
+    @Timeout(value = 240, unit = TimeUnit.SECONDS)
+    void aBuildRunsPastTheShortBound_whichStillCancelsIt_andADropKeepsTheShortOne() throws Exception {
+        tenant = "pcirestart-5";
+        newTenantLeaves();
+        String cut = name("cut");
+        String kept = name("kept");
+        collection(cut, B + 40);
+        collection(kept, B + 40);
+        PciCatalog.Leaf leaf = leaf();
+        String cutIndex = PciCatalog.indexName(M384, tenant, cut);
+        String keptIndex = PciCatalog.indexName(M384, tenant, kept);
+
+        // The short bound stands in for the old 30 minutes: a build held open past it is cancelled.
+        var shortSession = new PciBuilderSession(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS, OLD_NONCE, SETTINGS,
+            () -> 0L, Duration.ofSeconds(1));
+        try (PciBuilderSession.Pass pass = shortSession.open(); LeafWriter writer = new LeafWriter(leaf)) {
+            assertThat(pass.build(leaf, 384, cut)).as("held open for longer than the bound: cancelled")
+                .isEqualTo(PciBuilderSession.DdlOutcome.FAILED);
+            assertThat(logged("event=pci_ddl_failed op=build index=" + cutIndex)).isEqualTo(1);
+            assertThat(logged("sqlstate=57014")).as("query_canceled, by the statement timeout").isEqualTo(1);
+        }
+
+        // The production value: the same wait is not a failure.
+        try (PciBuilderSession.Pass pass = session(NEW_NONCE).open(); LeafWriter writer = new LeafWriter(leaf)) {
+            CompletableFuture<PciBuilderSession.DdlOutcome> build =
+                CompletableFuture.supplyAsync(() -> pass.build(leaf, 384, kept));
+            await(() -> index(keptIndex) != null && !index(keptIndex).valid(), "the build's invalid index");
+            Thread.sleep(3_000);
+            assertThat(build.isDone()).as("still building, past the injected bound").isFalse();
+            writer.close();
+            assertThat(build.get(60, TimeUnit.SECONDS)).isEqualTo(PciBuilderSession.DdlOutcome.DONE);
+            assertThat(pass.currentSetting("statement_timeout")).as("the build's bound").isEqualTo("6h");
+
+            assertThat(pass.drop(leaf, index(keptIndex))).isEqualTo(PciBuilderSession.DdlOutcome.DONE);
+            assertThat(pass.currentSetting("statement_timeout")).as("a drop keeps the short bound")
+                .isEqualTo("30min");
+        }
+    }
 }

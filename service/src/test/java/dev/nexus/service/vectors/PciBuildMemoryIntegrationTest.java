@@ -170,7 +170,8 @@ class PciBuildMemoryIntegrationTest {
      * A parallel HNSW build keeps its graph in one shared-memory area as large as maintenance_work_mem. Where
      * /dev/shm is smaller (a container's default is 64 MB) the build fails with 53100 and, left alone, would fail on
      * every pass and be backed off forever. The builder drops the failed index and builds serially, and starts every
-     * later build serial. 64 GB is the override's top value: no test host's /dev/shm holds it.
+     * later build serial. 2047 MB is the override's top value (the Windows limit of maintenance_work_mem): the test
+     * container's /dev/shm, Docker's 64 MB default, does not hold it.
      */
     @Test
     void aSharedMemoryShortage_fallsBackToASerialBuild_andLaterBuildsStartSerial() throws Exception {
@@ -203,7 +204,7 @@ class PciBuildMemoryIntegrationTest {
         Level before = logger.getLevel();
         logger.setLevel(Level.INFO);
         logger.addAppender(appender);
-        try (PciBuilderSession.Pass pass = builder("aa000006", new PciSettings(true, 200, 600, 16, 65_536), 64 * GB)
+        try (PciBuilderSession.Pass pass = builder("aa000006", new PciSettings(true, 200, 600, 16, 2_047), 64 * GB)
                 .open()) {
             assertThat(pass.build(leaf, 384, first)).as("built, after the fallback").isEqualTo(DdlOutcome.DONE);
             assertThat(pass.build(leaf, 384, second)).as("the next build starts serial").isEqualTo(DdlOutcome.DONE);

@@ -863,10 +863,11 @@ public final class PgSession {
     /**
      * Bounds of {@code NX_SEARCH_PCI_BUILD_MEM_MB} (nexus-f3yqd): the maintenance_work_mem of an index build, in MB.
      * There is no default here: unset means the builder computes min(1 GB, 1/8 of RAM) where Postgres is on the
-     * engine's host and keeps Postgres's own setting elsewhere.
+     * engine's host and keeps Postgres's own setting elsewhere. The maximum is 2047: PostgreSQL on Windows rejects a
+     * maintenance_work_mem above it, and every build would then fail.
      */
     static final int SEARCH_PCI_BUILD_MEM_MB_MIN = 16;
-    static final int SEARCH_PCI_BUILD_MEM_MB_MAX = 65_536;
+    static final int SEARCH_PCI_BUILD_MEM_MB_MAX = 2_047;
 
     /**
      * The {@code NX_SEARCH_PCI*} settings, resolved once at class init.
@@ -936,7 +937,7 @@ public final class PgSession {
             0, SEARCH_PCI_MAX_PER_LEAF_MAX);
     }
 
-    /** Parse {@code NX_SEARCH_PCI_BUILD_MEM_MB}: integer MB in [16, 65536], or {@code null} when unset or blank. */
+    /** Parse {@code NX_SEARCH_PCI_BUILD_MEM_MB}: integer MB in [16, 2047], or {@code null} when unset or blank. */
     static Integer searchPciBuildMemMb(String raw) {
         if (raw == null || raw.isBlank()) {
             return null;

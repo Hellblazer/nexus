@@ -129,7 +129,7 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * {@link #FAILING_AFTER} consecutive failures it counts as <i>failing</i>. A restart forgets all of it, so a build
  * that always fails is retried at once after each boot and then backs off again. A success clears the entry, and so
  * does a collection leaving the registry, being superseded or quarantined, or gaining a valid index. A build ended
- * by the connection being terminated (a schema migration, the engine's shutdown) or lost is not a failure of the
+ * by the connection being terminated (a schema migration) or lost is not a failure of the
  * build and is not charged.
  *
  * <p><b>With more than one engine the backoff is bounded, not exponential.</b> The builder lock serialises passes,
@@ -1089,7 +1089,7 @@ public final class PciReconciler {
                 recordFailure(key, build.name());
             }
             // The pass ended before the statement went out (a migration, a privilege error), or the backend was ended
-            // under it (a migration walk or the shutdown terminated it; the network dropped): not this collection's fault.
+            // under it (a migration walk terminated it; the network dropped): not this collection's fault.
             default -> log.info("event=pci_index_build_not_done leaf={} index={} outcome={}", leafId(leaf),
                 build.name(), outcome);
         }
