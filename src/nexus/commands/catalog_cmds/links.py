@@ -743,7 +743,6 @@ def generate_links_cmd(
                 click.echo(f"      - {r.from_tumbler} -> {r.to_tumbler} ({r.link_type})")
         grand = 0
         same_content_unpreviewed = 0
-        path_edges_previewed = 0
         for name, fn in selected:
             recorder = DryRunLinkWriter(existing=existing, resolver=cat)
             try:
@@ -767,18 +766,12 @@ def generate_links_cmd(
             click.echo(f"  {name}: would create {len(proposals)} link(s)")
             if recorder.unresolved_paths:
                 click.echo(
-                    f"    {recorder.unresolved_paths} path(s) name no document at that path under the "
+                    f"    {recorder.unresolved_paths} path reference(s) name no document at that path under the "
                     "repository's owner and are not counted (the engine reports them unresolved; it can "
                     "also match a file registered under another owner, so this is a close estimate)"
                 )
             if not proposals:
                 continue
-            if recorder.path_edges:
-                path_edges_previewed += recorder.path_edges
-                click.echo(
-                    f"    {recorder.path_edges} of these are path edges the engine resolves: counted before "
-                    "it drops the paths it cannot resolve and the links that already exist (an upper bound)"
-                )
             by_type = recorder.count_by_link_type()
             click.echo(f"    by link type: {by_type}")
             click.echo(f"    by creator:   {recorder.count_by_creator()}")
@@ -800,8 +793,6 @@ def generate_links_cmd(
             f"Catalog link count would go {len(existing)} -> "
             f"{len(existing) + grand - retracted_total}"
         )
-        if path_edges_previewed:
-            click.echo(f"  ({path_edges_previewed} path edge(s) in that total: an upper bound, see above)")
         if same_content_unpreviewed:
             click.echo("  (the same-content linker's links are not in that total: they are not previewed)")
         return

@@ -833,7 +833,7 @@ class TestGenerateLinksCliDryRunAndWritePass:
         _State.add_document("1.1.4", content_type="pdf", index_content_hash="h")
         out = self._cli(reader, writer, monkeypatch, "--dry-run")
         assert "rdr-filepath: would create 1 link(s)" in out, out
-        assert "1 path(s) name no document at that path under the repository's owner and are not counted" in out
+        assert "1 path reference(s) name no document at that path under the repository's owner and are not counted" in out
         assert "path edges the engine resolves" not in out and "upper bound" not in out
         assert "1.1.2 -> 1.1.1 (implements) by filepath_extractor" in out
         assert "pdf-corpus: 2 document(s) would go to the engine's same-content linker" in out

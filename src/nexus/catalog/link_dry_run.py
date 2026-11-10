@@ -133,6 +133,8 @@ class DryRunLinkWriter:
         found = self._resolver.find_all_by_file_paths(sorted({fp for _, fp in wanted}))  # type: ignore[attr-defined]
         out: dict[tuple[str, str], str] = {}
         for owner, file_path in wanted:
+            # Text order, not numeric: the engine picks ORDER BY tumbler DESC in the database's
+            # collation (catalog-048-5's file_path arm), so 1.2.9 outranks 1.2.10 there too.
             own = sorted(str(e.tumbler) for e in found.get(file_path, []) if str(e.tumbler).startswith(owner + "."))
             if own:
                 out[(owner, file_path)] = own[-1]
