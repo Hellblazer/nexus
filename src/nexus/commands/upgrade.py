@@ -480,11 +480,17 @@ def _record_deferrals(report: "LadderRunReport", completions: "Callable[[], dict
 class _BatchProgress:
     """The ladder's :class:`~nexus.upgrade_ladder.protocol.ProgressReporter` for ``nx upgrade`` (nexus-mjmjl).
 
-    Every event still goes to structlog. A rung's ``*_batch`` event also prints one line, at most every
-    :attr:`EVERY_S` per rung: ``  manifest span fill: documents 3,200, filled 410, ...`` (the batch's own counts).
-    *clock* is injectable for tests."""
+    Every event still goes to structlog. A rung's progress event (``*_batch``, ``*_collection_done``) also prints
+    one line, at most every :attr:`EVERY_S` per rung, with the running counts named in :attr:`SHOWN`:
+    ``  manifest span fill: documents 3,200, rows 9,870, fillable 410, filled 410``. *clock* is injectable."""
 
     EVERY_S: float = 5.0
+    #: The fields a line shows, in this order; a rung's other counters stay in the structlog event.
+    SHOWN: tuple[str, ...] = (
+        "collection", "documents", "rows", "fillable", "filled", "examined", "converted", "remaining",
+        "manifest_rows_written",
+    )
+    _SUFFIXES: tuple[str, ...] = ("_batch", "_collection_done")
 
     def __init__(self, *, to_stderr: bool = False, clock: "Callable[[], float] | None" = None) -> None:
         import time  # noqa: PLC0415 — stdlib
@@ -495,9 +501,10 @@ class _BatchProgress:
 
     def emit(self, event: str, **fields: object) -> None:
         _log.info(event, **fields)
-        if not event.endswith("_batch"):
+        suffix = next((s for s in self._SUFFIXES if event.endswith(s)), None)
+        if suffix is None:
             return
-        rung = event.removesuffix("_batch")
+        rung = event.removesuffix(suffix).removesuffix("_rung")
         now = self._clock()
         if now - self._last.get(rung, float("-inf")) < self.EVERY_S:
             return
@@ -505,7 +512,7 @@ class _BatchProgress:
         shown = ", ".join(
             f"{key.replace('_', ' ')} {value:,}" if isinstance(value, int) and not isinstance(value, bool)
             else f"{key.replace('_', ' ')} {value}"
-            for key, value in fields.items()
+            for key in self.SHOWN if (value := fields.get(key)) is not None
         )
         try:
             click.echo(f"  {rung.replace('_', ' ')}: {shown}", err=self._err)

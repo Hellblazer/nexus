@@ -138,6 +138,7 @@ from nexus.upgrade_ladder.auto_guard import (
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
+from nexus.upgrade_ladder.scan_reuse import ScanReuse
 from nexus.upgrade_ladder.unattended import is_cheap_detect
 from nexus.upgrade_ladder.census_progress import guarded
 from nexus.upgrade_ladder.completion import CompletionRecord
@@ -436,6 +437,7 @@ class ManifestSectionLabelsRung:
         self._filled = 0
         self._verify_detail = ""
         self._record_detail = ""
+        self._clean_scan: ScanReuse[Counts] = ScanReuse()  # converge's walk that found nothing to fill
         self._partial = Counts()
 
     # ── the scan ─────────────────────────────────────────────────────────────
@@ -842,6 +844,7 @@ class ManifestSectionLabelsRung:
             )
             _log.info("manifest_section_labels_converge_skipped", reason=reason)
             return ConvergeResult(ConvergeOutcome.DEFERRED, detail=reason)
+        self._clean_scan.clear()
         reader = self._reader_factory()
         if reader is None:
             return ConvergeResult(ConvergeOutcome.DEFERRED, detail="no catalog is available")
@@ -881,6 +884,9 @@ class ManifestSectionLabelsRung:
                     f"remaining legacy rows ({counts.summary()})"
                 ),
             )
+        if not counts.fillable:
+            # Nothing to fill means nothing written: this walk is the dry run verify would take next.
+            self._clean_scan.keep(counts)
         return ConvergeResult(ConvergeOutcome.COMPLETED, detail=counts.summary())
 
     # ── verify ───────────────────────────────────────────────────────────────
@@ -903,7 +909,7 @@ class ManifestSectionLabelsRung:
             self._verify_detail = unattended_verify_refusal("every document and manifest")
             return False
         try:
-            counts = self._dry_run()
+            counts = self._clean_scan.take() or self._dry_run()
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is unknown, and unknown is not reached
             self._verify_detail = f"could not read the catalog to confirm the fill: {exc}"
             return False

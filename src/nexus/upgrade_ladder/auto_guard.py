@@ -15,9 +15,10 @@ cheaper to answer from (a completion record, a bounded engine count), does not r
 callout) against a managed service. It reports itself NOT APPLICABLE, with a reason naming where the first scan
 happens: an interactive ``nx upgrade``. A bounded engine count lets such a ``detect()`` answer (``manifest-section-labels``,
 nexus-l4hds), but only as a REPORT: the same rung's ``converge()`` is the whole-catalog scan with writes, so it
-checks :func:`refuses_unbounded_read` too and is DEFERRED unattended; an interactive ``nx upgrade`` fills. Interactive ``nx upgrade`` runs and local engines keep their
-walk, except under ``nx doctor``, which runs its sweep as unattended (nexus-mq980) and with bounded reads only, on any
-engine (nexus-mjmjl), and reports a refused rung as not checked.
+checks :func:`refuses_unbounded_read` too and is DEFERRED unattended; an interactive ``nx upgrade`` fills. Under ``nx doctor``, which runs its sweep as unattended (nexus-mq980) and with bounded reads only, on any
+engine (nexus-mjmjl), a refused rung is reported as not checked. A ``nx upgrade`` that may fill (not ``--dry-run``)
+runs detect under ``cheap_detect``: a data rung with no record answers pending without its scan, and the
+fill's own walk is the one read (:data:`CHEAP_PENDING`, nexus-mjmjl).
 """
 from __future__ import annotations
 
