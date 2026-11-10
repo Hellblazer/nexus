@@ -477,6 +477,7 @@ class ManifestSpanFillRung:
                 "expected": expected_values(now),
             })
         written: set[str] = set()
+        asked: set[str] = set()  # every document owed before its request: settled after, written or not
         in_flight: list[str] = []  # the request being sent: a raise after the engine committed it restamped these too
         try:
             for collection, per_doc in sorted(by_collection.items()):
@@ -487,6 +488,7 @@ class ManifestSpanFillRung:
                         continue
                     in_flight = [d for d, _rows in request]
                     self._owed.owe({d: stamps.get(d, "") for d in in_flight})  # before the engine restamps them
+                    asked.update(in_flight)
                     try:
                         result = writer.append_manifest_many(request, collection=collection)
                     except (SupersededCollectionWriteError, httpx.HTTPStatusError) as exc:
@@ -520,7 +522,7 @@ class ManifestSpanFillRung:
             # wrote, and left alone that stamp switches the chunk-newer guard off for the document's other rows
             before = len(counts.restore_failed_docs)
             ManifestSectionLabelsRung._restore_batch(writer, sorted(written | set(in_flight)), stamps, counts)  # type: ignore[arg-type]  # reads only the restore counters
-            self._owed.settle(sorted(written | set(in_flight)), counts.restore_failed_docs[before:])
+            self._owed.settle(sorted(asked), counts.restore_failed_docs[before:])
 
     def _requests(self, docs_rows: list[tuple[str, list[dict]]]) -> list[list[tuple[str, list[dict]]]]:
         """Cut ``(doc_id, rows)`` pairs into requests of at most ``max_rows`` rows and ``doc_batch`` documents; a

@@ -146,3 +146,66 @@ def test_the_section_label_rung_pays_its_owed_restore_too() -> None:
     report = runner.run()
     assert world.docs["1.1.1"].indexed_at == stamp != RESTAMP
     assert [r.outcome for r in report.runs] == [RungOutcome.RECORDED], [(r.outcome, r.detail) for r in report.runs]
+
+
+def test_a_document_the_engine_refused_to_write_owes_nothing() -> None:
+    """failed_doc_ids: the engine never restamped it, so a later payment could only undo a re-index."""
+    world = World()
+    a = world.doc("1.1.1")
+    world.row(a, 0, h(1))
+    world.chunk(h(1), **SPAN)
+    world.fail_doc_ids.add(a)
+    note = _Note()
+    world.rung(owed_store=note).converge(Recorder())
+    assert note.note is None
+
+
+class _Unreadable(_Note):
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__()
+        self.note = {"docs": {"1.1.9": {"stamp": DOC_STAMP, "tries": 0}}}
+        self.cause = cause
+        self.saves = 0
+
+    def load(self, *, strict: bool = False):
+        from nexus.upgrade_ladder.census_progress import NoteUnreadable  # noqa: PLC0415 — the store's own error
+
+        if strict:
+            raise NoteUnreadable(str(self.cause)) from self.cause
+        return None
+
+    def save(self, note):
+        self.saves += 1
+        super().save(note)
+
+
+def test_a_note_that_cannot_be_read_is_never_overwritten() -> None:
+    world = World()
+    world.restamp_on_append = RESTAMP
+    a = world.doc("1.1.1")
+    world.row(a, 0, h(1))
+    world.chunk(h(1), **SPAN)
+    store = _Unreadable(ValueError("bad row"))
+    world.rung(owed_store=store).converge(Recorder())
+    assert store.saves == 0 and "1.1.9" in store.note["docs"]
+
+
+def test_a_note_unreadable_because_the_engine_is_away_raises_for_the_runner() -> None:
+    world = World()
+    store = _Unreadable(ConnectionRefusedError(61, "refused"))
+    with pytest.raises(Exception) as raised:
+        world.rung(owed_store=store).converge(Recorder())
+    from nexus.upgrade_ladder.engine_outage import engine_unreachable  # noqa: PLC0415 — the classifier
+
+    assert engine_unreachable(raised.value)
+
+
+def test_a_slow_payment_does_not_use_up_a_try() -> None:
+    world = World()
+    note = _Note()
+    note.note = {"docs": {"1.1.1": {"stamp": DOC_STAMP, "tries": 0}}}
+    world.doc("1.1.1")
+    world.update = lambda *a, **k: (_ for _ in ()).throw(TimeoutError("read timed out"))  # type: ignore[method-assign]
+    for _ in range(4):
+        assert world.rung(owed_store=note).converge(Recorder()).deferred
+    assert note.note["docs"]["1.1.1"]["tries"] == 0
