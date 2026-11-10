@@ -1149,14 +1149,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         well_formed = (
             not isinstance(count, bool) and isinstance(count, int) and count >= 0 and isinstance(capped, bool)
             and isinstance(documents, list)
-            and all(isinstance(d, dict) and isinstance(d.get("tumbler"), str) and isinstance(d.get("physical_collection"), str)
-                    for d in documents)
+            # A document flagged before it was indexed has no collection: the engine sends null, read as "",
+            # as _to_entry reads it for the walk.
+            and all(isinstance(d, dict) and isinstance(d.get("tumbler"), str) and "physical_collection" in d
+                    and isinstance(d["physical_collection"], (str, type(None))) for d in documents)
             and (capped or len(documents) == count)
         )
         if not well_formed:
             _log.warning("http_catalog_client.sensitive_documents_malformed", keys=sorted(result))
             return None
-        return {"count": count, "capped": capped, "documents": documents}
+        return {
+            "count": count, "capped": capped,
+            "documents": [{"tumbler": d["tumbler"], "physical_collection": d.get("physical_collection") or ""}
+                          for d in documents],
+        }
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead

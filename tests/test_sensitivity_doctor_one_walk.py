@@ -146,3 +146,28 @@ def test_an_empty_route_answer_is_not_applicable_without_a_walk(monkeypatch: pyt
     report = sd.check_sensitive_with_aspects()
     assert r.walks == 0
     assert report["status"] == sd.NOT_APPLICABLE and report["reason"] == "no sensitive documents in this catalog"
+
+
+def test_a_bounded_read_that_raises_falls_back_to_the_walk(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Raising(_RouteReader):
+        def sensitive_documents(self, limit: int = 1000) -> dict | None:
+            self.route_calls += 1
+            raise RuntimeError("proxy blew up")
+
+    r = _Raising([_Doc(True)], None)
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: r)
+    report = sd.check_sensitive_in_external_embedder()
+    assert r.route_calls == 1 and r.walks == 1 and report["sensitive_documents"] == 1, report
+
+
+def test_the_route_is_asked_for_the_engines_maximum(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[int] = []
+
+    class _Recording(_RouteReader):
+        def sensitive_documents(self, limit: int = 1000) -> dict | None:
+            asked.append(limit)
+            return _ONE
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Recording([], _ONE))
+    sd.check_sensitive_in_external_embedder()
+    assert asked == [10_000]

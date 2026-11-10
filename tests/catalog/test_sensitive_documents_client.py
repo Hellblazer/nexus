@@ -73,3 +73,11 @@ def test_a_capped_answer_is_returned_as_capped(monkeypatch: pytest.MonkeyPatch) 
     body = {"count": 5, "limit": 2, "capped": True, "documents": _BODY["documents"]}
     c, _calls = _client(monkeypatch, get=body)
     assert c.sensitive_documents(2) == {"count": 5, "capped": True, "documents": _BODY["documents"]}
+
+
+def test_a_document_with_no_collection_is_read_as_an_empty_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A document flagged before it was indexed has a NULL collection; the walk's _to_entry reads that as ""."""
+    body = {"count": 1, "capped": False, "documents": [{"tumbler": "1.2.3", "physical_collection": None}]}
+    c, _calls = _client(monkeypatch, get=body)
+    assert c.sensitive_documents() == {"count": 1, "capped": False,
+                                       "documents": [{"tumbler": "1.2.3", "physical_collection": ""}]}

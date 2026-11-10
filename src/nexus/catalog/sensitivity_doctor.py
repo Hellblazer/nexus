@@ -28,8 +28,9 @@ nexus-moht0 doctrines), and a row that read nothing must not go red on a virgin 
 need a sensitive document actually met.
 
 The collaborators are injectable (``reader``, ``aspects``, ``queue``, ``select``) for tests; the defaults
-are the production handles. Reading the sensitive set walks the catalog's documents once (the engine has
-no sensitive filter on ``/list``), which a person running a doctor verb has asked for.
+are the production handles. The sensitive set comes from the engine's bounded list (``GET /sensitive``,
+engine 0.1.188) when it is advertised and answers; otherwise the rows walk the catalog's documents once, which
+a person running a doctor verb has asked for.
 """
 from __future__ import annotations
 
@@ -61,8 +62,11 @@ def _report(name: str, status: str, reason: str = "", total: int = 0, findings: 
             "findings": findings or []}
 
 
-#: The most sensitive documents the bounded route is asked for; a tenant with more walks the catalog instead.
-_SENSITIVE_LIST_LIMIT = 1000
+#: The most sensitive documents the bounded route is asked for: the engine's own maximum (CatalogSensitiveReads.
+#: MAX_LIMIT). The route reads the whole sensitive set from its index whatever the limit, so asking for fewer
+#: saves nothing. A tenant with more walks the catalog, which keeps the gating row's coverage; past that size the
+#: rows' own per-document reads dominate anyway.
+_SENSITIVE_LIST_LIMIT = 10_000
 
 #: The walk shared inside :func:`one_walk`: ``(documents, not-applicable reason)``, or unset outside one.
 _SHARED: contextvars.ContextVar[dict[str, tuple[list[Any], str | None]] | None] = contextvars.ContextVar(
@@ -72,11 +76,11 @@ _SHARED: contextvars.ContextVar[dict[str, tuple[list[Any], str | None]] | None] 
 
 @contextlib.contextmanager
 def one_walk() -> Iterator[None]:
-    """Inside this scope the rows that find their own catalog share one walk (F30, nexus-f3yqd.6).
-
-    Each row walks the whole catalog (``all_documents(limit=0)``) to find the sensitive documents; measured on a
-    laptop tenant that was about 23 s a row, three rows in a row in ``nx doctor``. A row given its own *reader*
-    still walks it alone. The result lives only for the scope, so a later run sees a fresh catalog."""
+    """Inside this scope the rows that find their own catalog share one read of the sensitive set (F30,
+    nexus-f3yqd.6): the engine's bounded list, or, where that is not available, a walk of the whole catalog
+    (``all_documents(limit=0)``; measured on a laptop tenant, about 23 s, which each of the three rows in
+    ``nx doctor`` paid before they shared it). A row given its own *reader* still reads it alone. The result
+    lives only for the scope, so a later run sees a fresh catalog."""
     token = _SHARED.set({})
     try:
         yield
@@ -94,6 +98,20 @@ def _sensitive_documents(name: str, reader: Any) -> tuple[list[Any], dict | None
     if shared is not None:
         shared["walk"] = (documents, reason)
     return (documents, None) if reason is None else ([], _report(name, NOT_APPLICABLE, reason))
+
+
+def _bounded_sensitive(reader: Any) -> dict | None:
+    """The engine's bounded sensitive list, or ``None`` (fall back to the walk) if the reader has no such read
+    or it fails in any way: a failure here must never read as "the catalog could not be read"."""
+    bounded = getattr(reader, "sensitive_documents", None)
+    if not callable(bounded):
+        return None
+    try:
+        answer = bounded(limit=_SENSITIVE_LIST_LIMIT)
+    except Exception as exc:  # noqa: BLE001 — an optional fast path; the walk below is the answer of record
+        _log.info("sensitivity_doctor_bounded_read_failed", error=str(exc))
+        return None
+    return answer if isinstance(answer, dict) else None
 
 
 def _walk_sensitive(name: str, reader: Any) -> tuple[list[Any], str | None]:
@@ -114,8 +132,7 @@ def _walk_sensitive(name: str, reader: Any) -> tuple[list[Any], str | None]:
                 return [], what
         # F30 (nexus-f3yqd.6): an engine with the bounded route (0.1.188) answers in one indexed read; on
         # ``None`` (an older engine, a 404 or 503) or a capped list, the rows walk the catalog as before.
-        bounded = getattr(reader, "sensitive_documents", None)
-        answer = bounded(limit=_SENSITIVE_LIST_LIMIT) if callable(bounded) else None
+        answer = _bounded_sensitive(reader)
         if isinstance(answer, dict) and answer.get("capped") is False:
             documents = [
                 SimpleNamespace(tumbler=d["tumbler"], physical_collection=d["physical_collection"], sensitive=True)
