@@ -1840,6 +1840,26 @@ def test_a_long_step_rewrites_its_status_with_elapsed_time_and_the_last_log_line
     assert "elapsed_s" not in mod.read_status(box.setup), "a new step drops the last one's time so far"
 
 
+
+def test_a_progress_write_that_fails_does_not_end_the_running_step(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _in_process(box, monkeypatch)
+    box.setup.mkdir(parents=True)
+    token = mod.acquire_lock(box.setup)
+    assert token
+    monkeypatch.setattr(mod, "PROGRESS_REFRESH_S", 0.2)
+    run = mod._Run(box.setup, "local", False, mod._Heartbeat(box.setup / "lock", token))
+    run.at("build")
+    real_update = run.update
+
+    def full_disk(**fields: Any) -> None:
+        if "elapsed_s" in fields:
+            raise OSError(28, "No space left on device")
+        real_update(**fields)
+
+    monkeypatch.setattr(run, "update", full_disk)
+    code, _ = run.cmd([sys.executable, "-c", "import time; time.sleep(1.0)"])
+    assert code == 0, "a failed progress write ended the build"
+
 def test_the_progress_words() -> None:
     mod = _load_module()
     assert [mod._elapsed_words(s) for s in (45, 725, 3720)] == ["45 s", "12 min 05 s", "1 h 02 min"]
