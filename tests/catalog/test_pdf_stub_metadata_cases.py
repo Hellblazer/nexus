@@ -214,7 +214,7 @@ def test_the_client_rule_counts_each_scenarios_owners(scenario: dict, monkeypatc
     ],
 )
 def test_a_collection_registered_by_the_client_gets_its_names_first_segment_as_the_registry_content_type(
-    name: str, prefix: str,
+    name: str, prefix: str, cloud_mode: None,
 ) -> None:
     """The engine route examines the registry's knowledge and docs collections; the client scans the name prefixes.
 
