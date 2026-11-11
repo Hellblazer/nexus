@@ -1388,6 +1388,12 @@ def test_pdf_collection_flag_normalization(runner, fake_pdf, flag_val, expected)
     (["--collection", "knowledge__delos__voyage-context-3__v1"], "delos"),
     (["--collection", "knowledge__delos", "--corpus", "mine"], "mine"),   # an explicit --corpus still wins
     ([], "default"),                                                      # neither: the old default
+    # Only a knowledge collection has a subject. A docs__/code__ name's owner segment is the tumbler-derived owner id
+    # (``1-48``), not a subject, and must not become the curator owner a PDF registers under.
+    (["--collection", "docs__1-48__voyage-context-3__v1"], "default"),
+    (["--collection", "code__1-48__voyage-code-3__v1"], "default"),
+    (["--collection", "docs__myrepo"], "default"),                        # legacy two-segment name, promoted to docs__
+    (["--collection", "knowledge__a-b-c__voyage-context-3__v1"], "a-b-c"),
 ])
 def test_pdf_corpus_follows_the_collection_subject(runner, fake_pdf, argv, expected_corpus):
     rv = {"chunks": 5, "pages": [1], "title": "T", "author": "A"}

@@ -247,6 +247,53 @@ def test_the_streaming_pipeline_tail_writes_no_chunk_row_and_leaves_the_title_to
     t3.update_chunks.assert_not_called()
 
 
+@pytest.mark.parametrize("stem,metadata,text,override,expected_title,expected_fallback", [
+    # GH #1611: the document's own title (its metadata) reads exactly like the title-cased stem. It is a REAL title,
+    # so the hook is told it is not the stem fallback and writes it over a stem placeholder.
+    ("attention-is-all-you-need", {"pdf_title": "Attention Is All You Need"}, "body text", "",
+     "Attention Is All You Need", False),
+    # the same equality, from the first H1 of the text
+    ("attention-is-all-you-need", {}, "# Attention Is All You Need\n\nbody text", "",
+     "Attention Is All You Need", False),
+    # no metadata title and no H1: the title IS the stem fallback, and a placeholder
+    ("attention-is-all-you-need", {}, "body text with no heading", "", "Attention Is All You Need", True),
+    # an explicit --title is the user's and never a fallback, even when it equals the stem form
+    ("attention-is-all-you-need", {}, "body text", "Attention Is All You Need", "Attention Is All You Need", False),
+])
+def test_the_streaming_pipeline_tells_the_catalog_hook_whether_the_title_is_the_stem_fallback(
+    tmp_path, stem, metadata, text, override, expected_title, expected_fallback,
+) -> None:
+    """``pipeline_index_pdf`` passes ``title_is_fallback`` (from ``pdf_title_source``) to ``_catalog_pdf_hook``; the
+    hook's own tests drive the flag directly, so only this one pins that the streaming path sends it."""
+    from pathlib import Path
+
+    from nexus.hook_registry import HookRegistry
+    from nexus.pipeline_stages import pipeline_index_pdf
+    from tests.pipeline_fake_engine import make_fake_engine_db
+
+    pdf = Path(tmp_path / f"{stem}.pdf")
+    pdf.write_bytes(b"%PDF-1.4 title source\n")
+    db, _engine = make_fake_engine_db()
+    extraction = MagicMock()
+    extraction.text = text
+    extraction.metadata = {"extraction_method": "mineru", "page_count": 1, **metadata}
+    with patch("nexus.pipeline_stages.extractor_loop", return_value=extraction), \
+            patch("nexus.pipeline_stages.chunker_loop", return_value=None), \
+            patch("nexus.pipeline_stages.uploader_loop", return_value=0), \
+            patch("nexus.doc_indexer._fence_begin"), patch("nexus.doc_indexer._fence_fail"), \
+            patch("nexus.pipeline_stages._catalog_pdf_hook") as hook, \
+            patch("nexus.catalog.factory.make_catalog_reader", return_value=MagicMock()):
+        pipeline_index_pdf(
+            pdf, "e" * 64, "knowledge__x", MagicMock(), db=db,
+            embed_fn=lambda texts, model: ([[0.1] * 4] * len(texts), model),
+            extraction_stats={}, doc_id="1.9.9", hooks=HookRegistry(), title_override=override,
+        )
+
+    hook.assert_called_once()
+    assert hook.call_args.kwargs["title"] == expected_title
+    assert hook.call_args.kwargs["title_is_fallback"] is expected_fallback
+
+
 def test_the_post_pass_writers_are_gone() -> None:
     import nexus.pipeline_stages as ps
 
