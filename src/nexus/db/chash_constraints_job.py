@@ -68,7 +68,7 @@ def _ask_operator_text() -> str:
 
     if is_local_mode():
         return ("the chash CHECK validate job needs the engine's root token, and this install's credentials are not "
-                "it: run it with the install's own service token (the one `nx daemon service` publishes)")
+                "it: set it with `nx config set service_token <root token>` (or NX_SERVICE_TOKEN), then run this again")
     return ("the chash CHECK validate job needs the engine operator's credentials, which a managed install does not "
             "hold: ask the operator of your nexus service to run `nx t3 validate-chash-checks`")
 
@@ -124,7 +124,7 @@ def _error_text(exc: httpx.HTTPStatusError) -> str:
 
 
 def poll_hint(job_id: str) -> str:
-    return f"the job keeps running on the engine; follow it with `nx t3 validate-chash-checks --job {job_id}`"
+    return f"the job may still be running on the engine; follow it with `nx t3 validate-chash-checks --job {job_id}`"
 
 
 def start(client: Any, *, dry_run: bool) -> dict[str, Any]:
@@ -295,6 +295,11 @@ def _deferred_line(e: dict[str, Any]) -> str:
     return f"deferred: {_where(e)}: {meaning}"
 
 
+def _count(value: Any, listed: int) -> int:
+    """The engine's full count when it is an int, never less than what the capped list holds."""
+    return max(value, listed) if isinstance(value, int) and not isinstance(value, bool) else listed
+
+
 def verdict(body: dict[str, Any], *, repair_ready: bool = False) -> Verdict:
     """Read a finished job by its entries' reasons; ``done`` alone means nothing."""
     if body.get("state") == "failed":
@@ -304,17 +309,17 @@ def verdict(body: dict[str, Any], *, repair_ready: bool = False) -> Verdict:
         return Verdict(False, f"the job ended in state {body.get('state')!r}; run this again")
     refused = [e for e in body.get("refused") or [] if isinstance(e, dict)]
     deferred = [e for e in body.get("deferred") or [] if isinstance(e, dict)]
-    n_refused = body.get("refused_count", len(refused))
-    n_deferred = body.get("deferred_count", len(deferred))
+    n_refused = _count(body.get("refused_count"), len(refused))
+    n_deferred = _count(body.get("deferred_count"), len(deferred))
     lines: list[str] = []
     for e in refused:
         lines += _refused_lines(e, repair_ready=repair_ready)
     lines += [_deferred_line(e) for e in deferred]
-    if len(refused) < (n_refused or 0) or len(deferred) < (n_deferred or 0):
+    if len(refused) < n_refused or len(deferred) < n_deferred:
         lines.append("(lists cut short by the engine; the counts are complete)")
     if body.get("dry_run"):
         would = body.get("would_validate_count", len(body.get("would_validate") or []))
-        return Verdict(not refused and not deferred,
+        return Verdict(not n_refused and not n_deferred,
                        f"dry run: {would} would validate, {n_refused} would be refused, {n_deferred} would be deferred; "
                        "nothing was changed", lines)
     if n_refused:
@@ -373,6 +378,9 @@ def doctor_fix_lines(client: Any, *, dry_run: bool, echo: Callable[[str], None],
     except ValidateJobError as exc:
         echo(f"chash CHECKs: {exc}")
         return False
+    except KeyboardInterrupt:
+        echo(f"chash CHECKs: stopped following; {poll_hint(job_id)}" if job_id else "chash CHECKs: stopped")
+        raise
     v = verdict(body, repair_ready=repair_supported(client))
     for line in v.lines:
         echo(f"  {line}")

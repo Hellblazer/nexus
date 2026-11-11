@@ -10951,8 +10951,8 @@ def _check_chash_validate_offer() -> list[HealthResult]:
     return [HealthResult(
         label="chash CHECK validation", ok=False, warn=True,
         detail=("the chash width CHECKs are not validated: they already refuse a new bad row, and validating proves "
-                "no old row breaks them (doctor then skips its conformance scan). The engine runs that only as a job a "
-                "user starts; it deletes nothing and resumes where it left off"),
+                "no old row breaks them (on a local install doctor then skips its conformance scan). The engine runs "
+                "that only as a job a user starts; it deletes nothing and resumes where it left off"),
         fix_suggestions=_chash_validate_suggestions(),
     )]
 

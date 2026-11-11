@@ -157,7 +157,7 @@ class TestStart:
         self, client, engine, monkeypatch,
     ) -> None:
         engine.start_status, engine.start_body = 403, {"error": "operator privilege required"}
-        with pytest.raises(job.AskOperator, match="root token"):
+        with pytest.raises(job.AskOperator, match="nx config set service_token"):
             job.start(client, dry_run=False)
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
         with pytest.raises(job.AskOperator, match="ask the operator"):
@@ -169,6 +169,43 @@ class TestStart:
         with pytest.raises(job.ValidateJobError, match=text) as exc:
             job.start(client, dry_run=False)
         assert exc.value.exit_code == 1
+
+
+class TestDryRunNeverWrites:
+    """A dry run must post dry_run=true on every path: a dry run turned into a real VALIDATE is a write the user did
+    not ask for (review r2)."""
+
+    def test_start_posts_the_flag_it_was_given(self, client, engine) -> None:
+        job.start(client, dry_run=True)
+        job.start(client, dry_run=False)
+        posts = [r[2] for r in engine.requests if r[0] == "POST" and r[1] == job.JOB_PATH]
+        assert posts == [{"dry_run": True}, {"dry_run": False}]
+
+    def test_doctor_fix_dry_run_posts_a_dry_run(self, client, engine, monkeypatch) -> None:
+        monkeypatch.setattr(job, "POLL_EVERY_S", 0.0)
+        engine.polls = [(200, _done(dry_run=True, would_validate=["nexus.chunks"], would_validate_count=1))]
+        job.doctor_fix_lines(client, dry_run=True, echo=lambda _l: None, clock=_clock())
+        assert [r[2] for r in engine.requests if r[0] == "POST"] == [{"dry_run": True}]
+
+    def test_the_doctor_entry_point_passes_dry_run_through(self, client, engine, monkeypatch) -> None:
+        monkeypatch.setattr(chash_checks, "_client", lambda: client)
+        monkeypatch.setattr(client, "close", lambda: None)
+        monkeypatch.setattr(job, "POLL_EVERY_S", 0.0)
+        engine.polls = [(200, _done(dry_run=True, would_validate=[], would_validate_count=0))]
+        chash_checks.doctor_chash_fix(dry_run=True)
+        assert [r[2] for r in engine.requests if r[0] == "POST"] == [{"dry_run": True}]
+
+    def test_the_verb_with_dry_run_posts_a_dry_run(self, client, engine, monkeypatch) -> None:
+        monkeypatch.setattr(chash_checks, "_client", lambda: client)
+        monkeypatch.setattr(client, "close", lambda: None)
+        monkeypatch.setattr(job, "POLL_EVERY_S", 0.0)
+        engine.polls = [(200, _done(dry_run=True, would_validate=["nexus.chunks"], would_validate_count=1))]
+        r = CliRunner().invoke(main, ["t3", "validate-chash-checks", "--dry-run"])
+        assert r.exit_code == 0, r.output
+        assert [q[2] for q in engine.requests if q[0] == "POST"] == [{"dry_run": True}]
+
+    def test_a_count_that_is_not_an_int_does_not_crash_the_verdict(self) -> None:
+        assert job.verdict(_done(refused_count="many", deferred_count=None)).ok is True
 
 
 class TestWait:
