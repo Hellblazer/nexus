@@ -7,8 +7,9 @@ end, or follows a job already started (``--job``). Stopping this command does no
 engine. Stopping the engine stops it safely: a CHECK it validated stays valid, and the next run skips it. It needs the
 engine's root credentials, so on a managed install the operator runs it.
 
-``repair-chash`` is the step a refused manifest CHECK needs: it removes a document's bad 16-byte manifest rows and marks
-the document for re-index, through the engine. No released engine has that route yet; the verb says so. A dry run (the
+``repair-chash`` is the step a refused manifest CHECK needs: the engine rekeys a document's 16-byte manifest rows
+losslessly (it recomputes the 32-byte key from the stored chunk text, moves or merges the chunk, repoints the manifest
+and drops the old row; Sam's choice), nothing to re-index. No released engine has that route yet; the verb says so. A dry run (the
 default) counts and changes nothing; ``--apply`` writes.
 
 Exit codes: 0 every CHECK validated (a dry run: nothing would be refused or deferred); 1 a CHECK refused or deferred,
@@ -90,11 +91,11 @@ def validate_chash_checks_cmd(dry_run: bool, job_id: str | None, no_wait: bool, 
 @click.argument("doc_id", required=False)
 @click.option("--all", "all_docs", is_flag=True, default=False, help="Every document with a bad manifest row.")
 @click.option("--apply", "apply", is_flag=True, default=False,
-              help="Remove the bad rows and mark the documents for re-index. Without it nothing is changed.")
+              help="Rekey the documents' 16-byte manifest rows. Without it nothing is changed.")
 @click.option("--limit", type=click.IntRange(1, 100_000), default=None, help="At most this many documents.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the engine's answer as one JSON document.")
 def repair_chash_cmd(doc_id: str | None, all_docs: bool, apply: bool, limit: int | None, as_json: bool) -> None:
-    """Remove a document's bad 16-byte manifest rows and mark it for re-index (needs an engine with the route)."""
+    """Rekey a document's 16-byte manifest rows to their 32-byte keys, losslessly (needs an engine with the route)."""
     if bool(doc_id) == all_docs:
         _fail("name one document (its tumbler), or --all for every document with a bad row", EXIT_USAGE)
     client = _client()
@@ -109,17 +110,13 @@ def repair_chash_cmd(doc_id: str | None, all_docs: bool, apply: bool, limit: int
         click.echo(json.dumps(out, indent=2, default=str))
         return
     for d in out["documents"]:
-        marked = " and marked for re-index" if d.get("marked_for_reindex") else ""
-        click.echo(f"  {d.get('doc_id')}: {d.get('bad_rows')} bad manifest row(s)"
-                   f"{' removed' + marked if apply else ''}")
+        click.echo(f"  {d.get('doc_id')}: {d.get('bad_rows')} 16-byte manifest row(s){' rekeyed' if apply else ''}")
     capped = " (capped: more remain, raise --limit)" if out.get("capped") else ""
     count = out.get("count", len(out["documents"]))
     if apply:
-        click.echo(f"Repaired {count} document(s){capped}. Re-index them (`nx index repo` for repository files; a "
-                   "note stored with `nx store` has no source file and must be stored again), then run "
-                   "`nx t3 validate-chash-checks`.")
+        click.echo(f"Rekeyed {count} document(s){capped}. Run `nx t3 validate-chash-checks` again.")
     else:
-        click.echo(f"{count} document(s) would be repaired{capped}; nothing was changed. Rerun with --apply to repair.")
+        click.echo(f"{count} document(s) would be rekeyed{capped}; nothing was changed. Rerun with --apply to rekey.")
 
 
 def doctor_chash_fix(*, dry_run: bool) -> bool:

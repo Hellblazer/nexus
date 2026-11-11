@@ -393,13 +393,13 @@ class TestVerbs:
 
     def test_repair_is_a_dry_run_unless_applied(self, engine) -> None:
         engine.flags["catalog_manifest_repair_chash_supported"] = True
-        engine.repair_body = {"documents": [{"doc_id": "1.2.3", "bad_rows": 2, "marked_for_reindex": False}],
+        engine.repair_body = {"documents": [{"doc_id": "1.2.3", "bad_rows": 2}],
                               "count": 1, "capped": False, "dry_run": True}
         r = self._invoke("repair-chash", "1.2.3")
         assert r.exit_code == 0 and "nothing was changed" in r.stdout
         assert engine.requests[-1][2]["dry_run"] is True
         r = self._invoke("repair-chash", "1.2.3", "--apply")
-        assert engine.requests[-1][2]["dry_run"] is False and "Repaired 1 document" in r.stdout
+        assert engine.requests[-1][2]["dry_run"] is False and "Rekeyed 1 document" in r.stdout
 
     def test_repair_needs_one_document_or_all(self) -> None:
         assert self._invoke("repair-chash").exit_code == 2

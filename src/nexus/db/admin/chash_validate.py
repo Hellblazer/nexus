@@ -15,7 +15,9 @@ Routes:
 - ``POST /v1/admin/validate-constraints`` ``{dry_run}`` (root token only, flag ``chash_constraints_validate_job_supported``)
   answers ``{job_id, created}``; ``GET .../{job_id}`` reports progress and the result. A tenant token gets 403.
 - ``POST /v1/catalog/manifest/repair-chash`` ``{doc_id, dry_run, limit}`` (flag ``catalog_manifest_repair_chash_supported``):
-  the repair a manifest ``bad_rows`` refusal needs. No released engine has it yet; the client says so.
+  the lossless rekey a manifest ``bad_rows`` refusal needs (Sam's choice): the engine recomputes the 32-byte key from
+  the stored chunk text, moves or merges the chunk, repoints the manifest and drops the 16-byte row, per tenant. No
+  released engine has it yet; the client says so. Its final path and flag come from wren's engine half.
 
 There is no fallback to direct SQL: an engine without the job flag is named too old.
 """
@@ -280,7 +282,7 @@ def _refused_lines(e: dict[str, Any], *, repair_ready: bool) -> list[str]:
     if examples:
         out.append("  examples: " + ", ".join(str(x) for x in examples[:5]))
     if e.get("table") == MANIFEST_TABLE:
-        out.append("  next: `nx t3 repair-chash --all` (a dry run) then `--all --apply`, re-index, run this again"
+        out.append("  next: `nx t3 repair-chash --all` (a dry run) then `--all --apply`, then run this again"
                    if repair_ready else
                    "  next: these manifest rows need the repair route (`nx t3 repair-chash`), which no released "
                    "engine has yet; nothing else to do until it lands")
