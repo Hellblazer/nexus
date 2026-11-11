@@ -17,6 +17,7 @@ import pytest
 
 from nexus import health
 from nexus.catalog.http_catalog_client import (
+    INDEX_RUN_CENSUS_RULES_DIFFER,
     INDEX_RUN_FENCE_FLOOR_ISO,
     INDEX_RUN_STALE_THRESHOLD_S,
     INDEX_RUN_CENSUS_MAX_LIMIT,
@@ -81,6 +82,20 @@ def test_both_routes_are_supported_only_when_both_flags_are_json_true(monkeypatc
     assert c.index_run_routes_supported() is want
 
 
+def test_a_failed_version_probe_is_told_from_an_answer_without_the_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(self, path, **kw):
+        raise httpx.ConnectError("refused")
+
+    for body, failed in (({}, False), ({"catalog_index_run_census_supported": True}, False)):
+        c = object.__new__(HttpCatalogClient)
+        monkeypatch.setattr("nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin._get",
+                            lambda self, path, **kw: body)
+        assert c.index_run_routes_supported() is False and c.version_probe_failed() is failed
+    c = object.__new__(HttpCatalogClient)
+    monkeypatch.setattr("nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin._get", refuse)
+    assert c.index_run_routes_supported() is False and c.version_probe_failed() is True
+
+
 # ── the census ───────────────────────────────────────────────────────────────
 
 
@@ -92,7 +107,7 @@ def test_the_census_travels_the_wire_with_the_engines_whole_limit(monkeypatch: p
     assert path == "/index-run/census" and kw["limit"] == INDEX_RUN_CENSUS_MAX_LIMIT == 10_000 and kw["idempotent"] is False
     # Under the public edge's roughly 30 s cut, which is also the engine's worst case (three 10 s buckets in series):
     # a longer timeout buys nothing through the edge.
-    assert kw["timeout"] == INDEX_RUN_CENSUS_TIMEOUT_S and 25 <= INDEX_RUN_CENSUS_TIMEOUT_S < 30
+    assert kw["timeout"] == INDEX_RUN_CENSUS_TIMEOUT_S and 25 < INDEX_RUN_CENSUS_TIMEOUT_S < 30
 
 
 def test_a_limit_the_caller_names_is_the_limit_sent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -168,10 +183,20 @@ def test_a_body_without_all_three_buckets_is_cannot_say(monkeypatch: pytest.Monk
 
 
 @pytest.mark.parametrize(("key", "value"), [
-    ("threshold_s", 3600), ("threshold_s", 21601), ("threshold_s", "21600"), ("threshold_s", True), ("threshold_s", None),
-    ("floor", "2026-08-07T16:00:36Z"), ("floor", "2026-08-01T00:00:00Z"), ("floor", "not a time"), ("floor", None), ("floor", 0),
+    ("threshold_s", 3600), ("threshold_s", 21601), ("threshold_s", 0),
+    ("floor", "2026-08-07T16:00:36Z"), ("floor", "2026-08-01T00:00:00Z"),
 ])
-def test_a_census_computed_with_another_threshold_or_floor_is_cannot_say(monkeypatch: pytest.MonkeyPatch, key: str, value) -> None:
+def test_a_census_computed_with_another_threshold_or_floor_says_so(monkeypatch: pytest.MonkeyPatch, key: str, value) -> None:
+    """A well-formed ``threshold_s`` or ``floor`` that is not the client's is its own answer, not a malformed body."""
+    c, _calls = _client(monkeypatch, flags=_BOTH, get={**_CENSUS, key: value})
+    assert c.index_run_census() is INDEX_RUN_CENSUS_RULES_DIFFER
+
+
+@pytest.mark.parametrize(("key", "value"), [
+    ("threshold_s", "21600"), ("threshold_s", True), ("threshold_s", None), ("threshold_s", -1),
+    ("floor", "not a time"), ("floor", None), ("floor", 0),
+])
+def test_a_census_whose_threshold_or_floor_is_malformed_is_cannot_say(monkeypatch: pytest.MonkeyPatch, key: str, value) -> None:
     c, _calls = _client(monkeypatch, flags=_BOTH, get={**_CENSUS, key: value})
     assert c.index_run_census() is None
 

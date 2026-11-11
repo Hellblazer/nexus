@@ -276,10 +276,10 @@ STUB_METADATA_TIMED_OUT = object()
 #: roughly 30 s cut.
 STUB_METADATA_TIMEOUT_S = 28.0
 #: The index-run census read's client timeout (engine 0.1.190, nexus-f3yqd.6). The engine runs its three buckets in
-#: series, each under its own 10 s bound (``CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS``), so the worst case is about
-#: 30 s. The public edge cuts at about 30 s too, so a longer client timeout buys nothing through it: this is under
-#: that cut. A cut, by the edge or by this timeout, is an error to the caller, and the doctor then reports all three
-#: rows not checked; a census that finishes inside it answers per bucket, a bucket that timed out as ``timed_out``.
+#: series, each under the smaller of its own 10 s bound and what is left of one 25 s budget for the call
+#: (``IndexRunCensusReads.CALL_BUDGET_MS``), so it answers inside about 25 s, a bucket out of time as ``timed_out``.
+#: This is above that and under the public edge's roughly 30 s cut. A cut, by the edge or by this timeout, is an error
+#: to the caller, and the doctor then reports all three rows not checked.
 INDEX_RUN_CENSUS_TIMEOUT_S = 28.0
 #: The next_seq drift read's client timeout. The engine checks a call-level 10 s deadline before each owner probe and
 #: re-arms a 10 s ``statement_timeout`` for each one, so its worst case is about 20 s; this is above that and under
@@ -290,6 +290,10 @@ NEXT_SEQ_DRIFT_TIMEOUT_S = 25.0
 #: different census than this client's rules assume, so its answer is read as "cannot say".
 INDEX_RUN_STALE_THRESHOLD_S = 6 * 3600
 INDEX_RUN_FENCE_FLOOR_ISO = "2026-08-07T16:00:35Z"
+#: :meth:`HttpCatalogClient.index_run_census`'s answer when the engine echoed a well-formed ``threshold_s`` or ``floor``
+#: that is not this client's: the engine and the client are from different releases, and the doctor reports the rows
+#: not checked, with that reason, instead of "did not answer".
+INDEX_RUN_CENSUS_RULES_DIFFER = object()
 #: The most documents one bucket of the census lists or counts, and the most examples the drift read lists: the
 #: engine's ``IndexRunCensusReads.MAX_LIMIT`` and ``NextSeqDriftReads.MAX_LIMIT``. A caller that wants the whole
 #: answer asks for this much; a ``capped`` answer is then a floor, never a count.
@@ -668,6 +672,17 @@ def _valid_failed_hidden_bucket(b: dict) -> bool:
                 isinstance(e.get("tumbler"), str) and _is_text_or_null(e.get("source_uri"))
                 and _is_count(e.get("chunk_count")) and _is_count(e.get("chunks_stored"))))
             and len(b["examples"]) <= b["count"])
+
+
+def _census_rules_differ(body: object) -> bool:
+    """True when *body* echoes a well-formed ``threshold_s`` and ``floor`` and either is not this client's. A body
+    that echoes neither, or a malformed one, is not this case (it is malformed)."""
+    if not isinstance(body, dict):
+        return False
+    threshold, floor = body.get("threshold_s"), body.get("floor")
+    if not (_is_count(threshold) and _is_instant(floor)):
+        return False
+    return threshold != INDEX_RUN_STALE_THRESHOLD_S or _instant(floor) != _instant(INDEX_RUN_FENCE_FLOOR_ISO)
 
 
 def _valid_index_run_census(body: object) -> dict | None:
@@ -1404,6 +1419,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         from nexus.catalog.foreign_collection_doctor import parse_foreign_collection_body  # noqa: PLC0415 — kept out of this over-cap module
 
         return parse_foreign_collection_body(result)
+    def version_probe_failed(self) -> bool:
+        """Did the last ``GET /version`` probe fail (an error, not an answer without a flag)? Then every capability
+        reads unsupported although the engine said nothing about it. Read after a capability call."""
+        return self._version_probe_failed
+
     def index_run_routes_supported(self) -> bool:
         """Does the engine answer both doctor census routes (``GET /version``'s ``catalog_index_run_census_supported``
         and ``catalog_next_seq_drift_read_supported``, engine 0.1.190, nexus-f3yqd.6)? Only JSON ``true`` counts, so an
@@ -1412,7 +1432,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return (flags.get("catalog_index_run_census_supported") is True
                 and flags.get("catalog_next_seq_drift_read_supported") is True)
 
-    def index_run_census(self, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | None:
+    def index_run_census(self, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | object | None:
         """The engine's bounded census of the index-run fence (``GET /v1/catalog/index-run/census``, engine 0.1.190,
         nexus-f3yqd.6): ``{"stale": ..., "fence": ..., "failed_hidden": ...}``, each bucket either the engine's object
         (see ``IndexRunCensusReads``) or ``{"timed_out": True}`` when that bucket could not be read in time (the
@@ -1420,7 +1440,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         ``None`` means "cannot say", never "none found": the engine does not advertise
         ``catalog_index_run_census_supported`` (no request is sent then), the route answers 403, 404, 503 or any
-        other error, the request fails, or the body is not the shape the engine documents.
+        other error, the request fails, or the body is not the shape the engine documents. A body whose echoed
+        ``threshold_s`` or ``floor`` is well formed but not this client's answers :data:`INDEX_RUN_CENSUS_RULES_DIFFER`:
+        also "cannot say", with its reason.
         """
         if self._version_flags().get("catalog_index_run_census_supported") is not True:
             return None
@@ -1429,6 +1451,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller reports not checked
             _log.info("http_catalog_client.index_run_census_unavailable", error=str(exc))
             return None
+        if _census_rules_differ(body):
+            _log.warning("http_catalog_client.index_run_census_rules_differ")
+            return INDEX_RUN_CENSUS_RULES_DIFFER
         census = _valid_index_run_census(body)
         if census is None:
             _log.warning("http_catalog_client.index_run_census_malformed")
@@ -3623,6 +3648,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     _CAPABILITY_TTL_S: float = 300.0
     _version_flags_cache: dict[str, Any] | None = None
     _version_flags_fetched_at: float | None = None
+    #: Whether the last ``GET /version`` probe raised (its ``{}`` then says nothing about the engine).
+    _version_probe_failed: bool = False
     #: The clock the interval is measured on; a test replaces it on the instance.
     _capability_clock = staticmethod(time.monotonic)
 
@@ -3640,8 +3667,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         except Exception as exc:  # noqa: BLE001 — a capability probe never raises; the caller takes the unsupported path
             _log.warning("http_catalog_client.version_probe_failed", error=str(exc))
             flags: dict[str, Any] = {}
+            self._version_probe_failed = True
         else:
             flags = body if isinstance(body, dict) else {}
+            self._version_probe_failed = False
         self._version_flags_cache = flags
         self._version_flags_fetched_at = self._capability_clock()
         return flags

@@ -43,12 +43,12 @@ def _old_engine_rows(monkeypatch: pytest.MonkeyPatch) -> list[h.HealthResult]:
     return h._check_index_run_routes()
 
 
-def test_the_index_run_rows_of_an_old_engine_say_it_needs_0_1_190_and_are_marked_not_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_index_run_rows_of_an_engine_without_the_flags_say_what_is_known_and_are_marked_not_checked(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = _old_engine_rows(monkeypatch)
     assert [r.label for r in rows] == list(_INDEX_RUN_LABELS)
     for r in rows:
         assert r.ok is True and r.skipped is True and not r.warn
-        assert r.detail.startswith("not checked") and "needs engine 0.1.190 or later" in r.detail, r.detail
+        assert r.detail.startswith("not checked") and "does not advertise the census routes" in r.detail, r.detail
 
 
 def test_a_skipped_row_renders_as_not_checked_never_as_a_pass(monkeypatch: pytest.MonkeyPatch) -> None:

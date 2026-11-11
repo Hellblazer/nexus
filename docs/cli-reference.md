@@ -3800,7 +3800,7 @@ fast as the catalog grows (measured on a laptop tenant: 2 m 16 s before this cha
 (stale index-run fences, failed index runs with hidden chunks, tumbler allocator drift) are read from the engine's
 two census routes (`GET /v1/catalog/index-run/census`, `GET /v1/catalog/owners/next_seq_drift`, engine 0.1.190):
 two bounded requests and no walk of the catalog. An engine that does not advertise `catalog_index_run_census_supported`
-and `catalog_next_seq_drift_read_supported` gets three `[ ]` `not checked` rows that say `needs engine 0.1.190 or later`.
+and `catalog_next_seq_drift_read_supported` gets three `[ ]` `not checked` rows that say its `/version` does not advertise the census routes (engine 0.1.190 or later; on the managed service, also the edge's `/version` allowlist). A `/version` probe that itself failed says so and asks again on the next run.
 Whatever the engine cannot answer (a bucket that timed out, a 404 or 503) prints `[ ]` `not checked`, and a capped
 failed-runs census with nothing found prints `not fully checked`, never `none`. The supplementary taxonomy row prints
 `not checked` and names `nx doctor --check-taxonomy`. These

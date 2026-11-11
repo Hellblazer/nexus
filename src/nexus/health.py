@@ -13228,10 +13228,18 @@ def _not_checked_row(label: str, why: str, *, retry: bool = True) -> HealthResul
 
 
 _INDEX_RUN_LABELS = (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL, _NEXT_SEQ_LABEL)
-#: Why the rows are not checked against an engine that does not advertise both census routes. Retrying changes
-#: nothing until the engine (or the public edge's ``/version`` allowlist) does.
-_NEEDS_CENSUS_ENGINE = ("needs engine 0.1.190 or later (its /version does not advertise "
-                        "catalog_index_run_census_supported and catalog_next_seq_drift_read_supported)")
+#: Why the rows are not checked when the reader answers its /version without both census flags. It says only what is
+#: known: an older engine and a public edge that has not allowlisted the flags look the same from here. Retrying
+#: changes nothing until the engine (or the edge's allowlist) does.
+_CENSUS_NOT_ADVERTISED = ("this engine's /version does not advertise the census routes (engine 0.1.190 or later; "
+                          "on the managed service, also the edge's /version allowlist)")
+#: The engine echoed a threshold or floor that is not the client's (``INDEX_RUN_CENSUS_RULES_DIFFER``).
+_CENSUS_RULES_DIFFER = ("the engine judges stale fences by a different threshold or floor than this client "
+                        "(engine and client from different releases)")
+#: A reader that does not read the routes at all (not the HTTP catalog client).
+_CENSUS_READER_CANNOT = "this catalog reader does not read the census routes"
+#: The /version probe itself failed, which says nothing about the engine: asking again can answer.
+_CENSUS_PROBE_FAILED = "the engine's /version could not be read"
 
 
 _CENSUS_UNANSWERED = ("the engine did not answer its bounded census read (an engine without the route, a public edge that "
@@ -13311,41 +13319,60 @@ def _check_index_run_routes() -> list[HealthResult]:
 
     An engine that does not advertise both ``catalog_index_run_census_supported`` and
     ``catalog_next_seq_drift_read_supported`` (an older engine, or a public edge whose ``/version`` allowlist does
-    not list them) gets three not-checked rows that say it needs engine 0.1.190 or later. Every way the engine
+    not list them) gets three not-checked rows that say only that its /version does not advertise the routes (engine
+    0.1.190 or later; on the managed service, also the edge's allowlist); a /version probe that itself failed gets
+    rows that say so and that the next run asks again. Every way the engine
     cannot say with the flags set (a 404 or 503, a bucket that timed out, a malformed body, a failed request, no
     catalog reader) is likewise a not-checked row: ok and skipped, never a warning, never "none"."""
     def _all_not_checked(why: str, *, retry: bool = True) -> list[HealthResult]:
         return [_not_checked_row(label, why, retry=retry) for label in _INDEX_RUN_LABELS]
 
     try:
-        from nexus.catalog.http_catalog_client import INDEX_RUN_CENSUS_MAX_LIMIT  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.catalog.http_catalog_client import (  # noqa: PLC0415 — deferred to avoid circular import
+            INDEX_RUN_CENSUS_MAX_LIMIT,
+            INDEX_RUN_CENSUS_RULES_DIFFER,
+        )
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
 
         cat = make_catalog_reader()
         if cat is None:
             return _all_not_checked("no catalog reader")
         supported = getattr(cat, "index_run_routes_supported", None)
-        if not callable(supported) or supported() is not True:
-            return _all_not_checked(_NEEDS_CENSUS_ENGINE, retry=False)
+        if not callable(supported):
+            return _all_not_checked(_CENSUS_READER_CANNOT, retry=False)
+        if supported() is not True:
+            probe_failed = getattr(cat, "version_probe_failed", None)
+            if callable(probe_failed) and probe_failed() is True:
+                return _all_not_checked(_CENSUS_PROBE_FAILED)
+            return _all_not_checked(_CENSUS_NOT_ADVERTISED, retry=False)
     except Exception as exc:  # noqa: BLE001 — a row that cannot be read is not checked, never a crash
         _log.debug("doctor_index_run_routes_unavailable", error=str(exc))
         return _all_not_checked("the catalog reader could not be built")
 
-    def _ask(method: str) -> dict | None:
+    def _ask(method: str) -> Any:
         try:
             answer = getattr(cat, method)(limit=INDEX_RUN_CENSUS_MAX_LIMIT)
         except Exception as exc:  # noqa: BLE001 — "cannot say" is a not-checked row, never a crash
             _log.debug("doctor_index_run_route_failed", method=method, error=str(exc))
             return None
+        if answer is INDEX_RUN_CENSUS_RULES_DIFFER:
+            return answer
         return answer if isinstance(answer, dict) else None
 
     census, drift = _ask("index_run_census"), _ask("next_seq_drift")
-    rows: list[HealthResult] = []
+    if census is INDEX_RUN_CENSUS_RULES_DIFFER:
+        # No bucket of it is read, so the stale-fence and failed-runs rows say why; the drift list has no such rule.
+        rows = [_not_checked_row(label, _CENSUS_RULES_DIFFER, retry=False) for label in (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL)]
+        census = None
+    else:
+        rows = []
     try:
-        rows += (_stale_fence_rows_from_census(cat, _STALE_FENCES_LABEL, census) if census
-                 else [_not_checked_row(_STALE_FENCES_LABEL, _CENSUS_UNANSWERED)])
-        rows += (_failed_hidden_rows_from_census(_HIDDEN_CHUNKS_LABEL, census["failed_hidden"]) if census
-                 else [_not_checked_row(_HIDDEN_CHUNKS_LABEL, _CENSUS_UNANSWERED)])
+        if census is not None:
+            rows += _stale_fence_rows_from_census(cat, _STALE_FENCES_LABEL, census)
+            rows += _failed_hidden_rows_from_census(_HIDDEN_CHUNKS_LABEL, census["failed_hidden"])
+        elif not rows:
+            rows += [_not_checked_row(_STALE_FENCES_LABEL, _CENSUS_UNANSWERED),
+                     _not_checked_row(_HIDDEN_CHUNKS_LABEL, _CENSUS_UNANSWERED)]
         rows += (_next_seq_drift_rows_from_route(_NEXT_SEQ_LABEL, drift) if drift
                  else [_not_checked_row(_NEXT_SEQ_LABEL, _CENSUS_UNANSWERED.replace("census", "next_seq drift"))])
     except Exception as exc:  # noqa: BLE001 — a body the client accepted but the row cannot render is not a crash

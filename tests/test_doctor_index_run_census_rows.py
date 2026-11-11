@@ -4,7 +4,7 @@
 The rows run in the default sweep and under ``--check-index-runs`` from two bounded requests and no catalog walk
 (``catalog_index_run_census_supported``, ``catalog_next_seq_drift_read_supported``). Every way the engine cannot say (a
 404 or 503, a bucket that timed out, a malformed body, a failed request, an unlisted flag, no catalog reader) is a
-not-checked row: ok, skipped, no warning, never "none"; a missing flag says the rows need engine 0.1.190 or later. A
+not-checked row: ok, skipped, no warning, never "none"; a missing flag says only that /version does not advertise the routes, and a failed /version probe says so. A
 capped census with a zero is "not fully checked", never "none".
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 import nexus.health as h
-from nexus.catalog.http_catalog_client import INDEX_RUN_CENSUS_MAX_LIMIT
+from nexus.catalog.http_catalog_client import INDEX_RUN_CENSUS_MAX_LIMIT, INDEX_RUN_CENSUS_RULES_DIFFER
 
 _LABELS = (h._STALE_FENCES_LABEL, h._HIDDEN_CHUNKS_LABEL, h._NEXT_SEQ_LABEL)
 
@@ -237,20 +237,69 @@ def test_a_body_the_client_accepted_but_the_row_cannot_render_is_three_not_check
     assert all(_is_not_checked(r) for v in rows.values() for r in v) and len(rows) == 3
 
 
+# ── an engine that judges by another threshold or floor ─────────────────────
+
+
+def test_a_census_the_engine_computed_by_other_rules_says_so_on_the_census_rows_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = _rows(monkeypatch, _Reader(INDEX_RUN_CENSUS_RULES_DIFFER, _DRIFT_NONE))
+    assert list(rows) == list(_LABELS)
+    for label in (h._STALE_FENCES_LABEL, h._HIDDEN_CHUNKS_LABEL):
+        (r,) = rows[label]
+        assert _is_not_checked(r) and "different threshold or floor than this client" in r.detail, r.detail
+        assert "different releases" in r.detail and "did not answer" not in r.detail and "asks again" not in r.detail
+    (drift,) = rows[h._NEXT_SEQ_LABEL]
+    assert drift.ok and not drift.skipped and drift.detail == "none (4 owner(s) checked)"
+
+
 # ── no routes: three not-checked rows that say what they need ───────────────
 
 
+_ADVERTISE = "does not advertise the census routes (engine 0.1.190 or later; on the managed service, also the edge's /version allowlist)"
+
+
+class _ProbeReader:
+    """A reader whose /version answered without the flags, or whose /version probe itself failed."""
+
+    def __init__(self, *, probe_failed: bool) -> None:
+        self._failed = probe_failed
+
+    def index_run_routes_supported(self) -> bool:
+        return False
+
+    def version_probe_failed(self) -> bool:
+        return self._failed
+
+
 @pytest.mark.parametrize("reader", [
-    object(), _Reader(supported=False), type("R", (), {"index_run_routes_supported": lambda self: "yes"})(),
-], ids=["no-method", "flag-false", "flag-not-true"])
-def test_an_engine_without_both_routes_is_three_not_checked_rows_that_need_0_1_190(monkeypatch: pytest.MonkeyPatch, reader: Any) -> None:
+    _Reader(supported=False), type("R", (), {"index_run_routes_supported": lambda self: "yes"})(),
+    _ProbeReader(probe_failed=False),
+], ids=["flag-false", "flag-not-true", "probe-answered-without-flags"])
+def test_an_engine_that_does_not_advertise_the_routes_is_three_not_checked_rows_that_say_only_that(monkeypatch: pytest.MonkeyPatch, reader: Any) -> None:
     rows = _rows(monkeypatch, reader)
     assert list(rows) == list(_LABELS)
     for label in _LABELS:
         (r,) = rows[label]
-        assert _is_not_checked(r) and "needs engine 0.1.190 or later" in r.detail, r.detail
+        assert _is_not_checked(r) and _ADVERTISE in r.detail and "asks again" not in r.detail, r.detail
+    assert "needs engine" not in " ".join(r.detail for v in rows.values() for r in v)
     if isinstance(reader, _Reader):
         assert reader.asked == [] and reader.walks == 0
+
+
+def test_a_failed_version_probe_is_not_checked_and_asks_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = _rows(monkeypatch, _ProbeReader(probe_failed=True))
+    assert list(rows) == list(_LABELS)
+    for label in _LABELS:
+        (r,) = rows[label]
+        assert _is_not_checked(r) and "/version could not be read" in r.detail and "the next `nx doctor` asks again" in r.detail, r.detail
+        assert "advertise" not in r.detail
+
+
+def test_a_reader_that_does_not_read_the_routes_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = _rows(monkeypatch, object())
+    for label in _LABELS:
+        (r,) = rows[label]
+        assert _is_not_checked(r) and "this catalog reader does not read the census routes" in r.detail, r.detail
+        assert "engine 0.1.190" not in r.detail
 
 
 @pytest.mark.parametrize("reader", [
@@ -298,12 +347,12 @@ def test_the_default_sweep_reads_the_three_rows_from_the_routes_without_a_walk(m
     assert not any(r.skipped for label in _LABELS for r in rows[label])
 
 
-def test_the_default_sweep_on_an_engine_without_the_routes_says_it_needs_0_1_190(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_default_sweep_on_an_engine_without_the_flags_says_what_is_known(monkeypatch: pytest.MonkeyPatch) -> None:
     reader = _Reader(_census(), _DRIFT_NONE, supported=False)
     rows = _sweep(monkeypatch, reader)
     for label in _LABELS:
         (r,) = rows[label]
-        assert _is_not_checked(r) and "needs engine 0.1.190 or later" in r.detail and not r.warn
+        assert _is_not_checked(r) and _ADVERTISE in r.detail and not r.warn
     assert reader.walks == 0 and reader.asked == []
 
 
@@ -312,7 +361,7 @@ def test_the_default_sweep_with_unanswered_routes_is_not_checked_and_no_walk(mon
     rows = _sweep(monkeypatch, reader)
     for label in _LABELS:
         (r,) = rows[label]
-        assert _is_not_checked(r) and "needs engine" not in r.detail
+        assert _is_not_checked(r) and "advertise" not in r.detail
     assert reader.walks == 0
 
 
@@ -324,12 +373,12 @@ def test_check_index_runs_is_the_same_three_rows_alone(monkeypatch: pytest.Monke
     assert reader.walks == 0 and len(reader.asked) == 2
 
 
-def test_check_index_runs_on_an_old_engine_needs_0_1_190_and_does_not_walk(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_check_index_runs_on_an_engine_without_the_flags_does_not_walk(monkeypatch: pytest.MonkeyPatch) -> None:
     reader = _Reader(_census(), _DRIFT_NONE, supported=False)
     _wire(monkeypatch, reader)
     rows = h.run_index_run_checks()
     assert [r.label for r in rows] == list(_LABELS)
-    assert all(_is_not_checked(r) and "needs engine 0.1.190 or later" in r.detail for r in rows)
+    assert all(_is_not_checked(r) and _ADVERTISE in r.detail for r in rows)
     assert reader.walks == 0 and reader.asked == []
 
 

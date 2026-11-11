@@ -101,7 +101,7 @@ def test_a_default_doctor_run_does_not_walk_the_catalog(monkeypatch) -> None:
     assert cat.calls == 0, f"{cat.calls} full catalog walks in a default doctor run"
     for label in ("stale index-run fences", "failed index runs with hidden chunks", "tumbler allocator drift"):
         assert rows[label].ok is True and rows[label].skipped is True and not rows[label].warn, rows[label]
-        assert "needs engine 0.1.190 or later" in rows[label].detail, rows[label]
+        assert "census routes" in rows[label].detail, rows[label]
     # The rung's dry run lists every document and reads manifests: on a managed service doctor skips it.
     assert cat.stats_calls == 0
     ladder = rows["Upgrade ladder"]
@@ -116,7 +116,7 @@ def test_check_index_runs_does_not_walk_the_catalog_either(monkeypatch) -> None:
     rows = _doctor_over(monkeypatch, cat, managed=True, rung_reads=[], index_runs=True)
     assert cat.calls == 0, f"{cat.calls} full catalog walks in one --check-index-runs run"
     for label in ("stale index-run fences", "failed index runs with hidden chunks", "tumbler allocator drift"):
-        assert rows[label].skipped is True and "needs engine 0.1.190 or later" in rows[label].detail, rows[label]
+        assert rows[label].skipped is True and "census routes" in rows[label].detail, rows[label]
 
 
 def test_a_local_engine_does_not_scan_in_doctor_either(monkeypatch) -> None:
