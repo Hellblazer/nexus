@@ -171,9 +171,13 @@ _PAYLOAD_SHAPES: tuple[tuple[frozenset[str], AnswerShape], ...] = (
     # capping, core.py); also_in_ids pairs with also_in (critique [25095]).
     # chash_allow_dropped / warnings are set when a document-confined search
     # drops rows the engine returned outside chash_allow (nexus-jypmj).
-    (frozenset({"ids", "tumblers", "distances", "collections",
-                "chunk_collections", "chunk_text_hash", "also_in", "also_in_ids",
-                "seed_scope", "graph_scope", "chash_allow_dropped", "warnings"}),
+    # hybrid_scores (both tools, nexus-la5pr), next_offset (search, GH #1524) and the RDR-243 posture
+    # keys (sensitive_withheld, sensitive) were missing: any real structured search or query result
+    # read as ANSWERED (review of 9661bcc29).
+    (frozenset({"ids", "tumblers", "distances", "hybrid_scores", "collections",
+                "chunk_collections", "chunk_text_hash", "also_in", "also_in_ids", "next_offset",
+                "seed_scope", "graph_scope", "chash_allow_dropped", "warnings",
+                "sensitive_withheld", "sensitive"}),
      AnswerShape.RETRIEVAL_ONLY),
     # store_get_many(structured=True): source_notes (nexus-onn7s) and section_type_basis (nexus-sx1t0)
     # are part of the payload; without them a full dump did not match and read as ANSWERED.

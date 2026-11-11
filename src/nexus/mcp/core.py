@@ -3979,8 +3979,8 @@ def search(
     - A chunk whose text is identical in several collections is returned once,
       the best-ranked copy, with the other collections named: an `also in:`
       line in the text, and `also_in` and `also_in_ids` (the other collections
-      and the copies' ids, one list per row, aligned with `ids`, `[]` for a row
-      with no copy) in the dict, present only when some row on the page has
+      and the documents the copies belong to, one list per row, aligned with
+      `ids`, `[]` for a row with no copy) in the dict, present only when some row on the page has
       copies. A copy that is sensitive makes the returned row sensitive and is
       not named.
     - The dict carries `next_offset` when more rows may follow the page (the
@@ -4588,10 +4588,14 @@ def _collapse_identical_chunk_results(results: list) -> list:
             also = kept.metadata.setdefault("also_in", [])
             if r.collection not in also:
                 also.append(r.collection)
-        if r.id and r.id != kept.id:
+        # The dropped copy's identity: its own id when it differs, else the document it speaks for.
+        # A search row's id is the chunk id, the same for identical text in every collection, so the
+        # copy is told apart by its owning document (review of 9661bcc29).
+        other_id = r.id if (r.id and r.id != kept.id) else (owner if owner and owner != _row_key(kept)[2] else "")
+        if other_id:
             ids = kept.metadata.setdefault("also_in_ids", [])
-            if r.id not in ids:
-                ids.append(r.id)
+            if other_id not in ids:
+                ids.append(other_id)
     return out
 
 

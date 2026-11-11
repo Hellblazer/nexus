@@ -174,9 +174,34 @@ def test_a_sensitive_copy_withholds_the_row_it_collapses_into_end_to_end(run, mo
     assert "knowledge__medical" not in text and "text of c1" not in text, text
 
 
-def test_structured_rows_name_the_dropped_copies_documents_like_query(run) -> None:
+def test_structured_rows_name_the_dropped_copies_documents_like_query(run, monkeypatch: pytest.MonkeyPatch) -> None:
+    # As the engine returns them: one chunk id for identical text in every collection, each copy
+    # speaking for its own document (doc_id). The copies are named by document.
+    def copy(coll: str, doc: str, dist: float) -> SearchResult:
+        r = _sr("chunk-a", coll, _A, dist)
+        r.metadata["doc_id"] = doc
+        return r
+
+    rows = [copy("rdr__1-53__m__v1", "1.53.4", 0.1), copy("rdr__1-46__m__v1", "1.46.9", 0.2),
+            copy("rdr__1-2__m__v1", "1.2.7", 0.3)]
+    monkeypatch.setattr("nexus.search_engine.search_cross_corpus", lambda query, target, **kw: rows)
     out, _ = run(structured=True)
-    assert out["also_in_ids"] == [["c2", "c4", "c5"], []], out
+    assert out["ids"] == ["chunk-a"]
+    assert out["also_in"] == [["rdr__1-46__m__v1", "rdr__1-2__m__v1"]]
+    assert out["also_in_ids"] == [["1.46.9", "1.2.7"]], out
+
+
+def test_a_real_structured_search_result_classifies_as_retrieval_only(run) -> None:
+    import json
+
+    from nexus.plans.answer_shape import AnswerShape, classify_answer_shape
+
+    out, _ = run(structured=True)
+    assert {"hybrid_scores", "also_in", "also_in_ids"} <= set(out)
+    assert classify_answer_shape(json.dumps(out)) is AnswerShape.RETRIEVAL_ONLY
+    out["next_offset"] = 10
+    out["sensitive_withheld"] = 1
+    assert classify_answer_shape(json.dumps(out)) is AnswerShape.RETRIEVAL_ONLY
 
 
 def _paged(monkeypatch: pytest.MonkeyPatch, n_rows: int, offsets: list[int]) -> list[dict]:
