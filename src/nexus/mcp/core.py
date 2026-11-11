@@ -3646,6 +3646,10 @@ def _search_render(
                     results = [r for g in ordered for r in sorted(g, key=_score, reverse=True)]
             # Non-clustered results are now ranked by hybrid_score
             # (apply_ranking_boosts' own sort) rather than raw distance.
+            # GH #1524: one row per identical chunk across collections, the best-ranked kept and the
+            # others named on it (``also_in``), as query() has done since 7.38.0. Collapsed before the
+            # page cache stores the list, so a cached page is never collapsed twice.
+            results = _collapse_identical_chunk_results(results)
             if use_page_cache:
                 _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
         if not results:
@@ -3754,6 +3758,10 @@ def _search_render(
                 **({"warnings": [w for w in (_failed_collections_note(diag), rerank_note, _chash_allow_note(diag)) if w]}
                    if (_failed_collections_note(diag) or rerank_note or _chash_allow_note(diag)) else {}),
                 **({"chash_allow_dropped": _chash_allow_dropped(diag)} if _chash_allow_dropped(diag) else {}),
+                # GH #1524: aligned with ``ids``; present only when a row stands for a chunk other
+                # collections hold too, so a page with no copies keeps its documented shape.
+                **({"also_in": [list(r.metadata.get("also_in", [])) for r in shown]}
+                   if any(r.metadata.get("also_in") for r in shown) else {}),
                 **posture.structured_keys(),
             }
 
@@ -3826,6 +3834,8 @@ def _search_render(
             # resolved with the display title; the chunk row's are the last writer's.
             note = hit_annotation_line(r.metadata)
             note_line = f"\n  {note}" if note else ""
+            if r.metadata.get("also_in"):  # GH #1524: the same chunk, in the other collections
+                note_line += f"\n  also in: {', '.join(r.metadata['also_in'])}"
             badge = f" {_SENSITIVE_BADGE}" if posture.flagged(_idx) else ""
             lines.append(f"[{dist}]{badge} {label}{flag}{note_line}\n  {snippet}")
 
