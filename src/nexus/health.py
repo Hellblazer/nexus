@@ -10932,6 +10932,16 @@ _CHASH_CONFORMANCE_REPORT_LABEL = "Chunk chash conformance (tenant-scoped, engin
 _CHASH_CONFORMANCE_REPORT_DIMS: tuple[int, ...] = (384, 768, 1024)
 
 
+def _chash_validate_suggestions() -> list[str]:
+    from nexus.config import is_local_mode  # noqa: PLC0415 — config only
+
+    if not is_local_mode():
+        return ["ask your nexus service's operator to run `nx t3 validate-chash-checks` (it needs the engine's "
+                "operator credentials)"]
+    return ["nx t3 validate-chash-checks  # the job alone",
+            "nx doctor --fix  # also runs it, after deleting catalog garbage (preview with --fix --dry-run)"]
+
+
 def _check_chash_validate_offer() -> list[HealthResult]:
     """nexus-f3yqd: whenever the engine says a chash width CHECK is not validated, offer its validate job. The engine
     never validates at boot; a user starts the job (`nx doctor --fix` or `nx t3 validate-chash-checks`). No row when
@@ -10940,12 +10950,10 @@ def _check_chash_validate_offer() -> list[HealthResult]:
         return []
     return [HealthResult(
         label="chash CHECK validation", ok=False, warn=True,
-        detail=("the chash width CHECKs are not validated; the engine validates them only when a user starts its "
-                "job, which is safe to stop and resumes where it left off"),
-        fix_suggestions=[
-            "nx doctor --fix  # starts the validate job (operator credentials; on a managed install ask the operator)",
-            "nx t3 validate-chash-checks",
-        ],
+        detail=("the chash width CHECKs are not validated: they already refuse a new bad row, and validating proves "
+                "no old row breaks them (doctor then skips its conformance scan). The engine runs that only as a job a "
+                "user starts; it deletes nothing and resumes where it left off"),
+        fix_suggestions=_chash_validate_suggestions(),
     )]
 
 

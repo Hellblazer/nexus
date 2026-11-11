@@ -3081,7 +3081,9 @@ def _engine_work_lines() -> list[str]:
     help="DELETE catalog garbage, permanently: orphaned links, tombstoned documents "
          "past 1 day and their stranded chunks (no undo; preview the counts with "
          "--fix --dry-run). Then, on a local install, VACUUM ANALYZE the tuple-space tables "
-         "the dead-tuple row would fail, and HNSW ef tuning on local collections.",
+         "the dead-tuple row would fail; start the engine's chash CHECK validate job when a CHECK is "
+         "not validated (it deletes nothing; `nx t3 validate-chash-checks` runs it alone); "
+         "and HNSW ef tuning on local collections.",
 )
 @click.option(
     "--fix-paths",
@@ -3829,8 +3831,9 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         if any(line.startswith("VACUUM of ") for line in vacuum_lines):
             raise click.ClickException("a dead-tuple VACUUM failed; see the line above")
         from nexus.commands.t3_cmds.chash_checks import doctor_chash_fix  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-        if not doctor_chash_fix(dry_run=False):  # nexus-f3yqd: the user-started VALIDATE of the chash CHECKs
-            raise click.ClickException("the chash CHECK validate job did not validate every CHECK; see the lines above")
+        # nexus-f3yqd: the user-started VALIDATE of the chash CHECKs. A refused or deferred CHECK prints its next step and
+        # does not fail --fix: the doctor row keeps offering the job until it validates.
+        doctor_chash_fix(dry_run=False)
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
