@@ -31,6 +31,8 @@ _BODY = {
         pytest.param(_BODY, id="announced"),
         pytest.param({**_BODY, "announced_at": None, "announce_count": 0}, id="never-announced"),
         pytest.param({**_BODY, "sender_session": "S1"}, id="stamped-sender"),
+        pytest.param({**_BODY, "sender_session": None}, id="sender-key-null"),
+        pytest.param({k: v for k, v in _BODY.items() if not k.startswith("announce")}, id="pre-rdr-213-engine"),
     ],
 )
 def test_the_cli_json_row_has_the_mcp_rows_keys_and_values(body: dict) -> None:

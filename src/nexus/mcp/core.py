@@ -19,7 +19,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
@@ -3504,154 +3504,167 @@ def _search_render(
         # document was flagged (the flag can be set from another process) would otherwise be served under
         # ``exclude`` for up to the TTL. Page turns under ``exclude`` re-run the retrieval.
         use_page_cache = sensitivity != "exclude"
-        cached = _page_cache_get(cache_key, need) if use_page_cache else None
-        #: nexus-ml9vu: the row-preferred model resolver the retrieval builds,
-        #: handed to the boosts so the calibration reads the same rows.
-        model_of_out: list = []
-        if cached is not None:
-            results, diag, rerank_note = cached
-        else:
-            results = None
-        if results is None:
-            # nexus-zdzm5 (RDR-217 A2): a lexical row's vector distance is
-            # usually the worst in its window, and RDR-217 forbids ordering
-            # across the two legs by distance. Only the server rerank scores
-            # rows on their text, and this path never asked for it, so
-            # lexical=true changed the page's scores and not its rows. Ask
-            # for it whenever lexical is on (the CLI already reranks the
-            # multi-collection case; see search_cmd.py).
-            lexical_rerank = lexical and bool(getattr(t3, "supports_server_rerank", False))
-            rerank_meta: dict = {}
-            # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
-            # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
-            # nexus-vpa9q: telemetry and taxonomy both go through the pooled
-            # shared T2 client; no per-call T2Database.
-            results = search_cross_corpus(
-                query, target, n_results=fetch_n, t3=t3, where=where_dict,
-                cluster_by=cluster_by or None,
-                catalog=_get_catalog(),
-                link_boost=False,
-                taxonomy=_search_taxonomy(),
-                topic=topic or None,
-                threshold_override=threshold,
-                lexical=lexical,
-                telemetry=_search_telemetry_sink(),
-                diagnostics_out=diag,
-                rerank=lexical_rerank,
-                rerank_meta_out=rerank_meta if lexical_rerank else None,
-                content_chars=_MCP_CONTENT_CHARS,
-                # nexus-ann50: measured without server rerank only; a reranked
-                # page is pool-sensitive (nexus-abdp2), so it keeps the full k.
-                per_collection_k_cap=None if lexical_rerank else _MCP_PER_COLLECTION_K,
-                model_of_out=model_of_out,
-                sensitivity=sensitivity,
-            )
-            # hybrid scoring + RDR-055 E2 quality boost — parity
-            # with the CLI (search_cmd.py), which has applied both since
-            # RDR-055 / the frecency-scoring work. Before this fix the MCP
-            # path ranked by raw vector distance only and never read
-            # frecency_score or bib_citation_count at all.
-            _cluster_order = [_row_key(r) for r in results] if clustered else None
-            # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): rows the engine held back from a text-exporting reranker keep
-            # the slot it merged them into; read before apply_ranking_boosts re-sorts the list.
-            held_slots = _engine_held_slots(results) if lexical_rerank else []
-            results = apply_ranking_boosts(
-                results,
-                hybrid=cfg.get("search", {}).get("hybrid_default", False),
-                tuning=get_tuning_config(),
-                catalog=_get_catalog(),
-                window=boost_window,
-                model_of=model_of_out[-1] if model_of_out else None,
-            )
-            if lexical_rerank:
-                # Same consumption as the CLI's: scored rows lead in server
-                # relevance order; rows beyond the engine's rerank cap follow
-                # in boosted order, since the two scales differ. RDR-210
-                # Technical Design 12 (nexus-hf29s): when a collection
-                # DEGRADED and others were scored, "scored rows lead" would
-                # sink the degraded family's rows, so every row stays in the
-                # calibrated hybrid_score order apply_ranking_boosts set.
-                # An all-sensitive collection's "no rerank performed" degrade is the engine holding every row back,
-                # not a failure: it is not a degrade here (fix r1, review S2) and does not flip the page to the
-                # calibrated order.
-                benign = _benign_held_degrades(rerank_meta, results)
-                degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded") and c not in benign)
-                scored = [r for r in results if "rerank_score" in r.metadata]
-                partial_rerank = bool(degraded) and bool(scored)
-                if partial_rerank:
-                    # apply_ranking_boosts already ordered the rows (calibrated
-                    # window order, then distance order past the window).
-                    pass
-                else:
-                    for r in scored:
-                        r.hybrid_score = float(r.metadata["rerank_score"])
-                    scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
-                    held_ids = {id(r) for _slot, r in held_slots}
-                    # Held rows return to the engine's slots (a sensitive top-1 stays top-1).
-                    results = _restore_held_slots(
-                        scored + [r for r in results if "rerank_score" not in r.metadata and id(r) not in held_ids],
-                        held_slots,
-                    )
-                if benign and not degraded:
-                    rerank_note = (
-                        f"{len(benign)} collection(s) not reranked: every candidate row is sensitive and is held "
-                        "back from the reranker"
-                    )
-                if degraded:
-                    rerank_note = (
-                        f"lexical rerank degraded in {len(degraded)} collection(s) "
-                        f"({', '.join(degraded[:3])}{', ...' if len(degraded) > 3 else ''}); "
-                        + (
-                            "all rows are in calibrated distance order"
-                            if partial_rerank
-                            else "their lexical rows are in vector-distance order and may be cut"
-                        )
-                    )
-            if clustered:
-                # apply_ranking_boosts sorts by hybrid_score globally, which
-                # would scatter same-cluster results apart — the text
-                # renderer below assumes cluster labels appear CONTIGUOUSLY
-                # (the `current_cluster` grouping further down). Boosted
-                # hybrid_score values are kept on each result; only the
-                # display ORDER is restored to the cluster-grouped order
-                # search_cross_corpus produced.
-                # By row, not by id (nexus-tko2w): a chunk several documents hold comes back
-                # once per document with the same id and a different ``doc_id``, and an
-                # id-keyed map would keep one of the two and return it twice.
-                _by_row: dict[tuple, list] = {}
-                for r in results:
-                    _by_row.setdefault(_row_key(r), []).append(r)
-                results = [_by_row[k].pop(0) for k in _cluster_order if _by_row.get(k)]
+        # GH #1524: the page is cut from the collapsed list (one row per identical chunk across
+        # collections, the best-ranked kept and the others named on it, as query() does), but the page
+        # cache holds the rows as fetched: its "exhausted" test compares that count with the fetch
+        # depth, and a collapsed count would read a full window as the end of the corpus. When the
+        # collapse leaves fewer rows than the page needs and the engine was not exhausted, fetch
+        # again, deeper (critique of 0f2e04cae).
+        raw_n = 0
+        for _round in range(_COLLAPSE_REFETCH_ROUNDS + 1):
+            cached = _page_cache_get(cache_key, need) if (use_page_cache and _round == 0) else None
+            #: nexus-ml9vu: the row-preferred model resolver the retrieval builds,
+            #: handed to the boosts so the calibration reads the same rows.
+            model_of_out: list = []
+            if cached is not None:
+                results, diag, rerank_note = cached
+            else:
+                results = None
+            if results is None:
+                diag = []
+                rerank_note = None
+                # nexus-zdzm5 (RDR-217 A2): a lexical row's vector distance is
+                # usually the worst in its window, and RDR-217 forbids ordering
+                # across the two legs by distance. Only the server rerank scores
+                # rows on their text, and this path never asked for it, so
+                # lexical=true changed the page's scores and not its rows. Ask
+                # for it whenever lexical is on (the CLI already reranks the
+                # multi-collection case; see search_cmd.py).
+                lexical_rerank = lexical and bool(getattr(t3, "supports_server_rerank", False))
+                rerank_meta: dict = {}
+                # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
+                # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
+                # nexus-vpa9q: telemetry and taxonomy both go through the pooled
+                # shared T2 client; no per-call T2Database.
+                results = search_cross_corpus(
+                    query, target, n_results=fetch_n, t3=t3, where=where_dict,
+                    cluster_by=cluster_by or None,
+                    catalog=_get_catalog(),
+                    link_boost=False,
+                    taxonomy=_search_taxonomy(),
+                    topic=topic or None,
+                    threshold_override=threshold,
+                    lexical=lexical,
+                    telemetry=_search_telemetry_sink(),
+                    diagnostics_out=diag,
+                    rerank=lexical_rerank,
+                    rerank_meta_out=rerank_meta if lexical_rerank else None,
+                    content_chars=_MCP_CONTENT_CHARS,
+                    # nexus-ann50: measured without server rerank only; a reranked
+                    # page is pool-sensitive (nexus-abdp2), so it keeps the full k.
+                    per_collection_k_cap=None if lexical_rerank else _MCP_PER_COLLECTION_K,
+                    model_of_out=model_of_out,
+                    sensitivity=sensitivity,
+                )
+                # hybrid scoring + RDR-055 E2 quality boost — parity
+                # with the CLI (search_cmd.py), which has applied both since
+                # RDR-055 / the frecency-scoring work. Before this fix the MCP
+                # path ranked by raw vector distance only and never read
+                # frecency_score or bib_citation_count at all.
+                _cluster_order = [_row_key(r) for r in results] if clustered else None
+                # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): rows the engine held back from a text-exporting reranker keep
+                # the slot it merged them into; read before apply_ranking_boosts re-sorts the list.
+                held_slots = _engine_held_slots(results) if lexical_rerank else []
+                results = apply_ranking_boosts(
+                    results,
+                    hybrid=cfg.get("search", {}).get("hybrid_default", False),
+                    tuning=get_tuning_config(),
+                    catalog=_get_catalog(),
+                    window=boost_window,
+                    model_of=model_of_out[-1] if model_of_out else None,
+                )
                 if lexical_rerank:
-                    # The restore above would put a lexical row back in its
-                    # distance position (review finding on a463fa4ce). Keep
-                    # clusters contiguous, but order the clusters by their
-                    # best rerank score and each cluster's rows by score,
-                    # scored rows first.
-                    def _score(r) -> float:
-                        if partial_rerank:
-                            # Mixed scales: the calibrated hybrid_score orders
-                            # every row (Technical Design 12, nexus-hf29s).
-                            return r.hybrid_score
-                        s = r.metadata.get("rerank_score")
-                        return float(s) if s is not None else float("-inf")
-
-                    groups: dict[str, list] = {}
+                    # Same consumption as the CLI's: scored rows lead in server
+                    # relevance order; rows beyond the engine's rerank cap follow
+                    # in boosted order, since the two scales differ. RDR-210
+                    # Technical Design 12 (nexus-hf29s): when a collection
+                    # DEGRADED and others were scored, "scored rows lead" would
+                    # sink the degraded family's rows, so every row stays in the
+                    # calibrated hybrid_score order apply_ranking_boosts set.
+                    # An all-sensitive collection's "no rerank performed" degrade is the engine holding every row back,
+                    # not a failure: it is not a degrade here (fix r1, review S2) and does not flip the page to the
+                    # calibrated order.
+                    benign = _benign_held_degrades(rerank_meta, results)
+                    degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded") and c not in benign)
+                    scored = [r for r in results if "rerank_score" in r.metadata]
+                    partial_rerank = bool(degraded) and bool(scored)
+                    if partial_rerank:
+                        # apply_ranking_boosts already ordered the rows (calibrated
+                        # window order, then distance order past the window).
+                        pass
+                    else:
+                        for r in scored:
+                            r.hybrid_score = float(r.metadata["rerank_score"])
+                        scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
+                        held_ids = {id(r) for _slot, r in held_slots}
+                        # Held rows return to the engine's slots (a sensitive top-1 stays top-1).
+                        results = _restore_held_slots(
+                            scored + [r for r in results if "rerank_score" not in r.metadata and id(r) not in held_ids],
+                            held_slots,
+                        )
+                    if benign and not degraded:
+                        rerank_note = (
+                            f"{len(benign)} collection(s) not reranked: every candidate row is sensitive and is held "
+                            "back from the reranker"
+                        )
+                    if degraded:
+                        rerank_note = (
+                            f"lexical rerank degraded in {len(degraded)} collection(s) "
+                            f"({', '.join(degraded[:3])}{', ...' if len(degraded) > 3 else ''}); "
+                            + (
+                                "all rows are in calibrated distance order"
+                                if partial_rerank
+                                else "their lexical rows are in vector-distance order and may be cut"
+                            )
+                        )
+                if clustered:
+                    # apply_ranking_boosts sorts by hybrid_score globally, which
+                    # would scatter same-cluster results apart — the text
+                    # renderer below assumes cluster labels appear CONTIGUOUSLY
+                    # (the `current_cluster` grouping further down). Boosted
+                    # hybrid_score values are kept on each result; only the
+                    # display ORDER is restored to the cluster-grouped order
+                    # search_cross_corpus produced.
+                    # By row, not by id (nexus-tko2w): a chunk several documents hold comes back
+                    # once per document with the same id and a different ``doc_id``, and an
+                    # id-keyed map would keep one of the two and return it twice.
+                    _by_row: dict[tuple, list] = {}
                     for r in results:
-                        # Topic grouping labels rows _topic_label, Ward
-                        # clustering _cluster_label (search_engine.py).
-                        key = r.metadata.get("_cluster_label") or r.metadata.get("_topic_label", "")
-                        groups.setdefault(key, []).append(r)
-                    ordered = sorted(groups.values(), key=lambda g: max(_score(r) for r in g), reverse=True)
-                    results = [r for g in ordered for r in sorted(g, key=_score, reverse=True)]
-            # Non-clustered results are now ranked by hybrid_score
-            # (apply_ranking_boosts' own sort) rather than raw distance.
-            # GH #1524: one row per identical chunk across collections, the best-ranked kept and the
-            # others named on it (``also_in``), as query() has done since 7.38.0. Collapsed before the
-            # page cache stores the list, so a cached page is never collapsed twice.
-            results = _collapse_identical_chunk_results(results)
-            if use_page_cache:
-                _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
+                        _by_row.setdefault(_row_key(r), []).append(r)
+                    results = [_by_row[k].pop(0) for k in _cluster_order if _by_row.get(k)]
+                    if lexical_rerank:
+                        # The restore above would put a lexical row back in its
+                        # distance position (review finding on a463fa4ce). Keep
+                        # clusters contiguous, but order the clusters by their
+                        # best rerank score and each cluster's rows by score,
+                        # scored rows first.
+                        def _score(r) -> float:
+                            if partial_rerank:
+                                # Mixed scales: the calibrated hybrid_score orders
+                                # every row (Technical Design 12, nexus-hf29s).
+                                return r.hybrid_score
+                            s = r.metadata.get("rerank_score")
+                            return float(s) if s is not None else float("-inf")
+
+                        groups: dict[str, list] = {}
+                        for r in results:
+                            # Topic grouping labels rows _topic_label, Ward
+                            # clustering _cluster_label (search_engine.py).
+                            key = r.metadata.get("_cluster_label") or r.metadata.get("_topic_label", "")
+                            groups.setdefault(key, []).append(r)
+                        ordered = sorted(groups.values(), key=lambda g: max(_score(r) for r in g), reverse=True)
+                        results = [r for g in ordered for r in sorted(g, key=_score, reverse=True)]
+                # Non-clustered results are now ranked by hybrid_score
+                # (apply_ranking_boosts' own sort) rather than raw distance.
+                if use_page_cache:
+                    _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
+            raw_n = len(results)
+            exhausted = raw_n < fetch_n if cached is None else _page_cache_exhausted(cache_key)
+            collapsed = _collapse_identical_chunk_results(results)
+            if len(collapsed) >= need or exhausted or _round == _COLLAPSE_REFETCH_ROUNDS:
+                break
+            fetch_n *= 2
+        results = collapsed
         if not results:
             if structured:
                 return _structured_no_results(diag)
@@ -3857,7 +3870,7 @@ def _search_render(
         shown_end = offset + len(page)
         if shown_end < total:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
-        elif total >= fetch_n:
+        elif raw_n >= fetch_n:  # the fetched count, not the collapsed one (GH #1524)
             lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
         else:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
@@ -3954,6 +3967,12 @@ def search(
     - `cluster_by` defaults to "" (no clustering).
     - The text and `structured=True` can disagree on ranking order within a
       page: text applies a per-file diversity cap, the dict does not.
+    - A chunk whose text is identical in several collections is returned once,
+      the best-ranked copy, with the other collections named: an `also in:`
+      line in the text, and `also_in` (a list per row, aligned with `ids`,
+      `[]` for a row no other collection holds) in the dict, present only when
+      some row on the page has copies. A copy that is sensitive makes the
+      returned row sensitive and is not named.
     """
     # nexus-zdzm5: the documented page cap was not enforced; limit=301
     # returned 301 rows (118 KB). Refuse, and say how to page instead.
@@ -3979,6 +3998,8 @@ def search(
 #: them without holding stale results past content changes. Thread-safe via
 #: the lock (MCP tools can run concurrently).
 _PAGE_LOOKAHEAD_PAGES = 2
+#: GH #1524: extra, deeper fetches when collapsing identical chunks leaves a page short.
+_COLLAPSE_REFETCH_ROUNDS = 2
 
 #: nexus-tao37: the MCP search and query tools show at most 300 characters of a row
 #: (search's snippet is 200, query's is 300), so they ask the engine for no more.
@@ -4013,6 +4034,15 @@ def _page_cache_get(key: tuple, need: int) -> tuple[list, list, str | None] | No
             # belongs to (a separate read could see a newer entry's).
             return results, _page_cache.get("diag") or [], _page_cache.get("note")
         return None
+
+
+def _page_cache_exhausted(key: tuple) -> bool:
+    """Whether the cached entry for *key* holds the whole pool: its fetch came back short of the depth
+    it asked for. A cache hit whose collapsed rows fall short of a page needs no refetch then (GH #1524)."""
+    with _page_cache_lock:
+        if _page_cache.get("key") != key:
+            return False
+        return len(_page_cache.get("results") or []) < _page_cache.get("fetch_n", 0)
 
 
 def _page_cache_put(
@@ -4448,6 +4478,21 @@ def _dedup_by_id(rows: list[dict]) -> list[dict]:
     return _collapse_identical_chunk_rows(deduped)
 
 
+def _absorb_dropped_copy_sensitivity(kept: dict, dropped: Mapping[str, Any]) -> bool:
+    """A dropped copy of the kept chunk that is sensitive makes the kept one sensitive: the text is the
+    same chunk, so the output posture (RDR-243) must judge it as the sensitive copy, and the copy's
+    collection and id stay out of ``also_in`` (review of 0f2e04cae). *kept* is a row or a result's
+    metadata, mutated in place; returns whether the dropped copy was sensitive."""
+    sensitive, owners = _hit_facts(dropped)
+    if not sensitive:
+        return False
+    kept["sensitive"] = True
+    merged = list(kept.get("sensitive_owners") or [])
+    merged += [o for o in owners if o not in merged]
+    kept["sensitive_owners"] = merged
+    return True
+
+
 def _collapse_identical_chunk_rows(rows: list[dict]) -> list[dict]:
     """GH #1524 (nexus-20uv3): a chunk is content-addressed, so the same text
     indexed in five collections (the RDR template's README, byte-identical
@@ -4466,6 +4511,8 @@ def _collapse_identical_chunk_rows(rows: list[dict]) -> list[dict]:
         if kept is None:
             kept_by_chash[chash] = r
             out.append(r)
+            continue
+        if _absorb_dropped_copy_sensitivity(kept, r):
             continue
         other = r.get("collection", "")
         if other and other != kept.get("collection", ""):
@@ -4514,6 +4561,8 @@ def _collapse_identical_chunk_results(results: list) -> list:
             if (chash, owner) not in owners_kept:
                 owners_kept.add((chash, owner))
                 out.append(r)
+            continue
+        if _absorb_dropped_copy_sensitivity(kept.metadata, r.metadata or {}):
             continue
         if r.collection and r.collection != kept.collection:
             also = kept.metadata.setdefault("also_in", [])

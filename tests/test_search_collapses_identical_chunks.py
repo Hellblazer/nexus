@@ -101,3 +101,42 @@ def test_a_page_without_copies_keeps_its_structured_shape(run, monkeypatch: pyte
     out, _ = run(structured=True)
     assert out["ids"] == ["c1", "c3"]
     assert "also_in" not in out
+
+
+def _hundred_with_five_copies(n: int) -> list[SearchResult]:
+    def sr(i: int) -> SearchResult:
+        chash = _A if i <= 4 else f"{i:064x}"
+        return _sr(f"c{i}", f"rdr__1-{i}__bge-base-en-v15-768__v1", chash, 0.1 + i * 0.001)
+
+    return [sr(i) for i in range(min(n, 100))]
+
+
+def test_paging_across_a_window_holding_copies_reaches_every_row(run, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The critique of 0f2e04cae: the page cache read "fewer rows than fetched" as "the corpus is
+    # exhausted", so a collapsed window ended paging early (offset 30 of 96 distinct rows came back empty).
+    asked: list[int] = []
+
+    def fake(query: str, target: list[str], **kw: Any) -> list[SearchResult]:
+        asked.append(kw["n_results"])
+        return _hundred_with_five_copies(kw["n_results"])
+
+    monkeypatch.setattr("nexus.search_engine.search_cross_corpus", fake)
+    core._page_cache_invalidate()
+    seen: list[str] = []
+    try:
+        for off in range(0, 100, 10):
+            out = core.search(query="q", corpus="rdr", threshold=float("inf"), structured=True, offset=off, limit=10)
+            seen += out.get("ids", []) if isinstance(out, dict) else []
+    finally:
+        core._page_cache_invalidate()
+    assert len(asked) > 1, f"the window edge refetched: {asked}"
+    assert seen == ["c0"] + [f"c{i}" for i in range(5, 100)], (len(seen), seen[-5:])
+
+
+def test_the_text_footer_says_more_rows_exist_when_a_collapsed_window_is_full(run, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nexus.search_engine.search_cross_corpus",
+        lambda query, target, **kw: _hundred_with_five_copies(kw["n_results"]),
+    )
+    out, _ = run(offset=20, limit=10)
+    assert "(end)" not in out, out[-200:]
