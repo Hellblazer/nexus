@@ -75,8 +75,8 @@ round trip.
 
 The local `nx backup` shipped in 8.1.x after the 2026-11-10 incident (nexus-f3yqd) in which an upgrade
 rewrote user data at first boot. Cloud users were left out because the client cannot reach the cloud
-database. The tenant `nexus` holds 3.82 GB and 2.27M rows in the tables a backup exports, 48,772 of
-them catalog documents (A5).
+database. The tenant `nexus` exports 3.82 GB of binary COPY and 2.27M rows from the tables a backup
+covers, 48,772 of them catalog documents (T2 `nexus/rdr248-cloud-spike-2026-11-11`).
 
 ### Technical Environment
 
@@ -370,7 +370,10 @@ exporter; every new table needs a new exporter.
   closes the session, removes `.partial`, and says to run again.
 - The engine restarts mid-session: the dedicated transaction ends, the snapshot is gone; the next page
   request gets a clear "session closed" and the client starts over.
-- Import fails mid-load: one transaction, so the tenant stays empty; the error names the table.
+- Import fails mid-load: one transaction, so the tenant stays empty; the status route reports the table.
+- The client drops during a load: the load continues; the outcome is read later from the status route.
+- The engine restarts during or after a load: the outcome is lost; the verb reopens to learn whether the
+  load committed (the empty-tenant check refuses) or rolled back (it accepts).
 - Registry out of date: the parity test fails in CI before release.
 
 ## Implementation Plan
@@ -378,7 +381,8 @@ exporter; every new table needs a new exporter.
 ### Prerequisites
 
 - [x] A1, A5 and A7 settled from the cloud (bob, read-only window on Sam's go, and conexus config)
-- [x] A2, A3, A4 and A6 verified by local spikes (A4 at toy scale; its scale run is in Step 5)
+- [x] A2, A3, A4 and A6 verified by local spikes (A3 for the types that held data, the rest seeded in
+  Step 5; A4 at toy scale, its scale run in Step 5)
 
 ### Minimum Viable Validation
 
@@ -478,15 +482,18 @@ The first draft's single streamed response contradicted A1 once it was refuted (
 every exchange at 60 s); the design was changed to sessions of short requests (c9bbb3f94), and no part of
 the text still assumes one long stream. The first draft's "60 tables" came from a changeset count; the
 live catalog says 50 parent tables plus 40 chunk leaves, and the registry is built from the live catalog.
-No other contradictions found between research findings, design principles, and proposed solution.
+Gate round 1 found the import commit and the changeset rule contradicting the cloud limits; both were
+redesigned (asynchronous commit; a column-compatibility rule keyed on the changeset count). No other
+contradictions found between research findings, design principles, and proposed solution.
 
 ### Assumption Verification
 
-A2 to A7 are verified (research records 248-research-1 to -8): A2, A3, A4 and A6 by local spikes, A5 and
-A7 by a read-only cloud window, A1 refuted and designed around. Left for implementation, not assumed in
-the design: the column types the spike did not exercise (bigint[], smallint, uuid, the identity column),
-which the Step 5 test seeds; and the cloud edge's transfer rate, which sets an export's time but no
-design choice and is recorded at Activation Step 2.
+A2 to A7 are verified (research records 248-research-1 to -14): A2, A3 and A6 by local spikes, A4 at toy
+scale by a local spike, A5 and A7 by a read-only cloud window, A1 refuted and designed around. Left for
+implementation, not assumed in the design: the column types the spike did not exercise (bigint[],
+smallint, uuid, the identity column), which the Step 5 test seeds; the commit's time at scale, measured
+in Step 5 and used for the load's statement timeout; and the cloud edge's transfer rate, which sets an
+export's time but no design choice and is recorded at Activation Step 2.
 
 #### API Verification
 
@@ -501,8 +508,8 @@ design choice and is recorded at Activation Step 2.
 
 The Minimum Viable Validation is Step 5's round-trip test: export a seeded tenant through the shipped
 routes, import into an empty tenant in the same database, and assert equal counts, checksums and joins,
-in-process with the test fixtures. It is in Phase 1 and gates the engine release; the cloud round trip is
-Activation Step 2.
+in-process with the test fixtures, plus one commit at scale (at least 500,000 synthetic chunks) whose time
+is recorded. It is in Phase 1 and gates the engine release; the cloud round trip is Activation Step 2.
 
 ### Cross-Cutting Concerns
 
