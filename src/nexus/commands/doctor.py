@@ -3081,7 +3081,8 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="DELETE catalog garbage, permanently: orphaned links, tombstoned documents "
          "past 1 day and their stranded chunks (no undo; preview the counts with "
-         "--fix --dry-run). Then HNSW ef tuning on local collections (local mode only).",
+         "--fix --dry-run). Then, on a local install, VACUUM ANALYZE the tuple-space tables "
+         "the dead-tuple row would fail, and HNSW ef tuning on local collections.",
 )
 @click.option(
     "--fix-paths",
@@ -3792,6 +3793,11 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             f" {TRASH_MAX_AGE_DAYS} day ago, and the {preview.stranded_chunks} chunk(s) those documents"
             " left behind. Nothing was deleted; run `nx doctor --fix` to delete them."
         )
+        # GH #1609: the dead-tuple VACUUM --fix would run.
+        from nexus.health import vacuum_tuple_tables  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        for line in vacuum_tuple_tables(dry_run=True):
+            click.echo(line)
         return
 
     if fix:
@@ -3812,6 +3818,15 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             f"{reclaimed.trash_documents} tombstoned document(s), "
             f"{reclaimed.stranded_chunks} stranded chunk(s) (older than {TRASH_MAX_AGE_DAYS} day)."
         )
+        # GH #1609: the tuples.dead_tuple_ratio row's VACUUM, through this install's local admin credentials, so a
+        # user needs neither the database password nor SQL. A failed VACUUM fails the command.
+        from nexus.health import vacuum_tuple_tables  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        vacuum_lines = vacuum_tuple_tables(dry_run=False)
+        for line in vacuum_lines:
+            click.echo(line)
+        if any(line.startswith("VACUUM of ") for line in vacuum_lines):
+            raise click.ClickException("a dead-tuple VACUUM failed; see the line above")
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps

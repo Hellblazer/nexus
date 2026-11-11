@@ -8835,6 +8835,61 @@ def _check_tuple_lock_held(
 _TUPLE_BLOAT_LABEL = "tuples.dead_tuple_ratio"
 
 
+_TUPLE_BLOAT_SQL = (
+    "SELECT relname, n_live_tup, n_dead_tup, last_autovacuum, last_autoanalyze "
+    "FROM pg_stat_user_tables "
+    "WHERE schemaname = 'nexus' AND relname IN ('tuples', 'tuple_claim_log') "
+    "ORDER BY relname;"
+)
+
+
+def _tuple_admin_conn(
+    creds_path: Path | None, psql_bin: Path | None, label: str,
+) -> tuple[Path, str, int, str, str, str] | HealthResult:
+    """``(psql, host, port, dbname, user, password)`` from this install's local ``pg_credentials``, or the
+    row that says why there is none (a managed deployment, an unconfigured box, no psql)."""
+    if creds_path is None:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+
+    if not creds_path.exists():
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+        if not is_local_mode():
+            return _managed_not_probeable(label)
+        return HealthResult(label=label, ok=False, warn=True, detail=_LOCAL_MODE_NOT_CONFIGURED_DETAIL)
+
+    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
+        _read_credentials,
+        discover_pg_binaries,
+        PgBinaryNotFoundError,
+    )
+
+    creds = _read_credentials(creds_path)
+    host = "127.0.0.1"
+    try:
+        port = int(creds.get("PG_PORT", 0))
+    except ValueError:
+        port = 0
+    if port <= 0:
+        return HealthResult(label=label, ok=False, warn=True, detail="pg_credentials missing PG_PORT; cannot connect")
+
+    db_url = creds.get("NX_DB_ADMIN_URL", "")
+    dbname = "nexus"
+    if "/" in db_url:
+        dbname = db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
+    user = creds.get("NX_DB_ADMIN_USER", "nexus_admin")
+    password = creds.get("NX_DB_ADMIN_PASS", "")
+
+    if psql_bin is None:
+        try:
+            psql_bin = discover_pg_binaries().psql
+        except PgBinaryNotFoundError as exc:
+            return HealthResult(label=label, ok=False, warn=True, detail=f"psql binary not found: {exc}")
+
+    return psql_bin, host, port, dbname, user, password
+
+
 def _check_tuple_table_bloat(
     creds_path: Path | None = None,
     psql_bin: Path | None = None,
@@ -8859,52 +8914,12 @@ def _check_tuple_table_bloat(
     label = _TUPLE_BLOAT_LABEL
     route_predates_floor = _tuple_route_predates_floor()
 
-    if creds_path is None:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
-        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
-        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+    conn = _tuple_admin_conn(creds_path, psql_bin, label)
+    if isinstance(conn, HealthResult):
+        return [conn]
+    psql_bin, host, port, dbname, user, password = conn
 
-    if not creds_path.exists():
-        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
-        if not is_local_mode():
-            return [_managed_not_probeable(label)]
-        return [HealthResult(label=label, ok=False, warn=True, detail=_LOCAL_MODE_NOT_CONFIGURED_DETAIL)]
-
-    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
-        _read_credentials,
-        discover_pg_binaries,
-        PgBinaryNotFoundError,
-    )
-
-    creds = _read_credentials(creds_path)
-    host = "127.0.0.1"
-    try:
-        port = int(creds.get("PG_PORT", 0))
-    except ValueError:
-        port = 0
-    if port <= 0:
-        return [HealthResult(label=label, ok=False, warn=True, detail="pg_credentials missing PG_PORT; cannot connect")]
-
-    db_url = creds.get("NX_DB_ADMIN_URL", "")
-    dbname = "nexus"
-    if "/" in db_url:
-        dbname = db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
-    user = creds.get("NX_DB_ADMIN_USER", "nexus_admin")
-    password = creds.get("NX_DB_ADMIN_PASS", "")
-
-    if psql_bin is None:
-        try:
-            psql_bin = discover_pg_binaries().psql
-        except PgBinaryNotFoundError as exc:
-            return [HealthResult(label=label, ok=False, warn=True, detail=f"psql binary not found: {exc}")]
-
-    sql = (
-        "SELECT relname, n_live_tup, n_dead_tup, last_autovacuum, last_autoanalyze "
-        "FROM pg_stat_user_tables "
-        "WHERE schemaname = 'nexus' AND relname IN ('tuples', 'tuple_claim_log') "
-        "ORDER BY relname;"
-    )
-    proc = _run_psql(psql_bin, host, port, dbname, user, password, sql, psql_runner=psql_runner)
+    proc = _run_psql(psql_bin, host, port, dbname, user, password, _TUPLE_BLOAT_SQL, psql_runner=psql_runner)
     if proc.returncode != 0:
         stderr_snip = (proc.stderr or "").strip()[:300]
         return [HealthResult(
@@ -8970,13 +8985,69 @@ def _check_tuple_table_bloat(
                 f"{worst_table} dead-tuple ratio {worst_ratio:.2%} exceeds "
                 f"{_TUPLE_DEAD_RATIO_WARN:.0%}: " + "; ".join(details)
             ),
-            fix_suggestions=[f"VACUUM ANALYZE nexus.{worst_table};"],
+            # GH #1609: the VACUUM runs through `nx doctor --fix` with this install's admin credentials; a user
+            # need not have the database password or write SQL.
+            fix_suggestions=[
+                f"nx doctor --fix   (runs VACUUM ANALYZE nexus.{worst_table} with this install's admin credentials; "
+                "--fix --dry-run lists it first)"
+            ],
         )]
     note = (
         "; a ratio counts only past twice the table's autovacuum trigger"
         if skipped else ""
     )
     return [HealthResult(label=label, ok=True, detail=("; ".join(details) or "none") + note)]
+
+
+def vacuum_tuple_tables(
+    *, dry_run: bool, creds_path: Path | None = None, psql_bin: Path | None = None, psql_runner=None,
+) -> list[str]:
+    """``nx doctor --fix``'s dead-tuple VACUUM (GH #1609): ``VACUUM ANALYZE`` on each tuple-space table the
+    tuples.dead_tuple_ratio row would fail (dead rows past twice its autovacuum trigger and a ratio over
+    :data:`_TUPLE_DEAD_RATIO_WARN`), through this install's local admin credentials. *dry_run* lists them and
+    runs nothing. Returns the lines to print; none when nothing is over the line.
+
+    Local only: a managed service's database is its operator's, so nothing is run there."""
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+    if not is_local_mode():
+        return ["Dead-tuple VACUUM skipped: a managed service's database is its operator's to vacuum."]
+    conn = _tuple_admin_conn(creds_path, psql_bin, _TUPLE_BLOAT_LABEL)
+    if isinstance(conn, HealthResult):
+        return [f"Dead-tuple VACUUM skipped: {conn.detail}"]
+    psql, host, port, dbname, user, password = conn
+    proc = _run_psql(psql, host, port, dbname, user, password, _TUPLE_BLOAT_SQL, psql_runner=psql_runner)
+    if proc.returncode != 0:
+        return [f"Dead-tuple VACUUM skipped: the engine did not answer (psql exit {proc.returncode})."]
+    over: list[tuple[str, float]] = []
+    for line in (ln.strip() for ln in proc.stdout.splitlines()):
+        parts = line.split("|")
+        if len(parts) != 5:
+            continue
+        relname = parts[0]
+        try:
+            live, dead = int(parts[1] or 0), int(parts[2] or 0)
+        except ValueError:
+            continue
+        ratio = dead / (live + dead) if live + dead else 0.0
+        # Only the two tuple-space tables the query names, by construction; the name is checked anyway before
+        # it is put into SQL.
+        if relname in ("tuples", "tuple_claim_log") and dead > _tuple_dead_rows_floor(live) and ratio > _TUPLE_DEAD_RATIO_WARN:
+            over.append((relname, ratio))
+    lines: list[str] = []
+    for relname, ratio in over:
+        if dry_run:
+            lines.append(f"--fix would VACUUM ANALYZE nexus.{relname} (dead-tuple ratio {ratio:.2%}).")
+            continue
+        done = _run_psql(psql, host, port, dbname, user, password, f"VACUUM ANALYZE nexus.{relname};",
+                         psql_runner=psql_runner)
+        if done.returncode != 0:
+            lines.append(
+                f"VACUUM of nexus.{relname} failed (psql exit {done.returncode}): {(done.stderr or '').strip()[:300]}"
+            )
+        else:
+            lines.append(f"Vacuumed nexus.{relname} (dead-tuple ratio {ratio:.2%}).")
+    return lines
 
 
 _TUPLE_SWEEP_LABEL = "tuples.sweep_freshness"
@@ -11452,6 +11523,33 @@ _MAX_TRACKED_RUN_IDS = 5000
 _MAX_TRACKED_UNSTAMPED = 1000
 
 
+def _repo_candidates_with_missing_files(
+    cat: Any, idents: list[str], prefixes: dict[str, str], files: dict[str, str],
+) -> list[tuple[str, str, str]]:
+    """``(owner prefix, ident, file_path)`` for each named repo document whose file is gone (GH #1610).
+
+    A relative ``file_path`` resolves against its owner's repo root, as ``nx catalog prune-stale`` resolves it.
+    A document is judged only when that root is a directory on this machine: a repo cloned elsewhere, an owner
+    with no recorded root, or an unreadable owner table proves nothing, and the document keeps the old remedy."""
+    if not idents:
+        return []
+    try:
+        roots = cat.owners_with_roots()
+    except Exception as exc:  # noqa: BLE001 — best-effort classification, must not crash `nx doctor`
+        _log.debug("doctor_fence_owner_roots_unavailable", error=str(exc))
+        return []
+    missing: list[tuple[str, str, str]] = []
+    for ident in idents:
+        fp, prefix = files.get(ident, ""), prefixes.get(ident, "")
+        root = roots.get(prefix, "")
+        if not fp or "/" not in fp or not root or not Path(root).is_dir():
+            continue
+        resolved = Path(fp) if fp.startswith("/") else Path(root) / fp
+        if not resolved.exists():
+            missing.append((prefix, ident, fp))
+    return missing
+
+
 def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None) -> list[HealthResult]:
     """Name documents stranded in ``index_state='indexing'`` beyond a
     threshold (nexus-5xn3k.6, bead-text amendment 2026-08-02 —
@@ -11519,6 +11617,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
     # remedy can be split by owner kind below -- `nx index <path> --force`
     # applies to a repo file and to nothing else.
     candidate_prefix: dict[str, str] = {}
+    candidate_file: dict[str, str] = {}
     # nexus-oiu1t: the install's OWN evidence that it has run a fenced
     # producer — the earliest document carrying a real index_state. A fact
     # about THIS install, unlike a release-tag date, which assumes the user
@@ -11590,6 +11689,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
                         candidates.append((ident, ia_dt))
                         _tumbler = str(getattr(entry, "tumbler", "") or "")
                         candidate_prefix[ident] = ".".join(_tumbler.split(".")[:2])
+                        candidate_file[ident] = str(getattr(entry, "file_path", "") or "")
                     else:
                         candidates_truncated += 1
                 continue
@@ -11713,6 +11813,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
     # come from the owner table; a table that cannot be read leaves every
     # candidate classified as a repo file, the pre-GH-1512 behaviour.
     non_repo_count = 0
+    missing_files: list[tuple[str, str, str]] = []
     if post_anchor:
         try:
             owner_types = {
@@ -11725,6 +11826,14 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
         non_repo_count = sum(
             1 for ident, _at in post_anchor
             if owner_types.get(candidate_prefix.get(ident, ""), "repo") != "repo"
+        )
+        # GH #1610: a repo document whose file is gone from its repo cannot be re-indexed, so `--force` cannot clear
+        # it; such files are counted apart and pointed at `nx catalog prune-stale`.
+        missing_files = _repo_candidates_with_missing_files(
+            cat,
+            [ident for ident, _at in post_anchor
+             if owner_types.get(candidate_prefix.get(ident, ""), "repo") == "repo"],
+            candidate_prefix, candidate_file,
         )
 
     if post_anchor:
@@ -11815,13 +11924,23 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
                     if run_ids_dropped and proven_anchor is None else ""
                 )
                 + f"{legacy_note}{undated_note}{non_repo_note}"
+                + (
+                    f" {len(missing_files)} of the named repo document(s) name a file that is no longer in its "
+                    f"repo (e.g. {missing_files[0][2]}): `nx index --force` cannot re-index a file that is gone, "
+                    "and `nx catalog prune-stale` removes these entries (GH #1610)."
+                    if missing_files else ""
+                )
             ),
             fix_suggestions=(
                 [
                     "nx catalog reconcile-fences --dry-run   (the non-repo "
                     "document(s): stamp the whole ones, then drop --dry-run)",
                 ] if non_repo_count else []
-            ) + (
+            ) + [
+                f"nx catalog prune-stale --owner {prefix}   (the document(s) whose file is gone: lists them; "
+                "then add --no-dry-run --confirm)"
+                for prefix in sorted({p for p, _ident, _fp in missing_files})
+            ] + ([] if len(post_anchor) - non_repo_count - len(missing_files) <= 0 else (
                 [
                     "nx index <path> --force   (re-index ONLY the named "
                     "document(s) above — this clears the symptom, not the "
@@ -11833,7 +11952,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
                     "ONLY the named document(s) above — this clears the "
                     "symptom, not the unfenced producer)",
                 ]
-            ),
+            )),
         ))
     elif anchor is None and (candidates or candidates_truncated):
         # nexus-oiu1t: post-floor unstamped documents exist, but NO document in
