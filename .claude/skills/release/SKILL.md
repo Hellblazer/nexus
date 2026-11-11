@@ -186,10 +186,11 @@ through the Plugin-only fast lane below: offer that. The retired
 `plugin-vX.Y.Z-n` tags are not an option; do not revive them. Source: memory
 `feedback_release_and_develop_ci` § peer_holdouts_from_a_release_go_to_sam.
 
-### 1. Run unit + integration suite
+### 1. Run the release battery
 
 ```bash
-tests/e2e/release-battery.sh --skip-preflight   # Step 0c ran the preflight on this sha; the legs below in ONE parallel run: per-leg logs, verdict table, exit 1 on any red
+tests/e2e/release-battery.sh --skip-preflight   # Step 0c passed on this HEAD (it refuses otherwise); runs the legs below in ONE parallel run: per-leg logs, verdict table, exit 1 on any red
+# The lines below are WHAT THE BATTERY RUNS, for reading and for rerunning one red leg alone. Do not run them as well.
 env NX_GATE_SMOKE_ONLY=1 tests/e2e/local-service-gate.sh   # leg lsg: the throwaway service as shipped boots and serves (14 smoke probes + the engine log); the integration pytest family runs in PR CI
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # leg pkgup: ONE-engine convergence MVV (nexus-cfgo9)
 tests/e2e/fresh-install-mvv.sh       # leg mvv: VIRGIN-journey gate (nexus-nolqs) — see below
@@ -209,12 +210,21 @@ non-vacuity check as on develop. A hand unit suite on the same tree is the
 audit window, aba1742e8, is a unit test the PR shards run), and it held a lab-l
 grant the release's shards needed. The lsg pytest family ran those integration
 tests serially for about 26 minutes and was the battery's long pole; the nightly
-local-service gate still runs it against the throwaway service. On a release PR
+local-service gate still runs the whole family with lsg's floor, skip budget and
+carve-out counts. What the move gives up, as the audit's table said when Sam
+approved it: a run on the laptop's platform (PR CI is Linux) with the operator's
+substrates, and the `NX_GATE_SERVICE_EXPECTED` pin that turns
+`test_mcp_server_round_trip`'s no-service skip into a failure. On a release PR
 whose `service/` is byte-identical to the pinned engine tag, service-ci skips the
-Java suite (cut 6): that tree was tested when the tag was cut.
+Java suite (cut 6), but only when it finds a green `Java tests + jOOQ codegen drift
+guard` run on a commit with that tree; otherwise the suite runs. A change to
+`service-ci.yml` on the release branch also runs it, so the first release after
+this change still runs Java once.
 
 **Reading the battery's table, which is where a vacuous pass hides.** The
-driver runs about 30 minutes on this box. Reds never stop it and it prints one
+driver's long pole is now the smoke-only lsg leg and dual (minutes, not the
+26-minute pytest family it used to be; the next cut's battery log gives the new
+figure). Reds never stop it and it prints one
 table at the end, so the verdict you act on is the table, not the exit. **A leg
 with no verdict line is MISSING, never passed** — implemented in
 `release-battery.sh` (`LEG_STATUS[$leg]="MISSING"`), and it is the rule that
@@ -300,7 +310,9 @@ fixtures (`_isolate_service_endpoint_env`, `_isolate_config_dir`,
 at self-provisioned substrates the suite manages itself; `NX_SERVICE_HOST`/
 `PORT` is harmless legacy env, not a pin. The two proofs are kept separate:
 - The pytest FLOOR/BUDGET family is the functional surface of local mode,
-  proven against those self-provisioned substrates. Historically it only ran
+  proven against those self-provisioned substrates. Since nexus-jh1f2 cut 4 the
+  release battery no longer runs it (`NX_GATE_SMOKE_ONLY=1`): the nightly gate
+  runs it with this guard, and a release PR runs the same files in PR CI. Historically it only ran
   when a dev-box service HAPPENED to be alive against a lived-in install — an
   ambient, irreproducible gate that silently degraded to 74/516 tests the day
   the ambient service died. A vacuity guard now asserts pinned passed/skipped
@@ -1272,8 +1284,9 @@ lint bucket left it, nexus-jh1f2 cut 3, and runs in PR CI's `test-lint`), the
 hook-CLI skew leg and the plugin-lockstep leg. `lsg`, `pkgup`, `mvv`, `dual` and
 `resolve` are shown as `SKIPPED(plugin-only: ...)`, never omitted, and the closing
 line names the mode and the skipped count; a plain `RELEASE BATTERY PASSED` is
-not what this lane prints. **Accepted risk:** those five legs, and Step 1's
-integration suite, are skipped because the wheel and the engine are identical to
+not what this lane prints. **Accepted risk:** those five legs are skipped (the
+integration family is not: the lane's PR into main runs every integration file in
+three shards, cut 4); they are skipped because the wheel and the engine are identical to
 the base tag's but for the version, not because their inputs are identical:
 `resolve`, `mvv`, `pkgup` and `dual` also depend on package indexes and keys that
 change with time, so a dependency or index break since the base tag goes

@@ -8,7 +8,7 @@
 # plugins nexus-z7ddd):
 #   mvv    tests/e2e/fresh-install-mvv.sh                              the core install invariant
 #   pkgup  tests/e2e/migration-rehearsal/run.sh --package-upgrade    package-upgrade convergence
-#   lsg    tests/e2e/local-service-gate.sh                            the local-service gate
+#   lsg    NX_GATE_SMOKE_ONLY=1 tests/e2e/local-service-gate.sh       the local-service gate, smoke leg only (nexus-jh1f2)
 #   dual   tests/e2e/dual-embedder-gate.sh                            the keyed bge + Voyage engine (needs a key)
 #   resolve tests/e2e/constraints-resolve-gate.sh                     the shipped lock resolves on every supported
 #                                                                     target (uv pip compile, off-host; network)
@@ -58,8 +58,9 @@
 #   lockstep  tests/e2e/plugin-lockstep-tests.sh         the plugin/CLI lockstep tests
 # The closing line then names the mode, and a plugin-only run never prints a bare
 # "RELEASE BATTERY PASSED". The unit suite is not a leg here or in the full mode
-# (the release skill runs it serial to the battery); the lint bucket and the pin
-# tests are inside the preflight. --only and --plan compose.
+# (PR CI runs it on the release tree; the plugin-only lane also runs it by hand,
+# serial to the battery); the pin tests are inside the preflight and the lint
+# bucket runs in PR CI's test-lint (nexus-jh1f2 cut 3). --only and --plan compose.
 set -uo pipefail
 (( BASH_VERSINFO[0] >= 4 )) || { echo "bash >= 4 required (found $BASH_VERSION)" >&2; exit 2; }
 export NO_COLOR=1
