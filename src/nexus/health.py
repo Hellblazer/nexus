@@ -10913,6 +10913,13 @@ def _check_manifest_null_collection() -> list[HealthResult]:
     return [HealthResult(label=label, ok=False, warn=True, detail=detail, fix_suggestions=fix_suggestions)]
 
 
+def _check_manifest_foreign_collection() -> list[HealthResult]:
+    """GH #1611: see :mod:`nexus.catalog.foreign_collection_doctor` (kept there: this file is over its size cap)."""
+    from nexus.catalog.foreign_collection_doctor import check_manifest_foreign_collection  # noqa: PLC0415 — deferred: cheap either way
+
+    return check_manifest_foreign_collection()
+
+
 #: RDR-180 (bead nexus-du2dw): the label for the ENGINE-ROUTE chash
 #: conformance check, deliberately DISTINCT from ``CHASH_CONFORMANCE_LABEL``
 #: (``nexus.db.chash_tables``, "Chunk chash conformance") — that label is
@@ -13450,6 +13457,8 @@ def run_health_checks(
     # explicitly, EXPLICITLY NOT RETIRED (RDR-191 Decision item 4's own
     # carve-out; see the check's own docstring).
     results.extend(_step("_check_manifest_null_collection", lambda: _check_manifest_null_collection()))
+    # GH #1611: documents whose manifest names chunks outside their physical_collection; one bounded engine read.
+    results.extend(_step("check_manifest_foreign_collection", lambda: _check_manifest_foreign_collection()))
     # RDR-180 (bead nexus-du2dw): managed/cloud-mode chash width-conformance
     # coverage via the engine route — the local nexus_diag psql probe inside
     # _check_migration_state (above) is LOCAL-ONLY by design (nexus-y3wuu)

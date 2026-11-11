@@ -1251,6 +1251,57 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 else {"collection": r["collection"], "stub_chunks": r["stub_chunks"], "capped": r["capped"],
                       "examples": list(r["examples"])} for r in collections]
 
+    def manifest_foreign_collection(self, limit: int = 1000) -> dict | None:
+        """The live documents whose manifest names chunks outside their own ``physical_collection``, from one bounded
+        engine read (``GET /manifest/foreign_collection``, GH #1611): ``{"count": n, "capped": bool, "documents":
+        [{"tumbler", "physical_collection", "collections", "chunks"}]}``, at most *limit* documents; ``count`` is every
+        such document and ``capped`` means the list holds fewer. ``collections`` are the other collections the manifest
+        names, ``chunks`` the manifest rows that name them.
+
+        ``None`` is "cannot say", never "none": the route answers 404 (an engine from before it) or 503 (its own
+        statement timeout), the request fails, or the body is malformed or inconsistent (an uncapped list whose length
+        is not ``count``). Sent once with a bound of its own, as :meth:`sensitive_documents` is. No capability flag
+        gates it: a 404 says the same thing.
+        """
+        try:
+            result = self._get(
+                "/manifest/foreign_collection", idempotent=False, timeout=_SECTION_LABEL_FILLABLE_TIMEOUT_S, limit=limit)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            _log.info("http_catalog_client.manifest_foreign_collection_unavailable", status=status)
+            return None
+        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller reports "cannot say"
+            _log.info("http_catalog_client.manifest_foreign_collection_unavailable", error=str(exc))
+            return None
+        if not isinstance(result, dict):
+            return None
+        count, capped, documents = result.get("count"), result.get("capped"), result.get("documents")
+
+        def _is_count(v: Any) -> bool:
+            return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+        well_formed = (
+            _is_count(count) and isinstance(capped, bool) and isinstance(documents, list)
+            and all(
+                isinstance(d, dict) and isinstance(d.get("tumbler"), str) and isinstance(d.get("physical_collection"), str)
+                and isinstance(d.get("collections"), list) and all(isinstance(c, str) for c in d["collections"])
+                and _is_count(d.get("chunks"))
+                for d in documents
+            )
+            and (capped or len(documents) == count)
+        )
+        if not well_formed:
+            _log.warning("http_catalog_client.manifest_foreign_collection_malformed", keys=sorted(result))
+            return None
+        return {
+            "count": count, "capped": capped,
+            "documents": [
+                {"tumbler": d["tumbler"], "physical_collection": d["physical_collection"],
+                 "collections": list(d["collections"]), "chunks": d["chunks"]}
+                for d in documents
+            ],
+        }
+
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead
         nexus-du2dw): the engine-route counterpart to the LOCAL-ONLY
