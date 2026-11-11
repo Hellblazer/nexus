@@ -1,56 +1,1315 @@
 {
-  "_comment": "The PDF placeholder-metadata rule, one table for both halves (nexus-f3yqd). A chunk is a stub when (1) its chunk row metadata holds any non-chunk-row key (DOCUMENT, POSITION or LEGACY of the chunk-metadata key table; 'title' is itself a DOCUMENT key, so a row with only an empty title key is a stub) AND (2) holds no truthy title, AND (3) its owning live document is a PDF (nexus.catalog_source_format = pdf: the extension first, then the catalog content type) whose catalog metadata records no truthy extraction_method. The Python half is nexus.health._pdf_stubs_in_collection (through _is_pdf_stub_metadata and catalog_source_format); the engine half is the SQL of GET /v1/catalog/stub-metadata. tests/catalog/test_pdf_stub_metadata_cases.py runs every case through the client function and CatalogStubMetadataParityTest runs every case through the route, each in a collection of its own; a change to either rule that the other does not follow fails one of the two. 'document' is the owning catalog document (content_type, file_path, source_uri, meta = its metadata object); 'chunk' is the chunk row's metadata; 'expect.stub' is whether that one chunk counts as a stub; 'expect.source' is the name the client counts it under (source_uri, else file_path, else 'content_hash ' + the first 12 characters of the chunk's content_hash, or '?'), null when the chunk is not a stub. Python falsiness is the rule for title and extraction_method: absent, null, false, 0, 0.0, \"\", [] and {} are all 'no value'. Values stay in forms a jsonb round trip leaves alone.",
-  "cases": [
-    {"id": "stub-empty-title-with-document-key", "document": {"content_type": "pdf", "file_path": "/a/p1.pdf", "source_uri": "file:///a/p1.pdf", "meta": {}}, "chunk": {"title": "", "content_hash": "c1"}, "expect": {"stub": true, "source": "file:///a/p1.pdf"}},
-    {"id": "stub-no-title-key", "document": {"content_type": "pdf", "file_path": "/a/p2.pdf", "source_uri": "file:///a/p2.pdf", "meta": {}}, "chunk": {"content_hash": "c2"}, "expect": {"stub": true, "source": "file:///a/p2.pdf"}},
-    {"id": "stub-title-null", "document": {"content_type": "pdf", "file_path": "/a/p3.pdf", "source_uri": "file:///a/p3.pdf", "meta": {}}, "chunk": {"title": null, "page_number": 3}, "expect": {"stub": true, "source": "file:///a/p3.pdf"}},
-    {"id": "stub-title-false", "document": {"content_type": "pdf", "file_path": "/a/p4.pdf", "source_uri": "file:///a/p4.pdf", "meta": {}}, "chunk": {"title": false, "line_start": 1}, "expect": {"stub": true, "source": "file:///a/p4.pdf"}},
-    {"id": "stub-title-zero", "document": {"content_type": "pdf", "file_path": "/a/p5.pdf", "source_uri": "file:///a/p5.pdf", "meta": {}}, "chunk": {"title": 0, "line_start": 1}, "expect": {"stub": true, "source": "file:///a/p5.pdf"}},
-    {"id": "stub-title-zero-float", "document": {"content_type": "pdf", "file_path": "/a/p6.pdf", "source_uri": "file:///a/p6.pdf", "meta": {}}, "chunk": {"title": 0.0, "line_start": 1}, "expect": {"stub": true, "source": "file:///a/p6.pdf"}},
-    {"id": "stub-title-empty-list", "document": {"content_type": "pdf", "file_path": "/a/p7.pdf", "source_uri": "file:///a/p7.pdf", "meta": {}}, "chunk": {"title": [], "section_type": "body"}, "expect": {"stub": true, "source": "file:///a/p7.pdf"}},
-    {"id": "stub-title-empty-object", "document": {"content_type": "pdf", "file_path": "/a/p8.pdf", "source_uri": "file:///a/p8.pdf", "meta": {}}, "chunk": {"title": {}, "section_type": "body"}, "expect": {"stub": true, "source": "file:///a/p8.pdf"}},
-    {"id": "not-stub-title-text", "document": {"content_type": "pdf", "file_path": "/a/p9.pdf", "source_uri": "file:///a/p9.pdf", "meta": {}}, "chunk": {"title": "A Paper", "content_hash": "c9"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-title-blank-text", "document": {"content_type": "pdf", "file_path": "/a/p10.pdf", "source_uri": "file:///a/p10.pdf", "meta": {}}, "chunk": {"title": " ", "content_hash": "c10"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-title-string-zero", "document": {"content_type": "pdf", "file_path": "/a/p11.pdf", "source_uri": "file:///a/p11.pdf", "meta": {}}, "chunk": {"title": "0", "content_hash": "c11"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-title-true", "document": {"content_type": "pdf", "file_path": "/a/p12.pdf", "source_uri": "file:///a/p12.pdf", "meta": {}}, "chunk": {"title": true, "content_hash": "c12"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-title-number", "document": {"content_type": "pdf", "file_path": "/a/p13.pdf", "source_uri": "file:///a/p13.pdf", "meta": {}}, "chunk": {"title": 7, "content_hash": "c13"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-title-nonempty-list", "document": {"content_type": "pdf", "file_path": "/a/p14.pdf", "source_uri": "file:///a/p14.pdf", "meta": {}}, "chunk": {"title": ["x"], "content_hash": "c14"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-title-nonempty-object", "document": {"content_type": "pdf", "file_path": "/a/p15.pdf", "source_uri": "file:///a/p15.pdf", "meta": {}}, "chunk": {"title": {"a": 1}, "content_hash": "c15"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-no-key-empty-metadata", "document": {"content_type": "pdf", "file_path": "/a/p16.pdf", "source_uri": "file:///a/p16.pdf", "meta": {}}, "chunk": {}, "expect": {"stub": false, "source": null}},
-    {"id": "stub-only-an-empty-title-key", "document": {"content_type": "pdf", "file_path": "/a/p17.pdf", "source_uri": "file:///a/p17.pdf", "meta": {}}, "chunk": {"title": ""}, "expect": {"stub": true, "source": "file:///a/p17.pdf"}},
-    {"id": "stub-only-a-null-title-key", "document": {"content_type": "pdf", "file_path": "/a/p17b.pdf", "source_uri": "file:///a/p17b.pdf", "meta": {}}, "chunk": {"title": null}, "expect": {"stub": true, "source": "file:///a/p17b.pdf"}},
-    {"id": "not-stub-only-chunk-keys", "document": {"content_type": "pdf", "file_path": "/a/p18.pdf", "source_uri": "file:///a/p18.pdf", "meta": {}}, "chunk": {"chunk_text_hash": "h", "embedding_model": "m"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-only-row-keys", "document": {"content_type": "pdf", "file_path": "/a/p19.pdf", "source_uri": "file:///a/p19.pdf", "meta": {}}, "chunk": {"quarantined_at": "2026-10-01T00:00:00+00:00"}, "expect": {"stub": false, "source": null}},
-    {"id": "stub-document-class-key-only", "document": {"content_type": "pdf", "file_path": "/a/p20.pdf", "source_uri": "file:///a/p20.pdf", "meta": {}}, "chunk": {"source_author": "x"}, "expect": {"stub": true, "source": "file:///a/p20.pdf"}},
-    {"id": "stub-position-class-key-only", "document": {"content_type": "pdf", "file_path": "/a/p21.pdf", "source_uri": "file:///a/p21.pdf", "meta": {}}, "chunk": {"section_title": "S"}, "expect": {"stub": true, "source": "file:///a/p21.pdf"}},
-    {"id": "stub-legacy-class-key-only", "document": {"content_type": "pdf", "file_path": "/a/p22.pdf", "source_uri": "file:///a/p22.pdf", "meta": {}}, "chunk": {"git_branch": "main"}, "expect": {"stub": true, "source": "file:///a/p22.pdf"}},
-    {"id": "stub-legacy-chunk-index-key", "document": {"content_type": "pdf", "file_path": "/a/p23.pdf", "source_uri": "file:///a/p23.pdf", "meta": {}}, "chunk": {"chunk_index": 4}, "expect": {"stub": true, "source": "file:///a/p23.pdf"}},
-    {"id": "stub-key-present-with-null-value", "document": {"content_type": "pdf", "file_path": "/a/p24.pdf", "source_uri": "file:///a/p24.pdf", "meta": {}}, "chunk": {"corpus": null}, "expect": {"stub": true, "source": "file:///a/p24.pdf"}},
-    {"id": "stub-key-present-with-empty-value", "document": {"content_type": "pdf", "file_path": "/a/p25.pdf", "source_uri": "file:///a/p25.pdf", "meta": {}}, "chunk": {"tags": ""}, "expect": {"stub": true, "source": "file:///a/p25.pdf"}},
-    {"id": "not-stub-document-has-method", "document": {"content_type": "pdf", "file_path": "/a/p26.pdf", "source_uri": "file:///a/p26.pdf", "meta": {"extraction_method": "pymupdf_text"}}, "chunk": {"title": "", "content_hash": "c26"}, "expect": {"stub": false, "source": null}},
-    {"id": "stub-document-method-empty-string", "document": {"content_type": "pdf", "file_path": "/a/p27.pdf", "source_uri": "file:///a/p27.pdf", "meta": {"extraction_method": ""}}, "chunk": {"title": "", "content_hash": "c27"}, "expect": {"stub": true, "source": "file:///a/p27.pdf"}},
-    {"id": "stub-document-method-null", "document": {"content_type": "pdf", "file_path": "/a/p28.pdf", "source_uri": "file:///a/p28.pdf", "meta": {"extraction_method": null}}, "chunk": {"title": "", "content_hash": "c28"}, "expect": {"stub": true, "source": "file:///a/p28.pdf"}},
-    {"id": "stub-document-method-false", "document": {"content_type": "pdf", "file_path": "/a/p29.pdf", "source_uri": "file:///a/p29.pdf", "meta": {"extraction_method": false}}, "chunk": {"title": "", "content_hash": "c29"}, "expect": {"stub": true, "source": "file:///a/p29.pdf"}},
-    {"id": "stub-document-method-zero", "document": {"content_type": "pdf", "file_path": "/a/p30.pdf", "source_uri": "file:///a/p30.pdf", "meta": {"extraction_method": 0}}, "chunk": {"title": "", "content_hash": "c30"}, "expect": {"stub": true, "source": "file:///a/p30.pdf"}},
-    {"id": "stub-document-method-empty-list", "document": {"content_type": "pdf", "file_path": "/a/p31.pdf", "source_uri": "file:///a/p31.pdf", "meta": {"extraction_method": []}}, "chunk": {"title": "", "content_hash": "c31"}, "expect": {"stub": true, "source": "file:///a/p31.pdf"}},
-    {"id": "stub-document-method-empty-object", "document": {"content_type": "pdf", "file_path": "/a/p32.pdf", "source_uri": "file:///a/p32.pdf", "meta": {"extraction_method": {}}}, "chunk": {"title": "", "content_hash": "c32"}, "expect": {"stub": true, "source": "file:///a/p32.pdf"}},
-    {"id": "not-stub-document-method-string-zero", "document": {"content_type": "pdf", "file_path": "/a/p33.pdf", "source_uri": "file:///a/p33.pdf", "meta": {"extraction_method": "0"}}, "chunk": {"title": "", "content_hash": "c33"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-document-method-true", "document": {"content_type": "pdf", "file_path": "/a/p34.pdf", "source_uri": "file:///a/p34.pdf", "meta": {"extraction_method": true}}, "chunk": {"title": "", "content_hash": "c34"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-document-method-nonempty-list", "document": {"content_type": "pdf", "file_path": "/a/p35.pdf", "source_uri": "file:///a/p35.pdf", "meta": {"extraction_method": ["x"]}}, "chunk": {"title": "", "content_hash": "c35"}, "expect": {"stub": false, "source": null}},
-    {"id": "stub-document-other-meta-keys-no-method", "document": {"content_type": "pdf", "file_path": "/a/p36.pdf", "source_uri": "file:///a/p36.pdf", "meta": {"source_format": "pdf", "tags": ["x"]}}, "chunk": {"title": "", "content_hash": "c36"}, "expect": {"stub": true, "source": "file:///a/p36.pdf"}},
-    {"id": "not-stub-document-is-markdown", "document": {"content_type": "prose", "file_path": "/a/n1.md", "source_uri": "file:///a/n1.md", "meta": {}}, "chunk": {"title": "", "content_hash": "n1"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-document-is-code", "document": {"content_type": "code", "file_path": "/a/n2.py", "source_uri": "file:///a/n2.py", "meta": {}}, "chunk": {"title": "", "content_hash": "n2"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-document-is-a-note", "document": {"content_type": "note", "file_path": "", "source_uri": "nx-note://n3", "meta": {}}, "chunk": {"title": "", "content_hash": "n3"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-dotfile-named-pdf-is-not-an-extension", "document": {"content_type": "prose", "file_path": "/a/.pdf", "source_uri": "file:///a/dotpdf", "meta": {}}, "chunk": {"title": "", "content_hash": "n4"}, "expect": {"stub": false, "source": null}},
-    {"id": "not-stub-dot-in-directory-is-not-an-extension", "document": {"content_type": "prose", "file_path": "/a/dir.pdf/readme", "source_uri": "file:///a/n5", "meta": {}}, "chunk": {"title": "", "content_hash": "n5"}, "expect": {"stub": false, "source": null}},
-    {"id": "stub-extension-pdf-under-a-prose-type", "document": {"content_type": "prose", "file_path": "/a/q1.pdf", "source_uri": "file:///a/q1.pdf", "meta": {}}, "chunk": {"title": "", "content_hash": "q1"}, "expect": {"stub": true, "source": "file:///a/q1.pdf"}},
-    {"id": "stub-extension-upper-case-pdf", "document": {"content_type": "pdf", "file_path": "/a/Q2.PDF", "source_uri": "file:///a/Q2.PDF", "meta": {}}, "chunk": {"title": "", "content_hash": "q2"}, "expect": {"stub": true, "source": "file:///a/Q2.PDF"}},
-    {"id": "stub-paper-type-with-no-extension", "document": {"content_type": "paper", "file_path": "/a/q3", "source_uri": "file:///a/q3", "meta": {}}, "chunk": {"title": "", "content_hash": "q3"}, "expect": {"stub": true, "source": "file:///a/q3"}},
-    {"id": "stub-pdf-type-under-a-markdown-extension", "document": {"content_type": "pdf", "file_path": "/a/q4.md", "source_uri": "file:///a/q4.md", "meta": {}}, "chunk": {"title": "", "content_hash": "q4"}, "expect": {"stub": true, "source": "file:///a/q4.md"}},
-    {"id": "stub-pdf-type-with-no-file-path", "document": {"content_type": "pdf", "file_path": "", "source_uri": "dt://q5", "meta": {}}, "chunk": {"title": "", "content_hash": "q5"}, "expect": {"stub": true, "source": "dt://q5"}},
-    {"id": "stub-named-by-file-path-when-no-source-uri", "document": {"content_type": "pdf", "file_path": "/a/q6.pdf", "source_uri": "", "meta": {}}, "chunk": {"title": "", "content_hash": "q6"}, "expect": {"stub": true, "source": "/a/q6.pdf"}},
-    {"id": "stub-named-by-source-uri-over-file-path", "document": {"content_type": "pdf", "file_path": "/a/q7-path.pdf", "source_uri": "file:///a/q7-uri.pdf", "meta": {}}, "chunk": {"title": "", "content_hash": "q7"}, "expect": {"stub": true, "source": "file:///a/q7-uri.pdf"}},
-    {"id": "stub-named-by-content-hash-when-no-uri-and-no-path", "document": {"content_type": "pdf", "file_path": "", "source_uri": "", "meta": {}}, "chunk": {"title": "", "content_hash": "0123456789abcdefXYZ"}, "expect": {"stub": true, "source": "content_hash 0123456789ab"}},
-    {"id": "stub-named-by-question-mark-when-no-uri-path-or-hash", "document": {"content_type": "pdf", "file_path": "", "source_uri": "", "meta": {}}, "chunk": {"title": "", "page_number": 1}, "expect": {"stub": true, "source": "content_hash ?"}}
-  ]
+ "_comment": "The PDF placeholder-metadata rule as the client (nexus.health._pdf_stubs_in_collection, through _is_pdf_stub_metadata and catalog_source_format) and the SQL of GET /v1/catalog/stub-metadata both apply it; tests/catalog/test_pdf_stub_metadata_cases.py runs this table through the client function and CatalogStubMetadataParityTest runs it through the route, so a change to either side's rule on what this table varies fails one of the two. WHAT IT PINS. 'cases': ONE document with ONE chunk, varying the document's content_type, file_path, source_uri and metadata and the chunk row's metadata: a chunk is a stub when its row holds any DOCUMENT, POSITION or LEGACY key of the chunk-metadata key table ('title' is itself a DOCUMENT key, so a row with only an empty title key is a stub) AND no truthy title (Python falsiness: absent, null, false, 0, 0.0, \"\", [] and {} are all 'no value') AND its owning document is a PDF (nexus.catalog_source_format: the extension first, then the catalog content type) whose metadata records no truthy extraction_method; expect.source is the name the client counts it under (source_uri, else file_path, else 'content_hash ' + the first 12 characters of the chunk's content_hash, or '?'). 'scenarios': several documents, chunks and manifest rows in a collection named main (and one named other): the OWNING document decides (the same chunk row is a stub under a PDF holder with no method and not under one with a method or under a markdown holder), a chunk two documents hold counts under each, a chunk a manifest lists at two positions of one document counts once, a manifest row naming another collection than the one examined is not counted, a document of another collection is counted there only, and two documents with one source name merge under it; expect maps each examined collection to {source: stub chunks}. WHAT IT DOES NOT PIN (Java tests only): the limit and its capped flag, tombstones, tenants, which collections are examined, the order and number of examples, and timeouts. Values stay in forms a jsonb round trip leaves alone.",
+ "cases": [
+  {
+   "id": "stub-empty-title-with-document-key",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p1.pdf",
+    "source_uri": "file:///a/p1.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c1"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p1.pdf"
+   }
+  },
+  {
+   "id": "stub-no-title-key",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p2.pdf",
+    "source_uri": "file:///a/p2.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "content_hash": "c2"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p2.pdf"
+   }
+  },
+  {
+   "id": "stub-title-null",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p3.pdf",
+    "source_uri": "file:///a/p3.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": null,
+    "page_number": 3
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p3.pdf"
+   }
+  },
+  {
+   "id": "stub-title-false",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p4.pdf",
+    "source_uri": "file:///a/p4.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": false,
+    "line_start": 1
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p4.pdf"
+   }
+  },
+  {
+   "id": "stub-title-zero",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p5.pdf",
+    "source_uri": "file:///a/p5.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": 0,
+    "line_start": 1
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p5.pdf"
+   }
+  },
+  {
+   "id": "stub-title-zero-float",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p6.pdf",
+    "source_uri": "file:///a/p6.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": 0.0,
+    "line_start": 1
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p6.pdf"
+   }
+  },
+  {
+   "id": "stub-title-empty-list",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p7.pdf",
+    "source_uri": "file:///a/p7.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": [],
+    "section_type": "body"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p7.pdf"
+   }
+  },
+  {
+   "id": "stub-title-empty-object",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p8.pdf",
+    "source_uri": "file:///a/p8.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": {},
+    "section_type": "body"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p8.pdf"
+   }
+  },
+  {
+   "id": "not-stub-title-text",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p9.pdf",
+    "source_uri": "file:///a/p9.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "A Paper",
+    "content_hash": "c9"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-title-blank-text",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p10.pdf",
+    "source_uri": "file:///a/p10.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": " ",
+    "content_hash": "c10"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-title-string-zero",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p11.pdf",
+    "source_uri": "file:///a/p11.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "0",
+    "content_hash": "c11"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-title-true",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p12.pdf",
+    "source_uri": "file:///a/p12.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": true,
+    "content_hash": "c12"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-title-number",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p13.pdf",
+    "source_uri": "file:///a/p13.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": 7,
+    "content_hash": "c13"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-title-nonempty-list",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p14.pdf",
+    "source_uri": "file:///a/p14.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": [
+     "x"
+    ],
+    "content_hash": "c14"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-title-nonempty-object",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p15.pdf",
+    "source_uri": "file:///a/p15.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": {
+     "a": 1
+    },
+    "content_hash": "c15"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-no-key-empty-metadata",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p16.pdf",
+    "source_uri": "file:///a/p16.pdf",
+    "meta": {}
+   },
+   "chunk": {},
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "stub-only-an-empty-title-key",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p17.pdf",
+    "source_uri": "file:///a/p17.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": ""
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p17.pdf"
+   }
+  },
+  {
+   "id": "stub-only-a-null-title-key",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p17b.pdf",
+    "source_uri": "file:///a/p17b.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": null
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p17b.pdf"
+   }
+  },
+  {
+   "id": "not-stub-only-chunk-keys",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p18.pdf",
+    "source_uri": "file:///a/p18.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "chunk_text_hash": "h",
+    "embedding_model": "m"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-only-row-keys",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p19.pdf",
+    "source_uri": "file:///a/p19.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "quarantined_at": "2026-10-01T00:00:00+00:00"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "stub-document-class-key-only",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p20.pdf",
+    "source_uri": "file:///a/p20.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "source_author": "x"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p20.pdf"
+   }
+  },
+  {
+   "id": "stub-position-class-key-only",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p21.pdf",
+    "source_uri": "file:///a/p21.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "section_title": "S"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p21.pdf"
+   }
+  },
+  {
+   "id": "stub-legacy-class-key-only",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p22.pdf",
+    "source_uri": "file:///a/p22.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "git_branch": "main"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p22.pdf"
+   }
+  },
+  {
+   "id": "stub-legacy-chunk-index-key",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p23.pdf",
+    "source_uri": "file:///a/p23.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "chunk_index": 4
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p23.pdf"
+   }
+  },
+  {
+   "id": "stub-key-present-with-null-value",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p24.pdf",
+    "source_uri": "file:///a/p24.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "corpus": null
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p24.pdf"
+   }
+  },
+  {
+   "id": "stub-key-present-with-empty-value",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p25.pdf",
+    "source_uri": "file:///a/p25.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "tags": ""
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p25.pdf"
+   }
+  },
+  {
+   "id": "not-stub-document-has-method",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p26.pdf",
+    "source_uri": "file:///a/p26.pdf",
+    "meta": {
+     "extraction_method": "pymupdf_text"
+    }
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c26"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "stub-document-method-empty-string",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p27.pdf",
+    "source_uri": "file:///a/p27.pdf",
+    "meta": {
+     "extraction_method": ""
+    }
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c27"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p27.pdf"
+   }
+  },
+  {
+   "id": "stub-document-method-null",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p28.pdf",
+    "source_uri": "file:///a/p28.pdf",
+    "meta": {
+     "extraction_method": null
+    }
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c28"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p28.pdf"
+   }
+  },
+  {
+   "id": "stub-document-method-false",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p29.pdf",
+    "source_uri": "file:///a/p29.pdf",
+    "meta": {
+     "extraction_method": false
+    }
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c29"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p29.pdf"
+   }
+  },
+  {
+   "id": "stub-document-method-zero",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p30.pdf",
+    "source_uri": "file:///a/p30.pdf",
+    "meta": {
+     "extraction_method": 0
+    }
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c30"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p30.pdf"
+   }
+  },
+  {
+   "id": "stub-document-method-empty-list",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p31.pdf",
+    "source_uri": "file:///a/p31.pdf",
+    "meta": {
+     "extraction_method": []
+    }
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c31"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p31.pdf"
+   }
+  },
+  {
+   "id": "stub-document-method-empty-object",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p32.pdf",
+    "source_uri": "file:///a/p32.pdf",
+    "meta": {
+     "extraction_method": {}
+    }
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c32"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p32.pdf"
+   }
+  },
+  {
+   "id": "not-stub-document-method-string-zero",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p33.pdf",
+    "source_uri": "file:///a/p33.pdf",
+    "meta": {
+     "extraction_method": "0"
+    }
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c33"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-document-method-true",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p34.pdf",
+    "source_uri": "file:///a/p34.pdf",
+    "meta": {
+     "extraction_method": true
+    }
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c34"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-document-method-nonempty-list",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p35.pdf",
+    "source_uri": "file:///a/p35.pdf",
+    "meta": {
+     "extraction_method": [
+      "x"
+     ]
+    }
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c35"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "stub-document-other-meta-keys-no-method",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/p36.pdf",
+    "source_uri": "file:///a/p36.pdf",
+    "meta": {
+     "source_format": "pdf",
+     "tags": [
+      "x"
+     ]
+    }
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "c36"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/p36.pdf"
+   }
+  },
+  {
+   "id": "not-stub-document-is-markdown",
+   "document": {
+    "content_type": "prose",
+    "file_path": "/a/n1.md",
+    "source_uri": "file:///a/n1.md",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "n1"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-document-is-code",
+   "document": {
+    "content_type": "code",
+    "file_path": "/a/n2.py",
+    "source_uri": "file:///a/n2.py",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "n2"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-document-is-a-note",
+   "document": {
+    "content_type": "note",
+    "file_path": "",
+    "source_uri": "nx-note://n3",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "n3"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-dotfile-named-pdf-is-not-an-extension",
+   "document": {
+    "content_type": "prose",
+    "file_path": "/a/.pdf",
+    "source_uri": "file:///a/dotpdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "n4"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "not-stub-dot-in-directory-is-not-an-extension",
+   "document": {
+    "content_type": "prose",
+    "file_path": "/a/dir.pdf/readme",
+    "source_uri": "file:///a/n5",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "n5"
+   },
+   "expect": {
+    "stub": false,
+    "source": null
+   }
+  },
+  {
+   "id": "stub-extension-pdf-under-a-prose-type",
+   "document": {
+    "content_type": "prose",
+    "file_path": "/a/q1.pdf",
+    "source_uri": "file:///a/q1.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "q1"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/q1.pdf"
+   }
+  },
+  {
+   "id": "stub-extension-upper-case-pdf",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/Q2.PDF",
+    "source_uri": "file:///a/Q2.PDF",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "q2"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/Q2.PDF"
+   }
+  },
+  {
+   "id": "stub-paper-type-with-no-extension",
+   "document": {
+    "content_type": "paper",
+    "file_path": "/a/q3",
+    "source_uri": "file:///a/q3",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "q3"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/q3"
+   }
+  },
+  {
+   "id": "stub-pdf-type-under-a-markdown-extension",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/q4.md",
+    "source_uri": "file:///a/q4.md",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "q4"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/q4.md"
+   }
+  },
+  {
+   "id": "stub-pdf-type-with-no-file-path",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "",
+    "source_uri": "dt://q5",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "q5"
+   },
+   "expect": {
+    "stub": true,
+    "source": "dt://q5"
+   }
+  },
+  {
+   "id": "stub-named-by-file-path-when-no-source-uri",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/q6.pdf",
+    "source_uri": "",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "q6"
+   },
+   "expect": {
+    "stub": true,
+    "source": "/a/q6.pdf"
+   }
+  },
+  {
+   "id": "stub-named-by-source-uri-over-file-path",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "/a/q7-path.pdf",
+    "source_uri": "file:///a/q7-uri.pdf",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "q7"
+   },
+   "expect": {
+    "stub": true,
+    "source": "file:///a/q7-uri.pdf"
+   }
+  },
+  {
+   "id": "stub-named-by-content-hash-when-no-uri-and-no-path",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "",
+    "source_uri": "",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "content_hash": "0123456789abcdefXYZ"
+   },
+   "expect": {
+    "stub": true,
+    "source": "content_hash 0123456789ab"
+   }
+  },
+  {
+   "id": "stub-named-by-question-mark-when-no-uri-path-or-hash",
+   "document": {
+    "content_type": "pdf",
+    "file_path": "",
+    "source_uri": "",
+    "meta": {}
+   },
+   "chunk": {
+    "title": "",
+    "page_number": 1
+   },
+   "expect": {
+    "stub": true,
+    "source": "content_hash ?"
+   }
+  }
+ ],
+ "scenarios": [
+  {
+   "id": "one-chunk-two-pdf-holders-counts-under-each",
+   "documents": [
+    {
+     "key": "d1",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s1/d1.pdf",
+     "source_uri": "file:///s1/d1.pdf",
+     "meta": {}
+    },
+    {
+     "key": "d2",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s1/d2.pdf",
+     "source_uri": "file:///s1/d2.pdf",
+     "meta": {}
+    }
+   ],
+   "chunks": [
+    {
+     "key": "c1",
+     "collection": "main",
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    }
+   ],
+   "manifest": [
+    {
+     "doc": "d1",
+     "position": 0,
+     "chunk": "c1"
+    },
+    {
+     "doc": "d2",
+     "position": 0,
+     "chunk": "c1"
+    }
+   ],
+   "expect": {
+    "main": {
+     "file:///s1/d1.pdf": 1,
+     "file:///s1/d2.pdf": 1
+    }
+   }
+  },
+  {
+   "id": "owning-document-decides-the-method-not-the-chunk",
+   "documents": [
+    {
+     "key": "d1",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s2/d1.pdf",
+     "source_uri": "file:///s2/d1.pdf",
+     "meta": {}
+    },
+    {
+     "key": "d2",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s2/d2.pdf",
+     "source_uri": "file:///s2/d2.pdf",
+     "meta": {
+      "extraction_method": "pymupdf_text"
+     }
+    }
+   ],
+   "chunks": [
+    {
+     "key": "c1",
+     "collection": "main",
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    }
+   ],
+   "manifest": [
+    {
+     "doc": "d1",
+     "position": 0,
+     "chunk": "c1"
+    },
+    {
+     "doc": "d2",
+     "position": 0,
+     "chunk": "c1"
+    }
+   ],
+   "expect": {
+    "main": {
+     "file:///s2/d1.pdf": 1
+    }
+   }
+  },
+  {
+   "id": "a-markdown-holder-of-a-stub-chunk-is-not-counted",
+   "documents": [
+    {
+     "key": "d1",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s3/d1.pdf",
+     "source_uri": "file:///s3/d1.pdf",
+     "meta": {}
+    },
+    {
+     "key": "d2",
+     "collection": "main",
+     "content_type": "prose",
+     "file_path": "/s3/d2.md",
+     "source_uri": "file:///s3/d2.md",
+     "meta": {}
+    }
+   ],
+   "chunks": [
+    {
+     "key": "c1",
+     "collection": "main",
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    }
+   ],
+   "manifest": [
+    {
+     "doc": "d1",
+     "position": 0,
+     "chunk": "c1"
+    },
+    {
+     "doc": "d2",
+     "position": 0,
+     "chunk": "c1"
+    }
+   ],
+   "expect": {
+    "main": {
+     "file:///s3/d1.pdf": 1
+    }
+   }
+  },
+  {
+   "id": "a-chunk-listed-at-two-positions-counts-once",
+   "documents": [
+    {
+     "key": "d1",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s4/d1.pdf",
+     "source_uri": "file:///s4/d1.pdf",
+     "meta": {}
+    }
+   ],
+   "chunks": [
+    {
+     "key": "c1",
+     "collection": "main",
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    },
+    {
+     "key": "c2",
+     "collection": "main",
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    }
+   ],
+   "manifest": [
+    {
+     "doc": "d1",
+     "position": 0,
+     "chunk": "c1"
+    },
+    {
+     "doc": "d1",
+     "position": 1,
+     "chunk": "c2"
+    },
+    {
+     "doc": "d1",
+     "position": 2,
+     "chunk": "c1"
+    }
+   ],
+   "expect": {
+    "main": {
+     "file:///s4/d1.pdf": 2
+    }
+   }
+  },
+  {
+   "id": "two-positions-in-one-holder-and-a-second-holder",
+   "documents": [
+    {
+     "key": "d1",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s5/d1.pdf",
+     "source_uri": "file:///s5/d1.pdf",
+     "meta": {}
+    },
+    {
+     "key": "d2",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s5/d2.pdf",
+     "source_uri": "file:///s5/d2.pdf",
+     "meta": {}
+    }
+   ],
+   "chunks": [
+    {
+     "key": "c1",
+     "collection": "main",
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    }
+   ],
+   "manifest": [
+    {
+     "doc": "d1",
+     "position": 0,
+     "chunk": "c1"
+    },
+    {
+     "doc": "d1",
+     "position": 1,
+     "chunk": "c1"
+    },
+    {
+     "doc": "d2",
+     "position": 0,
+     "chunk": "c1"
+    }
+   ],
+   "expect": {
+    "main": {
+     "file:///s5/d1.pdf": 1,
+     "file:///s5/d2.pdf": 1
+    }
+   }
+  },
+  {
+   "id": "a-manifest-row-at-another-collection-is-not-counted",
+   "documents": [
+    {
+     "key": "d1",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s6/d1.pdf",
+     "source_uri": "file:///s6/d1.pdf",
+     "meta": {}
+    }
+   ],
+   "chunks": [
+    {
+     "key": "c1",
+     "collection": [
+      "main",
+      "other"
+     ],
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    },
+    {
+     "key": "c2",
+     "collection": "main",
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    }
+   ],
+   "manifest": [
+    {
+     "doc": "d1",
+     "position": 0,
+     "chunk": "c1",
+     "collection": "other"
+    },
+    {
+     "doc": "d1",
+     "position": 1,
+     "chunk": "c2"
+    }
+   ],
+   "expect": {
+    "main": {
+     "file:///s6/d1.pdf": 1
+    },
+    "other": {}
+   },
+   "_note": "c1 (the same chunk text, so the same chash) is a stub row in BOTH collections: only the manifest row's own collection tells main's read that d1 does not hold it there"
+  },
+  {
+   "id": "a-document-of-another-collection-is-counted-there-only",
+   "documents": [
+    {
+     "key": "d1",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s7/d1.pdf",
+     "source_uri": "file:///s7/d1.pdf",
+     "meta": {}
+    },
+    {
+     "key": "d2",
+     "collection": "other",
+     "content_type": "pdf",
+     "file_path": "/s7/d2.pdf",
+     "source_uri": "file:///s7/d2.pdf",
+     "meta": {}
+    }
+   ],
+   "chunks": [
+    {
+     "key": "c1",
+     "collection": "main",
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    },
+    {
+     "key": "c2",
+     "collection": "other",
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    }
+   ],
+   "manifest": [
+    {
+     "doc": "d1",
+     "position": 0,
+     "chunk": "c1"
+    },
+    {
+     "doc": "d2",
+     "position": 0,
+     "chunk": "c2"
+    }
+   ],
+   "expect": {
+    "main": {
+     "file:///s7/d1.pdf": 1
+    },
+    "other": {
+     "file:///s7/d2.pdf": 1
+    }
+   }
+  },
+  {
+   "id": "two-documents-with-one-source-name-merge-under-it",
+   "documents": [
+    {
+     "key": "d1",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s8/same.pdf",
+     "source_uri": "",
+     "meta": {}
+    },
+    {
+     "key": "d2",
+     "collection": "main",
+     "content_type": "pdf",
+     "file_path": "/s8/same.pdf",
+     "source_uri": "",
+     "meta": {}
+    }
+   ],
+   "chunks": [
+    {
+     "key": "c1",
+     "collection": "main",
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    },
+    {
+     "key": "c2",
+     "collection": "main",
+     "metadata": {
+      "title": "",
+      "content_hash": "c0ffee0123456789"
+     }
+    }
+   ],
+   "manifest": [
+    {
+     "doc": "d1",
+     "position": 0,
+     "chunk": "c1"
+    },
+    {
+     "doc": "d2",
+     "position": 0,
+     "chunk": "c2"
+    }
+   ],
+   "expect": {
+    "main": {
+     "/s8/same.pdf": 2
+    }
+   }
+  }
+ ]
 }

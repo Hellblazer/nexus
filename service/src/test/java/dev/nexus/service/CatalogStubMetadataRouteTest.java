@@ -143,22 +143,112 @@ class CatalogStubMetadataRouteTest extends StubMetadataTestBase {
     }
 
     /**
-     * Row-level security is the second line; the statement scopes by tenant itself (an explicit equality on the registry,
-     * the documents and the chunk rows). Run as the superuser, which row-level security does not filter, with the SAME
-     * collection name holding a stub in both tenants, it must still answer only the tenant it was asked about.
+     * Row-level security is the second line; each statement scopes by tenant itself (explicit equalities on the registry, the
+     * documents and the chunk rows, and on the earlier-position probe). Run as the superuser, which row-level security does
+     * not filter, tenant B holds the SAME tumbler, collection, chunk and manifest row as tenant A, with the chunk at an
+     * EARLIER position than A's. The statement must still answer only A, and must not let B's earlier position hide A's row
+     * from the duplicate-position probe.
      */
     @Test
-    void theStatementScopesByTenantItself_evenOnASessionRowLevelSecurityDoesNotFilter() throws Exception {
-        stubPdf(KNOW_A, "ours");
-        pdfWithChunk(TENANT_B, KNOW_A, "theirs", STUB);
-        pdfWithChunk(TENANT_B, KNOW_B, "theirs-only-collection", STUB);
+    void theStatementsScopeByTenantThemselves_evenOnASessionRowLevelSecurityDoesNotFilter() throws Exception {
+        collection(TENANT, KNOW_A);
+        collection(TENANT_B, KNOW_A);
+        collection(TENANT_B, KNOW_B);
+        byte[] chash = nextChash();
+        for (String tenant : List.of(TENANT, TENANT_B)) {
+            chunk(tenant, KNOW_A, chash, STUB);
+            document(tenant, "7.600.1", KNOW_A, "pdf", "/stubs/same.pdf", "file:///stubs/same.pdf", "{}", false);
+        }
+        manifest(TENANT, "7.600.1", 1, KNOW_A, chash);      // ours: position 1
+        manifest(TENANT_B, "7.600.1", 0, KNOW_A, chash);    // theirs: the same chunk at position 0, which is "earlier"
         try (Connection su = pg.createConnection("")) {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
-            var rows = PdfStubMetadataReads.query(ctx, TENANT, 11).fetch();
-            assertThat(rows).extracting(r -> r.value1()).containsExactly(KNOW_A);
-            assertThat(rows).extracting(r -> r.value2()).containsExactly("file:///stubs/ours.pdf");
-            assertThat(rows).extracting(r -> r.value3()).containsExactly(1);
+            assertThat(PdfStubMetadataReads.collectionsQuery(ctx, TENANT).fetch())
+                .extracting(r -> r.value1()).as("tenant B's own collection is not listed for A").containsExactly(KNOW_A);
+            var rows = PdfStubMetadataReads.query(ctx, TENANT, KNOW_A, MODEL, 11).fetch();
+            assertThat(rows).extracting(r -> r.value1()).containsExactly("file:///stubs/same.pdf");
+            assertThat(rows).extracting(r -> r.value2()).as("one chunk of ours, however many tenants hold it").containsExactly(1);
         }
+    }
+
+    // ── the collection's model ──────────────────────────────────────────────
+
+    /**
+     * Why {@code ch.embedding_model = <the collection's model>} cannot change an ANSWER: the registry's composite foreign key
+     * (tenant, collection, embedding_model) gives a collection exactly one model, so a chunk row of the collection at another
+     * model cannot be written. The predicate is what lets the planner prune the chunk partitions, which the next test pins.
+     */
+    @Test
+    void aCollectionCannotHoldAChunkAtAnotherModel_soTheModelPredicateIsAboutThePlanNotTheAnswer() throws Exception {
+        collection(TENANT, KNOW_A);
+        collection(TENANT, KNOW_384);
+        byte[] chash = nextChash();
+        chunk(TENANT, KNOW_A, chash, STUB);
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> dsl.insertInto(dev.nexus.service.jooq.nexus.Tables.CHUNKS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.TENANT_ID, TENANT)
+                .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION, KNOW_A)
+                .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.CHASH, chash)
+                .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.EMBEDDING_MODEL, MODEL_384)
+                .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.CHUNK_TEXT, "other model")
+                .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0.1f))
+                .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.METADATA, org.jooq.JSONB.valueOf(STUB))
+                .execute()).hasMessageContaining("chunks_collection_fk");
+        }
+    }
+
+    /**
+     * The chunk read names the collection's model as a constant, so the planner prunes nexus.chunks to that model's
+     * partitions when it plans, not at run time: the plan mentions exactly one chunk leaf of the tenant for each collection,
+     * and a different one for the collection of the other model. Without the predicate every model's leaf is planned.
+     */
+    @Test
+    void theChunkReadIsPrunedToTheCollectionsModelPartition_atPlanTime() throws Exception {
+        stubPdf(KNOW_A, "bge");
+        pdfWithChunk(TENANT, KNOW_384, "minilm", STUB);
+        var scope = new TenantScope(svcDs);
+        var leaves = new java.util.ArrayList<java.util.Set<String>>();
+        for (var ref : List.of(List.of(KNOW_A, MODEL), List.of(KNOW_384, MODEL_384))) {
+            String plan = scope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlanWith(ctx,
+                PdfStubMetadataReads.query(ctx, TENANT, ref.get(0), ref.get(1), 11),
+                new PgContainerHelper.ExplainOptions(false, false, false, false)));
+            Matcher m = Pattern.compile("chunks_m[0-9a-f]+_t_[0-9a-f]+").matcher(plan);
+            var seen = new java.util.TreeSet<String>();
+            while (m.find()) seen.add(m.group());
+            assertThat(seen).as("chunk leaves planned for " + ref.get(0) + ":\n" + plan).hasSize(1);
+            leaves.add(seen);
+        }
+        assertThat(leaves.get(0)).as("the two models read different leaves").isNotEqualTo(leaves.get(1));
+    }
+
+    // ── a collection's registration ─────────────────────────────────────────
+
+    @Test
+    void aCollectionRegisteredThroughTheRealRouteIsExaminedByItsRegistryContentType() throws Exception {
+        // POST /v1/catalog/collections/upsert is the one choke point the client's register_collection calls; it stores the
+        // content_type it is sent (the client derives it from the first segment of the name, pinned in
+        // tests/catalog/test_pdf_stub_metadata_cases.py), and that registry value is what picks the examined collections.
+        for (var reg : List.of(List.of(KNOW_A, "knowledge", "stubs-a"), List.of(DOCS_A, "docs", "stubs-a"), List.of(CODE_A, "code", "stubs-a"))) {
+            var body = mapper.writeValueAsString(Map.of("name", reg.get(0), "content_type", reg.get(1), "owner_id", reg.get(2),
+                "embedding_model", MODEL, "model_version", "v1"));
+            var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/upsert")
+                .header("Authorization", "Bearer " + TOKEN).header("X-Nexus-Tenant", TENANT)
+                .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body)).build();
+            var resp = http.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+            assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        }
+        for (String name : List.of(KNOW_A, DOCS_A, CODE_A)) {
+            byte[] chash = nextChash();
+            chunk(TENANT, name, chash, STUB);
+            String t = "7.610." + name.length() + name.charAt(0);
+            document(TENANT, t, name, "pdf", "/stubs/" + name.charAt(0) + ".pdf", "file:///stubs/" + name.charAt(0) + ".pdf", "{}", false);
+            manifest(TENANT, t, 0, name, chash);
+        }
+        var body = stubs("");
+        assertThat(collections(body)).extracting(c -> c.get("collection")).containsExactly(DOCS_A, KNOW_A);
+        assertThat(entry(body, KNOW_A)).containsEntry("stub_chunks", 1);
+        assertThat(entry(body, DOCS_A)).containsEntry("stub_chunks", 1);
     }
 
     // ── the bound ───────────────────────────────────────────────────────────
@@ -224,23 +314,82 @@ class CatalogStubMetadataRouteTest extends StubMetadataTestBase {
         assertThat(get(null, TENANT, "/v1/catalog/stub-metadata").statusCode()).isEqualTo(401);
     }
 
+    /** The table of the chunk leaf that holds {@code collection}'s rows (each model has its own leaf per tenant). */
+    private org.jooq.Table<?> chunkLeafOf(String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            Long oid = ctx.select(DSL.field(DSL.name("tableoid")).cast(org.jooq.impl.SQLDataType.BIGINT))
+                .from(dev.nexus.service.jooq.nexus.Tables.CHUNKS)
+                .where(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION.eq(collection)).limit(1).fetchOne(0, Long.class);
+            String leaf = ctx.select(DSL.field(DSL.name("relname"), String.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_class")))
+                .where(DSL.field(DSL.name("oid")).cast(org.jooq.impl.SQLDataType.BIGINT).eq(oid)).fetchOne(0, String.class);
+            return DSL.table(DSL.name("nexus", leaf));
+        }
+    }
+
     @Test
-    void aReadThatOutlastsItsStatementBoundAnswers503WithNoPartialBody_andTheNextReadAnswers() throws Exception {
-        // Deterministic: another session holds ACCESS EXCLUSIVE on the documents table, so the statement waits on the
-        // lock until its statement_timeout fires; nothing is answered in part.
+    void oneSlowCollectionIsReportedTimedOutWithNoCount_theOthersAnswer_andTheStatusStays200() throws Exception {
+        // Another session holds ACCESS EXCLUSIVE on the chunk leaf of the 384-dimension collection. The read of that
+        // collection waits on the lock until its statement_timeout fires; the read of the other collection plans only its
+        // own model's leaf (pruned) and answers. Nothing of the slow collection is guessed: no count, no examples.
+        stubPdf(KNOW_A, "fast");
+        pdfWithChunk(TENANT, KNOW_384, "slow", STUB);
+        var leaf = chunkLeafOf(KNOW_384);
+        System.setProperty(CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, "300");
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            PgContainerHelper.lockTable(holder, leaf, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
+            long t0 = System.nanoTime();
+            var resp = get(TOKEN, TENANT, "/v1/catalog/stub-metadata");
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+            var body = mapper.readValue(resp.body(), MAP_T);
+            assertThat(entry(body, KNOW_A)).containsEntry("stub_chunks", 1).containsEntry("capped", false);
+            var slow = entry(body, KNOW_384);
+            assertThat(slow.keySet()).as("a timed-out collection carries no count").containsExactlyInAnyOrder("collection", "timed_out");
+            assertThat(slow).containsEntry("timed_out", true);
+            assertThat(ms).as("answered at the bound, not after the lock was released").isLessThan(5_000);
+            holder.rollback();
+        } finally {
+            System.clearProperty(CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY);
+        }
+        var after = stubs("");
+        assertThat(entry(after, KNOW_384)).containsEntry("stub_chunks", 1);
+        assertThat(entry(after, KNOW_A)).containsEntry("stub_chunks", 1);
+    }
+
+    @Test
+    void whenTheCallsBudgetIsSpent_theRemainingCollectionsAreTimedOutWithoutBeingRead() throws Exception {
+        stubPdf(KNOW_A, "a");
+        stubPdf(KNOW_B, "b");
+        System.setProperty(PdfStubMetadataReads.BUDGET_PROPERTY, "0");
+        try {
+            var body = stubs("");
+            assertThat(collections(body)).hasSize(2);
+            for (var c : collections(body)) {
+                assertThat(c.keySet()).containsExactlyInAnyOrder("collection", "timed_out");
+                assertThat(c).containsEntry("timed_out", true);
+            }
+        } finally {
+            System.clearProperty(PdfStubMetadataReads.BUDGET_PROPERTY);
+        }
+        assertThat(entry(stubs(""), KNOW_A)).containsEntry("stub_chunks", 1);
+    }
+
+    @Test
+    void aCollectionListThatOutlastsItsBoundIsTheOnlyWholeCallFailure_503WithNoPartialBody() throws Exception {
         stubPdf(KNOW_A, "a");
         System.setProperty(CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, "300");
         try (Connection holder = pg.createConnection("")) {
             holder.setAutoCommit(false);
-            PgContainerHelper.lockTable(holder, CATALOG_DOCUMENTS, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
-            long t0 = System.nanoTime();
+            PgContainerHelper.lockTable(holder, dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
+                PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
             var resp = get(TOKEN, TENANT, "/v1/catalog/stub-metadata");
-            long ms = (System.nanoTime() - t0) / 1_000_000;
             assertThat(resp.statusCode()).as(resp.body()).isEqualTo(503);
             var body = mapper.readValue(resp.body(), MAP_T);
             assertThat(body).containsEntry("reason", "statement_timeout");
             assertThat(body).doesNotContainKeys("collections", "limit");
-            assertThat(ms).as("answered at the bound, not after the lock was released").isLessThan(5_000);
             holder.rollback();
         } finally {
             System.clearProperty(CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY);
@@ -279,42 +428,34 @@ class CatalogStubMetadataRouteTest extends StubMetadataTestBase {
                     byte[] chash = new byte[32];
                     chash[0] = (byte) (d >> 8); chash[1] = (byte) d; chash[2] = (byte) r; chash[31] = 1;
                     chunks.add(dsl.insertInto(dev.nexus.service.jooq.nexus.Tables.CHUNKS)
-                        .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.TENANT_ID, TENANT)
-                        .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION, KNOW_A)
-                        .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.CHASH, chash)
-                        .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.EMBEDDING_MODEL, model)
-                        .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.CHUNK_TEXT, "t")
-                        .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))
-                        .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.METADATA,
-                            org.jooq.JSONB.valueOf(pdf ? STUB : HEALTHY)));
+                        .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.TENANT_ID, TENANT).set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION, KNOW_A)
+                        .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.CHASH, chash).set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.EMBEDDING_MODEL, model)
+                        .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.CHUNK_TEXT, "t").set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))
+                        .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.METADATA, org.jooq.JSONB.valueOf(pdf ? STUB : HEALTHY)));
                     manifest.add(dsl.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS)
-                        .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
-                        .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.DOC_ID, t)
-                        .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.POSITION, r)
-                        .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, r)
-                        .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
-                        .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION, KNOW_A)
+                        .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.DOC_ID, t)
+                        .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.POSITION, r).set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, r)
+                        .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHASH, chash).set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION, KNOW_A)
                         .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model));
                 }
             }
             dsl.batch(docs).execute();
             for (int i = 0; i < chunks.size(); i += 400) dsl.batch(chunks.subList(i, Math.min(i + 400, chunks.size()))).execute();
             dsl.batch(manifest).execute();
-            for (var table : List.of(CATALOG_DOCUMENTS, dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS,
-                    dev.nexus.service.jooq.nexus.Tables.CHUNKS)) {
+            for (var table : List.of(CATALOG_DOCUMENTS, dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS, dev.nexus.service.jooq.nexus.Tables.CHUNKS)) {
                 PgContainerHelper.analyzeTable(su, table);
             }
         }
         var scope = new TenantScope(svcDs);
         String plan = scope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlanWith(ctx,
-            PdfStubMetadataReads.query(ctx, TENANT, 1001), PgContainerHelper.ExplainOptions.ANALYZE_VERBOSE_COSTS_OFF));
+            PdfStubMetadataReads.query(ctx, TENANT, KNOW_A, MODEL, 1001), PgContainerHelper.ExplainOptions.ANALYZE_VERBOSE_COSTS_OFF));
         System.out.println("plan of the stub-metadata statement over 2,440 chunk rows, 40 of them candidates:\n" + plan);
         assertThat(chunkRowsRead(plan)).as("chunk rows read by the plan:\n" + plan).isPositive().isLessThan(400);
         assertThat(entry(stubs(""), KNOW_A)).containsEntry("stub_chunks", 40).containsEntry("capped", false);
     }
 
     /** The {@code rows x loops} of every plan node that scans the chunk table (a partition of it included). */
-    private static long chunkRowsRead(String plan) {
+    static long chunkRowsRead(String plan) {
         long read = 0;
         Matcher m = Pattern.compile("^.*(?:Scan|Only Scan) (?:using \\S+ )?on (?:\\S+\\.)?chunks\\S* .*\\(actual time=\\S+ rows=(\\d+) loops=(\\d+)\\)")
             .matcher("");
@@ -351,7 +492,7 @@ class CatalogStubMetadataRouteTest extends StubMetadataTestBase {
         }
         var scope = new TenantScope(svcDs);
         String plan = scope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlanWith(ctx,
-            PdfStubMetadataReads.query(ctx, TENANT, 4), PgContainerHelper.ExplainOptions.ANALYZE_VERBOSE_COSTS_OFF));
+            PdfStubMetadataReads.query(ctx, TENANT, KNOW_A, MODEL, 4), PgContainerHelper.ExplainOptions.ANALYZE_VERBOSE_COSTS_OFF));
         System.out.println("plan of the stub-metadata statement at limit 3, analysed:\n" + plan);
         long chunkRowsRead = chunkRowsRead(plan);
         assertThat(chunkRowsRead).as("chunk rows read by the plan:\n" + plan).isPositive().isLessThan(40);

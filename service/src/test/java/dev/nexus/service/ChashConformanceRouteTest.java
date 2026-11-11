@@ -295,11 +295,59 @@ class ChashConformanceRouteTest {
 
     @Test
     @Order(10)
-    void theReadIsOneCatalogStatement_noProductTableIsNamed() {
+    void theReadIsOneCatalogStatement_everyRelationItNamesIsInPgCatalog() {
         var ctx = DSL.using(SQLDialect.POSTGRES);
-        String sql = ctx.renderInlined(ChashConformanceConstraints.query(ctx)).toLowerCase();
-        assertThat(sql).contains("pg_constraint").contains("pg_inherits");
-        assertThat(sql).doesNotContain("nexus.\"chunks\"").doesNotContain("catalog_document_chunks\" ")
-            .doesNotContain("tenant_id");
+        String sql = ctx.renderInlined(ChashConformanceConstraints.query(ctx));
+        // Every relation after FROM or JOIN, schema-qualified as jOOQ renders it: "schema"."name".
+        var relation = java.util.regex.Pattern.compile("(?i)\\b(?:from|join)\\s+(\"[^\"]+\"|\\w+)\\s*\\.\\s*(\"[^\"]+\"|\\w+)");
+        var m = relation.matcher(sql);
+        var seen = new java.util.ArrayList<String>();
+        while (m.find()) {
+            seen.add(m.group(1) + "." + m.group(2));
+            assertThat(m.group(1)).as("relation " + m.group(0) + " in:\n" + sql).isEqualTo("\"pg_catalog\"");
+        }
+        assertThat(seen).as("the relations found (a scan that found none proved nothing) in:\n" + sql)
+            .containsExactlyInAnyOrder("\"pg_catalog\".\"pg_constraint\"", "\"pg_catalog\".\"pg_class\"",
+                "\"pg_catalog\".\"pg_namespace\"", "\"pg_catalog\".\"pg_inherits\"");
+        assertThat(sql.toLowerCase()).doesNotContain("tenant_id");
+    }
+
+    /**
+     * The fold must not hide a real copy: the copies it counts for nexus.chunks equal the descendants {@code pg_inherits}
+     * holds below it, at every depth, on the real partition tree (a copy whose chain the fold could not reach would be left
+     * out of the count and, if it were not valid, out of {@code validated}).
+     */
+    @Test
+    @Order(11)
+    void theCopiesTheFoldCounts_equalTheDescendantsPgInheritsHolds() throws Exception {
+        resetBothNotValid();
+        int descendants;
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var inhrelid = DSL.field(DSL.name("inhrelid")).cast(org.jooq.impl.SQLDataType.BIGINT);
+            var inhparent = DSL.field(DSL.name("inhparent")).cast(org.jooq.impl.SQLDataType.BIGINT);
+            var children = new java.util.HashMap<Long, java.util.List<Long>>();
+            for (var r : ctx.select(inhparent, inhrelid).from(DSL.table(DSL.name("pg_catalog", "pg_inherits"))).fetch()) {
+                children.computeIfAbsent(r.value1(), k -> new java.util.ArrayList<>()).add(r.value2());
+            }
+            Long chunksOid = ctx.select(DSL.field(DSL.name("c", "oid")).cast(org.jooq.impl.SQLDataType.BIGINT))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("c", "relname"), String.class).eq("chunks")).fetchOne(0, Long.class);
+            var stack = new java.util.ArrayDeque<>(children.getOrDefault(chunksOid, java.util.List.of()));
+            int count = 0;
+            while (!stack.isEmpty()) {
+                count++;
+                stack.addAll(children.getOrDefault(stack.pop(), java.util.List.of()));
+            }
+            descendants = count;
+        }
+        var chunks = row(report(), "nexus.chunks");
+        assertThat(descendants).as("the partition tree has descendants (a tree of none proves nothing)").isGreaterThan(4);
+        assertThat(chunks.get("partitions").asInt()).isEqualTo(descendants);
+        assertThat(chunks.get("partitions_not_validated").asInt()).isEqualTo(descendants);
+        assertThat(row(report(), "nexus.catalog_document_chunks").get("partitions").asInt()).isZero();
     }
 }

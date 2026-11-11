@@ -164,6 +164,13 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         + "limit and capped, and which refuses a limit above 10,000 with a 400; CatalogSensitiveListRouteTest pins "
         + "the envelope, the cap edges and the 400";
 
+    private static final String STUB_METADATA_ONE_PER_COLLECTION =
+        "the handler method dispatches to CatalogStubMetadataRoute, whose response is one entry per registry knowledge or docs "
+        + "collection of the tenant (a registry-scale list, never paged), each entry carrying its own capped count "
+        + "(stub_chunks at most limit, capped true when more exist) or timed_out; the limit is per collection and is refused "
+        + "above 10,000 with a 400. CatalogStubMetadataRouteTest pins the envelope, the cap edges, the 400 and the "
+        + "per-collection timeout";
+
     // ── Route table (rationale-as-data, pinned classification) ─────────────
 
     record RouteSpec(String route, String handler, boolean collectionReturning,
@@ -305,10 +312,10 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         collectionExempt("/sensitive", "handleSensitiveList", BOUNDED_READ_DELEGATE),
         // nexus-f3yqd: a scalar {kind, fillable, limit, capped, rule, stamp} bounded count, not a JSON array.
         neither("/manifest/fillable", "handleManifestFillable"),
-        // nexus-f3yqd: {collections:[{collection, stub_chunks, capped, examples}], limit}: a bounded per-collection count, whose
-        // body lives in CatalogStubMetadataRoute (CatalogHandler is over the file-size cap) and which the handler method here
-        // only dispatches to; its envelope is pinned by CatalogStubMetadataRouteTest.
-        neither("/stub-metadata", "handleStubMetadata"),
+        // nexus-f3yqd: {collections:[{collection, stub_chunks, capped, examples} | {collection, timed_out}], limit}: a top-level
+        // object whose "collections" array is the registry's list, so the body is collection-returning, and its count lives in
+        // each entry (CatalogStubMetadataRoute, not this file); classified exempt, not neither.
+        collectionExempt("/stub-metadata", "handleStubMetadata", STUB_METADATA_ONE_PER_COLLECTION),
         // nexus-f3yqd (R2): a POST that starts a background job and answers {job_id, created}, not a JSON array; the poll,
         // GET /manifest/fill/{job_id}, carries its id in the path and is dispatched from the default branch.
         neither("/manifest/fill", "handleManifestFill"),

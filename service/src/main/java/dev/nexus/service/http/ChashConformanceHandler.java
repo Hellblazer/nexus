@@ -16,9 +16,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * {@code GET /v1/admin/chash-conformance} (nexus-f3yqd): whether the chash width CHECK constraints are validated, read from
- * {@code pg_constraint.convalidated} in one catalog statement, so {@code nx doctor} can answer its chash conformance row
- * from the catalog where it used to run about eighteen scans.
+ * {@code GET /v1/admin/chash-conformance} (nexus-f3yqd): whether the two poison tables' chash width CHECK constraints are
+ * validated, read from {@code pg_constraint.convalidated} in one catalog statement. It does not replace the doctor's
+ * legacy-debt legs, and on a fresh or never-validated store it answers {@code all_validated: false}, so it saves nothing
+ * there; see {@link ChashConformanceConstraints}.
  *
  * <p>{@code {constraints:[{table, name, present, validated, partitions, partitions_not_validated}], all_validated}}.
  * {@link ChashConformanceConstraints} has which constraints, how a partitioned table's copies fold into {@code validated}

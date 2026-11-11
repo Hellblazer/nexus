@@ -17,9 +17,14 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 
 /**
  * nexus-f3yqd: the state of the chash width CHECK constraints, read from {@code pg_constraint.convalidated} in ONE catalog
- * statement, for {@code GET /v1/admin/chash-conformance}. The doctor's chash conformance row counts non-conformant rows
- * with about eighteen scans; a constraint that is VALID says no row of its table is non-conformant, so the row can read
- * the catalog instead.
+ * statement, for {@code GET /v1/admin/chash-conformance}. A width CHECK that is VALID says no row of its table is
+ * non-conformant, so a reader may take that answer for the table's poison count instead of counting rows.
+ *
+ * <p><b>What it replaces, and what it does not.</b> It speaks to the two poison tables' width CHECKs only. The client's
+ * legacy-debt legs ({@code topic_assignments}, {@code frecency}, {@code relevance_log}: anti-joins with no CHECK behind
+ * them) are unchanged, and the migrations leave both CHECKs NOT VALID until the chash re-key rung validates them, so on a
+ * fresh or never-validated store the answer is {@code all_validated: false} and nothing is saved. The payoff begins where a
+ * store has been validated (the ladder's VALIDATE job of engine 0.1.190 is what makes that common).
  *
  * <p><b>Which constraints.</b> The two the client's gate list names as poison tables
  * ({@code nexus.db.chash_tables.POISON_CHASH_TABLES}: the tables that carry a width CHECK, so a non-conformant row

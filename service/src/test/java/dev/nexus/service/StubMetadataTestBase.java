@@ -44,6 +44,8 @@ abstract class StubMetadataTestBase {
     protected static final String KNOW_A   = "knowledge__stubs-a__" + MODEL + "__v1";
     protected static final String KNOW_B   = "knowledge__stubs-b__" + MODEL + "__v1";
     protected static final String DOCS_A   = "docs__stubs-a__" + MODEL + "__v1";
+    protected static final String MODEL_384 = "minilm-l6-v2-384";
+    protected static final String KNOW_384 = "knowledge__stubs-384__" + MODEL_384 + "__v1";
     protected static final String CODE_A   = "code__stubs-a__" + MODEL + "__v1";
     protected static final String RDR_A    = "rdr__stubs-a__" + MODEL + "__v1";
     protected static final String STUB     = "{\"title\":\"\",\"content_hash\":\"deadbeefcafe0123\"}";
@@ -128,12 +130,13 @@ abstract class StubMetadataTestBase {
             su.setAutoCommit(true);
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
             String model = PgContainerHelper.collectionModel(dsl, tenant, collection);
-            dsl.insertInto(CHUNKS)
+            var insert = dsl.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, collection).set(CHUNKS.CHASH, chash)
                 .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, "stub")
-                .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))
-                .set(CHUNKS.METADATA, JSONB.valueOf(metadataJson))
-                .execute();
+                .set(CHUNKS.METADATA, JSONB.valueOf(metadataJson));
+            // a vector's width is its model's dimension (the model partition's CHECK)
+            (model.endsWith("-384") ? insert.set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0.1f))
+                : insert.set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))).execute();
         }
     }
 

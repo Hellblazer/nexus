@@ -7,7 +7,7 @@ import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
-import org.jooq.Record3;
+import org.jooq.Record2;
 import org.jooq.Select;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
@@ -50,23 +50,35 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  * </ul>
  * A chunk the manifest lists at two positions of one document counts once (the client keeps one chash per document);
  * a chunk two documents hold counts under each. {@code content_type} of the collection REGISTRY decides which
- * collections are examined ({@code knowledge} and {@code docs}); the client lists T3 and filters on the name prefix,
- * and the engine does not parse names (CollectionParseGateTest), so a collection whose registry type disagrees with its
- * name prefix is the one place the two can differ.
+ * collections are examined ({@code knowledge} and {@code docs}); the client lists T3 and filters on the name prefix, and the
+ * engine does not parse names (CollectionParseGateTest). The two agree for a prefixed name because the client registers a
+ * collection with the first segment of its name as the content type ({@code corpus.collection_registration_kwargs}; pinned
+ * by {@code tests/catalog/test_pdf_stub_metadata_cases.py}). They differ only in the engine's favour: a bare name with no
+ * {@code __} registers as {@code knowledge} though the client's prefix scan skips it, so the engine can examine a
+ * collection the client does not, never the reverse.
  *
  * <p><b>Naming.</b> An example is the owning document's {@code source_uri}, else its {@code file_path}, else
  * {@code "content_hash " + first 12 characters of the stub chunk's content_hash} (or {@code "?"}), as the client names
  * it. The client's last form reads {@code str()} of the value, so a non-string {@code content_hash} on a document with
  * neither URI nor path can be named differently here; the count is unaffected.
  *
- * <p><b>Bounds.</b> ONE statement for every collection: a {@code LEFT JOIN LATERAL} per collection whose inner select
- * stops at {@code limit + 1} stub rows, so a collection with a backlog costs {@code limit + 1} chunk reads and only an
- * all-clear collection reads every candidate chunk (the converged case, which cannot stop early). It runs in a
- * {@code tenantScope.withTenant} transaction (FORCE row-level security scopes every table; the tenant is also an
- * explicit equality everywhere) under the {@code statement_timeout} of {@link CatalogRepository#manifestSectionLabelFillable}
- * and its test hook; a timeout is SQLSTATE {@link CatalogRepository#QUERY_CANCELED}, the transaction ends, and no part of the
- * answer leaves this method. Which {@code limit + 1} rows a capped collection returns is the planner's; its count is
- * {@code limit} and {@code capped} is true, and its examples are drawn from those rows.
+ * <p><b>Bounds, one statement per collection.</b> A first statement lists the tenant's examined collections (the registry,
+ * tiny). Then each collection is read by a statement of its own, in its own transaction, whose inner select stops at
+ * {@code limit + 1} stub rows: a collection with a backlog costs {@code limit + 1} chunk reads and only an all-clear
+ * collection reads every candidate chunk (the converged case, which cannot stop early). Every statement runs in a
+ * {@code tenantScope.withTenant} transaction (FORCE row-level security scopes each table; the tenant is also an explicit
+ * equality) under a {@code statement_timeout}. The bound of a collection is the smaller of {@link #collectionBoundMs} (the
+ * {@link CatalogRepository#FILLABLE_COUNT_TIMEOUT_MS} of the fillable counts, 10 s, with its test hook) and what is left of
+ * the call's overall budget ({@link #BUDGET_MS}, 25 s, under the public edge's roughly 30 s, with its own test hook), so one
+ * slow collection cannot blank the others and the whole call cannot outlast the edge. A collection whose statement is
+ * cancelled (SQLSTATE {@link CatalogRepository#QUERY_CANCELED}), or that the exhausted budget never reached, is reported
+ * {@code timed_out} with NO count: it is "cannot say", never zero, and the other collections answer. A failure of the
+ * collection list itself is the only whole-call failure (the route answers 503). The chunk read names the collection's
+ * embedding model as a constant, so the planner prunes {@code nexus.chunks} to that model's partitions at plan time (the
+ * model is the registry's, as the client's by-collection read uses it; the registry's composite foreign key gives a
+ * collection exactly one model, so no chunk of the collection sits in another). Which {@code limit + 1} rows a capped
+ * collection returns is the planner's; its count is {@code limit}, {@code capped} is true, and its examples are drawn from
+ * those rows.
  */
 public final class PdfStubMetadataReads {
 
@@ -82,11 +94,25 @@ public final class PdfStubMetadataReads {
     /** The registry content types whose collections are examined (the client scans the knowledge and docs prefixes). */
     static final List<String> SCANNED_CONTENT_TYPES = List.of("knowledge", "docs");
 
+    /** The call's overall time budget in milliseconds; a system property replaces it (the test hook), read on every call. */
+    public static final long BUDGET_MS = 25_000;
+    public static final String BUDGET_PROPERTY = "nexus.catalog.stub_metadata_budget_ms";
+
     /**
-     * One collection's answer: {@code stubChunks} is at most {@code limit}; {@code capped} means more than {@code limit}
-     * exist, so the count is a lower bound; {@code examples} are at most {@link #MAX_EXAMPLES} owning-document names.
+     * One collection's answer: {@code stubChunks} is at most {@code limit}; {@code capped} means MORE than {@code limit}
+     * exist, so the count is "at least" that; {@code examples} are at most {@link #MAX_EXAMPLES} owning-document names.
+     * {@code timedOut} means the collection could not be read in time: it carries no count ({@code stubChunks} 0 and
+     * {@code capped} false are meaningless then) and no example.
      */
-    public record CollectionStubs(String collection, int stubChunks, boolean capped, List<String> examples) {}
+    public record CollectionStubs(String collection, int stubChunks, boolean capped, List<String> examples,
+                                  boolean timedOut) {
+        static CollectionStubs timedOut(String collection) {
+            return new CollectionStubs(collection, 0, false, List.of(), true);
+        }
+    }
+
+    /** An examined collection and the embedding model the registry gives it. */
+    record CollectionRef(String name, String embeddingModel) {}
 
     /** The answer: every examined collection, in name order, stub-free ones included (they were examined). */
     public record Page(int limit, List<CollectionStubs> collections) {}
@@ -127,13 +153,22 @@ public final class PdfStubMetadataReads {
         return any;
     }
 
+    /** The tenant's examined collections: knowledge and docs by registry content type, in name order. Public for the plan and scope tests. */
+    public static Select<Record2<String, String>> collectionsQuery(DSLContext ctx, String tenant) {
+        var cols = CATALOG_COLLECTIONS;
+        return ctx.select(cols.NAME, cols.EMBEDDING_MODEL).from(cols)
+            .where(cols.TENANT_ID.eq(tenant).and(cols.CONTENT_TYPE.in(SCANNED_CONTENT_TYPES)))
+            .orderBy(cols.NAME);
+    }
+
     /**
-     * The statement: one row per (examined collection, stub source), {@code cnt} the stub chunks under that source in the
-     * collection's first {@code fetchLimit} stub rows; a collection with no stub is one row with a NULL source and count.
-     * The caller passes {@code limit + 1}. Public so a plan-shape test can explain the exact statement the route runs.
+     * The statement of ONE collection: one row per stub source, {@code cnt} the stub chunks under that source in the first
+     * {@code fetchLimit} stub rows (none when the collection has no stub). The caller passes {@code limit + 1}.
+     * {@code model} is the collection's registry model, a constant so the chunk partitions prune at plan time. Public so a
+     * plan-shape test can explain the exact statement the route runs.
      */
-    public static Select<Record3<String, String, Integer>> query(DSLContext ctx, String tenant, int fetchLimit) {
-        var cols = CATALOG_COLLECTIONS.as("cols");
+    public static Select<Record2<String, Integer>> query(DSLContext ctx, String tenant, String collection, String model,
+                                                         int fetchLimit) {
         var d = CATALOG_DOCUMENTS.as("d");
         var m = CATALOG_DOCUMENT_CHUNKS.as("m");
         var earlier = CATALOG_DOCUMENT_CHUNKS.as("earlier");
@@ -148,15 +183,15 @@ public final class PdfStubMetadataReads {
         Table<?> stubs = ctx.select(source.as("src"))
             .from(d)
             .join(m).on(m.TENANT_ID.eq(d.TENANT_ID).and(m.DOC_ID.eq(d.TUMBLER)))
-            .join(ch).on(ch.TENANT_ID.eq(m.TENANT_ID).and(ch.COLLECTION.eq(m.COLLECTION)).and(ch.CHASH.eq(m.CHASH))
-                .and(ch.EMBEDDING_MODEL.eq(cols.EMBEDDING_MODEL)))
+            .join(ch).on(ch.TENANT_ID.eq(m.TENANT_ID).and(ch.COLLECTION.eq(m.COLLECTION)).and(ch.CHASH.eq(m.CHASH)))
             .where(d.TENANT_ID.eq(tenant)
-                .and(d.PHYSICAL_COLLECTION.eq(cols.NAME))
+                .and(d.PHYSICAL_COLLECTION.eq(collection))
                 .and(d.DELETED_AT.isNull())
                 .and(format.eq("pdf"))
                 .and(pythonFalsy(DSL.jsonbGetAttribute(d.METADATA, "extraction_method")))
-                .and(m.COLLECTION.eq(cols.NAME))
+                .and(m.COLLECTION.eq(collection))
                 .and(ch.TENANT_ID.eq(tenant))
+                .and(ch.EMBEDDING_MODEL.eq(model))
                 .and(carriesNonChunkRowKey(ch.METADATA))
                 .and(pythonFalsy(DSL.jsonbGetAttribute(ch.METADATA, "title")))
                 // one chash per document: only the first position of a chunk a manifest lists twice
@@ -168,44 +203,73 @@ public final class PdfStubMetadataReads {
             .limit(fetchLimit)
             .asTable("s");
         Field<String> src = stubs.field("src", String.class);
-        var perCollection = DSL.lateral(ctx.select(src.as("src"), DSL.count().as("cnt")).from(stubs).groupBy(src)).as("g");
+        return ctx.select(src, DSL.count()).from(stubs).groupBy(src);
+    }
 
-        return ctx.select(cols.NAME, perCollection.field("src", String.class), perCollection.field("cnt", Integer.class))
-            .from(cols)
-            .leftJoin(perCollection).on(DSL.trueCondition())
-            .where(cols.TENANT_ID.eq(tenant).and(cols.CONTENT_TYPE.in(SCANNED_CONTENT_TYPES)))
-            .orderBy(cols.NAME);
+    /** The statement bound of one collection read, in milliseconds: the fillable counts' bound unless its test hook replaces it. */
+    static int collectionBoundMs() {
+        return Integer.getInteger(CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS);
+    }
+
+    /** True when {@code t} or a cause (depth-bounded) is a SQLException cancelled by its statement_timeout. */
+    private static boolean cancelled(Throwable t) {
+        int depth = 0;
+        for (Throwable c = t; c != null && depth < 32; c = c.getCause(), depth++) {
+            if (c instanceof java.sql.SQLException sql && CatalogRepository.QUERY_CANCELED.equals(sql.getSQLState())) return true;
+        }
+        return false;
     }
 
     /**
      * @param limit 1 to {@link #MAX_LIMIT}
      * @throws IllegalArgumentException when {@code limit} is outside that range
+     * @throws RuntimeException when the collection LIST cannot be read (a statement timeout there has SQLSTATE
+     *                          {@link CatalogRepository#QUERY_CANCELED} in its cause chain); a collection's own timeout is
+     *                          an entry, not an exception
      */
     public Page read(String tenant, int limit) {
         if (limit < 1 || limit > MAX_LIMIT) {
             throw new IllegalArgumentException("limit must be 1.." + MAX_LIMIT);
         }
-        return repo.tenantScope().withTenant(tenant, ctx -> {
-            PgSession.setLocal(ctx, "statement_timeout", Integer.toString(Integer.getInteger(
-                CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS)));
-            var rows = query(ctx, tenant, limit + 1).fetch();
-            Map<String, Map<String, Integer>> bySource = new LinkedHashMap<>();
-            for (var r : rows) {
-                Map<String, Integer> sources = bySource.computeIfAbsent(r.value1(), k -> new LinkedHashMap<>());
-                if (r.value2() != null) {
-                    sources.merge(r.value2(), r.value3(), Integer::sum);
-                }
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
+            Long.getLong(BUDGET_PROPERTY, BUDGET_MS));
+        List<CollectionRef> refs = repo.tenantScope().withTenant(tenant, ctx -> {
+            PgSession.setLocal(ctx, "statement_timeout", Integer.toString(collectionBoundMs()));
+            List<CollectionRef> out = new ArrayList<>();
+            for (var r : collectionsQuery(ctx, tenant).fetch()) out.add(new CollectionRef(r.value1(), r.value2()));
+            return out;
+        });
+        List<CollectionStubs> out = new ArrayList<>(refs.size());
+        for (CollectionRef ref : refs) {
+            long leftMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+            if (leftMs <= 0) {
+                out.add(CollectionStubs.timedOut(ref.name()));
+                continue;
             }
-            List<CollectionStubs> out = new ArrayList<>(bySource.size());
-            bySource.forEach((collection, sources) -> {
-                int total = sources.values().stream().mapToInt(Integer::intValue).sum();
-                List<String> examples = sources.entrySet().stream()
-                    .sorted(Map.Entry.<String, Integer>comparingByValue(Comparator.reverseOrder())
-                        .thenComparing(Map.Entry.comparingByKey()))
-                    .limit(MAX_EXAMPLES).map(Map.Entry::getKey).toList();
-                out.add(new CollectionStubs(collection, Math.min(total, limit), total > limit, examples));
-            });
-            return new Page(limit, List.copyOf(out));
+            int boundMs = (int) Math.min(collectionBoundMs(), leftMs);
+            try {
+                out.add(readOne(tenant, ref, limit, boundMs));
+            } catch (RuntimeException e) {
+                if (!cancelled(e)) throw e;
+                out.add(CollectionStubs.timedOut(ref.name()));
+            }
+        }
+        return new Page(limit, List.copyOf(out));
+    }
+
+    private CollectionStubs readOne(String tenant, CollectionRef ref, int limit, int boundMs) {
+        return repo.tenantScope().withTenant(tenant, ctx -> {
+            PgSession.setLocal(ctx, "statement_timeout", Integer.toString(boundMs));
+            Map<String, Integer> sources = new LinkedHashMap<>();
+            for (var r : query(ctx, tenant, ref.name(), ref.embeddingModel(), limit + 1).fetch()) {
+                sources.merge(r.value1(), r.value2(), Integer::sum);
+            }
+            int total = sources.values().stream().mapToInt(Integer::intValue).sum();
+            List<String> examples = sources.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue(Comparator.reverseOrder())
+                    .thenComparing(Map.Entry.comparingByKey()))
+                .limit(MAX_EXAMPLES).map(Map.Entry::getKey).toList();
+            return new CollectionStubs(ref.name(), Math.min(total, limit), total > limit, examples, false);
         });
     }
 }
