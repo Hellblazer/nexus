@@ -3799,7 +3799,11 @@ section ends by naming the flags a default run still does NOT cover
 fast as the catalog grows (measured on a laptop tenant: 2 m 16 s before this change). The three rows that read
 every catalog document (stale index-run fences, failed index runs with hidden chunks, tumbler allocator drift)
 print `[ ]` and `not checked in the default sweep` and name `nx doctor --check-index-runs`, which reads the catalog once and
-runs all three. The supplementary taxonomy row prints `not checked` and names `nx doctor --check-taxonomy`. These
+runs all three. Against an engine that advertises `catalog_index_run_census_supported` and `catalog_next_seq_drift_read_supported`
+(0.1.190) the three rows run in the default sweep instead, from two bounded requests (`GET /v1/catalog/index-run/census`,
+`GET /v1/catalog/owners/next_seq_drift`) and no walk, and `--check-index-runs` reads the same routes; whatever the engine cannot
+answer (a bucket that timed out, a 404 or 503) prints `[ ]` `not checked`, and a capped failed-runs census with nothing found
+prints `not fully checked`, never `none`. The supplementary taxonomy row prints `not checked` and names `nx doctor --check-taxonomy`. These
 lines are marked not checked (`[ ]`, and `"status": "skipped"` under `--json`): neither a pass nor a warning,
 and they do not change the exit code. The section is printed on the human-readable path
 only. Under `--json` the main sweep's rows keep their shape, with one addition: a row not checked this run has `"status": "skipped"`, counted in `summary.skipped`.
@@ -3835,7 +3839,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 |------|-------------|
 | `--check-search` | Run probes 3a and 3b: the name-resolution canary from `tests/fixtures/name_canaries.py`, then a retrieval probe that queries each collection with one of its own chunks and checks that some other chunk survives the distance threshold. A collection whose nearest real neighbours all fall past its threshold is a warning row naming that distance, the threshold, and the sample it rests on. Exits 2 only when a surface raises or a collection's embedding model disagrees with its name (RDR-087 Phase 3) |
 | `--check-resources` | Probe POSIX semaphore headroom and report orphan multiprocessing-tracker pressure. Exits 2 with `Errno 28` when the namespace is exhausted (MinerU workers / trackers re-parented to init after ungraceful MCP shutdowns) |
-| `--check-index-runs` | Read every catalog document once and run the three rows a default run skips: stale index-run fences, failed index runs with hidden chunks, and tumbler allocator drift (which counts tombstoned children, as the engine's own sweep does). Exits as the default sweep does on a failing row |
+| `--check-index-runs` | Run the three rows a default run skips on an engine before 0.1.190 (one walk of every catalog document; 0.1.190 answers them from its census routes and the default sweep runs them): stale index-run fences, failed index runs with hidden chunks, and tumbler allocator drift (which counts tombstoned children, as the engine's own sweep does). Exits as the default sweep does on a failing row |
 | `--check-taxonomy` | Verify the `topic_links` ≡ projection-assignment invariant (GH #252) against the ENGINE. Exits 1 on drift or an engine-side error, 2 when no engine answers or the deployed engine lacks the `/links/drift` route (unverifiable is not a pass; the frozen-SQLite fallback was deleted 2026-08-29 — there is no path back to that era) |
 | `--check-tier-discipline` | Audit tier-write activity for the current session: prints the tier-write summary and warns when a substantive session has no write-back (Phase 1B nexus-a52i) |
 | `--check-mcp-logs` | Summarize ERROR/CRITICAL events in nexus's OWN structured MCP log (`<NEXUS_CONFIG_DIR>/logs/mcp.log` plus rotations), counted by event name with the most-recent example per event. Until 7.11.0 this scanned ONLY Claude Code's per-server cache, so nexus's own error signatures had no automated consumer at all; that cache scan survives as a clearly-labeled secondary section, since it carries a distinct signal the nexus-side log cannot (client-side stdio transport death: `STDIO connection dropped`, `stdio transport error`, macOS only, skips cleanly elsewhere — RDR-094 Phase H, nexus-50u5) |

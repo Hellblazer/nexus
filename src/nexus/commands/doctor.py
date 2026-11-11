@@ -3158,9 +3158,10 @@ def _engine_work_lines() -> list[str]:
     "check_index_runs",
     is_flag=True,
     default=False,
-    help="Read every catalog document once and report stale index-run fences, failed index runs with "
-         "hidden chunks and tumbler allocator drift. The default sweep skips these rows because the read "
-         "grows with the catalog.",
+    help="Report stale index-run fences, failed index runs with hidden chunks and tumbler allocator drift. "
+         "An engine with the census routes (0.1.190) answers them in two bounded requests, and the default "
+         "sweep then runs them too. Any other engine is read by walking every catalog document once, which "
+         "the default sweep skips because the read grows with the catalog.",
 )
 @click.option(
     "--check-plan-library",

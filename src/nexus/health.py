@@ -11619,6 +11619,32 @@ def _repo_candidates_with_missing_files(
     return missing
 
 
+@dataclass
+class _FenceFacts:
+    """What the stale-fence row renders, whichever way it was learned: a walk of every document
+    (:func:`_check_stale_indexing_runs`) or the engine's census (:func:`_stale_fence_rows_from_census`). The row's
+    wording and rules live in :func:`_stale_fence_rows` alone, so the two sources cannot say different things about
+    the same numbers."""
+
+    stale_total: int  # documents stranded in 'indexing' past the threshold (a floor when ``stale_capped``)
+    stale_shown: list[tuple[str, str, bool]]  # (name, age text, is a note): the at most 10 the row names
+    stale_notes: int
+    checked: int
+    reported_null: int
+    undated_reported_null: int
+    candidates_total: int  # unstamped documents indexed after the coverage floor
+    candidates_truncated: int  # of those, the ones a walk's tracking cap left unattributed (a census has none)
+    post_anchor: list[tuple[str, datetime]]  # (name, indexed_at) of the unstamped documents after the baseline
+    post_anchor_count: int  # the exact count; ``post_anchor`` may hold fewer
+    candidate_prefix: dict[str, str]
+    candidate_file: dict[str, str]
+    anchor: datetime | None
+    proven: bool  # the baseline is a batched run's, not the earliest stamp's
+    run_ids_dropped: int
+    nothing_to_assess: str  # the row's text when no document carries or lacks a fence state
+    stale_capped: bool = False
+
+
 def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None) -> list[HealthResult]:
     """Name documents stranded in ``index_state='indexing'`` beyond a
     threshold (nexus-5xn3k.6, bead-text amendment 2026-08-02 —
@@ -11832,23 +11858,6 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
         _log.debug("doctor_stale_indexing_scan_failed", error=str(exc))
         return [HealthResult(label=label, ok=True, detail="skipped (corpus scan failed)")]
 
-    # nexus-vw594 F3 fix-round CRITICAL (substantive-critic, T2
-    # nexus/vw594-critique-2026-08-05 [21445]): this check MUST run
-    # UNCONDITIONALLY — never nested inside `if checked == 0`. The prior
-    # shape nested the reported_null/vw594-signature detection inside
-    # that guard, so a mixed corpus where ONE document has a genuine
-    # fenced run (checked > 0 — e.g. the very first `nx index repo` post-
-    # deploy) fell through to the generic "none (N checked)" ok=True
-    # branch WITHOUT EVER INSPECTING reported_null, even when a SECOND
-    # document in the same corpus was reported-but-NULL and indexed
-    # after the fence shipped. That is nexus-biq4x's silent-green bug
-    # reborn under a new trigger (checked > 0 instead of "engine predates
-    # the fence"); the critic reproduced it against this function with a
-    # real 2-doc mixed fixture. `results` collects every WARN-worthy
-    # finding independently; the summary branches below only run when
-    # NONE fired.
-    results: list[HealthResult] = []
-
     # nexus-oiu1t: derive the anchor from THIS INSTALL's evidence, floored by
     # the release that first carried full coverage. A release-tag date alone
     # assumes the user upgraded the day it shipped; an install that upgraded
@@ -11875,6 +11884,45 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
             proven_anchor = _first_dt
     anchor = proven_anchor if proven_anchor is not None else earliest_stamped_dt
     post_anchor = [c for c in candidates if anchor is not None and c[1] > anchor]
+
+    return _stale_fence_rows(cat, label, _FenceFacts(
+        stale_total=len(stale),
+        stale_shown=[(ident, age, ident in stale_notes) for ident, age in stale[:10]],
+        stale_notes=len(stale_notes),
+        checked=checked, reported_null=reported_null, undated_reported_null=undated_reported_null,
+        candidates_total=len(candidates) + candidates_truncated, candidates_truncated=candidates_truncated,
+        post_anchor=post_anchor, post_anchor_count=len(post_anchor),
+        candidate_prefix=candidate_prefix, candidate_file=candidate_file,
+        anchor=anchor, proven=proven_anchor is not None, run_ids_dropped=run_ids_dropped,
+        nothing_to_assess=("skipped (engine does not report index_state — predates "
+                           "the index-run fence)"),
+    ))
+
+
+def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult]:
+    """The stale-fence row (stale ``indexing`` fences, the NULL-fence census and its baseline) rendered from *f*.
+    *cat* is read for owner kinds and repo roots only, to classify the named post-baseline documents."""
+    checked, reported_null, undated_reported_null = f.checked, f.reported_null, f.undated_reported_null
+    candidates_truncated, run_ids_dropped = f.candidates_truncated, f.run_ids_dropped
+    post_anchor, anchor, candidate_prefix, candidate_file = f.post_anchor, f.anchor, f.candidate_prefix, f.candidate_file
+    proven_anchor = anchor if f.proven else None
+
+    # nexus-vw594 F3 fix-round CRITICAL (substantive-critic, T2
+    # nexus/vw594-critique-2026-08-05 [21445]): this check MUST run
+    # UNCONDITIONALLY — never nested inside `if checked == 0`. The prior
+    # shape nested the reported_null/vw594-signature detection inside
+    # that guard, so a mixed corpus where ONE document has a genuine
+    # fenced run (checked > 0 — e.g. the very first `nx index repo` post-
+    # deploy) fell through to the generic "none (N checked)" ok=True
+    # branch WITHOUT EVER INSPECTING reported_null, even when a SECOND
+    # document in the same corpus was reported-but-NULL and indexed
+    # after the fence shipped. That is nexus-biq4x's silent-green bug
+    # reborn under a new trigger (checked > 0 instead of "engine predates
+    # the fence"); the critic reproduced it against this function with a
+    # real 2-doc mixed fixture. `results` collects every WARN-worthy
+    # finding independently; the summary branches below only run when
+    # NONE fired.
+    results: list[HealthResult] = []
 
     # GH #1512 (nexus-kt7f4): a candidate under a NON-repo owner (the curator
     # owner of the knowledge store, 1.1.*) has no file path, so the repo
@@ -11905,7 +11953,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
             candidate_prefix, candidate_file,
         )
 
-    if post_anchor:
+    if f.post_anchor_count > 0:
         # A document landed AFTER this install demonstrably had a fully-fenced
         # client and still carries no stamp — a NEW producer regression. Never
         # ok=True for this (nexus-biq4x's misdiagnosis was exactly rendering
@@ -11916,7 +11964,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
         # unqualified `nx index <path> --force`, which on a corpus indexed
         # before v7.3.0 reads as "re-embed all 462 of your documents" —
         # contradicting vw594's own no-backfill decision.
-        post_anchor_count = len(post_anchor)
+        post_anchor_count = f.post_anchor_count
         names = "; ".join(
             f"{ident} ({at.isoformat()})"
             for ident, at in post_anchor[:_MAX_NAMED_UNSTAMPED]
@@ -12023,7 +12071,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
                 ]
             )),
         ))
-    elif anchor is None and (candidates or candidates_truncated):
+    elif anchor is None and f.candidates_total > 0:
         # nexus-oiu1t: post-floor unstamped documents exist, but NO document in
         # this corpus has ever been stamped — nothing establishes whether this
         # install has run a fully-fenced client at all. A late upgrader and a
@@ -12035,7 +12083,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
         # that a warning existed, but that it ASSERTED a producer bug it could
         # not prove and prescribed re-embedding the whole corpus; so this arm
         # states the ambiguity and prescribes ONE document.
-        ambiguous_total = len(candidates) + candidates_truncated
+        ambiguous_total = f.candidates_total
         results.append(HealthResult(
             label=label, ok=False, warn=True,
             detail=(
@@ -12062,20 +12110,20 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
             ],
         ))
 
-    if stale:
+    if f.stale_total > 0:
         names = "; ".join(
-            f"{ident} ({age}{', note' if ident in stale_notes else ''})"
-            for ident, age in stale[:10])
-        if len(stale) > 10:
-            names += f"; +{len(stale) - 10} more"
+            f"{ident} ({age}{', note' if is_note else ''})"
+            for ident, age, is_note in f.stale_shown)
+        if f.stale_total > len(f.stale_shown):
+            names += f"; +{f.stale_total - len(f.stale_shown)} more"
         note_hint = ""
         suggestions = [
             "nx index <path>   (a normal re-index clears the fence; "
             "--force is not required)",
         ]
-        if stale_notes:
+        if f.stale_notes:
             note_hint = (
-                f" {len(stale_notes)} of them are notes (marked 'note'): a note killed in a "
+                f" {f.stale_notes} of them are notes (marked 'note'): a note killed in a "
                 "post-store chain, or whose completion stamp failed, is whole and owned but "
                 "stays 'indexing', and no command reruns it. Put it again with the same title "
                 "(`nx store put`, MCP `store_put`, `nx memory promote`): the re-put is an "
@@ -12084,14 +12132,14 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
             suggestions = [
                 "nx store put - --title <title> -c <subject> < note.txt   (re-put a stranded "
                 "note: it fires the chains and stamps it; also MCP store_put, nx memory promote)",
-                *(suggestions if len(stale_notes) < len(stale) else []),
+                *(suggestions if f.stale_notes < f.stale_total else []),
             ]
         results.append(HealthResult(
             label=label,
             ok=False,
             warn=True,
             detail=(
-                f"{len(stale)} document(s) stranded in index_state='indexing' "
+                f"{'at least ' if f.stale_capped else ''}{f.stale_total} document(s) stranded in index_state='indexing' "
                 f"beyond {_STALE_INDEXING_THRESHOLD_HOURS:.0f}h: {names}. A "
                 "normal re-index run now clears this automatically, even "
                 "when the document's content is unchanged (nexus-cp46b) — "
@@ -12156,11 +12204,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
     # scanned had nothing to say at all. Either way there is nothing this
     # check can assess — say so rather than render an all-clear it cannot
     # actually support.
-    return [HealthResult(
-        label=label, ok=True,
-        detail="skipped (engine does not report index_state — predates "
-               "the index-run fence)",
-    )]
+    return [HealthResult(label=label, ok=True, detail=f.nothing_to_assess)]
 
 
 #: Collection prefixes that can hold PDF chunks. ``code__`` never does, and
@@ -12720,7 +12764,15 @@ def _check_next_seq_drift(documents: list[Any] | _WalkFailed | None = None) -> l
 
     if checked == 0:
         return [HealthResult(label=label, ok=True, detail="skipped (no owner was readable)")]
-    if not drifted:
+    return _next_seq_drift_rows(label, checked=checked, drifted=drifted, drifted_total=len(drifted), unread=unread)
+
+
+def _next_seq_drift_rows(
+    label: str, *, checked: int, drifted: list[tuple[str, int, int]], drifted_total: int, unread: str = "",
+) -> list[HealthResult]:
+    """The allocator-drift row from its numbers: *checked* owners, *drifted* the ``(owner, next_seq, highest child)``
+    it names and *drifted_total* how many owners drifted (more than it names when the engine's census was capped)."""
+    if not drifted_total:
         return [HealthResult(
             label=label, ok=True, detail=f"none ({checked} owner(s) checked{unread})",
         )]
@@ -12728,12 +12780,14 @@ def _check_next_seq_drift(documents: list[Any] | _WalkFailed | None = None) -> l
     names = "; ".join(
         f"{p} (next_seq={ns}, highest child={hi})" for p, ns, hi in drifted
     )
+    if drifted_total > len(drifted):
+        names += f"; +{drifted_total - len(drifted)} more"
     return [HealthResult(
         label=label,
         ok=False,
         warn=True,
         detail=(
-            f"{len(drifted)} owner(s) whose allocator is at or below their "
+            f"{drifted_total} owner(s) whose allocator is at or below their "
             f"highest existing tumbler: {names}. The engine floors past this on "
             "the next registration, so these self-heal when next written to."
         ),
@@ -12830,15 +12884,30 @@ def _check_failed_runs_hidden_chunks(documents: list[Any] | _WalkFailed | None =
         _log.debug("doctor_failed_runs_hidden_chunks_check_failed", error=str(exc))
         return [HealthResult(label=label, ok=True, detail="skipped (catalog or T3 unavailable)")]
 
-    if not result.reconciled:
+    return _failed_hidden_rows(label, failed=len(failed), hidden=result.reconciled, capped=False)
+
+
+def _failed_hidden_rows(label: str, *, failed: int, hidden: int, capped: bool) -> list[HealthResult]:
+    """The failed-runs row from its two numbers: *failed* documents in ``index_state='failed'`` and *hidden*, how
+    many of them ``heal_manifest_gaps(dry_run=True)`` would rebuild (``reconciled``). *capped* is the engine census's:
+    it examined only the first *failed* failed documents, so *hidden* is a floor and zero is not "none"."""
+    if failed == 0:
+        return [HealthResult(label=label, ok=True, detail="not applicable (no failed index runs)")]
+    if not hidden:
+        if capped:
+            return [HealthResult(
+                label=label, ok=True, skipped=True,
+                detail=(f"not fully checked: the engine examined the first {failed} failed document(s), none with "
+                        "stored chunks hidden, and there are more it did not examine"),
+            )]
         return [HealthResult(
             label=label, ok=True,
-            detail=f"none ({len(failed)} failed document(s), none with stored chunks hidden)",
+            detail=f"none ({failed} failed document(s), none with stored chunks hidden)",
         )]
     return [HealthResult(
         label=label, ok=False, warn=True,
         detail=(
-            f"{result.reconciled} of {len(failed)} failed document(s) have "
+            f"{'at least ' if capped else ''}{hidden} of {failed}{'+' if capped else ''} failed document(s) have "
             "chunks stored with no manifest owner, so every read hides them"
         ),
         fix_suggestions=[
@@ -13356,8 +13425,134 @@ def _index_run_rows_not_checked() -> list[HealthResult]:
             for label in (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL, _NEXT_SEQ_LABEL)]
 
 
+def _not_checked_row(label: str, why: str) -> HealthResult:
+    """A row the engine's census could not answer: not checked (``[ ]``), never a pass or a warning."""
+    return HealthResult(label=label, ok=True, skipped=True, detail=f"not checked: {why}; the next `nx doctor` asks again.")
+
+
+_CENSUS_UNANSWERED = ("the engine did not answer its bounded census read (an engine without the route, a public edge that "
+                      "does not list it, an error or a timeout)")
+
+
+def _instant(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _stale_fence_rows_from_census(cat: Any, label: str, census: dict) -> list[HealthResult]:
+    """The stale-fence row from the engine's ``stale`` and ``fence`` buckets (``HttpCatalogClient.index_run_census``),
+    rendered by :func:`_stale_fence_rows`, the function the walk's row renders through. A bucket that timed out is
+    not checked: the other bucket's findings still show, and the row never says "none" for what was not read."""
+    stale, fence = census["stale"], census["fence"]
+    stale_out, fence_out = bool(stale.get("timed_out")), bool(fence.get("timed_out"))
+    if stale_out and fence_out:
+        return [_not_checked_row(label, "the engine's bounded reads of the stale fences and the unstamped documents "
+                                        "did not finish in time")]
+    shown: list[tuple[str, str, bool]] = []
+    post_anchor: list[tuple[str, datetime]] = []
+    prefixes: dict[str, str] = {}
+    files: dict[str, str] = {}
+    anchor: datetime | None = None
+    if not stale_out:
+        shown = [(e["source_uri"] or e["tumbler"] or "?", f"{e['age_s'] / 3600.0:.1f}h", e["note"])
+                 for e in stale["examples"]]
+    if not fence_out:
+        if fence["anchor"]["kind"]:
+            anchor = _instant(fence["anchor"]["at"])
+        for e in fence["post_anchor"]["examples"]:
+            ident = e["source_uri"] or e["tumbler"] or "?"
+            post_anchor.append((ident, _instant(e["indexed_at"])))
+            prefixes[ident] = ".".join(e["tumbler"].split(".")[:2])
+            files[ident] = e["file_path"] or ""
+    facts = _FenceFacts(
+        stale_total=0 if stale_out else stale["count"], stale_capped=not stale_out and stale["capped"],
+        stale_shown=shown, stale_notes=0 if stale_out else stale["notes"],
+        checked=0 if fence_out else fence["checked"], reported_null=0 if fence_out else fence["reported_null"],
+        undated_reported_null=0 if fence_out else fence["undated_reported_null"],
+        candidates_total=0 if fence_out else fence["floor_candidates"], candidates_truncated=0,
+        post_anchor=post_anchor, post_anchor_count=0 if fence_out else fence["post_anchor"]["count"],
+        candidate_prefix=prefixes, candidate_file=files,
+        anchor=anchor, proven=not fence_out and fence["anchor"]["kind"] == "proven", run_ids_dropped=0,
+        nothing_to_assess="none (no catalog document)",
+    )
+    rows = _stale_fence_rows(cat, label, facts)
+    if not (stale_out or fence_out):
+        return rows
+    rows = [r for r in rows if not r.ok]  # only findings: an ok summary would say "none" for a bucket not read
+    rows.append(_not_checked_row(
+        label, "the engine's bounded read of the " + ("stale fences" if stale_out else "unstamped documents")
+        + " did not finish in time"))
+    return rows
+
+
+def _failed_hidden_rows_from_census(label: str, bucket: dict) -> list[HealthResult]:
+    """The failed-runs row from the engine's ``failed_hidden`` bucket: ``count`` is what the heal's dry run would
+    rebuild. A capped bucket examined only the first ``failed`` failed documents, so its zero is "not fully checked"."""
+    if bucket.get("timed_out"):
+        return [_not_checked_row(label, "the engine's bounded read of the failed documents did not finish in time")]
+    return _failed_hidden_rows(label, failed=bucket["failed"]["count"], hidden=bucket["count"],
+                               capped=bucket["failed"]["capped"] or bucket["capped"])
+
+
+def _next_seq_drift_rows_from_route(label: str, drift: dict) -> list[HealthResult]:
+    """The allocator-drift row from the engine's read-only drift list (``HttpCatalogClient.next_seq_drift``)."""
+    if drift["checked"] == 0:
+        return [HealthResult(label=label, ok=True, detail="skipped (no owners)")]
+    return _next_seq_drift_rows(
+        label, checked=drift["checked"], drifted_total=drift["drifted"],
+        drifted=[(e["owner"], e["next_seq"], e["highest_child_seq"]) for e in drift["examples"]])
+
+
+def _check_index_run_routes() -> list[HealthResult]:
+    """The three index-run rows read from the engine's census routes (engine 0.1.190, nexus-f3yqd.6), or ``[]`` when
+    the engine does not answer both routes (a missing ``catalog_index_run_census_supported`` or
+    ``catalog_next_seq_drift_read_supported`` flag, no catalog reader): the caller then keeps the rows it had before,
+    the default sweep's "not checked" and ``--check-index-runs``'s walk.
+
+    With both flags set the rows always come back, and every way the engine cannot say (a 404 or 503, a bucket that
+    timed out, a malformed body, a failed request) is a not-checked row: ok, never a warning, never "none".
+    Two requests, no catalog walk. Never raises."""
+    try:
+        from nexus.catalog.http_catalog_client import INDEX_RUN_CENSUS_MAX_LIMIT  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        supported = getattr(cat, "index_run_routes_supported", None)
+        if cat is None or not callable(supported) or supported() is not True:
+            return []
+    except Exception as exc:  # noqa: BLE001 — an optional fast path; the caller keeps its other rows
+        _log.debug("doctor_index_run_routes_unavailable", error=str(exc))
+        return []
+
+    def _ask(method: str) -> dict | None:
+        try:
+            answer = getattr(cat, method)(limit=INDEX_RUN_CENSUS_MAX_LIMIT)
+        except Exception as exc:  # noqa: BLE001 — "cannot say" is a not-checked row, never a crash
+            _log.debug("doctor_index_run_route_failed", method=method, error=str(exc))
+            return None
+        return answer if isinstance(answer, dict) else None
+
+    census, drift = _ask("index_run_census"), _ask("next_seq_drift")
+    rows: list[HealthResult] = []
+    try:
+        rows += (_stale_fence_rows_from_census(cat, _STALE_FENCES_LABEL, census) if census
+                 else [_not_checked_row(_STALE_FENCES_LABEL, _CENSUS_UNANSWERED)])
+        rows += (_failed_hidden_rows_from_census(_HIDDEN_CHUNKS_LABEL, census["failed_hidden"]) if census
+                 else [_not_checked_row(_HIDDEN_CHUNKS_LABEL, _CENSUS_UNANSWERED)])
+        rows += (_next_seq_drift_rows_from_route(_NEXT_SEQ_LABEL, drift) if drift
+                 else [_not_checked_row(_NEXT_SEQ_LABEL, _CENSUS_UNANSWERED.replace("census", "next_seq drift"))])
+    except Exception as exc:  # noqa: BLE001 — a body the client accepted but the row cannot render is not a crash
+        _log.warning("doctor_index_run_routes_render_failed", error=str(exc))
+        return [_not_checked_row(label, _CENSUS_UNANSWERED)
+                for label in (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL, _NEXT_SEQ_LABEL)]
+    return rows
+
+
 def run_index_run_checks() -> list[HealthResult]:
-    """``nx doctor --check-index-runs``: the three rows over one catalog walk."""
+    """``nx doctor --check-index-runs``: the three rows, read from the engine's census routes when it has them
+    (:func:`_check_index_run_routes`), else over one catalog walk (an engine before 0.1.190)."""
+    routed = _check_index_run_routes()
+    if routed:
+        return routed
     documents: list[Any] | _WalkFailed | None = _walk_documents_for_doctor()
     if documents is None:
         documents = _WALK_FAILED
@@ -13378,8 +13573,10 @@ def run_health_checks(
     """Run all health checks.
 
     The three rows that read every catalog document (stale index-run fences, failed runs with hidden chunks,
-    allocator drift; one walk, 22 s measured on a laptop tenant) report "not checked" here and name
-    ``nx doctor --check-index-runs``, which runs them through :func:`run_index_run_checks` (F30, nexus-f3yqd.6).
+    allocator drift; one walk, 22 s measured on a laptop tenant) are read from the engine's two census routes when it
+    has them (0.1.190: two bounded requests, :func:`_check_index_run_routes`). Against any other engine they report
+    "not checked" here and name ``nx doctor --check-index-runs``, which walks for them through
+    :func:`run_index_run_checks` (F30, nexus-f3yqd.6).
 
     ``git_hooks_scope``: forwarded to :func:`_check_git_hooks` (nexus-jds59)
     to restrict the git-hooks stanza-drift walk to repos at or under the
@@ -13480,19 +13677,25 @@ def run_health_checks(
     # Shakedown 7.94.0 class A: the allocator-drift row below reads the same list, so ONE walk feeds all
     # three rows (it walked on its own before).
     # nexus-mjmjl: the corpus walk is the sweep's longest stretch on a big tenant; a named step.
-    # F30 (nexus-f3yqd.6): no catalog walk here; `nx doctor --check-index-runs` runs these rows.
-    not_checked = {r.label: r for r in _index_run_rows_not_checked()}
-    results.append(not_checked[_STALE_FENCES_LABEL])
+    # F30 (nexus-f3yqd.6): no catalog walk here; `nx doctor --check-index-runs` runs these rows over a walk.
+    # An engine with both census routes (0.1.190) answers all three rows in two bounded requests, so they run here;
+    # any other engine leaves them "not checked" and `nx doctor --check-index-runs` walks for them.
+    index_run_rows: dict[str, list[HealthResult]] = {}
+    for row in _step("_check_index_run_routes", lambda: _check_index_run_routes()):
+        index_run_rows.setdefault(row.label, []).append(row)
+    if not index_run_rows:
+        index_run_rows = {r.label: [r] for r in _index_run_rows_not_checked()}
+    results.extend(index_run_rows[_STALE_FENCES_LABEL])
     # nexus-0ntxj: a failed run's chunks stored with no manifest owner are
     # hidden by live(c). Degrades internally.
-    results.append(not_checked[_HIDDEN_CHUNKS_LABEL])
+    results.extend(index_run_rows[_HIDDEN_CHUNKS_LABEL])
     # nexus-rte90: PDF chunks left with the upload placeholder metadata
     # (nexus-w94eo). Degrades internally.
     results.extend(_step("_check_pdf_stub_metadata", lambda: _check_pdf_stub_metadata()))
     # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
     # their own children. Self-healing is silent, so the blast radius must
     # be reportable rather than guessed.
-    results.append(not_checked[_NEXT_SEQ_LABEL])
+    results.extend(index_run_rows[_NEXT_SEQ_LABEL])
     # nexus-c0g6e (GH #1529): topics whose cached doc_count disagrees with
     # the real topic_assignments count (6.18.1-era import drift, predating
     # taxonomy-013's recompute triggers). Self-heals on the engine's next
