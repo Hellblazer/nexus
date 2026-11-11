@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-f3yqd: the client for the engine's user-started chash CHECK VALIDATE job and the manifest repair.
+"""nexus-f3yqd: the client for the engine's user-started chash CHECK VALIDATE job.
 
 Driven through a real ``HttpCatalogClient`` against a scripted fake engine (``ThreadingHTTPServer`` on port 0), so the
 requests take the client's own transport, auth and the unprefixed mixin calls. The fake's bodies follow engine
@@ -42,7 +42,6 @@ class _Engine:
         self.start_status = 202
         self.start_body: dict = {"job_id": "j1", "created": True}
         self.polls: list[tuple[int, dict]] = [(404, {"error": "no such constraint validate job"})]
-        self.repair_body: dict = {"chunks": [], "count": 0, "capped": False, "incomplete": False, "dry_run": True}
         self.requests: list[tuple[str, str, dict | None]] = []
 
 
@@ -76,8 +75,6 @@ def _handler(engine: _Engine) -> type[BaseHTTPRequestHandler]:
             engine.requests.append(("POST", self.path, body))
             if self.path == job.JOB_PATH:
                 return self._send(engine.start_status, engine.start_body)
-            if self.path == "/v1/catalog" + job.REPAIR_PATH:
-                return self._send(200, engine.repair_body)
             self._send(404, {"error": "not found"})
 
     return H
@@ -270,19 +267,25 @@ class TestVerdict:
         text = " ".join(v.lines)
         assert v.ok is False and "schema" in text and "repair-chash" not in text
 
-    def test_a_manifest_refusal_names_the_tenants_and_says_no_engine_has_the_repair_yet(self) -> None:
+    def test_a_manifest_refusal_names_the_tenants_and_sends_it_to_the_operator(self) -> None:
         v = job.verdict(_done(all_validated=False, refused=[_refusal()], refused_count=1))
         text = "\n".join(v.lines)
-        assert "tenants: t1 (3)" in text and "no released engine has yet" in text
+        assert "tenants: t1 (3)" in text and "report it to the operator" in text and "repair-chash" not in text
 
-    def test_a_manifest_refusal_names_the_repair_once_the_engine_has_it(self) -> None:
-        v = job.verdict(_done(all_validated=False, refused=[_refusal()], refused_count=1), repair_ready=True)
-        assert "nx t3 repair-chash --all" in "\n".join(v.lines)
+    def test_unkeyable_chunks_are_listed_with_their_owners(self) -> None:
+        unclearable = [{"chash": "ab" * 8, "reason": "no_text",
+                        "owners": [{"doc_id": "1.2.3", "title": "notes.md", "source": "a/notes.md", "via": "manifest"}]},
+                       {"chash": "cd" * 8, "reason": "text_mismatch", "owners": []}]
+        v = job.verdict(_done(all_validated=False, refused=[_refusal(unclearable=unclearable, unclearable_capped=True)],
+                              refused_count=1))
+        text = "\n".join(v.lines)
+        assert "abababababab (no_text; notes.md)" in text and "(text_mismatch; no owning document)" in text
+        assert "more not listed" in text
 
     def test_a_chunk_row_refusal_says_no_client_repair_exists(self) -> None:
         v = job.verdict(_done(all_validated=False, refused=[_refusal(table="nexus.chunks_m1_t1", bad_rows=7)],
                               refused_count=1))
-        assert "7 bad row(s)" in "\n".join(v.lines) and "no client repair" in "\n".join(v.lines)
+        assert "7 bad row(s)" in "\n".join(v.lines) and "no client step clears it" in "\n".join(v.lines)
 
     def test_counts_beyond_the_listed_cap_are_reported(self) -> None:
         v = job.verdict(_done(all_validated=False, refused=[_refusal()], refused_count=250))
@@ -343,7 +346,7 @@ class TestDoctorFix:
 
 
 class TestVerbs:
-    """`nx t3 validate-chash-checks` and `nx t3 repair-chash` through the CLI, against the fake engine."""
+    """`nx t3 validate-chash-checks` through the CLI, against the fake engine."""
 
     @pytest.fixture(autouse=True)
     def _use_fake(self, client, monkeypatch) -> None:
@@ -385,42 +388,6 @@ class TestVerbs:
         engine.polls = [(200, _done())]
         r = self._invoke("validate-chash-checks", "--json")
         assert r.exit_code == 0 and json.loads(r.stdout)["all_validated"] is True
-
-    def test_repair_without_an_engine_route_exits_3_and_changes_nothing(self, engine) -> None:
-        r = self._invoke("repair-chash", "1.2.3", "--apply")
-        assert r.exit_code == 3 and "no released engine" in r.stderr
-        assert not [q for q in engine.requests if q[0] == "POST"]
-
-    def _rekey_engine(self, engine, **body) -> None:
-        engine.flags["catalog_manifest_rekey_chash_supported"] = True
-        engine.repair_body = {"chunks": [
-            {"collection": "knowledge__x", "old_chash_hex": "ab" * 16, "new_chash_hex": "cd" * 32,
-             "action": "would_rekey", "manifest_rows": 2, "refs_repointed": {"frecency": 1}},
-            {"collection": "knowledge__x", "old_chash_hex": "ef" * 16, "new_chash_hex": None,
-             "action": "refused", "reason": "text_mismatch", "manifest_rows": 1, "refs_repointed": {}}],
-            "count": 2, "capped": False, "incomplete": False, "dry_run": True} | body
-
-    def test_repair_is_a_dry_run_unless_applied_and_sends_the_contract_body(self, engine) -> None:
-        self._rekey_engine(engine)
-        r = self._invoke("repair-chash", "1.2.3")
-        assert r.exit_code == 0 and "nothing was changed" in r.stdout
-        assert "does not hash to its id" in r.stdout and "frecency 1" in r.stdout
-        assert engine.requests[-1][1] == "/v1/catalog/manifest/rekey-chash"
-        assert engine.requests[-1][2] == {"doc_id": "1.2.3", "collection": None, "dry_run": True}
-        self._rekey_engine(engine, dry_run=False)
-        r = self._invoke("repair-chash", "--all", "--collection", "knowledge__x", "--limit", "50", "--apply")
-        assert engine.requests[-1][2] == {"doc_id": None, "collection": "knowledge__x", "dry_run": False, "limit": 50}
-        assert "Rekeyed 2 chunk(s)" in r.stdout
-
-    @pytest.mark.parametrize(("flags", "text"), [({"capped": True}, "more remain"), ({"incomplete": True}, "Cut short")])
-    def test_capped_and_incomplete_say_run_it_again(self, engine, flags, text) -> None:
-        self._rekey_engine(engine, **flags)
-        r = self._invoke("repair-chash", "--all")
-        assert text in r.stdout and "Run it again" in r.stdout
-
-    def test_repair_needs_one_document_or_all(self) -> None:
-        assert self._invoke("repair-chash").exit_code == 2
-        assert self._invoke("repair-chash", "1.2.3", "--all").exit_code == 2
 
 
 class TestDoctorWiring:

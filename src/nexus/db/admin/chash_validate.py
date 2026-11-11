@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Client for the engine's user-started chash CHECK VALIDATE job and the manifest repair (nexus-f3yqd).
+"""Client for the engine's user-started chash CHECK VALIDATE job (nexus-f3yqd).
 
 The engine validates the chash width CHECKs on ``nexus.chunks`` and ``nexus.catalog_document_chunks`` only when a user
 starts the job (engine 0.1.190, Sam 2026-11-11: never at boot). ``nx t3 validate-chash-checks`` and ``nx doctor --fix``
@@ -14,11 +14,10 @@ Routes:
 - ``GET /v1/schema/chash-conformance`` (any token): read through ``HttpCatalogClient.chash_constraints_validated``.
 - ``POST /v1/admin/validate-constraints`` ``{dry_run}`` (root token only, flag ``chash_constraints_validate_job_supported``)
   answers ``{job_id, created}``; ``GET .../{job_id}`` reports progress and the result. A tenant token gets 403.
-- ``POST /v1/catalog/manifest/rekey-chash`` ``{doc_id, collection, dry_run, limit}`` (flag
-  ``catalog_manifest_rekey_chash_supported``, contract from wren 2026-11-11):
-  the lossless rekey a manifest ``bad_rows`` refusal needs (Sam's choice): the engine recomputes the 32-byte key from
-  the stored chunk text, moves or merges the chunk, repoints the manifest and drops the 16-byte row, per tenant. No
-  released engine has it yet; the client says so. Its final path and flag come from wren's engine half.
+
+No manifest repair verb: a boot changeset since engine 0.1.100 already deletes every non-32-byte manifest row, so a
+store that reaches 0.1.190 has none for a repair to work on (Sam, 2026-11-11). A refused CHECK is reported, with what
+the engine says about the rows, for the operator.
 
 There is no fallback to direct SQL: an engine without the job flag is named too old.
 """
@@ -39,9 +38,7 @@ from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 _log = structlog.get_logger(__name__)
 
 JOB_PATH: str = "/v1/admin/validate-constraints"
-REPAIR_PATH: str = "/manifest/rekey-chash"  # under the catalog client's /v1/catalog prefix
 JOB_FLAG: str = "chash_constraints_validate_job_supported"
-REPAIR_FLAG: str = "catalog_manifest_rekey_chash_supported"
 MANIFEST_TABLE: str = "nexus.catalog_document_chunks"
 #: Seconds between polls; VALIDATE gives no row progress, so a poll shows the table it is on.
 POLL_EVERY_S: float = 5.0
@@ -96,10 +93,6 @@ def _cannot_tell_or_too_old(client: Any) -> CannotRun:
 
 def job_supported(client: Any) -> bool:
     return _flags(client).get(JOB_FLAG) is True
-
-
-def repair_supported(client: Any) -> bool:
-    return _flags(client).get(REPAIR_FLAG) is True
 
 
 def all_validated(client: Any) -> bool | None:
@@ -268,7 +261,7 @@ def _where(e: dict[str, Any]) -> str:
     return f"{e.get('table')} {e.get('constraint')}"
 
 
-def _refused_lines(e: dict[str, Any], *, repair_ready: bool) -> list[str]:
+def _refused_lines(e: dict[str, Any]) -> list[str]:
     reason = e.get("reason")
     if reason == "definition_mismatch":
         return [f"refused: {_where(e)}: a CHECK of that name exists but is not the width check; this is a schema "
@@ -282,14 +275,19 @@ def _refused_lines(e: dict[str, Any], *, repair_ready: bool) -> list[str]:
     examples = e.get("example_chashes") or []
     if examples:
         out.append("  examples: " + ", ".join(str(x) for x in examples[:5]))
-    if e.get("table") == MANIFEST_TABLE:
-        out.append("  next: `nx t3 repair-chash --all` (a dry run) then `--all --apply`, then run this again"
-                   if repair_ready else
-                   "  next: these manifest rows need the repair route (`nx t3 repair-chash`), which no released "
-                   "engine has yet; nothing else to do until it lands")
-    else:
-        out.append("  next: no client repair exists for chunk rows yet; report it to the operator with these examples")
+    owners = [o for o in e.get("unclearable") or [] if isinstance(o, dict)]
+    if owners:
+        out.append("  unkeyable chunks: " + "; ".join(_owner_text(o) for o in owners[:5])
+                   + (" (more not listed)" if e.get("unclearable_capped") or len(owners) > 5 else ""))
+    out.append("  next: report it to the operator of your nexus engine with these lines; no client step clears it")
     return out
+
+
+def _owner_text(o: dict[str, Any]) -> str:
+    """One unkeyable chunk and its owning documents, as the engine reports them (whatever subset it sends)."""
+    docs = [d for d in o.get("owners") or [] if isinstance(d, dict)]
+    who = ", ".join(str(d.get("title") or d.get("doc_id")) for d in docs[:3]) or "no owning document"
+    return f"{str(o.get('chash') or o.get('old_chash_hex') or '?')[:12]} ({o.get('reason') or 'unknown'}; {who})"
 
 
 def _deferred_line(e: dict[str, Any]) -> str:
@@ -303,7 +301,7 @@ def _count(value: Any, listed: int) -> int:
     return max(value, listed) if isinstance(value, int) and not isinstance(value, bool) else listed
 
 
-def verdict(body: dict[str, Any], *, repair_ready: bool = False) -> Verdict:
+def verdict(body: dict[str, Any]) -> Verdict:
     """Read a finished job by its entries' reasons; ``done`` alone means nothing."""
     if body.get("state") == "failed":
         return Verdict(False, f"the validate job failed: {body.get('error') or body.get('reason') or 'no reason given'}"
@@ -316,7 +314,7 @@ def verdict(body: dict[str, Any], *, repair_ready: bool = False) -> Verdict:
     n_deferred = _count(body.get("deferred_count"), len(deferred))
     lines: list[str] = []
     for e in refused:
-        lines += _refused_lines(e, repair_ready=repair_ready)
+        lines += _refused_lines(e)
     lines += [_deferred_line(e) for e in deferred]
     if len(refused) < n_refused or len(deferred) < n_deferred:
         lines.append("(lists cut short by the engine; the counts are complete)")
@@ -335,65 +333,6 @@ def verdict(body: dict[str, Any], *, repair_ready: bool = False) -> Verdict:
                              f"{body.get('already_valid_count', 0)} already valid)", lines)
     return Verdict(False, "the job ended but the engine could not confirm every CHECK validated "
                           f"(all_validated={body.get('all_validated')!r}); run this again", lines)
-
-
-#: What a refused rekey means for the user, by reason (wren's contract; unknown reasons print as given).
-_REKEY_REFUSED: dict[str, str] = {
-    "text_mismatch": "its stored text does not hash to its id, so it is left as it is; report it to the operator",
-}
-
-
-def repair(
-    client: Any, *, doc_id: str | None, collection: str | None, dry_run: bool, limit: int | None = None,
-) -> dict[str, Any]:
-    """POST the lossless rekey. ``doc_id`` and ``collection`` narrow it; neither means every 16-byte row of this
-    tenant, ``limit`` chunks per call (``capped`` means call again)."""
-    if not repair_supported(client):
-        raise CannotRun("this engine has no chash manifest rekey route; no released engine has it yet "
-                        "(nexus-f3yqd), so there is nothing to run until it lands")
-    payload: dict[str, Any] = {"doc_id": doc_id, "collection": collection, "dry_run": dry_run}
-    if limit is not None:
-        payload["limit"] = limit
-    try:
-        body = client._post(REPAIR_PATH, payload, idempotent=False, mutates=not dry_run)
-    except httpx.HTTPStatusError as exc:
-        raise ValidateJobError(f"the engine refused the rekey (HTTP {_status_code(exc)}): {_error_text(exc)}") from exc
-    except Exception as exc:  # noqa: BLE001 — transport, or the client's re-resolve giving up
-        raise ValidateJobError(f"could not reach the engine ({exc}); check it with `nx doctor`") from exc
-    if not isinstance(body, dict) or not isinstance(body.get("chunks"), list):
-        raise ValidateJobError(f"the engine answered the rekey with no chunk list: {body!r}")
-    return body
-
-
-def rekey_lines(body: dict[str, Any]) -> list[str]:
-    """One line per chunk, then what to do next."""
-    lines: list[str] = []
-    for c in body.get("chunks") or []:
-        if not isinstance(c, dict):
-            continue
-        what = f"{c.get('collection')} {str(c.get('old_chash_hex'))[:12]}"
-        action = c.get("action")
-        if action == "refused":
-            reason = str(c.get("reason") or "")
-            lines.append(f"  refused: {what}: {_REKEY_REFUSED.get(reason) or reason or 'no reason given'}")
-            continue
-        repointed = c.get("refs_repointed") if isinstance(c.get("refs_repointed"), dict) else {}
-        refs = ", ".join(f"{t} {n}" for t, n in repointed.items() if n)
-        lines.append(f"  {action}: {what} -> {str(c.get('new_chash_hex'))[:12]} ({c.get('manifest_rows')} manifest "
-                     f"row(s){'; ' + refs if refs else ''})")
-    dry = body.get("dry_run")
-    count = body.get("count", len(body.get("chunks") or []))
-    if body.get("incomplete"):
-        lines.append(f"Cut short by the engine's time limit after {count} chunk(s); what is listed was "
-                     f"{'counted' if dry else 'done'}. Run it again to continue.")
-    elif body.get("capped"):
-        lines.append(f"{count} chunk(s) {'would be rekeyed' if dry else 'rekeyed'} in this call; more remain. "
-                     "Run it again to continue.")
-    elif dry:
-        lines.append(f"{count} chunk(s) would be rekeyed; nothing was changed. Rerun with --apply to rekey.")
-    else:
-        lines.append(f"Rekeyed {count} chunk(s). Run `nx t3 validate-chash-checks` again.")
-    return lines
 
 
 def doctor_fix_lines(client: Any, *, dry_run: bool, echo: Callable[[str], None], clock: Clock = SYSTEM) -> bool:
@@ -424,7 +363,7 @@ def doctor_fix_lines(client: Any, *, dry_run: bool, echo: Callable[[str], None],
     except KeyboardInterrupt:
         echo(f"chash CHECKs: stopped following; {poll_hint(job_id)}" if job_id else "chash CHECKs: stopped")
         raise
-    v = verdict(body, repair_ready=repair_supported(client))
+    v = verdict(body)
     for line in v.lines:
         echo(f"  {line}")
     echo(f"chash CHECKs: {v.summary}")
