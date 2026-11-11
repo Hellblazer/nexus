@@ -98,12 +98,15 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
   never widens eligibility, but it does narrow it for a ``lookup`` request (nexus-indyo,
   ``grown_route_not_lookup``): a grown plan that recorded any kind other than lookup was grown by a request
   that was not a lookup, so its steps were planned for something else, the H09 cost shape the lookup row
-  exists to keep out (nexus-jypmj.11). A grown plan that recorded lookup, or no kind, still serves lookups,
-  and ``discovery/listing`` requests are unchanged. This is a guard, not a measured effect: replaying the 77
+  exists to keep out (nexus-jypmj.11). This is a guard, not a measured effect: replaying the 77
   lookup runs since the gate was enabled against the live library (2026-11-03) changed no selection only
   because none of its 5 grown plans matched a lookup; the one live case (run 775 took grown plan 584, a
-  non-answer) cannot be replayed, the row being deleted. Grown plans that recorded no kind still serve
-  lookups; that path and discovery requests are open in nexus-a4g2a;
+  non-answer) cannot be replayed, the row being deleted. Two more guards (nexus-a4g2a, halcyon 2026-11-11):
+  a grown plan that recorded no kind serves no lookup or listing (``grown_route_unrecorded``, or the row's
+  own defect flag), and a ``discovery/listing`` request takes only a grown plan that recorded discovery
+  (``grown_route_not_discovery``). Neither was measured (5 grown plans, none accruing); both only narrow, so
+  the worst case is an inline replan, and a good hit can be lost (grown plan 585 served discovery run 794
+  well). A grown plan that recorded lookup still serves lookups, mislabelled or not (open in nexus-a4g2a);
 * ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``, and
   every request kind refuses it (nexus-rflvp: ``unattested_plan`` for ``lookup`` and ``discovery/listing``,
   the reasons it always had for the others). A builtin seeded before nexus-jypmj.2.1 is this until
@@ -352,6 +355,8 @@ REASONS: frozenset[str] = frozenset({
     "unreviewed_route",
     "single_source_synthesis",
     "grown_route_not_lookup",
+    "grown_route_unrecorded",
+    "grown_route_not_discovery",
     "unattested_plan",
     "saved_unknown_plan",
     "saved_other_project",
@@ -397,6 +402,10 @@ _SINGLE_SOURCE_REQUESTS = frozenset({_S, _U})
 
 #: Request kinds a GROWN unknown-kind plan may still serve. An unattested plan serves none (nexus-rflvp).
 _UNKNOWN_PLAN_REQUESTS = frozenset({_L, _D})
+
+#: The refusals a grown plan's recorded kind caused, counted per recorded kind (``refused_recorded_kinds``):
+#: the lookup narrowing (nexus-indyo, nexus-q7dpt) and the listing narrowing (nexus-a4g2a).
+_RECORDED_KIND_REASONS = frozenset({"grown_route_not_lookup", "grown_route_not_discovery"})
 
 
 def coerce_kind(raw: object) -> PlanAnswerKind:
@@ -683,6 +692,16 @@ def _judge(
         and standing.recorded_kind is not _L
     ):
         verdict = Verdict(False, "grown_route_not_lookup")
+    if verdict.eligible and standing.provenance == "grown" and request_kind in _UNKNOWN_PLAN_REQUESTS:
+        # nexus-a4g2a (halcyon, 2026-11-11, rule 6): a guard, not a measured effect. A grown plan that recorded no
+        # kind serves no lookup or listing (its steps were planned for a request nothing classified), and a
+        # listing takes only a grown plan that recorded discovery, as the matrix gives listings listing plans.
+        # It only narrows: the worst case is an inline replan. Counted by reason (and recorded kind) to show
+        # its cost as grown plans accrue.
+        if standing.recorded_kind is None:
+            verdict = Verdict(False, standing.flag or "grown_route_unrecorded")
+        elif request_kind is _D and standing.recorded_kind is not _D:
+            verdict = Verdict(False, "grown_route_not_discovery")
     return standing, verdict
 
 
@@ -788,7 +807,7 @@ class EligibilityFilter:
             return True
         counts["excluded"] += 1
         counts["reasons"][verdict.reason] = counts["reasons"].get(verdict.reason, 0) + 1
-        if verdict.reason == "grown_route_not_lookup" and standing.recorded_kind is not None:
+        if verdict.reason in _RECORDED_KIND_REASONS and standing.recorded_kind is not None:
             kind = standing.recorded_kind.value
             self._refused_recorded_kinds[kind] = self._refused_recorded_kinds.get(kind, 0) + 1
         if isinstance(plan_id, int) and plan_id not in self._excluded_ids:
