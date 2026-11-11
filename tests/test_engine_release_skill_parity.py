@@ -190,11 +190,13 @@ def test_every_live_standalone_journey_is_named_in_the_skill() -> None:
     )
 
 
-@pytest.mark.parametrize("flag", ["--package-upgrade", "--acquire"])
+@pytest.mark.parametrize("flag", ["--acquire"])
 def test_the_release_gates_are_prescribed_as_commands(flag: str) -> None:
-    """--acquire (post-publish, the PUBLISHED bytes) and --package-upgrade
-    (the populated-store rehearsal Step 5b names) are the gates the skill must
-    give the operator a runnable command for.
+    """--acquire (post-publish, the PUBLISHED bytes) is the run.sh gate the skill
+    must give the operator a runnable command for. --package-upgrade left this
+    list with audit cut 7 (Sam 2026-11-10, nexus-jh1f2): Step 5b.1 runs the
+    user's-seat upgrade rehearsal instead (pinned below), and the
+    --package-upgrade leg itself runs in the PyPI release skill's Step 1.
 
     Mentioning them is not enough — the failure mode being guarded is a step
     degrading into prose nobody executes. The published artifact is different
@@ -208,6 +210,24 @@ def test_the_release_gates_are_prescribed_as_commands(flag: str) -> None:
         f"the gate historically caught nexus-pi3s3 + nexus-qeoxf, defects in "
         f"published bytes that every local suite missed."
     )
+
+
+def test_step_5b1_prescribes_the_user_seat_upgrade_rehearsal() -> None:
+    """Audit cut 7 (Sam 2026-11-10, nexus-jh1f2): a schema- or data-carrying tag's
+    representative-scale rehearsal is tests/e2e/upgrade-rehearsal.sh (release Step
+    6e, nexus-f3yqd.5) as a runnable command, on the tag's published bytes: run from
+    a tree that pins the tag, never with --engine-jar."""
+    skill = _skill()
+    start = skill.index("### 5b.")
+    step = skill[start : skill.index("\n2. ", start)]
+    fenced = "\n".join(_FENCE_RE.findall(step))
+    assert "tests/e2e/upgrade-rehearsal.sh" in fenced, "5b.1 has no runnable rehearsal command"
+    assert "--engine-jar" not in fenced, "5b.1 must drive the published binary, not a jar"
+    assert "run.sh --package-upgrade" not in fenced, "5b.1 still runs the retired toy-seed leg"
+    assert "REQUIRED_ENGINE_VERSION" in step, "5b.1 must say the tree pins this tag"
+    assert "NEXUS_SERVICE_JAR" in step, "5b.1 must rule out the environment's jar override too"
+    assert "every line must name this tag" in step, "5b.1 must have the operator read the served engine"
+    assert "--expect-engine X.Y.Z" in fenced, "5b.1 must have the driver check the tag itself"
 
 
 # ── The one-engine-identity directive, as a test (Hal 2026-07-15) ────────────

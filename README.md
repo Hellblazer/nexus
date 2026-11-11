@@ -2,8 +2,6 @@
 
 **Permanent memory and search by meaning for Claude.** Nexus runs on your computer. Search and storage need no API key, no account, and no separate database install. What Claude learns in one session is there in the next. The steps that call a language model (the `nx_answer` operators, aspect extraction, topic labels) use the Claude Code CLI when it is installed, and otherwise an Anthropic API key you set with `nx config set anthropic_api_key`.
 
-> **Known issue in 8.0.0: after an engine restart, nexus can spend 20 minutes or more rebuilding search indexes.** On a large store the engine builds its search indexes in the background, with heavy disk writes, and `nx doctor` or `nx upgrade` shows no progress while it runs. A restart of the engine stops the build in progress, and the next start builds that index again from the beginning. Leave the engine running so the builds can finish, and avoid `nx upgrade` and `nx daemon restart-stale` until the fix ships. Your data is not lost when this happens. Engine 0.1.186 fixes this.
-
 [![CI](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml/badge.svg)](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/conexus)](https://pypi.org/project/conexus/)
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
@@ -88,7 +86,7 @@ Once a day the MCP server sends one message with six values: a random install id
 - [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html): record a decision before you build, in eight lessons.
 - [Research with Nexus](https://hellblazer.github.io/nexus/research.html): what you say to Claude at each step of research work, and what you see.
 - [Research in Nexus](https://hellblazer.github.io/nexus/research-in-nexus.html): the thinking behind the method, what was borrowed from experimental science and what was left out.
-- [From 7.6.1 to 8.0.0](https://hellblazer.github.io/nexus/journey-from-7-6-1.html): what changed in Nexus between 7.6.1 and 8.0.0, theme by theme, and what an upgrade from 7.6.x needs.
+- [From 7.6.1 to 8.1.2](https://hellblazer.github.io/nexus/journey-from-7-6-1.html): what changed in Nexus between 7.6.1 and 8.1.2, theme by theme, and what an upgrade from 7.6.x needs.
 - [The Nexus Tuple Space](https://hellblazer.github.io/nexus/tuple-space.html): how sessions, agents, and hooks coordinate.
 - [Coordination](https://hellblazer.github.io/nexus/coordination.html): how sessions and agents coordinate through the tuple space, and which steps the hooks, the channel, and Claude each do.
 - [How Agents Build and Ship Nexus](https://hellblazer.github.io/nexus/how-agents-ship.html): how agent sessions, the conexus instance, GitHub and a second build machine coordinate through the tuple space to build, test, review and release Nexus.

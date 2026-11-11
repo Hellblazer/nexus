@@ -3112,6 +3112,8 @@ class RawSqlGateTest {
         Map.entry("manifest-chunks-column-select", "CatalogManifestSweepRepositoryTest runs it with one fixed role "
             + "literal"),
         Map.entry("tuples-column-select", "NexusServiceTupleSweepIsolationTest runs it with one fixed role literal"),
+        Map.entry("chunks-text-column-select", "StoreGetIncludeColumnPrivilegeTest runs it with one fixed role "
+            + "literal"),
         Map.entry("poison-tuple-row-install", "TupleRepositoryTest runs it with the hex of a fixed byte string"),
         Map.entry("role-search-path-poison", "SharedClusterMutationFalsifyTest runs it with a fixed role literal; the "
             + "poison value is written literally in the changelog and pinned by "

@@ -2194,6 +2194,10 @@ def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S
                 stderr=stderr_f,
                 text=False,
                 timeout=timeout_s,
+                # MinerU's render-executor pool outlives the probe child; without this its worker
+                # processes stayed alive after doctor returned (labrun-pex: 0.28 GB each, held to
+                # the end of a test shard).
+                reap_group_on_return=True,
             )
         stderr_text = stderr_path.read_text(errors="replace", encoding="utf-8")
     if proc.returncode != 0:
@@ -2653,12 +2657,12 @@ def _stale_mineru_server() -> str | None:
 #                                          | the default sweep's own T3
 #                                          | checks, and the verbose report
 #                                          | is meant for on-demand reading.
-#   --check-taxonomy            | YES       | one HTTP call to the
-#                                          | already-configured engine
-#                                          | (``HttpTaxonomyStore
-#                                          | .get_link_drift``); a real
-#                                          | invariant-drift signal with no
-#                                          | default-sweep equivalent.
+#   --check-taxonomy            | NAMED     | one HTTP call, but the engine
+#                                          | reads every projection
+#                                          | assignment (9-13 s measured,
+#                                          | F30): the default sweep prints
+#                                          | "not checked" and names the
+#                                          | flag (nexus-f3yqd.6).
 #   --check-plan-library        | YES       | one HTTP call, bounded page
 #                                          | size; the global-tier builtin
 #                                          | floor is a real, otherwise-
@@ -2925,6 +2929,7 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
     "--check-storage-boundary", "--check-post-store-hooks",
     "--check-mineru", "--check-wal-retention", "--check-collection-shape",
     "--check-embeddings", "--check-assignments", "--check-references",
+    "--check-index-runs",
 )
 
 
@@ -2946,7 +2951,7 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET, *, p
     runners: dict[str, Any] = {
         "resources": _run_check_resources,
         "plan-library": _run_check_plan_library,
-        "taxonomy": _run_check_taxonomy,
+        "taxonomy": _taxonomy_not_checked,
         "aspect-queue": lambda: _run_check_aspect_queue(engine_status),
         "t1": _run_check_t1,
         "engine-activity": lambda: _run_check_engine_activity(engine_status),
@@ -2964,6 +2969,20 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET, *, p
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
         "--check-* diagnostics):"
     )
+    from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
+
+    # F30 (nexus-f3yqd.6): the three sensitivity rows share one read of the sensitive set: the engine's bounded
+    # list, or one catalog walk where that is not available (each row walked, about 23 s, before they shared it).
+    with sd.one_walk():
+        gating_failed = _run_supplementary_rows(runners, progress)
+    click.echo(
+        "\nRemaining opt-in-only checks (not run above; invoke explicitly): "
+        + ", ".join(_OPT_IN_ONLY_CHECKS)
+    )
+    return gating_failed
+
+
+def _run_supplementary_rows(runners: dict[str, Any], progress: Any) -> bool:
     gating_failed = False
     for name in _SUPPLEMENTARY_CHECK_NAMES:
         runner = runners[name]
@@ -2990,10 +3009,6 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET, *, p
                 "doctor_supplementary_check_failed", check=name,
                 error=_exc_detail(exc),
             )
-    click.echo(
-        "\nRemaining opt-in-only checks (not run above; invoke explicitly): "
-        + ", ".join(_OPT_IN_ONLY_CHECKS)
-    )
     return gating_failed
 
 
@@ -3036,8 +3051,15 @@ def _doctor_progress() -> Any:
     return StepReporter(
         0, echo=lambda text: click.echo(text, err=True), stream=sys.stderr, tty=tty, compact=True,
         slow_s=3.0, heartbeat_s=3.0 if tty else 30.0, announce="Checking {what}{detail}", name="nx doctor",
-        show_reason=False, lazy=not tty,
+        show_reason=False, lazy=not tty, work=_engine_work_lines,
     )
+
+
+def _engine_work_lines() -> list[str]:
+    """nexus-f3yqd.3: what the engine is busy with, repeated during a long check."""
+    from nexus.progress.boot_work import engine_lines  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+
+    return engine_lines()
 
 
 @click.command("doctor", epilog=COLLECTIONS_RULES_EPILOG)
@@ -3129,6 +3151,15 @@ def _doctor_progress() -> Any:
     default=False,
     help="Verify the topic_links ≡ projection-assignment invariant "
          "(GH #252). Exits 1 on drift.",
+)
+@click.option(
+    "--check-index-runs",
+    "check_index_runs",
+    is_flag=True,
+    default=False,
+    help="Read every catalog document once and report stale index-run fences, failed index runs with "
+         "hidden chunks and tumbler allocator drift. The default sweep skips these rows because the read "
+         "grows with the catalog.",
 )
 @click.option(
     "--check-plan-library",
@@ -3511,6 +3542,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                fix_paths: bool, dry_run: bool, check_schema: bool,
                check_search: bool, check_resources: bool,
                check_quotas: bool, check_taxonomy: bool,
+               check_index_runs: bool,
                check_plan_library: bool,
                check_mcp_logs: bool, mcp_log_hours: int,
                check_mineru: bool,
@@ -3553,6 +3585,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-schema": check_schema,
             "--check-resources": check_resources,
             "--check-taxonomy": check_taxonomy,
+            "--check-index-runs": check_index_runs,
             "--check-plan-library": check_plan_library,
             "--check-tier-discipline": check_tier_discipline,
             "--check-storage-boundary": check_storage_boundary,
@@ -3600,6 +3633,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-quotas": check_quotas,
             "--check-mcp-logs": check_mcp_logs,
             "--check-taxonomy": check_taxonomy,
+            "--check-index-runs": check_index_runs,
             "--check-plan-library": check_plan_library,
             "--check-post-store-hooks": check_post_store_hooks,
             "--check-mineru": check_mineru,
@@ -3657,6 +3691,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_taxonomy:
         _run_check_taxonomy()
+        return
+
+    if check_index_runs:
+        _run_check_index_runs()
         return
 
     if check_plan_library:
@@ -4683,6 +4721,30 @@ def _format_quota_report(report: dict) -> str:
         )
 
     return "\n".join(lines)
+
+
+def _run_check_index_runs() -> None:
+    """``nx doctor --check-index-runs`` (F30, nexus-f3yqd.6): the three rows the default sweep skips, over one
+    catalog walk, printed and exit-coded as the main sweep prints and exit-codes its rows."""
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred, keeps CLI startup fast
+    from nexus.health import format_health_for_cli, health_exit_code, run_index_run_checks  # noqa: PLC0415 — deferred, keeps CLI startup fast
+
+    results = run_index_run_checks()
+    output, _failed = format_health_for_cli(results, local_mode=is_local_mode())
+    click.echo(output)
+    code = health_exit_code(results)
+    if code:
+        raise click.exceptions.Exit(code)
+
+
+def _taxonomy_not_checked() -> None:
+    """The default sweep's taxonomy row (F30, nexus-f3yqd.6). The link-drift census reads every projection
+    assignment engine-side (9-13 s measured on a laptop tenant), so the default sweep names the explicit check
+    instead of running it. ``--check-taxonomy`` runs :func:`_run_check_taxonomy` unchanged."""
+    click.echo(
+        "[ ] taxonomy link drift: not checked in the default sweep (it reads every projection assignment); "
+        "run `nx doctor --check-taxonomy`"
+    )
 
 
 def _run_check_taxonomy() -> None:

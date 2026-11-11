@@ -641,10 +641,16 @@ class TestUploaderLoop:
         th = threading.Thread(target=self._up, args=(db,), kwargs={"chunking_done": cd, "cancel": cancel},
                               daemon=True)
         th.start()
+        # The uploader thread creates its writer when it starts; under CI load that can take longer than any
+        # fixed sleep, so wait (bounded) for the writer before checking that it is held.
+        deadline = time.monotonic() + 10.0
+        while not writer.instances and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert writer.instances, "the uploader never created its writer"
         time.sleep(0.3)
         assert th.is_alive() and not writer.instances[0].finished, "held until the chunker is done"
         cd.set()
-        th.join(timeout=3.0)
+        th.join(timeout=10.0)
         assert not th.is_alive() and writer.instances[0].finished
 
     def test_a_resume_with_everything_already_uploaded_needs_no_writer(self, db, writer) -> None:

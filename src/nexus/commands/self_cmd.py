@@ -1030,6 +1030,16 @@ def _build_argv(
 #: The failures a target installer can be blamed for: the build step's own messages.
 _BUILD_FAILURE_PREFIXES = ("generation build failed", "legacy migration failed")
 
+#: The advice for a build failure none of the specific hints recognises (F22, nexus-f3yqd.6). It keeps the
+#: ``<advice>\n\nuv output:`` shape :func:`split_build_failure` reads, and names no network or TLS words, so
+#: ``pdf_stack``'s classifier reads the message as it read uv's output alone.
+_UNRECOGNISED_BUILD_HINT = (
+    "nexus does not recognise this build failure; uv's output below says why it failed. "
+    "`nx self install --dry-run` prints the build command, to run by hand and read its whole output."
+)
+#: The same for a first install (``--bootstrap``), where there is no ``nx`` on PATH to run ``--dry-run`` with.
+_UNRECOGNISED_BOOTSTRAP_HINT = "nexus does not recognise this build failure; uv's output below says why it failed."
+
 
 def _target_installer(
     source: str, *, version: str | None, extras: list[str] | bool,
@@ -1594,12 +1604,10 @@ def _build_flip_shims(
                 index_failure_hint(detail, bootstrap=bootstrap), platform_failure_hint(detail),
                 torch_backend_hint(detail),
             ) if h
-        )
+        ) or (_UNRECOGNISED_BOOTSTRAP_HINT if bootstrap else _UNRECOGNISED_BUILD_HINT)
         # A streamed build already showed uv's output: repeat only its tail.
         shown = _tail(detail) if progress else detail
         label = "uv output (last lines; the full output is above)" if progress else "uv output"
-        if not hint:
-            raise click.ClickException(f"generation build failed:\n{shown}")
         raise click.ClickException(
             f"generation build failed:\n{hint}\n\n{label}:\n{shown}"
         )
@@ -1748,9 +1756,9 @@ def _windows_build_flip_shims(
         )
     except core.GenerationError as exc:
         detail = str(exc)
-        hint = index_failure_hint(detail, bootstrap=bootstrap)
-        if hint is None:
-            raise click.ClickException(f"generation build failed:\n{detail}") from exc
+        hint = index_failure_hint(detail, bootstrap=bootstrap) or (
+            _UNRECOGNISED_BOOTSTRAP_HINT if bootstrap else _UNRECOGNISED_BUILD_HINT
+        )
         raise click.ClickException(
             f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
         ) from exc
@@ -2413,11 +2421,31 @@ def install_cmd(
     with reporter.step("Prune uv's package cache", f"cleanup only: {generation.name} is already in use"):
         click.echo(prune_uv_cache())
     reporter.summary()
-    click.echo(
-        "if this upgraded an existing install, run `nx upgrade` for migrations "
-        "(a fresh install is set up by `nx init` instead); "
-        "live sessions converge at their next spawn"
-    )
+    click.echo(_after_install_line())
+
+
+def _box_is_set_up() -> bool:
+    """Whether ``nx init`` (or onboarding to a managed service) ever ran here: the local service's
+    ``pg_credentials``, a configured service address (``credentials.service_url`` or ``NX_SERVICE_URL``,
+    read as :func:`nexus.config.is_local_mode` reads it), or a recorded ``install.mode``."""
+    from nexus import config as _config  # noqa: PLC0415 — deferred, keeps the CLI's cold start light
+
+    try:
+        if (_config.nexus_config_dir() / "pg_credentials").is_file():
+            return True
+        if _config.get_credential("service_url").strip():  # config.yml credentials, or NX_SERVICE_URL
+            return True
+        return bool((_config.load_config().get("install") or {}).get("mode"))
+    except Exception:  # noqa: BLE001 — an unreadable config reads as set up: `nx upgrade` is the safe advice there
+        return True
+
+
+def _after_install_line() -> str:
+    """The closing line of ``nx self install``, chosen for this machine (F23, nexus-f3yqd.6). It used to name
+    both cases and leave the choice to the user."""
+    if _box_is_set_up():
+        return "run `nx upgrade` to migrate this install's data; live sessions converge at their next spawn"
+    return "nothing is set up on this machine yet: run `nx init`"
 
 
 @self_group.command("gc")

@@ -84,6 +84,9 @@ sites = ["tests/_engine_substrate.py::_boot::pg_ctl_start"]
 "tests/e2e/gc-ab/run-ab.sh::sh_docker_run" = 1
 "tests/test_init_pg_bundle_acquire.py::test_pinned_tag_downloads_extracts_selects::initdb" = 1
 "tests/test_pg_ctl_start.py::test_a_failed_start_raises_with_what_pg_ctl_said::pg_ctl_start" = 2
+"tests/test_pg_ctl_start.py::test_a_socket_dir_past_sun_path_fails_loud_before_pg_ctl_runs::pg_ctl_start" = 1
+"tests/test_pg_ctl_start.py::test_a_socket_dir_that_fits_starts_as_before::pg_ctl_start" = 1
+"tests/test_pg_ctl_start.py::test_a_tcp_only_start_without_k_is_not_checked::pg_ctl_start" = 1
 "tests/test_pg_ctl_start.py::test_pg_ctl_start_returns_while_the_postmaster_still_holds_its_handles::pg_ctl_start" = 1
 
 [provisioning]

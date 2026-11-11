@@ -4192,8 +4192,25 @@ public final class PgVectorRepository {
     public Map<String, Object> get(String tenant, String collection,
                                    List<String> ids, int limit, int offset,
                                    boolean includeSourceUri, boolean excludeSensitive) {
+        return get(tenant, collection, ids, limit, offset, includeSourceUri, excludeSensitive,
+                   StoreGetProjection.FULL);
+    }
+
+    /**
+     * {@link #get(String, String, List, int, int, boolean, boolean)} projected to what the caller reads
+     * (nexus-f3yqd, {@link StoreGetProjection}): the statement selects only the projected columns, and the
+     * envelope omits the key of one it did not select. {@code count}, {@code sensitives}, {@code chashes} and
+     * {@code spans} are always present; {@code spans} are derived from the span keys the statement still reads.
+     */
+    public Map<String, Object> get(String tenant, String collection,
+                                   List<String> ids, int limit, int offset,
+                                   boolean includeSourceUri, boolean excludeSensitive,
+                                   StoreGetProjection projection) {
         int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) {
+            // Predates the projection (nexus-f3yqd) and ignores it: no row is read, so there is nothing to omit. It
+            // returns the old shape (documents and metadatas keys, no count, chashes or spans); a caller that
+            // sends include with no ids sees that, not the projected envelope.
             return Map.of("ids", List.of(), "documents", List.of(), "metadatas", List.of(), "sensitives", List.of());
         }
 
@@ -4219,7 +4236,7 @@ public final class PgVectorRepository {
             org.jooq.Condition cond = scope.and(ch.chash().in(ids))
                                           .and(liveChunksCondition(ctx, ch))
                                           .and(excludeSensitive ? notSensitiveCondition(ch) : DSL.trueCondition());
-            var rows = ctx.select(ch.chash(), ch.chunkText(), ch.metadata(), countField)
+            var rows = ctx.select(projection.selectFields(ch, countField))
                .from(ch.table())
                // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
                // this fetch-by-id read was structurally invisible to the nexus-3ck2g
@@ -4250,22 +4267,25 @@ public final class PgVectorRepository {
         List<Map<String, Object>> outMetas = new ArrayList<>(result.size());
         long matchedLive = emptyPageCountHolder[0] >= 0 ? emptyPageCountHolder[0] : 0L;
         for (var rec : result) {
-            outIds.add(rec.value1());
-            outDocs.add(rec.value2());
-            JSONB meta = rec.value3();
+            outIds.add(rec.get(0, String.class));
+            outDocs.add(rec.get(1, String.class));
+            JSONB meta = rec.get(2, JSONB.class);
             outMetas.add(fromJson(meta != null ? meta.data() : null));
             matchedLive = rec.get(countField).longValue();
         }
         Map<String, Object> envelope = new LinkedHashMap<>(
             Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas));
+        if (!projection.documents()) envelope.remove("documents");
         // nexus-hdx2u E3: additive matched-LIVE-rows-before-LIMIT count, so the
         // client can detect a truncated page (count > len(returned)) instead of
         // silently treating a beyond-the-page id as absent. Single-statement/
         // single-snapshot (see above) — never a race between two reads.
         envelope.put("count", matchedLive);
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
-        return withSensitives(tenant, collection, enrichGetEnvelope(tenant, collection, envelope, includeSourceUri),
-                              excludeSensitive);
+        var enriched = enrichGetEnvelope(tenant, collection, envelope, includeSourceUri);
+        // Spans are derived from the metadata above; a caller that excluded metadatas gets the spans, not the keys.
+        if (!projection.metadatas()) { enriched = new LinkedHashMap<>(enriched); enriched.remove("metadatas"); }
+        return withSensitives(tenant, collection, enriched, excludeSensitive);
     }
 
     /** The exclusion predicate over a chunk-table row: no live owner of the chunk is sensitive. */

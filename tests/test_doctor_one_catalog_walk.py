@@ -68,7 +68,8 @@ class _NoCollections:
 KEEP = ("_check_stale_indexing_runs", "_check_failed_runs_hidden_chunks", "_check_next_seq_drift", "_check_pending_rungs")
 
 
-def _doctor_over(monkeypatch: pytest.MonkeyPatch, cat: CountingCatalog, *, managed: bool, rung_reads: list):
+def _doctor_over(monkeypatch: pytest.MonkeyPatch, cat: CountingCatalog, *, managed: bool, rung_reads: list,
+                 index_runs: bool = False):
     """Run ``run_health_checks`` with only the catalog-reading rows live, over *cat*."""
     for name in dir(health):
         if name.startswith("_check_") and name not in KEEP and callable(getattr(health, name)):
@@ -85,24 +86,35 @@ def _doctor_over(monkeypatch: pytest.MonkeyPatch, cat: CountingCatalog, *, manag
         record_fn=lambda: None, managed_fn=lambda: managed, stale_zero_fn=lambda: False,
     )
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
-    results, _local = health.run_health_checks()
+    # The default sweep never walks (F30); `nx doctor --check-index-runs` runs the three rows over one walk.
+    results = health.run_index_run_checks() if index_runs else health.run_health_checks()[0]
     return {r.label: r for r in results}
 
 
 @pytest.mark.usefixtures("cloud_mode")
-def test_a_managed_doctor_run_walks_the_catalog_once_and_not_through_the_rung(monkeypatch) -> None:
+def test_a_default_doctor_run_does_not_walk_the_catalog(monkeypatch) -> None:
+    """F30 (nexus-f3yqd.6): the default sweep names --check-index-runs instead of reading every document."""
     cat = CountingCatalog()
-    rung_reads: list = []
-    rows = _doctor_over(monkeypatch, cat, managed=True, rung_reads=rung_reads)
-    # One shared walk feeds the stale-run row, the failed-run row and the allocator-drift row.
-    assert cat.calls == 1, f"{cat.calls} full catalog walks in one doctor run"
-    assert cat.pages == math.ceil(DOCUMENTS / PAGE)
+    rows = _doctor_over(monkeypatch, cat, managed=True, rung_reads=[])
+    assert cat.calls == 0, f"{cat.calls} full catalog walks in a default doctor run"
+    for label in ("stale index-run fences", "failed index runs with hidden chunks", "tumbler allocator drift"):
+        assert rows[label].ok is True and rows[label].skipped is True, rows[label]
+        assert "nx doctor --check-index-runs" in rows[label].detail, rows[label]
     # The rung's dry run lists every document and reads manifests: on a managed service doctor skips it.
     assert cat.stats_calls == 0
     ladder = rows["Upgrade ladder"]
     assert ladder.warn and not ladder.ok
     assert "not checked" in ladder.detail and RUNG_MANIFEST_SECTION_LABELS in ladder.detail
     assert any("nx upgrade" in s and "interactively" in s for s in ladder.fix_suggestions), ladder.fix_suggestions
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_check_index_runs_walks_the_catalog_once(monkeypatch) -> None:
+    cat = CountingCatalog()
+    rows = _doctor_over(monkeypatch, cat, managed=True, rung_reads=[], index_runs=True)
+    # One shared walk feeds the stale-run row, the failed-run row and the allocator-drift row.
+    assert cat.calls == 1, f"{cat.calls} full catalog walks in one --check-index-runs run"
+    assert cat.pages == math.ceil(DOCUMENTS / PAGE)
     # The three shared rows still answered from the one walk (non-vacuous: they read the list, not skipped).
     assert rows["stale index-run fences"].detail and "skipped" not in rows["stale index-run fences"].detail
     assert "skipped" not in rows["tumbler allocator drift"].detail
@@ -116,7 +128,7 @@ def test_a_failed_shared_walk_is_not_walked_again_by_each_row(monkeypatch) -> No
             raise RuntimeError("edge saturated")
 
     cat = FailingCatalog()
-    rows = _doctor_over(monkeypatch, cat, managed=True, rung_reads=[])
+    rows = _doctor_over(monkeypatch, cat, managed=True, rung_reads=[], index_runs=True)
     assert cat.calls == 2, "one shared walk, retried once, then every row degrades without walking"
     for label in ("stale index-run fences", "tumbler allocator drift"):
         assert "skipped" in rows[label].detail, (label, rows[label].detail)

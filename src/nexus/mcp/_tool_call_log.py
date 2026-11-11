@@ -34,6 +34,21 @@ process), then greps ``mcp_tool_call pid=N`` after that start line's timestamp
 ``meta_keys_truncated`` set when anything was cut) so a hostile client cannot
 grow a line.
 
+FAILURES (nexus-3ceda.7). The key-set rule means ``mcp_tool_call`` is not one
+line per call, so it cannot say how often an agent retries after an error. Two
+more INFO events can: ``mcp_tool_error`` for every ``tools/call`` whose result
+is ``isError`` or that raised (a marked failure, a ``ToolError``, a crash, an
+unknown tool), with ``streak`` (consecutive failures of that tool), ``calls``
+(the process's tools/call count so far) and ``superseded`` (it replaced an
+older failure no call had followed yet; the older one's follow-up is lost); and ``mcp_tool_after_error`` for the next
+call that process makes, with ``failed_tool``, ``same_tool``, ``same_args``
+(compared through a per-process keyed digest held in memory, never logged) and
+``seconds`` since the failure. Both carry ``schema``. A blind retry is
+``same_tool`` and ``same_args``; a corrected one is ``same_tool`` without
+``same_args``. How the rate is computed (time bounds, denominator, windows) is
+in the bead. The volume is one or two lines per failure. Like
+``mcp_tool_call``, neither line carries an argument, a result or the error text.
+
 HOOK. A ``Server.middleware`` entry (mcp 2.x; the 1.x ``request_handlers``
 wrap is gone with the decorator registry, nexus-sgmyl). The chain runs ahead of
 every inbound message, so the entry acts only on ``ctx.method == "tools/call"``
@@ -47,8 +62,11 @@ not break startup (nexus-vc5yb / nexus-3hc9z).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import structlog
@@ -67,13 +85,38 @@ _MAX_KEY_LEN = 128
 _seen_keysets: set[tuple[tuple[str, ...], bool]] = set()
 _limit_noted = False
 
+#: The failure lines' format. Step 3 of nexus-3ceda.7 bumps it, so an analysis
+#: can tell the code that wrote a line without a version in the start lines.
+FAILURE_SCHEMA = 1
+
+#: The call that last failed in this process: its tool, when (``_clock``), and a
+#: keyed digest of its arguments, until the next ``tools/call`` logs what the
+#: agent did after it (nexus-3ceda.7). One slot: a failure while another is
+#: still pending replaces it, and its error line says ``superseded=True``. Same
+#: single-thread reasoning as ``_seen_keysets``.
+_last_failure: tuple[str | None, float, bytes | None] | None = None
+#: Failures of each tool since that tool last succeeded in this process (other
+#: tools' calls do not reset it, and there is no time bound). Bounded like
+#: ``_seen_keysets``: past 64 distinct failing names a new name always logs
+#: ``streak=1``, so ``streak=1`` is not proof of a first failure.
+_streaks: dict[str, int] = {}
+#: ``tools/call`` requests this process has seen, for errors per call.
+_calls = 0
+_clock: Callable[[], float] = time.monotonic
+#: Per-process key for the argument digest: the digest never leaves memory, and
+#: the key keeps it from being a stable fingerprint of the arguments even there.
+_ARGS_KEY: bytes = os.urandom(16)
+
 
 def _reset_state() -> None:
     """Forget the remembered key-sets (tests; a process never needs it)."""
-    global _limit_noted, _cwd_healed
+    global _limit_noted, _cwd_healed, _last_failure, _calls
     _seen_keysets.clear()
     _limit_noted = False
     _cwd_healed = False
+    _last_failure = None
+    _streaks.clear()
+    _calls = 0
 
 
 def _meta_keys(params: Any) -> list[str]:
@@ -117,6 +160,82 @@ def _emit(params: Any) -> None:
     emit("mcp_tool_call", tool=name, meta_keys=keys, pid=os.getpid(), **extra)
 
 
+def _tool_name(params: Any) -> str | None:
+    name = params.get("name") if isinstance(params, Mapping) else None
+    return name[:_MAX_KEY_LEN] if isinstance(name, str) else None
+
+
+def _args_digest(params: Any) -> bytes:
+    """A keyed digest of the call's arguments, compared in memory and never logged."""
+    args = params.get("arguments") if isinstance(params, Mapping) else None
+    if args is None:
+        args = {}  # an omitted arguments object is the empty one
+    try:
+        text = json.dumps(args, sort_keys=True, default=repr)
+    except (TypeError, ValueError):
+        text = repr(args)
+    return hashlib.blake2b(text.encode("utf-8", "replace"), key=_ARGS_KEY, digest_size=16).digest()
+
+
+def _same_args(params: Any, failed_args: bytes | None) -> bool:
+    if failed_args is None:
+        return False
+    try:
+        return _args_digest(params) == failed_args
+    except Exception:  # noqa: BLE001 — an undigestable argument reads as "not the same", never a lost line
+        return False
+
+
+def _note_next_call(params: Any) -> None:
+    """Count the call; after a failure, log what the agent did next, once (nexus-3ceda.7).
+
+    ``same_args`` separates a blind retry (same tool, same arguments) from a
+    corrected one (same tool, other arguments)."""
+    global _last_failure, _calls
+    _calls += 1
+    if _last_failure is None:
+        return
+    failed_tool, at, failed_args = _last_failure
+    _last_failure = None
+    tool = _tool_name(params)
+    same_tool = tool is not None and tool == failed_tool
+    structlog.get_logger(__name__).info(
+        "mcp_tool_after_error", tool=tool, failed_tool=failed_tool, same_tool=same_tool,
+        same_args=same_tool and _same_args(params, failed_args),
+        seconds=round(_clock() - at, 1), schema=FAILURE_SCHEMA, pid=os.getpid(),
+    )
+
+
+def _is_error(result: Any) -> bool:
+    if isinstance(result, Mapping):
+        return result.get("isError") is True
+    return getattr(result, "is_error", False) is True
+
+
+def _note_outcome(params: Any, failed: bool) -> None:
+    """Log a failed call and remember it for the next one. Tool name and outcome only:
+    never an argument, a result or the error text, which can carry tokens."""
+    global _last_failure
+    tool = _tool_name(params)
+    if not failed:
+        if tool is not None:
+            _streaks.pop(tool, None)
+        return
+    streak = _streaks.get(tool, 0) + 1 if tool is not None else 1
+    if tool is not None and (tool in _streaks or len(_streaks) < _MAX_KEYSETS):
+        _streaks[tool] = streak
+    superseded = _last_failure is not None
+    try:
+        digest: bytes | None = _args_digest(params)
+    except Exception:  # noqa: BLE001 — an undigestable argument must not cost the error line
+        digest = None
+    _last_failure = (tool, _clock(), digest)
+    structlog.get_logger(__name__).info(
+        "mcp_tool_error", tool=tool, streak=streak, calls=_calls, superseded=superseded,
+        schema=FAILURE_SCHEMA, pid=os.getpid(),
+    )
+
+
 _cwd_healed = False
 
 
@@ -154,6 +273,23 @@ def install_tool_call_log(server: object) -> str:
                     _heal_cwd()
                 except Exception:  # noqa: BLE001 — a failed chdir must never break a tool call
                     pass
+                try:
+                    _note_next_call(ctx.params)
+                except Exception:  # noqa: BLE001 — observability must never break a tool call
+                    pass
+                try:
+                    result = await call_next(ctx)
+                except Exception:
+                    try:
+                        _note_outcome(ctx.params, True)
+                    except Exception:  # noqa: BLE001 — observability must never break a tool call
+                        pass
+                    raise
+                try:
+                    _note_outcome(ctx.params, _is_error(result))
+                except Exception:  # noqa: BLE001 — observability must never break a tool call
+                    pass
+                return result
             return await call_next(ctx)
 
         _logged._nx_tool_call_log = True  # type: ignore[attr-defined]

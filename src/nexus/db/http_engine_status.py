@@ -31,11 +31,14 @@ from nexus._log_safe_url import scrub_transport_error
 _log = structlog.get_logger(__name__)
 
 
-def fetch_engine_status(*, timeout: float = 5.0) -> dict | None:
+def fetch_engine_status(*, timeout: float = 5.0, mint_deadline_s: float | None = None) -> dict | None:
     """Fetch the engine's ``GET /v1/status`` body, or ``None`` on any failure
     (unresolvable endpoint, transport error, non-200, malformed JSON) — never
     raises, mirroring the existing ``GET /version`` probe idiom in
     ``commands/doctor.py``.
+
+    *mint_deadline_s* bounds a data-token mint on a mint-armed managed install (nexus-f3yqd.3): an advisory
+    caller such as the boot_work notice must not sit through a cold mint's retries before any output.
     """
     try:
         from nexus.db.service_endpoint import (  # noqa: PLC0415 — deferred to keep CLI startup fast
@@ -60,7 +63,7 @@ def fetch_engine_status(*, timeout: float = 5.0) -> dict | None:
         try:
             from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to keep CLI startup fast
             from nexus.db.http_scratch_store import DEFAULT_TENANT  # noqa: PLC0415 — deferred to keep CLI startup fast
-            token = get_data_token_manager().bearer_for(base_url, DEFAULT_TENANT)
+            token = get_data_token_manager().bearer_for(base_url, DEFAULT_TENANT, deadline_s=mint_deadline_s)
         except Exception as exc:  # noqa: BLE001 — fail-closed: a mint failure makes the engine "unprobeable", never a crash
             _log.debug("engine_status_data_token_unavailable", error=str(exc))
             return None
@@ -80,6 +83,20 @@ def fetch_engine_status(*, timeout: float = 5.0) -> dict | None:
     if not isinstance(body, dict):
         return None
     return body
+
+
+def fetch_engine_status_at(base_url: str, token: str | None, *, timeout: float = 2.0) -> dict | None:
+    """``GET /v1/status`` on an engine named by its own address (a lease the caller already holds), with no
+    endpoint resolution, or ``None`` on any failure. Never raises (nexus-f3yqd.3)."""
+    try:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 — advisory: an unreadable status is nothing to report
+        _log.debug("engine_status_probe_failed", error=scrub_transport_error(exc, base_url))
+        return None
+    return body if isinstance(body, dict) else None
 
 
 def _format_activity_fields(activity: dict) -> list[str]:

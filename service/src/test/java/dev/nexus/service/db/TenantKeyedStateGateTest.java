@@ -572,6 +572,7 @@ public class TenantKeyedStateGateTest {
                 notKeyed.put(f, "a component of one sweep call's result record, built for that request and dropped "
                     + "with its response; nothing keeps it between requests");
             }
+            notKeyed.put("CatalogSensitiveReads.Page.documents", RESULT);   // nexus-f3yqd: one sensitive-list call's documents
             notKeyed.put("CatalogRepository.Rewritten.ledger", "a component of one stale-note repair batch's result, "
                 + "the ledger of the rows that call changed, built for that request and returned in its response "
                 + "(nexus-bivz3.24); nothing keeps it between requests");

@@ -41,9 +41,10 @@ import sys as _sys  # noqa: E402
 # tests._shard_collection_plugin (nexus-bo5lv): a CI shard records the collection it split, for pytest-gate.
 # tests._signal_fence (nexus-xzorj): every os.kill/os.killpg target is classified as this session's or not, Linux
 # only; a foreign signal fails the run (fail mode, the default), listed in the terminal summary.
+# tests._malloc_trim (labrun-pex): malloc_trim(0) after each module, so a worker returns freed heap (Linux glibc).
 pytest_plugins = [
     "pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter", "tests._tenant_pool",
-    "tests._shard_collection_plugin", "tests._signal_fence",
+    "tests._shard_collection_plugin", "tests._signal_fence", "tests._malloc_trim",
 ]
 if _sys.platform != "win32":
     pytest_plugins.insert(1, "tests._posix_spawn")
@@ -78,6 +79,14 @@ def _disable_aspect_worker_autostart() -> None:
     # nexus-h5olw: the MCP lifespan fires the anonymous install ping on a
     # daemon thread; the suite must never beacon the managed service.
     os.environ.setdefault("NX_NO_TELEMETRY", "1")
+    # labrun-pex: the MinerU kill switch (_pin_mineru_autostart_off, nexus-1qdb9) is a function-scoped
+    # monkeypatch, which pytest sets up AFTER any module- or session-scoped fixture. A module fixture that
+    # runs the real PDFExtractor (test_pdf_chunker_integration's multipage_result) therefore autostarted a
+    # real mineru-api server (1.04 GB anon) that lived until its xdist worker exited, across the shard's
+    # memory peak. Pinned here as well, so no scope can reach the autostart.
+    # Assigned, not setdefault: an exported NX_MINERU_AUTOSTART=1 must not reach these scopes either
+    # (the function-scoped pin overwrites it too).
+    os.environ["NX_MINERU_AUTOSTART"] = "0"
 
 
 _disable_aspect_worker_autostart()

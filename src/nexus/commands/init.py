@@ -138,7 +138,10 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
         # un-bootable service. Surface it as a hard error; re-run when online
         # (idempotent — PG provisioning is skipped on the retry).
         _log.warning("service_bge_provision_failed", error=str(exc))
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(
+            f"Could not download the service's bge-768 model: {exc}. Check the network connection and free "
+            "disk space; the local storage service reads this file when it starts."
+        ) from exc
 
     _provision_service_crossencoder_step()
 
@@ -344,12 +347,21 @@ def _start_service_step(config_dir: Path):  # noqa: ANN201 — returns LeaseReco
         lease = ensure_storage_supervisor(config_dir)
     except StorageServiceStartError as exc:
         # StorageServiceStartError messages already carry a remedy (build/install
-        # the artifact, re-run init, etc.); relay verbatim, fail fatal.
+        # the artifact, re-run init, etc.) and name the supervisor or engine log;
+        # relay verbatim, fail fatal.
         click.echo(f"\nStorage service failed to start: {exc}", err=True)
         raise SystemExit(1)
     except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
         _log.error("service_start_failed", error=str(exc))
-        click.echo(f"\nStorage service failed to start: {exc}", err=True)
+        # F11 (nexus-f3yqd.6): name the logs the cause is in. A failed start leaves no lease, so
+        # `nx daemon service status` cannot list them here.
+        logs = config_dir / "logs"
+        click.echo(
+            f"\nStorage service failed to start: {exc}\n"
+            f"  Logs: {logs / 'storage_service.log'} (the engine's log is in the same folder)"
+            + _pg_log_hint(config_dir, ", and"),
+            err=True,
+        )
         raise SystemExit(1)
 
     ep = lease.endpoint
@@ -517,9 +529,16 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
             # The unit was already there; the service simply has not (re)published
             # a lease yet (e.g. a re-run right after reboot while it activates).
             # Nothing for init to fix — exit 0; the OS unit brings it up.
+            # F9 (nexus-f3yqd.6): say why this is exit 0 when a fresh install in the same state is exit 1, and
+            # name the logs the fresh branch names.
             click.echo(
-                "  The service has not published a lease yet; the autostart unit "
-                "will bring it up. Check `nx daemon service status`.",
+                "  The service has not published a lease yet. This is not an error: the autostart unit "
+                "registered before this run brings it up (it may still be starting, e.g. just after a login). "
+                "Once `nx daemon service status` shows it running, run `nx init` again to finish its last "
+                "steps. If it is still not running after a minute, read the supervisor log "
+                f"{config_dir / 'logs' / 'storage_service.log'} and the engine's own log in "
+                f"{config_dir / 'logs'} (storage_service_native.log, or storage_service_jar.log for a jar "
+                "launch).",
                 err=True,
             )
             return None
@@ -648,7 +667,11 @@ def _acquire_pg_bundle_step(config_dir: Path) -> Path:
         # A verified download that fails to EXTRACT (disk full, permissions,
         # corrupt-on-disk) must not escape as a traceback (code-review High).
         _log.error("pg_bundle_extract_failed", tag=tag, error=str(exc))
-        click.echo(f"\nDownloaded PG bundle could not be extracted: {exc}", err=True)
+        click.echo(
+            f"\nDownloaded PG bundle could not be extracted: {exc}\n"
+            f"  Check free disk space and the permissions on {config_dir}.",
+            err=True,
+        )
         raise SystemExit(1)
     if bin_dir is None:  # defensive: archive just placed, selection must resolve
         click.echo(
@@ -659,6 +682,13 @@ def _acquire_pg_bundle_step(config_dir: Path) -> Path:
         )
         raise SystemExit(1)
     return bin_dir
+
+
+def _pg_log_hint(config_dir: Path, lead: str) -> str:
+    """`` <lead> <config>/postgres/pg.log`` when PostgreSQL has written it, else nothing: the file exists only
+    once ``pg_ctl start`` ran, so an initdb failure has none (F11, nexus-f3yqd.6)."""
+    pg_log = config_dir / "postgres" / "pg.log"
+    return f"{lead} {pg_log}" if pg_log.is_file() else ""
 
 
 def _provision_postgres_step() -> None:
@@ -707,7 +737,11 @@ def _provision_postgres_step() -> None:
         bundle_bin = _select_bundled_pg(config_dir)
     except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
         _log.error("pg_bundle_extract_failed", error=str(exc))
-        click.echo(f"\nBundled PostgreSQL extraction failed: {exc}", err=True)
+        click.echo(
+            f"\nBundled PostgreSQL extraction failed: {exc}\n"
+            f"  Check free disk space and the permissions on {config_dir}.",
+            err=True,
+        )
         raise SystemExit(1)
 
     if bundle_bin is not None:
@@ -726,7 +760,7 @@ def _provision_postgres_step() -> None:
         raise SystemExit(1)
     except Exception as exc:  # noqa: BLE001 — user-facing
         _log.error("pg_provision_failed", error=str(exc))
-        click.echo(f"\nPostgres provisioning failed: {exc}", err=True)
+        click.echo(f"\nPostgres provisioning failed: {exc}" + _pg_log_hint(config_dir, "\n  Log:"), err=True)
         raise SystemExit(1)
 
     if result.already_provisioned:

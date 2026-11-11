@@ -105,7 +105,7 @@ def reconcile_fences(reader, writer, *, dry_run: bool, limit: int, echo=click.ec
 def reconcile_fences_cmd(dry_run: bool, limit: int) -> None:
     """Stamp index-run fences on non-repo documents that carry none (GH #1512).
 
-    The remedy `nx doctor` names for its "stale index-run fences" row when
+    The remedy `nx doctor --check-index-runs` names for its "stale index-run fences" row when
     the documents belong to the knowledge store's owner rather than a repo.
     """
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred: catalog only on this path

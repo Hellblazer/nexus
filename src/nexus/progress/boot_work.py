@@ -13,7 +13,7 @@ The engine sends no durations: the elapsed time is derived here. A top-level
 no time left is derived from it; a step whose ``done`` is null (a waiting
 phase) shows its phase alone; ``safe_to_stop`` never renders bare, always with
 ``on_stop``; an empty list does not mean idle. ``step.what`` names no
-collection (``/v1/status`` is unauthenticated).
+collection: the engine answers ``/v1/status`` with no tenant check (the managed edge still asks for a token).
 
 :func:`render` turns entries into lines; :class:`Announcer` prints them from
 inside a wait loop, once when the work is first seen and again every
@@ -76,8 +76,10 @@ def _progress(obj: dict[str, Any], *, top: bool) -> str:
     return f"{done:,} of {total:,}" + (f" {unit}" if unit else "")
 
 
-def render(entries: Iterable[dict[str, Any]], *, now: float) -> list[str]:
-    """Lines for the entries, never raising on a malformed one."""
+def render(entries: Iterable[dict[str, Any]], *, now: float, waiting: bool = True) -> list[str]:
+    """Lines for the entries, never raising on a malformed one. *waiting* False is for a command that waits on
+    nothing (``nx daemon service status``): it says what stopping the service costs, not what interrupting
+    this command does."""
     lines: list[str] = []
     for entry in entries:
         try:
@@ -98,6 +100,9 @@ def render(entries: Iterable[dict[str, Any]], *, now: float) -> list[str]:
             on_stop = entry.get("on_stop")
             if isinstance(entry.get("notice"), str) and entry["notice"]:
                 lines.append(f"  {entry['notice']}")
+            elif not waiting:
+                if on_stop:
+                    lines.append(f"  Stopping the service now: {on_stop}.")
             elif entry.get("safe_to_stop") is True:
                 # Never a bare "safe to stop" (engine review S3): say what stopping costs.
                 lines.append(
@@ -122,9 +127,58 @@ def local_entries(config_dir: Path, *, clock: Callable[[], float] = time.time) -
     return [record] if record else []
 
 
-def notice(config_dir: Path, *, clock: Callable[[], float] = time.time) -> list[str]:
-    """Lines for the local migration record; empty when nothing is running."""
-    return render(local_entries(config_dir, clock=clock), now=clock())
+def _fetch_if_an_engine_is_there(*, timeout: float) -> dict[str, Any] | None:
+    """``/v1/status``, asked only when there is an engine to ask: a managed service with a ``service_url``, or a
+    local install whose supervisor has published a lease. A local install with no lease (stopped, never started) is not
+    resolved at all, so a command that only wants to say what the engine is doing never trips the
+    endpoint resolver's not-running error."""
+    from nexus.config import get_credential, is_local_mode  # noqa: PLC0415 — deferred, not stdlib
+    from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred, not stdlib
+    from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — deferred, not stdlib
+
+    if is_local_mode():
+        if discover_lease()[0] is None:
+            return None
+    elif not (get_credential("service_url") or "").strip():
+        return None  # managed with no service_url: nothing to resolve, so the resolver's error is never raised
+    return fetch_engine_status(timeout=timeout, mint_deadline_s=timeout)  # advisory: never a long mint
+
+
+def engine_entries(*, fetch: Callable[..., dict[str, Any] | None] | None = None) -> list[dict[str, Any]]:
+    """The engine's ``/v1/status`` ``boot_work`` list. Empty when the engine is idle, predates the field (no
+    key), or cannot be reached: none of those is work to report. Never raises."""
+    try:
+        if fetch is None:
+            fetch = _fetch_if_an_engine_is_there
+        body = fetch(timeout=2.0)
+    except Exception:  # noqa: BLE001 — advisory: an unreadable status is nothing to report
+        return []
+    work = body.get("boot_work") if isinstance(body, dict) else None
+    return [entry for entry in work if isinstance(entry, dict)] if isinstance(work, list) else []
+
+
+def engine_lines() -> list[str]:
+    """Lines for the engine's own ``boot_work`` now: a step reporter's ``work`` source, so a long wait on a
+    busy engine repeats its progress (nexus-f3yqd.3). Empty when idle or unreachable."""
+    return render(engine_entries(), now=time.time())
+
+
+def current_entries(
+    config_dir: Path, *, clock: Callable[[], float] = time.time,
+    fetch: Callable[..., dict[str, Any] | None] | None = None,
+) -> list[dict[str, Any]]:
+    """What the engine is doing: the supervisor's migration record while it has one (the engine has not bound
+    HTTP yet), else the engine's own ``boot_work`` list."""
+    local = local_entries(config_dir, clock=clock)
+    return local if local else engine_entries(fetch=fetch)
+
+
+def notice(
+    config_dir: Path, *, clock: Callable[[], float] = time.time,
+    fetch: Callable[..., dict[str, Any] | None] | None = None,
+) -> list[str]:
+    """Lines for the heavy work the engine is doing (nexus-f3yqd.3); empty when nothing is running."""
+    return render(current_entries(config_dir, clock=clock, fetch=fetch), now=clock())
 
 
 class Announcer:

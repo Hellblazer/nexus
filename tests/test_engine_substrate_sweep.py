@@ -58,6 +58,7 @@ from tests._engine_substrate import (
     throwaway_pg_cluster,
 )
 from tests._module_seam import setattr_in
+from tests._pg_ctl import sun_path_limit_lifted  # noqa: F401 — fixture, used by name
 
 
 def _dead_pid() -> int:
@@ -576,6 +577,8 @@ class TestThrowawayClusterBootIsBounded:
     segment table at its ceiling. What IS deterministic is the structural
     property that lets the failure happen, so that is what is pinned.
     """
+
+    pytestmark = pytest.mark.usefixtures("sun_path_limit_lifted")
 
     def test_boot_waits_for_a_semaphore_slot_and_leaves_no_debris(
         self, tmp_path,

@@ -24,6 +24,7 @@ from datetime import datetime
 import pytest
 
 from nexus.db.t2.http_tuple_store import SchemaViolationError
+from tests._settle import FakeClock, settle
 from nexus.mcp.subscriptions import (
     DIRECTORY_TTL_S,
     MAX_BOARD_TOPICS,
@@ -341,8 +342,10 @@ class TestNameLease:
                 state_dir=tmp_path, directory_ttl_s=2.0, directory_heartbeat_s=0.2, lease_poll_s=0.05,
             )
             assert len(calls) == 1  # the synchronous first arm
-            time.sleep(0.6)
-            assert len(calls) >= 2, "the background thread never re-sent within its configured interval"
+            settle(lambda: len(calls) < 2 and f"{len(calls)} send(s)", what="the background re-send")
+            # the heartbeat decides on time.time(), so no virtual clock: bound the gap by the 2 s TTL,
+            # which a re-send must beat or the row lapses between sends
+            assert calls[1] - calls[0] < 2.0, f"re-sent {calls[1] - calls[0]:.2f} s apart, past the 2 s TTL"
         finally:
             s.shutdown()
 
@@ -415,14 +418,13 @@ class TestDirectoryRelease:
         with t2_ctx() as db:
             assert len(db.tuples.rd(f"directory/{name}", {"name": name})) == 1
         s.unsubscribe(f"mailbox/{name}")
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
+
+        def _rows():
             with t2_ctx() as db:
-                rows = db.tuples.rd(f"directory/{name}", {"name": name})
-            if not rows:
-                break
-            time.sleep(0.25)
-        assert not rows, "the released directory row did not lapse within 10 s (TTL is 300 s)"
+                return db.tuples.rd(f"directory/{name}", {"name": name})
+
+        # a row that only lapsed by its TTL would take 300 s
+        settle(_rows, deadline=10.0, interval=0.25, what="the released directory row")
 
 
 class TestPersistenceAcrossResumeAndClear:
@@ -857,10 +859,10 @@ class TestWaiterStartArmsTheSessionName:
         core, _sid, fake, started = server
         core._start_channel_waiter()
         core._channel.register_active_waiter(started[0])
-        core._start_channel_waiter()
         assert _wait_for(lambda: len(fake.calls) == 1)
-        time.sleep(0.1)
-        assert len(fake.calls) == 1
+        core._start_channel_waiter()
+        # the live-waiter guard returns before building a second waiter, so nothing waits to be seen
+        assert len(started) == 1 and len(fake.calls) == 1
 
     def test_no_registry_entry_still_starts_the_waiter_and_writes_nothing(self, server, tmp_path, monkeypatch) -> None:
         core, _sid, fake, started = server
@@ -945,17 +947,19 @@ class TestArmDoesNoEngineWorkOnTheCallingThread:
 
 
 def test_the_registry_is_not_re_read_before_the_interval() -> None:
-    # NAME_RESOLVE_INTERVAL_S at its real 60 s: many lease-loop polls, no registry read.
-    fake, reads = _FakeTuples(), []
-    s = SubscriptionSet(session_id="sess-cadence")
+    # NAME_RESOLVE_INTERVAL_S at its real 60 s, on a virtual clock: polls before it read nothing.
+    fake, reads, clock = _FakeTuples(), [], FakeClock()
+    s = SubscriptionSet(session_id="sess-cadence", clock=clock)
     try:
         s.arm_session_name(
             "steady", store_factory=lambda: _fake_store_factory(fake),
-            resolve=lambda: reads.append(1) or "steady", lease_poll_s=0.01,
+            resolve=lambda: reads.append(1) or "steady", lease_poll_s=1.0,
         )
-        assert _wait_for(lambda: len(fake.calls) >= 1)
-        time.sleep(0.3)
+        for _ in range(30):  # 30 polls, 30 s of virtual time
+            clock.step(1.0)
         assert reads == []
+        clock.step(30.0)  # the poll at 60 s re-reads the registry
+        assert reads == [1]
     finally:
         s.shutdown()
 
@@ -1029,16 +1033,19 @@ class TestNameFollowsTheRegistry:
             s.shutdown()
 
     def test_an_explicit_name_is_never_swapped(self, tmp_path) -> None:
-        fake, registry = _FakeTuples(), self._Registry("auto-name")
+        fake, registry, clock = _FakeTuples(), self._Registry("auto-name"), FakeClock()
         factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
-        s = SubscriptionSet(session_id="sess-expl")
+        s = SubscriptionSet(session_id="sess-expl", clock=clock)
         try:
             self._arm(s, fake, registry, "auto-name")
             assert _wait_for(lambda: len(fake.calls) >= 1)
-            s.subscribe("mailbox/chosen", templates=[], store_factory=factory, state_dir=tmp_path)
+            s.subscribe(
+                "mailbox/chosen", templates=[], store_factory=factory, state_dir=tmp_path, lease_poll_s=1.0,
+            )
             registry.name = "renamed-later"
             reads = registry.reads
-            time.sleep(0.2)
+            for _ in range(5):  # five rounds of the chosen name's lease thread
+                clock.step(1.0)
             assert registry.reads == reads, "no resolver runs once the name is a choice"
             assert s.leased_name == "chosen"
             assert not any(c[0] == "directory/renamed-later" for c in fake.calls)

@@ -83,7 +83,8 @@ def upgrade(
 
     # P0 (nexus-f3yqd): --auto (the SessionStart hook) and the lockstep hook's unattended
     # run never restart the storage service; only a person's own `nx upgrade` does.
-    restarts = not dry_run and not auto_mode and not env_unattended()
+    # nexus-f3yqd.6: nor does --skip-t3, whose restart is a no-op, so its step line is not printed either.
+    restarts = not dry_run and not auto_mode and not env_unattended() and not skip_t3
     # A restart that could not finish is reported at the end and fails an interactive
     # run (nexus-mjmjl item 14); the precondition stage records its failure here.
     failures: list[str] = []
@@ -96,7 +97,12 @@ def upgrade(
             dry_run=dry_run, auto_mode=auto_mode, skip_t3=skip_t3, assume_yes=assume_yes,
             no_beads_prime=no_beads_prime, failures=failures,
         )
-        reporter = StepReporter(len(steps) + (1 if restarts else 0), quiet=auto_mode, name="nx upgrade")
+        from nexus.progress.boot_work import engine_lines  # noqa: PLC0415 — deferred, keeps the cold start light
+
+        # nexus-f3yqd.3: a long step on a busy engine repeats what the engine is doing, every 30 s.
+        reporter = StepReporter(
+            len(steps) + (1 if restarts else 0), quiet=auto_mode, name="nx upgrade", work=engine_lines,
+        )
         for what, detail, run in steps:
             # Every step is safe to repeat (the ladder records what converged), so
             # the remedy for any failed one is the same command again.
@@ -167,6 +173,8 @@ def _upgrade_steps(
         # on-disk state each invocation, never recorded.
         steps.append((
             "Bring the engine, the PDF stack and the runtime to this release",
+            "under --skip-t3 it skips the engine install, the PDF stack rebuild and the service restart"
+            if skip_t3 else
             "can download the engine and its PostgreSQL bundle, rebuild the PDF stack and restart services "
             "still on the old version; minutes when it does",
             lambda: _note_failure(failures, _converge_preconditions(auto_mode=auto_mode, skip_t3=skip_t3)),
@@ -657,14 +665,22 @@ def _run_ladder(
             if run.outcome in (RungOutcome.DEFERRED, RungOutcome.VERIFY_FAILED, RungOutcome.FAILED)
         ]
         summary = "; ".join(f"{run.name}: {run.outcome.value} ({run.detail})" for run in failed)
-        raise click.ClickException(f"upgrade ladder did not converge — {summary}")
+        # F17 (nexus-f3yqd.6): say what to do. The step reporter around the ladder prints the retry line.
+        raise click.ClickException(
+            f"upgrade ladder did not converge — {summary}. Fix what each step above reports, then run "
+            "`nx upgrade` again (`nx upgrade --dry-run` lists the steps still pending)."
+        )
     if not report.converged and not auto_mode:
         # Deferred-only: the RDR-142 would-defer class is non-fatal by
         # design (precondition-blocked, retried on a later run) — notice,
         # not failure; nothing was recorded, the position stays pinned.
         for run in report.runs:
             if run.outcome is RungOutcome.DEFERRED:
-                click.echo(f"Upgrade ladder: rung '{run.name}' deferred — {run.detail}")
+                # F17 (nexus-f3yqd.6): a deferral is retried, so say when, and where a stuck one shows.
+                click.echo(
+                    f"Upgrade ladder: rung '{run.name}' deferred — {run.detail}. It runs again on the next "
+                    "`nx upgrade`; `nx doctor` names a step that has deferred on three runs over a day or more."
+                )
 
 
 

@@ -20,6 +20,7 @@ import dev.nexus.service.vectors.OwnershipGuard;
 import dev.nexus.service.vectors.PciQueryRing;
 import dev.nexus.service.vectors.PgVectorRepository;
 import dev.nexus.service.vectors.QueryVector;
+import dev.nexus.service.vectors.StoreGetProjection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1290,6 +1291,13 @@ public final class VectorHandler implements HttpHandler {
      *
      * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...], "sensitives":[...]}
      *
+     * <p><strong>{@code include} (nexus-f3yqd):</strong> an optional array of {@code "documents"},
+     * {@code "metadatas"} (and {@code "embeddings"}, accepted and never returned). Absent: the envelope above,
+     * unchanged. Present, on the ids branch: the statement selects only the named columns (a metadata-only read
+     * never detoasts {@code chunk_text}), and the envelope omits the key of a column it did not select. {@code
+     * ids}, {@code count}, {@code chashes}, {@code spans} and {@code sensitives} are always returned. Any other
+     * value, or a non-array, is 400. See {@link StoreGetProjection}. The {@code include_non_live} mode ignores it.
+     *
      * <p>{@code "sensitivity": "exclude"} and the {@code sensitives} list behave as on {@link #handleGet}
      * (nexus-rfvyy.7.4, RDR-243): the ids branch (get-many) and the paginated branch both filter inside the
      * statement, so {@code limit}, {@code offset} and {@code count} are over the surviving rows.
@@ -1336,11 +1344,17 @@ public final class VectorHandler implements HttpHandler {
             return;
         }
 
+        // nexus-f3yqd: the ids branch selects only what `include` names (absent = every column, the envelope as
+        // it was). A bad value is a 400 (IllegalArgumentException) here, whichever of the two calls below runs;
+        // the paginated (no ids) branch then ignores a good one and keeps its full envelope. It is NOT a 400 under
+        // include_non_live: that mode answered above, before this line, and never reads `include`.
+        var projection = StoreGetProjection.parse(body.get("include"));
+
         // No ids → paginated full fetch (same envelope); getWhere with no
         // predicates is exactly that shape.
         var result = (ids == null)
                 ? repo.getWhere(tenant, collection, null, limit, offset, includeSourceUri, false, excludeSensitive)
-                : repo.get(tenant, collection, ids, limit, offset, includeSourceUri, excludeSensitive);
+                : repo.get(tenant, collection, ids, limit, offset, includeSourceUri, excludeSensitive, projection);
         HttpUtil.send(ex, 200, json(result));
     }
 

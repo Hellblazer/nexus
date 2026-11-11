@@ -1122,6 +1122,48 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             return None
         return {"fillable": fillable, "limit": limit, "capped": capped}
 
+    def sensitive_documents(self, limit: int = 1000) -> dict | None:
+        """The tenant's live sensitive documents, from one bounded engine read (``GET /sensitive``, engine 0.1.188,
+        nexus-f3yqd.6): ``{"count": n, "capped": bool, "documents": [{"tumbler", "physical_collection"}]}``, at most
+        *limit* documents; ``capped`` means there are more than the list holds.
+
+        ``None`` is "cannot say", never "none": the engine does not advertise ``catalog_sensitive_list_supported``
+        (no request is sent then), the route answers 404 or 503 (the engine's own statement timeout), or the body is
+        malformed or inconsistent (an uncapped list whose length is not ``count``). A caller walks the catalog
+        instead on ``None``. Sent once, with a bound of its own, as :meth:`manifest_section_label_fillable` is.
+        """
+        if self._version_flags().get("catalog_sensitive_list_supported") is not True:
+            return None
+        try:
+            result = self._get("/sensitive", idempotent=False, timeout=_SECTION_LABEL_FILLABLE_TIMEOUT_S, limit=limit)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            _log.info("http_catalog_client.sensitive_documents_unavailable", status=status)
+            return None
+        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller walks instead
+            _log.info("http_catalog_client.sensitive_documents_unavailable", error=str(exc))
+            return None
+        if not isinstance(result, dict):
+            return None
+        count, capped, documents = result.get("count"), result.get("capped"), result.get("documents")
+        well_formed = (
+            not isinstance(count, bool) and isinstance(count, int) and count >= 0 and isinstance(capped, bool)
+            and isinstance(documents, list)
+            # A document flagged before it was indexed has no collection: the engine sends null, read as "",
+            # as _to_entry reads it for the walk.
+            and all(isinstance(d, dict) and isinstance(d.get("tumbler"), str) and "physical_collection" in d
+                    and isinstance(d["physical_collection"], (str, type(None))) for d in documents)
+            and (capped or len(documents) == count)
+        )
+        if not well_formed:
+            _log.warning("http_catalog_client.sensitive_documents_malformed", keys=sorted(result))
+            return None
+        return {
+            "count": count, "capped": capped,
+            "documents": [{"tumbler": d["tumbler"], "physical_collection": d.get("physical_collection") or ""}
+                          for d in documents],
+        }
+
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead
         nexus-du2dw): the engine-route counterpart to the LOCAL-ONLY

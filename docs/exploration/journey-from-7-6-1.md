@@ -1,6 +1,6 @@
-# From 7.6.1 to 8.0.0
+# From 7.6.1 to 8.1.2
 
-It’s been a long journey from Milan to Minsk - wait.  Wrong show.   In the Nexus show, there’s been a lot of work in the last three months.   The storage became Postgres only: no SQLite and no ChromaDB.  The vector search got one partition per embedding model and a check on the search’s own recall.  Search answers now tell you when the evidence is thin. Documents can now be marked sensitive to keep them out of the LLM.  The plugin now installs the command line nx tooling for you, simplifying the installation.  Nexus is now officially supported on Windows and the local engine and Postgres service are native executables.  Agents can now wait for each other, ask a person for a decision, and run small programs in a sandbox.
+It’s been a long journey from Milan to Minsk - wait.  Wrong show.   In the Nexus show, there’s been a lot of work in the last three months.   The storage became Postgres only: no SQLite and no ChromaDB.  The vector search got one partition per embedding model and a check on the search’s own recall.  Search answers now tell you when the evidence is thin. Documents can now be marked sensitive to keep them out of the LLM.  The plugin now installs the command line nx tooling for you, simplifying the installation.  Nexus is now officially supported on Windows and the local engine and Postgres service are native executables.  Agents can now wait for each other, ask a person for a decision, and run small programs in a sandbox. The first upgrades to 8.0.0 were slow and silent on large stores, and 8.1.0 to 8.1.2 fixed that.
 
 This post goes through the changes one theme at a time. For each change, it says what changed, what it means if you use Nexus, and the Nexus release where you first see it. Near the end, a short list says what an upgrade from 7.6.x does by itself and what it leaves for you to do.
 
@@ -8,7 +8,7 @@ This post goes through the changes one theme at a time. For each change, it says
 
 Since 7.23.0, Nexus does not use SQLite databases at all. Everything is now in Postgres, behind the engine: session scratch, memory, the catalog and the vectors. So you have one store to back up, and one place to ask about your data. If `nx doctor` finds an old `memory.db` or `.catalog.db` file, it tells you that you can safely delete it.
 
-Since 7.74.0, the local cluster also has a password. Before, it trusted every local connection. New clusters use scram-sha-256 with a superuser password. An existing cluster changes to this on its next service start. A local tool that connected to the local Postgres cluster without a password now needs the password that the service keeps.
+Since 7.74.0, the local cluster also has a password. Before, it trusted every local connection. New clusters use scram-sha-256 with a superuser password. An existing cluster changes to this on its next service start. A local tool that connected to the cluster without a password now needs the password that the service keeps.
 
 From 7.95.0, the engine does not start on a PostgreSQL older than 17. If you try, it logs `pg_version_below_floor` and stops before it accesses the schema. If your local data directory came from an older PostgreSQL, use `nx daemon service pg-upgrade --old-bin <bin dir>`, from 7.99.0. It is a dry run until you add `--apply`.
 
@@ -34,7 +34,9 @@ From 7.97.0, a question that lists entities gets a multi-step query plan. An exa
 
 Since 7.89.0, MinerU is the PDF extractor. It is the default for `nx index pdf`, `nx dt index` and `nx dt capture`. Docling, the earlier extractor, and its dependency are removed. The old option values still work: they run MinerU and print one line that says so.
 
-Engine 0.1.185 (9 November) skips the slow half of the text gate for long lexical queries. It is live on the managed service. Local installs get it only when a client release pins it, and no client release does yet. The text gate in front of hybrid search ran a trigram match next to the full-text match. On 35 sentence-length questions checked locally, the trigram half let no rows through, and it cost 20 to 30 times as much as the full-text half. So a gate text of more than eight words now skips the trigram half. The cost: above eight words, a pasted passage with one changed word, or an identifier inside a longer sentence, no longer matches through trigrams.
+Engine 0.1.185 (9 November) skips the slow half of the text gate for long lexical queries. It is live on the managed service, and local installs get it from 8.1.0, which pins engine 0.1.186. The text gate in front of hybrid search ran a trigram match next to the full-text match. On 35 sentence-length questions checked locally, the trigram half let no rows through, and it cost 20 to 30 times as much as the full-text half. So a gate text of more than eight words now skips the trigram half. The cost: above eight words, a pasted passage with one changed word, or an identifier inside a longer sentence, no longer matches through trigrams.
+
+Engine 0.1.187 (8.1.2) fixes hybrid search that came back empty or short. This happened when the text gate let through a large share of a collection, and the chunks it let through ranked behind many closer chunks that the gate had excluded. The engine now ranks that set exactly.
 
 ## Sensitive documents
 
@@ -48,6 +50,16 @@ Since 7.81.0, the plugin installs the nx command line for you. The MCP server of
 
 Nexus now runs natively on Windows x64. 7.72.0 installs and runs the local engine: the engine, the bundled PostgreSQL 17 with pgvector, and the CLI. You do not need WSL. 7.72.1 fixes a hang in MCP search on Windows. The executables are not code-signed yet. Windows on ARM and 32-bit Windows refuse to install. `nx init` checks Smart App Control before it provisions, and `nx doctor` reports it (7.81.0). The Windows guide lists the supported versions.
 
+## Upgrades on large stores
+
+The first upgrades to 8.0.0 on large local stores wrote a lot of data to disk for 20 minutes or more, with nothing on screen. Two things caused it. The engine migrated its schema and showed no message. And every engine restart ended the build of a per-collection index (from 7.77.0), so the next start built that index again from zero. A store that restarted often never finished its queue of builds. Conexus 8.1.0, 8.1.1 and 8.1.2 fixed this on 10 November, with engines 0.1.186 and 0.1.187.
+
+Since engine 0.1.186 (8.1.0), a stop or a restart that leaves Postgres running does not end the build, unless that restart applies a change to the database schema. The next engine finds the finished index and uses it. A failed build is rebuilt in the same pass, not ten minutes later. Each build also gets more memory, up to 1 GB on the bundled Postgres, so it runs faster and a large build writes less to disk. In a local test, a 40,000-row build took about 35 seconds instead of about 125. An 80,000-row build wrote at most 1.2 GB instead of about 3.2. `NX_SEARCH_PCI_BUILD_MEM_MB` sets a different value. Engine 0.1.187 (8.1.2) also keeps the build when the engine process is killed, with the same exception for a schema change. Its `GET /v1/status` lists the heavy work the engine is doing and whether it is safe to stop. A reboot, a stop with `--with-pg`, and the first start after an upgrade that changes the schema still end the build, and the next pass builds that index again.
+
+The client now says what it is doing. From 8.1.0, `nx upgrade`, `nx self install` and `nx doctor` print each step and the time it has run. A download shows its size, rate and time left. A command that waits on a migrating engine says so. `nx doctor` no longer reads the whole catalog to find pending upgrade steps, so on a large store it takes about 15 seconds, not 3 to 4 minutes. With two Nexus clients installed, a new Claude session no longer restarts a healthy storage service. In 8.1.1, the data steps of `nx upgrade` from a 7.x store read the catalog fewer times. On a 140,000-row store they take about 3 minutes, not about 9. In 8.1.2, when the engine restarts during a data step of `nx upgrade`, the step waits up to two minutes for the engine and then runs again. If the engine does not come back, the step is deferred, and the next `nx upgrade` runs it.
+
+From 8.1.2, `nx backup` writes a copy of the local database to one file while the engine keeps serving. The file is about as large as the database. It works on a local install only. Nothing runs it for you: not `nx upgrade`, not `nx doctor`, not a hook. Run it before your next upgrade.
+
 ## Agents: the tuple space and waiting for CI
 
 Since 7.41.0, agents have a shared place where they leave messages for each other. This place is the tuple space. It holds small records: one session writes a record, and another session claims it. Sessions use it to give each other work and mail. Later releases added claim renewal and replies inside an acknowledgement (7.44.0), size limits (7.45.0), and boards, queues, locks and a verb to give a claim back (7.51.0). A session that started without the channel flag, for example in the Claude Desktop Code tab, can run `nx tuple wait` as a background task. The session continues when its mail arrives (7.90.0). From 8.0.0, `nx ci wait <sha>` waits on the CI board for the runs of that commit. It prints one line with the result of each run, and its exit code tells a script the result. An adapter that you host yourself fills the board from GitHub webhooks (RDR-220). So an agent can wait for a peer, or for CI where the board has data, without asking every minute.
@@ -59,6 +71,12 @@ Some decisions only a person can make. A session writes such a decision as an as
 ## Agents: small programs in a sandbox
 
 Since 7.99.0, agents can run small programs in a sandbox. `nx run NAME` and the MCP tool `procedure_run` run a library procedure. The procedure is Lua 5.4 in a separate worker with an empty environment. Nexus checks it before it runs, and limits its instructions, memory, time and result size. A four-line header declares the arguments of the procedure and what it can read. In 8.0.0, two record-keeping steps of the agents use procedures. The agent gives the facts, the procedure returns the record in one fixed shape, and the agent stores it. A later search can trust records that all have one shape.
+
+## Agents: continuing after compaction
+
+When the context of a long session fills, Claude Code compacts it: it replaces the conversation with a summary. On one session, two automatic compactions at about 969,000 tokens gave summaries of about 0.5 percent of the context. The state that the session needed to continue was in the repository and its task records, not in the summary. Since 7.91.1, the conexus plugin writes that state down before a compaction and puts it back after it. Before the compaction, a hook writes a checkpoint. It holds the session's notes about its work, its worktree, branch and HEAD, and the tasks it has open. It also holds its uncommitted files, its open pull requests and its latest commits. After the compaction, a hook puts the checkpoint into the new context, and the summary is added to the same file.
+
+Claude Code also compacts a session that has been idle for about an hour. Since Claude Code 2.1.314, the summary of that idle compaction can be used at the next message, possibly hours later. Since 7.94.0, the hooks pair a checkpoint with the compaction that uses it, and no longer assume that the compaction follows within 30 minutes. From 8.1.2, a checkpoint that no compaction has used is kept for seven days. Before, another session's hook could delete it after two days, and the idle session then had nothing to restore.
 
 ## If you are upgrading from 7.6.x
 
@@ -81,6 +99,7 @@ Then run `nx doctor`. No row should show as failed. The migration runbook has th
 
 - [Migration runbook](../migration-runbook.md), every upgrade step and how to check it
 - [Sensitive documents](../sensitivity.md), what the flag covers and what it does not
+- [Backup and restore](../operations/backup-restore.md), what `nx backup` writes and how to restore it
 - [Windows install](../windows-install.md), the native Windows path
 - [The tuple space](https://hellblazer.github.io/nexus/tuple-space.html) and [Coordination](https://hellblazer.github.io/nexus/coordination.html), how agents wait and hand off work
 - [CHANGELOG](../../CHANGELOG.md), every release in this window, with the details this essay leaves out

@@ -24,6 +24,7 @@ Every process a test starts is stopped by pid in its own ``finally``.
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import re
 import shutil
@@ -51,7 +52,7 @@ from nexus.daemon.service_registry import (
     ttl_for_tier,
 )
 from tests._module_seam import setattr_in
-from tests._settle import FakeClock
+from tests._settle import FakeClock, settle
 
 _POSIX = sys.platform != "win32"
 _posix_only = pytest.mark.skipif(not _POSIX, reason="removing a directory under a running worker needs POSIX unlink semantics")
@@ -388,8 +389,18 @@ def workers(tmp_path: Path) -> Iterator[Callable[..., _RealWorker]]:
 def test_a_real_worker_exits_when_its_config_dir_is_removed(workers: Callable[..., _RealWorker]) -> None:
     w = workers("orphan")
     w.wait_for_lease()
-    time.sleep(1.5)  # a few heartbeats with the directory present: it must stay up
-    assert w.alive(), w.output()
+    epochs: set[float] = set()
+
+    def _beats() -> str:
+        # heartbeats with the directory present: it must stay up through them
+        assert w.alive(), w.output()
+        try:
+            epochs.add(float(json.loads(w.lease.read_text(encoding="utf-8"))["heartbeat_epoch"]))
+        except (OSError, ValueError, KeyError):
+            pass  # mid-rewrite: read it on the next probe
+        return "" if len(epochs) >= 3 else f"{len(epochs)} lease stamp(s)"
+
+    settle(_beats, 30.0, interval=0.05, what="two heartbeats after the lease")
     shutil.rmtree(w.cfg)
     t0 = time.monotonic()
     rc = w.wait_exit(_ORPHAN_EXIT_BOUND_S)

@@ -17,8 +17,9 @@ from nexus.pdf_extractor import PDFExtractor
 
 @pytest.fixture(scope="module")
 def multipage_result(multipage_pdf: Path):
-    """Extract multipage.pdf once for all chunker tests in this module."""
-    return PDFExtractor().extract(multipage_pdf)
+    """Extract multipage.pdf once for all chunker tests in this module. PyMuPDF: these tests are about
+    chunking real text, and MinerU's model (about 1 GB per parse) adds nothing to them (labrun-pex)."""
+    return PDFExtractor().extract(multipage_pdf, extractor="pymupdf")
 
 
 class TestMultipleChunks:
@@ -87,14 +88,14 @@ class TestIsImagePdf:
         """TrueType PDF with real extractable text → chunks produced
         (i.e. not classified as image-only and short-circuited)."""
         content_hash = _sha256(simple_pdf)
-        chunks = _pdf_chunks(simple_pdf, content_hash, "test-model", "2026-01-01", "test")
+        chunks = _pdf_chunks(simple_pdf, content_hash, "test-model", "2026-01-01", "test", extractor="pymupdf")
         assert chunks, "Expected at least one chunk from simple.pdf"
         assert all("is_image_pdf" not in chunk[2] for chunk in chunks)
 
     def test_multipage_real_text_produces_chunks(self, multipage_pdf: Path) -> None:
         """3-page TrueType PDF → chunks produced on every page."""
         content_hash = _sha256(multipage_pdf)
-        chunks = _pdf_chunks(multipage_pdf, content_hash, "test-model", "2026-01-01", "test")
+        chunks = _pdf_chunks(multipage_pdf, content_hash, "test-model", "2026-01-01", "test", extractor="pymupdf")
         assert chunks
         assert all("is_image_pdf" not in chunk[2] for chunk in chunks)
 
@@ -102,12 +103,12 @@ class TestIsImagePdf:
         """Type3 PDF whose glyph renders as empty text — extractor still
         runs without crashing whether or not chunks emerge."""
         from nexus.pdf_extractor import PDFExtractor
-        result = PDFExtractor().extract(type3_pdf)
+        result = PDFExtractor().extract(type3_pdf, extractor="pymupdf")
         page_count = result.metadata.get("page_count", 1) or 1
         chars_per_page = len(result.text) / page_count
         if chars_per_page < 20:
             content_hash = _sha256(type3_pdf)
-            chunks = _pdf_chunks(type3_pdf, content_hash, "test-model", "2026-01-01", "test")
+            chunks = _pdf_chunks(type3_pdf, content_hash, "test-model", "2026-01-01", "test", extractor="pymupdf")
             for chunk in chunks:
                 assert "is_image_pdf" not in chunk[2]
 

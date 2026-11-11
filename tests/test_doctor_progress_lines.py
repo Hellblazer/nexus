@@ -90,9 +90,10 @@ def test_the_supplementary_checks_run_as_steps(monkeypatch) -> None:
     assert names == ["t1"]
 
 
-def test_the_catalog_document_walk_is_a_named_step() -> None:
+def test_the_default_sweep_has_no_catalog_document_walk() -> None:
+    """F30 (nexus-f3yqd.6): the walk was the default sweep's longest named step (22 s on a laptop tenant); it now
+    runs only under `nx doctor --check-index-runs`."""
     import inspect
 
-    src = inspect.getsource(health.run_health_checks)
-    assert '"_check_catalog_document_walk", _walk_documents_for_doctor' in src
-    assert health._row_label("_check_catalog_document_walk") == "catalog document walk"
+    assert "_walk_documents_for_doctor" not in inspect.getsource(health.run_health_checks)
+    assert "_walk_documents_for_doctor()" in inspect.getsource(health.run_index_run_checks)

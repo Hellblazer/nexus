@@ -2,7 +2,8 @@
 title: "Note source_uri scheme: replace chroma:// with nx-note://"
 id: RDR-231
 type: Technical Debt
-status: accepted
+status: closed
+closed_date: 2026-11-10
 priority: low
 author: nexus_8f2
 reviewed-by: self
@@ -124,6 +125,18 @@ URI (canonicalized, step 2) is the one stored; `updateDocumentCollection` and
 `updateDocumentCollections` (`:3433`, `:3445`) have no in-tree caller and are out of
 scope.
 
+#### Gap 5: Notes already moved name a collection they no longer live in, and a scheme-only backfill keeps that
+
+*Added at close (2026-11-10) to record scope built under the round 2 Significant S7 and Decision 6; the
+gate text carried S7 in the beads instead (Revision History, 2026-10-26).* Gap 4's moves happened before
+this RDR, so some notes' stored URIs name an old collection (`chroma://X/t` on a row that lives in `Y`).
+The backfill (step 5) changes the scheme only and leaves the collection segment, because many such notes
+already have a twin at the `Y` spelling: repairing the segment inside the changeset would collide on the
+live-URI unique index and halt boot on any install that never ran a census, and Decision 2 forbids an
+automatic merge in a changeset (Sam's ruling S7, 2026-10-26). Repair is therefore a separate,
+operator-run step: a census and rewrite of such rows, and a merge pass for the ones with a live twin
+(Technical Design step 8, Decision 6).
+
 ## Relationship to Prior RDRs
 
 Searched the RDR titles and bodies for note identity, `source_uri`, the store hook,
@@ -196,14 +209,15 @@ for tenant-spanning row DML.
 - **Verified**: the three client classifiers use three predicates (`nexus_rdr/231-research-13`): `reconcile_stale.py:379` is a bare `startswith("chroma://")`; `recovery_bundle.py:90-100` excludes file-routed collections by `entry.physical_collection`, and `backfill.py` selects exactly those rows as its candidates. Only the last two treat `chroma://` under a file-routed collection as residue; the `reconcile_stale.py:220-229` text saying so is a comment, not code.
 - **Verified**: `completeMove` (`CatalogRepository.java:6391`, the RDR-210 P6 re-embed move) sets `physical_collection` and the satellites' `collection` and never `source_uri`; it refuses a tombstoned document per document (`TombstonedDocumentException`), which the re-embed runner recognizes (`nexus_rdr/231-research-11`).
 - **Verified**: the rename refuses before anything moves when a rewritten URI is held by a live document (`SourceUriCollision`, `:9778-9801`); re-home moves table by table and reports per-table refusals, and chunks, keyed by chash, cannot be held back per document (`nexus_rdr/231-research-12`).
+- **Verified on a production fork** (nexus-bivz3.18, 2026-10-27, read-only): the `columnsHolding` sweep over 277 text-like columns found `chroma://` in the two `source_uri` columns exactly as the census counted, and also as prose or quoted text in `catalog_document_chunks.section_title` (75), `chunks.chunk_text` (343), `chunks.metadata` (71), `memory.content` (85), `tuples.body` (3) and five `document_aspects` prose fields. Those are not note identities and are outside the backfill. `chunks.metadata` was checked again after the deploy (nexus-bivz3.23): search resolves `source_uri` through the catalog join, and RDR-236 retires document keys from chunk rows.
 - **Inferred, not run** (`nexus_rdr/231-research-14`): with engine canonicalization and no legacy rendering, an old client's re-put does not duplicate (its byte compare drops the `nx-note://` row, register then returns `created=false`), but the re-put's metadata (tags, category, ttl, the `meta.doc_id` stamp) is not applied, and its classifiers, its recovery-bundle export, `nx doctor --check-references`, `aspect_sql`'s compare and `find_ids_by_title` stop recognising notes.
 
 ### Critical Assumptions
 
-- [ ] The three tables in Key Discoveries are the only places a note URI is stored. — **Status**: Verified in source (rename cascade and its information_schema sweep); not yet checked against production data — **Method**: run the `columnsHolding` sweep for `chroma://` against a restored copy of the cloud database before the engine tag, and assert in the backfill test that the sweep finds no note URI after the changeset
-- [ ] No tenant holds a live legacy note row and a live `nx-note://` row for the same note, so the backfill cannot collide on catalog-016. — **Status**: Unverified on production; true by construction for any database no new client has written to — **Method**: the census query in Technical Design step 5, run read-only per tenant against the cloud database before the engine tag, and the same count as the changeset's in-transaction guard
-- [ ] Every engine route through which a caller's URI enters a write or a lookup is in the route table of Technical Design step 2. — **Status**: Verified by source search (2026-10-23; the string-key and `vectors` domain re-swept by the 2026-10-26 fix checks) — **Method**: `NoteUriRouteGateTest` drives each listed route with `chroma://` and asserts `nx-note://` is stored or matched, and a static sweep fails on any reference to the `source_uri` column, by the jOOQ symbol or by the string key `"source_uri"`, in `CatalogRepository`, `AspectRepository` or the `vectors` package, inside a method the table neither lists nor exempts
-- [ ] The cloud engine does not serve from an old and a new instance at once after the backfill. — **Status**: Unverified; a conexus-side fact (`nexus_rdr/231-research-15`) — **Method**: ask conexus for the deploy topology before the tag; deploy with old instances drained, because the changeset runs once and nothing rewrites a lone `chroma://` row an old instance writes after it; run the census for live `chroma://` note rows after the rollout
+- [x] The three tables in Key Discoveries are the only places a note URI is stored. — **Status**: Verified in source, then on a production fork (nexus-bivz3.18: the two `source_uri` columns hold every note URI; the other `chroma://` text is prose, Key Discoveries) — **Method**: run the `columnsHolding` sweep for `chroma://` against a restored copy of the cloud database before the engine tag, and assert in the backfill test that the sweep finds no note URI after the changeset
+- [x] No tenant holds a live legacy note row and a live `nx-note://` row for the same note, so the backfill cannot collide on catalog-016. — **Status**: Verified on a production fork before the tag (nexus-bivz3.18: 0 live twin pairs, direct and export form); the client's `NOTE_URI_MIN_ENGINE_VERSION` refusal that keeps it true afterwards is best-effort, with the backfill guard as the backstop (step 6) — **Method**: the census query in Technical Design step 5, run read-only per tenant against the cloud database before the engine tag, and the same count as the changeset's in-transaction guard
+- [x] Every engine route through which a caller's URI enters a write or a lookup is in the route table of Technical Design step 2. — **Status**: Verified by source search, then pinned (nexus-bivz3.2: `NoteUriRouteGateTest` 16/16; the static sweep turned red on a planted unlisted method and on a dropped `NoteUri.canonical`) — **Method**: `NoteUriRouteGateTest` drives each listed route with `chroma://` and asserts `nx-note://` is stored or matched, and a static sweep fails on any reference to the `source_uri` column, by the jOOQ symbol or by the string key `"source_uri"`, in `CatalogRepository`, `AspectRepository` or the `vectors` package, inside a method the table neither lists nor exempts
+- [x] The cloud engine does not serve from an old and a new instance at once after the backfill. — **Status**: Verified with conexus (nexus-bivz3.18: the deploy stops, then runs; it is not rolling), and the post-rollout census found 0 live `chroma://` note rows on every tenant (nexus-bivz3.23) — **Method**: ask conexus for the deploy topology before the tag; deploy with old instances drained, because the changeset runs once and nothing rewrites a lone `chroma://` row an old instance writes after it; run the census for live `chroma://` note rows after the rollout
 
 ## Proposed Solution
 
@@ -340,6 +354,16 @@ an old artifact into the new spelling at the one place it reads one.
 
    UPDATEs, for each of the three tables:
    `UPDATE nexus.<table> SET source_uri = 'nx-note://' || substr(source_uri, 10) WHERE <note predicate on source_uri>;`.
+
+   *As built (`note-uri-001-1`, `note-uri-001-backfill.xml`, whose header is the exact statement):* the
+   changeset also rewrites, and its guard also counts, the export form a cross-collection import stores,
+   `nxexp://<target>/chroma://<c>/<rest>` with `<c>` not file-routed, to `nxexp://<target>/nx-note://<c>/<rest>`
+   (Sam's ruling S6, 2026-10-26: once the client mints `nx-note://`, a re-import would miss an unrewritten
+   export row and mint a duplicate). Its predicate is
+   `source_uri ~ '^nxexp://[^/]*/chroma://'` with the same file-routed exclusion applied to the inner collection
+   segment. The rewrite changes the scheme only, never the collection segment (S7, Gap 5).
+   `NoteUriBackfillPredicateParityTest` pins the three predicates (direct, `nx-note`, export) to the SQL and to
+   the shared corpus.
    Live and tombstoned rows are both rewritten (a later restore must find its
    note). The rewrite is injective and no new value can equal an old one, so a
    single UPDATE cannot trip catalog-016 once the guard has passed. Its comment
@@ -383,8 +407,26 @@ an old artifact into the new spelling at the one place it reads one.
    restart-stale`). A probe that resolves no version does not refuse; it logs
    (inferred, not read: whether any engine build reports no version).
 
+   *As built (`engine_version.py`, `NOTE_URI_MIN_ENGINE_VERSION` = 0.1.167):* the refusal is best-effort, not
+   a guarantee. A dev or blank jar reports no version and an unreachable engine answers nothing; in both
+   cases the client logs one warning per process and writes. The backfill guard (step 5) is the backstop:
+   a twin written that way halts the next engine's boot, and the migration runbook's recovery merges it.
+   The refusal covers the note-minting writes (`store_put`, `nx store put`, `nx memory promote`, the
+   recovery-bundle import, `import_collection`), not aspect or highlight upserts, which have no unique key on
+   `source_uri`.
+
 7. **Input-accept forever.** The engine never refuses `chroma://` on input; it
    canonicalizes it. No response carries it for a note.
+
+8. **Repair of notes naming a collection they no longer live in (Gap 5; added at close, as built under
+   nexus-bivz3.24).** Operator-run, never at boot. `POST /v1/catalog/note_uri_repair` (`CatalogHandler`,
+   `CatalogRepository`) is a census of note rows whose URI's collection segment differs from the row's
+   collection and, with `apply`, rewrites the segment for rows whose target URI is free.
+   `nx catalog repair-note-uris` drives it (dry run by default, `--apply` to write). Rows whose target URI
+   is held by a live twin go through the merge pass, `nx catalog repair-note-uris --merge` (dry run by
+   default, `--merge --apply` performs it, with a ledger of every pair). Its survivor rule is Decision 6
+   and lives in `nexus.catalog.note_uri_merge`. Run on tenant nexus, the census found nothing to repair, so
+   no apply ran (nexus-bivz3.24, Sam's choice "close, no apply").
 
 ```text
 // Illustrative: engine helper
@@ -466,7 +508,7 @@ part of the route gate.
 - **Risk**: the backfill collides on catalog-016. **Mitigation**: the in-transaction guard aborts before any row moves; the pre-tag census finds pairs first.
 - **Risk**: an input route is missed, so an old client or an old artifact mints a duplicate. **Mitigation**: `NoteUriRouteGateTest`, behavioural and static.
 - **Risk**: an old cloud client's recovery-bundle export silently omits notes, and its re-puts do not update metadata, until it upgrades. **Mitigation**: the client release notes say so; nothing refuses an old client (Alternative 4 rejected that).
-- **Risk**: a new client writes to a local engine that has not restarted onto the tag. **Mitigation**: the `NOTE_URI_MIN_ENGINE_VERSION` write refusal (step 6).
+- **Risk**: a new client writes to a local engine that has not restarted onto the tag. **Mitigation**: the `NOTE_URI_MIN_ENGINE_VERSION` write refusal (step 6), which is best-effort: an engine that reports no version is not refused, and the backfill guard then halts its next boot, with the runbook's merge as the recovery.
 - **Risk**: a rolling cloud deploy serves an old engine instance after the backfill, and an old client's re-put through it writes a lone `chroma://` note row that nothing rewrites. **Mitigation**: the deploy-topology assumption (§ Critical Assumptions): drained deploy, then the post-rollout census.
 - **Risk**: a classifier misses the new spelling and treats notes as residue. **Mitigation**: one `is_note_uri`, the fixture corpus shared with the engine and the SQL predicate, and a lint that no `chroma://` or `nx-note://` literal, and no `"chroma"` scheme key, appears outside the definitions, `backfill.py` and `recovery_bundle`'s residue counter.
 
@@ -486,8 +528,8 @@ job's report, with the holder named.
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified
-- [ ] Engine-tag freeze ended (>= 2026-10-26 13:46Z)
+- [x] All Critical Assumptions verified (§ Critical Assumptions, each with its bead evidence)
+- [x] Engine-tag freeze ended (>= 2026-10-26 13:46Z): engine-service-v0.1.167 was cut after it (nexus-bivz3.21)
 
 ### Minimum Viable Validation
 
@@ -553,7 +595,8 @@ None.
 - **Scenario**: re-embed move of a note — **Verify**: the note's URI names the sibling collection, its aspects and highlights match it, and a re-put under the sibling finds it.
 - **Scenario**: re-embed move where the sibling already holds a live document at the rewritten URI — **Verify**: that document is skipped with the holder named in the job report; the job's other documents move; the job does not end failed.
 - **Scenario**: `/v1/catalog/update` moving a note's `physical_collection` without `source_uri`, then with a taken target URI — **Verify**: URI rewritten to the new collection; then 409 `SourceUriCollision`, nothing changed.
-- **Scenario**: a note write from a new client to an engine reporting a version below `NOTE_URI_MIN_ENGINE_VERSION` — **Verify**: refused, naming `nx daemon restart-stale`; nothing registered.
+- **Scenario**: a note write from a new client to an engine reporting a version below `NOTE_URI_MIN_ENGINE_VERSION` — **Verify**: refused, naming `nx daemon restart-stale`; nothing registered. *As built (`tests/test_bivz3_13_note_uri_engine_floor.py`):* when the pin itself is below the floor the refusal names the pin and the floor instead of `restart-stale`, so the user is not sent round a restart loop; a probe that reports no version is not refused (step 6).
+- **Scenario** (Gap 5, step 8): census and rewrite of notes naming a collection they no longer live in, a taken target, and the merge pass's survivor rule — **Verify**: `NoteUriRepairTest` (engine route), `tests/test_bivz324_merge_pass_docs.py` and `tests/test_note_uri_merge_rule.py` (Decision 6 ordering, the chunk-holder refusal, the ledger).
 - **Scenario**: `recovery_bundle._resolve_link_endpoint` on an old bundle's `chroma://` link after a mode change — **Verify**: re-derives the target through the `nx-note://` form.
 - **Scenario**: aspect rename and highlight rename — **Verify**: `source_uri` unchanged (the catalog row did not move).
 - **Scenario**: backfill with a planted live twin — **Verify**: the migration aborts, no row changed, FORCE still set on all three tables.
@@ -597,7 +640,10 @@ three predicates the code uses). Inferred, not run: 14 (an old client's behaviou
 against the new engine). Assumed, needing facts outside this tree and checked before
 the engine tag: 8 and 9 (production data, acknowledged by Sam at gate) and 15 (cloud
 deploy topology). If the census finds a pair, Decisions 2 applies (merge, then
-deploy).
+deploy). *At close (2026-11-10):* 8, 9 and 15 were settled by the pre-tag census on a production fork
+(nexus-bivz3.18: 0 live pairs, 0 export-form rows, 0 stale-collection notes; the deploy is not rolling)
+and the post-deploy census (nexus-bivz3.23: 0 live `chroma://` note rows in all three tables on every
+tenant, 417 notes now `nx-note://`); their T2 records are marked verified with those citations.
 
 #### API Verification
 
@@ -608,14 +654,20 @@ deploy).
 
 ### Scope Verification
 
-In scope: Gaps 1 to 4, each with a Technical Design step (Gaps 1 and 2: steps 1 and
-6; Gap 3: steps 2, 3 and 7; Gap 4: step 4). Added beyond the originating beads: the
+In scope: Gaps 1 to 5, each with a Technical Design step (Gaps 1 and 2: steps 1 and
+6; Gap 3: steps 2, 3 and 7; Gap 4: step 4; Gap 5: step 8, added at close). Added beyond the originating beads: the
 re-embed move (`completeMove`), found by the round 1 critique, because leaving one
 move of the catalog row unrewritten would keep Gap 4 open. Examined and left
 unchanged: the aspect and highlight renames, which do not move the catalog row
 (Gap 4). Out of scope: `updateDocumentCollection(s)` (no caller), applied changelogs
 that mention `chroma://` in comments (never edited), `engine_version.py` release
 history, and `backfill.py`'s residue rewrite, which keeps matching `chroma://`.
+
+Added during implementation, recorded at close (2026-11-10): the export form in the backfill and in input
+canonicalization (S6, step 5); Gap 5's repair and merge pass (S7, step 8, Decision 6); and three
+operator aids that are additions, not reductions: `nx daemon service note-uri-pairs` with psql access on
+every platform (nexus-bivz3.28), `nx catalog merge`'s refusal to fold a chunk holder into a chunkless
+canonical (nexus-bivz3.27), and the halt-and-recover diagnosis in `restart-stale` (nexus-bivz3.25).
 
 ### Cross-Cutting Concerns
 
@@ -676,3 +728,5 @@ Sam, 2026-11-08, on the merge half of nexus-bivz3.24 (ask `bivz324-merge-winner`
 - 2026-10-26: Accepted (Sam). The eight round 2 Significants are carried into the implementation beads, not edited here.
 
 - 2026-11-08: Decision 6 (Sam, ask `bivz324-merge-winner`): the merge pass picks its survivor by chunks (nexus-bivz3.24).
+
+- 2026-11-10: Text synced to the design of record at close (linda; standing grant 3, wording to match reviewed code): Gap 5 and Technical Design step 8 for the repair and merge pass (S7, Decision 6); step 5's export form and scheme-only rule (S6, S7); step 6's best-effort refusal; the census findings in Key Discoveries; Critical Assumptions and Prerequisites ticked with their bead evidence; Test Plan and Scope Verification lines for the additions. From the close critique `nexus/critique-7e3110e28-nexus-bivz3-2026-11-10` (0 Critical, 4 Significant, all text sync).

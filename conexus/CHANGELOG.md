@@ -1,5 +1,12 @@
 # Changelog
 
+## [8.1.3] - 2026-11-11
+
+Plugin version aligned with conexus 8.1.3. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- `conexus/launch/nx_setup.py`: nexus-f3yqd.6 (F3): a failed setup step names the cause line the command printed (never the nx init step reporter's tail; secrets masked), and its next step says to read the log before a retry.
+- `conexus/commands/setup.md`: nexus-f3yqd.6 (F3): on a failed or interrupted run, read the log for the cause before suggesting a retry. F2: an old-CLI user is told `nx self install` may sit silent while it clears uv's cache, and to let it finish.
+
 ## [8.1.2] - 2026-11-10
 
 Plugin version aligned with conexus 8.1.2. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).

@@ -7,6 +7,7 @@ and chromadb.EphemeralClient.
 
 AC-E1 through AC-E4 from RDR-011.
 """
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -112,12 +113,33 @@ def _local_embed(chunks, model, api_key="", input_type="document", timeout=120.0
 # ── AC-E1 / AC-E2 / AC-E3 — index_pdf E2E ────────────────────────────────────
 
 class TestIndexPdfE2E:
-    """AC-E1 / AC-E2 / AC-E3: index_pdf with real extraction + local embedding."""
+    """AC-E1 / AC-E2 / AC-E3: index_pdf with real extraction + local embedding.
+
+    AC-E1 keeps the default extractor, so this file keeps one end-to-end index through real MinerU
+    (tests/test_pdf_subsystem.py's slow tests have more). AC-E2 (page attribution), AC-E3 (staleness)
+    and AC-E4 (the git-repo wiring) are not about the extractor; they use pymupdf, which does not load
+    MinerU's model (about 1 GB a parse on a CI shard, labrun-pex)."""
 
     def test_e2e_simple_pdf_queryable(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
-        """AC-E1: simple.pdf indexed → query returns a pdf chunk with distance < 1.0."""
+        """AC-E1: simple.pdf indexed → query returns a pdf chunk with distance < 1.0.
+
+        The one end-to-end index through real MinerU in this file (labrun-pex), so it asserts MinerU
+        produced the text: a failed parse falls back to the PyMuPDF text layer and would pass every
+        assertion below. The suite's fenced HOME has MinerU's weights only where CI primes them
+        (``MINERU_TOOLS_CONFIG_JSON``); without them the test skips instead of passing on the fallback."""
+        settled: list[dict] = []
         with patch("nexus.config.get_credential", side_effect=fake_credentials()):
-            count = index_pdf(simple_pdf, "pdf-e2e-simple", t3=local_t3, embed_fn=_local_embed)
+            count = index_pdf(simple_pdf, "pdf-e2e-simple", t3=local_t3, embed_fn=_local_embed,
+                              on_extraction=settled.append)
+        method = settled[0]["extraction_method"] if settled else ""
+        if method != "mineru":
+            # The lab pool's self-hosted runners have the weights (this test parses with MinerU there), so a
+            # fallback there is a failure, never a quiet skip of the suite's one real-MinerU index.
+            expected = os.environ.get("MINERU_TOOLS_CONFIG_JSON") or os.environ.get("RUNNER_ENVIRONMENT") == "self-hosted"
+            if expected:
+                pytest.fail(f"MinerU's weights are expected here but the PDF was extracted by {method!r}: {settled}")
+            pytest.skip(f"no MinerU weights in the fenced HOME (MINERU_TOOLS_CONFIG_JSON unset, not a pool "
+                        f"runner); extracted by {method!r}")
 
         assert count > 0, "Expected at least one chunk indexed"
         results = local_t3.search("hello world test document", ["docs__pdf-e2e-simple__voyage-context-3__v1"], sensitivity="include")
@@ -129,9 +151,10 @@ class TestIndexPdfE2E:
     def test_e2e_multipage_page_attribution(self, multipage_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E2: multipage.pdf → query for 'database transactions' returns page 2 chunk."""
         with patch("nexus.config.get_credential", side_effect=fake_credentials()):
-            count = index_pdf(multipage_pdf, "pdf-e2e-multipage", t3=local_t3, embed_fn=_local_embed)
+            count = index_pdf(multipage_pdf, "pdf-e2e-multipage", t3=local_t3, embed_fn=_local_embed,
+                              extractor="pymupdf")
 
-        assert count > 1, (
+        assert count > 3, (  # the top-3 'transaction' check below needs more than three chunks
             "Expected multiple chunks from multipage_pdf so page attribution is testable"
         )
         results = local_t3.search(
@@ -171,8 +194,10 @@ class TestIndexPdfE2E:
                      iter(col.get(limit=1, include=["metadatas"], sensitivity="include")["metadatas"]), None,
                  ),
              ):
-            first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed)
-            second = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed)
+            first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed,
+                              extractor="pymupdf")
+            second = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed,
+                               extractor="pymupdf")
 
         assert first > 0
         assert second == 0, "Second index of unchanged PDF must return 0"
@@ -234,6 +259,7 @@ class TestIndexPdfFileE2E:
             now_iso=now_iso,
             score=0.5,
             embed_fn=lambda texts: _local_embed(texts, model)[0],
+            extractor="pymupdf",  # the git-repo wiring is the subject, not the extractor (labrun-pex)
         )
 
         results = local_t3.search("hello world test document", [collection_name], sensitivity="include")

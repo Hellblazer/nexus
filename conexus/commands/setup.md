@@ -19,7 +19,7 @@ nx self install
 nx upgrade
 ```
 
-The first builds the current version and the second converges the data. On the older uv-tool layout (`nx self install` says this nx is not running from a generation) the first is `uv tool upgrade conexus`, and a third command, `nx self install`, then moves the box onto the generation layout and keeps PDF support (the upgrade alone leaves a slim tree). Afterwards the user reconnects the `nexus` server or starts a new session, and runs `/conexus:setup` again. Stop here.
+The first builds the current version and the second converges the data. From a CLI this old, `nx self install` can sit silent for up to ten minutes at the end, clearing uv's cache while another uv process holds it; tell the user it is not stuck and to let it finish. On the older uv-tool layout (`nx self install` says this nx is not running from a generation) the first is `uv tool upgrade conexus`, and a third command, `nx self install`, then moves the box onto the generation layout and keeps PDF support (the upgrade alone leaves a slim tree). Afterwards the user reconnects the `nexus` server or starts a new session, and runs `/conexus:setup` again. Stop here.
 
 ## Step 2: act on the answer
 
@@ -27,7 +27,7 @@ The first builds the current version and the second converges the data. On the o
 - **A setup run is in progress.** Report its stage and when to ask again. Do not call `setup`. Follow it with `setup_status`, no sooner than the interval the answer names.
 - **The local service is installed and not running.** Say so, in the answer's words. Ask whether to start it and whether it should start when the user logs in; do not show the table, because starting it downloads nothing. If the user agrees, call `setup` with `mode` `local` and `autostart` as they answered.
 - **Something is missing.** Say what, in the answer's words, and put the one question below. Do not call `setup` before the user has answered.
-- **The last run failed or was interrupted.** Show the failure line and the log path from the answer. Ask the user first; if they agree, call `setup` again with the same choice the answer names, and it resumes from the failed step.
+- **The last run failed or was interrupted.** Show the failure line and the log path from the answer, and read the log for the cause before suggesting a retry. Ask the user first; if they agree, call `setup` again with the same choice the answer names, and it resumes from the failed step.
 
 ## The one question
 

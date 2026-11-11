@@ -611,6 +611,11 @@ class VectorSensitivityRouteParityTest {
             + "on, and RDR-243's census lists no pipeline staging read. It is not a corpus read: no search, get or "
             + "resolve route reaches it, and a sensitive document's text reaches pdf_chunks only through its own "
             + "indexing run");
+        OTHER_TEXT_READERS.put("StoreGetProjection.java#selectFields", "the select list of PgVectorRepository#get, "
+            + "named there as a column handle (ch.chunkText()) so a metadata-only store-get can leave it out. It "
+            + "reads nothing itself; the statement that runs it is PgVectorRepository#get's, whose WHERE applies "
+            + "notSensitiveCondition under sensitivity=exclude and whose envelope is then flagged by withSensitives "
+            + "(GATED above, nexus-rfvyy.7.4), exactly as before the projection");
     }
 
     // ── route table ───────────────────────────────────────────────────────────

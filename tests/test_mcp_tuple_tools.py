@@ -24,7 +24,6 @@ it.
 from __future__ import annotations
 
 import re
-import time
 import uuid
 from datetime import datetime
 
@@ -50,6 +49,7 @@ from nexus.mcp.core import (
     tuple_subscriptions,
     tuple_unsubscribe,
 )
+from tests._settle import settle
 
 
 def _uniq(label: str) -> str:
@@ -137,7 +137,11 @@ class TestShakeoutTupleSemantics:
         assert live[0]["claim_state"] == "claimed"
         assert tuple_stats(sub)["lapsed"] == 0
 
-        time.sleep(1.6)  # the 1 s lease passes; nothing re-takes it, so the row is still stored as claimed
+        # the 1 s lease passes on the engine's clock; nothing re-takes it, so the row is still stored as claimed
+        settle(
+            lambda: tuple_rd(sub, {"to": addr})[0]["claim_state"] != "lapsed" and "still claimed",
+            what="the 1 s lease",
+        )
 
         row = tuple_rd(sub, {"to": addr})[0]
         assert row["claim_state"] == "lapsed"
@@ -591,6 +595,11 @@ class TestMailboxSend:
     session marker on this box; the marker-vs-env tests below override
     that with an explicit marker file instead."""
 
+    @staticmethod
+    def _settle_lapsed(name: str) -> None:
+        """The entry's TTL runs on the engine's clock: wait until the engine stops returning it."""
+        settle(lambda: tuple_rd(f"directory/{name}", {"name": name}), what="the 1 s directory entry")
+
     def _directory_entry(self, name: str, session_id: str, *, ttl_seconds: int | None = None) -> None:
         tuple_out(
             f"directory/{name}", {"name": name}, {"session_id": session_id},
@@ -726,7 +735,7 @@ class TestMailboxSend:
         name = _uniq("name")
         sid = str(uuid.uuid4())
         self._directory_entry(name, sid, ttl_seconds=1)
-        time.sleep(1.5)
+        self._settle_lapsed(name)
 
         result = mailbox_send(name, body="x")
         assert "error" in result
@@ -743,7 +752,7 @@ class TestMailboxSend:
         name = _uniq("name")
         sid = str(uuid.uuid4())
         self._directory_entry(name, sid, ttl_seconds=1)
-        time.sleep(1.5)
+        self._settle_lapsed(name)
 
         refused = mailbox_send(name, body="x")
         assert "error" in refused and name in refused["error"]

@@ -46,6 +46,8 @@ import java.util.function.Supplier;
  *  "rerank_sensitive_exclusion_supported":true,
  *  "route_b_manifest_keys_supported":true,
  *  "route_c_manifest_keys_supported":true,
+ *  "catalog_sensitive_list_supported":true,
+ *  "catalog_manifest_fillable_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -549,6 +551,33 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-f3yqd capability advertisement: does {@code GET /v1/catalog/sensitive?limit=N} list the tenant's live
+     * sensitive documents (tumbler and physical collection, with the exact total and a {@code capped} flag)?
+     *
+     * <p>A route, so an old engine answers 404 and a client can tell; the flag lets a client (and the doctor's bounded
+     * reads) learn it from {@code /version} first instead of by a probe that 404s. Always present, always {@code true}
+     * on an engine carrying the change. Cloud clients see it only once the public conexus edge allowlists it (the
+     * {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendCatalogSensitiveListCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_sensitive_list_supported\":true");
+    }
+
+    /**
+     * nexus-f3yqd capability advertisement: does {@code GET /v1/catalog/manifest/fillable?kind=labels|spans&limit=N}
+     * count, strictly and up to a bound, the manifest rows the two upgrade rungs (manifest section labels, manifest
+     * spans) would fill?
+     *
+     * <p>A flag of its own, separate from the older {@code /manifest/section_label_fillable} route, which stays for old
+     * clients and counts a chunk {@code indexed_at} it cannot read (this route does not). Always present, always {@code
+     * true} on an engine carrying the change. Cloud clients see it only once the public conexus edge allowlists it
+     * (the {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendCatalogManifestFillableCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_manifest_fillable_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -752,6 +781,9 @@ public final class VersionHandler implements HttpHandler {
         appendRouteBManifestKeysCapabilityField(body);
         // nexus-u9dc5: route (c), the get routes, answers the same keys per owning document.
         appendRouteCManifestKeysCapabilityField(body);
+        // nexus-f3yqd: GET /v1/catalog/sensitive, and GET /v1/catalog/manifest/fillable (the strict bounded count).
+        appendCatalogSensitiveListCapabilityField(body);
+        appendCatalogManifestFillableCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

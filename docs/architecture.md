@@ -316,8 +316,8 @@ sequential number allocated per owner via `SELECT ... FOR UPDATE` on
 `catalog_owners.next_seq` (`CatalogHandler.java`); the column tracks the
 *last-claimed* value, not the *next* one. WAN round-trip cost on
 high-volume single-doc allocation motivated the `register_many` batch path
-(`http_catalog_client.py`). `nx doctor` ships a drift check
-(`health.py` `_check_next_seq_drift`) that compares each owner's stored
+(`http_catalog_client.py`). `nx doctor --check-index-runs` runs a drift check
+(`health.py` `_check_next_seq_drift`; the default sweep skips it, F30) that compares each owner's stored
 `next_seq` against the highest child tumbler actually observed; the
 converge route `POST /v1/catalog/owners/sweep_next_seq_drift`
 (`CatalogHandler.java`) floors every drifted owner's `next_seq` back to a

@@ -33,6 +33,10 @@ import pytest
 from nexus.daemon import service_registry
 from tests import _engine_substrate as sub
 from tests._module_seam import setattr_in
+from tests._pg_ctl import sun_path_limit_lifted  # noqa: F401 — fixture, used by name
+
+# Clusters here live under tmp_path and pg_ctl is faked (labrun-pex: the sun_path check runs first).
+pytestmark = pytest.mark.usefixtures("sun_path_limit_lifted")
 
 
 class _ForeignListener:

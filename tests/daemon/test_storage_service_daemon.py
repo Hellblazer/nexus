@@ -58,6 +58,7 @@ from nexus.daemon.storage_service_daemon import (
 )
 from tests._child_process import NEVER_ALIVE_PID
 from tests._module_seam import module_time, patch_in, patch_time
+from tests._settle import settle
 
 
 # ---------------------------------------------------------------------------
@@ -3659,10 +3660,10 @@ class TestEnsureStorageSupervisor:
         )
         try:
             os.kill(proc.pid, signal.SIGKILL)
-            deadline = time.monotonic() + 30.0
-            while time.monotonic() < deadline and process_state(proc.pid) != "Z":
-                time.sleep(0.02)
-            assert process_state(proc.pid) == "Z", "fixture must be a zombie"
+            settle(
+                lambda: process_state(proc.pid) != "Z" and f"state {process_state(proc.pid)!r}", 30.0,
+                interval=0.02, what="the fixture's zombie",
+            )
 
             registry = ServiceRegistry(
                 dir=config_dir,
@@ -4532,11 +4533,9 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
         )
         try:
             os.kill(proc.pid, signal.SIGKILL)
-            deadline = time.monotonic() + 30.0
-            while time.monotonic() < deadline and process_state(proc.pid) != "Z":
-                time.sleep(0.02)
-            assert process_state(proc.pid) == "Z", (
-                "fixture must produce a real unreaped zombie"
+            settle(
+                lambda: process_state(proc.pid) != "Z" and f"state {process_state(proc.pid)!r}", 30.0,
+                interval=0.02, what="the fixture's real unreaped zombie",
             )
             _write_stale_or_fresh_lease(
                 config_dir,

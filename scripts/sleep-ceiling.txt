@@ -1,0 +1,5 @@
+# Sleep-count ceiling (scripts/sleep_ratchet.py, nexus-3ceda.11): the most time.sleep calls the
+# tracked tests/**/*.py files may hold, at today's count plus max(10 calls, 5%) of headroom. It only
+# falls: removing more than one headroom of sleeps lowers it in the same commit
+# (`python3 scripts/sleep_ratchet.py update`); raising it needs `update --allow-raise` and a reason.
+tests 508

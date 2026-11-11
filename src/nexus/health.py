@@ -37,6 +37,7 @@ _ENGINE_STATUS_UNSET: object = object()
 #: after the key word is replaced, whatever its shape, so a rotated token or
 #: a raw api_key never reaches a log line (nexus-8ooxn / nexus-hcy4w).
 _CHECK = "✓"
+_NOT_CHECKED = "[ ]"
 _WARN = "✗"
 # RDR-129 B4 (nexus-uq8a4): a third, soft state — the check could not complete
 # but the condition is benign/transient (e.g. a healthy-but-busy database), so
@@ -93,6 +94,9 @@ class HealthResult:
     * ``ok=False, warn=True``      → soft warning (⚠) — benign/transient,
       never fatal, never marks the run failed (RDR-129 B4)
     * ``ok=False, warn=False``     → hard failure (✗)
+
+    ``skipped``: the row was not checked this run (``[ ]``, JSON status ``skipped``). It is ``ok`` for the exit
+    code, but never rendered as a pass (F30, nexus-f3yqd.6).
     """
 
     label: str
@@ -101,6 +105,7 @@ class HealthResult:
     fix_suggestions: list[str] = field(default_factory=list)
     fatal: bool = False
     warn: bool = False
+    skipped: bool = False
 
 
 # ── Formatting ────────────────────────────────────────────────────────────────
@@ -118,7 +123,9 @@ def format_health_for_cli(
     failed = False
 
     for r in results:
-        if r.ok:
+        if r.ok and r.skipped:
+            status = _NOT_CHECKED
+        elif r.ok:
             status = _CHECK
         elif r.warn:
             status = _SOFT_WARN
@@ -201,7 +208,9 @@ def format_health_for_json(
     """
     checks = []
     for r in results:
-        if r.ok:
+        if r.ok and r.skipped:
+            status = "skipped"
+        elif r.ok:
             status = "ok"
         elif r.warn:
             status = "warn"
@@ -220,6 +229,7 @@ def format_health_for_json(
         "ok": sum(1 for c in checks if c["status"] == "ok"),
         "warn": sum(1 for c in checks if c["status"] == "warn"),
         "fail": sum(1 for c in checks if c["status"] == "fail"),
+        "skipped": sum(1 for c in checks if c["status"] == "skipped"),
     }
     payload = {
         "checks": checks,
@@ -2088,12 +2098,15 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
 
     canonical_by_hook = {n: _canonical_stanza_body(n) for n in hook_names}
 
-    def _stanza_state(repo: Path, name: str) -> str:
+    def _stanza_state_in_dir(hooks_dir: Path, name: str) -> str:
+        """The one stanza comparison (commands/hooks.py), on the hooks directory the repo already resolved,
+        so each hook does not spawn git again to find it (F30, nexus-f3yqd.6)."""
         try:
-            from nexus.commands.hooks import hook_stanza_state  # noqa: PLC0415 — deferred to avoid circular import
-        except Exception:  # noqa: BLE001 — boundary fallback
+            from nexus.commands.hooks import _stanza_state_in  # noqa: PLC0415 — deferred to avoid circular import
+
+            return _stanza_state_in(hooks_dir, name)
+        except Exception:  # noqa: BLE001 — a census line must never traceback, as hook_stanza_state degrades
             return "unknown"
-        return hook_stanza_state(repo, name)
 
     # RDR-137 Phase 3.1 (nexus-tts0d.6): catalog-backed enumeration with
     # legacy ``repos.json`` fallback via the dual-read shim. Catalog
@@ -2177,7 +2190,8 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                 detail="no repos registered — run: nx index repo <path>",
             ))
     else:
-        for repo_str in repos:
+        def _one_repo(repo_str: str) -> list[HealthResult]:
+            out: list[HealthResult] = []
             repo_path = Path(repo_str)
             try:
                 hdir = _effective_hooks_dir(repo_path)
@@ -2199,7 +2213,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                     for name in installed:
                         if canonical_by_hook.get(name) is None:
                             continue
-                        _state = _stanza_state(repo_path, name)
+                        _state = _stanza_state_in_dir(hdir, name)
                         if _state == "stale":
                             drifted.append(name)
                         elif _state == "malformed":
@@ -2208,7 +2222,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                         # nexus-sis0m.6: a begin sentinel with no end is not
                         # drift -- `nx hooks update` refuses it, so it gets
                         # no update suggestion, same as `nx hooks status`.
-                        results.append(HealthResult(
+                        out.append(HealthResult(
                             label="git hooks (malformed stanza)",
                             ok=False,
                             detail=(
@@ -2219,7 +2233,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                             fatal=False,
                         ))
                     if drifted:
-                        results.append(HealthResult(
+                        out.append(HealthResult(
                             label="git hooks (stanza drift)",
                             ok=False,
                             detail=(
@@ -2240,12 +2254,12 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                             fatal=False,
                         ))
                     if not malformed and not drifted:
-                        results.append(HealthResult(
+                        out.append(HealthResult(
                             label="git hooks", ok=True,
                             detail=f"{repo_path} ({', '.join(installed)})",
                         ))
                 else:
-                    results.append(HealthResult(
+                    out.append(HealthResult(
                         label="git hooks", ok=True,
                         detail=f"{repo_path} — not installed",
                         fix_suggestions=[f"nx hooks install {shlex.quote(str(repo_path))}"],
@@ -2288,7 +2302,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                         # floor or not) but qualify the mutation arm honestly
                         # per the capability signal computed above, rather
                         # than claiming it unconditionally.
-                        results.append(HealthResult(
+                        out.append(HealthResult(
                             label="git hooks", ok=False, warn=True,
                             detail=(
                                 f"{repo_path} — owner root no longer exists "
@@ -2305,7 +2319,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                         # eliminate, just relocated. Its actual remedy also
                         # differs: repos.json is a local, directly editable
                         # file, not a catalog row.
-                        results.append(HealthResult(
+                        out.append(HealthResult(
                             label="git hooks", ok=False, warn=True,
                             detail=(
                                 f"{repo_path} — owner root no longer exists "
@@ -2328,7 +2342,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                     # not_a_repository and its deactivate arm covers it; a
                     # legacy repos.json-only entry is not a census row, so
                     # that case stays on the generic branch below.
-                    results.append(HealthResult(
+                    out.append(HealthResult(
                         label="git hooks", ok=False, warn=True,
                         detail=(
                             f"{repo_path} — registered owner root is not a "
@@ -2340,11 +2354,20 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                         ),
                     ))
                 else:
-                    results.append(HealthResult(
+                    out.append(HealthResult(
                         label="git hooks", ok=False, warn=True,
                         detail=f"{repo_path} — could not check ({exc})",
                     ))
 
+            return out
+
+        # F30 (nexus-f3yqd.6): each repo costs a few sequential git subprocesses; run the repos in a
+        # pool, the rows kept in registration order.
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — deferred, keeps CLI startup fast
+
+        with ThreadPoolExecutor(max_workers=min(8, len(repos))) as pool:
+            for rows in pool.map(_one_repo, repos):
+                results.extend(rows)
     return results
 
 
@@ -11459,7 +11482,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
     class doctor already pays in ``_check_next_seq_drift`` (nexus-ohxzu).
     Read-only; degrades to a skip; never crashes the command it diagnoses.
     """
-    label = "stale index-run fences"
+    label = _STALE_FENCES_LABEL
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -12331,7 +12354,7 @@ def _check_next_seq_drift(documents: list[Any] | _WalkFailed | None = None) -> l
     Read-only, per the RDR-185 rung shape. Degrades to a skip — a doctor check
     must never crash the command it is diagnosing.
     """
-    label = "tumbler allocator drift"
+    label = _NEXT_SEQ_LABEL
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -12393,6 +12416,13 @@ def _check_next_seq_drift(documents: list[Any] | _WalkFailed | None = None) -> l
             detail="skipped (corpus scan failed twice — drift not assessed "
                    "for ANY owner this run)",
         )]
+    # nexus-f3yqd.6: tombstoned children count, as the docstring says and the engine's sweep does.
+    trash = _tombstoned_tumblers(cat)
+    for tumbler in trash or []:
+        prefix, dot, tail = tumbler.rpartition(".")
+        if dot and tail.isdigit() and int(tail) > highs.get(prefix, 0):
+            highs[prefix] = int(tail)
+    unread = "" if trash is not None else "; tombstoned children not read, so drift a deleted child causes is not seen"
 
     drifted: list[tuple[str, int, int]] = []
     checked = 0
@@ -12427,7 +12457,7 @@ def _check_next_seq_drift(documents: list[Any] | _WalkFailed | None = None) -> l
         return [HealthResult(label=label, ok=True, detail="skipped (no owner was readable)")]
     if not drifted:
         return [HealthResult(
-            label=label, ok=True, detail=f"none ({checked} owner(s) checked)",
+            label=label, ok=True, detail=f"none ({checked} owner(s) checked{unread})",
         )]
 
     names = "; ".join(
@@ -12515,7 +12545,7 @@ def _check_failed_runs_hidden_chunks(documents: list[Any] | _WalkFailed | None =
     number of documents ``nx catalog reconcile`` would repair. Read-only;
     degrades to a skip.
     """
-    label = "failed index runs with hidden chunks"
+    label = _HIDDEN_CHUNKS_LABEL
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
         from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: manifest_heal imports the indexer
@@ -12551,6 +12581,38 @@ def _check_failed_runs_hidden_chunks(documents: list[Any] | _WalkFailed | None =
             "then re-index the named sources; the documents stay 'failed' until a run completes",
         ],
     )]
+
+
+#: Page size for the tombstone read in :func:`_tombstoned_tumblers`.
+_TRASH_PAGE = 500
+
+
+def _tombstoned_tumblers(cat: Any) -> list[str] | None:
+    """Every tombstoned document's tumbler (``GET /trash``, paged), or ``None`` when it cannot be read.
+
+    The live walk filters ``deleted_at IS NULL``, but a tombstoned tumbler is still taken (the unique key is
+    ``(tenant_id, tumbler)``) and the engine's ``highestChildSeq`` counts it (nexus-f3yqd.6)."""
+    tumblers: list[str] = []
+    seen: set[str] = set()
+    offset = 0
+    try:
+        while True:
+            page = cat.list_trash(limit=_TRASH_PAGE, offset=offset)
+            if not isinstance(page, list):
+                return None
+            batch = [str(d.get("tumbler", "") or "") for d in page if isinstance(d, dict)]
+            # A short page ends it; so does an empty one, or a repeat of the last page's first row (an engine
+            # that ignored ``offset`` would otherwise loop for ever).
+            if not batch or (tumblers and batch[0] in seen):
+                return tumblers
+            tumblers.extend(batch)
+            seen.update(batch)
+            if len(page) < _TRASH_PAGE:
+                return tumblers
+            offset += len(page)
+    except Exception as exc:  # noqa: BLE001 — an unreadable trash narrows the row, never crashes it
+        _log.warning("doctor_next_seq_trash_unread", error=str(exc))
+        return None
 
 
 def _highest_child_seqs(cat: Any, documents: list[Any] | _WalkFailed | None = None) -> dict[str, int]:
@@ -13015,6 +13077,32 @@ def _row_stepper(progress: Any) -> Callable[[str, Callable[[], list[HealthResult
     return _reported
 
 
+_STALE_FENCES_LABEL = "stale index-run fences"
+_HIDDEN_CHUNKS_LABEL = "failed index runs with hidden chunks"
+_NEXT_SEQ_LABEL = "tumbler allocator drift"
+
+
+def _index_run_rows_not_checked() -> list[HealthResult]:
+    """The default sweep's index-run rows (F30, nexus-f3yqd.6): marked not checked (``[ ]``), never a pass or
+    a warning, so a fresh install's doctor stays clean, and each names the flag that runs it."""
+    detail = ("not checked in the default sweep (it reads every catalog document); "
+              "run `nx doctor --check-index-runs`")
+    return [HealthResult(label=label, ok=True, detail=detail, skipped=True)
+            for label in (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL, _NEXT_SEQ_LABEL)]
+
+
+def run_index_run_checks() -> list[HealthResult]:
+    """``nx doctor --check-index-runs``: the three rows over one catalog walk."""
+    documents: list[Any] | _WalkFailed | None = _walk_documents_for_doctor()
+    if documents is None:
+        documents = _WALK_FAILED
+    return [
+        *_check_stale_indexing_runs(documents),
+        *_check_failed_runs_hidden_chunks(documents),
+        *_check_next_seq_drift(documents),
+    ]
+
+
 def run_health_checks(
     git_hooks_scope: str | Path | None = None,
     engine_status: object = _ENGINE_STATUS_UNSET,
@@ -13023,6 +13111,10 @@ def run_health_checks(
     progress: Any = None,
 ) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
+
+    The three rows that read every catalog document (stale index-run fences, failed runs with hidden chunks,
+    allocator drift; one walk, 22 s measured on a laptop tenant) report "not checked" here and name
+    ``nx doctor --check-index-runs``, which runs them through :func:`run_index_run_checks` (F30, nexus-f3yqd.6).
 
     ``git_hooks_scope``: forwarded to :func:`_check_git_hooks` (nexus-jds59)
     to restrict the git-hooks stanza-drift walk to repos at or under the
@@ -13121,22 +13213,19 @@ def run_health_checks(
     # Shakedown 7.94.0 class A: the allocator-drift row below reads the same list, so ONE walk feeds all
     # three rows (it walked on its own before).
     # nexus-mjmjl: the corpus walk is the sweep's longest stretch on a big tenant; a named step.
-    _index_run_docs: list[Any] | _WalkFailed | None = _row_stepper(progress)(  # type: ignore[assignment]
-        "_check_catalog_document_walk", _walk_documents_for_doctor,  # type: ignore[arg-type]
-    )
-    if _index_run_docs is None:
-        _index_run_docs = _WALK_FAILED
-    results.extend(_step("_check_stale_indexing_runs", lambda: _check_stale_indexing_runs(_index_run_docs)))
+    # F30 (nexus-f3yqd.6): no catalog walk here; `nx doctor --check-index-runs` runs these rows.
+    not_checked = {r.label: r for r in _index_run_rows_not_checked()}
+    results.append(not_checked[_STALE_FENCES_LABEL])
     # nexus-0ntxj: a failed run's chunks stored with no manifest owner are
     # hidden by live(c). Degrades internally.
-    results.extend(_step("_check_failed_runs_hidden_chunks", lambda: _check_failed_runs_hidden_chunks(_index_run_docs)))
+    results.append(not_checked[_HIDDEN_CHUNKS_LABEL])
     # nexus-rte90: PDF chunks left with the upload placeholder metadata
     # (nexus-w94eo). Degrades internally.
     results.extend(_step("_check_pdf_stub_metadata", lambda: _check_pdf_stub_metadata()))
     # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
     # their own children. Self-healing is silent, so the blast radius must
     # be reportable rather than guessed.
-    results.extend(_step("_check_next_seq_drift", lambda: _check_next_seq_drift(_index_run_docs)))
+    results.append(not_checked[_NEXT_SEQ_LABEL])
     # nexus-c0g6e (GH #1529): topics whose cached doc_count disagrees with
     # the real topic_assignments count (6.18.1-era import drift, predating
     # taxonomy-013's recompute triggers). Self-heals on the engine's next
