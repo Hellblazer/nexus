@@ -1199,7 +1199,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 or not isinstance(body.get("constraints"), list):
             return None
         constraints = body["constraints"]
-        if not all(isinstance(c, dict) for c in constraints):
+        if not all(isinstance(c, dict) and isinstance(c.get("table"), str) for c in constraints):
             return None
         from nexus.db.chash_tables import POISON_CHASH_TABLES  # noqa: PLC0415 — deferred to avoid circular import
 

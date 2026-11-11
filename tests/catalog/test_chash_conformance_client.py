@@ -75,3 +75,10 @@ def test_a_refusal_missing_route_or_timeout_is_no_answer(monkeypatch: pytest.Mon
 def test_a_malformed_body_is_no_answer(monkeypatch: pytest.MonkeyPatch, body: object) -> None:
     c, _calls = _client(monkeypatch, get=body)
     assert c.chash_constraints_validated() is None
+
+
+@pytest.mark.parametrize("table", [["nexus.chunks"], {"t": 1}, None])
+def test_a_constraint_without_a_table_name_is_malformed(monkeypatch: pytest.MonkeyPatch, table: object) -> None:
+    body = {**_VALID, "constraints": [{**_VALID["constraints"][0], "table": table}, _VALID["constraints"][1]]}
+    c, _calls = _client(monkeypatch, get=body)
+    assert c.chash_constraints_validated() is None
