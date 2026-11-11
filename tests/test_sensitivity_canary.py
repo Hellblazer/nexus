@@ -1520,7 +1520,8 @@ def _every_exclude_row_goes_red_when_a_read_path_ignores_the_posture(
     else:
         red = judge(world, surface.name, reads=True, pool=True) or ""
     assert any(k in red for k in ("sensitive", "engine")), (
-        f"row {surface.name!r} stayed green with every search read as include: {red!r}"
+        f"row {surface.name!r} stayed green on the {'route' if route else 'batched /search'} path "
+        f"with every search read as include: {red!r}"
     )
 
 
@@ -1529,19 +1530,15 @@ def _every_exclude_row_goes_red_when_a_read_path_ignores_the_posture(
 def test_harness_a_read_path_that_ignores_the_posture_turns_every_exclude_row_red(
     surface: Surface, t2_service_env: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """The mutation, in the suite, on the per-collection route (opt-in since nexus-tu8wp.3, so this
-    test opts in): ``HttpVectorClient.search_per_collection`` sends ``include`` whatever it was passed."""
-    _every_exclude_row_goes_red_when_a_read_path_ignores_the_posture(surface, monkeypatch, tmp_path, route=True)
-
-
-@pytest.mark.sensitivity_reads
-@pytest.mark.parametrize("surface", _exclude_cases())
-def test_harness_a_batched_read_path_that_ignores_the_posture_turns_every_exclude_row_red(
-    surface: Surface, t2_service_env: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """The same mutation on the default path (nexus-tu8wp.3): the route stays off and
-    ``HttpVectorClient.search``, the batched ``/v1/vectors/search`` read, sends ``include``."""
-    _every_exclude_row_goes_red_when_a_read_path_ignores_the_posture(surface, monkeypatch, tmp_path, route=False)
+    """The mutation, in the suite, on both read paths in one tenant: first the per-collection route (opt-in
+    since nexus-tu8wp.3, so this phase opts in) with ``search_per_collection`` sending ``include``, then the
+    default batched ``/v1/vectors/search`` path (route off) with ``search`` sending ``include``. Each phase
+    builds its own world in its own undo scope, and each must turn the row red."""
+    for route in (True, False):
+        workdir = tmp_path / ("route" if route else "batched")
+        workdir.mkdir()
+        with pytest.MonkeyPatch.context() as mp:
+            _every_exclude_row_goes_red_when_a_read_path_ignores_the_posture(surface, mp, workdir, route=route)
 
 
 # --------------------------------------------------------------------------- #
