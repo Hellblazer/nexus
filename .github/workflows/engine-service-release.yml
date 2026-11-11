@@ -298,6 +298,26 @@ jobs:
       ASSET: nexus-service-${{ matrix.target.arch }}
 
     steps:
+      # labrun-owz: fail at once, naming the binary, when the pool host lacks one this job
+      # needs, instead of a red deep in the run (a missing uuidgen reached the tests first).
+      # The macOS pool leg (lab-mac-m or hellmini); every name checked on hellmini 2026-11-11. Runs on the pool only: a hosted fallback (NX_CI_POOL=off, a fork PR, a hosted
+      # matrix leg) provisions its own tools. The list is kept here, next to the step;
+      # tests/test_ci_host_probe.py keeps it non-empty. Why each name is listed:
+      #   bash git curl tar shasum: checkout, GraalVM and asset fetch, digests
+      #   uuidgen codesign security: service/deploy/mac-sign.sh signs the binary
+      - name: Host binaries present (labrun-owz)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          NX_CI_HOST_BINARIES: bash git curl tar shasum uuidgen codesign security
+        run: |
+          set -u
+          [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
+          missing=0
+          for b in $NX_CI_HOST_BINARIES; do
+            command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          exit "$missing"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
       - name: Set up GraalVM 25.0.3
@@ -839,6 +859,25 @@ jobs:
     permissions:
       contents: read
     steps:
+      # labrun-owz: fail at once, naming the binary, when the pool host lacks one this job
+      # needs, instead of a red deep in the run (a missing uuidgen reached the tests first).
+      # hellmini; every name checked there 2026-11-11. Runs on the pool only: a hosted fallback (NX_CI_POOL=off, a fork PR, a hosted
+      # matrix leg) provisions its own tools. The list is kept here, next to the step;
+      # tests/test_ci_host_probe.py keeps it non-empty. Why each name is listed:
+      #   bash curl tar shasum: fetch, unpack and digest the built binary for native-smoke.sh
+      - name: Host binaries present (labrun-owz)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          NX_CI_HOST_BINARIES: bash curl tar shasum
+        run: |
+          set -u
+          [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
+          missing=0
+          for b in $NX_CI_HOST_BINARIES; do
+            command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          exit "$missing"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
       - name: Download the mac-arm64 binary the build leg uploaded
@@ -949,6 +988,29 @@ jobs:
       # (Linux legs never touch this var — harmless no-op there).
       MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
+      # labrun-owz: fail at once, naming the binary, when the pool host lacks one this job
+      # needs, instead of a red deep in the run (a missing uuidgen reached the tests first).
+      # The macOS pool leg (lab-mac-m or hellmini); every name checked on hellmini 2026-11-11. Runs on the pool only: a hosted fallback (NX_CI_POOL=off, a fork PR, a hosted
+      # matrix leg) provisions its own tools. The list is kept here, next to the step;
+      # tests/test_ci_host_probe.py keeps it non-empty. Why each name is listed:
+      #   bash git curl tar shasum: checkout, source fetch, digests
+      #   make cc and the Homebrew bison/flex kegs: scripts/build_pg_bundle.sh
+      - name: Host binaries present (labrun-owz)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          NX_CI_HOST_BINARIES: bash git curl tar shasum make cc
+        run: |
+          set -u
+          [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
+          missing=0
+          for b in $NX_CI_HOST_BINARIES; do
+            command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          for k in bison flex; do
+            [ -x "/opt/homebrew/opt/$k/bin/$k" ] || { echo "host missing: Homebrew $k keg (/opt/homebrew/opt/$k)"; missing=1; }
+          done
+          exit "$missing"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
       # nexus-m8au7: PG_VERSION + PGVECTOR_VERSION are pinned constants that

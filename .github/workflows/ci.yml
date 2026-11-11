@@ -656,10 +656,20 @@ jobs:
     steps:
       # labrun-owz: fail at once, naming the binary, when the pool host lacks one this job
       # needs, instead of a red deep in the run (a missing uuidgen reached the tests first).
-      # Linux pool (lab-6c18g); every name checked on chas and qwent 2026-11-11 (lsof is absent on chas and is not required). The list is kept here, next to the step; tests/test_ci_host_probe.py keeps it non-empty.
+      # Linux pool (lab-6c18g); every name checked on chas and qwent 2026-11-11. Runs on the pool only: a hosted fallback (NX_CI_POOL=off, a fork PR, a hosted
+      # matrix leg) provisions its own tools. The list is kept here, next to the step;
+      # tests/test_ci_host_probe.py keeps it non-empty. Why each name is listed:
+      #   bash git curl tar gzip xz unzip: checkout, uv, and the PG-bundle and model fetch-and-unpack steps
+      #   python3: the bare-python3 steps (scripts/ddl_ratchet.py and others)
+      #   rg: the docs and lint tests; the pool has no sudo to apt-install it (see the ripgrep step)
+      #   ps pgrep setsid flock timeout ipcs: the suite's process control, suite lease and xdist shm cap
+      #   uuidgen: the session-id tests (the labrun-owz incident); shellcheck: the gates that fail on CI without it
+      #   sha256sum: bundle and artifact digests. lsof is absent on chas; the tests that use it guard for it
       - name: Host binaries present (labrun-owz)
+        if: runner.environment == 'self-hosted'
+        shell: bash
         env:
-          NX_CI_HOST_BINARIES: bash git curl tar gzip xz unzip ps pgrep setsid flock timeout ipcs uuidgen shellcheck sha256sum
+          NX_CI_HOST_BINARIES: bash git curl tar gzip xz unzip python3 rg ps pgrep setsid flock timeout ipcs uuidgen shellcheck sha256sum
         run: |
           set -u
           [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
@@ -2397,16 +2407,26 @@ jobs:
     steps:
       # labrun-owz: fail at once, naming the binary, when the pool host lacks one this job
       # needs, instead of a red deep in the run (a missing uuidgen reached the tests first).
-      # macOS pool (lab-mac-s); every name checked on hellmini 2026-11-11. The list is kept here, next to the step; tests/test_ci_host_probe.py keeps it non-empty.
+      # macOS pool (lab-mac-s); every name checked on hellmini 2026-11-11. Runs on the pool only: a hosted fallback (NX_CI_POOL=off, a fork PR, a hosted
+      # matrix leg) provisions its own tools. The list is kept here, next to the step;
+      # tests/test_ci_host_probe.py keeps it non-empty. Why each name is listed:
+      #   bash git curl tar shasum: checkout and the bundle fetch and digest; python3: the bare-python3 steps
+      #   make cc and the Homebrew bison/flex kegs: scripts/build_pg_bundle.sh on a cache miss
+      #   uuidgen: the session-id tests
       - name: Host binaries present (labrun-owz)
+        if: runner.environment == 'self-hosted'
+        shell: bash
         env:
-          NX_CI_HOST_BINARIES: bash git curl tar shasum uuidgen
+          NX_CI_HOST_BINARIES: bash git curl tar shasum uuidgen python3 make cc
         run: |
           set -u
           [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
           missing=0
           for b in $NX_CI_HOST_BINARIES; do
             command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          for k in bison flex; do
+            [ -x "/opt/homebrew/opt/$k/bin/$k" ] || { echo "host missing: Homebrew $k keg (/opt/homebrew/opt/$k)"; missing=1; }
           done
           exit "$missing"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
