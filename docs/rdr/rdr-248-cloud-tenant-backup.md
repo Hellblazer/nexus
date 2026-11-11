@@ -222,8 +222,9 @@ reading one snapshot:
    so the network sets a page's time). The response carries the page's last key and a SHA-256 of the
    page; a table's first page also carries the table's row count in the snapshot.
 3. `DELETE /v1/tenant/export/{id}`, or expiry: the session closes, the transaction ends and the snapshot is
-   released. A session idle past a bound (minutes) or older than a ceiling is closed by the engine, so an
-   abandoned export cannot hold the snapshot, which pins the vacuum horizon for the whole database while
+   released. A session idle past 10 minutes, or older than 60 minutes, is closed by the engine, so an
+   abandoned export cannot hold the snapshot (Sam, 2026-11-11: "60 minutes"; an export that would need
+   longer fails loudly and names the limit, instead of holding the snapshot past what A5 observed), which pins the vacuum horizon for the whole database while
    it lives. The bounds must sit inside any `idle_in_transaction_session_timeout` the cloud sets for the
    engine role (A7).
 Because each page names where it ended, a client that loses a request asks again from the same key: a
@@ -483,9 +484,11 @@ exercised once per release in an announced window.
 
 For tenant `nexus` (the largest): a 3.82 GB file. The database reads it in about 83 s, so an export's time
 is the cloud edge's transfer rate: about 6 minutes at 10 MB/s, about 21 minutes at 3 MB/s. The first
-cloud round trip (Activation Step 2) records the real rate. Session bounds: idle 10 minutes, total 2
-hours, refused-with-retry when an engine already has its cap of concurrent sessions; the 60-minute hold
-measured in A5 shows the shared database tolerates that.
+cloud round trip (Activation Step 2) records the real rate. Export session bounds: idle 10 minutes,
+total 60 minutes (Sam, 2026-11-11), refused-with-retry when an engine already has its cap of concurrent
+sessions. 60 minutes is the hold A5 observed as benign at that window's write rate; an export that
+would run longer fails, naming the limit. The import session's bounds are settled in the Phase 2 design
+(nexus-csayy.5).
 
 ## Finalization Gate
 
@@ -554,3 +557,4 @@ tenants. Nothing to trim.
 - 2026-11-11: Gate round 1 — BLOCKED (2 Critical, 6 Significant, 2 ship-blocker(s)); critique `nexus_rdr/248-gate-critique-2026-11-11-r1` (gated commit in T2 `nexus_rdr/248-gate-latest`'s prior chain).
 - 2026-11-11: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); critique `nexus_rdr/248-gate-critique-2026-11-11-r2`, fix check `nexus_rdr/248-fix-check-6c291f8ba` (gated commit in T2 `nexus_rdr/248-gate-latest`).
 - 2026-11-11: Accepted by Sam, with export first and restore next, and the restore load's block on tenant create bounded (folded into the Implementation Plan and Risks).
+- 2026-11-11: Export session total bound set to 60 minutes (Sam, by dialog via halcyon: "60 minutes"; a larger export fails loudly and names the limit); amended under standing grant 3.
