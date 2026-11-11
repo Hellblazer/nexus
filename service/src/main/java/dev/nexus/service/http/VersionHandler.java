@@ -51,6 +51,8 @@ import java.util.function.Supplier;
  *  "catalog_stub_metadata_supported":true,
  *  "chash_conformance_constraints_supported":true,
  *  "catalog_manifest_foreign_collection_supported":true,
+ *  "catalog_index_run_census_supported":true,
+ *  "catalog_next_seq_drift_read_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -632,6 +634,30 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-f3yqd capability advertisement: does {@code GET /v1/catalog/index-run/census?limit=N} answer the stale
+     * index-run fences, the unstamped-document baseline and the failed documents with ownerless chunks that {@code nx
+     * doctor} otherwise reads from a walk of every document?
+     *
+     * <p>A route, so an old engine answers 404 and a client can tell; the flag lets the doctor learn it from {@code
+     * /version} first. Always present, always {@code true} on an engine carrying the change. Cloud clients see it only
+     * once the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff;
+     * engine-release pre-tag check 3e).
+     */
+    static void appendCatalogIndexRunCensusCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_index_run_census_supported\":true");
+    }
+
+    /**
+     * nexus-f3yqd capability advertisement: does {@code GET /v1/catalog/owners/next_seq_drift?limit=N} list the owners
+     * whose {@code next_seq} trails their highest child without flooring them (the read-only form of {@code POST
+     * /owners/sweep_next_seq_drift})? A flag of its own, separate from the census's. Always present, always {@code true}
+     * on an engine carrying the change; cloud clients see it only once the public edge allowlists it.
+     */
+    static void appendCatalogNextSeqDriftReadCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_next_seq_drift_read_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -844,6 +870,9 @@ public final class VersionHandler implements HttpHandler {
         appendCatalogManifestForeignCollectionCapabilityField(body);
         // nexus-f3yqd (R2): POST /v1/catalog/manifest/fill, the engine-side fill job.
         appendCatalogManifestFillJobCapabilityField(body);
+        // nexus-f3yqd: GET /v1/catalog/index-run/census and GET /v1/catalog/owners/next_seq_drift (the doctor's bounded reads).
+        appendCatalogIndexRunCensusCapabilityField(body);
+        appendCatalogNextSeqDriftReadCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

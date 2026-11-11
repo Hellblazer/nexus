@@ -1692,7 +1692,7 @@ public final class CatalogRepository {
      * caller's {@code max(next_seq, high_water) + 1} degrade to plain
      * {@code next_seq + 1}.
      */
-    private static long highestChildSeq(DSLContext ctx, String tenant, String ownerPrefix) {
+    static long highestChildSeq(DSLContext ctx, String tenant, String ownerPrefix) {
         // TOMBSTONE-EXEMPT (nexus-mqd6t): tumbler allocator -- the tumbler PK
         // does not exclude tombstones, and filtering would re-issue an
         // already-taken child sequence number to a NEW document. See
@@ -1847,7 +1847,7 @@ public final class CatalogRepository {
         if (beforeSeq == null) return null;
 
         long highWater = highestChildSeq(ctx, tenant, prefix);
-        if (highWater <= beforeSeq) return Map.of();   // healthy: not drifted
+        if (!NextSeqDriftReads.drifted(beforeSeq, highWater)) return Map.of();   // healthy: not drifted (the predicate GET /owners/next_seq_drift reads)
 
         int updated = ctx.update(CATALOG_OWNERS)
             .set(CATALOG_OWNERS.NEXT_SEQ, DSL.greatest(CATALOG_OWNERS.NEXT_SEQ, DSL.val(highWater)))

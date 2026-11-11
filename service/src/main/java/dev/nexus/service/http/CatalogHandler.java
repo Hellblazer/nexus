@@ -66,6 +66,8 @@ import java.util.*;
  *   GET   /v1/catalog/manifest/foreign_collection?limit=N  live documents whose manifest names chunks outside their physical_collection (GH #1611)
  *   GET   /v1/catalog/sensitive?limit=N  the tenant's live sensitive documents, listed up to N, with the total (nexus-f3yqd)
  *   GET   /v1/catalog/stub-metadata?limit=N  per knowledge/docs collection, the PDF chunks still carrying the upload placeholder metadata, up to N (nexus-f3yqd)
+ *   GET   /v1/catalog/index-run/census?limit=N  bounded census of stale index-run fences, unstamped documents and failed documents with ownerless chunks (nexus-f3yqd)
+ *   GET   /v1/catalog/owners/next_seq_drift?limit=N  read-only list of the owners whose next_seq trails their highest child; the sweep below floors them (nexus-f3yqd)
  *   GET   /v1/catalog/manifest/section_label_fillable?limit=N  bounded count of legacy manifest rows the manifest-section-labels rung could still fill (nexus-l4hds)
  *   GET   /v1/catalog/manifest/null_collection  read-only count of pre-backfill (collection IS NULL) manifest rows (T2 nexus/chroma-residue-plan-2026-08-10 §C2)
  *   GET   /v1/catalog/chash/conformance   per-table chash width-conformance report (tenant-scoped, RDR-180 nexus-du2dw)
@@ -143,6 +145,8 @@ public final class CatalogHandler implements HttpHandler {
     private final CatalogBoundedReadRoutes boundedReads;
     /** nexus-f3yqd: {@code GET /stub-metadata}, the doctor's PDF placeholder-metadata read. */
     private final CatalogStubMetadataRoute stubMetadataRoute;
+    /** nexus-f3yqd: the two census routes of engine 0.1.190 (the index-run census, the read-only next_seq drift). */
+    private final CatalogCensusRoutes censusRoutes;
     /** nexus-f3yqd R2: the manifest fill job routes ({@link CatalogManifestFillRoutes}). */
     private final CatalogManifestFillRoutes manifestFill;
     /** The statement timeout a reconcile commit runs under: the reconcile instance's maximum runtime, never more. */
@@ -236,6 +240,8 @@ public final class CatalogHandler implements HttpHandler {
             new dev.nexus.service.db.CatalogSensitiveReads(repo), new dev.nexus.service.db.ManifestFillableCount(repo),
             new dev.nexus.service.db.ManifestForeignCollectionReads(repo));
         this.stubMetadataRoute = new CatalogStubMetadataRoute(new dev.nexus.service.db.PdfStubMetadataReads(repo));
+        this.censusRoutes = new CatalogCensusRoutes(
+            new dev.nexus.service.db.IndexRunCensusReads(repo), new dev.nexus.service.db.NextSeqDriftReads(repo));
         this.manifestFill = new CatalogManifestFillRoutes(new dev.nexus.service.db.ManifestFill(repo),
             new dev.nexus.service.db.ManifestFillableCount(repo), manifestFillJobs);
         this.combinedWriteService = combinedWriteService;
@@ -333,11 +339,13 @@ public final class CatalogHandler implements HttpHandler {
                 case "/index-run/begin-many"  -> handleIndexRunBeginMany(exchange, tenant, method);
                 case "/index-run/complete"    -> handleIndexRunComplete(exchange, tenant, method);
                 case "/index-run/fail"        -> handleIndexRunFail(exchange, tenant, method);
+                case "/index-run/census"      -> handleIndexRunCensus(exchange, tenant, method);
 
                 // ── Owners ────────────────────────────────────────────────────
                 case "/owners/upsert"         -> handleOwnerUpsert(exchange, tenant, method);
                 case "/owners/list"           -> handleOwnerList(exchange, tenant, method);
                 case "/owners/sweep_next_seq_drift" -> handleOwnersSweepNextSeqDrift(exchange, tenant, method);
+                case "/owners/next_seq_drift" -> handleNextSeqDriftRead(exchange, tenant, method);
                 case "/owners/by_repo"        -> handleOwnerByRepo(exchange, tenant, method);
                 case "/owners/by_name"        -> handleOwnerByName(exchange, tenant, method);
                 case "/owners/head_hash"      -> handleOwnerHeadHash(exchange, tenant, method);
@@ -2410,6 +2418,16 @@ public final class CatalogHandler implements HttpHandler {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         var report = repo.sweepNextSeqDrift(tenant);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(report));
+    }
+
+    /** GET /v1/catalog/owners/next_seq_drift?limit=N (nexus-f3yqd): the read-only form of the sweep above; the body is {@link CatalogCensusRoutes#nextSeqDrift}. */
+    private void handleNextSeqDriftRead(HttpExchange exchange, String tenant, String method) throws IOException {
+        censusRoutes.nextSeqDrift(exchange, tenant, method);
+    }
+
+    /** GET /v1/catalog/index-run/census?limit=N (nexus-f3yqd): the body is {@link CatalogCensusRoutes#indexRunCensus}. */
+    private void handleIndexRunCensus(HttpExchange exchange, String tenant, String method) throws IOException {
+        censusRoutes.indexRunCensus(exchange, tenant, method);
     }
 
     private void handleOwnerByRepo(HttpExchange exchange, String tenant, String method) throws IOException {

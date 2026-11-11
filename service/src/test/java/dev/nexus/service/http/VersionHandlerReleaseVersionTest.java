@@ -278,6 +278,20 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"catalog_manifest_fill_job_supported\":true");
     }
 
+    @Test
+    void versionAdvertisesTheIndexRunCensusAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogIndexRunCensusCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_index_run_census_supported\":true");
+    }
+
+    @Test
+    void versionAdvertisesTheNextSeqDriftReadAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogNextSeqDriftReadCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_next_seq_drift_read_supported\":true");
+    }
+
     // ── nexus-jypmj (RDR-232): the chash_allow restriction on the vector search routes ──
 
     @Test

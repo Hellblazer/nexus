@@ -171,6 +171,20 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         + "above 10,000 with a 400. CatalogStubMetadataRouteTest pins the envelope, the cap edges, the 400 and the "
         + "per-collection timeout";
 
+    private static final String CENSUS_DELEGATE =
+        "the handler method delegates to CatalogCensusRoutes, whose body is three buckets, each an object that carries its "
+        + "own exact count and capped flag beside a bounded example list (stale: count/capped/notes/examples; fence: the "
+        + "exact counts and post_anchor {count, capped, examples}; failed_hidden: failed {count, capped}, count, capped, "
+        + "examples), the lists never exceeding the request's limit (a 400 above 10,000); a bucket that cannot be read in "
+        + "time is {timed_out: true}, never a partial list. IndexRunCensusRouteTest pins the envelope, the cap edges, the "
+        + "400 and the per-bucket timeout";
+
+    private static final String NEXT_SEQ_DRIFT_READ_DELEGATE =
+        "the handler method delegates to CatalogCensusRoutes: {checked, drifted, limit, capped, examples}, where drifted is "
+        + "the exact number of drifted owners (every owner is examined, owners being admin-scale) and examples lists at most "
+        + "limit of them, capped when more drifted than were listed; a limit above 10,000 is a 400. NextSeqDriftReadRouteTest "
+        + "pins the envelope, the cap edge and the 400";
+
     // ── Route table (rationale-as-data, pinned classification) ─────────────
 
     record RouteSpec(String route, String handler, boolean collectionReturning,
@@ -346,11 +360,15 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         idListOk("/index-run/begin-many", "handleIndexRunBeginMany"),
         neither("/index-run/complete", "handleIndexRunComplete"),
         neither("/index-run/fail", "handleIndexRunFail"),
+        // nexus-f3yqd: a bounded census, three buckets of {count, capped, examples}; the body lives in CatalogCensusRoutes.
+        collectionExempt("/index-run/census", "handleIndexRunCensus", CENSUS_DELEGATE),
 
         // ── Owners ────────────────────────────────────────────────────────
         neither("/owners/upsert", "handleOwnerUpsert"),
         collectionExempt("/owners/list", "handleOwnerList", ADMIN_SCALE),
         collectionExempt("/owners/sweep_next_seq_drift", "handleOwnersSweepNextSeqDrift", ADMIN_SCALE),
+        // nexus-f3yqd: the read-only form of the sweep above; the body lives in CatalogCensusRoutes.
+        collectionExempt("/owners/next_seq_drift", "handleNextSeqDriftRead", NEXT_SEQ_DRIFT_READ_DELEGATE),
         neither("/owners/by_repo", "handleOwnerByRepo"),
         collectionExempt("/owners/by_name", "handleOwnerByName", ADMIN_SCALE),
         neither("/owners/head_hash", "handleOwnerHeadHash"),

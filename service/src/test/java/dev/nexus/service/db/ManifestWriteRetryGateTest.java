@@ -107,6 +107,8 @@ class ManifestWriteRetryGateTest {
         Map.entry("ReembedSourceReader", "RDR-210 Phase 6 Step 2 (nexus-f98bg): selects only (EXISTS and count over the manifest to"
             + " find a source's candidate documents and what a cutover's delete would destroy); the re-embed move"
             + " writes the manifest through CatalogRepository"),
+        Map.entry("IndexRunCensusReads", "nexus-f3yqd: a jOOQ SELECT EXISTS over the manifest (does a failed document keep any"
+            + " manifest row); it writes nothing"),
         Map.entry("ChunkOwnerLabel", "nexus-6pfgb.39: a jOOQ SELECT subquery over the manifest joined to its live document (the"
             + " owner label of a gc-audit chunk); it builds a Select and writes nothing"),
         Map.entry("ManifestFillableCount", "nexus-f3yqd: one jOOQ SELECT over the manifest joined to its live document and chunk row"
