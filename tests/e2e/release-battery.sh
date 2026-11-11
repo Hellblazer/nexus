@@ -97,6 +97,20 @@ if [ "$PLUGIN_ONLY" = 1 ]; then
   [[ "$PLUGIN_ONLY_BASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || { echo "--plugin-only wants the last client tag as vX.Y.Z (got '$PLUGIN_ONLY_BASE')" >&2; exit 2; }
 fi
+# --skip-preflight trusts an earlier preflight only when it passed on THIS HEAD with a clean tree
+# (nexus-jh1f2 review r1): release-preflight.sh writes the marker; any commit after it, or an
+# uncommitted change, means the preflight runs again (about three minutes since cut 3).
+if [ "$SKIP_PREFLIGHT" = 1 ] && [ "$PLAN_ONLY" != 1 ]; then
+  marker="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path release-preflight-verdict 2>/dev/null || true)"
+  head_now="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  dirty_now="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no 2>/dev/null || echo unknown)"
+  if [ -z "$marker" ] || [ ! -f "$marker" ] || ! grep -qx "head=$head_now" "$marker" \
+      || ! grep -qx "clean=yes" "$marker" || [ -n "$dirty_now" ]; then
+    echo "--skip-preflight: no passing preflight is recorded for HEAD ${head_now:-?} on a clean tree;" \
+      "run tests/e2e/release-preflight.sh on this commit first" >&2
+    exit 2
+  fi
+fi
 # >>> BEGIN moving-tree guard (nexus-57cvk) -- extracted verbatim by
 # tests/test_release_battery_refuses_moving_tree.py; keep both markers.
 #

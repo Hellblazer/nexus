@@ -117,6 +117,9 @@ def test_no_pytest_leg_of_the_preflight_can_queue_behind_another_run(tmp_path: P
     (root / "tests" / "e2e" / "lib" / "mandatory_pins.sh").write_text(
         "MANDATORY_PIN_MARK_EXPR=pin\nMANDATORY_PIN_EXPECTED=2\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                    "commit", "-q", "-m", "fixture"], check=True, capture_output=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "uv-calls"
@@ -135,6 +138,11 @@ def test_no_pytest_leg_of_the_preflight_can_queue_behind_another_run(tmp_path: P
     proc = subprocess.run(["bash", str(root / "tests" / "e2e" / "release-preflight.sh")],
                           capture_output=True, text=True, env=env, timeout=120, cwd=str(root))
     assert "PREFLIGHT PASSED" in proc.stdout, proc.stdout + proc.stderr
+    # nexus-jh1f2 review r1: a PASS records the HEAD it judged, for the battery's --skip-preflight.
+    git_dir = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-path", "release-preflight-verdict"],
+                             cwd=str(root), capture_output=True, text=True, check=True).stdout.strip()
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(root), capture_output=True, text=True).stdout.strip()
+    assert Path(git_dir).read_text(encoding="utf-8") == f"head={head}\nclean=yes\n"
     calls = [line.split("|", 2) for line in log.read_text(encoding="utf-8").splitlines()]
     pytest_calls = [(sub, wait, args) for sub, wait, args in calls if "pytest" in args.split()]
     # ci-evidence-contexts, mandatory-pins (collect + run), pin-tests: four calls, counted so a leg

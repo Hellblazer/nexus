@@ -129,6 +129,13 @@ class _Battery:
     def ran_legs(self) -> set[str]:
         return {p.name for p in self.ran.iterdir()}
 
+    def record_preflight_pass(self, *, head: str | None = None, clean: str = "yes") -> None:
+        """Write the verdict marker release-preflight.sh writes on a PASS (nexus-jh1f2 review r1)."""
+        def git(*a: str) -> str:
+            return subprocess.run(["git", *a], cwd=self.root, capture_output=True, text=True, check=True).stdout.strip()
+        marker = Path(git("rev-parse", "--path-format=absolute", "--git-path", "release-preflight-verdict"))
+        marker.write_text(f"head={head or git('rev-parse', 'HEAD')}\nclean={clean}\n")
+
 
 @pytest.fixture()
 def battery(tmp_path: Path) -> _Battery:
@@ -420,8 +427,34 @@ def test_skip_preflight_does_not_compose_with_plugin_only(battery: _Battery) -> 
     assert battery.ran_legs() == set()
     r = battery.run("--skip-preflight", "--plugin-only", _TAG)  # either order
     assert r.returncode == 2 and battery.ran_legs() == set(), (r.stdout, r.stderr)
+    battery.record_preflight_pass()
     r = battery.run("--skip-preflight", "--only", "mvv")  # the full battery still allows it
     assert r.returncode == 0, (r.stdout, r.stderr)
+
+
+# ── nexus-jh1f2 review r1: --skip-preflight needs a preflight PASS on this HEAD, clean ─────────────────
+
+
+def test_skip_preflight_runs_after_a_pass_on_this_head(battery: _Battery) -> None:
+    battery.record_preflight_pass()
+    r = battery.run("--skip-preflight", "--only", "mvv")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "preflight" not in battery.ran_legs()
+
+
+@pytest.mark.parametrize("how", ["no-marker", "other-head", "dirty-at-preflight", "dirty-now"])
+def test_skip_preflight_refuses_without_a_pass_on_this_clean_head(battery: _Battery, how: str) -> None:
+    if how == "other-head":
+        battery.record_preflight_pass(head="0" * 40)
+    elif how == "dirty-at-preflight":
+        battery.record_preflight_pass(clean="no")
+    elif how == "dirty-now":
+        battery.record_preflight_pass()
+        (battery.root / "scripts" / "check_plugin_only_eligibility.py").write_text("# changed after the preflight\n")
+    r = battery.run("--skip-preflight", "--only", "mvv")
+    assert r.returncode == 2, (how, r.stdout, r.stderr)
+    assert "no passing preflight is recorded" in r.stderr
+    assert battery.ran_legs() == set()
 
 
 # ── nexus-z7ddd: the plugin out-of-repo gate leg ──────────────────────────────────────────────────────

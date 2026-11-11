@@ -136,6 +136,12 @@ check () { # name, command...
 # remedy is a whole new tag rather than a retry.
 git fetch --tags --force --quiet origin 2>/dev/null || echo "  [warn] could not fetch remote refs -- tag/branch checks may be stale"
 
+# The verdict marker (nexus-jh1f2 review r1): a PASS records the HEAD it judged and whether the
+# tree was clean, and the battery's --skip-preflight refuses unless that HEAD is the one it is
+# about to test on a clean tree. Cleared first, so a red or an interrupted run leaves no pass behind.
+VERDICT_MARKER="$(git rev-parse --path-format=absolute --git-path release-preflight-verdict 2>/dev/null || true)"
+[ -z "$VERDICT_MARKER" ] || rm -f "$VERDICT_MARKER"
+
 echo "== release preflight =="
 
 # 1. Merge-blocking on EVERY PR to main -- an unacknowledged ## Unshipped entry
@@ -233,5 +239,9 @@ fi
 if [ "$SKIP" -gt 0 ]; then
   echo "PREFLIGHT UNVERIFIED -- a dependency was absent; 'could not check' is not 'fine'."
   exit 2
+fi
+if [ -n "$VERDICT_MARKER" ]; then
+  if [ -z "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then clean=yes; else clean=no; fi
+  printf 'head=%s\nclean=%s\n' "$(git rev-parse HEAD)" "$clean" > "$VERDICT_MARKER"
 fi
 echo "PREFLIGHT PASSED"
