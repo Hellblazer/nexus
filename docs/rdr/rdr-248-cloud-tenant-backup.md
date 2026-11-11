@@ -470,3 +470,4 @@ tenants. Nothing to trim.
 ## Revision History
 
 - 2026-11-11: draft; local spikes (two rounds) and a read-only cloud window settled A1-A7.
+- 2026-11-11: Gate round 1 — BLOCKED (2 Critical, 6 Significant, 2 ship-blocker(s)); commit `38a119ab9`; critique `nexus_rdr/248-gate-critique-2026-11-11-r1`.
