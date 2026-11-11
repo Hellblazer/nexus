@@ -3415,8 +3415,9 @@ def _search_render(
         cluster_by: "semantic" for topic/Ward clustering (default), empty to disable
         topic: Pre-filter to documents in this topic label (from nx taxonomy discover)
         structured: Return the ``{ids, tumblers, distances, hybrid_scores, collections,
-            chunk_collections, chunk_text_hash}`` dict (plus ``also_in`` when a row stands for
-            identical chunks in other collections, GH #1524) instead of human-readable string.  Used by the plan runner so ``$stepN.ids``
+            chunk_collections, chunk_text_hash}`` dict (plus ``also_in``/``also_in_ids`` when a
+            row stands for identical chunks in other collections, and ``next_offset`` when more
+            rows may follow; GH #1524) instead of human-readable string.  Used by the plan runner so ``$stepN.ids``
             references resolve to actual chunk IDs.
         threshold: Override the per-collection distance threshold uniformly
             (raw cosine distance, lower is stricter). Pass ``float('inf')``
@@ -3774,8 +3775,13 @@ def _search_render(
                 **({"chash_allow_dropped": _chash_allow_dropped(diag)} if _chash_allow_dropped(diag) else {}),
                 # GH #1524: aligned with ``ids``; present only when a row stands for a chunk other
                 # collections hold too, so a page with no copies keeps its documented shape.
-                **({"also_in": [list(r.metadata.get("also_in", [])) for r in shown]}
-                   if any(r.metadata.get("also_in") for r in shown) else {}),
+                **({"also_in": [list(r.metadata.get("also_in", [])) for r in shown],
+                    "also_in_ids": [list(r.metadata.get("also_in_ids", [])) for r in shown]}
+                   if any(r.metadata.get("also_in") or r.metadata.get("also_in_ids") for r in shown) else {}),
+                # The text footer's "next"/"may have more", for a caller of the dict: present when more
+                # rows may follow this page, so a page the collapse left short is never read as the end.
+                **({"next_offset": offset + len(page)}
+                   if (offset + len(page) < total or not exhausted) else {}),
                 **posture.structured_keys(),
             }
 
@@ -3920,8 +3926,9 @@ def search(
         description=(
             "Return the {ids, tumblers, distances, hybrid_scores, collections, "
             "chunk_collections, chunk_text_hash} dict instead of the human-readable "
-            "string (plus also_in, aligned with ids, when a row stands for identical "
-            "chunks in other collections); the plan runner uses this so $stepN.ids resolves."
+            "string (plus also_in and also_in_ids, aligned with ids, when a row stands for "
+            "identical chunks in other collections, and next_offset when more rows may "
+            "follow); the plan runner uses this so $stepN.ids resolves."
         ),
     )] = False,
     threshold: Annotated[float | None, Field(
@@ -3971,10 +3978,14 @@ def search(
       page: text applies a per-file diversity cap, the dict does not.
     - A chunk whose text is identical in several collections is returned once,
       the best-ranked copy, with the other collections named: an `also in:`
-      line in the text, and `also_in` (a list per row, aligned with `ids`,
-      `[]` for a row no other collection holds) in the dict, present only when
-      some row on the page has copies. A copy that is sensitive makes the
-      returned row sensitive and is not named.
+      line in the text, and `also_in` and `also_in_ids` (the other collections
+      and the copies' ids, one list per row, aligned with `ids`, `[]` for a row
+      with no copy) in the dict, present only when some row on the page has
+      copies. A copy that is sensitive makes the returned row sensitive and is
+      not named.
+    - The dict carries `next_offset` when more rows may follow the page (the
+      text footer's "next" or "may have more"); its absence means the page is
+      the last. A page can hold fewer than `limit` rows and still have one.
     """
     # nexus-zdzm5: the documented page cap was not enforced; limit=301
     # returned 301 rows (118 KB). Refuse, and say how to page instead.

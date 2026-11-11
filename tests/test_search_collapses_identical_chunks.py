@@ -172,3 +172,50 @@ def test_a_sensitive_copy_withholds_the_row_it_collapses_into_end_to_end(run, mo
     assert out.get("sensitive_withheld") == 1, out
     text, _ = run()
     assert "knowledge__medical" not in text and "text of c1" not in text, text
+
+
+def test_structured_rows_name_the_dropped_copies_documents_like_query(run) -> None:
+    out, _ = run(structured=True)
+    assert out["also_in_ids"] == [["c2", "c4", "c5"], []], out
+
+
+def _paged(monkeypatch: pytest.MonkeyPatch, n_rows: int, offsets: list[int]) -> list[dict]:
+    def fake(query: str, target: list[str], **kw: Any) -> list[SearchResult]:
+        return _hundred_with_five_copies(min(kw["n_results"], n_rows))
+
+    monkeypatch.setattr("nexus.search_engine.search_cross_corpus", fake)
+    core._page_cache_invalidate()
+    try:
+        return [core.search(query="q", corpus="rdr", threshold=float("inf"), structured=True, offset=o, limit=10)
+                for o in offsets]
+    finally:
+        core._page_cache_invalidate()
+
+
+def test_a_structured_page_says_where_the_next_page_starts(run, monkeypatch: pytest.MonkeyPatch) -> None:
+    (page,) = _paged(monkeypatch, 100, [0])
+    assert page["next_offset"] == 10, page
+
+
+def test_the_last_structured_page_has_no_next_offset(run, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 30 rows, 5 of them copies of one chunk: 26 distinct rows, so offset 20 is the last page.
+    (page,) = _paged(monkeypatch, 30, [20])
+    assert len(page["ids"]) == 6 and "next_offset" not in page, page
+
+
+def test_following_next_offset_reaches_every_row(run, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake(query: str, target: list[str], **kw: Any) -> list[SearchResult]:
+        return _hundred_with_five_copies(kw["n_results"])
+
+    monkeypatch.setattr("nexus.search_engine.search_cross_corpus", fake)
+    core._page_cache_invalidate()
+    seen: list[str] = []
+    off: int | None = 0
+    try:
+        while off is not None and len(seen) < 200:
+            page = core.search(query="q", corpus="rdr", threshold=float("inf"), structured=True, offset=off, limit=10)
+            seen += page["ids"]
+            off = page.get("next_offset")
+    finally:
+        core._page_cache_invalidate()
+    assert seen == ["c0"] + [f"c{i}" for i in range(5, 100)], (len(seen), seen[-3:])
