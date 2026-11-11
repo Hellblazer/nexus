@@ -1263,12 +1263,12 @@ Neither is a pass.
 uncommitted or untracked paths, and refuses `--skip-preflight`):
 
 ```bash
+lab-remote -c lab-l -- python3 scripts/watched_pytest.py --stall 180 --status /tmp/fastlane-X.Y.N.json -- uv run pytest -n auto   # the unit suite: a hand step, SERIAL to the battery (Common Mistakes), not a leg; the status file stays outside the worktree
 tests/e2e/release-battery.sh --plugin-only vX.Y.Z
 ```
 
-No hand unit suite (nexus-jh1f2 cut 5): PR CI's shards run it on this tree. The
-battery runs the eligibility gate again, then the preflight (the pin tests; the
-lint bucket runs in PR CI's `test-lint`), the
+The battery runs the eligibility gate again, then the preflight (the pin tests; the
+lint bucket left it, nexus-jh1f2 cut 3, and runs in PR CI's `test-lint`), the
 hook-CLI skew leg and the plugin-lockstep leg. `lsg`, `pkgup`, `mvv`, `dual` and
 `resolve` are shown as `SKIPPED(plugin-only: ...)`, never omitted, and the closing
 line names the mode and the skipped count; a plain `RELEASE BATTERY PASSED` is
@@ -1353,7 +1353,7 @@ push its tags once their gates are green (engine-release skill Step 4 states the
 - **Freehanding a version surface or a tag from memory of AGENTS.md instead of invoking this skill.** It skips the pre-push and post-publish verification that catches a failed publish (v4.32.13: the tag's workflow failed, PyPI was skipped, and the release was declared done anyway). Invoke `release` (or `engine-release`) before touching either.
 - **Bumping only `pyproject.toml` and missing the four plugin manifests.** CI parity check catches this late. Run the Step 8 pre-push check.
 - **Merging a release PR whose integration shards did not all run.** On a pull request into main, CI runs every integration file in three shards (nexus-jh1f2 cut 4); `pytest-gate` needs all three green. A release PR CI where `pytest (integration, affected, shard k/3)` is missing or skipped is not evidence: re-run it.
-- **Running the full unit suite CONCURRENTLY with the E2E gates** (if you run one by hand at all; the release path no longer does, nexus-jh1f2 cut 5). (2026-08-17, 7.9.0 battery.) The E2E gates parallelize safely among THEMSELVES, but their teardown phases (`nx daemon service stop --with-pg`, gate cleanup, the engine-substrate orphan sweep) share a machine-wide blast radius with the unit suite's self-provisioned engine substrates — the suite ran clean to ~75% then block-failed the moment a sandbox teardown fired. Sequence: E2E gates in parallel, the unit suite SERIAL (before or after). A block-shaped mass failure under concurrency is contention-shaped, but the quiet re-run of the failed set is mandatory evidence either way.
+- **Running the full unit suite CONCURRENTLY with the E2E gates** (the plugin-only lane still runs one by hand; the full release path no longer does, nexus-jh1f2 cut 5). (2026-08-17, 7.9.0 battery.) The E2E gates parallelize safely among THEMSELVES, but their teardown phases (`nx daemon service stop --with-pg`, gate cleanup, the engine-substrate orphan sweep) share a machine-wide blast radius with the unit suite's self-provisioned engine substrates — the suite ran clean to ~75% then block-failed the moment a sandbox teardown fired. Sequence: E2E gates in parallel, the unit suite SERIAL (before or after). A block-shaped mass failure under concurrency is contention-shaped, but the quiet re-run of the failed set is mandatory evidence either way.
 - **Using `gh release create` after `git push origin vX.Y.Z`.** Duplicate release. The Release workflow already creates one.
 - **Forgetting `uv sync`.** `uv.lock` not updated; CI fails or local install resolves differently.
 - **Forgetting the coordinated install after tag-push (Step 12).** Local `nx` stays on the old version; the post-merge "verify locally" step lies. The opposite slip is also a mistake: running `scripts/reinstall-tool.sh` or `nx upgrade` in one session while others are live.
