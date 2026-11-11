@@ -24,5 +24,11 @@ def test_capture_against_the_local_engine(t2_service_env) -> None:
     sys.modules["agent_error_probes"] = aep
     spec.loader.exec_module(aep)
     assert aep.local_engine_refusal() == "", "the fixture must give a local engine"
+    # An empty engine answers a search with "no collections match" before it checks `where`:
+    # seed one note in this test tenant so the search probes reach their own errors.
+    from nexus.mcp.core import store_put  # noqa: PLC0415 — the tool itself, in this process
+
+    seeded = store_put(content="Attention mechanisms and consensus, a seed note.", collection="probe-seed", title="seed")
+    assert str(seeded).startswith("Stored"), seeded
     out = Path(os.environ.get("NX_PROBE_OUT", "probe-errors.json")).resolve()
     assert aep.capture(out) == 0, out.read_text() if out.exists() else "no output"
