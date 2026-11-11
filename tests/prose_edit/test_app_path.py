@@ -400,3 +400,48 @@ def test_teach_decided_is_not_measurable_when_t1_held_a_query_or_paragraph(count
     t1 = _script("review", "render", "r1", {"counts": counts})
     got, note = tt.T.check_decided([], None, t1)              # t2 asked question 1 and did not apply
     assert got == verdict, note
+
+
+# ---------------------------------------------------------------------------
+# A first turn with a query: question 1 comes first, so the apply moves to the confirmation turn (step 11 Branch A)
+# ---------------------------------------------------------------------------
+
+def _read_turn(tid: str) -> list[dict]:
+    return _app_turn(tid, {})[:4]                            # list_suggestions and decisions --from-file, no apply
+
+
+def _confirm_turn(tid: str, real: dict) -> list[dict]:
+    return (_script("review", "apply", f"{tid}y", {"dry_run": True}, "--work /w --accept 2 --dry-run")
+            + _script("review", "apply", f"{tid}p", real, "--work /w --accept 2"))
+
+
+def _d_query_runs(answer: list[dict], confirm: list[dict]) -> dict[str, list[dict]]:
+    return {"d1": _script("brief", "filter", "f1", EDITS2)
+            + _script("review", "render", "r1", {"counts": {"edits": 2, "queries": 1}}),
+            "d2": answer, "d2c": confirm}
+
+
+REAL_D = {"applied": [{"n": 2}], "rejected": [1], "held": [], "rejections_stored": True}
+
+
+def test_with_a_query_the_control_passes_when_the_answer_reads_the_app_and_the_confirmation_applies() -> None:
+    rows = _rows(_review_verdicts(), _d_query_runs(_read_turn("d2"), _confirm_turn("c", REAL_D)))
+    assert rows["d2"][0] == "PASS" and "deferred" in rows["d2"][1], rows
+
+
+def test_with_a_query_an_answer_turn_that_never_read_the_app_fails() -> None:
+    rows = _rows(_review_verdicts(), _d_query_runs([], _confirm_turn("c", REAL_D)))
+    assert rows["d2"][0] == "FAIL" and "list_suggestions" in rows["d2"][1], rows
+
+
+def test_with_a_query_an_apply_before_question_1_fails() -> None:
+    early = _read_turn("d2") + _script("review", "apply", "e", REAL_D, "--work /w --accept 2")
+    rows = _rows(_review_verdicts(), _d_query_runs(early, _confirm_turn("c", REAL_D)))
+    assert rows["d2"][0] == "FAIL" and "before question 1" in rows["d2"][1], rows
+
+
+def test_without_a_query_a_confirmation_turn_apply_still_fails() -> None:
+    runs = _d_query_runs(_read_turn("d2"), _confirm_turn("c", REAL_D))
+    runs["d1"] = _script("brief", "filter", "f1", EDITS2) + _script("review", "render", "r1", {"counts": {"edits": 2}})
+    rows = _rows(_review_verdicts(), runs)
+    assert rows["d2"][0] == "FAIL" and "same turn" in rows["d2"][1], rows

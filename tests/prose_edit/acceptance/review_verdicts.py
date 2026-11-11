@@ -196,6 +196,47 @@ def app_flow(events: list[Obj], *, applied: bool) -> tuple[bool, str]:
     return ok, note
 
 
+def _ordered(events: list[Obj], steps: list[tuple[str, int | None]]) -> tuple[bool, str]:
+    missing = [n for n, at in steps if at is None]
+    order = [at for _, at in steps if at is not None]
+    ok = not missing and order == sorted(order)
+    return ok, "ok" if ok else (f"BROKEN missing={missing}" if missing else "BROKEN out-of-order")
+
+
+def deferred_flow(answer: list[Obj], confirm: list[Obj]) -> tuple[bool, str]:
+    """The flow of a run whose first turn held a query or a paragraph proposal: SKILL.md step 11 Branch A asks question 1
+    and ends the answer turn after reading the app, so the answer turn has list_suggestions then `decisions --from-file`,
+    and the confirmation turn has the dry run then the real apply."""
+    read_ok, read_note = _ordered(answer, [("list_suggestions", _app_index(answer, "list_suggestions")),
+                                           ("decisions --from-file", _bash_index(answer, "review", "decisions", has="--from-file"))])
+    apply_ok, apply_note = _ordered(confirm, [("apply --dry-run", _bash_index(confirm, "review", "apply", has="--dry-run")),
+                                              ("apply", _bash_index(confirm, "review", "apply", lacks="--dry-run"))])
+    early = real_apply(answer) is not None
+    ok = read_ok and apply_ok and not early
+    return ok, f"flow=deferred(read {read_note}; confirm {apply_note}{'; applied before question 1' if early else ''})"
+
+
+def held_question(render: Obj | None) -> bool:
+    """The rendered proposal carried a query or a paragraph proposal, so question 1 comes before any apply."""
+    counts = (render or {}).get("counts") or {}
+    return bool(counts.get("queries") or counts.get("paragraphs"))
+
+
+def answer_and_apply(first: list[Obj], answer: list[Obj], confirm: list[Obj]) -> tuple[Obj | None, bool, str]:
+    """The apply that settled an app-decided answer, whether the flow was right, and its note. With question 1 to ask
+    (the first turn rendered a query or a paragraph proposal) the apply belongs to the confirmation turn; otherwise to
+    the answer turn itself, and a confirmation-turn apply is a stray."""
+    if held_question(last(first, "review", "render")):
+        flow_ok, flow_note = deferred_flow(answer, confirm)
+        return real_apply(confirm), flow_ok, flow_note
+    flow_ok, flow_note = app_flow(answer, applied=True)
+    if real_apply(answer) is None and real_apply(confirm) is not None:
+        flow_note += (" applied only after a confirmation turn: the run was App-decided with no question to ask, so it must"
+                      " apply in the same turn")
+        flow_ok = False
+    return real_apply(answer), flow_ok, flow_note
+
+
 def answer_turn(events: list[Obj]) -> tuple[bool, str]:
     """The author's answer ends at the echo: a dry run was shown and nothing was applied yet."""
     echoed, applied = dry_apply(events), real_apply(events)
@@ -211,7 +252,9 @@ def clean(events: list[Obj]) -> tuple[bool, str]:
 def check_a(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     a1, a2, a3, a4 = (runs.get(k, []) for k in ("a1", "a2", "a3", "a4"))
-    filt1, render1, apply2 = last(a1, "brief", "filter"), last(a1, "review", "render"), real_apply(a2)
+    filt1, render1 = last(a1, "brief", "filter"), last(a1, "review", "render")
+    a2c = runs.get("a2c", [])
+    apply2, flow_ok, flow_note = answer_and_apply(a1, a2, a2c)
     ok, note = clean(a1)
     out.append(("a1", "PASS" if ok and filt1 and render1 and render1.get("counts", {}).get("edits", 0) >= 2 else "FAIL",
                 f"filtered={bool(filt1)} rendered={bool(render1)} {note}"))
@@ -219,16 +262,11 @@ def check_a(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
     if filt1 and apply2:
         by_n = {e["n"]: e["old"] for e in filt1.get("edits", [])}
         rejected_old = [by_n[n] for n in apply2.get("rejected", []) if n in by_n]
-    ok, note = clean(a2)
-    flow_ok, flow_note = app_flow(a2, applied=True)
-    stray = real_apply(runs.get("a2c", []))  # the skill asked "Apply" instead of applying an App-decided run
+    ok, note = clean(a2 + a2c)
     applied_n = [e["n"] for e in (apply2 or {}).get("applied", [])]
     good = bool(apply2 and applied_n == [1] and rejected_old and apply2.get("rejections_stored") is True)
-    out.append(("a2", "PASS" if ok and flow_ok and good and not stray else "FAIL",
-                f"{flow_note} applied={applied_n} rejected={(apply2 or {}).get('rejected')}"
-                + (" applied only after a confirmation turn: the run was App-decided, so it must apply in the same turn"
-                   if stray and not apply2 else "")
-                + f" {note}"))
+    out.append(("a2", "PASS" if ok and flow_ok and good else "FAIL",
+                f"{flow_note} applied={applied_n} rejected={(apply2 or {}).get('rejected')} {note}"))
     filt3 = last(a3, "brief", "filter")
     ok, note = clean(a3)
     if not filt3:
@@ -255,6 +293,10 @@ def check_a(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
             out.append(("a3", "PASS" if ok else "FAIL", detail))
     apply4 = real_apply(runs.get("a4c", []))
     ok, note = clean(a4)
+    if filt3 is not None and not filt3.get("edits"):
+        # a3 kept no edit, so it sent the app nothing to hold and "reviewed" answers a3's query question
+        out.append(("a4", "NOT-MEASURABLE", f"a3 kept no edit after the filter, so the app held nothing to leave pending; {note}"))
+        return out
     held_back, echo_note = answer_turn(a4)
     flow_ok, flow_note = app_flow(a4, applied=False)
     out.append(("a4", "PASS" if ok and held_back and flow_ok and apply4 and not apply4.get("rejected") and not apply4.get("applied")
@@ -335,16 +377,16 @@ def check_d(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
     out = [("d1", "PASS" if d1_ok else "FAIL",
             f"filtered={bool(filt1)} rendered={bool(render1)} edits={(render1 or {}).get('counts', {}).get('edits')} "
             f"unplaced_of_1_2={unplaced1} {note}")]
-    apply2 = real_apply(d2)
-    ok, note = clean(d2)
-    flow_ok, flow_note = app_flow(d2, applied=True)
+    d2c = runs.get("d2c", [])
+    apply2, flow_ok, flow_note = answer_and_apply(d1, d2, d2c)
+    ok, note = clean(d2 + d2c)
     applied_n = [e["n"] for e in (apply2 or {}).get("applied", [])]
     rejected_n = (apply2 or {}).get("rejected", [])
     if 1 in applied_n:
         verdict = "FAIL"
         why = "edit 1 was applied: the app rejected it, so the run followed the chat or its own prior, not the app"
     elif apply2 is None:
-        verdict, why = "FAIL", "no real apply in the answer turn"
+        verdict, why = "FAIL", "no real apply where the flow puts it"
     else:
         good = applied_n == [2] and 1 in rejected_n and apply2.get("rejections_stored") is True
         verdict = "PASS" if ok and flow_ok and good else "FAIL"
@@ -358,7 +400,7 @@ GROUPS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "a": (("a1", "a2", "a3", "a4"), ("a1", "a2", "a2c", "a3", "a4", "a4c")),
     "b": (("b1", "b2", "b3", "b4"), ("b1", "b2", "b3", "b4", "b4c")),
     "c": (("c1", "c2"), ("c1", "c2", "c2c")),
-    "d": (("d1", "d2"), ("d1", "d2")),
+    "d": (("d1", "d2"), ("d1", "d2", "d2c")),
 }
 CHECKS = {"a": check_a, "b": check_b, "c": check_c, "d": check_d}
 
