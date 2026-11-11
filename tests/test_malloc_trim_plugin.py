@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests import _malloc_trim
+from tests._module_seam import setattr_in
 
 _GLIBC_ONLY = pytest.mark.skipif(
     not sys.platform.startswith("linux") or platform.libc_ver()[0] != "glibc", reason="malloc_trim is glibc only",
@@ -51,14 +52,14 @@ def test_no_trim_function_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_off_linux_there_is_no_trim(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_malloc_trim.sys, "platform", "darwin")
+    setattr_in(monkeypatch, _malloc_trim, "sys.platform", "darwin")
     assert _malloc_trim._load_trim() is None
 
 
 def test_the_off_switch_means_no_trim(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_malloc_trim.sys, "platform", "linux")
+    setattr_in(monkeypatch, _malloc_trim, "sys.platform", "linux")
     monkeypatch.setenv("NX_TEST_MALLOC_TRIM", "0")
-    monkeypatch.setattr(_malloc_trim.ctypes, "CDLL", lambda _name: pytest.fail("loaded libc despite the off switch"))
+    setattr_in(monkeypatch, _malloc_trim, "ctypes.CDLL", lambda _name: pytest.fail("loaded libc despite the off switch"))
     assert _malloc_trim._load_trim() is None
 
 
@@ -66,14 +67,14 @@ def test_a_libc_that_will_not_load_means_no_trim(monkeypatch: pytest.MonkeyPatch
     def refuse(_name: str) -> None:
         raise OSError("musl: no libc.so.6")
 
-    monkeypatch.setattr(_malloc_trim.sys, "platform", "linux")
-    monkeypatch.setattr(_malloc_trim.ctypes, "CDLL", refuse)
+    setattr_in(monkeypatch, _malloc_trim, "sys.platform", "linux")
+    setattr_in(monkeypatch, _malloc_trim, "ctypes.CDLL", refuse)
     assert _malloc_trim._load_trim() is None
 
 
 def test_a_libc_without_malloc_trim_means_no_trim(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_malloc_trim.sys, "platform", "linux")
-    monkeypatch.setattr(_malloc_trim.ctypes, "CDLL", lambda _name: SimpleNamespace())
+    setattr_in(monkeypatch, _malloc_trim, "sys.platform", "linux")
+    setattr_in(monkeypatch, _malloc_trim, "ctypes.CDLL", lambda _name: SimpleNamespace())
     assert _malloc_trim._load_trim() is None
 
 
