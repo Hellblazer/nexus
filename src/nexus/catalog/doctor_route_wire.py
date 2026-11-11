@@ -154,7 +154,7 @@ def _valid_next_seq_drift(body: object) -> dict | None:
     return {"checked": body["checked"], "drifted": body["drifted"], "capped": body["capped"], "examples": examples}
 
 
-def read_index_run_census(get: Callable[..., Any], flags: dict, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | object | None:
+def read_index_run_census(http_get: Callable[..., Any], flags: dict, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | object | None:
     """The engine's bounded census of the index-run fence (``GET /v1/catalog/index-run/census``, engine 0.1.190,
     nexus-f3yqd.6): ``{"stale": ..., "fence": ..., "failed_hidden": ...}``, each bucket either the engine's object
     (see ``IndexRunCensusReads``) or ``{"timed_out": True}`` when that bucket could not be read in time (the
@@ -169,7 +169,7 @@ def read_index_run_census(get: Callable[..., Any], flags: dict, limit: int = IND
     if flags.get("catalog_index_run_census_supported") is not True:
         return None
     try:
-        body = get("/index-run/census", idempotent=False, timeout=INDEX_RUN_CENSUS_TIMEOUT_S, limit=limit)
+        body = http_get("/index-run/census", idempotent=False, timeout=INDEX_RUN_CENSUS_TIMEOUT_S, limit=limit)
     except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller reports not checked
         _log.info("http_catalog_client.index_run_census_unavailable", error=str(exc))
         return None
@@ -182,7 +182,7 @@ def read_index_run_census(get: Callable[..., Any], flags: dict, limit: int = IND
     return census
 
 
-def read_next_seq_drift(get: Callable[..., Any], flags: dict, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | None:
+def read_next_seq_drift(http_get: Callable[..., Any], flags: dict, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | None:
     """The owners whose ``next_seq`` trails their highest child, read without flooring them (``GET
     /v1/catalog/owners/next_seq_drift``, engine 0.1.190, nexus-f3yqd.6): ``{"checked", "drifted", "capped",
     "examples": [{"owner", "next_seq", "highest_child_seq"}]}``. ``drifted`` counts every drifted owner;
@@ -194,7 +194,7 @@ def read_next_seq_drift(get: Callable[..., Any], flags: dict, limit: int = INDEX
     if flags.get("catalog_next_seq_drift_read_supported") is not True:
         return None
     try:
-        body = get("/owners/next_seq_drift", idempotent=False, timeout=NEXT_SEQ_DRIFT_TIMEOUT_S, limit=limit)
+        body = http_get("/owners/next_seq_drift", idempotent=False, timeout=NEXT_SEQ_DRIFT_TIMEOUT_S, limit=limit)
     except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller reports not checked
         _log.info("http_catalog_client.next_seq_drift_unavailable", error=str(exc))
         return None
