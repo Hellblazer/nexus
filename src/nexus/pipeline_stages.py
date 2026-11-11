@@ -1436,9 +1436,14 @@ def _catalog_pdf_hook(
         # registered the PDF first) is that owner's document: stamping this run's collection, title or meta onto it
         # would point its row at chunks it does not own. Left alone and named; this owner's own row by path, if any,
         # is still the one updated.
+        # Only a row held in ANOTHER, non-empty collection is left alone, as on the repo side (reconcile_run):
+        # a foreign row already in this run's collection (a PDF registered under corpus "default" before the
+        # --collection corpus change, say) is updated as before.
         _foreign_by_uri = None
         if existing is not None and not str(existing.tumbler).startswith(f"{owner}."):
-            _foreign_by_uri, existing = existing, None
+            _held_in = getattr(existing, "physical_collection", "") or ""
+            if _held_in and _held_in != collection_name:
+                _foreign_by_uri, existing = existing, None
         if existing is None:
             existing = reader.by_file_path(owner, file_path_str)
         if existing is None and _foreign_by_uri is not None:

@@ -401,6 +401,17 @@ class TestPdfCatalogHookLeavesAnotherOwnersRowAlone:
                 corpus="curator", source_uri="file:///data/shared.pdf", **kw)
         return cap
 
+    @pytest.mark.parametrize("held_in", ["knowledge__curator", ""])
+    def test_a_row_of_another_owner_in_this_runs_collection_or_none_is_updated_as_before(self, monkeypatch, held_in):
+        """Review r2: only a row held in another, non-empty collection is left alone. A PDF registered under corpus
+        "default" before the --collection corpus change is another owner's row by URI but sits in this run's
+        collection; its title, meta and extraction record are still written."""
+        reader = self._Reader(by_uri=self._entry("1.7.5", held_in))
+        writer = self._Writer()
+        cap = self._run(monkeypatch, reader, writer)
+        assert [t for t, _ in writer.updates] == ["1.7.5"], writer.updates
+        assert not [e for e in cap if e.get("event") == "catalog_pdf_hook_skipped_foreign_owner_row"]
+
     def test_a_row_of_another_owner_found_by_source_uri_is_not_written_and_is_named(self, monkeypatch):
         reader = self._Reader(self._entry("1.7.3", "docs__repo"))
         writer = self._Writer()
