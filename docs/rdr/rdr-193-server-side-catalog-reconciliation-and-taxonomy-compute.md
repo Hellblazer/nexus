@@ -1680,11 +1680,13 @@ and the document says so where the gap is stated.
 
 ### Assumption Verification
 
-Three load-bearing claims are unverified and gated at named steps with
-pass or fail bars: commit parity (Step 2), the 20,000-row commit time
-(Step 2) and HDBSCAN parity (Step 10). Three counts are measured at Step 0
-before the identity tests are written. One mechanism is inferred, not read:
-whether `unlink` deletes softly or hard (checked at Step 3). Every other
+Three load-bearing claims were gated at named steps with pass or fail
+bars. Two passed at Step 2: commit parity (the parity fixture, 31 cases,
+0 differences) and the 20,000-row commit time (8.5 s insert, 9.2 s update,
+against a 30 s bar). The third, HDBSCAN parity (Step 10), is held with
+Part B. Three counts were measured at Step 0 before the identity tests were
+written (T2 `nexus/rdr193-identity-measurement`). One mechanism is inferred,
+not read: whether `unlink` deletes softly or hard (checked at Step 3). Every other
 claim is verified by source reading or spike (research-1 to research-38).
 
 #### API Verification
@@ -1854,3 +1856,4 @@ which removes Steps 4, 8 and 10-12 from this RDR's acceptance.
 - 2026-11-08: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `962a93b3c`; critique `nexus_rdr/193-gate-critique-2026-11-08-r3`.
 - 2026-11-08: Accepted by Sam (Parts A and A4; Part B held). Residual dispositions: the two BLOCKS-PLANNING residuals by c8a4921eb and 6d05bc01e (fix check `nexus_rdr/193-fix-check-6d05bc01e`, after `-c8a4921eb` failed once); the three round-3 DISCOVER-AT-IMPLEMENTATION residuals and the five carried from fix check 962a93b3c by nexus-blbd3 (two of those five held with Part B).
 - 2026-11-10: held-scope wording amended to the reviewed Phase 2 code (standing grant 3; residual 8, nexus-u5m5g.9): Gaps closed by this acceptance are 1 and 4; one engine cut; the Java HDBSCAN check, the Step 10 gate, discover egress and both discover Test Plan scenarios marked held with Part B; Done stated as Steps 0-3, 5-7 and 9; the Minimum Viable Validation restated (residual 5) against the parity fixture's rules; factory line reference 417 to 429. Step 9 is not reworded here: its re-scope (no pin change; 0.1.186 already pinned) is recorded on nexus-u5m5g.10.
+- 2026-11-11: Assumption Verification amended to the measured results (standing grant 3; nexus-blbd3): the two Step 2 claims passed (parity fixture 31 cases, 0 differences; 20,000-row commit 8.5 s insert and 9.2 s update against the 30 s bar, nexus-u5m5g.3), HDBSCAN parity marked held with Part B, and the Step 0 counts given their record.
