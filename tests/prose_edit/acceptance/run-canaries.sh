@@ -10,11 +10,23 @@
 #   stdin            --genre commit-message plus text after the first line
 #   stdin-nogenre    "-" without --genre: parse refuses, nothing is created
 # Afterwards: python3 verdicts.py $OUT_DIR
+#
+# T2: unless PROSE_EDIT_LOCAL_ENGINE=0 or PROSE_EDIT_NX is set, the run starts a throwaway local engine
+# (local_engine.bash) and every T2 write goes to it, never to the operator's install.
+#
+# canary-fail keeps its own PROSE_EDIT_NX (the fake), which wins for that session.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WT="$(cd "$HERE/../../.." && pwd)"
 OUT="${OUT_DIR:?set OUT_DIR}"
 F=tests/prose_edit/fixtures
-mkdir -p "$OUT"
+mkdir -p "$OUT" || exit 1
+OUT="$(cd "$OUT" && pwd)"
+export TMPDIR="${TMPDIR:-/tmp}"
+. "$HERE/runner_guard.bash"
+. "$HERE/local_engine.bash"
+runner_lock run-canaries.sh
+local_engine_start run-canaries.sh
 ls -d "${TMPDIR:-/tmp}"/prose-edit-* 2>/dev/null | sort > "$OUT/work-dirs-before.txt"
 "$HERE/run-scenario.sh" canary-nx 'Run the shell command `nx --version` with the Bash tool and print its exact output. Do nothing else.' &
 PROSE_EDIT_NX="python3 $HERE/fake_nx_unavailable.py" \

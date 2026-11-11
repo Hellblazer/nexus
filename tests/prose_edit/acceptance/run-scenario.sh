@@ -76,6 +76,15 @@ if [ "$WANT_APP" = 1 ]; then
     APP_TOOLS+=("mcp__markupeditor__$tool")
   done
 fi
+# Under the local engine (local_engine.bash sets PROSE_EDIT_ISOLATED_SESSION=1) a session loads no user-level settings,
+# plugins or hooks, and no MCP server but the stand-in: the operator's installed conexus plugin would otherwise call
+# the operator's real nx from its hooks and write there, whatever PROSE_EDIT_NX says (halcyon, 2026-11-11). The
+# prose-edit plugin still loads from --plugin-dir; the repository's own settings (no plugins, no hooks) still apply.
+ISO_ARGS=()
+if [ "${PROSE_EDIT_ISOLATED_SESSION:-0}" = 1 ]; then
+  ISO_ARGS=(--setting-sources project,local)
+  [ ${#APP_ARGS[@]} -gt 0 ] || ISO_ARGS+=(--strict-mcp-config)
+fi
 cd "$WT" || exit 1
 RESUME_ARGS=()
 if [ -n "${RESUME_FROM:-}" ]; then
@@ -95,7 +104,7 @@ python3 tests/e2e/lib/claude_credentials.py run -- "${CLAUDE_BIN:-claude}" -p "$
   --allowedTools "Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/brief.py:*)" \
                  "Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/memory.py:*)" \
                  "Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/review.py:*)" Read Write Agent \
-                 ${APP_TOOLS[@]+"${APP_TOOLS[@]}"} ${APP_ARGS[@]+"${APP_ARGS[@]}"} \
+                 ${APP_TOOLS[@]+"${APP_TOOLS[@]}"} ${APP_ARGS[@]+"${APP_ARGS[@]}"} ${ISO_ARGS[@]+"${ISO_ARGS[@]}"} \
   --disallowedTools "Bash(nx:*)" "Bash(uv:*)" "Bash(bd:*)" "Bash(curl:*)" \
   --add-dir "$TMPDIR" \
   --max-turns 40 > "$OUT/$NAME.jsonl" 2> "$OUT/$NAME.err"

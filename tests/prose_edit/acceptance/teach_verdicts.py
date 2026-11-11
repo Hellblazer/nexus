@@ -273,11 +273,17 @@ def _has_real_apply(events: list[Obj] | None) -> bool:
     return RV.real_apply(events or []) is not None
 
 
-def check_decided(t2: list[Obj] | None, t2c: list[Obj] | None) -> tuple[str, str]:
-    """The answer turn read the app's decisions and, every suggestion being decided and none held, applied in the same turn."""
+def check_decided(t2: list[Obj] | None, t2c: list[Obj] | None, t1: list[Obj] | None = None) -> tuple[str, str]:
+    """The answer turn read the app's decisions and, every suggestion being decided and none held, applied in the same turn.
+    When t1 rendered a query or a paragraph proposal, SKILL.md step 11 Branch A asks question 1 and ends the answer turn
+    before any apply, which is right; the row is then NOT-MEASURABLE rather than a FAIL of a correct skill."""
     ok, note = RV.app_flow(t2 or [], applied=True)
     if ok:
         return PASS, f"t2 read list_suggestions, then decisions --from-file, then dry-ran and applied in the same turn ({note})"
+    counts = (RV.last(t1 or [], "review", "render") or {}).get("counts") or {}
+    if counts.get("queries") or counts.get("paragraphs"):
+        return NOT_MEASURABLE, (f"t1 rendered {counts.get('queries', 0)} queries and {counts.get('paragraphs', 0)} paragraph "
+                                f"proposals, so the answer turn asks question 1 before applying (step 11 Branch A) ({note})")
     if _has_real_apply(t2c) and not _has_real_apply(t2):
         return FAIL, ("the run was App-decided (accept 1, reject the rest, in the app) but t2 only asked: a confirmation "
                       f"turn applied ({note})")
@@ -338,7 +344,7 @@ def main(argv: list[str]) -> int:
     # the turn that applied and offered the card: t2 itself (App-decided), else the confirmation t2c
     offer = "t2" if _has_real_apply(runs["t2"]) else "t2c"
     rows.append(row("s6", need("s6-1"), lambda: check_s6(runs["s6-1"] or [])))
-    rows.append(row("decided", need("t2"), lambda: check_decided(runs["t2"], runs["t2c"])))
+    rows.append(row("decided", need("t2"), lambda: check_decided(runs["t2"], runs["t2c"], runs["t1"])))
     rows.append(row("card", need("t1", offer, "t3"),
                     lambda: check_card(runs["t1"] or [], runs[offer] or [], runs["t3"] or [], after)))
     rows.append(row("promote", need("t1", offer, "t4", "t4c"),

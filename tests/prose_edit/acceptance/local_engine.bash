@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Sourced by run-review.sh, run-teach.sh and run-memory-gate.sh after runner_guard.bash and runner_lock (not run on
-# its own). WT, OUT and TMPDIR must be set first. nexus-scmcs.3.
+# Sourced by run-review.sh, run-teach.sh, run-memory-gate.sh, run-cut.sh and run-canaries.sh after runner_guard.bash
+# and runner_lock (not run on its own). WT, OUT and TMPDIR must be set first. nexus-scmcs.3.
 #
 # Why it exists: the runners WRITE to T2 (zzprose-prefixed projects). On the operator's machine `nx` is whatever is
 # configured, usually the real, cloud-mode install, so a test run wrote to the operator's real store. Decision of
@@ -72,6 +72,10 @@ local_engine_start() {
     echo "$name: no $nxbin. The local engine runs the checkout's own nx: run 'uv sync' in $WT. To skip the engine, set PROSE_EDIT_LOCAL_ENGINE=0 (T2 goes to the operator's configured nx) or PROSE_EDIT_NX=<command>." >&2
     exit 1
   fi
+  case "${PROSE_EDIT_ENGINE_STOP_WAIT:-10}" in
+    ""|*[!0-9]*) echo "$name: PROSE_EDIT_ENGINE_STOP_WAIT must be a whole number of seconds, got '${PROSE_EDIT_ENGINE_STOP_WAIT}'." >&2
+                 exit 1 ;;
+  esac
   base="${TMPDIR:?set TMPDIR}"
   base="${base%/}"
   mkdir -p "$base" || exit 1
@@ -109,11 +113,22 @@ local_engine_start() {
     echo "$name: nx init exited 0 but did not say the service backend is serving; its log is $log." >&2
     exit 1
   fi
+  # NX_ALLOW_PROD_WRITE in the wrapper turns the write guard off, so the sandbox config must name no endpoint but a
+  # loopback one: a remote service_url there would carry the writes to it.
+  if grep -Ei '^[[:space:]]*service_url:' "$LOCAL_ENGINE_CONFIG/config.yml" 2>/dev/null \
+      | grep -Eqv '://(127\.0\.0\.1|localhost|\[::1\])[:/]'; then
+    echo "$name: the sandbox config $LOCAL_ENGINE_CONFIG/config.yml names a service_url that is not loopback; refusing to write T2 through it." >&2
+    exit 1
+  fi
   if [ -n "$cache" ] && [ -d "$sandbox/home/.cache/nexus" ] && [ ! -d "$cache/nexus" ]; then
     mkdir -p "$cache" && cp -R "$sandbox/home/.cache/nexus" "$cache/nexus" 2>/dev/null
   fi
   PROSE_EDIT_NX="$(printf '%q ' "${LOCAL_ENGINE_ENV[@]}")"
   export PROSE_EDIT_NX
+  # The sessions must not reach the operator's install by any other road either: run-scenario.sh starts them without
+  # user-level settings, plugins and hooks (--setting-sources project,local, --strict-mcp-config) while this is set.
+  PROSE_EDIT_ISOLATED_SESSION=1
+  export PROSE_EDIT_ISOLATED_SESSION
   _local_engine_note "started: $sandbox (T2 goes to this throwaway engine through PROSE_EDIT_NX; it is removed on exit)"
 }
 

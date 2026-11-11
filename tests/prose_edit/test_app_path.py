@@ -10,12 +10,14 @@ edit 2 and reject edit 1, the reverse of what the old chat answer named: applyin
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from tests.prose_edit.test_acceptance_tools import (
+    _b_runs,
     ACC,
     _app_turn,
     _check_a_runs,
@@ -154,8 +156,6 @@ def test_a_held_answer_turn_ends_at_the_dry_run_and_the_apply_is_the_confirmatio
 
 
 def test_b4_reads_the_app_too() -> None:
-    from tests.prose_edit.test_acceptance_tools import _b_runs
-
     rv = _review_verdicts()
     removed = {"old": "really quite ", "new": ""}
     again = {"edits": [{"n": 1, "old": "The worker really quite simply retries", "new": "The worker simply retries"}], "dropped": []}
@@ -291,8 +291,6 @@ def _prompts(box: Box) -> list[str]:
 
 
 def _bash(body: str, **env: str) -> subprocess.CompletedProcess[str]:
-    import os
-
     return subprocess.run(["bash", "-c", f'. "{ACC / "runner_guard.bash"}"\n{body}'], capture_output=True, text=True,
                           env={**os.environ, **env}, timeout=30)
 
@@ -383,3 +381,22 @@ def test_the_teach_runner_resumes_t3_from_the_turn_that_applied(box: Box) -> Non
     proc = _run_runner(box, "run-teach.sh", PROSE_EDIT_APP_RUNNER="1", PROSE_EDIT_LOCAL_ENGINE="0")
     assert proc.returncode == 0, proc.stderr
     assert not (box.out / "t2c.jsonl").exists() and (box.out / "t3.jsonl").is_file()
+
+
+def test_the_control_fails_d1_when_edit_1_or_2_never_reached_the_app() -> None:
+    rv = _review_verdicts()
+    for n in (1, 2):
+        runs = _d_runs([2], [1])
+        runs["d1"] = _script("brief", "filter", "f1", EDITS2) + _script(
+            "review", "render", "r1", {"counts": {"edits": 2}, "unplaced": [{"n": n, "cause": "not found"}]})
+        row = _rows(rv, runs)["d1"]
+        assert row[0] == "FAIL" and f"unplaced_of_1_2=[{n}]" in row[1], row
+
+
+@pytest.mark.parametrize(("counts", "verdict"), [({"edits": 2, "queries": 1}, "NOT-MEASURABLE"),
+                                                 ({"edits": 2, "paragraphs": 1}, "NOT-MEASURABLE"),
+                                                 ({"edits": 2}, "FAIL")])
+def test_teach_decided_is_not_measurable_when_t1_held_a_query_or_paragraph(counts: dict, verdict: str) -> None:
+    t1 = _script("review", "render", "r1", {"counts": counts})
+    got, note = tt.T.check_decided([], None, t1)              # t2 asked question 1 and did not apply
+    assert got == verdict, note

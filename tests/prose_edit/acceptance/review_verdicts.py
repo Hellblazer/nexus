@@ -329,8 +329,12 @@ def check_d(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
     d1, d2 = runs.get("d1", []), runs.get("d2", [])
     filt1, render1 = last(d1, "brief", "filter"), last(d1, "review", "render")
     ok, note = clean(d1)
-    out = [("d1", "PASS" if ok and filt1 and render1 and render1.get("counts", {}).get("edits", 0) >= 2 else "FAIL",
-            f"filtered={bool(filt1)} rendered={bool(render1)} edits={(render1 or {}).get('counts', {}).get('edits')} {note}")]
+    # d2's rule names edits 1 and 2, so both must have reached the app: an unplaced one carries no suggestion to decide
+    unplaced1 = sorted(int(u["n"]) for u in (render1 or {}).get("unplaced") or [] if int(u["n"]) in (1, 2))
+    d1_ok = ok and filt1 and render1 and render1.get("counts", {}).get("edits", 0) >= 2 and not unplaced1
+    out = [("d1", "PASS" if d1_ok else "FAIL",
+            f"filtered={bool(filt1)} rendered={bool(render1)} edits={(render1 or {}).get('counts', {}).get('edits')} "
+            f"unplaced_of_1_2={unplaced1} {note}")]
     apply2 = real_apply(d2)
     ok, note = clean(d2)
     flow_ok, flow_note = app_flow(d2, applied=True)

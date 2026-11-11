@@ -39,6 +39,7 @@ case "$1" in
     mkdir -p "$HOME/.cache/nexus"
     [ -f "$HOME/.cache/nexus/model.bin" ] && echo seeded > "$CTRL/seeded.txt"
     echo model > "$HOME/.cache/nexus/model.bin"
+    [ -f "$CTRL/config_yml" ] && mkdir -p "$NEXUS_CONFIG_DIR" && cp "$CTRL/config_yml" "$NEXUS_CONFIG_DIR/config.yml"
     [ -f "$CTRL/init_noserving" ] || echo "nx init --service complete — the service backend is serving."
     exit "$(cat "$CTRL/init_rc" 2>/dev/null || echo 0)" ;;
   daemon)
@@ -125,7 +126,7 @@ class Box:
              "CLAUDE_BIN": str(self.claude), "PROSE_EDIT_STANDIN_PYTHON": sys.executable}
         for k in ("PROSE_EDIT_NX", "PROSE_EDIT_LOCAL_ENGINE", "PROSE_EDIT_ENGINE_CACHE", "PROSE_EDIT_APP_RUNNER",
                   "PROSE_EDIT_ENGINE_STOP_WAIT", "RESUME_FROM", "SCENARIOS", "GATE_JOBS", "ANSWER",
-                  "PROSE_EDIT_STANDIN_DECISIONS", "HTTPS_PROXY", "HTTP_PROXY"):
+                  "PROSE_EDIT_STANDIN_DECISIONS", "HTTPS_PROXY", "HTTP_PROXY", "PROSE_EDIT_ISOLATED_SESSION"):
             e.pop(k, None)
         e.update(extra)
         return e
@@ -360,7 +361,7 @@ def test_without_a_cache_directory_nothing_is_seeded_or_saved(box: Box) -> None:
 # The runners: they source the helper, start the engine after the lock and not-run decisions, tear it down on exit
 # ---------------------------------------------------------------------------
 
-RUNNERS = ("run-review.sh", "run-teach.sh", "run-memory-gate.sh")
+RUNNERS = ("run-review.sh", "run-teach.sh", "run-memory-gate.sh", "run-cut.sh")
 
 
 @pytest.mark.parametrize("name", RUNNERS)
@@ -478,3 +479,51 @@ def test_the_readme_documents_the_local_engine_its_switches_and_the_standin_cave
                    "harness measurement", "not a run of the preregistered gate", "GATE_JOBS", "import mcp.server.mcpserver",
                    "`reviewed`", "same turn"):
         assert needle in text, needle
+
+
+def test_run_canaries_starts_the_engine_after_the_lock_and_before_its_first_session() -> None:
+    sh = (ACC / "run-canaries.sh").read_text(encoding="utf-8")
+    assert '. "$HERE/local_engine.bash"' in sh
+    assert sh.index("runner_lock run-canaries.sh") < sh.index("local_engine_start run-canaries.sh") \
+        < sh.index('"$HERE/run-scenario.sh"')
+    assert not re.search(r"^trap ", sh, re.MULTILINE) and "local_engine_stop" not in sh
+    # canary-fail names its own fake nx inline, so it wins over the engine's wrapper for that session only
+    assert 'PROSE_EDIT_NX="python3 $HERE/fake_nx_unavailable.py"' in sh
+
+
+# ---------------------------------------------------------------------------
+# Session isolation, the endpoint check and the stop-wait check
+# ---------------------------------------------------------------------------
+
+def test_a_started_engine_marks_the_sessions_isolated(box: Box) -> None:
+    proc = drive(box, 'local_engine_start t\necho "ISO=${PROSE_EDIT_ISOLATED_SESSION:-unset}"\n'
+                      'bash -c \'echo "CHILD=${PROSE_EDIT_ISOLATED_SESSION:-unset}"\'')
+    assert proc.returncode == 0, proc.stderr
+    assert "ISO=1" in proc.stdout and "CHILD=1" in proc.stdout     # exported, so run-scenario.sh sees it
+
+
+@pytest.mark.parametrize("env", [{"PROSE_EDIT_LOCAL_ENGINE": "0"}, {"PROSE_EDIT_NX": "python3 /x/fake.py"}])
+def test_no_engine_no_isolation(box: Box, env: dict[str, str]) -> None:
+    proc = drive(box, 'local_engine_start t\necho "ISO=${PROSE_EDIT_ISOLATED_SESSION:-unset}"', **env)
+    assert proc.returncode == 0 and "ISO=unset" in proc.stdout     # an opt-out changes nothing from before
+
+
+def test_a_sandbox_config_naming_a_remote_service_url_stops_the_run(box: Box) -> None:
+    box.control("config_yml", "service_url: https://api.example.invalid/v1\n")
+    proc = drive(box, 'local_engine_start t\necho REACHED')
+    assert proc.returncode == 1 and "REACHED" not in proc.stdout
+    assert "not loopback" in proc.stderr
+    assert "PROSE_EDIT_NX" not in proc.stdout and box.sandboxes() == []   # torn down by the guard's exit hook
+
+
+def test_a_sandbox_config_naming_a_loopback_service_url_is_accepted(box: Box) -> None:
+    box.control("config_yml", "service_url: http://127.0.0.1:41234\n")
+    proc = drive(box, 'local_engine_start t\necho REACHED')
+    assert proc.returncode == 0 and "REACHED" in proc.stdout, proc.stderr
+
+
+@pytest.mark.parametrize("value", ["abc", "5s", "-1"])
+def test_a_stop_wait_that_is_not_whole_seconds_stops_the_run_before_any_engine(box: Box, value: str) -> None:
+    proc = drive(box, 'local_engine_start t\necho REACHED', PROSE_EDIT_ENGINE_STOP_WAIT=value)
+    assert proc.returncode == 1 and "REACHED" not in proc.stdout
+    assert "PROSE_EDIT_ENGINE_STOP_WAIT" in proc.stderr and box.calls() == [] and box.sandboxes() == []

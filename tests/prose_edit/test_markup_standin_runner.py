@@ -51,7 +51,8 @@ def _run(wt: Path, tmp_path: Path, name: str, prompt: str, **env: str) -> tuple[
     stub.write_text(f'#!/bin/sh\nfor a in "$@"; do printf \'%s\\0\' "$a"; done > {argv_file}\nexit 0\n', encoding="utf-8")
     stub.chmod(0o755)
     e = {**os.environ, "OUT_DIR": str(out), "CLAUDE_BIN": str(stub), "TMPDIR": str(tmp_path)}
-    for k in ("PROSE_EDIT_APP_RUNNER", "PROSE_EDIT_STANDIN_PYTHON", "PROSE_EDIT_STANDIN_DECISIONS", "RESUME_FROM"):
+    for k in ("PROSE_EDIT_APP_RUNNER", "PROSE_EDIT_STANDIN_PYTHON", "PROSE_EDIT_STANDIN_DECISIONS", "RESUME_FROM",
+              "PROSE_EDIT_ISOLATED_SESSION"):
         e.pop(k, None)
     if env.get("PROSE_EDIT_APP_RUNNER") == "1" and "PROSE_EDIT_STANDIN_PYTHON" not in env:
         e["PROSE_EDIT_STANDIN_PYTHON"] = sys.executable   # this interpreter has mcp; the preflight imports it
@@ -314,3 +315,39 @@ def test_a_session_run_through_run_scenario_with_the_switch_leaves_its_app_marke
                        capture_output=True, text=True, env=env, timeout=60, check=True)
     assert (out / "a1.app").read_text(encoding="utf-8").strip() == "standin"
     assert (out / "c1.app").read_text(encoding="utf-8").strip() == "none"
+
+
+ISO = ["--setting-sources", "project,local", "--strict-mcp-config"]
+
+
+def _without_iso(argv: list[str]) -> list[str]:
+    rest = list(argv)
+    i = rest.index("--setting-sources")
+    assert rest[i + 1] == "project,local"
+    del rest[i:i + 2]
+    return rest
+
+
+@pytest.mark.parametrize(("name", "prompt"), [("c1", STDIN_RUN), ("a2", "Accept edit 1."),
+                                              ("canary-nx", "Run the shell command `nx --version`.")])
+def test_an_isolated_session_loads_no_user_settings_and_no_user_mcp_servers(tmp_path: Path, name: str, prompt: str) -> None:
+    wt = _tree(tmp_path)
+    argv, _ = _run(wt, tmp_path, name, prompt, PROSE_EDIT_ISOLATED_SESSION="1")
+    base = _baseline(wt, tmp_path, prompt)
+    i = base.index("--disallowedTools")
+    assert argv == base[:i] + ISO + base[i:]          # the plugin still comes from --plugin-dir; nothing else moves
+
+
+def test_an_isolated_path_run_under_the_switch_names_strict_mcp_config_once(tmp_path: Path) -> None:
+    wt = _tree(tmp_path)
+    argv, out = _run(wt, tmp_path, "a1", PATH_RUN, PROSE_EDIT_APP_RUNNER="1", PROSE_EDIT_ISOLATED_SESSION="1")
+    assert argv.count("--strict-mcp-config") == 1 and argv.count("--setting-sources") == 1
+    rest, found = _split(_without_iso(argv))
+    assert rest == _baseline(wt, tmp_path, PATH_RUN) and found["config"] == str(out / "a1.mcp.json")
+
+
+@pytest.mark.parametrize("value", ["0", ""])
+def test_without_the_isolation_mark_the_argv_is_unchanged(tmp_path: Path, value: str) -> None:
+    wt = _tree(tmp_path)
+    argv, _ = _run(wt, tmp_path, "c1", STDIN_RUN, PROSE_EDIT_ISOLATED_SESSION=value)
+    assert argv == _baseline(wt, tmp_path, STDIN_RUN)
