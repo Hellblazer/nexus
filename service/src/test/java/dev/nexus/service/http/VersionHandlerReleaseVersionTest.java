@@ -265,6 +265,13 @@ class VersionHandlerReleaseVersionTest {
     }
 
     @Test
+    void versionAdvertisesTheManifestForeignCollectionReadAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogManifestForeignCollectionCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_manifest_foreign_collection_supported\":true");
+    }
+
+    @Test
     void versionAdvertisesTheManifestFillJobAsItsOwnFlag() {
         var body = new StringBuilder();
         VersionHandler.appendCatalogManifestFillJobCapabilityField(body);

@@ -390,6 +390,7 @@ class EmbedPostureHandlersTest {
         assertThat(body.get("catalog_manifest_fillable_supported").asBoolean()).isTrue();
         assertThat(body.get("catalog_stub_metadata_supported").asBoolean()).isTrue();
         assertThat(body.get("chash_conformance_constraints_supported").asBoolean()).isTrue();
+        assertThat(body.get("catalog_manifest_foreign_collection_supported").asBoolean()).isTrue();
         assertThat(body.get("catalog_manifest_fill_job_supported").asBoolean()).isTrue();
     }
 

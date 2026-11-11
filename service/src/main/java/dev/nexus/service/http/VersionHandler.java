@@ -50,6 +50,7 @@ import java.util.function.Supplier;
  *  "catalog_manifest_fillable_supported":true,
  *  "catalog_stub_metadata_supported":true,
  *  "chash_conformance_constraints_supported":true,
+ *  "catalog_manifest_foreign_collection_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -620,6 +621,17 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * GH #1611 capability advertisement: does {@code GET /v1/catalog/manifest/foreign_collection} list the live documents
+     * whose manifest names chunks in a collection other than their {@code physical_collection}, under the bounded-read
+     * statement timeout? An engine before the change answers 404. Always present, always {@code true} on an engine
+     * carrying the change. Cloud clients see it only once the public conexus edge allowlists it (the
+     * {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendCatalogManifestForeignCollectionCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_manifest_foreign_collection_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -828,6 +840,8 @@ public final class VersionHandler implements HttpHandler {
         appendCatalogManifestFillableCapabilityField(body);
         appendCatalogStubMetadataCapabilityField(body);
         appendChashConformanceConstraintsCapabilityField(body);
+        // GH #1611: GET /v1/catalog/manifest/foreign_collection (documents with manifest chunks outside their collection).
+        appendCatalogManifestForeignCollectionCapabilityField(body);
         // nexus-f3yqd (R2): POST /v1/catalog/manifest/fill, the engine-side fill job.
         appendCatalogManifestFillJobCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
