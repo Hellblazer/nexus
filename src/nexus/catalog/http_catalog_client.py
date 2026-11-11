@@ -1284,11 +1284,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             _is_count(count) and isinstance(capped, bool) and isinstance(documents, list)
             and all(
                 isinstance(d, dict) and isinstance(d.get("tumbler"), str) and isinstance(d.get("physical_collection"), str)
-                and isinstance(d.get("collections"), list) and all(isinstance(c, str) for c in d["collections"])
+                and isinstance(d.get("collections"), list) and bool(d["collections"])
+                and all(isinstance(c, str) for c in d["collections"])
                 and _is_count(d.get("chunks"))
                 for d in documents
             )
             and (capped or len(documents) == count)
+            and (bool(documents) or count == 0)  # a nonzero count with nothing listed cannot be shown
         )
         if not well_formed:
             _log.warning("http_catalog_client.manifest_foreign_collection_malformed", keys=sorted(result))

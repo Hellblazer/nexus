@@ -72,6 +72,9 @@ def test_a_transport_error_is_cannot_say(monkeypatch: pytest.MonkeyPatch, exc: E
     {"count": 1, "capped": False, "documents": [{**_DOC_A, "chunks": "56"}]},
     {"count": 1, "capped": False, "documents": [{**_DOC_A, "physical_collection": None}]},
     {"count": 3, "capped": False, "documents": [_DOC_A, _DOC_B]},
+    # Review r2 M2: an empty other-collections list, and a capped answer that lists nothing, cannot be shown.
+    {"count": 1, "capped": False, "documents": [{**_DOC_A, "collections": []}]},
+    {"count": 5, "capped": True, "documents": []},
 ])
 def test_a_malformed_or_inconsistent_body_is_cannot_say(monkeypatch: pytest.MonkeyPatch, body: object) -> None:
     c, _calls = _client(monkeypatch, get=body)

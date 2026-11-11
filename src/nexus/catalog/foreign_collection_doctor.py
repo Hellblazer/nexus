@@ -118,7 +118,7 @@ def _fixes(doc: dict) -> list[str]:
         f"nx index pdf <that file> --collection {home} --force   (for a Markdown document, nx index md): re-sends "
         f"the document's chunks to {home} and replaces ALL of its manifest rows with rows naming them. It does not "
         f"remove the copy in {other}",
-        f"nx t3 gc -c {other} --dry-run   (lists the chunks in {other} that no manifest names; the engine moves a "
-        "chunk to quarantine only after 30 days with no owner, and it expires later, so the stray copy stays until "
-        "then)",
+        f"nx t3 gc -c {other} --dry-run   (lists the chunks in {other} that have had no manifest owner for 30 days, "
+        "so right after the re-index it lists none of the stray copy; the stray copy stays until it passes that "
+        "grace, then gc moves it to quarantine, and it expires later)",
     ]
