@@ -12305,6 +12305,26 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
     return stubs, coverage
 
 
+_STUB_ROUTE_TIMED_OUT = object()
+
+
+def _pdf_stub_route() -> list[dict] | object | None:
+    """The engine's bounded stub-metadata count (``HttpCatalogClient.stub_metadata``), ``_STUB_ROUTE_TIMED_OUT`` when
+    its read timed out, or ``None`` (scan as before) for an engine without it or any failure to ask."""
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.catalog.http_catalog_client import STUB_METADATA_TIMED_OUT  # noqa: PLC0415 — deferred to avoid circular import
+
+        bounded = getattr(make_catalog_reader(), "stub_metadata", None)
+        answer = bounded() if callable(bounded) else None
+    except Exception as exc:  # noqa: BLE001 — an optional fast path; the scan is the answer of record
+        _log.debug("doctor_pdf_stub_route_failed", error=str(exc))
+        return None
+    if answer is STUB_METADATA_TIMED_OUT:
+        return _STUB_ROUTE_TIMED_OUT
+    return answer if isinstance(answer, list) else None
+
+
 def _check_pdf_stub_metadata() -> list[HealthResult]:
     """Count PDF chunks whose extraction metadata never landed
     (nexus-rte90, indexing-brittleness P0.6; the defect is nexus-w94eo).
@@ -12346,6 +12366,24 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             detail="not applicable (no knowledge or docs collections)",
         )]
 
+    # F30 (nexus-f3yqd.6): an engine with the bounded route (0.1.189) counts every collection it lists in one read;
+    # only a collection it does not list is scanned. Without the route the scan runs as before.
+    route = _pdf_stub_route()
+    if route is _STUB_ROUTE_TIMED_OUT:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"NOT CHECKED: the engine's bounded read of the {len(names)} knowledge/docs collection(s) timed out "
+                "(its own statement bound); the next `nx doctor` asks again."
+            ),
+        )]
+    route_hits: list[dict] = []
+    names_to_scan = names
+    if isinstance(route, list):
+        route_hits = [r for r in route if r["stub_chunks"] > 0]
+        covered = {r["collection"] for r in route}
+        names_to_scan = [n for n in names if n not in covered]
+
     from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — only this check fans out
 
     def _scan(name: str) -> tuple[str, dict[str, int] | None, _StubScanCoverage]:
@@ -12356,8 +12394,11 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             _log.debug("doctor_pdf_stub_metadata_collection_failed", collection=name, error=str(exc))
             return name, None, _StubScanCoverage()
 
-    with ThreadPoolExecutor(max_workers=_PDF_STUB_WORKERS) as pool:
-        scanned = list(pool.map(_scan, names))
+    if names_to_scan:
+        with ThreadPoolExecutor(max_workers=_PDF_STUB_WORKERS) as pool:
+            scanned = list(pool.map(_scan, names_to_scan))
+    else:
+        scanned = []
 
     unreadable = [n for n, found, _ in scanned if found is None]
     samples_over = [n for n, found, cover in scanned if found is not None and cover.samples_over]
@@ -12398,11 +12439,30 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             "sample skips is not seen; `nx catalog backfill-meta` makes the scan exact."
         )
 
-    if stubs:
+    if stubs or route_hits:
         documents = {k: n for k, n in stubs.items() if not k[1].startswith(_PDF_STUB_NO_URI)}
         unowned = {k: n for k, n in stubs.items() if k[1].startswith(_PDF_STUB_NO_URI)}
         parts: list[str] = []
         fixes: list[str] = []
+        if route_hits:
+            total = sum(r["stub_chunks"] for r in route_hits)
+            at_least = any(r["capped"] for r in route_hits)
+            listing = "; ".join(
+                f"{r['collection']}: {r['stub_chunks']}{' or more' if r['capped'] else ''} chunk(s)"
+                + (f", e.g. {', '.join(r['examples'][:3])}" if r["examples"] else "")
+                for r in sorted(route_hits, key=lambda r: -r["stub_chunks"])[:_PDF_STUB_MAX_NAMED]
+            )
+            parts.append(
+                f"{'at least ' if at_least else ''}{total} PDF chunk(s) in {len(route_hits)} collection(s) still carry "
+                "the upload placeholder metadata (empty title, no extraction_method): the extraction enrichment "
+                "never landed, or a late write overwrote it (nexus-w94eo). Readers keyed on the chunk title skip "
+                f"them. {listing}."
+            )
+            fixes += [
+                "nx index pdf <path> --force        (file-backed document)",
+                "nx dt index --uuid <uuid> --force  (DEVONthink record)",
+                "nx enrich bib <collection>         (after the re-index)",
+            ]
         if documents:
             total = sum(documents.values())
             named = sorted(documents.items(), key=lambda kv: -kv[1])[:_PDF_STUB_MAX_NAMED]
@@ -12415,11 +12475,11 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
                 "write overwrote it (nexus-w94eo). Readers keyed on the chunk "
                 f"title skip them. {listing}{more}."
             )
-            fixes += [
+            fixes += [f for f in (
                 "nx index pdf <path> --force        (file-backed document)",
                 "nx dt index --uuid <uuid> --force  (DEVONthink record)",
                 "nx enrich bib <collection>         (after the re-index)",
-            ]
+            ) if f not in fixes]
         if unowned:
             named = sorted(unowned.items(), key=lambda kv: -kv[1])[:_PDF_STUB_MAX_NAMED]
             listing = "; ".join(f"{col}: {src} ({n})" for (col, src), n in named)

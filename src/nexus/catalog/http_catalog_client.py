@@ -268,6 +268,10 @@ _COMBINED_WRITE_EMBED_TIMEOUT_S = 600.0
 #: still cut off well under the 30 s client-wide default.
 _SECTION_LABEL_FILLABLE_TIMEOUT_S = 15.0
 
+#: :meth:`HttpCatalogClient.stub_metadata`'s answer when the engine's bounded read timed out (a 503): the doctor row
+#: reports itself not checked, with that reason, rather than rerunning the slow scan.
+STUB_METADATA_TIMED_OUT = object()
+
 #: The engine's caps on the RDR-223 append routes (Phase 1, P1.3/P1.4). Refused here, locally and
 #: before any round trip, so a violation reads as a client bug naming the cap instead of a 400
 #: that arrives after an embed budget was set aside. ``sweep_chashes`` at most this many per
@@ -1163,6 +1167,44 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "documents": [{"tumbler": d["tumbler"], "physical_collection": d.get("physical_collection") or ""}
                           for d in documents],
         }
+
+    def stub_metadata(self, limit: int = 1000) -> list[dict] | object | None:
+        """Per knowledge/docs collection, the bounded count of PDF chunks still carrying the upload placeholder
+        metadata (``GET /stub-metadata``, engine 0.1.189, nexus-f3yqd.6): ``[{"collection", "stub_chunks", "capped",
+        "examples"}]``. ``capped`` means more than *limit* exist, so ``stub_chunks`` reads as "at least"; ``examples``
+        are owning-document names (source URI, else file path).
+
+        ``None`` means scan as before: the engine does not advertise ``catalog_stub_metadata_supported`` (no request
+        is sent then), the route answers 403 or 404 or another error, the request fails, or the body is malformed.
+        A 503 is the engine's own statement timeout: :data:`STUB_METADATA_TIMED_OUT` is returned so a caller reports
+        the row not checked instead of running the slow scan the route replaces.
+        """
+        if self._version_flags().get("catalog_stub_metadata_supported") is not True:
+            return None
+        try:
+            result = self._get("/stub-metadata", idempotent=False, timeout=_SECTION_LABEL_FILLABLE_TIMEOUT_S, limit=limit)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            _log.info("http_catalog_client.stub_metadata_unavailable", status=status)
+            return STUB_METADATA_TIMED_OUT if status == 503 else None
+        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller scans instead
+            _log.info("http_catalog_client.stub_metadata_unavailable", error=str(exc))
+            return None
+        collections = result.get("collections") if isinstance(result, dict) else None
+
+        def _row_ok(r: object) -> bool:
+            if not isinstance(r, dict):
+                return False
+            n = r.get("stub_chunks")
+            return (isinstance(r.get("collection"), str) and not isinstance(n, bool) and isinstance(n, int) and n >= 0
+                    and isinstance(r.get("capped"), bool) and isinstance(r.get("examples"), list)
+                    and all(isinstance(e, str) for e in r["examples"]))
+
+        if not isinstance(collections, list) or not all(_row_ok(r) for r in collections):
+            _log.warning("http_catalog_client.stub_metadata_malformed")
+            return None
+        return [{"collection": r["collection"], "stub_chunks": r["stub_chunks"], "capped": r["capped"],
+                 "examples": list(r["examples"])} for r in collections]
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead
