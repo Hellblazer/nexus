@@ -146,8 +146,11 @@ class IndexRunCensusPlanTest extends IndexRunCensusTestBase {
                 .set(CHUNKS.CHUNK_TEXT, "t").set(CHUNKS.METADATA, org.jooq.JSONB.valueOf("{}"))
                 .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0.1f)).execute();
         }
-        assertThat(leavesPlanned(C1, MODEL)).as("two models, two leaves")
-            .isNotEqualTo(leavesPlanned(C384, PgContainerHelper.collectionModel(DSL.using(pg.createConnection(""), SQLDialect.POSTGRES), TENANT, C384)));
+        String model384;
+        try (Connection su = pg.createConnection("")) {
+            model384 = PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, C384);
+        }
+        assertThat(leavesPlanned(C1, MODEL)).as("two models, two leaves").isNotEqualTo(leavesPlanned(C384, model384));
     }
 
     /** Control: without the limit the same statement reads all of its set, so the bound above is the limit's doing. */
