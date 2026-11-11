@@ -1179,7 +1179,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def chash_constraints_validated(self) -> bool | None:
         """Whether the chash width CHECKs on ``nexus.chunks`` and ``nexus.catalog_document_chunks`` are validated
         (``GET /v1/schema/chash-conformance``, engine 0.1.189, nexus-f3yqd.6). Reads only ``all_validated`` and each
-        constraint's ``present`` and ``validated`` (a tenant token gets nothing more).
+        constraint's ``table``, ``present``, ``validated`` and ``definition_matches`` (the CHECK's expression is the
+        width predicate, not only its name).
 
         ``True`` only when both poison tables are listed, every listed constraint is present and validated, and
         ``all_validated`` is true: no row of
@@ -1205,7 +1206,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         named = {c.get("table") for c in constraints}
         return (body["all_validated"] is True and {t.table for t in POISON_CHASH_TABLES} <= named
-                and all(c.get("present") is True and c.get("validated") is True for c in constraints))
+                and all(c.get("present") is True and c.get("validated") is True and c.get("definition_matches") is True
+                        for c in constraints))
 
     def stub_metadata(self, limit: int = 1000) -> list[dict] | object | None:
         """Per knowledge/docs collection, the bounded count of PDF chunks still carrying the upload placeholder

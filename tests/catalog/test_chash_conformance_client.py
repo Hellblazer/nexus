@@ -15,8 +15,8 @@ import pytest
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 
 _VALID = {"all_validated": True, "constraints": [
-    {"table": "nexus.chunks", "name": "chunks_chash_octet_check", "present": True, "validated": True},
-    {"table": "nexus.catalog_document_chunks", "name": "catalog_document_chunks_chash_octet_check", "present": True, "validated": True},
+    {"table": "nexus.chunks", "name": "chunks_chash_octet_check", "present": True, "validated": True, "definition_matches": True},
+    {"table": "nexus.catalog_document_chunks", "name": "catalog_document_chunks_chash_octet_check", "present": True, "validated": True, "definition_matches": True},
 ]}
 
 
@@ -46,6 +46,9 @@ def test_a_validated_store_reads_true(monkeypatch: pytest.MonkeyPatch) -> None:
     {"all_validated": True, "constraints": [{**_VALID["constraints"][0], "validated": False}, _VALID["constraints"][1]]},
     {"all_validated": True, "constraints": [{**_VALID["constraints"][0], "present": False}, _VALID["constraints"][1]]},
     {"all_validated": True, "constraints": []},
+    {"all_validated": True, "constraints": [{**_VALID["constraints"][0], "definition_matches": False}, _VALID["constraints"][1]]},
+    {"all_validated": True, "constraints": [{k: v for k, v in _VALID["constraints"][0].items() if k != "definition_matches"},
+                                            _VALID["constraints"][1]]},
     {"all_validated": True, "constraints": [_VALID["constraints"][0]]},
     {"all_validated": True, "constraints": [_VALID["constraints"][0],
                                             {**_VALID["constraints"][1], "table": "nexus.some_other_table"}]},
