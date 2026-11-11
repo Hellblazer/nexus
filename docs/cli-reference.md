@@ -6534,8 +6534,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   (a lookup request refusing a grown plan whose discounted recorded kind is not lookup: the
   recorded kind never widens eligibility but does narrow it, nexus-indyo), `grown_route_not_discovery`
   (a discovery/listing request refusing a grown plan that recorded another kind, nexus-a4g2a),
-  `grown_route_unrecorded` (a lookup or discovery/listing request refusing a grown plan that recorded no kind,
-  nexus-a4g2a), `unattested_plan`
+  `grown_route_unrecorded` (a lookup or discovery/listing request refusing a grown plan that recorded no kind;
+  a curated claim without the builtin tag is refused there under `untrusted_curated_claim`, nexus-a4g2a), `unattested_plan`
   (a lookup or discovery/listing request refusing a plan that declares no answer kind, such as a
   user-saved one; the other request kinds refuse it under their own reasons, nexus-rflvp),
   `saved_unknown_plan` (a saved plan of unknown kind serves no request), `saved_other_project` (a saved

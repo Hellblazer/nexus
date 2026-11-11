@@ -67,7 +67,9 @@ otherwise ``nx_answer`` plans inline.
 
 ``unknown`` plan kinds are limited by provenance, as the RDR says: a curated (reviewed builtin) unknown
 plan is eligible as the table reads; a grown unknown plan (grown with no recorded route, or whose recorded
-route is not trusted) is eligible only for ``lookup`` and ``discovery/listing`` requests; an unattested plan,
+route is not trusted) is eligible only for ``lookup`` and ``discovery/listing`` requests, and ``_judge``
+narrows that further (nexus-indyo, nexus-a4g2a, below): only when it recorded the request's own kind; an
+unattested plan,
 one that declares nothing, is eligible for neither (Sam, 2026-11-03, nexus-rflvp: user-saved plans, which
 declare nothing, won 31 of 77 lookups since the gate was enabled, one of them another project's plan through
 the cosine branch, and answered with raw ids; the curated lookup plan answered the same questions; reason
@@ -106,7 +108,9 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
   own defect flag), and a ``discovery/listing`` request takes only a grown plan that recorded discovery
   (``grown_route_not_discovery``). Neither was measured (5 grown plans, none accruing); both only narrow, so
   the worst case is an inline replan, and a good hit can be lost (grown plan 585 served discovery run 794
-  well). A grown plan that recorded lookup still serves lookups, mislabelled or not (open in nexus-a4g2a);
+  well, unless 585 recorded discovery: its row is gone and its recorded kind unknown). A grown plan that
+  recorded lookup still serves lookups, and one that recorded discovery serves listings, whether or not the
+  request that grew it was labelled correctly (the label is the request's guess; open in nexus-a4g2a);
 * ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``, and
   every request kind refuses it (nexus-rflvp: ``unattested_plan`` for ``lookup`` and ``discovery/listing``,
   the reasons it always had for the others). A builtin seeded before nexus-jypmj.2.1 is this until
@@ -400,7 +404,9 @@ SINGLE_SOURCE_EXCLUDED_STRATEGIES: frozenset[str] = frozenset({"citation-travers
 #: single-source synthesis request unknown, and the unknown row admits curated synthesis plans).
 _SINGLE_SOURCE_REQUESTS = frozenset({_S, _U})
 
-#: Request kinds a GROWN unknown-kind plan may still serve. An unattested plan serves none (nexus-rflvp).
+#: Request kinds the matrix lets a GROWN unknown-kind plan serve. An unattested plan serves none (nexus-rflvp).
+#: ``_judge`` narrows these further (nexus-a4g2a): only a grown plan that recorded the request's own kind, or
+#: recorded lookup for a lookup, is admitted.
 _UNKNOWN_PLAN_REQUESTS = frozenset({_L, _D})
 
 #: The refusals a grown plan's recorded kind caused, counted per recorded kind (``refused_recorded_kinds``):
@@ -426,7 +432,7 @@ class PlanStanding:
     ``model-assisted``), whether or not it was honoured; ``None`` when the row records none. ``kind`` is the
     EFFECTIVE kind: ``unknown`` when the declared one was discounted. ``recorded_kind`` is the kind a grown plan
     recorded when that kind was discounted (``unreviewed_route``); it never widens eligibility, it only narrows
-    it (the lookup rule, nexus-indyo). ``None`` everywhere else.
+    it (the lookup rule, nexus-indyo; the listing rule, nexus-a4g2a). ``None`` everywhere else.
     """
 
     kind: PlanAnswerKind
@@ -692,12 +698,17 @@ def _judge(
         and standing.recorded_kind is not _L
     ):
         verdict = Verdict(False, "grown_route_not_lookup")
-    if verdict.eligible and standing.provenance == "grown" and request_kind in _UNKNOWN_PLAN_REQUESTS:
+    if (
+        verdict.eligible and standing.provenance == "grown" and standing.kind is _U
+        and request_kind in _UNKNOWN_PLAN_REQUESTS
+    ):
         # nexus-a4g2a (halcyon, 2026-11-11, rule 6): a guard, not a measured effect. A grown plan that recorded no
         # kind serves no lookup or listing (its steps were planned for a request nothing classified), and a
         # listing takes only a grown plan that recorded discovery, as the matrix gives listings listing plans.
         # It only narrows: the worst case is an inline replan. Counted by reason (and recorded kind) to show
-        # its cost as grown plans accrue.
+        # its cost as grown plans accrue. Only an unknown-kind grown plan: one on a trusted route keeps its
+        # known kind and goes by the matrix. A grown-read curated claim (untrusted_curated_claim) records no
+        # kind either, so it is refused here under its own flag.
         if standing.recorded_kind is None:
             verdict = Verdict(False, standing.flag or "grown_route_unrecorded")
         elif request_kind is _D and standing.recorded_kind is not _D:
@@ -784,7 +795,8 @@ class EligibilityFilter:
         self._judged: dict[int, tuple[PlanStanding, Verdict]] = {}
         self._excluded_ids: list[int] = []
         self._enforced_excluded = 0
-        #: nexus-q7dpt: per recorded kind, the ``grown_route_not_lookup`` exclusions (counted like ``excluded``).
+        #: nexus-q7dpt, nexus-a4g2a: per recorded kind, the ``grown_route_not_lookup`` and
+        #: ``grown_route_not_discovery`` exclusions (counted like ``excluded``).
         self._refused_recorded_kinds: dict[str, int] = {}
         self._returned: dict[str, int] | None = None
         self._selected: dict[str, Any] | None = None

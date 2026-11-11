@@ -1706,8 +1706,9 @@ def test_nx_answer_hands_the_filter_the_cwd_name_and_the_primary_checkouts_name(
 # halcyon's decision, 2026-11-11, rule 6 (option A on the bead): a stated guard, not a measured effect. With five
 # grown plans in the library (517, 594-597) and none accruing since 2026-11-07, nothing could be measured; the
 # exclusions are counted by reason so the cost shows once grown plans accrue. It only narrows: the worst case is an
-# inline replan. The bead's own example would now be excluded: grown plan 585 served discovery run 794 well
-# (0.064 USD). Case 2 (a request mislabelled lookup recording lookup on a synthesis-shaped plan) stays open.
+# inline replan. The bead's own example may now be excluded: grown plan 585 served discovery run 794 well
+# (0.064 USD); it is excluded unless it recorded discovery, and its row is gone, so its recorded kind is
+# unknown. Case 2 (a request mislabelled lookup, or discovery, on a plan of another shape) stays open.
 GROWN_UNTRUSTED_CLAIM = _row(907, "grown-untrusted", kind=L, tags="ad-hoc", provenance="curated")
 
 
@@ -1763,3 +1764,21 @@ def test_the_new_guard_runs_in_shadow_like_the_matrix() -> None:
 
 def test_the_new_reasons_are_in_the_closed_vocabulary() -> None:
     assert {"grown_route_unrecorded", "grown_route_not_discovery"} <= el.REASONS
+
+
+def test_an_untrusted_curated_claim_serves_no_listing_either() -> None:
+    out, filt = _match([GROWN_UNTRUSTED_CLAIM], [(907, 0.05)], D)
+    assert out == [] and filt.to_wire()["branches"]["cosine"]["reasons"] == {"untrusted_curated_claim": 1}
+
+
+@pytest.mark.parametrize(
+    ("row", "request_kind"),
+    [pytest.param(GROWN_LOOKUP, L, id="trusted-lookup-serves-a-lookup"),
+     pytest.param(GROWN_DISCOVERY, D, id="trusted-discovery-serves-a-listing")],
+)
+def test_a_grown_plan_on_a_trusted_route_is_not_read_as_unrecorded(monkeypatch, row, request_kind) -> None:
+    # Review r1 of 45969ecb0: a trusted route keeps the plan's known kind (recorded_kind stays None); the guard is for
+    # unknown-kind grown plans only, so the matrix decides and the plan serves its own kind.
+    monkeypatch.setattr(el, "TRUSTED_ROUTES", frozenset({"explicit"}))
+    out, _ = _match([row], [(row["id"], 0.05)], request_kind)
+    assert _ids(out) == [row["id"]]
