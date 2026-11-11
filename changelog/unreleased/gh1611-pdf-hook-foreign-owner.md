@@ -1,0 +1,3 @@
+### Fixed
+
+- **`nx index pdf` no longer stamps its collection, title or metadata onto another owner's document** (GH #1611). When a repository run had already registered the PDF, `nx index pdf <file> --collection ...` found that row by its source URI (the lookup is not owner-scoped) and wrote its own `physical_collection`, title, author, year and extraction record onto it, pointing the repository's document at a collection holding chunks it does not own. The catalog step now leaves a row of another owner alone and logs `catalog_pdf_hook_skipped_foreign_owner_row` (with the collection the row holds); a row of the PDF's own owner is updated as before. The chunks the run's pre-flight wrote under the other owner's tumbler are not changed by this.

@@ -1432,8 +1432,24 @@ def _catalog_pdf_hook(
         # through to the plain by_file_path lookup only when source_uri is
         # absent preserves prior behaviour for every non-DT ingest path.
         existing = reader.by_source_uri(source_uri) if source_uri else None
+        # GH #1611: by_source_uri is not owner-scoped. A live row of ANOTHER owner holding this URI (a repo run
+        # registered the PDF first) is that owner's document: stamping this run's collection, title or meta onto it
+        # would point its row at chunks it does not own. Left alone and named; this owner's own row by path, if any,
+        # is still the one updated.
+        _foreign_by_uri = None
+        if existing is not None and not str(existing.tumbler).startswith(f"{owner}."):
+            _foreign_by_uri, existing = existing, None
         if existing is None:
             existing = reader.by_file_path(owner, file_path_str)
+        if existing is None and _foreign_by_uri is not None:
+            _log.warning(
+                "catalog_pdf_hook_skipped_foreign_owner_row",
+                tumbler=str(_foreign_by_uri.tumbler), owner=str(owner), file_path=file_path_str,
+                source_uri=source_uri, held_in=getattr(_foreign_by_uri, "physical_collection", ""),
+                collection=collection_name,
+            )
+            _not_recorded("foreign_owner_row")
+            return
 
         # Known TOCTOU window (Reviewer B/I-3): this stat happens AFTER
         # the PDF was extracted + chunked earlier in the pipeline. A
