@@ -182,13 +182,70 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(union)
 
 
+#: ab7ac46e6 (nexus-rfvyy.7.8) made ``sensitivity`` a required keyword-only
+#: argument on ``search_cross_corpus`` and on every client read that returns
+#: chunk text. ``include`` is what scripts/measure_search_per_collection.py
+#: passes, and it sends nothing extra on the wire, so every path here (old,
+#: batched, route) searches the same rows.
+_READ_SENSITIVITY = "include"
+
+
+class _SensitivityClient:
+    """Thin proxy that supplies ``sensitivity`` to the client reads the frozen
+    pre-fix module makes, so that module's code stays untouched.
+
+    Only ``search`` takes the argument among the reads the old module issues
+    (``get_embeddings`` returns vectors, not chunk text). Everything else is
+    delegated. ``search`` resolves ``self._client.search`` at call time, so a
+    ``CallLog`` that patches the real client's ``search`` still counts these
+    calls. ``__class__`` reports the wrapped client's class because the old
+    module's ``_voyage_thresholds_active`` tests ``isinstance(t3,
+    HttpVectorClient)``: without it a default-threshold run would silently drop
+    the per-collection thresholds the reference path applies.
+    """
+
+    def __init__(self, client, sensitivity: str = _READ_SENSITIVITY) -> None:
+        object.__setattr__(self, "_client", client)
+        object.__setattr__(self, "_sensitivity", sensitivity)
+
+    @property
+    def __class__(self):  # type: ignore[override]
+        return type(self._client)
+
+    def search(self, *args, **kwargs):
+        kwargs.setdefault("sensitivity", self._sensitivity)
+        return self._client.search(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._client, name, value)
+
+
+def _with_read_sensitivity(old_search_cross_corpus):
+    """Wrap the frozen ``search_cross_corpus`` so its client carries
+    ``sensitivity`` on every read; the call signature the callers use is the
+    old one."""
+
+    def search_cross_corpus(query, collections, n_results, t3, **kwargs):
+        sensitivity = kwargs.pop("sensitivity", _READ_SENSITIVITY)
+        return old_search_cross_corpus(
+            query, collections, n_results, _SensitivityClient(t3, sensitivity), **kwargs,
+        )
+
+    return search_cross_corpus
+
+
 def _load_old_search_cross_corpus():
     """Load the pre-nexus-d9xt2 ``search_cross_corpus`` standalone from
     ``git show ab837d219:src/nexus/search_engine.py``, executed into a
     fresh module namespace so it resolves imports (``nexus.config``,
     ``nexus.db.http_vector_client``, ``nexus.types``) against the CURRENT
     installed package -- none of those changed shape between the pre-fix
-    commit and today, only ``search_cross_corpus``'s own body did.
+    commit and today, only ``search_cross_corpus``'s own body did. The
+    function returned is the old one behind :class:`_SensitivityClient`, so its
+    client reads meet the current required ``sensitivity`` argument.
     """
     old_source = subprocess.run(
         ["git", "show", f"{_PRE_FIX_SHA}:src/nexus/search_engine.py"],
@@ -206,7 +263,7 @@ def _load_old_search_cross_corpus():
         )
     finally:
         del sys.modules[spec.name]
-    return old_module.search_cross_corpus
+    return _with_read_sensitivity(old_module.search_cross_corpus)
 
 
 def _top_ids(results, limit: int) -> set[str]:
@@ -304,7 +361,12 @@ def test_recall_parity_old_vs_batched_fan_out(
             for _ in range(_REFERENCE_RUNS)
         ]
         old_searches += _REFERENCE_RUNS * len(cols)  # the old path is one search per collection
-        new_ids = _top_ids(new_search_cross_corpus(query, cols, _LIMIT, _live_client, **kwargs), _LIMIT)
+        new_ids = _top_ids(
+            new_search_cross_corpus(
+                query, cols, _LIMIT, _live_client, sensitivity=_READ_SENSITIVITY, **kwargs,
+            ),
+            _LIMIT,
+        )
         score, in_union, core_kept = _reference_score(old_runs, new_ids)
         union = set().union(*old_runs)
         core = set.intersection(*old_runs)
@@ -490,6 +552,7 @@ def _run_floor(
         results = search(
             query, cols, n, client, cluster_by=None, threshold_override=threshold,
             rerank=rerank, catalog=catalog, deep_candidates=deep_candidates,
+            sensitivity=_READ_SENSITIVITY,
         )
     finally:
         for p in reversed(patches):
