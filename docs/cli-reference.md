@@ -4580,6 +4580,7 @@ the engine and PostgreSQL itself (nexus-f9bgu.51).
 | `--json` | (`status`) Raw JSON output. |
 | `--with-pg` | (`stop`) Full-stack stop: also stop the nx-managed Postgres cluster and the MinerU server nexus started. |
 | `--announce-stdout` | (`start`) Emit the discovery JSON on stdout at startup. |
+| `--legacy-backup PATH` | (`start`) After a legacy-chash refusal (exit 75: the store holds 16-byte chash rows the engine's first boot deletes), a dump written by `nx backup --to PATH` outside `~/nexus-backups/`. It must be newer than the refusal and list the chunk table's data; the start then goes on. A dump in `~/nexus-backups/` is found without it. |
 
 **Memory-constrained hosts.** Set `NX_SERVICE_MAX_HEAP` (e.g. `NX_SERVICE_MAX_HEAP=1g`)
 to cap the native service's JVM heap. On low-RAM laptops and containers the

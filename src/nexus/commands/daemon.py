@@ -666,7 +666,38 @@ def still_migrating_message(waited_s: float, config_dir: Path) -> str:
     )
 
 
-def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
+def _legacy_chash_refusal(config_dir: Path):
+    """A pending legacy-chash refusal as a start error (exit 75), or None (nexus-f3yqd)."""
+    from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
+    from nexus.daemon.storage_service_daemon import LegacyChashStartRefused  # noqa: PLC0415 — deferred import
+
+    record = _guard.pending_refusal(config_dir)
+    return LegacyChashStartRefused(_guard.refusal_text(record)) if record else None
+
+
+def _clear_legacy_chash_refusal(config_dir: Path, legacy_backup: Path | None) -> None:
+    """The user's next start clears a pending legacy-chash refusal with a verified backup of this cluster, or is
+    refused again with exit 75 (nexus-f3yqd; wren: explicit, never a file merely appearing)."""
+    from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
+    from nexus.db.pg_provision import discover_pg_binaries  # noqa: PLC0415 — deferred import
+
+    if _guard.pending_refusal(config_dir) is None:
+        return
+    pg_restore = discover_pg_binaries(config_dir).bin_dir / ("pg_restore.exe" if os.name == "nt" else "pg_restore")
+    accepted = _guard.try_clear(config_dir, pg_restore=pg_restore, explicit=legacy_backup)
+    if accepted is not None:
+        click.echo(f"Legacy chash rows: the backup {accepted} reads back with the chunk rows; starting the engine, "
+                   "which deletes them at its first start.", err=True)
+        return
+    refused = _legacy_chash_refusal(config_dir)
+    if refused is not None:
+        if legacy_backup is not None:
+            refused.args = (f"{refused.args[0]}\nThe backup you named, {legacy_backup}, was not accepted: it must be "
+                            "newer than the refusal and `pg_restore -l` must list the nexus chunks table data.",)
+        raise refused
+
+
+def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None, legacy_backup: Path | None = None):
     """Ensure a persistent (heartbeated) storage-service supervisor owns the lease.
 
     Returns the live :class:`LeaseRecord`. If a FRESH lease already exists this
@@ -739,6 +770,7 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     # from here would linger, and this caller would wait out the lease timeout
     # instead of saying why.
     _refuse_cluster_below_floor_before_start(config_dir)
+    _clear_legacy_chash_refusal(config_dir, legacy_backup)
     # A start is the user's "run again": it ends any earlier stop request, whether
     # or not a supervisor turns out to be running already (RDR-224, nexus-f9bgu.33).
     clear_stop_marker(config_dir, "storage_service", scope)
@@ -851,6 +883,8 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
         existing = _service_endpoint.discover_storage_service_lease(registry, scope)
         if existing is not None:
             return existing
+        if (refused := _legacy_chash_refusal(config_dir)) is not None:
+            raise refused  # the supervisor stays up with Postgres running, for nx backup
         announcer.poll()
         # nexus-qk6p6: a supervisor that has exited will never publish. An
         # engine that refuses to start takes it down within a second, and
@@ -1020,6 +1054,8 @@ def _start_via_autostart_unit(
         lease = _service_endpoint.discover_storage_service_lease(registry, scope)
         if lease is not None:
             return lease
+        if (refused := _legacy_chash_refusal(config_dir)) is not None:
+            raise refused
         if time.monotonic() >= deadline:
             break
         announcer.poll()
@@ -1067,10 +1103,21 @@ def _start_via_autostart_unit(
     default=False,
     help="Emit the discovery JSON on stdout at startup.",
 )
+@click.option(
+    "--legacy-backup",
+    "legacy_backup",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "A dump written by `nx backup --to PATH` after a legacy-chash refusal, when it is not in ~/nexus-backups/. "
+        "It must be newer than the refusal and hold the chunk rows."
+    ),
+)
 def service_start_cmd(
     config_dir_str: str | None,
     foreground: bool,
     announce_stdout: bool,
+    legacy_backup: Path | None = None,
 ) -> None:
     """Start the native storage-service + Postgres supervisor (RDR-152 P5.1).
 
@@ -1112,17 +1159,17 @@ def service_start_cmd(
             code = run_storage_supervisor(config_dir=config_dir)
         except StorageServiceStartError as exc:
             click.echo(f"Error: {exc}", err=True)
-            sys.exit(2)
+            sys.exit(getattr(exc, "exit_code", 2))
         sys.exit(code)
 
     # Non-foreground: ensure a persistent (heartbeated) supervisor owns the lease.
     # ensure_storage_supervisor starts an installed, enabled autostart unit
     # through the OS manager and spawns the detached supervisor only otherwise.
     try:
-        existing = ensure_storage_supervisor(config_dir)
+        existing = ensure_storage_supervisor(config_dir, legacy_backup=legacy_backup)
     except StorageServiceStartError as exc:
         click.echo(f"Error: {exc}", err=True)
-        sys.exit(2)
+        sys.exit(getattr(exc, "exit_code", 2))
 
     ep = existing.endpoint
     if announce_stdout:

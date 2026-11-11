@@ -104,7 +104,8 @@ class TestRecordAndBackup:
 
     def _runner(self, readable: set[str]):
         def run(argv, **_kw):
-            return subprocess.CompletedProcess(argv, 0 if Path(argv[-1]).name in readable else 1, b"", b"")
+            ok = Path(argv[-1]).name in readable
+            return subprocess.CompletedProcess(argv, 0 if ok else 1, b"; 1; 0 2 TABLE DATA nexus chunks nexus\n", b"")
 
         return run
 
@@ -198,3 +199,120 @@ class TestRealPostgres:
         _seed(scratch_db, chash_type="bytea", changesets=["rdr180-001-bytea-chash"], legacy_chunks=0,
               legacy_manifest=0)
         assert guard.check(scratch_db).proceed is True
+
+
+# ── the gate, the supervisor's wait and the CLI's exit 75 ───────────────────────────────────────────────────────
+
+
+def _legacy(sql: str) -> str:
+    if "to_regclass" in sql:
+        return "t"
+    if "hygiene-001-5" in sql:
+        return "f"
+    if "information_schema" in sql:
+        return "chunks|bytea\ncatalog_document_chunks|bytea"
+    return "2"
+
+
+class TestGate:
+    def test_a_legacy_store_is_refused_and_recorded(self, tmp_path: Path) -> None:
+        with pytest.raises(guard.LegacyChashRefused, match="nx backup"):
+            guard.gate(tmp_path, _legacy)
+        assert guard.pending_refusal(tmp_path)["counts"] == {"chunks": 2, "catalog_document_chunks": 2}
+
+    def test_a_cleared_refusal_lets_the_start_go_on_while_the_rows_remain(self, tmp_path: Path) -> None:
+        with pytest.raises(guard.LegacyChashRefused):
+            guard.gate(tmp_path, _legacy)
+        guard.mark_cleared(tmp_path, tmp_path / "x.dump")
+        assert guard.gate(tmp_path, _legacy).proceed is False  # the rows are there; the gate lets it go on anyway
+
+    def test_an_explicit_backup_must_be_newer_and_hold_the_chunk_data(self, tmp_path: Path) -> None:
+        with pytest.raises(guard.LegacyChashRefused):
+            guard.gate(tmp_path, _legacy)
+        dump = tmp_path / "elsewhere.dump"
+        dump.write_bytes(b"PGDMP")
+        listing = {"ok": b"; 4321; 0 16390 TABLE DATA nexus chunks nexus\n", "no": b"; 1; 0 1 TABLE DATA nexus other x\n"}
+
+        def runner(which: str):
+            return lambda argv, **_k: subprocess.CompletedProcess(argv, 0, listing[which], b"")
+
+        assert guard.try_clear(tmp_path, pg_restore=Path("pg_restore"), explicit=dump, runner=runner("no")) is None
+        assert guard.try_clear(tmp_path, pg_restore=Path("pg_restore"), explicit=dump, runner=runner("ok")) == dump
+        assert guard.read_record(tmp_path)["cleared_by"] == str(dump)
+
+    def test_a_partitioned_chunk_table_counts_as_the_chunk_data(self) -> None:
+        assert guard.holds_chunk_data("; 9; 0 1 TABLE DATA nexus chunks_m1_t1 nexus")
+        assert not guard.holds_chunk_data("; 9; 0 1 TABLE DATA nexus chunkstore nexus")
+
+
+class TestSupervisorWiring:
+    def _sup(self, tmp_path: Path):
+        from nexus.daemon.storage_service_daemon import StorageServiceSupervisor
+
+        sup = StorageServiceSupervisor.__new__(StorageServiceSupervisor)
+        sup._config_dir = tmp_path
+        sup._creds = {"PG_DATA": str(tmp_path / "pg"), "PG_PORT": "1"}
+        return sup
+
+    def test_the_guard_refuses_the_spawn_as_a_start_error(self, tmp_path: Path, monkeypatch) -> None:
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+
+        monkeypatch.setattr(guard, "bundled_run_sql", lambda *_a, **_k: _legacy)
+        with pytest.raises(StorageServiceStartError) as exc:
+            self._sup(tmp_path)._legacy_chash_guard()
+        assert isinstance(exc.value.__cause__, guard.LegacyChashRefused)
+
+    def test_a_guard_that_cannot_ask_does_not_block_the_start(self, tmp_path: Path, monkeypatch) -> None:
+        def broken(*_a, **_k):
+            raise RuntimeError("no psql")
+
+        monkeypatch.setattr(guard, "bundled_run_sql", broken)
+        self._sup(tmp_path)._legacy_chash_guard()  # logs an error, does not raise
+
+    def test_managed_postgres_is_not_checked(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(guard, "bundled_run_sql", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError))
+        sup = self._sup(tmp_path)
+        sup._creds = {"PG_PORT": "1"}
+        sup._legacy_chash_guard()
+
+    def test_the_wait_retries_only_once_the_user_cleared_it(self, tmp_path: Path, monkeypatch) -> None:
+        import threading
+
+        from nexus.daemon import storage_service_daemon as ssd
+
+        monkeypatch.setattr(ssd, "_BELOW_FLOOR_RECHECK_S", 0.0)
+        with pytest.raises(guard.LegacyChashRefused) as refused:
+            guard.gate(tmp_path, _legacy)
+        err = ssd.StorageServiceStartError(str(refused.value))
+        err.__cause__ = refused.value
+        stop = threading.Event()
+        cleared_after: list[int] = []
+
+        def is_cleared(cfg: Path) -> bool:
+            cleared_after.append(1)
+            return len(cleared_after) >= 3
+
+        monkeypatch.setattr(guard, "is_cleared", is_cleared)
+        assert ssd._wait_for_legacy_backup(self._sup(tmp_path), err, stop, lambda: None) == ssd._ClusterFloorWait.RETRY
+        assert len(cleared_after) == 3
+        assert ssd._wait_for_legacy_backup(self._sup(tmp_path), ssd.StorageServiceStartError("other"), stop,
+                                           lambda: None) is None
+
+
+class TestCliStart:
+    def test_a_pending_refusal_without_a_backup_exits_75_before_anything_starts(self, tmp_path: Path,
+                                                                                 monkeypatch) -> None:
+        from click.testing import CliRunner
+
+        from nexus.cli import main
+
+        with pytest.raises(guard.LegacyChashRefused):
+            guard.gate(tmp_path, _legacy)
+        monkeypatch.setattr("nexus.db.pg_provision.discover_pg_binaries",
+                            lambda *_a, **_k: type("B", (), {"bin_dir": tmp_path})())
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        spawned: list[int] = []
+        monkeypatch.setattr("nexus.commands.daemon._start_via_autostart_unit", lambda *a, **k: spawned.append(1))
+        r = CliRunner().invoke(main, ["daemon", "service", "start", "--config-dir", str(tmp_path)])
+        assert r.exit_code == 75, r.output
+        assert "nx backup" in r.stderr and not spawned

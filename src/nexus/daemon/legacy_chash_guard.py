@@ -22,6 +22,7 @@ Specified by wren (engine), word for word in the design relay; nothing here runs
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -42,6 +43,14 @@ TABLES: tuple[tuple[str, str], ...] = (("chunks", "chunk rows"), ("catalog_docum
 
 #: Runs one SQL statement and returns its tuple-only output (psql -tA); raises on an SQL or connection error.
 RunSql = Callable[[str], str]
+
+
+class LegacyChashRefused(RuntimeError):
+    """The engine was not started: legacy rows would be deleted and no verified backup cleared it."""
+
+
+#: ``pg_restore -l`` names the chunk rows' data as ``TABLE DATA nexus chunks`` (or a partition ``chunks_...``).
+_CHUNKS_DATA = re.compile(r"TABLE DATA nexus chunks(\s|_)")
 
 
 @dataclass(frozen=True)
@@ -105,17 +114,18 @@ def record_refusal(config_dir: Path, verdict: Verdict, *, now: datetime | None =
 
 
 def verified_backup_since(
-    refused_at: str, *, pg_restore: Path, home: Path | None = None,
+    refused_at: str, *, pg_restore: Path, home: Path | None = None, explicit: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> Path | None:
-    """The newest dump in ``~/nexus-backups/`` written after ``refused_at`` that ``pg_restore -l`` reads, or None."""
+    """The newest dump written after ``refused_at`` whose ``pg_restore -l`` lists the chunk rows' data, or None.
+    Looks in ``~/nexus-backups/``, or only at ``explicit`` when the user named one (``--legacy-backup``)."""
     try:
         since = datetime.fromisoformat(refused_at).timestamp()
     except ValueError:
         return None
-    folder = backup_dir(home)
     try:
-        candidates = sorted((p for p in folder.glob("*.dump") if p.is_file() and p.stat().st_mtime > since),
+        pool = [explicit] if explicit is not None else list(backup_dir(home).glob("*.dump"))
+        candidates = sorted((p for p in pool if p.is_file() and p.stat().st_mtime > since),
                             key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return None
@@ -125,10 +135,15 @@ def verified_backup_since(
         except (OSError, subprocess.SubprocessError) as exc:
             _log.warning("legacy_chash_guard_backup_unreadable", path=str(dump), error=str(exc))
             continue
-        if done.returncode == 0:
+        if done.returncode == 0 and holds_chunk_data(done.stdout):
             return dump
         _log.warning("legacy_chash_guard_backup_unreadable", path=str(dump), returncode=done.returncode)
     return None
+
+
+def holds_chunk_data(listing: bytes | str) -> bool:
+    text = listing.decode("utf-8", "replace") if isinstance(listing, bytes) else listing
+    return bool(_CHUNKS_DATA.search(text))
 
 
 def mark_cleared(config_dir: Path, backup: Path, *, now: datetime | None = None) -> None:
@@ -152,8 +167,9 @@ def refusal_text(record: dict, *, home: Path | None = None) -> str:
         f"{record.get('changeset', DELETING_CHANGESET)} migration deletes them at its first start, and that cannot be "
         "undone, so nexus will not start it until a copy exists.\n"
         f"Run `nx backup` now (Postgres is left running for it); it writes a verified dump to {backup_dir(home)}/. "
-        "Then start again: the start goes on once a dump newer than this refusal "
-        f"({record.get('refused_at')}) reads back."
+        "Then start again (`nx daemon service start`, or `nx upgrade`): the start goes on once a dump newer than "
+        f"this refusal ({record.get('refused_at')}) reads back with the chunk rows. A dump written elsewhere "
+        "(`nx backup --to PATH`): `nx daemon service start --legacy-backup PATH`."
     )
 
 
@@ -169,3 +185,65 @@ def pending_refusal(config_dir: Path) -> dict | None:
     """The unresolved refusal, if any (for the CLI's start wait)."""
     record = read_record(config_dir)
     return record if record and record.get("refused_at") and not record.get("cleared_at") else None
+
+
+def is_cleared(config_dir: Path) -> bool:
+    record = read_record(config_dir)
+    return bool(record and record.get("cleared_at"))
+
+
+def try_clear(
+    config_dir: Path, *, pg_restore: Path, explicit: Path | None = None, home: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> Path | None:
+    """The user's next start: clear a pending refusal with a verified backup of this cluster. Returns the backup
+    it accepted (recorded in the guard file), or None when the refusal stands."""
+    record = pending_refusal(config_dir)
+    if record is None:
+        return None
+    found = verified_backup_since(record["refused_at"], pg_restore=pg_restore, home=home, explicit=explicit,
+                                  runner=runner)
+    if found is not None:
+        mark_cleared(config_dir, found)
+        _log.info("legacy_chash_guard_cleared", backup=str(found))
+    return found
+
+
+def gate(config_dir: Path, run_sql: RunSql) -> Verdict:
+    """The supervisor's step before it spawns an engine. Proceeds, or raises :class:`LegacyChashRefused` after
+    recording the refusal. A refusal the user cleared with a verified backup lets the start go on: the rows are still
+    there until the engine's first boot deletes them, which is what the backup was taken for."""
+    verdict = check(run_sql)
+    if verdict.proceed:
+        return verdict
+    if is_cleared(config_dir):
+        _log.warning("legacy_chash_guard_proceeding_after_backup", counts=verdict.counts,
+                     backup=(read_record(config_dir) or {}).get("cleared_by"))
+        return verdict
+    record = record_refusal(config_dir, verdict)
+    raise LegacyChashRefused(refusal_text(record))
+
+
+def bundled_run_sql(config_dir: Path, creds: dict[str, str], *, psql_runner=None) -> RunSql:
+    """A RunSql against the bundled cluster as its bootstrap superuser (FORCE RLS binds the table owner too; wren)."""
+    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred: heavy import
+        NEXUS_DB_NAME,
+        SUPERUSER_PASS_KEY,
+        bootstrap_superuser,
+        discover_pg_binaries,
+    )
+    from nexus.health import _run_psql  # noqa: PLC0415 — the shared psql helper
+
+    psql = discover_pg_binaries(config_dir).psql
+    port = int(creds.get("PG_PORT", "0") or 0)
+    user = bootstrap_superuser()
+    password = creds.get(SUPERUSER_PASS_KEY, "")
+
+    def run(sql: str) -> str:
+        done = _run_psql(psql, "127.0.0.1", port, NEXUS_DB_NAME, user, password, sql, psql_runner=psql_runner,
+                         timeout=120)
+        if done.returncode != 0:
+            raise RuntimeError(f"legacy chash guard query failed: {(done.stderr or '').strip()[-300:]}")
+        return done.stdout if isinstance(done.stdout, str) else done.stdout.decode("utf-8", "replace")
+
+    return run

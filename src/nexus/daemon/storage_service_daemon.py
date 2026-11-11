@@ -390,8 +390,13 @@ class StorageServiceStartError(RuntimeError):
         self.still_starting = still_starting
 
 
-# ── Credential helpers ─────────────────────────────────────────────────────────
+class LegacyChashStartRefused(StorageServiceStartError):
+    """The legacy-chash guard refused the engine start (nexus-f3yqd): exit 75, the message says what to run."""
 
+    exit_code = 75
+
+
+# ── Credential helpers ─────────────────────────────────────────────────────────
 
 def _read_pg_credentials(creds_path: Path) -> dict[str, str]:
     """Parse ``pg_credentials`` shell-env file into a {key: value} dict.
@@ -2183,6 +2188,20 @@ class StorageServiceSupervisor:
             return nothing
         return _parse_migration_probe(proc.stdout or "")
 
+    def _legacy_chash_guard(self) -> None:
+        """Refuse the spawn while legacy rows would be deleted and no verified backup cleared it (nexus-f3yqd).
+        Bundled cluster only. A guard that cannot run its queries logs an error and lets the start go on."""
+        if not self._creds.get("PG_DATA", "").strip():
+            return
+        from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
+
+        try:
+            _guard.gate(self._config_dir, _guard.bundled_run_sql(self._config_dir, self._creds))
+        except _guard.LegacyChashRefused as exc:
+            raise StorageServiceStartError(str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 — a guard that cannot ask must not block every start
+            _log.error("legacy_chash_guard_could_not_check", error=str(exc))
+
     def _release_stale_changelog_lock(self, *, reason: str) -> None:
         """Best-effort: terminate orphaned admin backends and release a
         stuck ``databasechangeloglock`` row (nexus-8vp0i / GH #1486).
@@ -2898,6 +2917,10 @@ class StorageServiceSupervisor:
         # otherwise block the fresh engine's Liquibase run indefinitely.
         # Best-effort and guarded to the bundled cluster (skips on managed PG).
         self._release_stale_changelog_lock(reason="pre_spawn")
+
+        # Step 1.75 (nexus-f3yqd): an engine whose hygiene-001-5 deletes 16-byte chash rows does not start on a store
+        # that still holds them until the user takes a verified backup (legacy_chash_guard; wren's spec).
+        self._legacy_chash_guard()
 
         # RDR-161: the legacy schema-skew gate (nexus-pebfx.4) is expunged with
         # the legacy launch path. A native binary ships its Liquibase changelog baked
@@ -3695,6 +3718,32 @@ def _wait_for_cluster_at_floor(
         return _ClusterFloorWait.RETRY
 
 
+def _wait_for_legacy_backup(
+    sup: StorageServiceSupervisor, exc: BaseException, stop_requested: threading.Event, flush_logging,
+) -> str | None:
+    """The legacy-chash guard refused the spawn (nexus-f3yqd): Postgres stays up so ``nx backup`` can dump it, and the
+    supervisor waits for the user's next start to clear the refusal with a verified backup (never for a file merely
+    appearing). None when ``exc`` is not that refusal."""
+    from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
+
+    if not isinstance(exc.__cause__, _guard.LegacyChashRefused):
+        return None
+    _log.error("storage_service_legacy_chash_refused", error=str(exc),
+               msg="waiting for a verified backup; Postgres stays up for nx backup")
+    flush_logging()
+    while True:
+        deadline = time.monotonic() + _BELOW_FLOOR_RECHECK_S
+        while (left := deadline - time.monotonic()) > 0:
+            if stop_requested.wait(min(left, DEFAULT_HEARTBEAT_INTERVAL)):
+                return _ClusterFloorWait.STOPPED
+        if stop_requested.is_set():
+            return _ClusterFloorWait.STOPPED
+        if _guard.is_cleared(sup._config_dir):
+            _log.info("storage_service_legacy_chash_cleared")
+            flush_logging()
+            return _ClusterFloorWait.RETRY
+
+
 def _supervise_until_stopped(
     sup: StorageServiceSupervisor,
     stop_requested: threading.Event,
@@ -3743,6 +3792,8 @@ def _supervise_until_stopped(
             return 0
         except StorageServiceStartError as exc:
             waited = _wait_for_cluster_at_floor(sup, exc, stop_requested, flush_logging)
+            if waited is None:
+                waited = _wait_for_legacy_backup(sup, exc, stop_requested, flush_logging)
             if waited is None:
                 raise
             if waited == _ClusterFloorWait.RETRY:
