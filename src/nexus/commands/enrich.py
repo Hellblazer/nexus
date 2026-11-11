@@ -168,6 +168,14 @@ class _CollectionDocuments:
 # spelling of ``paper`` (link_generator._PDF_CORPUS_SOURCE_TYPES reads both).
 _PAPER_CONTENT_TYPES: frozenset[str] = frozenset({"paper", "pdf"})
 
+# The catalog content types ``nx enrich bib --content-type`` accepts (the types the indexers and ``nx catalog register``
+# write), and ``any`` for every type. A typo is refused at the CLI: it would otherwise match no document and read as
+# an empty collection. A set, sorted: this is a vocabulary, not the prefix-to-type map of
+# ``metadata_schema`` (``tests/test_z0o2p12_note_write.py::TestContentTypeMap`` scans tuples and lists for a second
+# copy of that map and must not read this as one).
+BIB_CONTENT_TYPE_CHOICES: tuple[str, ...] = tuple(sorted(
+    {"paper", "pdf", "markdown", "prose", "code", "rdr", "knowledge", "any"}))
+
 
 def _catalog_collection_documents(
     collection: str, id_field: str, served: set[str], content_type: str = "paper",
@@ -498,6 +506,7 @@ def enrich() -> None:
 )
 @click.option(
     "--content-type",
+    type=click.Choice(BIB_CONTENT_TYPE_CHOICES),
     default="paper",
     show_default=True,
     help=(

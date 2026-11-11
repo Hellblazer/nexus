@@ -1159,3 +1159,35 @@ def test_enrich_bib_reports_documents_of_another_type() -> None:
     result, _backend, _lookup = _enrich_with({"c1": {"title": "x"}}, found, {})
 
     assert "3 not papers (not looked up; --content-type any looks them up)" in result.output
+
+
+@pytest.mark.parametrize("argv,expected", [
+    ([], "paper"),                                    # the default
+    (["--content-type", "any"], "any"),
+    (["--content-type", "knowledge"], "knowledge"),
+])
+@patch("nexus.commands.enrich.run_bib_enrichment")
+@patch("nexus.db.make_t3")
+def test_enrich_bib_forwards_content_type_to_the_core(
+    mock_t3_factory: MagicMock, mock_run: MagicMock, argv: list[str], expected: str,
+) -> None:
+    """GH #1611: ``--content-type`` reached ``run_bib_enrichment`` only by the keyword the CLI passes; nothing
+    pinned that. A dropped keyword would read as the default (papers only) and look like a working flag."""
+    mock_t3_factory.return_value = MagicMock(spec=HttpVectorClient)
+    result = CliRunner().invoke(enrich, ["bib", "knowledge__test", *argv])
+    assert result.exit_code == 0, result.output
+    mock_run.assert_called_once()
+    assert mock_run.call_args.kwargs["content_type"] == expected
+
+
+@patch("nexus.commands.enrich.run_bib_enrichment")
+@patch("nexus.db.make_t3")
+def test_enrich_bib_refuses_an_unknown_content_type_before_any_lookup(
+    mock_t3_factory: MagicMock, mock_run: MagicMock,
+) -> None:
+    """A typo (``papers``) matched no document and read as an empty collection; the CLI refuses it."""
+    mock_t3_factory.return_value = MagicMock(spec=HttpVectorClient)
+    result = CliRunner().invoke(enrich, ["bib", "knowledge__test", "--content-type", "papers"])
+    assert result.exit_code == 2, result.output
+    assert "papers" in result.output and "paper" in result.output
+    mock_run.assert_not_called()
