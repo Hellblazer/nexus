@@ -61,7 +61,7 @@ def _world(monkeypatch, *, route: bool):
 
 def _estimate(cols):
     def estimate(shape):
-        n, rerank = drv.SHAPES[shape]
+        n, rerank, _limit = drv.SHAPES[shape]
         return rp.estimate_batched_calls(cols, n, deep=rerank)
 
     return estimate
@@ -210,7 +210,7 @@ def test_a_batched_run_that_reaches_the_route_is_not_a_baseline(monkeypatch):
 
 def test_the_exit_code_for_an_unserved_route_is_three(monkeypatch):
     engine, cols, make_client = _world(monkeypatch, route=False)
-    monkeypatch.setattr(drv, "_live_world", lambda: (cols, make_client, search_cross_corpus, SearchDiagnostics))
+    monkeypatch.setattr(drv, "_live_world", lambda: (cols, {"mcp": cols, "cli": cols}, make_client, search_cross_corpus, SearchDiagnostics))
     module_time(monkeypatch, drv).sleep = lambda _s: None
     assert drv.main(["latency", "--rounds", "1", "--warmup", "0", "--shapes", "mcp", "--pause", "0"]) == 3
     assert drv.EXIT_ROUTE_NOT_SERVED == 3

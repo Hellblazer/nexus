@@ -328,7 +328,7 @@ def test_runs_record_their_kept_counts_and_page_in_the_json_payload():
 
 
 def test_mcp_route_k_is_the_mcp_tools_own_cap_and_cli_stays_uncapped():
-    cols = ["code__1-1__voyage-code-3__v1", "docs__1-1__voyage-context-3__v1"]
+    cols = ["code__1-1__model-code__v1", "docs__1-1__model-ctx__v1"]
     route_k_of = spp.make_route_k(cols, msc.SHAPES)
     mcp = route_k_of("mcp")  # n=30: 60 code / 120 docs uncapped, lowered to the cap
     assert spp.shape_k_cap("mcp") == _MCP_PER_COLLECTION_K
@@ -340,7 +340,7 @@ def test_mcp_route_k_is_the_mcp_tools_own_cap_and_cli_stays_uncapped():
 
 
 def test_uncapped_route_k_at_n_30_is_60_code_120_docs():
-    cols = ["code__1-1__voyage-code-3__v1", "docs__1-1__voyage-context-3__v1"]
+    cols = ["code__1-1__model-code__v1", "docs__1-1__model-ctx__v1"]
     route_k_of = spp.make_route_k(cols, {"x": (30, False, 10)})  # a shape with no cap
     uncapped = route_k_of("x")
     assert (uncapped(cols[0]), uncapped(cols[1])) == (60, 120)
@@ -348,7 +348,7 @@ def test_uncapped_route_k_at_n_30_is_60_code_120_docs():
 
 def test_the_cap_never_lowers_k_below_n():
     # min(k, max(cap, n)): a page deeper than the cap still fills
-    cols = ["code__1-1__voyage-code-3__v1"]
+    cols = ["code__1-1__model-code__v1"]
     route_k_of = spp.make_route_k(cols, {"mcp": (100, False, 10)})
     assert route_k_of("mcp")(cols[0]) == 100
 
@@ -693,8 +693,8 @@ def test_boosted_page_hands_on_the_searchs_model_of(spied):
 
 
 def test_a_group_takes_its_widest_multiplier_so_a_code_collection_beside_docs_gets_the_docs_k():
-    same_model = ["code__1-1__voyage-context-3__v1", "docs__1-1__voyage-context-3__v1"]
-    own_model = "code__2-1__voyage-code-3__v1"
+    same_model = ["code__1-1__model-ctx__v1", "docs__1-1__model-ctx__v1"]
+    own_model = "code__2-1__model-code__v1"
     route_k_of = spp.make_route_k([*same_model, own_model], {"x": (30, False, 10)})
     k = route_k_of("x")
     assert k(same_model[1]) == 120
@@ -743,8 +743,8 @@ def test_the_latency_leg_searches_each_shape_over_its_own_collections():
 
 
 def test_route_k_and_the_request_estimate_follow_each_shapes_collections():
-    alone = ["code__1-1__voyage-code-3__v1"]
-    grouped = ["code__1-1__voyage-context-3__v1", "docs__1-1__voyage-context-3__v1"]
+    alone = ["code__1-1__model-code__v1"]
+    grouped = ["code__1-1__model-ctx__v1", "docs__1-1__model-ctx__v1"]
     # shapes with no cap, so the multiplier is what differs: x holds the code collection alone,
     # y puts it beside a docs collection of its model
     route_k_of = spp.make_route_k({"x": alone, "y": grouped}, {"x": (30, False, 10), "y": (30, False, 10)})
