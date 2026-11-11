@@ -23,6 +23,12 @@ def test_a_tuple_tools_unknown_subspace_error_names_tuple_registry() -> None:
     assert "tuple_registry" in out
 
 
+def test_the_named_tool_is_registered() -> None:
+    from tests._mcp_inproc import list_tools  # noqa: PLC0415 — the server's own tools/list
+
+    assert "tuple_registry" in {t.name for t in list_tools(core.mcp)}
+
+
 def test_other_tuple_errors_and_non_tuple_tools_are_unchanged() -> None:
     assert core._mcp_tool_error("tuple_rd", SchemaViolationError("bad keys")) == "Error: bad keys"
     # mailbox_send's subspace is built from a name: listing templates is not the fix there

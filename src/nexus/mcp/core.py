@@ -304,7 +304,7 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
             # agent reached for a tool that does not exist (3 runs of 3).
             return _fail(
                 f"Error: {text}\n"
-                "Call tuple_registry to list the registered subspace templates, then use one of them."
+                "Call tuple_registry to list the registered subspace templates, then use a subspace that matches one."
             )
     return _fail(f"Error: {text}")
 
