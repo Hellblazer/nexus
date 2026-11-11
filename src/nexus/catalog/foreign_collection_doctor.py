@@ -122,3 +122,40 @@ def _fixes(doc: dict) -> list[str]:
         "so right after the re-index it lists none of the stray copy; the stray copy stays until it passes that "
         "grace, then gc moves it to quarantine, and it expires later)",
     ]
+
+
+def parse_foreign_collection_body(result: Any) -> dict | None:
+    """The checked body of ``GET /v1/catalog/manifest/foreign_collection`` for
+    :meth:`~nexus.catalog.http_catalog_client.HttpCatalogClient.manifest_foreign_collection`, or ``None`` ("cannot say")
+    when it is malformed or inconsistent: an uncapped list whose length is not ``count``, a nonzero count listing
+    nothing, or a document with no other collection."""
+    if not isinstance(result, dict):
+        return None
+    count, capped, documents = result.get("count"), result.get("capped"), result.get("documents")
+
+    def _is_count(v: Any) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+    well_formed = (
+        _is_count(count) and isinstance(capped, bool) and isinstance(documents, list)
+        and all(
+            isinstance(d, dict) and isinstance(d.get("tumbler"), str) and isinstance(d.get("physical_collection"), str)
+            and isinstance(d.get("collections"), list) and bool(d["collections"])
+            and all(isinstance(c, str) for c in d["collections"])
+            and _is_count(d.get("chunks"))
+            for d in documents
+        )
+        and (capped or len(documents) == count)
+        and (bool(documents) or count == 0)  # a nonzero count with nothing listed cannot be shown
+    )
+    if not well_formed:
+        _log.warning("http_catalog_client.manifest_foreign_collection_malformed", keys=sorted(result))
+        return None
+    return {
+        "count": count, "capped": capped,
+        "documents": [
+            {"tumbler": d["tumbler"], "physical_collection": d["physical_collection"],
+             "collections": list(d["collections"]), "chunks": d["chunks"]}
+            for d in documents
+        ],
+    }

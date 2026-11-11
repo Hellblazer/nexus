@@ -1273,36 +1273,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller reports "cannot say"
             _log.info("http_catalog_client.manifest_foreign_collection_unavailable", error=str(exc))
             return None
-        if not isinstance(result, dict):
-            return None
-        count, capped, documents = result.get("count"), result.get("capped"), result.get("documents")
+        from nexus.catalog.foreign_collection_doctor import parse_foreign_collection_body  # noqa: PLC0415 — kept out of this over-cap module
 
-        def _is_count(v: Any) -> bool:
-            return isinstance(v, int) and not isinstance(v, bool) and v >= 0
-
-        well_formed = (
-            _is_count(count) and isinstance(capped, bool) and isinstance(documents, list)
-            and all(
-                isinstance(d, dict) and isinstance(d.get("tumbler"), str) and isinstance(d.get("physical_collection"), str)
-                and isinstance(d.get("collections"), list) and bool(d["collections"])
-                and all(isinstance(c, str) for c in d["collections"])
-                and _is_count(d.get("chunks"))
-                for d in documents
-            )
-            and (capped or len(documents) == count)
-            and (bool(documents) or count == 0)  # a nonzero count with nothing listed cannot be shown
-        )
-        if not well_formed:
-            _log.warning("http_catalog_client.manifest_foreign_collection_malformed", keys=sorted(result))
-            return None
-        return {
-            "count": count, "capped": capped,
-            "documents": [
-                {"tumbler": d["tumbler"], "physical_collection": d["physical_collection"],
-                 "collections": list(d["collections"]), "chunks": d["chunks"]}
-                for d in documents
-            ],
-        }
+        return parse_foreign_collection_body(result)
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead
