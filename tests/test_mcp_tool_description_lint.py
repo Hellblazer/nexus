@@ -146,8 +146,7 @@ def _sent_length(description: str, fn: object, *, raw_docstring: str | None = No
     indentation); one passed explicitly is measured as given."""
     raw = raw_docstring if raw_docstring is not None else _source_docstring(fn)
     if raw and inspect.cleandoc(raw) == inspect.cleandoc(description):
-        doc = getattr(fn, "__doc__", None) or ""
-        return max(len(description), len(raw), len(doc))
+        return max(len(description), len(raw))
     return len(description)
 
 
