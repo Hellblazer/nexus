@@ -6723,6 +6723,10 @@ def _check_migration_state(
 
     Gated on pg_credentials being present (service/PG mode configured).
     """
+    # The engine's constraint state stands in for the scan only where the engine is the store the scan reads: the
+    # default credentials of a local install. An explicit creds_path (upgrade_finish's gate, another config dir) or a
+    # managed config beside leftover local credentials always scans.
+    engine_is_scanned_store = creds_path is None
     # Resolve creds_path default.
     if creds_path is None:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
@@ -7051,7 +7055,12 @@ def _check_migration_state(
         # non-conformant, and a CHECK holds for every tenant's rows, so the engine's constraint state answers the
         # whole-store question the scan below asks (engine 0.1.189). The debt tables carry no CHECK, so their probe
         # still runs. Anything other than True scans as before, with nothing said about the skipped read.
-        if (constraints_validated or _chash_constraints_validated_by_engine)() is True:
+        if constraints_validated is None and engine_is_scanned_store:
+            from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+            if is_local_mode():
+                constraints_validated = _chash_constraints_validated_by_engine
+        if constraints_validated is not None and constraints_validated() is True:
             nonconforming = 0
             view_era = True  # the debt probe below runs; its failure reports UNKNOWN, never a silent omission
         else:
@@ -12413,14 +12422,17 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(
-                f"NOT CHECKED: the engine's bounded read of the {len(names)} knowledge/docs collection(s) timed out "
-                "(its own statement bound); the next `nx doctor` asks again."
+                f"NOT CHECKED: the engine answered 503 to its bounded read of the {len(names)} knowledge/docs "
+                "collection(s) (its statement bound, or the service unavailable); the next `nx doctor` asks again."
             ),
         )]
     route_hits: list[dict] = []
+    route_timed_out: list[str] = []
     names_to_scan = names
     if isinstance(route, list):
-        route_hits = [r for r in route if r["stub_chunks"] > 0]
+        listed = set(names)
+        route_hits = [r for r in route if r["collection"] in listed and not r.get("timed_out") and r["stub_chunks"] > 0]
+        route_timed_out = [r["collection"] for r in route if r["collection"] in listed and r.get("timed_out")]
         covered = {r["collection"] for r in route}
         names_to_scan = [n for n in names if n not in covered]
 
@@ -12451,6 +12463,11 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
     }
 
     gaps = ""
+    if route_timed_out:
+        shown = ", ".join(route_timed_out[:5])
+        more = f" (+{len(route_timed_out) - 5} more)" if len(route_timed_out) > 5 else ""
+        gaps += (f" NOT CHECKED: the engine's bounded read did not finish in time for {len(route_timed_out)} "
+                 f"collection(s): {shown}{more}; the next `nx doctor` asks again.")
     if unreadable:
         shown = ", ".join(unreadable[:5])
         more = f" (+{len(unreadable) - 5} more)" if len(unreadable) > 5 else ""
@@ -12543,7 +12560,7 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             detail=" ".join(parts) + gaps,
             fix_suggestions=fixes,
         )]
-    if unreadable or samples_over or stubs_over:
+    if route_timed_out or unreadable or samples_over or stubs_over:
         return [HealthResult(
             label=label,
             ok=False,

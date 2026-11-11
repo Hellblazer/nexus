@@ -3,7 +3,7 @@
 ``nexus.chunks`` and ``nexus.catalog_document_chunks`` are VALIDATED (``GET /v1/schema/chash-conformance``, engine
 0.1.189, capability ``chash_conformance_constraints_supported``; any authenticated token).
 
-``True`` only when the engine answers and every listed constraint is present and validated with ``all_validated`` true:
+``True`` only when the engine answers, lists both poison tables, and every listed constraint is present and validated with ``all_validated`` true:
 then no row of those tables can be non-conformant and the doctor skips its scans. ``False`` is an answer that is not
 validated (every store until the 0.1.190 VALIDATE job runs). ``None`` is no answer. Both mean scan as before.
 """
@@ -16,7 +16,7 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 
 _VALID = {"all_validated": True, "constraints": [
     {"table": "nexus.chunks", "name": "chunks_chash_octet_check", "present": True, "validated": True},
-    {"table": "nexus.catalog_document_chunks", "name": "cdc_chash_octet_check", "present": True, "validated": True},
+    {"table": "nexus.catalog_document_chunks", "name": "catalog_document_chunks_chash_octet_check", "present": True, "validated": True},
 ]}
 
 
@@ -46,6 +46,9 @@ def test_a_validated_store_reads_true(monkeypatch: pytest.MonkeyPatch) -> None:
     {"all_validated": True, "constraints": [{**_VALID["constraints"][0], "validated": False}, _VALID["constraints"][1]]},
     {"all_validated": True, "constraints": [{**_VALID["constraints"][0], "present": False}, _VALID["constraints"][1]]},
     {"all_validated": True, "constraints": []},
+    {"all_validated": True, "constraints": [_VALID["constraints"][0]]},
+    {"all_validated": True, "constraints": [_VALID["constraints"][0],
+                                            {**_VALID["constraints"][1], "table": "nexus.some_other_table"}]},
 ])
 def test_anything_short_of_every_constraint_validated_reads_false(monkeypatch: pytest.MonkeyPatch, body: dict) -> None:
     c, _calls = _client(monkeypatch, get=body)

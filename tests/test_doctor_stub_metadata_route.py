@@ -63,10 +63,39 @@ def test_a_clean_route_answer_is_clean_without_a_scan(monkeypatch: pytest.Monkey
 def test_the_routes_timeout_is_not_checked_and_not_a_scan(monkeypatch: pytest.MonkeyPatch) -> None:
     scanned = _setup(monkeypatch, STUB_METADATA_TIMED_OUT)
     r = h._check_pdf_stub_metadata()[0]
-    assert scanned == [] and r.ok is False and r.detail.startswith("NOT CHECKED: the engine's bounded read"), r.detail
+    assert scanned == [] and r.ok is False and r.detail.startswith("NOT CHECKED: the engine answered 503"), r.detail
 
 
 def test_no_route_scans_as_before(monkeypatch: pytest.MonkeyPatch) -> None:
     scanned = _setup(monkeypatch, None)
     r = h._check_pdf_stub_metadata()[0]
     assert sorted(scanned) == sorted(_NAMES) and r.ok is True
+
+
+def test_a_collection_the_engine_cut_off_is_not_checked_and_not_scanned(monkeypatch: pytest.MonkeyPatch) -> None:
+    route = [
+        {"collection": _NAMES[0], "stub_chunks": 3, "capped": False, "examples": ["a.pdf"]},
+        {"collection": _NAMES[1], "timed_out": True},
+        {"collection": _NAMES[2], "stub_chunks": 0, "capped": False, "examples": []},
+    ]
+    scanned = _setup(monkeypatch, route)
+    r = h._check_pdf_stub_metadata()[0]
+    assert scanned == [], "a timed-out collection is not rescanned"
+    assert r.ok is False and r.detail.startswith("3 PDF chunk(s) in 1 collection(s)"), r.detail
+    assert f"NOT CHECKED: the engine's bounded read did not finish in time for 1 collection(s): {_NAMES[1]}" in r.detail
+
+
+def test_only_timed_out_rows_still_say_not_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    route = [{"collection": n, "stub_chunks": 0, "capped": False, "examples": []} for n in _NAMES[:2]]
+    route.append({"collection": _NAMES[2], "timed_out": True})
+    scanned = _setup(monkeypatch, route)
+    r = h._check_pdf_stub_metadata()[0]
+    assert scanned == [] and r.ok is False and "did not finish in time" in r.detail, r.detail
+
+
+def test_a_route_row_for_a_collection_the_scan_would_skip_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    route = [{"collection": n, "stub_chunks": 0, "capped": False, "examples": []} for n in _NAMES]
+    route.append({"collection": "other__z__voyage-context-3__v1", "stub_chunks": 9, "capped": False, "examples": ["q.pdf"]})
+    _setup(monkeypatch, route)
+    r = h._check_pdf_stub_metadata()[0]
+    assert r.ok is True, r.detail

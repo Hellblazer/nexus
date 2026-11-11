@@ -271,6 +271,10 @@ _SECTION_LABEL_FILLABLE_TIMEOUT_S = 15.0
 #: :meth:`HttpCatalogClient.stub_metadata`'s answer when the engine's bounded read timed out (a 503): the doctor row
 #: reports itself not checked, with that reason, rather than rerunning the slow scan.
 STUB_METADATA_TIMED_OUT = object()
+#: The stub-metadata read's client timeout: above the engine's 25 s call budget (PdfStubMetadataReads.BUDGET_MS), so
+#: the engine's per-collection ``timed_out`` rows arrive instead of a client-side timeout, and under the public edge's
+#: roughly 30 s cut.
+STUB_METADATA_TIMEOUT_S = 28.0
 
 #: The engine's caps on the RDR-223 append routes (Phase 1, P1.3/P1.4). Refused here, locally and
 #: before any round trip, so a violation reads as a client bug naming the cap instead of a 400
@@ -1177,7 +1181,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         (``GET /v1/schema/chash-conformance``, engine 0.1.189, nexus-f3yqd.6). Reads only ``all_validated`` and each
         constraint's ``present`` and ``validated`` (a tenant token gets nothing more).
 
-        ``True`` only when every listed constraint is present and validated and ``all_validated`` is true: no row of
+        ``True`` only when both poison tables are listed, every listed constraint is present and validated, and
+        ``all_validated`` is true: no row of
         those tables can then be non-conformant. ``False`` is an answer that is not that (every store until the
         engine's VALIDATE job runs). ``None`` is no answer: no ``chash_conformance_constraints_supported`` flag (no
         request is sent), a 403, 404 or 503, an error, or a malformed body. A caller scans on anything but ``True``.
@@ -1196,24 +1201,28 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         constraints = body["constraints"]
         if not all(isinstance(c, dict) for c in constraints):
             return None
-        return (body["all_validated"] is True and bool(constraints)
+        from nexus.db.chash_tables import POISON_CHASH_TABLES  # noqa: PLC0415 — deferred to avoid circular import
+
+        named = {c.get("table") for c in constraints}
+        return (body["all_validated"] is True and {t.table for t in POISON_CHASH_TABLES} <= named
                 and all(c.get("present") is True and c.get("validated") is True for c in constraints))
 
     def stub_metadata(self, limit: int = 1000) -> list[dict] | object | None:
         """Per knowledge/docs collection, the bounded count of PDF chunks still carrying the upload placeholder
         metadata (``GET /stub-metadata``, engine 0.1.189, nexus-f3yqd.6): ``[{"collection", "stub_chunks", "capped",
-        "examples"}]``. ``capped`` means more than *limit* exist, so ``stub_chunks`` reads as "at least"; ``examples``
+        "examples"}]``, or ``{"collection", "timed_out": True}`` for a collection the engine's bound cut off. ``capped`` means more than *limit* exist, so ``stub_chunks`` reads as "at least"; ``examples``
         are owning-document names (source URI, else file path).
 
         ``None`` means scan as before: the engine does not advertise ``catalog_stub_metadata_supported`` (no request
         is sent then), the route answers 403 or 404 or another error, the request fails, or the body is malformed.
-        A 503 is the engine's own statement timeout: :data:`STUB_METADATA_TIMED_OUT` is returned so a caller reports
-        the row not checked instead of running the slow scan the route replaces.
+        A 503 (the engine's statement bound on the collection list, or the service unavailable) returns
+        :data:`STUB_METADATA_TIMED_OUT`, so a caller reports the row not checked instead of running the slow scan the
+        route replaces.
         """
         if self._version_flags().get("catalog_stub_metadata_supported") is not True:
             return None
         try:
-            result = self._get("/stub-metadata", idempotent=False, timeout=_SECTION_LABEL_FILLABLE_TIMEOUT_S, limit=limit)
+            result = self._get("/stub-metadata", idempotent=False, timeout=STUB_METADATA_TIMEOUT_S, limit=limit)
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             _log.info("http_catalog_client.stub_metadata_unavailable", status=status)
@@ -1226,6 +1235,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         def _row_ok(r: object) -> bool:
             if not isinstance(r, dict):
                 return False
+            if r.get("timed_out") is True:
+                return isinstance(r.get("collection"), str)
             n = r.get("stub_chunks")
             return (isinstance(r.get("collection"), str) and not isinstance(n, bool) and isinstance(n, int) and n >= 0
                     and isinstance(r.get("capped"), bool) and isinstance(r.get("examples"), list)
@@ -1234,8 +1245,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if not isinstance(collections, list) or not all(_row_ok(r) for r in collections):
             _log.warning("http_catalog_client.stub_metadata_malformed")
             return None
-        return [{"collection": r["collection"], "stub_chunks": r["stub_chunks"], "capped": r["capped"],
-                 "examples": list(r["examples"])} for r in collections]
+        return [{"collection": r["collection"], "timed_out": True} if r.get("timed_out") is True
+                else {"collection": r["collection"], "stub_chunks": r["stub_chunks"], "capped": r["capped"],
+                      "examples": list(r["examples"])} for r in collections]
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead

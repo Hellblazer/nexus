@@ -46,4 +46,5 @@ def test_anything_else_scans_as_before_with_no_warning(monkeypatch: pytest.Monke
     cat = _Cat(validated)
     r = _row(monkeypatch, cat)
     assert cat.dims == list(h._CHASH_CONFORMANCE_REPORT_DIMS)
-    assert r.ok is True and "⚠" not in r.detail and "FAIL" not in r.detail, r.detail
+    assert r.ok is True and r.warn is False, r.detail
+    assert "constraint state" not in r.detail and "validated" not in r.detail, "the fallback names the skipped read"

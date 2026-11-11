@@ -97,3 +97,47 @@ def test_the_engine_probe_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader",
                         lambda: type("C", (), {"chash_constraints_validated": lambda self: True})())
     assert h._chash_constraints_validated_by_engine() is True
+
+
+def _default_creds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, local: bool) -> list[str]:
+    """Point the default credentials at tmp_path and record whether the engine is asked."""
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred, matches the check under test
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    _make_creds_file(cfg).rename(cfg / CREDENTIALS_FILENAME)
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: cfg)
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: local)
+    asked: list[str] = []
+
+    def engine() -> bool:
+        asked.append("engine")
+        return True
+
+    monkeypatch.setattr(h, "_chash_constraints_validated_by_engine", engine)
+    return asked
+
+
+def _run_default(**kw: object) -> list[str]:
+    seen, runner = _recording_runner(debt=0)
+    h._check_migration_state(psql_bin=Path("/fake/psql"), psql_runner=_psql_runner_ok(7), diag_runner=runner, **kw)
+    return seen
+
+
+def test_a_local_install_with_default_credentials_asks_the_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    asked = _default_creds(tmp_path, monkeypatch, local=True)
+    seen = _run_default()
+    assert asked == ["engine"] and not _ran_any(seen, chash_tables.chash_conformance_statements())
+
+
+def test_a_managed_config_beside_local_credentials_scans(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    asked = _default_creds(tmp_path, monkeypatch, local=False)
+    seen = _run_default()
+    assert asked == [] and _ran_any(seen, chash_tables.chash_conformance_statements())
+
+
+def test_explicit_credentials_scan_without_asking_the_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """upgrade_finish's gate passes its own creds_path: the engine the ambient config names need not be that store."""
+    asked = _default_creds(tmp_path, monkeypatch, local=True)
+    seen = _run_default(creds_path=_make_creds_file(tmp_path))
+    assert asked == [] and _ran_any(seen, chash_tables.chash_conformance_statements())
