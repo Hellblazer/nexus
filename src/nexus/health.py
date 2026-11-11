@@ -13246,7 +13246,7 @@ _CENSUS_UNANSWERED = ("the engine did not answer its bounded census read (an eng
                       "does not list it, an error or a timeout)")
 
 
-def _instant(value: str) -> datetime:
+def _census_instant(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
@@ -13269,10 +13269,10 @@ def _stale_fence_rows_from_census(cat: Any, label: str, census: dict) -> list[He
                  for e in stale["examples"]]
     if not fence_out:
         if fence["anchor"]["kind"]:
-            anchor = _instant(fence["anchor"]["at"])
+            anchor = _census_instant(fence["anchor"]["at"])
         for e in fence["post_anchor"]["examples"]:
             ident = e["source_uri"] or e["tumbler"] or "?"
-            post_anchor.append((ident, _instant(e["indexed_at"])))
+            post_anchor.append((ident, _census_instant(e["indexed_at"])))
             prefixes[ident] = ".".join(e["tumbler"].split(".")[:2])
             files[ident] = e["file_path"] or ""
     facts = _FenceFacts(

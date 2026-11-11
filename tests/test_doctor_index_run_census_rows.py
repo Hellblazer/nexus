@@ -9,7 +9,11 @@ capped census with a zero is "not fully checked", never "none".
 """
 from __future__ import annotations
 
+import ast
+from collections import Counter
+
 import copy
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -386,3 +390,10 @@ def test_the_walk_is_retired() -> None:
     for name in ("_walk_documents_for_doctor", "_WALK_FAILED", "_WalkFailed", "_doc_list", "_index_run_rows_not_checked",
                  "_check_stale_indexing_runs", "_check_failed_runs_hidden_chunks", "_check_next_seq_drift"):
         assert not hasattr(h, name), name
+
+
+def test_health_defines_no_top_level_function_twice() -> None:
+    """A second ``_instant`` once shadowed the engine-status one and crashed the per-collection-index row on a null."""
+    tree = ast.parse(Path(h.__file__).read_text(encoding="utf-8"))
+    names = Counter(n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    assert [n for n, c in names.items() if c > 1] == []
