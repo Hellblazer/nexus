@@ -1,0 +1,3 @@
+### Fixed
+
+- **`nx index repo` no longer writes chunks for a file another owner's document holds** (GH #1611). When a file inside a repository was already catalogued by another owner (`nx index pdf <file> --collection ...`, say), the repo run resolved onto that document and wrote its chunks into the repository's collection under the other document's id, where the document's own collection did not have them: search scoped to that collection missed the file and its live count fell. The repo run now skips such a file, names it in a warning (`catalog_register_skipped_foreign_owner`) and in the run's summary, and does not count it as a failure.

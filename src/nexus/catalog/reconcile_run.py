@@ -25,6 +25,12 @@ _log = structlog.get_logger(__name__)
 #: Rows per stage call: the engine's cap (``CatalogHandler.MAX_BATCH_DOC_IDS``).
 STAGE_PAGE = 1000
 
+#: Causes (prefixes of the hook's ``unregistered`` values) for a file left without a document ON PURPOSE: a worktree or
+#: temp-dir path (``ephemeral:``) or a file another owner's live row holds (``foreign_owner:``, GH #1611 item 1). Not a
+#: failure: neither fails the run summary, enters the durable failure record, nor holds the --since-head base.
+DELIBERATE_SKIP_CAUSES: tuple[str, ...] = ("ephemeral:", "foreign_owner:")
+
+
 
 def stage_and_commit(writer: Any, owner: Any, rows: list[dict], *, walk: str, page: int = STAGE_PAGE) -> dict:
     """Stage *rows* (pages of at most *page*), commit the run once and return the outcome.
@@ -56,6 +62,10 @@ class Applied:
     #: tumbler -> the files of this run a ``--sensitive-glob`` matched that the commit left unflagged
     sensitivity_pending: dict[str, list[Path]] = field(default_factory=dict)
     reconciled: list[tuple[Path, str]] = field(default_factory=list)
+    #: GH #1611 item 1: file -> the live row of ANOTHER owner the engine resolved it onto (``foreign_owner``). The
+    #: file is that owner's document: this run gives it no document id, so none of its chunks are written under a row
+    #: whose physical_collection is the other owner's collection.
+    foreign: dict[Path, str] = field(default_factory=dict)
     refused: dict[Path, str] = field(default_factory=dict)
     #: staged present rows the outcome has no row for (the engine answers one row per staged row, so this is a defect)
     missing: list[Path] = field(default_factory=list)
@@ -85,6 +95,9 @@ def apply_outcome(outcome: dict, *, rel_to_abs: dict[str, Path], staged: dict[st
             out.refused[abs_path] = str(r.get("reason") or action or "")
             continue
         tumbler = str(tumbler)
+        if action == "foreign_owner":
+            out.foreign[abs_path] = tumbler
+            continue
         row = staged[rel]
         out.file_to_doc_id[abs_path] = tumbler
         if row.get("sensitive"):
@@ -106,7 +119,7 @@ def apply_outcome(outcome: dict, *, rel_to_abs: dict[str, Path], staged: dict[st
                 out.stale_fence_doc_ids.add(tumbler)
             elif state == "complete" and r.get("index_content_hash"):
                 out.complete_doc_hashes[tumbler] = str(r["index_content_hash"])
-        elif action in ("same_owner_by_uri", "foreign_owner"):
+        elif action == "same_owner_by_uri":
             out.reconciled.append((abs_path, tumbler))
         if row.get("sensitive") and r.get("sensitive"):
             out.sensitive_confirmed.add(abs_path)

@@ -165,6 +165,46 @@ def test_the_hook_names_a_row_the_commit_did_not_answer_as_no_outcome_row(tmp_pa
     assert unregistered == {b: "no_outcome_row"}
 
 
+# ── GH #1611 item 1: a row another owner holds takes none of this run's chunks ─────────────────────────────────
+
+def test_a_foreign_owner_row_gets_no_document_id_and_is_named(tmp_path: Path) -> None:
+    """The engine resolved the file onto a live row of another owner (a curator's ``nx index pdf --collection``
+    document). Its physical_collection is that owner's collection, so chunks this run wrote under its tumbler landed
+    in the repo's collection, where the row does not say they are, and the curator collection's live count lost them.
+    The file is the other owner's document: it gets no document id here and is listed in ``foreign``."""
+    a, b = tmp_path / "a.py", tmp_path / "paper.pdf"
+    applied = reconcile_run.apply_outcome(
+        _outcome(_row("a.py", "created", "1.7.1"), _row("paper.pdf", "foreign_owner", "1.23.96")),
+        rel_to_abs={"a.py": a, "paper.pdf": b}, staged={"a.py": _STAGED, "paper.pdf": _STAGED})
+    assert applied.file_to_doc_id == {a: "1.7.1"}
+    assert applied.foreign == {b: "1.23.96"}
+    assert applied.reconciled == []
+    assert applied.missing == []
+
+
+def test_a_same_owner_row_found_by_uri_keeps_its_document_id(tmp_path: Path) -> None:
+    a = tmp_path / "a.py"
+    applied = reconcile_run.apply_outcome(
+        _outcome(_row("a.py", "same_owner_by_uri", "1.7.9")), rel_to_abs={"a.py": a}, staged={"a.py": _STAGED})
+    assert applied.file_to_doc_id == {a: "1.7.9"}
+    assert applied.reconciled == [(a, "1.7.9")]
+    assert applied.foreign == {}
+
+
+def test_the_hook_skips_a_foreign_owner_file_loudly(tmp_path: Path) -> None:
+    a, b = tmp_path / "a.py", tmp_path / "paper.pdf"
+    a.write_text("a\n")
+    b.write_bytes(b"%PDF-1.4\n")
+    writer = _Writer(_outcome(_row("a.py", "created", "1.7.1"), _row("paper.pdf", "foreign_owner", "1.23.96")))
+    unregistered: dict[Path, str] = {}
+    with structlog.testing.capture_logs() as logs:
+        ids = _hook(tmp_path, [(a, "code", "code__r"), (b, "pdf", "docs__r")], writer, unregistered=unregistered)
+    assert ids == {a: "1.7.1"}
+    assert unregistered == {b: "foreign_owner:1.23.96"}
+    ev = [e for e in logs if e.get("event") == "catalog_register_skipped_foreign_owner"]
+    assert len(ev) == 1 and ev[0]["log_level"] == "warning" and ev[0]["tumbler"] == "1.23.96", logs
+
+
 # ── per-item log events from the outcome ────────────────────────────────────────────────────────────────────────
 
 def test_the_outcome_logs_one_event_for_each_rename_sweep_and_explicit_delete(info_logs) -> None:

@@ -494,6 +494,13 @@ class TestRefusedFilesEnterTheDurableRecord:
         )
         store.record_index_failures_batch.assert_not_called()
 
+    def test_a_foreign_owner_only_run_writes_no_durable_row_at_all(self, tmp_path: Path) -> None:
+        """GH #1611 item 1: a file another owner's row holds is skipped on purpose, like a worktree path: no
+        failure row, so `nx doctor` stays green and the post-commit hook's base can advance."""
+        repo = _repo(tmp_path, "paper.pdf")
+        _stats, store = self._run_with_store(repo, {"paper.pdf": "foreign_owner:1.23.96"})
+        store.record_index_failures_batch.assert_not_called()
+
     def test_nothing_is_written_when_every_file_has_a_document(self, tmp_path: Path) -> None:
         repo = _repo(tmp_path, "good.py")
         _stats, store = self._run_with_store(repo, {})

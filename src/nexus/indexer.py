@@ -33,6 +33,7 @@ from nexus import _locking
 from nexus._locking import lock_file, unlock_file
 from nexus.bounded_subprocess import run_bounded
 from nexus.catalog.indexed_meta import document_register_meta, fill_only_meta
+from nexus.catalog.reconcile_run import DELIBERATE_SKIP_CAUSES as _DELIBERATE_SKIP
 from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import index_model_for_collection, is_conformant_collection_name
 from nexus.db.limits import QUOTAS
@@ -1627,6 +1628,18 @@ def _catalog_hook(
                 repo=repo_name, rel_path=str(_path.relative_to(repo)) if _path.is_relative_to(repo) else _path.name,
                 tumbler=_tum, owner=str(owner),
             )
+        for _path, _tum in applied.foreign.items():
+            # GH #1611 item 1: another owner's live row holds this file (a curator's `nx index pdf --collection`
+            # document, say). Its chunks belong in that row's collection; writing them here under its tumbler hid them
+            # from it. The file is skipped, by name.
+            skipped_files.append((_path, f"foreign_owner:{_tum}"))
+            if unregistered is not None:
+                unregistered[_path] = f"foreign_owner:{_tum}"
+            _log.warning(
+                "catalog_register_skipped_foreign_owner",
+                repo=repo_name, rel_path=str(_path.relative_to(repo)) if _path.is_relative_to(repo) else _path.name,
+                tumbler=_tum, owner=str(owner),
+            )
         for _path, _cause in applied.refused.items():
             skipped_files.append((_path, _cause))
             if unregistered is not None:
@@ -1649,7 +1662,7 @@ def _catalog_hook(
             owner=str(owner), repo=repo_name, walk=walk, rows=len(rows),
             created=len(new_tumblers), updated=applied.updated, trashed=len(outcome.get("trashed", [])),
             renamed=len(outcome.get("renamed", [])), swept=len(outcome.get("swept", [])),
-            reconciled=len(reconciled), refused=len(applied.refused),
+            reconciled=len(reconciled), refused=len(applied.refused), foreign_owner=len(applied.foreign),
         )
 
         if skipped_files or ephemeral_skipped or reconciled:
@@ -1663,8 +1676,15 @@ def _catalog_hook(
                     f"{len(reconciled)} reconciled onto rows outside this owner "
                     f"(nexus-53cae; see structlog warnings)"
                 )
-            if skipped_files:
-                _skip_bits.append(f"{len(skipped_files)} skipped (see structlog warnings)")
+            if applied.foreign:
+                _skip_bits.append(
+                    f"{len(applied.foreign)} held by another owner's document, not written "
+                    "(GH #1611; see structlog warnings)"
+                )
+            if len(skipped_files) > len(applied.foreign):
+                _skip_bits.append(
+                    f"{len(skipped_files) - len(applied.foreign)} skipped (see structlog warnings)"
+                )
             if ephemeral_skipped:
                 _skip_bits.append(
                     f"{ephemeral_skipped} worktree/tempdir path(s) refused (nexus-u8n4r)"
@@ -4705,7 +4725,7 @@ def _refuse_identity_less_files(
     apart by the hook's cause map:
 
     * ``ephemeral:*``: registration was refused on purpose (worktree or temp
-      dir). Counted by the ephemeral-skip summary, not a failure, not in the
+      dir); ``foreign_owner:*`` (GH #1611) is handled the same way. Counted by the ephemeral-skip summary, not a failure, not in the
       durable record (``nx doctor`` would go red over it), and does not hold
       the --since-head base.
     * anything else (``register_failed``, ``register_refused``,
@@ -4729,7 +4749,7 @@ def _refuse_identity_less_files(
         cause = causes.get(path, "unexplained")
         refusals.append((path, cause))
         cause_counts[cause] = cause_counts.get(cause, 0) + 1
-        if cause.startswith("ephemeral:"):
+        if cause.startswith(_DELIBERATE_SKIP):
             continue
         dropped += 1
         named.append(str(path))
@@ -5781,7 +5801,7 @@ def _run_index(
             on_phase(f"{len(_glob_unflagged)} file(s) matching --sensitive-glob not indexed: the flag could not be set")
     _identity_less_dropped = sum(
         1 for _p, _cause in _identity_less_refusals
-        if not _cause.startswith("ephemeral:")
+        if not _cause.startswith(_DELIBERATE_SKIP)
     )
     _dispatch_code = [(sc, f) for sc, f in code_files if f not in _refused_paths]
     _dispatch_prose = [(sc, f) for sc, f in prose_files if f not in _refused_paths]
@@ -7298,7 +7318,7 @@ def _run_index(
             *_identity_less_refusals,
             *_late_identity_less_drops.items(),
         ]
-        if not _cause.startswith("ephemeral:")
+        if not _cause.startswith(_DELIBERATE_SKIP)
     ]
     _identity_less_durable_write_failed = False
     if _identity_less_to_record:
