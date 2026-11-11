@@ -14,6 +14,14 @@
 # recorded in OUT_DIR/not-run.txt with the reason, no session starts, and the exit is 3. verdicts.py scores it NOT-RUN.
 # canary-fail and unmapped stop before the app by design and run (runner_guard.bash).
 #
+# PROSE_EDIT_APP_RUNNER=1 puts the stand-in MarkupEditor server (markup_standin.py, nexus-scmcs.3) in every session
+# of the run: an --mcp-config file OUT_DIR/NAME.mcp.json naming it `markupeditor`, --strict-mcp-config (the machine's
+# own MarkupEditor servers stay out), and the tools the skill calls allowed (never save_document or replace_blocks).
+# The sessions of one run share OUT_DIR/markup-standin-state.json, so a resumed session finds what the last one
+# proposed; NAME picks the author's scripted decisions (PROSE_EDIT_STANDIN_DECISIONS, default
+# markup_standin_decisions.json). PROSE_EDIT_STANDIN_PYTHON names the interpreter that has the mcp package (default:
+# the checkout's .venv, else python3). Without the switch nothing here changes.
+#
 # Tool restriction (the session is a scenario, not a person):
 #   allowed   Bash only for the three prose-edit scripts, Read, Write, Agent
 #   denied    Bash(nx:*), Bash(uv:*), Bash(bd:*), Bash(curl:*)
@@ -33,6 +41,22 @@ if [ "${PROSE_EDIT_APP_RUNNER:-0}" != 1 ] && runner_prompt_is_path_run "$PROMPT"
   exit 3
 fi
 mkdir -p "$OUT"
+APP_ARGS=()
+APP_TOOLS=()
+if [ "${PROSE_EDIT_APP_RUNNER:-0}" = 1 ]; then
+  OUT_ABS="$(cd "$OUT" && pwd)" || exit 1
+  STANDIN_PY="${PROSE_EDIT_STANDIN_PYTHON:-}"
+  if [ -z "$STANDIN_PY" ]; then
+    if [ -x "$WT/.venv/bin/python" ]; then STANDIN_PY="$WT/.venv/bin/python"; else STANDIN_PY=python3; fi
+  fi
+  python3 "$HERE/markup_standin.py" mcp-config --out "$OUT_ABS/$NAME.mcp.json" --python "$STANDIN_PY" \
+    --state "$OUT_ABS/markup-standin-state.json" \
+    --decisions "${PROSE_EDIT_STANDIN_DECISIONS:-$HERE/markup_standin_decisions.json}" --scenario "$NAME" || exit 1
+  APP_ARGS=(--mcp-config "$OUT_ABS/$NAME.mcp.json" --strict-mcp-config)
+  for tool in open_document get_document propose_edits list_suggestions undo; do
+    APP_TOOLS+=("mcp__markupeditor__$tool")
+  done
+fi
 cd "$WT" || exit 1
 RESUME_ARGS=()
 if [ -n "${RESUME_FROM:-}" ]; then
@@ -52,6 +76,7 @@ python3 tests/e2e/lib/claude_credentials.py run -- "${CLAUDE_BIN:-claude}" -p "$
   --allowedTools "Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/brief.py:*)" \
                  "Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/memory.py:*)" \
                  "Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/review.py:*)" Read Write Agent \
+                 ${APP_TOOLS[@]+"${APP_TOOLS[@]}"} ${APP_ARGS[@]+"${APP_ARGS[@]}"} \
   --disallowedTools "Bash(nx:*)" "Bash(uv:*)" "Bash(bd:*)" "Bash(curl:*)" \
   --add-dir "$TMPDIR" \
   --max-turns 40 > "$OUT/$NAME.jsonl" 2> "$OUT/$NAME.err"

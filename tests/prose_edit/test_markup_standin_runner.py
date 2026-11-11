@@ -1,0 +1,181 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""run-scenario.sh points a session at the stand-in MarkupEditor server only under PROSE_EDIT_APP_RUNNER=1 (nexus-scmcs.3).
+
+The runners run a copy of the acceptance directory in a scratch tree, with a stub in place of the credentials helper
+and a stub `claude` that records its argv, so no session starts and nothing costs money. The argv is asserted whole:
+without the switch it is what it was before the stand-in existed; with it, it is that argv plus the MCP config and
+the tool allowances, and nothing else.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
+
+from tests.prose_edit.test_brief import ROOT
+
+ACC = ROOT / "tests" / "prose_edit" / "acceptance"
+F = "tests/prose_edit/fixtures"
+PATH_RUN = f"/prose-edit {F}/qualifiers-a.md --genre reference-doc --budget 5"
+STDIN_RUN = "/prose-edit - --genre commit-message\n\nfix: make the queue drain in order basically"
+TOOLS = ("open_document", "get_document", "propose_edits", "list_suggestions", "undo")
+
+
+def _tree(tmp_path: Path) -> Path:
+    """A scratch tree laid out like the checkout: tests/prose_edit/acceptance and a credentials stub."""
+    wt = Path(os.path.realpath(tmp_path)) / "wt"
+    acc = wt / "tests" / "prose_edit" / "acceptance"
+    acc.mkdir(parents=True)
+    for name in ("run-scenario.sh", "runner_guard.bash", "record-run.sh", "markup_standin.py", "markup_standin_decisions.json"):
+        shutil.copy(ACC / name, acc / name)
+    lib = wt / "tests" / "e2e" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "claude_credentials.py").write_text(
+        "import os, sys\nassert sys.argv[1:3] == ['run', '--'], sys.argv\nos.execvp(sys.argv[3], sys.argv[3:])\n", encoding="utf-8")
+    return wt
+
+
+def _run(wt: Path, tmp_path: Path, name: str, prompt: str, **env: str) -> tuple[list[str], Path]:
+    """Run run-scenario.sh with a stub claude; the argv the stub saw, and the out dir."""
+    out = Path(os.path.realpath(tmp_path)) / "out"
+    argv_file = tmp_path / "argv.txt"
+    stub = tmp_path / "claude"
+    stub.write_text(f'#!/bin/sh\nfor a in "$@"; do printf \'%s\\0\' "$a"; done > {argv_file}\nexit 0\n', encoding="utf-8")
+    stub.chmod(0o755)
+    e = {**os.environ, "OUT_DIR": str(out), "CLAUDE_BIN": str(stub), "TMPDIR": str(tmp_path)}
+    for k in ("PROSE_EDIT_APP_RUNNER", "PROSE_EDIT_STANDIN_PYTHON", "PROSE_EDIT_STANDIN_DECISIONS", "RESUME_FROM"):
+        e.pop(k, None)
+    e.update(env)
+    proc = subprocess.run(["bash", str(wt / "tests/prose_edit/acceptance/run-scenario.sh"), name, prompt],
+                          capture_output=True, text=True, env=e, timeout=60)
+    assert argv_file.exists(), proc.stderr
+    return argv_file.read_bytes().decode("utf-8").split("\0")[:-1], out
+
+
+def _baseline(wt: Path, tmp_path: Path, prompt: str) -> list[str]:
+    """The argv run-scenario.sh built before the stand-in existed."""
+    scripts = f"{wt}/prose-edit/skills/prose-edit/scripts"
+    return ["-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk",
+            "--plugin-dir", f"{wt}/prose-edit",
+            "--allowedTools", f"Bash(python3 {scripts}/brief.py:*)", f"Bash(python3 {scripts}/memory.py:*)",
+            f"Bash(python3 {scripts}/review.py:*)", "Read", "Write", "Agent",
+            "--disallowedTools", "Bash(nx:*)", "Bash(uv:*)", "Bash(bd:*)", "Bash(curl:*)",
+            "--add-dir", str(tmp_path), "--max-turns", "40"]
+
+
+@pytest.mark.parametrize(("name", "prompt"), [("c1", STDIN_RUN), ("canary-fail", PATH_RUN), ("a2", "Accept edit 1."),
+                                              ("canary-nx", "Run the shell command `nx --version`.")])
+def test_without_the_switch_the_session_gets_the_argv_it_always_had(tmp_path: Path, name: str, prompt: str) -> None:
+    wt = _tree(tmp_path)
+    argv, out = _run(wt, tmp_path, name, prompt)
+    assert argv == _baseline(wt, tmp_path, prompt)
+    assert not list(out.glob("*.mcp.json")) and not (out / "markup-standin-state.json").exists()
+
+
+def _split(argv: list[str]) -> tuple[list[str], dict[str, str]]:
+    """The argv without the stand-in's additions, and the additions."""
+    rest = list(argv)
+    i = rest.index("--mcp-config")
+    config = rest[i + 1]
+    del rest[i:i + 2]
+    rest.remove("--strict-mcp-config")
+    allowed = {t: f"mcp__markupeditor__{t}" for t in TOOLS}
+    for tool in allowed.values():
+        rest.remove(tool)
+    return rest, {"config": config}
+
+
+@pytest.mark.parametrize(("name", "prompt"), [("a1", PATH_RUN), ("c1", STDIN_RUN), ("a2", "Accept edit 1.")])
+def test_with_the_switch_every_session_gets_the_mcp_config_and_the_tools_and_nothing_else(tmp_path: Path, name: str, prompt: str) -> None:
+    wt = _tree(tmp_path)
+    argv, out = _run(wt, tmp_path, name, prompt, PROSE_EDIT_APP_RUNNER="1")
+    rest, found = _split(argv)
+    assert rest == _baseline(wt, tmp_path, prompt)
+    assert found["config"] == str(out / f"{name}.mcp.json")
+    allowed = argv[argv.index("--allowedTools") + 1:argv.index("--disallowedTools")]
+    assert all(f"mcp__markupeditor__{t}" in allowed for t in TOOLS)
+    # the skill never saves or replaces: those stay refused (dontAsk) so a run that tries shows as a denied call
+    assert not any("save_document" in a or "replace_blocks" in a for a in argv)
+    assert "--strict-mcp-config" in argv  # the machine's own MarkupEditor servers stay out of a scenario
+    assert not any(a.startswith("mcp__markupeditor__") for a in argv[:argv.index("--allowedTools")])
+
+
+def test_the_config_names_the_standin_under_markupeditor_with_its_state_decisions_and_scenario(tmp_path: Path) -> None:
+    wt = _tree(tmp_path)
+    _, out = _run(wt, tmp_path, "a1", PATH_RUN, PROSE_EDIT_APP_RUNNER="1")
+    _, out = _run(wt, tmp_path, "a2", "Accept edit 1.", PROSE_EDIT_APP_RUNNER="1")
+    acc = wt / "tests" / "prose_edit" / "acceptance"
+    one = json.loads((out / "a1.mcp.json").read_text(encoding="utf-8"))
+    two = json.loads((out / "a2.mcp.json").read_text(encoding="utf-8"))
+    assert list(one["mcpServers"]) == ["markupeditor"]
+    server = one["mcpServers"]["markupeditor"]
+    assert server["command"] == "python3" and server["args"] == [str(acc / "markup_standin.py")]
+    assert server["env"] == {"MARKUP_STANDIN_STATE": str(out / "markup-standin-state.json"),
+                             "MARKUP_STANDIN_SCENARIO": "a1",
+                             "MARKUP_STANDIN_DECISIONS": str(acc / "markup_standin_decisions.json")}
+    # the sessions of one run share the state file (a resumed session is a new process), and differ in the scenario
+    assert two["mcpServers"]["markupeditor"]["env"]["MARKUP_STANDIN_STATE"] == server["env"]["MARKUP_STANDIN_STATE"]
+    assert two["mcpServers"]["markupeditor"]["env"]["MARKUP_STANDIN_SCENARIO"] == "a2"
+
+
+def test_the_caller_can_name_the_interpreter_and_the_decision_table(tmp_path: Path) -> None:
+    wt = _tree(tmp_path)
+    table = tmp_path / "mine.json"
+    table.write_text("{}", encoding="utf-8")
+    _, out = _run(wt, tmp_path, "a1", PATH_RUN, PROSE_EDIT_APP_RUNNER="1", PROSE_EDIT_STANDIN_PYTHON="/opt/py/bin/python",
+                  PROSE_EDIT_STANDIN_DECISIONS=str(table))
+    server = json.loads((out / "a1.mcp.json").read_text(encoding="utf-8"))["mcpServers"]["markupeditor"]
+    assert server["command"] == "/opt/py/bin/python" and server["env"]["MARKUP_STANDIN_DECISIONS"] == str(table)
+
+
+def test_the_checkouts_own_venv_is_the_interpreter_when_it_has_one(tmp_path: Path) -> None:
+    wt = _tree(tmp_path)
+    py = wt / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text("#!/bin/sh\n", encoding="utf-8")
+    py.chmod(0o755)
+    _, out = _run(wt, tmp_path, "a1", PATH_RUN, PROSE_EDIT_APP_RUNNER="1")
+    assert json.loads((out / "a1.mcp.json").read_text(encoding="utf-8"))["mcpServers"]["markupeditor"]["command"] == str(py)
+
+
+def test_the_written_config_starts_a_server_that_answers_the_markupeditor_tools(tmp_path: Path) -> None:
+    wt = _tree(tmp_path)
+    _, out = _run(wt, tmp_path, "a1", PATH_RUN, PROSE_EDIT_APP_RUNNER="1", PROSE_EDIT_STANDIN_PYTHON=sys.executable)
+    server = json.loads((out / "a1.mcp.json").read_text(encoding="utf-8"))["mcpServers"]["markupeditor"]
+    doc = tmp_path / "d.md"
+    doc.write_text("# T\n\nA basically fine line.\n", encoding="utf-8")
+
+    async def go() -> tuple[set[str], str]:
+        env = {**get_default_environment(), **server["env"]}
+        params = StdioServerParameters(command=server["command"], args=server["args"], env=env)
+        async with stdio_client(params) as (r, w), ClientSession(r, w) as session:
+            await session.initialize()
+            names = {t.name for t in (await session.list_tools()).tools}
+            await session.call_tool("open_document", {"path": str(doc)})
+            reply = await session.call_tool("get_document", {"from": 0, "limit": 1})
+            return names, reply.content[0].text  # type: ignore[union-attr]
+
+    names, text = asyncio.run(go())
+    assert names >= set(TOOLS) | {"save_document"}
+    assert json.loads(text)["blocks"][0]["markdown"] == "# T"
+
+
+def test_the_guard_reason_names_the_standin_and_no_longer_says_none_exists() -> None:
+    proc = subprocess.run(["bash", "-c", '. "$1"; printf %s "$RUNNER_NO_APP_REASON"', "x", str(ACC / "runner_guard.bash")],
+                          capture_output=True, text=True, timeout=30)
+    reason = proc.stdout
+    assert "none exists yet" not in reason
+    assert "PROSE_EDIT_APP_RUNNER=1" in reason and "markup_standin.py" in reason and "MarkupEditor" in reason
+
+
+def test_the_readme_says_how_to_run_against_the_standin() -> None:
+    text = (ACC / "README.md").read_text(encoding="utf-8")
+    assert "markup_standin.py" in text and "markup_standin_decisions.json" in text and "PROSE_EDIT_STANDIN_PYTHON" in text

@@ -32,7 +32,7 @@
 #
 # PROSE_EDIT_RUNNER_LOCK overrides the lock path (the tests use it); by default the lock sits in the git common
 # directory, so every worktree of the box sees it.
-RUNNER_NO_APP_REASON="a path run reviews its edits in the MarkupEditor app, which a headless claude -p session cannot drive; the scenario needs a harness that answers the MarkupEditor tools (PROSE_EDIT_APP_RUNNER=1 says one is in place; none exists yet)"
+RUNNER_NO_APP_REASON="a path run reviews its edits in the MarkupEditor app, which a headless claude -p session cannot drive; the scenario needs a harness that answers the MarkupEditor tools (PROSE_EDIT_APP_RUNNER=1 runs it against markup_standin.py, a stand-in server that serves them from the recorded replies and a script of the author's decisions; it is not the app)"
 RUNNER_COPIES=()
 
 runner_not_run() {
