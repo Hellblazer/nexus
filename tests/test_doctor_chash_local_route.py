@@ -106,7 +106,7 @@ def _default_creds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, local: bo
     cfg = tmp_path / "cfg"
     cfg.mkdir()
     _make_creds_file(cfg).rename(cfg / CREDENTIALS_FILENAME)
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: cfg)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: local)
     asked: list[str] = []
 

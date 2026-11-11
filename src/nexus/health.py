@@ -12520,6 +12520,15 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
                 "nx dt index --uuid <uuid> --force  (DEVONthink record)",
                 "nx enrich bib <collection>         (after the re-index)",
             ]
+            if any(e.startswith(_PDF_STUB_NO_URI) for r in route_hits for e in r["examples"]):
+                parts.append(
+                    "An example named by content_hash belongs to a document registered without a source URI, so it "
+                    "cannot be named for a re-index (RDR-192 Step 5, nexus-wbfpw.10)."
+                )
+                fixes.append(
+                    "no source URI: find the owning document (nx catalog show) "
+                    "and update it with a file path or source URI"
+                )
         if documents:
             total = sum(documents.values())
             named = sorted(documents.items(), key=lambda kv: -kv[1])[:_PDF_STUB_MAX_NAMED]

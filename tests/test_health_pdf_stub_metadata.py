@@ -105,7 +105,7 @@ def _row(results):
     return rows[0]
 
 
-def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env) -> None:
+def _seed_stub_and_controls() -> None:
     t3 = make_t3()
     ids = _seed(t3, [
         # Two stub chunks of one document: the w94eo signature.
@@ -131,6 +131,11 @@ def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env) -> None:
     _own([ids[4]], "/tmp/rte90/Old.pdf")
     _own([ids[5]], "/tmp/rte90/notes.md", content_type="markdown")
 
+
+def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env, monkeypatch) -> None:
+    """The scan's answer, per owning document (an engine without the bounded route, F30)."""
+    _seed_stub_and_controls()
+    monkeypatch.setattr(health, "_pdf_stub_route", lambda: None)
     row = _row(health._check_pdf_stub_metadata())
 
     assert not row.ok and row.warn, row.detail
@@ -142,6 +147,19 @@ def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env) -> None:
     assert any("registered without one" in f or "no source URI" in f for f in row.fix_suggestions), (
         row.fix_suggestions
     )
+    assert any("--force" in f for f in row.fix_suggestions), row.fix_suggestions
+
+
+def test_the_engines_bounded_count_judges_the_same_chunks(t2_service_env) -> None:
+    """The engine's route (0.1.189) answers per collection: the two stub chunks and the URI-less one are counted, the
+    controls are not, and the URI-less owner still gets its own remedy."""
+    _seed_stub_and_controls()
+    row = _row(health._check_pdf_stub_metadata())
+    assert not row.ok and row.warn, row.detail
+    assert row.detail.startswith("3 PDF chunk(s) in 1 collection(s)"), row.detail
+    assert "file:///tmp/rte90/FootprintRAG.pdf" in row.detail and "content_hash bbbbbbbbbbbb" in row.detail, row.detail
+    assert "Healthy.pdf" not in row.detail and "Old.pdf" not in row.detail and "notes.md" not in row.detail
+    assert any("no source URI" in f for f in row.fix_suggestions), row.fix_suggestions
     assert any("--force" in f for f in row.fix_suggestions), row.fix_suggestions
 
 
