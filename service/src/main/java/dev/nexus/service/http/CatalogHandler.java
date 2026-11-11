@@ -64,6 +64,7 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/fill      fill exactly those rows as a background job: 202 {job_id, created} (nexus-f3yqd, R2)
  *   GET   /v1/catalog/manifest/fill/{job_id}  the fill job: state, stage, done_rows, total_rows, filled, cursor, counts (nexus-f3yqd, R2)
  *   GET   /v1/catalog/sensitive?limit=N  the tenant's live sensitive documents, listed up to N, with the total (nexus-f3yqd)
+ *   GET   /v1/catalog/stub-metadata?limit=N  per knowledge/docs collection, the PDF chunks still carrying the upload placeholder metadata, up to N (nexus-f3yqd)
  *   GET   /v1/catalog/manifest/section_label_fillable?limit=N  bounded count of legacy manifest rows the manifest-section-labels rung could still fill (nexus-l4hds)
  *   GET   /v1/catalog/manifest/null_collection  read-only count of pre-backfill (collection IS NULL) manifest rows (T2 nexus/chroma-residue-plan-2026-08-10 §C2)
  *   GET   /v1/catalog/chash/conformance   per-table chash width-conformance report (tenant-scoped, RDR-180 nexus-du2dw)
@@ -139,6 +140,8 @@ public final class CatalogHandler implements HttpHandler {
     private final CatalogLinksHandler linkRoutes;
     /** nexus-f3yqd: the bounded read routes of engine 0.1.188 (the sensitive list, the strict fillable count). */
     private final CatalogBoundedReadRoutes boundedReads;
+    /** nexus-f3yqd: {@code GET /stub-metadata}, the doctor's PDF placeholder-metadata read. */
+    private final CatalogStubMetadataRoute stubMetadataRoute;
     /** nexus-f3yqd R2: the manifest fill job routes ({@link CatalogManifestFillRoutes}). */
     private final CatalogManifestFillRoutes manifestFill;
     /** The statement timeout a reconcile commit runs under: the reconcile instance's maximum runtime, never more. */
@@ -230,6 +233,7 @@ public final class CatalogHandler implements HttpHandler {
         this.linkRoutes = new CatalogLinksHandler(new dev.nexus.service.db.CatalogLinksRepository(repo));
         this.boundedReads = new CatalogBoundedReadRoutes(
             new dev.nexus.service.db.CatalogSensitiveReads(repo), new dev.nexus.service.db.ManifestFillableCount(repo));
+        this.stubMetadataRoute = new CatalogStubMetadataRoute(new dev.nexus.service.db.PdfStubMetadataReads(repo));
         this.manifestFill = new CatalogManifestFillRoutes(new dev.nexus.service.db.ManifestFill(repo),
             new dev.nexus.service.db.ManifestFillableCount(repo), manifestFillJobs);
         this.combinedWriteService = combinedWriteService;
@@ -302,6 +306,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/fillable"     -> handleManifestFillable(exchange, tenant, method);
                 case "/manifest/fill"         -> handleManifestFill(exchange, tenant, method);
                 case "/sensitive"             -> handleSensitiveList(exchange, tenant, method);
+                case "/stub-metadata"         -> handleStubMetadata(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /docs/orphaned already
                 // existed; links had no equivalent, which is why the client
@@ -3725,6 +3730,11 @@ public final class CatalogHandler implements HttpHandler {
     /** GET /v1/catalog/sensitive?limit=N (nexus-f3yqd): the body is {@link CatalogBoundedReadRoutes#sensitive}. */
     private void handleSensitiveList(HttpExchange exchange, String tenant, String method) throws IOException {
         boundedReads.sensitive(exchange, tenant, method);
+    }
+
+    /** GET /v1/catalog/stub-metadata?limit=N (nexus-f3yqd): the body is {@link CatalogStubMetadataRoute#stubMetadata}. */
+    private void handleStubMetadata(HttpExchange exchange, String tenant, String method) throws IOException {
+        stubMetadataRoute.stubMetadata(exchange, tenant, method);
     }
 
     /**

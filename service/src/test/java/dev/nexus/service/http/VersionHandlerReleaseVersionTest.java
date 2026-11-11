@@ -251,6 +251,20 @@ class VersionHandlerReleaseVersionTest {
     }
 
     @Test
+    void versionAdvertisesTheStubMetadataReadAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogStubMetadataCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_stub_metadata_supported\":true");
+    }
+
+    @Test
+    void versionAdvertisesTheChashConformanceConstraintsReadAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendChashConformanceConstraintsCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"chash_conformance_constraints_supported\":true");
+    }
+
+    @Test
     void versionAdvertisesTheManifestFillJobAsItsOwnFlag() {
         var body = new StringBuilder();
         VersionHandler.appendCatalogManifestFillJobCapabilityField(body);

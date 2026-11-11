@@ -48,6 +48,8 @@ import java.util.function.Supplier;
  *  "route_c_manifest_keys_supported":true,
  *  "catalog_sensitive_list_supported":true,
  *  "catalog_manifest_fillable_supported":true,
+ *  "catalog_stub_metadata_supported":true,
+ *  "chash_conformance_constraints_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -590,6 +592,33 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-f3yqd capability advertisement: does {@code GET /v1/catalog/stub-metadata?limit=N} count, per knowledge and
+     * docs collection and up to a bound, the PDF chunks that still carry the upload placeholder metadata, and name a few
+     * of the documents that own them?
+     *
+     * <p>A route, so an old engine answers 404 and a client can tell; the flag lets the doctor learn it from
+     * {@code /version} first instead of by a probe that 404s. Always present, always {@code true} on an engine carrying
+     * the change. Cloud clients see it only once the public conexus edge allowlists it (the
+     * {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendCatalogStubMetadataCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_stub_metadata_supported\":true");
+    }
+
+    /**
+     * nexus-f3yqd capability advertisement: does {@code GET /v1/admin/chash-conformance} report whether the chash width CHECK
+     * constraints are validated, from {@code pg_constraint} in one catalog statement?
+     *
+     * <p>An operator route (root token), so a client with a tenant token reads 403 and one on an old engine 404; the flag
+     * lets the doctor learn it from {@code /version} first instead of by a probe. Always present, always {@code true} on an
+     * engine carrying the change. Cloud clients see it only once the public conexus edge allowlists it (the
+     * {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendChashConformanceConstraintsCapabilityField(StringBuilder body) {
+        body.append(",\"chash_conformance_constraints_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -796,6 +825,8 @@ public final class VersionHandler implements HttpHandler {
         // nexus-f3yqd: GET /v1/catalog/sensitive, and GET /v1/catalog/manifest/fillable (the strict bounded count).
         appendCatalogSensitiveListCapabilityField(body);
         appendCatalogManifestFillableCapabilityField(body);
+        appendCatalogStubMetadataCapabilityField(body);
+        appendChashConformanceConstraintsCapabilityField(body);
         // nexus-f3yqd (R2): POST /v1/catalog/manifest/fill, the engine-side fill job.
         appendCatalogManifestFillJobCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).

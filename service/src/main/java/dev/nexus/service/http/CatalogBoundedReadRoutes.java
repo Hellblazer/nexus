@@ -128,7 +128,7 @@ final class CatalogBoundedReadRoutes {
     // ── shared ───────────────────────────────────────────────────────────────
 
     /** The {@code limit} query parameter, {@code def} when absent; null after answering a 400 for a bad one. */
-    private static Integer limitParam(HttpExchange exchange, int def, int max) throws IOException {
+    static Integer limitParam(HttpExchange exchange, int def, int max) throws IOException {
         String raw = queryParam(exchange, "limit");
         if (raw == null || raw.isBlank()) return def;
         int limit;
@@ -157,11 +157,11 @@ final class CatalogBoundedReadRoutes {
         return null;
     }
 
-    private static void timeout(HttpExchange exchange, String message) throws IOException {
+    static void timeout(HttpExchange exchange, String message) throws IOException {
         HttpUtil.send(exchange, 503, "{\"error\":" + HttpUtil.jsonString(message) + ",\"reason\":\"statement_timeout\"}");
     }
 
-    private static void send(HttpExchange exchange, int status, Map<String, Object> body) throws IOException {
+    static void send(HttpExchange exchange, int status, Map<String, Object> body) throws IOException {
         try {
             HttpUtil.send(exchange, status, CatalogHandler.MAPPER.writeValueAsString(body));
         } catch (JsonProcessingException e) {

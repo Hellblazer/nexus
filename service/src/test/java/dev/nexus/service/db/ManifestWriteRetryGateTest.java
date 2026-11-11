@@ -111,6 +111,11 @@ class ManifestWriteRetryGateTest {
             + " owner label of a gc-audit chunk); it builds a Select and writes nothing"),
         Map.entry("ManifestFillableCount", "nexus-f3yqd: one jOOQ SELECT over the manifest joined to its live document and chunk row"
             + " (the strict count of the rows the label and span rungs would fill); it writes nothing"),
+        Map.entry("PdfStubMetadataReads", "nexus-f3yqd: one jOOQ SELECT over the registry, the documents, the manifest and the chunk rows"
+            + " (the PDF chunks that still carry the upload placeholder metadata, per collection, with a NOT EXISTS over an"
+            + " earlier manifest position of the same chunk); it writes nothing"),
+        Map.entry("ChashConformanceConstraints", "nexus-f3yqd: names the manifest table only to name its chash width CHECK;"
+            + " the one statement reads pg_catalog (pg_constraint, pg_class, pg_inherits) and never reads or writes the table"),
         Map.entry("ManifestFillablePredicates", "nexus-f3yqd: jOOQ conditions over the manifest, its documents and chunk rows (the"
             + " guards the two rung counts share, with a NOT EXISTS over the other holders of a chash); it builds"
             + " conditions and writes nothing"),

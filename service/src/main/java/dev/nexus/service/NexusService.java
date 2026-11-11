@@ -764,6 +764,13 @@ public final class NexusService {
                         () -> { var v = chunksLeavesCanary; return v == null ? null : v.get(); }));
         chunksLeavesCtx.getFilters().addAll(authFilter);
 
+        // /v1/admin/chash-conformance — whether the chash width CHECKs are validated, read from pg_constraint in one
+        // catalog statement (nexus-f3yqd), so nx doctor's chash row can skip its scans. Operator (root token) only.
+        var chashConformanceCtx = server.createContext(dev.nexus.service.http.ChashConformanceHandler.PATH,
+                new dev.nexus.service.http.ChashConformanceHandler(
+                        new dev.nexus.service.db.ChashConformanceConstraints(tenantScope)));
+        chashConformanceCtx.getFilters().addAll(authFilter);
+
         // /v1/requests/<id> — RDR-222 Phase 1 request status (bead nexus-yye8l.4). The one
         // RequestLedger instance; the keyed sweep forms (nexus-yye8l.5) take this same one.
         var requestLedger = new dev.nexus.service.db.RequestLedger(tenantScope, dataSource);
