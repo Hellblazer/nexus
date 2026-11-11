@@ -1012,6 +1012,9 @@ def _row_dict(row: Any, *, fresh_claim: bool = False) -> dict[str, Any]:
         "lease_until": row.lease_until, "attempts": row.attempts,
         "consumed_at": row.consumed_at, "consumed_by": row.consumed_by,
         "expires_at": row.expires_at, "created_at": row.created_at,
+        # GitHub #1567: the row's announce budget, as the MCP serializer renders it
+        # (nexus.mcp.core._tuple_row_to_dict; tests/test_tuple_cli_announce_fields.py keeps them equal).
+        "announced_at": row.announced_at, "announce_count": row.announce_count,
     }
     # nexus-ztwp4 (F3 step 2): null = no stamp: no live minted session at write time, a reply row written by an engine before nexus-g2ckl (v0.1.163), or a row that predates the column;
     # omitted when the engine renders no such key.
@@ -1038,6 +1041,8 @@ def _print_row(row: Any, *, fresh_claim: bool = False) -> None:
     click.echo(f"  body: {row.body}")
     click.echo(f"  claim_state: {row.claim_state if fresh_claim else row.effective_claim_state()}")
     click.echo(f"  created_at: {row.created_at}")
+    click.echo(f"  announced_at: {row.announced_at}")
+    click.echo(f"  announce_count: {row.announce_count}")
     if row.sender_session_known:
         click.echo(f"  sender_session: {row.sender_session}")
 
