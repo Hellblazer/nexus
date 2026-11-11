@@ -524,14 +524,7 @@ public final class SchemaMigrator {
             // form for a SET statement at all") is retired with it: set_config(...)
             // is an ordinary PostgreSQL function, not the bare SET statement, so this
             // was never actually a no-typed-form case either.
-            try {
-                DSL.using(conn, SQLDialect.POSTGRES)
-                    .select(DSL.function("set_config", SQLDataType.VARCHAR,
-                        DSL.val("TimeZone"), DSL.val("UTC"), DSL.val(false)))
-                    .fetchOne();
-            } catch (DataAccessException e) {
-                throw new SQLException("SET TIME ZONE 'UTC' (via set_config) failed", e);
-            }
+            pinSessionTimeZoneToUtc(conn);
             logWalkStartSession(conn);
             pinSearchPathToPublic(conn);
             refuseSplitHistory(conn);
@@ -542,37 +535,7 @@ public final class SchemaMigrator {
             // nexus-vxmcl: the same for the shared lock table, which the walk's one transaction fills with leaf locks.
             WalkLockPreflight.check(conn);
 
-            Database database = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(conn));
-
-            // nexus-q81g7: pin Liquibase's bookkeeping to public. Without this,
-            // Liquibase puts DATABASECHANGELOG (and its lock table) in whatever
-            // schema current_schema() reports, and PostgreSQL's default
-            // search_path ("$user", public) makes that the schema named after
-            // the migrating role once such a schema exists. A role called
-            // nexus, t1 or staging (the three schemas this changelog creates)
-            // therefore boots once with the history in public, creates its own
-            // schema mid-walk, and on boot 2 reads an EMPTY history there,
-            // re-plans every changeset and dies re-creating nexus.memory
-            // ("relation already exists"). Every engine query on the history
-            // table already hardcodes public.databasechangelog (VersionHandler,
-            // and the count helpers below), and so does grants-nexus-svc.xml's
-            // GRANT, so public is the one place it can live.
-            //
-            // Both names are set: liquibaseSchemaName places the history and
-            // lock tables; defaultSchemaName is what Liquibase resolves
-            // unqualified objects and its own existence checks against, and it
-            // follows the same current_schema(). The session search_path is
-            // pinned too (pinSearchPathToPublic above): Liquibase's
-            // DatabaseUtils.initializeDatabase leaves a search_path that already
-            // starts with the default schema alone, and otherwise PREPENDS it to
-            // the existing one (public, $user, public), which keeps the
-            // role's own schema in the path. For a role with no like-named
-            // schema (the production nexus_admin) current_schema() is already
-            // public, so all three are no-ops there and existing installs are
-            // unchanged.
-            database.setLiquibaseSchemaName("public");
-            database.setDefaultSchemaName("public");
+            Database database = openLiquibaseDatabase(conn);
 
             // nexus-8sph2: the migration lock is declared AFTER Liquibase so it closes FIRST. Liquibase's
             // close() closes the connection, which on a pool returns it with the session, and so the
@@ -824,6 +787,64 @@ public final class SchemaMigrator {
     // ── nexus-q81g7: session pin, walk-start diagnostics, split-history refusal ──
 
     /**
+     * Pins the session's {@code TimeZone} to UTC (nexus-rph82; see the comment at the call site in
+     * {@link #migrate}). Package-private so the test-scope {@code PreMigrationSchema} tool opens its session
+     * exactly as a walk does.
+     */
+    static void pinSessionTimeZoneToUtc(Connection conn) throws SQLException {
+        try {
+            DSL.using(conn, SQLDialect.POSTGRES)
+                .select(DSL.function("set_config", SQLDataType.VARCHAR,
+                    DSL.val("TimeZone"), DSL.val("UTC"), DSL.val(false)))
+                .fetchOne();
+        } catch (DataAccessException e) {
+            throw new SQLException("SET TIME ZONE 'UTC' (via set_config) failed", e);
+        }
+    }
+
+    /**
+     * The Liquibase {@link Database} a walk runs on, with its bookkeeping pinned to {@code public}. Extracted
+     * verbatim from {@link #migrate} so the test-scope {@code PreMigrationSchema} tool builds it identically.
+     *
+     * <p>Callers pin the session first ({@link #pinSessionTimeZoneToUtc}, {@link #pinSearchPathToPublic}):
+     * Liquibase leaves a search_path that already starts with the default schema alone.
+     */
+    static Database openLiquibaseDatabase(Connection conn) throws LiquibaseException {
+        Database database = DatabaseFactory.getInstance()
+            .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+
+        // nexus-q81g7: pin Liquibase's bookkeeping to public. Without this,
+        // Liquibase puts DATABASECHANGELOG (and its lock table) in whatever
+        // schema current_schema() reports, and PostgreSQL's default
+        // search_path ("$user", public) makes that the schema named after
+        // the migrating role once such a schema exists. A role called
+        // nexus, t1 or staging (the three schemas this changelog creates)
+        // therefore boots once with the history in public, creates its own
+        // schema mid-walk, and on boot 2 reads an EMPTY history there,
+        // re-plans every changeset and dies re-creating nexus.memory
+        // ("relation already exists"). Every engine query on the history
+        // table already hardcodes public.databasechangelog (VersionHandler,
+        // and the count helpers below), and so does grants-nexus-svc.xml's
+        // GRANT, so public is the one place it can live.
+        //
+        // Both names are set: liquibaseSchemaName places the history and
+        // lock tables; defaultSchemaName is what Liquibase resolves
+        // unqualified objects and its own existence checks against, and it
+        // follows the same current_schema(). The session search_path is
+        // pinned too (pinSearchPathToPublic above): Liquibase's
+        // DatabaseUtils.initializeDatabase leaves a search_path that already
+        // starts with the default schema alone, and otherwise PREPENDS it to
+        // the existing one (public, $user, public), which keeps the
+        // role's own schema in the path. For a role with no like-named
+        // schema (the production nexus_admin) current_schema() is already
+        // public, so all three are no-ops there and existing installs are
+        // unchanged.
+        database.setLiquibaseSchemaName("public");
+        database.setDefaultSchemaName("public");
+        return database;
+    }
+
+    /**
      * Pins this migration connection's session {@code search_path} to
      * {@code public}. Same shape as the time-zone pin above ({@code set_config(...,
      * false)} is the session-scoped {@code SET}); the connection is the migration
@@ -835,7 +856,7 @@ public final class SchemaMigrator {
      * changeset to {@code public} on boot 1 and to a role-named schema from
      * boot 2 on, the same root cause as the history-table split, one level over.
      */
-    private static void pinSearchPathToPublic(Connection conn) throws SQLException {
+    static void pinSearchPathToPublic(Connection conn) throws SQLException {
         try {
             DSL.using(conn, SQLDialect.POSTGRES)
                 .select(DSL.function("set_config", SQLDataType.VARCHAR,

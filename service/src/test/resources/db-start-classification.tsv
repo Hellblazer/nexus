@@ -13,6 +13,7 @@ Taxonomy014TenantFkRepointTest	startEmptyDatabase	WALK	walks to before taxonomy-
 Rdr71gw2CollectionNotNullTest	startEmptyDatabase	WALK	stops the walk before vectors-004-1: catalog-025 reads the per-dimension chunk tables the unify drops
 MigrationJobsDroppedTest	startEmptyDatabase	WALK	proves migration-002 drops migration_jobs, against a walk that excludes the drop and one that includes it
 Hygiene001NotNullMigrationRlsTest	startEmptyDatabase	WALK	walks to before hygiene-001-1, seeds legacy rows in two tenants, asserts the FORCE-RLS-toggled backfill as a NOBYPASSRLS owner
+PreMigrationSchemaTest	startEmptyDatabase	WALK	builds a pre-hygiene-001-5 schema with the test-scope stop tool, seeds legacy and 32-byte chunks, then runs the real walk
 Hygiene002CollectionAttributesWalkTest	startEmptyDatabase	WALK	walks to before hygiene-002-1, seeds every branch, asserts the backfill and the constraints it adds
 Hygiene004OwnerGrammarUnderscoreTest	startEmptyDatabase	WALK	walks to before hygiene-004-1, seeds misclassified rows, asserts the re-file
 Hygiene005GcRegistrationFromOriginRowDataCorrectionTest	startEmptyDatabase	WALK	walks to before hygiene-005-3, seeds the shipped defect's shape, asserts the correction
