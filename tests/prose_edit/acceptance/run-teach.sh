@@ -8,8 +8,10 @@
 #   python3 teach_verdicts.py $OUT_DIR, then delete the zzprose0206_* T2 projects.
 #
 #   s6-1            scenario 6: a user-level entry is stored first, then a document of another genre is edited
-#   t1 t2 t2c       step 13, voice card: edit a copy of fixtures/review-scenario.md at docs/zz-teach/scenario.md,
-#                   the author's answer, and the confirmation of the dry-run echo the skill shows
+#   t1 t2 [t2c]     step 13, voice card: edit a copy of fixtures/review-scenario.md at docs/zz-teach/scenario.md,
+#                   the author's answer (under PROSE_EDIT_APP_RUNNER=1 just "reviewed": the decisions are the stand-in's
+#                   statuses, markup_standin_decisions.json), and, only when t2 did not already apply, the confirmation
+#                   of the dry-run echo the skill shows. An App-decided run applies in t2 and has no t2c.
 #   t3              the author's yes to keeping the voice card; the script then reads the card back itself
 #   t4 t4c          step 13, promote: the skill dry-runs and asks; the author confirms and it promotes for real
 #   t5              a second edit run of the same document in a fresh session, after the card is stored: its brief
@@ -31,12 +33,17 @@
 # an exclusive lock for the whole run (one runner at a time; exit 75 when another holds it), sweeps the leftovers
 # of an older runner and removes the copy on exit.
 #
+# T2: unless PROSE_EDIT_LOCAL_ENGINE=0 or PROSE_EDIT_NX is set, the run starts a throwaway local engine
+# (local_engine.bash) and every T2 write, this script's own memory.py calls included, goes to it, never to the
+# operator's install.
+#
 # Stop and report if a run shows a T2 failure; never repair it from here.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WT="$(cd "$HERE/../../.." && pwd)"
 OUT="${OUT_DIR:?set OUT_DIR}"
 . "$HERE/runner_guard.bash"
+. "$HERE/local_engine.bash"
 runner_lock run-teach.sh
 export TMPDIR="${TMPDIR:?set TMPDIR to a directory outside the repository}"
 export PROSE_EDIT_PROJECT_PREFIX="${PROSE_EDIT_PROJECT_PREFIX:-zzprose0206_}"
@@ -52,6 +59,8 @@ DOC=$DIR/scenario.md
 S6DOC=tests/prose_edit/fixtures/user-entry.md
 MEM=(python3 prose-edit/skills/prose-edit/scripts/memory.py)
 mkdir -p "$OUT"
+runner_standin_reset "$OUT"
+local_engine_start run-teach.sh
 cd "$WT" || exit 1
 runner_sweep_stale
 mkdir -p "$DIR" && runner_track "$DIR"
@@ -59,6 +68,8 @@ cp tests/prose_edit/fixtures/review-scenario.md "$DOC" || exit 1
 git status --short > "$OUT/repo-status-before.txt"
 
 run() { OUT_DIR="$OUT" "$HERE/run-scenario.sh" "$@"; }
+# The turn the later turns resume from: t2c when the answer turn t2 only dry-ran, t2 when it already applied.
+LAST=t2
 
 # A clean start, or no session at all.
 "${MEM[@]}" voice-card "$DOC" > "$OUT/start-voice-card.json" || exit 1
@@ -77,9 +88,12 @@ run s6-1 "/prose-edit $S6DOC --genre changelog --budget 5"
 "${MEM[@]}" entries --level user --remove diagnostics > "$OUT/seed-entry-removed.json" || exit 1
 
 run t1 "/prose-edit $DOC --genre reference-doc --budget 5"
-RESUME_FROM=t1 run t2 "Accept edit 1 and reject all the other edits."
-RESUME_FROM=t2 run t2c "Yes, apply."
-RESUME_FROM=t2c run t3 "Yes, keep that voice card as shown."
+RESUME_FROM=t1 run t2 "$(runner_answer "Accept edit 1 and reject all the other edits.")"
+if ! runner_turn_applied "$OUT" t2; then
+  RESUME_FROM=t2 run t2c "Yes, apply."
+  LAST=t2c
+fi
+RESUME_FROM="$LAST" run t3 "Yes, keep that voice card as shown."
 "${MEM[@]}" voice-card "$DOC" > "$OUT/voice-card-after.json"
 python3 prose-edit/skills/prose-edit/scripts/memory.py promote "$DOC" 1 --level repo > "$OUT/promote-nodry.out" 2> "$OUT/promote-nodry.err"
 echo "rc=$?" > "$OUT/promote-nodry.rc"

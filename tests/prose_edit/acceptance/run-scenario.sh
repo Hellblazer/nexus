@@ -14,13 +14,15 @@
 # recorded in OUT_DIR/not-run.txt with the reason, no session starts, and the exit is 3. verdicts.py scores it NOT-RUN.
 # canary-fail and unmapped stop before the app by design and run (runner_guard.bash).
 #
-# PROSE_EDIT_APP_RUNNER=1 puts the stand-in MarkupEditor server (markup_standin.py, nexus-scmcs.3) in every session
-# of the run: an --mcp-config file OUT_DIR/NAME.mcp.json naming it `markupeditor`, --strict-mcp-config (the machine's
+# PROSE_EDIT_APP_RUNNER=1 puts the stand-in MarkupEditor server (markup_standin.py, nexus-scmcs.3) in every path-run
+# session of the run, and in an answer turn resumed from one (RESUME_FROM names a run with NAME.mcp.json): an --mcp-config file OUT_DIR/NAME.mcp.json naming it `markupeditor`, --strict-mcp-config (the machine's
 # own MarkupEditor servers stay out), and the tools the skill calls allowed (never save_document or replace_blocks).
 # The sessions of one run share OUT_DIR/markup-standin-state.json, so a resumed session finds what the last one
 # proposed; NAME picks the author's scripted decisions (PROSE_EDIT_STANDIN_DECISIONS, default
 # markup_standin_decisions.json). PROSE_EDIT_STANDIN_PYTHON names the interpreter that has the mcp package (default:
-# the checkout's .venv, else python3). Without the switch nothing here changes.
+# the checkout's .venv, else python3); the run exits 1 before any session when it cannot import it. Each session also
+# writes OUT_DIR/NAME.calls.jsonl, the stand-in's log of the tool calls (markup_standin.py). Without the switch, and in
+# any session the stand-in is not wanted in, nothing here changes.
 #
 # Tool restriction (the session is a scenario, not a person):
 #   allowed   Bash only for the three prose-edit scripts, Read, Write, Agent
@@ -43,14 +45,31 @@ fi
 mkdir -p "$OUT"
 APP_ARGS=()
 APP_TOOLS=()
+# The stand-in goes only into the sessions that drive the app: a path run, and an answer turn resumed from one (its
+# parent left NAME.mcp.json). A stdin run, a cut run, a canary and the answer turn of a stdin run keep the argv they
+# always had.
+WANT_APP=0
 if [ "${PROSE_EDIT_APP_RUNNER:-0}" = 1 ]; then
+  if runner_prompt_is_path_run "$PROMPT"; then
+    WANT_APP=1
+  elif [ -n "${RESUME_FROM:-}" ] && [ -f "$OUT/$RESUME_FROM.mcp.json" ]; then
+    WANT_APP=1
+  fi
+fi
+if [ "$WANT_APP" = 1 ]; then
   OUT_ABS="$(cd "$OUT" && pwd)" || exit 1
   STANDIN_PY="${PROSE_EDIT_STANDIN_PYTHON:-}"
   if [ -z "$STANDIN_PY" ]; then
     if [ -x "$WT/.venv/bin/python" ]; then STANDIN_PY="$WT/.venv/bin/python"; else STANDIN_PY=python3; fi
   fi
+  # Before any session: a stand-in that cannot start dies inside claude's MCP child, where nobody sees it, and the run
+  # then looks like a real "app missing" after paid sessions.
+  if ! "$STANDIN_PY" -c 'import mcp.server.mcpserver' >/dev/null 2>&1; then
+    echo "run-scenario.sh: $STANDIN_PY cannot import mcp.server.mcpserver, so the stand-in MarkupEditor server cannot start. Set PROSE_EDIT_STANDIN_PYTHON to an interpreter that has the mcp package (the checkout's .venv has it: run 'uv sync')." >&2
+    exit 1
+  fi
   python3 "$HERE/markup_standin.py" mcp-config --out "$OUT_ABS/$NAME.mcp.json" --python "$STANDIN_PY" \
-    --state "$OUT_ABS/markup-standin-state.json" \
+    --state "$OUT_ABS/markup-standin-state.json" --calls "$OUT_ABS/$NAME.calls.jsonl" \
     --decisions "${PROSE_EDIT_STANDIN_DECISIONS:-$HERE/markup_standin_decisions.json}" --scenario "$NAME" || exit 1
   APP_ARGS=(--mcp-config "$OUT_ABS/$NAME.mcp.json" --strict-mcp-config)
   for tool in open_document get_document propose_edits list_suggestions undo; do

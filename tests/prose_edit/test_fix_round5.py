@@ -490,9 +490,9 @@ def test_unrequested_scenarios_exit_3_when_everything_that_ran_passed_and_1_on_a
 
 def test_run_review_takes_a_scenarios_list_and_records_it_for_the_verdicts() -> None:
     sh = (ACC / "run-review.sh").read_text(encoding="utf-8")
-    assert 'SCENARIOS="${SCENARIOS:-a b c}"' in sh
+    assert 'SCENARIOS="${SCENARIOS:-a b c d}"' in sh
     assert 'scenarios.txt' in sh and "unknown scenario" in sh
-    for group in ("a", "b", "c"):
+    for group in ("a", "b", "c", "d"):
         assert re.search(rf'\*" {group} "\*\)', sh), group  # each group runs only when asked for
     readme = (ACC / "README.md").read_text(encoding="utf-8")
     assert "SCENARIOS" in readme and "NOT-RUN" in readme and "scenarios.txt" in readme

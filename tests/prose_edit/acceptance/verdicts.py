@@ -234,6 +234,21 @@ _FUNCTION_WORDS = frozenset((
     "it its each every per as and or than then has have had so because if this these those their they does do").split())
 
 
+STANDIN_HEADER = ("app: STAND-IN (the MarkupEditor tools were answered by markup_standin.py from recorded replies and a script of "
+                  "the author's decisions, not by the app: a harness measurement, not a run in the app)")
+
+
+def standin_run(out_dir: Path) -> bool:
+    """Whether any session of the run in OUT_DIR ran against the stand-in MarkupEditor server: a NAME.app file that
+    says `standin` (record-run.sh writes it when NAME.mcp.json exists)."""
+    return any(p.read_text(encoding="utf-8").strip() == "standin" for p in out_dir.glob("*.app"))
+
+
+def tag_standin(verdict: str, standin: bool) -> str:
+    """A PASS in a stand-in run says so. Other verdicts are already not a pass."""
+    return f"{verdict} (stand-in)" if standin and verdict == "PASS" else verdict
+
+
 def load_events(path: Path) -> list[Obj]:
     events: list[Obj] = []
     for raw in path.read_text(encoding="utf-8").splitlines():

@@ -10,9 +10,21 @@ OUT_DIR holds what run-review.sh writes: NAME.jsonl for each turn of the three s
                 reject the rest), turn 3 is a fresh run on the same document, turn 4 is the answer "hold everything"
   b1 b2 b3 b4   list the stored rejections, remove number 1, run again, hold everything
   c1 c2         a stdin run with --genre commit-message: the copy, then the author's answer
-  a2c a4c b4c c2c   the author's confirmation of the dry-run echo the skill showed for the answer turn
+  d1 d2         the control for the app path: the answer turn says only "reviewed" and the stand-in's rule for d2
+                accepts edit 2 and rejects edit 1, the reverse of the old chat answer. The run must apply edit 2 and
+                not edit 1; FAIL when edit 1 is applied (the run followed something other than the app)
+  a4c b4c c2c   the author's confirmation ("Yes, apply.") of the dry-run echo the skill showed for the answer turn
 
-An answer turn must end at `apply --dry-run` (no real apply in it); the real apply is the confirmation turn's.
+The path runs (a, b, d) are decided in the app (the stand-in's list_suggestions statuses), and the verdicts pin that
+the decisions came from there: a list_suggestions call, then `review.py decisions --from-file`, then the dry run, then
+(when it applied) the real apply. SKILL.md step 12, "App-decided run": when every suggestion is decided in the app and
+nothing is held, the skill applies in the SAME turn (a2, d2: no confirmation turn; a "Yes, apply." turn that applies
+instead is a FAIL); when something is held (a4, b4: nothing was decided) the answer turn ends at `apply --dry-run` and
+the Apply question, and the real apply is the confirmation turn's (a4c, b4c). A stdin run (c) decides in the chat and
+keeps the echo turn then the confirmation turn.
+
+A run against the stand-in MarkupEditor server (a NAME.app file that says `standin`) is a harness measurement, not a
+run in the app: the output starts with `app: STAND-IN` and every PASS row is tagged `PASS (stand-in)`.
 
 Each verdict reads the tool results the skill's own scripts printed, so it checks what the author would have
 seen, not what the model claims.
@@ -144,6 +156,46 @@ def dry_apply(events: list[Obj]) -> Obj | None:
     return found[-1] if found else None
 
 
+def _bash_index(events: list[Obj], script: str, verb: str, *, has: str = "", lacks: str = "") -> int | None:
+    """Position (in call order) of the first Bash call running `<script>.py <verb>`, with `has` in the command and
+    without `lacks`; None when there is none."""
+    for at, (_, name, inp, _) in enumerate(V.tool_uses(events, sub=False)):
+        command = str(inp.get("command", ""))
+        if (name == "Bash" and V.runs_script(command, script, verb) and (not has or has in command)
+                and (not lacks or lacks not in command)):
+            return at
+    return None
+
+
+def _app_index(events: list[Obj], tool: str) -> int | None:
+    for at, (_, name, _, _) in enumerate(V.tool_uses(events, sub=False)):
+        if name.startswith("mcp__") and name.endswith(f"__{tool}"):
+            return at
+    return None
+
+
+def app_flow(events: list[Obj], *, applied: bool) -> tuple[bool, str]:
+    """The decisions came from the app: list_suggestions, then `review.py decisions --from-file`, then the dry run, and
+    (applied=True) the real apply, in that order, in this turn. A turn that read the chat instead has no list_suggestions
+    call before its decisions."""
+    listed = _app_index(events, "list_suggestions")
+    decided = _bash_index(events, "review", "decisions", has="--from-file")
+    dry = _bash_index(events, "review", "apply", has="--dry-run")
+    real = _bash_index(events, "review", "apply", lacks="--dry-run")
+    steps = [("list_suggestions", listed), ("decisions --from-file", decided), ("apply --dry-run", dry)]
+    if applied:
+        steps.append(("apply", real))
+    missing = [n for n, at in steps if at is None]
+    order = [at for _, at in steps if at is not None]
+    ok = not missing and order == sorted(order)
+    note = f"flow={'ok' if ok else 'BROKEN'}"
+    if missing:
+        note += f" missing={missing}"
+    elif not ok:
+        note += " out-of-order"
+    return ok, note
+
+
 def answer_turn(events: list[Obj]) -> tuple[bool, str]:
     """The author's answer ends at the echo: a dry run was shown and nothing was applied yet."""
     echoed, applied = dry_apply(events), real_apply(events)
@@ -159,7 +211,7 @@ def clean(events: list[Obj]) -> tuple[bool, str]:
 def check_a(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     a1, a2, a3, a4 = (runs.get(k, []) for k in ("a1", "a2", "a3", "a4"))
-    filt1, render1, apply2 = last(a1, "brief", "filter"), last(a1, "review", "render"), real_apply(runs.get("a2c", []))
+    filt1, render1, apply2 = last(a1, "brief", "filter"), last(a1, "review", "render"), real_apply(a2)
     ok, note = clean(a1)
     out.append(("a1", "PASS" if ok and filt1 and render1 and render1.get("counts", {}).get("edits", 0) >= 2 else "FAIL",
                 f"filtered={bool(filt1)} rendered={bool(render1)} {note}"))
@@ -168,13 +220,15 @@ def check_a(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
         by_n = {e["n"]: e["old"] for e in filt1.get("edits", [])}
         rejected_old = [by_n[n] for n in apply2.get("rejected", []) if n in by_n]
     ok, note = clean(a2)
-    held_back, echo_note = answer_turn(a2)
-    ok_c, note_c = clean(runs.get("a2c", []))
-    good = bool(apply2 and 1 in [e["n"] for e in apply2.get("applied", [])] and rejected_old
-                and apply2.get("rejections_stored") is True)
-    out.append(("a2", "PASS" if ok and ok_c and held_back and good else "FAIL",
-                f"{echo_note} applied={[e['n'] for e in (apply2 or {}).get('applied', [])]} "
-                f"rejected={(apply2 or {}).get('rejected')} {note} {note_c}"))
+    flow_ok, flow_note = app_flow(a2, applied=True)
+    stray = real_apply(runs.get("a2c", []))  # the skill asked "Apply" instead of applying an App-decided run
+    applied_n = [e["n"] for e in (apply2 or {}).get("applied", [])]
+    good = bool(apply2 and applied_n == [1] and rejected_old and apply2.get("rejections_stored") is True)
+    out.append(("a2", "PASS" if ok and flow_ok and good and not stray else "FAIL",
+                f"{flow_note} applied={applied_n} rejected={(apply2 or {}).get('rejected')}"
+                + (" applied only after a confirmation turn: the run was App-decided, so it must apply in the same turn"
+                   if stray and not apply2 else "")
+                + f" {note}"))
     filt3 = last(a3, "brief", "filter")
     ok, note = clean(a3)
     if not filt3:
@@ -202,8 +256,9 @@ def check_a(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
     apply4 = real_apply(runs.get("a4c", []))
     ok, note = clean(a4)
     held_back, echo_note = answer_turn(a4)
-    out.append(("a4", "PASS" if ok and held_back and apply4 and not apply4.get("rejected") and not apply4.get("applied")
-                else "FAIL", f"{echo_note} held={(apply4 or {}).get('held')} rejected={(apply4 or {}).get('rejected')} {note}"))
+    flow_ok, flow_note = app_flow(a4, applied=False)
+    out.append(("a4", "PASS" if ok and held_back and flow_ok and apply4 and not apply4.get("rejected") and not apply4.get("applied")
+                else "FAIL", f"{echo_note} {flow_note} held={(apply4 or {}).get('held')} rejected={(apply4 or {}).get('rejected')} {note}"))
     return out
 
 
@@ -243,8 +298,9 @@ def check_b(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
     apply4 = real_apply(runs.get("b4c", []))
     ok, note = clean(b4)
     held_back, echo_note = answer_turn(b4)
-    out.append(("b4", "PASS" if ok and held_back and apply4 and not apply4.get("rejected") else "FAIL",
-                f"{echo_note} held={(apply4 or {}).get('held')} {note}"))
+    flow_ok, flow_note = app_flow(b4, applied=False)
+    out.append(("b4", "PASS" if ok and held_back and flow_ok and apply4 and not apply4.get("rejected") else "FAIL",
+                f"{echo_note} {flow_note} held={(apply4 or {}).get('held')} {note}"))
     return out
 
 
@@ -266,13 +322,41 @@ def check_c(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
     ]
 
 
+def check_d(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
+    """The control for the app path (marginalia's decision, nexus-scmcs.3): the answer turn says only "reviewed", and the
+    stand-in's rule for d2 accepts edit 2 and rejects edit 1, the reverse of what the old chat answer named. Edit 2 is
+    applied and edit 1 is not: an applied edit 1 means the run followed the old prior or the chat, not the app."""
+    d1, d2 = runs.get("d1", []), runs.get("d2", [])
+    filt1, render1 = last(d1, "brief", "filter"), last(d1, "review", "render")
+    ok, note = clean(d1)
+    out = [("d1", "PASS" if ok and filt1 and render1 and render1.get("counts", {}).get("edits", 0) >= 2 else "FAIL",
+            f"filtered={bool(filt1)} rendered={bool(render1)} edits={(render1 or {}).get('counts', {}).get('edits')} {note}")]
+    apply2 = real_apply(d2)
+    ok, note = clean(d2)
+    flow_ok, flow_note = app_flow(d2, applied=True)
+    applied_n = [e["n"] for e in (apply2 or {}).get("applied", [])]
+    rejected_n = (apply2 or {}).get("rejected", [])
+    if 1 in applied_n:
+        verdict = "FAIL"
+        why = "edit 1 was applied: the app rejected it, so the run followed the chat or its own prior, not the app"
+    elif apply2 is None:
+        verdict, why = "FAIL", "no real apply in the answer turn"
+    else:
+        good = applied_n == [2] and 1 in rejected_n and apply2.get("rejections_stored") is True
+        verdict = "PASS" if ok and flow_ok and good else "FAIL"
+        why = "edit 2 applied, edit 1 rejected" if good else "expected applied=[2] with edit 1 rejected and stored"
+    out.append(("d2", verdict, f"{why}; {flow_note} applied={applied_n} rejected={rejected_n} {note}"))
+    return out
+
+
 # What each scenario group writes: the rows it scores and the transcripts it leaves.
 GROUPS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "a": (("a1", "a2", "a3", "a4"), ("a1", "a2", "a2c", "a3", "a4", "a4c")),
     "b": (("b1", "b2", "b3", "b4"), ("b1", "b2", "b3", "b4", "b4c")),
     "c": (("c1", "c2"), ("c1", "c2", "c2c")),
+    "d": (("d1", "d2"), ("d1", "d2")),
 }
-CHECKS = {"a": check_a, "b": check_b, "c": check_c}
+CHECKS = {"a": check_a, "b": check_b, "c": check_c, "d": check_d}
 
 
 def requested(out_dir: Path) -> set[str] | None:
@@ -318,8 +402,12 @@ def main(argv: list[str]) -> int:
     asked = requested(out_dir)
     skipped = not_run_reasons(out_dir)
     rows = [row for group in GROUPS for row in group_rows(group, runs, asked, skipped)]
+    standin = V.standin_run(out_dir)
+    if standin:
+        sys.stdout.write(V.STANDIN_HEADER + "\n")
     for name, verdict, note in rows:
-        sys.stdout.write(f"{name:3} {verdict:8} {note}\n")
+        shown = V.tag_standin(verdict, standin)
+        sys.stdout.write(f"{name:3} {shown:8} {note}\n")
     verdicts = {v for _, v, _ in rows}
     if verdicts == {"PASS"}:
         return 0

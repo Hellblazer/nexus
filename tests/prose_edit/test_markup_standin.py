@@ -246,7 +246,7 @@ def test_ids_keep_counting_across_documents_and_list_returns_the_previous_docume
 
 
 def _proposed(tmp_path: Path, **kw: Any) -> Any:
-    tmp_path.mkdir(exist_ok=True)
+    tmp_path.mkdir(parents=True, exist_ok=True)
     app = standin.Standin(**kw)
     app.open_document(str(_write_fixture_doc(tmp_path)))
     h = _hashes(app.get_document())
@@ -277,7 +277,8 @@ def test_a_decision_is_kept_once_made(tmp_path: Path) -> None:
     assert _status_by_edit(app) == {1: "accepted", 2: "rejected", 3: "rejected", 6: "rejected"}
 
 
-def test_an_accepted_suggestion_dirties_the_buffer_and_undo_clears_it(tmp_path: Path) -> None:
+def test_an_accepted_suggestion_dirties_the_buffer_and_undo_does_not_clear_it(tmp_path: Path) -> None:
+    """NOTES h, live run 3: after the accepts, undo runs out ("There is nothing to undo") and hasChanges stays true."""
     app = _proposed(tmp_path, decisions={"accepted": [1, 2], "default": "rejected"})
     assert app.get_document(limit=1)["hasChanges"] is False
     app.list_suggestions()
@@ -285,10 +286,126 @@ def test_an_accepted_suggestion_dirties_the_buffer_and_undo_clears_it(tmp_path: 
     app.undo()
     assert app.get_document(limit=1)["hasChanges"] is True
     app.undo()
+    assert app.get_document(limit=1)["hasChanges"] is True   # the sticky mark: the buffer stays dirty
+    with pytest.raises(standin.StandinError, match="There is nothing to undo"):
+        app.undo()
+    assert app.get_document(limit=1)["hasChanges"] is True
+    app.open_document(app.get_document(limit=1)["url"])      # only a reopen (or a save) clears it
     assert app.get_document(limit=1)["hasChanges"] is False
+
+
+def test_save_clears_the_dirty_mark(tmp_path: Path) -> None:
+    app = _proposed(tmp_path, decisions={"accepted": [1], "default": "rejected"})
+    app.list_suggestions()
+    assert app.get_document(limit=1)["hasChanges"] is True
+    app.save_document()
+    assert app.get_document(limit=1)["hasChanges"] is False
+
+
+def test_an_undo_with_nothing_to_undo_leaves_a_clean_buffer_clean(tmp_path: Path) -> None:
+    app = _proposed(tmp_path)
     with pytest.raises(standin.StandinError, match="nothing to undo"):
         app.undo()
-    app.open_document(app.get_document(limit=1)["url"])  # reopening discards unsaved changes
+    assert app.get_document(limit=1)["hasChanges"] is False
+
+
+def test_reopening_the_same_document_drops_its_suggestions_and_restarts_the_ids(tmp_path: Path) -> None:
+    """Per the app's server instructions (not yet confirmed on the app): suggestions are lost on reopen, ids restart."""
+    app = _proposed(tmp_path)
+    assert [s["id"] for s in app.list_suggestions()["suggestions"]] == ["s1", "s2", "s3", "s4"]
+    app.open_document(str(tmp_path / "doc.md"))
+    assert app.list_suggestions()["suggestions"] == []
+    h = _hashes(app.get_document())
+    again = app.propose_edits([_edit(1, h[1], "basically ordered", "ordered", "Edit 1: hedge")])
+    assert again["results"][0]["id"] == "s1"
+
+
+def test_reopening_a_document_keeps_another_documents_entries_and_never_reuses_their_ids(tmp_path: Path) -> None:
+    a = _doc(tmp_path, "# A\n\nThe alpha is basically fine.\n", "a.md")
+    b = _doc(tmp_path, "# B\n\nThe beta is really fine.\n", "b.md")
+    app = standin.Standin()
+    app.open_document(str(a))
+    app.propose_edits([_edit(1, app.get_document()["blocks"][1]["hash"], "basically ", "", "Edit 1")])      # s1, A
+    app.open_document(str(b))
+    app.propose_edits([_edit(1, app.get_document()["blocks"][1]["hash"], "really ", "", "Edit 1")])         # s2, B
+    app.open_document(str(b))                                                                               # B again
+    assert [s["id"] for s in app.list_suggestions()["suggestions"]] == ["s1"]                               # A's stays
+    assert app.propose_edits([_edit(1, app.get_document()["blocks"][1]["hash"], "really ", "", "Edit 1")])["results"][0]["id"] == "s2"
+
+
+def test_a_malformed_edit_entry_is_an_error_and_changes_nothing(tmp_path: Path) -> None:
+    app = standin.Standin()
+    app.open_document(str(_write_fixture_doc(tmp_path)))
+    h = _hashes(app.get_document())
+    with pytest.raises(standin.StandinError, match="not an object"):
+        app.propose_edits([_edit(1, h[1], "basically ordered", "ordered", "Edit 1"), "oops"])  # type: ignore[list-item]
+    assert app.list_suggestions()["suggestions"] == []  # the good entry before it was not kept
+
+
+def test_the_overlap_refusal_names_the_suggestion_and_gives_no_instruction(tmp_path: Path) -> None:
+    app = standin.Standin()
+    app.open_document(str(_doc(tmp_path, "# T\n\nA basically fine line.\n")))
+    h = _hashes(app.get_document())
+    app.propose_edits([_edit(1, h[1], "basically fine", "fine", "Edit 1")])
+    reason = app.propose_edits([_edit(1, h[1], "fine line", "line", "Edit 2")])["results"][0]["reason"]
+    assert reason == "find overlaps pending suggestion s1"
+
+
+def test_an_ambiguous_find_is_located_at_the_first_occurrence_and_flagged_in_the_calls_log(tmp_path: Path) -> None:
+    calls = tmp_path / "calls.jsonl"
+    app = standin.Standin(calls_path=calls, scenario="a1")
+    app.open_document(str(_doc(tmp_path, "# T\n\nIt is really fine and really good.\n")))
+    h = _hashes(app.get_document())
+    out = app.propose_edits([_edit(1, h[1], "really ", "", "Edit 1")])
+    assert out["results"][0]["status"] == "proposed"
+    rows = [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()]
+    row = rows[-1]
+    assert row["tool"] == "propose_edits" and row["scenario"] == "a1"
+    assert row["ambiguous"] == [{"block": 1, "find": "really ", "occurrences": 2, "located": {"unit": 0, "start": 6}}]
+
+
+def test_the_calls_log_records_each_tool_call_the_decisions_applied_and_the_invented_replies(tmp_path: Path) -> None:
+    calls = tmp_path / "calls.jsonl"
+    app = _proposed(tmp_path / "w", decisions={"accepted": [1], "default": "rejected"}, calls_path=calls, scenario="a2")
+    app.list_suggestions()
+    app.undo()
+    with pytest.raises(standin.StandinError):
+        app.undo()
+    app.save_document()
+    rows = [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()]
+    assert [r["tool"] for r in rows] == ["open_document", "get_document", "propose_edits", "list_suggestions", "undo", "undo",
+                                         "save_document"]
+    assert rows[0]["args"] == {"path": str(tmp_path / "w" / "doc.md")} and rows[0]["ok"] is True
+    listed = rows[3]
+    assert listed["decisions_applied"] == [{"id": "s1", "edit": 1, "status": "accepted"},
+                                           {"id": "s2", "edit": 2, "status": "rejected"},
+                                           {"id": "s3", "edit": 3, "status": "rejected"},
+                                           {"id": "s4", "edit": 6, "status": "rejected"}]
+    assert "invented" not in rows[0] and "invented" not in listed and "invented" not in rows[2]  # shapes the fixtures hold
+    assert rows[4]["invented"] and rows[6]["invented"]                                           # undo success and save are made up
+    assert rows[5]["ok"] is False and rows[5]["error"] == "There is nothing to undo" and "invented" not in rows[5]  # recorded text
+    assert all(r["scenario"] == "a2" for r in rows)
+
+
+def test_a_refusal_other_than_the_recorded_one_is_flagged_as_invented(tmp_path: Path) -> None:
+    calls = tmp_path / "calls.jsonl"
+    app = standin.Standin(calls_path=calls)
+    app.open_document(str(_doc(tmp_path, "# T\n\nA **bold really** line.\n")))
+    h = _hashes(app.get_document())
+    out = app.propose_edits([_edit(1, h[1], "nothing here", "x", "Edit 1")])
+    assert out["results"][0]["status"] == "refused"
+    row = json.loads(calls.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["invented"]  # the not-found refusal's text is not in the fixtures
+    out = app.propose_edits([_edit(1, h[1], "A bold", "A", "Edit 2")])  # crosses into the bold run: the recorded refusal
+    assert out["results"][0]["status"] == "refused"
+    assert "invented" not in json.loads(calls.read_text(encoding="utf-8").splitlines()[-1])
+
+
+def test_the_state_file_is_written_through_a_temp_file_of_its_own_name(tmp_path: Path) -> None:
+    state = tmp_path / "state.json"
+    app = standin.Standin(state_path=state)
+    app.open_document(str(_write_fixture_doc(tmp_path)))
+    assert state.is_file() and sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("state.json")) == ["state.json"]
 
 
 def test_rules_are_picked_per_scenario_by_pattern_and_the_first_match_wins() -> None:
@@ -305,7 +422,10 @@ def test_the_shipped_decision_table_decides_the_answer_turns_the_runners_script(
         assert standin.rule_for(name, table) == {"accepted": [1], "default": "rejected"}
     for name in ("memgate-1-2", "memgate-10-2"):  # the gate's "Accept none. Reject all the edits."
         assert standin.rule_for(name, table) == {"default": "rejected"}
-    for name in ("a1", "a3", "a4", "b3", "b4", "t1", "t5", "memgate-1-1", "memgate-1-4", "a2c"):
+    # marginalia's control (nexus-scmcs.3): the answer turn says only "reviewed", and the app's rule is the REVERSE of
+    # what the old prompt named: edit 2 accepted, edit 1 rejected. A run that applies edit 1 read the chat, not the app.
+    assert standin.rule_for("d2", table) == {"accepted": [2], "default": "rejected"}
+    for name in ("a1", "a3", "a4", "b3", "b4", "t1", "t5", "memgate-1-1", "memgate-1-4", "a2c", "d1", "d2c"):
         assert standin.rule_for(name, table) is None, name
 
 

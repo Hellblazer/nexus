@@ -1,5 +1,6 @@
 {
   "a2": {"accepted": [1], "default": "rejected"},
+  "d2": {"accepted": [2], "default": "rejected"},
   "t2": {"accepted": [1], "default": "rejected"},
   "*-[0-9]*-2": {"default": "rejected"}
 }
