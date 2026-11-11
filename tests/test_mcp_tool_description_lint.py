@@ -146,8 +146,15 @@ def _sent_length(description: str, fn: object, *, raw_docstring: str | None = No
     indentation); one passed explicitly is measured as given."""
     raw = raw_docstring if raw_docstring is not None else _source_docstring(fn)
     if raw and inspect.cleandoc(raw) == inspect.cleandoc(description):
-        return max(len(description), len(raw))
+        doc = getattr(fn, "__doc__", None) or ""
+        return max(len(description), len(raw), len(doc))
     return len(description)
+
+
+def _over_limit(rows: list[tuple[str, str, str, object]], limit: int) -> list[tuple[str, str, int]]:
+    """(server, tool, sent length) for every row over *limit*, by :func:`_sent_length`: the one
+    rule both length checks apply."""
+    return [(s, n, k) for s, n, d, fn in rows if (k := _sent_length(d, fn)) > limit]
 
 
 def test_the_measure_is_the_source_docstring_on_every_python() -> None:
@@ -165,12 +172,15 @@ def test_a_docstring_over_the_cut_only_with_its_indentation_is_over() -> None:
     stripped = inspect.cleandoc(raw)
     assert len(stripped) <= HARNESS_TRUNCATION_LIMIT < len(raw), (len(stripped), len(raw))
 
-    def tool():
-        pass
+    assert _sent_length(stripped, len, raw_docstring=raw) > HARNESS_TRUNCATION_LIMIT
+    assert _sent_length(raw, len, raw_docstring=raw) > HARNESS_TRUNCATION_LIMIT
 
-    tool.__doc__ = raw
-    assert _sent_length(stripped, tool, raw_docstring=raw) > HARNESS_TRUNCATION_LIMIT
-    assert _sent_length(raw, tool, raw_docstring=raw) > HARNESS_TRUNCATION_LIMIT
+
+def test_a_tool_whose_source_cannot_be_read_is_measured_as_given() -> None:
+    # A builtin (or a closure whose docstring is set at runtime) has no readable source: the
+    # description's own length, never 0.
+    assert _source_docstring(len) is None
+    assert _sent_length("x" * 3000, len) == 3000
 
 
 def test_an_explicit_description_is_measured_as_given() -> None:
@@ -178,11 +188,7 @@ def test_an_explicit_description_is_measured_as_given() -> None:
 
 
 def test_no_description_exceeds_the_harness_truncation_limit() -> None:
-    over = [
-        (server, name, n)
-        for server, name, desc, fn in _iter_tool_fns()
-        if (n := _sent_length(desc, fn)) > HARNESS_TRUNCATION_LIMIT
-    ]
+    over = _over_limit(_iter_tool_fns(), HARNESS_TRUNCATION_LIMIT)
     assert not over, (
         f"{len(over)} tool description(s) exceed the {HARNESS_TRUNCATION_LIMIT}-char "
         f"harness truncation cut -- the harness silently cuts these mid-sentence, "
@@ -192,11 +198,7 @@ def test_no_description_exceeds_the_harness_truncation_limit() -> None:
 
 
 def test_descriptions_stay_within_the_target_length() -> None:
-    over = [
-        (server, name, len(desc))
-        for server, name, desc in _iter_tool_descriptions()
-        if len(desc) > TARGET_LENGTH
-    ]
+    over = _over_limit(_iter_tool_fns(), TARGET_LENGTH)
     if over:
         import warnings
 
@@ -208,11 +210,63 @@ def test_descriptions_stay_within_the_target_length() -> None:
         )
 
 
+def _planted_over_only_with_indentation():
+    """Planted tool.
+
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+    """
+
+
 def test_planted_oversized_description_is_detected() -> None:
-    """Non-vacuity: the length check actually distinguishes long from short."""
-    fake = [("nexus", "planted_tool", "x" * (HARNESS_TRUNCATION_LIMIT + 1))]
-    over = [(s, n, len(d)) for s, n, d in fake if len(d) > HARNESS_TRUNCATION_LIMIT]
-    assert over
+    """Non-vacuity, through the rule the lint applies (_over_limit): a plain oversized description,
+    and one that is under the cut as 3.13 sends it but over as 3.12 sends it, are both flagged."""
+    raw = _source_docstring(_planted_over_only_with_indentation)
+    assert raw is not None
+    stripped = inspect.cleandoc(raw)
+    assert len(stripped) <= HARNESS_TRUNCATION_LIMIT < len(raw), (len(stripped), len(raw))
+    rows = [
+        ("nexus", "plain", "x" * (HARNESS_TRUNCATION_LIMIT + 1), len),
+        ("nexus", "indented", stripped, _planted_over_only_with_indentation),
+        ("nexus", "short", "fine", len),
+    ]
+    assert [n for _s, n, _k in _over_limit(rows, HARNESS_TRUNCATION_LIMIT)] == ["plain", "indented"]
+
+
+def test_most_tools_are_measured_by_their_source_docstring() -> None:
+    """Non-vacuity floor for the raw path (nexus-moht0): a tool whose source docstring cannot be
+    read falls back to its description, which on 3.13 is the stripped text the lint used to miss.
+    52 of 57 tools take the raw path today; the 5 others pass ``description=`` or set the
+    docstring at runtime."""
+    rows = _iter_tool_fns()
+    raw_path = [n for _s, n, d, fn in rows
+                if (r := _source_docstring(fn)) and inspect.cleandoc(r) == inspect.cleandoc(d)]
+    assert len(raw_path) >= 45, f"only {len(raw_path)} of {len(rows)} tools measured by their source docstring"
 
 
 # ── Parameter schema coverage ────────────────────────────────────────────
