@@ -3976,16 +3976,12 @@ def search(
     - `cluster_by` defaults to "" (no clustering).
     - The text and `structured=True` can disagree on ranking order within a
       page: text applies a per-file diversity cap, the dict does not.
-    - A chunk whose text is identical in several collections is returned once,
-      the best-ranked copy, with the other collections named: an `also in:`
-      line in the text, and `also_in` and `also_in_ids` (the other collections
-      and the documents the copies belong to, one list per row, aligned with
-      `ids`, `[]` for a row with no copy) in the dict, present only when some row on the page has
-      copies. A copy that is sensitive makes the returned row sensitive and is
-      not named.
-    - The dict carries `next_offset` when more rows may follow the page (the
-      text footer's "next" or "may have more"); its absence means the page is
-      the last. A page can hold fewer than `limit` rows and still have one.
+    - Identical chunk text in several collections is returned once, with the
+      other collections named: `also in:` in the text; `also_in` and
+      `also_in_ids` (collections, their documents; aligned with `ids`) in the
+      dict when a row has copies. A sensitive copy makes the row sensitive.
+    - The dict has `next_offset` while more rows may follow; absent on the
+      last page. A short page can still have one.
     """
     # nexus-zdzm5: the documented page cap was not enforced; limit=301
     # returned 301 rows (118 KB). Refuse, and say how to page instead.
