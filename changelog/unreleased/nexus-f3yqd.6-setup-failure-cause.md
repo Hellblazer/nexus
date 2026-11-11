@@ -1,3 +1,0 @@
-### Fixed
-
-- **A failed `/conexus:setup` says why, and says to read the log before retrying** (nexus-f3yqd.6, F3). When the build, the login-unit registration, the service start, `nx init` or saving the credentials failed, setup reported only "the build exited 2." and advised calling setup again. It now adds the line that names the cause: an `error:` or exception line, uv's deepest `cause:` line, or a line naming a failure, never the `nx init` step reporter's own "failed after" and "Re-run" lines; after a timeout, the line it stopped at. Credentials in a URL, bearer tokens and `token=` values are masked. The next step is to read the log and tell the user the cause, then, if the user agrees, retry once it is fixed or when it was brief.
