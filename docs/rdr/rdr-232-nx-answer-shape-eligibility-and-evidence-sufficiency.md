@@ -2673,3 +2673,16 @@ remains Sam's (nexus-uxyyt).
 - 2026-11-03: Post-close note (nexus-se11w; Sam's ruling of 2026-10-31 applied to a contradicted facet, option b): the tail repair now covers a contradicted facet with most anchors unread, ranked after unsupported and before covered, inside the same budget; support in the tail records it as conflicted (`conflicted_from_contradicted`) but the run stays partial with its notice. See the post-close note in Key Discoveries. Status unchanged (closed).
 - 2026-11-03: Post-close note (nexus-rflvp; Sam's decision): an unattested plan, one that declares no answer kind, is no longer eligible for a lookup or a discovery/listing request (reason `unattested_plan`); grown and curated plans and the unknown request row are unchanged; plan save writing a declaration is nexus-0vh80. See the post-close note in Key Discoveries.
 - 2026-11-04: Post-close note (nexus-0vh80; Sam's six rulings of 2026-11-03): a new `saved` provenance and matrix column; plan save takes a required `answer_kind` and writes a saved declaration, honoured narrowly (own kind only, never the unknown request, only the saving project, shape veto); a saved plan of unknown kind serves nothing; only the builtin tier may claim curated. See the post-close note in Key Discoveries. Status unchanged (closed).
+
+## Post-close amendments
+
+Appended after close; the text above is unchanged. Sam's decision of 2026-11-11, by dialog, relayed by halcyon.
+
+### 2026-11-11: grown plans serve a lookup or a listing only by their recorded kind (nexus-indyo, nexus-a4g2a)
+
+Section 1's matrix admits an unknown-kind grown plan for `lookup` and `discovery/listing` requests. Two later changes narrow that, both in `src/nexus/plans/eligibility.py` `_judge`. Neither widens eligibility. Neither was measured; each is a guard.
+
+- **nexus-indyo (2026-11-03):** a grown plan that recorded a kind other than lookup no longer serves a lookup (reason `grown_route_not_lookup`). Its steps were planned for another kind of request, the cost shape the lookup row exists to keep out.
+- **nexus-a4g2a (2026-11-11):** a grown plan of unknown kind that recorded no kind serves neither a lookup nor a listing (reason `grown_route_unrecorded`, or the row's own defect flag such as `untrusted_curated_claim`). A `discovery/listing` request takes only a grown plan that recorded discovery (reason `grown_route_not_discovery`). The library held five grown plans with none accruing, so nothing could be measured. The exclusions are counted by reason, and `refused_recorded_kinds` counts both narrowings per recorded kind, so the cost shows as grown plans accrue. The worst case is an inline replan; a good match can be lost.
+
+The narrowed rule, as it now stands: an unknown-kind grown plan serves a lookup only when it recorded lookup, and a listing only when it recorded discovery. A grown plan on a trusted route keeps its known kind and goes by the matrix. Still open in nexus-a4g2a: the recorded kind is the request's label, not the plan's shape, so a grown plan grown from a mislabelled request still serves the kind it recorded.
