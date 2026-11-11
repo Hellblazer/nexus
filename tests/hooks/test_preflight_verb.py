@@ -62,16 +62,33 @@ class TestPreflightVerbExists:
         assert module_path.exists()
 
 
+def _stub_tools(bin_dir: Path) -> str:
+    """A PATH whose first entry holds ``nx`` and ``bd`` stubs that answer at once.
+
+    The healthy-path test is about the hook's silence when nx answers, not about how fast the real CLI starts:
+    under CI load a cold ``nx --version`` outran the hook's 3 s bounded probe (develop CI shard 4 on 1087db0ef,
+    reproduced on chas with the cores saturated), and the hook then emitted the FAILED marker it is meant to.
+    POSIX only: the hook runs a bare ``nx`` from PATH there (``nexus.util.nx_argv``)."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name, text in (("nx", "nx, version 0.0.0-stub"), ("bd", "bd version 0.0.0-stub")):
+        tool = bin_dir / name
+        tool.write_text(f"#!/bin/sh\necho '{text}'\n", encoding="utf-8")
+        tool.chmod(0o755)
+    return f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+
 class TestPreflightHealthy:
-    def test_silent_when_nx_works(self) -> None:
-        """On a host where ``nx --version`` works, preflight emits
-        nothing. Reverting the silence-when-healthy guard would emit
-        the FAILED marker on every session and break the existing
-        macOS/Linux flow.
+    def test_silent_when_nx_works(self, tmp_path: Path) -> None:
+        """When ``nx --version`` answers, preflight emits nothing. Reverting the silence-when-healthy guard would emit
+        the FAILED marker on every session and break the existing macOS/Linux flow.
         """
-        if shutil.which("nx") is None:
-            pytest.skip("nx not on PATH on this host; healthy-path test n/a")
-        rc, out = _run_preflight()
+        if sys.platform == "win32":
+            # Windows runs nx as ``<python> -m nexus.cli`` (nx_argv), not from PATH: no stub can stand in.
+            if shutil.which("nx") is None:
+                pytest.skip("nx not on PATH on this host; healthy-path test n/a")
+            rc, out = _run_preflight()
+        else:
+            rc, out = _run_preflight(env_path=_stub_tools(tmp_path / "bin"))
         assert rc == 0
         assert out == "" or out.strip() == "", (
             f"preflight must be silent when nx works; got stdout: {out[:200]!r}"
