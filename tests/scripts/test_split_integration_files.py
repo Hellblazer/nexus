@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -75,6 +76,52 @@ def test_indented_and_summary_lines_are_not_counted(tmp_path: Path) -> None:
     finally:
         sys.path.pop(0)
     assert s.test_counts(path.read_text(encoding="utf-8")) == {"tests/a.py": 1}
+
+
+def test_recorded_seconds_outweigh_test_count(tmp_path: Path) -> None:
+    """One slow file (tests/test_indexer_e2e.py took 1321 of 3281 s) gets a shard to itself."""
+    files = ["tests/slow.py", "tests/a.py", "tests/b.py", "tests/c.py"]
+    counts = {"tests/slow.py": 30, "tests/a.py": 100, "tests/b.py": 100, "tests/c.py": 100}
+    durations = tmp_path / "durations.json"
+    durations.write_text(json.dumps({"tests/slow.py": 1300.0, "tests/a.py": 300.0, "tests/b.py": 300.0, "tests/c.py": 300.0}))
+    collect = tmp_path / "collect.txt"
+    collect.write_text(_collect(counts), encoding="utf-8")
+    out = [subprocess.run([sys.executable, "-I", str(SCRIPT), "--shard", str(k), "--of", "2", "--collected", str(collect),
+                           "--durations", str(durations)], input="\n".join(files), capture_output=True, text=True,
+                          check=True).stdout.split() for k in (1, 2)]
+    assert sorted(out, key=len) == [["tests/slow.py"], ["tests/a.py", "tests/b.py", "tests/c.py"]]
+
+
+def test_an_unrecorded_file_weighs_its_count_times_the_recorded_rate(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import split_integration_files as s  # noqa: PLC0415 - the script is not a package module
+    finally:
+        sys.path.pop(0)
+    w = s.weights(["tests/a.py", "tests/new.py"], {"tests/a.py": 10, "tests/new.py": 4}, {"tests/a.py": 20.0})
+    assert w == {"tests/a.py": 20.0, "tests/new.py": 8.0}
+
+
+def test_record_writes_per_file_seconds_from_junit(tmp_path: Path) -> None:
+    junit = tmp_path / "j.xml"
+    junit.write_text(
+        '<testsuites><testsuite>'
+        '<testcase classname="tests.integration.test_x.TestY" name="a" time="1.5"/>'
+        '<testcase classname="tests.integration.test_x" name="b" time="2.0"/>'
+        '<testcase classname="tests.test_z" name="c" time="4.0"/>'
+        '<testcase classname="" name="tests/test_q.py" time="0.0"/>'
+        '</testsuite></testsuites>')
+    out = tmp_path / "durations.json"
+    subprocess.run([sys.executable, "-I", str(SCRIPT), "--record", str(out), str(junit)],
+                   input="tests/integration/test_x.py\ntests/test_z.py\n", capture_output=True, text=True, check=True)
+    assert json.loads(out.read_text()) == {"tests/integration/test_x.py": 3.5, "tests/test_z.py": 4.0}
+
+
+def test_the_committed_time_table_names_only_real_integration_files() -> None:
+    table = json.loads((ROOT / "tests" / "integration_durations.json").read_text(encoding="utf-8"))
+    assert table, "the time table is empty"
+    missing = [f for f in table if not (ROOT / f).is_file()]
+    assert not missing, f"time table names files that no longer exist (re-record it): {missing}"
 
 
 @pytest.mark.parametrize("bad", [["--shard", "0", "--of", "3"], ["--shard", "4", "--of", "3"], ["--shard", "1", "--of", "0"]])

@@ -1558,7 +1558,10 @@ jobs:
     # Worst case is the whole family. The nightly's pytest step for it took
     # 38 minutes on this runner class (run 37197448487, 2026-10-04: 789 passed
     # in 2301 s), so 60 leaves room for setup and a cold cache. A release PR
-    # splits that family three ways (cut 4 below), about 13 minutes a shard.
+    # splits that family three ways (cut 4 below). Measured on chas 2026-11-11
+    # (1168 executed, 15 skipped, 3282 s of test time): tests/test_indexer_e2e.py
+    # alone is 1322 s, so its shard is about 22 minutes of tests plus setup and
+    # the others about 16; tests/integration_durations.json holds the per-file times.
     timeout-minutes: 60
     # nexus-jh1f2 cut 4: one shard on develop and interior PRs; three on a pull request into
     # main, where the selection is every integration file (about 1180 tests). Each shard
@@ -1702,12 +1705,13 @@ jobs:
           fi
           # nexus-jh1f2 cut 4: this shard's files, then this shard's collected count.
           python3 scripts/split_integration_files.py --shard "${{ matrix.shard }}" --of "${{ strategy.job-total }}" \
-            --collected integration-collect.txt < integration-all.txt > integration-selected.txt
+            --collected integration-collect.txt --durations tests/integration_durations.json \
+            < integration-all.txt > integration-selected.txt
           echo "shard ${{ matrix.shard }}/${{ strategy.job-total }} files:"
           cat integration-selected.txt
           collected=0
           while IFS= read -r f; do
-            n="$(grep -cF -- "${f}::" integration-collect.txt || true)"
+            n="$(awk -F'::' -v f="$f" '$1 == f { n++ } END { print n + 0 }' integration-collect.txt)"
             collected=$((collected + n))
           done < integration-selected.txt
           if [ -s integration-selected.txt ]; then
@@ -1748,6 +1752,69 @@ jobs:
             --junit integration-affected.xml \
             --selected integration-selected.txt \
             --collected "${{ steps.collect.outputs.collected }}"
+
+      # nexus-jh1f2 cut 4 review r1: on a release PR the shards' files and JUnit go to
+      # integration-release-floor, which checks the whole family (every file in exactly one
+      # shard, the executed floor, the skip budget) where no single shard can see it.
+      - name: Keep this shard's files and JUnit (release PRs)
+        if: always() && strategy.job-total > 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: integration-shard-${{ matrix.shard }}
+          path: |
+            integration-selected.txt
+            integration-affected.xml
+            integration-all.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      # The carve-outs the old lsg pytest family counted exactly: a test newly marked
+      # lived_in, keyed_voyage or mandatory_regression_pin leaves this family silently, so
+      # each count must equal the expected number the gate scripts hold. Once per release PR.
+      - name: Carve-out counts (release PRs, nexus-jh1f2)
+        if: strategy.job-total > 1 && matrix.shard == 1
+        run: |
+          set -euo pipefail
+          . tests/e2e/lib/mandatory_pins.sh
+          lived_exp="$(sed -nE 's/^LIVED_IN_EXPECTED=([0-9]+).*/\1/p' tests/e2e/local-service-gate.sh)"
+          keyed_exp="$(sed -nE 's/^KEYED_VOYAGE_EXPECTED=([0-9]+).*/\1/p' tests/e2e/local-service-gate.sh)"
+          [ -n "$lived_exp" ] && [ -n "$keyed_exp" ] || { echo "::error::could not read the carve-out counts from local-service-gate.sh"; exit 1; }
+          count() { NX_TEST_T2_SUBSTRATE=none uv run pytest "$@" --collect-only -q 2>/dev/null | grep -cE '^[^ ]+\.py::' || true; }
+          lived="$(count -m "integration and lived_in")"
+          keyed="$(count -m "integration and keyed_voyage")"
+          pins="$(count -o addopts="" -m "$MANDATORY_PIN_MARK_EXPR")"
+          echo "lived_in $lived (expected $lived_exp), keyed_voyage $keyed (expected $keyed_exp), pins $pins (expected $MANDATORY_PIN_EXPECTED)"
+          bad=0
+          [ "$lived" -eq "$lived_exp" ] || { echo "::error::lived_in carve-out is $lived tests, expected $lived_exp (bump LIVED_IN_EXPECTED in local-service-gate.sh consciously)"; bad=1; }
+          [ "$keyed" -eq "$keyed_exp" ] || { echo "::error::keyed_voyage carve-out is $keyed tests, expected $keyed_exp (KEYED_VOYAGE_EXPECTED)"; bad=1; }
+          [ "$pins" -eq "$MANDATORY_PIN_EXPECTED" ] || { echo "::error::mandatory_regression_pin is $pins tests, expected $MANDATORY_PIN_EXPECTED (tests/e2e/lib/mandatory_pins.sh)"; bad=1; }
+          exit "$bad"
+
+  integration-release-floor:
+    # nexus-jh1f2 cut 4 review r1: the floor and skip budget the old lsg pytest family
+    # carried, over all three release-PR shards together. Floor and budget come from the
+    # 2026-11-11 chas run of exactly this selection (1168 executed, 15 skipped); a drop
+    # under the floor or a skip wave over the budget fails the release PR, as it failed lsg.
+    name: integration release floor (all shards)
+    runs-on: ubuntu-latest
+    needs: [changes, test-integration-affected]
+    if: always() && needs.changes.outputs.integration_shards != '' && needs.changes.outputs.integration_shards != '[1]'
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+      - name: Fetch every shard's files and JUnit
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: integration-shard-*
+          path: shards
+      - name: The family's floor, skip budget and file coverage
+        run: |
+          set -euo pipefail
+          first=""
+          for d in shards/integration-shard-*; do [ -f "$d/integration-all.txt" ] && { first="$d"; break; }; done
+          [ -n "$first" ] || { echo "::error::no shard uploaded its files and JUnit"; exit 1; }
+          python3 scripts/assert_integration_affected_ran.py --aggregate shards --all "$first/integration-all.txt" \
+            --min-executed 1100 --max-skipped 40
 
   pytest-gate:
     # nexus-n0ful: required-check fan-in over the sharded `test` matrix.
@@ -1801,7 +1868,7 @@ jobs:
     # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, mcpb-resolve-gate, constraints-resolve-gate]
+    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, integration-release-floor, mcpb-resolve-gate, constraints-resolve-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1817,6 +1884,8 @@ jobs:
           release_ledger_result="${{ needs.release-ledger-gate.result }}"
           integration_any="${{ needs.changes.outputs.integration_any }}"
           integration_result="${{ needs.test-integration-affected.result }}"
+          integration_shards="${{ needs.changes.outputs.integration_shards }}"
+          integration_floor_result="${{ needs.integration-release-floor.result }}"
           mcpb_result="${{ needs.mcpb-resolve-gate.result }}"
           constraints_result="${{ needs.constraints-resolve-gate.result }}"
           event_name="${{ github.event_name }}"
@@ -1964,6 +2033,30 @@ jobs:
               ;;
             *)
               echo "::error::unrecognised integration_any '$integration_any' from the changes job — failing loud instead of guessing"
+              exit 1
+              ;;
+          esac
+
+          # nexus-jh1f2 cut 4 review r1: a release PR's three shards must also pass the
+          # whole-family floor; one shard everywhere else, where the floor job skips.
+          case "$integration_shards" in
+            '[1]')
+              case "$integration_floor_result" in
+                skipped|success) ;;
+                *)
+                  echo "::error::integration-release-floor reported '$integration_floor_result' on a one-shard run"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            '[1,2,3]')
+              if [ "$integration_floor_result" != "success" ]; then
+                echo "::error::a release PR's integration shards need integration-release-floor, which reported '$integration_floor_result' instead of success"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::unrecognised integration_shards '$integration_shards' from the changes job — failing loud instead of guessing"
               exit 1
               ;;
           esac

@@ -106,14 +106,74 @@ def check(junit: pathlib.Path, selected: list[str], collected: int) -> list[str]
     return problems
 
 
+def _lines(path: pathlib.Path) -> list[str]:
+    return [s.strip() for s in path.read_text().splitlines() if s.strip()]
+
+
+def aggregate(shard_dirs: list[pathlib.Path], all_files: list[str], min_executed: int, max_skipped: int) -> list[str]:
+    """The release-PR floor over every shard (nexus-jh1f2 cut 4 review r1).
+
+    Each shard directory holds that shard's ``integration-selected.txt`` and
+    ``integration-affected.xml``. Every selected file must be in exactly one
+    shard, and the shards together must execute at least *min_executed* tests and
+    skip at most *max_skipped*: the old lsg floor and skip budget, which the
+    per-file check above cannot see (a file can skip 29 of its 30 tests)."""
+    problems: list[str] = []
+    owner: dict[str, str] = {}
+    executed = skipped = 0
+    for d in sorted(shard_dirs):
+        sel_path, junit = d / "integration-selected.txt", d / "integration-affected.xml"
+        if not sel_path.is_file() or not junit.is_file():
+            problems.append(f"{d.name}: missing integration-selected.txt or integration-affected.xml")
+            continue
+        for rel in _lines(sel_path):
+            if rel in owner:
+                problems.append(f"{rel} ran in two shards ({owner[rel]} and {d.name})")
+            owner[rel] = d.name
+        e = s = 0
+        for c in ET.parse(junit).getroot().iter("testcase"):
+            if _executed(c):
+                e += 1
+            else:
+                s += 1
+        sys.stdout.write(f"{d.name}: {len(_lines(sel_path))} files, {e} executed, {s} skipped\n")
+        executed, skipped = executed + e, skipped + s
+    lost = sorted(set(all_files) - set(owner))
+    extra = sorted(set(owner) - set(all_files))
+    if lost:
+        problems.append(f"{len(lost)} selected files ran in no shard (first: {lost[0]})")
+    if extra:
+        problems.append(f"{len(extra)} files ran that the selection does not list (first: {extra[0]})")
+    sys.stdout.write(f"all shards: {executed} executed (floor {min_executed}), {skipped} skipped (budget {max_skipped})\n")
+    if executed < min_executed:
+        problems.append(f"the shards executed {executed} tests, under the floor of {min_executed}")
+    if skipped > max_skipped:
+        problems.append(f"the shards skipped {skipped} tests, over the budget of {max_skipped}")
+    return problems
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--junit", type=pathlib.Path, required=True)
-    parser.add_argument("--selected", type=pathlib.Path, required=True)
-    parser.add_argument("--collected", type=int, required=True)
+    parser.add_argument("--junit", type=pathlib.Path)
+    parser.add_argument("--selected", type=pathlib.Path)
+    parser.add_argument("--collected", type=int)
+    parser.add_argument("--aggregate", type=pathlib.Path, help="a directory of shard directories (release PRs)")
+    parser.add_argument("--all", type=pathlib.Path, help="with --aggregate: the whole selection, one file per line")
+    parser.add_argument("--min-executed", type=int, default=0)
+    parser.add_argument("--max-skipped", type=int, default=0)
     args = parser.parse_args(argv)
-    selected = [s.strip() for s in args.selected.read_text().splitlines() if s.strip()]
-    problems = check(args.junit, selected, args.collected)
+    if args.aggregate is not None:
+        if args.all is None:
+            parser.error("--aggregate needs --all")
+        shard_dirs = [p for p in args.aggregate.iterdir() if p.is_dir()]
+        if not shard_dirs:
+            problems = [f"no shard directories under {args.aggregate}"]
+        else:
+            problems = aggregate(shard_dirs, _lines(args.all), args.min_executed, args.max_skipped)
+    else:
+        if args.junit is None or args.selected is None or args.collected is None:
+            parser.error("--junit, --selected and --collected are required without --aggregate")
+        problems = check(args.junit, _lines(args.selected), args.collected)
     for p in problems:
         sys.stdout.write(f"::error::{p}\n")
     return 1 if problems else 0

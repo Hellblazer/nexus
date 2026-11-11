@@ -374,6 +374,45 @@ def test_fanin_tolerates_skip_when_nothing_selected(result: str) -> None:
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
 
 
+@pytest.mark.parametrize("floor", ["failure", "skipped", "cancelled"])
+def test_fanin_fails_a_release_pr_whose_floor_did_not_pass(floor: str) -> None:
+    """nexus-jh1f2 cut 4 review r1: three shards need integration-release-floor green."""
+    proc = _run(_pytest_gate_script(**{
+        "needs.changes.outputs.integration_any": "true",
+        "needs.test-integration-affected.result": "success",
+        "needs.changes.outputs.integration_shards": "[1,2,3]",
+        "needs.integration-release-floor.result": floor,
+    }))
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "integration-release-floor" in proc.stdout + proc.stderr
+
+
+def test_fanin_passes_a_release_pr_whose_floor_passed() -> None:
+    proc = _run(_pytest_gate_script(**{
+        "needs.changes.outputs.integration_any": "true",
+        "needs.test-integration-affected.result": "success",
+        "needs.changes.outputs.integration_shards": "[1,2,3]",
+        "needs.integration-release-floor.result": "success",
+    }))
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+
+
+@pytest.mark.parametrize("shards", ["", "[1,2]", "maybe"])
+def test_fanin_fails_on_an_unrecognised_shard_list(shards: str) -> None:
+    proc = _run(_pytest_gate_script(**{"needs.changes.outputs.integration_shards": shards}))
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+
+
+def test_the_floor_job_is_wired_into_pytest_gate() -> None:
+    doc = yaml.safe_load(CI_YML.read_text())
+    assert "integration-release-floor" in doc["jobs"]["pytest-gate"]["needs"]
+    floor = doc["jobs"]["integration-release-floor"]
+    assert floor["needs"] == ["changes", "test-integration-affected"]
+    assert "always()" in floor["if"] and "'[1]'" in floor["if"]
+    run = next(s["run"] for s in floor["steps"] if "run" in s and "--aggregate" in s["run"])
+    assert "--min-executed 1100" in run and "--max-skipped 40" in run
+
+
 @pytest.mark.parametrize("any_", ["", "maybe"])
 def test_fanin_fails_on_unrecognised_selection_flag(any_: str) -> None:
     proc = _run(_pytest_gate_script(**{
@@ -545,3 +584,38 @@ def test_collected_family_meets_floor_and_is_visible_to_the_selector() -> None:
     collected_files = {i.split("::", 1)[0] for i in ids}
     universe = set(sel.select_all(REPO_ROOT)) | set(sel.COVERED_ELSEWHERE)
     assert collected_files <= universe, sorted(collected_files - universe)
+
+
+# -- nexus-jh1f2 cut 4 review r1: the carve-out counts on a release PR's shard 1 --------------
+
+
+def _run_carveout(tmp: pathlib.Path, lived: int, keyed: int, pins: int) -> subprocess.CompletedProcess[str]:
+    (tmp / "tests" / "e2e" / "lib").mkdir(parents=True, exist_ok=True)
+    (tmp / "tests" / "e2e" / "local-service-gate.sh").write_text("LIVED_IN_EXPECTED=98  # note\nKEYED_VOYAGE_EXPECTED=3\n")
+    (tmp / "tests" / "e2e" / "lib" / "mandatory_pins.sh").write_text(
+        'MANDATORY_PIN_MARK_EXPR="integration and mandatory_regression_pin"\nMANDATORY_PIN_EXPECTED=4\n')
+    bindir = tmp / "bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "uv"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'case "$*" in *lived_in*) n={lived} ;; *keyed_voyage*) n={keyed} ;; *mandatory*) n={pins} ;; *) n=0 ;; esac\n'
+        'for i in $(seq 1 "$n"); do echo "tests/test_x.py::t$i"; done\necho "$n tests collected"\n')
+    stub.chmod(0o755)
+    script = _GH_EXPR.sub(lambda m: {"strategy.job-total": "3", "matrix.shard": "1"}[m.group(1).strip()],
+                          _job_step("Carve-out counts"))
+    env = dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    return subprocess.run(["bash", "-c", script], cwd=tmp, env=env, capture_output=True, text=True)
+
+
+def test_carveout_counts_pass_when_they_match(tmp_path: pathlib.Path) -> None:
+    proc = _run_carveout(tmp_path, 98, 3, 4)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize(("lived", "keyed", "pins", "named"),
+                         [(99, 3, 4, "lived_in"), (98, 2, 4, "keyed_voyage"), (98, 3, 5, "mandatory_regression_pin")])
+def test_carveout_counts_fail_on_any_drift(tmp_path: pathlib.Path, lived: int, keyed: int, pins: int, named: str) -> None:
+    proc = _run_carveout(tmp_path, lived, keyed, pins)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"::error::{named}" in proc.stdout
