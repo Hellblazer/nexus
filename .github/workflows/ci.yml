@@ -1767,6 +1767,9 @@ jobs:
             integration-all.txt
           if-no-files-found: error
           retention-days: 7
+          # A re-run of a flaked shard (or of all jobs) uploads under the same name; without
+          # this the second upload fails on a name conflict and the release PR cannot go green.
+          overwrite: true
 
       # The carve-outs the old lsg pytest family counted exactly: a test newly marked
       # lived_in, keyed_voyage or mandatory_regression_pin leaves this family silently, so
@@ -1798,7 +1801,7 @@ jobs:
     name: integration release floor (all shards)
     runs-on: ubuntu-latest
     needs: [changes, test-integration-affected]
-    if: always() && needs.changes.outputs.integration_shards != '' && needs.changes.outputs.integration_shards != '[1]'
+    if: ${{ !cancelled() && needs.changes.outputs.integration_shards != '' && needs.changes.outputs.integration_shards != '[1]' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5

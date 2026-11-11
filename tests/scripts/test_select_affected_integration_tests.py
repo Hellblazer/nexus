@@ -408,7 +408,15 @@ def test_the_floor_job_is_wired_into_pytest_gate() -> None:
     assert "integration-release-floor" in doc["jobs"]["pytest-gate"]["needs"]
     floor = doc["jobs"]["integration-release-floor"]
     assert floor["needs"] == ["changes", "test-integration-affected"]
-    assert "always()" in floor["if"] and "'[1]'" in floor["if"]
+    assert "!cancelled()" in floor["if"] and "'[1]'" in floor["if"]
+    # The shard upload and the floor's download agree on names, and a re-run can re-upload.
+    (upload,) = [s for s in doc["jobs"]["test-integration-affected"]["steps"]
+                 if "upload-artifact" in str(s.get("uses", ""))]
+    assert upload["with"]["name"] == "integration-shard-${{ matrix.shard }}"
+    assert upload["with"]["overwrite"] is True
+    assert {"integration-selected.txt", "integration-affected.xml", "integration-all.txt"} <= set(upload["with"]["path"].split())
+    (download,) = [s for s in floor["steps"] if "download-artifact" in str(s.get("uses", ""))]
+    assert download["with"]["pattern"] == "integration-shard-*" and "merge-multiple" not in download["with"]
     run = next(s["run"] for s in floor["steps"] if "run" in s and "--aggregate" in s["run"])
     assert "--min-executed 1100" in run and "--max-skipped 40" in run
 
