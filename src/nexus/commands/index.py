@@ -3239,7 +3239,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     _log = structlog.get_logger(__name__)
 
     from nexus.config import get_pdf_extractor, note_formula_oom_ignored, resolve_extractor  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
-    from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.corpus import candidate_knowledge_subject, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         CredentialsMissingError,
@@ -3260,13 +3260,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     # that collection's subject (knowledge__delos -> delos), never the literal "default". Only a knowledge collection
     # has a subject there: a docs__/code__ name's owner segment is a tumbler-derived id (``1-48``), not a subject.
     if corpus is None:
-        corpus = "default"
-        if collection:
-            _resolved = t3_collection_name(collection)
-            if is_conformant_collection_name(_resolved):
-                _parts = parse_conformant_collection_name(_resolved)
-                if _parts["content_type"] == "knowledge":
-                    corpus = _parts["owner_id"]
+        corpus = (candidate_knowledge_subject(collection) if collection else "") or "default"
 
     # Local wrapper: convert the typed credential/identity errors into a
     # Click exception so the CLI shows a friendly message + exits non-zero
