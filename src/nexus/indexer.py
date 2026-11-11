@@ -1245,7 +1245,8 @@ def _gone_from_main_checkout(cat: object, owner: object, repo: Path, main_repo: 
         if not root or Path(root).resolve() != here:
             return []
         listed = subprocess.run(  # noqa: S603 — argv list, git on PATH, no shell
-            ["git", "-C", str(here), "ls-files", "-z"], capture_output=True, text=True, timeout=60, check=False,
+            ["git", "-C", str(here), "ls-files", "-z"], capture_output=True, text=True, errors="surrogateescape",
+            timeout=60, check=False,
         )
         if listed.returncode != 0:
             return []
@@ -1253,7 +1254,9 @@ def _gone_from_main_checkout(cat: object, owner: object, repo: Path, main_repo: 
         gone: set[str] = set()
         for entry in cat.by_owner(owner):
             fp = str(getattr(entry, "file_path", "") or "")
-            if not fp or fp.startswith("/") or fp in seen or fp in tracked:
+            # A basename-only or URI path is not a repo-relative path to judge: `prune-stale` and the doctor row
+            # skip it as remediable, and so does this.
+            if not fp or "/" not in fp or "://" in fp or fp.startswith("/") or fp in seen or fp in tracked:
                 continue
             target = here / fp
             if target.exists() or target.is_symlink():

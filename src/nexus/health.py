@@ -9016,7 +9016,10 @@ def vacuum_tuple_tables(
     if isinstance(conn, HealthResult):
         return [f"Dead-tuple VACUUM skipped: {conn.detail}"]
     psql, host, port, dbname, user, password = conn
-    proc = _run_psql(psql, host, port, dbname, user, password, _TUPLE_BLOAT_SQL, psql_runner=psql_runner)
+    try:
+        proc = _run_psql(psql, host, port, dbname, user, password, _TUPLE_BLOAT_SQL, psql_runner=psql_runner)
+    except OSError as exc:
+        return [f"Dead-tuple VACUUM skipped: psql could not run ({exc})."]
     if proc.returncode != 0:
         return [f"Dead-tuple VACUUM skipped: the engine did not answer (psql exit {proc.returncode})."]
     over: list[tuple[str, float]] = []
@@ -9039,8 +9042,12 @@ def vacuum_tuple_tables(
         if dry_run:
             lines.append(f"--fix would VACUUM ANALYZE nexus.{relname} (dead-tuple ratio {ratio:.2%}).")
             continue
-        done = _run_psql(psql, host, port, dbname, user, password, f"VACUUM ANALYZE nexus.{relname};",
-                         psql_runner=psql_runner)
+        try:
+            done = _run_psql(psql, host, port, dbname, user, password, f"VACUUM ANALYZE nexus.{relname};",
+                             psql_runner=psql_runner)
+        except OSError as exc:
+            lines.append(f"VACUUM of nexus.{relname} failed: psql could not run ({exc})")
+            continue
         if done.returncode != 0:
             lines.append(
                 f"VACUUM of nexus.{relname} failed (psql exit {done.returncode}): {(done.stderr or '').strip()[:300]}"

@@ -46,13 +46,15 @@ class _Cat:
         return [type("E", (), {"file_path": p})() for p in self.paths]
 
 
-_PATHS = ["kept.md", "gone.md", "tracked_but_deleted.md", "/abs/elsewhere.md", "", "seen.md", "link.md"]
+_PATHS = ["kept.md", "docs/gone.md", "tracked_but_deleted.md", "/abs/elsewhere.md", "", "docs/seen.md", "docs/link.md",
+          "bare-name.md", "chroma://code__x/y.py"]
 
 
 def test_only_a_positively_gone_untracked_path_is_retired(repo: Path) -> None:
-    (repo / "link.md").symlink_to(repo / "nowhere")  # a dangling symlink is still something at the path
-    gone = indexer._gone_from_main_checkout(_Cat(str(repo), _PATHS), "1.22", repo, repo, {"seen.md"})
-    assert gone == ["gone.md"]
+    (repo / "docs").mkdir()
+    (repo / "docs" / "link.md").symlink_to(repo / "nowhere")  # a dangling symlink is still something at the path
+    gone = indexer._gone_from_main_checkout(_Cat(str(repo), _PATHS), "1.22", repo, repo, {"docs/seen.md"})
+    assert gone == ["docs/gone.md"], "a basename-only or URI path is not judged, as prune-stale does not judge it"
 
 
 def test_a_worktree_run_retires_nothing(repo: Path, tmp_path: Path) -> None:
