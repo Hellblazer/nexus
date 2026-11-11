@@ -10,11 +10,15 @@ that is not the documented shape. A bucket the engine could not read in time tra
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 
 import httpx
 import pytest
 
+from nexus import health
 from nexus.catalog.http_catalog_client import (
+    INDEX_RUN_FENCE_FLOOR_ISO,
+    INDEX_RUN_STALE_THRESHOLD_S,
     INDEX_RUN_CENSUS_MAX_LIMIT,
     INDEX_RUN_CENSUS_TIMEOUT_S,
     NEXT_SEQ_DRIFT_TIMEOUT_S,
@@ -86,8 +90,9 @@ def test_the_census_travels_the_wire_with_the_engines_whole_limit(monkeypatch: p
     assert got == {k: _CENSUS[k] for k in ("stale", "fence", "failed_hidden")}
     ((path, kw),) = calls
     assert path == "/index-run/census" and kw["limit"] == INDEX_RUN_CENSUS_MAX_LIMIT == 10_000 and kw["idempotent"] is False
-    # Above three 10 s buckets read one after another, so the engine's timed_out answers arrive and no client timeout cuts in.
-    assert kw["timeout"] == INDEX_RUN_CENSUS_TIMEOUT_S and INDEX_RUN_CENSUS_TIMEOUT_S > 30
+    # Under the public edge's roughly 30 s cut, which is also the engine's worst case (three 10 s buckets in series):
+    # a longer timeout buys nothing through the edge.
+    assert kw["timeout"] == INDEX_RUN_CENSUS_TIMEOUT_S and 25 <= INDEX_RUN_CENSUS_TIMEOUT_S < 30
 
 
 def test_a_limit_the_caller_names_is_the_limit_sent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,6 +167,27 @@ def test_a_body_without_all_three_buckets_is_cannot_say(monkeypatch: pytest.Monk
     assert c.index_run_census() is None
 
 
+@pytest.mark.parametrize(("key", "value"), [
+    ("threshold_s", 3600), ("threshold_s", 21601), ("threshold_s", "21600"), ("threshold_s", True), ("threshold_s", None),
+    ("floor", "2026-08-07T16:00:36Z"), ("floor", "2026-08-01T00:00:00Z"), ("floor", "not a time"), ("floor", None), ("floor", 0),
+])
+def test_a_census_computed_with_another_threshold_or_floor_is_cannot_say(monkeypatch: pytest.MonkeyPatch, key: str, value) -> None:
+    c, _calls = _client(monkeypatch, flags=_BOTH, get={**_CENSUS, key: value})
+    assert c.index_run_census() is None
+
+
+@pytest.mark.parametrize("key", ["threshold_s", "floor"])
+def test_a_census_that_does_not_echo_its_threshold_and_floor_is_cannot_say(monkeypatch: pytest.MonkeyPatch, key: str) -> None:
+    body = {k: v for k, v in _CENSUS.items() if k != key}
+    c, _calls = _client(monkeypatch, flags=_BOTH, get=body)
+    assert c.index_run_census() is None
+
+
+def test_the_clients_threshold_and_floor_are_the_rules_the_oracle_applies() -> None:
+    assert health._STALE_INDEXING_THRESHOLD_HOURS * 3600 == INDEX_RUN_STALE_THRESHOLD_S
+    assert health._PRODUCER_FENCE_RELEASE_DT == datetime.fromisoformat(INDEX_RUN_FENCE_FLOOR_ISO.replace("Z", "+00:00"))
+
+
 def test_an_unanchored_fence_with_no_examples_is_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     fence = {"checked": 0, "reported_null": 3, "undated_reported_null": 1, "floor_candidates": 0,
              "anchor": {"kind": None, "at": None, "earliest_stamped_at": None, "proven_at": None},
@@ -178,7 +204,8 @@ def test_the_drift_travels_the_wire_with_the_engines_whole_limit(monkeypatch: py
     assert c.next_seq_drift() == {"checked": 4, "drifted": 1, "capped": False, "examples": _DRIFT["examples"]}
     ((path, kw),) = calls
     assert path == "/owners/next_seq_drift" and kw["limit"] == 10_000 and kw["idempotent"] is False
-    assert kw["timeout"] == NEXT_SEQ_DRIFT_TIMEOUT_S and 10 < NEXT_SEQ_DRIFT_TIMEOUT_S < INDEX_RUN_CENSUS_TIMEOUT_S
+    # The engine re-arms a 10 s statement timeout per probe after a call-level deadline check: about 20 s worst case.
+    assert kw["timeout"] == NEXT_SEQ_DRIFT_TIMEOUT_S and 20 < NEXT_SEQ_DRIFT_TIMEOUT_S < 30
 
 
 @pytest.mark.parametrize("flags", [{}, {"catalog_next_seq_drift_read_supported": False},

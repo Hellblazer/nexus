@@ -275,13 +275,21 @@ STUB_METADATA_TIMED_OUT = object()
 #: the engine's per-collection ``timed_out`` rows arrive instead of a client-side timeout, and under the public edge's
 #: roughly 30 s cut.
 STUB_METADATA_TIMEOUT_S = 28.0
-#: The index-run census read's client timeout (engine 0.1.190, nexus-f3yqd.6). The engine bounds each of its three
-#: buckets at 10 s (``CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS``) and reads them one after another, so a census
-#: whose every bucket times out takes about 30 s: this is above that, so the engine's per-bucket ``timed_out`` answers
-#: arrive instead of a client-side timeout.
-INDEX_RUN_CENSUS_TIMEOUT_S = 32.0
-#: The next_seq drift read's client timeout: above the engine's one 10 s bound, under the census's.
-NEXT_SEQ_DRIFT_TIMEOUT_S = 15.0
+#: The index-run census read's client timeout (engine 0.1.190, nexus-f3yqd.6). The engine runs its three buckets in
+#: series, each under its own 10 s bound (``CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS``), so the worst case is about
+#: 30 s. The public edge cuts at about 30 s too, so a longer client timeout buys nothing through it: this is under
+#: that cut. A cut, by the edge or by this timeout, is an error to the caller, and the doctor then reports all three
+#: rows not checked; a census that finishes inside it answers per bucket, a bucket that timed out as ``timed_out``.
+INDEX_RUN_CENSUS_TIMEOUT_S = 28.0
+#: The next_seq drift read's client timeout. The engine checks a call-level 10 s deadline before each owner probe and
+#: re-arms a 10 s ``statement_timeout`` for each one, so its worst case is about 20 s; this is above that and under
+#: the public edge's cut. A cut is an error to the caller: the drift row is then reported not checked.
+NEXT_SEQ_DRIFT_TIMEOUT_S = 25.0
+#: The census the client reads is the one for these constants, which the engine echoes (``threshold_s``, ``floor``):
+#: a 6 h stale-fence threshold and the release of full producer coverage. An engine that echoes others computes a
+#: different census than this client's rules assume, so its answer is read as "cannot say".
+INDEX_RUN_STALE_THRESHOLD_S = 6 * 3600
+INDEX_RUN_FENCE_FLOOR_ISO = "2026-08-07T16:00:35Z"
 #: The most documents one bucket of the census lists or counts, and the most examples the drift read lists: the
 #: engine's ``IndexRunCensusReads.MAX_LIMIT`` and ``NextSeqDriftReads.MAX_LIMIT``. A caller that wants the whole
 #: answer asks for this much; a ``capped`` answer is then a floor, never a count.
@@ -617,6 +625,12 @@ def _is_instant(v: object) -> bool:
     return True
 
 
+def _instant(v: str) -> Any:
+    from datetime import datetime  # noqa: PLC0415 — only these validators parse a time
+
+    return datetime.fromisoformat(v.replace("Z", "+00:00"))
+
+
 def _rows_ok(rows: object, ok: Any) -> bool:
     return isinstance(rows, list) and all(isinstance(r, dict) and ok(r) for r in rows)
 
@@ -658,8 +672,14 @@ def _valid_failed_hidden_bucket(b: dict) -> bool:
 
 def _valid_index_run_census(body: object) -> dict | None:
     """The census body, or ``None`` when it is not the documented shape. A bucket is the engine's object or exactly
-    ``{"timed_out": true}``; one malformed bucket makes the whole body malformed (a half-read census is not read)."""
+    ``{"timed_out": true}``; one malformed bucket makes the whole body malformed (a half-read census is not read). The
+    echoed ``threshold_s`` and ``floor`` must be this client's own (:data:`INDEX_RUN_STALE_THRESHOLD_S`,
+    :data:`INDEX_RUN_FENCE_FLOOR_ISO`)."""
     if not isinstance(body, dict):
+        return None
+    threshold, floor = body.get("threshold_s"), body.get("floor")
+    if not (_is_count(threshold) and threshold == INDEX_RUN_STALE_THRESHOLD_S and _is_instant(floor)
+            and _instant(floor) == _instant(INDEX_RUN_FENCE_FLOOR_ISO)):
         return None
     census: dict = {}
     for name, valid in (("stale", _valid_stale_bucket), ("fence", _valid_fence_bucket),

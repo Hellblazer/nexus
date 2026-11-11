@@ -11641,7 +11641,7 @@ class _FenceFacts:
     anchor: datetime | None
     proven: bool  # the baseline is a batched run's, not the earliest stamp's
     run_ids_dropped: int
-    nothing_to_assess: str  # the row's text when no document carries or lacks a fence state
+    not_reported: int  # documents whose engine did not report ``index_state`` at all (a walk's count; a census has none)
     stale_capped: bool = False
 
 
@@ -11858,8 +11858,7 @@ def _fence_facts_from_documents(documents: list[Any]) -> _FenceFacts:
         post_anchor=post_anchor, post_anchor_count=len(post_anchor),
         candidate_prefix=candidate_prefix, candidate_file=candidate_file,
         anchor=anchor, proven=proven_anchor is not None, run_ids_dropped=run_ids_dropped,
-        nothing_to_assess=("skipped (engine does not report index_state — predates "
-                           "the index-run fence)"),
+        not_reported=not_reported,
     )
 
 
@@ -12174,7 +12173,12 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
     # scanned had nothing to say at all. Either way there is nothing this
     # check can assess — say so rather than render an all-clear it cannot
     # actually support.
-    return [HealthResult(label=label, ok=True, detail=f.nothing_to_assess)]
+    if f.not_reported > 0:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="skipped (engine does not report index_state — predates the index-run fence)",
+        )]
+    return [HealthResult(label=label, ok=True, detail="none (no catalog document)")]
 
 
 #: Collection prefixes that can hold PDF chunks. ``code__`` never does, and
@@ -12727,15 +12731,16 @@ def _failed_hidden_rows_over(documents: list[Any], cat: Any) -> list[HealthResul
 def _failed_hidden_rows(label: str, *, failed: int, hidden: int, capped: bool) -> list[HealthResult]:
     """The failed-runs row from its two numbers: *failed* documents in ``index_state='failed'`` and *hidden*, how
     many of them ``heal_manifest_gaps(dry_run=True)`` would rebuild (``reconciled``). *capped* is the engine census's:
-    it examined only the first *failed* failed documents, so *hidden* is a floor and zero is not "none"."""
+    it examined only *failed* of the failed documents (which ones is the planner's: the query has no ORDER BY), so
+    *hidden* is a floor and zero is not "none"."""
     if failed == 0:
         return [HealthResult(label=label, ok=True, detail="not applicable (no failed index runs)")]
     if not hidden:
         if capped:
             return [HealthResult(
                 label=label, ok=True, skipped=True,
-                detail=(f"not fully checked: the engine examined the first {failed} failed document(s), none with "
-                        "stored chunks hidden, and there are more it did not examine"),
+                detail=(f"not fully checked: the engine examined {failed} of the failed documents (it has no order, so "
+                        "which ones is its own), none with stored chunks hidden, and there are more it did not examine"),
             )]
         return [HealthResult(
             label=label, ok=True,
@@ -13271,7 +13276,7 @@ def _stale_fence_rows_from_census(cat: Any, label: str, census: dict) -> list[He
         post_anchor=post_anchor, post_anchor_count=0 if fence_out else fence["post_anchor"]["count"],
         candidate_prefix=prefixes, candidate_file=files,
         anchor=anchor, proven=not fence_out and fence["anchor"]["kind"] == "proven", run_ids_dropped=0,
-        nothing_to_assess="none (no catalog document)",
+        not_reported=0,
     )
     rows = _stale_fence_rows(cat, label, facts)
     if not (stale_out or fence_out):

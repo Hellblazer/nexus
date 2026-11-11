@@ -153,3 +153,18 @@ def test_the_route_rows_are_held_to_every_branch_of_the_fence_row(monkeypatch: p
         seen.add("post_anchor" if "carry no stamp, despite" in d else "no_baseline" if d.startswith("cannot attribute")
                  else "clean" if d.startswith("none (") else "quiet" if d.startswith("fence live") else d)
     assert seen == {"post_anchor", "no_baseline", "clean", "quiet"}
+
+
+def test_an_empty_catalog_reads_the_same_on_both_paths() -> None:
+    """The one place the nothing-to-assess text lives is ``_stale_fence_rows``: the oracle over no documents and the
+    route over an empty census say the same, and a pre-fence engine (documents that never carried the key) still says so."""
+    empty_fence = {"checked": 0, "reported_null": 0, "undated_reported_null": 0, "floor_candidates": 0,
+                   "anchor": {"kind": None, "at": None, "earliest_stamped_at": None, "proven_at": None},
+                   "post_anchor": {"count": 0, "capped": False, "examples": []}}
+    route = health._stale_fence_rows_from_census(
+        None, health._STALE_FENCES_LABEL, {"stale": _NEUTRAL_STALE, "fence": empty_fence, "failed_hidden": _NEUTRAL_FAILED})
+    _same(health._stale_fence_rows_over([]), route)
+    assert route[0].detail == "none (no catalog document)"
+    pre_fence = SimpleNamespace(index_state=None, index_state_reported=False, tumbler="1.1.1")
+    (row,) = health._stale_fence_rows_over([pre_fence])
+    assert row.detail.startswith("skipped (engine does not report index_state")
