@@ -171,36 +171,6 @@ def _extract_fake_routes(source: str) -> set[str]:
 #: live fake server, delete the entry (the completeness gate below refuses a
 #: stale one).
 ROUTE_EXCLUSIONS: dict[str, str] = {
-    "/stub-metadata": (
-        "nexus-f3yqd: DELIBERATELY engine-only for now (engine 0.1.189) — the "
-        "client half (an HttpCatalogClient method behind the doctor's PDF "
-        "chunk-metadata row) is a separate change, so there is no Catalog or "
-        "HttpCatalogClient method to fake yet; adding the Python half here "
-        "would make this commit a both-halves wire-contract commit "
-        "(docs/wire-contract-pending.md). Its wire shape — collections of "
-        "{collection, stub_chunks, capped, examples}, limit, the 400 on a "
-        "limit outside 1..10000 and the 503 on a statement timeout — is "
-        "validated Java-side by CatalogStubMetadataRouteTest, and its rule is "
-        "held to the client's by CatalogStubMetadataParityTest and "
-        "tests/catalog/test_pdf_stub_metadata_cases.py over one case table. "
-        "When the client method lands, DELETE this entry and fake the route "
-        "instead; the census checks both directions, so a stale exclusion "
-        "here fails just as loudly as a missing one"
-    ),
-    "/index-run/census": (
-        "nexus-f3yqd: engine-only until the doctor's client half lands "
-        "(engine 0.1.190; docs/wire-contract-pending.md). Wire shape: "
-        "IndexRunCensusRouteTest; rules vs the client: "
-        "index-run-census-cases.json. DELETE this entry and fake the route "
-        "when the client method lands; the census checks both directions"
-    ),
-    "/owners/next_seq_drift": (
-        "nexus-f3yqd: engine-only read form of POST /owners/"
-        "sweep_next_seq_drift until the doctor's client half lands (engine "
-        "0.1.190). Wire shape: NextSeqDriftReadRouteTest; rule vs the client: "
-        "next-seq-drift-cases.json. DELETE this entry and fake the route "
-        "when the client method lands; the census checks both directions"
-    ),
     "/sensitive": (
         "nexus-f3yqd: DELIBERATELY engine-only for now (engine 0.1.188) — the "
         "client half (an HttpCatalogClient method behind the doctor's bounded "

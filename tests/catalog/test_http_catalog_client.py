@@ -684,6 +684,24 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                             "title": "Test Doc",
                             "content_type": "code",
                         })
+        elif op == "/stub-metadata":
+            # nexus-f3yqd.6: an empty tenant's answer; the rule is held to the client's by the shared case table.
+            self._send_json({"collections": [], "limit": int(self._query_params().get("limit", "1000"))})
+        elif op == "/index-run/census":
+            # nexus-f3yqd.6: an empty tenant's census; the engine's real bodies are the goldens
+            # (index-run-census-golden.json, read by tests/catalog/test_index_run_census_golden.py).
+            self._send_json({
+                "limit": int(self._query_params().get("limit", "10000")),
+                "threshold_s": 21600, "floor": "2026-08-07T16:00:35Z",
+                "stale": {"count": 0, "capped": False, "notes": 0, "examples": []},
+                "fence": {"checked": 0, "reported_null": 0, "undated_reported_null": 0, "floor_candidates": 0,
+                          "anchor": {"kind": None, "at": None, "earliest_stamped_at": None, "proven_at": None},
+                          "post_anchor": {"count": 0, "capped": False, "examples": []}},
+                "failed_hidden": {"failed": {"count": 0, "capped": False}, "count": 0, "capped": False, "examples": []},
+            })
+        elif op == "/owners/next_seq_drift":
+            self._send_json({"checked": 0, "drifted": 0, "capped": False, "examples": [],
+                             "limit": int(self._query_params().get("limit", "1000"))})
         else:
             self._send_json({"error": f"unknown GET op: {op}"}, 404)
 
