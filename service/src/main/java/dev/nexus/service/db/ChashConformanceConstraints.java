@@ -22,7 +22,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  *
  * <p><b>What it replaces, and what it does not.</b> It speaks to the two poison tables' width CHECKs only. The client's
  * legacy-debt legs ({@code topic_assignments}, {@code frecency}, {@code relevance_log}: anti-joins with no CHECK behind
- * them) are unchanged, and the migrations leave both CHECKs NOT VALID until the chash re-key rung validates them, so on a
+ * them) are unchanged, and the migrations leave both CHECKs NOT VALID until a user starts the VALIDATE job ({@code POST
+ * /v1/admin/validate-constraints}), so on a
  * fresh or never-validated store the answer is {@code all_validated: false} and nothing is saved. The payoff begins where a
  * store has been validated (the ladder's VALIDATE job of engine 0.1.190 is what makes that common).
  *
@@ -30,8 +31,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  * ({@code nexus.db.chash_tables.POISON_CHASH_TABLES}: the tables that carry a width CHECK, so a non-conformant row
  * crash-loops an upgrade): {@code chunks_chash_octet_check} on {@code nexus.chunks} and
  * {@code catalog_document_chunks_chash_octet_check} on {@code nexus.catalog_document_chunks}, both
- * {@code CHECK (octet_length(chash) = 32)}, both added NOT VALID (rdr180-001, vectors-004) and validated by the chash
- * re-key rung's VALIDATE. The debt tables ({@code topic_assignments.doc_id}, {@code frecency.chunk_id},
+ * {@code CHECK (octet_length(chash) = 32)}, both added NOT VALID (rdr180-001, vectors-004) and validated by that
+ * job. The debt tables ({@code topic_assignments.doc_id}, {@code frecency.chunk_id},
  * {@code relevance_log.chunk_id}) carry no width CHECK and are NOT reported: a client that wants them counts them. A
  * same-named constraint on another relation (the retired {@code chunks_retired_225} carries its own
  * {@code chunks_chash_octet_check}) is not one of these and is never read: a constraint counts only through the table it
@@ -125,34 +126,52 @@ public final class ChashConformanceConstraints {
      * any other table (a same-named constraint on a retired table) leads to no root and is not counted.
      */
     static Report aggregate(List<Row> rows) {
-        Map<Long, Row> byRelation = new HashMap<>();
-        for (Row r : rows) byRelation.put(r.relation(), r);
         List<Entry> out = new ArrayList<>(TARGETS.size());
         for (Target t : TARGETS) {
-            Row root = rows.stream()
-                .filter(r -> r.relationParent() == 0 && r.relationName().equals(t.table().getName())
-                    && r.name().equals(t.constraint()))
-                .findFirst().orElse(null);
+            Tree tree = tree(t, rows);
+            Row root = tree.root();
             if (root == null) {
                 out.add(new Entry(t.qualifiedTable(), t.constraint(), false, false, false, 0, 0));
                 continue;
             }
-            int copies = 0;
             int notValid = 0;
             // A constraint that carries the right name with another expression (hand-recreated, weaker) is not the check this
             // reports on, validated or not: the root and every copy must deparse to the expected definition.
             boolean definitionMatches = normalise(root.definition()).equals(t.expectedDefinition());
-            for (Row r : rows) {
-                if (r.relation() != root.relation() && r.name().equals(root.name()) && descendsFrom(r, root.relation(), byRelation)) {
-                    copies++;
-                    if (!r.validated()) notValid++;
-                    if (!normalise(r.definition()).equals(t.expectedDefinition())) definitionMatches = false;
-                }
+            for (Row r : tree.copies()) {
+                if (!r.validated()) notValid++;
+                if (!normalise(r.definition()).equals(t.expectedDefinition())) definitionMatches = false;
             }
             out.add(new Entry(t.qualifiedTable(), t.constraint(), true, root.validated() && notValid == 0 && definitionMatches,
-                definitionMatches, copies, notValid));
+                definitionMatches, tree.copies().size(), notValid));
         }
         return new Report(List.copyOf(out));
+    }
+
+    /**
+     * One target's rows: its {@code root}, the constraint on the declaring table (null when the constraint is absent), and its
+     * {@code copies}, the same-named constraint on every partition below it at any depth, in the order {@code rows} gave them.
+     * The report folds this, and the VALIDATE job ({@link ChashConstraintValidator}) walks it, so both read one definition of
+     * which rows belong to a target.
+     */
+    record Tree(Row root, List<Row> copies) {}
+
+    /** The rows of {@code t} among {@code rows}: see {@link Tree}. A same-named row on a table that leads to no root is in neither. */
+    static Tree tree(Target t, List<Row> rows) {
+        Map<Long, Row> byRelation = new HashMap<>();
+        for (Row r : rows) byRelation.put(r.relation(), r);
+        Row root = rows.stream()
+            .filter(r -> r.relationParent() == 0 && r.relationName().equals(t.table().getName())
+                && r.name().equals(t.constraint()))
+            .findFirst().orElse(null);
+        if (root == null) return new Tree(null, List.of());
+        List<Row> copies = new ArrayList<>();
+        for (Row r : rows) {
+            if (r.relation() != root.relation() && r.name().equals(root.name()) && descendsFrom(r, root.relation(), byRelation)) {
+                copies.add(r);
+            }
+        }
+        return new Tree(root, List.copyOf(copies));
     }
 
     /** True when the table of {@code r} is below table {@code ancestor} through {@code relationParent} links (bounded, so a cycle cannot loop). */

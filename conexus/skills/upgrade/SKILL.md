@@ -78,21 +78,26 @@ the reaper the census read zero.
 
 ## When a user is blocked on legacy chunk ids
 
-Pre-RDR-108 stores hold 16/18-char chunk ids. `nx upgrade` converges these on
-the wire — the correct id is `sha256(chunk_text)[:32]`, a pure function of text
-the ETL is already carrying, so **no re-index and no source files are needed**,
-including for `store_put`-only notes that have neither.
+Nothing converges legacy chunk ids any more: the wire re-id rung and
+`/v1/remap/rekey` are retired. A current engine deletes them instead. Its boot
+changeset `hygiene-001-5` (first in engine 0.1.91) deletes every chunk row whose
+chash is not 32 bytes, and the manifest rows that reference those chunks, and
+`hygiene-001-8` deletes the remaining legacy-width manifest rows. So an install
+that has booted engine 0.1.91 or later holds no legacy rows.
 
-If you meet an older diagnostic (or the removed `migrate-to-service` path)
-printing "re-index from source" as the remedy for legacy ids: that remedy was
-impossible for source-less notes and is what RDR-185 retired. The answer is
-`nx upgrade`.
+An install still older than engine 0.1.91 loses those rows, `store_put`-only
+notes included, the first time a current engine boots on it. Before upgrading
+one, take a backup with `nx backup`, which keeps a copy of every row.
+
+If the VALIDATE job (`POST /v1/admin/validate-constraints`) or `nx doctor`
+reports legacy-width rows on a current install, the width CHECK was bypassed or
+dropped and re-added. These rows are not expected, and no command repairs them.
+Report them, with the documents the report names, to the operator or
+maintainer.
 
 **Never drop or weaken chash length CHECK constraints to force upserts
-through** (GH #1390). Wire re-id computes the CORRECT address for existing
-content; it does not force a wrong id through. If you are blocked on
-chash-length errors, run `nx upgrade` or STOP and report — never "unblock" the
-constraint.
+through** (GH #1390). If you are blocked on chash-length errors, STOP and
+report; never "unblock" the constraint.
 
 ## Installs that predate Postgres
 

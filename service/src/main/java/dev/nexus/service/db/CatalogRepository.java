@@ -8629,7 +8629,7 @@ public final class CatalogRepository {
      * (memo §3.5) already closes the window in the intended single-writer-per-doc
      * pipeline; this lock is the belt for a MIS-sequenced or out-of-band writer.
      */
-    private static void acquireIndexRunLock(DSLContext ctx, String tenant, String docId) {
+    static void acquireIndexRunLock(DSLContext ctx, String tenant, String docId) {
         // nexus-zrcj7: typed jOOQ function(...) composition (house rule --
         // RawSqlGateTest), mirroring acquireSweepGateShared's idiom exactly.
         // The key text is built with plain Java string concatenation (a VALUE,

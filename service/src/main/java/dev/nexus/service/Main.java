@@ -603,6 +603,8 @@ public final class Main {
         service.chunkConstraintAdmin(new dev.nexus.service.vectors.ChunkConstraintAdmin(adminConnection));
         // nexus-6pfgb.44: the same for the catalog TTL CHECK census/add/validate routes; nothing calls them.
         service.catalogTtlCheckAdmin(new dev.nexus.service.db.CatalogTtlCheckAdmin(adminConnection));
+        // nexus-f3yqd: the same for the user-started chash VALIDATE CONSTRAINT job; bound here, started only by a user's POST.
+        service.chashConstraintValidator(adminConnection);
         // nexus-hbnml: a retired aspect_extraction_queue table that still holds rows (aspects-005-2 keeps it) is
         // drained onto the aspects tuples once, shortly after boot; the next boot's guard drops the emptied table.
         service.aspectQueueDrain(adminConnection);

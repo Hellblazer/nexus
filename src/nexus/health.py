@@ -7218,28 +7218,23 @@ def _check_migration_state(
             detail=(
                 f"{nonconforming} chunk row(s) have a {POISON_DETAIL_TOKEN} "
                 "(octet_length <> 32 — legacy pre-RDR-108 ids, or chash "
-                "CHECK constraints were dropped out-of-band). The engine "
+                "CHECK constraints were dropped out-of-band). Such rows are "
+                "not expected after the engine's boot migrations (they "
+                "delete them, and the NOT VALID width CHECK refuses new "
+                "ones), so their presence means the CHECK was bypassed, or "
+                "dropped and re-added after rows were written. The engine "
                 "serves fine with these rows (the octet-width CHECKs stay "
-                "NOT VALID for these rows), but "
-                "they are unhealed upgrade-ladder debt (GH #1414 / "
-                "nexus-pnwu0). Re-indexing affected content HEALS these "
-                "rows in place and lowers this count (new conformant rows "
-                "are written before stale rows are pruned — nexus-2hklz "
-                "verified heal-by-replacement); deleting affected content "
-                "also lowers it, so read a falling count as healing only "
-                "where your content is intact."
+                "NOT VALID for these rows), but they are unrepaired "
+                "(GH #1414 / nexus-pnwu0). No command repairs them. "
+                "Report this to the operator or maintainer."
             ),
             fix_suggestions=[
-                "Step 1 — find each affected collection's repo: "
-                "`nx catalog owners`",
-                "Step 2 — re-index the file-backed legacy collections: "
-                "`nx index repo <path>` (additive, per-collection). This "
-                "is the ONLY remedy: re-indexing writes conformant rows "
-                "before pruning stale ones. Content with no file behind "
-                "it (store_put-only notes) cannot be healed this way — "
-                "re-put it if the count matters.",
-                "Step 3 — re-run `nx doctor`; upgrade the engine once "
-                "this warning clears.",
+                "No command repairs these rows. Report it to the operator "
+                "or maintainer with this count. "
+                "The root-token job `POST /v1/admin/validate-constraints` "
+                "reports which rows are bad, by reason, with their owning "
+                "documents; `GET /v1/schema/chash-conformance?"
+                "detail=legacy_chunks` reports the same for one tenant.",
                 "Do NOT drop the chash length constraints to 'unblock' "
                 "anything — that is what caused GH #1390.",
                 "The will-not-boot class ONLY (service crash-looping at "

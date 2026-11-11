@@ -594,6 +594,10 @@ class VectorSensitivityRouteParityTest {
         "ReembedSourceReader.java#planCounts", "octet_length of the text: byte counts"));
 
     static {
+        OTHER_TEXT_READERS.put("LegacyChunkSurvey.java#textOf", "the chunk_text column handle of the reason expression (a sha256 prefix test); "
+            + "counts and keys come out, no text");
+        OTHER_TEXT_READERS.put("LegacyChunkSurvey.java#manifestReason", "the reason expression of a manifest row: classifies it by its chunk's text with the same sha256 "
+            + "prefix test; the callers take counts and documents only");
         // found when the census began reading string literals and field initialisers (nexus-rfvyy.7.17)
         OTHER_TEXT_READERS.put("CatalogRepository.java#chunkRow", "map builder resolveSpan (GATED above) calls with "
             + "the values it read; it reads nothing itself");

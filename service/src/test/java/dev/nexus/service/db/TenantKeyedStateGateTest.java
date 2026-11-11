@@ -452,6 +452,7 @@ public class TenantKeyedStateGateTest {
         private static final String CHUNK_KEYS_JOBS = "ChunkKeysSweepJobs";
         private static final String RECONCILE_JOBS = "EngineJobs.reconcile";
         private static final String MANIFEST_FILL_JOBS = "EngineJobs.manifestFill";
+        private static final String VALIDATE_JOBS = "ValidateConstraintsJobs";
 
         private static final String HANDLE =
             "a TenantScope handle: it holds the DataSource wrapper only, the tenant is a per-call argument";
@@ -587,6 +588,55 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("IndexRunCensusReads.PostAnchor.examples", RESULT);
             notKeyed.put("IndexRunCensusReads.FailedHidden.examples", RESULT);
             notKeyed.put("NextSeqDriftReads.Page.examples", RESULT);
+            // nexus-f3yqd (0.1.190): the engine-wide chash VALIDATE job. Its job tenant is a fixed non-tenant string, so
+            // the tenant reset does not evict it; what a refused step says of a tenant (its bad-row count and example
+            // chashes) is scrubbed by the ValidateConstraintsJobs evictor. The other lists are pg_catalog relation names.
+            notKeyed.put("ValidateConstraintsJobs.JOB_TENANT", CONSTANT);   // the fixed (engine) owner of the one engine-wide job
+            keyed.put("ValidateConstraintsJobs.Progress.refused", VALIDATE_JOBS);   // refused steps: tenant counts and example chashes
+            keyed.put("ChashConstraintValidator.Step.tenantRows", VALIDATE_JOBS);   // the bad rows by tenant, held by a refused step
+            keyed.put("ChashConstraintValidator.Step.exampleChashes", VALIDATE_JOBS);   // up to three chashes of a refused table (any tenant's when the admin pre-check found them: cleared on every reset)
+            for (String f : List.of("ValidateConstraintsJobs.Progress.validated", "ValidateConstraintsJobs.Progress.wouldValidate",
+                "ValidateConstraintsJobs.Progress.deferred")) {
+                notKeyed.put(f, "a list of pg_catalog relation names and reasons of the engine-wide chash VALIDATE job (capped "
+                    + "at LIST_CAP), held on that job; they name no tenant and no row");
+            }
+            for (String f : List.of("ChashConstraintValidator.Planned.below", "ChashConstraintValidator.Precheck.examples",
+                "ChashConformanceConstraints.Tree.copies")) {
+                notKeyed.put(f, "a component of one validate run's plan record (constraint rows of pg_catalog, or up to "
+                    + "three example chashes of a refused table that the step above copies), built in that run and dropped "
+                    + "with it; nothing keeps it between runs and it is not a tenant's state");
+            }
+            notKeyed.put("ChashConstraintValidator.knownTenants", "a supplier of the known tenant names (TokenStore#"
+                + "listKnownTenants), read on the failure path of a VALIDATE; it caches nothing");
+            notKeyed.put("ChashConstraintValidator.TENANT_COUNT_BUDGET_PROPERTY", CONSTANT);
+            notKeyed.put("ChashConstraintValidator.Config.tenantCountBudgetMs", "a configured time bound (a system property read "
+                + "once per run); no tenant's data");
+            notKeyed.put("ChashConstraintValidator.planRows", TEST_HOOK);
+            notKeyed.put("ChashConstraintValidator.activeController", "the controller session of the run in flight (a connection "
+                + "handle), kept so the shutdown can cancel its statement; no tenant's rows, cleared when the run ends");
+            notKeyed.put("ChashConstraintValidator.activeStep", "the step session in flight (a connection handle), kept so the "
+                + "shutdown can cancel its statement; it holds no tenant's rows and is cleared when the step ends");
+            notKeyed.put("AdminDdlSession.resendAdminForTests", TEST_HOOK);
+            notKeyed.put("AdminDdlSession.running", "the DDL statement in flight on one admin session, kept so another thread can "
+                + "cancel it; a JDBC handle, cleared when the statement ends, no tenant state");
+            // the per-reason account of a refused step (its counts, listed chunks with their owners, documents and the tenants in it)
+            // is held in the job registry with the step, up to twelve hours: the ValidateConstraintsJobs evictor drops it on a reset
+            keyed.put("ChashConstraintValidator.Detail.reasonCounts", VALIDATE_JOBS);
+            keyed.put("ChashConstraintValidator.Detail.chunks", VALIDATE_JOBS);
+            keyed.put("ChashConstraintValidator.Detail.documents", VALIDATE_JOBS);
+            keyed.put("ChashConstraintValidator.Detail.tenants", VALIDATE_JOBS);
+            keyed.put("LegacyChunkSurvey.Bad.tenant", VALIDATE_JOBS);
+            keyed.put("LegacyChunkSurvey.Owners.owners", VALIDATE_JOBS);
+            keyed.put("LegacyChunkSurvey.DocList.docs", VALIDATE_JOBS);
+            keyed.put("LegacyChunkSurvey.DocRef.tenant", VALIDATE_JOBS);
+            // built for one doctor request and returned in its response
+            notKeyed.put("LegacyChunkSurvey.Counts.byReason", RESULT);
+            notKeyed.put("LegacyChunkSurvey.TenantDetail.chunks", RESULT);
+            notKeyed.put("LegacyChunkSurvey.TenantDetail.manifestDocs", RESULT);
+            notKeyed.put("ChashConformanceHandler.detailInFlight", "the tenants whose doctor detail is being read right now, one scan at a "
+                + "time per tenant; an entry lives only for the duration of that call and is removed in its finally, so no tenant's state is kept");
+            notKeyed.put("NexusService.chashConstraintValidator", "the admin-connection VALIDATE object bound once at boot; "
+                + "table-wide, it opens its connections per run and holds no per-tenant state");
             notKeyed.put("CatalogRepository.Rewritten.ledger", "a component of one stale-note repair batch's result, "
                 + "the ledger of the rows that call changed, built for that request and returned in its response "
                 + "(nexus-bivz3.24); nothing keeps it between requests");

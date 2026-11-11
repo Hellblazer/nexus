@@ -1237,9 +1237,10 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     is_flag=True,
     default=False,
     help="Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). Use "
-    "ONLY after healing per the runbook linked at the end of this help (re-index the "
-    "affected collections, then re-run doctor and confirm the warning "
-    "clears). The rows stay unhealed debt if you force past them; a "
+    "ONLY after the operator or maintainer has decided how the rows are handled "
+    "(the runbook linked at the end of this help covers a service that will not "
+    "start, not these rows). No command repairs them. The rows stay as they "
+    "are if you force past them; a "
     "pre-v0.1.48 char-era engine can still crash-loop on boot.",
 )
 def service_install_binary_cmd(
@@ -1273,11 +1274,12 @@ def service_install_binary_cmd(
 
     # nexus-pnwu0 / GH #1414 upgrade gate: refuse to install a new engine onto a
     # store whose pgvector target holds width-non-conformant chash rows. The
-    # rows are unhealed debt the operator should converge FIRST (re-index the
-    # affected collections, then doctor clears); swapping engine binaries
-    # mid-debt just churns the boot path while the heal is pending. The
-    # chash-rekey upgrade rung this used to steer operators toward is deleted
-    # (nexus-lgdel) — re-indexing is the remedy now. Note the original
+    # rows are not expected after the engine's boot migrations (they delete
+    # them; the NOT VALID CHECK refuses new ones), so they mean the CHECK was
+    # bypassed; no command repairs them, and the operator or maintainer
+    # decides first (the VALIDATE job and the doctor detail say which rows and
+    # whose). The chash-rekey upgrade rung this used to steer operators toward
+    # is deleted (nexus-lgdel). Note the original
     # crash-loop premise was
     # narrowed by nexus-joima (2026-07-21): v0.1.48+ engines tolerate the rows
     # at boot (octet checks NOT VALID until the rekey rung); only a pre-v0.1.48

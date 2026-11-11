@@ -1425,10 +1425,15 @@ class _ChashPoisonGuidance:
     surface + CLI ``nx remediate`` are deleted with it). This carries only
     the two renderings the two REAL, independent safety gates still need
     (:func:`converge_engine`'s block and ``nx daemon service
-    install-binary``'s refuse/force-override, nexus-pnwu0 / GH #1390) —
-    remedy corrected to re-indexing (the mechanism that actually
-    recomputes conformant ids today), no ordered-step/consent machinery,
-    because none remains to guide.
+    install-binary``'s refuse/force-override, nexus-pnwu0 / GH #1390).
+    Nothing here repairs a row: the engine's boot migrations (hygiene-001-5
+    and -8) delete every non-32-byte chunk and manifest row and the NOT
+    VALID width CHECK refuses new ones, so such a row is not expected on a
+    migrated store and means the CHECK was bypassed. No command repairs it.
+    The text says that and sends the operator to a maintainer (the runbook
+    has no section on these rows); ``POST /v1/admin/validate-constraints`` and
+    ``GET /v1/schema/chash-conformance?detail=legacy_chunks`` report which
+    rows and whose they are.
     """
 
     store_detail: str
@@ -1437,21 +1442,29 @@ class _ChashPoisonGuidance:
         return (
             "My conexus/nexus store has width-non-conformant chash rows in "
             "pgvector (octet_length <> 32 — legacy pre-RDR-108 ids; the "
-            "GH #1414 class). Resolve the affected collections to their "
-            "repos (`nx catalog owners`) and re-index the file-backed ones "
-            "(`nx index repo <path>` — additive, per-collection), then "
-            "re-run `nx doctor` and confirm the 'Chunk chash conformance' "
-            "warning has cleared. Do NOT drop the chash length constraints."
+            "GH #1414 class). Such rows are not expected after the engine's "
+            "boot migrations (they delete them and the NOT VALID width CHECK "
+            "refuses new ones), so the CHECK was bypassed or dropped and "
+            "re-added; no command repairs them. Ask the "
+            "operator or maintainer which "
+            "collections hold them (the root-token job "
+            "`POST /v1/admin/validate-constraints` and `nx doctor` report "
+            "them by reason with their owning documents), and do not "
+            "proceed until they say how to handle it. Do NOT drop the chash "
+            "length constraints."
         )
 
     def terminal_block(self) -> str:
         """The CLI refusal body."""
         return (
             "\nRefusing to install (nexus-pnwu0 / GH #1414): this store has "
-            "width-non-conformant chash rows — heal them by re-indexing "
-            "before swapping engine binaries.\n"
+            "width-non-conformant chash rows. They are not expected after "
+            "the engine's boot migrations, which means the width CHECK was "
+            "bypassed; no command repairs them. Report this to the "
+            "operator or maintainer before swapping engine binaries.\n"
             f"  {self.store_detail}\n\n"
-            "Remediate first — full recovery runbook (clickable):\n"
+            "Runbook (it covers a service that will not start; no section "
+            "covers these rows):\n"
             f"  {MIGRATION_RUNBOOK_URL}\n\n"
             "Or paste this to your Claude to be walked through it:\n"
             f"{_PASTE_RULE}\n"
@@ -1459,17 +1472,18 @@ class _ChashPoisonGuidance:
             f"{_PASTE_RULE}\n\n"
             "Do NOT drop the chash length constraints to force it through — "
             "that is the exact action that caused GH #1390. Re-run with "
-            "--force ONLY after you have remediated."
+            "--force ONLY after the operator or maintainer has decided how "
+            "the rows are handled."
         )
 
     def force_override_warning(self) -> str:
         """The one-line warning when the operator overrides the gate."""
         return (
             "WARNING (nexus-pnwu0 / GH #1414): --force overrides the "
-            f"chash-poison gate. {self.store_detail} The rows stay unhealed "
-            "debt until you re-index the affected collections, and a "
+            f"chash-poison gate. {self.store_detail} The rows stay as they "
+            "are (no command repairs them), and a "
             "pre-v0.1.48 char-era engine can still crash-loop on boot. "
-            f"Recovery: {MIGRATION_RUNBOOK_URL}."
+            f"Runbook (service will not start): {MIGRATION_RUNBOOK_URL}."
         )
 
 

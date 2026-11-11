@@ -803,19 +803,23 @@ class TestCheckMigrationState:
         assert chash.warn is True
         assert chash.fatal is False
         assert "12" in chash.detail
-        # nexus-2hklz (round-3 critique HIGH-1): the falling-count guidance
-        # must scope the healing claim to re-indexing — deletions also
-        # lower the count, so no blanket "shrinking = healing" claim.
-        assert "Re-indexing affected content HEALS" in chash.detail
-        assert "heal-by-replacement" in chash.detail
-        assert "deleting affected content also lowers it" in chash.detail
+        # nexus-f3yqd: such rows are not expected after boot migration and no
+        # command repairs them: no claim that anything heals them, and no
+        # remedy by re-indexing, in the detail or the fixes.
+        assert "not expected after the engine's boot migrations" in chash.detail
+        assert "No command repairs them" in chash.detail
+        assert "HEALS" not in chash.detail and "heal-by-replacement" not in chash.detail
+        assert not any("re-index" in s.lower() for s in chash.fix_suggestions)
+        assert "re-index" not in chash.detail.lower()
         assert "not data loss" not in chash.detail
-        # nexus-o513u: heal steps lead; no unconditional do-not-upgrade
-        # gate; rollback only as the will-not-boot branch. The chash-rekey
-        # rung was deleted at 5a3dcd16c, so re-indexing is the ONLY remedy
-        # — these asserts must never again name a rung that cannot run
-        # (default_registry() == [] and RUNG_ORDER == ()).
-        assert any("nx index repo" in s for s in chash.fix_suggestions)
+        # nexus-o513u: no unconditional do-not-upgrade gate; rollback only as
+        # the will-not-boot branch. The chash-rekey rung was deleted at
+        # 5a3dcd16c — these asserts must never again name a rung that cannot
+        # run (default_registry() == [] and RUNG_ORDER == ()). Nothing here
+        # repairs the rows: the fixes say so and point at the reports.
+        assert not any("nx index repo" in s for s in chash.fix_suggestions)
+        assert any("validate-constraints" in s for s in chash.fix_suggestions)
+        assert any("detail=legacy_chunks" in s for s in chash.fix_suggestions)
         assert not any("nx upgrade" in s for s in chash.fix_suggestions)
         assert not any("chash-rekey" in s for s in chash.fix_suggestions)
         assert not any("Do NOT upgrade" in s for s in chash.fix_suggestions)

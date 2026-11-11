@@ -42,6 +42,13 @@ import java.util.Map;
  * and constraint names and booleans about the shared schema) is identical for every tenant. Nothing is tenant data, no table
  * is scanned and no tenant predicate applies.
  *
+ * <p><b>Opt-in detail.</b> {@code ?detail=legacy_chunks} adds, when a width CHECK is not validated, {@code legacy_chunks}: for
+ * the CALLER's own tenant only, counts per reason among its non-32-byte chunks and manifest rows ({@code chunk_reasons},
+ * {@code manifest_reasons}) and up to 20 of those chunks ({@code chunks}, each with its
+ * collection, model, chash, reason and owners). It is not free: no index serves a width test, so it scans the tenant's own
+ * chunk partition under a 5 s bound ({@code available:false} when the bound is hit), which is why the route does it only when
+ * asked and the default answer still scans nothing.
+ *
  * <p>An old engine answers 404; a client reads that and a 503 as "not checked", never as "validated".
  */
 public final class ChashConformanceHandler implements HttpHandler {
@@ -52,10 +59,31 @@ public final class ChashConformanceHandler implements HttpHandler {
     /** The route's path; {@code NexusService} mounts the handler here, behind {@link AuthFilter}. */
     public static final String PATH = "/v1/schema/chash-conformance";
 
+    /** The most chunks and manifest rows the opt-in detail counts, the chunks it lists, and how long its scan may run. */
+    static final int DETAIL_COUNT_CAP = 1_000;
+    static final int DETAIL_LIST_CAP = 20;
+    static final int DETAIL_TIMEOUT_MS = 5_000;
+    /** The whole detail's budget: its three scans and every owner lookup together. */
+    static final long DETAIL_DEADLINE_MS = 8_000L;
+    /** Overrides {@link #DETAIL_DEADLINE_MS} (milliseconds), read once when the handler is built: a test's way to run out of time. */
+    static final String DEADLINE_PROPERTY = "nexus.doctor.legacy_detail_deadline_ms";
+
     private final ChashConformanceConstraints constraints;
+    private final dev.nexus.service.db.TenantScope scope;
+    private final long detailDeadlineMs;
+    /** The tenants whose detail is being read now: one scan at a time per tenant (a second call answers busy, it does not scan again). Cleared as each call ends. */
+    private final java.util.Set<String> detailInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public ChashConformanceHandler(ChashConformanceConstraints constraints) {
+        this(constraints, null);
+    }
+
+    /** @param scope the tenant-scoped sessions the opt-in {@code detail=legacy_chunks} reads through (null: that detail is not offered) */
+    public ChashConformanceHandler(ChashConformanceConstraints constraints, dev.nexus.service.db.TenantScope scope) {
         this.constraints = constraints;
+        this.scope = scope;
+        // read once, when the handler is built: a test's way to run out of time, not a setting a request can change
+        this.detailDeadlineMs = Long.getLong(DEADLINE_PROPERTY, DETAIL_DEADLINE_MS);
     }
 
     @Override
@@ -79,7 +107,59 @@ public final class ChashConformanceHandler implements HttpHandler {
             }
             return;
         }
-        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(body(report, RequestContext.isOperator())));
+        Map<String, Object> out = body(report, RequestContext.isOperator());
+        String query = ex.getRequestURI().getRawQuery();
+        // opt-in only: the route itself scans nothing, and this reads the caller's own legacy-width chunks (no index serves it)
+        if (scope != null && query != null && java.util.Arrays.asList(query.split("&")).contains("detail=legacy_chunks")
+                && !report.allValidated()) {
+            out.put("legacy_chunks", legacyChunks(tenant));
+        }
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(out));
+    }
+
+    /**
+     * (Public so a test can drive one detail without the HTTP stack.) The caller's own legacy-width chunks by reason, and up to a bounded number of them listed with their owning documents
+     * ({@link dev.nexus.service.db.LegacyChunkSurvey}); bounded by {@link #DETAIL_COUNT_CAP}, {@link #DETAIL_LIST_CAP} and
+     * {@link #DETAIL_TIMEOUT_MS} per statement and {@link #DETAIL_DEADLINE_MS} for the whole detail ({@code deadline_exceeded}), and
+     * {@code {"available": false}} when a statement outlasts its bound.
+     */
+    public Map<String, Object> legacyChunks(String tenant) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (!detailInFlight.add(tenant)) {
+            out.put("available", false);
+            out.put("busy", true);
+            return out;
+        }
+        try {
+            var d = dev.nexus.service.db.LegacyChunkSurvey.forTenant(scope, tenant, DETAIL_COUNT_CAP, DETAIL_LIST_CAP, DETAIL_TIMEOUT_MS,
+                detailDeadlineMs);
+            out.put("available", true);
+            // a stage that was cut by the request deadline is null (unknown), never an empty answer
+            out.put("chunk_reasons", d.chunkCounts() == null ? null : d.chunkCounts().byReason());
+            out.put("chunk_reasons_capped", d.chunkCounts() == null ? null : d.chunkCounts().capped());
+            out.put("manifest_reasons", d.manifestCounts() == null ? null : d.manifestCounts().byReason());
+            out.put("manifest_reasons_capped", d.manifestCounts() == null ? null : d.manifestCounts().capped());
+            out.put("manifest_documents", d.manifestDocs() == null ? null : dev.nexus.service.db.LegacyChunkSurvey.docsJson(d.manifestDocs()));
+            out.put("chunks", d.chunks() == null ? null : d.chunks().stream().map(b -> {
+                Map<String, Object> e = new LinkedHashMap<>();
+                e.put("collection", b.collection());
+                e.put("embedding_model", b.model());
+                e.put("chash_hex", b.chashHex());
+                e.put("reason", b.reason());
+                e.put("owners", dev.nexus.service.db.LegacyChunkSurvey.ownersJson(b.owners()));
+                e.put("owners_capped", b.owners() != null && b.owners().capped());
+                return e;
+            }).toList());
+            out.put("chunks_capped", d.chunks() == null ? null : d.chunksCapped());
+            // the request deadline passed before every stage ran: what is missing is empty, and owners not looked up are null
+            out.put("deadline_exceeded", d.partial());
+        } catch (RuntimeException e) {
+            log.warn("event=chash_conformance_detail_unavailable tenant={} error={}", tenant, e.getMessage());
+            out.put("available", false);
+        } finally {
+            detailInFlight.remove(tenant);
+        }
+        return out;
     }
 
     /**

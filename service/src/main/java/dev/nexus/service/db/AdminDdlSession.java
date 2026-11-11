@@ -42,6 +42,12 @@ public final class AdminDdlSession implements AutoCloseable {
     private static final String LOCK_TIMEOUT = "5s";
     /** Above the longest statement bound a caller sets, so the server gives up before the socket does. */
     private static final int SOCKET_TIMEOUT_SECONDS = 35 * 60;
+    /**
+     * The longest {@code statement_timeout} (or {@code lock_timeout}) a caller may set on this session, in milliseconds: a
+     * minute under the socket timeout, so the server gives up before the client's read does and the caller sees the
+     * server's SQLSTATE rather than a dropped socket. A configurable bound must be clamped to this.
+     */
+    public static final long MAX_STATEMENT_TIMEOUT_MS = (SOCKET_TIMEOUT_SECONDS - 60L) * 1000L;
     private static final int LOGIN_TIMEOUT_SECONDS = 30;
 
     /** SQLSTATE: lock_not_available (the 5 s lock_timeout tripped). */
@@ -57,11 +63,23 @@ public final class AdminDdlSession implements AutoCloseable {
     public static final class Refused extends RuntimeException {
         private final int status;
         private final String reason;
+        private final String sqlState;
 
         public Refused(int status, String reason, String message) {
+            this(status, reason, message, null);
+        }
+
+        /** {@code sqlState} is the SQLSTATE of the failed statement, or null when the refusal is not a statement's. */
+        public Refused(int status, String reason, String message, String sqlState) {
             super(message);
             this.status = status;
             this.reason = reason;
+            this.sqlState = sqlState;
+        }
+
+        /** The SQLSTATE of the statement that failed (55P03, 23514, 57014, ...), or null. */
+        public String sqlState() {
+            return sqlState;
         }
 
         public int status() {
@@ -97,12 +115,34 @@ public final class AdminDdlSession implements AutoCloseable {
     private final Connection conn;
     private final DSLContext ctx;
     private boolean locked;
+    /**
+     * The statement in flight on this session (a DDL, or any jOOQ query: {@link CancelTracker} records it), so another thread
+     * (the engine's shutdown) can cancel it; null between statements.
+     */
+    private volatile Statement running;
+    /** Set first by {@link #cancel}: a statement about to start sees it and does not start (see {@link #runDdl}). */
+    private volatile boolean cancelled;
+    /** The admin values this session was opened with (null for a session handed a connection), for {@link #cancel}'s fresh connection. */
+    private AdminConnection admin;
+    /** The server backend of this session's connection, or 0 when it is not known. */
+    private int backendPid;
+    /** When that backend started: with the pid it names this backend and no later one that reuses the pid. */
+    private java.time.OffsetDateTime backendStart;
+    /** Test seam: the admin values the backend cancel connects with, in place of {@link #admin} (an unreachable server). */
+    volatile AdminConnection resendAdminForTests;
+    /** The wall-clock bound of {@link #cancel}, in milliseconds (default {@value #DEFAULT_CANCEL_DEADLINE_MS}, 100 to 60000). */
+    public static final String CANCEL_DEADLINE_PROPERTY = "nexus.validate.cancel_deadline_ms";
+    static final long DEFAULT_CANCEL_DEADLINE_MS = 5_000L;
+
+    /** Test seam: {@link #cancel} skips the driver's statement cancel, so a test can show the backend cancel alone lands. */
+    volatile boolean statementCancelDisabledForTests;
 
     /** Package-private so a test can hand it a connection that fails where a real one rarely does. */
     AdminDdlSession(Settings settings, Connection conn) {
         this.settings = settings;
         this.conn = conn;
-        this.ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        this.ctx = DSL.using(new org.jooq.impl.DefaultConfiguration().set(conn).set(SQLDialect.POSTGRES)
+            .set(new org.jooq.impl.DefaultExecuteListenerProvider(new CancelTracker())));
     }
 
     /**
@@ -119,6 +159,7 @@ public final class AdminDdlSession implements AutoCloseable {
         props.setProperty("loginTimeout", Integer.toString(LOGIN_TIMEOUT_SECONDS));
         props.setProperty("socketTimeout", Integer.toString(SOCKET_TIMEOUT_SECONDS));
         props.setProperty("tcpKeepAlive", "true");
+        props.setProperty("cancelSignalTimeout", "2");   // the driver's own cancel connection: seconds, not its default ten
         Connection conn;
         try {
             conn = DriverManager.getConnection(admin.url(), props);
@@ -128,6 +169,18 @@ public final class AdminDdlSession implements AutoCloseable {
                 "the constraint run could not open the admin connection: sqlstate=" + e.getSQLState());
         }
         AdminDdlSession s = new AdminDdlSession(settings, conn);
+        s.admin = admin;
+        try {
+            var pid = DSL.field(DSL.name("pid"), Integer.class);
+            var started = s.ctx.select(DSL.function("pg_backend_pid", SQLDataType.INTEGER),
+                    DSL.field(DSL.name("backend_start"), SQLDataType.TIMESTAMPWITHTIMEZONE))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(pid.eq(DSL.function("pg_backend_pid", SQLDataType.INTEGER))).fetchOne();
+            s.backendPid = started.value1();
+            s.backendStart = started.value2();
+        } catch (DataAccessException | NullPointerException e) {
+            s.backendPid = 0;   // cancel() then relies on the driver's statement cancel alone
+        }
         if (lock) {
             try {
                 s.lock();
@@ -414,7 +467,15 @@ public final class AdminDdlSession implements AutoCloseable {
             params[i + 1] = a instanceof String[] arr
                 ? DSL.val(arr, SQLDataType.CLOB.array()) : DSL.val((String) a);
         }
-        String sql = ctx.select(DSL.function("format", SQLDataType.CLOB, params)).fetchOne(0, String.class);
+        String sql;
+        try {
+            sql = ctx.select(DSL.function("format", SQLDataType.CLOB, params)).fetchOne(0, String.class);
+        } catch (DataAccessException e) {
+            if (QUERY_CANCELED.equals(e.sqlState()) && (cancelled || Thread.currentThread().isInterrupted())) {
+                throw refusal(new SQLException("the statement was cancelled before it started", QUERY_CANCELED));
+            }
+            throw e;
+        }
         try {
             runDdl(sql);
         } catch (SQLException e) {
@@ -428,7 +489,143 @@ public final class AdminDdlSession implements AutoCloseable {
     // concatenated in Java. Plain JDBC Statement.execute, as PciBuilderSession does. Single-homed: ddl.
     private void runDdl(String sql) throws SQLException {
         try (Statement st = conn.createStatement()) {
+            running = st;
+            // cancel() sets `cancelled` and then reads `running`; this sets `running` and then reads `cancelled`: either the
+            // cancel sees the statement or this sees the cancel, so a stop that lands before the statement starts is seen
+            // here (the engine's stop interrupts the thread before it cancels, so the interrupt flag says the same)
+            if (cancelled || Thread.currentThread().isInterrupted()) {
+                throw new SQLException("the statement was cancelled before it started", QUERY_CANCELED);
+            }
             st.execute(sql);
+        } finally {
+            running = null;
+        }
+    }
+
+    /** True once {@link #cancel} was called on this session: whatever it was about to do, it must not start. */
+    public boolean isCancelled() {
+        return cancelled;
+    }
+
+    /**
+     * Cancels the statement in flight, DDL or query, if any, and makes every later statement of this session refuse to
+     * start ({@link #isCancelled}, 57014). Safe from any thread; used by the engine's shutdown (synchronously), so a VALIDATE
+     * does not outlive the engine that started it.
+     *
+     * <p>What it guarantees. A statement whose start comes after this sets the flag is refused before it reaches the server
+     * (a DDL in {@link #runDdl}, a jOOQ query in {@link CancelTracker#executeStart}). A statement already past that check is
+     * cancelled: first by the driver's cancel on its statement, then, while it is still the statement in flight, by {@code
+     * pg_cancel_backend} on this session's backend from a fresh short-lived admin connection, re-sent every 100 ms. The
+     * re-send is what covers a cancel that landed in the instant before the server started the statement (the driver sends a
+     * statement's cancel once and PostgreSQL drops a signal that reaches an idle backend). It signals only the backend that
+     * was recorded at open, by pid AND backend start time, so a pid the server has since reused for another session is never
+     * signalled.
+     *
+     * <p>The whole of it is bounded by a WALL-CLOCK deadline, {@value #CANCEL_DEADLINE_PROPERTY} (default 5 s): each driver or
+     * re-send call runs on a daemon thread this waits for only as long as the deadline has left, and a re-send's connection
+     * gets connect, login and socket timeouts that fit in what is left, so a server that does not answer cannot hold the
+     * engine's shutdown past it. At the deadline this gives up: that one statement runs to its own timeout (the only case not
+     * covered), and every statement after it is refused.
+     */
+    public void cancel() {
+        cancelled = true;
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
+            Math.max(100L, Math.min(60_000L, Long.getLong(CANCEL_DEADLINE_PROPERTY, DEFAULT_CANCEL_DEADLINE_MS))));
+        for (int attempt = 0; ; attempt++) {
+            Statement st = running;
+            if (st == null) return;
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                log.warn("event=admin_ddl_cancel_gave_up run={} backend_pid={}", settings.runLabel(), backendPid);
+                return;
+            }
+            if (attempt == 0 && !statementCancelDisabledForTests) {
+                boundedCall(() -> {
+                    try {
+                        st.cancel();
+                    } catch (SQLException e) {
+                        log.debug("event=admin_ddl_cancel_failed run={} cause=\"{}\"", settings.runLabel(), e.toString());
+                    }
+                }, remaining);
+            } else {
+                boundedCall(() -> cancelBackend(remaining), remaining);
+            }
+            try {
+                Thread.sleep(Math.min(100L, Math.max(1L, (deadline - System.nanoTime()) / 1_000_000L)));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (running != st) return;   // it ended (cancelled, or finished first)
+        }
+    }
+
+    /** Runs {@code call} on a daemon thread and waits at most {@code remainingNanos} for it; a call that hangs is abandoned (it ends on its own timeouts). */
+    private static void boundedCall(Runnable call, long remainingNanos) {
+        Thread t = new Thread(call, "admin-ddl-cancel");
+        t.setDaemon(true);
+        t.start();
+        try {
+            t.join(Math.max(1L, remainingNanos / 1_000_000L));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * {@code pg_cancel_backend} on this session's backend, from a fresh connection that is closed again, only for the backend
+     * with the recorded pid AND start time; failures are logged only. The connection's timeouts fit in {@code remainingNanos}.
+     */
+    private void cancelBackend(long remainingNanos) {
+        AdminConnection target = resendAdminForTests != null ? resendAdminForTests : admin;
+        if (target == null || backendPid <= 0 || backendStart == null) return;
+        String seconds = Long.toString(Math.max(1L, (remainingNanos + 999_999_999L) / 1_000_000_000L));
+        Properties props = new Properties();
+        props.setProperty("user", target.user());
+        props.setProperty("password", target.password());
+        props.setProperty("ApplicationName", settings.applicationName() + "-cancel");
+        props.setProperty("connectTimeout", seconds);
+        props.setProperty("loginTimeout", seconds);
+        props.setProperty("socketTimeout", seconds);
+        try (Connection c = DriverManager.getConnection(target.url(), props)) {
+            c.setAutoCommit(true);
+            var pid = DSL.field(DSL.name("pid"), Integer.class);
+            var start = DSL.field(DSL.name("backend_start"), SQLDataType.TIMESTAMPWITHTIMEZONE);
+            DSL.using(c, SQLDialect.POSTGRES).select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN, pid))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity"))).where(pid.eq(backendPid)).and(start.eq(backendStart))
+                .fetch();
+        } catch (SQLException | DataAccessException e) {
+            log.debug("event=admin_ddl_backend_cancel_failed run={} cause=\"{}\"", settings.runLabel(), e.toString());
+        }
+    }
+
+    /** Test seam: replaces the recorded backend start time, to show a pid whose start differs is not signalled. */
+    void backendStartForTests(java.time.OffsetDateTime start) {
+        this.backendStart = start;
+    }
+
+    /** Test seam: the backend start time recorded at open. */
+    java.time.OffsetDateTime backendStartForTests() {
+        return backendStart;
+    }
+
+    /**
+     * Records the statement a jOOQ query has in flight on this session, so {@link #cancel} can reach it, and refuses to start
+     * one after a cancel or an interrupt (the Dekker partner of {@link #cancel}: it publishes, then reads the flag).
+     */
+    private final class CancelTracker implements org.jooq.ExecuteListener {
+        @Override
+        public void executeStart(org.jooq.ExecuteContext c) {
+            running = c.statement();
+            if (cancelled || Thread.currentThread().isInterrupted()) {
+                throw new DataAccessException("the statement was cancelled before it started",
+                    new SQLException("the statement was cancelled before it started", QUERY_CANCELED));
+            }
+        }
+
+        @Override
+        public void end(org.jooq.ExecuteContext c) {
+            running = null;
         }
     }
 
@@ -438,23 +635,25 @@ public final class AdminDdlSession implements AutoCloseable {
             return new Refused(503, "lock_timeout",
                 "the table lock was not available within " + LOCK_TIMEOUT + ". Earlier constraints of this run "
                     + "may already have landed (a run is several statements, none rolled back); a rerun is safe: "
-                    + "add skips a constraint that exists and validate skips one that is valid");
+                    + "add skips a constraint that exists and validate skips one that is valid", state);
         }
         if (CHECK_VIOLATION.equals(state)) {
             return new Refused(409, "check_violation",
                 "VALIDATE found a row that breaks the constraint; it stays NOT VALID. Count the offenders with "
-                    + "the " + settings.offenderCount() + " and fix them first");
+                    + "the " + settings.offenderCount() + " and fix them first", state);
         }
         if (INSUFFICIENT_PRIVILEGE.equals(state)) {
             return new Refused(503, "insufficient_privilege",
-                "the admin role may not alter " + settings.tableLabel() + " (NX_DB_ADMIN_* must name its owner)");
+                "the admin role may not alter " + settings.tableLabel() + " (NX_DB_ADMIN_* must name its owner)", state);
         }
         log.warn("event=admin_ddl_failed run={} sqlstate={} cause=\"{}\"", settings.runLabel(), state, e.getMessage());
-        return new Refused(500, "ddl_failed", "the constraint statement failed: sqlstate=" + state);
+        return new Refused(500, "ddl_failed", "the constraint statement failed: sqlstate=" + state, state);
     }
 
     @Override
     public void close() {
+        // after a cancel the unlock below is refused like any statement (57014); that is swallowed here, and closing the
+        // connection releases the session lock all the same
         try {
             if (locked) {
                 ctx.select(DSL.function("pg_advisory_unlock", SQLDataType.BOOLEAN, DSL.val(settings.lockKey())))

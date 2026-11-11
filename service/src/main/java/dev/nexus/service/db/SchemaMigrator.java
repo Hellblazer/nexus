@@ -566,6 +566,7 @@ public final class SchemaMigrator {
                     logPciBuildersKept(conn, retrying);
                 } else {
                     terminatePciBuilders(conn, "reason=schema_changesets_pending n=" + schemaChangesets);
+                    terminateChashValidators(conn, "reason=schema_changesets_pending n=" + schemaChangesets);
                 }
 
                 // nexus-jl08t: identify THIS walk's own rows via a pre-walk
@@ -754,6 +755,7 @@ public final class SchemaMigrator {
                 // nexus-f3yqd: the repair alters a leaf (ENABLE ROW LEVEL SECURITY, ACCESS EXCLUSIVE), which queues
                 // behind a build's ShareUpdateExclusiveLock while the build waits for this statement's snapshot.
                 terminatePciBuilders(conn, "reason=partition_access_drift");
+                terminateChashValidators(conn, "reason=partition_access_drift");
             }
             for (String parent : PARTITION_PARENTS) {
                 try {
@@ -917,6 +919,36 @@ public final class SchemaMigrator {
             log.info("event=pci_builders_terminated count={} {}", terminated, why);
         } catch (DataAccessException e) {
             log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
+        }
+    }
+
+    /**
+     * nexus-f3yqd: end every backend of the user-started chash VALIDATE job ({@link ChashConstraintValidator#APPLICATION_NAME_PREFIX})
+     * in this database, at the two points where the walk ends the index builders: a walk with schema work queues its ACCESS
+     * EXCLUSIVE behind a VALIDATE's SHARE UPDATE EXCLUSIVE (up to 30 minutes, and an orphaned VALIDATE outlives the engine
+     * that started it), and every statement behind that waits too. Terminating is safe: a VALIDATE is atomic, so the
+     * constraint is exactly as it was, and the next job resumes at the step that was cut. Failure to signal is logged, never
+     * fatal, as for the builders.
+     */
+    private static void terminateChashValidators(Connection conn, String why) {
+        var pid = DSL.field(DSL.name("pid"), Integer.class);
+        try {
+            int terminated = 0;
+            for (Boolean ended : DSL.using(conn, SQLDialect.POSTGRES)
+                    .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
+                    .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                    .where(DSL.field(DSL.name("application_name"), String.class)
+                        .startsWith(ChashConstraintValidator.APPLICATION_NAME_PREFIX))
+                    .and(pid.ne(DSL.function("pg_backend_pid", SQLDataType.INTEGER)))
+                    .and(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", SQLDataType.VARCHAR)))
+                    .fetch(0, Boolean.class)) {
+                if (Boolean.TRUE.equals(ended)) {
+                    terminated++;
+                }
+            }
+            log.info("event=chash_validators_terminated count={} {}", terminated, why);
+        } catch (DataAccessException e) {
+            log.error("event=chash_validators_terminate_failed cause=\"{}\"", e.toString());
         }
     }
 
