@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-f3yqd: the client's two index-run doctor rows answer the shared census table.
+"""nexus-f3yqd: the Python oracle of the index-run census answers the shared census table.
 
-``nx doctor`` finds stale index-run fences and failed documents with hidden chunks by walking every document
-(``nexus.health._check_stale_indexing_runs`` and ``_check_failed_runs_hidden_chunks``, which runs the manifest heal in
-dry-run over the failed ones). The engine route ``GET /v1/catalog/index-run/census`` answers the same questions in three
-bounded buckets (stale, fence, failed_hidden). The two halves are written in different languages, so one table
-(``service/src/test/resources/index-run-census-cases.json``) is read by both: the Java ``IndexRunCensusParityTest`` holds
-the SQL to it, and this test holds the client rows to it, scenario by scenario, through the real functions a doctor run
-calls (over the same documents, with the table's clock and the table's chunk rows behind a fake T3). A change to either
-rule that the other does not follow fails one of the two.
+``nx doctor`` reads stale index-run fences and failed documents with hidden chunks from the engine route
+``GET /v1/catalog/index-run/census``, three bounded buckets (stale, fence, failed_hidden). The same rules, written in
+Python over a list of documents, are the oracle: ``nexus.health._stale_fence_rows_over`` and ``_failed_hidden_rows_over``
+(the second runs ``heal_manifest_gaps(dry_run=True)`` over the failed ones). The two halves are written in different
+languages, so one table (``service/src/test/resources/index-run-census-cases.json``) is read by both: the Java
+``IndexRunCensusParityTest`` holds the SQL to it, and this test holds the oracle to it, scenario by scenario, over the same
+documents, with the table's clock and the table's chunk rows behind a fake T3.
+``test_index_run_census_route_parity.py`` then holds the route-fed rows to the oracle's. A change to either rule that the
+other does not follow fails one of them.
 
 The rows answer in sentences, so each scenario's numbers are read back out of the row's detail text; the readers below
 are the only coupling to its wording, and a non-vacuity test holds every branch of the fence row to at least one scenario.
@@ -23,7 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nexus import health
+from nexus import db, health
 from nexus.errors import CollectionNotFoundError
 
 _TABLE = Path(__file__).resolve().parents[2] / "service/src/test/resources/index-run-census-cases.json"
@@ -119,10 +120,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, scenario: dict) -> None:
-    from nexus import db
-    from nexus.catalog import factory
-
-    monkeypatch.setattr(factory, "make_catalog_reader", lambda *a, **k: _Catalog(scenario))
+    """The fake T3 the manifest heal reads (``_failed_hidden_rows_over`` builds it through ``nexus.db.make_t3``)."""
     monkeypatch.setattr(db, "make_t3", lambda *a, **k: _T3(scenario))
 
 
@@ -163,7 +161,7 @@ def _stale_view(rows: list[health.HealthResult]) -> dict:
 @pytest.mark.parametrize("scenario", _scenarios("stale"), ids=lambda s: s["id"])
 def test_the_stale_fences_row_counts_what_the_tables_stale_bucket_counts(scenario: dict, monkeypatch, clock) -> None:
     _wire(monkeypatch, scenario)
-    got = _stale_view(health._check_stale_indexing_runs(_walk(scenario)))
+    got = _stale_view(health._stale_fence_rows_over(_walk(scenario), _Catalog(scenario)))
     assert got == scenario["expect"]["stale"]
 
 
@@ -211,7 +209,7 @@ def _fence_view(rows: list[health.HealthResult]) -> tuple[str, dict]:
 def test_the_fence_rows_branches_read_the_tables_fence_numbers(scenario: dict, monkeypatch, clock) -> None:
     _wire(monkeypatch, scenario)
     want = scenario["expect"]["fence"]
-    branch, got = _fence_view(health._check_stale_indexing_runs(_walk(scenario)))
+    branch, got = _fence_view(health._stale_fence_rows_over(_walk(scenario), _Catalog(scenario)))
     if branch == "post_anchor":
         assert got["post_anchor"] == want["post_anchor"] and got["post_anchor_count"] == len(want["post_anchor"])
         assert got["anchor_kind"] == want["anchor_kind"] and got["anchor_at"] == _iso(want["anchor_at"])
@@ -235,7 +233,7 @@ def test_every_branch_of_the_fence_row_is_held_to_a_scenario(monkeypatch, clock)
     seen: set[str] = set()
     for scenario in _scenarios("fence"):
         _wire(monkeypatch, scenario)
-        seen.add(_fence_view(health._check_stale_indexing_runs(_walk(scenario)))[0])
+        seen.add(_fence_view(health._stale_fence_rows_over(_walk(scenario), _Catalog(scenario)))[0])
     assert seen == {"post_anchor", "no_baseline", "clean", "quiet"}
 
 
@@ -257,7 +255,7 @@ def _hidden_view(rows: list[health.HealthResult]) -> dict:
 def test_the_failed_runs_row_counts_what_the_tables_failed_hidden_bucket_counts(scenario: dict, monkeypatch) -> None:
     _wire(monkeypatch, scenario)
     want = scenario["expect"]["failed_hidden"]
-    assert _hidden_view(health._check_failed_runs_hidden_chunks(_walk(scenario))) == {"failed": want["failed"], "count": want["count"]}
+    assert _hidden_view(health._failed_hidden_rows_over(_walk(scenario), _Catalog(scenario))) == {"failed": want["failed"], "count": want["count"]}
 
 
 def test_the_heal_dry_run_itself_rebuilds_exactly_the_tables_hidden_count(monkeypatch) -> None:

@@ -273,7 +273,8 @@ class TestRunDiesAfterRegistrationBeforeAnyFlush:
         self, tmp_path: Path, catalog_env: Path, local_t3: T3Database,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from nexus.health import _check_stale_indexing_runs
+        from nexus.catalog.factory import make_catalog_reader
+        from nexus.health import _stale_fence_rows_over
 
         repo = tmp_path / "repo"
         _init_repo(repo)
@@ -285,7 +286,8 @@ class TestRunDiesAfterRegistrationBeforeAnyFlush:
         with pytest.raises(RuntimeError, match="simulated crash"):
             self._run(repo, local_t3, monkeypatch)
 
-        results = _check_stale_indexing_runs()
+        cat = make_catalog_reader()
+        results = _stale_fence_rows_over(list(cat.all_documents(limit=0)), cat)
         label = "stale index-run fences"
         matching = [r for r in results if r.label == label]
         assert matching, f"expected a '{label}' result, got {results}"

@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-f3yqd.6: the doctor's route-fed rows say what the walk-fed rows say, over the engine's shared cases.
+"""nexus-f3yqd.6: the doctor's route-fed rows say what the Python oracle's rows say, over the engine's shared cases.
 
-``test_index_run_census_cases.py`` and ``test_next_seq_drift_cases.py`` hold the Python oracle (the doctor's walk rows,
-and ``heal_manifest_gaps(dry_run=True).reconciled`` behind the failed-runs row) to the tables the engine's Java tests
-hold its SQL to, so the SQL and the walk agree. This module holds the third leg: for each case the engine's answer is
-rebuilt from the table's expected numbers (what the SQL is proven to return), fed through the rows a default ``nx
-doctor`` runs against engine 0.1.190, and the rows must equal the walk's, text and marks. A change to the rendering of
-either path that the other does not follow, or to the table that the route rows do not follow, fails here.
+``test_index_run_census_cases.py`` and ``test_next_seq_drift_cases.py`` hold the Python oracle (``_stale_fence_rows_over``,
+``_next_seq_drift_rows_over``, and ``heal_manifest_gaps(dry_run=True).reconciled`` behind ``_failed_hidden_rows_over``) to
+the tables the engine's Java tests hold its SQL to, so the SQL and the oracle agree. This module holds the third leg: for
+each case the engine's answer is rebuilt from the table's expected numbers (what the SQL is proven to return), fed through
+the rows a default ``nx doctor`` runs against engine 0.1.190, and the rows must equal the oracle's, text and marks. A
+change to the rendering of either path that the other does not follow, or to the table that the route rows do not follow,
+fails here.
 """
 from __future__ import annotations
 
@@ -17,9 +18,8 @@ from typing import Any
 import pytest
 
 from nexus import health
-from nexus.catalog import factory
 from nexus.catalog.manifest_heal import heal_manifest_gaps
-from tests.catalog.test_index_run_census_cases import (  # noqa: F401 — clock is the fixture the walk rows need
+from tests.catalog.test_index_run_census_cases import (  # noqa: F401 — clock is the fixture the oracle rows need
     _NOW,
     _Catalog,
     _scenarios,
@@ -28,8 +28,7 @@ from tests.catalog.test_index_run_census_cases import (  # noqa: F401 — clock 
     _wire,
     clock,
 )
-from tests.catalog.test_next_seq_drift_cases import _Catalog as _DriftCatalog
-from tests.catalog.test_next_seq_drift_cases import _cases
+from tests.catalog.test_next_seq_drift_cases import _cases, _owners
 
 _NEUTRAL_STALE = {"count": 0, "capped": False, "notes": 0, "examples": []}
 _NEUTRAL_FENCE = {
@@ -79,43 +78,42 @@ def _failed_bucket(scenario: dict) -> dict:
     return {"failed": {"count": want["failed"], "capped": False}, "count": want["count"], "capped": False, "examples": examples}
 
 
-def _same(walk_rows: list[health.HealthResult], route_rows: list[health.HealthResult]) -> None:
+def _same(oracle_rows: list[health.HealthResult], route_rows: list[health.HealthResult]) -> None:
     assert [(r.ok, r.warn, r.skipped, r.fatal, r.detail, r.fix_suggestions) for r in route_rows] == \
-           [(r.ok, r.warn, r.skipped, r.fatal, r.detail, r.fix_suggestions) for r in walk_rows]
+           [(r.ok, r.warn, r.skipped, r.fatal, r.detail, r.fix_suggestions) for r in oracle_rows]
 
 
 def _cat(scenario: dict, monkeypatch: pytest.MonkeyPatch) -> Any:
-    _wire(monkeypatch, scenario)
-    return factory.make_catalog_reader()
+    _wire(monkeypatch, scenario)  # the fake T3 the heal reads
+    return _Catalog(scenario)
 
 
 @pytest.mark.parametrize("scenario", _scenarios("stale"), ids=lambda s: s["id"])
-def test_the_stale_row_from_the_route_is_the_walk_row(scenario: dict, monkeypatch: pytest.MonkeyPatch, clock: None) -> None:
+def test_the_stale_row_from_the_route_is_the_oracle_row(scenario: dict, monkeypatch: pytest.MonkeyPatch, clock: None) -> None:
     cat = _cat(scenario, monkeypatch)
     census = {"stale": _stale_bucket(scenario), "fence": _NEUTRAL_FENCE, "failed_hidden": _NEUTRAL_FAILED}
     route = health._stale_fence_rows_from_census(cat, health._STALE_FENCES_LABEL, census)
-    walk = health._check_stale_indexing_runs(_walk(scenario))
-    _same([r for r in walk if "stranded in index_state='indexing'" in r.detail],
+    oracle = health._stale_fence_rows_over(_walk(scenario), cat)
+    _same([r for r in oracle if "stranded in index_state='indexing'" in r.detail],
           [r for r in route if "stranded in index_state='indexing'" in r.detail])
     assert any("stranded" in r.detail for r in route) == (scenario["expect"]["stale"]["count"] > 0)
 
 
 @pytest.mark.parametrize("scenario", _scenarios("fence"), ids=lambda s: s["id"])
-def test_the_fence_row_from_the_route_is_the_walk_row(scenario: dict, monkeypatch: pytest.MonkeyPatch, clock: None) -> None:
+def test_the_fence_row_from_the_route_is_the_oracle_row(scenario: dict, monkeypatch: pytest.MonkeyPatch, clock: None) -> None:
     cat = _cat(scenario, monkeypatch)
     census = {"stale": _NEUTRAL_STALE, "fence": _fence_bucket(scenario), "failed_hidden": _NEUTRAL_FAILED}
     route = health._stale_fence_rows_from_census(cat, health._STALE_FENCES_LABEL, census)
-    walk = health._check_stale_indexing_runs(_walk(scenario))
-    _same([r for r in walk if "stranded in index_state='indexing'" not in r.detail], route)
+    oracle = health._stale_fence_rows_over(_walk(scenario), cat)
+    _same([r for r in oracle if "stranded in index_state='indexing'" not in r.detail], route)
 
 
 @pytest.mark.parametrize("scenario", _scenarios("failed_hidden"), ids=lambda s: s["id"])
-def test_the_failed_runs_row_from_the_route_is_the_walk_row(scenario: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_failed_runs_row_from_the_route_is_the_oracle_row(scenario: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     cat = _cat(scenario, monkeypatch)
     route = health._failed_hidden_rows_from_census(health._HIDDEN_CHUNKS_LABEL, _failed_bucket(scenario))
-    walk = health._check_failed_runs_hidden_chunks(_walk(scenario))
-    _same(walk, route)
-    assert cat is not None
+    oracle = health._failed_hidden_rows_over(_walk(scenario), cat)
+    _same(oracle, route)
 
 
 @pytest.mark.parametrize("scenario", _scenarios("failed_hidden"), ids=lambda s: s["id"])
@@ -128,19 +126,19 @@ def test_the_failed_count_the_route_answers_is_what_the_heal_dry_run_reconciles(
 
 
 @pytest.mark.parametrize("case", _cases(), ids=lambda c: c["id"])
-def test_the_drift_row_from_the_route_is_the_walk_row(case: dict, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(factory, "make_catalog_reader", lambda *a, **k: _DriftCatalog(case))
-    walk = health._check_next_seq_drift([SimpleNamespace(tumbler=t) for t in case["live"]])
+def test_the_drift_row_from_the_route_is_the_oracle_row(case: dict) -> None:
+    oracle = health._next_seq_drift_rows_over(
+        _owners(case), [SimpleNamespace(tumbler=t) for t in case["live"]], case["tombstoned"])
     drifted = sorted(case["expect"]["drifted"], key=lambda d: d["owner"])
     body = {"checked": len(case["owners"]), "drifted": len(drifted), "capped": False, "examples": drifted}
     route = health._next_seq_drift_rows_from_route(health._NEXT_SEQ_LABEL, body)
-    # The walk names owners in the catalog's order, the engine's route in prefix order: compare the order-free text.
+    # The oracle names owners in the catalog's order, the engine's route in prefix order: compare the order-free text.
     if len(drifted) > 1:
         assert sorted(route[0].detail.split("highest existing tumbler: ")[1].split(". The engine floors")[0].split("; ")) == \
-               sorted(walk[0].detail.split("highest existing tumbler: ")[1].split(". The engine floors")[0].split("; "))
-        assert (route[0].ok, route[0].warn) == (walk[0].ok, walk[0].warn)
+               sorted(oracle[0].detail.split("highest existing tumbler: ")[1].split(". The engine floors")[0].split("; "))
+        assert (route[0].ok, route[0].warn) == (oracle[0].ok, oracle[0].warn)
     else:
-        _same(walk, route)
+        _same(oracle, route)
 
 
 def test_the_route_rows_are_held_to_every_branch_of_the_fence_row(monkeypatch: pytest.MonkeyPatch, clock: None) -> None:

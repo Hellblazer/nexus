@@ -316,9 +316,9 @@ sequential number allocated per owner via `SELECT ... FOR UPDATE` on
 `catalog_owners.next_seq` (`CatalogHandler.java`); the column tracks the
 *last-claimed* value, not the *next* one. WAN round-trip cost on
 high-volume single-doc allocation motivated the `register_many` batch path
-(`http_catalog_client.py`). `nx doctor --check-index-runs` runs a drift check
-(`health.py` `_check_next_seq_drift`; the default sweep skips it, F30) that compares each owner's stored
-`next_seq` against the highest child tumbler actually observed; the
+(`http_catalog_client.py`). `nx doctor` runs a drift check
+(read from the engine's `GET /v1/catalog/owners/next_seq_drift`, F30; `health.py` `_drifted_owners` is the Python
+oracle of the rule) that compares each owner's stored `next_seq` against the highest child tumbler actually observed; the
 converge route `POST /v1/catalog/owners/sweep_next_seq_drift`
 (`CatalogHandler.java`) floors every drifted owner's `next_seq` back to a
 safe value across all owners in one call.
@@ -615,8 +615,8 @@ still-live write-path use of the SAME underlying `nexus.manifest_verify(text)` S
 function answers a *different* question the FK does not.
 
 **Doctor axis.** `nx doctor` separately flags documents stranded in
-`index_state='indexing'` past a threshold (`health.py
-_check_stale_indexing_runs`) — a distinct failure class from a
+`index_state='indexing'` past a threshold (read from the engine's
+`GET /v1/catalog/index-run/census`; `health.py` `_fence_facts_from_documents` is the Python oracle of the rule) — a distinct failure class from a
 manifest-verify miss: missing chunks vs. a fence that never cleared (e.g.
 a rolling engine deploy that straddles one multi-batch run's begin/complete
 pair, stranding the document in `'indexing'` until a future full re-index

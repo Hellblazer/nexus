@@ -11557,7 +11557,7 @@ _PRODUCER_FENCE_RELEASE_DT = datetime(2026, 8, 7, 16, 0, 35, tzinfo=UTC)
 #: NOT the anchor on its own — a LOWER BOUND on it (nexus-oiu1t). No client
 #: can have had full producer coverage before the release that carried it, so
 #: no evidence-derived anchor may ever fall below this. See
-#: ``_check_stale_indexing_runs`` for the install-local anchor this floors.
+#: ``_fence_facts_from_documents`` for the install-local anchor this floors.
 
 #: How many post-anchor unstamped identifiers are NAMED in the WARN detail.
 _MAX_NAMED_UNSTAMPED = 10
@@ -11622,7 +11622,7 @@ def _repo_candidates_with_missing_files(
 @dataclass
 class _FenceFacts:
     """What the stale-fence row renders, whichever way it was learned: a walk of every document
-    (:func:`_check_stale_indexing_runs`) or the engine's census (:func:`_stale_fence_rows_from_census`). The row's
+    (:func:`_fence_facts_from_documents`, the oracle) or the engine's census (:func:`_stale_fence_rows_from_census`). The row's
     wording and rules live in :func:`_stale_fence_rows` alone, so the two sources cannot say different things about
     the same numbers."""
 
@@ -11645,47 +11645,18 @@ class _FenceFacts:
     stale_capped: bool = False
 
 
-def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None) -> list[HealthResult]:
-    """Name documents stranded in ``index_state='indexing'`` beyond a
-    threshold (nexus-5xn3k.6, bead-text amendment 2026-08-02 —
-    substantive-critic on .3's client diff, T2 nexus/5xn3k3-critique-2026-08-02).
+def _fence_facts_from_documents(documents: list[Any]) -> _FenceFacts:
+    """The fence numbers of a list of catalog documents: the Python oracle for the rule the engine's census
+    (``GET /v1/catalog/index-run/census``) computes in SQL, which ``index-run-census-cases.json`` holds the SQL to
+    (nexus-5xn3k.6, nexus-apig6, nexus-oiu1t, nexus-2sa6w, nexus-f3yqd.6). Pure: no catalog, no request.
 
-    DISTINCT AXIS from the now-retired ``_check_dangling_manifests``
-    (memo §3.2/§4, ``manifest_verify_all`` — both RETIRED RDR-191 Phase 6,
-    nexus-o8dil.33): that check found MISSING-CHUNK aggregates — it said
-    nothing about a document whose fence was never cleared, and this check
-    is independent of it either way. ``'indexing'`` is the correct, SAFE
-    state for an in-flight or crashed run
-    (memo §3.5 / nexus-lcmbp non-goal: a document in ``'indexing'`` always
-    re-indexes, never silently skips) but nothing bounds how LONG it can sit
-    there. A rolling engine deploy that straddles one multi-batch run's
-    begin/complete pair (begin lands on an upgraded pod, complete 404s
-    against a not-yet-upgraded pod) strands a document in ``'indexing'``
-    until a FUTURE full re-index happens to route both calls through
-    upgraded pods; every intervening ``nx index`` pass re-chunks and
-    re-embeds it at full cost with no signal distinguishing "still catching
-    up" from "stuck."
-
-    Formerly surfaced ALONGSIDE the manifest_verify_all check, never folded
-    into it — they detected different failure classes (missing chunks vs. a
-    fence that never cleared). That sibling check no longer runs; this one
-    is unaffected.
-
-    Walks the full corpus once (``all_documents(limit=0)``) — the same cost
-    class doctor already pays in ``_check_next_seq_drift`` (nexus-ohxzu).
-    Read-only; degrades to a skip; never crashes the command it diagnoses.
+    Documents stranded in ``index_state='indexing'`` beyond a threshold (a fence that never cleared: ``'indexing'``
+    is the correct, SAFE state for an in-flight or crashed run, but nothing bounds how LONG it can sit there, and
+    every intervening ``nx index`` re-chunks and re-embeds at full cost); and the NULL-fence census with its
+    baseline (the install's own evidence that a fenced producer ran) and the unstamped documents indexed after it.
+    ``nx doctor`` no longer walks the catalog to get these (the engine answers them from the census route), so this
+    runs only where a test holds the engine's rule to the Python one.
     """
-    label = _STALE_FENCES_LABEL
-    try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
-
-        cat = make_catalog_reader()
-        if cat is None:
-            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.debug("doctor_stale_indexing_check_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
-
     now = datetime.now(UTC)
     stale: list[tuple[str, str]] = []  # (identifier, age)
     # nexus-z0o2p.34: the stale documents that are NOTES (content_type "knowledge": MCP store_put,
@@ -11747,116 +11718,109 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
     # never claims they predate coverage when nothing establishes that
     # (code-review-expert, 2026-08-11).
     undated_reported_null = 0
-    try:
-        # nexus-ft7eg: share this walk with _check_next_seq_drift
-        # (_highest_child_seqs' identical `all_documents(limit=0)` scan) —
-        # doctor currently pays for the full-corpus walk TWICE per run.
-        for entry in _doc_list(cat, documents):
-            reported = bool(getattr(entry, "index_state_reported", True))
-            state = getattr(entry, "index_state", None)
-            if not reported:
-                # Genuinely pre-fence engine — the wire never carried the
-                # key. Unknown, not evidence either way.
-                not_reported += 1
-                continue
-            if state is None:
-                # Fence-aware engine, but this document has never been
-                # stamped (unfenced producer, or simply not re-indexed
-                # since full producer coverage shipped —
-                # §_PRODUCER_FENCE_RELEASE_DT below tells these two apart).
-                reported_null += 1
-                indexed_at = str(getattr(entry, "indexed_at", "") or "")
-                ia_dt = None
-                if indexed_at:
-                    try:
-                        ia_dt = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
-                    except ValueError:
-                        ia_dt = None
-                if ia_dt is None:
-                    undated_reported_null += 1
-                elif ia_dt > _PRODUCER_FENCE_RELEASE_DT:
-                    if len(candidates) < _MAX_TRACKED_UNSTAMPED:
-                        ident = (
-                            str(getattr(entry, "source_uri", "") or "")
-                            or str(getattr(entry, "tumbler", "") or "")
-                            or "?"
-                        )
-                        candidates.append((ident, ia_dt))
-                        _tumbler = str(getattr(entry, "tumbler", "") or "")
-                        candidate_prefix[ident] = ".".join(_tumbler.split(".")[:2])
-                        candidate_file[ident] = str(getattr(entry, "file_path", "") or "")
-                    else:
-                        candidates_truncated += 1
-                continue
-            checked += 1
-            # nexus-oiu1t: a real index_state is proof that a fence ran on
-            # this document.
-            #
-            # ONLY 'complete' rows may date that proof (code-review-expert,
-            # 2026-08-11; verified in service/.../db/CatalogRepository.java).
-            # beginIndexRun writes INDEX_STATE/INDEX_RUN_ID/INDEX_STARTED_AT
-            # and completeIndexRun writes INDEX_STATE/INDEX_CONTENT_HASH/
-            # CHUNK_COUNT — NEITHER writes INDEXED_AT, which only the
-            # manifest-write/register path sets. So on a row stuck at
-            # 'indexing' or 'failed' (a crashed or in-flight run), indexed_at
-            # is a leftover from that document's PRIOR, unrelated successful
-            # index. Dating either anchor from it puts the anchor earlier than
-            # any evidence supports — and for the ledger it would let a
-            # CRASHED begin-many batch assert a regression, unhedged, against
-            # documents written before coverage was ever proven. Reopening the
-            # over-claiming class through a new door.
-            #
-            # NOTE the guard is an `if`, NOT an early `continue`: the
-            # stale-'indexing' detection below is this function's ORIGINAL
-            # purpose and must still see every non-complete row. A `continue`
-            # here silently disabled it (caught by
-            # TestCheckStaleIndexingRuns::test_stale_indexing_document_is_reported).
-            if state == "complete":
-                stamped_at = str(getattr(entry, "indexed_at", "") or "")
-                if stamped_at:
-                    try:
-                        st_dt = datetime.fromisoformat(stamped_at.replace("Z", "+00:00"))
-                    except ValueError:
-                        st_dt = None
-                    if st_dt is not None:
-                        if (earliest_stamped_dt is None
-                                or st_dt < earliest_stamped_dt):
-                            earliest_stamped_dt = st_dt
-                        # nexus-2sa6w: ledger the run id so a SHARED one can
-                        # prove begin-many, hence a full-coverage client.
-                        rid = str(getattr(entry, "index_run_id", "") or "")
-                        if rid:
-                            slot = run_ids.get(rid)
-                            if slot is not None:
-                                slot[0] += 1
-                                if st_dt < slot[1]:
-                                    slot[1] = st_dt
-                            elif len(run_ids) < _MAX_TRACKED_RUN_IDS:
-                                run_ids[rid] = [1, st_dt]
-                            else:
-                                run_ids_dropped += 1
-            if state != "indexing":
-                continue
-            started = getattr(entry, "index_started_at", "") or ""
-            if not started:
-                continue
-            try:
-                started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            age_hours = (now - started_dt).total_seconds() / 3600.0
-            if age_hours >= _STALE_INDEXING_THRESHOLD_HOURS:
-                ident = (
-                    str(getattr(entry, "source_uri", "") or "")
-                    or str(getattr(entry, "tumbler", "") or "")
-                    or "?"
-                )
-                stale.append((ident, f"{age_hours:.1f}h"))
-                if str(getattr(entry, "content_type", "") or "") == "knowledge":
-                    stale_notes.add(ident)
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.debug("doctor_stale_indexing_scan_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (corpus scan failed)")]
+    for entry in documents:
+        reported = bool(getattr(entry, "index_state_reported", True))
+        state = getattr(entry, "index_state", None)
+        if not reported:
+            # Genuinely pre-fence engine — the wire never carried the
+            # key. Unknown, not evidence either way.
+            not_reported += 1
+            continue
+        if state is None:
+            # Fence-aware engine, but this document has never been
+            # stamped (unfenced producer, or simply not re-indexed
+            # since full producer coverage shipped —
+            # §_PRODUCER_FENCE_RELEASE_DT below tells these two apart).
+            reported_null += 1
+            indexed_at = str(getattr(entry, "indexed_at", "") or "")
+            ia_dt = None
+            if indexed_at:
+                try:
+                    ia_dt = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
+                except ValueError:
+                    ia_dt = None
+            if ia_dt is None:
+                undated_reported_null += 1
+            elif ia_dt > _PRODUCER_FENCE_RELEASE_DT:
+                if len(candidates) < _MAX_TRACKED_UNSTAMPED:
+                    ident = (
+                        str(getattr(entry, "source_uri", "") or "")
+                        or str(getattr(entry, "tumbler", "") or "")
+                        or "?"
+                    )
+                    candidates.append((ident, ia_dt))
+                    _tumbler = str(getattr(entry, "tumbler", "") or "")
+                    candidate_prefix[ident] = ".".join(_tumbler.split(".")[:2])
+                    candidate_file[ident] = str(getattr(entry, "file_path", "") or "")
+                else:
+                    candidates_truncated += 1
+            continue
+        checked += 1
+        # nexus-oiu1t: a real index_state is proof that a fence ran on
+        # this document.
+        #
+        # ONLY 'complete' rows may date that proof (code-review-expert,
+        # 2026-08-11; verified in service/.../db/CatalogRepository.java).
+        # beginIndexRun writes INDEX_STATE/INDEX_RUN_ID/INDEX_STARTED_AT
+        # and completeIndexRun writes INDEX_STATE/INDEX_CONTENT_HASH/
+        # CHUNK_COUNT — NEITHER writes INDEXED_AT, which only the
+        # manifest-write/register path sets. So on a row stuck at
+        # 'indexing' or 'failed' (a crashed or in-flight run), indexed_at
+        # is a leftover from that document's PRIOR, unrelated successful
+        # index. Dating either anchor from it puts the anchor earlier than
+        # any evidence supports — and for the ledger it would let a
+        # CRASHED begin-many batch assert a regression, unhedged, against
+        # documents written before coverage was ever proven. Reopening the
+        # over-claiming class through a new door.
+        #
+        # NOTE the guard is an `if`, NOT an early `continue`: the
+        # stale-'indexing' detection below is this function's ORIGINAL
+        # purpose and must still see every non-complete row. A `continue`
+        # here silently disabled it (caught by
+        # TestCheckStaleIndexingRuns::test_stale_indexing_document_is_reported).
+        if state == "complete":
+            stamped_at = str(getattr(entry, "indexed_at", "") or "")
+            if stamped_at:
+                try:
+                    st_dt = datetime.fromisoformat(stamped_at.replace("Z", "+00:00"))
+                except ValueError:
+                    st_dt = None
+                if st_dt is not None:
+                    if (earliest_stamped_dt is None
+                            or st_dt < earliest_stamped_dt):
+                        earliest_stamped_dt = st_dt
+                    # nexus-2sa6w: ledger the run id so a SHARED one can
+                    # prove begin-many, hence a full-coverage client.
+                    rid = str(getattr(entry, "index_run_id", "") or "")
+                    if rid:
+                        slot = run_ids.get(rid)
+                        if slot is not None:
+                            slot[0] += 1
+                            if st_dt < slot[1]:
+                                slot[1] = st_dt
+                        elif len(run_ids) < _MAX_TRACKED_RUN_IDS:
+                            run_ids[rid] = [1, st_dt]
+                        else:
+                            run_ids_dropped += 1
+        if state != "indexing":
+            continue
+        started = getattr(entry, "index_started_at", "") or ""
+        if not started:
+            continue
+        try:
+            started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        age_hours = (now - started_dt).total_seconds() / 3600.0
+        if age_hours >= _STALE_INDEXING_THRESHOLD_HOURS:
+            ident = (
+                str(getattr(entry, "source_uri", "") or "")
+                or str(getattr(entry, "tumbler", "") or "")
+                or "?"
+            )
+            stale.append((ident, f"{age_hours:.1f}h"))
+            if str(getattr(entry, "content_type", "") or "") == "knowledge":
+                stale_notes.add(ident)
 
     # nexus-oiu1t: derive the anchor from THIS INSTALL's evidence, floored by
     # the release that first carried full coverage. A release-tag date alone
@@ -11885,7 +11849,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
     anchor = proven_anchor if proven_anchor is not None else earliest_stamped_dt
     post_anchor = [c for c in candidates if anchor is not None and c[1] > anchor]
 
-    return _stale_fence_rows(cat, label, _FenceFacts(
+    return _FenceFacts(
         stale_total=len(stale),
         stale_shown=[(ident, age, ident in stale_notes) for ident, age in stale[:10]],
         stale_notes=len(stale_notes),
@@ -11896,7 +11860,13 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
         anchor=anchor, proven=proven_anchor is not None, run_ids_dropped=run_ids_dropped,
         nothing_to_assess=("skipped (engine does not report index_state — predates "
                            "the index-run fence)"),
-    ))
+    )
+
+
+def _stale_fence_rows_over(documents: list[Any], cat: Any = None) -> list[HealthResult]:
+    """The oracle's stale-fence row: :func:`_fence_facts_from_documents` rendered by :func:`_stale_fence_rows`, the
+    function the route-fed row renders through. *cat* is read for owner kinds and repo roots only (``None``: none)."""
+    return _stale_fence_rows(cat, _STALE_FENCES_LABEL, _fence_facts_from_documents(documents))
 
 
 def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult]:
@@ -12637,144 +12607,75 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
     )]
 
 
-def _check_next_seq_drift(documents: list[Any] | _WalkFailed | None = None) -> list[HealthResult]:
-    """Name owners whose tumbler allocator has fallen BEHIND its own children
-    (nexus-0ehwe item 4).
+def _drifted_owners(
+    owners: list[dict], documents: list[Any], tombstoned: list[str] | tuple[str, ...] = (),
+) -> tuple[int, list[tuple[str, int, int]]]:
+    """``(owners checked, [(owner, next_seq, highest child)] drifted)``: the Python oracle for the rule the engine's
+    ``GET /v1/catalog/owners/next_seq_drift`` computes in SQL and ``next-seq-drift-cases.json`` holds it to
+    (nexus-0ehwe item 4, nexus-f3yqd.6). Pure: no catalog, no request.
 
-    THE WEDGE THIS SURFACES. ``registerDocument`` claims
-    ``catalog_owners.next_seq`` and inserts; the INSERT's only ON CONFLICT
-    arbiter is ``(tenant_id, source_uri)``, but the only unique key on
-    ``catalog_documents`` is ``(tenant_id, tumbler)`` — so a tumbler collision
-    has no arm and escapes as a bare 409. Pre-fix the counter's increment shared
-    the failing transaction and rolled back WITH it, making one drifted owner a
-    PERMANENT, TOTAL outage for that owner (nexus-pbawi, owner 1.12, fixed by
-    hand).
+    THE WEDGE THIS SURFACES. ``registerDocument`` claims ``catalog_owners.next_seq`` and inserts; the INSERT's only
+    ON CONFLICT arbiter is ``(tenant_id, source_uri)``, but the only unique key on ``catalog_documents`` is
+    ``(tenant_id, tumbler)``, so a tumbler collision has no arm and escapes as a bare 409. Pre-fix the counter's
+    increment shared the failing transaction and rolled back WITH it, making one drifted owner a PERMANENT, TOTAL
+    outage for that owner (nexus-pbawi, owner 1.12, fixed by hand). The engine now floors the claim past any drift,
+    so a drifted owner self-heals on its next registration; this row exists because self-healing is silent.
 
-    The engine now floors the claim past any drift, so a drifted owner
-    SELF-HEALS on its next registration rather than wedging. This check exists
-    because self-healing is silent: it reports which owners are ALREADY below
-    their high-water mark, so the blast radius is known rather than guessed, and
-    so an owner that never gets written to again does not sit drifted forever.
-
-    Counts TOMBSTONED children: the ``(tenant_id, tumbler)`` PK does not exclude
-    soft-deleted rows the way the partial ``source_uri`` index does, so a
-    deleted document's tumbler is still taken.
-
-    Read-only, per the RDR-185 rung shape. Degrades to a skip — a doctor check
-    must never crash the command it is diagnosing.
+    Counts TOMBSTONED children (*tombstoned*, their tumblers): the ``(tenant_id, tumbler)`` PK does not exclude
+    soft-deleted rows the way the partial ``source_uri`` index does, so a deleted document's tumbler is still taken.
     """
-    label = _NEXT_SEQ_LABEL
-    try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
-
-        cat = make_catalog_reader()
-        if cat is None:
-            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
-        # nexus-cw262 (round-3 critique, T2 21467 Significant-3): list_owners()
-        # defaults to excluding deactivated owners now that the flag exists —
-        # include_deactivated=True preserves this check's PRIOR coverage
-        # (every owner, always) rather than silently narrowing it. Mirrors
-        # CatalogRepository.sweepNextSeqDrift's own deliberate choice to keep
-        # covering deactivated owners: "a deactivated owner can still receive
-        # late-arriving writes via an explicit tumbler_prefix (e.g. ETL
-        # replay)" — next_seq drift-floor visibility is orthogonal to owner
-        # liveness, same as the engine-side sweep this check watches.
-        owners = cat.list_owners(include_deactivated=True)
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.debug("doctor_next_seq_check_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
-
-    if not owners:
-        return [HealthResult(label=label, ok=True, detail="skipped (no owners)")]
-    if not any("next_seq" in o for o in owners):
-        # NON-VACUITY: an engine that predates nexus-0ehwe item 3 omits the
-        # field entirely, and every owner would then read as drift-free. Say so
-        # rather than render an all-clear this check cannot actually support.
-        return [HealthResult(
-            label=label, ok=True,
-            detail="skipped (engine does not report next_seq — needs the "
-                   "nexus-0ehwe engine change)",
-        )]
-
-    # ONE corpus pass for every owner at once. This loop called
-    # _highest_child_seq (a full all_documents walk) PER OWNER — 65 owners x
-    # ~22k documents = ~1.4M records over the managed API per doctor run,
-    # measured at 218s of a 224s doctor (nexus-ohxzu). The max-seq for every
-    # prefix falls out of a single walk.
-    # One shared walk serves all owners, which also means one mid-walk
-    # failure would blank drift visibility for EVERY owner (the old
-    # per-owner walks failed independently). Retry once before conceding,
-    # and say so at WARNING — a check with a total-outage history
-    # (nexus-pbawi) must not vanish at debug level.
-    highs: dict[str, int] | None = None
-    # The doctor run's shared walk (*documents*) was already retried by _walk_documents_for_doctor, and a
-    # walk that failed there is not repeated here; called alone, the row walks and retries as before.
-    for attempt in (1, 2):
-        try:
-            highs = _highest_child_seqs(cat, documents)
-            break
-        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-            _log.warning(
-                "doctor_next_seq_scan_failed", attempt=attempt, error=str(exc),
-            )
-            if documents is not None:
-                break  # a shared list, or a shared walk that failed, does not change on a retry
-    if highs is None:
-        return [HealthResult(
-            label=label, ok=True,
-            detail="skipped (corpus scan failed twice — drift not assessed "
-                   "for ANY owner this run)",
-        )]
-    # nexus-f3yqd.6: tombstoned children count, as the docstring says and the engine's sweep does.
-    trash = _tombstoned_tumblers(cat)
-    for tumbler in trash or []:
+    highs = _highest_child_seqs(documents)
+    for tumbler in tombstoned:
         prefix, dot, tail = tumbler.rpartition(".")
         if dot and tail.isdigit() and int(tail) > highs.get(prefix, 0):
             highs[prefix] = int(tail)
-    unread = "" if trash is not None else "; tombstoned children not read, so drift a deleted child causes is not seen"
-
     drifted: list[tuple[str, int, int]] = []
     checked = 0
     for owner in owners:
         prefix = str(owner.get("tumbler_prefix", ""))
         if not prefix or "next_seq" not in owner:
             continue
-        try:
-            next_seq = int(owner.get("next_seq") or 0)
-            high = highs.get(prefix, 0)
-        except Exception as exc:  # noqa: BLE001 — one unreadable owner must not end the sweep
-            _log.debug("doctor_next_seq_owner_skipped", owner=prefix, error=str(exc))
-            continue
         checked += 1
-        # STRICTLY less-than. ``next_seq`` holds the LAST CLAIMED sequence, not
-        # the next one to hand out: CatalogRepository.claimNextSeq computes
-        # ``claim = max(next_seq, high_water) + 1`` and stores ``claim``, so
-        # after every successful registration ``next_seq == highest child`` by
-        # construction. Equality is the healthy steady state of every owner
-        # that has ever been written to; only a counter that has fallen BELOW
-        # its own high-water mark is drift, which is what this docstring says
-        # and what the engine's own ``next_seq_drift_healed`` log keys on
-        # (it fires when ``claim != next_seq + 1``, i.e. high_water > next_seq).
-        #
-        # This was ``<=`` (nexus-k5sdi), which flagged every healthy owner. It
-        # went unnoticed because the check skipped entirely against engines that
-        # did not report next_seq, and no test covered the equality boundary.
+        next_seq = int(owner.get("next_seq") or 0)
+        high = highs.get(prefix, 0)
+        # STRICTLY less-than. ``next_seq`` holds the LAST CLAIMED sequence, not the next one to hand out:
+        # CatalogRepository.claimNextSeq computes ``claim = max(next_seq, high_water) + 1`` and stores ``claim``, so
+        # after every successful registration ``next_seq == highest child`` by construction. Equality is the
+        # healthy steady state of every owner that has ever been written to; only a counter that has fallen BELOW
+        # its own high-water mark is drift, which is what the engine's own ``next_seq_drift_healed`` log keys on
+        # (it fires when ``claim != next_seq + 1``, i.e. high_water > next_seq). This was ``<=`` (nexus-k5sdi),
+        # which flagged every healthy owner; no test covered the equality boundary.
         if high and next_seq < high:
             drifted.append((prefix, next_seq, high))
+    return checked, drifted
 
-    if checked == 0:
-        return [HealthResult(label=label, ok=True, detail="skipped (no owner was readable)")]
-    return _next_seq_drift_rows(label, checked=checked, drifted=drifted, drifted_total=len(drifted), unread=unread)
+
+def _next_seq_drift_rows_over(
+    owners: list[dict], documents: list[Any], tombstoned: list[str] | tuple[str, ...] = (),
+) -> list[HealthResult]:
+    """The oracle's allocator-drift row: :func:`_drifted_owners` rendered by :func:`_next_seq_drift_rows`, the
+    function the route-fed row renders through."""
+    if owners and not any("next_seq" in o for o in owners):
+        # NON-VACUITY: an engine that predates nexus-0ehwe item 3 omits the field entirely, and every owner would then
+        # read as drift-free. Say so rather than render an all-clear this row cannot support.
+        return [HealthResult(
+            label=_NEXT_SEQ_LABEL, ok=True,
+            detail="skipped (engine does not report next_seq — needs the nexus-0ehwe engine change)",
+        )]
+    checked, drifted = _drifted_owners(owners, documents, tombstoned)
+    return _next_seq_drift_rows(_NEXT_SEQ_LABEL, checked=checked, drifted=drifted, drifted_total=len(drifted))
 
 
 def _next_seq_drift_rows(
-    label: str, *, checked: int, drifted: list[tuple[str, int, int]], drifted_total: int, unread: str = "",
+    label: str, *, checked: int, drifted: list[tuple[str, int, int]], drifted_total: int,
 ) -> list[HealthResult]:
     """The allocator-drift row from its numbers: *checked* owners, *drifted* the ``(owner, next_seq, highest child)``
     it names and *drifted_total* how many owners drifted (more than it names when the engine's census was capped)."""
+    if checked == 0:
+        return [HealthResult(label=label, ok=True, detail="skipped (no owners)")]
     if not drifted_total:
         return [HealthResult(
-            label=label, ok=True, detail=f"none ({checked} owner(s) checked{unread})",
+            label=label, ok=True, detail=f"none ({checked} owner(s) checked)",
         )]
 
     names = "; ".join(
@@ -12797,94 +12698,30 @@ def _next_seq_drift_rows(
     )]
 
 
-class _WalkFailed:
-    """Passed to the document-list rows when the doctor run's one catalog walk failed, so no row walks again."""
+def _failed_hidden_rows_over(documents: list[Any], cat: Any) -> list[HealthResult]:
+    """The oracle's failed-runs row over *documents*: the failed ones (``index_state='failed'``) whose stored chunks
+    have no manifest owner (nexus-0ntxj, nexus-f3yqd.6).
 
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return "<catalog walk failed>"
+    An index run upserts chunks before their manifest rows. When it fails between the two, the chunks stay stored
+    with no owner, and engine v0.1.137's live(c) hides them from every read (measured 2026-09-28, shakeout 7.64.1:
+    FootPrintRAGVA 1.82.146/147, 395 chunks, repaired by hand with ``nx catalog reconcile``). Since RDR-223 every
+    writer sends a chunk with its owner row, so a failed run no longer leaves ownerless chunks; this row finds what
+    remains: a failed document written before the combined write, or by a client older than it. It covers documents
+    with no manifest yet (a failed first run); a failed re-index keeps its old, readable manifest and is not counted.
 
-
-#: The shared walk failed (twice): each row degrades to a "skipped" row instead of re-walking a catalog
-#: that just failed to list (a re-walk from each of three rows is the load that saturated the edge).
-_WALK_FAILED = _WalkFailed()
-
-
-def _doc_list(cat: Any, documents: list[Any] | _WalkFailed | None) -> Any:
-    """The document list a row reads: the run's shared walk when given, its own walk when called alone
-    (``documents is None``), and a raise (each row's handler reports "skipped") when the shared walk failed."""
-    if documents is _WALK_FAILED:
-        raise RuntimeError("the catalog walk failed earlier in this doctor run")
-    return documents if documents is not None else cat.all_documents(limit=0)
-
-
-def _walk_documents_for_doctor() -> list | None:
-    """Every catalog document, walked ONCE per doctor run for the rows that read the whole list (stale
-    index-run fences, failed runs with hidden chunks, tumbler allocator drift), or ``None`` when the walk
-    cannot run (``run_health_checks`` then hands the rows :data:`_WALK_FAILED`, so none walks again).
-
-    One walk is 44 paged requests on a 43.7k-document tenant; three rows each walking were three times
-    that, plus the upgrade ladder's own scan (shakedown 7.94.0 class A, nexus-mq980). A mid-walk failure
-    blanks all three rows, so it is retried once and said at WARNING, as the drift row did when it
-    walked alone (nexus-pbawi).
+    Runs the shared heal core in dry-run mode over the failed documents, so the count is the number of documents
+    ``nx catalog reconcile`` would repair: ``heal_manifest_gaps(dry_run=True).reconciled``, the number the engine's
+    ``failed_hidden.count`` equals (``index-run-census-cases.json`` holds the SQL to it). ``nx doctor`` reads the
+    engine's census instead of running this, so it runs only where a test holds the engine's rule to the heal's.
     """
-    try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: manifest_heal imports the indexer
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
 
-        cat = make_catalog_reader()
-    except Exception as exc:  # noqa: BLE001 — best-effort: each row degrades on its own
-        _log.debug("doctor_document_walk_failed", error=str(exc))
-        return None
-    if cat is None:
-        return None
-    for attempt in (1, 2):
-        try:
-            return list(cat.all_documents(limit=0))
-        except Exception as exc:  # noqa: BLE001 — best-effort: each row degrades on its own
-            _log.warning("doctor_document_walk_failed", attempt=attempt, error=str(exc))
-    return None
-
-
-def _check_failed_runs_hidden_chunks(documents: list[Any] | _WalkFailed | None = None) -> list[HealthResult]:
-    """Name failed documents whose stored chunks have no manifest owner
-    (nexus-0ntxj).
-
-    An index run upserts chunks before their manifest rows. When it fails
-    between the two, the chunks stay stored with no owner, and engine
-    v0.1.137's live(c) hides them from every read. Measured 2026-09-28
-    (shakeout 7.64.1): FootPrintRAGVA 1.82.146/147, 395 chunks, repaired
-    by hand with ``nx catalog reconcile``. Since RDR-223 every writer sends a chunk with its
-    owner row, so a failed run no longer leaves ownerless chunks and ``_fence_fail`` no longer heals
-    (the heal was retired, nexus-z0o2p.35); this row finds what remains: a failed document written
-    before the combined write, or by a client older than it. Like the old heal, it covers documents
-    with no manifest yet (a failed first run); a failed re-index keeps its old, readable manifest
-    and is not counted.
-
-    Walks the corpus for ``index_state='failed'`` documents, then runs the
-    shared heal core in dry-run mode over just those, so the count is the
-    number of documents ``nx catalog reconcile`` would repair. Read-only;
-    degrades to a skip.
-    """
-    label = _HIDDEN_CHUNKS_LABEL
-    try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
-        from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: manifest_heal imports the indexer
-        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
-
-        cat = make_catalog_reader()
-        if cat is None:
-            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
-        failed = [
-            e for e in _doc_list(cat, documents)
-            if getattr(e, "index_state", None) == "failed"
-        ]
-        if not failed:
-            return [HealthResult(label=label, ok=True, detail="not applicable (no failed index runs)")]
-        result = heal_manifest_gaps(failed, cat, make_t3, None, dry_run=True)
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.debug("doctor_failed_runs_hidden_chunks_check_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (catalog or T3 unavailable)")]
-
-    return _failed_hidden_rows(label, failed=len(failed), hidden=result.reconciled, capped=False)
+    failed = [e for e in documents if getattr(e, "index_state", None) == "failed"]
+    if not failed:
+        return _failed_hidden_rows(_HIDDEN_CHUNKS_LABEL, failed=0, hidden=0, capped=False)
+    result = heal_manifest_gaps(failed, cat, make_t3, None, dry_run=True)
+    return _failed_hidden_rows(_HIDDEN_CHUNKS_LABEL, failed=len(failed), hidden=result.reconciled, capped=False)
 
 
 def _failed_hidden_rows(label: str, *, failed: int, hidden: int, capped: bool) -> list[HealthResult]:
@@ -12917,48 +12754,11 @@ def _failed_hidden_rows(label: str, *, failed: int, hidden: int, capped: bool) -
     )]
 
 
-#: Page size for the tombstone read in :func:`_tombstoned_tumblers`.
-_TRASH_PAGE = 500
-
-
-def _tombstoned_tumblers(cat: Any) -> list[str] | None:
-    """Every tombstoned document's tumbler (``GET /trash``, paged), or ``None`` when it cannot be read.
-
-    The live walk filters ``deleted_at IS NULL``, but a tombstoned tumbler is still taken (the unique key is
-    ``(tenant_id, tumbler)``) and the engine's ``highestChildSeq`` counts it (nexus-f3yqd.6)."""
-    tumblers: list[str] = []
-    seen: set[str] = set()
-    offset = 0
-    try:
-        while True:
-            page = cat.list_trash(limit=_TRASH_PAGE, offset=offset)
-            if not isinstance(page, list):
-                return None
-            batch = [str(d.get("tumbler", "") or "") for d in page if isinstance(d, dict)]
-            # A short page ends it; so does an empty one, or a repeat of the last page's first row (an engine
-            # that ignored ``offset`` would otherwise loop for ever).
-            if not batch or (tumblers and batch[0] in seen):
-                return tumblers
-            tumblers.extend(batch)
-            seen.update(batch)
-            if len(page) < _TRASH_PAGE:
-                return tumblers
-            offset += len(page)
-    except Exception as exc:  # noqa: BLE001 — an unreadable trash narrows the row, never crashes it
-        _log.warning("doctor_next_seq_trash_unread", error=str(exc))
-        return None
-
-
-def _highest_child_seqs(cat: Any, documents: list[Any] | _WalkFailed | None = None) -> dict[str, int]:
-    """Highest numeric child sequence per owner prefix, tombstones INCLUDED.
-
-    One ``all_documents`` walk for ALL owners, or none when *documents* (the doctor run's shared walk) is given. The predecessor
-    (``_highest_child_seq(cat, prefix)``) re-walked the full corpus per
-    owner — O(owners x documents) over the managed API (nexus-ohxzu:
-    218s of a 224s doctor on 65 owners x ~22k docs).
-    """
+def _highest_child_seqs(documents: list[Any]) -> dict[str, int]:
+    """Highest numeric child sequence per owner prefix among *documents* (a child is ``<prefix>.<digits>``; a deeper
+    address and a non-digit tail are not children)."""
     best: dict[str, int] = {}
-    for entry in _doc_list(cat, documents):
+    for entry in documents:
         tumbler = str(getattr(entry, "tumbler", "") or "")
         prefix, dot, tail = tumbler.rpartition(".")
         if not dot or not tail.isdigit():
@@ -13058,7 +12858,7 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
     from ``topic_assignments`` and self-heals on the engine's next restart.
     This check exists because that healing is SILENT until the operator
     restarts: it names the blast radius so it is known rather than guessed,
-    the same framing as :func:`_check_next_seq_drift`. The remedy this check
+    the same framing as :func:`_drifted_owners`. The remedy this check
     names is repeatable and does not require a restart: `nx taxonomy audit
     --fix-doc-count` calls the SAME engine-side recount on demand (`--yes`
     to apply, dry-run by default) — useful when drift reappears from a fresh
@@ -13069,7 +12869,7 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
     Critical/Important finding on the prior version of this check, which
     looped one HTTP GET per topic via ``count_assignments`` against an
     unbounded ``get_all_topics()``: the exact N+1-per-item anti-pattern
-    :func:`_check_next_seq_drift`'s own header documents as a past incident,
+    :func:`_drifted_owners`'s own header documents as a past incident,
     "65 owners x ~22k documents ... measured at 218s of a 224s doctor",
     nexus-ohxzu). This check now calls
     :meth:`HttpTaxonomyStore.get_doc_count_drift` exactly ONCE — the engine
@@ -13083,7 +12883,7 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
     connectivity failure, an empty drift set, or a pre-route engine (the
     ``/topics/doc_count_drift`` route the check depends on) — a pre-route
     engine must report the row as UNREAD, never clean (mirrors
-    :func:`_check_next_seq_drift`'s own next_seq-absent skip). A doctor check
+    :func:`_drifted_owners`'s own next_seq-absent skip). A doctor check
     must never crash the command it is diagnosing.
     """
     import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
@@ -13416,18 +13216,17 @@ _HIDDEN_CHUNKS_LABEL = "failed index runs with hidden chunks"
 _NEXT_SEQ_LABEL = "tumbler allocator drift"
 
 
-def _index_run_rows_not_checked() -> list[HealthResult]:
-    """The default sweep's index-run rows (F30, nexus-f3yqd.6): marked not checked (``[ ]``), never a pass or
-    a warning, so a fresh install's doctor stays clean, and each names the flag that runs it."""
-    detail = ("not checked in the default sweep (it reads every catalog document); "
-              "run `nx doctor --check-index-runs`")
-    return [HealthResult(label=label, ok=True, detail=detail, skipped=True)
-            for label in (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL, _NEXT_SEQ_LABEL)]
-
-
-def _not_checked_row(label: str, why: str) -> HealthResult:
+def _not_checked_row(label: str, why: str, *, retry: bool = True) -> HealthResult:
     """A row the engine's census could not answer: not checked (``[ ]``), never a pass or a warning."""
-    return HealthResult(label=label, ok=True, skipped=True, detail=f"not checked: {why}; the next `nx doctor` asks again.")
+    return HealthResult(label=label, ok=True, skipped=True,
+                        detail=f"not checked: {why}" + ("; the next `nx doctor` asks again." if retry else ""))
+
+
+_INDEX_RUN_LABELS = (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL, _NEXT_SEQ_LABEL)
+#: Why the rows are not checked against an engine that does not advertise both census routes. Retrying changes
+#: nothing until the engine (or the public edge's ``/version`` allowlist) does.
+_NEEDS_CENSUS_ENGINE = ("needs engine 0.1.190 or later (its /version does not advertise "
+                        "catalog_index_run_census_supported and catalog_next_seq_drift_read_supported)")
 
 
 _CENSUS_UNANSWERED = ("the engine did not answer its bounded census read (an engine without the route, a public edge that "
@@ -13440,7 +13239,7 @@ def _instant(value: str) -> datetime:
 
 def _stale_fence_rows_from_census(cat: Any, label: str, census: dict) -> list[HealthResult]:
     """The stale-fence row from the engine's ``stale`` and ``fence`` buckets (``HttpCatalogClient.index_run_census``),
-    rendered by :func:`_stale_fence_rows`, the function the walk's row renders through. A bucket that timed out is
+    rendered by :func:`_stale_fence_rows`, the function the oracle's row renders through. A bucket that timed out is
     not checked: the other bucket's findings still show, and the row never says "none" for what was not read."""
     stale, fence = census["stale"], census["fence"]
     stale_out, fence_out = bool(stale.get("timed_out")), bool(fence.get("timed_out"))
@@ -13495,33 +13294,37 @@ def _failed_hidden_rows_from_census(label: str, bucket: dict) -> list[HealthResu
 
 def _next_seq_drift_rows_from_route(label: str, drift: dict) -> list[HealthResult]:
     """The allocator-drift row from the engine's read-only drift list (``HttpCatalogClient.next_seq_drift``)."""
-    if drift["checked"] == 0:
-        return [HealthResult(label=label, ok=True, detail="skipped (no owners)")]
     return _next_seq_drift_rows(
         label, checked=drift["checked"], drifted_total=drift["drifted"],
         drifted=[(e["owner"], e["next_seq"], e["highest_child_seq"]) for e in drift["examples"]])
 
 
 def _check_index_run_routes() -> list[HealthResult]:
-    """The three index-run rows read from the engine's census routes (engine 0.1.190, nexus-f3yqd.6), or ``[]`` when
-    the engine does not answer both routes (a missing ``catalog_index_run_census_supported`` or
-    ``catalog_next_seq_drift_read_supported`` flag, no catalog reader): the caller then keeps the rows it had before,
-    the default sweep's "not checked" and ``--check-index-runs``'s walk.
+    """The three index-run rows (stale index-run fences, failed runs with hidden chunks, tumbler allocator drift) read
+    from the engine's census routes (engine 0.1.190, nexus-f3yqd.6): two bounded requests, no catalog walk. Always
+    returns the three labels (the stale-fence row may carry more than one row), and never raises.
 
-    With both flags set the rows always come back, and every way the engine cannot say (a 404 or 503, a bucket that
-    timed out, a malformed body, a failed request) is a not-checked row: ok, never a warning, never "none".
-    Two requests, no catalog walk. Never raises."""
+    An engine that does not advertise both ``catalog_index_run_census_supported`` and
+    ``catalog_next_seq_drift_read_supported`` (an older engine, or a public edge whose ``/version`` allowlist does
+    not list them) gets three not-checked rows that say it needs engine 0.1.190 or later. Every way the engine
+    cannot say with the flags set (a 404 or 503, a bucket that timed out, a malformed body, a failed request, no
+    catalog reader) is likewise a not-checked row: ok and skipped, never a warning, never "none"."""
+    def _all_not_checked(why: str, *, retry: bool = True) -> list[HealthResult]:
+        return [_not_checked_row(label, why, retry=retry) for label in _INDEX_RUN_LABELS]
+
     try:
         from nexus.catalog.http_catalog_client import INDEX_RUN_CENSUS_MAX_LIMIT  # noqa: PLC0415 — deferred to avoid circular import
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
 
         cat = make_catalog_reader()
+        if cat is None:
+            return _all_not_checked("no catalog reader")
         supported = getattr(cat, "index_run_routes_supported", None)
-        if cat is None or not callable(supported) or supported() is not True:
-            return []
-    except Exception as exc:  # noqa: BLE001 — an optional fast path; the caller keeps its other rows
+        if not callable(supported) or supported() is not True:
+            return _all_not_checked(_NEEDS_CENSUS_ENGINE, retry=False)
+    except Exception as exc:  # noqa: BLE001 — a row that cannot be read is not checked, never a crash
         _log.debug("doctor_index_run_routes_unavailable", error=str(exc))
-        return []
+        return _all_not_checked("the catalog reader could not be built")
 
     def _ask(method: str) -> dict | None:
         try:
@@ -13542,25 +13345,14 @@ def _check_index_run_routes() -> list[HealthResult]:
                  else [_not_checked_row(_NEXT_SEQ_LABEL, _CENSUS_UNANSWERED.replace("census", "next_seq drift"))])
     except Exception as exc:  # noqa: BLE001 — a body the client accepted but the row cannot render is not a crash
         _log.warning("doctor_index_run_routes_render_failed", error=str(exc))
-        return [_not_checked_row(label, _CENSUS_UNANSWERED)
-                for label in (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL, _NEXT_SEQ_LABEL)]
+        return _all_not_checked(_CENSUS_UNANSWERED)
     return rows
 
 
 def run_index_run_checks() -> list[HealthResult]:
-    """``nx doctor --check-index-runs``: the three rows, read from the engine's census routes when it has them
-    (:func:`_check_index_run_routes`), else over one catalog walk (an engine before 0.1.190)."""
-    routed = _check_index_run_routes()
-    if routed:
-        return routed
-    documents: list[Any] | _WalkFailed | None = _walk_documents_for_doctor()
-    if documents is None:
-        documents = _WALK_FAILED
-    return [
-        *_check_stale_indexing_runs(documents),
-        *_check_failed_runs_hidden_chunks(documents),
-        *_check_next_seq_drift(documents),
-    ]
+    """``nx doctor --check-index-runs``: the three index-run rows alone, read from the engine's census routes as the
+    default sweep reads them (:func:`_check_index_run_routes`; engine 0.1.190 or later)."""
+    return _check_index_run_routes()
 
 
 def run_health_checks(
@@ -13572,11 +13364,10 @@ def run_health_checks(
 ) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
-    The three rows that read every catalog document (stale index-run fences, failed runs with hidden chunks,
-    allocator drift; one walk, 22 s measured on a laptop tenant) are read from the engine's two census routes when it
-    has them (0.1.190: two bounded requests, :func:`_check_index_run_routes`). Against any other engine they report
-    "not checked" here and name ``nx doctor --check-index-runs``, which walks for them through
-    :func:`run_index_run_checks` (F30, nexus-f3yqd.6).
+    The three index-run rows (stale index-run fences, failed runs with hidden chunks, allocator drift) are read from
+    the engine's two census routes: two bounded requests, no catalog walk (the walk took 22 s on a laptop tenant;
+    :func:`_check_index_run_routes`, F30, nexus-f3yqd.6). An engine before 0.1.190 gets three not-checked rows that
+    say so.
 
     ``git_hooks_scope``: forwarded to :func:`_check_git_hooks` (nexus-jds59)
     to restrict the git-hooks stanza-drift walk to repos at or under the
@@ -13671,31 +13462,22 @@ def run_health_checks(
     # nexus-5xn3k.6 (bead-text amendment): a document's fence never
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).
-    # nexus-0ntxj: one corpus walk feeds both index-run rows (the second
-    # row would otherwise add a walk; nexus-ft7eg tracks the others). A
-    # failed walk here passes None and each check walks, and degrades, alone.
-    # Shakedown 7.94.0 class A: the allocator-drift row below reads the same list, so ONE walk feeds all
-    # three rows (it walked on its own before).
-    # nexus-mjmjl: the corpus walk is the sweep's longest stretch on a big tenant; a named step.
-    # F30 (nexus-f3yqd.6): no catalog walk here; `nx doctor --check-index-runs` runs these rows over a walk.
-    # An engine with both census routes (0.1.190) answers all three rows in two bounded requests, so they run here;
-    # any other engine leaves them "not checked" and `nx doctor --check-index-runs` walks for them.
+    # F30 (nexus-f3yqd.6): the three index-run rows come from the engine's two census routes (0.1.190), not from a
+    # walk of every catalog document (22 s on a laptop tenant); an engine without them leaves three not-checked rows.
     index_run_rows: dict[str, list[HealthResult]] = {}
     for row in _step("_check_index_run_routes", lambda: _check_index_run_routes()):
         index_run_rows.setdefault(row.label, []).append(row)
-    if not index_run_rows:
-        index_run_rows = {r.label: [r] for r in _index_run_rows_not_checked()}
-    results.extend(index_run_rows[_STALE_FENCES_LABEL])
+    results.extend(index_run_rows.get(_STALE_FENCES_LABEL, []))
     # nexus-0ntxj: a failed run's chunks stored with no manifest owner are
-    # hidden by live(c). Degrades internally.
-    results.extend(index_run_rows[_HIDDEN_CHUNKS_LABEL])
+    # hidden by live(c).
+    results.extend(index_run_rows.get(_HIDDEN_CHUNKS_LABEL, []))
     # nexus-rte90: PDF chunks left with the upload placeholder metadata
     # (nexus-w94eo). Degrades internally.
     results.extend(_step("_check_pdf_stub_metadata", lambda: _check_pdf_stub_metadata()))
     # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
     # their own children. Self-healing is silent, so the blast radius must
     # be reportable rather than guessed.
-    results.extend(index_run_rows[_NEXT_SEQ_LABEL])
+    results.extend(index_run_rows.get(_NEXT_SEQ_LABEL, []))
     # nexus-c0g6e (GH #1529): topics whose cached doc_count disagrees with
     # the real topic_assignments count (6.18.1-era import drift, predating
     # taxonomy-013's recompute triggers). Self-heals on the engine's next

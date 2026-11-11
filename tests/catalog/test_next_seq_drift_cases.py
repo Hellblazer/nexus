@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-f3yqd: the client's allocator-drift row answers the shared next_seq table.
 
-``nx doctor`` finds owners whose tumbler allocator has fallen behind their own children with
-``nexus.health._check_next_seq_drift`` (a walk of every live document and the trash list; tombstoned children count, as
-the engine's floor does, nexus-f3yqd.6). The engine route ``GET /v1/catalog/owners/next_seq_drift`` answers the same
-question in one bounded read, with the computation ``POST /owners/sweep_next_seq_drift`` floors by. The two halves are
-written in different languages, so one table (``service/src/test/resources/next-seq-drift-cases.json``) is read by both:
-the Java ``NextSeqDriftParityTest`` holds the SQL to it (and the sweep to the route), and this test holds the client row to
-it, case by case, through the real function a doctor run calls. A change to either rule that the other does not follow
-fails one of the two.
+``nx doctor`` finds owners whose tumbler allocator has fallen behind their own children from the engine route
+``GET /v1/catalog/owners/next_seq_drift``, one bounded read with the computation ``POST /owners/sweep_next_seq_drift``
+floors by (tombstoned children count, nexus-f3yqd.6). The same rule, written in Python over a list of documents and the
+tombstoned tumblers, is the oracle: ``nexus.health._next_seq_drift_rows_over``. The two halves are written in different
+languages, so one table (``service/src/test/resources/next-seq-drift-cases.json``) is read by both: the Java
+``NextSeqDriftParityTest`` holds the SQL to it (and the sweep to the route), and this test holds the oracle to it, case by
+case. ``test_index_run_census_route_parity.py`` then holds the route-fed row to the oracle's. A change to either rule that
+the other does not follow fails one of them.
 """
 from __future__ import annotations
 
@@ -28,27 +28,14 @@ def _cases() -> list[dict]:
     return json.loads(_TABLE.read_text(encoding="utf-8"))["cases"]
 
 
-class _Catalog:
-    """The owners (deactivated ones too, as the row asks) and the trash list, paged, as the catalog answers them."""
-
-    def __init__(self, case: dict) -> None:
-        self._owners = [{"tumbler_prefix": o["prefix"], "next_seq": o["next_seq"]} for o in case["owners"]]
-        self._trash = [{"tumbler": t} for t in case["tombstoned"]]
-
-    def list_owners(self, include_deactivated: bool = False) -> list:
-        assert include_deactivated, "the row covers deactivated owners, as the sweep does"
-        return self._owners
-
-    def list_trash(self, *, limit: int, offset: int) -> list:
-        return self._trash[offset:offset + limit]
+def _owners(case: dict) -> list[dict]:
+    """Every owner, deactivated ones too, as the sweep examines them."""
+    return [{"tumbler_prefix": o["prefix"], "next_seq": o["next_seq"]} for o in case["owners"]]
 
 
-def _row(monkeypatch: pytest.MonkeyPatch, case: dict) -> health.HealthResult:
-    from nexus.catalog import factory
-
-    monkeypatch.setattr(factory, "make_catalog_reader", lambda *a, **k: _Catalog(case))
+def _row(case: dict) -> health.HealthResult:
     walk = [SimpleNamespace(tumbler=t) for t in case["live"]]
-    [row] = health._check_next_seq_drift(walk)
+    [row] = health._next_seq_drift_rows_over(_owners(case), walk, case["tombstoned"])
     return row
 
 
@@ -75,8 +62,8 @@ def test_the_table_is_read_whole() -> None:
 
 
 @pytest.mark.parametrize("case", _cases(), ids=lambda c: c["id"])
-def test_the_client_row_lists_exactly_the_tables_drifted_owners(case: dict, monkeypatch: pytest.MonkeyPatch) -> None:
-    got = _view(_row(monkeypatch, case))
+def test_the_oracle_row_lists_exactly_the_tables_drifted_owners(case: dict) -> None:
+    got = _view(_row(case))
     want = sorted(case["expect"]["drifted"], key=lambda d: d["owner"])
     assert got["drifted"] == want
     if not want:

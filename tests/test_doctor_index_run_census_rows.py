@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """F30 (nexus-f3yqd.6): the doctor's three index-run rows read the engine's census routes (engine 0.1.190).
 
-With both flags (``catalog_index_run_census_supported``, ``catalog_next_seq_drift_read_supported``) the rows run in the
-default sweep from two bounded requests and no catalog walk. Every way the engine cannot say (a 404 or 503, a bucket
-that timed out, a malformed body, a failed request, an unlisted flag) is a not-checked row: ok, skipped, no warning,
-never "none". A capped census with a zero is "not fully checked", never "none". Without the flags the rows are what they
-were: "not checked" in the default sweep, a catalog walk under ``--check-index-runs``.
+The rows run in the default sweep and under ``--check-index-runs`` from two bounded requests and no catalog walk
+(``catalog_index_run_census_supported``, ``catalog_next_seq_drift_read_supported``). Every way the engine cannot say (a
+404 or 503, a bucket that timed out, a malformed body, a failed request, an unlisted flag, no catalog reader) is a
+not-checked row: ok, skipped, no warning, never "none"; a missing flag says the rows need engine 0.1.190 or later. A
+capped census with a zero is "not fully checked", never "none".
 """
 from __future__ import annotations
 
@@ -237,26 +237,37 @@ def test_a_body_the_client_accepted_but_the_row_cannot_render_is_three_not_check
     assert all(_is_not_checked(r) for v in rows.values() for r in v) and len(rows) == 3
 
 
-# ── no routes: the rows are what they were ───────────────────────────────────
+# ── no routes: three not-checked rows that say what they need ───────────────
 
 
 @pytest.mark.parametrize("reader", [
-    None, object(), _Reader(supported=False), type("R", (), {"index_run_routes_supported": lambda self: "yes"})(),
-    type("R", (), {"index_run_routes_supported": lambda self: (_ for _ in ()).throw(RuntimeError("no /version"))})(),
-], ids=["no-reader", "no-method", "flag-false", "flag-not-true", "probe-raises"])
-def test_an_engine_without_both_routes_yields_no_route_rows(monkeypatch: pytest.MonkeyPatch, reader: Any) -> None:
-    _wire(monkeypatch, reader)
-    assert h._check_index_run_routes() == []
+    object(), _Reader(supported=False), type("R", (), {"index_run_routes_supported": lambda self: "yes"})(),
+], ids=["no-method", "flag-false", "flag-not-true"])
+def test_an_engine_without_both_routes_is_three_not_checked_rows_that_need_0_1_190(monkeypatch: pytest.MonkeyPatch, reader: Any) -> None:
+    rows = _rows(monkeypatch, reader)
+    assert list(rows) == list(_LABELS)
+    for label in _LABELS:
+        (r,) = rows[label]
+        assert _is_not_checked(r) and "needs engine 0.1.190 or later" in r.detail, r.detail
     if isinstance(reader, _Reader):
-        assert reader.asked == []
+        assert reader.asked == [] and reader.walks == 0
 
 
-def test_a_reader_that_cannot_be_built_yields_no_route_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("reader", [
+    None, type("R", (), {"index_run_routes_supported": lambda self: (_ for _ in ()).throw(RuntimeError("no /version"))})(),
+], ids=["no-reader", "probe-raises"])
+def test_a_missing_or_unreadable_catalog_is_three_not_checked_rows(monkeypatch: pytest.MonkeyPatch, reader: Any) -> None:
+    rows = _rows(monkeypatch, reader)
+    assert list(rows) == list(_LABELS) and all(_is_not_checked(r) for v in rows.values() for r in v)
+
+
+def test_a_reader_that_cannot_be_built_is_three_not_checked_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*a: Any, **k: Any) -> None:
         raise RuntimeError("no service")
 
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", boom)
-    assert h._check_index_run_routes() == []
+    rows = h._check_index_run_routes()
+    assert [r.label for r in rows] == list(_LABELS) and all(_is_not_checked(r) for r in rows)
 
 
 # ── the sweep and --check-index-runs ─────────────────────────────────────────
@@ -272,14 +283,10 @@ def _sweep(monkeypatch: pytest.MonkeyPatch, reader: Any) -> dict[str, list[h.Hea
         if name.startswith("_check_") and name != "_check_index_run_routes" and callable(getattr(h, name)):
             monkeypatch.setattr(h, name, lambda *a, **k: [])
     monkeypatch.setattr("nexus.db.make_t3", lambda *a, **k: _NoCollections())
-    walked: list[int] = []
-    monkeypatch.setattr(h, "_walk_documents_for_doctor", lambda: (walked.append(1), None)[1])
     _wire(monkeypatch, reader)
-    assert not walked
     out: dict[str, list[h.HealthResult]] = {}
     for r in h.run_health_checks()[0]:
         out.setdefault(r.label, []).append(r)
-    assert not walked, "the default sweep walked the catalog"
     return out
 
 
@@ -289,43 +296,44 @@ def test_the_default_sweep_reads_the_three_rows_from_the_routes_without_a_walk(m
     assert reader.walks == 0 and len(reader.asked) == 2
     assert any("stranded in index_state='indexing'" in r.detail for r in rows[h._STALE_FENCES_LABEL])
     assert not any(r.skipped for label in _LABELS for r in rows[label])
-    assert not any("--check-index-runs" in r.detail for label in _LABELS for r in rows[label])
 
 
-def test_the_default_sweep_on_an_engine_without_the_routes_is_what_it_was(monkeypatch: pytest.MonkeyPatch) -> None:
-    rows = _sweep(monkeypatch, _Reader(_census(), _DRIFT_NONE, supported=False))
+def test_the_default_sweep_on_an_engine_without_the_routes_says_it_needs_0_1_190(monkeypatch: pytest.MonkeyPatch) -> None:
+    reader = _Reader(_census(), _DRIFT_NONE, supported=False)
+    rows = _sweep(monkeypatch, reader)
     for label in _LABELS:
         (r,) = rows[label]
-        assert r.ok is True and r.skipped is True and not r.warn
-        assert r.detail == ("not checked in the default sweep (it reads every catalog document); "
-                            "run `nx doctor --check-index-runs`")
+        assert _is_not_checked(r) and "needs engine 0.1.190 or later" in r.detail and not r.warn
+    assert reader.walks == 0 and reader.asked == []
 
 
-def test_the_default_sweep_with_unanswered_routes_is_not_checked_and_still_no_walk(monkeypatch: pytest.MonkeyPatch) -> None:
-    rows = _sweep(monkeypatch, _Reader(None, None))
+def test_the_default_sweep_with_unanswered_routes_is_not_checked_and_no_walk(monkeypatch: pytest.MonkeyPatch) -> None:
+    reader = _Reader(None, None)
+    rows = _sweep(monkeypatch, reader)
     for label in _LABELS:
         (r,) = rows[label]
-        assert _is_not_checked(r) and "--check-index-runs" not in r.detail
+        assert _is_not_checked(r) and "needs engine" not in r.detail
+    assert reader.walks == 0
 
 
-def test_check_index_runs_reads_the_routes_and_does_not_walk_when_the_engine_has_them(monkeypatch: pytest.MonkeyPatch) -> None:
-    reader = _Reader(_census(), _DRIFT_NONE)
+def test_check_index_runs_is_the_same_three_rows_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    reader = _Reader(_census(_STALE_TWO), _DRIFT_NONE)
     _wire(monkeypatch, reader)
-    walked: list[int] = []
-    monkeypatch.setattr(h, "_walk_documents_for_doctor", lambda: (walked.append(1), [])[1])
     rows = h.run_index_run_checks()
-    assert [r.label for r in rows] == list(_LABELS) and not walked and reader.walks == 0
+    assert [r.label for r in rows][0] == h._STALE_FENCES_LABEL and {r.label for r in rows} == set(_LABELS)
+    assert reader.walks == 0 and len(reader.asked) == 2
 
 
-def test_check_index_runs_walks_as_before_on_an_engine_without_the_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_check_index_runs_on_an_old_engine_needs_0_1_190_and_does_not_walk(monkeypatch: pytest.MonkeyPatch) -> None:
     reader = _Reader(_census(), _DRIFT_NONE, supported=False)
     _wire(monkeypatch, reader)
-    walks: list[int] = []
-    docs: list = []
-    monkeypatch.setattr(h, "_walk_documents_for_doctor", lambda: (walks.append(1), docs)[1])
-    seen: list[object] = []
-    for name, label in zip(("_check_stale_indexing_runs", "_check_failed_runs_hidden_chunks", "_check_next_seq_drift"), _LABELS):
-        monkeypatch.setattr(h, name, lambda d, label=label: (seen.append(d), [h.HealthResult(label=label, ok=True, detail="none")])[1])
     rows = h.run_index_run_checks()
-    assert walks == [1] and seen == [docs, docs, docs] and reader.asked == []
     assert [r.label for r in rows] == list(_LABELS)
+    assert all(_is_not_checked(r) and "needs engine 0.1.190 or later" in r.detail for r in rows)
+    assert reader.walks == 0 and reader.asked == []
+
+
+def test_the_walk_is_retired() -> None:
+    for name in ("_walk_documents_for_doctor", "_WALK_FAILED", "_WalkFailed", "_doc_list", "_index_run_rows_not_checked",
+                 "_check_stale_indexing_runs", "_check_failed_runs_hidden_chunks", "_check_next_seq_drift"):
+        assert not hasattr(h, name), name

@@ -2929,7 +2929,6 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
     "--check-storage-boundary", "--check-post-store-hooks",
     "--check-mineru", "--check-wal-retention", "--check-collection-shape",
     "--check-embeddings", "--check-assignments", "--check-references",
-    "--check-index-runs",
 )
 
 
@@ -3158,10 +3157,9 @@ def _engine_work_lines() -> list[str]:
     "check_index_runs",
     is_flag=True,
     default=False,
-    help="Report stale index-run fences, failed index runs with hidden chunks and tumbler allocator drift. "
-         "An engine with the census routes (0.1.190) answers them in two bounded requests, and the default "
-         "sweep then runs them too. Any other engine is read by walking every catalog document once, which "
-         "the default sweep skips because the read grows with the catalog.",
+    help="Run only the three index-run rows (stale index-run fences, failed index runs with hidden chunks, "
+         "tumbler allocator drift), which the default sweep also runs. They read the engine's census routes "
+         "(two bounded requests); an engine before 0.1.190 reports them not checked.",
 )
 @click.option(
     "--check-plan-library",
@@ -4740,8 +4738,9 @@ def _format_quota_report(report: dict) -> str:
 
 
 def _run_check_index_runs() -> None:
-    """``nx doctor --check-index-runs`` (F30, nexus-f3yqd.6): the three rows the default sweep skips, over one
-    catalog walk, printed and exit-coded as the main sweep prints and exit-codes its rows."""
+    """``nx doctor --check-index-runs`` (F30, nexus-f3yqd.6): the three index-run rows alone, read from the engine's
+    census routes (the default sweep reads them too), printed and exit-coded as the main sweep prints and exit-codes
+    its rows."""
     from nexus.config import is_local_mode  # noqa: PLC0415 — deferred, keeps CLI startup fast
     from nexus.health import format_health_for_cli, health_exit_code, run_index_run_checks  # noqa: PLC0415 — deferred, keeps CLI startup fast
 

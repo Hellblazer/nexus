@@ -167,7 +167,7 @@ class TestRepoIndexKilledMidflushLeavesIndexing:
     arm — ``ChunkBatcher``'s ``on_file_failed`` callback
     (``indexer.py``'s ``_batched_file_failed``) fired but only logged,
     never called ``_fence_fail``. The row was stranded at ``'indexing'``
-    with only the 6h doctor sweep (``_check_stale_indexing_runs``, which
+    with only the 6h doctor sweep (``_stale_fence_rows_over``, which
     fires ONLY for ``state == 'indexing'``) as signal — exactly the
     nexus-bhlfy bug (nexus-tjf7l investigation: 13 ART docs stranded this
     way by a real 504 run).
@@ -294,18 +294,14 @@ class TestRepoIndexKilledMidflushLeavesIndexing:
         # Load-bearing: a CLEANLY-REPORTED failure (state == 'failed', not
         # 'indexing') must NOT trip doctor's stale-'indexing' WARN — that
         # check exists for a run that died silently with no report at all
-        # (health.py's `_check_stale_indexing_runs`: `if state !=
+        # (health.py's `_fence_facts_from_documents`: `if state !=
         # "indexing": continue`). Restating an already-known failure 6h
         # later would be noise, not signal — this is the actual payoff of
         # the fail-arm fix (T1 scratch nexus-tjf7l investigation).
         import nexus.health as health
 
         monkeypatch.setattr(health, "_STALE_INDEXING_THRESHOLD_HOURS", 0.0)
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda *a, **k: cat, raising=False,
-        )
-        results = health._check_stale_indexing_runs()
+        results = health._stale_fence_rows_over(list(cat.all_documents(limit=0)), cat)
         warns = [r for r in results if r.warn and r.ok is False]
         assert not warns, (
             f"a cleanly fence-failed document ('failed', not 'indexing') "

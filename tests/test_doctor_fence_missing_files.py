@@ -26,9 +26,6 @@ def _entry(*, index_state: str | None, indexed_at: str, tumbler: str, file_path:
 
 def _run(monkeypatch: pytest.MonkeyPatch, entries: list[Any], owners: list[dict], roots: dict[str, str] | Exception) -> h.HealthResult:
     class _Cat:
-        def all_documents(self, limit: int = 0) -> list[Any]:
-            return list(entries)
-
         def list_owners(self, *, include_deactivated: bool = False) -> list[dict]:
             return owners
 
@@ -37,8 +34,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, entries: list[Any], owners: list[dict]
                 raise roots
             return roots
 
-    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: _Cat(), raising=False)
-    return h._check_stale_indexing_runs()[0]
+    return h._stale_fence_rows_over(list(entries), _Cat())[0]
 
 
 _BASELINE = _entry(index_state="complete", indexed_at="2026-08-07T17:00:00+00:00", tumbler="1.22.1", file_path="src/Base.java")
