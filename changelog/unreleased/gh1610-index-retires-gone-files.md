@@ -1,0 +1,3 @@
+### Fixed
+
+- **A full `nx index repo` retires documents whose files were deleted, in one run** (GH #1610). The engine's sweep retired a missing file only after it had been missed by two complete walks, and the owner's recorded git head moved past the deletion in the first, so no later delta run named the file again. A repo kept current by the commit hook never ran the second complete walk, and its deleted files stayed in the catalog with their chunks. A complete walk from the main checkout now retires, in the same run, each document whose file git no longer tracks and that no longer exists on disk; a worktree run, a moved repository, or any failure to tell keeps the two-walk rule. The retirement is a soft delete, which `nx catalog restore` undoes.

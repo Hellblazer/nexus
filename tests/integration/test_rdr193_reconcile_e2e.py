@@ -162,6 +162,16 @@ def test_a_delta_run_with_a_deleted_file_trashes_it_and_touches_no_unvisited_row
     for p in unvisited:
         assert after[p] == before[p], f"{p} was not in the delta and was touched"
 
+    # GH #1610: a file deleted outside any delta (the owner's head already past it) is retired by ONE complete walk
+    # from the main checkout, not left at miss_count=1 for a second complete walk a hook-driven install never runs.
+    (repo / "docs" / "notes.md").unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "delete notes")
+    _index(repo, local_t3, monkeypatch)
+    rows = _rows()
+    assert "docs/notes.md" not in rows, "a complete walk retires a file that is gone from the main checkout"
+    assert "docs/guide.md" in rows and "src/app.py" in rows, "files still there are kept"
+
 
 def test_the_commit_does_not_move_the_owner_head_hash_but_the_run_end_does(
     tmp_path: Path, catalog_env: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,

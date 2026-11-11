@@ -1229,6 +1229,44 @@ def _register_time_meta(rel_path: str, file_hash: str, extra: dict | None = None
     return meta or None
 
 
+def _gone_from_main_checkout(cat: object, owner: object, repo: Path, main_repo: Path, seen: set[str]) -> list[str]:
+    """The owner's live repo-relative ``file_path`` values whose file is positively gone (GH #1610).
+
+    A row qualifies only when this run walks the main checkout and that checkout is the owner's recorded
+    ``repo_root`` (a worktree, or a moved or re-cloned repo, keeps the engine's two-walk rule), the path is not in the
+    walk's own set (*seen*: staged, kept or already deleted), git does not track it, and nothing exists at it on disk.
+    Any failure to read the owner's root, its documents or ``git ls-files`` retires nothing. The retirement is the
+    engine's ordinary explicit deletion: a soft delete that ``nx catalog restore`` undoes."""
+    try:
+        here = repo.resolve()
+        if main_repo.resolve() != here:
+            return []
+        root = cat.owners_with_roots().get(str(owner), "")
+        if not root or Path(root).resolve() != here:
+            return []
+        listed = subprocess.run(  # noqa: S603 — argv list, git on PATH, no shell
+            ["git", "-C", str(here), "ls-files", "-z"], capture_output=True, text=True, timeout=60, check=False,
+        )
+        if listed.returncode != 0:
+            return []
+        tracked = {p for p in listed.stdout.split("\0") if p}
+        gone: set[str] = set()
+        for entry in cat.by_owner(owner):
+            fp = str(getattr(entry, "file_path", "") or "")
+            if not fp or fp.startswith("/") or fp in seen or fp in tracked:
+                continue
+            target = here / fp
+            if target.exists() or target.is_symlink():
+                continue
+            gone.add(fp)
+    except Exception as exc:  # noqa: BLE001 — a fast path to a retirement; the engine's two-walk sweep stays the rule
+        _log.info("catalog_hook_gone_files_unread", error=str(exc))
+        return []
+    if gone:
+        _log.info("catalog_hook_retiring_gone_files", owner=str(owner), count=len(gone))
+    return sorted(gone)
+
+
 def _catalog_hook(
     repo: Path,
     repo_name: str,
@@ -1546,6 +1584,13 @@ def _catalog_hook(
                 rows.append({"kind": "keep", "seq": len(rows), "file_path": _rel})
         for _rel in deleted_relpaths or []:
             if _rel not in _seen:
+                _seen.add(_rel)
+                rows.append({"kind": "deleted", "seq": len(rows), "file_path": _rel})
+        # GH #1610: a complete walk from the main checkout retires, in this run, a document whose file is positively
+        # gone. Without this the engine only counts it missed once (its two-miss sweep needs a second complete walk)
+        # and the owner's head moves past the deletion, so no later delta names it.
+        if walk == "complete":
+            for _rel in _gone_from_main_checkout(cat, owner, repo, main_repo, _seen):
                 _seen.add(_rel)
                 rows.append({"kind": "deleted", "seq": len(rows), "file_path": _rel})
 
