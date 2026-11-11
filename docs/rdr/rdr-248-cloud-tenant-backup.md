@@ -1,5 +1,5 @@
 ---
-title: "Cloud-Mode nx backup: an Engine Tenant Export Streamed to One File, with a Tested Restore into an Empty Tenant"
+title: "Cloud-Mode nx backup: an Engine Tenant Export Saved to One File, with a Tested Restore into an Empty Tenant"
 id: RDR-248
 type: Feature
 status: draft
@@ -12,7 +12,7 @@ related_issues: [nexus-f3yqd.4]
 related_rdrs: [RDR-108, RDR-155, RDR-243]
 ---
 
-# RDR-248: Cloud-Mode nx backup: an Engine Tenant Export Streamed to One File, with a Tested Restore into an Empty Tenant
+# RDR-248: Cloud-Mode nx backup: an Engine Tenant Export Saved to One File, with a Tested Restore into an Empty Tenant
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
@@ -75,7 +75,8 @@ round trip.
 
 The local `nx backup` shipped in 8.1.x after the 2026-11-10 incident (nexus-f3yqd) in which an upgrade
 rewrote user data at first boot. Cloud users were left out because the client cannot reach the cloud
-database. The tenant `nexus` holds about 2.4 GB and 86k document rows (T2 critique on nexus-f3yqd.5).
+database. The tenant `nexus` holds 3.82 GB and 2.27M rows in the tables a backup exports, 48,772 of
+them catalog documents (A5).
 
 ### Technical Environment
 
@@ -107,7 +108,7 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
 | --- | --- | --- |
 | Postgres `COPY` under RLS | No (docs only) | `COPY table TO` is refused on an RLS table; `COPY (SELECT ...) TO STDOUT` applies the policies. |
 | pgvector binary I/O | No | `vector` has binary send/receive, so binary COPY should round-trip. To verify (A3). |
-| Cloud ingress | No | Whether a multi-minute, multi-GB streamed response survives the managed service's front end is unknown (A1). |
+| Cloud ingress | Yes (conexus config, bob) | Every exchange ends at an absolute 60 s and a request body is capped at 20 MB (A1, refuted), hence the session design. |
 
 ### Key Discoveries
 
@@ -154,8 +155,8 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
 
 The engine writes the backup, because only the engine can read a tenant completely and consistently. One
 read-only snapshot, scoped to the caller's tenant by RLS, is read in many short requests, each well
-inside the cloud's 60-second exchange limit, and the client joins the pieces into one framed file. `nx backup` in cloud mode saves that stream to one file, checks it, and says how to keep
-it. A second route loads such a file into an EMPTY tenant, so a restore can never overwrite data. The
+inside the cloud's 60-second exchange limit, and the client joins the pieces into one framed file. `nx backup` in cloud mode checks that file and
+says how to keep it. A second route loads such a file into an EMPTY tenant, so a restore can never overwrite data. The
 same routes run against a local engine, which is where the round trip is tested.
 
 ### Technical Design
@@ -356,8 +357,8 @@ exporter; every new table needs a new exporter.
 
 ### Prerequisites
 
-- [ ] A1, A2 (cloud half) and A5 measured in an announced cloud window (bob, on Sam's go)
-- [ ] A2 (local half), A3, A4 verified by a local spike
+- [x] A1, A5 and A7 settled from the cloud (bob, read-only window on Sam's go, and conexus config)
+- [x] A2, A3, A4 and A6 verified by local spikes (A4 at toy scale; its scale run is in Step 5)
 
 ### Minimum Viable Validation
 
@@ -372,9 +373,9 @@ in a window, with time and size recorded.
 
 #### Step 1: Table registry and parity test (engine): class, load order, reassigned ids and their references, trigger-maintained columns
 
-#### Step 2: Export route, streamed, with header and trailer (engine)
+#### Step 2: Export session: snapshot, page route, header and trailer (engine)
 
-#### Step 3: `nx backup` cloud arm: stream, verify, publish (client)
+#### Step 3: `nx backup` cloud arm: pull pages, verify, publish (client)
 
 #### Step 4: Import session (staged load, id reassignment, foreign-key order, verification, asynchronous commit with a status route) and `nx backup restore` (engine + client)
 
