@@ -112,6 +112,33 @@ def _local_embed(chunks, model, api_key="", input_type="document", timeout=120.0
 
 # ── AC-E1 / AC-E2 / AC-E3 — index_pdf E2E ────────────────────────────────────
 
+#: The page sources that are MinerU parses (pdf_extractor: rung 1 and the no-formula rung 2).
+_MINERU_RUNGS: frozenset[str] = frozenset({"mineru", "mineru-no-formula"})
+
+
+def _pages_outside_mineru(method: str, pages: dict[str, list[int]]) -> dict[str, list[int]] | None:
+    """None when MinerU's weights parsed every page (rung 1, or rung 2 after a rung-1 timeout); else the
+    pages that came from elsewhere ("pymupdf-text", "unextracted"), or {} when the method names no MinerU."""
+    if method == "mineru":
+        return None
+    if method == "mineru+degraded" and pages:
+        outside = {m: p for m, p in pages.items() if m not in _MINERU_RUNGS}
+        return outside or None
+    return {}
+
+
+@pytest.mark.parametrize(("method", "pages", "by_mineru"), [
+    ("mineru", {}, True),
+    ("mineru+degraded", {"mineru-no-formula": [1]}, True),  # CI 43055109589: rung 1 timed out, rung 2 parsed
+    ("mineru+degraded", {"mineru-no-formula": [1], "pymupdf-text": [2]}, False),
+    ("mineru+degraded", {"unextracted": [1]}, False),
+    ("mineru+degraded", {}, False),
+    ("pymupdf", {}, False),
+])
+def test_a_page_counts_as_mineru_only_on_a_mineru_rung(method: str, pages: dict, by_mineru: bool) -> None:
+    assert (_pages_outside_mineru(method, pages) is None) is by_mineru
+
+
 class TestIndexPdfE2E:
     """AC-E1 / AC-E2 / AC-E3: index_pdf with real extraction + local embedding.
 
@@ -132,12 +159,19 @@ class TestIndexPdfE2E:
             count = index_pdf(simple_pdf, "pdf-e2e-simple", t3=local_t3, embed_fn=_local_embed,
                               on_extraction=settled.append)
         method = settled[0]["extraction_method"] if settled else ""
-        if method != "mineru":
+        pages = settled[0].get("extraction_pages") or {} if settled else {}
+        # Both of MinerU's rungs prove the weights parsed the PDF: rung 1 ("mineru") and rung 2
+        # ("mineru-no-formula", the ladder's retry without the formula model when rung 1 times out, as it
+        # did under shard load in CI 43055109589: rung 1 hit its 180 s limit, rung 2 extracted page 1).
+        # Only a page outside MinerU ("pymupdf-text", "unextracted") is the fallback this test exists to catch.
+        outside = _pages_outside_mineru(method, pages)
+        if outside is not None:
             # The lab pool's self-hosted runners have the weights (this test parses with MinerU there), so a
             # fallback there is a failure, never a quiet skip of the suite's one real-MinerU index.
             expected = os.environ.get("MINERU_TOOLS_CONFIG_JSON") or os.environ.get("RUNNER_ENVIRONMENT") == "self-hosted"
             if expected:
-                pytest.fail(f"MinerU's weights are expected here but the PDF was extracted by {method!r}: {settled}")
+                pytest.fail(f"MinerU's weights are expected here but pages came from outside MinerU "
+                            f"({outside or method!r}): {settled}")
             pytest.skip(f"no MinerU weights in the fenced HOME (MINERU_TOOLS_CONFIG_JSON unset, not a pool "
                         f"runner); extracted by {method!r}")
 
