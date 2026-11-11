@@ -1,0 +1,3 @@
+### Fixed
+
+- **`nx index pdf` keeps a real title that happens to equal the file name, and `--collection` alone sets the catalog corpus** (GH #1611). A PDF whose metadata title or first heading read the same as its title-cased file name was treated as an untitled placeholder, so a later run could overwrite it; the title is now a fallback only when it came from the file name. With `--collection` and no `--corpus`, the catalog corpus was `default`; it is now the collection's subject (`agentic-data-systems` for `--collection agentic-data-systems` or `knowledge__agentic-data-systems__...`), and `--corpus` still overrides it.

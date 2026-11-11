@@ -2666,14 +2666,18 @@ def _pdf_chunks(
     # Compute source_title once before the loop so bib lookup uses the same value.
     # nexus-8l6 fallback: extractor metadata wins; otherwise derive from
     # first H1 or normalised filename (preserves initialisms like RDR, API).
-    from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    source_title = title_override or resolve_pdf_title(result.metadata, pdf_path, result.text)
+    from nexus.indexer_utils import pdf_title_source  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    if title_override:
+        source_title, title_source = title_override, "override"
+    else:
+        source_title, title_source = pdf_title_source(result.metadata, pdf_path, result.text)
     bib: dict = {}
     if bib_enrich_enabled and not sensitive:  # RDR-243 rows 7 and 8: a sensitive document's title is never sent
         from nexus.bib_enricher import enrich as bib_enrich  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         bib = bib_enrich(source_title)
     if extraction_stats is not None:
         extraction_stats["title"] = source_title
+        extraction_stats["title_source"] = title_source
         extraction_stats["author"] = str(result.metadata.get("pdf_author", "") or "")
     if extraction_stats is not None and bib:
         # nexus-6pfgb.28: index_pdf writes the lookup to the catalog document's bib_* columns.
@@ -3441,6 +3445,8 @@ def index_pdf(
                 # The title and author are the extraction's (``_pdf_chunks`` fills them into the stats):
                 # a chunk row carries neither since RDR-236 Phase 4 Step 1. A chunk never carried a year.
                 title=str(_extraction_stats.get("title", "")),
+                title_is_fallback=(_extraction_stats["title_source"] == "stem"
+                                   if "title_source" in _extraction_stats else None),
                 author=str(_extraction_stats.get("author", "")),
                 year=0,
                 corpus=corpus,

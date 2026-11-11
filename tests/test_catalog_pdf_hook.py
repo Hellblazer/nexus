@@ -309,6 +309,38 @@ class TestPdfCatalogHookTitleBackfill:
         assert only_document().title == "Attention Is All You Need"
 
 
+    def test_real_title_equal_to_the_normalised_stem_lands(self, tmp_path, monkeypatch):
+        """GH #1611 bug 3: a PDF whose real title (its own metadata or first H1) reads exactly like the
+        title-cased stem was treated as the stem placeholder and never written. The hook now takes the
+        title's source: a title that did not come from the stem fallback is written."""
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        p = Path("/data/attention-is-all-you-need.pdf")
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="")   # pre-flight shape
+        assert only_document().title == "attention-is-all-you-need"
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="Attention Is All You Need",
+                          title_is_fallback=False)
+        assert only_document().title == "Attention Is All You Need"
+
+    def test_a_stem_fallback_title_is_still_a_placeholder(self, tmp_path, monkeypatch):
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        p = Path("/data/attention-is-all.pdf")
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="")
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="Attention Is All",
+                          title_is_fallback=True)
+        assert only_document().title == "attention-is-all"
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="Attention Is All You Need",
+                          title_is_fallback=False)
+        assert only_document().title == "Attention Is All You Need"
+
+
 # ── RDR-237 (nexus-tr1rj.3): the extraction record on the catalog document ───────────────────
 
 _DEGRADED = {"extraction_method": "mineru+degraded", "extraction_pages": {"mineru-no-formula": [3, 7], "pymupdf-text": [12]}}
