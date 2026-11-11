@@ -11552,8 +11552,14 @@ def _repo_candidates_with_missing_files(
         if not fp or "/" not in fp or not root or not Path(root).is_dir():
             continue
         resolved = Path(fp) if fp.startswith("/") else Path(root) / fp
-        if not resolved.exists():
+        # os.path.exists, not Path.exists: on Python 3.12 the latter re-raises EACCES, and one unreadable
+        # directory must not take the row down. An unreadable path reads as present, so it is not judged gone.
+        try:
+            os.stat(resolved)
+        except FileNotFoundError:
             missing.append((prefix, ident, fp))
+        except OSError:
+            continue
     return missing
 
 

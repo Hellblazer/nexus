@@ -423,7 +423,9 @@ class TestCatalogHookBatchedLookups:
 
     def test_the_hook_issues_no_owner_list_and_no_per_file_lookup(self, tmp_path, monkeypatch):
         # was: test_no_per_file_lookups_single_owner_list (which counted 2 owner lists, the hook's join and
-        # housekeeping's fresh fetch; both moved into the engine's commit, so the count is now 0)
+        # housekeeping's fresh fetch; both moved into the engine's commit, so the count is now 0). GH #1610 added one
+        # by_owner read on a complete walk from a git main checkout (the gone-file retirement); tmp_path is not a git
+        # repository, so that read is skipped here and this count stays 0. tests/test_indexer_gone_files.py covers it.
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         files = []

@@ -1303,7 +1303,8 @@ def _catalog_hook(
     not hold.
 
     ``walk`` is ``complete`` when *indexed_files* is every file of the repository (a file the catalog holds that is not
-    among them is counted missing, swept after two runs, or renamed when its content reappears at a new path) and
+    among them is counted missing, swept after two runs, or renamed when its content reappears at a new path; from
+    the owner's main checkout a file git no longer tracks and that is gone from disk is retired in this run, GH #1610) and
     ``partial`` for a delta (``--since-head``) walk: nothing is counted, swept or renamed, and only the rows named are
     touched (the mass-delete class of nexus-fltb4).
 

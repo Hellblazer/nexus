@@ -1563,7 +1563,7 @@ nx catalog gc                          # report-only (default is --dry-run)
 nx catalog gc --no-dry-run --confirm   # actually delete
 ```
 
-Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). **Not reversible in-product**: the pre-delete JSONL backup snapshots died with the local catalog in 7.0.0 (nexus-i711w).
+Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs; a complete `nx index repo` run from the main checkout already retires a file that is gone from the repository in one run, GH #1610). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). **Not reversible in-product**: the pre-delete JSONL backup snapshots died with the local catalog in 7.0.0 (nexus-i711w).
 
 ### nx catalog list-backups / vacuum-backups (removed)
 
