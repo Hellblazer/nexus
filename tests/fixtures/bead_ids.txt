@@ -3148,6 +3148,17 @@ nexus-crn9l
 nexus-crtso
 nexus-crwqm
 nexus-cs6t0
+nexus-csayy
+nexus-csayy.1
+nexus-csayy.10
+nexus-csayy.2
+nexus-csayy.3
+nexus-csayy.4
+nexus-csayy.5
+nexus-csayy.6
+nexus-csayy.7
+nexus-csayy.8
+nexus-csayy.9
 nexus-csrto
 nexus-ct17r
 nexus-ct92f
@@ -3714,6 +3725,7 @@ nexus-f3yqd.4
 nexus-f3yqd.5
 nexus-f3yqd.6
 nexus-f3yqd.7
+nexus-f3yqd.8
 nexus-f3yxx
 nexus-f3yxx.1
 nexus-f4apk
@@ -4898,6 +4910,7 @@ nexus-jgjw
 nexus-jgoy5
 nexus-jgoy5.1
 nexus-jgzl
+nexus-jh1f2
 nexus-jh2oi
 nexus-jh86x
 nexus-jh8ej
