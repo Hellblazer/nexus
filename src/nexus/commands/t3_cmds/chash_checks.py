@@ -89,19 +89,23 @@ def validate_chash_checks_cmd(dry_run: bool, job_id: str | None, no_wait: bool, 
 
 @click.command("repair-chash")
 @click.argument("doc_id", required=False)
-@click.option("--all", "all_docs", is_flag=True, default=False, help="Every document with a bad manifest row.")
+@click.option("--all", "all_docs", is_flag=True, default=False,
+              help="Every 16-byte manifest row of your tenant (narrow with --collection).")
+@click.option("--collection", default=None, metavar="NAME", help="Only chunks in this collection.")
 @click.option("--apply", "apply", is_flag=True, default=False,
-              help="Rekey the documents' 16-byte manifest rows. Without it nothing is changed.")
-@click.option("--limit", type=click.IntRange(1, 100_000), default=None, help="At most this many documents.")
+              help="Rekey the rows. Without it the engine counts and nothing is changed.")
+@click.option("--limit", type=click.IntRange(1, 1000), default=None,
+              help="At most this many chunks per call (the engine's default is 100).")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the engine's answer as one JSON document.")
-def repair_chash_cmd(doc_id: str | None, all_docs: bool, apply: bool, limit: int | None, as_json: bool) -> None:
-    """Rekey a document's 16-byte manifest rows to their 32-byte keys, losslessly (needs an engine with the route)."""
+def repair_chash_cmd(doc_id: str | None, all_docs: bool, collection: str | None, apply: bool, limit: int | None,
+                     as_json: bool) -> None:
+    """Rekey 16-byte manifest rows to their 32-byte keys, losslessly (needs an engine with the route)."""
     if bool(doc_id) == all_docs:
-        _fail("name one document (its tumbler), or --all for every document with a bad row", EXIT_USAGE)
+        _fail("name one document (its tumbler), or --all for every 16-byte row of your tenant", EXIT_USAGE)
     client = _client()
     try:
         try:
-            out = job.repair(client, doc_id=doc_id, dry_run=not apply, limit=limit)
+            out = job.repair(client, doc_id=doc_id, collection=collection, dry_run=not apply, limit=limit)
         except job.ValidateJobError as exc:
             _fail(str(exc), exc.exit_code)
     finally:
@@ -109,14 +113,8 @@ def repair_chash_cmd(doc_id: str | None, all_docs: bool, apply: bool, limit: int
     if as_json:
         click.echo(json.dumps(out, indent=2, default=str))
         return
-    for d in out["documents"]:
-        click.echo(f"  {d.get('doc_id')}: {d.get('bad_rows')} 16-byte manifest row(s){' rekeyed' if apply else ''}")
-    capped = " (capped: more remain, raise --limit)" if out.get("capped") else ""
-    count = out.get("count", len(out["documents"]))
-    if apply:
-        click.echo(f"Rekeyed {count} document(s){capped}. Run `nx t3 validate-chash-checks` again.")
-    else:
-        click.echo(f"{count} document(s) would be rekeyed{capped}; nothing was changed. Rerun with --apply to rekey.")
+    for line in job.rekey_lines(out):
+        click.echo(line)
 
 
 def doctor_chash_fix(*, dry_run: bool) -> bool:

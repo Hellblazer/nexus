@@ -2298,11 +2298,11 @@ Validates the chash width CHECKs on `nexus.chunks` and `nexus.catalog_document_c
 ### nx t3 repair-chash
 
 ```
-nx t3 repair-chash DOC_ID [--apply] [--json]
-nx t3 repair-chash --all [--limit N] [--apply] [--json]
+nx t3 repair-chash DOC_ID [--apply] [--limit N] [--json]
+nx t3 repair-chash --all [--collection NAME] [--limit N] [--apply] [--json]
 ```
 
-The step a refused manifest CHECK needs: the engine rekeys a document's 16-byte manifest rows losslessly, recomputing the 32-byte key from the stored chunk text, moving or merging the chunk, repointing the manifest and dropping the old row, within your tenant. No released engine has that route yet; until one does the verb says so and changes nothing. Without `--apply` it counts and changes nothing. After an apply, run `nx t3 validate-chash-checks` again.
+The step a refused manifest CHECK needs: the engine rekeys a document's 16-byte manifest rows losslessly, recomputing the 32-byte key from the stored chunk text, moving or merging the chunk, repointing the manifest and dropping the old row, within your tenant (`POST /v1/catalog/manifest/rekey-chash`). A chunk whose stored text does not hash to its id is refused and left as it is. Each call handles at most `--limit` chunks (the engine's default is 100); when more remain, or the engine's time limit cut the call short, it says to run it again. No released engine has that route yet; until one does the verb says so and changes nothing. Without `--apply` it counts and changes nothing. After an apply, run `nx t3 validate-chash-checks` again.
 
 ### nx t3 quarantine restore
 

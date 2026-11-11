@@ -42,7 +42,7 @@ class _Engine:
         self.start_status = 202
         self.start_body: dict = {"job_id": "j1", "created": True}
         self.polls: list[tuple[int, dict]] = [(404, {"error": "no such constraint validate job"})]
-        self.repair_body: dict = {"documents": [], "count": 0, "capped": False, "dry_run": True}
+        self.repair_body: dict = {"chunks": [], "count": 0, "capped": False, "incomplete": False, "dry_run": True}
         self.requests: list[tuple[str, str, dict | None]] = []
 
 
@@ -391,15 +391,32 @@ class TestVerbs:
         assert r.exit_code == 3 and "no released engine" in r.stderr
         assert not [q for q in engine.requests if q[0] == "POST"]
 
-    def test_repair_is_a_dry_run_unless_applied(self, engine) -> None:
-        engine.flags["catalog_manifest_repair_chash_supported"] = True
-        engine.repair_body = {"documents": [{"doc_id": "1.2.3", "bad_rows": 2}],
-                              "count": 1, "capped": False, "dry_run": True}
+    def _rekey_engine(self, engine, **body) -> None:
+        engine.flags["catalog_manifest_rekey_chash_supported"] = True
+        engine.repair_body = {"chunks": [
+            {"collection": "knowledge__x", "old_chash_hex": "ab" * 16, "new_chash_hex": "cd" * 32,
+             "action": "would_rekey", "manifest_rows": 2, "refs_repointed": {"frecency": 1}},
+            {"collection": "knowledge__x", "old_chash_hex": "ef" * 16, "new_chash_hex": None,
+             "action": "refused", "reason": "text_mismatch", "manifest_rows": 1, "refs_repointed": {}}],
+            "count": 2, "capped": False, "incomplete": False, "dry_run": True} | body
+
+    def test_repair_is_a_dry_run_unless_applied_and_sends_the_contract_body(self, engine) -> None:
+        self._rekey_engine(engine)
         r = self._invoke("repair-chash", "1.2.3")
         assert r.exit_code == 0 and "nothing was changed" in r.stdout
-        assert engine.requests[-1][2]["dry_run"] is True
-        r = self._invoke("repair-chash", "1.2.3", "--apply")
-        assert engine.requests[-1][2]["dry_run"] is False and "Rekeyed 1 document" in r.stdout
+        assert "does not hash to its id" in r.stdout and "frecency 1" in r.stdout
+        assert engine.requests[-1][1] == "/v1/catalog/manifest/rekey-chash"
+        assert engine.requests[-1][2] == {"doc_id": "1.2.3", "collection": None, "dry_run": True}
+        self._rekey_engine(engine, dry_run=False)
+        r = self._invoke("repair-chash", "--all", "--collection", "knowledge__x", "--limit", "50", "--apply")
+        assert engine.requests[-1][2] == {"doc_id": None, "collection": "knowledge__x", "dry_run": False, "limit": 50}
+        assert "Rekeyed 2 chunk(s)" in r.stdout
+
+    @pytest.mark.parametrize(("flags", "text"), [({"capped": True}, "more remain"), ({"incomplete": True}, "Cut short")])
+    def test_capped_and_incomplete_say_run_it_again(self, engine, flags, text) -> None:
+        self._rekey_engine(engine, **flags)
+        r = self._invoke("repair-chash", "--all")
+        assert text in r.stdout and "Run it again" in r.stdout
 
     def test_repair_needs_one_document_or_all(self) -> None:
         assert self._invoke("repair-chash").exit_code == 2
