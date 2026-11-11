@@ -105,7 +105,11 @@ class IndexRunCensusParityTest extends IndexRunCensusTestBase {
         for (JsonNode s : table.get("scenarios")) if (s.get("id").asText().equals(id)) sc = s;
         assertThat(sc).isNotNull();
         // the fixture's now, moved to the real one
-        Duration shift = Duration.between(Instant.parse(table.get("now").asText()), Instant.now());
+        // The run's clock carries nanoseconds on Linux and PostgreSQL keeps microseconds, so the shift always carries a
+        // sub-microsecond part here (789 ns): a started_at that went through the database is then the fixture's plus the
+        // shift TRUNCATED, which is what normalised() removes.
+        Instant seededAt = Instant.now().plusNanos(789);
+        Duration shift = Duration.between(Instant.parse(table.get("now").asText()), seededAt);
 
         if (sc.has("collections")) for (JsonNode c : sc.get("collections")) collection(TENANT, collectionName(c.asText()));
         if (sc.has("chunk_groups")) {
@@ -134,7 +138,7 @@ class IndexRunCensusParityTest extends IndexRunCensusTestBase {
         }
 
         var body = census("?limit=100");
-        GOLDEN.check(id, normalised(body, shift));
+        GOLDEN.check(id, normalised(body, shift, Duration.between(seededAt, Instant.now())));
         JsonNode expect = sc.get("expect");
         if (expect.has("stale")) {
             JsonNode want = expect.get("stale");
@@ -178,17 +182,21 @@ class IndexRunCensusParityTest extends IndexRunCensusTestBase {
     /**
      * The body with the run's real clock taken out: the route ages documents against the real clock, and the seed moved each
      * {@code index_started_at} by {@code shift} to keep its age, so removing the shift gives the fixture's timestamp and
-     * rounding the age to the minute gives the fixture clock's (the call runs seconds after the seed).
+     * taking the time since the seed out of the age and rounding it to the minute gives the fixture clock's. The route reads now from its own JVM clock (Clock.systemUTC), not from PostgreSQL, so the only wall-clock dependence of a body is this shift; every other time in it (indexed_at, the anchors) is the table's absolute value.
      */
     @SuppressWarnings("unchecked")
-    private static Map<String, Object> normalised(Map<String, Object> body, Duration shift) {
+    private static Map<String, Object> normalised(Map<String, Object> body, Duration shift, Duration sinceSeed) {
         var copy = new java.util.LinkedHashMap<String, Object>(body);
         var stale = new java.util.LinkedHashMap<String, Object>((Map<String, Object>) body.get("stale"));
         var examples = new ArrayList<Map<String, Object>>();
         for (var e : (List<Map<String, Object>>) stale.get("examples")) {
             var n = new java.util.LinkedHashMap<String, Object>(e);
-            n.put("started_at", java.time.format.DateTimeFormatter.ISO_INSTANT.format(Instant.parse((String) e.get("started_at")).minus(shift)));
-            n.put("age_s", Math.round(((Number) e.get("age_s")).doubleValue() / 60.0) * 60L);
+            // the shift as the database holds it (microseconds), and the result to the second
+            Instant started = Instant.parse((String) e.get("started_at")).minus(shift.truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+            n.put("started_at", java.time.format.DateTimeFormatter.ISO_INSTANT.format(
+                started.plusMillis(500).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)));
+            // the route's age is the fixture's plus the time since the seed; take that out, then round to the minute
+            n.put("age_s", Math.round((((Number) e.get("age_s")).doubleValue() - sinceSeed.toSeconds()) / 60.0) * 60L);
             examples.add(n);
         }
         stale.put("examples", examples);
