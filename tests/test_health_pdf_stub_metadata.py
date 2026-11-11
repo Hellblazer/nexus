@@ -133,8 +133,19 @@ def _seed_stub_and_controls() -> None:
 
 
 def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env, monkeypatch) -> None:
-    """The scan's answer, per owning document (an engine without the bounded route, F30)."""
+    """One seeded tenant, judged twice: by the scan, per owning document (an engine without the bounded route), and by
+    the engine's route (0.1.189), per collection. Both count the two stub chunks and the URI-less one, neither counts a
+    control, and the URI-less owner gets its own remedy either way."""
     _seed_stub_and_controls()
+
+    route_row = _row(health._check_pdf_stub_metadata())
+    assert not route_row.ok and route_row.warn, route_row.detail
+    assert route_row.detail.startswith("3 PDF chunk(s) in 1 collection(s)"), route_row.detail
+    assert "file:///tmp/rte90/FootprintRAG.pdf" in route_row.detail and "content_hash bbbbbbbbbbbb" in route_row.detail
+    assert not any(c in route_row.detail for c in ("Healthy.pdf", "Old.pdf", "notes.md")), route_row.detail
+    assert any("no source URI" in f for f in route_row.fix_suggestions), route_row.fix_suggestions
+    assert any("--force" in f for f in route_row.fix_suggestions), route_row.fix_suggestions
+
     monkeypatch.setattr(health, "_pdf_stub_route", lambda: None)
     row = _row(health._check_pdf_stub_metadata())
 
@@ -147,19 +158,6 @@ def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env, monkeypa
     assert any("registered without one" in f or "no source URI" in f for f in row.fix_suggestions), (
         row.fix_suggestions
     )
-    assert any("--force" in f for f in row.fix_suggestions), row.fix_suggestions
-
-
-def test_the_engines_bounded_count_judges_the_same_chunks(t2_service_env) -> None:
-    """The engine's route (0.1.189) answers per collection: the two stub chunks and the URI-less one are counted, the
-    controls are not, and the URI-less owner still gets its own remedy."""
-    _seed_stub_and_controls()
-    row = _row(health._check_pdf_stub_metadata())
-    assert not row.ok and row.warn, row.detail
-    assert row.detail.startswith("3 PDF chunk(s) in 1 collection(s)"), row.detail
-    assert "file:///tmp/rte90/FootprintRAG.pdf" in row.detail and "content_hash bbbbbbbbbbbb" in row.detail, row.detail
-    assert "Healthy.pdf" not in row.detail and "Old.pdf" not in row.detail and "notes.md" not in row.detail
-    assert any("no source URI" in f for f in row.fix_suggestions), row.fix_suggestions
     assert any("--force" in f for f in row.fix_suggestions), row.fix_suggestions
 
 
