@@ -23,7 +23,7 @@ from typing import Any, NoReturn
 
 import click
 
-from nexus.db import chash_constraints_job as job
+from nexus.db.admin import chash_validate as job
 
 EXIT_OK = 0
 EXIT_NOT_VALID = 1

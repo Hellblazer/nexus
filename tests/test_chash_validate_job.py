@@ -24,7 +24,7 @@ import nexus.health as health
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
 from nexus.commands.t3_cmds import chash_checks
-from nexus.db import chash_constraints_job as job
+from nexus.db.admin import chash_validate as job
 from tests._settle import FakeClock
 
 _CONFORMANCE_FALSE = {"constraints": [
