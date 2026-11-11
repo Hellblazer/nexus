@@ -143,8 +143,8 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
 | --- | --- | --- | --- |
 | A1 | The cloud front end lets one authenticated response stream for tens of minutes and several GB | **Refuted** (bob, from conexus config, 2026-11-11): the edge proxy closes every exchange at an absolute 60 s, the load balancer idle timeout and CloudFront's origin read timeout are 60 s, and the sidecar caps a request body at 20 MB | Config reading; the design below works within those limits |
 | A2 | One `REPEATABLE READ READ ONLY` transaction with `set_config('nexus.tenant', T, true)` returns exactly that tenant's rows from every RLS table | Verified locally (spike); the cloud has no pooler (the engine reaches PG directly through its own Hikari pool, bob 2026-11-11), so the local result carries | Local spike |
-| A3 | Binary `COPY` of the column types in these tables round-trips | Verified for every type that held data; staged load required | Local spike; the remaining types (bigint[], smallint, uuid, identity) by the Step 5 test's seed |
-| A4 | Import loads in one transaction | Verified at toy scale (57 chunks, 0.12 s) with id reassignment, foreign-key order and tuples excluded; at real scale the load cannot fit one 60-second exchange (248-research-11, inferred), so the commit is asynchronous; its time at scale is measured in Step 5 | Local spike |
+| A3 | Binary `COPY` of the column types in these tables round-trips | Verified for every type that held data; staged load required | Local spike; the remaining types (bigint[], smallint, uuid, identity) by the Steps 4 and 6 test's seed |
+| A4 | Import loads in one transaction | Verified at toy scale (57 chunks, 0.12 s) with id reassignment, foreign-key order and tuples excluded; at real scale the load cannot fit one 60-second exchange (248-research-11, inferred), so the commit is asynchronous; its time at scale is measured in Step 6 | Local spike |
 | A5 | A read-only snapshot held for the export does not hurt the shared cloud database | Verified (bob, read-only cloud window, Sam's go, 2026-11-11, T2 `nexus/rdr248-cloud-spike-2026-11-11`): tenant `nexus` is 2,272,023 rows and 3.82 GB in binary COPY over the 26 data and derived tables, read from one snapshot in about 83 s (`chunks` 542,778 rows, 3.39 GB, 78 s, about 43 MB/s; the rest about 5 s). A snapshot held 60 minutes (by accident) left the xmin age near 1000 and dead tuples barely grown (`topic_assignments` 45.7k to 46.8k); no autovacuum ran in the window | Cloud measurement |
 | A6 | A snapshot exported by one transaction serves many later page transactions, confined by RLS, consistent across writes | Verified locally (spike round 2, T2 `nexus/rdr248-local-spike-r2-2026-11-11`): 43 pages, writes and deletes committed between pages, concatenated pages equal the single-transaction export row for row on all 26 tables | Local spike |
 | A7 | The cloud engine role has no `idle_in_transaction_session_timeout` that would kill the held transaction between page requests | Verified (bob, same window): idle-in-transaction, idle-session, statement and transaction timeouts are 0 at server level, with no role or database override for `nexus_svc`; the engine sets `statement_timeout` locally only on its search and taxonomy paths, so the export's dedicated connection sets its own bounds | Cloud settings read; engine source |
@@ -253,7 +253,7 @@ check refuses after a committed load and accepts after a rolled-back one. Every 
 commit, status) answers only the token of the tenant that opened it; any other tenant's token gets "no
 such session". The idle bound applies until commit (a status poll is not activity, because nothing waits
 on the client during the load); the total bound applies to the upload phase; the load itself runs under
-a statement timeout set from the Step 5 scale measurement. It loads into the caller's own tenant, which must exist
+a statement timeout set from the Step 6 scale measurement. It loads into the caller's own tenant, which must exist
 through tenant create (that is what makes its `chunks` partition leaves; rows are never how a tenant
 comes to exist). It refuses unless every `data` and `derived` table is empty for that tenant, ignoring the rows tenant create
 itself writes; unless the engine can read the file; and unless every `embedding_models` row in the
@@ -276,9 +276,11 @@ that adds a changeset. Then, in that one transaction, table by table in load ord
    parent's map; target columns the file lacks take their defaults.
 While the load runs, its inserts hold locks on the `chunks` tree until commit, so tenant create, which
 needs an exclusive lock on a model-level `chunks` partition, fails with `tenant_creation_busy` for the
-load's duration (248-research-13). That is accepted: a restore is rare and operator-run, and the runbook
-says the operator creates no tenant while a restore loads (the restore's own target tenant exists before
-the session opens).
+load's duration (248-research-13). The user starts a restore, so no operator can schedule around it.
+Sam's choice (2026-11-11) is to bound it, not accept it: the engine admits one restore load at a time,
+and only when no tenant create is pending; a tenant create that arrives during a load waits a short
+window for it to end, then answers with a retry-after (the restore's own target tenant exists before the
+session opens).
 It then checks each table's row count against the trailer, and a checksum over the columns that neither
 the reassignment nor a trigger touches. Any failure rolls the whole load back. Reassigning ids always,
 not only on a collision, also leaves the sequences correct: the engine role cannot `setval`, and a load
@@ -356,13 +358,14 @@ exporter; every new table needs a new exporter.
   full.
 - **Risk**: a schema change between export and import makes a file unloadable.
   **Mitigation**: the compatibility rule loads a file from an older engine whose columns still exist in
-  the target, filling new columns from their defaults. A committed fixture enforces it: Step 5 writes a
+  the target, filling new columns from their defaults. A committed fixture enforces it: Step 6 writes a
   small backup file with the engine of this RDR's implementation and keeps it in the repository; a test
   loads that fixture on every later engine, so a migration that drops or retypes an exported column goes
   red there and must say what it does to old backups.
 - **Risk**: a restore's load blocks tenant create on the shared database until it commits.
-  **Mitigation**: accepted (restores are rare and operator-run); the runbook says no tenant is created
-  during a restore load; the Step 5 scale run records how long that window is.
+  **Mitigation** (Sam, 2026-11-11: bound it): one restore load at a time per engine, admitted only when no
+  tenant create is pending; a tenant create during a load waits a short window, then gets a retry-after;
+  the Step 6 scale run records how long the window is.
 
 ### Failure Modes
 
@@ -382,34 +385,43 @@ exporter; every new table needs a new exporter.
 
 - [x] A1, A5 and A7 settled from the cloud (bob, read-only window on Sam's go, and conexus config)
 - [x] A2, A3, A4 and A6 verified by local spikes (A3 for the types that held data, the rest seeded in
-  Step 5; A4 at toy scale, its scale run in Step 5)
+  Steps 4 and 6; A4 at toy scale, its scale run in Steps 4 and 6)
 
 ### Minimum Viable Validation
 
-Done locally for the method (the spike). The MVV is the Step 5 test doing the same against the shipped
+Done locally for the method (the spike). The MVV is Step 4's export tests (Phase 1) and Step 6's round-trip test (Phase 2) doing the same against the shipped
 routes, in-process with the test fixtures (a subprocess CLI from a checkout is refused by the
 production-write guard even against a loopback engine), plus one commit at scale (at least 500,000
 synthetic chunks) whose time is recorded, seeding every `data` and `derived` table,
 including the types the spike did not exercise; then one export and import against a cloud test tenant
 in a window, with time and size recorded.
 
-### Phase 1: Code Implementation
+Sam's choice (2026-11-11): export ships first, restore next. Phase 1 puts a verified backup in cloud
+users' hands; Phase 2 adds the restore once the import's open questions (the gate's S1 to S5 and N2,
+T2 `nexus_rdr/248-gate-critique-2026-11-11-r2`) are settled. Until Phase 2 ships, a cloud restore is an
+operator task from the file.
+
+### Phase 1: Export (code)
 
 #### Step 1: Table registry and parity test (engine): class, load order, reassigned ids and their references, trigger-maintained columns
 
 #### Step 2: Export session: snapshot, page route, header and trailer (engine)
 
-#### Step 3: `nx backup` cloud arm: pull pages, verify, publish (client)
+#### Step 3: `nx backup` cloud arm: pull pages, verify, publish, and `nx backup --check FILE` (client)
 
-#### Step 4: Import session (staged load, id reassignment, foreign-key order, verification, asynchronous commit with a status route) and `nx backup restore` (engine + client)
+#### Step 4: Export tests: two-tenant isolation, snapshot consistency across pages, every column type, and export paging at scale (at least 500,000 synthetic chunks, per-page time recorded)
 
-#### Step 5: The round-trip test (local engine, two tenants) and the runbook
+### Phase 2: Restore (code), after the import's open questions are settled
 
-### Phase 2: Operational Activation
+#### Step 5: Import session (staged load, id reassignment, foreign-key order, verification, asynchronous commit with a status route, the one-load-at-a-time bound) and `nx backup restore` (engine + client)
 
-#### Activation Step 1: Engine release carrying the routes, then the cloud deploy (Sam's go)
+#### Step 6: The round-trip test (local engine, two tenants), the commit at scale, the committed fixture file, and the runbook
 
-#### Activation Step 2: A cloud round trip on a test tenant in an announced window (bob)
+### Phase 3: Operational Activation
+
+#### Activation Step 1: Engine release carrying the export routes (Phase 1), then the cloud deploy (Sam's go); the restore routes ride a later release
+
+#### Activation Step 2: A cloud export of a test tenant in an announced window (bob), time and size recorded; after Phase 2, a cloud round trip
 
 ### Day 2 Operations
 
@@ -437,8 +449,9 @@ None.
   accepted.
 - **Scenario**: another tenant's token on a session's rows, commit or status route — **Verify**: "no such
   session".
-- **Scenario**: tenant create during an import load — **Verify**: `tenant_creation_busy` while it loads,
-  success after commit.
+- **Scenario**: tenant create during an import load (the test holds the load open between its `chunks`
+  insert and commit) — **Verify**: it waits, then gets a retry-after, and succeeds after commit; a second
+  restore load on the same engine is not admitted until the first ends.
 - **Scenario**: the committed fixture file from the implementing engine — **Verify**: it loads on the
   current engine.
 - **Scenario**: a commit at scale (a synthetic tenant of at least 500,000 chunks, local) — **Verify**: it
@@ -491,8 +504,8 @@ contradictions found between research findings, design principles, and proposed 
 A2 to A7 are verified (research records 248-research-1 to -14): A2, A3 and A6 by local spikes, A4 at toy
 scale by a local spike, A5 and A7 by a read-only cloud window, A1 refuted and designed around. Left for
 implementation, not assumed in the design: the column types the spike did not exercise (bigint[],
-smallint, uuid, the identity column), which the Step 5 test seeds; the commit's time at scale, measured
-in Step 5 and used for the load's statement timeout; and the cloud edge's transfer rate, which sets an
+smallint, uuid, the identity column), which the Step 4 and 6 tests seed; the commit's time at scale, measured
+in Step 6 and used for the load's statement timeout; and the cloud edge's transfer rate, which sets an
 export's time but no design choice and is recorded at Activation Step 2.
 
 #### API Verification
@@ -506,7 +519,7 @@ export's time but no design choice and is recorded at Activation Step 2.
 
 ### Scope Verification
 
-The Minimum Viable Validation is Step 5's round-trip test: export a seeded tenant through the shipped
+The Minimum Viable Validation is Step 4's export tests at scale (Phase 1) and Step 6's round-trip test (Phase 2): export a seeded tenant through the shipped
 routes, import into an empty tenant in the same database, and assert equal counts, checksums and joins,
 in-process with the test fixtures, plus one commit at scale (at least 500,000 synthetic chunks) whose time
 is recorded. It is in Phase 1 and gates the engine release; the cloud round trip is Activation Step 2.
