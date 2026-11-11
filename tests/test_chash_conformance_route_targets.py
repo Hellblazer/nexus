@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-f3yqd: the engine's chash width constraints are the client's poison tables.
 
-``GET /v1/admin/chash-conformance`` reports the width CHECKs of the tables in ``ChashConformanceConstraints.TARGETS``.
+``GET /v1/schema/chash-conformance`` reports the width CHECKs of the tables in ``ChashConformanceConstraints.TARGETS``.
 ``nx doctor`` skips its chash scans on the strength of that answer, so the engine list must be the client's list of tables
 that carry such a CHECK (``POISON_CHASH_TABLES``): a table the client counts that the route does not report would read as
 "validated" by omission, and a table the route reports that the client does not know would gate on a constraint the

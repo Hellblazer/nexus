@@ -606,11 +606,12 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
-     * nexus-f3yqd capability advertisement: does {@code GET /v1/admin/chash-conformance} report whether the chash width CHECK
+     * nexus-f3yqd capability advertisement: does {@code GET /v1/schema/chash-conformance} report whether the chash width CHECK
      * constraints are validated, from {@code pg_constraint} in one catalog statement?
      *
-     * <p>An operator route (root token), so a client with a tenant token reads 403 and one on an old engine 404; the flag
-     * lets the doctor learn it from {@code /version} first instead of by a probe. Always present, always {@code true} on an
+     * <p>Readable by any authenticated token (a tenant token included; the partition counts are the root token's), so a
+     * managed user's doctor can use it; an engine before the change answers 404. The flag lets the doctor learn it from
+     * {@code /version} first instead of by a probe. Always present, always {@code true} on an
      * engine carrying the change. Cloud clients see it only once the public conexus edge allowlists it (the
      * {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
      */

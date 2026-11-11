@@ -31,7 +31,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * nexus-f3yqd: {@code GET /v1/admin/chash-conformance} through the real {@link NexusService} and its {@code AuthFilter}:
+ * nexus-f3yqd: {@code GET /v1/schema/chash-conformance} through the real {@link NexusService} and its {@code AuthFilter}
+ * (any authenticated token reads it; only the root token sees the partition counts):
  * the state of the two chash width CHECKs, read from {@code pg_constraint}. Real PostgreSQL, so the partitioned
  * {@code nexus.chunks} is the real partition tree. The classes run in order because they move one database's constraints
  * through the states a reader meets: as the migrations leave them, validated, one dropped and re-added NOT VALID,
@@ -44,6 +45,7 @@ class ChashConformanceRouteTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String ROOT = "tok-root-chash-conf-0123456789abcdef";
     private static final String TENANT_TOKEN = "tok-tenant-chash-conf-0123456789abcd";
+    private static final String OTHER_TENANT_TOKEN = "tok-other-chash-conf-0123456789abcdef";
     private static final String MINT_TOKEN = "tok-mint-chash-conf-0123456789abcdef";
     private static final String CHUNKS_CHECK = "chunks_chash_octet_check";
     private static final String MANIFEST_CHECK = "catalog_document_chunks_chash_octet_check";
@@ -65,6 +67,7 @@ class ChashConformanceRouteTest {
             PgContainerHelper.seedServiceToken(dsl, ROOT, TenantConstants.DEFAULT_TENANT, TokenStore.ROOT_TOKEN_LABEL,
                 TokenStore.SCOPE_ROOT, null, null);
             PgContainerHelper.seedServiceToken(dsl, TENANT_TOKEN, "chash-conf-tenant", "tenant-token");
+            PgContainerHelper.seedServiceToken(dsl, OTHER_TENANT_TOKEN, "chash-conf-other-tenant", "other-tenant-token");
             PgContainerHelper.seedServiceToken(dsl, MINT_TOKEN, "chash-conf-tenant", "mint-token",
                 TokenStore.SCOPE_MINT, null, null);
         }
@@ -87,7 +90,7 @@ class ChashConformanceRouteTest {
     }
 
     private HttpResponse<String> get(String bearer) throws Exception {
-        var b = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/admin/chash-conformance");
+        var b = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/schema/chash-conformance");
         if (bearer != null) b.header("Authorization", "Bearer " + bearer);
         return http.send(b.GET().build(), HttpResponse.BodyHandlers.ofString());
     }
@@ -273,22 +276,80 @@ class ChashConformanceRouteTest {
 
     @Test
     @Order(8)
-    void noCredentialIsA401_aTenantTokenIsA403_aMintTokenIsRefused_andOnlyTheRootTokenReads() throws Exception {
+    void noCredentialIsA401_aMintTokenIsRefusedByTheFilter_andEveryOtherAuthenticatedTokenReads() throws Exception {
         assertThat(get(null).statusCode()).isEqualTo(401);
         assertThat(get("a-token-the-registry-does-not-know").statusCode()).isEqualTo(401);
-        var tenant = get(TENANT_TOKEN);
-        assertThat(tenant.statusCode()).isEqualTo(403);
-        assertThat(tenant.body()).doesNotContain("chunks_chash").doesNotContain("constraints");
+        // A mint-scoped credential exists to call the data-token mint and nothing else: AuthFilter refuses it on every other
+        // path, this one included (unchanged by the route being open to tenants), and the body carries nothing.
         var mint = get(MINT_TOKEN);
         assertThat(mint.statusCode()).isEqualTo(403);
         assertThat(mint.body()).doesNotContain("constraints");
+        assertThat(get(TENANT_TOKEN).statusCode()).isEqualTo(200);
         assertThat(get(ROOT).statusCode()).isEqualTo(200);
+    }
+
+    // ── what each caller sees ───────────────────────────────────────────────
+
+    @Test
+    @Order(12)
+    void aTenantTokenGetsExactlyTheSchemaFacts_noPartitionCount_inAnyState() throws Exception {
+        for (int state = 0; state < 3; state++) {
+            // fresh-like (both NOT VALID), then one valid, then both valid
+            if (state == 0) resetBothNotValid();
+            if (state == 1) validateChunks();
+            if (state == 2) validateManifest();
+            var resp = get(TENANT_TOKEN);
+            assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+            var body = MAPPER.readTree(resp.body());
+            // the key sets are asserted whole, so a field added later cannot leak to a tenant unnoticed
+            assertThat(body.fieldNames()).toIterable().containsExactlyInAnyOrder("constraints", "all_validated");
+            assertThat(body.get("constraints")).hasSize(2);
+            for (JsonNode c : body.get("constraints")) {
+                assertThat(c.fieldNames()).toIterable().containsExactlyInAnyOrder("table", "name", "present", "validated");
+            }
+            assertThat(resp.body()).doesNotContain("partitions");
+            // and it agrees with what the root token sees of the same facts
+            var root = report();
+            assertThat(body.get("all_validated")).isEqualTo(root.get("all_validated"));
+            for (JsonNode c : body.get("constraints")) {
+                var r = row(root, c.get("table").asText());
+                assertThat(c.get("validated")).isEqualTo(r.get("validated"));
+                assertThat(c.get("present")).isEqualTo(r.get("present"));
+                assertThat(c.get("name")).isEqualTo(r.get("name"));
+            }
+        }
+    }
+
+    @Test
+    @Order(13)
+    void theRootTokenKeepsThePartitionCounts_andTheyAreNotInATenantsBody() throws Exception {
+        resetBothNotValid();
+        var root = report();
+        for (JsonNode c : root.get("constraints")) {
+            assertThat(c.fieldNames()).toIterable()
+                .containsExactlyInAnyOrder("table", "name", "present", "validated", "partitions", "partitions_not_validated");
+        }
+        assertThat(row(root, "nexus.chunks").get("partitions").asInt()).isPositive();
+        assertThat(get(TENANT_TOKEN).body()).doesNotContain("partitions");
+    }
+
+    @Test
+    @Order(14)
+    void aTenantsBodyIsByteIdenticalForTwoDifferentTenants_soItCarriesNothingTenantSpecific() throws Exception {
+        for (int state = 0; state < 2; state++) {
+            if (state == 0) resetBothNotValid(); else validateBoth();
+            var first = get(TENANT_TOKEN);
+            var second = get(OTHER_TENANT_TOKEN);
+            assertThat(first.statusCode()).isEqualTo(200);
+            assertThat(second.statusCode()).isEqualTo(200);
+            assertThat(first.body()).isEqualTo(second.body());
+        }
     }
 
     @Test
     @Order(9)
     void onlyGetIsAllowed() throws Exception {
-        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/admin/chash-conformance")
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/schema/chash-conformance")
             .header("Authorization", "Bearer " + ROOT).POST(HttpRequest.BodyPublishers.ofString("{}")).build();
         assertThat(http.send(req, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(405);
     }

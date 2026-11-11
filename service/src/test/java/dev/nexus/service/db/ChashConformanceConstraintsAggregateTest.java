@@ -13,7 +13,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * nexus-f3yqd: how {@code GET /v1/admin/chash-conformance} folds the {@code pg_constraint} rows of a partitioned table.
+ * nexus-f3yqd: how {@code GET /v1/schema/chash-conformance} folds the {@code pg_constraint} rows of a partitioned table.
  * Pure, so the shapes PostgreSQL will not build on request (a parent valid over a copy that is not) are still pinned.
  * Each case names the mutation of {@link ChashConformanceConstraints#aggregate} it kills.
  */

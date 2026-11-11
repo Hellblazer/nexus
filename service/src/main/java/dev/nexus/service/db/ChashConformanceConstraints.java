@@ -17,7 +17,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 
 /**
  * nexus-f3yqd: the state of the chash width CHECK constraints, read from {@code pg_constraint.convalidated} in ONE catalog
- * statement, for {@code GET /v1/admin/chash-conformance}. A width CHECK that is VALID says no row of its table is
+ * statement, for {@code GET /v1/schema/chash-conformance}. A width CHECK that is VALID says no row of its table is
  * non-conformant, so a reader may take that answer for the table's poison count instead of counting rows.
  *
  * <p><b>What it replaces, and what it does not.</b> It speaks to the two poison tables' width CHECKs only. The client's

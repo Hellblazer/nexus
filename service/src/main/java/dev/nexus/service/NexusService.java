@@ -764,8 +764,10 @@ public final class NexusService {
                         () -> { var v = chunksLeavesCanary; return v == null ? null : v.get(); }));
         chunksLeavesCtx.getFilters().addAll(authFilter);
 
-        // /v1/admin/chash-conformance — whether the chash width CHECKs are validated, read from pg_constraint in one
-        // catalog statement (nexus-f3yqd), so nx doctor's chash row can skip its scans. Operator (root token) only.
+        // /v1/schema/chash-conformance — whether the two poison tables' chash width CHECKs are validated, read from
+        // pg_constraint in one catalog statement (nexus-f3yqd), for nx doctor's chash row. Any authenticated token reads it
+        // (a managed user's doctor holds a tenant data token); only the root token sees the partition counts, which would
+        // reveal how many tenants share the engine.
         var chashConformanceCtx = server.createContext(dev.nexus.service.http.ChashConformanceHandler.PATH,
                 new dev.nexus.service.http.ChashConformanceHandler(
                         new dev.nexus.service.db.ChashConformanceConstraints(tenantScope)));
