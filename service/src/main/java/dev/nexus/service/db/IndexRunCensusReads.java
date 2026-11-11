@@ -5,6 +5,7 @@ package dev.nexus.service.db;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.Record2;
 import org.jooq.Record4;
 import org.jooq.Record6;
 import org.jooq.Select;
@@ -25,7 +26,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
+import java.util.function.BiFunction;
+import java.util.function.LongSupplier;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -70,7 +72,15 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  * the heal reads with {@code include_non_live}), with {@code chunk_count == 0} or {@code n <= chunk_count}. A failed
  * document that keeps manifest rows (an old, readable manifest) is not counted, and neither is one the heal leaves for a
  * re-index (more stored rows than its {@code chunk_count}). When {@code failed} is capped {@code count} is "at least": the
- * documents past the bound were not examined. A {@code content_hash} that is not a string is compared as its JSON text.
+ * documents past the bound were not examined, so {@code capped} with a {@code count} of 0 is NOT a clean answer, it is "not
+ * fully checked" (the same holds of {@code stale}: {@code capped} makes {@code count} {@code limit}, "at least"). A caller
+ * that needs the whole set asks for {@code limit=10000}.
+ *
+ * <h2>Which rows a capped answer holds</h2> The stale and failed statements stop at {@code limit + 1} rows in the
+ * planner's order, so a capped answer is a SAMPLE, not a stable prefix. An {@code ORDER BY tumbler} would make it stable
+ * but cannot use the partial index's order ({@code (tenant_id, index_state)} holds equal keys in physical order), so it
+ * reads every non-complete row of the state and sorts; the plan test pins that cost, and the planner's order is kept.
+ * An uncapped answer is exact and is listed in tumbler order. A {@code content_hash} that is not a string is compared as its JSON text.
  */
 public final class IndexRunCensusReads {
 
@@ -93,6 +103,16 @@ public final class IndexRunCensusReads {
      * {@code _PRODUCER_FENCE_RELEASE_DT}. No document indexed before it is an unstamped-producer candidate.
      */
     public static final Instant FENCE_FLOOR = Instant.parse("2026-08-07T16:00:35Z");
+
+    /**
+     * The call's overall time budget in milliseconds, shared by the three buckets: each runs under the smaller of its own
+     * bound ({@link CatalogRepository#FILLABLE_COUNT_TIMEOUT_MS}, 10 s) and what is left of this, under the public edge's
+     * roughly 30 s. WORST CASE: the call answers within this budget plus the small cost of opening the transactions (the
+     * three bounds alone would sum to 30 s); a bucket the budget never reached is {@code timed_out}. A system property
+     * replaces it (the test hook), read on every call.
+     */
+    public static final long CALL_BUDGET_MS = 25_000;
+    public static final String CALL_BUDGET_PROPERTY = "nexus.catalog.index_run_census_budget_ms";
 
     /** The chunk-row hashes looked up per statement. */
     private static final int HASH_BATCH = 500;
@@ -132,6 +152,7 @@ public final class IndexRunCensusReads {
 
     private final CatalogRepository repo;
     private final Clock clock;
+    private final LongSupplier nanos;
 
     public IndexRunCensusReads(CatalogRepository repo) {
         this(repo, Clock.systemUTC());
@@ -139,8 +160,14 @@ public final class IndexRunCensusReads {
 
     /** The clock decides what "six hours ago" means; a test fixes it. */
     public IndexRunCensusReads(CatalogRepository repo, Clock clock) {
+        this(repo, clock, System::nanoTime);
+    }
+
+    /** {@code nanos} is the monotonic source every time bound reads; a test replaces it to spend a budget deterministically. */
+    public IndexRunCensusReads(CatalogRepository repo, Clock clock, LongSupplier nanos) {
         this.repo = repo;
         this.clock = clock;
+        this.nanos = nanos;
     }
 
     // ── statements (public so a plan test can explain the exact statement the route runs) ──
@@ -194,28 +221,47 @@ public final class IndexRunCensusReads {
             throw new IllegalArgumentException("limit must be 1.." + MAX_LIMIT);
         }
         Instant now = clock.instant();
+        // ONE deadline for the call: each bucket runs under min(its own bound, what is left of the call budget), and a
+        // bucket that starts with none left is reported timed_out without a statement.
+        long callDeadline = nanos.getAsLong() + TimeUnit.MILLISECONDS.toNanos(Long.getLong(CALL_BUDGET_PROPERTY, CALL_BUDGET_MS));
         return new Census(limit,
-            bucket("stale", tenant, ctx -> stale(ctx, tenant, limit, now)),
-            bucket("fence", tenant, ctx -> fence(ctx, tenant, limit)),
-            bucket("failed_hidden", tenant, ctx -> failedHidden(ctx, tenant, limit)));
+            bucket("stale", tenant, callDeadline, (ctx, budget) -> stale(ctx, budget, tenant, limit, now)),
+            bucket("fence", tenant, callDeadline, (ctx, budget) -> fence(ctx, budget, tenant, limit)),
+            bucket("failed_hidden", tenant, callDeadline, (ctx, budget) -> failedHidden(ctx, budget, tenant, limit)));
     }
 
     private static int boundMs() {
         return Integer.getInteger(CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS);
     }
 
-    /** A statement budget: every statement of a bucket sets its timeout to what is left of the bucket's bound. */
-    private static final class Budget {
-        private final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMs());
+    /**
+     * The time one bucket may spend: until {@code min(start + its bound, the call's deadline)}. Every statement of the
+     * bucket sets its {@code statement_timeout} to what is left, and a bucket with nothing left throws the cancelled error
+     * instead of issuing a statement (a {@code statement_timeout} of 0 means NO limit in PostgreSQL, so a spent budget must
+     * never be armed).
+     */
+    public static final class Budget {
+        private final long deadline;
+        private final LongSupplier nanos;
 
-        /** Sets the statement timeout to the time left; throws the cancelled error when none is left. */
-        void arm(DSLContext ctx) {
-            long leftMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+        public Budget(long startNanos, long callDeadlineNanos, int boundMs, LongSupplier nanos) {
+            this.deadline = Math.min(startNanos + TimeUnit.MILLISECONDS.toNanos(boundMs), callDeadlineNanos);
+            this.nanos = nanos;
+        }
+
+        /** Milliseconds left, at least 1; throws the cancelled error (SQLSTATE 57014) when none is. */
+        public long leftMs() {
+            long leftMs = TimeUnit.NANOSECONDS.toMillis(deadline - nanos.getAsLong());
             if (leftMs <= 0) {
                 throw new org.jooq.exception.DataAccessException("census bucket exceeded its time bound",
                     new java.sql.SQLException("time bound", CatalogRepository.QUERY_CANCELED));
             }
-            PgSession.setLocal(ctx, "statement_timeout", Long.toString(leftMs));
+            return leftMs;
+        }
+
+        /** Sets the statement timeout to the time left (one read of the clock). */
+        void arm(DSLContext ctx) {
+            PgSession.setLocal(ctx, "statement_timeout", Long.toString(leftMs()));
         }
     }
 
@@ -227,10 +273,19 @@ public final class IndexRunCensusReads {
         return false;
     }
 
-    /** One bucket in its own transaction under its own bound: a cancelled statement is a {@code timed_out} entry, never the whole call. */
-    private <T> Outcome<T> bucket(String name, String tenant, Function<DSLContext, T> work) {
+    /**
+     * One bucket in its own transaction under its own bound and the call's deadline: a cancelled statement, at any point of
+     * the bucket, is a {@code timed_out} entry (nothing of the bucket's partial work is kept), never the whole call.
+     */
+    private <T> Outcome<T> bucket(String name, String tenant, long callDeadline, BiFunction<DSLContext, Budget, T> work) {
+        long start = nanos.getAsLong();
+        if (callDeadline - start <= 0) {
+            log.warn("event=catalog_index_run_census_bucket_unread tenant={} bucket={}", tenant, name);
+            return Outcome.none();
+        }
+        Budget budget = new Budget(start, callDeadline, boundMs(), nanos);
         try {
-            return Outcome.of(repo.tenantScope().withTenant(tenant, work));
+            return Outcome.of(repo.tenantScope().withTenant(tenant, ctx -> work.apply(ctx, budget)));
         } catch (RuntimeException e) {
             if (!cancelled(e)) throw e;
             log.warn("event=catalog_index_run_census_bucket_timeout tenant={} bucket={}", tenant, name);
@@ -244,8 +299,8 @@ public final class IndexRunCensusReads {
 
     // ── stale ────────────────────────────────────────────────────────────────
 
-    private Stale stale(DSLContext ctx, String tenant, int limit, Instant now) {
-        new Budget().arm(ctx);
+    private Stale stale(DSLContext ctx, Budget budget, String tenant, int limit, Instant now) {
+        budget.arm(ctx);
         OffsetDateTime cutoff = OffsetDateTime.ofInstant(now.minusSeconds(STALE_THRESHOLD_S), ZoneOffset.UTC);
         var rows = new ArrayList<>(staleQuery(ctx, tenant, cutoff, limit + 1).fetch());
         boolean capped = rows.size() > limit;
@@ -266,8 +321,7 @@ public final class IndexRunCensusReads {
 
     // ── fence ────────────────────────────────────────────────────────────────
 
-    private Fence fence(DSLContext ctx, String tenant, int limit) {
-        Budget budget = new Budget();
+    private Fence fence(DSLContext ctx, Budget budget, String tenant, int limit) {
         var d = CATALOG_DOCUMENTS;
         OffsetDateTime floor = OffsetDateTime.ofInstant(FENCE_FLOOR, ZoneOffset.UTC);
         Condition live = d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull());
@@ -320,8 +374,7 @@ public final class IndexRunCensusReads {
 
     // ── failed_hidden ────────────────────────────────────────────────────────
 
-    private FailedHidden failedHidden(DSLContext ctx, String tenant, int limit) {
-        Budget budget = new Budget();
+    private FailedHidden failedHidden(DSLContext ctx, Budget budget, String tenant, int limit) {
         budget.arm(ctx);
         var rows = new ArrayList<>(failedQuery(ctx, tenant, limit + 1).fetch());
         boolean capped = rows.size() > limit;
@@ -370,24 +423,32 @@ public final class IndexRunCensusReads {
     private record Candidate(String tumbler, String sourceUri, int chunkCount, String hash) {}
 
     /**
-     * Chunk rows of {@code collection} per recorded {@code content_hash}, for the given hashes. The collection and its
-     * model are constants, so the planner prunes {@code nexus.chunks} to that collection's leaf at plan time; a row is
-     * counted live or not (the heal's read asks for non-live rows too).
+     * The statement that counts the chunk rows of {@code collection} per recorded {@code content_hash}, for the given
+     * hashes. The collection and its model are constants, so the planner prunes {@code nexus.chunks} to that collection's
+     * leaf at plan time (IndexRunCensusPlanTest pins one leaf in the plan); a row is counted live or not (the heal's
+     * read asks for non-live rows too). {@code content_hash} is a legacy metadata key with NO index: the statement reads
+     * every row of the leaf once, the same work the client's {@code $in} read did server-side (measured in IndexRunCensusPlanTest), and it is the only statement of the census that scales with a collection's chunks.
+     * A derived table, so the grouped expression is one column and not two bind-parameter spellings of it. Public so a plan
+     * test can explain the exact statement the route runs.
      */
+    public static Select<Record2<String, Integer>> storedByHashQuery(DSLContext ctx, String tenant, String collection,
+                                                                    String model, List<String> hashes) {
+        Field<String> hash = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "content_hash");
+        var rows = ctx.select(hash.as("h")).from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection))
+                .and(CHUNKS.EMBEDDING_MODEL.eq(model)).and(hash.in(hashes)))
+            .asTable("rows");
+        Field<String> h = rows.field("h", String.class);
+        return ctx.select(h, DSL.count()).from(rows).groupBy(h);
+    }
+
     private static Map<String, Integer> storedByHash(DSLContext ctx, Budget budget, String tenant, String collection,
                                                       String model, List<String> hashes) {
-        Field<String> hash = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "content_hash");
         Map<String, Integer> out = new HashMap<>();
         for (int i = 0; i < hashes.size(); i += HASH_BATCH) {
             budget.arm(ctx);
             var batch = hashes.subList(i, Math.min(i + HASH_BATCH, hashes.size()));
-            // a derived table, so the grouped expression is one column and not two bind-parameter spellings of it
-            var rows = ctx.select(hash.as("h")).from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection))
-                    .and(CHUNKS.EMBEDDING_MODEL.eq(model)).and(hash.in(batch)))
-                .asTable("rows");
-            Field<String> h = rows.field("h", String.class);
-            for (var r : ctx.select(h, DSL.count()).from(rows).groupBy(h).fetch()) {
+            for (var r : storedByHashQuery(ctx, tenant, collection, model, batch).fetch()) {
                 out.merge(r.value1(), r.value2(), Integer::sum);
             }
         }

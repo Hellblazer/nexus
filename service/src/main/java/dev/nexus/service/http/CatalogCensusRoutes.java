@@ -20,10 +20,13 @@ import java.util.function.Function;
 /**
  * nexus-f3yqd: the two read-only catalog census routes of engine 0.1.190, which {@code nx doctor} reads in place of a walk
  * of every document. Each is tenant-scoped and bounded by the section-label count's statement timeout
- * ({@link CatalogRepository#FILLABLE_COUNT_TIMEOUT_MS}); one that outlasts it answers 503
- * {@code {"error":..., "reason":"statement_timeout"}} with none of the answer. A client that gets a 404 is on an engine
- * before the route and one that gets a 503 is on an engine that could not answer in time: both read "cannot say", never
- * "none". New paths rather than parameters on existing routes: an old engine would ignore a parameter and answer a 200
+ * ({@link CatalogRepository#FILLABLE_COUNT_TIMEOUT_MS}). The drift route answers 503
+ * {@code {"error":..., "reason":"statement_timeout"}} with none of the answer when it outlasts the bound. The census
+ * never answers 503 for a bound: it is three independent buckets under one call budget
+ * ({@link IndexRunCensusReads#CALL_BUDGET_MS}), and a bucket that could not be read in time is {@code {"timed_out": true}}
+ * in a 200, the others answering. A client that gets a 404 is on an engine before the route; a 503 or a {@code timed_out}
+ * bucket is an engine that could not answer in time: all read "cannot say", never "none". A {@code capped} bucket is "at
+ * least" (see {@link IndexRunCensusReads}), and a capped {@code failed_hidden} with a count of 0 is "not fully checked". New paths rather than parameters on existing routes: an old engine would ignore a parameter and answer a 200
  * that looks like "nothing found".
  */
 final class CatalogCensusRoutes {

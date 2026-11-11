@@ -258,3 +258,15 @@ def test_the_failed_runs_row_counts_what_the_tables_failed_hidden_bucket_counts(
     _wire(monkeypatch, scenario)
     want = scenario["expect"]["failed_hidden"]
     assert _hidden_view(health._check_failed_runs_hidden_chunks(_walk(scenario))) == {"failed": want["failed"], "count": want["count"]}
+
+
+def test_the_heal_dry_run_itself_rebuilds_exactly_the_tables_hidden_count(monkeypatch) -> None:
+    """The row's count is the heal's ``reconciled``; this runs ``heal_manifest_gaps`` directly, so the oracle the engine bucket
+    is held to is the heal and not only the row's wording of it (the shared walk the row used to read is going away)."""
+    from nexus.catalog.manifest_heal import heal_manifest_gaps
+
+    for scenario in _scenarios("failed_hidden"):
+        _wire(monkeypatch, scenario)
+        failed = [e for e in _walk(scenario) if e.index_state == "failed"]
+        result = heal_manifest_gaps(failed, _Catalog(scenario), lambda s=scenario: _T3(s), None, dry_run=True)
+        assert result.reconciled == scenario["expect"]["failed_hidden"]["count"], scenario["id"]

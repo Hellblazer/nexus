@@ -173,7 +173,7 @@ class CatalogHandlerEnvelopeConformanceGateTest {
 
     private static final String CENSUS_DELEGATE =
         "the handler method delegates to CatalogCensusRoutes, whose body is three buckets, each an object that carries its "
-        + "own exact count and capped flag beside a bounded example list (stale: count/capped/notes/examples; fence: the "
+        + "own count (exact unless capped, when it is \"at least\") and capped flag beside a bounded example list (stale: count/capped/notes/examples; fence: the "
         + "exact counts and post_anchor {count, capped, examples}; failed_hidden: failed {count, capped}, count, capped, "
         + "examples), the lists never exceeding the request's limit (a 400 above 10,000); a bucket that cannot be read in "
         + "time is {timed_out: true}, never a partial list. IndexRunCensusRouteTest pins the envelope, the cap edges, the "

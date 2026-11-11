@@ -13,6 +13,7 @@ import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * nexus-f3yqd: {@code GET /v1/catalog/owners/next_seq_drift?limit=N}, the read-only form of the next_seq sweep: the
@@ -113,6 +114,26 @@ class NextSeqDriftReadRouteTest extends IndexRunCensusTestBase {
         }
         assertThat(swept).containsEntry("checked", before.get("checked")).containsEntry("healed", before.get("drifted"));
         assertThat(drift("")).containsEntry("drifted", 0);
+    }
+
+    /**
+     * The call deadline between owners (one probe per owner): the clock the deadline reads is spent after the first owner, so
+     * the second owner's probe is refused with the cancelled error (SQLSTATE 57014), which the route answers as the 503 the
+     * statement-timeout test above shows. No partial list leaves the read.
+     */
+    @Test
+    void theDeadlineBetweenOwnersIsTheCancelledError_andNoPartialAnswerLeaves() throws Exception {
+        owner(TENANT, "7.10", 0, 2);
+        owner(TENANT, "7.11", 0, 2);
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        // read 1 sets the deadline, read 2 is the first owner's check; from the third on the clock is a minute later
+        java.util.function.LongSupplier clock = () -> reads.incrementAndGet() <= 2 ? 0L : 60_000_000_000L;
+        var reads2 = new dev.nexus.service.db.NextSeqDriftReads(repo, clock);
+        assertThatThrownBy(() -> reads2.read(TENANT, 10)).isInstanceOf(org.jooq.exception.DataAccessException.class)
+            .satisfies(e -> assertThat(((java.sql.SQLException) e.getCause()).getSQLState()).isEqualTo(CatalogRepository.QUERY_CANCELED));
+        // control: the same read with a clock that never moves lists both owners
+        var whole = new dev.nexus.service.db.NextSeqDriftReads(repo, () -> 0L).read(TENANT, 10);
+        assertThat(whole.drifted()).isEqualTo(2);
     }
 
     @Test

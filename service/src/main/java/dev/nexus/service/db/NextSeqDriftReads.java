@@ -5,6 +5,7 @@ package dev.nexus.service.db;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 
@@ -45,9 +46,16 @@ public final class NextSeqDriftReads {
     public record Page(int checked, int drifted, int limit, boolean capped, List<Drift> examples) {}
 
     private final CatalogRepository repo;
+    private final LongSupplier nanos;
 
     public NextSeqDriftReads(CatalogRepository repo) {
+        this(repo, System::nanoTime);
+    }
+
+    /** {@code nanos} is the monotonic source the call deadline reads; a test replaces it to spend the deadline deterministically. */
+    public NextSeqDriftReads(CatalogRepository repo, LongSupplier nanos) {
         this.repo = repo;
+        this.nanos = nanos;
     }
 
     /**
@@ -68,7 +76,7 @@ public final class NextSeqDriftReads {
             throw new IllegalArgumentException("limit must be 1.." + MAX_LIMIT);
         }
         int boundMs = Integer.getInteger(CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS);
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMs);
+        long deadline = nanos.getAsLong() + TimeUnit.MILLISECONDS.toNanos(boundMs);
         return repo.tenantScope().withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(boundMs));
             var owners = ctx.select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NEXT_SEQ)
@@ -79,7 +87,7 @@ public final class NextSeqDriftReads {
             int drifted = 0;
             List<Drift> examples = new ArrayList<>();
             for (var o : owners) {
-                if (System.nanoTime() > deadline) {
+                if (nanos.getAsLong() > deadline) {
                     // The call as a whole outlasted its bound: the same SQLSTATE a cancelled statement carries, so the
                     // route answers it as it answers a statement timeout (503, no partial answer).
                     throw new org.jooq.exception.DataAccessException("next_seq drift read exceeded its time bound",
