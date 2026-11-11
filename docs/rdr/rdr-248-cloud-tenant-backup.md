@@ -140,8 +140,8 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
 
 | # | Assumption | Status | Method |
 | --- | --- | --- | --- |
-| A1 | The cloud front end lets one authenticated response stream for tens of minutes and several GB | Unverified | Spike against the cloud in an announced window (bob, on Sam's go) |
-| A2 | One `REPEATABLE READ READ ONLY` transaction with `set_config('nexus.tenant', T, true)` returns exactly that tenant's rows from every RLS table | Verified locally (spike); under the managed pooler unverified | Cloud spike for the pooler half |
+| A1 | The cloud front end lets one authenticated response stream for tens of minutes and several GB | **Refuted** (bob, from conexus config, 2026-11-11): the edge proxy closes every exchange at an absolute 60 s, the load balancer idle timeout and CloudFront's origin read timeout are 60 s, and the sidecar caps a request body at 20 MB | Config reading; the design below works within those limits |
+| A2 | One `REPEATABLE READ READ ONLY` transaction with `set_config('nexus.tenant', T, true)` returns exactly that tenant's rows from every RLS table | Verified locally (spike); the cloud has no pooler (the engine reaches PG directly through its own Hikari pool, bob 2026-11-11), so the local result carries | Local spike |
 | A3 | Binary `COPY` of the column types in these tables round-trips | Verified for every type that held data; staged load required | Local spike; the remaining types (bigint[], smallint, uuid, identity) by the Step 5 test's seed |
 | A4 | Import loads in one transaction | Verified with id reassignment, foreign-key order and tuples excluded | Local spike |
 | A5 | A read-only snapshot held for the export does not hurt the shared cloud database | Unverified | Cloud spike: time and size for the `nexus` tenant |
@@ -151,8 +151,8 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
 ### Approach
 
 The engine writes the backup, because only the engine can read a tenant completely and consistently. One
-read-only transaction, scoped to the caller's tenant by RLS, copies every tenant-owned table into one
-framed stream. `nx backup` in cloud mode saves that stream to one file, checks it, and says how to keep
+read-only snapshot, scoped to the caller's tenant by RLS, is read in many short requests, each well
+inside the cloud's 60-second exchange limit, and the client joins the pieces into one framed file. `nx backup` in cloud mode saves that stream to one file, checks it, and says how to keep
 it. A second route loads such a file into an EMPTY tenant, so a restore can never overwrite data. The
 same routes run against a local engine, which is where the round trip is tested.
 
@@ -187,30 +187,47 @@ The classes, from the spike (one reason each in the spike record):
   chash_remap, gc_audit, hook_failures, index_failures, ladder_completions, request_ledger,
   retention_markers, routing_events, tier_writes).
 
-**Export route.** `GET /v1/tenant/export`, authorized by the caller's own tenant token (no admin token, no
-other tenant). In one `REPEATABLE READ READ ONLY` transaction as the engine role, with
-`set_config('nexus.tenant', T, true)`:
-1. a header: format version, engine version, the last Liquibase changeset id, tenant id, UTC time, the
-   table list with each table's columns and types, and the `embedding_models` rows the tenant's rows
-   refer to (a global table, outside the export, that two exported tables reference by foreign key);
-2. per `data` and `derived` table, in load order: a frame (table name, row count) holding
-   `COPY (SELECT <non-generated columns> FROM <table>) TO STDOUT (FORMAT binary)`;
-3. a trailer: per-table row counts and a SHA-256 of each frame.
-The body streams with constant engine memory.
+**Export session.** The cloud edge ends every HTTP exchange at 60 seconds and caps a request body at
+20 MB (A1), so no single request carries a backup. An export is a session made of short requests, all
+reading one snapshot:
+1. `POST /v1/tenant/export` (the caller's own tenant token; no admin token, no other tenant). The engine
+   opens a dedicated connection, begins a `REPEATABLE READ READ ONLY` transaction as the engine role with
+   `set_config('nexus.tenant', T, true)`, and calls `pg_export_snapshot()`. That transaction stays open
+   for the session's life and holds the snapshot. The response is the session id and the header: format
+   version, engine version, last Liquibase changeset id, tenant id, UTC time, each `data` and `derived`
+   table's columns, types and row count in the snapshot, and the `embedding_models` rows the tenant's rows
+   refer to (a global table that two exported tables reference by foreign key).
+2. `GET /v1/tenant/export/{id}/rows?table=T&after=<key>&limit=N`. Each call is its own short transaction
+   that runs `SET TRANSACTION SNAPSHOT '<id>'` (so it reads exactly what step 1 saw) and the tenant
+   setting, and returns `COPY (SELECT <non-generated columns> FROM T WHERE <key> > after ORDER BY <key>
+   LIMIT N) TO STDOUT (FORMAT binary)`, the key being the table's primary key. N is sized so a page takes
+   a few seconds (chunks: a few thousand rows of about 5 KB). The response carries the page's last key
+   and a SHA-256 of the page.
+3. `DELETE /v1/tenant/export/{id}`, or expiry: the session closes, the transaction ends and the snapshot is
+   released. A session idle past a bound (minutes) or older than a ceiling is closed by the engine, so an
+   abandoned export cannot hold the snapshot.
+Because each page names where it ended, a client that loses a request asks again from the same key: a
+dropped connection costs one page, not the export. One export session per tenant at a time.
 
-**Client (`nx backup`, cloud arm).** In managed mode `resolve_target` no longer refuses. The verb streams
-the route to `~/nexus-backups/nexus-<tenant>-<UTC stamp>.nxtenant.partial`, mode 0600, verifies the
-framing and every checksum and count against the trailer, then renames. It prints size, time, row counts
+**Client (`nx backup`, cloud arm).** In managed mode `resolve_target` no longer refuses. The verb opens a
+session, pulls every table page by page into `~/nexus-backups/nexus-<tenant>-<UTC stamp>.nxtenant.partial`
+(mode 0600) as one framed file (the header, a frame per table made of its pages, and a trailer of
+per-table row counts and SHA-256), retries a failed page from its key, checks each table's rows against
+the header's count, closes the session, then renames. It prints size, time, row counts
 by class, `ONLY_COPY_SENTENCE`, and that the file holds sensitive documents when any are present. The
 local arm is unchanged. A client older than the route's engine version refuses with the version it needs.
 
-**Import route.** `POST /v1/tenant/import`, for the caller's own tenant, which must exist through tenant
-create (that is what makes its `chunks` partition leaves; rows are never how a tenant comes to exist). It
-refuses unless every `data` and `derived` table is empty for that tenant, ignoring the rows tenant create
+**Import session.** The same limits apply, so an import is a session too: `POST /v1/tenant/import`
+opens it with the file's header and gets an id; `PUT /v1/tenant/import/{id}/rows?table=T&part=k` sends
+pages under 20 MB each, staged on the engine's dedicated connection inside one open transaction; `POST
+/v1/tenant/import/{id}/commit` runs the checks below and commits, or rolls everything back. An import
+session that idles past its bound is rolled back. It loads into the caller's own tenant, which must exist
+through tenant create (that is what makes its `chunks` partition leaves; rows are never how a tenant
+comes to exist). It refuses unless every `data` and `derived` table is empty for that tenant, ignoring the rows tenant create
 itself writes; unless the header's changeset id equals the engine's (a mismatch names both); and unless
-every `embedding_models` row in the header exists. Then, in one transaction, table by table in load order:
-1. stage the frame: a temp table shaped like the target, `COPY ... FROM STDIN (FORMAT binary)` into it
-   (COPY into the RLS table itself is refused);
+every `embedding_models` row in the header exists. Then, in that one transaction, table by table in load order:
+1. stage the pages: a temp table shaped like the target, `COPY ... FROM STDIN (FORMAT binary)` into it as
+   they arrive (COPY into the RLS table itself is refused);
 2. for a table with a reassigned id, build a temp map of old id to a new id from the table's own sequence;
 3. `INSERT ... SELECT` from the stage with the caller's tenant in the tenant column, new ids from the map,
    and referring columns, foreign key or not, rewritten through their parent's map.
@@ -278,16 +295,23 @@ exporter; every new table needs a new exporter.
   **Mitigation**: the registry names trigger-maintained columns, and the parity test lists the tables'
   triggers so a new one is a reviewed change.
 
-- **Risk**: an export left running holds back vacuum on the shared database (A5).
-  **Mitigation**: a statement timeout on the export transaction sized from the cloud spike, and one export
-  per tenant at a time.
+- **Risk**: an export session holds a snapshot, and so holds back vacuum on the shared database, for its
+  whole life (A5); an import session holds an open write transaction.
+  **Mitigation**: idle and total bounds per session, the engine closing a session that passes either; one
+  session per tenant at a time; the bounds set from the cloud measurement of A5.
+- **Risk**: a session's dedicated connection is one of the engine's pool for minutes.
+  **Mitigation**: a separate, small cap on concurrent sessions per engine, refused with a retry-after when
+  full.
 - **Risk**: a schema change between export and import makes a file unloadable.
   **Mitigation**: import refuses on a changeset mismatch and names both; the runbook says to restore with
   the engine version that wrote the file, then upgrade.
 
 ### Failure Modes
 
-- Stream cut mid-export: the client keeps only `.partial`, deletes it, and says to run again.
+- A page request fails: the client asks again from the same key; after a bounded number of tries it
+  closes the session, removes `.partial`, and says to run again.
+- The engine restarts mid-session: the dedicated transaction ends, the snapshot is gone; the next page
+  request gets a clear "session closed" and the client starts over.
 - Import fails mid-load: one transaction, so the tenant stays empty; the error names the table.
 - Registry out of date: the parity test fails in CI before release.
 
@@ -340,7 +364,11 @@ None.
 - **Scenario**: two tenants — **Verify**: the export holds none of the other tenant's rows.
 - **Scenario**: import into a non-empty tenant — **Verify**: refused, nothing written.
 - **Scenario**: changeset mismatch — **Verify**: refused, both ids named.
-- **Scenario**: stream cut — **Verify**: no file left but nothing at the destination.
+- **Scenario**: a page request cut mid-transfer — **Verify**: the client resumes from the page's key and
+  the file still verifies.
+- **Scenario**: a write between two page requests — **Verify**: the export does not contain it (one
+  snapshot across requests).
+- **Scenario**: a session idle past its bound — **Verify**: the engine closes it and releases the snapshot.
 - **Scenario**: an RLS table added without a class — **Verify**: the parity test fails.
 - **Scenario**: import into a second tenant in the same database — **Verify**: no key collision; foreign
   keys and the two unenforced references resolve to the new rows; the next engine insert after the load
