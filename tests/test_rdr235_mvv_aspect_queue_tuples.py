@@ -42,6 +42,9 @@ THE BULLETS (numbering follows the RDR):
    nexus-hbnml, so there is no second queue to hold back);
 8. no document text in any task body, each under 4,096 bytes.
 
+Bullet 5 has a live half (the end of the journey): a worker that keeps renewing keeps its claim through a stalled
+catalog check and a stalled write, each longer than the lease (the renewer runs from the claim to the last verdict).
+
 Scenario 24 (a parked worker is woken by an ``out`` from a second client
 process) and scenario 25 (the measured backlog, 1,200 tasks against
 ``max_live_rows`` 10,000; ``slow`` marker, run by name) follow the journey.
@@ -72,6 +75,7 @@ import pytest
 
 from nexus.aspect_extractor import AspectRecord
 from nexus.aspect_worker import AspectExtractionWorker
+from nexus.aspect_worker_tuples import TupleQueueSide
 from nexus.db.t2.http_tuple_store import ClaimNotFoundError
 from tests import _external_engine
 
@@ -701,6 +705,61 @@ def test_mvv_journey_on_the_tuple_queue(
     second_worker_takes_over("/nx235/fence-b.md")
     assert db.document_aspects.get_by_doc_id(fence_b).problem_formulation == "second-worker"
     assert [t.id for t in _tasks(db)] == [task13], "only the dead task remains"
+
+    # ── bullet 5, live half: a worker that IS renewing keeps its claim through a stall anywhere ──
+    # The renewer runs from the claim to the last verdict. A batch of two, the lease 2 s: the first claim's
+    # catalog check stalls longer than the lease (before the extractor, the window the renewer once missed),
+    # and the first claim's write stalls longer than the lease (after the extractor, the other window; the
+    # second claim waits behind it). Both stalls are in the side's own injected seams, so nothing is patched
+    # in the standard library. A claim that lapsed would fail its write (404 on the fence) and be retried,
+    # so every write succeeds and the queue drains back to the dead task only.
+    stall_s = timing.lease_s + 0.5
+    span_paths = ["/nx235/doc-60.md", "/nx235/doc-61.md"]
+    span_docs = [_register_doc(f"span-{k}", coll) for k in range(2)]
+    for path, doc in zip(span_paths, span_docs):
+        db.aspect_queue.enqueue(coll, path, content_hash="s", doc_id=doc)
+    ledger.reset()
+    stalled: dict[str, float] = {}
+    span_worker = AspectExtractionWorker(batch_size=2, tuple_options=_worker_opts(lease_s=timing.lease_s))
+
+    def stalling_sensitive(doc_id: str) -> bool:
+        if "check" not in stalled:
+            t0 = time.monotonic()
+            time.sleep(stall_s)
+            stalled["check"] = time.monotonic() - t0
+        return span_worker._document_sensitive(doc_id)
+
+    def stalling_complete(fields: dict[str, Any], claim_id: str, claimant: str) -> Any:
+        if "write" not in stalled:
+            t0 = time.monotonic()
+            time.sleep(stall_s)
+            stalled["write"] = time.monotonic() - t0
+        return span_worker._complete_with_claim(fields, claim_id, claimant)
+
+    span_side = TupleQueueSide(
+        worker_id=span_worker._worker_id, batch_size=2, tuples_call=span_worker._tuples_call,
+        complete=stalling_complete, extract=span_worker._extract_tuple_rows,
+        on_self_fault=lambda reason, claim, exc: None,
+        lease_s=timing.lease_s, renew_every_s=timing.renew_every_s, deadline_s=lambda n: 120.0,
+        document_gone=span_worker._document_gone, document_sensitive=stalling_sensitive,
+    )
+    got, failed = span_side.claim_batch(park=False)
+    assert len(got) == 2 and not failed, "both span tasks claimed in one batch"
+    span_side.process(got)
+    assert min(stalled.values()) >= timing.lease_s and set(stalled) == {"check", "write"}, (
+        f"each stall outlasted the lease, so only renewal kept the claim live: {stalled}"
+    )
+    with ledger._lock:
+        span_upserts = [u for u in ledger.upserts if u["doc_id"] in span_docs]
+    assert [u["error"] for u in span_upserts] == [None, None], (
+        f"a write met a claim that was not live: {span_upserts}"
+    )
+    for path, doc in zip(span_paths, span_docs):
+        rec = db.document_aspects.get_by_doc_id(doc)
+        assert rec is not None and rec.problem_formulation == f"extracted:{path}", path
+        assert ex.count(path) == 1, "extracted once: no claim lapsed and came back"
+    assert not span_side.held(), "both claims finished"
+    assert [t.id for t in _tasks(db)] == [task13], "the span tasks were consumed; only the dead task remains"
 
 
 @pytest.mark.scenario
