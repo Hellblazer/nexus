@@ -95,7 +95,7 @@ def test_only_timed_out_rows_still_say_not_checked(monkeypatch: pytest.MonkeyPat
 
 def test_a_route_row_for_a_collection_the_scan_would_skip_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     route = [{"collection": n, "stub_chunks": 0, "capped": False, "examples": []} for n in _NAMES]
-    route.append({"collection": "other__z__voyage-context-3__v1", "stub_chunks": 9, "capped": False, "examples": ["q.pdf"]})
+    route.append({"collection": "other__z__bge-768__v1", "stub_chunks": 9, "capped": False, "examples": ["q.pdf"]})
     _setup(monkeypatch, route)
     r = h._check_pdf_stub_metadata()[0]
     assert r.ok is True, r.detail

@@ -90,11 +90,11 @@ def test_a_malformed_body_is_scan_as_before(monkeypatch: pytest.MonkeyPatch, bod
 
 
 def test_a_timed_out_collection_travels_beside_the_counted_ones(monkeypatch: pytest.MonkeyPatch) -> None:
-    body = {"limit": 1000, "collections": [*_BODY["collections"], {"collection": "knowledge__slow__voyage-context-3__v1",
+    body = {"limit": 1000, "collections": [*_BODY["collections"], {"collection": "knowledge__slow__bge-768__v1",
                                                                     "timed_out": True}]}
     c, _calls = _client(monkeypatch, get=body)
     assert c.stub_metadata(1000) == [*_BODY["collections"],
-                                     {"collection": "knowledge__slow__voyage-context-3__v1", "timed_out": True}]
+                                     {"collection": "knowledge__slow__bge-768__v1", "timed_out": True}]
 
 
 @pytest.mark.parametrize("row", [{"timed_out": True}, {"collection": 7, "timed_out": True},
