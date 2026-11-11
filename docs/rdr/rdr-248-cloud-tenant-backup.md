@@ -143,7 +143,7 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
 | A1 | The cloud front end lets one authenticated response stream for tens of minutes and several GB | **Refuted** (bob, from conexus config, 2026-11-11): the edge proxy closes every exchange at an absolute 60 s, the load balancer idle timeout and CloudFront's origin read timeout are 60 s, and the sidecar caps a request body at 20 MB | Config reading; the design below works within those limits |
 | A2 | One `REPEATABLE READ READ ONLY` transaction with `set_config('nexus.tenant', T, true)` returns exactly that tenant's rows from every RLS table | Verified locally (spike); the cloud has no pooler (the engine reaches PG directly through its own Hikari pool, bob 2026-11-11), so the local result carries | Local spike |
 | A3 | Binary `COPY` of the column types in these tables round-trips | Verified for every type that held data; staged load required | Local spike; the remaining types (bigint[], smallint, uuid, identity) by the Step 5 test's seed |
-| A4 | Import loads in one transaction | Verified with id reassignment, foreign-key order and tuples excluded | Local spike |
+| A4 | Import loads in one transaction | Verified at toy scale (57 chunks, 0.12 s) with id reassignment, foreign-key order and tuples excluded; at real scale the load cannot fit one 60-second exchange (248-research-11, inferred), so the commit is asynchronous; its time at scale is measured in Step 5 | Local spike |
 | A5 | A read-only snapshot held for the export does not hurt the shared cloud database | Verified (bob, read-only cloud window, Sam's go, 2026-11-11, T2 `nexus/rdr248-cloud-spike-2026-11-11`): tenant `nexus` is 2,272,023 rows and 3.82 GB in binary COPY over the 26 data and derived tables, read from one snapshot in about 83 s (`chunks` 542,778 rows, 3.39 GB, 78 s, about 43 MB/s; the rest about 5 s). A snapshot held 60 minutes (by accident) left the xmin age near 1000 and dead tuples barely grown (`topic_assignments` 45.7k to 46.8k); no autovacuum ran in the window | Cloud measurement |
 | A6 | A snapshot exported by one transaction serves many later page transactions, confined by RLS, consistent across writes | Verified locally (spike round 2, T2 `nexus/rdr248-local-spike-r2-2026-11-11`): 43 pages, writes and deletes committed between pages, concatenated pages equal the single-transaction export row for row on all 26 tables | Local spike |
 | A7 | The cloud engine role has no `idle_in_transaction_session_timeout` that would kill the held transaction between page requests | Verified (bob, same window): idle-in-transaction, idle-session, statement and transaction timeouts are 0 at server level, with no role or database override for `nexus_svc`; the engine sets `statement_timeout` locally only on its search and taxonomy paths, so the export's dedicated connection sets its own bounds | Cloud settings read; engine source |
@@ -203,8 +203,10 @@ reading one snapshot:
    0.04 s with the snapshot alone). The header is read in a separate short transaction that imports the
    snapshot. The response is the session id and the header: format
    version, engine version, last Liquibase changeset id, tenant id, UTC time, each `data` and `derived`
-   table's columns, types and row count in the snapshot, and the `embedding_models` rows the tenant's rows
-   refer to (a global table that two exported tables reference by foreign key).
+   table's columns and types, and the `embedding_models` rows the tenant's rows refer to (a global table
+   that two exported tables reference by foreign key). It carries no row counts: counting every table in
+   one request would be a long request again, so each table's first page carries that table's count in
+   the snapshot.
 2. `GET /v1/tenant/export/{id}/rows?table=T&after=<key>`. Each call is its own short `REPEATABLE READ
    READ ONLY` transaction whose FIRST statement is `SET TRANSACTION SNAPSHOT '<id>'` (Postgres refuses it
    later, and refuses it under READ COMMITTED), followed by the tenant setting. The tenant comes from the
@@ -234,12 +236,25 @@ local arm is unchanged. A client older than the route's engine version refuses w
 **Import session.** The same limits apply, so an import is a session too: `POST /v1/tenant/import`
 opens it with the file's header and gets an id; `PUT /v1/tenant/import/{id}/rows?table=T&part=k` sends
 pages under 20 MB each, staged on the engine's dedicated connection inside one open transaction; `POST
-/v1/tenant/import/{id}/commit` runs the checks below and commits, or rolls everything back. An import
-session that idles past its bound is rolled back. It loads into the caller's own tenant, which must exist
+/v1/tenant/import/{id}/commit` starts the load and returns 202 at once, because loading a large tenant
+(2.27M rows for `nexus`, 542,778 chunks into an HNSW index) cannot finish inside one 60-second exchange.
+The engine runs the steps below on the session's dedicated connection, and `GET /v1/tenant/import/{id}`
+reports `staging`, `loading <table>`, `verifying`, `committed` or `failed: <reason>`; the outcome is kept
+for 24 hours after the session ends. A client that loses its connection reads the outcome later:
+dropping the client neither stops nor rolls back a running load. An engine restart during the load rolls
+the transaction back and loses the outcome, and the next status call answers "no such session"; the
+tenant is then still empty, which the restore verb checks and says. An import session that idles past
+its bound before commit is rolled back. It loads into the caller's own tenant, which must exist
 through tenant create (that is what makes its `chunks` partition leaves; rows are never how a tenant
 comes to exist). It refuses unless every `data` and `derived` table is empty for that tenant, ignoring the rows tenant create
-itself writes; unless the header's changeset id equals the engine's (a mismatch names both); and unless
-every `embedding_models` row in the header exists. Then, in that one transaction, table by table in load order:
+itself writes; unless the engine can read the file; and unless every `embedding_models` row in the
+header exists. The engine can read a file when its format version is one the engine supports, its last
+changeset is one the engine has applied (a file written by a newer engine is refused, naming both), and,
+for every table in the file, the table is in the engine's registry and every file column exists there with
+the same type; a target column the file lacks must be nullable or have a default, and takes it. A file
+from an older engine therefore loads into a newer one, which is the cloud case: the operator, not the
+user, decides the engine version, and the schema moves with every engine release. Equal changesets skip
+the column comparison. Then, in that one transaction, table by table in load order:
 1. stage the pages: a temp table built from the registry's column types (not `CREATE TABLE ... AS` from
    the target, which would hold a lock on every `chunks` partition until commit and block tenant create
    the same way), `COPY ... FROM STDIN (FORMAT binary)` into it as they arrive (COPY into the RLS table
@@ -252,9 +267,13 @@ the reassignment nor a trigger touches. Any failure rolls the whole load back. R
 not only on a collision, also leaves the sequences correct: the engine role cannot `setval`, and a load
 that kept the old ids made the engine's next insert collide.
 
-**Restore verb.** `nx backup restore FILE` (cloud and local) calls the import route. The local `pg_restore`
-runbook stays for whole-cluster restores. An empty tenant comes from tenant create: the operator on the
-cloud (conexus), `nx init` on a fresh local install. The runbook says how.
+**Restore verb.** `nx backup restore FILE` (cloud and local) starts an import session, uploads the
+pages, commits and polls the status until it ends. A cloud file restores into a local engine under the
+same rule, when the local engine's schema is the file's or newer. The local `pg_restore` runbook stays
+for whole-cluster restores. An empty tenant comes from tenant create: the operator on the cloud
+(conexus), `nx init` on a fresh local install. The runbook's order is: the operator runs the current
+engine, creates the empty tenant and issues its token; the user restores. Nobody pins an engine
+version.
 
 ### Existing Infrastructure Audit
 
@@ -296,8 +315,8 @@ exporter; every new table needs a new exporter.
 
 ### Consequences
 
-- A new engine route pair and a file format that must stay readable across engine versions (the header's
-  format version and changeset id).
+- A new engine route pair and a file format that newer engines must keep reading (the header's format
+  version and per-table column lists decide; see the import's compatibility rule).
 - The cloud holds one read-only transaction per running export.
 
 ### Risks and Mitigations
@@ -319,8 +338,10 @@ exporter; every new table needs a new exporter.
   **Mitigation**: a separate, small cap on concurrent sessions per engine, refused with a retry-after when
   full.
 - **Risk**: a schema change between export and import makes a file unloadable.
-  **Mitigation**: import refuses on a changeset mismatch and names both; the runbook says to restore with
-  the engine version that wrote the file, then upgrade.
+  **Mitigation**: the compatibility rule loads a file from any older engine whose columns still exist in
+  the target, filling new columns from their defaults; a migration that drops or retypes an exported
+  column must say what it does to backups, and the Step 5 test loads a file written before the newest
+  changeset.
 
 ### Failure Modes
 
@@ -342,7 +363,8 @@ exporter; every new table needs a new exporter.
 
 Done locally for the method (the spike). The MVV is the Step 5 test doing the same against the shipped
 routes, in-process with the test fixtures (a subprocess CLI from a checkout is refused by the
-production-write guard even against a loopback engine), seeding every `data` and `derived` table,
+production-write guard even against a loopback engine), plus one commit at scale (at least 500,000
+synthetic chunks) whose time is recorded, seeding every `data` and `derived` table,
 including the types the spike did not exercise; then one export and import against a cloud test tenant
 in a window, with time and size recorded.
 
@@ -354,7 +376,7 @@ in a window, with time and size recorded.
 
 #### Step 3: `nx backup` cloud arm: stream, verify, publish (client)
 
-#### Step 4: Import route (staged load, id reassignment, foreign-key order, verification) and `nx backup restore` (engine + client)
+#### Step 4: Import session (staged load, id reassignment, foreign-key order, verification, asynchronous commit with a status route) and `nx backup restore` (engine + client)
 
 #### Step 5: The round-trip test (local engine, two tenants) and the runbook
 
@@ -379,7 +401,14 @@ None.
 - **Scenario**: export then import into an empty tenant — **Verify**: per-table counts and checksums equal.
 - **Scenario**: two tenants — **Verify**: the export holds none of the other tenant's rows.
 - **Scenario**: import into a non-empty tenant — **Verify**: refused, nothing written.
-- **Scenario**: changeset mismatch — **Verify**: refused, both ids named.
+- **Scenario**: a file written by an older engine — **Verify**: it loads, and columns the file lacks take
+  their defaults.
+- **Scenario**: a file written by a newer engine, or with a column the target lacks — **Verify**: refused,
+  naming the changeset or the column.
+- **Scenario**: the client drops during a commit — **Verify**: the load continues, and a later status call
+  reports its outcome.
+- **Scenario**: a commit at scale (a synthetic tenant of at least 500,000 chunks, local) — **Verify**: it
+  completes, and its time is recorded for Performance Expectations.
 - **Scenario**: a page request cut mid-transfer — **Verify**: the client resumes from the page's key and
   the file still verifies.
 - **Scenario**: a write between two page requests — **Verify**: the export does not contain it (one
