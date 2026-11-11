@@ -1,0 +1,118 @@
+{
+  "_readme" : "The response body of GET /v1/catalog/owners/next_seq_drift for each case of next-seq-drift-cases.json, read from the real route (default limit). Read by NextSeqDriftParityTest, which asserts the live body equals its entry here (a wire-shape change fails until this file is regenerated on purpose: -Dnexus.golden.write=true, see GoldenBodies) and by the client half of the allocator row (the Python doctor row), which parses these bodies. Keys sorted; the bodies hold no tenant id and no time.",
+  "cases" : {
+    "a-deactivated-owner-is-examined" : {
+      "capped" : false,
+      "checked" : 1,
+      "drifted" : 1,
+      "examples" : [ {
+        "highest_child_seq" : 3,
+        "next_seq" : 0,
+        "owner" : "5.9"
+      } ],
+      "limit" : 1000
+    },
+    "a-deeper-address-is-not-a-child" : {
+      "capped" : false,
+      "checked" : 2,
+      "drifted" : 1,
+      "examples" : [ {
+        "highest_child_seq" : 9,
+        "next_seq" : 0,
+        "owner" : "5.6.1"
+      } ],
+      "limit" : 1000
+    },
+    "a-live-child-above-next-seq" : {
+      "capped" : false,
+      "checked" : 1,
+      "drifted" : 1,
+      "examples" : [ {
+        "highest_child_seq" : 4,
+        "next_seq" : 2,
+        "owner" : "5.2"
+      } ],
+      "limit" : 1000
+    },
+    "a-longer-prefix-is-another-owner" : {
+      "capped" : false,
+      "checked" : 2,
+      "drifted" : 1,
+      "examples" : [ {
+        "highest_child_seq" : 5,
+        "next_seq" : 4,
+        "owner" : "5.80"
+      } ],
+      "limit" : 1000
+    },
+    "a-lower-tombstone-never-lowers-the-mark" : {
+      "capped" : false,
+      "checked" : 1,
+      "drifted" : 1,
+      "examples" : [ {
+        "highest_child_seq" : 7,
+        "next_seq" : 1,
+        "owner" : "5.4"
+      } ],
+      "limit" : 1000
+    },
+    "a-non-digit-tail-is-not-a-sequence" : {
+      "capped" : false,
+      "checked" : 1,
+      "drifted" : 0,
+      "examples" : [ ],
+      "limit" : 1000
+    },
+    "a-tombstoned-child-above-next-seq" : {
+      "capped" : false,
+      "checked" : 1,
+      "drifted" : 1,
+      "examples" : [ {
+        "highest_child_seq" : 6,
+        "next_seq" : 2,
+        "owner" : "5.3"
+      } ],
+      "limit" : 1000
+    },
+    "an-owner-with-no-children" : {
+      "capped" : false,
+      "checked" : 1,
+      "drifted" : 0,
+      "examples" : [ ],
+      "limit" : 1000
+    },
+    "equality-is-healthy" : {
+      "capped" : false,
+      "checked" : 1,
+      "drifted" : 0,
+      "examples" : [ ],
+      "limit" : 1000
+    },
+    "leading-zeros-read-as-the-number" : {
+      "capped" : false,
+      "checked" : 1,
+      "drifted" : 1,
+      "examples" : [ {
+        "highest_child_seq" : 7,
+        "next_seq" : 6,
+        "owner" : "5.10"
+      } ],
+      "limit" : 1000
+    },
+    "several-owners-listed-in-prefix-order" : {
+      "capped" : false,
+      "checked" : 3,
+      "drifted" : 2,
+      "examples" : [ {
+        "highest_child_seq" : 4,
+        "next_seq" : 1,
+        "owner" : "6.1"
+      }, {
+        "highest_child_seq" : 5,
+        "next_seq" : 1,
+        "owner" : "6.2"
+      } ],
+      "limit" : 1000
+    }
+  }
+}

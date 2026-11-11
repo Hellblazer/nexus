@@ -30,6 +30,13 @@ class NextSeqDriftParityTest extends IndexRunCensusTestBase {
 
     private static final String RESOURCE = "next-seq-drift-cases.json";
 
+    private static final GoldenBodies GOLDEN = new GoldenBodies("next-seq-drift-golden.json", "cases",
+        "The response body of GET /v1/catalog/owners/next_seq_drift for each case of next-seq-drift-cases.json, read from the "
+        + "real route (default limit). Read by NextSeqDriftParityTest, which asserts the live body equals its entry here (a "
+        + "wire-shape change fails until this file is regenerated on purpose: -Dnexus.golden.write=true, see GoldenBodies) "
+        + "and by the client half of the allocator row (the Python doctor row), which parses these bodies. Keys sorted; the "
+        + "bodies hold no tenant id and no time.");
+
     static Stream<String> caseIds() throws Exception {
         try (var in = NextSeqDriftParityTest.class.getResourceAsStream("/" + RESOURCE)) {
             var ids = new ArrayList<String>();
@@ -46,6 +53,13 @@ class NextSeqDriftParityTest extends IndexRunCensusTestBase {
         for (JsonNode c : cases) { if (c.get("expect").get("drifted").size() > 0) drifted++; else healthy++; }
         assertThat(drifted).isGreaterThanOrEqualTo(6);
         assertThat(healthy).isGreaterThanOrEqualTo(3);
+    }
+
+    @Test
+    void theGoldenHoldsExactlyTheTablesCases() throws Exception {
+        var ids = new java.util.HashSet<String>();
+        caseIds().forEach(ids::add);
+        GOLDEN.checkKeys(ids);
     }
 
     @ParameterizedTest(name = "{0}")
@@ -70,6 +84,7 @@ class NextSeqDriftParityTest extends IndexRunCensusTestBase {
 
         JsonNode want = sc.get("expect");
         var body = drift("");
+        GOLDEN.check(id, body);
         assertThat(body).as(id).containsEntry("checked", want.get("checked").asInt())
             .containsEntry("drifted", want.get("drifted").size()).containsEntry("capped", false);
         var got = new ArrayList<List<Object>>();

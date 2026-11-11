@@ -1,0 +1,698 @@
+{
+  "_readme" : "The response body of GET /v1/catalog/index-run/census?limit=100 for each scenario of index-run-census-cases.json, read from the real route. Read by IndexRunCensusParityTest, which asserts the live body equals its entry here (a wire-shape change fails until this file is regenerated on purpose: -Dnexus.golden.write=true, see GoldenBodies) and by the client half of the census (the Python doctor rows), which parses these bodies. Normalised: stale examples' started_at is the fixture's (the run's clock shift removed) and age_s the fixture clock's, rounded to the minute; keys sorted; no tenant ids; tumblers are the table's.",
+  "scenarios" : {
+    "failed-documents-sharing-a-hash-share-its-rows" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 2,
+        "examples" : [ {
+          "chunk_count" : 3,
+          "chunks_stored" : 3,
+          "source_uri" : "file:///r/3.2.1.py",
+          "tumbler" : "3.2.1"
+        }, {
+          "chunk_count" : 4,
+          "chunks_stored" : 3,
+          "source_uri" : "file:///r/3.2.2.py",
+          "tumbler" : "3.2.2"
+        } ],
+        "failed" : {
+          "capped" : false,
+          "count" : 3
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : null,
+          "earliest_stamped_at" : null,
+          "kind" : null,
+          "proven_at" : null
+        },
+        "checked" : 3,
+        "floor_candidates" : 0,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 0,
+          "examples" : [ ]
+        },
+        "reported_null" : 0,
+        "undated_reported_null" : 0
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "failed-none-at-all" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 0
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : "2026-09-01T00:00:00Z",
+          "earliest_stamped_at" : "2026-09-01T00:00:00Z",
+          "kind" : "earliest",
+          "proven_at" : null
+        },
+        "checked" : 1,
+        "floor_candidates" : 0,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 0,
+          "examples" : [ ]
+        },
+        "reported_null" : 0,
+        "undated_reported_null" : 0
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "failed-none-hidden" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 2
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : null,
+          "earliest_stamped_at" : null,
+          "kind" : null,
+          "proven_at" : null
+        },
+        "checked" : 2,
+        "floor_candidates" : 0,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 0,
+          "examples" : [ ]
+        },
+        "reported_null" : 0,
+        "undated_reported_null" : 0
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "failed-the-heal-rule-case-by-case" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 3,
+        "examples" : [ {
+          "chunk_count" : 3,
+          "chunks_stored" : 3,
+          "source_uri" : "file:///r/3.1.1.py",
+          "tumbler" : "3.1.1"
+        }, {
+          "chunk_count" : 5,
+          "chunks_stored" : 2,
+          "source_uri" : "file:///r/3.1.2.py",
+          "tumbler" : "3.1.2"
+        }, {
+          "chunk_count" : 0,
+          "chunks_stored" : 2,
+          "source_uri" : "file:///r/3.1.4.py",
+          "tumbler" : "3.1.4"
+        } ],
+        "failed" : {
+          "capped" : false,
+          "count" : 10
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : null,
+          "earliest_stamped_at" : null,
+          "kind" : null,
+          "proven_at" : null
+        },
+        "checked" : 12,
+        "floor_candidates" : 0,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 0,
+          "examples" : [ ]
+        },
+        "reported_null" : 0,
+        "undated_reported_null" : 0
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "failed-the-meta-hash-wins-over-the-fence-hash" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 3,
+        "examples" : [ {
+          "chunk_count" : 3,
+          "chunks_stored" : 3,
+          "source_uri" : "file:///r/3.5.1.py",
+          "tumbler" : "3.5.1"
+        }, {
+          "chunk_count" : 3,
+          "chunks_stored" : 2,
+          "source_uri" : "file:///r/3.5.2.py",
+          "tumbler" : "3.5.2"
+        }, {
+          "chunk_count" : 3,
+          "chunks_stored" : 3,
+          "source_uri" : "file:///r/3.5.4.py",
+          "tumbler" : "3.5.4"
+        } ],
+        "failed" : {
+          "capped" : false,
+          "count" : 4
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : null,
+          "earliest_stamped_at" : null,
+          "kind" : null,
+          "proven_at" : null
+        },
+        "checked" : 4,
+        "floor_candidates" : 0,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 0,
+          "examples" : [ ]
+        },
+        "reported_null" : 0,
+        "undated_reported_null" : 0
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "fence-a-shared-run-needs-two-usable-stamps" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 0
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : "2026-08-12T00:00:00Z",
+          "earliest_stamped_at" : "2026-08-12T00:00:00Z",
+          "kind" : "earliest",
+          "proven_at" : null
+        },
+        "checked" : 2,
+        "floor_candidates" : 1,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 1,
+          "examples" : [ {
+            "file_path" : "/r/2.3.3.py",
+            "indexed_at" : "2026-08-13T00:00:00Z",
+            "source_uri" : "file:///r/2.3.3.py",
+            "tumbler" : "2.3.3"
+          } ]
+        },
+        "reported_null" : 1,
+        "undated_reported_null" : 0
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "fence-documents-that-are-not-complete-prove-no-baseline" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 1
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : "2026-08-20T10:00:00Z",
+          "earliest_stamped_at" : "2026-08-20T10:00:00Z",
+          "kind" : "earliest",
+          "proven_at" : null
+        },
+        "checked" : 4,
+        "floor_candidates" : 2,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 1,
+          "examples" : [ {
+            "file_path" : "/r/2.8.6.py",
+            "indexed_at" : "2026-08-25T00:00:00Z",
+            "source_uri" : "file:///r/2.8.6.py",
+            "tumbler" : "2.8.6"
+          } ]
+        },
+        "reported_null" : 2,
+        "undated_reported_null" : 0
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "fence-ignores-tombstones" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 0
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : "2026-08-20T10:00:00Z",
+          "earliest_stamped_at" : "2026-08-20T10:00:00Z",
+          "kind" : "proven",
+          "proven_at" : "2026-08-20T10:00:00Z"
+        },
+        "checked" : 2,
+        "floor_candidates" : 1,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 1,
+          "examples" : [ {
+            "file_path" : "/r/2.7.4.py",
+            "indexed_at" : "2026-08-25T00:00:00Z",
+            "source_uri" : "file:///r/2.7.4.py",
+            "tumbler" : "2.7.4"
+          } ]
+        },
+        "reported_null" : 1,
+        "undated_reported_null" : 0
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "fence-no-baseline-with-candidates" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 0
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : null,
+          "earliest_stamped_at" : null,
+          "kind" : null,
+          "proven_at" : null
+        },
+        "checked" : 1,
+        "floor_candidates" : 2,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 0,
+          "examples" : [ ]
+        },
+        "reported_null" : 4,
+        "undated_reported_null" : 1
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "fence-proven-anchor" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 1
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : "2026-08-20T10:00:00Z",
+          "earliest_stamped_at" : "2026-08-09T09:00:00Z",
+          "kind" : "proven",
+          "proven_at" : "2026-08-20T10:00:00Z"
+        },
+        "checked" : 5,
+        "floor_candidates" : 3,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 1,
+          "examples" : [ {
+            "file_path" : "/r/2.1.6.py",
+            "indexed_at" : "2026-08-25T00:00:00Z",
+            "source_uri" : "file:///r/2.1.6.py",
+            "tumbler" : "2.1.6"
+          } ]
+        },
+        "reported_null" : 6,
+        "undated_reported_null" : 1
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "fence-quiet-corpus" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 0
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : null,
+          "earliest_stamped_at" : null,
+          "kind" : null,
+          "proven_at" : null
+        },
+        "checked" : 0,
+        "floor_candidates" : 0,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 0,
+          "examples" : [ ]
+        },
+        "reported_null" : 3,
+        "undated_reported_null" : 1
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "fence-unstamped-all-before-the-baseline" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 0
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : "2026-08-20T10:00:00Z",
+          "earliest_stamped_at" : "2026-08-20T10:00:00Z",
+          "kind" : "proven",
+          "proven_at" : "2026-08-20T10:00:00Z"
+        },
+        "checked" : 2,
+        "floor_candidates" : 1,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 0,
+          "examples" : [ ]
+        },
+        "reported_null" : 2,
+        "undated_reported_null" : 1
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "fence-weak-anchor-when-no_run_is_shared" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 0
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : "2026-08-12T00:00:00Z",
+          "earliest_stamped_at" : "2026-08-12T00:00:00Z",
+          "kind" : "earliest",
+          "proven_at" : null
+        },
+        "checked" : 4,
+        "floor_candidates" : 2,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 1,
+          "examples" : [ {
+            "file_path" : "/r/2.2.4.py",
+            "indexed_at" : "2026-09-05T00:00:00Z",
+            "source_uri" : "file:///r/2.2.4.py",
+            "tumbler" : "2.2.4"
+          } ]
+        },
+        "reported_null" : 2,
+        "undated_reported_null" : 0
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "stale-ignores-tombstones" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 0
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : null,
+          "earliest_stamped_at" : null,
+          "kind" : null,
+          "proven_at" : null
+        },
+        "checked" : 1,
+        "floor_candidates" : 0,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 0,
+          "examples" : [ ]
+        },
+        "reported_null" : 0,
+        "undated_reported_null" : 0
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 1,
+        "examples" : [ {
+          "age_s" : 43200,
+          "note" : false,
+          "source_uri" : "file:///r/1.3.1.py",
+          "started_at" : "2026-11-11T00:00:00Z",
+          "tumbler" : "1.3.1"
+        } ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    },
+    "stale-notes-are-the-knowledge-documents" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 0
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : null,
+          "earliest_stamped_at" : null,
+          "kind" : null,
+          "proven_at" : null
+        },
+        "checked" : 4,
+        "floor_candidates" : 0,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 0,
+          "examples" : [ ]
+        },
+        "reported_null" : 0,
+        "undated_reported_null" : 0
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 3,
+        "examples" : [ {
+          "age_s" : 28800,
+          "note" : true,
+          "source_uri" : "nx-note://one",
+          "started_at" : "2026-11-11T04:00:00Z",
+          "tumbler" : "1.2.1"
+        }, {
+          "age_s" : 32400,
+          "note" : true,
+          "source_uri" : "",
+          "started_at" : "2026-11-11T03:00:00Z",
+          "tumbler" : "1.2.2"
+        }, {
+          "age_s" : 36000,
+          "note" : false,
+          "source_uri" : "file:///r/1.2.3.py",
+          "started_at" : "2026-11-11T02:00:00Z",
+          "tumbler" : "1.2.3"
+        } ],
+        "notes" : 2
+      },
+      "threshold_s" : 21600
+    },
+    "stale-threshold-edges" : {
+      "failed_hidden" : {
+        "capped" : false,
+        "count" : 0,
+        "examples" : [ ],
+        "failed" : {
+          "capped" : false,
+          "count" : 1
+        }
+      },
+      "fence" : {
+        "anchor" : {
+          "at" : "2026-11-09T21:00:00Z",
+          "earliest_stamped_at" : "2026-11-09T21:00:00Z",
+          "kind" : "earliest",
+          "proven_at" : null
+        },
+        "checked" : 6,
+        "floor_candidates" : 0,
+        "post_anchor" : {
+          "capped" : false,
+          "count" : 0,
+          "examples" : [ ]
+        },
+        "reported_null" : 1,
+        "undated_reported_null" : 1
+      },
+      "floor" : "2026-08-07T16:00:35Z",
+      "limit" : 100,
+      "stale" : {
+        "capped" : false,
+        "count" : 2,
+        "examples" : [ {
+          "age_s" : 21600,
+          "note" : false,
+          "source_uri" : "file:///r/1.1.1.py",
+          "started_at" : "2026-11-11T06:00:00Z",
+          "tumbler" : "1.1.1"
+        }, {
+          "age_s" : 108000,
+          "note" : false,
+          "source_uri" : "file:///r/1.1.3.py",
+          "started_at" : "2026-11-10T06:00:00Z",
+          "tumbler" : "1.1.3"
+        } ],
+        "notes" : 0
+      },
+      "threshold_s" : 21600
+    }
+  }
+}

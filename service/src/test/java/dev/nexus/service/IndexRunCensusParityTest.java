@@ -35,6 +35,14 @@ class IndexRunCensusParityTest extends IndexRunCensusTestBase {
 
     private static final String RESOURCE = "index-run-census-cases.json";
 
+    private static final GoldenBodies GOLDEN = new GoldenBodies("index-run-census-golden.json", "scenarios",
+        "The response body of GET /v1/catalog/index-run/census?limit=100 for each scenario of index-run-census-cases.json, "
+        + "read from the real route. Read by IndexRunCensusParityTest, which asserts the live body equals its entry here (a "
+        + "wire-shape change fails until this file is regenerated on purpose: -Dnexus.golden.write=true, see GoldenBodies) "
+        + "and by the client half of the census (the Python doctor rows), which parses these bodies. Normalised: stale "
+        + "examples' started_at is the fixture's (the run's clock shift removed) and age_s the fixture clock's, rounded to the "
+        + "minute; keys sorted; no tenant ids; tumblers are the table's.");
+
     static Stream<String> scenarioIds() throws Exception {
         try (var in = IndexRunCensusParityTest.class.getResourceAsStream("/" + RESOURCE)) {
             var ids = new ArrayList<String>();
@@ -126,6 +134,7 @@ class IndexRunCensusParityTest extends IndexRunCensusTestBase {
         }
 
         var body = census("?limit=100");
+        GOLDEN.check(id, normalised(body, shift));
         JsonNode expect = sc.get("expect");
         if (expect.has("stale")) {
             JsonNode want = expect.get("stale");
@@ -164,6 +173,34 @@ class IndexRunCensusParityTest extends IndexRunCensusTestBase {
             for (var e : list(fh, "examples")) tumblers.add((String) e.get("tumbler"));
             assertThat(tumblers).as(id + " hidden documents").containsExactlyElementsOf(textList(want.get("hidden")));
         }
+    }
+
+    /**
+     * The body with the run's real clock taken out: the route ages documents against the real clock, and the seed moved each
+     * {@code index_started_at} by {@code shift} to keep its age, so removing the shift gives the fixture's timestamp and
+     * rounding the age to the minute gives the fixture clock's (the call runs seconds after the seed).
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> normalised(Map<String, Object> body, Duration shift) {
+        var copy = new java.util.LinkedHashMap<String, Object>(body);
+        var stale = new java.util.LinkedHashMap<String, Object>((Map<String, Object>) body.get("stale"));
+        var examples = new ArrayList<Map<String, Object>>();
+        for (var e : (List<Map<String, Object>>) stale.get("examples")) {
+            var n = new java.util.LinkedHashMap<String, Object>(e);
+            n.put("started_at", java.time.format.DateTimeFormatter.ISO_INSTANT.format(Instant.parse((String) e.get("started_at")).minus(shift)));
+            n.put("age_s", Math.round(((Number) e.get("age_s")).doubleValue() / 60.0) * 60L);
+            examples.add(n);
+        }
+        stale.put("examples", examples);
+        copy.put("stale", stale);
+        return copy;
+    }
+
+    @Test
+    void theGoldenHoldsExactlyTheTablesScenarios() throws Exception {
+        var ids = new java.util.HashSet<String>();
+        scenarioIds().forEach(ids::add);
+        GOLDEN.checkKeys(ids);
     }
 
     private static String text(JsonNode n) {
