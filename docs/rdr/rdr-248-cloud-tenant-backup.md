@@ -415,4 +415,58 @@ measured in A5 shows the shared database tolerates that.
 
 ### Contradiction Check
 
-To be completed at gate.
+The first draft's single streamed response contradicted A1 once it was refuted (the cloud edge ends
+every exchange at 60 s); the design was changed to sessions of short requests (c9bbb3f94), and no part of
+the text still assumes one long stream. The first draft's "60 tables" came from a changeset count; the
+live catalog says 50 parent tables plus 40 chunk leaves, and the registry is built from the live catalog.
+No other contradictions found between research findings, design principles, and proposed solution.
+
+### Assumption Verification
+
+A2 to A7 are verified (research records 248-research-1 to -8): A2, A3, A4 and A6 by local spikes, A5 and
+A7 by a read-only cloud window, A1 refuted and designed around. Left for implementation, not assumed in
+the design: the column types the spike did not exercise (bigint[], smallint, uuid, the identity column),
+which the Step 5 test seeds; and the cloud edge's transfer rate, which sets an export's time but no
+design choice and is recorded at Activation Step 2.
+
+#### API Verification
+
+| API Call | Library | Verification |
+| --- | --- | --- |
+| `pg_export_snapshot()`, `SET TRANSACTION SNAPSHOT` | PostgreSQL 17 | Spike (round 2) |
+| `COPY (SELECT ...) TO STDOUT (FORMAT binary)` under RLS | PostgreSQL 17 | Spike |
+| `COPY ... FROM STDIN (FORMAT binary)` into a temp table | PostgreSQL 17 | Spike |
+| `vector` binary send/receive | pgvector | Spike |
+
+### Scope Verification
+
+The Minimum Viable Validation is Step 5's round-trip test: export a seeded tenant through the shipped
+routes, import into an empty tenant in the same database, and assert equal counts, checksums and joins,
+in-process with the test fixtures. It is in Phase 1 and gates the engine release; the cloud round trip is
+Activation Step 2.
+
+### Cross-Cutting Concerns
+
+- **Versioning**: the file header carries a format version and the Liquibase changeset id; import refuses
+  a mismatch and names both. The routes are an additive wire change, recorded in the wire-contract ledger.
+- **Build tool compatibility**: N/A.
+- **Licensing**: N/A (no new dependency).
+- **Deployment model**: an engine release and a cloud deploy, both on Sam's go; the client refuses an
+  engine older than the routes' version.
+- **IDE compatibility**: N/A.
+- **Incremental adoption**: the local `nx backup` (pg_dump) is unchanged; the cloud arm and
+  `nx backup restore` are additions.
+- **Secret/credential lifecycle**: tokens live only in global tables, which the export cannot read; the
+  routes take the caller's own tenant token and never a tenant from the request; the file is mode 0600
+  and says when it holds sensitive documents.
+- **Memory management**: the engine pages by bytes (about 16 MB) and never holds a whole table; the client
+  writes pages to disk as they arrive.
+
+### Proportionality
+
+Right-sized for a new engine route pair, a file format and a restore path that must be correct across
+tenants. Nothing to trim.
+
+## Revision History
+
+- 2026-11-11: draft; local spikes (two rounds) and a read-only cloud window settled A1-A7.
