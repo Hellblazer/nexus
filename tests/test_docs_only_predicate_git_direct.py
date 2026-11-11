@@ -83,14 +83,15 @@ def test_changes_job_has_no_dorny_step() -> None:
 
 def test_changes_job_outputs_contract_unchanged() -> None:
     """`code` stays wired straight from the gate step, byte-identical. The
-    only other outputs are nexus-rpaat's affected-integration selection, which
-    comes from its own step so the gate step stays the script this file
-    executes."""
+    only other outputs are nexus-rpaat's affected-integration selection and its
+    shard list (nexus-jh1f2 cut 4), which come from their own step so the gate
+    step stays the script this file executes."""
     job = _changes_job()
     assert job["outputs"] == {
         "code": "${{ steps.gate.outputs.code }}",
         "integration_files": "${{ steps.integration.outputs.integration_files }}",
         "integration_any": "${{ steps.integration.outputs.integration_any }}",
+        "integration_shards": "${{ steps.integration.outputs.integration_shards }}",
     }
 
 

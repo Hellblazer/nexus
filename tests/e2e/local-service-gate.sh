@@ -933,6 +933,17 @@ engine_log_expect() {
 engine_log_expect "event=pci_sweep_read_started"
 engine_log_expect "event=pci_sweep valid="
 
+# NX_GATE_SMOKE_ONLY=1 (nexus-jh1f2 cut 4, Sam 2026-11-10): stop after the smoke leg and the
+# engine-log leg. The release battery's lsg leg runs this way: the integration pytest family
+# below moved into PR CI (ci.yml selects every integration file when a pull request targets
+# main, sharded three ways), and the nightly local-service gate still runs the whole family.
+# What stays here is the only proof that the throwaway service as shipped boots and serves.
+if [ "${NX_GATE_SMOKE_ONLY:-0}" = "1" ]; then
+  echo "[gate] LOCAL-SERVICE GATE PASSED (smoke only: ${SMOKE_PASSED}/${SMOKE_EXPECTED} smoke checks and the engine log;" \
+    "the integration pytest family runs in PR CI and the nightly gate)"
+  exit 0
+fi
+
 # The NX_SERVICE_* env leg below pins the SERVICE at the throwaway
 # instance (.env was sourced up top, before the service spawned). HOST/PORT
 # halves only — deliberately NOT NX_SERVICE_URL: the URL leg outranks the

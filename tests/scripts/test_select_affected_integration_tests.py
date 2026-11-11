@@ -258,12 +258,13 @@ def repo(tree: pathlib.Path) -> pathlib.Path:
     return tree
 
 
-def _run_step(repo: pathlib.Path, event: str, base: str) -> dict[str, str]:
+def _run_step(repo: pathlib.Path, event: str, base: str, base_ref: str = "develop") -> dict[str, str]:
     script = _render(
         {
             "github.event_name": event,
             "github.event.pull_request.base.sha": base,
             "github.event.before": base,
+            "github.base_ref": base_ref if event == "pull_request" else "",
         }
     )
     out = repo / ".gh_output"
@@ -279,6 +280,7 @@ def test_step_push_selects_importers(repo: pathlib.Path) -> None:
     (repo / "src/nexus/other.py").write_text("Y = 2\n")
     _commit_all(repo, "change")
     assert _run_step(repo, "push", before) == {
+        "integration_shards": "[1]",
         "integration_files": "tests/test_c_integration.py",
         "integration_any": "true",
     }
@@ -301,6 +303,7 @@ def test_step_doc_change_selects_nothing(repo: pathlib.Path) -> None:
     (repo / "docs/x.md").write_text("x\n")
     _commit_all(repo, "docs")
     assert _run_step(repo, "push", before) == {
+        "integration_shards": "[1]",
         "integration_files": "",
         "integration_any": "false",
     }
@@ -311,6 +314,27 @@ def test_step_unusable_base_selects_everything(repo: pathlib.Path, base: str) ->
     out = _run_step(repo, "push", base)
     assert out["integration_any"] == "true"
     assert out["integration_files"].split() == sel.select_all(repo)
+
+
+def test_step_a_release_pr_selects_everything_in_three_shards(repo: pathlib.Path) -> None:
+    """nexus-jh1f2 cut 4: a pull request into main runs the whole family, even for a doc-only diff."""
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "docs").mkdir()
+    (repo / "docs/x.md").write_text("x\n")
+    _commit_all(repo, "docs")
+    out = _run_step(repo, "pull_request", base, base_ref="main")
+    assert out["integration_shards"] == "[1,2,3]"
+    assert out["integration_any"] == "true"
+    assert out["integration_files"].split() == sel.select_all(repo)
+
+
+def test_step_a_pr_into_develop_keeps_the_diff_and_one_shard(repo: pathlib.Path) -> None:
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "docs").mkdir()
+    (repo / "docs/x.md").write_text("x\n")
+    _commit_all(repo, "docs")
+    out = _run_step(repo, "pull_request", base, base_ref="develop")
+    assert out == {"integration_shards": "[1]", "integration_files": "", "integration_any": "false"}
 
 
 def test_step_selector_change_selects_everything(repo: pathlib.Path) -> None:
@@ -370,17 +394,17 @@ def _job_step(name_prefix: str) -> str:
 
 def _run_job_step(
     tmp: pathlib.Path, name_prefix: str, *, stub_out: str, stub_rc: int,
-    collected: str = "0", files: str = "tests/test_a.py tests/test_b.py",
+    collected: str = "0", files: str = "tests/test_a.py tests/test_b.py", shard: int = 1, of: int = 1,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
     bindir = tmp / "bin"
     bindir.mkdir(exist_ok=True)
     stub = bindir / "uv"
     stub.write_text(f"#!/usr/bin/env bash\ncat <<'OUT'\n{stub_out}\nOUT\nexit {stub_rc}\n")
     stub.chmod(0o755)
-    script = _GH_EXPR.sub(
-        lambda m: {"steps.collect.outputs.collected": collected}[m.group(1).strip()],
-        _job_step(name_prefix),
-    )
+    values = {"steps.collect.outputs.collected": collected, "matrix.shard": str(shard), "strategy.job-total": str(of)}
+    script = _GH_EXPR.sub(lambda m: values[m.group(1).strip()], _job_step(name_prefix))
+    (tmp / "scripts").mkdir(exist_ok=True)
+    shutil.copy(REPO_ROOT / "scripts" / "split_integration_files.py", tmp / "scripts" / "split_integration_files.py")
     out = tmp / "gh_output"
     out.write_text("")
     env = dict(
@@ -404,7 +428,7 @@ _COLLECT_OUT = (
 def test_collect_step_counts_node_ids_only(tmp_path: pathlib.Path) -> None:
     proc, out = _run_job_step(tmp_path, "Collect", stub_out=_COLLECT_OUT, stub_rc=0)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert out == {"collected": "2"}
+    assert out == {"empty": "false", "collected": "2"}
     assert (tmp_path / "integration-selected.txt").read_text().split() == [
         "tests/test_a.py", "tests/test_b.py",
     ]
@@ -413,7 +437,7 @@ def test_collect_step_counts_node_ids_only(tmp_path: pathlib.Path) -> None:
 def test_collect_step_accepts_nothing_matched(tmp_path: pathlib.Path) -> None:
     proc, out = _run_job_step(tmp_path, "Collect", stub_out="no tests ran", stub_rc=5)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert out == {"collected": "0"}
+    assert out == {"empty": "false", "collected": "0"}
 
 
 def test_collect_step_fails_on_collection_error(tmp_path: pathlib.Path) -> None:
@@ -424,6 +448,37 @@ def test_collect_step_fails_on_collection_error(tmp_path: pathlib.Path) -> None:
 def test_collect_step_fails_on_empty_selection(tmp_path: pathlib.Path) -> None:
     proc, _ = _run_job_step(tmp_path, "Collect", stub_out="", stub_rc=0, files="")
     assert proc.returncode == 1
+
+
+def test_collect_step_keeps_this_shards_files_and_counts_only_them(tmp_path: pathlib.Path) -> None:
+    """nexus-jh1f2 cut 4: shard k of N runs its own files, and its non-vacuity count is theirs alone."""
+    collect = "tests/test_a.py::t1\ntests/test_a.py::t2\ntests/test_b.py::t1\n\n3 tests collected in 0.1s"
+    selections, counts = [], []
+    for k in (1, 2):
+        shard_dir = tmp_path / f"s{k}"
+        shard_dir.mkdir()
+        proc, out = _run_job_step(shard_dir, "Collect", stub_out=collect, stub_rc=0, shard=k, of=2)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        selections.append((shard_dir / "integration-selected.txt").read_text().split())
+        counts.append(int(out["collected"]))
+        assert out["empty"] == "false"
+    assert sorted(f for s in selections for f in s) == ["tests/test_a.py", "tests/test_b.py"]
+    assert sorted(counts) == [1, 2]
+
+
+def test_collect_step_marks_a_shard_with_no_files_empty(tmp_path: pathlib.Path) -> None:
+    proc, out = _run_job_step(tmp_path, "Collect", stub_out="tests/test_a.py::t1\n", stub_rc=0,
+                              files="tests/test_a.py", shard=3, of=3)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert out == {"empty": "true", "collected": "0"}
+    assert (tmp_path / "integration-selected.txt").read_text() == ""
+
+
+def test_the_run_step_is_skipped_for_an_empty_shard() -> None:
+    doc = yaml.safe_load(CI_YML.read_text())
+    (step,) = [s for s in doc["jobs"]["test-integration-affected"]["steps"]
+               if s.get("name", "").startswith("Run the affected")]
+    assert step.get("if") == "steps.collect.outputs.empty != 'true'"
 
 
 def _seed_selection(tmp: pathlib.Path) -> None:

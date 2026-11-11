@@ -230,6 +230,9 @@ jobs:
       # tests/test_docs_only_predicate_git_direct.py executes.
       integration_files: ${{ steps.integration.outputs.integration_files }}
       integration_any: ${{ steps.integration.outputs.integration_any }}
+      # nexus-jh1f2 cut 4: the affected-integration job's shard list, [1,2,3] on a pull
+      # request into main (every integration file runs there), [1] everywhere else.
+      integration_shards: ${{ steps.integration.outputs.integration_shards }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -386,6 +389,16 @@ jobs:
               mode="all"
             fi
           fi
+          # nexus-jh1f2 cut 4 (Sam 2026-11-10): a pull request into main (a release PR) runs
+          # the whole integration family here, three shards wide. It replaced the release
+          # battery's lsg pytest family, which ran the same tests serially on the laptop
+          # (about 26 min, the battery's long pole); lsg keeps only its smoke leg.
+          shards='[1]'
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.base_ref }}" = "main" ]; then
+            mode="all"
+            shards='[1,2,3]'
+          fi
+          echo "integration_shards=$shards" >> "$GITHUB_OUTPUT"
           if [ "$mode" = all ]; then
             sel="$(python3 scripts/select_affected_integration_tests.py --repo . --all)"
           else
@@ -1528,14 +1541,24 @@ jobs:
     # for the same selection, and every selected file that collects tests must
     # execute at least one, unless allowlisted. A selection whose files carry
     # only carved-out marks collects nothing and says so.
-    name: pytest (integration, affected)
+    name: ${{ strategy.job-total > 1 && format('pytest (integration, affected, shard {0}/{1})', matrix.shard, strategy.job-total) || 'pytest (integration, affected)' }}
     runs-on: ubuntu-latest
     needs: [changes, service-jar]
     if: success() && needs.changes.outputs.integration_any == 'true'
     # Worst case is the whole family. The nightly's pytest step for it took
     # 38 minutes on this runner class (run 37197448487, 2026-10-04: 789 passed
-    # in 2301 s), so 60 leaves room for setup and a cold cache.
+    # in 2301 s), so 60 leaves room for setup and a cold cache. A release PR
+    # splits that family three ways (cut 4 below), about 13 minutes a shard.
     timeout-minutes: 60
+    # nexus-jh1f2 cut 4: one shard on develop and interior PRs; three on a pull request into
+    # main, where the selection is every integration file (about 1180 tests). Each shard
+    # takes its files from scripts/split_integration_files.py, balanced on collected test
+    # count, and checks non-vacuity over its own files. pytest-gate reads the matrix's
+    # combined result, so every shard must succeed.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.changes.outputs.integration_shards || '[1]') }}
     env:
       NX_T2_SUBSTRATE_EXPECTED: "1"
       # Must equal LSG_PYTEST_MARK_EXPR in tests/e2e/lib/mandatory_pins.sh
@@ -1652,14 +1675,12 @@ jobs:
         id: collect
         run: |
           set -euo pipefail
-          tr ' ' '\n' <<< "$INTEGRATION_FILES" | sed '/^$/d' > integration-selected.txt
-          echo "selected files:"
-          cat integration-selected.txt
-          files=(); while IFS= read -r f; do files+=("$f"); done < integration-selected.txt
-          [ "${#files[@]}" -gt 0 ] || { echo "::error::integration_any=true but the selection is empty"; exit 1; }
+          tr ' ' '\n' <<< "$INTEGRATION_FILES" | sed '/^$/d' > integration-all.txt
+          all=(); while IFS= read -r f; do all+=("$f"); done < integration-all.txt
+          [ "${#all[@]}" -gt 0 ] || { echo "::error::integration_any=true but the selection is empty"; exit 1; }
           set +e
           NX_TEST_T2_SUBSTRATE=none uv run pytest -o addopts="" -m "$INTEGRATION_MARK_EXPR" \
-            --collect-only -q "${files[@]}" > integration-collect.txt
+            --collect-only -q "${all[@]}" > integration-collect.txt
           rc=$?
           set -e
           # 0 = collected, 5 = nothing matched the expression; anything else
@@ -1669,11 +1690,27 @@ jobs:
             echo "::error::pytest --collect-only exited $rc on the affected selection"
             exit 1
           fi
-          collected="$(grep -cE '^[^ ]+\.py::' integration-collect.txt || true)"
+          # nexus-jh1f2 cut 4: this shard's files, then this shard's collected count.
+          python3 scripts/split_integration_files.py --shard "${{ matrix.shard }}" --of "${{ strategy.job-total }}" \
+            --collected integration-collect.txt < integration-all.txt > integration-selected.txt
+          echo "shard ${{ matrix.shard }}/${{ strategy.job-total }} files:"
+          cat integration-selected.txt
+          collected=0
+          while IFS= read -r f; do
+            n="$(grep -cF -- "${f}::" integration-collect.txt || true)"
+            collected=$((collected + n))
+          done < integration-selected.txt
+          if [ -s integration-selected.txt ]; then
+            echo "empty=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "this shard got no files (fewer files than shards); nothing to run"
+            echo "empty=true" >> "$GITHUB_OUTPUT"
+          fi
           echo "collected=$collected" >> "$GITHUB_OUTPUT"
-          echo "collected $collected integration tests"
+          echo "collected $collected integration tests in this shard"
 
       - name: Run the affected integration tests
+        if: steps.collect.outputs.empty != 'true'
         env:
           # Same reason as the nightly's ungated-integration step: these files
           # self-provision a throwaway engine substrate and write to it.

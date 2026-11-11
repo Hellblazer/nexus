@@ -237,7 +237,9 @@ define_leg() {  # define_leg <name> <phase> <verdict-regex> <command...>
 [ "$SKIP_PREFLIGHT" = 1 ] || \
 define_leg preflight  serial "PREFLIGHT (PASSED|FAILED)"                 tests/e2e/release-preflight.sh
 # Group, longest first so the slots pack.
-define_leg lsg        group  "LOCAL-SERVICE GATE (PASSED|FAILED)"       tests/e2e/local-service-gate.sh
+# lsg runs smoke-only (nexus-jh1f2 cut 4): the integration pytest family runs in PR CI on the
+# release PR (every integration file, sharded x3) and in the nightly local-service gate.
+define_leg lsg        group  "LOCAL-SERVICE GATE (PASSED|FAILED)"       env NX_GATE_SMOKE_ONLY=1 tests/e2e/local-service-gate.sh
 define_leg pkgup      group  "PACKAGE-UPGRADE CONVERGENCE MVV (PASSED|FAILED)"   tests/e2e/migration-rehearsal/run.sh --package-upgrade
 define_leg mvv        group  "FRESH-INSTALL MVV (PASSED|FAILED)"        tests/e2e/fresh-install-mvv.sh
 # nexus-oc2bk (RDR-210 P5.2): keyed bge + Voyage engine, release battery and by hand only, never nightly (Sam, Q3).
