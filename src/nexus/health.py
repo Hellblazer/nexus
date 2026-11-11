@@ -10932,6 +10932,23 @@ _CHASH_CONFORMANCE_REPORT_LABEL = "Chunk chash conformance (tenant-scoped, engin
 _CHASH_CONFORMANCE_REPORT_DIMS: tuple[int, ...] = (384, 768, 1024)
 
 
+def _check_chash_validate_offer() -> list[HealthResult]:
+    """nexus-f3yqd: whenever the engine says a chash width CHECK is not validated, offer its validate job. The engine
+    never validates at boot; a user starts the job (`nx doctor --fix` or `nx t3 validate-chash-checks`). No row when
+    the engine cannot say (older engine, error) or when every CHECK is validated."""
+    if _chash_constraints_validated_by_engine() is not False:
+        return []
+    return [HealthResult(
+        label="chash CHECK validation", ok=False, warn=True,
+        detail=("the chash width CHECKs are not validated; the engine validates them only when a user starts its "
+                "job, which is safe to stop and resumes where it left off"),
+        fix_suggestions=[
+            "nx doctor --fix  # starts the validate job (operator credentials; on a managed install ask the operator)",
+            "nx t3 validate-chash-checks",
+        ],
+    )]
+
+
 def _check_chash_conformance_report() -> list[HealthResult]:
     """Managed/cloud-mode chash width-conformance check (RDR-180, bead
     nexus-du2dw) — the engine-route counterpart to the LOCAL-ONLY
@@ -13482,6 +13499,7 @@ def run_health_checks(
     # fed into the install-binary/convergence gates — see the check's own
     # docstring for the scoping rationale).
     results.extend(_step("_check_chash_conformance_report", lambda: _check_chash_conformance_report()))
+    results.extend(_step("_check_chash_validate_offer", lambda: _check_chash_validate_offer()))
     # nexus-sybbh: independent local evidence a purge-trash ran recently,
     # cross-referenced against the engine's gc_audit table — degrades to a
     # named skip when there is no local evidence, never a false clean pass.

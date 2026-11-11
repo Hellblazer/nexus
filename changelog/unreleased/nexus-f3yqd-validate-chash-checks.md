@@ -1,0 +1,4 @@
+### Added
+
+- **`nx t3 validate-chash-checks` and `nx doctor --fix` validate the chash width CHECKs, which the engine no longer does at boot** (nexus-f3yqd; engine-service 0.1.190). The command starts the engine's VALIDATE job and polls it to the end, showing the table it is on; it is safe to stop, and a CHECK it validated stays valid. A finished job is read by its verdict: a refused CHECK means rows break it and must be repaired first, a deferred one means run it again. It needs the engine's operator credentials, so on a managed install the operator runs it. `nx doctor` shows a row offering the job whenever the engine reports a CHECK not validated. An engine older than 0.1.190 is named as too old; nothing falls back to direct SQL.
+- **`nx t3 repair-chash`** removes a document's 16-byte manifest rows and marks it for re-index (the step a refused manifest CHECK names). A dry run unless `--apply`.

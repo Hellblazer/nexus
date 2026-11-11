@@ -1878,3 +1878,12 @@ t3.add_command(_quarantine_group)
 from nexus.commands.t3_cmds.retire_keys import retire_keys_cmd as _retire_keys_cmd  # noqa: E402 — must follow the `t3` group definition above
 
 t3.add_command(_retire_keys_cmd)
+
+# ── nexus-f3yqd: `nx t3 validate-chash-checks` and `nx t3 repair-chash` ──────
+# The user-started engine job that VALIDATEs the chash width CHECKs (never at boot), and the manifest repair a refused
+# CHECK names. Own module for the reason `quarantine` is.
+from nexus.commands.t3_cmds.chash_checks import repair_chash_cmd as _repair_chash_cmd  # noqa: E402 — must follow the `t3` group definition above
+from nexus.commands.t3_cmds.chash_checks import validate_chash_checks_cmd as _validate_chash_checks_cmd  # noqa: E402 — must follow the `t3` group definition above
+
+t3.add_command(_validate_chash_checks_cmd)
+t3.add_command(_repair_chash_cmd)

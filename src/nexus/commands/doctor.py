@@ -3797,6 +3797,8 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
         for line in vacuum_tuple_tables(dry_run=True):
             click.echo(line)
+        from nexus.commands.t3_cmds.chash_checks import doctor_chash_fix  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        doctor_chash_fix(dry_run=True)  # nexus-f3yqd: a dry-run job, which changes nothing
         return
 
     if fix:
@@ -3826,6 +3828,9 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             click.echo(line)
         if any(line.startswith("VACUUM of ") for line in vacuum_lines):
             raise click.ClickException("a dead-tuple VACUUM failed; see the line above")
+        from nexus.commands.t3_cmds.chash_checks import doctor_chash_fix  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        if not doctor_chash_fix(dry_run=False):  # nexus-f3yqd: the user-started VALIDATE of the chash CHECKs
+            raise click.ClickException("the chash CHECK validate job did not validate every CHECK; see the lines above")
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps

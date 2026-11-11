@@ -2286,6 +2286,24 @@ Reading the audit afterwards: the verb prints, per call, the ids of the intent a
 
 ---
 
+### nx t3 validate-chash-checks
+
+```
+nx t3 validate-chash-checks [--dry-run] [--no-wait] [--json]
+nx t3 validate-chash-checks --job ID [--json]
+```
+
+Validates the chash width CHECKs on `nexus.chunks` and `nexus.catalog_document_chunks` by starting the engine's job (`POST /v1/admin/validate-constraints`, engine 0.1.190) and polling it to the end. The engine never runs this at boot; this command and `nx doctor --fix` start it. The job is safe to stop: a CHECK it validated stays valid, and the next run skips it. It needs the engine's operator credentials, so on a managed install the operator runs it. A finished job is read by its verdict, not its state: a refused CHECK means rows break it and must be repaired first (`nx t3 repair-chash`), a deferred one means run it again. `--dry-run` reports what each CHECK would do and changes nothing. Exit 0 when every CHECK is validated, 1 when one is refused or deferred or the job failed, 3 when the engine is too old or the credentials cannot run it.
+
+### nx t3 repair-chash
+
+```
+nx t3 repair-chash DOC_ID [--apply] [--json]
+nx t3 repair-chash --all [--limit N] [--apply] [--json]
+```
+
+The step a refused manifest CHECK names: removes a document's 16-byte manifest rows and marks it for re-index (`POST /v1/catalog/manifest/repair-chash`). Without `--apply` it counts and changes nothing. After an apply, re-index the documents (`nx index repo`), then run `nx t3 validate-chash-checks` again.
+
 ### nx t3 quarantine restore
 
 ```
