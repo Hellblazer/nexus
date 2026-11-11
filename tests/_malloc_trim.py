@@ -27,9 +27,12 @@ def _load_trim() -> Callable[[int], int] | None:
     if not sys.platform.startswith("linux"):
         return None
     try:
-        return getattr(ctypes.CDLL("libc.so.6"), "malloc_trim", None)
+        fn = getattr(ctypes.CDLL("libc.so.6"), "malloc_trim", None)
     except OSError:
         return None
+    if fn is not None:
+        fn.argtypes, fn.restype = [ctypes.c_size_t], ctypes.c_int
+    return fn
 
 
 _TRIM: Callable[[int], int] | None = _load_trim()
@@ -39,7 +42,7 @@ def trim_at_module_boundary(item: object, nextitem: object | None) -> None:
     """Trim when *item* is its module's last test (or the session's)."""
     if _TRIM is None:
         return
-    if nextitem is None or getattr(nextitem, "module", None) is not getattr(item, "module", None):
+    if getattr(nextitem, "module", None) is not getattr(item, "module", None):
         _TRIM(0)
 
 
