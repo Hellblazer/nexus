@@ -70,14 +70,10 @@ def test_a_root_that_is_not_this_checkout_retires_nothing(repo: Path, tmp_path: 
 
 
 def test_a_failed_git_listing_retires_nothing(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    real = subprocess.run
+    def failing(_repo: Path, **_kw: object) -> list[Path]:
+        raise RuntimeError("git ls-files failed")
 
-    def failing(argv, *a, **k):  # noqa: ANN001
-        if "ls-files" in argv:
-            return subprocess.CompletedProcess(argv, 128, "", "fatal: not a git repository")
-        return real(argv, *a, **k)
-
-    monkeypatch.setattr(indexer.subprocess, "run", failing)
+    monkeypatch.setattr(indexer, "_git_ls_files", failing)
     assert indexer._gone_from_main_checkout(_Cat(str(repo), _PATHS), "1.22", repo, repo, set()) == []
 
 

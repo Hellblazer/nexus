@@ -1244,13 +1244,10 @@ def _gone_from_main_checkout(cat: object, owner: object, repo: Path, main_repo: 
         root = cat.owners_with_roots().get(str(owner), "")
         if not root or Path(root).resolve() != here:
             return []
-        listed = subprocess.run(  # noqa: S603 — argv list, git on PATH, no shell
-            ["git", "-C", str(here), "ls-files", "-z"], capture_output=True, text=True, errors="surrogateescape",
-            timeout=60, check=False,
-        )
-        if listed.returncode != 0:
+        # The walk's own listing (run_bounded, tracked files only); it raises in a git repo it cannot list.
+        tracked = {str(p.relative_to(here)) for p in _git_ls_files(here)}
+        if not tracked:
             return []
-        tracked = {p for p in listed.stdout.split("\0") if p}
         gone: set[str] = set()
         for entry in cat.by_owner(owner):
             fp = str(getattr(entry, "file_path", "") or "")
