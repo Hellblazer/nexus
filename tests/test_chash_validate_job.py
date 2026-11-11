@@ -272,15 +272,20 @@ class TestVerdict:
         text = "\n".join(v.lines)
         assert "tenants: t1 (3)" in text and "report it to the operator" in text and "repair-chash" not in text
 
-    def test_unkeyable_chunks_are_listed_with_their_owners(self) -> None:
-        unclearable = [{"chash": "ab" * 8, "reason": "no_text",
-                        "owners": [{"doc_id": "1.2.3", "title": "notes.md", "source": "a/notes.md", "via": "manifest"}]},
-                       {"chash": "cd" * 8, "reason": "text_mismatch", "owners": []}]
-        v = job.verdict(_done(all_validated=False, refused=[_refusal(unclearable=unclearable, unclearable_capped=True)],
-                              refused_count=1))
+    def test_legacy_chunks_are_listed_with_reasons_and_owners(self) -> None:
+        chunks = [{"tenant": "t1", "collection": "knowledge__x", "model": "bge", "chash": "ab" * 8,
+                   "reason": "no_text",
+                   "owners": [{"doc_id": "1.2.3", "title": "notes.md", "source": "a/notes.md", "via": "manifest"}]},
+                  {"tenant": "t1", "collection": "code__y", "model": "bge", "chash": "cd" * 8,
+                   "reason": "text_mismatch", "owners": []}]
+        refusal = _refusal(table="nexus.chunks_m1_t1", reasons={"no_text": 1, "text_mismatch": 1}, chunks=chunks,
+                           chunks_capped=True)
+        v = job.verdict(_done(all_validated=False, refused=[refusal], refused_count=1))
         text = "\n".join(v.lines)
-        assert "abababababab (no_text; notes.md)" in text and "(text_mismatch; no owning document)" in text
-        assert "more not listed" in text
+        assert "why: no stored text 1, stored text that does not hash to its key 1" in text
+        assert "abababababab in t1/knowledge__x (no stored text; notes.md)" in text
+        assert "(stored text that does not hash to its key; no owning document)" in text
+        assert "more chunks not listed" in text and "report it to the operator" in text
 
     def test_a_chunk_row_refusal_says_no_client_repair_exists(self) -> None:
         v = job.verdict(_done(all_validated=False, refused=[_refusal(table="nexus.chunks_m1_t1", bad_rows=7)],

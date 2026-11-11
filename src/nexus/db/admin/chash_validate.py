@@ -275,19 +275,36 @@ def _refused_lines(e: dict[str, Any]) -> list[str]:
     examples = e.get("example_chashes") or []
     if examples:
         out.append("  examples: " + ", ".join(str(x) for x in examples[:5]))
-    owners = [o for o in e.get("unclearable") or [] if isinstance(o, dict)]
-    if owners:
-        out.append("  unkeyable chunks: " + "; ".join(_owner_text(o) for o in owners[:5])
-                   + (" (more not listed)" if e.get("unclearable_capped") or len(owners) > 5 else ""))
+    reasons = e.get("reasons") if isinstance(e.get("reasons"), dict) else {}
+    if reasons:
+        out.append("  why: " + ", ".join(f"{_REASON.get(r, r)} {n}" for r, n in reasons.items() if n)
+                   + (" (counts capped)" if e.get("reasons_capped") else ""))
+    chunks = [c for c in e.get("chunks") or [] if isinstance(c, dict)]
+    for c in chunks[:5]:
+        out.append(f"  chunk: {_owner_text(c)}")
+    if len(chunks) > 5 or e.get("chunks_capped"):
+        out.append("  (more chunks not listed)")
     out.append("  next: report it to the operator of your nexus engine with these lines; no client step clears it")
     return out
 
 
-def _owner_text(o: dict[str, Any]) -> str:
-    """One unkeyable chunk and its owning documents, as the engine reports them (whatever subset it sends)."""
-    docs = [d for d in o.get("owners") or [] if isinstance(d, dict)]
+#: The engine's descriptive reasons for a non-32-byte row (wren, engine 0.1.190); nothing clears a row.
+_REASON: dict[str, str] = {
+    "legacy_digest_key": "a 16-byte legacy key",
+    "text_mismatch": "stored text that does not hash to its key",
+    "no_text": "no stored text",
+    "unexpected_width": "a key of an unexpected width",
+    "manifest_without_chunk": "a manifest row with no chunk",
+}
+
+
+def _owner_text(c: dict[str, Any]) -> str:
+    """One legacy chunk and its owning documents, as the engine reports them."""
+    docs = [d for d in c.get("owners") or [] if isinstance(d, dict)]
     who = ", ".join(str(d.get("title") or d.get("doc_id")) for d in docs[:3]) or "no owning document"
-    return f"{str(o.get('chash') or o.get('old_chash_hex') or '?')[:12]} ({o.get('reason') or 'unknown'}; {who})"
+    where = "/".join(str(c[k]) for k in ("tenant", "collection") if c.get(k))
+    return (f"{str(c.get('chash') or '?')[:12]} in {where or '?'} "
+            f"({_REASON.get(str(c.get('reason')), c.get('reason') or 'unknown')}; {who})")
 
 
 def _deferred_line(e: dict[str, Any]) -> str:
