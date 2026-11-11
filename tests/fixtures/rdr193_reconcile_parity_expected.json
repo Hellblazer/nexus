@@ -3388,9 +3388,6 @@
     "docs__rdr193parity"
    ]
   },
-  "id_foreign::file_to_doc_id id_foreign/x.txt": {
-   "value": "X:id_foreign/x.txt#0"
-  },
   "id_legacy::file_to_doc_id id_legacy/changed.txt": {
    "value": "M:id_legacy/changed.txt#0"
   },

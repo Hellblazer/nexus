@@ -26,10 +26,10 @@ _log = structlog.get_logger(__name__)
 STAGE_PAGE = 1000
 
 #: Causes (prefixes of the hook's ``unregistered`` values) for a file left without a document ON PURPOSE: a worktree or
-#: temp-dir path (``ephemeral:``) or a file another owner's live row holds (``foreign_owner:``, GH #1611 item 1). Not a
-#: failure: neither fails the run summary, enters the durable failure record, nor holds the --since-head base.
+#: temp-dir path (``ephemeral:``) or a file another owner's live row holds in a different collection
+#: (``foreign_owner:``, GH #1611). Not a failure: neither fails the run summary, enters the durable failure record, nor
+#: holds the --since-head base.
 DELIBERATE_SKIP_CAUSES: tuple[str, ...] = ("ephemeral:", "foreign_owner:")
-
 
 
 def stage_and_commit(writer: Any, owner: Any, rows: list[dict], *, walk: str, page: int = STAGE_PAGE) -> dict:
@@ -62,9 +62,10 @@ class Applied:
     #: tumbler -> the files of this run a ``--sensitive-glob`` matched that the commit left unflagged
     sensitivity_pending: dict[str, list[Path]] = field(default_factory=dict)
     reconciled: list[tuple[Path, str]] = field(default_factory=list)
-    #: GH #1611 item 1: file -> the live row of ANOTHER owner the engine resolved it onto (``foreign_owner``). The
-    #: file is that owner's document: this run gives it no document id, so none of its chunks are written under a row
-    #: whose physical_collection is the other owner's collection.
+    #: GH #1611: file -> the live row of ANOTHER owner the engine resolved it onto (``foreign_owner``) whose
+    #: physical_collection is a collection other than the one this run writes the file to. The file is that owner's
+    #: document: this run gives it no document id, so none of its chunks are written under a row that does not say they
+    #: are there. A ``foreign_owner`` row that holds no collection, or this run's own, is adopted (``reconciled``).
     foreign: dict[Path, str] = field(default_factory=dict)
     refused: dict[Path, str] = field(default_factory=dict)
     #: staged present rows the outcome has no row for (the engine answers one row per staged row, so this is a defect)
@@ -72,13 +73,46 @@ class Applied:
     updated: int = 0
 
 
-def apply_outcome(outcome: dict, *, rel_to_abs: dict[str, Path], staged: dict[str, dict]) -> Applied:
+def foreign_row_collections(reader: Any, outcome: dict, *, rel_to_abs: dict[str, Path]) -> dict[str, str]:
+    """``tumbler -> physical_collection`` for the other-owner rows the outcome resolved this run's files onto.
+
+    The outcome names a ``foreign_owner`` row's tumbler and owner but not the collection that row holds, which decides
+    whether the run may write the file's chunks under it (:func:`apply_outcome`). One batched read. A tumbler the read
+    does not return, or a read that fails (warned of), is left out of the result: :func:`apply_outcome` reads that as
+    "unknown" and refuses the file, never as "no collection".
+    """
+    tumblers = sorted({
+        str(r["tumbler"]) for r in outcome.get("rows", [])
+        if r.get("action") == "foreign_owner" and r.get("tumbler") and r.get("file_path") in rel_to_abs
+    })
+    if not tumblers:
+        return {}
+    try:
+        entries = reader.resolve_many(tumblers)
+    except Exception as exc:  # noqa: BLE001 - boundary: an unreadable row leaves its file refused (loud), not adopted
+        _log.warning("catalog_foreign_owner_rows_unreadable", rows=len(tumblers), error_type=type(exc).__name__,
+                     error=str(exc))
+        return {}
+    return {t: str(getattr(e, "physical_collection", "") or "") for t, e in entries.items()}
+
+
+def apply_outcome(
+    outcome: dict, *, rel_to_abs: dict[str, Path], staged: dict[str, dict],
+    foreign_collections: dict[str, str] | None = None,
+) -> Applied:
     """Rebuild the hook's out-structures from the outcome's ``rows`` (RDR-193 Part A2, lines 949-965).
 
     *rel_to_abs* maps the staged ``file_path`` of each present row to the file; *staged* holds the row as staged. An
     outcome row for a path outside *rel_to_abs* (a ``keep`` or ``deleted`` row) belongs to no file of this run. A staged
     present row with no outcome row is listed in ``missing`` and warned of: it is in neither ``file_to_doc_id`` nor
     ``refused``, and the caller must not read it as registered.
+
+    A ``foreign_owner`` row (the file's source URI is held by another owner's live row, which the commit leaves as it
+    is) is told apart by *foreign_collections* (:func:`foreign_row_collections`): one that holds a collection other than
+    the one this run writes the file to goes to ``foreign`` and gets no document id (its chunks would land where the row
+    does not say they are, GH #1611); one that holds none, or this run's collection, is adopted as ``reconciled``, the
+    file keeping that tumbler (the nexus-53cae curator rows of repo files). A tumbler *foreign_collections* does not
+    answer is ``refused``: the run cannot tell, and a retry can.
     """
     out = Applied()
     flagged_wanted: dict[str, list[Path]] = {}  # tumbler -> files of this run a glob matched
@@ -95,10 +129,15 @@ def apply_outcome(outcome: dict, *, rel_to_abs: dict[str, Path], staged: dict[st
             out.refused[abs_path] = str(r.get("reason") or action or "")
             continue
         tumbler = str(tumbler)
-        if action == "foreign_owner":
-            out.foreign[abs_path] = tumbler
-            continue
         row = staged[rel]
+        if action == "foreign_owner":
+            held_in = (foreign_collections or {}).get(tumbler)
+            if held_in is None:
+                out.refused[abs_path] = "foreign_owner_row_unreadable"
+                continue
+            if held_in and held_in != row.get("physical_collection", ""):
+                out.foreign[abs_path] = tumbler
+                continue
         out.file_to_doc_id[abs_path] = tumbler
         if row.get("sensitive"):
             flagged_wanted.setdefault(tumbler, []).append(abs_path)
@@ -119,12 +158,15 @@ def apply_outcome(outcome: dict, *, rel_to_abs: dict[str, Path], staged: dict[st
                 out.stale_fence_doc_ids.add(tumbler)
             elif state == "complete" and r.get("index_content_hash"):
                 out.complete_doc_hashes[tumbler] = str(r["index_content_hash"])
-        elif action == "same_owner_by_uri":
+        elif action in ("same_owner_by_uri", "foreign_owner"):
             out.reconciled.append((abs_path, tumbler))
         if row.get("sensitive") and r.get("sensitive"):
             out.sensitive_confirmed.add(abs_path)
+    # A file left to another owner's document is not indexed by this run, so this run does not flag that document either.
+    skipped_rows = set(out.foreign.values())
     for tumbler in outcome.get("sensitivity_pending", []):
-        out.sensitivity_pending[str(tumbler)] = flagged_wanted.get(str(tumbler), [])
+        if str(tumbler) not in skipped_rows:
+            out.sensitivity_pending[str(tumbler)] = flagged_wanted.get(str(tumbler), [])
     for rel, abs_path in rel_to_abs.items():
         if rel not in answered:
             out.missing.append(abs_path)

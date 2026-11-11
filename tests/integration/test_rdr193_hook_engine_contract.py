@@ -191,25 +191,62 @@ def test_a_stranded_fence_fills_stale_fence_doc_ids_and_a_complete_one_fills_com
     assert complete == {ids[c]: _sha("c\n")}
 
 
-def test_a_path_another_owner_holds_resolves_to_that_row_and_is_reported_not_called_new(tmp_path: Path, capsys) -> None:
+def test_a_path_another_owner_holds_in_this_runs_collection_resolves_to_that_row_and_is_reported_not_called_new(
+    tmp_path: Path, capsys,
+) -> None:
+    """The nexus-53cae shape: the other owner's row holds the collection the run writes the file to, so the file keeps
+    its tumbler (the chunks land where the row says), the row is not touched, and the run does not call it new."""
     cat = HttpCatalogClient()
     try:
         other = cat.register_owner("hook_other", "curator")
         held = _write(tmp_path, "held.txt", "held\n")
         foreign = str(cat.register(other, "foreign", content_type="prose", file_path="held.txt",
-                                   physical_collection="docs__foreign", source_uri=f"file://{held.resolve()}"))
+                                   physical_collection="docs__hookrepo", source_uri=f"file://{held.resolve()}"))
     finally:
         cat.close()
     with structlog.testing.capture_logs() as logs:
         ids = _hook(tmp_path, [(held, "prose", "docs__hookrepo")])
     assert ids[held] == foreign, "the chunks of the file carry the tumbler of the row that holds it"
     assert [e for e in logs if e.get("event") == "catalog_register_reconciled_onto_existing_row"]
+    assert not [e for e in logs if e.get("event") == "catalog_register_skipped_foreign_owner"]
     row = HttpCatalogClient()
     try:
-        assert row.resolve(foreign).physical_collection == "docs__foreign", "the other owner's row is unchanged"
+        assert row.resolve(foreign).physical_collection == "docs__hookrepo", "the other owner's row is unchanged"
     finally:
         row.close()
     assert "1 new" not in capsys.readouterr().err
+
+
+def test_a_path_another_owner_holds_in_another_collection_gets_no_document_id_and_that_row_is_unchanged(
+    tmp_path: Path, capsys,
+) -> None:
+    """GH #1611, the engine's own ``foreign_owner`` row and the hook's one batched read of the row's collection: the file
+    is the other owner's document, so it has no id here (none of its chunks are written under that tumbler), it is named
+    as a deliberate skip, and the other owner's row is as it was."""
+    cat = HttpCatalogClient()
+    try:
+        other = cat.register_owner("hook_other", "curator")
+        held = _write(tmp_path, "held.txt", "held\n")
+        ok = _write(tmp_path, "ok.txt", "ok\n")
+        foreign = str(cat.register(other, "foreign", content_type="prose", file_path="held.txt",
+                                   physical_collection="docs__foreign", source_uri=f"file://{held.resolve()}"))
+    finally:
+        cat.close()
+    unregistered: dict[Path, str] = {}
+    with structlog.testing.capture_logs() as logs:
+        ids = _hook(tmp_path, [(held, "prose", "docs__hookrepo"), (ok, "prose", "docs__hookrepo")],
+                    unregistered=unregistered)
+    assert ok in ids and held not in ids, "non-vacuity: the ordinary file has its id, the held one has none"
+    assert unregistered == {held: f"foreign_owner:{foreign}"}
+    ev = [e for e in logs if e.get("event") == "catalog_register_skipped_foreign_owner"]
+    assert len(ev) == 1 and ev[0]["held_in"] == "docs__foreign" and ev[0]["written_to"] == "docs__hookrepo", logs
+    row = HttpCatalogClient()
+    try:
+        entry = row.resolve(foreign)
+        assert entry.physical_collection == "docs__foreign" and entry.title == "foreign", "the other owner's row is unchanged"
+    finally:
+        row.close()
+    assert "held by another owner's document in another collection, not written: held.txt" in capsys.readouterr().err
 
 
 def test_a_file_matching_a_sensitive_glob_is_born_flagged_and_confirmed(tmp_path: Path) -> None:

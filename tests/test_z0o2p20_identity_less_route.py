@@ -316,6 +316,24 @@ class TestRunRefusesIdentityLessFilesBeforeChunking:
         assert get_manifest_identity_drops() == []
         assert stats["identity_less_dropped_files"] == 0
 
+    def test_a_foreign_owner_file_is_not_chunked_and_is_not_a_failure(self, tmp_path: Path) -> None:
+        """GH #1611: a file another owner's document holds in another collection is left without a document on
+        purpose, as a worktree path is. Not chunked (its chunks would land under a row that does not hold them), and
+        not a drop: no ``identity_less_files_refused_before_chunking`` warning, no manifest identity drop, a count of 0."""
+        from nexus.mcp_infra import get_manifest_identity_drops
+
+        repo = _repo(tmp_path, "good.py", "paper.py")
+        with structlog.testing.capture_logs() as logs:
+            stats, mocks, _db = _run(
+                repo, extra={"nexus.indexer._catalog_hook": {
+                    "side_effect": _hook_naming({"paper.py": "foreign_owner:1.23.96"})}},
+            )
+        dispatched = {c.args[0].name for c in mocks["_index_code_file"].call_args_list}
+        assert dispatched == {"good.py"}, "non-vacuity: the ordinary file was dispatched, the foreign one was not"
+        assert not [e for e in logs if e.get("event") == "identity_less_files_refused_before_chunking"]
+        assert get_manifest_identity_drops() == []
+        assert stats["identity_less_dropped_files"] == 0
+
 
 class TestSinceHeadBaseWaitsForRefusedFiles:
     def test_base_is_not_advanced_past_a_dropped_file(
@@ -615,6 +633,16 @@ class TestDoctorAfterARefusal:
         failure: ``nx doctor`` must not go red for up to 30 days over it."""
         repo = _repo(tmp_path, "good.py", "draft.py")
         stats = self._index(repo, {"draft.py": "ephemeral:worktree_unique_no_main_mirror"})
+        assert stats["identity_less_dropped_files"] == 0
+        code, printed = _doctor_verdict()
+        assert code is None, printed
+        assert "FAIL" not in printed
+        assert "0 recorded failure" in printed
+
+    def test_a_foreign_owner_skip_leaves_doctor_green(self, tmp_path: Path) -> None:
+        """GH #1611: the same for a file another owner's document holds in another collection."""
+        repo = _repo(tmp_path, "good.py", "paper.py")
+        stats = self._index(repo, {"paper.py": "foreign_owner:1.23.96"})
         assert stats["identity_less_dropped_files"] == 0
         code, printed = _doctor_verdict()
         assert code is None, printed

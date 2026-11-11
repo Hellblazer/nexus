@@ -1327,9 +1327,11 @@ def _catalog_hook(
 
     ``unregistered`` (nexus-z0o2p.20, RDR-223 P2.10): ``abs_path -> cause`` for every file this call could NOT resolve
     to a catalog document: ``ephemeral:<reason>`` (refused by the worktree/tempdir guard), ``register_failed`` (the
-    file's row could not be built), ``register_refused`` (the engine refused the row: its derived source URI lies outside
-    the owner's repo root), ``no_outcome_row`` (the commit answered no row for a staged one) and ``catalog_hook_failed``
-    (the whole run failed).
+    file's row could not be built), ``foreign_owner:<tumbler>`` (another owner's live row holds the file in a collection
+    other than the one this run writes it to, GH #1611; a deliberate skip like ``ephemeral:``), ``register_refused`` (the
+    engine refused the row: its derived source URI lies outside the owner's repo root, or the other owner's row could not
+    be read), ``no_outcome_row`` (the commit answered no row for a staged one) and ``catalog_hook_failed`` (the whole run
+    failed).
 
     ``stale_fence_doc_ids`` (nexus-cp46b): the tumbler of every existing document fenced ``indexing`` or ``failed``
     (a run stranded mid-way), so the staleness caches force it stale instead of skipping it on its unchanged content.
@@ -1601,7 +1603,15 @@ def _catalog_hook(
 
         from nexus.catalog import reconcile_run  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
         outcome = reconcile_run.stage_and_commit(writer, owner, rows, walk=walk, page=_CATALOG_REGISTER_PAGE)
-        applied = reconcile_run.apply_outcome(outcome, rel_to_abs=rel_to_abs, staged=staged)
+        # GH #1611: a row another owner holds is left to that owner only when it holds a different collection than the
+        # one this run writes the file to; the outcome does not carry that collection, so it is one batched read.
+        _foreign_collections = reconcile_run.foreign_row_collections(cat, outcome, rel_to_abs=rel_to_abs)
+        applied = reconcile_run.apply_outcome(
+            outcome, rel_to_abs=rel_to_abs, staged=staged, foreign_collections=_foreign_collections)
+        if sensitive_wanted is not None:
+            # a file left to another owner's document is not indexed by this run, so no flag is owed for it (and its
+            # absence from sensitive_confirmed must not read as "the flag could not be set")
+            sensitive_wanted.difference_update(applied.foreign)
         # RDR-243 Q8 (nexus-rfvyy.8.8): the commit never flags an existing document; raise those a --sensitive-glob
         # matched through the audited route. A page that fails leaves its files unconfirmed, so the run does not embed them.
         reconcile_run.raise_pending_sensitivity(writer, applied, repo_name=repo_name, page=_CATALOG_REGISTER_PAGE)
@@ -1619,8 +1629,8 @@ def _catalog_hook(
         if sensitive_confirmed is not None:
             sensitive_confirmed.update(applied.sensitive_confirmed)
         # nexus-53cae: a file whose path the owner did not hold resolved onto a live row by source_uri (the same
-        # owner's, or another owner's: that row is left as it is). Not new, not linked, and named, so the count
-        # cannot lie again.
+        # owner's, or another owner's row that holds no other collection than this run's: that row is left as it is
+        # and the file keeps its tumbler). Not new, not linked, and named, so the count cannot lie again.
         reconciled = applied.reconciled
         for _path, _tum in reconciled:
             _log.warning(
@@ -1629,16 +1639,17 @@ def _catalog_hook(
                 tumbler=_tum, owner=str(owner),
             )
         for _path, _tum in applied.foreign.items():
-            # GH #1611 item 1: another owner's live row holds this file (a curator's `nx index pdf --collection`
-            # document, say). Its chunks belong in that row's collection; writing them here under its tumbler hid them
-            # from it. The file is skipped, by name.
+            # GH #1611: another owner's live row holds this file in a different collection than this run writes it to
+            # (a curator's `nx index pdf --collection` document, say). Its chunks belong in that row's collection;
+            # writing them here under its tumbler hid them from it. The file is skipped, by name.
+            _rel = str(_path.relative_to(repo)) if _path.is_relative_to(repo) else _path.name
             skipped_files.append((_path, f"foreign_owner:{_tum}"))
             if unregistered is not None:
                 unregistered[_path] = f"foreign_owner:{_tum}"
             _log.warning(
                 "catalog_register_skipped_foreign_owner",
-                repo=repo_name, rel_path=str(_path.relative_to(repo)) if _path.is_relative_to(repo) else _path.name,
-                tumbler=_tum, owner=str(owner),
+                repo=repo_name, rel_path=_rel, tumbler=_tum, owner=str(owner),
+                held_in=_foreign_collections.get(_tum, ""), written_to=staged[_rel]["physical_collection"],
             )
         for _path, _cause in applied.refused.items():
             skipped_files.append((_path, _cause))
@@ -1673,13 +1684,15 @@ def _catalog_hook(
             _skip_bits = []
             if reconciled:
                 _skip_bits.append(
-                    f"{len(reconciled)} reconciled onto rows outside this owner "
+                    f"{len(reconciled)} reconciled onto an existing row by source URI "
                     f"(nexus-53cae; see structlog warnings)"
                 )
             if applied.foreign:
+                _names = [p.name for p in list(applied.foreign)[:3]]
+                _more = len(applied.foreign) - len(_names)
                 _skip_bits.append(
-                    f"{len(applied.foreign)} held by another owner's document, not written "
-                    "(GH #1611; see structlog warnings)"
+                    f"{len(applied.foreign)} held by another owner's document in another collection, not written: "
+                    f"{', '.join(_names)}{f', +{_more} more' if _more else ''} (GH #1611; see structlog warnings)"
                 )
             if len(skipped_files) > len(applied.foreign):
                 _skip_bits.append(
@@ -4721,19 +4734,19 @@ def _refuse_identity_less_files(
     ``(refused_paths, refusals)``: the caller removes ``refused_paths`` from
     what it dispatches; ``refusals`` (``(path, cause)``, every refused file)
     is what the run summarises, and what it writes to the durable per-file
-    failure record, less the ``ephemeral:*`` kind below. Two kinds, told
+    failure record, less the deliberate kind below. Two kinds, told
     apart by the hook's cause map:
 
-    * ``ephemeral:*``: registration was refused on purpose (worktree or temp
-      dir); ``foreign_owner:*`` (GH #1611) is handled the same way. Counted by the ephemeral-skip summary, not a failure, not in the
-      durable record (``nx doctor`` would go red over it), and does not hold
-      the --since-head base.
+    * ``ephemeral:*`` and ``foreign_owner:*`` (:data:`~nexus.catalog.reconcile_run.DELIBERATE_SKIP_CAUSES`): the file
+      was left without a document on purpose (a worktree or temp dir; a file another owner's document holds in another
+      collection, GH #1611). Counted by the hook's own summary line, not a failure, not in the durable record
+      (``nx doctor`` would go red over it), and does not hold the --since-head base.
     * anything else (``register_failed``, ``register_refused``,
       ``no_outcome_row``, ``catalog_hook_failed``, ``unexplained``): a named identity drop with nothing written, which
       fails the run summary and holds the --since-head base.
 
     The second kind is returned in ``refusals`` too; the count of dropped
-    files is ``sum(not cause.startswith("ephemeral:"))``.
+    files is the number of refusals whose cause does not start with a deliberate-skip prefix.
     """
     from nexus.mcp_infra import _record_manifest_identity_drop  # noqa: PLC0415 — deferred: avoid module-load cross-import
 
@@ -4758,8 +4771,8 @@ def _refuse_identity_less_files(
             files=[{"file": str(path), "chunks": 0, "cause": cause}],
         )
     if dropped:
-        # An ephemeral-only run is already reported by
-        # ephemeral_path_registration_skipped; this event is for real drops.
+        # A deliberate skip is already reported by the hook (ephemeral_path_registration_skipped,
+        # catalog_register_skipped_foreign_owner); this event is for real drops.
         _log.warning(
             "identity_less_files_refused_before_chunking",
             dropped=dropped, ephemeral_refused=len(refusals) - dropped,

@@ -1361,22 +1361,28 @@ class TestCatalogHookReconciledIsNotNew:
         a, b = tmp_path / "a.py", tmp_path / "b.py"
         a.write_text("a = 1\n")
         b.write_text("b = 2\n")
-        foreign = self._foreign_row(cat, b)
+        # the other owner's row holds the collection this run writes b.py to: adopted (GH #1611 narrows the skip to a
+        # row that holds a DIFFERENT collection, see the two tests below)
+        foreign = self._foreign_row(cat, b, collection="code__nexus")
 
         with structlog.testing.capture_logs() as logs:
             mapping = self._hook(tmp_path, [a, b])
 
         err = capsys.readouterr().err
-        assert "Catalog: 1 new, 0 updated, 1 reconciled onto rows outside this owner" in err, err
+        assert "Catalog: 1 new, 0 updated, 1 reconciled onto an existing row by source URI" in err, err
         assert "done (1 new," in err
         assert mapping[b] == foreign, "the reconciled path still maps to its live row"
         events = [e for e in logs if e["event"] == "catalog_register_reconciled_onto_existing_row"]
         assert len(events) == 1 and events[0]["tumbler"] == foreign and events[0]["rel_path"] == "b.py"
 
-    def test_a_foreign_owners_reconciled_row_is_never_repointed(self, tmp_path, monkeypatch) -> None:
+    def test_a_foreign_owners_row_in_another_collection_is_never_repointed_and_gets_none_of_this_runs_chunks(
+        self, tmp_path, monkeypatch, capsys,
+    ) -> None:
         """nexus-r1tnx round 4 (fix-check CRITICAL): b.py resolves onto a row of ANOTHER owner. Repointing its
         physical_collection to THIS run's target would reassign that owner's document on this owner's intent. The
-        commit reports it ``foreign_owner`` and leaves the row as it is."""
+        commit reports it ``foreign_owner`` and leaves the row as it is. GH #1611: and when that row holds a different
+        collection than this run writes b.py to, the run gives b.py no document id at all, so none of its chunks are
+        written under a row that does not say they are there."""
         from nexus.mcp_infra import (
             get_reconciled_collections_count,
             reset_reconciled_collections_count,
@@ -1389,10 +1395,43 @@ class TestCatalogHookReconciledIsNotNew:
         a.write_text("a = 1\n")
         b.write_text("b = 2\n")
         foreign = self._foreign_row(cat, b, collection="code__OLD")
+        unregistered: dict = {}
 
-        self._hook(tmp_path, [a, b])
+        from nexus.indexer import _catalog_hook
+
+        mapping = _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash=self.REPO_HASH, head_hash="h1",
+            indexed_files=[(f, "code", "code__nexus") for f in (a, b)], unregistered=unregistered,
+        )
 
         assert cat.resolve(foreign).physical_collection == "code__OLD", "a foreign owner's document must not be repointed"
+        assert get_reconciled_collections_count() == 0
+        assert b not in mapping and a in mapping, "b.py gets no document id: it is the other owner's document"
+        assert unregistered == {b: f"foreign_owner:{foreign}"}
+        assert "1 held by another owner's document in another collection, not written: b.py" in capsys.readouterr().err
+
+    def test_a_foreign_owners_row_in_this_runs_collection_is_adopted_and_never_repointed(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """The nexus-53cae curator row of a repo file: its collection is the one this run writes to, so the file keeps
+        the row's tumbler (its chunks land where the row says) and the row is not touched."""
+        from nexus.mcp_infra import (
+            get_reconciled_collections_count,
+            reset_reconciled_collections_count,
+        )
+        reset_reconciled_collections_count()
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        foreign = self._foreign_row(cat, b, collection="code__nexus")
+
+        mapping = self._hook(tmp_path, [a, b])
+
+        assert mapping[b] == foreign
+        assert cat.resolve(foreign).physical_collection == "code__nexus"
         assert get_reconciled_collections_count() == 0
 
     def test_a_same_owners_reconciled_rows_stale_physical_collection_is_repointed(

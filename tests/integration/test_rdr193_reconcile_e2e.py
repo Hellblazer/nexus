@@ -8,7 +8,8 @@ staleness decision. Each one counts the requests the run made and reads the rows
 * a HEAD bump only: every row takes the new head, no content hash changed, no document is fenced for real work;
 * a delta run with one file deleted: its document is trashed by the commit, no unvisited row is touched;
 * the commit never moves the owner's ``head_hash`` (the run end does, only when nothing was deferred or failed);
-* a path another owner holds: the run reports it, that row is left as it is, the file's chunks carry its tumbler;
+* a path another owner holds: that row is left as it is; when it holds a different collection the run skips the file
+  (GH #1611), when it holds the run's own the file's chunks carry its tumbler;
 * a refused row (a staged path outside the repository root): no tumbler, the other rows of the run committed;
 * a held PDF (the PDF stack is missing): the owner's ``head_hash`` is held and the next delta holds the file again;
 * a ``git mv``: the old document is gone, the new one stands under a new tumbler, the old one's links moved to it;
@@ -195,9 +196,12 @@ def test_the_commit_does_not_move_the_owner_head_hash_but_the_run_end_does(
         cat.close()
 
 
-def test_a_path_another_owner_holds_is_reported_and_that_row_is_left_as_it_is(
-    tmp_path: Path, catalog_env: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _repo_with_a_foreign_row_for_notes(
+    tmp_path: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch, *, in_runs_collection: bool,
+) -> tuple[Path, str]:
+    """A primed repo whose docs/notes.md another owner's live row already holds, in a collection other than the one
+    this run writes the repo's docs to (the curator's ``nx index pdf --collection`` shape, GH #1611) or, with
+    *in_runs_collection*, in that very collection (the nexus-53cae shape)."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     _prime_owner(repo, local_t3, monkeypatch)
@@ -207,18 +211,57 @@ def test_a_path_another_owner_holds_is_reported_and_that_row_is_left_as_it_is(
     try:
         other = cat.register_owner("e2e_other", "curator")
         held = (repo / "docs" / "notes.md").resolve()
+        collection = (
+            cat.by_file_path(cat.owner_for_repo(_repo_identity(repo)[1]), "prime.md").physical_collection
+            if in_runs_collection else "docs__foreign")
+        assert collection, "non-vacuity: the primed repo's docs collection is known"
         foreign = str(cat.register(other, "foreign notes", content_type="prose", file_path="docs/notes.md",
-                                   physical_collection="docs__foreign", source_uri=f"file://{held}"))
+                                   physical_collection=collection, source_uri=f"file://{held}"))
     finally:
         cat.close()
+    return repo, foreign
+
+
+def test_a_path_another_owner_holds_in_another_collection_is_skipped_and_that_row_is_left_as_it_is(
+    tmp_path: Path, catalog_env: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GH #1611: the repo run wrote the held file's chunks into ITS collection under the other owner's tumbler, where
+    that row's physical_collection (the curator's) does not have them. The file is skipped, named, and not a failure."""
+    repo, foreign = _repo_with_a_foreign_row_for_notes(tmp_path, local_t3, monkeypatch, in_runs_collection=False)
     with structlog.testing.capture_logs() as logs:
         _index(repo, local_t3, monkeypatch)
-    assert [e for e in logs if e.get("event") == "catalog_register_reconciled_onto_existing_row"
-            and e.get("tumbler") == foreign], "the run reports the row it resolved onto"
+    skipped = [e for e in logs if e.get("event") == "catalog_register_skipped_foreign_owner"
+               and e.get("tumbler") == foreign]
+    assert len(skipped) == 1 and skipped[0]["held_in"] == "docs__foreign", "the run names the file it left to the other owner"
+    assert not [e for e in logs if e.get("event") == "catalog_register_reconciled_onto_existing_row"
+                and e.get("tumbler") == foreign]
+    assert not [e for e in logs if e.get("event") == "identity_less_files_refused_before_chunking"], "a deliberate skip, not a drop"
     row = HttpCatalogClient()
     try:
         entry = row.resolve(foreign)
         assert entry.physical_collection == "docs__foreign" and entry.title == "foreign notes", "that row is unchanged"
+        own = str(row.by_file_path(row.owner_for_repo(_repo_identity(repo)[1]), "docs/guide.md").tumbler)
+        assert row.get_manifest(own), "non-vacuity: the run wrote chunks for an ordinary file, so an empty manifest below means something"
+        assert not row.get_manifest(foreign), "none of the held file's chunks were written under the other owner's tumbler"
+    finally:
+        row.close()
+
+
+def test_a_path_another_owner_holds_in_this_runs_collection_is_adopted_and_that_row_is_left_as_it_is(
+    tmp_path: Path, catalog_env: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The nexus-53cae shape: the other owner's row holds the collection the run writes the file to. The run reports
+    the row it resolved onto, leaves it as it is, and writes the file's chunks under its tumbler, where the row says."""
+    repo, foreign = _repo_with_a_foreign_row_for_notes(tmp_path, local_t3, monkeypatch, in_runs_collection=True)
+    with structlog.testing.capture_logs() as logs:
+        _index(repo, local_t3, monkeypatch)
+    assert [e for e in logs if e.get("event") == "catalog_register_reconciled_onto_existing_row"
+            and e.get("tumbler") == foreign], "the run reports the row it resolved onto"
+    assert not [e for e in logs if e.get("event") == "catalog_register_skipped_foreign_owner"]
+    row = HttpCatalogClient()
+    try:
+        entry = row.resolve(foreign)
+        assert entry.title == "foreign notes", "that row is unchanged"
         own = str(row.by_file_path(row.owner_for_repo(_repo_identity(repo)[1]), "docs/guide.md").tumbler)
         assert row.get_manifest(own), "non-vacuity: the run wrote chunks for an ordinary file, so an empty manifest below means something"
         assert row.get_manifest(foreign), "the chunks of the held file were written under the tumbler of the row that holds it"
