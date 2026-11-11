@@ -36,6 +36,8 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  # nexus-jh1f2 cut 6: the release-tag step reads the Java check-run on the tag's tree.
+  checks: read
 
 concurrency:
   group: service-ci-${{ github.ref }}
@@ -78,12 +80,18 @@ jobs:
 
       # nexus-jh1f2 cut 6 (Sam 2026-11-10): on a release PR (a pull request into main) whose
       # service/ tree is byte-identical to the engine tag the release pins
-      # (REQUIRED_ENGINE_VERSION), the Java suite has already run on that tree: the tag was cut
-      # from a commit service-ci tested. 20 release PRs re-ran it with 0 failures, holding a
-      # lab-16c16g slot the release's pytest shards need. Any service/ difference, a change to
-      # this workflow, or a pinned tag missing from the checkout runs the suite as before.
+      # (REQUIRED_ENGINE_VERSION), and a green "Java tests + jOOQ codegen drift guard" check-run
+      # exists on a commit with that same service/ tree, the suite is not run again: 20 release
+      # PRs re-ran it with 0 failures, holding a lab-16c16g slot the release's pytest shards
+      # need. The evidence is looked up, not assumed (review r1): engine-service-release.yml
+      # builds with -DskipTests, and a develop run can be cancelled. Any service/ difference, a
+      # change to this workflow, a pinned tag missing from the checkout, or no green run on the
+      # tag's tree runs the suite as before.
       - name: Is service/ the pinned engine tag's tree? (release PRs, nexus-jh1f2 cut 6)
         id: release_tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JAVA_CHECK: "Java tests + jOOQ codegen drift guard"
         run: |
           set -euo pipefail
           same=false
@@ -96,8 +104,22 @@ jobs:
               echo "::warning::the pinned ${tag} is not in this checkout; the Java suite runs"
             elif git diff --quiet "$tag" HEAD -- service/ \
                 && git diff --quiet "${{ github.event.pull_request.base.sha }}...HEAD" -- .github/workflows/service-ci.yml; then
-              same=true
-              echo "service/ is byte-identical to ${tag}, whose tree service-ci already tested."
+              # Walk back from the tag while service/ is the same tree (at most 50 commits), and
+              # take the first commit whose Java check-run succeeded.
+              tree="$(git rev-parse "${tag}:service")"
+              evidence=""
+              for c in $(git rev-list -n 50 "$tag"); do
+                [ "$(git rev-parse "${c}:service" 2>/dev/null)" = "$tree" ] || break
+                n="$(gh api -X GET "repos/${{ github.repository }}/commits/${c}/check-runs" -f check_name="$JAVA_CHECK" \
+                      --jq '[.check_runs[] | select(.conclusion == "success")] | length' 2>/dev/null || true)"
+                if [ "${n:-0}" -gt 0 ] 2>/dev/null; then evidence="$c"; break; fi
+              done
+              if [ -n "$evidence" ]; then
+                same=true
+                echo "service/ is byte-identical to ${tag}; '${JAVA_CHECK}' passed on ${evidence}, which has that tree."
+              else
+                echo "::warning::service/ equals ${tag} but no green '${JAVA_CHECK}' run was found on that tree; the Java suite runs"
+              fi
             else
               echo "service/ differs from ${tag} (or this workflow changed); the Java suite runs."
             fi

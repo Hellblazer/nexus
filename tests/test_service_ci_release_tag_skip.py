@@ -53,17 +53,40 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
-def _run(repo: Path, *, event: str = "pull_request", base_ref: str = "main", base: str | None = None) -> tuple[str, str]:
+_GH_STUB = """#!/usr/bin/env bash
+# A stand-in for `gh api .../commits/<sha>/check-runs`: one green Java run on each sha in GREEN_SHAS.
+for a in "$@"; do
+  case "$a" in */commits/*/check-runs) c="${a#*/commits/}"; c="${c%/check-runs}" ;; esac
+done
+printf '%s\\n' "$*" >> "$GH_CALLS"
+case " $GREEN_SHAS " in *" $c "*) echo 1 ;; *) echo 0 ;; esac
+"""
+
+
+def _run(repo: Path, *, event: str = "pull_request", base_ref: str = "main", base: str | None = None,
+         green: tuple[str, ...] | None = None) -> tuple[str, str]:
+    """Run the step. *green* lists the shas with a green Java run (default: the tag's commit)."""
     values = {
         "github.event_name": event,
         "github.base_ref": base_ref,
         "github.event.pull_request.base.sha": base or _git(repo, "rev-list", "--max-parents=0", "HEAD"),
+        "github.repository": "Hellblazer/nexus",
     }
     script = _EXPR.sub(lambda m: values[m.group(1).strip()], _step_run())
     out = repo.parent / "gh_output"
     out.write_text("")
-    proc = subprocess.run(["bash", "-c", script], cwd=repo, env={**os.environ, "GITHUB_OUTPUT": str(out)},
-                          capture_output=True, text=True, check=True)
+    bindir = repo.parent / "bin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "gh").write_text(_GH_STUB)
+    (bindir / "gh").chmod(0o755)
+    if green is None:
+        tagged = subprocess.run(["git", "rev-parse", "-q", "--verify", "engine-service-v0.1.187^{commit}"],
+                                cwd=repo, capture_output=True, text=True, check=False).stdout.strip()
+        green = (tagged,) if tagged else ()
+    env = {**os.environ, "GITHUB_OUTPUT": str(out), "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+           "GREEN_SHAS": " ".join(green), "GH_CALLS": str(repo.parent / "gh_calls"),
+           "JAVA_CHECK": "Java tests + jOOQ codegen drift guard"}
+    proc = subprocess.run(["bash", "-c", script], cwd=repo, env=env, capture_output=True, text=True, check=True)
     return dict(line.split("=", 1) for line in out.read_text().splitlines())["same"], proc.stdout
 
 
@@ -106,3 +129,50 @@ def test_a_pin_to_another_tag_compares_against_that_tag(repo: Path) -> None:
 @pytest.mark.parametrize(("event", "base_ref"), [("pull_request", "develop"), ("push", "")])
 def test_only_a_pull_request_into_main_can_skip(repo: Path, event: str, base_ref: str) -> None:
     assert _run(repo, event=event, base_ref=base_ref)[0] == "false"
+
+
+# -- review r1: the skip needs a green Java run on the tag's service/ tree --------------------
+
+
+def test_no_green_java_run_on_the_tags_tree_runs_the_suite(repo: Path) -> None:
+    same, stdout = _run(repo, green=())
+    assert same == "false"
+    assert "no green" in stdout
+
+
+def test_a_green_run_on_an_earlier_commit_with_the_same_tree_counts(tmp_path: Path) -> None:
+    r = tmp_path / "repo2"
+    (r / "service").mkdir(parents=True)
+    (r / "src" / "nexus").mkdir(parents=True)
+    (r / ".github" / "workflows").mkdir(parents=True)
+    (r / "service" / "Main.java").write_text("class Main {}\n")
+    (r / "src" / "nexus" / "engine_version.py").write_text("REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 187)\n")
+    (r / ".github" / "workflows" / "service-ci.yml").write_text("name: x\n")
+    _git(r, "init", "-q")
+    _git(r, "config", "user.email", "t@example.com")
+    _git(r, "config", "user.name", "T")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-q", "-m", "service change: service-ci ran here")
+    tested = _git(r, "rev-parse", "HEAD")
+    _commit(r, "README", "docs only\n")
+    _git(r, "tag", "engine-service-v0.1.187")
+    assert _run(r, green=(tested,))[0] == "true"
+
+
+def test_a_green_run_on_a_different_service_tree_does_not_count(tmp_path: Path) -> None:
+    r = tmp_path / "repo3"
+    (r / "service").mkdir(parents=True)
+    (r / "src" / "nexus").mkdir(parents=True)
+    (r / ".github" / "workflows").mkdir(parents=True)
+    (r / "service" / "Main.java").write_text("class Old {}\n")
+    (r / "src" / "nexus" / "engine_version.py").write_text("REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 187)\n")
+    (r / ".github" / "workflows" / "service-ci.yml").write_text("name: x\n")
+    _git(r, "init", "-q")
+    _git(r, "config", "user.email", "t@example.com")
+    _git(r, "config", "user.name", "T")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-q", "-m", "old service")
+    old = _git(r, "rev-parse", "HEAD")
+    _commit(r, "service/Main.java", "class Main {}\n")
+    _git(r, "tag", "engine-service-v0.1.187")
+    assert _run(r, green=(old,))[0] == "false"
