@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -34,9 +35,18 @@ def _tarball(tmp: Path, target: str) -> tuple[Path, str]:
     return path, hashlib.sha256(buf.getvalue()).hexdigest()
 
 
+#: The real tools the script and the stubs need. The test's PATH is ONLY the sandbox bin dir: links to
+#: these plus the stubs, so a host rg (CI's runners have /usr/bin/rg) can never satisfy the first branch.
+_REAL_TOOLS = ("sh", "bash", "tar", "gzip", "sha256sum", "shasum", "perl", "cut", "mkdir", "uname", "sleep", "cat", "cp")
+
+
 def _stubs(tmp: Path, *, curl_ok: bool, tar_path: Path | None, apt_ok: bool) -> Path:
     bindir = tmp / "bin"
     bindir.mkdir()
+    for tool in _REAL_TOOLS:
+        real = shutil.which(tool)
+        if real:
+            (bindir / tool).symlink_to(real)
     curl = bindir / "curl"
     if curl_ok and tar_path is not None:
         curl.write_text(f'#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && {{ cp "{tar_path}" "$2"; exit 0; }}; shift; done\nexit 22\n')
@@ -53,7 +63,7 @@ def _run(tmp: Path, bindir: Path, *, sha: str, extra_path: str = "") -> subproce
     gh_path = tmp / "github_path"
     gh_path.write_text("")
     env = {
-        "PATH": f"{bindir}{os.pathsep}{extra_path}{os.pathsep if extra_path else ''}/usr/bin:/bin",
+        "PATH": f"{bindir}{os.pathsep}{extra_path}" if extra_path else str(bindir),
         "RUNNER_TEMP": str(tmp / "runner_temp"),
         "GITHUB_PATH": str(gh_path),
         "NX_RG_SHA256_X86_64": sha,
@@ -61,7 +71,8 @@ def _run(tmp: Path, bindir: Path, *, sha: str, extra_path: str = "") -> subproce
         "NX_RG_APT_RETRY_SLEEP": "0",
     }
     (tmp / "runner_temp").mkdir(exist_ok=True)
-    return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
+    assert not (bindir / "rg").exists()
+    return subprocess.run([str(bindir / "bash"), str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
 
 
 def _target() -> str:
