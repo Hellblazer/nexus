@@ -47,7 +47,7 @@ class PreMigrationSchemaTest {
     private static final String DOC = TENANT + "-doc-1";
 
     private static final byte[] LEGACY_CHASH = "legacywidthchsh1".getBytes(StandardCharsets.US_ASCII);
-    /** 40 bytes: the UTF-8 carry-over class rdr180 leaves for a non-hex 40-char id. Deleted by hygiene-001-5. */
+    /** 38 bytes (anything over 32): the UTF-8 carry-over class rdr180 leaves for a longer non-hex id. Deleted by hygiene-001-5. */
     private static final byte[] LONG_LEGACY_CHASH = "longlegacy-chash-0123456789-0123456789".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] GOOD_CHASH = filled(32, (byte) 0x5a);
     /** Exactly 32 bytes but not a digest: survives hygiene-001-5 by design (it keys on width only). */
@@ -202,6 +202,65 @@ class PreMigrationSchemaTest {
     }
 
     @Test
+    void refusesAnExistingChunksTableThatHasNoLiquibaseHistory_andChangesNothing() throws Exception {
+        PostgreSQLContainer<?> pg = freshDatabase();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.createSchemaIfNotExists(DSL.name("nexus")).execute();
+            ctx.createTable(DSL.name("nexus", "chunks")).column("x", SQLDataType.INTEGER).execute();
+        }
+
+        Cli cli = runTool(pg);
+
+        assertThat(cli.rc()).as(cli.err()).isEqualTo(PreMigrationSchema.EXIT_REFUSED);
+        assertThat(cli.err()).contains("nexus.chunks exists with no Liquibase history");
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchExists(DSL.table(DSL.name("pg_catalog", "pg_tables")),
+                DSL.field(DSL.name("tablename"), String.class).in("databasechangelog", PreMigrationSchema.SCRATCH_MARKER)))
+                .as("nothing applied, no marker left").isFalse();
+        }
+    }
+
+    @Test
+    void releasesTheAdvisoryLockOnTheToolsOwnSession_onEveryRefusalPath() throws Exception {
+        PostgreSQLContainer<?> pg = freshDatabase();
+        // Control that the probe can see a held lock at all: another session holds it.
+        try (Connection holder = pg.createConnection("")) {
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_lock", SQLDataType.OTHER,
+                DSL.val(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY))).fetch();
+            assertThat(SchemaMigrator.migrationLockHolderPid(DSL.using(holder, SQLDialect.POSTGRES)))
+                .as("probe control").isNotEqualTo(-1);
+        }
+        assertThat(runTool(pg).rc()).isEqualTo(PreMigrationSchema.EXIT_OK);
+
+        // (a) refusal after Liquibase took the connection ("already applied"), (b) before it (not a scratch
+        // database: marker removed). Both must have released the lock while the connection was still open.
+        java.util.List<Integer> holderAfterRelease = new java.util.ArrayList<>();
+        java.util.function.Consumer<Connection> probe =
+            c -> holderAfterRelease.add(SchemaMigrator.migrationLockHolderPid(DSL.using(c, SQLDialect.POSTGRES)));
+
+        try (Connection c = java.sql.DriverManager.getConnection(pg.getJdbcUrl(), ROLE, PASS)) {
+            org.assertj.core.api.Assertions.assertThatThrownBy(
+                    () -> PreMigrationSchema.apply(c, "hygiene-001-4", probe))
+                .isInstanceOf(PreMigrationSchema.Refusal.class).hasMessageContaining("already applied");
+        }
+        assertThat(holderAfterRelease).as("released inside the Liquibase block: probe ran, lock gone")
+            .isNotEmpty().containsOnly(-1);
+
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).dropTable(DSL.name("public", PreMigrationSchema.SCRATCH_MARKER)).execute();
+        }
+        holderAfterRelease.clear();
+        try (Connection c = java.sql.DriverManager.getConnection(pg.getJdbcUrl(), ROLE, PASS)) {
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> PreMigrationSchema.apply(c, "hygiene-001-5", probe))
+                .isInstanceOf(PreMigrationSchema.Refusal.class).hasMessageContaining("not made by this tool");
+        }
+        assertThat(holderAfterRelease).as("released on the pre-Liquibase refusal path: probe ran, lock gone")
+            .isNotEmpty().containsOnly(-1);
+    }
+
+    @Test
     void refusesWhenARoleNamedSchemaHoldsTheHistoryAndPublicDoesNot() throws Exception {
         PostgreSQLContainer<?> pg = freshDatabase();
         try (Connection su = pg.createConnection("")) {
@@ -284,7 +343,7 @@ class PreMigrationSchemaTest {
     }
 
     /**
-     * 16-byte and 40-byte legacy chunks (the 16-byte one with a topic assignment), a 32-byte digest chunk and a
+     * 16-byte and 38-byte legacy chunks (the 16-byte one with a topic assignment), a 32-byte digest chunk and a
      * 32-byte non-hex one, each with a manifest row. At this walk point chunks_chash_octet_check and
      * catalog_document_chunks_chash_octet_check are live NOT VALID constraints, which still reject a NEW
      * non-32-byte row, so they are dropped for the seed and re-added NOT VALID after: the aged-install shape
@@ -303,6 +362,8 @@ class PreMigrationSchemaTest {
             }
             assertThat(ctx.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT),
                 TOPIC_ASSIGNMENTS.DOC_ID.eq(LEGACY_CHASH))).as("topic assignment on the legacy chunk").isEqualTo(1);
+            assertThat(ctx.select(TOPICS.DOC_COUNT).from(TOPICS).where(TOPICS.TENANT_ID.eq(TENANT))
+                .fetchOne(TOPICS.DOC_COUNT)).as("positive control: doc_count is 1 before the walk").isEqualTo(1);
             assertThat(applied(su, "hygiene-001-5")).isFalse();
         }
     }

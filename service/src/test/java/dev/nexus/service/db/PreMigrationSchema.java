@@ -37,7 +37,9 @@ import java.util.Map;
  * store it performs exactly the deletes the guard exists to prevent. So it refuses any database it did not
  * make: it proceeds only when {@code public.databasechangelog} holds no rows (and no {@code nexus.chunks}
  * exists), or when the marker table {@code public.premigration_schema_scratch}, which this tool creates on
- * its first run, is present. A database the tool built keeps that marker, harmlessly, through later real walks.
+ * its first run, is present. The marker is what lets a LATER run apply real changesets (with their data effects)
+ * to that database, so it is a licence to destroy data there: never create or leave it on a database that holds
+ * anything you want to keep. It stays on the database through later real walks.
  *
  * <p><strong>Fidelity limits.</strong> The result is a schema of the right SHAPE, not an old install's path to
  * it:
@@ -147,6 +149,16 @@ public final class PreMigrationSchema {
      */
     public static Report apply(Connection conn, String stopBefore)
             throws Refusal, LiquibaseException, SQLException {
+        return apply(conn, stopBefore, c -> { });
+    }
+
+    /**
+     * As {@link #apply(Connection, String)}, with a test seam: {@code afterRelease} is called with the still-open
+     * connection right after the advisory lock was released on it, so a test can read the lock state from the
+     * tool's own session. It is not called when the connection is already closed (Liquibase closes it last).
+     */
+    static Report apply(Connection conn, String stopBefore, java.util.function.Consumer<Connection> afterRelease)
+            throws Refusal, LiquibaseException, SQLException {
         SchemaMigrator.pinJvmTimeZoneToUtc();
         SchemaMigrator.pinSessionTimeZoneToUtc(conn);
         SchemaMigrator.pinSearchPathToPublic(conn);
@@ -163,50 +175,53 @@ public final class PreMigrationSchema {
             // Liquibase.close() closes the connection, so the report is read before the try block ends.
             try (Liquibase liquibase = new Liquibase(
                     SchemaMigrator.MASTER_CHANGELOG, new ClassLoaderResourceAccessor(), database)) {
-                List<ChangeSet> declared = liquibase.getDatabaseChangeLog().getChangeSets().stream()
-                    .filter(cs -> stopBefore.equals(cs.getId())).toList();
-                if (declared.isEmpty()) {
-                    throw new Refusal("changeset '" + stopBefore + "' is not in " + SchemaMigrator.MASTER_CHANGELOG);
-                }
-                if (declared.size() > 1) {
-                    throw new Refusal("changeset id '" + stopBefore + "' appears " + declared.size()
-                        + " times in " + SchemaMigrator.MASTER_CHANGELOG + " (files: "
-                        + declared.stream().map(ChangeSet::getFilePath).toList() + "); a stop point must be unique");
-                }
-                markScratch(conn);
-                conn.commit();
-                List<ChangeSet> unrun = liquibase.listUnrunChangeSets(new Contexts(), new LabelExpression());
-                int idx = -1;
-                for (int i = 0; i < unrun.size(); i++) {
-                    if (stopBefore.equals(unrun.get(i).getId())) {
-                        idx = i;
-                        break;
-                    }
-                }
-                if (idx < 0) {
-                    throw new Refusal("changeset '" + stopBefore + "' is already applied to this database; "
-                        + "a pre-migration schema cannot be built on top of it");
-                }
-                final int count = idx;
                 try {
-                    // Liquibase's per-changeset "Running Changeset" lines go to its logger so stdout stays the report.
-                    Scope.child(Scope.Attr.ui, new LoggerUIService(),
-                        () -> liquibase.update(count, new Contexts(), new LabelExpression()));
-                } catch (LiquibaseException | RuntimeException e) {
-                    throw e;
-                } catch (Exception e) {
-                    throw new LiquibaseException(e);
+                    List<ChangeSet> declared = liquibase.getDatabaseChangeLog().getChangeSets().stream()
+                        .filter(cs -> stopBefore.equals(cs.getId())).toList();
+                    if (declared.isEmpty()) {
+                        throw new Refusal("changeset '" + stopBefore + "' is not in " + SchemaMigrator.MASTER_CHANGELOG);
+                    }
+                    if (declared.size() > 1) {
+                        throw new Refusal("changeset id '" + stopBefore + "' appears " + declared.size()
+                            + " times in " + SchemaMigrator.MASTER_CHANGELOG + " (files: "
+                            + declared.stream().map(ChangeSet::getFilePath).toList() + "); a stop point must be unique");
+                    }
+                    markScratch(conn);
+                    conn.commit();
+                    List<ChangeSet> unrun = liquibase.listUnrunChangeSets(new Contexts(), new LabelExpression());
+                    int idx = -1;
+                    for (int i = 0; i < unrun.size(); i++) {
+                        if (stopBefore.equals(unrun.get(i).getId())) {
+                            idx = i;
+                            break;
+                        }
+                    }
+                    if (idx < 0) {
+                        throw new Refusal("changeset '" + stopBefore + "' is already applied to this database; "
+                            + "a pre-migration schema cannot be built on top of it");
+                    }
+                    final int count = idx;
+                    try {
+                        // Liquibase's per-changeset "Running Changeset" lines go to its logger so stdout stays the report.
+                        Scope.child(Scope.Attr.ui, new LoggerUIService(),
+                            () -> liquibase.update(count, new Contexts(), new LabelExpression()));
+                    } catch (LiquibaseException | RuntimeException e) {
+                        throw e;
+                    } catch (Exception e) {
+                        throw new LiquibaseException(e);
+                    }
+                    Report report = report(conn, stopBefore, count);
+                    if (report.stopChangesetApplied()) {
+                        throw new IllegalStateException("changeset '" + stopBefore + "' is applied after the update; "
+                            + "the plan changed under the tool, so this database is not at the requested stop");
+                    }
+                    return report;
+                } finally {
+                    release(conn, afterRelease); // before close(), which ends the session anyway
                 }
-                Report report = report(conn, stopBefore, count);
-                if (report.stopChangesetApplied()) {
-                    throw new IllegalStateException("changeset '" + stopBefore + "' is applied after the update; "
-                        + "the plan changed under the tool, so this database is not at the requested stop");
-                }
-                advisoryUnlock(conn); // before close(), which ends the session anyway
-                return report;
             }
         } finally {
-            advisoryUnlock(conn); // no-op once released or once Liquibase closed the connection
+            release(conn, afterRelease); // covers a refusal before Liquibase took the connection
         }
     }
 
@@ -217,15 +232,25 @@ public final class PreMigrationSchema {
             .fetchOne(0, Boolean.class));
     }
 
-    /** Best effort: the lock is session-level and ends with the session, so a failure here changes nothing. */
-    private static void advisoryUnlock(Connection conn) {
+    private static void release(Connection conn, java.util.function.Consumer<Connection> afterRelease) {
+        if (advisoryUnlock(conn)) {
+            afterRelease.accept(conn);
+        }
+    }
+
+    /**
+     * Best effort: the lock is session-level and ends with the session, so a failure here changes nothing.
+     * Returns whether the unlock statement ran (false on a closed or failed connection).
+     */
+    private static boolean advisoryUnlock(Connection conn) {
         try {
             DSL.using(conn, SQLDialect.POSTGRES)
                 .select(DSL.function("pg_advisory_unlock", SQLDataType.BOOLEAN,
                     DSL.val(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY)))
                 .fetch();
+            return true;
         } catch (RuntimeException ignored) {
-            // session ends with the connection
+            return false; // session ends with the connection
         }
     }
 
