@@ -168,8 +168,8 @@ def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:
         # subspace 'directory/<to>'", which sent agents to tools that do not exist.
         raise DirectoryResolutionError(
             f"{to[:64]!r} cannot be a session name: names are letters, digits, '.', '_' and '-', "
-            "starting with a letter or digit. Send to its session id (a UUID) instead, "
-            "or to the name it holds."
+            "starting with a letter or digit. tuple_list(prefix=\"directory/\") lists the names "
+            "sessions hold; or send to the session id (a UUID)."
         )
 
     return classify_directory_holders(to, list_directory_entries(to, tuples))

@@ -147,7 +147,32 @@ def test_capture_refuses_anything_but_a_local_engine(monkeypatch: pytest.MonkeyP
     out = tmp_path / "e.json"
     assert aep.capture(out) == 1 and not out.exists(), "a refused capture writes nothing and calls nothing"
     monkeypatch.setattr(nexus.config, "is_local_mode", lambda: True)
-    monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com")
-    assert "not a local engine" in aep.local_engine_refusal()
-    monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:5999")
+    monkeypatch.setattr(nexus.config, "get_service_url", lambda: "https://api.conexus-nexus.com")
+    assert "not a local engine" in aep.local_engine_refusal(), "NX_LOCAL=1 with a cloud service_url in config.yml"
+    monkeypatch.setattr(nexus.config, "get_service_url", lambda: "http://127.0.0.1:5999")
     assert aep.local_engine_refusal() == ""
+    monkeypatch.setattr(nexus.config, "get_service_url", lambda: "")
+    assert aep.local_engine_refusal() == ""
+
+
+def test_the_cloud_url_in_config_yml_is_seen_with_nx_local_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The bypass review r2 reproduced: NX_LOCAL=1, no env URL, a cloud service_url in config.yml."""
+    (tmp_path / "config.yml").write_text("credentials:\n  service_url: https://api.conexus-nexus.com\n")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("NX_LOCAL", "1")
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    assert "not a local engine" in aep.local_engine_refusal()
+
+
+def test_ask_refuses_an_errors_file_with_a_bad_capture(tmp_path: Path) -> None:
+    errors = tmp_path / "e.json"
+    errors.write_text(json.dumps({"manifest": {"probe_set": aep.probe_set_hash(), "tools": [], "git": "x"},
+                                  "probes": {"search-where-word": {"ok": False, "why": "no tool search"}}}))
+    assert aep.ask(errors, 1, tmp_path / "r.json", "m") == 1 and not (tmp_path / "r.json").exists()
+
+
+def test_the_mailbox_probe_uses_the_servers_name_rule() -> None:
+    probe = next(p for p in aep.PROBES if p.id == "mailbox-name-with-spaces")
+    tools = {"mailbox_send"}
+    assert aep.score(probe, {"tool": "mailbox_send", "arguments": {"to": "a.b", "body": "x"}}, tools) is True
+    assert aep.score(probe, {"tool": "mailbox_send", "arguments": {"to": "-foo", "body": "x"}}, tools) is False

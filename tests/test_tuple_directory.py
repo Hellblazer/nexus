@@ -298,12 +298,25 @@ class TestANameNoSessionCanHold:
             resolve_send_address(to, self._NoReads())
         msg = str(exc_info.value)
         assert repr(to) in msg and "session id" in msg and "letters, digits" in msg, msg
+        assert 'tuple_list(prefix="directory/")' in msg, "name the tool that lists the names sessions hold"
         assert "template" not in msg
 
     @pytest.mark.parametrize("to", ["tamsin", "nexus_3dc", "kimi.nexus-edb", "a1"])
     def test_a_name_a_session_can_hold_still_reads_the_directory(self, to: str) -> None:
         with pytest.raises(AssertionError, match="the directory was read"):
             resolve_send_address(to, self._NoReads())
+
+    def test_the_rule_matches_the_engines_address_segment_pattern(self) -> None:
+        """The engine refuses a directory/<name> outside its ADDRESS_SEGMENT_PATTERN; keep the two equal."""
+        import re  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        from nexus.tuple_directory import SAFE_NAME_RE  # noqa: PLC0415
+
+        java = (Path(__file__).resolve().parents[1] / "service/src/main/java/dev/nexus/service/tuples/TemplateRegistry.java").read_text()
+        m = re.search(r'ADDRESS_SEGMENT_PATTERN = Pattern\.compile\("([^"]+)"\)', java)
+        assert m, "the engine's pattern moved: update this pin"
+        assert SAFE_NAME_RE.pattern == f"^{m.group(1)}$"
 
     def test_the_rule_is_the_one_sessions_lease_names_under(self) -> None:
         from nexus.mcp import subscriptions  # noqa: PLC0415 — the lease side of the same rule

@@ -68,7 +68,6 @@ from typing import Any
 
 _KV = re.compile(r"^\s*[A-Za-z_][\w.]*\s*(=|>=|<=|>|<|!=)\s*\S")
 _OPERATOR = re.compile(r"(>=|<=|>|<|!=)")
-_SAFE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 #: Share of asks that may fail to parse before ``ask`` refuses its own run.
 MAX_PARSE_FAILURES = 0.1
 
@@ -83,6 +82,13 @@ class Probe:
     fixed: Callable[[str, dict], bool]
     #: Why this probe cannot write, for a probe whose tool can (checked by the tests).
     refused_by: str = ""
+
+
+def _holdable(to: str) -> bool:
+    """A name a session can hold: the server's own rule (``nexus.tuple_directory.SAFE_NAME_RE``)."""
+    from nexus.tuple_directory import SAFE_NAME_RE  # noqa: PLC0415 — stdlib-only module, no store
+
+    return bool(SAFE_NAME_RE.fullmatch(to))
 
 
 def _where_ok(a: dict) -> bool:
@@ -153,9 +159,9 @@ PROBES: list[Probe] = [
           "doc_id is required", lambda t, a: t == "store_get" and bool(a.get("doc_id"))),
     Probe("mailbox-name-with-spaces", "mailbox_send", {"to": "Seminar seat: Bullock", "body": "hello"},
           "Send hello to the session that holds the seminar seat for Bullock.", "Seminar seat: Bullock",
-          lambda t, a: (t == "mailbox_send" and bool(_SAFE_NAME.match(str(a.get("to", "")))))
+          lambda t, a: (t == "mailbox_send" and _holdable(str(a.get("to", ""))))
           or t in ("tuple_rd", "tuple_list", "tuple_registry"),
-          refused_by="a name with spaces resolves to no directory row and no live holder"),
+          refused_by="resolve_send_address refuses a name no session can hold before any directory read"),
     Probe("query-catalog-where-operator", "query", {"question": "consensus", "author": "Lamport", "where": "year>=2020"},
           "Find documents by Lamport on consensus from 2020 on.", "operator-shaped",
           lambda t, a: t == "query" and not (a.get("author") and _OPERATOR.search(str(a.get("where", ""))))),
@@ -182,13 +188,15 @@ def local_engine_refusal() -> str:
     there). Only a local engine is allowed."""
     from urllib.parse import urlparse  # noqa: PLC0415
 
-    from nexus.config import is_local_mode  # noqa: PLC0415 — config only, no store
+    from nexus.config import get_service_url, is_local_mode  # noqa: PLC0415 — config only, no store
 
     if not is_local_mode():
         return "nexus is not in local mode here, so capture would reach the managed service"
-    url = os.environ.get("NX_SERVICE_URL", "")
+    # The client reads NX_SERVICE_URL and then config.yml (get_service_url), and NX_LOCAL=1 makes
+    # is_local_mode True even with a cloud service_url configured: check what the client would use.
+    url = get_service_url()
     if url and urlparse(url).hostname not in _LOOPBACK:
-        return f"NX_SERVICE_URL names {urlparse(url).hostname!r}, not a local engine"
+        return f"the configured service_url names {urlparse(url).hostname!r}, not a local engine"
     return ""
 
 
@@ -284,6 +292,10 @@ def ask(errors: Path, runs: int, out: Path, model: str) -> int:
     if data["manifest"]["probe_set"] != probe_set_hash():
         sys.stderr.write("refused: the errors file was captured for another probe set; capture again\n")
         return 1
+    bad = [k for k, v in data["probes"].items() if not v.get("ok")]
+    if bad:
+        sys.stderr.write(f"refused: the errors file has probes that did not capture their expected error: {bad}\n")
+        return 1
     tools = set(data["manifest"]["tools"])
     by_id = {p.id: p for p in PROBES}
     results: list[dict[str, Any]] = []
@@ -297,7 +309,7 @@ def ask(errors: Path, runs: int, out: Path, model: str) -> int:
                 nxt = _ask_once(prompt, model, cwd)
                 ok = score(p, nxt, tools)
                 results.append({"probe": pid, "run": run, "fixed": ok, "next_tool": nxt.get("tool"),
-                                "parse": nxt.get("parse")})
+                                "next_arguments": nxt.get("arguments"), "parse": nxt.get("parse")})
                 sys.stdout.write(f"{pid} run {run}: {'fixed' if ok else 'not fixed'} ({nxt.get('tool') or nxt.get('parse')})\n")
     failures = sum(1 for r in results if r["parse"])
     fixed = sum(r["fixed"] for r in results)
