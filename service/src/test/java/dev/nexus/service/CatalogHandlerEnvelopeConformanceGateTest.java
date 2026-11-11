@@ -161,8 +161,8 @@ class CatalogHandlerEnvelopeConformanceGateTest {
 
     private static final String BOUNDED_READ_DELEGATE =
         "the handler method delegates to CatalogBoundedReadRoutes, whose response carries count (the exact total), "
-        + "limit and capped, and which refuses a limit above 10,000 with a 400; CatalogSensitiveListRouteTest pins "
-        + "the envelope, the cap edges and the 400";
+        + "limit and capped, and which refuses a limit above 10,000 with a 400; CatalogSensitiveListRouteTest and "
+        + "ManifestForeignCollectionRouteTest pin the envelope, the cap edges and the 400";
 
     private static final String STUB_METADATA_ONE_PER_COLLECTION =
         "the handler method dispatches to CatalogStubMetadataRoute, whose response is one entry per registry knowledge or docs "
@@ -310,6 +310,8 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // handler method here only delegates, so the "count" key is not in the body this gate scans; it is pinned, with
         // count/limit/capped and the 10,000 cap, by CatalogSensitiveListRouteTest.
         collectionExempt("/sensitive", "handleSensitiveList", BOUNDED_READ_DELEGATE),
+        // GH #1611: same delegate shape as /sensitive; ManifestForeignCollectionRouteTest pins count/limit/capped, the 400 and the 503.
+        collectionExempt("/manifest/foreign_collection", "handleManifestForeignCollection", BOUNDED_READ_DELEGATE),
         // nexus-f3yqd: a scalar {kind, fillable, limit, capped, rule, stamp} bounded count, not a JSON array.
         neither("/manifest/fillable", "handleManifestFillable"),
         // nexus-f3yqd: {collections:[{collection, stub_chunks, capped, examples} | {collection, timed_out}], limit}: a top-level

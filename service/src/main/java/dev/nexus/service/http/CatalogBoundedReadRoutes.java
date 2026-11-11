@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpExchange;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.CatalogSensitiveReads;
 import dev.nexus.service.db.ManifestFillableCount;
+import dev.nexus.service.db.ManifestForeignCollectionReads;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,9 +32,13 @@ final class CatalogBoundedReadRoutes {
     private final CatalogSensitiveReads sensitiveReads;
     private final ManifestFillableCount fillableCount;
 
-    CatalogBoundedReadRoutes(CatalogSensitiveReads sensitiveReads, ManifestFillableCount fillableCount) {
+    private final ManifestForeignCollectionReads foreignReads;
+
+    CatalogBoundedReadRoutes(CatalogSensitiveReads sensitiveReads, ManifestFillableCount fillableCount,
+                             ManifestForeignCollectionReads foreignReads) {
         this.sensitiveReads = sensitiveReads;
         this.fillableCount = fillableCount;
+        this.foreignReads = foreignReads;
     }
 
     /**
@@ -122,6 +127,48 @@ final class CatalogBoundedReadRoutes {
         body.put("rule", ManifestFillableCount.RULE);
         body.put("stamp", ManifestFillableCount.STAMP);
         body.put("edge", result.edge());
+        send(exchange, 200, body);
+    }
+
+    /**
+     * GET /v1/catalog/manifest/foreign_collection?limit=N (GH #1611):
+     * {@code {count, limit, capped, documents:[{tumbler, physical_collection, collections, chunks}]}}.
+     *
+     * <p>The tenant's live documents whose manifest names chunks outside the document's own
+     * {@code physical_collection} ({@link ManifestForeignCollectionReads} has the predicate and the plan note):
+     * {@code collections} are the other collections named, {@code chunks} the manifest rows naming them.
+     * {@code count} is every such document; {@code documents} lists at most {@code limit} in tumbler order and
+     * {@code capped} is true when more exist. {@code limit} is 1 to {@link ManifestForeignCollectionReads#MAX_LIMIT}
+     * (default {@link ManifestForeignCollectionReads#DEFAULT_LIMIT}); anything else is a 400. A new path, so an old
+     * engine answers 404, which a client reads as "cannot say".
+     */
+    void foreignCollection(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Integer limit = limitParam(exchange, ManifestForeignCollectionReads.DEFAULT_LIMIT, ManifestForeignCollectionReads.MAX_LIMIT);
+        if (limit == null) return;
+        ManifestForeignCollectionReads.Page page;
+        try {
+            page = foreignReads.list(tenant, limit);
+        } catch (RuntimeException e) {
+            if (!CatalogHandler.hasSqlState(e, CatalogRepository.QUERY_CANCELED)) throw e;
+            log.warn("event=catalog_manifest_foreign_collection_timeout tenant={} limit={}", tenant, limit);
+            timeout(exchange, "manifest foreign-collection read exceeded its time bound");
+            return;
+        }
+        List<Map<String, Object>> docs = new ArrayList<>(page.documents().size());
+        for (var d : page.documents()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("tumbler", d.tumbler());
+            m.put("physical_collection", d.physicalCollection());
+            m.put("collections", d.collections());
+            m.put("chunks", d.chunks());
+            docs.add(m);
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("count", page.count());
+        body.put("limit", page.limit());
+        body.put("capped", page.capped());
+        body.put("documents", docs);
         send(exchange, 200, body);
     }
 

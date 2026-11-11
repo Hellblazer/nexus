@@ -63,6 +63,7 @@ import java.util.*;
  *   GET   /v1/catalog/manifest/fillable?kind=labels|spans&limit=N  strict bounded count of the manifest rows the two upgrade rungs would fill (nexus-f3yqd)
  *   POST  /v1/catalog/manifest/fill      fill exactly those rows as a background job: 202 {job_id, created} (nexus-f3yqd, R2)
  *   GET   /v1/catalog/manifest/fill/{job_id}  the fill job: state, stage, done_rows, total_rows, filled, cursor, counts (nexus-f3yqd, R2)
+ *   GET   /v1/catalog/manifest/foreign_collection?limit=N  live documents whose manifest names chunks outside their physical_collection (GH #1611)
  *   GET   /v1/catalog/sensitive?limit=N  the tenant's live sensitive documents, listed up to N, with the total (nexus-f3yqd)
  *   GET   /v1/catalog/stub-metadata?limit=N  per knowledge/docs collection, the PDF chunks still carrying the upload placeholder metadata, up to N (nexus-f3yqd)
  *   GET   /v1/catalog/manifest/section_label_fillable?limit=N  bounded count of legacy manifest rows the manifest-section-labels rung could still fill (nexus-l4hds)
@@ -232,7 +233,8 @@ public final class CatalogHandler implements HttpHandler {
         this.repo = repo;
         this.linkRoutes = new CatalogLinksHandler(new dev.nexus.service.db.CatalogLinksRepository(repo));
         this.boundedReads = new CatalogBoundedReadRoutes(
-            new dev.nexus.service.db.CatalogSensitiveReads(repo), new dev.nexus.service.db.ManifestFillableCount(repo));
+            new dev.nexus.service.db.CatalogSensitiveReads(repo), new dev.nexus.service.db.ManifestFillableCount(repo),
+            new dev.nexus.service.db.ManifestForeignCollectionReads(repo));
         this.stubMetadataRoute = new CatalogStubMetadataRoute(new dev.nexus.service.db.PdfStubMetadataReads(repo));
         this.manifestFill = new CatalogManifestFillRoutes(new dev.nexus.service.db.ManifestFill(repo),
             new dev.nexus.service.db.ManifestFillableCount(repo), manifestFillJobs);
@@ -307,6 +309,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/fill"         -> handleManifestFill(exchange, tenant, method);
                 case "/sensitive"             -> handleSensitiveList(exchange, tenant, method);
                 case "/stub-metadata"         -> handleStubMetadata(exchange, tenant, method);
+                case "/manifest/foreign_collection" -> handleManifestForeignCollection(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /docs/orphaned already
                 // existed; links had no equivalent, which is why the client
@@ -3725,6 +3728,11 @@ public final class CatalogHandler implements HttpHandler {
     /** POST /v1/catalog/manifest/fill (nexus-f3yqd, R2): starts the fill job; see {@link CatalogManifestFillRoutes}. The poll, GET /manifest/fill/{job_id}, is the default branch above. */
     private void handleManifestFill(HttpExchange exchange, String tenant, String method) throws IOException {
         manifestFill.start(exchange, tenant, method);
+    }
+
+    /** GET /v1/catalog/manifest/foreign_collection?limit=N (GH #1611): the body is {@link CatalogBoundedReadRoutes#foreignCollection}. */
+    private void handleManifestForeignCollection(HttpExchange exchange, String tenant, String method) throws IOException {
+        boundedReads.foreignCollection(exchange, tenant, method);
     }
 
     /** GET /v1/catalog/sensitive?limit=N (nexus-f3yqd): the body is {@link CatalogBoundedReadRoutes#sensitive}. */

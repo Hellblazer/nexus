@@ -201,6 +201,16 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "the census checks both directions, so a stale exclusion here fails "
         "just as loudly as a missing one"
     ),
+    "/manifest/foreign_collection": (
+        "GH #1611: engine route for the doctor's foreign-collection row; the "
+        "client method (HttpCatalogClient.manifest_foreign_collection) is "
+        "tested against a stubbed transport, as sensitive_documents is, so "
+        "the fake serves no branch for it. Its wire shape (count, limit, "
+        "capped, documents of {tumbler, physical_collection, collections, "
+        "chunks}, the 400 on a limit outside 1..10000 and the 503 on a "
+        "statement timeout) is validated Java-side by "
+        "ManifestForeignCollectionRouteTest"
+    ),
     "/manifest/fillable": (
         "nexus-f3yqd: DELIBERATELY engine-only for now (engine 0.1.188, route "
         "R1 of T2 nexus/rung-detect-route-spec-2026-11-10) — the client half "

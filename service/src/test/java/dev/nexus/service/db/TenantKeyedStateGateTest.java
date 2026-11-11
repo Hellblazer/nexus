@@ -580,6 +580,8 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("PdfStubMetadataReads.Page.collections", RESULT);   // nexus-f3yqd: one stub-metadata call's collections
             notKeyed.put("PdfStubMetadataReads.CollectionStubs.examples", RESULT);   // nexus-f3yqd: one collection's example names in that answer
             notKeyed.put("ChashConformanceConstraints.Report.constraints", RESULT);   // nexus-f3yqd: one chash-conformance call's entries (no tenant data: pg_catalog)
+            notKeyed.put("ManifestForeignCollectionReads.Page.documents", RESULT);   // GH #1611: one foreign-collection call's documents
+            notKeyed.put("ManifestForeignCollectionReads.Doc.collections", RESULT);   // GH #1611: one listed document's other collections
             notKeyed.put("CatalogRepository.Rewritten.ledger", "a component of one stale-note repair batch's result, "
                 + "the ledger of the rows that call changed, built for that request and returned in its response "
                 + "(nexus-bivz3.24); nothing keeps it between requests");
