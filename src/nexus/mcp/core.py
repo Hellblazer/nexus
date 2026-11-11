@@ -3414,8 +3414,9 @@ def _search_render(
         where: Metadata filter (KEY=VALUE, comma-separated). Ops: = >= <= > < !=
         cluster_by: "semantic" for topic/Ward clustering (default), empty to disable
         topic: Pre-filter to documents in this topic label (from nx taxonomy discover)
-        structured: Return ``{ids, tumblers, distances, collections}`` dict instead
-            of human-readable string.  Used by the plan runner so ``$stepN.ids``
+        structured: Return the ``{ids, tumblers, distances, hybrid_scores, collections,
+            chunk_collections, chunk_text_hash}`` dict (plus ``also_in`` when a row stands for
+            identical chunks in other collections, GH #1524) instead of human-readable string.  Used by the plan runner so ``$stepN.ids``
             references resolve to actual chunk IDs.
         threshold: Override the per-collection distance threshold uniformly
             (raw cosine distance, lower is stricter). Pass ``float('inf')``
@@ -3663,7 +3664,7 @@ def _search_render(
             collapsed = _collapse_identical_chunk_results(results)
             if len(collapsed) >= need or exhausted or _round == _COLLAPSE_REFETCH_ROUNDS:
                 break
-            fetch_n *= 2
+            fetch_n = 2 * max(fetch_n, 0 if cached is None else _page_cache_depth(cache_key))
         results = collapsed
         if not results:
             if structured:
@@ -3870,7 +3871,7 @@ def _search_render(
         shown_end = offset + len(page)
         if shown_end < total:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
-        elif raw_n >= fetch_n:  # the fetched count, not the collapsed one (GH #1524)
+        elif not exhausted:  # whether the fetch held the whole pool, not the collapsed count (GH #1524)
             lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
         else:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
@@ -3919,7 +3920,8 @@ def search(
         description=(
             "Return the {ids, tumblers, distances, hybrid_scores, collections, "
             "chunk_collections, chunk_text_hash} dict instead of the human-readable "
-            "string; the plan runner uses this so $stepN.ids resolves."
+            "string (plus also_in, aligned with ids, when a row stands for identical "
+            "chunks in other collections); the plan runner uses this so $stepN.ids resolves."
         ),
     )] = False,
     threshold: Annotated[float | None, Field(
@@ -4034,6 +4036,13 @@ def _page_cache_get(key: tuple, need: int) -> tuple[list, list, str | None] | No
             # belongs to (a separate read could see a newer entry's).
             return results, _page_cache.get("diag") or [], _page_cache.get("note")
         return None
+
+
+def _page_cache_depth(key: tuple) -> int:
+    """The fetch depth of the cached entry for *key*, 0 when there is none: a refetch goes deeper
+    than the entry it replaces, never shallower (GH #1524)."""
+    with _page_cache_lock:
+        return int(_page_cache.get("fetch_n", 0)) if _page_cache.get("key") == key else 0
 
 
 def _page_cache_exhausted(key: tuple) -> bool:

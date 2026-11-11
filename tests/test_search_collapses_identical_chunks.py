@@ -140,3 +140,35 @@ def test_the_text_footer_says_more_rows_exist_when_a_collapsed_window_is_full(ru
     )
     out, _ = run(offset=20, limit=10)
     assert "(end)" not in out, out[-200:]
+
+
+def test_a_cache_hit_short_after_the_collapse_refetches_deeper_than_the_entry(run, monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[int] = []
+
+    def fake(query: str, target: list[str], **kw: Any) -> list[SearchResult]:
+        asked.append(kw["n_results"])
+        return _hundred_with_five_copies(kw["n_results"])
+
+    monkeypatch.setattr("nexus.search_engine.search_cross_corpus", fake)
+    core._page_cache_invalidate()
+    try:
+        core.search(query="q", corpus="rdr", threshold=float("inf"), structured=True, offset=0, limit=10)
+        # offset 20 is a cache hit (need 30 of 30 fetched), but the collapse leaves 26 rows
+        out = core.search(query="q", corpus="rdr", threshold=float("inf"), structured=True, offset=20, limit=10)
+    finally:
+        core._page_cache_invalidate()
+    assert len(out["ids"]) == 10, out["ids"]
+    assert asked[0] == 30 and len(asked) == 2 and asked[1] > 30, asked
+
+
+def test_a_sensitive_copy_withholds_the_row_it_collapses_into_end_to_end(run, monkeypatch: pytest.MonkeyPatch) -> None:
+    clean = _sr("c1", "docs__1-1__bge-base-en-v15-768__v1", _A, 0.1)
+    clean.metadata["sensitive"] = False
+    secret = _sr("c2", "knowledge__medical__bge-base-en-v15-768__v1", _A, 0.2)
+    secret.metadata.update({"sensitive": True, "sensitive_owners": ["1.9.4"]})
+    monkeypatch.setattr("nexus.search_engine.search_cross_corpus", lambda query, target, **kw: [clean, secret])
+    out, _ = run(structured=True)
+    assert out["ids"] == [], "the row stands for the sensitive copy too, so it is withheld"
+    assert out.get("sensitive_withheld") == 1, out
+    text, _ = run()
+    assert "knowledge__medical" not in text and "text of c1" not in text, text
