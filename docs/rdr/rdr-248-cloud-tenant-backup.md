@@ -144,7 +144,9 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
 | A2 | One `REPEATABLE READ READ ONLY` transaction with `set_config('nexus.tenant', T, true)` returns exactly that tenant's rows from every RLS table | Verified locally (spike); the cloud has no pooler (the engine reaches PG directly through its own Hikari pool, bob 2026-11-11), so the local result carries | Local spike |
 | A3 | Binary `COPY` of the column types in these tables round-trips | Verified for every type that held data; staged load required | Local spike; the remaining types (bigint[], smallint, uuid, identity) by the Step 5 test's seed |
 | A4 | Import loads in one transaction | Verified with id reassignment, foreign-key order and tuples excluded | Local spike |
-| A5 | A read-only snapshot held for the export does not hurt the shared cloud database | Unverified | Cloud spike: time and size for the `nexus` tenant |
+| A5 | A read-only snapshot held for the export does not hurt the shared cloud database | Unverified (locally: the snapshot pins the database-wide xmin horizon for the session's life, so vacuum cannot remove rows dead after it) | Cloud measurement of the `nexus` tenant's export time (bob, on Sam's go in bob's session) |
+| A6 | A snapshot exported by one transaction serves many later page transactions, confined by RLS, consistent across writes | Verified locally (spike round 2, T2 `nexus/rdr248-local-spike-r2-2026-11-11`): 43 pages, writes and deletes committed between pages, concatenated pages equal the single-transaction export row for row on all 26 tables | Local spike |
+| A7 | The cloud engine role has no `idle_in_transaction_session_timeout` that would kill the held transaction between page requests | Unverified (0 on the local substrate) | bob reads the role's settings in the A5 window |
 
 ## Proposed Solution
 
@@ -162,8 +164,10 @@ same routes run against a local engine, which is where the round trip is tested.
 against the live catalog (`relrowsecurity AND NOT relispartition`), never a hand count. Each entry has:
 - a **class**: `data` (user data, always exported), `derived` (rebuildable, exported because it is cheap
   and saves a rebuild) or `excluded` (operational state, with a reason);
-- a **load order**: the topological order of the foreign keys (there are no cycles today, and only one
-  foreign key is deferrable, so deferring constraints does not replace ordering);
+- a **load order**: the topological order of the foreign keys AND of the references with no foreign key
+  (the spike's first staged load failed on `nx_answer_runs.plan_id`, which refers to `plans` with no
+  foreign key); there are no cycles today, and only one foreign key is deferrable, so deferring
+  constraints does not replace ordering;
 - its **reassigned id**, if its primary key is a global serial (18 tables), and the **columns that refer
   to it**, both foreign keys (`nx_answer_steps.run_id`, `topic_assignments.topic_id`,
   `topic_links.from_topic_id` and `to_topic_id`, `topics.parent_id`) and references with no foreign key
@@ -191,21 +195,31 @@ The classes, from the spike (one reason each in the spike record):
 20 MB (A1), so no single request carries a backup. An export is a session made of short requests, all
 reading one snapshot:
 1. `POST /v1/tenant/export` (the caller's own tenant token; no admin token, no other tenant). The engine
-   opens a dedicated connection, begins a `REPEATABLE READ READ ONLY` transaction as the engine role with
-   `set_config('nexus.tenant', T, true)`, and calls `pg_export_snapshot()`. That transaction stays open
-   for the session's life and holds the snapshot. The response is the session id and the header: format
+   opens a dedicated connection, begins a `REPEATABLE READ READ ONLY` transaction as the engine role, and
+   calls `pg_export_snapshot()`, and NOTHING ELSE: that transaction stays open for the session's life and
+   must read no table. A read there holds AccessShareLocks on every table it touched until the session
+   ends, and tenant create, which needs an AccessExclusiveLock on a model-level `chunks` partition, then
+   fails for every tenant (spike round 2: 503 `tenant_creation_busy` after 3.45 s with 467 locks held;
+   0.04 s with the snapshot alone). The header is read in a separate short transaction that imports the
+   snapshot. The response is the session id and the header: format
    version, engine version, last Liquibase changeset id, tenant id, UTC time, each `data` and `derived`
    table's columns, types and row count in the snapshot, and the `embedding_models` rows the tenant's rows
    refer to (a global table that two exported tables reference by foreign key).
-2. `GET /v1/tenant/export/{id}/rows?table=T&after=<key>&limit=N`. Each call is its own short transaction
-   that runs `SET TRANSACTION SNAPSHOT '<id>'` (so it reads exactly what step 1 saw) and the tenant
-   setting, and returns `COPY (SELECT <non-generated columns> FROM T WHERE <key> > after ORDER BY <key>
-   LIMIT N) TO STDOUT (FORMAT binary)`, the key being the table's primary key. N is sized so a page takes
-   a few seconds (chunks: a few thousand rows of about 5 KB). The response carries the page's last key
-   and a SHA-256 of the page.
+2. `GET /v1/tenant/export/{id}/rows?table=T&after=<key>`. Each call is its own short `REPEATABLE READ
+   READ ONLY` transaction whose FIRST statement is `SET TRANSACTION SNAPSHOT '<id>'` (Postgres refuses it
+   later, and refuses it under READ COMMITTED), followed by the tenant setting. The tenant comes from the
+   session's owner, never from the request: the snapshot does not carry the tenant, and the same snapshot
+   with another tenant's setting reads that tenant's rows. It returns `COPY (SELECT <non-generated
+   columns> FROM T WHERE <key> > after ORDER BY <key> LIMIT n) TO STDOUT (FORMAT binary)`, the key being
+   the table's primary key, with the page cut by bytes at about 16 MB (under the 20 MB body cap; about
+   3,200 bge-768 chunks or 2,700 voyage-1024 chunks; the database serves 4,000 chunk rows in about 0.1 s,
+   so the network sets a page's time). The response carries the page's last key and a SHA-256 of the
+   page.
 3. `DELETE /v1/tenant/export/{id}`, or expiry: the session closes, the transaction ends and the snapshot is
    released. A session idle past a bound (minutes) or older than a ceiling is closed by the engine, so an
-   abandoned export cannot hold the snapshot.
+   abandoned export cannot hold the snapshot, which pins the vacuum horizon for the whole database while
+   it lives. The bounds must sit inside any `idle_in_transaction_session_timeout` the cloud sets for the
+   engine role (A7).
 Because each page names where it ended, a client that loses a request asks again from the same key: a
 dropped connection costs one page, not the export. One export session per tenant at a time.
 
@@ -226,8 +240,10 @@ through tenant create (that is what makes its `chunks` partition leaves; rows ar
 comes to exist). It refuses unless every `data` and `derived` table is empty for that tenant, ignoring the rows tenant create
 itself writes; unless the header's changeset id equals the engine's (a mismatch names both); and unless
 every `embedding_models` row in the header exists. Then, in that one transaction, table by table in load order:
-1. stage the pages: a temp table shaped like the target, `COPY ... FROM STDIN (FORMAT binary)` into it as
-   they arrive (COPY into the RLS table itself is refused);
+1. stage the pages: a temp table built from the registry's column types (not `CREATE TABLE ... AS` from
+   the target, which would hold a lock on every `chunks` partition until commit and block tenant create
+   the same way), `COPY ... FROM STDIN (FORMAT binary)` into it as they arrive (COPY into the RLS table
+   itself is refused);
 2. for a table with a reassigned id, build a temp map of old id to a new id from the table's own sequence;
 3. `INSERT ... SELECT` from the stage with the caller's tenant in the tenant column, new ids from the map,
    and referring columns, foreign key or not, rewritten through their parent's map.
@@ -369,6 +385,10 @@ None.
 - **Scenario**: a write between two page requests — **Verify**: the export does not contain it (one
   snapshot across requests).
 - **Scenario**: a session idle past its bound — **Verify**: the engine closes it and releases the snapshot.
+- **Scenario**: tenant create while an export session is open — **Verify**: it succeeds promptly (the
+  session's held transaction reads no table).
+- **Scenario**: a page request for a session another tenant owns, or with another tenant's token —
+  **Verify**: refused; the page route never takes the tenant from the request.
 - **Scenario**: an RLS table added without a class — **Verify**: the parity test fails.
 - **Scenario**: import into a second tenant in the same database — **Verify**: no key collision; foreign
   keys and the two unenforced references resolve to the new rows; the next engine insert after the load
