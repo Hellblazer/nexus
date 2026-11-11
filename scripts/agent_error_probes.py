@@ -140,7 +140,8 @@ PROBES: list[Probe] = [
           refused_by="placeholder refusal before any engine call"),
     Probe("store-get-many-no-ids", "store_get_many", {},
           "Fetch documents abc and def.", "ids",
-          lambda t, a: t == "store_get_many" and isinstance(a.get("ids"), list) and bool(a["ids"])),
+          # ids takes a comma-separated string or a list (the tool's own schema)
+          lambda t, a: t == "store_get_many" and isinstance(a.get("ids"), (list, str)) and bool(a["ids"])),
     Probe("scratch-unknown-action", "scratch", {"action": "read", "entry_id": "abc"},
           "Read scratch entry abc.", "unknown action",
           lambda t, a: t == "scratch" and a.get("action") == "get" and a.get("entry_id") == "abc"),
@@ -164,7 +165,9 @@ PROBES: list[Probe] = [
           refused_by="resolve_send_address refuses a name no session can hold before any directory read"),
     Probe("query-catalog-where-operator", "query", {"question": "consensus", "author": "Lamport", "where": "year>=2020"},
           "Find documents by Lamport on consensus from 2020 on.", "operator-shaped",
-          lambda t, a: t == "query" and not (a.get("author") and _OPERATOR.search(str(a.get("where", ""))))),
+          # search's where takes KEY=VALUE and comparison operators, so moving the author and the year there is a fix
+          lambda t, a: (t == "query" and not (a.get("author") and _OPERATOR.search(str(a.get("where", "")))))
+          or (t == "search" and "author=" in str(a.get("where", "")))),
 ]
 
 

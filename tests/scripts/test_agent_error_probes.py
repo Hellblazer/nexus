@@ -40,14 +40,14 @@ CASES: dict[str, tuple[tuple[str, dict], tuple[str, dict]]] = {
     "tuple-out-no-keys": (("tuple_out", {"subspace": "board/probe", "keys": {"k": "v"}}), ("tuple_out", {"subspace": "board/probe"})),
     "tuple-rd-no-subspace": (("tuple_rd", {"subspace": "board/ci"}), ("tuple_rd", {})),
     "store-put-placeholder": (("store_put", {"collection": "distributed-systems"}), ("store_put", {"collection": "knowledge"})),
-    "store-get-many-no-ids": (("store_get_many", {"ids": ["abc", "def"]}), ("store_get_many", {"ids": "abc"})),
+    "store-get-many-no-ids": (("store_get_many", {"ids": "abc,def"}), ("store_get_many", {"ids": ""})),
     "scratch-unknown-action": (("scratch", {"action": "get", "entry_id": "abc"}), ("scratch", {"action": "read", "entry_id": "abc"})),
     "scratch-get-no-id": (("scratch", {"action": "get", "entry_id": "abc"}), ("scratch", {"action": "get"})),
     "metadata-scoped-operator": (("search_metadata_scoped", {"where": "topic=consensus"}), ("search_metadata_scoped", {"where": "year>=2020"})),
     "aspect-scoped-unknown-field": (("search_aspect_scoped", {"field": "experimental_datasets"}), ("search_aspect_scoped", {"field": "colour"})),
     "store-get-empty-id": (("store_get", {"doc_id": "push-train"}), ("store_get", {"doc_id": ""})),
     "mailbox-name-with-spaces": (("tuple_list", {}), ("mailbox_send", {"to": "Seminar seat: Bullock", "body": "x"})),
-    "query-catalog-where-operator": (("query", {"question": "c", "author": "Lamport"}), ("query", {"question": "c", "author": "Lamport", "where": "year>=2020"})),
+    "query-catalog-where-operator": (("search", {"query": "c", "where": "author=Lamport,year>=2020"}), ("search", {"query": "c", "where": "year>=2020"})),
 }
 TOOLS = {t for (good, bad) in CASES.values() for t in (good[0], bad[0])} | {"search", "query"}
 
