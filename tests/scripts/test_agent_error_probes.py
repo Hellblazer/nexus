@@ -137,3 +137,17 @@ def test_compare_refuses_no_pairs(tmp_path: Path) -> None:
     before = _run(tmp_path / "b.json", {("x", 0): True})
     after = _run(tmp_path / "a.json", {("y", 0): True})
     assert aep.compare(before, after) == 1
+
+
+def test_capture_refuses_anything_but_a_local_engine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import nexus.config  # noqa: PLC0415 — the switch the guard reads
+
+    monkeypatch.setattr(nexus.config, "is_local_mode", lambda: False)
+    assert "not in local mode" in aep.local_engine_refusal()
+    out = tmp_path / "e.json"
+    assert aep.capture(out) == 1 and not out.exists(), "a refused capture writes nothing and calls nothing"
+    monkeypatch.setattr(nexus.config, "is_local_mode", lambda: True)
+    monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com")
+    assert "not a local engine" in aep.local_engine_refusal()
+    monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:5999")
+    assert aep.local_engine_refusal() == ""

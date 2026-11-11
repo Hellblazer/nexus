@@ -32,7 +32,8 @@ LIMITS. Read a result with these in mind.
 - Runs within a probe are not independent (most probes give the same answer every run), so the
   probe-level p is the honest one; the run-level p overstates significance.
 - A bar of B points cannot pass when the before share is above 100 - B; compare says so.
-- capture runs against the local engine. Every probe is refused before any write while the
+- capture runs only against a local engine and refuses otherwise (on the laptop nexus resolves to
+  the managed service). Every probe is refused before any write while the
   server's guards hold (probes that could write or run work first, an oversized store_put or a
   procedure_run, are left out), but a guard regression would write for real: run it against a
   scratch engine when in doubt. It runs under a fresh session id, so it never touches the calling
@@ -42,7 +43,9 @@ LIMITS. Read a result with these in mind.
   a change to the tools' own error text cannot reword.
 - The user-level CLAUDE.md may still reach the asked agent; project files do not (empty cwd).
 
-Run on the laptop (it needs ``claude`` and the local engine), from the repository root.
+capture runs where a local engine is: ``tests/scripts/probe_capture_entry.py`` runs it under the
+suite's self-provisioned engine (on chas: ``uv run pytest tests/scripts/probe_capture_entry.py``
+with ``NX_PROBE_OUT`` set). ask and compare run on the laptop, which has ``claude``.
 """
 
 from __future__ import annotations
@@ -168,7 +171,33 @@ def _text(result: Any) -> str:
     return "\n".join(getattr(c, "text", "") for c in getattr(result, "content", []) or [])
 
 
+_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+
+def local_engine_refusal() -> str:
+    """Why capture must not run here, or "" when the endpoint is a local engine.
+
+    The probes are reads and refused writes, but they are still calls to whatever store this
+    process resolves, and the laptop resolves to the cloud (2026-11-11: five unannounced runs
+    there). Only a local engine is allowed."""
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    from nexus.config import is_local_mode  # noqa: PLC0415 — config only, no store
+
+    if not is_local_mode():
+        return "nexus is not in local mode here, so capture would reach the managed service"
+    url = os.environ.get("NX_SERVICE_URL", "")
+    if url and urlparse(url).hostname not in _LOOPBACK:
+        return f"NX_SERVICE_URL names {urlparse(url).hostname!r}, not a local engine"
+    return ""
+
+
 def capture(out: Path) -> int:
+    refusal = local_engine_refusal()
+    if refusal:
+        sys.stderr.write(f"refused: {refusal}. Run capture against a local engine "
+                         "(tests/scripts/probe_capture_entry.py on chas provisions one).\n")
+        return 1
     # A fresh session id: the server's lifespan mints T1 and arms a name lease for whatever
     # session the environment names, and must never touch the calling session's.
     os.environ["NX_SESSION_ID"] = str(uuid.uuid4())
