@@ -360,6 +360,31 @@ class CatalogStubMetadataRouteTest extends StubMetadataTestBase {
     }
 
     @Test
+    void aCollectionsBoundIsClampedToWhatIsLeftOfTheCallsBudget() throws Exception {
+        // The per-collection bound stays at its 10 s default; the call's budget is 1.5 s. A collection whose leaf is held
+        // must give up when the BUDGET runs out, not after its own 10 s bound, so the call stays inside its budget. Without
+        // the min(bound, budget left) clamp this read waits the full 10 s (r2 review, 4a1ed1bdf).
+        stubPdf(KNOW_A, "fast");
+        pdfWithChunk(TENANT, KNOW_384, "slow", STUB);
+        var leaf = chunkLeafOf(KNOW_384);
+        System.setProperty(PdfStubMetadataReads.BUDGET_PROPERTY, "1500");
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            PgContainerHelper.lockTable(holder, leaf, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
+            long t0 = System.nanoTime();
+            var resp = get(TOKEN, TENANT, "/v1/catalog/stub-metadata");
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+            var slow = entry(mapper.readValue(resp.body(), MAP_T), KNOW_384);
+            assertThat(slow).containsEntry("timed_out", true);
+            assertThat(ms).as("the call ends near its 1.5 s budget, not at the 10 s per-collection bound").isLessThan(5_000);
+            holder.rollback();
+        } finally {
+            System.clearProperty(PdfStubMetadataReads.BUDGET_PROPERTY);
+        }
+    }
+
+    @Test
     void whenTheCallsBudgetIsSpent_theRemainingCollectionsAreTimedOutWithoutBeingRead() throws Exception {
         stubPdf(KNOW_A, "a");
         stubPdf(KNOW_B, "b");

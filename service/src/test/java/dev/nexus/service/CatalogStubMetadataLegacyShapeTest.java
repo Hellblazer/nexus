@@ -25,7 +25,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * nexus-f3yqd: {@code GET /v1/catalog/stub-metadata} on the LEGACY shape the doctor row was slow on (nexus-iho0e, measured
  * 2026-11-03 on the local tenant: 24,517 chunks in 244 PDF documents that record no extraction method, mostly healthy
  * titled rows indexed before the placeholder was retired). Here: 244 such documents across three collections holding
- * 24,500 chunk rows, 241 of the documents healthy and three stub documents of 128 chunks each, so the converged case (which
+ * 24,484 chunk rows, 241 of the documents healthy and three stub documents of 128 chunks each, so the converged case (which
  * cannot stop early) reads every candidate chunk. The route must answer every collection exactly inside its bound, and the
  * timings (the route, and EXPLAIN ANALYZE of each collection's statement) are printed for the record.
  */
