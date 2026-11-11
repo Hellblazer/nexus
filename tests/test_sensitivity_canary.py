@@ -715,7 +715,9 @@ def _drive_enrich_bib(world: CanaryWorld) -> None:
 
     for source in ("s2", "openalex"):
         for collection in world.collections:
-            enrich_mod.run_bib_enrichment(collection, delay=0, source=source)
+            # "any": the corpus is knowledge notes, and the canary wants the widest reach, not
+            # the paper-only default (GH #1611 item 5).
+            enrich_mod.run_bib_enrichment(collection, delay=0, source=source, content_type="any")
 
 
 @driver("nexus.commands.enrich:_dt_crossref_bib")
@@ -737,7 +739,7 @@ def _drive_dt_crossref(world: CanaryWorld) -> None:
 
     mp.setattr("nexus.mcp_client.devonthink.dt_resolve_doi", resolve)
     for collection in world.collections:
-        enrich_mod.run_bib_enrichment(collection, delay=0, source="dt")
+        enrich_mod.run_bib_enrichment(collection, delay=0, source="dt", content_type="any")
     assert any(
         '"crossref-via-dt"' in r and world.canary_control in r for r in world.capture.requests
     ), "harness: the CrossRef gap-fill never asked about the control document's DOI, so the leg did not run"

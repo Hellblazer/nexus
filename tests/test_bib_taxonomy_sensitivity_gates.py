@@ -81,7 +81,10 @@ def _seed(collection: str, label: str, doi: str, arxiv: str, *, sensitive: bool)
         collection, ids=[chash], documents=[text],
         metadatas=[{"chunk_text_hash": chash, "title": title}],
     )
-    tumbler = give_chunks_a_live_owner(collection, [chash], title=title, owner_name=f"owner-{label}")
+    # A paper: `nx enrich bib` looks up paper documents only by default (GH #1611 item 5).
+    tumbler = give_chunks_a_live_owner(
+        collection, [chash], title=title, owner_name=f"owner-{label}", content_type="paper",
+    )
     if sensitive:
         with HttpCatalogClient() as cat:
             assert cat.set_sensitivity([tumbler], True, reason="RDR-243 gate test")["updated"] == [1]

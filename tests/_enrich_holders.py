@@ -49,7 +49,7 @@ def held(
             tumbler[t]: SimpleNamespace(
                 tumbler=tumbler[t], title=t, file_path=(file_paths or {}).get(t, ""),
                 bib_semantic_scholar_id=(bib_ids or {}).get(t, ""),
-                bib_openalex_id="", physical_collection=collection,
+                bib_openalex_id="", physical_collection=collection, content_type="paper",
                 index_content_hash=(content_hashes or {}).get(t, ""), meta={},
             )
             for t in titles
@@ -60,7 +60,7 @@ def held(
         owners = {c: [tumbler[t]] for c, t in by_chunk.items() if c in wanted}
         return owners, _entries(collection)
 
-    def _fake_documents(collection, id_field, served):
+    def _fake_documents(collection, id_field, served, content_type="paper"):  # every fake entry is a paper
         entries = _entries(collection)
         to_look_up = {}
         for t in titles:
