@@ -2,12 +2,12 @@
 title: "Cloud-Mode nx backup: an Engine Tenant Export Saved to One File, with a Tested Restore into an Empty Tenant"
 id: RDR-248
 type: Feature
-status: draft
+status: accepted
 priority: high
 author: Claude (linda, for Sam)
 reviewed-by: self
 created: 2026-11-11
-accepted_date:
+accepted_date: 2026-11-11
 related_issues: [nexus-f3yqd.4]
 related_rdrs: [RDR-108, RDR-155, RDR-243]
 ---
@@ -552,3 +552,4 @@ tenants. Nothing to trim.
 - 2026-11-11: draft; local spikes (two rounds) and a read-only cloud window settled A1-A7.
 - 2026-11-11: Gate round 1 — BLOCKED (2 Critical, 6 Significant, 2 ship-blocker(s)); commit `38a119ab9`; critique `nexus_rdr/248-gate-critique-2026-11-11-r1`.
 - 2026-11-11: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `6c291f8ba`; critique `nexus_rdr/248-gate-critique-2026-11-11-r2`.
+- 2026-11-11: Accepted by Sam, with export first and restore next, and the restore load's block on tenant create bounded (folded in at `1f89b5708`).
