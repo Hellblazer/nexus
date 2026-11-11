@@ -65,6 +65,10 @@ from nexus.db.limits import MAX_QUERY_RESULTS
 #: `tests/hooks/test_subagent_stop_hook.py:288`'s fixture id
 #: ("a16b397f79df79c42").
 _AGENT_ID_RE = re.compile(r"^a[0-9a-f]{16}$")
+#: The names a session can lease under `directory/<name>` (the lease side,
+#: ``nexus.mcp.subscriptions``, uses this same pattern). A `to` outside it can
+#: never resolve, so ``resolve_send_address`` refuses it before any read.
+SAFE_NAME_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class DirectoryResolutionError(RuntimeError):
@@ -159,6 +163,14 @@ def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:
         return to, "session"
     if looks_like_agent_id(to):
         return to, "agent"
+    if not SAFE_NAME_RE.fullmatch(to):
+        # nexus-3ceda.7: the engine's answer for such a name was "no template registered for
+        # subspace 'directory/<to>'", which sent agents to tools that do not exist.
+        raise DirectoryResolutionError(
+            f"{to[:64]!r} cannot be a session name: names are letters, digits, '.', '_' and '-', "
+            "starting with a letter or digit. Send to its session id (a UUID) instead, "
+            "or to the name it holds."
+        )
 
     return classify_directory_holders(to, list_directory_entries(to, tuples))
 

@@ -147,6 +147,15 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
         "NX_LOCAL+SANDBOX: nx store put / index md / collection list run by the rehearsal driver under a throwaway HOME "
         "and NEXUS_CONFIG_DIR with NX_LOCAL=1; two of the four matches are prose",
     ),
+    # nexus-3ceda.7: the agent-error probe battery. capture refuses unless nexus is in local mode with a
+    # loopback endpoint (local_engine_refusal, tested), and its supported route is
+    # tests/scripts/probe_capture_entry.py under the suite's self-provisioned engine. Every probe is a read or a
+    # call refused before any write. Two of the four matches are prose and a probe definition.
+    "scripts/agent_error_probes.py": (
+        4,
+        "NX_LOCAL: capture refuses anything but a local loopback engine; probes are reads or refused writes; "
+        "two of the four matches are prose and a probe definition",
+    ),
     # nexus-cnzei.5: imports nexus.mcp.core only to read each tool's
     # signature and schema for the committed wire snapshot; it calls no tool
     # and writes nothing, so it touches no tenant.

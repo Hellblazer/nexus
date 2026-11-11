@@ -152,7 +152,7 @@ PROBES: list[Probe] = [
     Probe("store-get-empty-id", "store_get", {"doc_id": ""}, "Read the document titled push-train.",
           "doc_id is required", lambda t, a: t == "store_get" and bool(a.get("doc_id"))),
     Probe("mailbox-name-with-spaces", "mailbox_send", {"to": "Seminar seat: Bullock", "body": "hello"},
-          "Send hello to the session that holds the seminar seat for Bullock.", "no template registered",
+          "Send hello to the session that holds the seminar seat for Bullock.", "Seminar seat: Bullock",
           lambda t, a: (t == "mailbox_send" and bool(_SAFE_NAME.match(str(a.get("to", "")))))
           or t in ("tuple_rd", "tuple_list", "tuple_registry"),
           refused_by="a name with spaces resolves to no directory row and no live holder"),
