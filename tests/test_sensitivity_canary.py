@@ -1483,26 +1483,30 @@ def _exclude_cases() -> list[Any]:
     ]
 
 
-@pytest.mark.sensitivity_reads
-@pytest.mark.parametrize("surface", _exclude_cases())
-def test_harness_a_read_path_that_ignores_the_posture_turns_every_exclude_row_red(
-    surface: Surface, t2_service_env: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+def _every_exclude_row_goes_red_when_a_read_path_ignores_the_posture(
+    surface: Surface, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, route: bool,
 ) -> None:
-    """The mutation, in the suite: ``HttpVectorClient.search_per_collection`` (the route the cross-corpus
-    pools and the MCP search take) is made to send ``include`` whatever the caller passed, which is what
+    """The mutation: the client method a search read goes through (``search_per_collection`` with the
+    per-collection route opted in, else ``search``, the batched ``/v1/vectors/search`` read that is the
+    default since nexus-tu8wp.3) is made to send ``include`` whatever the caller passed, which is what
     hard-coding ``sensitivity="include"`` at its ``search_engine`` call site does. Every Phase 2 row must
     go red: with the engine filter gone, the canary text, the sensitive chunk's id or the surface's own
     report of it reaches a payload. A row that stays green here would pass with its filter deleted."""
     import nexus.db.http_vector_client as hvc  # noqa: PLC0415 - after the substrate is pinned
 
+    if route:
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")
+    else:
+        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
     world = build_world(monkeypatch, workdir=tmp_path)
-    current = hvc.HttpVectorClient.search_per_collection
+    method = "search_per_collection" if route else "search"
+    current = getattr(hvc.HttpVectorClient, method)
 
     def include_always(self: Any, *a: Any, **kw: Any) -> Any:
         kw["sensitivity"] = "include"
         return current(self, *a, **kw)
 
-    monkeypatch.setattr(hvc.HttpVectorClient, "search_per_collection", include_always)
+    monkeypatch.setattr(hvc.HttpVectorClient, method, include_always)
     # RDR-243 Phase 3 (nexus-rfvyy.8.2): the MCP search tools now withhold a sensitive hit at their output whatever
     # the read asked for, so with the engine filter deleted that second layer would hide the leak this mutation is
     # meant to show. The mutation removes both layers: the output posture reads ``flag`` for the run.
@@ -1518,6 +1522,26 @@ def test_harness_a_read_path_that_ignores_the_posture_turns_every_exclude_row_re
     assert any(k in red for k in ("sensitive", "engine")), (
         f"row {surface.name!r} stayed green with every search read as include: {red!r}"
     )
+
+
+@pytest.mark.sensitivity_reads
+@pytest.mark.parametrize("surface", _exclude_cases())
+def test_harness_a_read_path_that_ignores_the_posture_turns_every_exclude_row_red(
+    surface: Surface, t2_service_env: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The mutation, in the suite, on the per-collection route (opt-in since nexus-tu8wp.3, so this
+    test opts in): ``HttpVectorClient.search_per_collection`` sends ``include`` whatever it was passed."""
+    _every_exclude_row_goes_red_when_a_read_path_ignores_the_posture(surface, monkeypatch, tmp_path, route=True)
+
+
+@pytest.mark.sensitivity_reads
+@pytest.mark.parametrize("surface", _exclude_cases())
+def test_harness_a_batched_read_path_that_ignores_the_posture_turns_every_exclude_row_red(
+    surface: Surface, t2_service_env: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The same mutation on the default path (nexus-tu8wp.3): the route stays off and
+    ``HttpVectorClient.search``, the batched ``/v1/vectors/search`` read, sends ``include``."""
+    _every_exclude_row_goes_red_when_a_read_path_ignores_the_posture(surface, monkeypatch, tmp_path, route=False)
 
 
 # --------------------------------------------------------------------------- #

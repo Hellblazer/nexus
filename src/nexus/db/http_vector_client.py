@@ -3465,19 +3465,22 @@ _PER_COLLECTION_PROPAGATED_CODES: frozenset[int] = frozenset({429, 502, 503, 504
 #: refuses or stubs routes it does not know).
 _PER_COLLECTION_ABSENT_CODES: frozenset[int] = frozenset({403, 404, 405, 501})
 
-#: Env switch that turns the per-collection route off (nexus-tu8wp.2), so a
-#: field defect in the route needs no client release. ``0``, ``false``,
-#: ``off`` or ``no`` (any case) sends every search down the batched path.
+#: Env opt-in for the per-collection route (nexus-tu8wp.2). Off by default since
+#: nexus-tu8wp.3: on the cloud's many-small-collections shape the route measured
+#: about 2x slower than the batched path (105 exact scans against a few combined
+#: statements) with the same page. ``1``, ``true``, ``on`` or ``yes`` (any case)
+#: sends searches down the route; every other value, and unset, keeps the batched path.
 PER_COLLECTION_ROUTE_ENV = "NX_SEARCH_PER_COLLECTION"
 
 
 def per_collection_route_enabled() -> bool:
-    """False when ``NX_SEARCH_PER_COLLECTION`` is ``0``/``false``/``off``/``no``.
+    """True only when ``NX_SEARCH_PER_COLLECTION`` is ``1``/``true``/``on``/``yes``.
 
-    Read on every search, so a flip takes effect on the next one.
+    Off by default (nexus-tu8wp.3). Read on every search, so a flip takes effect
+    on the next one.
     """
-    return os.environ.get(PER_COLLECTION_ROUTE_ENV, "").strip().lower() not in {
-        "0", "false", "off", "no",
+    return os.environ.get(PER_COLLECTION_ROUTE_ENV, "").strip().lower() in {
+        "1", "true", "on", "yes",
     }
 
 

@@ -750,14 +750,14 @@ _ROUTE_CELLS = [
 @pytest.fixture()
 def _route_client(_real_cloud_credentials: None, monkeypatch) -> HttpVectorClient:
     """A FRESH client that asks for the route (its 404 memo starts empty), with
-    the kill switch cleared so a stray ``NX_SEARCH_PER_COLLECTION=0`` cannot
-    turn the candidate into the reference."""
+    the route opted in (off by default since nexus-tu8wp.3) so an unset or stray
+    ``NX_SEARCH_PER_COLLECTION`` cannot turn the candidate into the reference."""
     from nexus.db.http_vector_client import (  # noqa: PLC0415
         PER_COLLECTION_ROUTE_ENV,
         per_collection_route_enabled,
     )
 
-    monkeypatch.delenv(PER_COLLECTION_ROUTE_ENV, raising=False)
+    monkeypatch.setenv(PER_COLLECTION_ROUTE_ENV, "1")
     assert per_collection_route_enabled()
     client = HttpVectorClient()
     assert client.supports_per_collection_search is True

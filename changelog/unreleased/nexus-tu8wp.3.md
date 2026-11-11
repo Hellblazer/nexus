@@ -1,0 +1,3 @@
+### Changed
+
+- **The per-collection search route is now opt-in** (nexus-tu8wp.3). Searches take the batched `/v1/vectors/search` path again by default. On the cloud's many-small-collections shape the route measured about 2x slower (105 exact scans against a few combined statements) and returned the same page (MCP page overlap 10/10). Set `NX_SEARCH_PER_COLLECTION=1` (or `true`, `on`, `yes`) to use the route; every other value, and unset, keeps the batched path. The route code stays, dormant. `scripts/measure_search_per_collection.py` sets the variable for its route runs and clears it for its batched runs.

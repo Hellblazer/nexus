@@ -108,6 +108,11 @@ status (a 503 from pool or admission exhaustion).
 A route run that did not reach the route (a 404, an edge refusal, an engine
 that predates it) exits 3 instead of timing the batched fallback as the route.
 
+The client's route is opt-in (``NX_SEARCH_PER_COLLECTION=1``, nexus-tu8wp.3). This script sets it
+for exactly the duration of a route run (and the concurrency and lexical modes' searches) and
+clears it for a batched run, then restores the caller's value; the caller's own setting never
+decides which path a leg measures.
+
 QUERY STRINGS PER LEG (distinct, so engine log lines are attributable): every
 string below ends in a leg marker; the concurrency mode adds ``-k<K>-s<i>`` per
 search.
@@ -115,8 +120,10 @@ search.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
+import os
 import statistics
 import sys
 import threading
@@ -142,9 +149,33 @@ DEFAULT_CORPORA = ("knowledge", "code", "docs", "rdr")
 #: file-diversity cap. ``cli``: ``nx search``'s default, n=10 with server rerank.
 SHAPES: dict[str, tuple[int, bool, int]] = {"mcp": (30, False, 10), "cli": (10, True, 10)}
 EXIT_ROUTE_NOT_SERVED = 3
+#: The client's route opt-in (``nexus.db.http_vector_client.PER_COLLECTION_ROUTE_ENV``; a test pins
+#: that the two agree, so this module still imports without the client). The route is off by default
+#: since nexus-tu8wp.3, so this script sets it for exactly the duration of a route run and clears it
+#: for a batched one, whatever the caller's environment says.
+ROUTE_ENV = "NX_SEARCH_PER_COLLECTION"
 DEFAULT_KS = (1, 2, 3)
 #: The pause between runs, in seconds, unless ``--pause`` says otherwise.
 DEFAULT_PAUSE_S = 1.0
+
+
+@contextlib.contextmanager
+def route_env(on: bool):
+    """Set ``NX_SEARCH_PER_COLLECTION=1`` (*on*) or remove it (off) for the duration of the block,
+    then restore the caller's value. The env is process-wide, so concurrent searches share one
+    ``route_env`` block around all of them; never nest one per thread."""
+    prior = os.environ.get(ROUTE_ENV)
+    if on:
+        os.environ[ROUTE_ENV] = "1"
+    else:
+        os.environ.pop(ROUTE_ENV, None)
+    try:
+        yield
+    finally:
+        if prior is None:
+            os.environ.pop(ROUTE_ENV, None)
+        else:
+            os.environ[ROUTE_ENV] = prior
 
 
 def latency_query(shape: str) -> str:
@@ -283,7 +314,7 @@ def run_one(
     model_of_out: list = []
     rerank_meta: dict = {}
     start = utc_now()
-    with Recorder(client) as rec:
+    with route_env(path == "route"), Recorder(client) as rec:
         t0 = time.perf_counter()
         results = search(
             query, cols, n_results=n, t3=client, cluster_by=None, rerank=rerank,
@@ -544,10 +575,11 @@ def measure_concurrency(
 
         start = utc_now()
         threads = [threading.Thread(target=_worker, args=(i,), name=f"conc-{k}-{i}") for i in range(k)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        with route_env(True):  # one block around every worker: the env is process-wide
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
         end = utc_now()
         unserved = [r for r in results if r["route_served"] < 1 or r["search_calls"] > 0]
         for i, r in enumerate(results):
@@ -660,8 +692,9 @@ def measure_lexical(
     def _go(path: str, round_no: int) -> None:
         if runs:
             sleep(pause_s)
-        r = _lexical_search_once(path=path, query=lexical_query(path), cols=cols,
-                                 make_client=make_client, search=search, diag_type=diag_type)
+        with route_env(True):
+            r = _lexical_search_once(path=path, query=lexical_query(path), cols=cols,
+                                     make_client=make_client, search=search, diag_type=diag_type)
         r["round"] = round_no
         runs.append(r)
         emit(
@@ -701,10 +734,11 @@ def measure_lexical(
 
         start = utc_now()
         threads = [threading.Thread(target=_worker, args=(i,), name=f"lex-{k}-{i}") for i in range(k)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        with route_env(True):
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
         end = utc_now()
         for i, r in enumerate(results):
             emit(
@@ -745,21 +779,11 @@ def _live_world() -> tuple[list[str], dict[str, list[str]], Callable[[bool], Any
     """The live client factory, collections and search function (imports here so
     the module imports without the client for the hermetic tests)."""
     from nexus.corpus import resolve_corpus  # noqa: PLC0415
-    from nexus.db.http_vector_client import (  # noqa: PLC0415
-        PER_COLLECTION_ROUTE_ENV,
-        HttpVectorClient,
-        per_collection_route_enabled,
-    )
+    from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415
     from nexus.logging_setup import configure_logging  # noqa: PLC0415
     from nexus.search_engine import SearchDiagnostics, search_cross_corpus  # noqa: PLC0415
 
     configure_logging("cli")  # structlog's unconfigured default writes to stdout
-    if not per_collection_route_enabled():
-        raise SystemExit(
-            f"{PER_COLLECTION_ROUTE_ENV} turns the route off in this environment; unset it, "
-            "or the route runs would be batched runs",
-        )
-
     def make_client(route: bool) -> HttpVectorClient:
         client = HttpVectorClient()
         client.supports_per_collection_search = route  # type: ignore[misc]

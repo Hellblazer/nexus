@@ -124,7 +124,7 @@ def world(monkeypatch):
     monkeypatch.setattr(hvc.HttpVectorClient, "__init__", lambda self, **kw: setattr(self, "_tenant", "t"))
     monkeypatch.setattr(se, "_mixed_model_groups", {})
     monkeypatch.setattr(hvc, "_per_collection_absent_warned", False)
-    monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+    monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")  # opt-in route (nexus-tu8wp.3)
     engine = _FakeEngine(monkeypatch, {COL_BGE: [(P1, 0.2), (CAN, 0.21)], COL_MINI: [(P2, 0.22)]})
     real = engine._request
 

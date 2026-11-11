@@ -50,6 +50,12 @@ def _seed(collection: str, texts: list[str], owner: str) -> list[str]:
     return ids
 
 
+@pytest.fixture(autouse=True)
+def _route_opted_in(monkeypatch):
+    """This file runs the route against the real engine; it is opt-in since nexus-tu8wp.3."""
+    monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")
+
+
 @pytest.fixture
 def seeded(t2_service_env):
     """A client bound to a fresh tenant with the fixture collections seeded."""

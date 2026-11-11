@@ -121,7 +121,7 @@ def _signature(results) -> list[tuple]:
 def _fresh_process_state(monkeypatch):
     monkeypatch.setattr(se, "_mixed_model_groups", {})
     monkeypatch.setattr(hvc, "_per_collection_absent_warned", False)
-    monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+    monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")  # opt-in route (nexus-tu8wp.3)
 
 
 class TestTheRowsCarryTheVectors:

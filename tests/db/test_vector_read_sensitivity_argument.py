@@ -341,7 +341,7 @@ def test_under_llm_bound_an_mcp_search_sends_exclude_from_every_pool_task(monkey
     monkeypatch.delenv("NX_SENSITIVITY_POSTURE", raising=False)  # the suite's blanket: this test owns its posture
     monkeypatch.setattr(se, "_mixed_model_groups", {})
     monkeypatch.setattr(hvc, "_per_collection_absent_warned", False)
-    monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+    monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")  # opt-in route (nexus-tu8wp.3)
     bge, mini = _cols("docs", _BGE, 2), _cols("docs", _MINI, 2)
     engine = _VersionedEngine(monkeypatch, {c: _rows("r", 4, 0.2) for c in bge + mini})
     monkeypatch.setattr(core, "_get_t3", lambda: engine.client)
@@ -379,6 +379,7 @@ def test_the_posture_reaches_a_pool_worker_that_did_not_inherit_the_context(monk
     """A7: a worker thread does not inherit the ContextVar. The value is a call argument, so a bare
     ``threading.Thread`` worker, which gets no context copy, still sends it."""
     monkeypatch.setattr(se, "_mixed_model_groups", {})
+    monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")  # reads route_calls(): the route is opt-in (nexus-tu8wp.3)
     cols = _cols("docs", _BGE, 2)
     engine = _VersionedEngine(monkeypatch, {c: _rows("r", 2, 0.2) for c in cols})
     seen: list = []
