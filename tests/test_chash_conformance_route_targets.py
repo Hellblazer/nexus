@@ -21,7 +21,7 @@ _CHANGELOG = _ROOT / "service/src/main/resources/db/changelog"
 
 def _targets() -> list[tuple[str, str]]:
     """(``nexus.<table>``, constraint name) of each ``new Target(TABLE_CONSTANT, "name")`` in the Java class."""
-    found = re.findall(r'new Target\(([A-Z_]+), "([a-z_0-9]+)"\)', _JAVA.read_text(encoding="utf-8"))
+    found = re.findall(r'new Target\(([A-Z_]+), "([a-z_0-9]+)", [A-Z_]+\)', _JAVA.read_text(encoding="utf-8"))
     return [(f"nexus.{constant.lower()}", name) for constant, name in found]
 
 

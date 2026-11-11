@@ -41,6 +41,13 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  * <p><b>A constraint that is not there is not valid.</b> Each target is reported whether or not the constraint exists;
  * an absent one is {@code present=false, validated=false}, so {@code all_validated} can never be a vacuous true.
  *
+ * <p><b>A name is not a definition.</b> The constraint is identified by name AND by what it checks: the statement also reads
+ * {@code pg_get_constraintdef(oid)} for the declaring table's constraint and every partition copy, and each must deparse
+ * (a trailing {@code NOT VALID} aside) to {@link #WIDTH_CHECK_DEFINITION}, the text PostgreSQL itself renders for the
+ * migrations' check. A same-named constraint with another expression (hand-recreated and weaker, then validated) reads
+ * {@code present: true, validated: false, definition_matches: false}, and {@code all_validated} false. The definition text is
+ * never returned, to any caller.
+ *
  * <p><b>Partitions.</b> {@code nexus.chunks} is partitioned, and a CHECK on a partitioned parent is copied to every
  * partition, at any depth, as a row of its own in {@code pg_constraint} (not linked by {@code conparentid}, which a
  * partition's inherited CHECK leaves 0: the link is the table's own place in {@code pg_inherits}).
@@ -54,21 +61,35 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 public final class ChashConformanceConstraints {
 
     /** A chash width constraint the route reports: the table it is declared on and its name. */
-    public record Target(Table<?> table, String constraint) {
+    public record Target(Table<?> table, String constraint, String expectedDefinition) {
         /** The schema-qualified table, as the client's table list names it ({@code nexus.chunks}). */
         public String qualifiedTable() {
             return table.getSchema().getName() + "." + table.getName();
         }
     }
 
+    /**
+     * What {@code pg_get_constraintdef} renders for the migrations' {@code CHECK (octet_length(chash) = 32)} once a trailing
+     * {@code NOT VALID} is taken off ({@link #normalise}): PostgreSQL's own deparse (double parentheses), not the migration's
+     * text. {@code ChashConformanceRouteTest} derives it from the migrations' constraint on a fresh database and from
+     * PostgreSQL's rendering of the migration's statement on a scratch table, so it cannot drift from what PostgreSQL prints.
+     * A PostgreSQL that deparsed it differently would make every target read {@code definition_matches: false}, the safe
+     * direction.
+     */
+    public static final String WIDTH_CHECK_DEFINITION = "CHECK ((octet_length(chash) = 32))";
+
     /** The reported constraints, in report order. */
     public static final List<Target> TARGETS = List.of(
-        new Target(CHUNKS, "chunks_chash_octet_check"),
-        new Target(CATALOG_DOCUMENT_CHUNKS, "catalog_document_chunks_chash_octet_check"));
+        new Target(CHUNKS, "chunks_chash_octet_check", WIDTH_CHECK_DEFINITION),
+        new Target(CATALOG_DOCUMENT_CHUNKS, "catalog_document_chunks_chash_octet_check", WIDTH_CHECK_DEFINITION));
 
-    /** One target's state. {@code partitions} counts the copies on partitions below the declaring table. */
-    public record Entry(String table, String name, boolean present, boolean validated, int partitions,
-                        int partitionsNotValidated) {}
+    /**
+     * One target's state. {@code definitionMatches} is true when the declaring table's constraint AND every partition copy
+     * deparse to the expected definition (false when absent). {@code partitions} counts the copies on partitions below the
+     * declaring table. The definition text itself is never part of an entry.
+     */
+    public record Entry(String table, String name, boolean present, boolean validated, boolean definitionMatches,
+                        int partitions, int partitionsNotValidated) {}
 
     /** The answer: one entry per target; {@code allValidated} is true only when every target is present and validated. */
     public record Report(List<Entry> constraints) {
@@ -82,7 +103,14 @@ public final class ChashConformanceConstraints {
      * {@code relationParent} the oid of that table's parent in {@code pg_inherits} (0 for a table that is nobody's partition).
      * A CHECK a partition inherits is its own row with {@code conparentid} 0, so the partition tree is the table tree.
      */
-    record Row(long relation, long relationParent, String relationName, String name, boolean validated) {}
+    record Row(long relation, long relationParent, String relationName, String name, boolean validated, String definition) {}
+
+    /** {@code pg_get_constraintdef} without the {@code NOT VALID} it appends to an unvalidated constraint (validity is its own field). */
+    static String normalise(String definition) {
+        if (definition == null) return "";
+        String d = definition.strip();
+        return d.endsWith(" NOT VALID") ? d.substring(0, d.length() - " NOT VALID".length()) : d;
+    }
 
     private final TenantScope scope;
 
@@ -106,18 +134,23 @@ public final class ChashConformanceConstraints {
                     && r.name().equals(t.constraint()))
                 .findFirst().orElse(null);
             if (root == null) {
-                out.add(new Entry(t.qualifiedTable(), t.constraint(), false, false, 0, 0));
+                out.add(new Entry(t.qualifiedTable(), t.constraint(), false, false, false, 0, 0));
                 continue;
             }
             int copies = 0;
             int notValid = 0;
+            // A constraint that carries the right name with another expression (hand-recreated, weaker) is not the check this
+            // reports on, validated or not: the root and every copy must deparse to the expected definition.
+            boolean definitionMatches = normalise(root.definition()).equals(t.expectedDefinition());
             for (Row r : rows) {
                 if (r.relation() != root.relation() && r.name().equals(root.name()) && descendsFrom(r, root.relation(), byRelation)) {
                     copies++;
                     if (!r.validated()) notValid++;
+                    if (!normalise(r.definition()).equals(t.expectedDefinition())) definitionMatches = false;
                 }
             }
-            out.add(new Entry(t.qualifiedTable(), t.constraint(), true, root.validated() && notValid == 0, copies, notValid));
+            out.add(new Entry(t.qualifiedTable(), t.constraint(), true, root.validated() && notValid == 0 && definitionMatches,
+                definitionMatches, copies, notValid));
         }
         return new Report(List.copyOf(out));
     }
@@ -138,7 +171,7 @@ public final class ChashConformanceConstraints {
      * (a left join to {@code pg_inherits}) and its validity. Reads {@code pg_catalog} only; no table of the product is
      * scanned and no tenant predicate applies. Public so a test can run it on a session of its choosing.
      */
-    public static org.jooq.Select<org.jooq.Record5<Long, Long, String, String, Boolean>> query(org.jooq.DSLContext ctx) {
+    public static org.jooq.Select<org.jooq.Record6<Long, Long, String, String, Boolean, String>> query(org.jooq.DSLContext ctx) {
         var con = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("con");
         var cls = DSL.table(DSL.name("pg_catalog", "pg_class")).as("cls");
         var ns = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("ns");
@@ -148,7 +181,8 @@ public final class ChashConformanceConstraints {
         Field<String> relationName = DSL.field(DSL.name("cls", "relname"), String.class);
         Field<String> name = DSL.field(DSL.name("con", "conname"), String.class);
         Field<Boolean> validated = DSL.field(DSL.name("con", "convalidated"), Boolean.class);
-        return ctx.select(relation, relationParent, relationName, name, validated)
+        Field<String> definition = DSL.function("pg_get_constraintdef", SQLDataType.VARCHAR, DSL.field(DSL.name("con", "oid")));
+        return ctx.select(relation, relationParent, relationName, name, validated, definition)
             .from(con)
             .join(cls).on(DSL.field(DSL.name("cls", "oid")).eq(DSL.field(DSL.name("con", "conrelid"))))
             .join(ns).on(DSL.field(DSL.name("ns", "oid")).eq(DSL.field(DSL.name("cls", "relnamespace"))))
@@ -166,7 +200,7 @@ public final class ChashConformanceConstraints {
         return scope.withTenant(tenant, ctx -> {
             List<Row> rows = new ArrayList<>();
             for (var r : query(ctx).fetch()) {
-                rows.add(new Row(r.value1(), r.value2(), r.value3(), r.value4(), Boolean.TRUE.equals(r.value5())));
+                rows.add(new Row(r.value1(), r.value2(), r.value3(), r.value4(), Boolean.TRUE.equals(r.value5()), r.value6()));
             }
             return aggregate(rows);
         });

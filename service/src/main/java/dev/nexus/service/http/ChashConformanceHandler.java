@@ -21,10 +21,11 @@ import java.util.Map;
  * legacy-debt legs, and on a fresh or never-validated store it answers {@code all_validated: false}, so it saves nothing
  * there; see {@link ChashConformanceConstraints}.
  *
- * <p>{@code {constraints:[{table, name, present, validated}], all_validated}}, and for the root token also
+ * <p>{@code {constraints:[{table, name, present, validated, definition_matches}], all_validated}}, and for the root token also
  * {@code partitions} and {@code partitions_not_validated} on each entry. {@link ChashConformanceConstraints} has which
  * constraints, how a partitioned table's copies fold into {@code validated} (a parent valid with a copy not valid reads NOT
- * validated) and why an absent constraint is {@code validated:false}. {@code all_validated} is true only when every listed
+ * validated), why an absent constraint is {@code validated:false}, and {@code definition_matches} (the constraint and every
+ * copy deparse to the expected check; a same-named weaker one is not the check). The definition text is never returned. {@code all_validated} is true only when every listed
  * constraint is present and validated, and a VALID width CHECK says no row of its table is non-conformant; it says nothing
  * about the tables that carry no such CHECK, which are not listed.
  *
@@ -94,6 +95,8 @@ public final class ChashConformanceHandler implements HttpHandler {
             row.put("name", e.name());
             row.put("present", e.present());
             row.put("validated", e.validated());
+            // schema metadata, so every caller sees it; the definition text it was judged on is never returned
+            row.put("definition_matches", e.definitionMatches());
             if (includePartitionCounts) {
                 row.put("partitions", e.partitions());
                 row.put("partitions_not_validated", e.partitionsNotValidated());

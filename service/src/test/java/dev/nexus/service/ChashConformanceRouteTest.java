@@ -45,6 +45,9 @@ class ChashConformanceRouteTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String ROOT = "tok-root-chash-conf-0123456789abcdef";
     private static final String TENANT_TOKEN = "tok-tenant-chash-conf-0123456789abcd";
+    private static final String DATA_TOKEN = "tok-data-chash-conf-0123456789abcdefgh";
+    private static final String MINT_LOCKED_TOKEN = "tok-mintlocked-chash-conf-0123456789ab";
+    private static final String BOARD_CI_TOKEN = "tok-boardci-chash-conf-0123456789abcd";
     private static final String OTHER_TENANT_TOKEN = "tok-other-chash-conf-0123456789abcdef";
     private static final String MINT_TOKEN = "tok-mint-chash-conf-0123456789abcdef";
     private static final String CHUNKS_CHECK = "chunks_chash_octet_check";
@@ -67,6 +70,12 @@ class ChashConformanceRouteTest {
             PgContainerHelper.seedServiceToken(dsl, ROOT, TenantConstants.DEFAULT_TENANT, TokenStore.ROOT_TOKEN_LABEL,
                 TokenStore.SCOPE_ROOT, null, null);
             PgContainerHelper.seedServiceToken(dsl, TENANT_TOKEN, "chash-conf-tenant", "tenant-token");
+            var later = java.time.OffsetDateTime.now().plusHours(1);
+            PgContainerHelper.seedServiceToken(dsl, DATA_TOKEN, "chash-conf-tenant", "data-token", TokenStore.SCOPE_DATA, later, null);
+            PgContainerHelper.seedServiceToken(dsl, MINT_LOCKED_TOKEN, "chash-conf-tenant", "mint-locked-token",
+                TokenStore.SCOPE_MINT_LOCKED, null, null);
+            PgContainerHelper.seedServiceToken(dsl, BOARD_CI_TOKEN, "chash-conf-tenant", "board-ci-token",
+                TokenStore.SCOPE_BOARD_CI, null, null);
             PgContainerHelper.seedServiceToken(dsl, OTHER_TENANT_TOKEN, "chash-conf-other-tenant", "other-tenant-token");
             PgContainerHelper.seedServiceToken(dsl, MINT_TOKEN, "chash-conf-tenant", "mint-token",
                 TokenStore.SCOPE_MINT, null, null);
@@ -92,6 +101,13 @@ class ChashConformanceRouteTest {
     private HttpResponse<String> get(String bearer) throws Exception {
         var b = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/schema/chash-conformance");
         if (bearer != null) b.header("Authorization", "Bearer " + bearer);
+        return http.send(b.GET().build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** A GET that also sends the client-claimed tenant header, which the engine must ignore. */
+    private HttpResponse<String> getClaiming(String bearer, String claimedTenant) throws Exception {
+        var b = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/schema/chash-conformance")
+            .header("Authorization", "Bearer " + bearer).header("X-Nexus-Tenant", claimedTenant);
         return http.send(b.GET().build(), HttpResponse.BodyHandlers.ofString());
     }
 
@@ -305,7 +321,7 @@ class ChashConformanceRouteTest {
             assertThat(body.fieldNames()).toIterable().containsExactlyInAnyOrder("constraints", "all_validated");
             assertThat(body.get("constraints")).hasSize(2);
             for (JsonNode c : body.get("constraints")) {
-                assertThat(c.fieldNames()).toIterable().containsExactlyInAnyOrder("table", "name", "present", "validated");
+                assertThat(c.fieldNames()).toIterable().containsExactlyInAnyOrder("table", "name", "present", "validated", "definition_matches");
             }
             assertThat(resp.body()).doesNotContain("partitions");
             // and it agrees with what the root token sees of the same facts
@@ -327,7 +343,7 @@ class ChashConformanceRouteTest {
         var root = report();
         for (JsonNode c : root.get("constraints")) {
             assertThat(c.fieldNames()).toIterable()
-                .containsExactlyInAnyOrder("table", "name", "present", "validated", "partitions", "partitions_not_validated");
+                .containsExactlyInAnyOrder("table", "name", "present", "validated", "definition_matches", "partitions", "partitions_not_validated");
         }
         assertThat(row(root, "nexus.chunks").get("partitions").asInt()).isPositive();
         assertThat(get(TENANT_TOKEN).body()).doesNotContain("partitions");
@@ -343,6 +359,146 @@ class ChashConformanceRouteTest {
             assertThat(first.statusCode()).isEqualTo(200);
             assertThat(second.statusCode()).isEqualTo(200);
             assertThat(first.body()).isEqualTo(second.body());
+        }
+    }
+
+    @Test
+    @Order(15)
+    void aDataTokenTheManagedDoctorsRealCredentialGetsExactlyTheTenantKeySets() throws Exception {
+        resetBothNotValid();
+        var resp = get(DATA_TOKEN);
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        var body = MAPPER.readTree(resp.body());
+        assertThat(body.fieldNames()).toIterable().containsExactlyInAnyOrder("constraints", "all_validated");
+        assertThat(body.get("constraints")).hasSize(2);
+        for (JsonNode c : body.get("constraints")) {
+            assertThat(c.fieldNames()).toIterable().containsExactlyInAnyOrder("table", "name", "present", "validated", "definition_matches");
+        }
+        assertThat(resp.body()).as("the same bytes a tenant token gets").isEqualTo(get(TENANT_TOKEN).body());
+    }
+
+    @Test
+    @Order(16)
+    void mintLockedAndBoardCiScopesAreRefusedOnThisPath_withNoBody() throws Exception {
+        for (String token : new String[]{MINT_LOCKED_TOKEN, BOARD_CI_TOKEN}) {
+            var resp = get(token);
+            assertThat(resp.statusCode()).isEqualTo(403);
+            assertThat(resp.body()).doesNotContain("constraints").doesNotContain("partitions");
+        }
+    }
+
+    @Test
+    @Order(17)
+    void aTenantTokenClaimingAnotherTenantByHeaderStillGetsNoPartitionCounts_andTheSameBody() throws Exception {
+        var plain = get(TENANT_TOKEN);
+        assertThat(plain.statusCode()).isEqualTo(200);
+        for (String claimed : new String[]{TenantConstants.DEFAULT_TENANT, "chash-conf-other-tenant", "*"}) {
+            var resp = getClaiming(TENANT_TOKEN, claimed);
+            assertThat(resp.statusCode()).as("claiming " + claimed + ": " + resp.body()).isEqualTo(200);
+            assertThat(resp.body()).as("claiming " + claimed).doesNotContain("partitions").isEqualTo(plain.body());
+        }
+        // and a data token the same
+        assertThat(getClaiming(DATA_TOKEN, TenantConstants.DEFAULT_TENANT).body()).isEqualTo(plain.body());
+    }
+
+    // ── a name is not a definition ──────────────────────────────────────────
+
+    /**
+     * The expected definition is what PostgreSQL itself renders, not a literal trusted on faith: the migrations' constraint
+     * on a fresh database (the table's own row and every partition copy, NOT VALID or valid) and a constraint made from the
+     * same expression on a scratch table by the jOOQ DDL both deparse to {@link ChashConformanceConstraints#WIDTH_CHECK_DEFINITION}.
+     */
+    @Test
+    @Order(18)
+    void theExpectedDefinitionIsWhatPostgresqlRendersForTheMigrationsCheck() throws Exception {
+        resetBothNotValid();
+        var scratch = DSL.name("nexus", "scratch_width_f3yqd");
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            for (int pass = 0; pass < 2; pass++) {
+                if (pass == 1) validateBoth();
+                var rows = ChashConformanceConstraints.query(ctx).fetch();
+                var genuine = rows.stream().filter(r -> !r.value3().equals("chunks_retired_225")).toList();
+                assertThat(genuine).as("the migrations' constraints and copies, pass " + pass).hasSizeGreaterThan(10);
+                for (var r : genuine) {
+                    String def = r.value6().replace(" NOT VALID", "");
+                    assertThat(def).as(r.value3() + " pass " + pass).isEqualTo(ChashConformanceConstraints.WIDTH_CHECK_DEFINITION);
+                }
+            }
+            var chash = DSL.field(DSL.name("chash"), byte[].class);
+            ctx.createTable(scratch).column(chash).constraint(DSL.constraint("scratch_width_check")
+                .check(DSL.function("octet_length", org.jooq.impl.SQLDataType.INTEGER, chash).eq(32))).execute();
+            try {
+                String rendered = ctx.select(DSL.function("pg_get_constraintdef", org.jooq.impl.SQLDataType.VARCHAR,
+                        DSL.field(DSL.name("con", "oid"))))
+                    .from(DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("con"))
+                    .where(DSL.field(DSL.name("con", "conname"), String.class).eq("scratch_width_check"))
+                    .fetchOne(0, String.class);
+                assertThat(rendered).isEqualTo(ChashConformanceConstraints.WIDTH_CHECK_DEFINITION);
+            } finally {
+                ctx.dropTable(scratch).execute();
+            }
+        }
+        resetBothNotValid();
+    }
+
+    /** Drops the genuine constraint of {@code table} and plants a WEAKER one of the same name (it is valid: the tables are empty). */
+    private void plantWeaker(org.jooq.Table<?> table, String name) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var chash = DSL.field(DSL.name("chash"), byte[].class);
+            ctx.alterTable(table).dropConstraint(name).execute();
+            ctx.alterTable(table).add(DSL.constraint(name)
+                .check(DSL.function("octet_length", org.jooq.impl.SQLDataType.INTEGER, chash).ge(1))).execute();
+        }
+    }
+
+    @Test
+    @Order(19)
+    void aWeakerConstraintOfTheSameName_evenValid_readsPresentNotValidatedAndNotTheCheck() throws Exception {
+        resetBothNotValid();
+        validateBoth();
+        plantWeaker(CATALOG_DOCUMENT_CHUNKS, MANIFEST_CHECK);
+        try {
+            var report = report();
+            var manifest = row(report, "nexus.catalog_document_chunks");
+            assertThat(manifest.get("present").asBoolean()).isTrue();
+            assertThat(manifest.get("definition_matches").asBoolean()).isFalse();
+            assertThat(manifest.get("validated").asBoolean()).as("a weaker same-named check is not the check").isFalse();
+            var chunks = row(report, "nexus.chunks");
+            assertThat(chunks.get("definition_matches").asBoolean()).as("the control: the genuine one").isTrue();
+            assertThat(chunks.get("validated").asBoolean()).isTrue();
+            assertThat(report.get("all_validated").asBoolean()).isFalse();
+
+            // a tenant sees the same facts, and never the definition text
+            var tenant = get(TENANT_TOKEN);
+            assertThat(tenant.statusCode()).isEqualTo(200);
+            var body = MAPPER.readTree(tenant.body());
+            assertThat(row(body, "nexus.catalog_document_chunks").get("definition_matches").asBoolean()).isFalse();
+            assertThat(row(body, "nexus.catalog_document_chunks").get("validated").asBoolean()).isFalse();
+            assertThat(body.get("all_validated").asBoolean()).isFalse();
+            assertThat(tenant.body()).doesNotContain("octet_length").doesNotContain("CHECK").doesNotContain(">=");
+            assertThat(get(ROOT).body()).doesNotContain("octet_length").doesNotContain("CHECK");
+        } finally {
+            resetBothNotValid();
+        }
+    }
+
+    @Test
+    @Order(20)
+    void aWeakerConstraintOnThePartitionedParent_reachesEveryCopy_andReadsNotTheCheck() throws Exception {
+        resetBothNotValid();
+        validateBoth();
+        plantWeaker(CHUNKS, CHUNKS_CHECK);
+        try {
+            var chunks = row(report(), "nexus.chunks");
+            assertThat(chunks.get("present").asBoolean()).isTrue();
+            assertThat(chunks.get("partitions").asInt()).as("the weaker constraint reached the copies").isPositive();
+            assertThat(chunks.get("partitions_not_validated").asInt()).isZero();
+            assertThat(chunks.get("definition_matches").asBoolean()).isFalse();
+            assertThat(chunks.get("validated").asBoolean()).isFalse();
+        } finally {
+            resetBothNotValid();
         }
     }
 

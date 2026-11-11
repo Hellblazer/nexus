@@ -21,23 +21,26 @@ class ChashConformanceConstraintsAggregateTest {
 
     private static final String CHUNKS_CHECK = "chunks_chash_octet_check";
     private static final String MANIFEST_CHECK = "catalog_document_chunks_chash_octet_check";
+    /** What PostgreSQL renders for the genuine check (an unvalidated one ends in NOT VALID). */
+    private static final String GOOD = "CHECK ((octet_length(chash) = 32))";
+    private static final String WEAK = "CHECK ((octet_length(chash) >= 1))";
     private static final long CHUNKS = 100, MODEL_PARTITION = 101, LEAF_A = 102, LEAF_B = 103, MANIFEST = 200, RETIRED = 300;
 
     private static Row chunksRoot(boolean valid) {
-        return new Row(CHUNKS, 0, "chunks", CHUNKS_CHECK, valid);
+        return new Row(CHUNKS, 0, "chunks", CHUNKS_CHECK, valid, GOOD);
     }
 
     private static Row manifestRoot(boolean valid) {
-        return new Row(MANIFEST, 0, "catalog_document_chunks", MANIFEST_CHECK, valid);
+        return new Row(MANIFEST, 0, "catalog_document_chunks", MANIFEST_CHECK, valid, GOOD);
     }
 
     /** chunks over a model partition over two leaves: the depth a model-then-tenant partitioning has. */
     private static List<Row> chunksTree(boolean root, boolean model, boolean leafA, boolean leafB) {
         return new ArrayList<>(List.of(
             chunksRoot(root),
-            new Row(MODEL_PARTITION, CHUNKS, "chunks_m1", CHUNKS_CHECK, model),
-            new Row(LEAF_A, MODEL_PARTITION, "chunks_m1_t_a", CHUNKS_CHECK, leafA),
-            new Row(LEAF_B, MODEL_PARTITION, "chunks_m1_t_b", CHUNKS_CHECK, leafB)));
+            new Row(MODEL_PARTITION, CHUNKS, "chunks_m1", CHUNKS_CHECK, model, GOOD),
+            new Row(LEAF_A, MODEL_PARTITION, "chunks_m1_t_a", CHUNKS_CHECK, leafA, GOOD),
+            new Row(LEAF_B, MODEL_PARTITION, "chunks_m1_t_b", CHUNKS_CHECK, leafB, GOOD)));
     }
 
     private static Entry chunks(Report report) {
@@ -50,9 +53,9 @@ class ChashConformanceConstraintsAggregateTest {
         var rows = chunksTree(true, true, true, true);
         rows.add(manifestRoot(true));
         Report report = ChashConformanceConstraints.aggregate(rows);
-        assertThat(chunks(report)).isEqualTo(new Entry("nexus.chunks", CHUNKS_CHECK, true, true, 3, 0));
+        assertThat(chunks(report)).isEqualTo(new Entry("nexus.chunks", CHUNKS_CHECK, true, true, true, 3, 0));
         assertThat(report.constraints().get(1)).isEqualTo(
-            new Entry("nexus.catalog_document_chunks", MANIFEST_CHECK, true, true, 0, 0));
+            new Entry("nexus.catalog_document_chunks", MANIFEST_CHECK, true, true, true, 0, 0));
         assertThat(report.allValidated()).isTrue();
     }
 
@@ -92,7 +95,7 @@ class ChashConformanceConstraintsAggregateTest {
     void aSameNamedConstraintOnAnUnrelatedTableIsNeitherRootNorCopy() {
         var rows = chunksTree(true, true, true, true);
         rows.add(manifestRoot(true));
-        rows.add(new Row(RETIRED, 0, "chunks_retired_225", CHUNKS_CHECK, false));
+        rows.add(new Row(RETIRED, 0, "chunks_retired_225", CHUNKS_CHECK, false, GOOD));
         var entry = chunks(ChashConformanceConstraints.aggregate(rows));
         assertThat(entry.validated()).as("the retired table's NOT VALID copy is not ours").isTrue();
         assertThat(entry.partitions()).isEqualTo(3);
@@ -101,9 +104,9 @@ class ChashConformanceConstraintsAggregateTest {
     /** Kills: taking a root by constraint name alone: a stray same-named table must not stand in for a missing root. */
     @Test
     void aMissingRootIsAbsentAndNotValid_whateverElseCarriesTheName() {
-        var rows = new ArrayList<>(List.of(new Row(RETIRED, 0, "chunks_retired_225", CHUNKS_CHECK, true), manifestRoot(true)));
+        var rows = new ArrayList<>(List.of(new Row(RETIRED, 0, "chunks_retired_225", CHUNKS_CHECK, true, GOOD), manifestRoot(true)));
         Report report = ChashConformanceConstraints.aggregate(rows);
-        assertThat(chunks(report)).isEqualTo(new Entry("nexus.chunks", CHUNKS_CHECK, false, false, 0, 0));
+        assertThat(chunks(report)).isEqualTo(new Entry("nexus.chunks", CHUNKS_CHECK, false, false, false, 0, 0));
         assertThat(report.allValidated()).isFalse();
     }
 
@@ -121,9 +124,44 @@ class ChashConformanceConstraintsAggregateTest {
     @Test
     void aCopyWhoseChainDoesNotReachTheRootIsNotCounted() {
         var rows = new ArrayList<>(List.of(chunksRoot(true), manifestRoot(true),
-            new Row(LEAF_A, 999, "orphan_leaf", CHUNKS_CHECK, false)));
+            new Row(LEAF_A, 999, "orphan_leaf", CHUNKS_CHECK, false, GOOD)));
         var entry = chunks(ChashConformanceConstraints.aggregate(rows));
         assertThat(entry.partitions()).isZero();
         assertThat(entry.validated()).isTrue();
+    }
+
+    /** Kills: comparing names only (a hand-recreated weaker constraint of the same name reads validated). */
+    @Test
+    void aSameNamedConstraintWithAnotherExpressionIsNotTheCheck_validatedOrNot() {
+        for (boolean valid : new boolean[]{true, false}) {
+            var rows = new ArrayList<>(List.of(new Row(CHUNKS, 0, "chunks", CHUNKS_CHECK, valid, WEAK), manifestRoot(true)));
+            var entry = chunks(ChashConformanceConstraints.aggregate(rows));
+            assertThat(entry.present()).isTrue();
+            assertThat(entry.definitionMatches()).isFalse();
+            assertThat(entry.validated()).as("weaker and valid=" + valid).isFalse();
+            assertThat(ChashConformanceConstraints.aggregate(rows).allValidated()).isFalse();
+        }
+    }
+
+    /** Kills: judging the root's definition only, leaving a copy that differs. */
+    @Test
+    void everyCopyMustDeparseToTheExpectedDefinition() {
+        var rows = chunksTree(true, true, true, true);
+        rows.set(3, new Row(LEAF_B, MODEL_PARTITION, "chunks_m1_t_b", CHUNKS_CHECK, true, WEAK));
+        rows.add(manifestRoot(true));
+        var entry = chunks(ChashConformanceConstraints.aggregate(rows));
+        assertThat(entry.definitionMatches()).isFalse();
+        assertThat(entry.validated()).isFalse();
+        assertThat(entry.partitionsNotValidated()).as("the copy is valid; only its definition differs").isZero();
+    }
+
+    /** Kills: a trailing NOT VALID read as a different definition (an unvalidated genuine check would read as not the check). */
+    @Test
+    void aTrailingNotValidIsNotPartOfTheDefinition() {
+        var rows = new ArrayList<>(List.of(new Row(CHUNKS, 0, "chunks", CHUNKS_CHECK, false, GOOD + " NOT VALID"), manifestRoot(true)));
+        var entry = chunks(ChashConformanceConstraints.aggregate(rows));
+        assertThat(entry.definitionMatches()).isTrue();
+        assertThat(entry.validated()).as("still not validated, for its own reason").isFalse();
+        assertThat(ChashConformanceConstraints.normalise(null)).isEmpty();
     }
 }
