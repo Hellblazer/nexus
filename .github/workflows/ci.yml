@@ -859,7 +859,7 @@ jobs:
 
       - name: Install ripgrep
         # The pool runners have no sudo and carry ripgrep preinstalled.
-        run: command -v rg >/dev/null || sudo apt-get install -y ripgrep
+        run: scripts/ci_install_ripgrep.sh
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # nexus-eqxxh: the engine substrate boots the SAME jar the write-seam
@@ -1367,7 +1367,7 @@ jobs:
           key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
 
       - name: Install ripgrep
-        run: sudo apt-get install -y ripgrep
+        run: scripts/ci_install_ripgrep.sh
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # The engine binds its port only after Bge768Embedder loads; see the
@@ -1671,7 +1671,7 @@ jobs:
           key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
 
       - name: Install ripgrep
-        run: sudo apt-get install -y ripgrep
+        run: scripts/ci_install_ripgrep.sh
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         uses: ./.github/actions/prime-bge-onnx

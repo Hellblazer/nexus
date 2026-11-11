@@ -136,8 +136,8 @@ jobs:
             maven-${{ runner.os }}-
 
       - name: Install ripgrep
-        # test_doctor_runs_and_reports asserts rg presence.
-        run: sudo apt-get install -y ripgrep
+        # test_doctor_runs_and_reports asserts rg presence. Not apt alone: see the script.
+        run: scripts/ci_install_ripgrep.sh
 
       - name: Install project + dev deps
         run: uv sync --group dev
