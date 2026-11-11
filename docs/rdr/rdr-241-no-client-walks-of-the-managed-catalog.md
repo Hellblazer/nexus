@@ -98,7 +98,7 @@ Scope boundary with RDR-193:
 | Taxonomy discover compute | yes | no |
 | Tenant-wide aggregates in doctor, console, catalog verbs, MCP tools | no | yes |
 | Upgrade-ladder data migrations | no | yes |
-| Link generation on the index path (census HOT PATH, `link_generator.py:60`) | yes, as index-time linking | names it; leaves it to RDR-193 |
+| Link generation on the index path (census HOT PATH, `link_generator.py:60`) | yes, as index-time linking | names it; RDR-193 Step 7 (nexus-u5m5g.8) removed it: the index path has no tenant-wide listing left, and `_entries_of_type` is reached only by the `nx catalog generate-links` full pass (BULK JOB) |
 | The ratchet lint over call sites | no | yes, covering both |
 
 ## Context
@@ -126,7 +126,7 @@ hook, MCP tool or daemon that reaches it and classified it.
 ### Key Discoveries
 
 - **Verified (source):** `all_documents(` appears on 40 lines; 30 are live
-  calls in 17 files. Classes: AGGREGATE 13, BULK JOB 13, BOUNDED 3, HOT PATH 1.
+  calls in 17 files. Classes: AGGREGATE 13, BULK JOB 13, BOUNDED 3, HOT PATH 1 (after RDR-193 Step 7: BULK JOB 14, HOT PATH 0).
   About 15 further whole-tenant shapes (list loops paged to the end, link
   audits, T3 group-bys) are listed in the census and are mostly AGGREGATE.
   These are "the census counts" cited below.
@@ -185,7 +185,7 @@ Applied per census class:
   rows the engine says are candidates; exports stream.
 - **BOUNDED:** keep, with the bound stated where it is set; a bound that
   truncates silently (suggest-links) reports the truncation.
-- **HOT PATH:** left to RDR-193 (index-time linking).
+- **HOT PATH:** none left among the `all_documents` call sites. RDR-193 Step 7 (nexus-u5m5g.8) moved index-time linking to scoped reads, `links_upsert_many` and `same_content`; census row #7 is now BULK JOB (the `generate-links` full pass), and the `prune_stale_same_as_links` link pages moved with it. `CollectionDocumentsCache` (store batches) is not index-time linking and stays as censused.
 - **Unattended paths** never walk: they call an aggregate route or report
   "not checked" with the command that would check.
 - **Ratchet:** a lint lists every surviving call site of `all_documents` and
