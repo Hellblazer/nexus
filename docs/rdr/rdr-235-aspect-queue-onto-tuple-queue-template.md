@@ -652,9 +652,10 @@ itself changed are listed in the Revision History.
   120 s. The function takes the worst split of `n` documents: `n` one-document
   sub-batches, each three attempts of 180 s plus jittered sleeps, which is
   548.75 s per document and 2,743.75 s for five, with 120 s on top (2,863.75
-  s for five). The 120 s margin covers the T3 reads, the manifest lookup and
-  the persist, which are outside the extractor's own timeouts, and it is
-  chosen, not measured. The first draft's "about 1,270 s" was one sub-batch of
+  s for five). The 120 s margin covers the T3 reads, the manifest lookup, the
+  catalog checks and the verdict loop (persist, `ack`, `nack`), which are
+  outside the extractor's own timeouts, and it is chosen, not measured
+  (nexus-bpikw, 2026-11-11, widened the renewer's span to match). The first draft's "about 1,270 s" was one sub-batch of
   five; the split into sub-batches is made inside the extractor, by document
   size the worker does not hold yet, so the bound must hold for any split. The
   single-call timeout is one named constant, and a source scan pins that no
@@ -1124,7 +1125,12 @@ becomes:
    pending rows, the tuple turn is `inp` and not a parked `in` (Migration).
 2. Extract, with a renewer thread that calls `renew` every 120 s on every claim
    in the batch, each by its own `claim_id` and its own claimant string, and
-   only while the extraction call is inside its own deadline.
+   only while the batch is inside its own deadline. The renewer starts when
+   `process()` starts, before the catalog checks, and stops after the last
+   write, `ack` or `nack`; a claim the worker no longer holds is not renewed
+   (nexus-bpikw, 2026-11-11; it first covered only the extraction call, so a
+   slow check or write could lapse a claim). The claim call itself, before
+   `process()` starts, is not covered.
    The worker computes that deadline from the extractor's limits. Each call gets
    3 attempts, each timed out at 420 s for a batch of 5 (180 s for one
    document), with sleeps of about 2 s and 5 s between attempts
@@ -1133,9 +1139,11 @@ becomes:
    worker does not see, so the deadline takes the worst split, five
    one-document sub-batches: three attempts of 180 s and the sleeps between them
    make 548.75 s a document and 2,743.75 s for five. The renewer works to
-   `worst_case_extract_seconds(n)` plus a margin of 120 s, which covers the T3
-   reads, the manifest lookup and the persist that the extractor's timeouts do
-   not. The 120 s is chosen, not measured. Past that deadline the renewer stops,
+   `worst_case_extract_seconds(n)` plus a margin of 120 s, counted from the
+   start of `process()` over every claim in the batch, which covers the T3
+   reads, the manifest lookup, the catalog checks and the verdict loop that the
+   extractor's timeouts do not. The 120 s is chosen, not measured; past it, a
+   claim still lives up to the 600 s lease after its last renewal. Past that deadline the renewer stops,
    the leases lapse within 600 s, and the tasks are retried with an attempt
    counted. A wedged extraction therefore releases its
    tasks; a renewer that ran on until retention would hold them for days.
@@ -1795,3 +1803,4 @@ so the question is not reopened without new evidence.
 - 2026-10-29: Phase 1 client half built and gated (beads nexus-5r2sc.3.1 to 3.7, review gate nexus-5r2sc.3.10); text corrections and outcome records by nexus-5r2sc.3.8. Gap 4 and Alternative 2 no longer give the 4,096-byte body as a reason, because E2 removed it (gate S5). Performance Expectations records the producer's time per document (gate S2). Migration records that a migrated row restarts at attempts 0 (gate O3). F30 to F38 record the sixth engine surface `list_waiting`, the rung's delete key, the producer and 409 outcomes, the renewer deadline, scenario 14's worker half, `requeue-failed` in tuples mode, the foreign key's missing creation-side guard and the Minimum Viable Validation's approximations. No decision text changed in this entry.
 - 2026-10-29: decision text recorded from the Phase 1 client half (bead nexus-5r2sc.3.8, held for Sam's go; review gate nexus-5r2sc.3.10). S1: the worker drains both queues whenever the engine has the `aspects` template, whatever its flag, and Activation Step 1 requires worker hosts upgraded first. Worker slot order: slots 1 to 4 first, slot 0 parks only when none found a task. S3: transport failures reading T3, the manifest or an HTTP source are retried on the ladder, on the old table's path too; a scenario for each is added. S4: the unclaimed-age sentence moves from Positive to Negative and the age row skips `aspects`. The renewer deadline replaces "about 1,270 s". The 409 memory bound, `requeue-failed` in `tuples` mode, and the two open items before the default flip (nexus-p909o, nexus-1o3ft) are stated.
 - 2026-11-03: nexus-eyynd (engine follow-ups from the E4/E5 critique). The fence now runs before the confidence and field gates on `POST /v1/aspects/upsert`, so a lapsed or foreign claim answers 404 or 403 whatever the payload is. A re-home leaves the source registered, so a holder's fenced write lands under the source name; stated beside the one-document move in Technical Design, accepted. No decision text changed.
+- 2026-11-11: nexus-bpikw (grant 3, wording to the reviewed renewer fix). Worker step 2 and F34: the claim renewer runs from the start of `process()` to the last write, `ack` or `nack`, skips claims no longer held, and counts its deadline over every claim; the 120 s margin now also covers the catalog checks and the verdict loop. No decision changed.
