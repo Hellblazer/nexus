@@ -1,3 +1,0 @@
-### Fixed
-
-- **A generation build that fails for an unrecognised reason says what to do** (nexus-f3yqd.6, F22). A build failure none of the specific hints recognised printed `generation build failed:` and uv's raw output. It now puts a line above that output saying uv's output below says why it failed, and, where an `nx` is installed, that `nx self install --dry-run` prints the build command to run by hand and read its whole output. The same line reaches every entry point that builds a generation: `nx self install`, `nx upgrade`, the PDF stack build for `nx index pdf`, and the plugin setup's first install (which gets no `--dry-run` advice, having no `nx` yet).

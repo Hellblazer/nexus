@@ -1,3 +1,0 @@
-### Added
-
-- **`mcp.log` records failed tool calls and what the agent did next** (nexus-3ceda.7). Every `tools/call` that answers `isError` or raises adds an INFO `mcp_tool_error` line: the tool, `streak` (consecutive failures of that tool in the process), `calls` (the process's call count so far) and `superseded` (it replaced a failure no call had followed yet). The next call in that process adds one `mcp_tool_after_error` line: its tool, `failed_tool`, `same_tool`, `same_args` and `seconds` since the failure. `same_args` compares the arguments through a per-process keyed digest held in memory and never logged, so a blind retry (same tool, same arguments) is told from a corrected one. Both lines carry `schema`. Neither carries an argument, a result or the error text.
