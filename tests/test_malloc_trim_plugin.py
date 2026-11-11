@@ -55,6 +55,13 @@ def test_off_linux_there_is_no_trim(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _malloc_trim._load_trim() is None
 
 
+def test_the_off_switch_means_no_trim(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_malloc_trim.sys, "platform", "linux")
+    monkeypatch.setenv("NX_TEST_MALLOC_TRIM", "0")
+    monkeypatch.setattr(_malloc_trim.ctypes, "CDLL", lambda _name: pytest.fail("loaded libc despite the off switch"))
+    assert _malloc_trim._load_trim() is None
+
+
 def test_a_libc_that_will_not_load_means_no_trim(monkeypatch: pytest.MonkeyPatch) -> None:
     def refuse(_name: str) -> None:
         raise OSError("musl: no libc.so.6")
