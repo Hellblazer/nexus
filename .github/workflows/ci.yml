@@ -641,6 +641,20 @@ jobs:
         python-version: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') && fromJSON('["3.12", "3.13"]') || fromJSON('["3.12"]') }}
 
     steps:
+      # labrun-owz: fail at once, naming the binary, when the pool host lacks one this job
+      # needs, instead of a red deep in the run (a missing uuidgen reached the tests first).
+      # Linux pool (lab-6c18g); every name checked on chas and qwent 2026-11-11 (lsof is absent on chas and is not required). The list is kept here, next to the step; tests/test_ci_host_probe.py keeps it non-empty.
+      - name: Host binaries present (labrun-owz)
+        env:
+          NX_CI_HOST_BINARIES: bash git curl tar gzip xz unzip ps pgrep setsid flock timeout ipcs uuidgen shellcheck sha256sum
+        run: |
+          set -u
+          [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
+          missing=0
+          for b in $NX_CI_HOST_BINARIES; do
+            command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          exit "$missing"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         # NO fetch-tags/fetch-depth here, deliberately (nexus-dhs30). The
         # engine-tag reader is exercised HERMETICALLY by
@@ -2344,6 +2358,20 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     steps:
+      # labrun-owz: fail at once, naming the binary, when the pool host lacks one this job
+      # needs, instead of a red deep in the run (a missing uuidgen reached the tests first).
+      # macOS pool (lab-mac-s); every name checked on hellmini 2026-11-11. The list is kept here, next to the step; tests/test_ci_host_probe.py keeps it non-empty.
+      - name: Host binaries present (labrun-owz)
+        env:
+          NX_CI_HOST_BINARIES: bash git curl tar shasum uuidgen
+        run: |
+          set -u
+          [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
+          missing=0
+          for b in $NX_CI_HOST_BINARIES; do
+            command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          exit "$missing"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
