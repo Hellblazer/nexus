@@ -788,8 +788,8 @@ public final class SchemaMigrator {
 
     /**
      * Pins the session's {@code TimeZone} to UTC (nexus-rph82; see the comment at the call site in
-     * {@link #migrate}). Package-private so the test-scope {@code PreMigrationSchema} tool opens its session
-     * exactly as a walk does.
+     * {@link #migrate}). Package-private so a caller outside {@code migrate} (a test tool) opens its
+     * session exactly as a walk does.
      */
     static void pinSessionTimeZoneToUtc(Connection conn) throws SQLException {
         try {
@@ -804,7 +804,7 @@ public final class SchemaMigrator {
 
     /**
      * The Liquibase {@link Database} a walk runs on, with its bookkeeping pinned to {@code public}. Extracted
-     * verbatim from {@link #migrate} so the test-scope {@code PreMigrationSchema} tool builds it identically.
+     * verbatim from {@link #migrate} so a caller outside {@code migrate} (a test tool) builds it identically.
      *
      * <p>Callers pin the session first ({@link #pinSessionTimeZoneToUtc}, {@link #pinSearchPathToPublic}):
      * Liquibase leaves a search_path that already starts with the default schema alone.
@@ -831,7 +831,7 @@ public final class SchemaMigrator {
         // lock tables; defaultSchemaName is what Liquibase resolves
         // unqualified objects and its own existence checks against, and it
         // follows the same current_schema(). The session search_path is
-        // pinned too (pinSearchPathToPublic above): Liquibase's
+        // pinned too (pinSearchPathToPublic, which the caller runs first): Liquibase's
         // DatabaseUtils.initializeDatabase leaves a search_path that already
         // starts with the default schema alone, and otherwise PREPENDS it to
         // the existing one (public, $user, public), which keeps the
@@ -998,7 +998,7 @@ public final class SchemaMigrator {
      * refuse. A history table the migration role cannot read is logged and skipped:
      * it is not ours to judge.
      */
-    private static void refuseSplitHistory(Connection conn) throws SQLException {
+    static void refuseSplitHistory(Connection conn) throws SQLException {
         try {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             Field<String> relname = DSL.field(DSL.name("c", "relname"), String.class);

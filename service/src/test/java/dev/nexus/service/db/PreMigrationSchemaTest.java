@@ -25,6 +25,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -45,7 +47,11 @@ class PreMigrationSchemaTest {
     private static final String DOC = TENANT + "-doc-1";
 
     private static final byte[] LEGACY_CHASH = "legacywidthchsh1".getBytes(StandardCharsets.US_ASCII);
+    /** 40 bytes: the UTF-8 carry-over class rdr180 leaves for a non-hex 40-char id. Deleted by hygiene-001-5. */
+    private static final byte[] LONG_LEGACY_CHASH = "longlegacy-chash-0123456789-0123456789".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] GOOD_CHASH = filled(32, (byte) 0x5a);
+    /** Exactly 32 bytes but not a digest: survives hygiene-001-5 by design (it keys on width only). */
+    private static final byte[] NON_HEX_32_CHASH = "abcdefghijklmnopqrstuvwxyz012345".getBytes(StandardCharsets.US_ASCII);
 
     private final java.util.List<PostgreSQLContainer<?>> started = new java.util.ArrayList<>();
 
@@ -103,7 +109,7 @@ class PreMigrationSchemaTest {
         assertThat(cli.out()).contains("nexus.chunks.chash.data_type=bytea\n");
         assertThat(cli.out()).contains("nexus.chunks=plain\n");
         assertThat(cli.out()).contains("nexus.catalog_document_chunks=plain\n");
-        assertThat(cli.out()).containsPattern("applied_this_run=[1-9][0-9]*\n");
+        assertThat(cli.out()).containsPattern("pending_ahead_of_stop=[1-9][0-9]*\n");
         // The report's "last applied" is read from the history, not echoed: it must be one the history holds.
         String last = cli.out().lines().filter(l -> l.startsWith("last_changeset_applied=")).findFirst()
             .orElseThrow().substring("last_changeset_applied=".length());
@@ -154,21 +160,89 @@ class PreMigrationSchemaTest {
     }
 
     @Test
-    void fullMigration_deletesTheLegacyWidthChunkAndItsManifestRow_andSparesA32ByteOne() throws Exception {
+    void refusesWhileAnotherSessionHoldsTheMigrationLock_andChangesNothing() throws Exception {
+        PostgreSQLContainer<?> pg = freshDatabase();
+        try (Connection holder = pg.createConnection("")) {
+            Boolean got = DSL.using(holder, SQLDialect.POSTGRES)
+                .select(DSL.function("pg_try_advisory_lock", SQLDataType.BOOLEAN,
+                    DSL.val(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY)))
+                .fetchOne(0, Boolean.class);
+            assertThat(got).as("the test's own hold on the lock").isTrue();
+
+            Cli cli = runTool(pg);
+
+            assertThat(cli.rc()).as(cli.err()).isEqualTo(PreMigrationSchema.EXIT_REFUSED);
+            assertThat(cli.err()).contains("REFUSED").contains("advisory lock");
+            assertThat(DSL.using(holder, SQLDialect.POSTGRES).fetchExists(
+                DSL.table(DSL.name("pg_catalog", "pg_tables")),
+                DSL.field(DSL.name("tablename"), String.class).eq("databasechangelog")))
+                .as("a refused run must not have started a walk").isFalse();
+        }
+        // The hold is gone with its session, and the tool then runs (and releases its own lock on exit).
+        assertThat(runTool(pg).rc()).isEqualTo(PreMigrationSchema.EXIT_OK);
+        try (Connection other = pg.createConnection("")) {
+            assertThat(DSL.using(other, SQLDialect.POSTGRES)
+                .select(DSL.function("pg_try_advisory_lock", SQLDataType.BOOLEAN,
+                    DSL.val(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY)))
+                .fetchOne(0, Boolean.class)).as("the tool released the lock").isTrue();
+        }
+    }
+
+    @Test
+    void refusesADatabaseItDidNotMake_butRebuildsOnItsOwn() throws Exception {
         PostgreSQLContainer<?> pg = freshDatabase();
         assertThat(runTool(pg).rc()).isEqualTo(PreMigrationSchema.EXIT_OK);
-
+        // Same database, marker removed: indistinguishable from a real store that has history.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            seedLegacyAndGood(su);
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            // Positive controls, read back: every "gone" assertion below is vacuous without these.
-            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.CHASH.eq(LEGACY_CHASH))).isEqualTo(1);
-            assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT),
-                CATALOG_DOCUMENT_CHUNKS.CHASH.eq(LEGACY_CHASH))).isEqualTo(1);
-            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.CHASH.eq(GOOD_CHASH))).isEqualTo(1);
-            assertThat(applied(su, "hygiene-001-5")).isFalse();
+            DSL.using(su, SQLDialect.POSTGRES).dropTable(DSL.name("public", PreMigrationSchema.SCRATCH_MARKER)).execute();
         }
+        Cli cli = runTool(pg);
+        assertThat(cli.rc()).as(cli.err()).isEqualTo(PreMigrationSchema.EXIT_REFUSED);
+        assertThat(cli.err()).contains("not made by this tool").contains("scratch");
+    }
+
+    @Test
+    void refusesWhenARoleNamedSchemaHoldsTheHistoryAndPublicDoesNot() throws Exception {
+        PostgreSQLContainer<?> pg = freshDatabase();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // Owned by the migrating role: a history it cannot read is skipped by the walk's check, not refused.
+            PgContainerHelper.createSchemaAuthorization(su, "stray_history", ROLE);
+            var stray = DSL.table(DSL.name("stray_history", "databasechangelog"));
+            ctx.createTable(stray).column("id", SQLDataType.VARCHAR).execute();
+            ctx.insertInto(stray).set(DSL.field(DSL.name("id"), String.class), "x").execute();
+            PgContainerHelper.alterTableOwner(su, stray, ROLE);
+        }
+        Cli cli = runTool(pg);
+        assertThat(cli.rc()).as(cli.err()).isEqualTo(PreMigrationSchema.EXIT_REFUSED);
+        assertThat(cli.err()).contains("history is split");
+    }
+
+    @Test
+    void neverEchoesAnArgumentValue() {
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        PrintStream out = new PrintStream(new ByteArrayOutputStream());
+        PrintStream errStream = new PrintStream(err, true, StandardCharsets.UTF_8);
+        for (String[] args : new String[][]{
+                {"--password=hunter2-secret", "x"},   // unknown flag with an inline value
+                {"--password=hunter2-secret"},        // the same, last: reported as a missing value
+                {"hunter2-secret", "x"},              // a stray value in key position
+                {"hunter2-secret"}}) {
+            err.reset();
+            assertThat(PreMigrationSchema.run(args, Map.of(), out, errStream)).isEqualTo(PreMigrationSchema.EXIT_USAGE);
+            assertThat(err.toString(StandardCharsets.UTF_8)).as(String.join(" ", args).replace("hunter2", "h")).doesNotContain("hunter2");
+        }
+        err.reset();
+        PreMigrationSchema.run(new String[]{"--password=hunter2-secret", "x"}, Map.of(), out, errStream);
+        assertThat(err.toString(StandardCharsets.UTF_8)).contains("unknown argument --password");
+    }
+
+    /** What the real walk is given: a tool-built schema with legacy rows seeded after it. */
+    @Test
+    void aToolBuiltSchemaIsAcceptedByTheRealWalk_whichDeletesLegacyRowsAndSparesThe32ByteOnes() throws Exception {
+        PostgreSQLContainer<?> pg = freshDatabase();
+        assertThat(runTool(pg).rc()).isEqualTo(PreMigrationSchema.EXIT_OK);
+        seedAndCheckControls(pg);
 
         HikariConfig cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -181,29 +255,89 @@ class PreMigrationSchemaTest {
         }
 
         try (Connection su = pg.createConnection("")) {
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             assertThat(applied(su, "hygiene-001-5")).as("the walk must have applied the stop changeset").isTrue();
-            assertThat(ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.CHASH.eq(LEGACY_CHASH)))
-                .as("the 16-byte chunk is deleted by hygiene-001-5").isFalse();
-            assertThat(ctx.fetchExists(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT),
-                CATALOG_DOCUMENT_CHUNKS.CHASH.eq(LEGACY_CHASH)))
-                .as("its manifest row is deleted with it").isFalse();
-            assertThat(ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.CHASH.eq(GOOD_CHASH)))
-                .as("the 32-byte chunk survives the whole walk").isTrue();
-            assertThat(ctx.fetchExists(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT),
-                CATALOG_DOCUMENT_CHUNKS.CHASH.eq(GOOD_CHASH)))
-                .as("its manifest row survives").isTrue();
+            assertLegacyGoneAndSurvivorsKept(su, true);
         }
     }
 
     /**
-     * One 16-byte (un-rekeyed legacy) chunk and one 32-byte chunk, each with a manifest row, for one tenant.
-     * At this walk point chunks_chash_octet_check and catalog_document_chunks_chash_octet_check are live NOT
-     * VALID constraints, which still reject a NEW 16-byte row, so they are dropped for the seed and re-added NOT
-     * VALID after, the exact aged-install shape rdr180-001 documents (same idiom as
-     * Hygiene001NotNullMigrationRlsTest).
+     * The delete is hygiene-001-5's, not a later changeset's: stopping before hygiene-001-6 (so before
+     * hygiene-001-8, which also removes legacy manifest rows) already shows the legacy chunk, its manifest row,
+     * the long legacy row and the topic assignment cascaded off the chunk gone, and the 32-byte rows kept.
      */
-    private static void seedLegacyAndGood(Connection su) throws Exception {
+    @Test
+    void hygiene001_5Alone_deletesTheLegacyRowsAndCascadesTheTopicAssignment() throws Exception {
+        PostgreSQLContainer<?> pg = freshDatabase();
+        assertThat(runTool(pg).rc()).isEqualTo(PreMigrationSchema.EXIT_OK);
+        seedAndCheckControls(pg);
+
+        Cli cli = runTool(pg, "--stop-before", "hygiene-001-6");
+        assertThat(cli.rc()).as(cli.err()).isEqualTo(PreMigrationSchema.EXIT_OK);
+        assertThat(cli.out()).contains("last_changeset_applied=hygiene-001-5\n");
+
+        try (Connection su = pg.createConnection("")) {
+            assertThat(applied(su, "hygiene-001-5")).isTrue();
+            assertThat(applied(su, "hygiene-001-6")).as("the stop").isFalse();
+            assertThat(applied(su, "hygiene-001-8")).as("the later manifest cleanup has not run").isFalse();
+            assertLegacyGoneAndSurvivorsKept(su, false);
+        }
+    }
+
+    /**
+     * 16-byte and 40-byte legacy chunks (the 16-byte one with a topic assignment), a 32-byte digest chunk and a
+     * 32-byte non-hex one, each with a manifest row. At this walk point chunks_chash_octet_check and
+     * catalog_document_chunks_chash_octet_check are live NOT VALID constraints, which still reject a NEW
+     * non-32-byte row, so they are dropped for the seed and re-added NOT VALID after: the aged-install shape
+     * rdr180-001 documents (same idiom as Hygiene001NotNullMigrationRlsTest).
+     */
+    private static void seedAndCheckControls(PostgreSQLContainer<?> pg) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            seed(su);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // Positive controls, read back: every "gone" assertion afterwards is vacuous without these.
+            for (byte[] chash : new byte[][]{LEGACY_CHASH, LONG_LEGACY_CHASH, GOOD_CHASH, NON_HEX_32_CHASH}) {
+                assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.CHASH.eq(chash))).isEqualTo(1);
+                assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT),
+                    CATALOG_DOCUMENT_CHUNKS.CHASH.eq(chash))).isEqualTo(1);
+            }
+            assertThat(ctx.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT),
+                TOPIC_ASSIGNMENTS.DOC_ID.eq(LEGACY_CHASH))).as("topic assignment on the legacy chunk").isEqualTo(1);
+            assertThat(applied(su, "hygiene-001-5")).isFalse();
+        }
+    }
+
+    /** {@code afterFullWalk}: also assert what only the rest of the walk guarantees (doc_count recount). */
+    private static void assertLegacyGoneAndSurvivorsKept(Connection su, boolean afterFullWalk) {
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        for (byte[] gone : new byte[][]{LEGACY_CHASH, LONG_LEGACY_CHASH}) {
+            String which = gone.length + "-byte";
+            assertThat(ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.CHASH.eq(gone)))
+                .as("the %s chunk is deleted", which).isFalse();
+            assertThat(ctx.fetchExists(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT),
+                CATALOG_DOCUMENT_CHUNKS.CHASH.eq(gone))).as("its manifest row is deleted with it").isFalse();
+        }
+        assertThat(ctx.fetchExists(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT),
+            TOPIC_ASSIGNMENTS.DOC_ID.eq(LEGACY_CHASH)))
+            .as("the topic assignment cascades off the deleted chunk").isFalse();
+        if (afterFullWalk) {
+            // Not asserted at the 001-5 stop: the cascade there leaves topics.doc_count at 1 (the trigger does not
+            // follow the owner's cascade under FORCE RLS); hygiene-007-1's recount repairs it later in the walk.
+            assertThat(ctx.select(TOPICS.DOC_COUNT).from(TOPICS).where(TOPICS.TENANT_ID.eq(TENANT))
+                .fetchOne(TOPICS.DOC_COUNT)).as("topics.doc_count is repaired by the full walk").isZero();
+        }
+        for (byte[] kept : new byte[][]{GOOD_CHASH, NON_HEX_32_CHASH}) {
+            assertThat(ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.CHASH.eq(kept)))
+                .as("a 32-byte chunk survives (hygiene-001-5 keys on width only)").isTrue();
+            assertThat(ctx.fetchExists(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT),
+                CATALOG_DOCUMENT_CHUNKS.CHASH.eq(kept))).as("its manifest row survives").isTrue();
+        }
+        assertThat(ctx.select(CHUNKS.METADATA).from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(TENANT), CHUNKS.CHASH.eq(GOOD_CHASH)).fetchOne(CHUNKS.METADATA))
+            .as("hygiene-001-5 backfills the survivor's NULL metadata").isNotNull();
+    }
+
+    private static void seed(Connection su) throws Exception {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
         ctx.insertInto(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.TENANT_ID, TENANT)
@@ -218,11 +352,11 @@ class PreMigrationSchemaTest {
         ctx.alterTable(CHUNKS).dropConstraint("chunks_chash_octet_check").execute();
         ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraint("catalog_document_chunks_chash_octet_check").execute();
         int position = 0;
-        for (byte[] chash : new byte[][]{LEGACY_CHASH, GOOD_CHASH}) {
+        for (byte[] chash : new byte[][]{LEGACY_CHASH, LONG_LEGACY_CHASH, GOOD_CHASH, NON_HEX_32_CHASH}) {
             // The embedding binds as a real[] (not the generated vector binding): the extension is still in
             // `public` at this walk point, and real[] -> vector is looked up by type oid. It is 768-wide because
             // vectors-030-1 later copies each row into the model partition the collection resolves to (bge-768
-            // here) and that leaf's dimension CHECK rejects any other width: the survivor must be copyable.
+            // here) and that leaf's dimension CHECK rejects any other width: a survivor must be copyable.
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, COLLECTION)
@@ -238,6 +372,20 @@ class PreMigrationSchemaTest {
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION)
                 .execute();
         }
+        // An assignment on the legacy chunk: topic_assignments_chunk_fk is ON DELETE CASCADE, so hygiene-001-5's
+        // chunk delete must remove it cleanly (and the doc_count trigger must follow).
+        long topicId = ctx.insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, TENANT)
+            .set(TOPICS.LABEL, "premig-topic")
+            .set(TOPICS.COLLECTION, COLLECTION)
+            .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
+            .returningResult(TOPICS.ID).fetchOne(TOPICS.ID);
+        ctx.insertInto(TOPIC_ASSIGNMENTS)
+            .set(TOPIC_ASSIGNMENTS.TENANT_ID, TENANT)
+            .set(TOPIC_ASSIGNMENTS.DOC_ID, LEGACY_CHASH)
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
+            .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, COLLECTION)
+            .execute();
         PgContainerHelper.readdChashOctetChecksNotValid(su);
     }
 
