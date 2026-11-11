@@ -296,6 +296,16 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
             "The nexus backing service may be unreachable — check the daemon is "
             "running with `nx doctor` (and `nx daemon service status`).")
         )
+    if tool.startswith("tuple_"):
+        from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — only on the error path
+
+        if isinstance(e, UnknownSubspaceError):
+            # nexus-3ceda.7: the probe battery's one stuck case. Told only the engine's text, an
+            # agent reached for a tool that does not exist (3 runs of 3).
+            return _fail(
+                f"Error: {text}\n"
+                "Call tuple_registry to list the registered subspace templates, then use one of them."
+            )
     return _fail(f"Error: {text}")
 
 
