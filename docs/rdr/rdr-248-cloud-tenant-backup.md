@@ -427,7 +427,7 @@ operator task from the file.
 
 | Resource | List | Info | Verify | Delete | Rename |
 | --- | --- | --- | --- | --- | --- |
-| Backup file | `ls ~/nexus-backups` | header print in `nx backup restore --check` | trailer checksums | user deletes | n/a |
+| Backup file | `ls ~/nexus-backups` | header print in `nx backup --check FILE` | trailer checksums | user deletes | n/a |
 
 ### New Dependencies
 
@@ -492,7 +492,7 @@ measured in A5 shows the shared database tolerates that.
 ### Contradiction Check
 
 The first draft's single streamed response contradicted A1 once it was refuted (the cloud edge ends
-every exchange at 60 s); the design was changed to sessions of short requests (c9bbb3f94), and no part of
+every exchange at 60 s); the design was changed to sessions of short requests, and no part of
 the text still assumes one long stream. The first draft's "60 tables" came from a changeset count; the
 live catalog says 50 parent tables plus 40 chunk leaves, and the registry is built from the live catalog.
 Gate round 1 found the import commit and the changeset rule contradicting the cloud limits; both were
@@ -522,7 +522,8 @@ export's time but no design choice and is recorded at Activation Step 2.
 The Minimum Viable Validation is Step 4's export tests at scale (Phase 1) and Step 6's round-trip test (Phase 2): export a seeded tenant through the shipped
 routes, import into an empty tenant in the same database, and assert equal counts, checksums and joins,
 in-process with the test fixtures, plus one commit at scale (at least 500,000 synthetic chunks) whose time
-is recorded. It is in Phase 1 and gates the engine release; the cloud round trip is Activation Step 2.
+is recorded. Step 4 gates the export release (Activation Step 1); Step 6 gates the later restore
+release (Activation Step 1); the cloud export is Activation Step 2.
 
 ### Cross-Cutting Concerns
 
@@ -550,6 +551,6 @@ tenants. Nothing to trim.
 ## Revision History
 
 - 2026-11-11: draft; local spikes (two rounds) and a read-only cloud window settled A1-A7.
-- 2026-11-11: Gate round 1 — BLOCKED (2 Critical, 6 Significant, 2 ship-blocker(s)); commit `38a119ab9`; critique `nexus_rdr/248-gate-critique-2026-11-11-r1`.
-- 2026-11-11: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `6c291f8ba`; critique `nexus_rdr/248-gate-critique-2026-11-11-r2`.
-- 2026-11-11: Accepted by Sam, with export first and restore next, and the restore load's block on tenant create bounded (folded in at `1f89b5708`).
+- 2026-11-11: Gate round 1 — BLOCKED (2 Critical, 6 Significant, 2 ship-blocker(s)); critique `nexus_rdr/248-gate-critique-2026-11-11-r1` (gated commit in T2 `nexus_rdr/248-gate-latest`'s prior chain).
+- 2026-11-11: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); critique `nexus_rdr/248-gate-critique-2026-11-11-r2`, fix check `nexus_rdr/248-fix-check-6c291f8ba` (gated commit in T2 `nexus_rdr/248-gate-latest`).
+- 2026-11-11: Accepted by Sam, with export first and restore next, and the restore load's block on tenant create bounded (folded into the Implementation Plan and Risks).
