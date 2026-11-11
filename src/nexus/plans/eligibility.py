@@ -97,7 +97,7 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
   the unknown-kind restriction for recorded provenance only "after review": until a reviewed decision
   (nexus-jypmj.2.8) adds a route, a grown plan reads as grown with kind ``unknown`` (``unreviewed_route``).
   The route is still recorded at the grow site; only eligibility discounts it. A discounted recorded kind
-  never widens eligibility, but it does narrow it for a ``lookup`` request (nexus-indyo,
+  never widens eligibility, but it does narrow it for a ``lookup`` request (and, below, a listing) (nexus-indyo,
   ``grown_route_not_lookup``): a grown plan that recorded any kind other than lookup was grown by a request
   that was not a lookup, so its steps were planned for something else, the H09 cost shape the lookup row
   exists to keep out (nexus-jypmj.11). This is a guard, not a measured effect: replaying the 77
