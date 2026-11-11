@@ -1522,7 +1522,7 @@ conexus, whose Liquibase walk on a point-in-time fork of production is the
 pre-deploy gate) and 6.1 (the client-path gate through the edge). The
 `--candidate-migration` leg the August draft named no longer exists.
 
-### Phase 2: Client half of Parts A, A4 and B1 (B1 held)
+### Phase 2 (CLOSED, 2026-11-10): Client half of Parts A, A4 and B1 (B1 held)
 
 #### Step 6: Reconcile client
 
