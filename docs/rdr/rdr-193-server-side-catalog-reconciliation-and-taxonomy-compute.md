@@ -1562,6 +1562,12 @@ floor bump in the release that ships Part B.
 
 ### Phase 3: Part B2 engine (engine cut 2; held)
 
+Held Part B carry-list: five implementation-time items found while
+Parts A and A4 were built (B1's supersession and predicates, the
+too_large heap share, Step 4's engine cut, taxonomy-022, the EngineJobs
+evictor gate) are tracked in a comment on epic nexus-u5m5g (2026-11-11).
+The un-hold starts there.
+
 #### Step 10: Clustering port
 
 Held at accept (Part B, open question 3).
@@ -1856,4 +1862,4 @@ which removes Steps 4, 8 and 10-12 from this RDR's acceptance.
 - 2026-11-08: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `962a93b3c`; critique `nexus_rdr/193-gate-critique-2026-11-08-r3`.
 - 2026-11-08: Accepted by Sam (Parts A and A4; Part B held). Residual dispositions: the two BLOCKS-PLANNING residuals by c8a4921eb and 6d05bc01e (fix check `nexus_rdr/193-fix-check-6d05bc01e`, after `-c8a4921eb` failed once); the three round-3 DISCOVER-AT-IMPLEMENTATION residuals and the five carried from fix check 962a93b3c by nexus-blbd3 (two of those five held with Part B).
 - 2026-11-10: held-scope wording amended to the reviewed Phase 2 code (standing grant 3; residual 8, nexus-u5m5g.9): Gaps closed by this acceptance are 1 and 4; one engine cut; the Java HDBSCAN check, the Step 10 gate, discover egress and both discover Test Plan scenarios marked held with Part B; Done stated as Steps 0-3, 5-7 and 9; the Minimum Viable Validation restated (residual 5) against the parity fixture's rules; factory line reference 417 to 429. Step 9 is not reworded here: its re-scope (no pin change; 0.1.186 already pinned) is recorded on nexus-u5m5g.10.
-- 2026-11-11: Assumption Verification amended to the measured results (standing grant 3; nexus-blbd3): the two Step 2 claims passed (parity fixture 31 cases, 0 differences; 20,000-row commit 8.5 s insert and 9.2 s update against the 30 s bar, nexus-u5m5g.3), HDBSCAN parity marked held with Part B, and the Step 0 counts given their record.
+- 2026-11-11: Assumption Verification amended to the measured results (standing grant 3; nexus-blbd3): the two Step 2 claims passed (parity fixture 31 cases, 0 differences; 20,000-row commit 8.5 s insert and 9.2 s update against the 30 s bar, nexus-u5m5g.3), HDBSCAN parity marked held with Part B, and the Step 0 counts given their record. The held Part B carry-list moved from nexus-blbd3 to epic nexus-u5m5g, named at Phase 3.
