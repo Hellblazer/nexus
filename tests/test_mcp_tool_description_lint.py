@@ -113,11 +113,75 @@ def test_non_vacuity_floor() -> None:
 # ── Length ───────────────────────────────────────────────────────────────
 
 
+# What the harness receives is the tool description as the running Python built it, and the
+# runtimes differ: 3.12 keeps a docstring's indentation, 3.13 strips it at compile time. A lint
+# run on 3.13 measured the shorter form and passed a search() description that CI's 3.12 measured
+# at 2074 (develop red at d9ac568a6). The measure below is the longest form any supported
+# runtime sends: the docstring as written in the source (which ``ast`` keeps raw on both).
+
+
+def _indented_tool():
+    """A long description, indented as written in source.
+
+        The quick brown fox jumps over the lazy dog, again and again and again.
+        The quick brown fox jumps over the lazy dog, again and again and again.
+    """
+
+
+def _source_docstring(fn: object) -> str | None:
+    """*fn*'s docstring exactly as written in its source, indentation kept (``None`` when the
+    source cannot be read)."""
+    try:
+        node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]  # type: ignore[arg-type]
+    except (OSError, TypeError, SyntaxError, IndexError):
+        return None
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None
+    return ast.get_docstring(node, clean=False)
+
+
+def _sent_length(description: str, fn: object, *, raw_docstring: str | None = None) -> int:
+    """The length of *description* as the longest-sending supported runtime sends it. A description
+    taken from the docstring is measured as written in source (3.12 sends that; 3.13 strips the
+    indentation); one passed explicitly is measured as given."""
+    raw = raw_docstring if raw_docstring is not None else _source_docstring(fn)
+    if raw and inspect.cleandoc(raw) == inspect.cleandoc(description):
+        return max(len(description), len(raw))
+    return len(description)
+
+
+def test_the_measure_is_the_source_docstring_on_every_python() -> None:
+    raw = ast.get_docstring(ast.parse(textwrap.dedent(inspect.getsource(_indented_tool))).body[0], clean=False)
+    assert raw is not None and raw != inspect.cleandoc(raw), "the fixture must carry indentation"
+    # As a 3.12 runtime sends it (raw), and as a 3.13 runtime sends it (stripped): one measure.
+    for runtime_desc in (raw, inspect.cleandoc(raw)):
+        assert _sent_length(runtime_desc, _indented_tool) == len(raw)
+
+
+def test_a_docstring_over_the_cut_only_with_its_indentation_is_over() -> None:
+    # Over the limit as 3.12 sends it, under as 3.13 sends it: the lint must call it over on both.
+    body = "    The quick brown fox jumps over the lazy dog, again and again and again.\n"
+    raw = "Long tool.\n\n" + body * 28
+    stripped = inspect.cleandoc(raw)
+    assert len(stripped) <= HARNESS_TRUNCATION_LIMIT < len(raw), (len(stripped), len(raw))
+
+    def tool():
+        pass
+
+    tool.__doc__ = raw
+    assert _sent_length(stripped, tool, raw_docstring=raw) > HARNESS_TRUNCATION_LIMIT
+    assert _sent_length(raw, tool, raw_docstring=raw) > HARNESS_TRUNCATION_LIMIT
+
+
+def test_an_explicit_description_is_measured_as_given() -> None:
+    assert _sent_length("short, set by description=", _indented_tool) == len("short, set by description=")
+
+
 def test_no_description_exceeds_the_harness_truncation_limit() -> None:
     over = [
-        (server, name, len(desc))
-        for server, name, desc in _iter_tool_descriptions()
-        if len(desc) > HARNESS_TRUNCATION_LIMIT
+        (server, name, n)
+        for server, name, desc, fn in _iter_tool_fns()
+        if (n := _sent_length(desc, fn)) > HARNESS_TRUNCATION_LIMIT
     ]
     assert not over, (
         f"{len(over)} tool description(s) exceed the {HARNESS_TRUNCATION_LIMIT}-char "
