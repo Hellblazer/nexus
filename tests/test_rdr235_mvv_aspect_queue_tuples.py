@@ -43,7 +43,7 @@ THE BULLETS (numbering follows the RDR):
 8. no document text in any task body, each under 4,096 bytes.
 
 Bullet 5 has a live half (the end of the journey): a worker that keeps renewing keeps its claim through a stalled
-catalog check and a stalled write, each longer than the lease (the renewer runs from the claim to the last verdict).
+catalog check and a stalled write, each longer than the lease (the renewer runs from the start of process() to the last verdict).
 
 Scenario 24 (a parked worker is woken by an ``out`` from a second client
 process) and scenario 25 (the measured backlog, 1,200 tasks against
@@ -707,7 +707,7 @@ def test_mvv_journey_on_the_tuple_queue(
     assert [t.id for t in _tasks(db)] == [task13], "only the dead task remains"
 
     # ── bullet 5, live half: a worker that IS renewing keeps its claim through a stall anywhere ──
-    # The renewer runs from the claim to the last verdict. A batch of two, the lease 2 s: the first claim's
+    # The renewer runs from the start of process() to the last verdict. A batch of two, the lease 2 s: the first claim's
     # catalog check stalls longer than the lease (before the extractor, the window the renewer once missed),
     # and the first claim's write stalls longer than the lease (after the extractor, the other window; the
     # second claim waits behind it). Both stalls are in the side's own injected seams, so nothing is patched

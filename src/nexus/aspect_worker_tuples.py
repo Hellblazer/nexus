@@ -14,10 +14,11 @@ its batch form); this module owns the rest:
   found, else an ``inp`` too. Every slot is visited on every call, so a claim
   left live by a failed ``ack`` comes back to its own slot;
 * a bounded renewer that renews every held claim every ``renew_every_s``
-  from the moment the batch is claimed until its last verdict, only while the
+  from the start of ``process()`` until its last verdict, only while the
   batch is inside its deadline (the engine refuses renew, ack, nack and the
   write fence once ``lease_until`` has passed, with no resurrection, so a
-  window with no renewal is a window in which a stall lapses the claim);
+  window with no renewal is a window in which a stall lapses the claim; the
+  one window left is the claim call itself, before ``process()`` starts);
 * the verdict map: success -> ``complete_aspect`` with the claim pair (a fenced
   upsert, then ``ack``); a missing catalog document, an unsupported collection
   or a permanent read failure -> ``ack`` as dropped; a retryable failure
@@ -66,8 +67,10 @@ LEASE_S: int = 600
 PARK_TIMEOUT_S: int = 25
 #: How often the renewer renews, against the 600 s lease.
 RENEW_INTERVAL_S: float = 120.0
-#: Added to the extractor's worst case before the renewer stops (T3 reads, the
-#: manifest lookup and the persist are outside the extractor's own timeouts).
+#: Added to the extractor's worst case before the renewer stops. The deadline counts from the start of
+#: ``process()``, so this margin also covers the per-claim catalog checks and the write, ack and nack loop
+#: (and T3 reads, the manifest lookup and the persist, outside the extractor's own timeouts). It is not the
+#: only backstop: once the renewer stops, a claim still lives up to ``LEASE_S`` (600 s) past its last renewal.
 RENEW_DEADLINE_MARGIN_S: float = 120.0
 #: ``tuple`` claims re-probe an engine that lacked the template after this long
 #: (an engine upgrade does not restart the aspect-worker daemon).
@@ -367,11 +370,12 @@ class TupleQueueSide:
     def process(self, claims: list[HeldClaim]) -> None:
         """Extract the claimed tasks and give each its verdict.
 
-        The renewer runs from here to the last verdict: the catalog checks, the extraction and the
-        write, ack and nack loop are all inside it, so no window between ``claimed_at`` and a
-        claim's own terminal call goes unrenewed. Its deadline therefore counts from the claim, not
-        from the extraction; ``RENEW_DEADLINE_MARGIN_S`` already covers the work outside the
-        extractor's own timeouts, and the checks and the verdict loop are that work."""
+        The renewer runs from the start of this call to the last verdict: the catalog checks, the
+        extraction and the write, ack and nack loop are all inside it, so no window between this
+        call's start and a claim's own terminal call goes unrenewed. (The time between ``claimed_at``
+        and this call, the rest of ``claim_batch``, is not covered.) Its deadline counts from the
+        start of this call, not from the extraction; ``RENEW_DEADLINE_MARGIN_S`` covers the checks
+        and the verdict loop with the other work outside the extractor's own timeouts."""
         self._abandon.clear()
         if not claims:
             return

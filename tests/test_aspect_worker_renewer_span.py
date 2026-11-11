@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""The claim renewer covers a claim from the moment it is taken to its last verdict (RDR-235).
+"""The claim renewer covers a claim from the start of ``process()`` to its last verdict (RDR-235).
 
 ``TupleQueueSide.process`` once started the renewer after the per-claim catalog
 checks and stopped it before the loop that writes results and acks or nacks. A
@@ -26,8 +26,10 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
+from structlog.testing import capture_logs
+
 from nexus.aspect_extractor import AspectRecord
-from nexus.aspect_worker_tuples import TupleQueueSide
+from nexus.aspect_worker_tuples import ClaimRenewer, HeldClaim, TupleQueueSide
 from nexus.db.t2.http_tuple_store import ClaimNotFoundError
 from tests._settle import FakeClock
 
@@ -153,7 +155,7 @@ def _side(
 
 
 def test_a_stalled_catalog_check_does_not_lapse_the_claim() -> None:
-    """The window from the claim to the first renewal: ``document_sensitive`` takes three renew intervals."""
+    """The window from the start of ``process()`` to the first renewal: ``document_sensitive`` takes three renew intervals."""
     clock = FakeClock()
     engine = _LeaseEngine(clock, 1)
 
@@ -222,3 +224,65 @@ def test_a_finished_claim_is_not_renewed() -> None:
         op for op in engine.ops[engine.index("write", first):] if op == ("renew", first)
     ]
     assert renewed_after_first_write == []
+
+
+_RENEWER_THREAD = "aspect-claim-renewer"
+
+
+def _renewer_threads() -> set[threading.Thread]:
+    return {t for t in threading.enumerate() if t.name == _RENEWER_THREAD and t.is_alive()}
+
+
+def test_the_renewer_thread_ends_with_process() -> None:
+    """``process`` stops the renewer it started: one renewer thread is alive while the checks run, and none
+    of this call's threads is alive once it returns (a bounded join, so a renewer left running fails by
+    timeout and not by hanging)."""
+    clock = FakeClock()
+    engine = _LeaseEngine(clock, 1)
+    before = _renewer_threads()
+    during: list[set[threading.Thread]] = []
+
+    def sensitive(doc_id: str) -> bool:
+        during.append(_renewer_threads() - before)
+        return False
+
+    side = _side(engine, clock, batch_size=1, document_sensitive=sensitive)
+    claims, _ = side.claim_batch(park=False)
+    side.process(claims)
+
+    assert len(during) == 1 and len(during[0]) == 1, "the renewer was running during the catalog check"
+    mine = during[0]
+    for thread in mine:
+        thread.join(timeout=2.0)
+    assert not any(t.is_alive() for t in mine), "process() returned with its renewer still running"
+
+
+def _lost_claim_logs(held_answers: list[bool]) -> list[dict[str, Any]]:
+    """One renewal round over one claim whose renew raises a lapse error; *held_answers* are what the
+    renewer's ``held`` predicate says on its successive asks (the check before the call, then the
+    re-check after the lapse error). Returns the ``aspect_worker_renew_claim_lost`` events."""
+    clock = FakeClock()
+    answers = iter(held_answers)
+
+    def renew(claim: HeldClaim) -> None:
+        raise KeyError("lapsed")
+
+    renewer = ClaimRenewer(
+        [HeldClaim(0, "w:0", "c0", "t0", 0, None)], renew, interval_s=120.0, deadline_s=3600.0,
+        lapse_errors=(KeyError,), clock=clock, held=lambda claim: next(answers),
+    )
+    with capture_logs() as logs:
+        renewer.start()
+        clock.step(120.0)
+        renewer.stop()
+    assert renewer.rounds == 1 and not list(answers), "one round asked the predicate exactly as often as given"
+    return [e for e in logs if e["event"] == "aspect_worker_renew_claim_lost"]
+
+
+def test_a_lapse_on_a_held_claim_is_logged_as_lost() -> None:
+    lost = _lost_claim_logs([True, True])
+    assert [e["task_id"] for e in lost] == ["t0"]
+
+
+def test_a_lapse_on_a_claim_that_finished_meanwhile_is_not_logged() -> None:
+    assert _lost_claim_logs([True, False]) == []
