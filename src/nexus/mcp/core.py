@@ -9626,38 +9626,30 @@ def tuple_subscribe(
 ) -> str:
     """Add `subspace` to this session's MCP server's subscription list (RDR-211, RDR-213).
 
-    The session's MCP server waits on its board topics and its own mailbox
-    (`mailbox/<session id>`) and pushes what arrives through the Claude
-    Code channel: the lifespan waiter (`mcp/channel.py`) sends a
-    notification carrying a REFERENCE only (subspace, tuple id) -- never
-    the body, never a claim -- which this session claims itself with
-    `tuple_in` (RDR-213: the waiter never claims mail, and `tuple_in`
-    returns the body WITH the claim, so there is no separate `tuple_rd`
-    read step first). With the plugin's hooks loaded, the notification
-    itself fires `UserPromptSubmit` and the drain hook claims, acks and
-    renders the body with THAT prompt before the session's own turn, so
-    the session claims for itself only when that rendering did not
-    already happen. `tuple_subscriptions` lists the current set.
-    Only board topics and the session's own mailbox are ever delivered: a
-    queue or a lock is refused naming `in`; a second `mailbox/<name>` is
+    The server waits on its board topics and its own mailbox
+    (`mailbox/<session id>`) and pushes what arrives through the Claude Code
+    channel. The notification carries a REFERENCE only (subspace, tuple id),
+    never the body or a claim; the session claims the row itself with
+    `tuple_in`, which returns the body with the claim (no `tuple_rd` first).
+    With the plugin's hooks loaded, the notification fires `UserPromptSubmit`
+    and the drain hook claims, acks and renders the body with that prompt, so
+    the session claims only rows it did not render. `tuple_subscriptions`
+    lists the set. Only board topics and the own mailbox are delivered: a
+    queue or a lock is refused naming `in`, and a second `mailbox/<name>` is
     refused once this session leases a name. At most 32 board topics.
 
-    A board subscription starts 30 seconds before the subscribe call (a
-    clock-skew margin): posts from that window on are pushed, at most 100
-    per wait, one notification per wait naming the count, the first and
-    last tuple id and the `tuple_rd` call that reads them. Older posts
-    are read with `tuple_rd`, never pushed. Mail sent to the mailbox
-    before the subscribe is delivered too, until it is claimed or
-    expires, each row announced at most 5 times (`max_announces`, 150 s
-    apart).
+    A board subscription starts 30 seconds before the subscribe call (clock
+    skew): posts from then on are pushed, at most 100 per wait, one
+    notification per wait naming the count, the first and last tuple id and
+    the `tuple_rd` call that reads them; older posts are read with `tuple_rd`.
+    Mail sent to the mailbox before the subscribe is delivered too, until it
+    is claimed or expires, each row announced at most 5 times
+    (`max_announces`, 150 s apart).
 
-    Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>`
-    lease so `mailbox_send` resolves that name to this session. It is NOT
-    a second delivered mailbox: nothing is pushed or drained for it; only
-    this session's own mailbox and its board topics ever are.
-
-    A `/resume` (same session id) restores this list; a `/clear` (a new
-    session id) starts clean.
+    Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>` lease so
+    `mailbox_send` resolves that name to this session; nothing is pushed or
+    drained for it. A `/resume` (same session id) restores this list; a
+    `/clear` (new session id) starts clean.
     """
     # RDR-208 Phase 3 (bead nexus-galkv.20): a leased name stopped being a
     # second delivered mailbox here -- see SubscriptionSet's own docstring.
