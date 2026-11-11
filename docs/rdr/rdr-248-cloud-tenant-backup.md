@@ -144,9 +144,9 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
 | A2 | One `REPEATABLE READ READ ONLY` transaction with `set_config('nexus.tenant', T, true)` returns exactly that tenant's rows from every RLS table | Verified locally (spike); the cloud has no pooler (the engine reaches PG directly through its own Hikari pool, bob 2026-11-11), so the local result carries | Local spike |
 | A3 | Binary `COPY` of the column types in these tables round-trips | Verified for every type that held data; staged load required | Local spike; the remaining types (bigint[], smallint, uuid, identity) by the Step 5 test's seed |
 | A4 | Import loads in one transaction | Verified with id reassignment, foreign-key order and tuples excluded | Local spike |
-| A5 | A read-only snapshot held for the export does not hurt the shared cloud database | Unverified (locally: the snapshot pins the database-wide xmin horizon for the session's life, so vacuum cannot remove rows dead after it) | Cloud measurement of the `nexus` tenant's export time (bob, on Sam's go in bob's session) |
+| A5 | A read-only snapshot held for the export does not hurt the shared cloud database | Verified (bob, read-only cloud window, Sam's go, 2026-11-11, T2 `nexus/rdr248-cloud-spike-2026-11-11`): tenant `nexus` is 2,272,023 rows and 3.82 GB in binary COPY over the 26 data and derived tables, read from one snapshot in about 83 s (`chunks` 542,778 rows, 3.39 GB, 78 s, about 43 MB/s; the rest about 5 s). A snapshot held 60 minutes (by accident) left the xmin age near 1000 and dead tuples barely grown (`topic_assignments` 45.7k to 46.8k); no autovacuum ran in the window | Cloud measurement |
 | A6 | A snapshot exported by one transaction serves many later page transactions, confined by RLS, consistent across writes | Verified locally (spike round 2, T2 `nexus/rdr248-local-spike-r2-2026-11-11`): 43 pages, writes and deletes committed between pages, concatenated pages equal the single-transaction export row for row on all 26 tables | Local spike |
-| A7 | The cloud engine role has no `idle_in_transaction_session_timeout` that would kill the held transaction between page requests | Unverified (0 on the local substrate) | bob reads the role's settings in the A5 window |
+| A7 | The cloud engine role has no `idle_in_transaction_session_timeout` that would kill the held transaction between page requests | Verified (bob, same window): idle-in-transaction, idle-session, statement and transaction timeouts are 0 at server level, with no role or database override for `nexus_svc`; the engine sets `statement_timeout` locally only on its search and taxonomy paths, so the export's dedicated connection sets its own bounds | Cloud settings read; engine source |
 
 ## Proposed Solution
 
@@ -405,7 +405,11 @@ exercised once per release in an announced window.
 
 ### Performance Expectations
 
-To be set from the cloud spike: export rate in MB/s and total time for the `nexus` tenant (about 2.4 GB).
+For tenant `nexus` (the largest): a 3.82 GB file. The database reads it in about 83 s, so an export's time
+is the cloud edge's transfer rate: about 6 minutes at 10 MB/s, about 21 minutes at 3 MB/s. The first
+cloud round trip (Activation Step 2) records the real rate. Session bounds: idle 10 minutes, total 2
+hours, refused-with-retry when an engine already has its cap of concurrent sessions; the 60-minute hold
+measured in A5 shows the shared database tolerates that.
 
 ## Finalization Gate
 
