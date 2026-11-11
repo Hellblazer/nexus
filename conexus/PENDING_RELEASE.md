@@ -47,4 +47,9 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/skills/upgrade/SKILL.md`
+  legacy chunk ids: nothing converges them; boot changesets delete them from
+  engine 0.1.91 on; back up an older install before upgrading; report rows the
+  VALIDATE job or doctor finds (nexus-f3yqd)
+
 ## Deferred to the next client release
