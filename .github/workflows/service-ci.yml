@@ -76,6 +76,34 @@ jobs:
               - 'service/**'
               - '.github/workflows/service-ci.yml'
 
+      # nexus-jh1f2 cut 6 (Sam 2026-11-10): on a release PR (a pull request into main) whose
+      # service/ tree is byte-identical to the engine tag the release pins
+      # (REQUIRED_ENGINE_VERSION), the Java suite has already run on that tree: the tag was cut
+      # from a commit service-ci tested. 20 release PRs re-ran it with 0 failures, holding a
+      # lab-16c16g slot the release's pytest shards need. Any service/ difference, a change to
+      # this workflow, or a pinned tag missing from the checkout runs the suite as before.
+      - name: Is service/ the pinned engine tag's tree? (release PRs, nexus-jh1f2 cut 6)
+        id: release_tag
+        run: |
+          set -euo pipefail
+          same=false
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.base_ref }}" = "main" ]; then
+            ver="$(python3 -c "import re,pathlib; m=re.search(r'^REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', pathlib.Path('src/nexus/engine_version.py').read_text(), re.M); print('.'.join(m.groups()) if m else '')")"
+            tag="engine-service-v${ver}"
+            if [ -z "$ver" ]; then
+              echo "::warning::REQUIRED_ENGINE_VERSION not parseable; the Java suite runs"
+            elif ! git rev-parse -q --verify "refs/tags/${tag}^{commit}" >/dev/null; then
+              echo "::warning::the pinned ${tag} is not in this checkout; the Java suite runs"
+            elif git diff --quiet "$tag" HEAD -- service/ \
+                && git diff --quiet "${{ github.event.pull_request.base.sha }}...HEAD" -- .github/workflows/service-ci.yml; then
+              same=true
+              echo "service/ is byte-identical to ${tag}, whose tree service-ci already tested."
+            else
+              echo "service/ differs from ${tag} (or this workflow changed); the Java suite runs."
+            fi
+          fi
+          echo "same=$same" >> "$GITHUB_OUTPUT"
+
       - name: Report the decision (fail loud, never default-skip)
         # State the skip out loud. A gate that silently declines to run reads
         # identically to one that ran and passed.
@@ -107,10 +135,25 @@ jobs:
         run: |
           set -euo pipefail
           service="${{ steps.filter.outputs.service }}"
+          same="${{ steps.release_tag.outputs.same }}"
+          case "$same" in
+            true|false) ;;
+            *)
+              echo "::error::the release-tag step produced no usable answer ('$same') — refusing to guess whether the Java suite may skip"
+              exit 1
+              ;;
+          esac
+          if [ "$service" = true ] && [ "$same" = true ]; then
+            echo "service/ equals the pinned engine tag — the Java suite is SKIPPED (reports success); the tag's tree was tested."
+            service=false_tag
+          fi
           case "$service" in
             true)
               echo "service/** changed — the Java suite WILL run."
               echo "service=true" >> "$GITHUB_OUTPUT"
+              ;;
+            false_tag)
+              echo "service=false" >> "$GITHUB_OUTPUT"
               ;;
             false)
               echo "service/** unchanged — the Java suite is SKIPPED (reports success)."
