@@ -1168,6 +1168,37 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                           for d in documents],
         }
 
+    def _get_unprefixed(self, path: str, *, idempotent: bool = True, timeout: float | None = None) -> Any:
+        """A GET outside ``/v1/catalog`` (the mixin's own ``_get``), for an engine route this client reads."""
+        return super()._get(path, idempotent=idempotent, timeout=timeout)
+
+    def chash_constraints_validated(self) -> bool | None:
+        """Whether the chash width CHECKs on ``nexus.chunks`` and ``nexus.catalog_document_chunks`` are validated
+        (``GET /v1/schema/chash-conformance``, engine 0.1.189, nexus-f3yqd.6). Reads only ``all_validated`` and each
+        constraint's ``present`` and ``validated`` (a tenant token gets nothing more).
+
+        ``True`` only when every listed constraint is present and validated and ``all_validated`` is true: no row of
+        those tables can then be non-conformant. ``False`` is an answer that is not that (every store until the
+        engine's VALIDATE job runs). ``None`` is no answer: no ``chash_conformance_constraints_supported`` flag (no
+        request is sent), a 403, 404 or 503, an error, or a malformed body. A caller scans on anything but ``True``.
+        """
+        if self._version_flags().get("chash_conformance_constraints_supported") is not True:
+            return None
+        try:
+            body = self._get_unprefixed(
+                "/v1/schema/chash-conformance", idempotent=False, timeout=_SECTION_LABEL_FILLABLE_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller scans instead
+            _log.info("http_catalog_client.chash_conformance_unavailable", error=str(exc))
+            return None
+        if not isinstance(body, dict) or not isinstance(body.get("all_validated"), bool) \
+                or not isinstance(body.get("constraints"), list):
+            return None
+        constraints = body["constraints"]
+        if not all(isinstance(c, dict) for c in constraints):
+            return None
+        return (body["all_validated"] is True and bool(constraints)
+                and all(c.get("present") is True and c.get("validated") is True for c in constraints))
+
     def stub_metadata(self, limit: int = 1000) -> list[dict] | object | None:
         """Per knowledge/docs collection, the bounded count of PDF chunks still carrying the upload placeholder
         metadata (``GET /stub-metadata``, engine 0.1.189, nexus-f3yqd.6): ``[{"collection", "stub_chunks", "capped",

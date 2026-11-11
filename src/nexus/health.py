@@ -6678,12 +6678,27 @@ def _check_service_autostart_drift() -> list[HealthResult]:
     )]
 
 
+def _chash_constraints_validated_by_engine() -> bool | None:
+    """The engine's answer to whether the chash width CHECKs on both poison tables are validated, or None when it
+    cannot say (an engine before 0.1.189, no catalog reader, any error). Never raises."""
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        probe = getattr(cat, "chash_constraints_validated", None)
+        return probe() if callable(probe) else None
+    except Exception as exc:  # noqa: BLE001 — an optional fast path; the scan is the answer of record
+        _log.debug("chash_constraints_probe_failed", error=str(exc))
+        return None
+
+
 def _check_migration_state(
     creds_path: Path | None = None,
     psql_bin: Path | None = None,
     psql_runner=None,  # injectable for unit tests
     diag_credentials=None,  # injectable: DiagCredentials | None
     diag_runner=None,  # injectable: run_diagnostic_sql psql_runner seam
+    constraints_validated=None,  # injectable: () -> bool | None, the engine's chash constraint state
 ) -> list[HealthResult]:
     """Verify Liquibase migration state on the nx-managed Postgres.
 
@@ -7032,153 +7047,161 @@ def _check_migration_state(
                 )
                 return True
 
-        try:
-            poison_tables = POISON_CHASH_TABLES
-            # Amendment A6 (nexus-9bufb): view-era statements first — counts
-            # by construction via nexus.diag_chash_conformance. An engine one
-            # generation behind (no view yet) fails the first set; the legacy
-            # direct-table statements still work there because the legacy
-            # grants era carries full-table SELECT — fall back LOUDLY (log),
-            # never silently.
+        # F30 (nexus-f3yqd.6): validated width CHECKs on both poison tables mean no row of either can be
+        # non-conformant, and a CHECK holds for every tenant's rows, so the engine's constraint state answers the
+        # whole-store question the scan below asks (engine 0.1.189). The debt tables carry no CHECK, so their probe
+        # still runs. Anything other than True scans as before, with nothing said about the skipped read.
+        if (constraints_validated or _chash_constraints_validated_by_engine)() is True:
+            nonconforming = 0
+            view_era = True  # the debt probe below runs; its failure reports UNKNOWN, never a silent omission
+        else:
             try:
-                counts = _run_diag(chash_conformance_statements())
-                view_era = True
-            except DiagnosticSqlViolation:
-                # A LINT failure is a product defect, never an engine-
-                # generation skew — re-raise to the outer handler (review
-                # 47dcb65e Critical: DiagnosticSqlViolation subclasses
-                # ValueError, so without this it would be silently retried
-                # against the legacy statements and mislabeled as fallback).
-                raise
-            except (RuntimeError, ValueError) as view_exc:
-                _log.warning(
-                    "chash_probe_view_fallback_legacy",
-                    error=str(view_exc)[:200],
-                    # GH #1402: do NOT assert the cause here — the view path
-                    # also fails on a live view when nexus_diag lacks the
-                    # owner-granted view SELECT or the view owner lost table
-                    # access (ownership fragmentation). The error field
-                    # carries the real cause.
-                    note="view-path probe failed — falling back to legacy "
-                         "direct-table statements (view absent on pre-A6 "
-                         "engines, or view/owner grant gap — see error)",
-                )
+                poison_tables = POISON_CHASH_TABLES
+                # Amendment A6 (nexus-9bufb): view-era statements first — counts
+                # by construction via nexus.diag_chash_conformance. An engine one
+                # generation behind (no view yet) fails the first set; the legacy
+                # direct-table statements still work there because the legacy
+                # grants era carries full-table SELECT — fall back LOUDLY (log),
+                # never silently.
                 try:
-                    counts = _run_diag(legacy_chash_conformance_statements())
+                    counts = _run_diag(chash_conformance_statements())
+                    view_era = True
                 except DiagnosticSqlViolation:
+                    # A LINT failure is a product defect, never an engine-
+                    # generation skew — re-raise to the outer handler (review
+                    # 47dcb65e Critical: DiagnosticSqlViolation subclasses
+                    # ValueError, so without this it would be silently retried
+                    # against the legacy statements and mislabeled as fallback).
                     raise
-                except (RuntimeError, ValueError) as direct_exc:
-                    # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
-                    # straddle in the poison gate. The view is absent AND the
-                    # unified-name direct fallback also failed — on a
-                    # straddle-era box (past A6, before the RDR-191 unify)
-                    # the unified nexus.chunks relation genuinely does not
-                    # exist yet, so this direct COUNT fails the same way the
-                    # view-path did. Existence-gate before retrying against
-                    # the pre-unify per-dim direct statements; a genuinely
-                    # broken current-era store re-raises the ORIGINAL error
-                    # rather than being silently reinterpreted.
-                    if _probe_unified_schema_exists():
-                        raise
+                except (RuntimeError, ValueError) as view_exc:
                     _log.warning(
-                        "chash_probe_direct_fallback_retrying_legacy_era",
-                        error=str(direct_exc)[:200],
-                        note="unified-name direct fallback failed and "
-                             "nexus.chunks does not exist yet — retrying "
-                             "against the pre-RDR-191 per-dim table names",
+                        "chash_probe_view_fallback_legacy",
+                        error=str(view_exc)[:200],
+                        # GH #1402: do NOT assert the cause here — the view path
+                        # also fails on a live view when nexus_diag lacks the
+                        # owner-granted view SELECT or the view owner lost table
+                        # access (ownership fragmentation). The error field
+                        # carries the real cause.
+                        note="view-path probe failed — falling back to legacy "
+                             "direct-table statements (view absent on pre-A6 "
+                             "engines, or view/owner grant gap — see error)",
                     )
-                    counts = _run_diag(
-                        legacy_chash_conformance_statements(LEGACY_POISON_CHASH_TABLES),
-                    )
-                    poison_tables = LEGACY_POISON_CHASH_TABLES
-
-            # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
-            # straddle in the poison gate (the confirmed shape, GH #1414
-            # class recurrence). The unified view-path query above can
-            # execute successfully yet return a NULL aggregate (blank psql
-            # line) for a table whose relation was created by RDR-191 —
-            # the deployed view was built by an OLDER engine's own
-            # provisioning and still carries rows keyed by the pre-unify
-            # per-dim names, so the unified WHERE filter matches no row.
-            # Existence-gate before reinterpreting: consulted UNCONDITIONALLY
-            # on a blank leg (never skipped), because the answer decides
-            # which of TWO distinct straddle windows this is.
-            if view_era and any(not c.strip() for c in counts):
-                if _probe_unified_schema_exists():
-                    # nexus-o8dil (2026-08-14, review round 2 SIGNIFICANT 1):
-                    # nexus.chunks EXISTS — the engine has already migrated —
-                    # yet the leg came back blank, so the deployed VIEW is
-                    # stale (still per-dim shaped): view re-provisioning only
-                    # happens via the chash-rekey rung's re-provision step or
-                    # `nx init`, never automatically after a bare
-                    # engine binary swap. This store IS measurable, just not
-                    # through the stale view — fall through to the SAME
-                    # direct unified-table statements used when the
-                    # view-path raises outright, instead of surfacing a
-                    # generic "could not probe" WARN for a store that is
-                    # provably current-era.
                     try:
-                        direct_counts = _run_diag(legacy_chash_conformance_statements())
+                        counts = _run_diag(legacy_chash_conformance_statements())
                     except DiagnosticSqlViolation:
                         raise
                     except (RuntimeError, ValueError) as direct_exc:
+                        # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
+                        # straddle in the poison gate. The view is absent AND the
+                        # unified-name direct fallback also failed — on a
+                        # straddle-era box (past A6, before the RDR-191 unify)
+                        # the unified nexus.chunks relation genuinely does not
+                        # exist yet, so this direct COUNT fails the same way the
+                        # view-path did. Existence-gate before retrying against
+                        # the pre-unify per-dim direct statements; a genuinely
+                        # broken current-era store re-raises the ORIGINAL error
+                        # rather than being silently reinterpreted.
+                        if _probe_unified_schema_exists():
+                            raise
                         _log.warning(
-                            "chash_probe_direct_fallback_for_stale_view_failed",
+                            "chash_probe_direct_fallback_retrying_legacy_era",
                             error=str(direct_exc)[:200],
-                            note="nexus.chunks exists but the view-path leg "
-                                 "was blank (stale per-dim view) and the "
-                                 "direct unified-table fallback also failed",
+                            note="unified-name direct fallback failed and "
+                                 "nexus.chunks does not exist yet — retrying "
+                                 "against the pre-RDR-191 per-dim table names",
                         )
-                    else:
-                        _log.info(
-                            "chash_probe_direct_fallback_for_stale_view",
-                            note="the diag view is stale (still per-dim "
-                                 "shaped) though the schema has already "
-                                 "migrated; measured via direct "
-                                 "unified-table counts instead",
+                        counts = _run_diag(
+                            legacy_chash_conformance_statements(LEGACY_POISON_CHASH_TABLES),
                         )
-                        counts = direct_counts
-                else:
-                    try:
-                        legacy_view_counts = _run_diag(
-                            legacy_era_chash_conformance_statements(),
-                        )
-                    except DiagnosticSqlViolation:
-                        raise
-                    except (RuntimeError, ValueError) as legacy_view_exc:
-                        _log.warning(
-                            "chash_probe_legacy_era_view_fallback_failed",
-                            error=str(legacy_view_exc)[:200],
-                        )
-                        legacy_view_counts = None
-                    if legacy_view_counts is not None and not any(
-                        not c.strip() for c in legacy_view_counts
-                    ):
-                        _log.info(
-                            "chash_probe_legacy_era_view_match",
-                            note="the unified-name view query returned a "
-                                 "NULL aggregate; the store verified via "
-                                 "the pre-RDR-191 per-dim table names "
-                                 "instead (RDR-191 straddle window)",
-                        )
-                        counts = legacy_view_counts
                         poison_tables = LEGACY_POISON_CHASH_TABLES
 
-            nonconforming = parse_conformance_sum(poison_tables, counts)
-        except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
-            # Probe failure (schema variant missing a table), lint refusal,
-            # or non-numeric output — a WARN, never a false poison-clean.
-            nonconforming = -1
-            results.append(HealthResult(
-                label=CHASH_CONFORMANCE_LABEL,
-                ok=False,
-                detail=(
-                    "could not probe chash length across chunk tables via the "
-                    f"nexus_diag path ({exc}) — the pre-upgrade poison check "
-                    "did not run"
-                ),
-                warn=True,
-            ))
+                # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
+                # straddle in the poison gate (the confirmed shape, GH #1414
+                # class recurrence). The unified view-path query above can
+                # execute successfully yet return a NULL aggregate (blank psql
+                # line) for a table whose relation was created by RDR-191 —
+                # the deployed view was built by an OLDER engine's own
+                # provisioning and still carries rows keyed by the pre-unify
+                # per-dim names, so the unified WHERE filter matches no row.
+                # Existence-gate before reinterpreting: consulted UNCONDITIONALLY
+                # on a blank leg (never skipped), because the answer decides
+                # which of TWO distinct straddle windows this is.
+                if view_era and any(not c.strip() for c in counts):
+                    if _probe_unified_schema_exists():
+                        # nexus-o8dil (2026-08-14, review round 2 SIGNIFICANT 1):
+                        # nexus.chunks EXISTS — the engine has already migrated —
+                        # yet the leg came back blank, so the deployed VIEW is
+                        # stale (still per-dim shaped): view re-provisioning only
+                        # happens via the chash-rekey rung's re-provision step or
+                        # `nx init`, never automatically after a bare
+                        # engine binary swap. This store IS measurable, just not
+                        # through the stale view — fall through to the SAME
+                        # direct unified-table statements used when the
+                        # view-path raises outright, instead of surfacing a
+                        # generic "could not probe" WARN for a store that is
+                        # provably current-era.
+                        try:
+                            direct_counts = _run_diag(legacy_chash_conformance_statements())
+                        except DiagnosticSqlViolation:
+                            raise
+                        except (RuntimeError, ValueError) as direct_exc:
+                            _log.warning(
+                                "chash_probe_direct_fallback_for_stale_view_failed",
+                                error=str(direct_exc)[:200],
+                                note="nexus.chunks exists but the view-path leg "
+                                     "was blank (stale per-dim view) and the "
+                                     "direct unified-table fallback also failed",
+                            )
+                        else:
+                            _log.info(
+                                "chash_probe_direct_fallback_for_stale_view",
+                                note="the diag view is stale (still per-dim "
+                                     "shaped) though the schema has already "
+                                     "migrated; measured via direct "
+                                     "unified-table counts instead",
+                            )
+                            counts = direct_counts
+                    else:
+                        try:
+                            legacy_view_counts = _run_diag(
+                                legacy_era_chash_conformance_statements(),
+                            )
+                        except DiagnosticSqlViolation:
+                            raise
+                        except (RuntimeError, ValueError) as legacy_view_exc:
+                            _log.warning(
+                                "chash_probe_legacy_era_view_fallback_failed",
+                                error=str(legacy_view_exc)[:200],
+                            )
+                            legacy_view_counts = None
+                        if legacy_view_counts is not None and not any(
+                            not c.strip() for c in legacy_view_counts
+                        ):
+                            _log.info(
+                                "chash_probe_legacy_era_view_match",
+                                note="the unified-name view query returned a "
+                                     "NULL aggregate; the store verified via "
+                                     "the pre-RDR-191 per-dim table names "
+                                     "instead (RDR-191 straddle window)",
+                            )
+                            counts = legacy_view_counts
+                            poison_tables = LEGACY_POISON_CHASH_TABLES
+
+                nonconforming = parse_conformance_sum(poison_tables, counts)
+            except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
+                # Probe failure (schema variant missing a table), lint refusal,
+                # or non-numeric output — a WARN, never a false poison-clean.
+                nonconforming = -1
+                results.append(HealthResult(
+                    label=CHASH_CONFORMANCE_LABEL,
+                    ok=False,
+                    detail=(
+                        "could not probe chash length across chunk tables via the "
+                        f"nexus_diag path ({exc}) — the pre-upgrade poison check "
+                        "did not run"
+                    ),
+                    warn=True,
+                ))
     if nonconforming > 0:
         results.append(HealthResult(
             label=CHASH_CONFORMANCE_LABEL,
@@ -10961,6 +10984,23 @@ def _check_chash_conformance_report() -> list[HealthResult]:
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=f"SKIPPED (catalog reader unavailable: {exc}) — not a clean-store signal",
+        )]
+
+    # F30 (nexus-f3yqd.6): validated width CHECKs on both covered tables mean no row can be non-conformant, so one
+    # catalog read stands in for the per-dim scans (engine 0.1.189). Anything else scans as before, with no warning.
+    try:
+        probe = getattr(cat, "chash_constraints_validated", None)
+        validated = probe() if callable(probe) else None
+    except Exception as exc:  # noqa: BLE001 — an optional fast path; the scans are the answer of record
+        _log.debug("doctor_chash_constraints_probe_failed", error=str(exc))
+        validated = None
+    if validated is True:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                "clean: the chash width CHECKs on nexus.chunks and nexus.catalog_document_chunks are validated, "
+                "so no row of either table can be non-conformant (read from the engine's constraint state, not a scan)"
+            ),
         )]
 
     import httpx  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
