@@ -12,8 +12,8 @@ not pile up one per restart. Once every restart is done, each resumed session ge
 wake prompt, saying what it was restarted onto and to re-read its board entry: as conexus
 mail with the same origin note and marker as every ask from here when it has the channel
 (typed instead only when no turn starts within a minute and the mail is confirmed
-withdrawn), else typed as a short pointer to ~/.claude/restart-wake/rw-<id>.txt, and
-typed only into an empty prompt.
+withdrawn), else typed as a short pointer to /tmp/rw-<id>.txt (removed once that turn
+ends), and typed only into an empty prompt.
 --no-wake leaves it idle as before.
 
 It always runs detached inside the tmux server (tmux run-shell -b), so it can
@@ -1568,6 +1568,12 @@ def _mail_wake(s: dict, text: str) -> tuple[str, str, Path | None]:
         sent = mail_ask(s, path, ASK_CLAIMANT, WAKE_TTL, kind="restart-wake", body=origin_note(s, path) + text,
                         note=f"mailing wake to {label(s)}")
         tid, marker = SENT_ASKS.pop(sid, ""), SENT_MARKERS.pop(sid, None)
+        if marker is not None:
+            # The session checks the marker a model turn after the mail arrives, and the footprint report at
+            # the end of the run removes every marker in MADE_MARKERS: a 22:17 sandbox run's session found
+            # it gone and rightly declined the wake. Left out of MADE_MARKERS, it expires by its own stamp
+            # (mail_ask sets its mtime to the ask's expiry; sweep_stale_markers removes it after that).
+            MADE_MARKERS.discard(marker)
     finally:
         if prior_ask is not None:
             SENT_ASKS[sid] = prior_ask
@@ -1578,25 +1584,20 @@ def _mail_wake(s: dict, text: str) -> tuple[str, str, Path | None]:
     return ("maybe", "", marker) if marker is not None else ("failed", "", None)
 
 
-#: Where the typed wake's text is written: inside HOME, one file per session id, overwritten each round, so the
-#: session can read it whenever its turn gets to it (a file removed at the end of the run would race that read).
-WAKE_DIR = Path.home() / ".claude" / "restart-wake"
+#: Typed wakes whose pointer file waits for the session's turn to end before it is removed: (file, sessions
+#: json). In /tmp like ask_line's file: a read under ~/.claude is denied in default mode until approved
+#: (nexus-acp8p), which would leave the woken session stopped at a permission prompt.
+WAKE_FILES: list[tuple[Path, Path]] = []
+#: Seconds wake_resumed waits, for all typed wakes together, for their turns to end before removing the files.
+WAKE_FILE_WAIT = 180
 
 
 def _type_wake(s: dict, text: str) -> str:
     """Type a short pointer to the wake text (long send-keys text arrives truncated: see ask_line)."""
-    WAKE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    cutoff = time.time() - 86400
-    for old in WAKE_DIR.glob("rw-*.txt"):  # a session that is gone leaves its file; a day is long enough
-        try:
-            if old.is_file() and old.stat().st_mtime < cutoff:
-                old.unlink()
-        except OSError:
-            pass
-    note = WAKE_DIR / f"rw-{s['sessionId'][:8]}.txt"
+    note = TMP / f"rw-{s['sessionId'][:8]}.txt"
     note.write_text(text + "\n", encoding="utf-8")
-    shown = f"~/{note.relative_to(Path.home())}" if note.is_relative_to(Path.home()) else str(note)
-    if submit(s["pane"], f"Read {shown}", Path(s["file"])):
+    WAKE_FILES.append((note, Path(s["file"])))
+    if submit(s["pane"], f"Read {note}", Path(s["file"])):
         log(f"{label(s)}: woken by a typed prompt")
         return "typed"
     log(f"WARN {label(s)}: the typed wake did not start a turn; check pane {s['pane']}")
@@ -1617,11 +1618,16 @@ def wake(s: dict) -> str:
     if NO_WAKE:
         return "not woken (--no-wake)"
     sess_file = Path(s["file"])
-    now = _status_after(sess_file, "idle", WAKE_IDLE_WAIT)
+    deadline = time.time() + WAKE_IDLE_WAIT
+    while (now := str((read(sess_file) or {}).get("status", ""))) != "idle" and time.time() < deadline:
+        time.sleep(1)  # a startup hook can show busy for a moment: wait for idle rather than skip at once
     if now != "idle":
-        why = "busy already" if now == "busy" else f"not idle after {WAKE_IDLE_WAIT}s ({now or 'no status'})"
+        why = f"not idle after {WAKE_IDLE_WAIT}s ({now or 'no status'})"
         log(f"{name}: not woken: {why}")
         return f"not woken: {why}"
+    if "prompts_at_resume" in s and prompt_count(s["sessionId"]) > s["prompts_at_resume"]:
+        log(f"{name}: not woken: it has had a prompt since it resumed")
+        return "not woken: it had a prompt of its own"
     text = wake_text()
     if has_channel(s):
         outcome, tid, marker = _mail_wake(s, text)
@@ -1633,9 +1639,7 @@ def wake(s: dict) -> str:
             return "not woken: mail may have landed"
         if outcome == "sent":
             gone = withdraw_ask(s["sessionId"], tid, "wake")
-            if gone != "withdrawn":
-                if gone not in GONE:
-                    UNWITHDRAWN.append(f"mailbox/{s['sessionId'][:8]}: wake {tid}: {gone}")
+            if gone != "withdrawn":  # withdraw_ask names an unconfirmed one in UNWITHDRAWN itself
                 log(f"{name}: not woken by typing: the mailed wake is {gone or 'not withdrawn'}")
                 return f"mailed, {gone or 'not withdrawn'}"
             if marker is not None:
@@ -1661,6 +1665,15 @@ def wake_resumed() -> None:
             wake(r)
         except Exception as e:  # noqa: BLE001 - a courtesy prompt must not end the roll
             log(f"WARN {label(r)}: wake failed ({type(e).__name__}: {e})")
+    deadline = time.time() + WAKE_FILE_WAIT
+    while WAKE_FILES:
+        note, sess_file = WAKE_FILES.pop(0)
+        while (read(sess_file) or {}).get("status") != "idle" and time.time() < deadline:
+            time.sleep(1)  # the turn the pointer started reads the file first; it is idle again once done
+        if (read(sess_file) or {}).get("status") == "idle" or not sess_file.exists():
+            note.unlink(missing_ok=True)
+        else:
+            log(f"WARN typed wake file {note} kept: its session is still mid-turn after {WAKE_FILE_WAIT}s")
 
 
 def _ps_args(pid: int) -> str:
@@ -1669,7 +1682,9 @@ def _ps_args(pid: int) -> str:
 
 def _resumed(d: dict, path: Path, pane: str) -> dict:
     """The resumed session as wake() reads it: its registry entry, file, pane and live launch line."""
-    return {**d, "file": path, "pane": pane, "argv": _ps_args(int(d.get("pid", 0) or 0))}
+    sid = str(d.get("sessionId", ""))
+    return {**d, "file": path, "pane": pane, "argv": _ps_args(int(d.get("pid", 0) or 0)),
+            "prompts_at_resume": prompt_count(sid) if sid else 0}
 
 
 def typed_ask(s: dict, path: str) -> bool:
@@ -2666,8 +2681,8 @@ def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers:
         left = [label(s) for s in others + callers]
         log(f"=== STOP: {e}; not yet restarted: {', '.join(left) or 'none'}; "
             f"{len(RESULTS)} of {len(found)} restarted before it; nothing further was exited.")
-        wake_resumed()  # the sessions already back still get their wake
         stop_report(a, found, e)
+        wake_resumed()  # the sessions already back still get their wake, after the stop notice
         return EXIT_STALLED
     wake_resumed()
     kinds = list(RESULTS.values())

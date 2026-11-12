@@ -85,7 +85,8 @@ class Box:
     """A resumed session's registry file, and fakes for the mail, the withdraw, the pane and the typed prompt."""
 
     def __init__(self, crs, monkeypatch, tmp_path: Path, *, channel: bool, status: str = "idle", draft: bool = False,
-                 mail: str = "sent", mail_starts_turn: bool = True, withdraw: str = "withdrawn") -> None:
+                 mail: str = "sent", mail_starts_turn: bool = True, withdraw: str = "withdrawn",
+                 busy_at_withdraw: bool = False) -> None:
         self.file = tmp_path / "sessions" / "999.json"
         self.file.parent.mkdir(exist_ok=True)
         self.set_status(status)
@@ -109,9 +110,18 @@ class Box:
         monkeypatch.setattr(crs, "_mail_wake", fake_mail)
         monkeypatch.setattr(crs, "submit", fake_submit)
         monkeypatch.setattr(crs, "pane_has_draft", lambda _p: draft)
-        monkeypatch.setattr(crs, "withdraw_ask", lambda *a: self.withdrawn.append(a) or withdraw)
+        def fake_withdraw(*a) -> str:
+            self.withdrawn.append(a)
+            if busy_at_withdraw:
+                self.set_status("busy")
+            return withdraw
+
+        monkeypatch.setattr(crs, "withdraw_ask", fake_withdraw)
         monkeypatch.setattr(crs, "plugin_versions", lambda: {"conexus@nexus-plugins": "8.2.0"})
-        monkeypatch.setattr(crs, "WAKE_DIR", tmp_path / "restart-wake")
+        monkeypatch.setattr(crs, "TMP", tmp_path)
+        monkeypatch.setattr(crs, "WAKE_FILES", [])
+        monkeypatch.setattr(crs, "prompt_count", lambda _sid: self.prompts)
+        self.prompts = 0
         monkeypatch.setattr(crs, "UNWITHDRAWN", [])
         monkeypatch.setattr(crs, "WAKE_IDLE_WAIT", 0)
         monkeypatch.setattr(crs, "WAKE_BUSY_WAIT", 0)
@@ -122,8 +132,8 @@ class Box:
 
     def typed_text(self) -> str:
         """What the typed pointer points at: the line is short, the text is in the file it names."""
-        assert self.typed == [f"Read {self.tmp / 'restart-wake' / 'rw-sid-new.txt'}"]
-        return (self.tmp / "restart-wake" / "rw-sid-new.txt").read_text(encoding="utf-8")
+        assert self.typed == [f"Read {self.tmp / 'rw-sid-new.txt'}"]
+        return (self.tmp / "rw-sid-new.txt").read_text(encoding="utf-8")
 
 
 def test_the_wake_text_names_the_version_the_script_and_the_board(crs, monkeypatch) -> None:
@@ -152,7 +162,12 @@ def test_a_wake_mail_that_was_not_withdrawn_is_never_typed_over(crs, monkeypatch
     box = Box(crs, monkeypatch, tmp_path, channel=True, mail_starts_turn=False, withdraw=outcome)
     assert crs.wake(box.s) == f"mailed, {outcome}"
     assert box.typed == []
-    assert bool(crs.UNWITHDRAWN) is (outcome not in crs.GONE)   # a live one is named in the footprint
+    assert crs.UNWITHDRAWN == []   # naming a live one in the footprint is withdraw_ask's own job, done once there
+
+
+def test_a_wake_withdrawn_as_the_session_went_busy_is_not_typed(crs, monkeypatch, tmp_path) -> None:
+    box = Box(crs, monkeypatch, tmp_path, channel=True, mail_starts_turn=False, busy_at_withdraw=True)
+    assert crs.wake(box.s) == "mailed" and box.typed == []
 
 
 def test_a_wake_mail_that_may_have_landed_is_never_typed_over(crs, monkeypatch, tmp_path) -> None:
@@ -180,12 +195,20 @@ def test_nothing_is_typed_over_an_unsent_draft(crs, monkeypatch, tmp_path, chann
     assert box.typed == []
 
 
-def test_a_session_that_is_busy_already_is_left_alone_at_once(crs, monkeypatch, tmp_path) -> None:
+def test_a_session_that_never_goes_idle_is_left_alone(crs, monkeypatch, tmp_path) -> None:
     box = Box(crs, monkeypatch, tmp_path, channel=True, status="busy")
-    monkeypatch.setattr(crs, "WAKE_IDLE_WAIT", 30)
-    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: pytest.fail("waited on a busy session"))
-    assert crs.wake(box.s) == "not woken: busy already"
+    assert crs.wake(box.s) == "not woken: not idle after 0s (busy)"
     assert box.mailed == [] and box.typed == []
+
+
+def test_a_session_that_had_a_prompt_of_its_own_since_the_resume_is_not_woken(crs, monkeypatch, tmp_path) -> None:
+    box = Box(crs, monkeypatch, tmp_path, channel=True)
+    box.s["prompts_at_resume"] = 3
+    box.prompts = 4
+    assert crs.wake(box.s) == "not woken: it had a prompt of its own"
+    assert box.mailed == [] and box.typed == []
+    box.prompts = 3
+    assert crs.wake(box.s) == "mailed"
 
 
 def test_no_wake_leaves_the_session_idle(crs, monkeypatch, tmp_path) -> None:
@@ -226,6 +249,9 @@ def test_the_wake_mail_carries_the_origin_note_and_marker_and_leaves_the_handoff
     monkeypatch.setattr(crs, "SENT_ASKS", {"sid-new-0000": "tid-handoff"})
     outcome, tid, marker = crs._mail_wake(s, "WAKE TEXT")
     assert (outcome, tid) == ("sent", "tid-wake") and marker is not None and marker.is_file()
+    # the footprint report removes every marker in MADE_MARKERS at the end of the run, before the woken session
+    # checks it (a live sandbox session found it gone and declined): the wake's marker expires by its own stamp
+    assert marker not in crs.MADE_MARKERS and marker.stat().st_mtime > time.time() + crs.WAKE_TTL - 60
     argv = sent[0]
     body = argv[argv.index("--body") + 1]
     assert body.startswith("This message comes from claude-restart-sessions") and body.endswith("WAKE TEXT")
@@ -255,6 +281,7 @@ def _restart_box(crs, monkeypatch, tmp_path) -> Path:
     monkeypatch.setattr(crs, "pane_state", lambda _p: None)
     monkeypatch.setattr(crs, "TO_WAKE", [])
     monkeypatch.setattr(crs, "_ps_args", lambda pid: f"/x/claude --channels {P} -n w --resume sid-1 #{pid}")
+    monkeypatch.setattr(crs, "prompt_count", lambda _sid: 2)
     monkeypatch.setattr(crs, "wake", lambda _r: pytest.fail("woken inside restart(): it waits for the loop"))
     return sessions_dir
 
@@ -275,6 +302,7 @@ def test_restart_queues_the_session_it_resumed_for_one_wake_after_the_loop(crs, 
     r = crs.TO_WAKE[0]
     assert r["pid"] == 999 and r["pane"] == "%1" and Path(r["file"]).name == "999.json"
     assert r["argv"].endswith("#999") and crs.has_channel(r)   # the RESUMED process's own line decides mail
+    assert r["prompts_at_resume"] == 2   # a prompt after this one means it is awake already
 
 
 def test_a_fresh_start_is_not_queued_for_a_wake(crs, monkeypatch, tmp_path) -> None:
@@ -311,6 +339,8 @@ def test_revive_wakes_each_session_it_resumed(crs, monkeypatch, tmp_path) -> Non
 
     monkeypatch.setattr(crs, "tmux", fake_tmux)
     monkeypatch.setattr(crs, "alive", lambda pid: pid == 42)
+    monkeypatch.setattr(crs, "_ps_args", lambda _pid: "")
+    monkeypatch.setattr(crs, "prompt_count", lambda _sid: 0)
     woken: list[dict] = []
     monkeypatch.setattr(crs, "wake", lambda r: woken.append(r) or "typed")
     a = argparse.Namespace(since=60, only=[], skip=[], flags="", dry_run=False, tmux_session="claude",
@@ -321,17 +351,14 @@ def test_revive_wakes_each_session_it_resumed(crs, monkeypatch, tmp_path) -> Non
 
 def test_the_typed_line_in_production_is_short(crs) -> None:
     # long send-keys text arrives truncated (only the last 50-65 characters, ask_line): the line points at a file
-    assert crs.WAKE_DIR == Path.home() / ".claude" / "restart-wake"
-    assert len("Read ~/.claude/restart-wake/rw-0123abcd.txt") < 50
+    assert crs.TMP == Path("/tmp") and len(f"Read {crs.TMP / 'rw-0123abcd.txt'}") < 30
 
 
-def test_a_typed_wake_file_lives_in_home_and_old_ones_are_pruned(crs, monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(("after", "kept"), [("idle", False), ("busy", True)])
+def test_the_typed_wake_file_is_removed_once_the_turn_ends(crs, monkeypatch, tmp_path, after, kept) -> None:
     box = Box(crs, monkeypatch, tmp_path, channel=False)
-    stale = tmp_path / "restart-wake" / "rw-deadbeef.txt"
-    stale.parent.mkdir()
-    stale.write_text("old", encoding="utf-8")
-    os.utime(stale, (time.time() - 2 * 86400,) * 2)
-    fresh = tmp_path / "restart-wake" / "rw-cafef00d.txt"
-    fresh.write_text("today", encoding="utf-8")
+    monkeypatch.setattr(crs, "WAKE_FILE_WAIT", 0)
     assert crs.wake(box.s) == "typed"
-    assert not stale.exists() and fresh.exists() and "board entry" in box.typed_text()
+    box.set_status(after)
+    crs.wake_resumed()
+    assert (tmp_path / "rw-sid-new.txt").exists() is kept and crs.WAKE_FILES == []

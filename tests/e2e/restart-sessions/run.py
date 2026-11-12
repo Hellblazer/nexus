@@ -1549,10 +1549,23 @@ def scenario_pane(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
                    for e in sb.events(str(was.get("sessionId")))):
             failures.append(f"{name}: no wake prompt ({WAKE_MARK!r}) in its resumed transcript")
         elif name in spec.channel:
-            # the mail is unattested: the session is told to check the script's marker first (origin_note)
-            checked = any("test -f" in json.dumps(e) and "restart-asks" in json.dumps(e)
-                          for e in sb.events(str(was.get("sessionId"))) if e.get("type") == "assistant")
-            notes.append(f"{name} {'ran' if checked else 'did NOT run'} the marker check on the mailed wake")
+            # The mail is unattested, so the session checks the script's marker first (origin_note) and acts only
+            # on `present`. A marker removed too early reads as forged mail: the session declines while the log
+            # says "woken by mail" (the 22:17 run, before the wake's marker was kept out of the footprint).
+            events = sb.events(str(was.get("sessionId")))
+            checks = {c.get("id") for e in events if e.get("type") == "assistant"
+                      for c in (e.get("message") or {}).get("content") or []
+                      if c.get("type") == "tool_use" and "test -f" in json.dumps(c.get("input"))
+                      and "restart-asks" in json.dumps(c.get("input"))}
+            printed = [json.dumps(c.get("content")) for e in events if e.get("type") == "user"
+                       for c in ((e.get("message") or {}).get("content") or [])
+                       if isinstance(c, dict) and c.get("type") == "tool_result" and c.get("tool_use_id") in checks]
+            if not checks:
+                failures.append(f"{name}: never ran the marker check on the mailed wake")
+            elif not any("present" in out for out in printed):
+                failures.append(f"{name}: the marker check on the mailed wake did not print present ({printed[:2]})")
+            else:
+                notes.append(f"{name}: the marker check on the mailed wake printed present")
         # A resume brings the transcript back: the session still knows the word it was told before the roll.
         reply = sb.prompt(name, "What is the project code word for this task? Reply with only the word.").upper()
         others = [w for n, w in spec.words.items() if n != name]
