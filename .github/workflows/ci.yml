@@ -2411,7 +2411,7 @@ jobs:
           tar -xJf "$txz" -C "$reloc"
           export NEXUS_PG_BUNDLE_ROOT="$reloc/$(basename "$bundle")"
           uv run pytest tests/db/test_pg_bundle_relocation.py \
-            -o addopts="" -m integration -q -rs --junit-xml=reloc.xml
+            -o addopts="" -m "integration and pg_bundle_artifact" -q -rs --junit-xml=reloc.xml
           # Reuse the CA-3 non-vacuity asserter (keys on the shared
           # "no CA-3 bundle" skip phrase + the CREATE EXTENSION core test).
           uv run python scripts/assert_ca3_ran.py reloc.xml test_create_extension_pg_background_runs_a_worker
@@ -2690,7 +2690,7 @@ jobs:
           tar -xJf "$txz" -C "$reloc"
           export NEXUS_PG_BUNDLE_ROOT="$reloc/$(basename "$bundle")"
           uv run pytest tests/db/test_pg_bundle_relocation.py \
-            -o addopts="" -m integration -q -rs --junit-xml=reloc.xml
+            -o addopts="" -m "integration and pg_bundle_artifact" -q -rs --junit-xml=reloc.xml
           uv run python scripts/assert_ca3_ran.py reloc.xml test_create_extension_pg_background_runs_a_worker
 
       - name: Upload bundle artifact (P3.1, consumed by P3.2/P3.4)
