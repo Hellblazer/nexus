@@ -2199,7 +2199,7 @@ class StorageServiceSupervisor:
         from nexus.db.pg_provision import SUPERUSER_PASS_KEY  # noqa: PLC0415 — deferred import
 
         if not pg_data and not self._creds.get(SUPERUSER_PASS_KEY):
-            _log.info("legacy_chash_guard_skipped", reason="no PG_DATA and no PG_SUPERUSER_PASS in pg_credentials: "
+            _log.info("legacy_chash_guard_skipped", reason="neither PG_DATA nor the superuser password in pg_credentials: "
                       "managed/BYO Postgres, or a bundled cluster whose credentials lost both")
             return
         self._guard_saw_no_changelog = None
