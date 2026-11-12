@@ -43,6 +43,7 @@ class _Engine:
         self.start_body: dict = {"job_id": "j1", "created": True}
         self.polls: list[tuple[int, dict]] = [(404, {"error": "no such constraint validate job"})]
         self.requests: list[tuple[str, str, dict | None]] = []
+        self.cancel: tuple[int, dict] = (404, {"error": "no such constraint validate job"})
 
 
 def _handler(engine: _Engine) -> type[BaseHTTPRequestHandler]:
@@ -76,6 +77,12 @@ def _handler(engine: _Engine) -> type[BaseHTTPRequestHandler]:
             if self.path == job.JOB_PATH:
                 return self._send(engine.start_status, engine.start_body)
             self._send(404, {"error": "not found"})
+
+        def do_DELETE(self) -> None:  # noqa: N802 — http.server's name
+            engine.requests.append(("DELETE", self.path, None))
+            if self.path.startswith(job.JOB_PATH + "/"):
+                return self._send(*engine.cancel)
+            self._send(405, {"error": "method not allowed"})
 
     return H
 
@@ -393,6 +400,119 @@ class TestVerbs:
         engine.polls = [(200, _done())]
         r = self._invoke("validate-chash-checks", "--json")
         assert r.exit_code == 0 and json.loads(r.stdout)["all_validated"] is True
+
+
+_CANCELLED_ERROR = ("the job was cancelled; a constraint already validated stays validated; a rerun resumes at the "
+                    "next one")
+
+
+def _cancelled(**over) -> dict:
+    """The end of a cancelled job, as engine 0.1.190's cancel route reports it (wren, 2026-11-12)."""
+    return _progress("failed", reason="cancelled", http_status=409, error=_CANCELLED_ERROR, stopping="cancelled",
+                     validated=["nexus.chunks_m1_t1"], validated_count=1) | over
+
+
+class TestCancel:
+    """The engine's DELETE on a job (Sam 2026-11-12, ask validate-cancel-gap: fix cancel first)."""
+
+    def test_a_running_job_is_cancelled_and_followed_to_its_end(self, client, engine) -> None:
+        engine.cancel = (202, _progress(stopping="cancelled"))
+        body = job.cancel(client, "j1")
+        assert body["stopping"] == "cancelled"
+        assert ("DELETE", f"{job.JOB_PATH}/j1", None) in engine.requests
+
+    def test_an_ended_job_comes_back_unchanged(self, client, engine) -> None:
+        engine.cancel = (200, _done())
+        assert job.cancel(client, "j1")["state"] == "done"
+
+    def test_an_unknown_job_is_lost(self, client, engine) -> None:
+        with pytest.raises(job.ValidateJobError, match="does not hold") as e:
+            job.cancel(client, "gone")
+        assert e.value.exit_code == 1
+
+    def test_an_engine_without_the_route_is_too_old(self, client, engine) -> None:
+        engine.cancel = (405, {"error": "method not allowed"})
+        with pytest.raises(job.CannotRun, match="cancel"):
+            job.cancel(client, "j1")
+
+    def test_a_tenant_token_asks_the_operator(self, client, engine) -> None:
+        engine.cancel = (403, {"error": "root token required"})
+        with pytest.raises(job.AskOperator):
+            job.cancel(client, "j1")
+
+    def test_a_cancelled_job_reads_as_cancelled_not_failed(self) -> None:
+        v = job.verdict(_cancelled())
+        assert not v.ok and "cancelled" in v.summary and "stays validated" in v.summary
+        assert "failed" not in v.summary
+
+    def test_progress_says_the_job_is_stopping(self) -> None:
+        assert "stopping (cancelled)" in job.progress_line(_progress(stopping="cancelled")).lower()
+        assert "stopping" not in job.progress_line(_progress()).lower()
+
+    def test_a_start_while_one_is_being_cancelled_says_wait_for_it(self, client, engine) -> None:
+        engine.start_status, engine.start_body = 409, {
+            "error": "the running validate job is being cancelled; poll it until it ends, then start again",
+            "reason": "cancelling", "job_id": "j0"}
+        with pytest.raises(job.ValidateJobError, match="being cancelled") as e:
+            job.start(client, dry_run=False)
+        assert "--job j0" in str(e.value) and "dry-run" not in str(e.value)
+
+    def test_a_dry_run_conflict_keeps_its_own_message(self, client, engine) -> None:
+        engine.start_status, engine.start_body = 409, {"error": "a job with dry_run=true is running", "job_id": "j0"}
+        with pytest.raises(job.ValidateJobError, match="other dry-run setting"):
+            job.start(client, dry_run=False)
+
+
+class TestCancelVerb:
+    @pytest.fixture(autouse=True)
+    def _use_fake(self, client, monkeypatch) -> None:
+        monkeypatch.setattr(chash_checks, "_client", lambda: client)
+        monkeypatch.setattr(client, "close", lambda: None)
+        monkeypatch.setattr(job, "POLL_EVERY_S", 0.0)
+
+    def _invoke(self, *args: str):
+        return CliRunner().invoke(main, ["t3", "validate-chash-checks", *args])
+
+    def test_cancel_waits_for_the_end_and_exits_0(self, engine) -> None:
+        engine.cancel = (202, _progress(stopping="cancelled"))
+        engine.polls = [(200, _progress(stopping="cancelled")), (200, _cancelled())]
+        r = self._invoke("--job", "j1", "--cancel")
+        assert r.exit_code == 0, r.output
+        assert "Cancelling validate job j1" in r.stdout and "cancelled" in r.stdout.splitlines()[-1]
+
+    def test_cancel_no_wait_returns_after_the_request(self, engine) -> None:
+        engine.cancel = (202, _progress(stopping="cancelled"))
+        r = self._invoke("--job", "j1", "--cancel", "--no-wait")
+        assert r.exit_code == 0, r.output
+        assert not [q for q in engine.requests if q[0] == "GET" and q[1].startswith(job.JOB_PATH + "/")]
+
+    def test_cancel_of_an_ended_job_reports_its_own_verdict(self, engine) -> None:
+        engine.cancel = (200, _done())
+        r = self._invoke("--job", "j1", "--cancel")
+        assert r.exit_code == 0 and "had already ended" in r.stdout and "every chash CHECK is validated" in r.stdout
+
+    def test_cancel_needs_a_job(self) -> None:
+        r = self._invoke("--cancel")
+        assert r.exit_code == 2 and "--job" in r.stderr
+
+    def test_cancel_takes_no_dry_run(self) -> None:
+        assert self._invoke("--job", "j1", "--cancel", "--dry-run").exit_code == 2
+
+    def test_cancel_on_an_old_engine_exits_3(self, engine) -> None:
+        engine.cancel = (405, {"error": "method not allowed"})
+        r = self._invoke("--job", "j1", "--cancel")
+        assert r.exit_code == 3 and "cancel" in r.stderr
+
+    def test_cancel_json_is_the_final_report(self, engine) -> None:
+        engine.cancel = (202, _progress(stopping="cancelled"))
+        engine.polls = [(200, _cancelled())]
+        r = self._invoke("--job", "j1", "--cancel", "--json")
+        assert r.exit_code == 0 and json.loads(r.stdout)["reason"] == "cancelled"
+
+    def test_following_a_job_someone_cancelled_exits_1(self, engine) -> None:
+        engine.polls = [(200, _cancelled())]
+        r = self._invoke("--job", "j1")
+        assert r.exit_code == 1 and "cancelled" in r.stdout
 
 
 class TestDoctorWiring:

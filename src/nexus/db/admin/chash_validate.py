@@ -14,6 +14,9 @@ Routes:
 - ``GET /v1/schema/chash-conformance`` (any token): read through ``HttpCatalogClient.chash_constraints_validated``.
 - ``POST /v1/admin/validate-constraints`` ``{dry_run}`` (root token only, flag ``chash_constraints_validate_job_supported``)
   answers ``{job_id, created}``; ``GET .../{job_id}`` reports progress and the result. A tenant token gets 403.
+- ``DELETE .../{job_id}`` (root only) cancels a running job: 202 with ``stopping: "cancelled"``, and the job then ends
+  ``failed`` with ``reason: "cancelled"``; an ended job answers 200 unchanged. A start while a cancelled job is still
+  ending is 409 ``reason: "cancelling"``. Read ``reason``, never the 409, which a start's own conflict also uses.
 
 No manifest repair verb: a boot changeset since engine 0.1.100 already deletes every non-32-byte manifest row, so a
 store that reaches 0.1.190 has none for a repair to work on (Sam, 2026-11-11). A refused CHECK is reported, with what
@@ -111,16 +114,21 @@ def _status_code(exc: httpx.HTTPStatusError) -> int:
     return exc.response.status_code if exc.response is not None else 0
 
 
-def _error_text(exc: httpx.HTTPStatusError) -> str:
+def _error_body(exc: httpx.HTTPStatusError) -> dict[str, Any]:
     try:
         body = exc.response.json()
     except Exception:  # noqa: BLE001 — a non-JSON error body: the status says enough
-        return ""
-    return str(body.get("error", "")) if isinstance(body, dict) else ""
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _error_text(exc: httpx.HTTPStatusError) -> str:
+    return str(_error_body(exc).get("error", ""))
 
 
 def poll_hint(job_id: str) -> str:
-    return f"the job may still be running on the engine; follow it with `nx t3 validate-chash-checks --job {job_id}`"
+    return (f"the job may still be running on the engine; follow it with `nx t3 validate-chash-checks --job {job_id}`, "
+            f"or cancel it with `nx t3 validate-chash-checks --job {job_id} --cancel`")
 
 
 def start(client: Any, *, dry_run: bool) -> dict[str, Any]:
@@ -133,6 +141,13 @@ def start(client: Any, *, dry_run: bool) -> dict[str, Any]:
         code = _status_code(exc)
         if code == 403:
             raise AskOperator(_ask_operator_text()) from exc
+        if code == 409 and _error_body(exc).get("reason") == "cancelling":
+            ending = _error_body(exc).get("job_id")
+            raise ValidateJobError(
+                "the running validate job is being cancelled; wait for it to end"
+                + (f" (follow it with `nx t3 validate-chash-checks --job {ending}`)" if ending else "")
+                + ", then run this again"
+            ) from exc
         if code == 409:
             raise ValidateJobError(
                 f"a validate job with the other dry-run setting is already running ({_error_text(exc)}); wait for it "
@@ -149,6 +164,34 @@ def start(client: Any, *, dry_run: bool) -> dict[str, Any]:
     if not isinstance(body, dict) or not isinstance(body.get("job_id"), str):
         raise ValidateJobError(f"the engine answered the start with no job id: {body!r}")
     return body
+
+
+def cancel(client: Any, job_id: str) -> dict[str, Any]:
+    """Ask the engine to cancel *job_id*. Returns the job's status: ``stopping == "cancelled"`` while it ends, or the
+    unchanged body of a job that had already ended. A CHECK already validated stays validated."""
+    try:
+        body = RefreshableHttpStoreMixin._delete(client, f"{JOB_PATH}/{job_id}", idempotent=True)
+    except httpx.HTTPStatusError as exc:
+        code = _status_code(exc)
+        if code == 404:
+            raise ValidateJobError(f"the engine does not hold job {job_id} (it ended long ago, expired, or the engine "
+                                   "restarted); nothing is running under that id") from exc
+        if code in (401, 403):
+            raise AskOperator(_ask_operator_text()) from exc
+        if code == 405:
+            raise CannotRun("this engine cannot cancel a validate job (it needs engine-service 0.1.190 or newer); "
+                            "stopping the engine stops the job safely, and a rerun resumes") from exc
+        raise ValidateJobError(f"the engine refused to cancel job {job_id} (HTTP {code}): {_error_text(exc)}") from exc
+    except Exception as exc:  # noqa: BLE001 — transport, or the client's re-resolve giving up (a RuntimeError)
+        raise ValidateJobError(f"could not reach the engine to cancel job {job_id} ({exc}); check it with "
+                               "`nx doctor`") from exc
+    if not isinstance(body, dict) or "state" not in body:
+        raise ValidateJobError(f"the engine answered the cancel of job {job_id} with no state: {body!r}")
+    return body
+
+
+def was_cancelled(body: dict[str, Any]) -> bool:
+    return body.get("state") == "failed" and body.get("reason") == "cancelled"
 
 
 class _Transient(Exception):
@@ -186,7 +229,8 @@ def progress_line(body: dict[str, Any], *, elapsed_s: float | None = None) -> st
         size = current.get("bytes")
         where = f", on {current.get('table')}" + (f" ({int(size) / 1e9:.1f} GB)" if isinstance(size, int) else "")
     since = f" [{int(elapsed_s // 60)} min]" if elapsed_s is not None and elapsed_s >= 60 else ""
-    return f"Validating the chash CHECKs: {done} of {total} tables{where}.{since}"
+    stopping = f" Stopping ({body['stopping']})." if body.get("stopping") else ""
+    return f"Validating the chash CHECKs: {done} of {total} tables{where}.{stopping}{since}"
 
 
 def wait(
@@ -320,6 +364,10 @@ def _count(value: Any, listed: int) -> int:
 
 def verdict(body: dict[str, Any]) -> Verdict:
     """Read a finished job by its entries' reasons; ``done`` alone means nothing."""
+    if was_cancelled(body):
+        n = body.get("validated_count", len(body.get("validated") or []))
+        return Verdict(False, f"the validate job was cancelled after validating {n} CHECK(s); a CHECK already "
+                              "validated stays validated, and a rerun resumes at the next one")
     if body.get("state") == "failed":
         return Verdict(False, f"the validate job failed: {body.get('error') or body.get('reason') or 'no reason given'}"
                               "; run this again")

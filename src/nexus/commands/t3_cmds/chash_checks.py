@@ -4,12 +4,12 @@
 The engine validates the chash width CHECKs on ``nexus.chunks`` and ``nexus.catalog_document_chunks`` only when a user
 starts its job (engine 0.1.190; Sam 2026-11-11: never at boot). ``validate-chash-checks`` starts it and polls it to the
 end, or follows a job already started (``--job``). Stopping this command does not stop the job: it keeps running on the
-engine. Stopping the engine stops it safely: a CHECK it validated stays valid, and the next run skips it. It needs the
-engine's root credentials, so on a managed install the operator runs it.
+engine. ``--job ID --cancel`` cancels it (Sam 2026-11-12): a CHECK it validated stays valid, and the next run skips it.
+It needs the engine's root credentials, so on a managed install the operator runs it.
 
-Exit codes: 0 every CHECK validated (a dry run: nothing would be refused or deferred); 1 a CHECK refused or deferred,
-the job failed or was lost, or the engine could not be reached (run it again); 2 usage; 3 this engine or these
-credentials cannot run it.
+Exit codes: 0 every CHECK validated (a dry run: nothing would be refused or deferred), or ``--cancel`` saw the job end
+cancelled; 1 a CHECK refused or deferred, the job failed, was cancelled (when not asked here) or was lost, or the
+engine could not be reached (run it again); 2 usage; 3 this engine or these credentials cannot run it.
 """
 
 from __future__ import annotations
@@ -44,15 +44,34 @@ def _fail(message: str, code: int) -> NoReturn:
               help="Report what each CHECK would do (validate, refuse, defer) and change nothing.")
 @click.option("--job", "job_id", default=None, metavar="ID", help="Follow a job already started instead of starting one.")
 @click.option("--no-wait", "no_wait", is_flag=True, default=False, help="Start the job, print its id and return.")
+@click.option("--cancel", "cancel", is_flag=True, default=False,
+              help="With --job: cancel that job and wait for it to end. A CHECK it validated stays valid.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the job's report as one JSON document.")
-def validate_chash_checks_cmd(dry_run: bool, job_id: str | None, no_wait: bool, as_json: bool) -> None:
+def validate_chash_checks_cmd(dry_run: bool, job_id: str | None, no_wait: bool, cancel: bool, as_json: bool) -> None:
     """Validate the chash width CHECKs: start the engine's job and wait for its verdict."""
-    if job_id and (dry_run or no_wait):
+    if cancel and (not job_id or dry_run):
+        _fail("--cancel needs --job ID (the id `validate-chash-checks` printed) and takes no --dry-run", EXIT_USAGE)
+    if job_id and not cancel and (dry_run or no_wait):
         _fail("--job follows a job already started: --dry-run and --no-wait do not apply to it", EXIT_USAGE)
     client = _client()
     try:
         try:
-            if job_id is None:
+            if cancel:
+                answered = job.cancel(client, str(job_id))
+                if answered.get("state") != "running":
+                    if not as_json:
+                        click.echo(f"Validate job {job_id} had already ended; nothing to cancel.")
+                    body = answered
+                elif no_wait:
+                    click.echo(json.dumps(answered) if as_json else
+                               f"Cancelling validate job {job_id}. Follow it to its end with: "
+                               f"nx t3 validate-chash-checks --job {job_id}")
+                    return
+                else:
+                    if not as_json:
+                        click.echo(f"Cancelling validate job {job_id}; waiting for it to end.")
+                    body = job.wait(client, str(job_id), on_progress=None if as_json else click.echo)
+            elif job_id is None:
                 started = job.start(client, dry_run=dry_run)
                 job_id = started["job_id"]
                 if no_wait:
@@ -63,8 +82,10 @@ def validate_chash_checks_cmd(dry_run: bool, job_id: str | None, no_wait: bool, 
                 if not as_json:
                     click.echo(f"Validate job {job_id} {'started' if started.get('created') else 'already running'}"
                                f"{' (dry run)' if dry_run else ''}. Stopping this command leaves it running; "
-                               f"follow it with `nx t3 validate-chash-checks --job {job_id}`.")
-            body = job.wait(client, job_id, on_progress=None if as_json else click.echo)
+                               f"follow it with `nx t3 validate-chash-checks --job {job_id}`, or cancel it with "
+                               f"`--job {job_id} --cancel`.")
+            if not cancel:
+                body = job.wait(client, str(job_id), on_progress=None if as_json else click.echo)
         except job.ValidateJobError as exc:
             _fail(str(exc), exc.exit_code)
         except KeyboardInterrupt:
@@ -78,7 +99,8 @@ def validate_chash_checks_cmd(dry_run: bool, job_id: str | None, no_wait: bool, 
         for line in verdict.lines:
             click.echo(f"  {line}")
         click.echo(verdict.summary)
-    raise SystemExit(EXIT_OK if verdict.ok else EXIT_NOT_VALID)
+    asked_and_done = cancel and job.was_cancelled(body)
+    raise SystemExit(EXIT_OK if verdict.ok or asked_and_done else EXIT_NOT_VALID)
 
 
 def doctor_chash_fix(*, dry_run: bool) -> bool:
