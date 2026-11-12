@@ -89,20 +89,27 @@ public final class TenantExport {
      * @param reassignedId      the primary-key column a restore gives new values from the table's own
      *                          sequence (a global serial or identity key), or {@code null}
      * @param references        every column that holds another table's key, foreign key or not
-     * @param triggers          every non-internal trigger on the table, by name
+     * @param triggers          every non-internal trigger on the table: name to its firing, the timing,
+     *                          events and level as {@code pg_get_triggerdef} prints them ({@code BEFORE
+     *                          UPDATE FOR EACH ROW}), so a trigger that starts firing on insert fails
+     *                          the parity test even when its name is kept
+     * @param loadsAfter        registered tables this one must load after with no reference to them: a
+     *                          trigger on this table reads or writes them during the load
      * @param triggerMaintained columns a trigger rewrites, which a restore's verification skips
      * @param notReferences     id-shaped columns (bigint, bigint[], jsonb: every reassigned id is a
-     *                          bigint) that hold no other row's key; with {@code reassignedId} and {@code references} this
-     *                          classifies every such column (RDR-248 gate S1, census half)
+     *                          bigint) that hold no other row's key; with {@code reassignedId} and
+     *                          {@code references} this classifies every such column (RDR-248 gate S1,
+     *                          census half)
      */
     public record ExportTable(String schema, String table, ExportClass exportClass, String reason,
                               List<Column> primaryKey, String reassignedId, List<Reference> references,
-                              Set<String> triggers, Set<String> triggerMaintained,
-                              Set<String> notReferences) {
+                              Map<String, String> triggers, Set<String> loadsAfter,
+                              Set<String> triggerMaintained, Set<String> notReferences) {
         public ExportTable {
             primaryKey = List.copyOf(primaryKey);
             references = List.copyOf(references);
-            triggers = Set.copyOf(triggers);
+            triggers = Map.copyOf(triggers);
+            loadsAfter = Set.copyOf(loadsAfter);
             triggerMaintained = Set.copyOf(triggerMaintained);
             notReferences = Set.copyOf(notReferences);
             if ((exportClass == ExportClass.EXCLUDED) == (reason == null || reason.isBlank())) {
@@ -117,6 +124,18 @@ public final class TenantExport {
 
         public boolean exported() {
             return exportClass != ExportClass.EXCLUDED;
+        }
+
+        /**
+         * References from this table to itself ({@code topics.parent_id}, a non-deferrable foreign key).
+         * Table load order says nothing about them. Postgres checks such a key at the end of each
+         * statement, so one {@code INSERT ... SELECT} of the whole table satisfies it in any row order; a
+         * load that splits the table over several statements must put parents first, and id order does
+         * not do that (taxonomy-004 can leave a child with a lower id than its parent). The Phase 2
+         * design (nexus-csayy.5) owns the import's statement shape.
+         */
+        public List<Reference> selfReferences() {
+            return references.stream().filter(r -> r.parentName().equals(name())).toList();
         }
 
         /** Every column this entry names, for the check that each still exists. */
@@ -145,7 +164,8 @@ public final class TenantExport {
         private final List<Column> pk = new ArrayList<>();
         private String reassigned;
         private final List<Reference> refs = new ArrayList<>();
-        private final Set<String> triggers = new LinkedHashSet<>();
+        private final Map<String, String> triggers = new java.util.LinkedHashMap<>();
+        private final Set<String> loadsAfter = new LinkedHashSet<>();
         private final Set<String> maintained = new LinkedHashSet<>();
         private final Set<String> notRefs = new LinkedHashSet<>();
 
@@ -178,8 +198,13 @@ public final class TenantExport {
             return ref(Reference.fk(List.of(columns.split(",")), parent, List.of(parentColumns.split(","))));
         }
 
-        Entry triggers(String... names) {
-            triggers.addAll(List.of(names));
+        Entry trigger(String name, String firing) {
+            triggers.put(name, firing);
+            return this;
+        }
+
+        Entry loadsAfter(String... tables) {
+            loadsAfter.addAll(List.of(tables));
             return this;
         }
 
@@ -195,7 +220,7 @@ public final class TenantExport {
 
         ExportTable build() {
             return new ExportTable(schema, table, exportClass, reason, pk, reassigned, refs, triggers,
-                maintained, notRefs);
+                loadsAfter, maintained, notRefs);
         }
     }
 
@@ -231,117 +256,173 @@ public final class TenantExport {
     public static final List<ExportTable> TABLES = List.of(
         // ── catalog ──
         data("catalog_owners").pk("tenant_id text", "tumbler_prefix text")
-            .notRefs("next_seq").build(),
+            .notRefs("next_seq")
+            .build(),
         data("catalog_collections").pk("tenant_id text", "name text")
             .ref(new Reference(List.of("embedding_model"), "nexus", "embedding_models",
                 List.of("embedding_model"), true, false, null))
             // catalog-044: owner_id is recomputed from the collection's documents on insert, and again
             // when documents load (catalog_documents_owner_to_collection).
-            .triggers("catalog_collections_owner_from_docs").maintained("owner_id").build(),
+            .trigger("catalog_collections_owner_from_docs",
+                "BEFORE INSERT OR UPDATE OF owner_id, content_type FOR EACH ROW")
+            .maintained("owner_id")
+            .build(),
         data("embedding_profile").pk("tenant_id text", "content_type text")
             .ref(new Reference(List.of("embedding_model"), "nexus", "embedding_models",
                 List.of("embedding_model"), true, false, null)).build(),
         data("catalog_documents").pk("tenant_id text", "tumbler text")
-            .triggers("catalog_documents_owner_to_collection").notRefs("metadata").build(),
-        data("catalog_meta").pk("tenant_id text", "key text").build(),
-        data("catalog_sensitivity_changes").pk("id bigint").reassigned("id").build(),
+            // catalog-044's owner trigger reads catalog_owners and rewrites catalog_collections.owner_id.
+            .trigger("catalog_documents_owner_to_collection",
+                "AFTER INSERT OR UPDATE OF physical_collection, deleted_at FOR EACH ROW")
+            .loadsAfter("catalog_owners", "catalog_collections")
+            .notRefs("metadata")
+            .build(),
+        data("catalog_meta").pk("tenant_id text", "key text")
+            .build(),
+        data("catalog_sensitivity_changes").pk("id bigint").reassigned("id")
+            .build(),
         data("chunks").pk("tenant_id text", "collection text", "chash bytea", "embedding_model text")
             .fk(COLLECTION_KEY, "catalog_collections", "tenant_id,name,embedding_model")
-            .notRefs("metadata").build(),
+            .notRefs("metadata")
+            .build(),
         data("catalog_document_chunks").pk("tenant_id text", "doc_id text", "position integer")
             .fk("tenant_id,doc_id", "catalog_documents", "tenant_id,tumbler")
             .fk(CHUNK_KEY, "chunks", CHUNK_KEY)
             // The stamp triggers fire on delete and update only; the chunk_index default fires only when
             // the inserted value is null, which an exported row never is.
-            .triggers("trg_catalog_chunks_stamp_on_delete", "trg_catalog_chunks_stamp_on_update",
-                "trg_catalog_document_chunks_chunk_index_default").build(),
+            .trigger("trg_catalog_chunks_stamp_on_delete", "AFTER DELETE FOR EACH STATEMENT")
+            .trigger("trg_catalog_chunks_stamp_on_update", "AFTER UPDATE FOR EACH STATEMENT")
+            .trigger("trg_catalog_document_chunks_chunk_index_default", "BEFORE INSERT FOR EACH ROW")
+            .build(),
         derived("chunk_orphaned_at").pk("tenant_id text", "collection text", "chash bytea")
             .fk(CHUNK_KEY, "chunks", CHUNK_KEY).build(),
         data("catalog_links").pk("tenant_id text", "id bigint").reassigned("id")
             .fk("tenant_id,from_tumbler", "catalog_documents", "tenant_id,tumbler")
             .fk("tenant_id,to_tumbler", "catalog_documents", "tenant_id,tumbler")
-            .notRefs("metadata").build(),
+            .notRefs("metadata")
+            .build(),
         data("document_aspects").pk("id bigint").reassigned("id")
             .fk("tenant_id,collection", "catalog_collections", "tenant_id,name")
             .fk("tenant_id,doc_id", "catalog_documents", "tenant_id,tumbler")
             // BEFORE UPDATE only: a load inserts, so updated_at keeps the exported value.
-            .triggers("trg_document_aspects_updated_at").notRefs("extras", "salient_sentences").build(),
+            .trigger("trg_document_aspects_updated_at", "BEFORE UPDATE FOR EACH ROW")
+            .notRefs("extras", "salient_sentences")
+            .build(),
         data("document_highlights").pk("id bigint").reassigned("id")
             .fk("tenant_id,collection", "catalog_collections", "tenant_id,name")
-            .fk("tenant_id,doc_id", "catalog_documents", "tenant_id,tumbler").build(),
+            .fk("tenant_id,doc_id", "catalog_documents", "tenant_id,tumbler")
+            .build(),
         // ── T2 ──
-        data("memory").pk("id bigint").reassigned("id").build(),
+        data("memory").pk("id bigint").reassigned("id")
+            .build(),
         data("memory_summaries").pk("id bigint").reassigned("id")
             .ref(Reference.softArray("source_ids", "memory", "id")).build(),
-        data("plans").pk("id bigint").reassigned("id").notRefs("plan_json", "default_bindings").build(),
+        data("plans").pk("id bigint").reassigned("id")
+            .notRefs("plan_json", "default_bindings")
+            .build(),
         derived("nx_answer_runs").pk("id bigint").reassigned("id")
             .ref(Reference.soft("plan_id", "plans", "id"))
             .ref(Reference.softJson("run_summary", "run.plan_id", "plans", "id"))
-            .notRefs("duration_ms").build(),
+            .notRefs("duration_ms")
+            .build(),
         derived("nx_answer_steps").pk("run_id bigint", "step_index integer")
-            .fk("run_id", "nx_answer_runs", "id").build(),
+            .fk("run_id", "nx_answer_runs", "id")
+            .build(),
         // ── taxonomy ──
         data("topics").pk("id bigint").reassigned("id")
             .fk("tenant_id,parent_id", "topics", "tenant_id,id")
             .fk("tenant_id,collection", "catalog_collections", "tenant_id,name")
             // doc_count is kept by topic_assignments' triggers, and that update restamps updated_at.
-            .triggers("trg_topics_updated_at").maintained("updated_at", "doc_count").build(),
+            .trigger("trg_topics_updated_at", "BEFORE UPDATE FOR EACH ROW")
+            .maintained("updated_at", "doc_count")
+            .build(),
         data("topic_assignments").pk("tenant_id text", "doc_id bytea", "topic_id bigint")
             .fk("tenant_id,topic_id", "topics", "tenant_id,id")
             .fk("tenant_id,source_collection,doc_id,embedding_model", "chunks", CHUNK_KEY)
             .fk("tenant_id,source_collection", "catalog_collections", "tenant_id,name")
-            .triggers("trg_topic_assignments_doc_count_del", "trg_topic_assignments_doc_count_ins").build(),
+            .trigger("trg_topic_assignments_doc_count_del", "AFTER DELETE FOR EACH STATEMENT")
+            .trigger("trg_topic_assignments_doc_count_ins", "AFTER INSERT FOR EACH STATEMENT")
+            .build(),
         data("topic_links").pk("tenant_id text", "from_topic_id bigint", "to_topic_id bigint")
             .fk("tenant_id,from_topic_id", "topics", "tenant_id,id")
             .fk("tenant_id,to_topic_id", "topics", "tenant_id,id")
-            .notRefs("link_types").build(),
+            .notRefs("link_types")
+            .build(),
         data("taxonomy_meta").pk("tenant_id text", "collection text")
-            .fk("tenant_id,collection", "catalog_collections", "tenant_id,name").build(),
+            .fk("tenant_id,collection", "catalog_collections", "tenant_id,name")
+            .build(),
         derived("taxonomy_centroids")
             .pk("tenant_id text", "collection text", "topic_id bigint", "embedding_model text")
             .ref(Reference.soft("topic_id", "topics", "id")).build(),
         // ── telemetry and consent ──
-        derived("frecency").pk("tenant_id text", "chunk_id text").build(),
+        derived("frecency").pk("tenant_id text", "chunk_id text")
+            .build(),
         derived("search_telemetry")
-            .pk("tenant_id text", "ts timestamp with time zone", "query_hash text", "collection text").build(),
-        derived("relevance_log").pk("id bigint").reassigned("id").build(),
-        data("claude_assisted_remediation_consents").pk("id bigint").reassigned("id").build(),
+            .pk("tenant_id text", "ts timestamp with time zone", "query_hash text", "collection text")
+            .build(),
+        derived("relevance_log").pk("id bigint").reassigned("id")
+            .build(),
+        data("claude_assisted_remediation_consents").pk("id bigint").reassigned("id")
+            .build(),
         // ── excluded ──
         excluded("pdf_pipeline", IN_FLIGHT).pk("tenant_id text", "pipeline_id bigint")
-            .reassigned("pipeline_id").build(),
+            .reassigned("pipeline_id")
+            .build(),
         excluded("pdf_pages", IN_FLIGHT).pk("tenant_id text", "pipeline_id bigint", "page_index integer")
-            .fk("tenant_id,pipeline_id", "pdf_pipeline", "tenant_id,pipeline_id").build(),
+            .fk("tenant_id,pipeline_id", "pdf_pipeline", "tenant_id,pipeline_id")
+            .build(),
         excluded("pdf_chunks", IN_FLIGHT).pk("tenant_id text", "pipeline_id bigint", "chunk_index integer")
-            .fk("tenant_id,pipeline_id", "pdf_pipeline", "tenant_id,pipeline_id").build(),
-        excluded("reembed_jobs", IN_FLIGHT).pk("tenant_id text", "job_id uuid").build(),
+            .fk("tenant_id,pipeline_id", "pdf_pipeline", "tenant_id,pipeline_id")
+            .build(),
+        excluded("reembed_jobs", IN_FLIGHT).pk("tenant_id text", "job_id uuid")
+            .build(),
         excluded("reembed_job_moves", IN_FLIGHT).pk("tenant_id text", "job_id uuid", "doc_id text")
-            .fk("tenant_id,job_id", "reembed_jobs", "tenant_id,job_id").build(),
-        excluded("tuples", COORDINATION).pk("id bytea").build(),
+            .fk("tenant_id,job_id", "reembed_jobs", "tenant_id,job_id")
+            .build(),
+        excluded("tuples", COORDINATION).pk("id bytea")
+            .build(),
         excluded("tuple_claim_log", COORDINATION).pk("log_id bigint").reassigned("log_id")
-            .fk("tuple_id", "tuples", "id").build(),
+            .fk("tuple_id", "tuples", "id")
+            .build(),
         excluded("tuple_deliveries", COORDINATION)
             .pk("tenant_id text", "subspace text", "subscriber text", "tuple_id bytea")
-            .fk("tuple_id", "tuples", "id").build(),
-        excluded("t1", "scratch", "session scratch: it lives for one session").pk("id text").build(),
-        excluded("agent_dispatches", OPERATIONAL).pk("id bigint").reassigned("id").build(),
-        excluded("aspect_promotion_log", OPERATIONAL).pk("id bigint").reassigned("id").build(),
+            .fk("tuple_id", "tuples", "id")
+            .build(),
+        excluded("t1", "scratch", "session scratch: it lives for one session").pk("id text")
+            .build(),
+        excluded("agent_dispatches", OPERATIONAL).pk("id bigint").reassigned("id")
+            .build(),
+        excluded("aspect_promotion_log", OPERATIONAL).pk("id bigint").reassigned("id")
+            .build(),
         excluded("canary_query_ring", OPERATIONAL)
             .pk("tenant_id text", "collection text", "vector_digest bytea")
-            .fk(COLLECTION_KEY, "catalog_collections", "tenant_id,name,embedding_model").build(),
-        excluded("capability_census", OPERATIONAL).pk("tenant_id text", "session_id text").build(),
-        excluded("catalog_reconcile_runs", OPERATIONAL).pk("tenant_id text", "run_id text").build(),
+            .fk(COLLECTION_KEY, "catalog_collections", "tenant_id,name,embedding_model")
+            .build(),
+        excluded("capability_census", OPERATIONAL).pk("tenant_id text", "session_id text")
+            .build(),
+        excluded("catalog_reconcile_runs", OPERATIONAL).pk("tenant_id text", "run_id text")
+            .build(),
         excluded("catalog_reconcile_rows", OPERATIONAL)
-            .pk("tenant_id text", "run_id text", "file_path text").build(),
+            .pk("tenant_id text", "run_id text", "file_path text")
+            .build(),
         excluded("chash_remap", OPERATIONAL)
-            .pk("tenant_id text", "source_collection text", "old_id text").build(),
-        excluded("gc_audit", OPERATIONAL).pk("id bigint").reassigned("id").build(),
-        excluded("hook_failures", OPERATIONAL).pk("id bigint").reassigned("id").build(),
-        excluded("index_failures", OPERATIONAL).pk("id bigint").reassigned("id").build(),
-        excluded("ladder_completions", OPERATIONAL).pk("tenant_id text", "rung_name text").build(),
+            .pk("tenant_id text", "source_collection text", "old_id text")
+            .build(),
+        excluded("gc_audit", OPERATIONAL).pk("id bigint").reassigned("id")
+            .build(),
+        excluded("hook_failures", OPERATIONAL).pk("id bigint").reassigned("id")
+            .build(),
+        excluded("index_failures", OPERATIONAL).pk("id bigint").reassigned("id")
+            .build(),
+        excluded("ladder_completions", OPERATIONAL).pk("tenant_id text", "rung_name text")
+            .build(),
         excluded("request_ledger", OPERATIONAL).pk("tenant_id text", "request_id uuid")
-            .triggers("trg_request_ledger_register_tenant").build(),
-        excluded("retention_markers", OPERATIONAL).pk("tenant_id text", "relation text").build(),
-        excluded("routing_events", OPERATIONAL).pk("id bigint").reassigned("id").build(),
+            .trigger("trg_request_ledger_register_tenant", "BEFORE INSERT FOR EACH ROW")
+            .build(),
+        excluded("retention_markers", OPERATIONAL).pk("tenant_id text", "relation text")
+            .build(),
+        excluded("routing_events", OPERATIONAL).pk("id bigint").reassigned("id")
+            .build(),
         excluded("tier_writes", OPERATIONAL).pk("id bigint").reassigned("id").build());
 
     private static final Map<String, ExportTable> BY_NAME = index(TABLES);
@@ -358,6 +439,7 @@ public final class TenantExport {
 
     /** The entry for {@code name}, any class. */
     public static Optional<ExportTable> entry(String name) {
+        if (name == null || name.isBlank()) return Optional.empty();
         return Optional.ofNullable(BY_NAME.get(name));
     }
 
@@ -371,8 +453,8 @@ public final class TenantExport {
 
     /**
      * Load-order violations in {@code tables}: one line per reference whose parent is a registered table
-     * that does not come before the child. A table's reference to itself ({@code topics.parent_id}) is not
-     * an ordering edge; the restore builds the table's id map before it inserts any row.
+     * that does not come before the child. A table's reference to itself ({@code topics.parent_id}) orders
+     * rows within the table, not tables, so it is not an edge here; see {@link ExportTable#selfReferences}.
      */
     public static List<String> loadOrderViolations(List<ExportTable> tables) {
         Map<String, Integer> position = new HashMap<>();
@@ -382,10 +464,17 @@ public final class TenantExport {
             ExportTable child = tables.get(i);
             for (Reference r : child.references()) {
                 Integer parent = position.get(r.parentName());
-                if (parent == null || r.parentName().equals(child.name())) continue;
+                if (parent == null) continue;
                 if (parent > i) {
                     violations.add(child.name() + "." + String.join(",", r.columns()) + " refers to "
                         + r.parentName() + ", which loads after it");
+                }
+            }
+            for (String before : child.loadsAfter()) {
+                Integer p = position.get(before);
+                if (p == null || p > i) {
+                    violations.add(child.name() + " must load after " + before
+                        + (p == null ? ", which is not registered" : ", which loads after it"));
                 }
             }
         }

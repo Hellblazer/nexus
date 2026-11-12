@@ -41,8 +41,8 @@ class TenantExportRegistryParityTest {
 
     /**
      * Column types the id census covers (gate S1): a reassigned id can hide in any of them. Every reassigned
-     * id is a bigint today; {@link #everyReassignedIdIsACensusType} fails if one is not, so the census widens
-     * with the ids it hunts.
+     * id is a bigint today; {@link #reassignedIdMismatches} fails if one is not, so the census widens with
+     * the ids it hunts.
      */
     static final Set<String> ID_SHAPED_TYPES = Set.of("bigint", "bigint[]", "jsonb");
 
@@ -61,7 +61,7 @@ class TenantExportRegistryParityTest {
     }
 
     record LiveTable(String name, Map<String, LiveColumn> columns, List<String> primaryKey,
-                     List<LiveFk> foreignKeys, Set<String> triggers) {
+                     List<LiveFk> foreignKeys, Map<String, String> triggers) {
     }
 
     PostgreSQLContainer<?> pg;
@@ -170,13 +170,15 @@ class TenantExportRegistryParityTest {
 
         Field<Long> tgrelid = f("t", "tgrelid", Long.class);
         Field<String> tgname = f("t", "tgname", String.class);
-        Map<Long, Set<String>> triggers = new HashMap<>();
-        for (Record r : ctx.select(tgrelid, tgname)
+        Field<String> tgdef = DSL.function("pg_get_triggerdef", String.class, f("t", "oid", Long.class));
+        Map<Long, Map<String, String>> triggers = new HashMap<>();
+        for (Record r : ctx.select(tgrelid, tgname, tgdef)
                 .from(DSL.table(DSL.name("pg_trigger")).as("t"))
                 .where(tgrelid.in(rlsParents))
                 .and(f("t", "tgisinternal", Boolean.class).isFalse())
                 .fetch()) {
-            triggers.computeIfAbsent(r.get(tgrelid), k -> new TreeSet<>()).add(r.get(tgname));
+            triggers.computeIfAbsent(r.get(tgrelid), k -> new TreeMap<>())
+                .put(r.get(tgname), firing(r.get(tgdef)));
         }
 
         Map<String, LiveTable> out = new TreeMap<>();
@@ -184,7 +186,7 @@ class TenantExportRegistryParityTest {
             Map<String, LiveColumn> cols = new LinkedHashMap<>();
             columnsByNum.getOrDefault(t, Map.of()).values().forEach(c -> cols.put(c.name(), c));
             out.put(nameOf.get(t), new LiveTable(nameOf.get(t), cols, pk.getOrDefault(t, List.of()),
-                fks.getOrDefault(t, List.of()), triggers.getOrDefault(t, Set.of())));
+                fks.getOrDefault(t, List.of()), triggers.getOrDefault(t, Map.of())));
         }
         return out;
     }
@@ -200,6 +202,16 @@ class TenantExportRegistryParityTest {
             .fetch()
             .forEach(r -> m.put(r.get(attnum), r.get(attname)));
         return m;
+    }
+
+    private static final java.util.regex.Pattern TRIGGER_DEF = java.util.regex.Pattern.compile(
+        "^CREATE (?:CONSTRAINT )?TRIGGER \\S+ (.+?) ON \\S+ .*?(FOR EACH (?:ROW|STATEMENT))");
+
+    /** {@code BEFORE INSERT OR UPDATE OF owner_id FOR EACH ROW} from a {@code pg_get_triggerdef} text. */
+    static String firing(String def) {
+        java.util.regex.Matcher m = TRIGGER_DEF.matcher(def);
+        if (!m.find()) throw new IllegalStateException("unparsed trigger definition: " + def);
+        return m.group(1) + " " + m.group(2);
     }
 
     private static String blankToNull(String s) {
@@ -269,6 +281,12 @@ class TenantExportRegistryParityTest {
                 if (t.columns().get(c).serial()) serials.add(c);
             }
             String serial = serials.isEmpty() ? null : serials.get(0);
+            t.columns().values().forEach(c -> {
+                if (c.serial() && !t.primaryKey().contains(c.name())) {
+                    wrong.add(name + "." + c.name() + ": a serial column outside the primary key; decide whether "
+                        + "a restore reassigns it before classing it");
+                }
+            });
             if (serials.size() > 1) {
                 wrong.add(name + ": more than one serial key column " + serials);
             } else if (!java.util.Objects.equals(serial, e.reassignedId())) {
@@ -312,12 +330,13 @@ class TenantExportRegistryParityTest {
                 if (!parent.columns().containsKey(c)) wrong.add(e.name() + ": " + r.parentName() + "." + c);
             });
             LiveTable own = live.get(e.name());
-            if (own != null && r.jsonPath() != null
-                    && !"jsonb".equals(own.columns().get(r.columns().get(0)).type())) {
-                wrong.add(e.name() + "." + r.columns().get(0) + ": a JSON path on a column that is not jsonb");
+            LiveColumn col = own == null ? null : own.columns().get(r.columns().get(0));
+            if (col == null) return; // a gone column is goneColumns' finding
+            if (r.jsonPath() != null && !"jsonb".equals(col.type())) {
+                wrong.add(e.name() + "." + col.name() + ": a JSON path on a column that is not jsonb");
             }
-            if (own != null && r.array() && !own.columns().get(r.columns().get(0)).type().endsWith("[]")) {
-                wrong.add(e.name() + "." + r.columns().get(0) + ": an array reference on a column that is not an array");
+            if (r.array() && !col.type().endsWith("[]")) {
+                wrong.add(e.name() + "." + col.name() + ": an array reference on a column that is not an array");
             }
         }));
         return wrong;
@@ -340,8 +359,8 @@ class TenantExportRegistryParityTest {
         byName(tables).forEach((name, e) -> {
             LiveTable t = live.get(name);
             if (t == null) return;
-            if (!new TreeSet<>(t.triggers()).equals(new TreeSet<>(e.triggers()))) {
-                wrong.add(name + ": live " + t.triggers() + ", entry " + new TreeSet<>(e.triggers()));
+            if (!new TreeMap<>(t.triggers()).equals(new TreeMap<>(e.triggers()))) {
+                wrong.add(name + ": live " + new TreeMap<>(t.triggers()) + ", entry " + new TreeMap<>(e.triggers()));
             }
         });
         return wrong;
@@ -364,6 +383,39 @@ class TenantExportRegistryParityTest {
         return unclassified;
     }
 
+    /** An exported table refers only to exported tables (or global ones): otherwise its rows cannot load. */
+    static List<String> referencesOutsideTheExport(List<ExportTable> tables) {
+        Map<String, ExportTable> reg = byName(tables);
+        List<String> wrong = new ArrayList<>();
+        tables.forEach(e -> {
+            if (!e.exported()) return;
+            e.references().forEach(r -> {
+                ExportTable parent = reg.get(r.parentName());
+                if (parent != null && !parent.exported()) {
+                    wrong.add(e.name() + " refers to excluded " + parent.name());
+                }
+                if (parent != null && e.exportClass() == TenantExport.ExportClass.DATA
+                        && parent.exportClass() == TenantExport.ExportClass.DERIVED) {
+                    // RDR-248 gate N2 may skip derived tables on a schema mismatch; data must stand alone.
+                    wrong.add("data " + e.name() + " refers to derived " + parent.name());
+                }
+            });
+        });
+        return wrong;
+    }
+
+    /** Every exported table carries {@code tenant_id text}: the export pages by it and the restore rewrites it. */
+    static List<String> exportedWithoutTenantColumn(Map<String, LiveTable> live, List<ExportTable> tables) {
+        List<String> wrong = new ArrayList<>();
+        tables.forEach(e -> {
+            LiveTable t = live.get(e.name());
+            if (t == null || !e.exported()) return;
+            LiveColumn c = t.columns().get("tenant_id");
+            if (c == null || !"text".equals(c.type())) wrong.add(e.name());
+        });
+        return wrong;
+    }
+
     // ── the registry against the live schema ──────────────────────────────────────────────────────────
 
     @Test
@@ -375,6 +427,39 @@ class TenantExportRegistryParityTest {
         long triggers = live.values().stream().mapToLong(t -> t.triggers().size()).sum();
         assertThat(fks).as("foreign keys read").isGreaterThan(20);
         assertThat(triggers).as("triggers read").isGreaterThan(5);
+    }
+
+    @Test
+    void exportedTablesReferOnlyToExportedTablesAndDataNeverToDerived() {
+        assertThat(referencesOutsideTheExport(TenantExport.TABLES)).isEmpty();
+    }
+
+    @Test
+    void everyExportedTableHasATenantColumn() {
+        assertThat(exportedWithoutTenantColumn(live, TenantExport.TABLES)).isEmpty();
+    }
+
+    @Test
+    void aReferenceToAnExcludedOrDerivedTableFails() {
+        List<ExportTable> toExcluded = replacing("memory", t -> copy(t, t.primaryKey(), t.reassignedId(),
+            List.of(Reference.soft("id", "tuples", "id")), t.triggers(), t.triggerMaintained(), t.notReferences()));
+        assertThat(referencesOutsideTheExport(toExcluded)).containsExactly("memory refers to excluded tuples");
+        List<ExportTable> toDerived = replacing("memory", t -> copy(t, t.primaryKey(), t.reassignedId(),
+            List.of(Reference.soft("id", "relevance_log", "id")), t.triggers(), t.triggerMaintained(),
+            t.notReferences()));
+        assertThat(referencesOutsideTheExport(toDerived))
+            .containsExactly("data memory refers to derived relevance_log");
+    }
+
+    @Test
+    void anExportedTableWithNoTenantColumnFails() {
+        Map<String, LiveTable> planted = new TreeMap<>(live);
+        LiveTable memory = live.get("memory");
+        Map<String, LiveColumn> cols = new LinkedHashMap<>(memory.columns());
+        cols.remove("tenant_id");
+        planted.put("memory", new LiveTable("memory", cols, memory.primaryKey(), memory.foreignKeys(),
+            memory.triggers()));
+        assertThat(exportedWithoutTenantColumn(planted, TenantExport.TABLES)).containsExactly("memory");
     }
 
     @Test
@@ -433,8 +518,62 @@ class TenantExportRegistryParityTest {
     }
 
     @Test
-    void theRegistryLoadsInAnOrderTheLiveSchemaAccepts() {
-        assertThat(TenantExport.loadOrderViolations(TenantExport.TABLES)).isEmpty();
+    void theOnlySelfReferenceIsTopicsParent() {
+        // Table load order cannot satisfy a self-reference (ExportTable.selfReferences); pin the live set so
+        // a new one reaches the Phase 2 design.
+        Set<String> liveSelf = new TreeSet<>();
+        live.values().forEach(t -> t.foreignKeys().forEach(fk -> {
+            if (fk.parent().equals(t.name())) liveSelf.add(t.name() + "." + fk);
+        }));
+        Set<String> registrySelf = new TreeSet<>();
+        TenantExport.TABLES.forEach(e -> e.selfReferences().forEach(r -> registrySelf.add(e.name() + "."
+            + new LiveFk(r.columns(), r.parentName(), r.parentColumns()))));
+        assertThat(registrySelf).isEqualTo(liveSelf)
+            .containsExactly("topics.tenant_id,parent_id -> topics(tenant_id,id)");
+    }
+
+    /**
+     * Membership is RLS-only, so a tenant-scoped table that lost or never got its policy would drop out of
+     * backups with no failure here. Every table in the product schemas with a {@code tenant_id} column must
+     * be an RLS parent table (or a partition of one).
+     */
+    /**
+     * Tables that carry a tenant_id but are global by design, so they have no RLS and no registry entry. A
+     * tenant export never carries them (RDR-248: credentials live only in global tables).
+     */
+    static final Map<String, String> GLOBAL_TENANT_KEYED = new TreeMap<>(Map.of(
+        "session_tokens", "credentials: a session token, never in a tenant's export",
+        "service_tokens", "credentials: a tenant's service token, never in a tenant's export",
+        "tuple_tenants", "engine registry of tenants that hold tuples",
+        "request_ledger_tenants", "engine registry of tenants with request-ledger rows"));
+
+    @Test
+    void everyTenantScopedTableIsAnRlsTable() {
+        Field<String> nsp = f("n", "nspname", String.class);
+        Field<String> rel = f("c", "relname", String.class);
+        List<String> unprotected = new ArrayList<>();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            for (Record r : ctx.select(nsp, rel)
+                    .from(DSL.table(DSL.name("pg_class")).as("c"))
+                    .join(DSL.table(DSL.name("pg_namespace")).as("n"))
+                    .on(f("c", "relnamespace", Long.class).eq(f("n", "oid", Long.class)))
+                    .join(DSL.table(DSL.name("pg_attribute")).as("a"))
+                    .on(f("a", "attrelid", Long.class).eq(f("c", "oid", Long.class)))
+                    .where(f("c", "relkind", String.class).in("r", "p"))
+                    .and(f("c", "relispartition", Boolean.class).isFalse())
+                    .and(f("c", "relrowsecurity", Boolean.class).isFalse())
+                    .and(nsp.notIn("pg_catalog", "information_schema"))
+                    .and(f("a", "attname", String.class).eq("tenant_id"))
+                    .and(f("a", "attisdropped", Boolean.class).isFalse())
+                    .fetch()) {
+                unprotected.add(TenantExport.qualify(r.get(nsp), r.get(rel)));
+            }
+        } catch (java.sql.SQLException ex) {
+            throw new IllegalStateException(ex);
+        }
+        assertThat(new TreeSet<>(unprotected)).as("tables with a tenant_id column and no row-level security, "
+            + "other than the global ones named in GLOBAL_TENANT_KEYED").isEqualTo(GLOBAL_TENANT_KEYED.keySet());
     }
 
     // ── each check bites: a planted registry one step away from the real one fails it ────────────────
@@ -446,9 +585,9 @@ class TenantExportRegistryParityTest {
     }
 
     private static ExportTable copy(ExportTable t, List<Column> pk, String reassigned, List<Reference> refs,
-                                    Set<String> triggers, Set<String> maintained, Set<String> notRefs) {
+                                    Map<String, String> triggers, Set<String> maintained, Set<String> notRefs) {
         return new ExportTable(t.schema(), t.table(), t.exportClass(), t.reason(), pk, reassigned, refs,
-            triggers, maintained, notRefs);
+            triggers, t.loadsAfter(), maintained, notRefs);
     }
 
     @Test
@@ -491,7 +630,15 @@ class TenantExportRegistryParityTest {
     @Test
     void anUnlistedTriggerFails() {
         List<ExportTable> planted = replacing("topics", t -> copy(t, t.primaryKey(), t.reassignedId(),
-            t.references(), Set.of(), t.triggerMaintained(), t.notReferences()));
+            t.references(), Map.of(), t.triggerMaintained(), t.notReferences()));
+        assertThat(triggerMismatches(live, planted)).singleElement().asString().startsWith("topics:");
+    }
+
+    @Test
+    void aTriggerThatChangesWhenItFiresFails() {
+        List<ExportTable> planted = replacing("topics", t -> copy(t, t.primaryKey(), t.reassignedId(),
+            t.references(), Map.of("trg_topics_updated_at", "BEFORE INSERT OR UPDATE FOR EACH ROW"),
+            t.triggerMaintained(), t.notReferences()));
         assertThat(triggerMismatches(live, planted)).singleElement().asString().startsWith("topics:");
     }
 
@@ -500,6 +647,53 @@ class TenantExportRegistryParityTest {
         List<ExportTable> planted = replacing("nx_answer_runs", t -> copy(t, t.primaryKey(), t.reassignedId(),
             t.references().subList(0, 1), t.triggers(), t.triggerMaintained(), t.notReferences()));
         assertThat(unclassifiedIdColumns(live, planted)).containsExactly("nx_answer_runs.run_summary jsonb");
+    }
+
+    @Test
+    void anEntryWithNoLiveTableFails() {
+        List<ExportTable> planted = new ArrayList<>(TenantExport.TABLES);
+        planted.add(new ExportTable("nexus", "ghost", TenantExport.ExportClass.DATA, null, List.of(), null,
+            List.of(), Map.of(), Set.of(), Set.of(), Set.of()));
+        assertThat(missingOrStaleTables(live, planted)).containsExactly("stale entry: ghost");
+    }
+
+    @Test
+    void aReassignedIdOnAKeyThatIsNotSerialFails() {
+        List<ExportTable> planted = replacing("catalog_meta", t -> copy(t, t.primaryKey(), "key",
+            t.references(), t.triggers(), t.triggerMaintained(), t.notReferences()));
+        assertThat(reassignedIdMismatches(live, planted)).singleElement().asString().startsWith("catalog_meta:");
+    }
+
+    @Test
+    void anUnclassifiedBigintFails() {
+        List<ExportTable> planted = replacing("catalog_owners", t -> copy(t, t.primaryKey(), t.reassignedId(),
+            t.references(), t.triggers(), t.triggerMaintained(), Set.of()));
+        assertThat(unclassifiedIdColumns(live, planted)).containsExactly("catalog_owners.next_seq bigint");
+    }
+
+    @Test
+    void anUnclassifiedBigintArrayFails() {
+        List<ExportTable> planted = replacing("memory_summaries", t -> copy(t, t.primaryKey(), t.reassignedId(),
+            List.of(), t.triggers(), t.triggerMaintained(), t.notReferences()));
+        assertThat(unclassifiedIdColumns(live, planted)).containsExactly("memory_summaries.source_ids bigint[]");
+    }
+
+    @Test
+    void aJsonPathOnAColumnThatIsNotJsonbFails() {
+        List<ExportTable> planted = replacing("nx_answer_runs", t -> copy(t, t.primaryKey(), t.reassignedId(),
+            List.of(Reference.softJson("plan_id", "run.plan_id", "plans", "id")), t.triggers(),
+            t.triggerMaintained(), Set.of("duration_ms", "run_summary")));
+        assertThat(softReferenceProblems(live, planted))
+            .containsExactly("nx_answer_runs.plan_id: a JSON path on a column that is not jsonb");
+    }
+
+    @Test
+    void anArrayReferenceOnAColumnThatIsNotAnArrayFails() {
+        List<ExportTable> planted = replacing("taxonomy_centroids", t -> copy(t, t.primaryKey(),
+            t.reassignedId(), List.of(Reference.softArray("topic_id", "topics", "id")), t.triggers(),
+            t.triggerMaintained(), t.notReferences()));
+        assertThat(softReferenceProblems(live, planted))
+            .containsExactly("taxonomy_centroids.topic_id: an array reference on a column that is not an array");
     }
 
     @Test

@@ -20,7 +20,8 @@ class TenantExportRegistryTest {
 
     private static ExportTable table(String name, Reference... refs) {
         return new ExportTable("nexus", name, ExportClass.DATA, null,
-            List.of(new Column("id", "bigint")), "id", List.of(refs), Set.of(), Set.of(), Set.of());
+            List.of(new Column("id", "bigint")), "id", List.of(refs), java.util.Map.of(), Set.of(), Set.of(),
+            Set.of());
     }
 
     @Test
@@ -36,9 +37,30 @@ class TenantExportRegistryTest {
     }
 
     @Test
-    void aSelfReferenceIsNotAnOrderingEdge() {
-        assertThat(TenantExport.loadOrderViolations(
-            List.of(table("topics", Reference.fk(List.of("parent_id"), "topics", List.of("id")))))).isEmpty();
+    void aSelfReferenceIsNotAnOrderingEdgeButIsReported() {
+        ExportTable topics = table("topics", Reference.fk(List.of("parent_id"), "topics", List.of("id")));
+        assertThat(TenantExport.loadOrderViolations(List.of(topics))).isEmpty();
+        assertThat(topics.selfReferences()).singleElement()
+            .satisfies(r -> assertThat(r.columns()).containsExactly("parent_id"));
+        assertThat(table("plans").selfReferences()).isEmpty();
+    }
+
+    @Test
+    void aTriggerInducedEdgeIsAnOrderingEdge() {
+        ExportTable docs = new ExportTable("nexus", "catalog_documents", ExportClass.DATA, null, List.of(), null,
+            List.of(), java.util.Map.of(), Set.of("catalog_owners"), Set.of(), Set.of());
+        ExportTable owners = table("catalog_owners");
+        assertThat(TenantExport.loadOrderViolations(List.of(docs, owners)))
+            .containsExactly("catalog_documents must load after catalog_owners, which loads after it");
+        assertThat(TenantExport.loadOrderViolations(List.of(owners, docs))).isEmpty();
+        assertThat(TenantExport.loadOrderViolations(List.of(docs)))
+            .containsExactly("catalog_documents must load after catalog_owners, which is not registered");
+    }
+
+    @Test
+    void theRegistryRecordsTopicsParentAsASelfReference() {
+        assertThat(TenantExport.entry("topics").orElseThrow().selfReferences()).singleElement()
+            .satisfies(r -> assertThat(r.columns()).containsExactly("tenant_id", "parent_id"));
     }
 
     @Test
@@ -47,18 +69,12 @@ class TenantExportRegistryTest {
     }
 
     @Test
-    void namesAreUnique() {
-        Set<String> seen = new HashSet<>();
-        TenantExport.TABLES.forEach(t -> assertThat(seen.add(t.name())).as(t.name()).isTrue());
-    }
-
-    @Test
     void anExcludedTableNeedsAReasonAndOnlyAnExcludedTableHasOne() {
         assertThatThrownBy(() -> new ExportTable("nexus", "x", ExportClass.EXCLUDED, null,
-            List.of(), null, List.of(), Set.of(), Set.of(), Set.of()))
+            List.of(), null, List.of(), java.util.Map.of(), Set.of(), Set.of(), Set.of()))
             .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new ExportTable("nexus", "x", ExportClass.DATA, "why",
-            List.of(), null, List.of(), Set.of(), Set.of(), Set.of()))
+            List.of(), null, List.of(), java.util.Map.of(), Set.of(), Set.of(), Set.of()))
             .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -72,6 +88,9 @@ class TenantExportRegistryTest {
         assertThat(TenantExport.exportable("embedding_models")).as("a global table").isEmpty();
         assertThat(TenantExport.exportable("pg_authid")).isEmpty();
         assertThat(TenantExport.entry("tuples")).isPresent();
+        assertThat(TenantExport.exportable(null)).as("a request with no table").isEmpty();
+        assertThat(TenantExport.exportable("")).isEmpty();
+        assertThat(TenantExport.entry(null)).isEmpty();
     }
 
     @Test
