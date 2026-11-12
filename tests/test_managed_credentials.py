@@ -79,8 +79,9 @@ def test_a_rejected_static_token_is_replaced_only_when_the_configured_one_change
     assert creds.rejected("new") is False
 
 
+@pytest.mark.expects_unresolvable_endpoint  # the resolver raises its not-resolvable error on purpose; no tenant
 def test_with_no_token_configured_the_bearer_is_a_refusal_saying_how_to_set_one(
-    t2_tenant: str, manager: FakeManager, monkeypatch: pytest.MonkeyPatch,
+    manager: FakeManager, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("NX_SERVICE_URL", BASE)
     monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)

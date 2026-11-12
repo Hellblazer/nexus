@@ -138,8 +138,9 @@ def _flat(text: str) -> str:
 # -- (b) managed mode, and no local engine: refused, nothing written ---------------------------------
 
 
+@pytest.mark.expects_unresolvable_endpoint  # no token resolves, on purpose; no tenant
 def test_managed_mode_takes_the_cloud_arm_not_the_local_refusal(
-    t2_tenant: str, cloud_mode: None, monkeypatch: pytest.MonkeyPatch, _home: Path,
+    cloud_mode: None, monkeypatch: pytest.MonkeyPatch, _home: Path,
 ) -> None:
     """Managed mode used to be refused ("cloud backups are on the conexus side"); since nexus-csayy.3 it is the
     cloud arm (an export of the caller's tenant), covered by ``tests/test_nx_backup_cloud.py``. Here: with no

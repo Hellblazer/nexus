@@ -117,8 +117,9 @@ def test_cloud_backup_refuses_an_existing_destination_without_touching_the_engin
     assert dest.read_bytes() == b"precious"
 
 
+@pytest.mark.expects_unresolvable_endpoint  # no token resolves, on purpose; no tenant
 def test_cloud_backup_with_no_token_says_how_to_set_one(
-    t2_tenant: str, cloud_mode: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    cloud_mode: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     with FakeEngine(standard_tables()) as engine:
         monkeypatch.setenv("NX_SERVICE_URL", engine.base_url)
