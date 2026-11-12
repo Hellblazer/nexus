@@ -305,3 +305,35 @@ def wait_until(predicate: Any, timeout: float = 5.0) -> bool:
             return True
         time.sleep(0.01)
     return False
+
+
+# ── the mid-stream phase alone ──────────────────────────────────────────────
+
+#: The bound on the first phase in a mid-stream test: long enough that a loaded box always reads the first event, short
+#: enough that a stream that never starts still fails the test instead of hanging it.
+FIRST_EVENT_BOUND_S: float = 30.0
+
+
+def time_the_mid_stream_phase_only(monkeypatch: Any) -> list[float]:
+    """Let a mid-stream stall test time only the phase it measures.
+
+    Both phases of a dispatch take their budget from ``dispatch._effective_phase_timeout``: phase 1 runs until the
+    first event, phase 2 until the stream ends. The stub writes every event before its stall at once, but on a loaded
+    box the client can take longer than the test's short timeout to read the first one, and the run then times out
+    "before the first event" with nothing partial (release PR #1653, run 43147789508). Here phase 1 ends when the
+    first event arrives (bounded by ``FIRST_EVENT_BOUND_S``) and phase 2 keeps the test's own timeout. Returns the
+    budgets handed out, in call order, so the test can check phase 2 got the short one."""
+    from nexus.operators import dispatch  # noqa: PLC0415 - the module whose helper both the API and CLI paths call
+
+    real = dispatch._effective_phase_timeout
+    given: list[float] = []
+
+    def phased(timeout: float, deadline: float | None) -> float:
+        budget = real(timeout, deadline)
+        if len(given) % 2 == 0:  # phase 1 of an attempt: it always ends on the first event, so phases alternate
+            budget = max(budget, FIRST_EVENT_BOUND_S)
+        given.append(budget)
+        return budget
+
+    monkeypatch.setattr(dispatch, "_effective_phase_timeout", phased)
+    return given

@@ -29,7 +29,13 @@ from nexus.operators.llm_types import (
     OperatorTimeoutError,
     ambient_usage_sink,
 )
-from tests._llm_fake_server import FakeLLMServer, Step, anthropic_error, anthropic_stream
+from tests._llm_fake_server import (
+    FakeLLMServer,
+    Step,
+    anthropic_error,
+    anthropic_stream,
+    time_the_mid_stream_phase_only,
+)
 
 SECRET = "sk-ant-api03-ZZTOPSECRETKEY0123456789abcdef"
 SCHEMA = {"type": "object", "properties": {"answer": {"type": "string"}, "n": {"type": "integer"}},
@@ -420,16 +426,29 @@ class TestTimeouts:
 
     def test_stall_mid_stream_keeps_the_partial_output(self, server, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        budgets = time_the_mid_stream_phase_only(monkeypatch)
         events = anthropic_stream(tool_json_chunks=['{"answer": ', '"par', 'tial'])
         server.add(Step(events=events, stall_after=len(events) - 4))  # inside the tool input, before content_block_stop
         with pytest.raises(OperatorTimeoutError) as ei:
             Harness(server).run(model="haiku", timeout=0.6)
         err = ei.value
+        assert budgets[1:] == [0.6]  # the mid-stream phase is the one timed, at the test's own budget
         assert err.partial_text.startswith('{"answer": ')
         assert err.event_count > 0
         assert err.log_path is not None and err.log_path.exists()
         logged = err.log_path.read_text()
         assert err.partial_text in logged and "mid-stream" in str(err)
+
+    def test_a_first_event_later_than_the_budget_still_times_out_mid_stream(self, server, tmp_path, monkeypatch) -> None:
+        # The CI flake, made certain: the first event comes 1 s in, past the 0.6 s budget. Without the helper this run
+        # times out "before the first event" with nothing partial; with it, the stall mid-stream is what is timed.
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        time_the_mid_stream_phase_only(monkeypatch)
+        events = anthropic_stream(tool_json_chunks=['{"answer": ', '"par', 'tial'])
+        server.add(Step(events=events, hold=1.0, stall_after=len(events) - 4))
+        with pytest.raises(OperatorTimeoutError) as ei:
+            Harness(server).run(model="haiku", timeout=0.6)
+        assert ei.value.partial_text.startswith('{"answer": ') and "mid-stream" in str(ei.value)
 
     def test_the_deadline_caps_each_phase(self, server) -> None:
         import time
@@ -622,6 +641,7 @@ class TestTheKeyIsScrubbedFromEveryThirdPartyString:
     ) -> None:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         events = anthropic_stream(tool_json_chunks=['{"answer": "my key is ', PLAIN_KEY, ' and more'])
+        time_the_mid_stream_phase_only(monkeypatch)
         server.add(Step(events=events, stall_after=len(events) - 4))  # inside the tool input, before content_block_stop
         with structlog.testing.capture_logs() as logs, pytest.raises(OperatorTimeoutError) as ei:
             Harness(server, api_key=PLAIN_KEY).run(model="haiku", timeout=0.6)
