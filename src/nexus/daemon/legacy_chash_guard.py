@@ -4,7 +4,7 @@
 The engine's changeset ``hygiene-001-5`` deletes every ``nexus.chunks`` row whose chash is not 32 bytes (and the
 manifest rows that reference them); ``hygiene-001-8`` deletes every ``nexus.catalog_document_chunks`` row whose chash is
 not 32 bytes. The 32-byte cutover has no way back, so such a row's content cannot be resolved. A store that last ran an
-engine before 0.1.100 can still hold them, and the next engine start would delete them at boot. Sam (2026-11-11): no
+engine before 0.1.91 can still hold them, and the next engine start would delete them at boot. Sam (2026-11-11): no
 deletion of user data without a copy first, and no automatic backup. So before the supervisor spawns an engine against
 the bundled cluster it asks the cluster, as the bootstrap superuser (the chunk table enforces row-level security even
 for its owner):
