@@ -20,6 +20,7 @@ from nexus.backup import cloud_export as ce
 from nexus.backup.cloud_export import ExportClient, ExportRefused, run_export
 from nexus.backup.pg_backup import BackupFailed, BackupRefused
 from nexus.backup.tenant_file import verify_file
+from tests._module_seam import setattr_in
 from tests._fake_export_engine import FakeEngine, Reply, TableSpec, standard_tables
 
 
@@ -439,3 +440,183 @@ def test_default_file_name_is_tenant_and_utc_stamp() -> None:
     name = ce.default_file_name("acme", now=datetime(2026, 11, 12, 1, 2, 3, tzinfo=UTC))
     assert name == "nexus-acme-20261112T010203Z.nxtenant"
     assert ce.default_file_name("a b/../c", now=datetime(2026, 1, 1, tzinfo=UTC)) == "nexus-a_b_.._c-20260101T000000Z.nxtenant"
+
+
+# -- fix round r1 ---------------------------------------------------------------------------------------------
+
+
+def _interrupt_on_page(n: int):
+    seen: list[str] = []
+
+    def progress(done: int, table: str, index: int, total: int, rows: int) -> None:
+        seen.append(table)
+        if len(seen) == n:
+            raise KeyboardInterrupt
+
+    return progress
+
+
+def test_a_second_interrupt_during_the_delete_still_leaves_no_partial_file(tmp_path: Path) -> None:
+    """The file is removed BEFORE the network DELETE, so a second Ctrl-C (or a SIGHUP then SIGTERM) while the
+    DELETE is in flight cannot leave a multi-gigabyte hidden partial in the backups directory."""
+    dest = tmp_path / "out" / "x.nxtenant"
+    with FakeEngine(standard_tables()) as engine:
+        client = _client(engine)
+
+        def delete_interrupted(*_a: object, **_k: object) -> None:
+            raise KeyboardInterrupt
+
+        client._http.delete = delete_interrupted  # type: ignore[method-assign]
+        with pytest.raises(KeyboardInterrupt):
+            run_export(client, dest, on_progress=_interrupt_on_page(2))
+    assert _entries(dest.parent) == set(), "no .partial"
+
+
+def test_an_interrupt_between_the_open_and_the_callers_assignment_still_deletes_the_session(tmp_path: Path) -> None:
+    with FakeEngine(standard_tables()) as engine:
+        client = _client(engine)
+        real_open = client.open_session
+
+        def open_then_interrupt():
+            real_open()  # the engine has the session; the caller never receives it
+            raise KeyboardInterrupt
+
+        client.open_session = open_then_interrupt  # type: ignore[method-assign]
+        with pytest.raises(KeyboardInterrupt):
+            run_export(client, tmp_path / "x.nxtenant")
+        assert len(engine.opened) == 1 and engine.deleted == engine.opened
+
+
+def test_an_interrupt_while_the_partial_file_is_being_made_leaves_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dest = tmp_path / "out" / "x.nxtenant"
+
+    def interrupted_fdopen(fd: int, *_a: object, **_k: object):
+        raise KeyboardInterrupt
+
+    setattr_in(monkeypatch, ce, "os.fdopen", interrupted_fdopen)
+    with FakeEngine(standard_tables()) as engine:
+        with pytest.raises(KeyboardInterrupt):
+            run_export(_client(engine), dest)
+        assert engine.deleted == engine.opened
+    assert _entries(dest.parent) == set()
+
+
+def test_a_full_disk_fails_with_the_free_space_message_and_leaves_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import errno  # noqa: PLC0415
+
+    from nexus.backup.tenant_file import TenantFileWriter  # noqa: PLC0415
+
+    class FullDisk(TenantFileWriter):
+        def add_page(self, *a, **k):  # type: ignore[no-untyped-def]
+            if self._current is not None and self._current.pages >= 1:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return super().add_page(*a, **k)
+
+    monkeypatch.setattr(ce, "TenantFileWriter", FullDisk)
+    dest = tmp_path / "out" / "x.nxtenant"
+    with FakeEngine(standard_tables()) as engine:
+        with pytest.raises(BackupFailed) as err:
+            run_export(_client(engine), dest)
+        assert engine.deleted == engine.opened
+    text = str(err.value)
+    assert "No space left on device" in text and "Free some space" in text and "run nx backup again" in text
+    assert _entries(dest.parent) == set()
+
+
+def test_a_session_exists_answer_with_no_id_is_waited_out_then_the_open_succeeds(tmp_path: Path) -> None:
+    sleeps = Sleeps()
+    with FakeEngine(standard_tables()) as engine:
+        engine.script.append(lambda r: Reply(409, {"error": "x", "reason": "export_session_exists"}) if r.kind == "open" and r.nth < 2 else None)
+        run_export(_client(engine, sleeps=sleeps), tmp_path / "x.nxtenant")
+    assert sleeps.seconds == list(ce.BACKOFF_LADDER[:2])
+
+
+def test_a_session_exists_answer_with_no_id_forever_is_refused_after_the_ladder(tmp_path: Path) -> None:
+    sleeps = Sleeps()
+    with FakeEngine(standard_tables()) as engine:
+        engine.script.append(lambda r: Reply(409, {"error": "x", "reason": "export_session_exists"}) if r.kind == "open" else None)
+        with pytest.raises(ExportRefused, match="already has an export session"):
+            run_export(_client(engine, sleeps=sleeps), tmp_path / "x.nxtenant")
+    assert sleeps.seconds == list(ce.BACKOFF_LADDER)
+
+
+def test_busy_answers_have_their_own_budget_and_do_not_use_up_the_attempts(tmp_path: Path) -> None:
+    """Ten 503 export_page_busy answers in a row (a tenant create holding a lock) is more than the five attempts a
+    failing page gets, and the export still completes."""
+    sleeps = Sleeps()
+    with FakeEngine(standard_tables()) as engine:
+        engine.script.append(lambda r: Reply(503, {"error": "busy", "reason": "export_page_busy"}, {"Retry-After": "1"}) if r.kind == "rows" and r.nth < 10 else None)
+        run_export(_client(engine, sleeps=sleeps), tmp_path / "x.nxtenant")
+    assert sleeps.seconds == [1.0] * 10
+
+
+def test_a_page_that_stays_busy_past_the_budget_fails_and_says_run_again(tmp_path: Path) -> None:
+    sleeps = Sleeps()
+    with FakeEngine(standard_tables()) as engine:
+        engine.script.append(lambda r: Reply(409, {"error": "x", "reason": "page_in_flight"}, {"Retry-After": "30"}) if r.kind == "rows" else None)
+        with pytest.raises(BackupFailed, match="page_in_flight") as err:
+            run_export(_client(engine, sleeps=sleeps), tmp_path / "x.nxtenant")
+    assert "run nx backup again" in str(err.value) and sum(sleeps.seconds) >= ce.BUSY_WAIT_BUDGET_S
+    assert _entries(tmp_path) == set()
+
+
+@pytest.mark.parametrize("body", [b"not json at all", b'{"no": "session id"}', b"[]"])
+def test_an_open_answer_that_is_not_a_session_header_is_a_clear_failure(body: bytes, tmp_path: Path) -> None:
+    with FakeEngine(standard_tables()) as engine:
+        engine.script.append(lambda r: Reply(200, body, {"Content-Type": "application/json"}) if r.kind == "open" else None)
+        with pytest.raises(BackupFailed, match="not an export session header") as err:
+            run_export(_client(engine), tmp_path / "x.nxtenant")
+    assert "Traceback" not in str(err.value)
+    assert _entries(tmp_path) == set()
+
+
+def test_a_transient_5xx_from_version_is_retried(tmp_path: Path) -> None:
+    sleeps = Sleeps()
+    with FakeEngine(standard_tables()) as engine:
+        engine.script.append(lambda r: Reply(502, {"error": "bad gateway"}) if r.kind == "version" and r.nth < 2 else None)
+        run_export(_client(engine, sleeps=sleeps), tmp_path / "x.nxtenant")
+    assert sleeps.seconds == list(ce.BACKOFF_LADDER[:2])
+
+
+def test_a_body_that_will_not_decode_is_a_failed_page_not_a_traceback(tmp_path: Path) -> None:
+    sleeps = Sleeps()
+    with FakeEngine(standard_tables()) as engine:
+        engine.script.append(
+            lambda r: Reply(200, b"this is not gzip", {"Content-Encoding": "gzip"}) if r.kind == "rows" and r.nth == 0 else None
+        )
+        run_export(_client(engine, sleeps=sleeps), tmp_path / "x.nxtenant")
+    assert sleeps.seconds == [ce.BACKOFF_LADDER[0]]
+    verify_file(tmp_path / "x.nxtenant")
+
+
+def test_waiting_for_a_free_export_slot_says_so(tmp_path: Path) -> None:
+    notes: list[str] = []
+    with FakeEngine(standard_tables()) as engine:
+        engine.script.append(lambda r: Reply(503, {"error": "full", "reason": "export_capacity_full"}, {"Retry-After": "5"}) if r.kind == "open" and r.nth == 0 else None)
+        run_export(_client(engine), tmp_path / "x.nxtenant", on_note=notes.append)
+    assert any("limit of concurrent export sessions" in n and "5 s" in n for n in notes), notes
+
+
+def test_the_old_engine_refusal_also_names_the_edge_allowlist(tmp_path: Path) -> None:
+    with FakeEngine(standard_tables(), supported=False, release="0.1.191") as engine:
+        with pytest.raises(ExportRefused) as err:
+            run_export(_client(engine), tmp_path / "x.nxtenant")
+    text = str(err.value)
+    assert "tenant_export_supported" in text and "edge" in text, "a current engine behind an un-updated edge reads as old"
+
+
+# -- the export format is read from the session header when /version has only the booleans ---------------------
+
+
+def test_a_version_without_the_format_integer_and_a_format_1_header_succeeds(tmp_path: Path) -> None:
+    with FakeEngine(standard_tables(), version_format_field=False) as engine:
+        run_export(_client(engine), tmp_path / "x.nxtenant")
+    verify_file(tmp_path / "x.nxtenant")
+
+
+def test_a_header_with_an_unknown_format_is_refused_and_its_session_deleted(tmp_path: Path) -> None:
+    with FakeEngine(standard_tables(), version_format_field=False, format_version=2) as engine:
+        with pytest.raises(ExportRefused, match="format version 2"):
+            run_export(_client(engine), tmp_path / "x.nxtenant")
+        assert len(engine.opened) == 1 and engine.deleted == engine.opened
+    assert _entries(tmp_path) == set()

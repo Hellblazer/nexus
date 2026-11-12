@@ -2565,6 +2565,11 @@ def _boot() -> dict:
         "NX_DB_ADMIN_PASS": "",
     }
     env.pop("NX_STORAGE_BACKEND", None)
+    # nexus-csayy.3: the smallest export page the engine accepts (1,024 bytes; a page always holds at least one whole row),
+    # so a handful of seeded rows spans several pages and the client's keyset chaining (each page's real
+    # X-Nexus-Export-Last-Key sent back as `after`) runs against the real engine. Only the tenant export routes read it.
+    # The 16 MiB default is the Java route tests' and the export battery's (nexus-csayy.4).
+    env.setdefault("NX_EXPORT_PAGE_BYTES", "1024")
     # nexus-fpwj1: the per-worker tenant pool (tests/_tenant_pool.py) needs POST /v1/_test/tenant-reset, which is
     # loopback-only and root-token-only, and which answers 503 while per-collection index builds (NX_SEARCH_PCI,
     # default ON when unset; DDL a data reset cannot undo) are on. These are set ONLY while the pool is on (it is on

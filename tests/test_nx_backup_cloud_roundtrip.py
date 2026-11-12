@@ -175,3 +175,41 @@ def test_the_engine_advertises_the_routes_the_client_gates_on(t2_service_env: st
     body = httpx.get(f"{state['base_url']}/version", timeout=10).json()
     assert body["tenant_export_supported"] is True
     assert body["tenant_export_format_version"] in ce.ENGINE_FORMAT_VERSIONS
+
+
+def test_a_table_that_spans_pages_is_chained_by_the_engines_own_last_keys(
+    t2_service_env: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The substrate engine cuts pages at 1,024 bytes (``tests/_engine_substrate.py``), so each chunk (an embedding
+    alone is over 1.5 KB) is a page of its own. The client sends every page's real ``X-Nexus-Export-Last-Key`` back as
+    ``after``; the file verifies only when every row arrived exactly once and in the engine's count."""
+    import json  # noqa: PLC0415
+    import struct  # noqa: PLC0415
+
+    runner = CliRunner()
+    _seed(runner)
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+    dest = tmp_path / "multi.nxtenant"
+    result = runner.invoke(main, ["backup", "--to", str(dest)])
+    assert result.exit_code == 0, result.output
+
+    raw = dest.read_bytes()
+    pos, metas = 10, []
+    while pos < len(raw):
+        kind, length = struct.unpack_from(">cQ", raw, pos)
+        payload = raw[pos + 9: pos + 9 + length]
+        pos += 9 + length
+        if kind == b"P":
+            (mlen,) = struct.unpack_from(">I", payload, 0)
+            metas.append(json.loads(payload[4: 4 + mlen]))
+    chunk_pages = [m for m in metas if m["table"] == "chunks"]
+    assert len(chunk_pages) >= len(_NOTES), f"chunks fit in {len(chunk_pages)} page(s); the page cut is not 1,024 bytes"
+    assert [m["done"] for m in chunk_pages] == [False] * (len(chunk_pages) - 1) + [True]
+    keys = [m["last_key"] for m in chunk_pages if m["rows"]]  # a table's final page may be empty, with no key
+    assert all(keys) and len(set(keys)) == len(keys) >= len(_NOTES), "each page ends at a new key the next page started after"
+    report = verify_file(dest)
+    assert {t.name: t for t in report.tables}["chunks"].rows == sum(m["rows"] for m in chunk_pages) >= len(_NOTES)
+    chunks = _rows(dest, "chunks")
+    cols = [c["name"] for t in report.header["tables"] if t["name"] == "chunks" for c in t["columns"]]
+    chashes = {r[cols.index("chash")] for r in chunks}
+    assert len(chashes) == len(chunks), "no chunk twice"

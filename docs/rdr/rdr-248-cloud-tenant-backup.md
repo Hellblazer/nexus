@@ -112,7 +112,7 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
 
 ### Key Discoveries
 
-- **Verified (source reading):** `nx backup` refuses managed mode first (`pg_backup.resolve_target`).
+- **Verified (source reading):** `nx backup` refuses managed mode first (`pg_backup.resolve_target`; since nexus-csayy.3 the verb takes the cloud arm before it calls that resolver, which stays the local arm's and still refuses managed mode).
 - **Verified (source reading):** the tenant is selected by the `nexus.tenant` setting in every RLS policy.
 - **Verified (source reading):** credentials live only in global tables, so a tenant export cannot carry a
   token by construction.
@@ -250,8 +250,8 @@ same state; the table whitelist is the registry's; and the engine, not the clien
 RDR-241 Step 5 should read "streamed" as "a session of short requests over an engine-held snapshot" when
 it lands.
 
-**Client (`nx backup`, cloud arm).** In managed mode `resolve_target` no longer refuses. The verb opens a
-session, pulls every table page by page into `~/nexus-backups/nexus-<tenant>-<UTC stamp>.nxtenant.partial`
+**Client (`nx backup`, cloud arm).** In managed mode the verb takes the cloud arm before it calls `resolve_target`, which stays the local arm's resolver and still refuses managed mode. The verb opens a
+session, pulls every table page by page into `~/nexus-backups/.nexus-<tenant>-<UTC stamp>.nxtenant.partial-<pid>`
 (mode 0600) as one framed file (the header, a frame per table made of its pages, and a trailer of
 per-table row counts and SHA-256), retries a failed page from its key, checks each table's rows against
 the count its first page carried, closes the session, then renames. It prints size, time, row counts
@@ -391,7 +391,7 @@ exporter; every new table needs a new exporter.
 ### Failure Modes
 
 - A page request fails: the client asks again from the same key; after a bounded number of tries it
-  closes the session, removes `.partial`, and says to run again.
+  closes the session, removes the partial file (`.<name>.partial-<pid>`), and says to run again.
 - The engine restarts mid-session: the dedicated transaction ends, the snapshot is gone; the next page
   request gets a clear "session closed" and the client starts over.
 - Import fails mid-load: one transaction, so the tenant stays empty; the status route reports the table.

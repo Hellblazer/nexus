@@ -71,13 +71,15 @@ class FakeEngine:
     def __init__(
         self, tables: list[TableSpec], *, accepted: set[str] | None = None, release: str = "0.1.191",
         supported: bool = True, format_version: int = 1, changesets: int | None = 572, tenant: str = "acme",
-        expires_in_seconds: int = 3600,
+        expires_in_seconds: int = 3600, version_format_field: bool = True,
     ) -> None:
         self.tables = {t.name: t for t in tables}
         self.order = [t.name for t in tables]
         self.accepted = accepted if accepted is not None else {"tok"}
         self.release, self.supported, self.format_version = release, supported, format_version
         self.changesets, self.tenant, self.expires_in = changesets, tenant, expires_in_seconds
+        #: the public edge relays capability fields as booleans only: False leaves the integer out of /version
+        self.version_format_field = version_format_field
         self.script: list[Callable[[Req], Reply | None]] = []
         self.log: list[Req] = []
         self.sessions: set[str] = set()
@@ -174,7 +176,8 @@ class FakeEngine:
         if req.kind == "version":
             return Reply(body={
                 "release_version": self.release, "app_version": "1.0-SNAPSHOT",
-                **({"tenant_export_supported": True, "tenant_export_format_version": self.format_version}
+                **({"tenant_export_supported": True,
+                    **({"tenant_export_format_version": self.format_version} if self.version_format_field else {})}
                    if self.supported else {}),
             })
         if req.bearer not in self.accepted:

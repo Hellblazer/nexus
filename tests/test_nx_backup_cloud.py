@@ -10,16 +10,17 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
-from nexus.backup.cloud_export import OMITTED_NOTICE
+from nexus.backup.cloud_export import EXCLUDED_TABLE_PHRASES
 from nexus.backup.pg_backup import ONLY_COPY_SENTENCE
 from nexus.backup.tenant_file import verify_file
 from nexus.cli import main
-from tests._fake_export_engine import FakeEngine, TableSpec, standard_tables
+from tests._fake_export_engine import FakeEngine, Reply, TableSpec, standard_tables
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +57,9 @@ def test_cloud_backup_writes_a_verified_file_and_says_what_it_holds(
     assert "acme" in out and "572" in out, "tenant and schema changeset count"
     assert re.search(r"data\D+6 rows", out) and re.search(r"derived\D+2 rows", out), out
     assert ONLY_COPY_SENTENCE in out
-    assert OMITTED_NOTICE in out
+    assert "Not in this backup:" in out
+    for phrase in set(EXCLUDED_TABLE_PHRASES.values()):
+        assert phrase in out, f"the run does not say it leaves out {phrase}"
     assert "sensitive" not in out.lower()
     assert f"nx backup --check {dest}" in out
     assert "pg_restore" not in out, "the local arm's restore commands are not for a tenant file"
@@ -181,11 +184,12 @@ def test_check_prints_the_header_and_each_tables_rows(good_file: Path, monkeypat
 
 def test_check_refuses_a_damaged_file_naming_the_table(good_file: Path) -> None:
     raw = bytearray(good_file.read_bytes())
-    raw[len(raw) // 2] ^= 0xFF
+    at = raw.index(b"row 1-0")  # inside the second page of the memory table
+    raw[at] ^= 0xFF
     good_file.write_bytes(bytes(raw))
     result = CliRunner().invoke(main, ["backup", "--check", str(good_file)])
     assert result.exit_code == 1
-    assert re.search(r"memory|frecency|plans|whole file|header", result.output)
+    assert "table memory page 2" in result.output and "hash" in result.output
     assert "OK" not in result.output
 
 
@@ -224,3 +228,80 @@ def test_the_help_describes_the_cloud_arm_and_check() -> None:
     text = _flat(CliRunner().invoke(main, ["backup", "--help"]).output)
     assert "--check" in text and ".nxtenant" in text and "cloud" in text.lower()
     assert ONLY_COPY_SENTENCE in text and "NOT compressed" in text, "the local arm's words are unchanged"
+
+
+# -- a real SIGTERM or SIGHUP mid-export (the verb's own signal handling, not a KeyboardInterrupt raised by hand) ----
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+def test_a_real_signal_mid_export_stops_the_verb_cleanly(
+    name: str, cloud_mode: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """SIGTERM (a kill) and SIGHUP (a closed terminal) must clean up like Ctrl-C: no partial file, and a DELETE for
+    every session the run opened. Without ``_signals_as_interrupt`` in the cloud arm the default action kills the
+    process with the partial file on disk and the engine's snapshot held; here a recording handler stands in for
+    that default (so a missing wiring fails this test instead of ending the test run), and it must never run."""
+    signum = getattr(signal, name)
+    stray: list[int] = []
+    previous = signal.signal(signum, lambda s, _f: stray.append(s))
+    dest = tmp_path / "out" / "x.nxtenant"
+    try:
+        with FakeEngine(standard_tables()) as engine:
+            def fire(req) -> Reply | None:
+                if req.kind == "rows" and req.nth == 1:
+                    os.kill(os.getpid(), signum)
+                return None
+
+            engine.script.append(fire)
+            _point_at(monkeypatch, engine)
+            result = CliRunner().invoke(main, ["backup", "--to", str(dest)])
+            assert len(engine.opened) == 1 and engine.deleted == engine.opened, "the snapshot is released at once"
+        assert stray == [], "the verb's own handler took the signal"
+        assert result.exit_code == 1 and "Aborted" in result.output, (result.exit_code, result.output)
+        assert signal.getsignal(signum) is not None
+        assert list(dest.parent.iterdir()) == [], "no .partial"
+    finally:
+        signal.signal(signum, previous)
+
+
+def test_resolve_target_still_refuses_managed_mode_for_a_direct_caller(cloud_mode: None) -> None:
+    from nexus.backup.pg_backup import BackupRefused, resolve_target  # noqa: PLC0415
+
+    with pytest.raises(BackupRefused, match="cloud arm"):
+        resolve_target()
+
+
+# -- --check on files that are not what the engine writes ---------------------------------------------------------
+
+
+def _hand_built(path: Path, header: dict) -> Path:
+    from nexus.backup.tenant_file import TenantFileWriter  # noqa: PLC0415
+
+    with path.open("wb") as fh:
+        w = TenantFileWriter(fh, check_complete=False)
+        w.write_header(header)
+        w.finish()
+    return path
+
+
+@pytest.mark.parametrize(("change", "says"), [({"tenant_id": None}, "no tenant"), ({"tables": []}, "no tables")])
+def test_check_refuses_a_header_with_no_tenant_or_no_tables_cleanly(change: dict, says: str, tmp_path: Path) -> None:
+    header = {"format_version": 1, "schema_changeset_count": 5, "tenant_id": "acme", "tables": [], **change}
+    path = _hand_built(tmp_path / "h.nxtenant", header)
+    result = CliRunner().invoke(main, ["backup", "--check", str(path)])
+    assert result.exit_code == 1 and says in result.output
+    assert "Traceback" not in result.output and isinstance(result.exception, SystemExit)
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="needs a file this user cannot read")
+def test_check_of_an_unreadable_file_is_a_clean_refusal(tmp_path: Path) -> None:
+    path = tmp_path / "locked.nxtenant"
+    path.write_bytes(b"NXTENANT")
+    path.chmod(0)
+    try:
+        result = CliRunner().invoke(main, ["backup", "--check", str(path)])
+    finally:
+        path.chmod(0o600)
+    assert result.exit_code in (1, 2) and "Traceback" not in result.output
+    assert isinstance(result.exception, SystemExit), result.exception

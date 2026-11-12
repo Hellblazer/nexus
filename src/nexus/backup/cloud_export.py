@@ -73,12 +73,50 @@ _PAGE_TIMEOUT = httpx.Timeout(connect=10.0, read=90.0, write=60.0, pool=10.0)
 _PROBE_TIMEOUT_S = 5.0
 _AGAIN = "The backup was not kept; run nx backup again."
 
-#: What a backup leaves out (RDR-248 "The classes": the ``excluded`` registry entries), printed after every run.
-OMITTED_NOTICE = (
-    "Not in this backup: tuple-space state (tuples, claims, deliveries), in-flight PDF and re-embed jobs, "
-    "session scratch (T1) and operational logs (the request ledger, tier writes, routing events and the like). "
-    "None of it is your documents or notes, and all of it is rebuilt or restarts empty."
-)
+#: How long a page request keeps waiting through 409 ``page_in_flight`` and 503 ``export_page_busy`` answers (each
+#: asks for a short ``Retry-After``) before it gives up. A separate budget from :data:`PAGE_ATTEMPTS`, which counts
+#: failures: a database busy behind a tenant create is not a failing page.
+BUSY_WAIT_BUDGET_S = 120.0
+
+#: Every table the engine's registry classes ``excluded`` (``TenantExport.java``, schema-qualified when it is not
+#: ``nexus``), each with the phrase the run prints for it. ``tests/test_backup_omitted_notice_lint.py`` parses the
+#: engine's ``excluded(...)`` entries and fails when this table lacks one or names one that is no longer excluded,
+#: so the sentence a user reads cannot drift from what the engine leaves out.
+EXCLUDED_TABLE_PHRASES: dict[str, str] = {
+    "pdf_pipeline": "in-flight PDF ingests",
+    "pdf_pages": "in-flight PDF ingests",
+    "pdf_chunks": "in-flight PDF ingests",
+    "reembed_jobs": "in-flight re-embed jobs",
+    "reembed_job_moves": "in-flight re-embed jobs",
+    "tuples": "tuple-space state (tuples, their claims and deliveries)",
+    "tuple_claim_log": "tuple-space state (tuples, their claims and deliveries)",
+    "tuple_deliveries": "tuple-space state (tuples, their claims and deliveries)",
+    "t1.scratch": "session scratch (T1)",
+    "agent_dispatches": "agent dispatch records",
+    "aspect_promotion_log": "the aspect promotion log",
+    "canary_query_ring": "the canary query ring",
+    "capability_census": "the capability census",
+    "catalog_reconcile_runs": "catalog reconcile run logs",
+    "catalog_reconcile_rows": "catalog reconcile run logs",
+    "chash_remap": "the chash remap log",
+    "gc_audit": "the garbage-collection audit",
+    "hook_failures": "hook failure records",
+    "index_failures": "index failure records",
+    "ladder_completions": "upgrade ladder completion marks",
+    "request_ledger": "the request ledger",
+    "retention_markers": "retention markers",
+    "routing_events": "routing events",
+    "tier_writes": "tier write records",
+}
+
+
+def _omitted_notice(phrases: dict[str, str]) -> str:
+    seen = list(dict.fromkeys(phrases.values()))
+    return "Not in this backup: " + ", ".join(seen[:-1]) + ", and " + seen[-1] + ". None of it is your documents or notes."
+
+
+#: What a backup leaves out, printed after every run (built from :data:`EXCLUDED_TABLE_PHRASES`).
+OMITTED_NOTICE = _omitted_notice(EXCLUDED_TABLE_PHRASES)
 
 
 class ExportRefused(BackupRefused):
@@ -93,6 +131,7 @@ class Credentials(Protocol):
     def rejected(self, sent: str) -> bool:
         """The engine answered 401 to *sent*. True when a different bearer is now available (re-minted, or
         re-read from config); False when this one is all there is."""
+        ...
 
 
 class ManagedCredentials:
@@ -240,6 +279,11 @@ class ExportClient:
         self._sleep = sleep
         self.now = now
         self._open_budget = open_wait_budget_s
+        #: Called with a one-line status when a wait would otherwise be silent; ``run_export`` sets it.
+        self.note: Callable[[str], None] = lambda _msg: None
+        #: Session ids this client opened and has not closed: ``close_all`` sends every one a DELETE, so an
+        #: exit at any point (an interrupt between the open and the caller's assignment included) releases them.
+        self._live: dict[str, None] = {}
 
     def close_http(self) -> None:
         self._http.close()
@@ -255,7 +299,7 @@ class ExportClient:
         what: str,
         own_session: bool = False,
         parse: Callable[[httpx.Response], Any] = lambda r: r,
-        busy_budget_s: float = 0.0,
+        capacity_wait: bool = False,
     ) -> Any:
         failures = 0
         reauths = 0
@@ -266,7 +310,9 @@ class ExportClient:
             try:
                 before_request()
                 resp = self._http.request(method, self._base + path, params=params, headers=headers)
-            except httpx.TransportError as exc:
+            except httpx.InvalidURL:
+                raise ExportRefused(f"the service URL ({self._shown}) is not a valid URL; check NX_SERVICE_URL.") from None
+            except httpx.HTTPError as exc:  # transport errors, but also a body that will not decode, too many redirects
                 problem, delay = f"{type(exc).__name__}: {scrub_transport_error(exc, self._base)}", None
             else:
                 status = resp.status_code
@@ -298,20 +344,28 @@ class ExportClient:
                         raise _SessionGone(reason or str(status))
                     if status == 409 and reason == "export_session_exists":
                         raise _SessionExists(_session_id(resp))
-                    if status == 503 and reason == "export_capacity_full" and busy_budget_s > 0:
-                        if waited >= busy_budget_s:
-                            raise ExportRefused(
-                                f"the engine at {self._shown} is at its limit of concurrent export sessions and none freed in "
-                                f"{int(busy_budget_s)} seconds. Try again in a few minutes."
-                            )
-                        wait = retry_after if retry_after is not None else BACKOFF_LADDER[-1]
+                    capacity = status == 503 and reason == "export_capacity_full" and capacity_wait
+                    busy = (status == 409 and reason == "page_in_flight") or (status == 503 and reason == "export_page_busy")
+                    if capacity or busy:
+                        # a wait the engine asked for is not a failure: its own bounded budget, not the attempts
+                        budget = self._open_budget if capacity else BUSY_WAIT_BUDGET_S
+                        if waited >= budget:
+                            if capacity:
+                                raise ExportRefused(
+                                    f"the engine at {self._shown} is at its limit of concurrent export sessions and none freed in "
+                                    f"{int(budget)} seconds. Try again in a few minutes."
+                                )
+                            raise BackupFailed(f"{what}: the engine kept answering {reason} for {int(budget)} seconds. {_AGAIN}")
+                        wait = max(retry_after if retry_after is not None else (BACKOFF_LADDER[-1] if capacity else 1.0), 1.0)
+                        if capacity:
+                            self.note(f"The engine is at its limit of concurrent export sessions; waiting {wait:g} s for a slot.")
                         self._sleep(wait)
                         waited += wait
                         continue
-                    if status in (400, 404, 405, 409) and not (status == 409 and reason == "page_in_flight"):
+                    if status in (400, 404, 405, 409):
                         raise BackupFailed(f"{what}: the engine answered {status} {reason or message}. {_AGAIN}")
                     problem = f"HTTP {status} {reason or message}".strip()
-                    delay = retry_after if status in (503, 409) else None
+                    delay = retry_after if status == 503 else None
             failures += 1
             if failures >= PAGE_ATTEMPTS:
                 raise BackupFailed(f"{what} failed {failures} times in a row (last: {problem}). {_AGAIN}")
@@ -320,15 +374,26 @@ class ExportClient:
     # -- the routes ----------------------------------------------------------------------------------
 
     def check_engine(self) -> None:
-        """Refuse an engine that has no export routes, or one whose export format this client does not read."""
-        before_request()
-        try:
-            resp = self._http.get(f"{self._base}/version", timeout=_PROBE_TIMEOUT_S, headers=client_identity_headers())
-        except httpx.TransportError as exc:
-            raise ExportRefused(
-                f"the nexus service at {self._shown} is unreachable ({type(exc).__name__}: "
-                f"{scrub_transport_error(exc, self._base)}). Check connectivity, then run nx backup again."
-            ) from None
+        """Refuse an engine that has no export routes. The export format is checked here only when ``/version``
+        carries it: the public edge relays capability fields as booleans, so the integer may never arrive, and
+        the authority is the ``format_version`` of the session header (:func:`_checked_header`)."""
+        resp = None
+        for attempt in range(3):
+            before_request()
+            try:
+                resp = self._http.get(f"{self._base}/version", timeout=_PROBE_TIMEOUT_S, headers=client_identity_headers())
+            except httpx.InvalidURL:
+                raise ExportRefused(f"the service URL ({self._shown}) is not a valid URL; check NX_SERVICE_URL.") from None
+            except httpx.HTTPError as exc:
+                raise ExportRefused(
+                    f"the nexus service at {self._shown} is unreachable ({type(exc).__name__}: "
+                    f"{scrub_transport_error(exc, self._base)}). Check connectivity, then run nx backup again."
+                ) from None
+            if resp.status_code in (502, 503, 504) and attempt < 2:  # an edge or a restarting engine, briefly
+                self._sleep(BACKOFF_LADDER[attempt])
+                continue
+            break
+        assert resp is not None
         try:
             body = resp.json() if resp.status_code == 200 else None
         except ValueError:
@@ -339,36 +404,49 @@ class ExportClient:
         if body.get("tenant_export_supported") is not True:
             raise ExportRefused(
                 f"the engine at {self._shown} (release {release}) has no tenant export routes, which cloud `nx backup` needs. "
-                f"They first ship in engine {TENANT_EXPORT_ENGINE}. Ask whoever runs the engine to upgrade it."
+                f"They first ship in engine {TENANT_EXPORT_ENGINE}. Ask whoever runs the engine to upgrade it. If it is already "
+                "that version or newer, the public edge in front of it may not relay `tenant_export_supported` from /version yet "
+                "(it passes an allowlist of fields); tell whoever runs the edge."
             )
         fmt = body.get("tenant_export_format_version")
-        if fmt not in ENGINE_FORMAT_VERSIONS:
+        if fmt is not None and fmt not in ENGINE_FORMAT_VERSIONS:
             raise ExportRefused(
                 f"the engine at {self._shown} writes export format {fmt}, and this nx reads format "
                 f"{', '.join(str(v) for v in sorted(ENGINE_FORMAT_VERSIONS))}. Upgrade nx (`nx upgrade`)."
             )
 
     def open_session(self) -> Session:
-        """Open the tenant's session. A session left by a killed earlier run is deleted once and the open repeated."""
+        """Open the tenant's session. A session left by a killed earlier run is deleted once and the open repeated;
+        a 409 that names none (an open still in progress) is waited out on the backoff ladder, then refused."""
         deleted_stale = False
+        exists_waits = 0
         while True:
             try:
                 body = self._request(
                     "POST", "/v1/tenant/export", what="opening the export session",
-                    parse=lambda r: r.json(), busy_budget_s=self._open_budget,
+                    parse=_parse_open, capacity_wait=True,
                 )
             except _SessionExists as exc:
-                if deleted_stale or not exc.session_id:
+                if exc.session_id and not deleted_stale:
+                    deleted_stale = True
+                    _log.info("backup_stale_export_session_deleted", session_id=exc.session_id)
+                    self._delete_quietly(exc.session_id)
+                    continue
+                if exists_waits >= len(BACKOFF_LADDER):
                     raise ExportRefused(
                         f"the tenant already has an export session on the engine at {self._shown} that this run cannot "
                         "clear (the engine closes an idle one after 10 minutes). Wait, then run nx backup again."
                     ) from None
-                deleted_stale = True
-                _log.info("backup_stale_export_session_deleted", session_id=exc.session_id)
-                self._delete_quietly(exc.session_id)
+                self._sleep(BACKOFF_LADDER[exists_waits])
+                exists_waits += 1
                 continue
-            total = int(body.get("total_timeout_seconds") or 3600)
-            return Session(str(body["session_id"]), body, _parse_instant(body.get("expires_at")), total)
+            sid = str(body["session_id"])
+            self._live[sid] = None
+            try:
+                total = int(body.get("total_timeout_seconds") or 3600)
+            except (TypeError, ValueError):
+                total = 3600
+            return Session(sid, body, _parse_instant(body.get("expires_at")), total)
 
     def page(self, session: Session, table: str, after: str | None, columns: int) -> Page:
         params = {"table": table, **({"after": after} if after is not None else {})}
@@ -382,7 +460,18 @@ class ExportClient:
         )
 
     def close(self, session: Session) -> None:
+        self._live.pop(session.id, None)
         self._delete_quietly(session.id)
+
+    def forget(self, session: Session) -> None:
+        """The engine says *session* is gone: there is nothing to delete."""
+        self._live.pop(session.id, None)
+
+    def close_all(self) -> None:
+        """A best-effort DELETE for every session this client opened and did not close."""
+        for sid in list(self._live):
+            self._live.pop(sid, None)
+            self._delete_quietly(sid)
 
     def _delete_quietly(self, session_id: str) -> None:
         """DELETE the session, once, on a short timeout; every failure is swallowed (the engine's own bounds
@@ -391,6 +480,19 @@ class ExportClient:
             before_request()
             headers = {"Authorization": f"Bearer {self._creds.bearer()}", **client_identity_headers()}
             self._http.delete(f"{self._base}/v1/tenant/export/{session_id}", headers=headers, timeout=_DELETE_TIMEOUT_S)
+
+
+def _parse_open(resp: httpx.Response) -> dict[str, Any]:
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict) or not body.get("session_id"):
+        raise BackupFailed(
+            "opening the export session: the answer is not an export session header (no JSON with a session_id). "
+            f"Something between you and the engine may be answering for it, such as a proxy or an edge. {_AGAIN}"
+        )
+    return body
 
 
 def _session_id(resp: httpx.Response) -> str | None:
@@ -447,6 +549,26 @@ class ExportResult:
 Progress = Callable[[int, str, int, int, int], None]
 
 
+class _Partial:
+    """The ``.partial`` file of one run: its path and open handle, and the one way to be rid of both."""
+
+    def __init__(self) -> None:
+        self.path: Path | None = None
+        self.fh: Any = None
+
+    def discard(self) -> None:
+        """Close the handle and unlink the file. Local and instant; never raises (the file may already be gone,
+        after a publish)."""
+        fh, self.fh = self.fh, None
+        if fh is not None:
+            with contextlib.suppress(OSError):
+                fh.close()
+        path, self.path = self.path, None
+        if path is not None:
+            with contextlib.suppress(OSError):
+                path.unlink()
+
+
 def run_export(
     client: ExportClient,
     destination: Path | Callable[[str], Path],
@@ -458,36 +580,36 @@ def run_export(
     """Export the caller's tenant to *destination* (a path, or a function of the tenant id that makes one).
 
     Raises :class:`ExportRefused` (nothing written), :class:`BackupFailed` (the run failed; no partial file),
-    or whatever interrupted it (SystemExit, KeyboardInterrupt) after sending a best-effort DELETE and
-    removing the partial file."""
+    or whatever interrupted it (SystemExit, KeyboardInterrupt) after removing the partial file and sending a
+    best-effort DELETE for every session this run opened. The file goes first: it is local and instant, so a
+    second interrupt during the network DELETE cannot leave it behind."""
     note = on_note or (lambda _msg: None)
+    client.note = note
     if isinstance(destination, Path) and os.path.lexists(destination):
         raise already_there(destination)
     client.check_engine()
     started = time.monotonic()
-    session: Session | None = None
-    tmp: Path | None = None
-    fh: Any = None
+    partial = _Partial()
     try:
         for restart in range(max_restarts + 1):
             session = client.open_session()
             header = _checked_header(session)
-            if tmp is None:
+            if partial.path is None:
                 dest = destination(str(header["tenant_id"])) if callable(destination) else destination
                 if os.path.lexists(dest):
                     raise already_there(dest)
-                tmp, fh = _open_partial(dest)
+                _open_partial(dest, partial)
             else:
-                fh.seek(0)
-                fh.truncate()
-            writer = TenantFileWriter(fh)
+                partial.fh.seek(0)
+                partial.fh.truncate()
+            writer = TenantFileWriter(partial.fh)
             try:
                 tables, sensitive = _pull(client, session, header, writer, on_progress)
             except _SessionGone:
-                gone, session = session, None
-                if gone.expires_at is not None and client.now() >= gone.expires_at:
+                client.forget(session)
+                if session.expires_at is not None and client.now() >= session.expires_at:
                     raise BackupFailed(
-                        f"the engine ended the export session: it allows {gone.total_seconds // 60}-minute sessions and this "
+                        f"the engine ended the export session: it allows {session.total_seconds // 60}-minute sessions and this "
                         f"export did not finish in time. {_AGAIN} A large tenant needs a faster connection or a quieter "
                         "time of day; the limit is the engine's, not this client's."
                     ) from None
@@ -499,21 +621,20 @@ def run_export(
                 note("The engine ended the export session; starting over with a new one.")
                 continue
             break
-        assert session is not None and tmp is not None and fh is not None  # the loop only exits by break or raise
+        assert partial.path is not None and partial.fh is not None  # the loop only exits by break or raise
         trailer = writer.finish()
-        fh.flush()
-        os.fsync(fh.fileno())
+        partial.fh.flush()
+        os.fsync(partial.fh.fileno())
         size = writer.bytes_written
-        fh.close()
-        fh = None
+        partial.fh.close()
+        partial.fh = None
         client.close(session)
-        session = None
         note("Checking the finished file.")
         try:
-            verify_file(tmp)  # the bytes on disk, not the bytes written: catches a bad disk and any writer bug
+            verify_file(partial.path)  # the bytes on disk, not the bytes written: catches a bad disk and any writer bug
         except TenantFileError as exc:
             raise BackupFailed(f"the finished file does not verify: {exc}. {_AGAIN}") from None
-        _publish(tmp, dest)
+        _publish(partial.path, dest)
         by_class: dict[str, int] = {}
         for _name, cls, rows, _pages in tables:
             by_class[cls] = by_class.get(cls, 0) + rows
@@ -522,14 +643,10 @@ def run_export(
     except OSError as exc:
         raise BackupFailed(f"cannot write the backup: {exc.strerror or exc}. Free some space or pick another path with --to. {_AGAIN}") from None
     finally:
-        if fh is not None:
-            with contextlib.suppress(OSError):
-                fh.close()
-        if session is not None:
-            client.close(session)  # best effort, never raises: a killed or failed run releases the snapshot at once
-        if tmp is not None:
-            with contextlib.suppress(OSError):
-                tmp.unlink()  # gone after a publish; the partial after anything else
+        try:
+            partial.discard()  # gone after a publish; the partial after anything else
+        finally:
+            client.close_all()  # whatever session is still open: a killed or failed run releases the snapshot at once
 
 
 def _checked_header(session: Session) -> dict[str, Any]:
@@ -548,20 +665,33 @@ def _checked_header(session: Session) -> dict[str, Any]:
     return header
 
 
-def _open_partial(dest: Path) -> tuple[Path, Any]:
+def _open_partial(dest: Path, partial: _Partial) -> None:
+    """Create the owner-only ``.partial`` beside *dest* and hand it to *partial*. An interrupt anywhere in here
+    leaves nothing: the file, once it exists, is unlinked on the way out (it carries this process's pid in its name)."""
     from nexus._winsec import open_private  # noqa: PLC0415 - the one place that makes a file owner-only on both platforms
 
     parent = dest.parent
+    tmp = parent / f".{dest.name}.partial-{os.getpid()}"
     try:
         if not parent.exists():
             parent.mkdir(parents=True)
             if os.name != "nt":
                 parent.chmod(0o700)  # the file holds the tenant's data (on Windows the folder's ACL decides)
-        tmp = parent / f".{dest.name}.partial-{os.getpid()}"
         fd = open_private(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)  # owner-only before the first byte
     except (OSError, ValueError) as exc:
         raise cannot_write(dest, exc) from None
-    return tmp, os.fdopen(fd, "wb")
+    except BaseException:  # an interrupt: the file may or may not exist
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    partial.path = tmp
+    try:
+        partial.fh = os.fdopen(fd, "wb")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        partial.discard()
+        raise
 
 
 def _pull(

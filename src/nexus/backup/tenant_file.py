@@ -320,10 +320,15 @@ def verify_file(path: Path) -> FileReport:
     table's count and SHA-256 against the trailer, the whole-file hash. No engine is contacted.
 
     Returns the header and per-table summary. Raises :class:`TenantFileError` naming the table at fault."""
-    size = path.stat().st_size
+    try:
+        size = path.stat().st_size
+        fh = path.open("rb")
+    except OSError as exc:
+        raise TenantFileError(f"cannot read {path}: {exc.strerror or exc}") from None
     if size == 0:
+        fh.close()
         raise TenantFileError(f"{path} is empty")
-    with path.open("rb") as fh:
+    with fh:
         head = fh.read(_FILE_HEAD_LEN)
         if len(head) < _FILE_HEAD_LEN or head[: len(FILE_MAGIC)] != FILE_MAGIC:
             raise TenantFileError(f"{path} is not a nexus tenant backup (it does not start with the {FILE_MAGIC.decode()} marker)")
@@ -397,6 +402,10 @@ def _verify_frames(fh: IO[bytes], size: int, head: bytes) -> FileReport:  # noqa
                 raise TenantFileError(f"the header says engine format version {header.get('format_version')!r}, which this client does not read")
             if header.get("schema_changeset_count") is None:
                 raise TenantFileError("the header has no schema_changeset_count, so no schema marker a restore can check")
+            if not isinstance(header.get("tenant_id"), str) or not header["tenant_id"]:
+                raise TenantFileError("the header names no tenant")
+            if not order:
+                raise TenantFileError("the header lists no tables")
         elif header is None:
             raise TenantFileError("a frame before the header")
         elif kind == KIND_TABLE:
