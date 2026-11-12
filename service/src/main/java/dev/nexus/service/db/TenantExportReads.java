@@ -11,6 +11,7 @@ import org.jooq.Record;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.postgresql.PGConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,6 +57,9 @@ public final class TenantExportReads {
     /** SQLSTATE of a lock wait that ran out of {@code lock_timeout}. */
     private static final String LOCK_NOT_AVAILABLE = "55P03";
 
+    /** SQLSTATE of a statement cancelled by {@code statement_timeout} (the page's time budget). */
+    private static final String QUERY_CANCELED = "57014";
+
     /** The snapshot is gone: the session's holding transaction ended (closed, expired or its connection died). */
     public static final class SnapshotGoneException extends RuntimeException {
         public SnapshotGoneException(String snapshotId) {
@@ -63,10 +67,17 @@ public final class TenantExportReads {
         }
     }
 
-    /** A page could not take a table lock inside its bound; retryable. */
+    /**
+     * A read could not take a table lock inside its lock bound, or ran past its time budget (statement timeout);
+     * retryable.
+     */
     public static final class PageBusyException extends RuntimeException {
         public PageBusyException(Throwable cause) {
-            super("export page waited too long for a table lock", cause);
+            super("export read waited too long for a table lock or ran past its time budget", cause);
+        }
+
+        PageBusyException(String message) {
+            super(message);
         }
     }
 
@@ -92,10 +103,21 @@ public final class TenantExportReads {
 
     private final DataSource dataSource;
     private final int lockTimeoutMs;
+    private final int budgetMs;
 
-    public TenantExportReads(DataSource dataSource, int lockTimeoutMs) {
+    /** Test seam: runs inside the page's transaction just before its COPY statement is rendered; null in production. */
+    java.util.function.Consumer<DSLContext> beforeCopyForTests;
+    /** Test seam: wraps the page's COPY sink (a test's sink can fail where the real one cannot); null in production. */
+    java.util.function.UnaryOperator<java.io.OutputStream> sinkWrapperForTests;
+
+    /**
+     * @param lockTimeoutMs the bound on a read's wait for any table lock
+     * @param budgetMs      the bound on one read's database time, all its statements together
+     */
+    public TenantExportReads(DataSource dataSource, int lockTimeoutMs, int budgetMs) {
         this.dataSource = dataSource;
         this.lockTimeoutMs = lockTimeoutMs;
+        this.budgetMs = budgetMs;
     }
 
     // ── the header ───────────────────────────────────────────────────────────────────────────────
@@ -144,23 +166,31 @@ public final class TenantExportReads {
             List<LiveColumn> columns = liveColumns(ctx, table);
             Long tableRows = null;
             if (after == null) {
+                rebound(txn);
                 tableRows = ctx.select(DSL.count()).from(sourceOf(table)).where(scope(columns, tenant))
                     .fetchOne(0, Long.class);
             }
             var select = pageSelect(ctx, table, columns, tenant, after, maxRows);
+            rebound(txn);
+            if (beforeCopyForTests != null) beforeCopyForTests.accept(ctx);
             String copy = copyStatement(ctx, select);
             BinaryCopyPage sink = new BinaryCopyPage(targetBytes, maxRows);
+            java.io.OutputStream target = sinkWrapperForTests == null ? sink : sinkWrapperForTests.apply(sink);
+            boolean finished = false;
             try {
-                copyOut(txn.conn, copy, sink);
+                copyOut(txn.conn, copy, target);
+                finished = true;
             } catch (BinaryCopyPage.PageFull cut) {
-                // the byte target: the copy was cancelled, the page ends at its last whole row. A cancelled copy
-                // leaves the driver's protocol state behind the server's (the next statement on the connection
-                // reads the cancelled copy's replies), so this connection is not returned to the pool.
-                txn.discard = true;
+                // the byte target: the copy was cancelled, the page ends at its last whole row
+                finished = true;
+                txn.discard = true;   // the cancel leaves the driver behind the server: see release()
             } catch (IOException | SQLException e) {
-                txn.discard = true;   // a copy that failed part-way leaves the connection in an unknown protocol state
-                throw lockWait(e) ? new PageBusyException(e) : new IllegalStateException(
+                throw retryable(e) ? new PageBusyException(e) : new IllegalStateException(
                     "export page copy failed for " + table.name(), e);
+            } finally {
+                // any other way out (a failed copy, a sink that threw, a cancelled statement) leaves the connection
+                // in a protocol state nobody checked, and the driver's cancel may still be in flight: not reusable
+                if (!finished) txn.discard = true;
             }
             int[] keyIndexes = table.primaryKey().stream()
                 .mapToInt(k -> indexOf(columns, k.name(), table)).toArray();
@@ -187,7 +217,7 @@ public final class TenantExportReads {
      */
     private static Condition scope(List<LiveColumn> columns, String tenant) {
         if (columns.stream().anyMatch(c -> "tenant_id".equals(c.column().name()))) {
-            return DSL.field(DSL.name("tenant_id"), String.class).eq(tenant);
+            return DSL.field(DSL.name("tenant_id"), String.class).eq(text(tenant));
         }
         return DSL.trueCondition();
     }
@@ -214,6 +244,23 @@ public final class TenantExportReads {
             .limit(maxRows);
     }
 
+    /**
+     * A text value as an expression that renders the same under every {@code standard_conforming_strings}: its UTF-8
+     * bytes as hex, decoded by the server. A COPY takes no bind parameters, so a key reaches the statement as
+     * inlined text, and a quoted literal means one thing with the setting on (a backslash is a backslash) and
+     * another with it off (a backslash escapes): hex digits mean the same in both, so no key text can end the
+     * expression, whatever the setting is.
+     */
+    static Field<String> text(String value) {
+        String hex = java.util.HexFormat.of().formatHex(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        // convert_from's encoding argument is a name, which carries the C collation, and a comparison would then
+        // sort by it instead of by the column's: the explicit collation puts the value back on the database default,
+        // the column's (a key compared under another collation than its index's is a wrong page, not an error)
+        return DSL.function("convert_from", SQLDataType.VARCHAR,
+            DSL.function("decode", SQLDataType.BLOB, DSL.val(hex), DSL.inline("hex")), DSL.inline("UTF8"))
+            .collate("default");
+    }
+
     /** The key is greater than {@code after}: one row-value comparison over the whole primary key (gate N1). */
     private static Condition keyAfter(List<Field<?>> keyFields, List<Object> after) {
         return rowGreater(keyFields, after);
@@ -224,7 +271,7 @@ public final class TenantExportReads {
         Field[] fields = keyFields.toArray(new Field[0]);
         Field[] values = new Field[fields.length];
         for (int i = 0; i < fields.length; i++) {
-            values[i] = DSL.val(after.get(i), fields[i].getDataType());
+            values[i] = after.get(i) instanceof String text ? text(text) : DSL.val(after.get(i), fields[i].getDataType());
         }
         return DSL.row(fields).gt(DSL.row(values));
     }
@@ -238,15 +285,31 @@ public final class TenantExportReads {
         return "COPY (" + ctx.renderInlined(query) + ") TO STDOUT (FORMAT binary)";
     }
 
-    private static void copyOut(Connection conn, String copy, BinaryCopyPage sink) throws IOException, SQLException {
+    private static void copyOut(Connection conn, String copy, java.io.OutputStream sink) throws IOException, SQLException {
         conn.unwrap(PGConnection.class).getCopyAPI().copyOut(copy, sink);
     }
 
-    private static boolean lockWait(Throwable e) {
+    /** A lock wait that ran out of its bound, or a statement cancelled at the time budget: both are retried. */
+    private static boolean retryable(Throwable e) {
         for (Throwable c = e; c != null; c = c.getCause()) {
-            if (c instanceof SQLException s && LOCK_NOT_AVAILABLE.equals(s.getSQLState())) return true;
+            if (c instanceof SQLException s
+                    && (LOCK_NOT_AVAILABLE.equals(s.getSQLState()) || QUERY_CANCELED.equals(s.getSQLState()))) {
+                return true;
+            }
         }
         return false;
+    }
+
+    /**
+     * Restarts the statement bound at what is left of the read's budget, so the statements of one read share one
+     * budget instead of each having its own. Spent: the read is refused as busy, before it starts another statement.
+     */
+    private static void rebound(Txn txn) {
+        long left = (txn.deadlineNanos - System.nanoTime()) / 1_000_000L;
+        if (left < 1) {
+            throw new PageBusyException("the export read used its whole time budget before its next statement");
+        }
+        PgSession.setLocal(txn.ctx, "statement_timeout", Long.toString(left));
     }
 
     private static int indexOf(List<LiveColumn> columns, String name, ExportTable table) {
@@ -301,11 +364,13 @@ public final class TenantExportReads {
     private static final class Txn {
         private final Connection conn;
         private final DSLContext ctx;
+        private final long deadlineNanos;
         private boolean discard;
 
-        private Txn(Connection conn, DSLContext ctx) {
+        private Txn(Connection conn, DSLContext ctx, long deadlineNanos) {
             this.conn = conn;
             this.ctx = ctx;
+            this.deadlineNanos = deadlineNanos;
         }
     }
 
@@ -327,15 +392,17 @@ public final class TenantExportReads {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             PgSession.GucBatch stamp = PgSession.gucBatch(ctx).stamp(TenantScope.DEFAULT_TENANT_GUC, tenant);
             PgSession.setLockTimeout(stamp, lockTimeoutMs);
+            stamp.set("statement_timeout", Integer.toString(budgetMs));   // the read's time budget, restarted per statement
+            long deadline = System.nanoTime() + budgetMs * 1_000_000L;
             stamp.apply(conn);
-            txn = new Txn(conn, ctx);
+            txn = new Txn(conn, ctx, deadline);
             return work.apply(txn);
         } catch (org.jooq.exception.DataAccessException e) {
             // a statement inside the read (jOOQ wraps the driver's exception): a lock wait that ran out is retryable
-            if (lockWait(e)) throw new PageBusyException(e);
+            if (retryable(e)) throw new PageBusyException(e);
             throw e;
         } catch (SQLException e) {
-            throw lockWait(e) ? new PageBusyException(e) : new IllegalStateException("export read failed", e);
+            throw retryable(e) ? new PageBusyException(e) : new IllegalStateException("export read failed", e);
         } finally {
             release(conn, txn != null && txn.discard);
         }

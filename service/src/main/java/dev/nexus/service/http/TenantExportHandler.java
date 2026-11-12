@@ -62,15 +62,43 @@ import java.util.regex.Pattern;
  * table's first page, else the {@code X-Nexus-Export-Last-Key} of the previous page; its encoding is
  * {@link TenantExportKeys}'s (base64url of a JSON array of one string per primary-key column, in the registry's
  * column order; for {@code chunks}: {@code tenant_id, collection, chash (hex), embedding_model}). Malformed:
- * 400 {@code malformed_after}. The body is a complete PostgreSQL binary COPY stream of the page's rows
+ * 400 {@code malformed_after}; a bad percent-encoding in the query string is 400 {@code malformed_query}
+ * (the JDK server may refuse it first, also with 400). The body is a complete PostgreSQL binary COPY stream of the page's rows
  * ({@code application/octet-stream}), at most about {@link TenantExportSessions.Config#pageBytes()} bytes.
  * Headers: {@code X-Nexus-Export-Table}, {@code -Rows} (rows in this page), {@code -Last-Key} (absent for an
  * empty page), {@code -Done} ({@code true} when this page ended the table), {@code -Sha256} (hex SHA-256 of
  * the body) and, on a first page only, {@code -Table-Rows} (the table's row count in the snapshot). The keyset
  * predicate is one row-value comparison over the whole primary key. 410 {@code session_closed} when
  * Postgres no longer has the snapshot (the held transaction ended outside the engine's own bounds); 409
- * {@code page_in_flight} for a second concurrent page of one session; 503 {@code export_page_busy} when a
- * page waited out its lock bound behind a tenant create (retry it).
+ * {@code page_in_flight} with {@code Retry-After: 1} for a second concurrent page of one session; 503
+ * {@code export_page_busy} with {@code Retry-After: 1} when a read (a page, or the header of a POST) waited out
+ * its lock bound behind a tenant create or ran past its time budget (retry it; a POST that answers it opened
+ * nothing).
+ *
+ * <p><b>The page cut and its time budget, against the edge limits.</b> The cloud edge ends an exchange at 60
+ * seconds (RDR-248 A1) and the bead's gate N1 wants a page to START its response inside 30 seconds; this holds
+ * to the stricter. A page is cut by bytes at {@link TenantExportSessions.Config#pageBytes()} (default 16 MiB,
+ * at most 19,000,000: under the 20 MB body cap, which a page may overshoot by one row). The engine bounds the
+ * page's DATABASE time to {@link TenantExportSessions.Config#pageBudgetMs()} (default 20 s, {@code
+ * NX_EXPORT_PAGE_BUDGET_SECONDS}), all its statements together (the first page's row count, then the COPY):
+ * each statement runs under {@code statement_timeout} set to what is left of the budget, and a statement
+ * cancelled at the bound answers 503 {@code export_page_busy}. The database serves about 4,000 chunk rows in
+ * 0.1 s (T2 {@code nexus/rdr248-local-spike-r2-2026-11-11}), so the budget is a bound on a pathological page,
+ * not the expected time; the rest of the 30 s is the pool borrow (the pool's own connection timeout, which
+ * answers a typed 503 when exhausted) and the response's first bytes. A page is buffered whole before its first
+ * byte is sent (its hash is a header), so the transfer is outside the response-start bound and the database
+ * transaction is already closed while the client reads. The measured 16 MB page time at 500,000 chunks is the
+ * export battery's (nexus-csayy.4).
+ *
+ * <p><b>A gone session.</b> The registry is in memory and PER ENGINE INSTANCE: the deployment assumes one
+ * engine instance, or routing that keeps one tenant on one instance. A 404 {@code no_such_session} or a 410
+ * {@code session_closed} on the caller's OWN session id means the session is gone: it expired (idle 10 minutes
+ * or 60 minutes old, from {@code expires_at}/{@code total_timeout_seconds} in the header), the engine
+ * restarted, the request reached a different engine instance, or its snapshot ended. The two are not told
+ * apart, and a client must not retry the page: it starts over with a new session, and when it was past
+ * {@code expires_at} it fails naming the 60-minute limit. A client must also refuse a header whose {@code
+ * schema_changeset_count} is null (the engine could not read its changelog identity, so the export carries no
+ * schema marker a restore can check).
  *
  * <p><b>DELETE.</b> 200 {@code {"closed":true}}, or 404 {@code no_such_session}.
  */
@@ -179,6 +207,11 @@ public final class TenantExportHandler implements HttpHandler {
             body.put("retry_after_seconds", e.retryAfterSeconds());
             HttpUtil.send(exchange, 503, MAPPER.writeValueAsString(body));
             return;
+        } catch (TenantExportReads.PageBusyException e) {
+            // the header read waited out a table lock or its time budget: nothing was opened (the held transaction ended)
+            exchange.getResponseHeaders().set("Retry-After", "1");
+            error(exchange, 503, "export_page_busy", e.getMessage());
+            return;
         }
         TenantExportSessions.Session session = opened.session();
         TenantExportSessions.Config config = s.config();
@@ -231,7 +264,15 @@ public final class TenantExportHandler implements HttpHandler {
         requireWellFormedId(id);
         TenantExportSessions s = sessions.get();
         TenantExportSessions.Session session = s.lookup(tenant, id);   // 404 first: nothing below is revealed to a stranger
-        String tableName = queryParam(exchange, "table");
+        String tableName;
+        String afterText;
+        try {
+            tableName = queryParam(exchange, "table");
+            afterText = queryParam(exchange, "after");
+        } catch (IllegalArgumentException e) {
+            error(exchange, 400, "malformed_query", "the query string holds a bad percent-encoding");
+            return;
+        }
         var entry = TenantExport.exportable(tableName);
         if (entry.isEmpty()) {
             error(exchange, 400, "unknown_table", "table must name an exportable data or derived table");
@@ -239,7 +280,6 @@ public final class TenantExportHandler implements HttpHandler {
         }
         ExportTable table = entry.get();
         List<Object> after = null;
-        String afterText = queryParam(exchange, "after");
         if (afterText != null) {
             try {
                 after = TenantExportKeys.binds(table.primaryKey(),
@@ -259,6 +299,7 @@ public final class TenantExportHandler implements HttpHandler {
             error(exchange, 410, "session_closed", "the export session's snapshot no longer exists; open a new session");
             return;
         } catch (TenantExportSessions.PageInFlightException e) {
+            exchange.getResponseHeaders().set("Retry-After", "1");
             error(exchange, 409, "page_in_flight", e.getMessage());
             return;
         } catch (TenantExportReads.PageBusyException e) {

@@ -31,11 +31,13 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -88,6 +90,12 @@ class TenantExportSessionsTest {
             }
             for (int i = 0; i < 3; i++) {
                 insertMemory(dsl, B, "title-" + i);
+            }
+            for (int i = 0; i < 7; i++) {   // a timestamptz key with microseconds, two rows sharing one instant
+                dsl.insertInto(SEARCH_TELEMETRY).set(SEARCH_TELEMETRY.TENANT_ID, A)
+                    .set(SEARCH_TELEMETRY.TS, OffsetDateTime.parse("2026-11-12T10:15:30.123456Z").plusSeconds(i / 2))
+                    .set(SEARCH_TELEMETRY.QUERY_HASH, "q" + i).set(SEARCH_TELEMETRY.COLLECTION, "c")
+                    .set(SEARCH_TELEMETRY.RAW_COUNT, 1).set(SEARCH_TELEMETRY.KEPT_COUNT, 1).execute();
             }
             for (String key : List.of("it's", "back\\slash", "éclair", "z", "quote\"d", "semi;colon", "100%")) {
                 dsl.insertInto(CATALOG_META).set(CATALOG_META.TENANT_ID, A).set(CATALOG_META.KEY, key)
@@ -151,8 +159,7 @@ class TenantExportSessionsTest {
     }
 
     private Config config(int maxSessions) {
-        return new Config(Duration.ofMinutes(60), Duration.ofMinutes(10), maxSessions, 16 * 1024 * 1024, 100_000,
-            300, 30, Duration.ofHours(1));
+        return Config.defaults().withMaxSessions(maxSessions).withLockTimeoutMs(300).withSweepInterval(Duration.ofHours(1));
     }
 
     private TenantExportSessions sessions(Config config, ExportTestClock clock) {
@@ -501,6 +508,236 @@ class TenantExportSessionsTest {
         }
         // and once the lock is gone the same page reads
         assertThat(s.reads().page(session.snapshotId(), A, table("memory"), null, 1 << 20, 100).rows()).isEqualTo(5);
+    }
+
+    // ── the sweeper, on the real clock ───────────────────────────────────────────────────────────
+
+    @Test
+    void theBackgroundSweeperClosesAnAbandonedSessionOnTheRealClock() throws Exception {
+        Config quick = Config.defaults().withBounds(Duration.ofMinutes(1), Duration.ofMillis(300))
+            .withSweepInterval(Duration.ofMillis(100));
+        var s = new TenantExportSessions(ds, quick, java.time.Clock.systemUTC());
+        opened.add(s);
+        int activeBefore = ds.getHikariPoolMXBean().getActiveConnections();
+        var session = s.open(A).session();
+        Integer pid = DSL.using(session.heldConnectionForTests(), SQLDialect.POSTGRES)
+            .select(DSL.function("pg_backend_pid", Integer.class)).fetchOne(0, Integer.class);
+        assertThat(s.openCount()).isEqualTo(1);
+
+        // nothing calls the session again: only the sweeper can end it
+        long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        while (s.openCount() > 0 && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+        }
+        assertThat(s.openCount()).as("the sweeper expired the idle session").isZero();
+        assertThat(ds.getHikariPoolMXBean().getActiveConnections()).as("its connection is back in the pool")
+            .isEqualTo(activeBefore);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext sctx = DSL.using(su, SQLDialect.POSTGRES);
+            Field<String> state = DSL.field(DSL.name("state"), String.class);
+            var states = sctx.select(state).from(DSL.table(DSL.name("pg_stat_activity")))
+                .where(DSL.field(DSL.name("pid"), Integer.class).eq(pid)).fetch(state);
+            assertThat(states).as("the held transaction is gone (the backend may live on, idle, in the pool)")
+                .doesNotContain("idle in transaction");
+            assertThat(sctx.fetchCount(DSL.table(DSL.name("pg_stat_activity")),
+                DSL.field(DSL.name("query"), String.class).likeIgnoreCase("%pg_export_snapshot%")
+                    .and(state.eq("idle in transaction"))))
+                .as("no export snapshot is held by any backend").isZero();
+        }
+    }
+
+    @Test
+    void aSessionWithAPageInFlightIsNeverExpiredAsIdleAndIdleRestartsWhenThePageEnds() throws Exception {
+        var clock = clock();
+        var s = sessions(config(2), clock);
+        var session = s.open(A).session();
+        CountDownLatch inPage = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CompletableFuture<String> page = CompletableFuture.supplyAsync(() -> s.withPage(session, held -> {
+            inPage.countDown();
+            try {
+                release.await(30, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return "read";
+        }));
+        assertThat(inPage.await(10, TimeUnit.SECONDS)).isTrue();
+
+        clock.advance(Duration.ofMinutes(11));
+        assertThat(s.sweep()).as("a page is being read: that is not idle time").isZero();
+        assertThat(s.openCount()).isEqualTo(1);
+        assertThatThrownBy(() -> s.withPage(session, held -> "second"))
+            .isInstanceOf(TenantExportSessions.PageInFlightException.class);
+
+        release.countDown();
+        assertThat(page.get(10, TimeUnit.SECONDS)).isEqualTo("read");
+        assertThat(s.sweep()).as("the idle clock restarted when the page ended").isZero();
+        clock.advance(Duration.ofMinutes(10));
+        assertThat(s.sweep()).isEqualTo(1);
+    }
+
+    // ── time budget, lock bound, progress and the cut ────────────────────────────────────────────
+
+    @Test
+    void aPageRunningPastItsTimeBudgetIsCancelledAsBusyNotHung() throws Exception {
+        // a lock wait far longer than the budget: it is the statement timeout that ends the wait
+        var s = sessions(config(2).withLockTimeoutMs(60_000).withPageBudgetMs(400), clock());
+        var session = s.open(A).session();
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            PgContainerHelper.lockTable(holder, MEMORY, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
+            long t0 = System.nanoTime();
+            assertThatThrownBy(() -> s.reads().page(session.snapshotId(), A, table("memory"), null, 1 << 20, 100))
+                .isInstanceOf(TenantExportReads.PageBusyException.class);
+            assertThat(Duration.ofNanos(System.nanoTime() - t0)).as("cut at the 400 ms budget, not the 60 s lock bound")
+                .isLessThan(Duration.ofSeconds(10));
+            holder.rollback();
+        }
+        assertThat(s.reads().page(session.snapshotId(), A, table("memory"), null, 1 << 20, 100).rows()).isEqualTo(5);
+    }
+
+    @Test
+    void aTargetSmallerThanOneRowStillMakesProgressSoNoPageIsEmptyAndNotDone() throws Exception {
+        var s = sessions(config(2), clock());
+        var session = s.open(A).session();
+        ExportTable chunks = table("chunks");
+        List<Object> after = null;
+        int total = 0;
+        for (int pages = 0; pages < 60; pages++) {
+            var page = s.reads().page(session.snapshotId(), A, chunks, after, 1, 100_000);   // one byte: below any row
+            if (page.done()) break;
+            assertThat(page.rows()).as("a page that is not the last holds a row").isEqualTo(1);
+            total += page.rows();
+            after = after(chunks, page.lastKey());
+        }
+        assertThat(total).isEqualTo(A_CHUNKS);
+    }
+
+    @Test
+    void aSinkThatFailsWithARuntimeExceptionLeavesNoPoisonedConnectionInThePool() throws Exception {
+        var s = sessions(config(2), clock());
+        var session = s.open(A).session();
+        ExportTable chunks = table("chunks");
+        s.reads().sinkWrapperForTests = sink -> new java.io.OutputStream() {
+            @Override
+            public void write(int b) {
+                throw new IllegalStateException("boom");
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) {
+                throw new IllegalStateException("boom");
+            }
+        };
+        assertThatThrownBy(() -> s.reads().page(session.snapshotId(), A, chunks, null, 1 << 20, 100_000))
+            .isInstanceOf(IllegalStateException.class).hasMessageContaining("boom");
+        s.reads().sinkWrapperForTests = null;
+        for (int i = 0; i < 12; i++) {   // every connection of a pool of 8 is borrowed more than once
+            assertThat(s.reads().page(session.snapshotId(), A, table("memory"), null, 1 << 20, 100).rows()).isEqualTo(5);
+            assertThat(s.reads().page(session.snapshotId(), A, chunks, null, 20_000, 100_000).rows()).isPositive();
+        }
+    }
+
+    // ── keys of other types, and a text key under standard_conforming_strings off ────────────────
+
+    @Test
+    void aTimestamptzKeyPagesAcrossItsBoundaryWithMicrosecondsIntact() throws Exception {
+        var s = sessions(config(2), clock());
+        var session = s.open(A).session();
+        ExportTable telemetry = table("search_telemetry");
+        List<String> expected;
+        try (Connection su = pg.createConnection("")) {
+            expected = DSL.using(su, SQLDialect.POSTGRES).select(SEARCH_TELEMETRY.TS, SEARCH_TELEMETRY.QUERY_HASH)
+                .from(SEARCH_TELEMETRY).where(SEARCH_TELEMETRY.TENANT_ID.eq(A))
+                .orderBy(SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS, SEARCH_TELEMETRY.QUERY_HASH,
+                    SEARCH_TELEMETRY.COLLECTION)
+                .fetch(r -> r.get(SEARCH_TELEMETRY.TS).toInstant() + "|" + r.get(SEARCH_TELEMETRY.QUERY_HASH));
+        }
+        assertThat(expected).hasSize(7);
+        assertThat(expected.get(0)).startsWith("2026-11-12T10:15:30.123456Z");
+        List<Object> after = null;
+        List<String> seen = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            var page = s.reads().page(session.snapshotId(), A, telemetry, after, 1 << 20, 2);   // two rows a page: the
+            if (page.rows() == 0) {                                                             // boundary splits a shared instant
+                assertThat(page.done()).isTrue();
+                break;
+            }
+            // the page's last row is read back through the cursor's own text form
+            var key = TenantExportKeys.decode(page.lastKey(), telemetry.primaryKey());
+            seen.add(Instant.parse(key.get(1)) + "|" + key.get(2));
+            after = after(telemetry, page.lastKey());
+        }
+        // each page's last key is the key of position 2, 4, 6 and 7
+        assertThat(seen).containsExactly(expected.get(1), expected.get(3), expected.get(5), expected.get(6));
+    }
+
+    @Test
+    void aTextKeyWithABackslashAndAQuoteIsExactEvenWhenStandardConformingStringsIsOff() throws Exception {
+        var s = sessions(config(2), clock());
+        var session = s.open(A).session();
+        ExportTable meta = table("catalog_meta");
+        List<String> expected;
+        try (Connection su = pg.createConnection("")) {
+            expected = DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_META.KEY).from(CATALOG_META)
+                .where(CATALOG_META.TENANT_ID.eq(A)).orderBy(CATALOG_META.TENANT_ID, CATALOG_META.KEY)
+                .fetch(CATALOG_META.KEY);
+        }
+        boolean[] wasOff = {false};
+        s.reads().beforeCopyForTests = ctx -> {
+            ctx.select(DSL.function("set_config", String.class, DSL.inline("standard_conforming_strings"),
+                DSL.inline("off"), DSL.inline(true))).fetch();
+            wasOff[0] = "off".equals(ctx.select(DSL.function("current_setting", String.class,
+                DSL.inline("standard_conforming_strings"))).fetchOne(0, String.class));
+        };
+        List<Object> after = null;
+        List<String> seen = new ArrayList<>();
+        for (int i = 0; i < 30; i++) {
+            var page = s.reads().page(session.snapshotId(), A, meta, after, 1 << 20, 1);
+            if (page.rows() == 0) break;
+            seen.add(TenantExportKeys.decode(page.lastKey(), meta.primaryKey()).get(1));
+            after = after(meta, page.lastKey());
+        }
+        assertThat(wasOff[0]).as("the setting really was off while the statement ran").isTrue();
+        assertThat(seen).as("a backslash key and a quote key neither skip nor repeat a row").isEqualTo(expected);
+        assertThat(expected).contains("back\\slash", "it's");
+    }
+
+    // ── config ───────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void theTunablesAreRangedSoNothingWrapsOverflowsOrYieldsAnEmptyPage() {
+        for (var bad : List.of(Map.entry(TenantExportSessions.ENV_PAGE_BYTES, "0"),
+            Map.entry(TenantExportSessions.ENV_PAGE_BYTES, "1000"),
+            Map.entry(TenantExportSessions.ENV_PAGE_BYTES, "19000001"),
+            Map.entry(TenantExportSessions.ENV_PAGE_BYTES, "4294967297"),
+            Map.entry(TenantExportSessions.ENV_MAX_SESSIONS, "4294967298"),
+            Map.entry(TenantExportSessions.ENV_MAX_SESSIONS, "65"),
+            Map.entry(TenantExportSessions.ENV_TOTAL_SECONDS, "9223372036854775807"),
+            Map.entry(TenantExportSessions.ENV_TOTAL_SECONDS, "604801"),
+            Map.entry(TenantExportSessions.ENV_IDLE_SECONDS, "-5"),
+            Map.entry(TenantExportSessions.ENV_PAGE_BUDGET_SECONDS, "301"))) {
+            assertThatThrownBy(() -> Config.fromEnv(Map.of(bad.getKey(), bad.getValue())::get))
+                .as(bad.getKey() + "=" + bad.getValue()).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(bad.getKey());
+        }
+        Config top = Config.fromEnv(Map.of(TenantExportSessions.ENV_PAGE_BYTES, "19000000",
+            TenantExportSessions.ENV_TOTAL_SECONDS, "604800")::get);
+        assertThat(top.pageBytes()).isEqualTo(19_000_000);
+        assertThat(Instant.parse("2026-11-12T00:00:00Z").plus(top.totalBound())).isAfter(Instant.parse("2026-11-12T00:00:00Z"));
+        assertThat(Config.defaults().pageBudgetMs()).as("20 s, inside the stricter 30 s response-start limit").isEqualTo(20_000);
+    }
+
+    @Test
+    void aSessionCapThePoolCannotCarryIsRefusedWithAMessageNamingBothSettings() {
+        Config.defaults().requirePoolHeadroom(10);                   // 2 sessions: needs 4
+        Config.defaults().withMaxSessions(5).requirePoolHeadroom(10);   // 5 sessions: needs 10
+        assertThatThrownBy(() -> Config.defaults().withMaxSessions(6).requirePoolHeadroom(10))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("NX_EXPORT_MAX_SESSIONS=6")
+            .hasMessageContaining("NX_POOL_SIZE of at least 12").hasMessageContaining("it is 10");
+        assertThatThrownBy(() -> Config.defaults().withMaxSessions(1).requirePoolHeadroom(2))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("at least 3");
     }
 
     // ── gate N1: the plan of a deep chunks page ──────────────────────────────────────────────────

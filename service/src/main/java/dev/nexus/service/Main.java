@@ -118,6 +118,15 @@ public final class Main {
         String dbUser = requireEnv("NX_DB_USER");
         String dbPass = requireEnv("NX_DB_PASS");
         int poolSize  = intEnv("NX_POOL_SIZE", 10);
+        // RDR-248 (nexus-csayy.2): the export session tunables, checked before any pool or listener exists, like the
+        // other environment values: a bad one is one clean line and exit 1, never a stack trace out of the service's
+        // constructor. A session cap the pool cannot carry is refused here too.
+        try {
+            dev.nexus.service.db.TenantExportSessions.Config.fromEnv(System::getenv).requirePoolHeadroom(poolSize);
+        } catch (IllegalArgumentException e) {
+            log.error("event=export_env_invalid error=\"{}\"", e.getMessage());
+            System.exit(1);
+        }
 
         var hikari = new HikariConfig();
         hikari.setJdbcUrl(dbUrl);

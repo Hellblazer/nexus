@@ -188,6 +188,37 @@ class MainBootEnvValidationIntegrationTest {
         assertRefusedAtValidation(boot("NX_SEARCH_PCI_SWEEP_SECONDS", "3601"), "NX_SEARCH_PCI_SWEEP_SECONDS");
     }
 
+    // ── the tenant export session tunables (nexus-csayy.2, RDR-248) ──────────────────────────────────────
+
+    /**
+     * A malformed or unsupported export tunable, or a session cap the pool cannot carry, is one clean event line and
+     * exit 1 before the schema migration: not a stack trace out of the service's constructor.
+     */
+    @Test
+    void aBadExportTunable_exitsOneWithOneCleanLine_beforeTheMigration() throws Exception {
+        String[][] cases = {
+            {"NX_EXPORT_IDLE_SECONDS", "soon", "NX_EXPORT_IDLE_SECONDS is not a whole number"},
+            {"NX_EXPORT_TOTAL_SECONDS", "99999999999", "NX_EXPORT_TOTAL_SECONDS must be between"},
+            {"NX_EXPORT_PAGE_BYTES", "5", "NX_EXPORT_PAGE_BYTES must be between"},
+            {"NX_EXPORT_PAGE_BYTES", "25000000", "NX_EXPORT_PAGE_BYTES must be between"},
+            {"NX_EXPORT_MAX_SESSIONS", "9999999999", "NX_EXPORT_MAX_SESSIONS must be between"},
+            {"NX_EXPORT_MAX_SESSIONS", "6", "needs NX_POOL_SIZE of at least 12"},
+        };
+        for (String[] c : cases) {
+            Boot boot = boot(c[0], c[1]);
+            assertThat(boot.reachedMigration()).as(c[0] + "=" + c[1] + " never reaches the migration:\n" + boot.output())
+                .isFalse();
+            assertThat(boot.exitCode()).as(boot.output()).isEqualTo(1);
+            List<String> events = lines(boot, "event=export_env_invalid");
+            assertThat(events).as("exactly one refusal event:\n" + boot.output()).hasSize(1);
+            assertThat(events.get(0)).contains(c[2]);
+            assertThat(boot.output()).as("not an escaped exception").doesNotContain("Exception in thread \"main\"");
+        }
+        // the same pool carries a smaller cap
+        Boot ok = bootWith(java.util.Map.of("NX_EXPORT_MAX_SESSIONS", "5"), MIGRATION_START);
+        assertThat(ok.reachedMigration()).as("5 sessions fit the default pool of 10:\n" + ok.output()).isTrue();
+    }
+
     // ── the test-only tenant reset route's bind check (nexus-0bl77, behavioural in nexus-vr8wk) ──────────
 
     private static final String BIND_REFUSED = "event=tenant_reset_route_bind_refused";

@@ -86,7 +86,7 @@ final class BinaryCopyPage extends OutputStream {
         System.arraycopy(src, off, buf, len, count);
         len += count;
         advance();
-        if (!sawTrailer && headerEnd >= 0 && endOfRows >= targetBytes) {
+        if (!sawTrailer && rows > 0 && endOfRows >= targetBytes) {   // never a page with no row
             throw new PageFull();
         }
     }

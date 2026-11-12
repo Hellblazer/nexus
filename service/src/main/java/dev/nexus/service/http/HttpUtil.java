@@ -413,9 +413,10 @@ public final class HttpUtil {
      *   <li>The tenant export routes ({@code /v1/tenant/export}, nexus-csayy.2, RDR-248) answer their own typed
      *       bodies from {@code TenantExportHandler}, whose class javadoc is the contract: {@code
      *       export_scope_forbidden} (403), {@code no_such_session} (404), {@code unknown_table} and {@code
-     *       malformed_after} (400), {@code export_session_exists} and {@code page_in_flight} (409), {@code
+     *       malformed_after} and {@code malformed_query} (400), {@code export_session_exists} and {@code page_in_flight} (409, the
+     *       latter with {@code Retry-After}), {@code
      *       session_closed} (410), {@code export_capacity_full} (503, with {@code retry_after_seconds}) and
-     *       {@code export_page_busy} (503). The client's copy of these values lands with the client half of
+     *       {@code export_page_busy} (503, with {@code Retry-After}: a lock bound or the page's time budget). The client's copy of these values lands with the client half of
      *       RDR-248 (nexus-csayy.3).</li>
      * </ul>
      * The typed 409 bodies predate the rule and discriminate on {@code status}

@@ -102,6 +102,19 @@ class BinaryCopyPageTest {
     }
 
     @Test
+    void aTargetBelowTheHeaderOrOneRowStillKeepsTheFirstWholeRow() throws Exception {
+        for (int target : new int[]{0, 1, 5, 19, 20}) {   // the header alone is 19 bytes
+            byte[] stream = stream(5, 40, false);
+            BinaryCopyPage page = new BinaryCopyPage(target, 100);
+            assertThatThrownBy(() -> feed(page, stream, 7)).isInstanceOf(BinaryCopyPage.PageFull.class);
+            BinaryCopyPage.Result r = page.finish(new int[]{0});
+            assertThat(r.rows()).as("target " + target + ": never a page with no row").isEqualTo(1);
+            assertThat(r.exhausted()).isFalse();
+            assertThat(idOf(r.lastKeyFields().get(0))).isEqualTo(1L);
+        }
+    }
+
+    @Test
     void aNullKeyFieldIsRefused() throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.writeBytes(SIGNATURE);

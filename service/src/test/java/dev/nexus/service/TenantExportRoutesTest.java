@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -28,6 +29,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.net.Socket;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -40,6 +42,8 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The tenant export routes through the real {@link NexusService} and its auth filter, on a real PostgreSQL
@@ -58,6 +62,8 @@ class TenantExportRoutesTest {
     private static final String B_TOKEN = "tok-b-export-0123456789abcdefghijkl";
     private static final String A_DATA_TOKEN = "tok-adata-export-0123456789abcdefghi";
     private static final String A_MINT_TOKEN = "tok-amint-export-0123456789abcdefghi";
+    private static final String A_MINT_LOCKED_TOKEN = "tok-amintl-export-0123456789abcdefgh";
+    private static final String A_BOARD_CI_TOKEN = "tok-aboard-export-0123456789abcdefgh";
     private static final String A = "t-routes-a";
     private static final String B = "t-routes-b";
     private static final String MODEL = "bge-base-en-v15-768";
@@ -89,6 +95,9 @@ class TenantExportRoutesTest {
             OffsetDateTime later = OffsetDateTime.now().plusHours(1);
             PgContainerHelper.seedServiceToken(dsl, A_DATA_TOKEN, A, "data-a", TokenStore.SCOPE_DATA, later, null);
             PgContainerHelper.seedServiceToken(dsl, A_MINT_TOKEN, A, "mint-a", TokenStore.SCOPE_MINT, null, null);
+            PgContainerHelper.seedServiceToken(dsl, A_MINT_LOCKED_TOKEN, A, "mint-locked-a",
+                TokenStore.SCOPE_MINT_LOCKED, null, null);
+            PgContainerHelper.seedServiceToken(dsl, A_BOARD_CI_TOKEN, A, "board-ci-a", TokenStore.SCOPE_BOARD_CI, null, null);
             PgContainerHelper.ensureTenantPartitions(dsl, A);
             PgContainerHelper.ensureTenantPartitions(dsl, B);
             PgContainerHelper.insertCollection(dsl, A, COLLECTION, MODEL);
@@ -112,6 +121,10 @@ class TenantExportRoutesTest {
         ds = new HikariDataSource(cfg);
         service = new NexusService(0, ROOT, ds);
         service.start();
+        // the filter's per-tenant ghost sweep reads the catalog on a tenant's first request: do it before any test holds a lock
+        for (String token : List.of(A_TOKEN, B_TOKEN)) {
+            assertThat(call("GET", "/v1/_whoami", token).statusCode()).isEqualTo(200);
+        }
     }
 
     @AfterAll
@@ -275,8 +288,7 @@ class TenantExportRoutesTest {
 
     @Test
     void theChunksCompositeKeyPagesByBytesThroughTheLastKeyHeaderAndEndsWithTheTable() throws Exception {
-        var small = new TenantExportSessions.Config(Duration.ofMinutes(60), Duration.ofMinutes(10), 2, 16_000, 100_000,
-            5_000, 30, Duration.ofHours(1));
+        var small = TenantExportSessions.Config.defaults().withPageBytes(16_000).withSweepInterval(Duration.ofHours(1));
         service.exportSessions(new TenantExportSessions(ds, small, java.time.Clock.systemUTC()));
         var id = open(A_TOKEN).get("session_id").asText();
 
@@ -325,11 +337,14 @@ class TenantExportRoutesTest {
     // ── who may call (gate S4a/b) ────────────────────────────────────────────────────────────────
 
     @Test
-    void theRootMintAndBoardCiScopesAreRefused() throws Exception {
+    void theRootMintMintLockedAndBoardCiScopesAreRefused() throws Exception {
         var root = call("POST", PATH, ROOT);
         assertThat(root.statusCode()).isEqualTo(403);
         assertThat(json(root).get("reason").asText()).isEqualTo("export_scope_forbidden");
-        assertThat(call("POST", PATH, A_MINT_TOKEN).statusCode()).as("a mint token's own surface is the mint route").isEqualTo(403);
+        for (String restricted : List.of(A_MINT_TOKEN, A_MINT_LOCKED_TOKEN, A_BOARD_CI_TOKEN)) {
+            assertThat(call("POST", PATH, restricted).statusCode()).as("a token that is confined to its own route").isEqualTo(403);
+            assertThat(rowsBytes(restricted, UNKNOWN_ID, rowsQuery("memory", null)).statusCode()).isEqualTo(403);
+        }
         assertThat(call("POST", PATH, null).statusCode()).isEqualTo(401);
         assertThat(call("POST", PATH, "tok-not-a-token").statusCode()).isEqualTo(401);
         // and a root token cannot read, close or probe a session either
@@ -474,8 +489,8 @@ class TenantExportRoutesTest {
 
     @Test
     void aFullEngineRefusesWith503AndRetryAfterUntilASlotFrees() throws Exception {
-        var one = new TenantExportSessions.Config(Duration.ofMinutes(60), Duration.ofMinutes(10), 1, 16 * 1024 * 1024,
-            100_000, 5_000, 17, Duration.ofHours(1));
+        var one = TenantExportSessions.Config.defaults().withMaxSessions(1).withRetryAfterSeconds(17)
+            .withSweepInterval(Duration.ofHours(1));
         service.exportSessions(new TenantExportSessions(ds, one, java.time.Clock.systemUTC()));
         var id = open(A_TOKEN).get("session_id").asText();
 
@@ -539,5 +554,161 @@ class TenantExportRoutesTest {
         assertThat(evictor.get().evictTenant(B)).isZero();
         assertThat(evictor.get().evictTenant(A)).isEqualTo(1);
         assertThat(call("POST", PATH, A_TOKEN).statusCode()).isEqualTo(200);
+    }
+
+    // ── bad percent-encoding: the raw bytes, not URL-encoded values ──────────────────────────────
+
+    /** One GET with the request target written byte for byte, so a malformed escape reaches the server as sent. */
+    private String[] rawGet(String target, String token) throws Exception {
+        try (Socket socket = new Socket("127.0.0.1", service.getPort())) {
+            socket.setSoTimeout(30_000);
+            socket.getOutputStream().write(("GET " + target + " HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer "
+                + token + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1));
+            socket.getOutputStream().flush();
+            String all = new String(socket.getInputStream().readAllBytes(), StandardCharsets.ISO_8859_1);
+            int split = all.indexOf("\r\n\r\n");
+            return new String[]{all.substring(9, 12), split < 0 ? "" : all.substring(split + 4)};
+        }
+    }
+
+    @Test
+    void aBadPercentEncodingInTableOrAfterIsA400NeverA500() throws Exception {
+        var id = open(A_TOKEN).get("session_id").asText();
+        String rows = PATH + "/" + id + "/rows";
+        for (String query : List.of("?table=%zz", "?table=%", "?table=%2", "?table=memory&after=%",
+                "?table=memory&after=%zz", "?table=memory&after=%E0%A4%A", "?%zz=1&table=memory", "?table=%C3%28",
+                "?table=memory&after=%ff%fe", "?table=%00", "?table=memory%0d%0aX-Evil:%201")) {
+            String[] r = rawGet(rows + query, A_TOKEN);
+            assertThat(r[0]).as(query + " -> " + r[1]).isEqualTo("400");
+            assertThat(r[1]).as(query).doesNotContain("internal");
+        }
+        // the session is untouched by all of it
+        assertThat(header(rowsBytes(A_TOKEN, id, rowsQuery("memory", null)), "X-Nexus-Export-Table-Rows")).isEqualTo("5");
+    }
+
+    // ── what a held lock makes of the routes: page_in_flight, export_page_busy, the open reservation ─────
+
+    /** Holds ACCESS EXCLUSIVE on {@code table} from a superuser transaction until closed. */
+    private Connection lockedBy(org.jooq.Table<?> table) throws Exception {
+        Connection holder = pg.createConnection("");
+        holder.setAutoCommit(false);
+        PgContainerHelper.lockTable(holder, table, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
+        return holder;
+    }
+
+    private void awaitBlockedBackends(int n) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            while (PgContainerHelper.backendsBlockedOnLocks(ctx) < n) {
+                assertThat(System.nanoTime()).as("%d backends blocked on a lock", n).isLessThan(deadline);
+                Thread.sleep(50);
+            }
+        }
+    }
+
+    private <T> CompletableFuture<T> async(java.util.concurrent.Callable<T> call) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return call.call();
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+    }
+
+    @Test
+    void aSecondPageOfOneSessionIs409PageInFlightWithRetryAfterAndTheFirstStillCompletes() throws Exception {
+        service.exportSessions(new TenantExportSessions(ds,
+            TenantExportSessions.Config.defaults().withLockTimeoutMs(60_000).withSweepInterval(Duration.ofHours(1)),
+            java.time.Clock.systemUTC()));
+        var id = open(A_TOKEN).get("session_id").asText();
+        try (Connection holder = lockedBy(MEMORY)) {
+            var first = async(() -> rowsBytes(A_TOKEN, id, rowsQuery("memory", null)));
+            awaitBlockedBackends(1);
+
+            var second = rowsBytes(A_TOKEN, id, rowsQuery("chunks", null));
+            assertThat(second.statusCode()).isEqualTo(409);
+            assertThat(new String(second.body(), StandardCharsets.UTF_8)).contains("page_in_flight");
+            assertThat(second.headers().firstValue("Retry-After")).contains("1");
+            assertThat(first).as("the first page is still waiting on the lock").isNotDone();
+
+            holder.rollback();
+            var done = first.get(30, TimeUnit.SECONDS);
+            assertThat(done.statusCode()).isEqualTo(200);
+            assertThat(header(done, "X-Nexus-Export-Table-Rows")).isEqualTo("5");
+        }
+        assertThat(rowsBytes(A_TOKEN, id, rowsQuery("chunks", null)).statusCode()).as("and then the gate is free").isEqualTo(200);
+    }
+
+    @Test
+    void aPageThatWaitsOutItsLockOrItsTimeBudgetIs503ExportPageBusyWithRetryAfter() throws Exception {
+        service.exportSessions(new TenantExportSessions(ds,
+            TenantExportSessions.Config.defaults().withLockTimeoutMs(300).withSweepInterval(Duration.ofHours(1)),
+            java.time.Clock.systemUTC()));
+        var id = open(A_TOKEN).get("session_id").asText();
+        try (Connection holder = lockedBy(MEMORY)) {
+            var busy = rowsBytes(A_TOKEN, id, rowsQuery("memory", null));
+            assertThat(busy.statusCode()).as("lock bound").isEqualTo(503);
+            assertThat(new String(busy.body(), StandardCharsets.UTF_8)).contains("export_page_busy");
+            assertThat(busy.headers().firstValue("Retry-After")).contains("1");
+            holder.rollback();
+        }
+        assertThat(rowsBytes(A_TOKEN, id, rowsQuery("memory", null)).statusCode()).as("retried, it reads").isEqualTo(200);
+
+        // the time budget, with a lock bound far above it: the statement timeout ends the wait
+        service.exportSessions(new TenantExportSessions(ds,
+            TenantExportSessions.Config.defaults().withLockTimeoutMs(60_000).withPageBudgetMs(400)
+                .withSweepInterval(Duration.ofHours(1)), java.time.Clock.systemUTC()));
+        var id2 = open(A_TOKEN).get("session_id").asText();
+        try (Connection holder = lockedBy(MEMORY)) {
+            long t0 = System.nanoTime();
+            var budget = rowsBytes(A_TOKEN, id2, rowsQuery("memory", null));
+            assertThat(budget.statusCode()).as("time budget").isEqualTo(503);
+            assertThat(new String(budget.body(), StandardCharsets.UTF_8)).contains("export_page_busy");
+            assertThat(budget.headers().firstValue("Retry-After")).contains("1");
+            assertThat(Duration.ofNanos(System.nanoTime() - t0)).isLessThan(Duration.ofSeconds(15));
+            holder.rollback();
+        }
+    }
+
+    @Test
+    void aHeaderReadThatWaitsOutItsLockIs503ExportPageBusyAndOpensNothing() throws Exception {
+        service.exportSessions(new TenantExportSessions(ds,
+            TenantExportSessions.Config.defaults().withLockTimeoutMs(300).withSweepInterval(Duration.ofHours(1)),
+            java.time.Clock.systemUTC()));
+        try (Connection holder = lockedBy(CATALOG_COLLECTIONS)) {
+            var busy = call("POST", PATH, A_TOKEN);
+            assertThat(busy.statusCode()).as(busy.body()).isEqualTo(503);
+            assertThat(json(busy).get("reason").asText()).isEqualTo("export_page_busy");
+            assertThat(busy.headers().firstValue("Retry-After")).contains("1");
+            holder.rollback();
+        }
+        assertThat(open(A_TOKEN).get("tenant_id").asText()).as("nothing was left reserved").isEqualTo(A);
+    }
+
+    @Test
+    void anOpenInProgressReservesTheTenantAndAnEnginesLastSlotAgainstTwoConcurrentPosts() throws Exception {
+        service.exportSessions(new TenantExportSessions(ds,
+            TenantExportSessions.Config.defaults().withMaxSessions(1).withLockTimeoutMs(60_000)
+                .withSweepInterval(Duration.ofHours(1)), java.time.Clock.systemUTC()));
+        try (Connection holder = lockedBy(CATALOG_COLLECTIONS)) {
+            var first = async(() -> call("POST", PATH, A_TOKEN));   // its header read waits on the lock
+            awaitBlockedBackends(1);
+
+            var sameTenant = call("POST", PATH, A_TOKEN_2);
+            assertThat(sameTenant.statusCode()).isEqualTo(409);
+            assertThat(json(sameTenant).get("reason").asText()).isEqualTo("export_session_exists");
+            assertThat(json(sameTenant).has("session_id")).as("no id exists yet").isFalse();
+
+            var otherTenant = call("POST", PATH, B_TOKEN);
+            assertThat(otherTenant.statusCode()).as("the one slot is taken by the open in progress").isEqualTo(503);
+            assertThat(json(otherTenant).get("reason").asText()).isEqualTo("export_capacity_full");
+
+            holder.rollback();
+            var opened = first.get(30, TimeUnit.SECONDS);
+            assertThat(opened.statusCode()).as(opened.body()).isEqualTo(200);
+            assertThat(call("POST", PATH, B_TOKEN).statusCode()).as("the slot stays taken by the finished session").isEqualTo(503);
+        }
     }
 }

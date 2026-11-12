@@ -65,46 +65,141 @@ public final class TenantExportSessions implements AutoCloseable {
     public static final String ENV_TOTAL_SECONDS = "NX_EXPORT_TOTAL_SECONDS";
     public static final String ENV_MAX_SESSIONS = "NX_EXPORT_MAX_SESSIONS";
     public static final String ENV_PAGE_BYTES = "NX_EXPORT_PAGE_BYTES";
+    public static final String ENV_PAGE_BUDGET_SECONDS = "NX_EXPORT_PAGE_BUDGET_SECONDS";
+
+    /** Longest a session bound may be set: a week. Keeps every bound sum far inside {@code Instant}'s range. */
+    static final long MAX_BOUND_SECONDS = 7L * 24 * 3600;
+    /** The most sessions an engine may be set to hold; each pins one pooled connection for up to the total bound. */
+    static final int MAX_SESSIONS_LIMIT = 64;
+    /** Smallest page byte target: a page always holds at least one whole row, so this only sets the cut's grain. */
+    static final int MIN_PAGE_BYTES = 1024;
+    /**
+     * Largest page byte target. The cloud edge caps a response body at 20 MB (RDR-248 A1); a page overshoots its
+     * target by at most one row plus one network read, so the target stays well under that.
+     */
+    static final int MAX_PAGE_BYTES = 19_000_000;
+    /** Longest a page's database time may be budgeted, seconds. */
+    static final long MAX_PAGE_BUDGET_SECONDS = 300;
 
     /**
      * Session and page settings. {@code pageBytes} is the page's byte target (about 16 MB: under the cloud
      * edge's 20 MB body cap); {@code pageMaxRows} bounds a page of small rows; {@code lockTimeoutMs} bounds a
-     * page's wait for a table lock behind a tenant create; {@code retryAfterSeconds} is what a full engine
-     * asks a client to wait.
+     * page's wait for a table lock behind a tenant create; {@code pageBudgetMs} bounds the DATABASE time of one
+     * page, all its statements together (default 20 s, held to the stricter edge limit, the 30 s response-start
+     * bound of the bead's gate N1; RDR-248 A1's exchange limit is 60 s); {@code retryAfterSeconds} is what a
+     * full engine asks a client to wait.
      */
     public record Config(Duration totalBound, Duration idleBound, int maxSessions, int pageBytes, int pageMaxRows,
-                         int lockTimeoutMs, int retryAfterSeconds, Duration sweepInterval) {
+                         int lockTimeoutMs, int retryAfterSeconds, Duration sweepInterval, int pageBudgetMs) {
         public Config {
             if (totalBound.isNegative() || totalBound.isZero() || idleBound.isNegative() || idleBound.isZero()) {
                 throw new IllegalArgumentException("export session bounds must be positive");
             }
-            if (maxSessions < 1 || pageBytes < 1 || pageMaxRows < 1) {
-                throw new IllegalArgumentException("export session capacity and page limits must be at least 1");
+            if (totalBound.toSeconds() > MAX_BOUND_SECONDS || idleBound.toSeconds() > MAX_BOUND_SECONDS) {
+                throw new IllegalArgumentException("export session bounds may not exceed " + MAX_BOUND_SECONDS
+                    + " seconds");
+            }
+            if (maxSessions < 1 || maxSessions > MAX_SESSIONS_LIMIT) {
+                throw new IllegalArgumentException("export sessions per engine must be between 1 and "
+                    + MAX_SESSIONS_LIMIT + ": " + maxSessions);
+            }
+            if (pageBytes < MIN_PAGE_BYTES || pageBytes > MAX_PAGE_BYTES) {
+                throw new IllegalArgumentException("export page bytes must be between " + MIN_PAGE_BYTES + " and "
+                    + MAX_PAGE_BYTES + " (the cloud edge caps a body at 20 MB): " + pageBytes);
+            }
+            if (pageMaxRows < 1 || lockTimeoutMs < 1 || retryAfterSeconds < 1 || pageBudgetMs < 1
+                    || sweepInterval.isNegative() || sweepInterval.isZero()) {
+                throw new IllegalArgumentException("export page limits must be at least 1");
             }
         }
 
         public static Config defaults() {
             return new Config(Duration.ofMinutes(60), Duration.ofMinutes(10), 2, 16 * 1024 * 1024, 100_000,
-                5_000, 30, Duration.ofSeconds(5));
+                5_000, 30, Duration.ofSeconds(5), 20_000);
         }
 
-        /** The defaults, with each {@code NX_EXPORT_*} value that {@code env} answers; a malformed one is an error. */
+        public Config withBounds(Duration total, Duration idle) {
+            return new Config(total, idle, maxSessions, pageBytes, pageMaxRows, lockTimeoutMs, retryAfterSeconds,
+                sweepInterval, pageBudgetMs);
+        }
+
+        public Config withMaxSessions(int n) {
+            return new Config(totalBound, idleBound, n, pageBytes, pageMaxRows, lockTimeoutMs, retryAfterSeconds,
+                sweepInterval, pageBudgetMs);
+        }
+
+        public Config withPageBytes(int n) {
+            return new Config(totalBound, idleBound, maxSessions, n, pageMaxRows, lockTimeoutMs, retryAfterSeconds,
+                sweepInterval, pageBudgetMs);
+        }
+
+        public Config withLockTimeoutMs(int n) {
+            return new Config(totalBound, idleBound, maxSessions, pageBytes, pageMaxRows, n, retryAfterSeconds,
+                sweepInterval, pageBudgetMs);
+        }
+
+        public Config withPageBudgetMs(int n) {
+            return new Config(totalBound, idleBound, maxSessions, pageBytes, pageMaxRows, lockTimeoutMs,
+                retryAfterSeconds, sweepInterval, n);
+        }
+
+        public Config withSweepInterval(Duration d) {
+            return new Config(totalBound, idleBound, maxSessions, pageBytes, pageMaxRows, lockTimeoutMs,
+                retryAfterSeconds, d, pageBudgetMs);
+        }
+
+        public Config withRetryAfterSeconds(int n) {
+            return new Config(totalBound, idleBound, maxSessions, pageBytes, pageMaxRows, lockTimeoutMs, n,
+                sweepInterval, pageBudgetMs);
+        }
+
+        /**
+         * The defaults, with each {@code NX_EXPORT_*} value that {@code env} answers. A value that is not a whole
+         * number, or is outside its range, is an {@link IllegalArgumentException} whose message names the variable
+         * and the range, so a boot can print it as it prints any other bad environment value.
+         */
         public static Config fromEnv(Function<String, String> env) {
             Config d = defaults();
             return new Config(
-                Duration.ofSeconds(positive(env, ENV_TOTAL_SECONDS, d.totalBound().toSeconds())),
-                Duration.ofSeconds(positive(env, ENV_IDLE_SECONDS, d.idleBound().toSeconds())),
-                (int) positive(env, ENV_MAX_SESSIONS, d.maxSessions()),
-                (int) positive(env, ENV_PAGE_BYTES, d.pageBytes()),
-                d.pageMaxRows(), d.lockTimeoutMs(), d.retryAfterSeconds(), d.sweepInterval());
+                Duration.ofSeconds(ranged(env, ENV_TOTAL_SECONDS, d.totalBound().toSeconds(), MAX_BOUND_SECONDS)),
+                Duration.ofSeconds(ranged(env, ENV_IDLE_SECONDS, d.idleBound().toSeconds(), MAX_BOUND_SECONDS)),
+                (int) ranged(env, ENV_MAX_SESSIONS, d.maxSessions(), MAX_SESSIONS_LIMIT),
+                (int) ranged(env, ENV_PAGE_BYTES, d.pageBytes(), MAX_PAGE_BYTES, MIN_PAGE_BYTES),
+                d.pageMaxRows(), d.lockTimeoutMs(), d.retryAfterSeconds(), d.sweepInterval(),
+                Math.toIntExact(ranged(env, ENV_PAGE_BUDGET_SECONDS, d.pageBudgetMs() / 1000, MAX_PAGE_BUDGET_SECONDS)
+                    * 1000));
         }
 
-        private static long positive(Function<String, String> env, String name, long fallback) {
+        /**
+         * Refuses a session cap the pool cannot carry. Each session holds one pooled connection for up to the
+         * total bound, and opening one needs a second for the header read; the rest of the engine needs the others.
+         * So the cap may not exceed half the pool, and the pool needs two connections beyond it.
+         *
+         * @throws IllegalArgumentException naming {@code NX_EXPORT_MAX_SESSIONS}, {@code NX_POOL_SIZE} and the least
+         *                                  pool size that carries the cap
+         */
+        public void requirePoolHeadroom(int poolSize) {
+            int needed = Math.max(2 * maxSessions, maxSessions + 2);
+            if (poolSize < needed) {
+                throw new IllegalArgumentException(ENV_MAX_SESSIONS + "=" + maxSessions + " needs NX_POOL_SIZE of at least "
+                    + needed + " (it is " + poolSize + "): each export session holds one connection for up to "
+                    + totalBound.toMinutes() + " minutes and opening one needs a second. Lower " + ENV_MAX_SESSIONS
+                    + " or raise NX_POOL_SIZE.");
+            }
+        }
+
+        private static long ranged(Function<String, String> env, String name, long fallback, long max) {
+            return ranged(env, name, fallback, max, 1);
+        }
+
+        private static long ranged(Function<String, String> env, String name, long fallback, long max, long min) {
             String v = env.apply(name);
             if (v == null || v.isBlank()) return fallback;
             try {
                 long n = Long.parseLong(v.trim());
-                if (n < 1) throw new IllegalArgumentException(name + " must be at least 1: " + v);
+                if (n < min || n > max) {
+                    throw new IllegalArgumentException(name + " must be between " + min + " and " + max + ": " + v);
+                }
                 return n;
             } catch (NumberFormatException e) {
                 throw new IllegalArgumentException(name + " is not a whole number: " + v);
@@ -211,7 +306,7 @@ public final class TenantExportSessions implements AutoCloseable {
         this.dataSource = dataSource;
         this.config = config;
         this.clock = clock;
-        this.reads = new TenantExportReads(dataSource, config.lockTimeoutMs());
+        this.reads = new TenantExportReads(dataSource, config.lockTimeoutMs(), config.pageBudgetMs());
     }
 
     public Config config() {
@@ -239,7 +334,7 @@ public final class TenantExportSessions implements AutoCloseable {
             if (closed) throw new IllegalStateException("export sessions are closed");
             expired = expireLocked(clock.instant());
         }
-        endAll(expired, "expired");
+        handOff(expired);
         synchronized (lock) {
             Session existing = byOwner.get(tenant);
             if (existing != null) throw new SessionExistsException(existing.id);
@@ -290,7 +385,7 @@ public final class TenantExportSessions implements AutoCloseable {
             s = byOwner.get(tenant);
             if (s != null && s.id.equals(id)) s.lastActive = clock.instant();
         }
-        endAll(expired, "expired");
+        handOff(expired);
         if (s == null || !s.id.equals(id)) throw new NoSuchSessionException();
         return s;
     }
@@ -324,7 +419,7 @@ public final class TenantExportSessions implements AutoCloseable {
             s = byOwner.get(tenant);
             if (s != null && s.id.equals(id)) byOwner.remove(tenant);
         }
-        endAll(expired, "expired");
+        handOff(expired);
         if (s == null || !s.id.equals(id)) throw new NoSuchSessionException();
         endHeld(s.held, "closed", tenant);
         log.info("event=export_session_closed session={} tenant={} reason=delete", s.id, tenant);
@@ -412,6 +507,28 @@ public final class TenantExportSessions implements AutoCloseable {
             byOwner.remove(s.owner);
         }
         return expired;
+    }
+
+    /**
+     * Ends the connections of sessions a REQUEST found expired, on the sweep thread, so a rollback that stalls (a
+     * wedged held connection) never stalls an unrelated tenant's request. With no sweeper (every session was
+     * closed already) there is nothing to hand to, and the work runs here.
+     */
+    private void handOff(List<Session> expired) {
+        if (expired.isEmpty()) return;
+        ScheduledExecutorService executor;
+        synchronized (lock) {
+            executor = sweeper;
+        }
+        if (executor != null && !executor.isShutdown()) {
+            try {
+                executor.execute(() -> endAll(expired, "expired"));
+                return;
+            } catch (java.util.concurrent.RejectedExecutionException e) {
+                // shut down between the check and the call: fall through
+            }
+        }
+        endAll(expired, "expired");
     }
 
     private static void endAll(List<Session> sessions, String why) {
