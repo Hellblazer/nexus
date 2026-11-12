@@ -10,20 +10,27 @@ and ``TenantExportHandler``'s class javadoc.
 What the driver does on each answer (the csayy.2 review gate's client rules):
 
 * ``GET /version`` first: no ``tenant_export_supported`` is refused naming the engine release that has the routes
-  (:data:`TENANT_EXPORT_ENGINE`), so an older engine is never sent a request it would answer 404.
+  (:data:`TENANT_EXPORT_ENGINE`), so an older engine is never sent a request it would answer 404. Only that flag is
+  required: the public edge relays capability fields as booleans, so the export format comes from the session
+  header's ``format_version`` (an unknown one is refused and the session deleted); a ``/version`` that does carry
+  an unknown ``tenant_export_format_version`` is refused early.
+* A token with a control character in it is refused before any request (the transport would quote it in its
+  error text), naming where tokens come from and never the value.
 * A 401 asks the credentials for a fresh token and repeats the SAME request, from the same key: a token that
   expires mid-export costs nothing, because the session belongs to the tenant and not to the token. A root token
   gets 403 ``export_scope_forbidden`` and is refused with what to use instead.
 * A page that fails (transport error, 5xx, a hash or row count that is not the page's) is asked for again from
-  the same ``after`` key, up to :data:`PAGE_ATTEMPTS` times, waiting :data:`BACKOFF_LADDER` between tries; a 503
-  or 409 ``page_in_flight`` with ``Retry-After`` waits that long instead. When the tries run out the session is
-  closed, the partial file removed, and the message says to run again.
+  the same ``after`` key, up to :data:`PAGE_ATTEMPTS` times, waiting :data:`BACKOFF_LADDER` between tries. A 503
+  ``export_page_busy`` or 409 ``page_in_flight`` is not a failure: it waits the ``Retry-After`` the engine gives, on
+  its own budget (:data:`BUSY_WAIT_BUDGET_S` per request, which one last wait can overshoot), not the tries. When
+  the tries or the budget run out the session is closed, the partial file removed, and the message says to run again.
 * A 404 or 410 on the client's OWN session id means the engine forgot it (it restarted, the session expired, the
   request reached another instance): start over with a new session, at most :data:`MAX_RESTARTS` times, and past
   the session's ``expires_at`` fail naming the engine's limit instead.
 * 409 ``export_session_exists`` carries the id of the tenant's open session (from a killed earlier run): it is
-  deleted once and the open repeated.
-* Any exit, an interrupt included, sends a best-effort DELETE and removes the partial file.
+  deleted once and the open repeated; one with no id is waited out on the backoff ladder, then refused.
+* Any exit, an interrupt included, removes the partial file first and then sends a best-effort DELETE for every
+  session this run opened.
 
 Imported by ``nexus.commands.backup_cmd`` only (``tests/test_nx_backup_pin.py``).
 """
@@ -117,6 +124,17 @@ def _omitted_notice(phrases: dict[str, str]) -> str:
 
 #: What a backup leaves out, printed after every run (built from :data:`EXCLUDED_TABLE_PHRASES`).
 OMITTED_NOTICE = _omitted_notice(EXCLUDED_TABLE_PHRASES)
+
+
+def _check_bearer(token: str) -> None:
+    """Refuse a token the transport would choke on, naming where tokens come from and never the value: httpx
+    quotes the whole header value in its error text, so a token with a control character in it would print."""
+    if any(ord(c) < 32 or ord(c) == 127 for c in token):
+        raise ExportRefused(
+            "the service token this install would send contains a control character (a line break, a NUL, or the "
+            "like), so it cannot be a token; the value is not shown. Re-set it with `nx config set service_token <token>` "
+            "(or NX_SERVICE_TOKEN), or check the mint_token credential if this install mints data tokens."
+        )
 
 
 class ExportRefused(BackupRefused):
@@ -306,6 +324,7 @@ class ExportClient:
         waited = 0.0
         while True:
             sent = self._creds.bearer()
+            _check_bearer(sent)
             headers = {"Authorization": f"Bearer {sent}", **client_identity_headers()}
             try:
                 before_request()
@@ -372,6 +391,10 @@ class ExportClient:
             self._sleep(delay if delay is not None else BACKOFF_LADDER[failures - 1])
 
     # -- the routes ----------------------------------------------------------------------------------
+
+    def check_token(self) -> None:
+        """Refuse an unusable token before the first request (:func:`_check_bearer`)."""
+        _check_bearer(self._creds.bearer())
 
     def check_engine(self) -> None:
         """Refuse an engine that has no export routes. The export format is checked here only when ``/version``
@@ -560,13 +583,15 @@ class _Partial:
         """Close the handle and unlink the file. Local and instant; never raises (the file may already be gone,
         after a publish)."""
         fh, self.fh = self.fh, None
-        if fh is not None:
-            with contextlib.suppress(OSError):
-                fh.close()
         path, self.path = self.path, None
-        if path is not None:
-            with contextlib.suppress(OSError):
-                path.unlink()
+        try:
+            if fh is not None:
+                with contextlib.suppress(OSError):
+                    fh.close()
+        finally:  # an interrupt inside close() must not skip the unlink
+            if path is not None:
+                with contextlib.suppress(OSError):
+                    path.unlink()
 
 
 def run_export(
@@ -587,6 +612,7 @@ def run_export(
     client.note = note
     if isinstance(destination, Path) and os.path.lexists(destination):
         raise already_there(destination)
+    client.check_token()
     client.check_engine()
     started = time.monotonic()
     partial = _Partial()

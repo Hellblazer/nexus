@@ -620,3 +620,66 @@ def test_a_header_with_an_unknown_format_is_refused_and_its_session_deleted(tmp_
             run_export(_client(engine), tmp_path / "x.nxtenant")
         assert len(engine.opened) == 1 and engine.deleted == engine.opened
     assert _entries(tmp_path) == set()
+
+
+# -- round 2 ------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("token", ["abc\ndef", "abc\r\ndef", "abc\x00def", "abc\x7fdef"])
+def test_a_token_with_a_control_character_is_refused_before_any_request_and_never_printed(token: str, tmp_path: Path) -> None:
+    with FakeEngine(standard_tables(), accepted={token}) as engine:
+        with pytest.raises(ExportRefused) as err:
+            run_export(_client(engine, Creds(token)), tmp_path / "x.nxtenant")
+        assert engine.log == [], "not even /version was asked"
+    text = str(err.value)
+    assert "control character" in text and "service_token" in text
+    assert "abc" not in text and "def" not in text, "the value is never in the message"
+    assert _entries(tmp_path) == set()
+
+
+def test_a_token_that_turns_bad_after_the_first_request_is_still_refused_not_quoted(tmp_path: Path) -> None:
+    class Turns(Creds):
+        def __init__(self) -> None:
+            super().__init__("good")
+            self.calls = 0
+
+        def bearer(self) -> str:
+            self.calls += 1
+            return "good" if self.calls <= 2 else "bad\r\ntoken"
+
+    with FakeEngine(standard_tables(), accepted={"good"}) as engine:
+        with pytest.raises(ExportRefused) as err:
+            run_export(_client(engine, Turns()), tmp_path / "x.nxtenant")
+    assert "control character" in str(err.value) and "bad" not in str(err.value)
+
+
+def test_the_transport_error_text_never_quotes_a_bearer_value() -> None:
+    from nexus._log_safe_url import scrub_transport_error  # noqa: PLC0415
+
+    for shown in (
+        "Illegal header value b'Bearer abc\\r\\ndef'",
+        "Illegal header value b'Bearer s3cr3t-token-value'",
+        "bad header: Authorization: bearer  s3cr3t-token-value",
+    ):
+        out = scrub_transport_error(RuntimeError(shown), "https://api.example.com")
+        assert "abc" not in out and "def" not in out and "s3cr3t" not in out, out
+        assert "Bearer <redacted>" in out
+    plain = scrub_transport_error(RuntimeError("connection refused"), "https://api.example.com")
+    assert plain == "connection refused", "text with no bearer is returned as it was"
+
+
+def test_an_interrupt_inside_the_files_close_still_removes_it(tmp_path: Path) -> None:
+    partial = ce._Partial()
+    ce._open_partial(tmp_path / "x.nxtenant", partial)
+    assert len(_entries(tmp_path)) == 1
+    real = partial.fh
+
+    class InterruptedClose:
+        def close(self) -> None:
+            real.close()  # the handle is released (Windows cannot unlink an open file), then the interrupt lands
+            raise KeyboardInterrupt
+
+    partial.fh = InterruptedClose()
+    with pytest.raises(KeyboardInterrupt):
+        partial.discard()
+    assert _entries(tmp_path) == set()

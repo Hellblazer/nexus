@@ -244,7 +244,10 @@ def test_a_real_signal_mid_export_stops_the_verb_cleanly(
     that default (so a missing wiring fails this test instead of ending the test run), and it must never run."""
     signum = getattr(signal, name)
     stray: list[int] = []
-    previous = signal.signal(signum, lambda s, _f: stray.append(s))
+    def recorder(s: int, _f: object) -> None:
+        stray.append(s)
+
+    previous = signal.signal(signum, recorder)
     dest = tmp_path / "out" / "x.nxtenant"
     try:
         with FakeEngine(standard_tables()) as engine:
@@ -259,7 +262,7 @@ def test_a_real_signal_mid_export_stops_the_verb_cleanly(
             assert len(engine.opened) == 1 and engine.deleted == engine.opened, "the snapshot is released at once"
         assert stray == [], "the verb's own handler took the signal"
         assert result.exit_code == 1 and "Aborted" in result.output, (result.exit_code, result.output)
-        assert signal.getsignal(signum) is not None
+        assert signal.getsignal(signum) is recorder, "the handler the verb found is the one it put back"
         assert list(dest.parent.iterdir()) == [], "no .partial"
     finally:
         signal.signal(signum, previous)
@@ -305,3 +308,58 @@ def test_check_of_an_unreadable_file_is_a_clean_refusal(tmp_path: Path) -> None:
         path.chmod(0o600)
     assert result.exit_code in (1, 2) and "Traceback" not in result.output
     assert isinstance(result.exception, SystemExit), result.exception
+
+
+# -- pg_backup._publish, the fallback both arms use on a filesystem without hard links ----------------------------
+
+
+@pytest.mark.parametrize("fails", ["close", "replace"])
+def test_publish_fallback_leaves_no_empty_placeholder_when_interrupted_after_the_claim(
+    fails: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import errno  # noqa: PLC0415
+
+    from nexus.backup import pg_backup  # noqa: PLC0415
+    from tests._module_seam import setattr_in  # noqa: PLC0415
+
+    src = tmp_path / "finished.partial"
+    src.write_bytes(b"a finished backup")
+    dest = tmp_path / "backup.nxtenant"
+
+    def no_hard_links(*_a: object, **_k: object) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    def interrupted(*_a: object, **_k: object) -> None:
+        raise KeyboardInterrupt
+
+    setattr_in(monkeypatch, pg_backup, "os.link", no_hard_links)
+    if fails == "close":
+        real_close = os.close
+
+        def close_then_interrupt(fd: int) -> None:
+            real_close(fd)
+            raise KeyboardInterrupt
+
+        setattr_in(monkeypatch, pg_backup, "os.close", close_then_interrupt)
+    else:
+        setattr_in(monkeypatch, pg_backup, "os.replace", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        pg_backup._publish(src, dest)
+    assert not dest.exists(), "no empty placeholder at the destination"
+    assert src.read_bytes() == b"a finished backup"
+
+
+def test_publish_fallback_never_touches_a_file_that_is_already_there(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import errno  # noqa: PLC0415
+
+    from nexus.backup import pg_backup  # noqa: PLC0415
+    from tests._module_seam import setattr_in  # noqa: PLC0415
+
+    src = tmp_path / "finished.partial"
+    src.write_bytes(b"new")
+    dest = tmp_path / "backup.nxtenant"
+    dest.write_bytes(b"someone else's backup")
+    setattr_in(monkeypatch, pg_backup, "os.link", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.EPERM, "no links")))
+    with pytest.raises(pg_backup.BackupRefused, match="already exists"):
+        pg_backup._publish(src, dest)
+    assert dest.read_bytes() == b"someone else's backup"
