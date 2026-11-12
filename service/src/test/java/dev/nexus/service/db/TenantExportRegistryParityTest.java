@@ -205,9 +205,14 @@ class TenantExportRegistryParityTest {
     }
 
     private static final java.util.regex.Pattern TRIGGER_DEF = java.util.regex.Pattern.compile(
-        "^CREATE (?:CONSTRAINT )?TRIGGER \\S+ (.+?) ON \\S+ .*?(FOR EACH (?:ROW|STATEMENT))");
+        "^CREATE (?:CONSTRAINT )?TRIGGER \\S+ (.+?) ON \\S+ (.+?) EXECUTE (?:FUNCTION|PROCEDURE) ");
 
-    /** {@code BEFORE INSERT OR UPDATE OF owner_id FOR EACH ROW} from a {@code pg_get_triggerdef} text. */
+    /**
+     * When a trigger fires, from its {@code pg_get_triggerdef} text: everything between the trigger's name
+     * and its function except the table, so timing, events, any FROM, deferral, REFERENCING, the level and
+     * any WHEN clause ({@code BEFORE INSERT OR UPDATE OF owner_id FOR EACH ROW}). The function body is not
+     * compared; a trigger that keeps its name and firing but changes what it writes passes.
+     */
     static String firing(String def) {
         java.util.regex.Matcher m = TRIGGER_DEF.matcher(def);
         if (!m.find()) throw new IllegalStateException("unparsed trigger definition: " + def);
@@ -533,11 +538,6 @@ class TenantExportRegistryParityTest {
     }
 
     /**
-     * Membership is RLS-only, so a tenant-scoped table that lost or never got its policy would drop out of
-     * backups with no failure here. Every table in the product schemas with a {@code tenant_id} column must
-     * be an RLS parent table (or a partition of one).
-     */
-    /**
      * Tables that carry a tenant_id but are global by design, so they have no RLS and no registry entry. A
      * tenant export never carries them (RDR-248: credentials live only in global tables).
      */
@@ -547,6 +547,11 @@ class TenantExportRegistryParityTest {
         "tuple_tenants", "engine registry of tenants that hold tuples",
         "request_ledger_tenants", "engine registry of tenants with request-ledger rows"));
 
+    /**
+     * Membership is RLS-only, so a tenant-scoped table that lost or never got its policy would drop out of
+     * backups with no failure here. Every table in the product schemas with a {@code tenant_id} column must
+     * be an RLS parent table, apart from the global ones named in {@link #GLOBAL_TENANT_KEYED}.
+     */
     @Test
     void everyTenantScopedTableIsAnRlsTable() {
         Field<String> nsp = f("n", "nspname", String.class);
@@ -647,6 +652,31 @@ class TenantExportRegistryParityTest {
         List<ExportTable> planted = replacing("nx_answer_runs", t -> copy(t, t.primaryKey(), t.reassignedId(),
             t.references().subList(0, 1), t.triggers(), t.triggerMaintained(), t.notReferences()));
         assertThat(unclassifiedIdColumns(live, planted)).containsExactly("nx_answer_runs.run_summary jsonb");
+    }
+
+    @Test
+    void firingKeepsEverythingButTheNameTableAndFunction() {
+        assertThat(firing("CREATE TRIGGER t BEFORE UPDATE ON nexus.topics FOR EACH ROW "
+            + "EXECUTE FUNCTION nexus.stamp_updated_at()")).isEqualTo("BEFORE UPDATE FOR EACH ROW");
+        assertThat(firing("CREATE TRIGGER t BEFORE INSERT OR UPDATE OF owner_id, content_type ON "
+            + "nexus.catalog_collections FOR EACH ROW WHEN ((new.owner_id IS NULL)) EXECUTE FUNCTION nexus.f()"))
+            .isEqualTo("BEFORE INSERT OR UPDATE OF owner_id, content_type FOR EACH ROW WHEN ((new.owner_id IS NULL))");
+        assertThat(firing("CREATE TRIGGER t AFTER INSERT ON nexus.topic_assignments REFERENCING NEW TABLE AS "
+            + "new_rows FOR EACH STATEMENT EXECUTE FUNCTION nexus.f()"))
+            .isEqualTo("AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT");
+        assertThat(firing("CREATE CONSTRAINT TRIGGER t AFTER INSERT ON nexus.x DEFERRABLE INITIALLY DEFERRED "
+            + "FOR EACH ROW EXECUTE PROCEDURE nexus.f()"))
+            .isEqualTo("AFTER INSERT DEFERRABLE INITIALLY DEFERRED FOR EACH ROW");
+    }
+
+    @Test
+    void aSerialColumnOutsideThePrimaryKeyFails() {
+        Map<String, LiveTable> planted = new TreeMap<>(live);
+        LiveTable plans = live.get("plans");
+        planted.put("plans", new LiveTable("plans", plans.columns(), List.of(), plans.foreignKeys(),
+            plans.triggers()));
+        assertThat(reassignedIdMismatches(planted, TenantExport.TABLES))
+            .anySatisfy(s -> assertThat(s).startsWith("plans.id: a serial column outside the primary key"));
     }
 
     @Test

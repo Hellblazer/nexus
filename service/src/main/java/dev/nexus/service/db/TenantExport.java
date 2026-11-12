@@ -94,7 +94,9 @@ public final class TenantExport {
      *                          UPDATE FOR EACH ROW}), so a trigger that starts firing on insert fails
      *                          the parity test even when its name is kept
      * @param loadsAfter        registered tables this one must load after with no reference to them: a
-     *                          trigger on this table reads or writes them during the load
+     *                          trigger on this table reads or writes them during the load. This and
+     *                          {@code triggerMaintained} come from reading the trigger functions; the
+     *                          parity test checks each trigger's firing, not what its body reads or writes
      * @param triggerMaintained columns a trigger rewrites, which a restore's verification skips
      * @param notReferences     id-shaped columns (bigint, bigint[], jsonb: every reassigned id is a
      *                          bigint) that hold no other row's key; with {@code reassignedId} and
@@ -262,9 +264,11 @@ public final class TenantExport {
             .ref(new Reference(List.of("embedding_model"), "nexus", "embedding_models",
                 List.of("embedding_model"), true, false, null))
             // catalog-044: owner_id is recomputed from the collection's documents on insert, and again
-            // when documents load (catalog_documents_owner_to_collection).
+            // when documents load (catalog_documents_owner_to_collection); the curator check reads
+            // catalog_owners.
             .trigger("catalog_collections_owner_from_docs",
                 "BEFORE INSERT OR UPDATE OF owner_id, content_type FOR EACH ROW")
+            .loadsAfter("catalog_owners")
             .maintained("owner_id")
             .build(),
         data("embedding_profile").pk("tenant_id text", "content_type text")
