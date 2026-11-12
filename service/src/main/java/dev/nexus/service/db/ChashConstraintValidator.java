@@ -208,8 +208,13 @@ public final class ChashConstraintValidator {
         /** A step ended. */
         void stepped(Step step);
 
-        /** Why the run should stop before its next step ({@code evicted}, {@code wall_clock_cap}, {@code interrupted}), or null. */
+        /** Why the run should stop before its next step ({@code cancelled}, {@code evicted}, {@code wall_clock_cap}), or null. */
         String stopReason();
+
+        /** What this run belongs to (the job), so {@link #cancelRunningFor} cancels this run and no other; null names nothing. */
+        default Object owner() {
+            return null;
+        }
     }
 
     /**
@@ -259,6 +264,8 @@ public final class ChashConstraintValidator {
     private volatile AdminDdlSession activeStep;
     /** The controller session of the run in flight (it reads the catalog and holds the run lock), for the same cancel. */
     private volatile AdminDdlSession activeController;
+    /** The listener of the run in flight, so {@link #cancelRunningFor} cancels only the run of the job it names. */
+    private volatile Listener activeListener;
 
     /** A validator that cannot count a refused table's bad rows by tenant ({@code bad_rows} stays null there). */
     public ChashConstraintValidator(AdminConnection admin) {
@@ -287,7 +294,8 @@ public final class ChashConstraintValidator {
 
     /**
      * Cancels whatever statement the running step (and the run's controller) has in flight, and refuses every later one
-     * ({@link AdminDdlSession#cancel} has what that guarantees). The engine's shutdown calls it after it
+     * ({@link AdminDdlSession#cancel} has what that guarantees). A {@code DELETE} of the job calls it after setting the job's
+     * stop reason, and the run ends with that reason. The engine's shutdown calls it after it
      * interrupts the job's thread, so the backend does not keep scanning a table for up to the statement timeout after the
      * engine that asked for it is gone. The step ends as stopped; nothing is lost (a VALIDATE is atomic).
      */
@@ -296,6 +304,23 @@ public final class ChashConstraintValidator {
         AdminDdlSession controller = activeController;
         if (controller != null) controller.cancel();
         if (step != null) step.cancel();
+    }
+
+    /**
+     * {@link #cancelRunning}, for the run that belongs to {@code owner} (a {@code DELETE} of the job sets its stop reason
+     * first). The job named may have ended and another started since: the sessions are read first and the run's listener after
+     * (a run publishes its listener before its sessions and clears it after them, all volatile), so a session read here belongs
+     * to the listener read after it or to a run that has already ended, and a run of another owner is left alone. Returns
+     * whether it cancelled.
+     */
+    public boolean cancelRunningFor(Object owner) {
+        AdminDdlSession step = activeStep;
+        AdminDdlSession controller = activeController;
+        Listener l = activeListener;
+        if (owner == null || l == null || l.owner() != owner) return false;
+        if (controller != null) controller.cancel();
+        if (step != null) step.cancel();
+        return true;
     }
 
     /**
@@ -308,6 +333,12 @@ public final class ChashConstraintValidator {
      */
     private static void checkStop(AdminDdlSession s) {
         if (Thread.currentThread().isInterrupted() || s.isCancelled()) throw new Stopped();
+    }
+
+    /** The listener's stop reason ({@code cancelled}, {@code evicted}, {@code wall_clock_cap}), or {@code interrupted} for the engine's stop. */
+    private static String stopOr(Listener listener) {
+        String reason = listener.stopReason();
+        return reason != null ? reason : "interrupted";
     }
 
     /** True when {@code e} is a statement ended by the engine's stop: 57014 on a session that was cancelled (or a thread that was interrupted), or the bounded read's own "interrupted". */
@@ -334,15 +365,17 @@ public final class ChashConstraintValidator {
         // The controller session holds the run's advisory lock for the whole job and reads the catalog; each step has its own.
         AdminDdlSession.Settings controllerSettings = settings(CHUNKS.getSchema().getName(), CHUNKS.getName(), true);
         try (AdminDdlSession controller = opener.open(admin, controllerSettings, true)) {
+            activeListener = listener;
             activeController = controller;
             try {
                 return runOn(controller, dryRun, listener, cfg);
             } catch (DataAccessException | AdminDdlSession.Refused e) {
                 // a statement of the controller cancelled by the engine's stop is the run's stop, not its failure
-                if (stopSignal(e, controller)) return new Result("interrupted", null);
+                if (stopSignal(e, controller)) return new Result(stopOr(listener), null);
                 throw e;
             } finally {
                 activeController = null;
+                activeListener = null;
             }
         }
     }
@@ -350,7 +383,7 @@ public final class ChashConstraintValidator {
     private Result runOn(AdminDdlSession controller, boolean dryRun, Listener listener, Config cfg) {
         {
             controller.guard("30s");
-            List<Row> rows = planRows.apply(readRowsBounded(controller, cfg));
+            List<Row> rows = planRows.apply(readRowsBounded(controller, cfg, listener));
             List<Planned> plan = new ArrayList<>();
             List<Step> upFront = new ArrayList<>();
             for (Target t : ChashConformanceConstraints.TARGETS) {
@@ -386,18 +419,22 @@ public final class ChashConstraintValidator {
                 if (stop == null && Thread.interrupted()) stop = "interrupted";
                 if (stop != null) return new Result(stop, null);
                 Step step = stepFor(p, usable, dryRun, cfg, listener);
-                if (step == null) {   // a sleep was interrupted: the engine is stopping
-                    return new Result("interrupted", null);
+                if (step == null) {   // a sleep was interrupted or a statement cancelled: the engine's stop or a cancel
+                    return new Result(stopOr(listener), null);
                 }
                 usable.put(p.row().relation(), step.outcome() == Outcome.VALIDATED || step.outcome() == Outcome.ALREADY_VALID
                     || step.outcome() == Outcome.WOULD_VALIDATE);
                 listener.stepped(step);
-                if (cfg.pauseMs() > 0 && !pause(cfg.pauseMs())) return new Result("interrupted", null);
+                if (cfg.pauseMs() > 0 && !sleep(cfg.pauseMs(), listener)) return new Result(stopOr(listener), null);
             }
+            // a cancel that landed after the last step is still the run's stop: the 202 said the job is stopping
+            String stop = listener.stopReason();
+            if (stop != null) return new Result(stop, null);
             Boolean all;
             try {
-                all = ChashConformanceConstraints.aggregate(readRowsBounded(controller, cfg)).allValidated();
+                all = ChashConformanceConstraints.aggregate(readRowsBounded(controller, cfg, listener)).allValidated();
             } catch (AdminDdlSession.Refused | DataAccessException e) {
+                if (stopSignal(e, controller) || listener.stopReason() != null) return new Result(stopOr(listener), null);
                 all = null;   // the steps are done and reported; the conformance route answers what this read could not
             }
             return new Result(null, all);
@@ -410,7 +447,7 @@ public final class ChashConstraintValidator {
      * retried with backoff, and a lock still held after the attempts is a {@code Refused} 503 {@code lock_timeout}: nothing
      * was changed and a rerun starts again. An ACCESS SHARE or SHARE lock (an index build, another VALIDATE) does not block it.
      */
-    private static List<Row> readRowsBounded(AdminDdlSession s, Config cfg) {
+    private static List<Row> readRowsBounded(AdminDdlSession s, Config cfg, Listener listener) {
         s.setSession("lock_timeout", cfg.lockTimeoutMs() + "ms");
         long backoff = cfg.backoffMs();
         for (int attempt = 1; ; attempt++) {
@@ -423,7 +460,7 @@ public final class ChashConstraintValidator {
                         + "session (ACCESS EXCLUSIVE), so the constraints could not be read within the lock bound; nothing "
                         + "was changed, and a rerun starts again", SQLSTATE_LOCK_NOT_AVAILABLE);
                 }
-                if (!sleep(backoff)) throw new AdminDdlSession.Refused(503, "interrupted", "the engine is stopping");
+                if (!sleep(backoff, listener)) throw new AdminDdlSession.Refused(503, "interrupted", "the run was stopped");
                 backoff = Math.min(MAX_BACKOFF_MS, Math.max(1, backoff) * 2);
             }
         }
@@ -495,6 +532,9 @@ public final class ChashConstraintValidator {
         try (AdminDdlSession s = opener.open(admin, settings(schema, p.row().relationName(), false), false)) {
             activeStep = s;
             try {
+                // a cancel sets the job's reason and then looks for a session to cancel; this reads the reason after publishing
+                // the session (both volatile), so a cancel that found no session is seen here and no statement starts
+                if (listener.stopReason() != null) return null;
                 checkStop(s);   // a stop that landed before the session was published to cancelRunning
                 s.guard(statementTimeout(cfg));
                 s.setSession("lock_timeout", cfg.lockTimeoutMs() + "ms");   // the size read takes a lock too
@@ -526,7 +566,7 @@ public final class ChashConstraintValidator {
                         log.warn("event=chash_validate_deferred table={} reason={} attempts={}", table, retry, attempt);
                         return Step.because(table, constraint, Outcome.DEFERRED, retry);
                     }
-                    if (!sleep(backoff)) return null;
+                    if (!sleep(backoff, listener)) return null;   // a cancel ends the backoff, as an interrupt does
                     backoff = Math.min(MAX_BACKOFF_MS, Math.max(1, backoff) * 2);
                 }
             } catch (Stopped e) {
@@ -613,6 +653,11 @@ public final class ChashConstraintValidator {
             validated = Boolean.TRUE.equals(s.states(List.of(constraint)).get(0).validated());
         } catch (DataAccessException e) {
             if (SQLSTATE_UNDEFINED_TABLE.equals(e.sqlState())) throw e;
+            if (s.isCancelled()) {
+                // a stop landed after the VALIDATE returned: it ran on the autocommit session and returned, so it committed
+                log.info("event=chash_validated table={} constraint={} state_read=cancelled", table, constraint);
+                return Step.of(table, constraint, Outcome.VALIDATED).withPrecheck(preState);
+            }
             return Step.because(table, constraint, Outcome.DEFERRED, "state_unreadable").withPrecheck(preState);
         }
         if (!validated) {
@@ -879,19 +924,25 @@ public final class ChashConstraintValidator {
         }
     }
 
-    private static boolean pause(long ms) {
-        return sleep(ms);
-    }
+    /** The slice a sleep is cut into, so a cancel (which does not interrupt the thread) is seen within it. */
+    private static final long SLEEP_SLICE_MS = 50;
 
-    /** Sleeps; false when interrupted (the engine is shutting down), with the flag set again. */
-    private static boolean sleep(long ms) {
-        if (ms <= 0) return !Thread.currentThread().isInterrupted();
-        try {
-            Thread.sleep(ms);
-            return true;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
+    /**
+     * Sleeps; false when interrupted (the engine is shutting down, the flag set again) or when {@code listener} has a stop
+     * reason (a cancel), read between slices of {@link #SLEEP_SLICE_MS}. A null listener is the interrupt alone.
+     */
+    private static boolean sleep(long ms, Listener listener) {
+        long end = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(Math.max(0, ms));
+        while (true) {
+            if (Thread.currentThread().isInterrupted() || (listener != null && listener.stopReason() != null)) return false;
+            long left = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(end - System.nanoTime());
+            if (left <= 0) return true;
+            try {
+                Thread.sleep(Math.min(left, SLEEP_SLICE_MS));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
         }
     }
 }

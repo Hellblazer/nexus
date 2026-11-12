@@ -31,7 +31,7 @@ import java.util.function.LongSupplier;
  *
  * <p><b>Bounds.</b> One job runs and none waits (a second start is handed the first); it stops at the next step boundary after
  * twelve hours or when its thread is interrupted (the engine's shutdown) and ends failed with {@code job_stopped}, what it did
- * kept. The lists a status carries ({@code validated}, {@code refused}, {@code deferred}) hold at most {@link #LIST_CAP}
+ * kept. A {@code DELETE} cancels it mid-statement and it ends failed with {@link #CANCELLED}. The lists a status carries ({@code validated}, {@code refused}, {@code deferred}) hold at most {@link #LIST_CAP}
  * entries each, with the full counts beside them, so a store with thousands of partitions does not make every poll large.
  */
 public final class ValidateConstraintsJobs {
@@ -49,6 +49,9 @@ public final class ValidateConstraintsJobs {
     /** What stopping the engine does to a running job: nothing is undone. */
     public static final String ON_STOP =
         "a constraint already validated stays validated; a rerun resumes at the next one";
+
+    /** The stop reason a {@code DELETE} gives a running job, and the failed outcome's {@code reason}. */
+    public static final String CANCELLED = "cancelled";
 
     /** The most entries of each list a status carries. */
     public static final int LIST_CAP = 200;
@@ -318,6 +321,11 @@ public final class ValidateConstraintsJobs {
             @Override
             public String stopReason() {
                 return job.stopReason();
+            }
+
+            @Override
+            public Object owner() {
+                return job;
             }
         };
     }

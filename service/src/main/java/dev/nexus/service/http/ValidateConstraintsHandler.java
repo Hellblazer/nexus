@@ -35,9 +35,17 @@ import java.util.function.Supplier;
  *       {@code all_validated} (the conformance route's answer after the last step; null until then), {@code safe_to_stop}
  *       (always true) and {@code on_stop}. A failed job adds {@code http_status}, {@code error}, {@code reason}. An id the
  *       engine does not hold (never started, expired, lost with a restart) is a 404.</li>
+ *   <li>{@code DELETE /v1/admin/validate-constraints/{job_id}} cancels a running job: the statement it has in flight (a
+ *       VALIDATE mid-table, a pre-check, a lock wait, a backoff) is cancelled on the server and no later one starts. A 202
+ *       (with the status, {@code stopping: cancelled}) says the cancel was accepted, and the job then ends {@code failed} with
+ *       {@code reason: cancelled} and {@code http_status} 409, wherever in its run the cancel landed; the discriminator is
+ *       {@code reason}, never the 409 (a start's conflict is a 409 too). A VALIDATE is atomic, so the table it was on stays
+ *       NOT VALID and every constraint validated before it stays validated; a new start resumes at the next one. A start sent
+ *       while a cancelled job is still ending is a 409 {@code reason: cancelling} naming it: poll it, then start again. A
+ *       DELETE of a job that has already ended is a 200 with its status, unchanged; an unknown id is a 404.</li>
  * </ul>
  *
- * <p><b>Authorization.</b> The root token only ({@link RequestContext#isOperator()}), both routes: the constraints are
+ * <p><b>Authorization.</b> The root token only ({@link RequestContext#isOperator()}), every route: the constraints are
  * table-wide and the job runs on the engine's admin connection. Any other credential is a 403 (the auth filter has already
  * refused a missing or unknown one with 401).
  *
@@ -87,7 +95,7 @@ public final class ValidateConstraintsHandler implements HttpHandler {
         }
         String method = ex.getRequestMethod().toUpperCase(Locale.ROOT);
         boolean start = rest.isEmpty();
-        if (start ? !"POST".equals(method) : !"GET".equals(method)) {
+        if (start ? !"POST".equals(method) : !("GET".equals(method) || "DELETE".equals(method))) {
             HttpUtil.send(ex, 405, "{\"error\":\"method not allowed\"}");
             return;
         }
@@ -102,6 +110,8 @@ public final class ValidateConstraintsHandler implements HttpHandler {
         ex.getResponseHeaders().set("Cache-Control", "no-store");
         if (start) {
             start(ex);
+        } else if ("DELETE".equals(method)) {
+            cancel(ex, rest.substring(1));
         } else {
             poll(ex, rest.substring(1));
         }
@@ -150,6 +160,15 @@ public final class ValidateConstraintsHandler implements HttpHandler {
             send(ex, 503, Map.of("error", b.getMessage()));
             return;
         }
+        if (!started.created() && ValidateConstraintsJobs.CANCELLED.equals(started.job().stopReason())) {
+            // the job a start would join is being cancelled: joining it would hand back a job that ends cancelled
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("error", "the running validate job is being cancelled; poll it until it ends, then start again");
+            err.put("reason", "cancelling");
+            err.put("job_id", started.job().id());
+            send(ex, 409, err);
+            return;
+        }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("job_id", started.job().id());
         out.put("created", started.created());
@@ -159,13 +178,42 @@ public final class ValidateConstraintsHandler implements HttpHandler {
     // ── GET ─────────────────────────────────────────────────────────────────
 
     private void poll(HttpExchange ex, String jobId) throws IOException {
-        EngineJobs.Job<Progress> job = jobId.isEmpty() || jobId.indexOf('/') >= 0
-            ? null : jobs.find(jobId, ValidateConstraintsJobs.JOB_TENANT);
+        EngineJobs.Job<Progress> job = find(jobId);
         if (job == null) {
             HttpUtil.send(ex, 404, "{\"error\":\"no such constraint validate job\"}");
             return;
         }
         send(ex, 200, status(job));
+    }
+
+    private EngineJobs.Job<Progress> find(String jobId) {
+        return jobId.isEmpty() || jobId.indexOf('/') >= 0 ? null : jobs.find(jobId, ValidateConstraintsJobs.JOB_TENANT);
+    }
+
+    // ── DELETE ──────────────────────────────────────────────────────────────
+
+    /**
+     * Cancels a running job. The stop reason is set first and the in-flight statements cancelled second: a step that publishes
+     * its session after the cancel looked for one reads the reason before its first statement ({@link ChashConstraintValidator}),
+     * so no VALIDATE starts after a 202. The cancel names this job ({@link ChashConstraintValidator#cancelRunningFor}), so a
+     * job started after this one ended is never touched. Logged, not audited: the route is root only and changes no data.
+     */
+    private void cancel(HttpExchange ex, String jobId) throws IOException {
+        EngineJobs.Job<Progress> job = find(jobId);
+        if (job == null) {
+            HttpUtil.send(ex, 404, "{\"error\":\"no such constraint validate job\"}");
+            return;
+        }
+        if (job.state() != EngineJobs.State.RUNNING) {
+            send(ex, 200, status(job));
+            return;
+        }
+        job.stopFor(ValidateConstraintsJobs.CANCELLED);
+        Map<String, Object> asked = status(job);   // before the cancel lands, so the answer shows the job still stopping
+        ChashConstraintValidator validator = validatorSource == null ? null : validatorSource.get();
+        if (validator != null) validator.cancelRunningFor(job);   // this job's run; never a newer job's statements
+        log.info("event=chash_validate_cancel_requested job_id={}", job.id());
+        send(ex, 202, asked);
     }
 
     private Map<String, Object> status(EngineJobs.Job<Progress> job) {
@@ -196,6 +244,11 @@ public final class ValidateConstraintsHandler implements HttpHandler {
         Progress p = job.data();
         stage.accept("planning");
         var result = validator.run(p.dryRun(), ValidateConstraintsJobs.listener(job, p, stage));
+        if (ValidateConstraintsJobs.CANCELLED.equals(result.stopped())) {
+            log.info("event=chash_validate_cancelled tables_done={}", p.view().get("tables_done"));
+            return ValidateConstraintsJobs.failed(409, ValidateConstraintsJobs.CANCELLED, "the job was cancelled; "
+                + ValidateConstraintsJobs.ON_STOP);
+        }
         if (result.stopped() != null) {
             log.info("event=chash_validate_stopped reason={}", result.stopped());
             return ValidateConstraintsJobs.failed(500, "job_stopped", "the job stopped (" + result.stopped()

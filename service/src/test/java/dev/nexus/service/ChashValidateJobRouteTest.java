@@ -279,6 +279,24 @@ class ChashValidateJobRouteTest {
         return http.send(b.GET().build(), HttpResponse.BodyHandlers.ofString());
     }
 
+    private HttpResponse<String> delete(String bearer, String path) throws Exception {
+        var b = TestHttp.request(url(path));
+        if (bearer != null) b.header("Authorization", "Bearer " + bearer);
+        return http.send(b.DELETE().build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** True while a VALIDATE of the job's step session on {@code relname} is active on the server. */
+    private boolean validateInFlightOn(String relname) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(DSL.selectOne()
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(DSL.field(DSL.name("application_name"), String.class).startsWith(ChashConstraintValidator.APPLICATION_NAME_PREFIX))
+                .and(DSL.field(DSL.name("state"), String.class).eq("active"))
+                .and(DSL.field(DSL.name("query"), String.class).contains("VALIDATE CONSTRAINT"))
+                .and(DSL.field(DSL.name("query"), String.class).contains(relname)));
+        }
+    }
+
     private String start(boolean dryRun) throws Exception {
         var resp = post(ROOT, "{\"dry_run\":" + dryRun + "}");
         assertThat(resp.statusCode()).as(resp.body()).isEqualTo(202);
@@ -698,6 +716,76 @@ class ChashValidateJobRouteTest {
         }
     }
 
+    /**
+     * The cancel route end to end: a DELETE while the job's VALIDATE is in flight on its table (here waiting on that table's
+     * lock, with a lock timeout of a minute) cancels the statement on the server at once, the job ends failed with
+     * {@code reason: cancelled} and {@code http_status} 409, the table stays NOT VALID, and a new start finishes the work. A
+     * start sent right after the 202 never joins the cancelled job, a second DELETE of the ended job is a 200 with its status,
+     * and only the root token may cancel. Kills: the 405 the route
+     * answered before (marginalia's real-store rehearsal, 2026-11-12); a cancel that sets the job's flag but leaves the
+     * statement to run its lock timeout.
+     */
+    @Test
+    void aDeleteWhileAVALIDATEIsInFlightOnItsTable_cancelsItAtOnce_andTheJobEndsCancelled_andARerunFinishes() throws Exception {
+        seedValid();
+        String leaf = leafOf(TENANT_A, "clean one");
+        System.setProperty(ChashConstraintValidator.LOCK_TIMEOUT_PROPERTY, "60000");
+        System.setProperty(ChashConstraintValidator.LOCK_ATTEMPTS_PROPERTY, "1");
+        Connection held = holdShare(leaf);   // the pre-check reads; the VALIDATE waits for its lock, in flight on the server
+        try {
+            String id = start(false);
+            long deadline = System.nanoTime() + java.time.Duration.ofSeconds(60).toNanos();
+            while (System.nanoTime() < deadline && !validateInFlightOn(leaf)) Thread.sleep(25);
+            assertThat(validateInFlightOn(leaf)).as("the leaf's VALIDATE is in flight: " + status(id)).isTrue();
+
+            assertThat(delete(TENANT_TOKEN, PATH + "/" + id).statusCode()).as("a tenant token may not cancel").isEqualTo(403);
+            assertThat(validateInFlightOn(leaf)).as("and that refusal cancelled nothing").isTrue();
+
+            long t0 = System.nanoTime();
+            var del = delete(ROOT, PATH + "/" + id);
+            assertThat(del.statusCode()).as(del.body()).isEqualTo(202);
+            JsonNode asked = MAPPER.readTree(del.body());
+            assertThat(asked.get("job_id").asText()).isEqualTo(id);
+            assertThat(asked.get("stopping").asText()).isEqualTo("cancelled");
+
+            // a start sent at once never joins the job being cancelled: a 409 naming it while it ends, or a new job after
+            var joined = post(ROOT, "{\"dry_run\":false}");
+            JsonNode jb = MAPPER.readTree(joined.body());
+            if (joined.statusCode() == 202) {
+                String other = jb.get("job_id").asText();
+                assertThat(other).as("a start never joins the cancelled job: " + joined.body()).isNotEqualTo(id);
+                assertThat(delete(ROOT, PATH + "/" + other).statusCode()).isIn(200, 202);
+                await(other);
+            } else {
+                assertThat(joined.statusCode()).as(joined.body()).isEqualTo(409);
+                assertThat(jb.get("reason").asText()).isEqualTo("cancelling");
+                assertThat(jb.get("job_id").asText()).isEqualTo(id);
+            }
+
+            JsonNode done = await(id);
+            assertThat(java.time.Duration.ofNanos(System.nanoTime() - t0)).as("cancelled, not waited out to the lock timeout")
+                .isLessThan(java.time.Duration.ofSeconds(30));
+            assertThat(done.get("state").asText()).as(done.toString()).isEqualTo("failed");
+            assertThat(done.get("reason").asText()).isEqualTo("cancelled");
+            assertThat(done.get("http_status").asInt()).isEqualTo(409);
+            assertThat(done.get("error").asText()).contains("cancelled").contains("a rerun resumes");
+            assertThat(validateInFlightOn(leaf)).as("no VALIDATE is left on the server").isFalse();
+            assertThat(validity().get(leaf)).as("the cancelled table stays NOT VALID").isFalse();
+            assertThat(strings(done.get("validated"))).doesNotContain("nexus." + leaf);
+
+            var again = delete(ROOT, PATH + "/" + id);
+            assertThat(again.statusCode()).as("a DELETE of an ended job changes nothing").isEqualTo(200);
+            assertThat(MAPPER.readTree(again.body()).get("reason").asText()).isEqualTo("cancelled");
+        } finally {
+            release(held);
+        }
+        System.setProperty(ChashConstraintValidator.LOCK_TIMEOUT_PROPERTY, "200");
+        JsonNode rerun = run(false);
+        assertThat(rerun.get("state").asText()).as(rerun.toString()).isEqualTo("done");
+        assertThat(rerun.get("all_validated").asBoolean()).as("a new start finishes the work").isTrue();
+        assertThat(validity().get(leaf)).isTrue();
+    }
+
     @Test
     void onlyTheRootTokenMayStartOrReadTheJob() throws Exception {
         seedValid();
@@ -775,9 +863,11 @@ class ChashValidateJobRouteTest {
         assertThat(post(ROOT, "{\"dry_run\":\"yes\"}").statusCode()).isEqualTo(400);
         assertThat(get(ROOT, PATH + "/no-such-job").statusCode()).isEqualTo(404);
         assertThat(get(ROOT, PATH).statusCode()).as("GET on the start route").isEqualTo(405);
-        var del = http.send(TestHttp.request(url(PATH + "/x")).header("Authorization", "Bearer " + ROOT).DELETE().build(),
-            HttpResponse.BodyHandlers.ofString());
-        assertThat(del.statusCode()).isEqualTo(405);
+        assertThat(delete(ROOT, PATH + "/x").statusCode()).as("DELETE of an id the engine does not hold").isEqualTo(404);
+        assertThat(delete(ROOT, PATH).statusCode()).as("DELETE on the start route").isEqualTo(405);
+        var put = http.send(TestHttp.request(url(PATH + "/x")).header("Authorization", "Bearer " + ROOT)
+            .PUT(HttpRequest.BodyPublishers.ofString("{}")).build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(put.statusCode()).isEqualTo(405);
         assertThat(get(ROOT, PATH + "x").statusCode()).as("a path that merely starts with it").isEqualTo(404);
     }
 
