@@ -126,6 +126,11 @@ def _error_text(exc: httpx.HTTPStatusError) -> str:
     return str(_error_body(exc).get("error", ""))
 
 
+def follow_or_cancel(job_id: str) -> str:
+    return (f"Follow it with `nx t3 validate-chash-checks --job {job_id}`, or cancel it with "
+            f"`nx t3 validate-chash-checks --job {job_id} --cancel`.")
+
+
 def poll_hint(job_id: str) -> str:
     return (f"the job may still be running on the engine; follow it with `nx t3 validate-chash-checks --job {job_id}`, "
             f"or cancel it with `nx t3 validate-chash-checks --job {job_id} --cancel`")
@@ -365,9 +370,11 @@ def _count(value: Any, listed: int) -> int:
 def verdict(body: dict[str, Any]) -> Verdict:
     """Read a finished job by its entries' reasons; ``done`` alone means nothing."""
     if was_cancelled(body):
+        if body.get("dry_run"):
+            return Verdict(False, "the dry run was cancelled; nothing was changed")
         n = body.get("validated_count", len(body.get("validated") or []))
         return Verdict(False, f"the validate job was cancelled after validating {n} CHECK(s); a CHECK already "
-                              "validated stays validated, and a rerun resumes at the next one")
+                              "validated stays validated, and a rerun starts again at the table it was on")
     if body.get("state") == "failed":
         return Verdict(False, f"the validate job failed: {body.get('error') or body.get('reason') or 'no reason given'}"
                               "; run this again")

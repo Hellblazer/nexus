@@ -43,7 +43,8 @@ def _fail(message: str, code: int) -> NoReturn:
 @click.option("--dry-run", "dry_run", is_flag=True, default=False,
               help="Report what each CHECK would do (validate, refuse, defer) and change nothing.")
 @click.option("--job", "job_id", default=None, metavar="ID", help="Follow a job already started instead of starting one.")
-@click.option("--no-wait", "no_wait", is_flag=True, default=False, help="Start the job, print its id and return.")
+@click.option("--no-wait", "no_wait", is_flag=True, default=False,
+              help="Start (or with --cancel, cancel) the job, print its id and return without waiting.")
 @click.option("--cancel", "cancel", is_flag=True, default=False,
               help="With --job: cancel that job and wait for it to end. A CHECK it validated stays valid.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the job's report as one JSON document.")
@@ -54,10 +55,11 @@ def validate_chash_checks_cmd(dry_run: bool, job_id: str | None, no_wait: bool, 
     if job_id and not cancel and (dry_run or no_wait):
         _fail("--job follows a job already started: --dry-run and --no-wait do not apply to it", EXIT_USAGE)
     client = _client()
+    body: dict[str, Any] | None = None
     try:
         try:
-            if cancel:
-                answered = job.cancel(client, str(job_id))
+            if cancel and job_id:
+                answered = job.cancel(client, job_id)
                 if answered.get("state") != "running":
                     if not as_json:
                         click.echo(f"Validate job {job_id} had already ended; nothing to cancel.")
@@ -67,31 +69,31 @@ def validate_chash_checks_cmd(dry_run: bool, job_id: str | None, no_wait: bool, 
                                f"Cancelling validate job {job_id}. Follow it to its end with: "
                                f"nx t3 validate-chash-checks --job {job_id}")
                     return
-                else:
-                    if not as_json:
-                        click.echo(f"Cancelling validate job {job_id}; waiting for it to end.")
-                    body = job.wait(client, str(job_id), on_progress=None if as_json else click.echo)
+                elif not as_json:
+                    click.echo(f"Cancelling validate job {job_id}; waiting for it to end.")
             elif job_id is None:
                 started = job.start(client, dry_run=dry_run)
                 job_id = started["job_id"]
+                what = "started" if started.get("created") else "already running"
                 if no_wait:
                     click.echo(json.dumps(started) if as_json else
-                               f"Validate job {job_id} {'started' if started.get('created') else 'already running'}. "
-                               f"Follow it with: nx t3 validate-chash-checks --job {job_id}")
+                               f"Validate job {job_id} {what}. {job.follow_or_cancel(job_id)}")
                     return
                 if not as_json:
-                    click.echo(f"Validate job {job_id} {'started' if started.get('created') else 'already running'}"
-                               f"{' (dry run)' if dry_run else ''}. Stopping this command leaves it running; "
-                               f"follow it with `nx t3 validate-chash-checks --job {job_id}`, or cancel it with "
-                               f"`--job {job_id} --cancel`.")
-            if not cancel:
-                body = job.wait(client, str(job_id), on_progress=None if as_json else click.echo)
+                    click.echo(f"Validate job {job_id} {what}{' (dry run)' if dry_run else ''}. Stopping this command "
+                               f"leaves it running. {job.follow_or_cancel(job_id)}")
+            if body is None and job_id:
+                body = job.wait(client, job_id, on_progress=None if as_json else click.echo)
         except job.ValidateJobError as exc:
             _fail(str(exc), exc.exit_code)
         except KeyboardInterrupt:
+            if cancel and job_id:
+                _fail(f"Stopped following. The cancel was sent; follow job {job_id} to its end with "
+                      f"`nx t3 validate-chash-checks --job {job_id}`.", EXIT_NOT_VALID)
             _fail(f"Stopped following. {job.poll_hint(job_id)}" if job_id else "Stopped.", EXIT_NOT_VALID)
     finally:
         client.close()
+    assert body is not None  # every path above set it, returned or exited
     verdict = job.verdict(body)
     if as_json:
         click.echo(json.dumps(body, indent=2, default=str))
