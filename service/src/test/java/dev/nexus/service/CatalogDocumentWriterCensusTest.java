@@ -372,7 +372,7 @@ class CatalogDocumentWriterCensusTest {
 
     /** Main files that name the audit table without writing it, with the reason. */
     private static final Map<String, String> AUDIT_READ_ONLY_REFERENCES = Map.of(
-        "TenantExport.java", "nexus-csayy.1: the tenant export's table registry names the table; it holds no DML");
+        "TenantExport.java", "nexus-csayy.1: the table registry of the tenant export names the table; it holds no DML");
     private static final Map<String, Path> AUDIT_READ_ONLY_FILES = Map.of(
         "TenantExport.java", Path.of("dev", "nexus", "service", "db", "TenantExport.java"));
 
@@ -405,7 +405,8 @@ class CatalogDocumentWriterCensusTest {
         for (String file : AUDIT_READ_ONLY_REFERENCES.keySet()) {
             String src = stripJavaComments(Files.readString(MAIN_JAVA.resolve(AUDIT_READ_ONLY_FILES.get(file))));
             assertThat(AUDIT_UPDATE_OR_DELETE.matcher(src).find() || src.contains("insertInto(CATALOG_SENSITIVITY_CHANGES")
-                    || Pattern.compile("(?i)insert\\s+into\\s+(?:\\w+\\.)?catalog_sensitivity_changes\\b").matcher(src).find())
+                    || Pattern.compile(String.join("\\s+", "(?i)insert", "into", "(?:\\w+\\.)?catalog_sensitivity_changes\\b"))
+                    .matcher(src).find())
                 .as(file + " is listed as read-only but writes the audit table").isFalse();
             assertThat(mentions).as(file + " is on AUDIT_READ_ONLY_REFERENCES but no longer names the table; "
                 + "delete the entry").anyMatch(x -> x.startsWith(file + "#"));

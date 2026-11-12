@@ -148,6 +148,8 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/db/RawSqlGateTest.java", 3),
         // input to the reapable-consumers scanner under test
         Map.entry("dev/nexus/service/db/ReapableConsumersScanTest.java", 6),
+        // pg_get_triggerdef texts, input to the trigger-firing parser under test
+        Map.entry("dev/nexus/service/db/TenantExportRegistryParityTest.java", 3),
         // a pattern matched against changelog text
         Map.entry("dev/nexus/service/db/TenantScopeVacuumMaintainGrantParityTest.java", 1),
         // expected substrings of the trigger function bodies
@@ -155,7 +157,7 @@ class SqlStringLiteralGateTest {
         // an expected substring of the gc function body
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 1));
 
-    private static final int TEXT_TOTAL = 71;
+    private static final int TEXT_TOTAL = 74;
 
     /** JDBC calls that take SQL text, per file, exact. Each entry says what the SQL is. */
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(
