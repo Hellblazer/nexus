@@ -312,7 +312,7 @@ class TestCli:
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         text = upgrade._restart(["nx"], run, lambda: None, "9.9.9", auto_mode=True)
-        assert text and "legacy-chash guard" in text and "`nx backup`" in text and "exit 75" in text
+        assert text and "legacy-chash guard" in text and "`nx backup`" in text and "no time limit" in text
 
     def test_a_waiting_supervisor_is_said_once_on_stderr_and_added_to_a_timeout(self, tmp_path: Path, capsys) -> None:
         from nexus.commands import daemon as cmd  # noqa: PLC0415 — the module under test, imported where it is used
@@ -322,7 +322,7 @@ class TestCli:
         assert cmd._legacy_chash_refusal(tmp_path) is None
         err = capsys.readouterr().err
         assert err.count("has not started yet") == 1 and "starting up" in err
-        assert "Nothing is wrong with your data" in cmd._legacy_chash_waiting_note(tmp_path)
+        assert "No backup is needed while it waits" in cmd._legacy_chash_waiting_note(tmp_path)
         guard.clear_wait_status(tmp_path)
         assert cmd._legacy_chash_waiting_note(tmp_path) == ""
 
@@ -377,3 +377,87 @@ class TestCli:
         with pytest.raises(rq.RestartAfterReplaceError) as exc2:
             rq._restart(ops2, rq.QuiesceState(stopped_service=True))
         assert "nx backup" not in str(exc2.value) and "Run 'nx daemon service start'." in str(exc2.value)
+
+    # round 3, item 6: a pending refusal with Postgres down must not be a dead end
+
+    def _down(self, tmp_path: Path, monkeypatch, *, accepting: bool) -> None:
+        (tmp_path / "pg_credentials").write_text("PG_PORT=5999\nPG_DATA=/pg\n", encoding="utf-8")
+        monkeypatch.setattr(guard, "pg_restore_path", lambda _c: tmp_path / "pg_restore")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        monkeypatch.setattr(ssd, "_port_accepting", lambda _host, _port: accepting)
+
+        def cannot(*_a, **_k):
+            def run(_sql: str) -> str:
+                raise RuntimeError("could not connect")
+
+            return run
+
+        monkeypatch.setattr(guard, "bundled_run_sql", cannot)
+
+    def test_with_postgres_down_the_start_goes_on_so_the_supervisor_can_bring_it_up(self, tmp_path: Path, monkeypatch,
+                                                                                    capsys) -> None:
+        from nexus.commands import daemon as cmd  # noqa: PLC0415 — the module under test, imported where it is used
+
+        with pytest.raises(guard.LegacyChashRefused):
+            guard.gate(tmp_path, _Cluster(counts={"chunks": 2}), pg_data="/pg")
+        self._down(tmp_path, monkeypatch, accepting=False)
+        cmd._clear_legacy_chash_refusal(tmp_path, None)  # no exit 75: nothing else could start Postgres
+        assert "Postgres is not running; starting it" in capsys.readouterr().err
+        assert guard.pending_refusal(tmp_path) is not None, "the refusal still stands; the engine stays stopped"
+
+    def test_with_postgres_up_the_refusal_is_raised(self, tmp_path: Path, monkeypatch) -> None:
+        from nexus.commands import daemon as cmd  # noqa: PLC0415 — the module under test, imported where it is used
+
+        with pytest.raises(guard.LegacyChashRefused):
+            guard.gate(tmp_path, _Cluster(counts={"chunks": 2}), pg_data="/pg")
+        self._down(tmp_path, monkeypatch, accepting=True)
+        with pytest.raises(StorageServiceStartError) as exc:
+            cmd._clear_legacy_chash_refusal(tmp_path, None)
+        assert exc.value.exit_code == 75
+
+    def test_a_named_backup_that_is_not_accepted_is_said_even_with_postgres_down(self, tmp_path: Path,
+                                                                                 monkeypatch) -> None:
+        from nexus.commands import daemon as cmd  # noqa: PLC0415 — the module under test, imported where it is used
+
+        with pytest.raises(guard.LegacyChashRefused):
+            guard.gate(tmp_path, _Cluster(counts={"chunks": 2}), pg_data="/pg")
+        self._down(tmp_path, monkeypatch, accepting=False)
+        monkeypatch.setattr("nexus.bounded_subprocess.run_bounded",
+                            lambda argv, **_k: subprocess.CompletedProcess(argv, 0, _listing("nexus chunks nexus"), b""))
+        with pytest.raises(StorageServiceStartError, match="was not accepted"):
+            cmd._clear_legacy_chash_refusal(tmp_path, self._dump(tmp_path))
+
+    def test_the_start_waits_for_postgres_before_it_raises_the_refusal(self, tmp_path: Path, monkeypatch) -> None:
+        """The spawned supervisor is still bringing Postgres up; the refusal promises it is left running."""
+        from nexus.commands import daemon as cmd  # noqa: PLC0415 — the module under test, imported where it is used
+
+        with pytest.raises(guard.LegacyChashRefused):
+            guard.gate(tmp_path, _Cluster(counts={"chunks": 2}), pg_data="/pg")
+        self._down(tmp_path, monkeypatch, accepting=False)
+        assert cmd._legacy_chash_refusal(tmp_path) is None
+        monkeypatch.setattr(ssd, "_port_accepting", lambda _host, _port: True)
+        assert cmd._legacy_chash_refusal(tmp_path).exit_code == 75
+
+    # round 3, item 7: nx upgrade reports the guard, not "still starting"
+
+    def _upgrade(self, monkeypatch, tmp_path: Path, *, timeout: bool):
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+
+        def run(argv, **_k):
+            if argv[-1] == "start" and timeout:
+                raise subprocess.TimeoutExpired(argv, 150)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        return upgrade._restart(["nx"], run, lambda: None, "9.9.9", auto_mode=True)
+
+    def test_an_upgrade_whose_start_timed_out_reading_a_dump_reports_the_guard(self, tmp_path: Path,
+                                                                              monkeypatch) -> None:
+        with pytest.raises(guard.LegacyChashRefused):
+            guard.gate(tmp_path, _Cluster(counts={"chunks": 2}), pg_data="/pg")
+        text = self._upgrade(monkeypatch, tmp_path, timeout=True)
+        assert text and "legacy-chash guard" in text and "`nx backup`" in text
+        assert "`nx daemon service start`" in text and "no time limit" in text
+
+    def test_an_upgrade_start_that_timed_out_with_no_refusal_is_still_starting(self, tmp_path: Path,
+                                                                              monkeypatch) -> None:
+        assert self._upgrade(monkeypatch, tmp_path, timeout=True) is None

@@ -39,6 +39,7 @@ import contextlib
 import json
 import os
 import secrets
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -105,7 +106,19 @@ class Verdict:
 
 
 def _bool(out: str) -> bool:
-    return out.strip() in ("t", "true", "1")
+    """psql -tA prints exactly ``t`` or ``f`` for a boolean; anything else (empty output, a garbled line) is not an
+    answer, and a guard that cannot tell never reads it as "no"."""
+    answer = out.strip()
+    if answer not in ("t", "f"):
+        raise ValueError(f"expected t or f from the database, got {answer[:40]!r}")
+    return answer == "t"
+
+
+def _system_identifier(run_sql: RunSql) -> str:
+    sid = run_sql("SELECT system_identifier FROM pg_control_system()").strip()
+    if not sid.isdigit():
+        raise ValueError(f"expected the cluster's system identifier, got {sid[:40]!r}")
+    return sid
 
 
 def _predicate(dtype: str) -> str:
@@ -123,7 +136,7 @@ def _count(run_sql: RunSql, table: str, dtype: str) -> int:
     where = f"FROM nexus.{table} WHERE {_predicate(dtype)}"
     if not _bool(run_sql(f"SELECT EXISTS (SELECT 1 {where})")):
         return 0
-    return int(run_sql(f"SELECT count(*) FROM (SELECT 1 {where} LIMIT {COUNT_CAP}) capped").strip() or 0)
+    return int(run_sql(f"SELECT count(*) FROM (SELECT 1 {where} LIMIT {COUNT_CAP}) capped").strip())
 
 
 def check(run_sql: RunSql) -> Verdict:
@@ -131,7 +144,7 @@ def check(run_sql: RunSql) -> Verdict:
     if not _bool(run_sql("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")):
         # Without it the chunk table's row-level security (and the catalog views) hide rows: every count reads 0.
         raise RuntimeError("the guard's database role is neither superuser nor BYPASSRLS, so it cannot see every row")
-    sid = run_sql("SELECT system_identifier FROM pg_control_system()").strip()
+    sid = _system_identifier(run_sql)
     if not _bool(run_sql("SELECT to_regclass('public.databasechangelog') IS NOT NULL")):
         return Verdict(True, "no engine has run against this store (no changelog)", {}, "no_changelog", cluster=sid)
     ran = {s.strip() for s in run_sql(
@@ -221,16 +234,23 @@ def create_sentinel(run_sql: RunSql) -> str:
     lists it in the archive's table of contents, which is all ``pg_restore -l`` has to show, and it carries no data
     and no table (nothing here is persistent state: it is dropped when the refusal clears)."""
     name = f"{SENTINEL_PREFIX}{secrets.token_hex(6)}"
-    run_sql(f"CREATE SCHEMA {name}")
-    run_sql(f"COMMENT ON SCHEMA {name} IS '{_SENTINEL_COMMENT}'")
+    _create_schema(run_sql, name)
     return name
 
 
+def _create_schema(run_sql: RunSql, name: str) -> None:
+    """The schema and its comment in ONE statement string, which psql sends as one implicit transaction: a failure
+    leaves no schema behind under a name nobody recorded."""
+    run_sql(f"CREATE SCHEMA {name}; COMMENT ON SCHEMA {name} IS '{_SENTINEL_COMMENT}'")
+
+
 def ensure_sentinel(run_sql: RunSql, name: str) -> None:
-    """The record's marker schema exists in the cluster (it is gone after a restore-swap or a hand clean-up)."""
-    if _valid_sentinel(name):  # the name came from a file: never splice anything else into SQL
-        run_sql(f"CREATE SCHEMA IF NOT EXISTS {name}")
-        run_sql(f"COMMENT ON SCHEMA {name} IS '{_SENTINEL_COMMENT}'")
+    """The record's marker schema exists in the cluster (it is gone after a restore-swap or a hand clean-up). One
+    probe when it is there; the wait runs this every few seconds."""
+    if not _valid_sentinel(name):  # the name came from a file: never splice anything else into SQL
+        return
+    if not _bool(run_sql(f"SELECT to_regnamespace('{name}') IS NOT NULL")):
+        _create_schema(run_sql, name)
 
 
 def _valid_sentinel(name: object) -> bool:
@@ -258,21 +278,17 @@ def _release_sentinel(config_dir: Path, run_sql: RunSql) -> None:
 # ── the record: states and updates ───────────────────────────────────────────────────────────────────────────────
 
 
-def mark_cleared(config_dir: Path, backup: Path, *, now: datetime | None = None) -> None:
-    """Keep the record as history: when and by which backup the refusal cleared. A record another start already
-    cleared keeps its first clearance."""
-    try:
-        record = json.loads(guard_path(config_dir).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        record = {}
-    if record.get("cleared_at"):
-        return
-    record.update({"cleared_at": (now or datetime.now(UTC)).isoformat(), "cleared_by": str(backup)})
-    _write_json(guard_path(config_dir), record)
+def mark_cleared(config_dir: Path, backup: Path, refused_at: object, *, now: datetime | None = None) -> bool:
+    """Keep the record as history: when and by which backup the refusal cleared. The write lands only on the pending
+    refusal ``refused_at`` the backup was checked against: a record that was replaced, retired or already cleared
+    while the dump was read is left as it is. Returns whether it wrote."""
+    return _update_record(config_dir, refused_at, only_pending=True,
+                          cleared_at=(now or datetime.now(UTC)).isoformat(), cleared_by=str(backup))
 
 
-def _label(table: str) -> str:
-    return {"chunks": "chunk rows", MANIFEST: "manifest rows"}.get(table, f"chunk rows in {table}")
+def _label(table: str, n: int) -> str:
+    noun = {"chunks": "chunk row", MANIFEST: "manifest row"}.get(table, f"chunk row in {table}")
+    return noun if n == 1 else noun.replace(" row", " rows", 1)
 
 
 def _rows(n: int) -> str:
@@ -283,19 +299,20 @@ def refusal_text(record: dict, *, home: Path | None = None) -> str:
     """What the user reads: what is at risk and why, the command to run, the marker schema's purpose, and which dumps
     were looked at and not accepted."""
     counts = record.get("counts") or {}
-    rows = ", ".join(f"{_rows(n)} {_label(t)}" for t, n in counts.items() if n)
+    rows = ", ".join(f"{_rows(n)} {_label(t, n)}" for t, n in counts.items() if n)
     sentinel = record.get("sentinel")
     marker = (
-        f"This refusal created the empty schema {sentinel} in your nexus database: a backup counts only if it contains "
-        "that schema, which proves it is a dump of this store taken after the refusal (a dump of another store, or an "
-        "older one, is not accepted), and nexus reads the whole dump back before it goes on. "
+        f"The checks: this refusal created the empty schema {sentinel} in your nexus database, and a backup counts only "
+        "if it contains that schema, which proves it is a dump of this store taken after the refusal (a dump of "
+        "another store, or an older one, is not accepted); it must hold the chunk and manifest data; and nexus reads "
+        "the whole dump back before it goes on.\n"
         if sentinel else
-        "The marker schema that binds a backup to this store could not be created yet; the supervisor retries it every "
-        "few seconds, and no backup is accepted until it exists. "
+        "The checks: the marker schema that binds a backup to this store could not be created yet; the supervisor "
+        "retries it every few seconds, and no backup is accepted until it exists.\n"
     )
     tried = rejected_paths(record)
     checked = (
-        "Checked and not accepted: " + "; ".join(f"{path} ({why})" for path, why in tried[-5:]) + ". " if tried else ""
+        "Checked and not accepted: " + "; ".join(f"{path} ({why})" for path, why in tried[-5:]) + ".\n" if tried else ""
     )
     return (
         f"Not starting the engine. Your database holds {rows} that the engine's next start deletes for good: they use "
@@ -303,12 +320,13 @@ def refusal_text(record: dict, *, home: Path | None = None) -> str:
         "only from a copy.\n"
         "Make the copy first: run `nx backup` (Postgres is left running for it; it writes a verified dump to "
         f"{backup_dir(home)}/).\nBackup guide: https://github.com/Hellblazer/nexus/blob/main/docs/operations/backup-restore.md\n"
-        f"{marker}{checked}"
         "Then start again (`nx daemon service start`, or `nx upgrade`): the start goes on once a dump written after "
-        f"this refusal ({record.get('refused_at')}) passes those checks. A dump written elsewhere "
-        "(`nx backup --to PATH`): `nx daemon service start --legacy-backup PATH`. The refusal stands until a backup "
-        f"clears it, even if the rows have been removed since. (The deleting migration is "
-        f"{record.get('changeset', DELETING_CHANGESET)}.)"
+        f"this refusal ({record.get('refused_at')}) passes the checks below. A dump written elsewhere "
+        "(`nx backup --to PATH`): `nx daemon service start --legacy-backup PATH`. Reading a large dump to its end can "
+        "take minutes; `nx daemon service start` has no time limit, `nx upgrade` does.\n"
+        f"{marker}{checked}"
+        "The refusal ends when a backup passes those checks, or when a check finds nothing left to delete. "
+        f"(The deleting migration is {record.get('changeset', DELETING_CHANGESET)}.)"
     )
 
 
@@ -336,7 +354,9 @@ def _update_record(config_dir: Path, refused_at: object, *, only_pending: bool =
     """Re-read the record and write ``fields`` into it, only when it is still the refusal ``refused_at`` (a record
     another start replaced, retired or cleared is not overwritten from a stale copy). Returns whether it wrote."""
     record = read_record(config_dir)
-    if not record or record.get("refused_at") != refused_at or (only_pending and record.get("cleared_at")):
+    if not record or record.get("refused_at") != refused_at or (
+        only_pending and (record.get("cleared_at") or record.get("retired_at"))
+    ):
         return False
     record.update(fields)
     try:
@@ -389,10 +409,13 @@ def try_clear(
         if current and current.get("refused_at") == record.get("refused_at"):
             _update_record(config_dir, record.get("refused_at"),
                            rejected={**(current.get("rejected") or {}), **record.get("rejected", {})})
-    if found is not None:
-        mark_cleared(config_dir, found)
+    if found is not None and mark_cleared(config_dir, found, record.get("refused_at")):
         _log.info("legacy_chash_guard_cleared", backup=str(found))
-    return found
+        return found
+    if found is not None:
+        _log.warning("legacy_chash_guard_clearance_not_written", backup=str(found),
+                     reason="the refusal changed while the dump was read")
+    return None
 
 
 def reconcile_pending(config_dir: Path, run_sql: RunSql, pg_data: str, *, recheck: bool) -> str:
@@ -405,7 +428,7 @@ def reconcile_pending(config_dir: Path, run_sql: RunSql, pg_data: str, *, rechec
     record = pending_refusal(config_dir)
     if record is None:
         return "none"
-    sid = run_sql("SELECT system_identifier FROM pg_control_system()").strip()
+    sid = _system_identifier(run_sql)
     if not _cluster_matches(record, pg_data, sid):
         retire_record(config_dir, "the refusal was recorded for another cluster")
         return "retired"
@@ -448,11 +471,35 @@ def wait_round(
 # ── the wait the user can see ────────────────────────────────────────────────────────────────────────────────────
 
 
+def describe_cannot_ask(exc: BaseException) -> str:
+    """Why the guard could not read the database, in plain words (the raw error, redacted, goes to the log)."""
+    from nexus.redact import redact_credentials  # noqa: PLC0415 — deferred
+
+    text = redact_credentials(str(exc))
+    low = text.lower()
+    if isinstance(exc, subprocess.TimeoutExpired) or "timed out" in low:
+        return "a query to the database did not finish in time"
+    if isinstance(exc, (FileNotFoundError, ImportError)) or "pgbinarynotfound" in type(exc).__name__.lower():
+        return "the Postgres tools nexus bundles could not be run"
+    if "cannot see every row" in low:
+        return "nexus's database account cannot see every row; it has to be a superuser"
+    if "password authentication failed" in low or "no password supplied" in low or "fe_sendauth" in low:
+        return "Postgres did not accept the superuser password in pg_credentials"
+    if "does not exist" in low and "role" in low:
+        return "the database account nexus reads with does not exist in this cluster"
+    if "starting up" in low or "recovery" in low or "shutting down" in low:
+        return "Postgres is still starting up or recovering"
+    if "connection refused" in low or "could not connect" in low or "no such file" in low:
+        return "Postgres is not accepting connections"
+    return f"the check failed ({text.strip().splitlines()[-1][:160] if text.strip() else type(exc).__name__})"
+
+
 def waiting_text(cause: str, log_path: Path | str) -> str:
     return (
-        "The engine has not started yet: nexus could not check your database for legacy rows that its first start "
-        f"would delete ({cause}). Nothing is wrong with your data and no backup is needed for this; nexus asks again "
-        f"every few seconds. Check `nx doctor`, and the log at {log_path}."
+        "The engine has not started yet: nexus could not read your database to check it for rows that its first "
+        f"start would delete for good ({cause}). No backup is needed while it waits. It asks again every few "
+        "seconds and starts once the check can read the database. If this lasts more than a minute or two, check "
+        f"that Postgres is healthy (`nx doctor`) and the superuser password in pg_credentials, and read {log_path}."
     )
 
 
@@ -529,7 +576,8 @@ def gate(config_dir: Path, run_sql: RunSql, *, pg_data: str = "") -> Verdict:
                          error=redact_credentials(str(exc)))
             clear_wait_status(config_dir)
             return Verdict(True, "could not ask; this store was seen past the deleting changesets", {}, "marker")
-        raise GuardCannotAsk(redact_credentials(f"{type(exc).__name__}: {exc}")) from exc
+        _log.warning("legacy_chash_guard_could_not_ask", error=redact_credentials(f"{type(exc).__name__}: {exc}"))
+        raise GuardCannotAsk(describe_cannot_ask(exc)) from exc
     clear_wait_status(config_dir)
     if verdict.proceed:
         if verdict.kind == "applied":

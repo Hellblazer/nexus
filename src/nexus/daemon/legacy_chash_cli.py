@@ -30,12 +30,28 @@ def _refusal_error(config_dir: Path):
     return LegacyChashStartRefused(_guard.refusal_text(record)) if record else None
 
 
+def _pg_accepting(config_dir: Path) -> bool:
+    """Is the bundled Postgres accepting connections? True when that cannot be told (no credentials, no port): the
+    caller then behaves as it did before this question existed."""
+    from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred import
+
+    try:
+        port = _ssd._read_pg_credentials(config_dir / CREDENTIALS_FILENAME).get("PG_PORT", "")
+    except OSError:
+        return True
+    return not port.isdigit() or _ssd._port_accepting(_ssd._SERVICE_HOST, int(port))
+
+
 def legacy_chash_refusal(config_dir: Path):
-    """A pending refusal as a start error (exit 75), or None. While none is pending and the supervisor is waiting
-    because it could not ask Postgres, its reason goes to stderr once per change."""
+    """A pending refusal as a start error (exit 75), or None. A refusal is raised once Postgres is up (the refusal
+    says it is left running for ``nx backup``; a supervisor just spawned is still starting it). While none is pending
+    and the supervisor is waiting because it could not ask Postgres, its reason goes to stderr once per change."""
     refused = _refusal_error(config_dir)
-    if refused is not None:
+    if refused is not None and _pg_accepting(config_dir):
         return refused
+    if refused is not None:
+        return None
     from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
 
     text = _guard.wait_status_text(config_dir)
@@ -53,8 +69,9 @@ def waiting_note(config_dir: Path) -> str:
     return f"\n{text}" if text else ""
 
 
-def _reconcile(config_dir: Path) -> None:
-    """Best effort: ask the running cluster, which the refusing supervisor left up, to keep the refusal true."""
+def _reconcile(config_dir: Path) -> str:
+    """Best effort: ask the running cluster, which the refusing supervisor left up, to keep the refusal true.
+    Returns the outcome (``pending``, ``retired``), or ``unreachable`` when the cluster could not be asked."""
     from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
     from nexus.daemon.storage_service_daemon import _read_pg_credentials  # noqa: PLC0415 — deferred import
     from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred import
@@ -67,9 +84,10 @@ def _reconcile(config_dir: Path) -> None:
         )
     except Exception as exc:  # noqa: BLE001 — Postgres may be down; the record stands as it is
         _log.info("legacy_chash_guard_cli_could_not_reconcile", error=redact_credentials(str(exc)))
-        return
+        return "unreachable"
     if outcome == "retired":
         click.echo("Legacy chash rows: the earlier refusal no longer applies to this database; starting.", err=True)
+    return outcome
 
 
 def clear_legacy_chash_refusal(config_dir: Path, legacy_backup: Path | None) -> None:
@@ -79,7 +97,7 @@ def clear_legacy_chash_refusal(config_dir: Path, legacy_backup: Path | None) -> 
 
     if _guard.pending_refusal(config_dir) is None:
         return
-    _reconcile(config_dir)
+    outcome = _reconcile(config_dir)
     if _guard.pending_refusal(config_dir) is None:
         return
     click.echo("Checking your backup (reading each candidate dump to its end)...", err=True)
@@ -101,4 +119,12 @@ def clear_legacy_chash_refusal(config_dir: Path, legacy_backup: Path | None) -> 
             refused.args = (f"{refused.args[0]}\nThe backup you named, {legacy_backup}, was not accepted: it must be "
                             "newer than the refusal, `pg_restore -l` must list the marker schema the refusal created "
                             "and the nexus chunk and manifest table data, and `pg_restore` must read all of it.",)
+            raise refused
+        if outcome == "unreachable" and not _pg_accepting(config_dir):
+            # Nothing has started Postgres (a reboot, `stop --with-pg`) and `nx backup` needs it up. Exiting 75 here
+            # would leave no way to bring it up short of --foreground: let the start go on. The supervisor starts
+            # Postgres, refuses again, and waits with it running; the start's own wait then raises the refusal.
+            click.echo("Postgres is not running; starting it so a backup can be taken. The engine stays stopped "
+                       "until a backup clears the refusal.", err=True)
+            return
         raise refused

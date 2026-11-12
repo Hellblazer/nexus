@@ -44,11 +44,12 @@ class _Cluster:
             return "t" if self.counts.get(sql.split("FROM nexus.")[1].split(" ")[0], 0) else "f"
         if "count(*)" in sql:
             return str(min(self.counts.get(sql.split("FROM nexus.")[1].split(" ")[0], 0), guard.COUNT_CAP))
+        if "to_regnamespace" in sql:
+            return "t" if re.search(r"nx_legacy_guard_[0-9a-f]{12}", sql).group(0) in self.schemas else "f"
         if sql.startswith("CREATE SCHEMA "):
-            name = sql.split(" ")[-1] if "IF NOT EXISTS" in sql else sql.split(" ")[2]
-            assert name.startswith("nx_legacy_guard_"), sql
-            if "IF NOT EXISTS" not in sql:
-                self.sentinels.append(name)
+            name = re.search(r"nx_legacy_guard_[0-9a-f]{12}", sql).group(0)
+            assert "COMMENT ON SCHEMA" in sql, "the schema and its comment go in one statement (one transaction)"
+            self.sentinels.append(name)
             self.schemas.add(name)
             return ""
         if sql.startswith("COMMENT ON SCHEMA nx_legacy_guard_"):
@@ -96,3 +97,9 @@ def _rdr180_using() -> str:
 
 
 _RDR180_USING = _rdr180_using()
+
+
+def clear_record(config_dir: Path, backup: str = "x.dump", *, now: datetime | None = None) -> bool:
+    """Clear the pending refusal on disk as a start that verified ``backup`` against it would."""
+    record = guard.read_record(config_dir)
+    return guard.mark_cleared(config_dir, config_dir / backup, record["refused_at"], now=now)

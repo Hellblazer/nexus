@@ -859,6 +859,9 @@ def _restart(nx, run, discover, installed: str, *, auto_mode: bool) -> str | Non
             contained=False,
         )
     except subprocess.TimeoutExpired:
+        if _legacy_chash_pending():
+            # `start` was reading a candidate backup to its end (a big dump takes longer than this command waits).
+            return _legacy_chash_failed(stop_problem, "", auto_mode=auto_mode)
         # The supervisor is detached and survives our timeout: still starting, not dead.
         return _still_starting(installed, auto_mode=auto_mode)
     except Exception as exc:  # noqa: BLE001 — a start that cannot be spawned is a failed restart
@@ -866,11 +869,7 @@ def _restart(nx, run, discover, installed: str, *, auto_mode: bool) -> str | Non
                                auto_mode=auto_mode)
     said = (getattr(started, "stderr", "") or "").strip()
     if started.returncode == _LEGACY_CHASH_REFUSED:
-        return _restart_failed(
-            _join(stop_problem, "the legacy-chash guard refused to start the engine (exit 75): the store holds rows "
-                  "the engine's first boot would delete"),
-            said, auto_mode=auto_mode, remedy="`nx backup`, then `nx daemon service start`",
-        )
+        return _legacy_chash_failed(stop_problem, said, auto_mode=auto_mode)
     if started.returncode != 0:
         if any(m in said for m in _STILL_STARTING) and not any(m in said for m in _FAILED_START):
             return _still_starting(installed, auto_mode=auto_mode)
@@ -890,6 +889,28 @@ def _restart(nx, run, discover, installed: str, *, auto_mode: bool) -> str | Non
     if not auto_mode:
         click.echo("Storage service restarted.")
     return None
+
+
+def _legacy_chash_pending() -> bool:
+    """Does the legacy-chash guard hold a pending refusal for this install (nexus-f3yqd)?"""
+    try:
+        from nexus import config as _config  # noqa: PLC0415 — deferred; a module import keeps the by-value import census where it is
+        from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred, as above
+
+        return _guard.pending_refusal(_config.nexus_config_dir()) is not None
+    except Exception:  # noqa: BLE001 — a question about advice must not fail the upgrade
+        return False
+
+
+def _legacy_chash_failed(stop_problem: str | None, said: str, *, auto_mode: bool) -> str:
+    """The service did not restart because the legacy-chash guard refuses an engine start that would delete rows."""
+    return _restart_failed(
+        _join(stop_problem, "the legacy-chash guard refused to start the engine: the store holds rows the engine's "
+              "first boot would delete for good, and no complete backup of it exists yet"),
+        said, auto_mode=auto_mode,
+        remedy="`nx backup`, then `nx daemon service start` (not `nx upgrade` again: reading a large backup to its "
+               "end takes longer than the upgrade waits, and `nx daemon service start` has no time limit)",
+    )
 
 
 def _join(first: str | None, second: str) -> str:

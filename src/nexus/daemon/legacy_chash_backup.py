@@ -36,6 +36,7 @@ RESTORE_READ_TIMEOUT_S: float = 1800.0
 MAX_DUMPS_PER_ATTEMPT: int = 5
 #: Exits that say the tool could not run, not that the dump is bad: the shell's "cannot execute" and "not found", and
 #: Windows' STATUS_DLL_NOT_FOUND (0xC0000135) as an unsigned and as a signed exit code.
+TIMED_OUT = "timed out reading after"
 UNAVAILABLE_EXITS: frozenset[int] = frozenset({126, 127, 0xC0000135, -1073741515})
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -120,13 +121,18 @@ def verified_backup_since(
         pool = [explicit] if explicit is not None else list(backup_dir(home).glob("*.dump"))
         candidates = sorted((p for p in pool if p.is_file() and p.stat().st_mtime > since),
                             key=lambda p: p.stat().st_mtime, reverse=True)
-        candidates = [p for p in candidates if dump_key(p) not in rejected][:MAX_DUMPS_PER_ATTEMPT]
+        # a rejected dump is not read again, except that a user who NAMES a dump that only ran out of time gets the
+        # long read once more
+        candidates = [p for p in candidates if dump_key(p) not in rejected
+                      or (explicit is not None and rejected[dump_key(p)].startswith(TIMED_OUT))][:MAX_DUMPS_PER_ATTEMPT]
     except OSError:
         return None
     env = _restore_env(pg_restore)
     for dump in candidates:
         listing = _run(runner, [str(pg_restore), "-l", str(dump)], RESTORE_LIST_TIMEOUT_S, env, pg_restore)
         if listing is None:
+            reason = f"{TIMED_OUT} {RESTORE_LIST_TIMEOUT_S / 60:g} min"
+            rejected[dump_key(dump)] = reason
             continue
         if listing.returncode != 0:
             reason = "unreadable"
@@ -135,8 +141,11 @@ def verified_backup_since(
         else:
             read = _run(runner, [str(pg_restore), "-f", os.devnull, "-a", str(dump)], RESTORE_READ_TIMEOUT_S, env,
                         pg_restore)
-            if read is None:
-                continue  # too slow to settle now: neither accepted nor written off
+            if read is None:  # too slow to settle: not accepted, and said so (a named dump gets another go)
+                reason = f"{TIMED_OUT} {RESTORE_READ_TIMEOUT_S / 60:g} min"
+                rejected[dump_key(dump)] = reason
+                _log.warning("legacy_chash_guard_backup_rejected", path=str(dump), reason=reason)
+                continue
             if read.returncode == 0:
                 return dump
             reason = "incomplete: pg_restore could not read all of its data"

@@ -21,7 +21,7 @@ import pytest
 from nexus.backup import pg_backup
 from nexus.daemon import legacy_chash_guard as guard
 from tests import _engine_substrate
-from tests.daemon._legacy_chash_support import _FULL, _MARK, _RDR180_USING, T0, _Cluster, _listing, _record
+from tests.daemon._legacy_chash_support import _FULL, _MARK, _RDR180_USING, T0, _Cluster, _listing, _record, clear_record
 
 
 class TestBackups:
@@ -182,12 +182,29 @@ class TestBackups:
         assert found == dump
         assert calls[1][1:] == ["-f", os.devnull, "-a", "nexus-ok.dump"]
 
-    def test_a_full_read_that_times_out_is_neither_accepted_nor_written_off(self, tmp_path: Path) -> None:
-        self._dump(tmp_path, "nexus-big.dump", T0 + timedelta(minutes=1))
+    def test_a_full_read_that_times_out_is_not_accepted_and_is_remembered_and_named(self, tmp_path: Path) -> None:
+        dump = self._dump(tmp_path, "nexus-big.dump", T0 + timedelta(minutes=1))
         rec = _record()
-        runner = self._split_runner(_FULL, subprocess.TimeoutExpired("pg_restore", 1))
+        calls: list[list[str]] = []
+        runner = self._split_runner(_FULL, subprocess.TimeoutExpired("pg_restore", 1), calls)
         assert guard.verified_backup_since(rec, pg_restore=Path("pg_restore"), home=tmp_path, runner=runner) is None
-        assert rec["rejected"] == {}
+        assert next(iter(rec["rejected"].values())) == "timed out reading after 30 min"
+        guard.verified_backup_since(rec, pg_restore=Path("pg_restore"), home=tmp_path, runner=runner)
+        assert len(calls) == 2, "not silently re-read forever (every client call, 30 minutes each)"
+        assert "nexus-big.dump (timed out reading after 30 min)" in guard.refusal_text(rec, home=tmp_path)
+        # naming the dump with --legacy-backup is the user's call to try again
+        ok = self._split_runner(_FULL, 0, calls)
+        assert guard.verified_backup_since(rec, pg_restore=Path("pg_restore"), home=tmp_path, explicit=dump,
+                                           runner=ok) == dump
+
+    def test_a_dump_rejected_as_incomplete_is_not_retried_even_when_named(self, tmp_path: Path) -> None:
+        dump = self._dump(tmp_path, "nexus-cut.dump", T0 + timedelta(minutes=1))
+        rec = _record()
+        calls: list[list[str]] = []
+        runner = self._split_runner(_FULL, 1, calls)
+        guard.verified_backup_since(rec, pg_restore=Path("pg_restore"), home=tmp_path, explicit=dump, runner=runner)
+        guard.verified_backup_since(rec, pg_restore=Path("pg_restore"), home=tmp_path, explicit=dump, runner=runner)
+        assert len(calls) == 2
 
     @pytest.mark.parametrize("code", [126, 127, 3221225781, -1073741515])
     def test_the_codes_that_mean_the_tool_could_not_run_are_not_the_dumps_fault(self, tmp_path: Path, code: int) -> None:
@@ -213,7 +230,7 @@ class TestBackups:
 
     def test_clearing_keeps_the_record_as_history_and_a_later_refusal_starts_over(self, tmp_path: Path) -> None:
         self._refuse(tmp_path)
-        guard.mark_cleared(tmp_path, tmp_path / "nexus-backups" / "nexus-good.dump", now=T0 + timedelta(hours=1))
+        clear_record(tmp_path, "nexus-backups/nexus-good.dump", now=T0 + timedelta(hours=1))
         record = json.loads((tmp_path / guard.GUARD_FILENAME).read_text(encoding="utf-8"))
         assert record["cleared_by"].endswith("nexus-good.dump") and guard.pending_refusal(tmp_path) is None
         later = T0 + timedelta(days=1)
@@ -438,6 +455,22 @@ class TestRealPostgres:
         partial = subprocess.run([str(bin_dir / "pg_restore"), "-l", str(only_chunks)], check=True,
                                  capture_output=True, timeout=60).stdout
         assert not guard.holds_required_data(partial, record), "a table-only dump has no marker schema and no manifest"
+
+    def test_a_marker_schema_whose_comment_fails_leaves_no_schema_behind(self, scratch_db) -> None:
+        """psql sends the one statement string as one transaction: no orphan schema under a name nobody recorded."""
+        def breaking(sql: str) -> str:
+            return scratch_db(sql.replace("COMMENT ON SCHEMA", "COMMENT ON SCHEMAX"))
+
+        with pytest.raises(RuntimeError):
+            guard.create_sentinel(breaking)
+        assert scratch_db("SELECT count(*) FROM pg_namespace WHERE nspname LIKE 'nx_legacy_guard_%'").strip() == "0"
+
+    def test_ensure_recreates_a_lost_marker_schema_and_leaves_a_present_one_alone(self, scratch_db) -> None:
+        name = guard.create_sentinel(scratch_db)
+        guard.ensure_sentinel(scratch_db, name)
+        guard.drop_sentinel(scratch_db, name)
+        guard.ensure_sentinel(scratch_db, name)
+        assert scratch_db(f"SELECT obj_description('{name}'::regnamespace, 'pg_namespace') IS NOT NULL").strip() == "t"
 
     def test_the_marker_schema_is_created_and_dropped_for_real(self, scratch_db) -> None:
         name = guard.create_sentinel(scratch_db)

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from nexus.daemon import legacy_chash_guard as guard
-from tests.daemon._legacy_chash_support import _RDR180_USING, _Cluster
+from tests.daemon._legacy_chash_support import _RDR180_USING, _Cluster, _listing, clear_record
 
 
 # ── check: the changelog, the era, and each table gated on its own changeset ────────────────────────────────────
@@ -90,7 +90,7 @@ class TestCheckHardening:
         """FORCE row-level security and the privilege-filtered catalogs read 0 to such a role: never "clean"."""
         with pytest.raises(RuntimeError, match="BYPASSRLS"):
             guard.check(_Cluster(role_ok=False, counts={"chunks": 5}))
-        with pytest.raises(guard.GuardCannotAsk, match="BYPASSRLS"):
+        with pytest.raises(guard.GuardCannotAsk, match="cannot see every row"):
             guard.gate(tmp_path, _Cluster(role_ok=False, counts={"chunks": 5}), pg_data="/pg")
         assert list(tmp_path.iterdir()) == []
 
@@ -175,7 +175,7 @@ class TestGate:
 
     def test_a_cleared_refusal_lets_the_start_go_on_and_drops_the_marker_schema_once(self, tmp_path: Path) -> None:
         run = self._refuse(tmp_path)
-        guard.mark_cleared(tmp_path, tmp_path / "x.dump")
+        clear_record(tmp_path)
         v = guard.gate(tmp_path, run, pg_data="/pg")
         assert v.proceed and v.kind == "cleared"
         sentinel = guard.read_record(tmp_path)["sentinel"]
@@ -188,7 +188,7 @@ class TestGate:
     def test_a_clearance_is_spent_once_the_deleting_changesets_are_seen_applied(self, tmp_path: Path) -> None:
         """A restored older database under the same config directory must not ride an earlier backup's clearance."""
         run = self._refuse(tmp_path)
-        guard.mark_cleared(tmp_path, tmp_path / "x.dump")
+        clear_record(tmp_path)
         assert guard.gate(tmp_path, run, pg_data="/pg").kind == "cleared"
         guard.gate(tmp_path, _Cluster(ran=("hygiene-001-5", "hygiene-001-8")), pg_data="/pg")
         assert not guard.is_cleared(tmp_path)
@@ -218,14 +218,14 @@ class TestGate:
 
     def test_a_clearance_for_another_cluster_is_not_honoured(self, tmp_path: Path) -> None:
         self._refuse(tmp_path, _Cluster(counts={"chunks": 1}, sid="111"))
-        guard.mark_cleared(tmp_path, tmp_path / "x.dump")
+        clear_record(tmp_path)
         with pytest.raises(guard.LegacyChashRefused):
             guard.gate(tmp_path, _Cluster(counts={"chunks": 1}, sid="222"), pg_data="/pg")
         assert guard.read_record(tmp_path)["cluster"]["system_identifier"] == "222"
 
     def test_a_clearance_for_the_same_cluster_still_is(self, tmp_path: Path) -> None:
         run = self._refuse(tmp_path, _Cluster(counts={"chunks": 1}, sid="111"))
-        guard.mark_cleared(tmp_path, tmp_path / "x.dump")
+        clear_record(tmp_path)
         assert guard.gate(tmp_path, run, pg_data="/other-path-same-cluster").kind == "cleared"
 
     def test_a_store_no_longer_at_risk_retires_the_pending_refusal(self, tmp_path: Path) -> None:
@@ -391,7 +391,7 @@ class TestReconcileAndWaitStatus:
 
     def test_the_wait_status_carries_the_cause_and_goes_stale(self, tmp_path: Path) -> None:
         text = guard.write_wait_status(tmp_path, "the database system is starting up", tmp_path / "logs" / "x.log")
-        assert "starting up" in text and "Nothing is wrong with your data" in text and "nx doctor" in text
+        assert "starting up" in text and "No backup is needed while it waits" in text and "nx doctor" in text
         assert guard.wait_status_text(tmp_path) == text
         first = json.loads((tmp_path / guard.WAIT_FILENAME).read_text(encoding="utf-8"))["since"]
         guard.write_wait_status(tmp_path, "still starting up", tmp_path / "logs" / "x.log")
@@ -408,9 +408,135 @@ class TestReconcileAndWaitStatus:
         os.utime(dump, (datetime.now(UTC).timestamp() + 60,) * 2)
 
         def runner(argv, **_k):  # while this start reads the dump, a second `nx` clears the refusal
-            guard.mark_cleared(tmp_path, tmp_path / "other.dump")
+            clear_record(tmp_path, "other.dump")
             return subprocess.CompletedProcess(argv, 1, b"", b"not a dump")
 
         assert guard.try_clear(tmp_path, pg_restore=Path("x"), home=tmp_path, runner=runner) is None
         record = guard.read_record(tmp_path)
         assert record["cleared_at"] and record["cleared_by"].endswith("other.dump")
+
+
+class TestRoundThree:
+    """The last small round: stale-record writes, fail-closed answers, plain text, an atomic marker, plain causes."""
+
+    def _pending(self, tmp_path: Path, run: _Cluster | None = None) -> _Cluster:
+        run = run or _Cluster(counts={"chunks": 3}, sid="111")
+        with pytest.raises(guard.LegacyChashRefused):
+            guard.gate(tmp_path, run, pg_data="/pg")
+        return run
+
+    # 1. a clearance lands only on the refusal the dump was checked against
+
+    def test_a_clearance_does_not_land_on_a_refusal_replaced_while_the_dump_was_read(self, tmp_path: Path) -> None:
+        self._pending(tmp_path)
+        old = guard.pending_refusal(tmp_path)["sentinel"]
+        dump = tmp_path / "nexus-backups" / "nexus-a.dump"
+        dump.parent.mkdir()
+        dump.write_bytes(b"PGDMP")
+        os.utime(dump, (datetime.now(UTC).timestamp() + 60,) * 2)
+        holds_old = _listing(f"SCHEMA - {old} nexus", "nexus chunks nexus", "nexus catalog_document_chunks nexus")
+
+        swapped: list[int] = []
+
+        def runner(argv, **_k):  # during the read: the store is swapped, and a new refusal is made for the new one
+            if not swapped:
+                swapped.append(1)
+                guard.retire_record(tmp_path, "swapped")
+                with pytest.raises(guard.LegacyChashRefused):
+                    guard.gate(tmp_path, _Cluster(counts={"chunks": 1}, sid="222"), pg_data="/pg")
+            return subprocess.CompletedProcess(argv, 0, holds_old, b"")
+
+        assert guard.try_clear(tmp_path, pg_restore=Path("x"), home=tmp_path, runner=runner) is None
+        assert swapped, "the runner ran"
+        new = guard.read_record(tmp_path)
+        assert new["cluster"]["system_identifier"] == "222" and not new.get("cleared_at")
+        assert guard.pending_refusal(tmp_path) is not None
+
+    def test_mark_cleared_writes_only_the_refusal_it_names(self, tmp_path: Path) -> None:
+        self._pending(tmp_path)
+        refused_at = guard.read_record(tmp_path)["refused_at"]
+        assert not guard.mark_cleared(tmp_path, tmp_path / "x.dump", "some other refusal")
+        assert not guard.read_record(tmp_path).get("cleared_at")
+        assert guard.mark_cleared(tmp_path, tmp_path / "x.dump", refused_at)
+        assert not guard.mark_cleared(tmp_path, tmp_path / "y.dump", refused_at), "a spent clearance keeps its first"
+        guard.retire_record(tmp_path, "later")
+        assert guard.read_record(tmp_path)["cleared_by"].endswith("x.dump")
+
+    # 2. an answer that is not an answer is never read as "no"
+
+    @pytest.mark.parametrize(("key", "out"), [
+        ("rolsuper", ""), ("rolsuper", "garbage"), ("rolsuper", "1"),
+        ("system_identifier", ""), ("system_identifier", "not-a-number"),
+        ("to_regclass", ""), ("to_regclass", "tt"),
+        ("SELECT EXISTS (SELECT 1 FROM nexus.", ""),
+    ])
+    def test_a_garbled_or_empty_answer_is_cannot_ask_not_proceed(self, tmp_path: Path, key: str, out: str) -> None:
+        inner = _Cluster(counts={"chunks": 5})
+
+        def run(sql: str) -> str:
+            return out if key in sql else inner(sql)
+
+        with pytest.raises(ValueError):
+            guard.check(run)
+        with pytest.raises(guard.GuardCannotAsk):
+            guard.gate(tmp_path, run, pg_data="/pg")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_an_empty_count_is_cannot_ask_not_zero(self) -> None:
+        inner = _Cluster(counts={"chunks": 5})
+
+        def run(sql: str) -> str:
+            return "" if "count(*)" in sql else inner(sql)
+
+        with pytest.raises(ValueError):
+            guard.check(run)
+
+    # 3. the text
+
+    def test_the_refusal_text_is_ordered_singular_and_true_about_a_removal(self) -> None:
+        rec = {"counts": {"chunks": 1, "catalog_document_chunks": 1}, "refused_at": "T", "sentinel": "nx_legacy_guard_abcdef012345"}
+        text = guard.refusal_text(rec, home=Path("/h"))
+        assert "1 chunk row, 1 manifest row that" in text
+        assert "even if the rows have been removed" not in text
+        assert "nothing left to delete" in text, "a clear check ends the refusal, as reconcile does"
+        assert text.index("nx backup") < text.index("Then start again") < text.index("The checks:")
+        assert "2 chunk rows" in guard.refusal_text({**rec, "counts": {"chunks": 2}}, home=Path("/h"))
+
+    # 5. the marker is one atomic statement; an existing one is not rewritten
+
+    def test_the_marker_schema_and_its_comment_are_one_statement(self) -> None:
+        sent: list[str] = []
+        name = guard.create_sentinel(lambda sql: sent.append(sql) or "")
+        assert len(sent) == 1 and sent[0].startswith(f"CREATE SCHEMA {name};") and "COMMENT ON SCHEMA" in sent[0]
+
+    def test_an_existing_marker_schema_costs_one_probe_and_no_writes(self) -> None:
+        run = _Cluster()
+        run.schemas.add("nx_legacy_guard_abcdef012345")
+        guard.ensure_sentinel(run, "nx_legacy_guard_abcdef012345")
+        assert len(run.asked) == 1 and "to_regnamespace" in run.asked[0]
+
+    # 8. causes in plain words
+
+    @pytest.mark.parametrize(("exc", "says"), [
+        (RuntimeError("legacy chash guard query failed: psql: error: connection to server at \"127.0.0.1\", port 1 "
+                      "failed: FATAL:  the database system is starting up"), "Postgres is still starting up"),
+        (RuntimeError('legacy chash guard query failed: FATAL:  password authentication failed for user "nx_ab"'),
+         "did not accept the superuser password in pg_credentials"),
+        (RuntimeError("legacy chash guard query failed: psql: error: connection refused"),
+         "not accepting connections"),
+        (subprocess.TimeoutExpired("psql", 120), "did not finish in time"),
+        (FileNotFoundError("psql"), "could not be run"),
+        (RuntimeError("the guard's database role is neither superuser nor BYPASSRLS, so it cannot see every row"),
+         "cannot see every row; it has to be a superuser"),
+        (RuntimeError("something odd password=hunter2secret"), "the check failed"),
+    ])
+    def test_a_cause_is_plain_words_without_the_exception_class(self, exc: Exception, says: str) -> None:
+        text = guard.describe_cannot_ask(exc)
+        assert says in text and "RuntimeError" not in text and "legacy chash guard query failed" not in text
+        assert "hunter2secret" not in text
+
+    def test_the_wait_text_says_what_ends_it_and_what_to_check(self) -> None:
+        text = guard.waiting_text("Postgres is still starting up", "/x/storage_service.log")
+        assert "starts once the check can read the database" in text and "asks again every few seconds" in text
+        assert "superuser password in pg_credentials" in text and "nx doctor" in text and "/x/storage_service.log" in text
+        assert "Nothing is wrong" not in text
