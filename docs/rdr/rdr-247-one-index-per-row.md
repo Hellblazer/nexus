@@ -547,7 +547,7 @@ collections out of that window:
 
 - never drop before replace: a rebuild builds under a temporary name and swaps
   only when the new index is VALID;
-- a FAILED_BUILD is rebuilt in the same pass (ab251481a);
+- a FAILED_BUILD is rebuilt in the same pass (ed34ea26e);
 - a canonical rename of a large collection copies, keeping its index.
 
 Settings that would open holes once the leaf graph is gone for a dimension are
@@ -923,5 +923,5 @@ the existing fan-out, builder and status reporting, and moves no rows.
   went to a sequenced drop. The lean text of that day used C′ for two designs:
   the per-leaf variant, now in Alternatives, and the sequenced parent drop, which
   this revision names Option C, sequenced.
-- 2026-11-12: Gate round 1 — BLOCKED (2 Critical, 8 Significant, 0 ship-blocker(s)); commit `d6740de4d`; critique `nexus_rdr/247-gate-critique-2026-11-12-r1`.
+- 2026-11-12: Gate round 1 — BLOCKED (2 Critical, 8 Significant, 0 ship-blocker(s)); the gated commit is recorded in T2 `nexus_rdr/247-gate-latest` (it predates this squash); critique `nexus_rdr/247-gate-critique-2026-11-12-r1`.
 - 2026-11-12: Deferred (Sam, by dialog): no longer an emergency, since the killed-build bug behind it was fixed in 0.1.186 and 0.1.187. Keep both indexes until RDR-229 is ready on its own merits; then RDR-247 rides with it as one visible job: stamp collection ids before each build, build each per-collection index on the id, then the bounded drop. Cost basis: T2 `nexus/rdr247-cost-comparison-2026-11-12`.
