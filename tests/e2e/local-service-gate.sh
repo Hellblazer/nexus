@@ -1029,6 +1029,18 @@ if [ "$KEYED_VOYAGE_COUNT" -ne "$KEYED_VOYAGE_EXPECTED" ]; then
   exit 1
 fi
 
+# The pg_bundle_artifact carve-out (nexus-f3yqd.2). tests/db/test_pg_bundle_relocation.py tests the BUILT
+# portable PostgreSQL bundle, relocated; only the ci.yml CA-3 bundle jobs build one, and they run the file by
+# path and assert its core tests passed (scripts/assert_ca3_ran.py). Here it could only skip, 19 times, against
+# this gate's skip budget. Same exact-count discipline as above.
+PG_BUNDLE_ARTIFACT_EXPECTED=19
+PG_BUNDLE_ARTIFACT_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "integration and pg_bundle_artifact" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
+if [ "$PG_BUNDLE_ARTIFACT_COUNT" -ne "$PG_BUNDLE_ARTIFACT_EXPECTED" ]; then
+  echo "[gate] VACUITY GUARD TRIPPED: pg_bundle_artifact carve-out is $PG_BUNDLE_ARTIFACT_COUNT tests, expected exactly $PG_BUNDLE_ARTIFACT_EXPECTED" >&2
+  echo "[gate] (a new pg_bundle_artifact mark must bump PG_BUNDLE_ARTIFACT_EXPECTED here, consciously)" >&2
+  exit 1
+fi
+
 # The mandatory_regression_pin carve-out (nexus-z0o2p.41). The GitHub-backed pins skip under this
 # gate's fenced HOME (the fence never mirrors ~/.config/gh), and conftest holds a skipped pin to a zero
 # budget, so they read this gate FAILED on every run. They run in tests/e2e/release-preflight.sh,

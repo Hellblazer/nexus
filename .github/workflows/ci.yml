@@ -1576,7 +1576,7 @@ jobs:
       NX_T2_SUBSTRATE_EXPECTED: "1"
       # Must equal LSG_PYTEST_MARK_EXPR in tests/e2e/lib/mandatory_pins.sh
       # (pinned by tests/scripts/test_select_affected_integration_tests.py).
-      INTEGRATION_MARK_EXPR: "integration and not lived_in and not keyed_voyage and not mandatory_regression_pin"
+      INTEGRATION_MARK_EXPR: "integration and not lived_in and not keyed_voyage and not mandatory_regression_pin and not pg_bundle_artifact"
       INTEGRATION_FILES: ${{ needs.changes.outputs.integration_files }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
@@ -1781,15 +1781,18 @@ jobs:
           . tests/e2e/lib/mandatory_pins.sh
           lived_exp="$(sed -nE 's/^LIVED_IN_EXPECTED=([0-9]+).*/\1/p' tests/e2e/local-service-gate.sh)"
           keyed_exp="$(sed -nE 's/^KEYED_VOYAGE_EXPECTED=([0-9]+).*/\1/p' tests/e2e/local-service-gate.sh)"
-          [ -n "$lived_exp" ] && [ -n "$keyed_exp" ] || { echo "::error::could not read the carve-out counts from local-service-gate.sh"; exit 1; }
+          bundle_exp="$(sed -nE 's/^PG_BUNDLE_ARTIFACT_EXPECTED=([0-9]+).*/\1/p' tests/e2e/local-service-gate.sh)"
+          [ -n "$lived_exp" ] && [ -n "$keyed_exp" ] && [ -n "$bundle_exp" ] || { echo "::error::could not read the carve-out counts from local-service-gate.sh"; exit 1; }
           count() { NX_TEST_T2_SUBSTRATE=none uv run pytest "$@" --collect-only -q 2>/dev/null | grep -cE '^[^ ]+\.py::' || true; }
           lived="$(count -m "integration and lived_in")"
           keyed="$(count -m "integration and keyed_voyage")"
+          bundle="$(count -m "integration and pg_bundle_artifact")"
           pins="$(count -o addopts="" -m "$MANDATORY_PIN_MARK_EXPR")"
-          echo "lived_in $lived (expected $lived_exp), keyed_voyage $keyed (expected $keyed_exp), pins $pins (expected $MANDATORY_PIN_EXPECTED)"
+          echo "lived_in $lived (expected $lived_exp), keyed_voyage $keyed (expected $keyed_exp), pg_bundle_artifact $bundle (expected $bundle_exp), pins $pins (expected $MANDATORY_PIN_EXPECTED)"
           bad=0
           [ "$lived" -eq "$lived_exp" ] || { echo "::error::lived_in carve-out is $lived tests, expected $lived_exp (bump LIVED_IN_EXPECTED in local-service-gate.sh consciously)"; bad=1; }
           [ "$keyed" -eq "$keyed_exp" ] || { echo "::error::keyed_voyage carve-out is $keyed tests, expected $keyed_exp (KEYED_VOYAGE_EXPECTED)"; bad=1; }
+          [ "$bundle" -eq "$bundle_exp" ] || { echo "::error::pg_bundle_artifact carve-out is $bundle tests, expected $bundle_exp (PG_BUNDLE_ARTIFACT_EXPECTED)"; bad=1; }
           [ "$pins" -eq "$MANDATORY_PIN_EXPECTED" ] || { echo "::error::mandatory_regression_pin is $pins tests, expected $MANDATORY_PIN_EXPECTED (tests/e2e/lib/mandatory_pins.sh)"; bad=1; }
           exit "$bad"
 

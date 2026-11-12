@@ -111,6 +111,9 @@ pytestmark = [
     pytest.mark.integration,
     # Drives PostgreSQL directly via psql; never launches the JVM service jar.
     pytest.mark.no_service_jar,
+    # Only the CA-3 bundle jobs build a bundle, and they run this file by path; the local-service gate and
+    # the release-PR integration shards deselect it, so its skips never count against their budgets.
+    pytest.mark.pg_bundle_artifact,
     pytest.mark.skipif(_ROOT is None, reason=_SKIP_REASON),
 ]
 

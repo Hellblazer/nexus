@@ -456,7 +456,7 @@ local JAR = step("build the gate jar first, pytest refuses a stale one"
   .. " (a cache miss is a Maven build; in a pool-host shell add --lab-run <class>)",
   "scripts/build-gate-jar.sh", true)
 
-local MARK = "'integration and not lived_in and not keyed_voyage and not mandatory_regression_pin'"
+local MARK = "'integration and not lived_in and not keyed_voyage and not mandatory_regression_pin and not pg_bundle_artifact'"
 
 local function standing(select_all)
   local sel = select_all
