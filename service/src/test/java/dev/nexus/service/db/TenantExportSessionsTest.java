@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -530,6 +531,11 @@ class TenantExportSessionsTest {
             Thread.sleep(50);
         }
         assertThat(s.openCount()).as("the sweeper expired the idle session").isZero();
+        // the connection is returned after the session leaves the map: poll, with a deadline
+        long returned = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        while (ds.getHikariPoolMXBean().getActiveConnections() != activeBefore && System.nanoTime() < returned) {
+            Thread.sleep(25);
+        }
         assertThat(ds.getHikariPoolMXBean().getActiveConnections()).as("its connection is back in the pool")
             .isEqualTo(activeBefore);
         try (Connection su = pg.createConnection("")) {
@@ -575,6 +581,92 @@ class TenantExportSessionsTest {
         assertThat(s.sweep()).as("the idle clock restarted when the page ended").isZero();
         clock.advance(Duration.ofMinutes(10));
         assertThat(s.sweep()).isEqualTo(1);
+    }
+
+    @Test
+    void theStatementsOfOnePageShareOneTimeBudget() throws Exception {
+        // the count and the COPY are two statements; the work between them (here a sleep) spends the budget, so the
+        // COPY is refused. A bound restarted in full per statement would let this page through.
+        var s = sessions(config(2).withPageBudgetMs(500), clock());
+        var session = s.open(A).session();
+        s.reads().beforeCopyForTests = ctx -> {
+            try {
+                Thread.sleep(700);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        assertThatThrownBy(() -> s.reads().page(session.snapshotId(), A, table("memory"), null, 1 << 20, 100))
+            .isInstanceOf(TenantExportReads.PageBusyException.class).hasMessageContaining("whole time budget");
+        s.reads().beforeCopyForTests = null;
+        assertThat(s.reads().page(session.snapshotId(), A, table("memory"), null, 1 << 20, 100).rows()).isEqualTo(5);
+    }
+
+    @Test
+    void closeFinishesTheExpiriesQueuedOnTheSweeperInsteadOfDroppingThem() throws Exception {
+        var clock = clock();
+        var s = sessions(config(2), clock);
+        int before = ds.getHikariPoolMXBean().getActiveConnections();
+        var a = s.open(A).session();
+        var sweeper = s.sweeperForTests();
+        CountDownLatch busy = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        sweeper.execute(() -> {   // the sweep thread is occupied, so the hand-off below queues behind this
+            busy.countDown();
+            try {
+                release.await(30, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertThat(busy.await(10, TimeUnit.SECONDS)).isTrue();
+        clock.advance(Duration.ofMinutes(11));
+        assertThatThrownBy(() -> s.lookup(A, a.id())).isInstanceOf(TenantExportSessions.NoSuchSessionException.class);
+        assertThat(s.openCount()).isZero();
+        assertThat(ds.getHikariPoolMXBean().getActiveConnections()).as("its rollback is queued, not done").isEqualTo(before + 1);
+
+        CompletableFuture<Void> closing = CompletableFuture.runAsync(s::close);
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (!sweeper.isShutdown() && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertThat(sweeper.isShutdown()).isTrue();
+        release.countDown();
+        closing.get(15, TimeUnit.SECONDS);
+        assertThat(ds.getHikariPoolMXBean().getActiveConnections()).as("close ran the queued expiry").isEqualTo(before);
+    }
+
+    @Test
+    void aPoolTooSmallForTheDefaultCapClampsItAndAnExplicitCapIsRefused() {
+        Function<String, String> unset = k -> null;
+        assertThat(Config.forPool(unset, 10).maxSessions()).isEqualTo(2);
+        assertThat(Config.forPool(unset, 4).maxSessions()).isEqualTo(2);
+        assertThat(Config.forPool(unset, 3).maxSessions()).as("pool 3 carries one").isEqualTo(1);
+        assertThat(Config.forPool(unset, 2).maxSessions()).as("pool 2 carries none: export is off").isZero();
+        assertThat(Config.forPool(unset, 1).maxSessions()).isZero();
+        for (int pool = 1; pool <= 12; pool++) {   // the clamp is exactly the largest cap the headroom rule accepts
+            int carried = Config.carriedSessions(pool);
+            if (carried > 0) Config.defaults().withMaxSessions(carried).requirePoolHeadroom(pool);
+            if (carried + 1 <= 64) {
+                final int p = pool;
+                assertThatThrownBy(() -> Config.defaults().withMaxSessions(carried + 1).requirePoolHeadroom(p))
+                    .as("pool %d does not carry %d", pool, carried + 1).isInstanceOf(IllegalArgumentException.class);
+            }
+        }
+        Function<String, String> two = Map.of(TenantExportSessions.ENV_MAX_SESSIONS, "2")::get;
+        assertThat(Config.forPool(two, 4).maxSessions()).isEqualTo(2);
+        assertThatThrownBy(() -> Config.forPool(two, 3)).isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("NX_EXPORT_MAX_SESSIONS=2").hasMessageContaining("at least 4").hasMessageContaining("it is 3");
+        assertThat(Config.forPool(Map.of(TenantExportSessions.ENV_MAX_SESSIONS, "1")::get, 3).maxSessions()).isEqualTo(1);
+        assertThatThrownBy(() -> Config.forPool(Map.of(TenantExportSessions.ENV_MAX_SESSIONS, "0")::get, 10))
+            .as("zero is not a way to set the cap; the pool's size is").isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void anEngineWhosePoolCarriesNoSessionAnswersCapacityFullToEveryOpen() {
+        var s = sessions(config(0), clock());
+        assertThatThrownBy(() -> s.open(A)).isInstanceOf(TenantExportSessions.CapacityFullException.class);
+        assertThat(s.openCount()).isZero();
     }
 
     // ── time budget, lock bound, progress and the cut ────────────────────────────────────────────

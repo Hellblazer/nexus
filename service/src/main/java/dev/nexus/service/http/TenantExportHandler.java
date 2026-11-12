@@ -62,8 +62,8 @@ import java.util.regex.Pattern;
  * table's first page, else the {@code X-Nexus-Export-Last-Key} of the previous page; its encoding is
  * {@link TenantExportKeys}'s (base64url of a JSON array of one string per primary-key column, in the registry's
  * column order; for {@code chunks}: {@code tenant_id, collection, chash (hex), embedding_model}). Malformed:
- * 400 {@code malformed_after}; a bad percent-encoding in the query string is 400 {@code malformed_query}
- * (the JDK server may refuse it first, also with 400). The body is a complete PostgreSQL binary COPY stream of the page's rows
+ * 400 {@code malformed_after}. (A malformed percent-encoding in the query string never reaches this handler:
+ * the JDK server answers its own bare 400, with no JSON body and no reason.) The body is a complete PostgreSQL binary COPY stream of the page's rows
  * ({@code application/octet-stream}), at most about {@link TenantExportSessions.Config#pageBytes()} bytes.
  * Headers: {@code X-Nexus-Export-Table}, {@code -Rows} (rows in this page), {@code -Last-Key} (absent for an
  * empty page), {@code -Done} ({@code true} when this page ended the table), {@code -Sha256} (hex SHA-256 of
@@ -76,19 +76,30 @@ import java.util.regex.Pattern;
  * nothing).
  *
  * <p><b>The page cut and its time budget, against the edge limits.</b> The cloud edge ends an exchange at 60
- * seconds (RDR-248 A1) and the bead's gate N1 wants a page to START its response inside 30 seconds; this holds
- * to the stricter. A page is cut by bytes at {@link TenantExportSessions.Config#pageBytes()} (default 16 MiB,
- * at most 19,000,000: under the 20 MB body cap, which a page may overshoot by one row). The engine bounds the
- * page's DATABASE time to {@link TenantExportSessions.Config#pageBudgetMs()} (default 20 s, {@code
- * NX_EXPORT_PAGE_BUDGET_SECONDS}), all its statements together (the first page's row count, then the COPY):
- * each statement runs under {@code statement_timeout} set to what is left of the budget, and a statement
- * cancelled at the bound answers 503 {@code export_page_busy}. The database serves about 4,000 chunk rows in
- * 0.1 s (T2 {@code nexus/rdr248-local-spike-r2-2026-11-11}), so the budget is a bound on a pathological page,
- * not the expected time; the rest of the 30 s is the pool borrow (the pool's own connection timeout, which
- * answers a typed 503 when exhausted) and the response's first bytes. A page is buffered whole before its first
- * byte is sent (its hash is a header), so the transfer is outside the response-start bound and the database
- * transaction is already closed while the client reads. The measured 16 MB page time at 500,000 chunks is the
- * export battery's (nexus-csayy.4).
+ * seconds (RDR-248 A1) and the bead's gate N1 wants a page to START its response inside 30 seconds. A page is
+ * cut by bytes at {@link TenantExportSessions.Config#pageBytes()} (default 16 MiB, at most 19,000,000: under
+ * the 20 MB body cap, which a page may overshoot by one row). The engine bounds the page's DATABASE time to
+ * {@link TenantExportSessions.Config#pageBudgetMs()} (default 20 s, {@code NX_EXPORT_PAGE_BUDGET_SECONDS}), all
+ * its statements together (the first page's row count, then the COPY): each runs under {@code statement_timeout}
+ * set to what is left of the budget, and a statement cancelled at the bound answers 503 {@code
+ * export_page_busy}. The database serves about 4,000 chunk rows in 0.1 s (T2 {@code
+ * nexus/rdr248-local-spike-r2-2026-11-11}), so the budget bounds a pathological page and is not the expected
+ * time. The budget does NOT include the pool borrow: that is bounded by the pool's own connection timeout
+ * (HikariCP's 30 s default; {@code Main} does not change it for the engine's pool) and runs before the budget
+ * starts. With a free pool connection a page starts its response well inside 30 s; on an exhausted pool the
+ * borrow can take up to 30 s first, so a page may start up to about 50 s after the request, inside the 60 s
+ * exchange limit but past the 30 s bound, and an exhausted pool answers 503 (see below). The header read of a
+ * POST gives each of its statements the full budget, not a shared one (they are catalog reads). A page is
+ * buffered whole before its first byte is sent (its hash is a header), so the transfer is outside the
+ * response-start bound and the database transaction is already closed while the client reads. The measured 16 MB
+ * page time at 500,000 chunks is the export battery's (nexus-csayy.4).
+ *
+ * <p><b>Other answers.</b> An exhausted pool answers 503 {@code {"error":"database connection pool exhausted,
+ * retry"}} with no reason code and no {@code Retry-After}: the client backs off on its own ladder. The auth filter
+ * answers 401, and 403 {@code forbidden} for a token confined to its own route; an unknown path under the prefix
+ * is 404 {@code not_found}, a wrong method 405 {@code method_not_allowed}, and anything unexpected 500 {@code
+ * internal}. A client may DELETE the {@code session_id} that 409 {@code export_session_exists} returns before it
+ * opens again.
  *
  * <p><b>A gone session.</b> The registry is in memory and PER ENGINE INSTANCE: the deployment assumes one
  * engine instance, or routing that keeps one tenant on one instance. A 404 {@code no_such_session} or a 410
@@ -219,12 +230,7 @@ public final class TenantExportHandler implements HttpHandler {
         body.put("session_id", session.id());
         body.put("format_version", FORMAT_VERSION);
         body.put("engine_version", engineVersion.get());
-        Long changesets = schemaChangesetCount.get();
-        if (changesets == null) {
-            body.putNull("schema_changeset_count");
-        } else {
-            body.put("schema_changeset_count", changesets);
-        }
+        putSchemaChangesetCount(body, schemaChangesetCount.get());
         body.put("tenant_id", tenant);
         body.put("created_at", session.openedAt().toString());
         body.put("expires_at", session.openedAt().plus(config.totalBound()).toString());
@@ -250,6 +256,15 @@ public final class TenantExportHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(body));
     }
 
+    /** {@code schema_changeset_count}: the number, or JSON null when the journal read failed (a client refuses a null). */
+    static void putSchemaChangesetCount(ObjectNode body, Long changesets) {
+        if (changesets == null) {
+            body.putNull("schema_changeset_count");
+        } else {
+            body.put("schema_changeset_count", changesets.longValue());
+        }
+    }
+
     // ── DELETE ───────────────────────────────────────────────────────────────────────────────────
 
     private void close(HttpExchange exchange, String tenant, String id) throws IOException {
@@ -264,15 +279,8 @@ public final class TenantExportHandler implements HttpHandler {
         requireWellFormedId(id);
         TenantExportSessions s = sessions.get();
         TenantExportSessions.Session session = s.lookup(tenant, id);   // 404 first: nothing below is revealed to a stranger
-        String tableName;
-        String afterText;
-        try {
-            tableName = queryParam(exchange, "table");
-            afterText = queryParam(exchange, "after");
-        } catch (IllegalArgumentException e) {
-            error(exchange, 400, "malformed_query", "the query string holds a bad percent-encoding");
-            return;
-        }
+        String tableName = queryParam(exchange, "table");
+        String afterText = queryParam(exchange, "after");
         var entry = TenantExport.exportable(tableName);
         if (entry.isEmpty()) {
             error(exchange, 400, "unknown_table", "table must name an exportable data or derived table");

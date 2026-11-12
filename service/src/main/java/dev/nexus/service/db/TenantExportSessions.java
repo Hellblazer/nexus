@@ -85,9 +85,12 @@ public final class TenantExportSessions implements AutoCloseable {
      * Session and page settings. {@code pageBytes} is the page's byte target (about 16 MB: under the cloud
      * edge's 20 MB body cap); {@code pageMaxRows} bounds a page of small rows; {@code lockTimeoutMs} bounds a
      * page's wait for a table lock behind a tenant create; {@code pageBudgetMs} bounds the DATABASE time of one
-     * page, all its statements together (default 20 s, held to the stricter edge limit, the 30 s response-start
-     * bound of the bead's gate N1; RDR-248 A1's exchange limit is 60 s); {@code retryAfterSeconds} is what a
-     * full engine asks a client to wait.
+     * page, all its statements together (default 20 s). The budget covers database statements only: the pool
+     * borrow before the first one is bounded by the pool's own connection timeout (HikariCP's 30 s default, which
+     * {@code Main} does not change), outside the budget, so the budget does not by itself keep a page inside the
+     * bead's 30 s response-start bound on a contended pool. The header read gives each of its statements the full
+     * budget (they are catalog reads, not table scans), not a shared one. {@code maxSessions} 0 disables export.
+     * {@code retryAfterSeconds} is what a full engine asks a client to wait.
      */
     public record Config(Duration totalBound, Duration idleBound, int maxSessions, int pageBytes, int pageMaxRows,
                          int lockTimeoutMs, int retryAfterSeconds, Duration sweepInterval, int pageBudgetMs) {
@@ -99,8 +102,8 @@ public final class TenantExportSessions implements AutoCloseable {
                 throw new IllegalArgumentException("export session bounds may not exceed " + MAX_BOUND_SECONDS
                     + " seconds");
             }
-            if (maxSessions < 1 || maxSessions > MAX_SESSIONS_LIMIT) {
-                throw new IllegalArgumentException("export sessions per engine must be between 1 and "
+            if (maxSessions < 0 || maxSessions > MAX_SESSIONS_LIMIT) {   // 0: export disabled (a pool too small to carry one)
+                throw new IllegalArgumentException("export sessions per engine must be between 0 and "
                     + MAX_SESSIONS_LIMIT + ": " + maxSessions);
             }
             if (pageBytes < MIN_PAGE_BYTES || pageBytes > MAX_PAGE_BYTES) {
@@ -171,6 +174,37 @@ public final class TenantExportSessions implements AutoCloseable {
         }
 
         /**
+         * The most sessions a pool of {@code poolSize} connections carries: each holds one connection and opening
+         * one needs a second, and the rest of the engine needs the others (see {@link #requirePoolHeadroom}).
+         * 3 connections carry 1, 4 carry 2, and below 3 none.
+         */
+        public static int carriedSessions(int poolSize) {
+            return poolSize >= 4 ? poolSize / 2 : poolSize == 3 ? 1 : 0;
+        }
+
+        /**
+         * {@link #fromEnv} fitted to the pool the engine runs with. A cap left UNSET is clamped to what the pool
+         * carries (possibly 0: export is then disabled and every open answers 503 {@code export_capacity_full}),
+         * so a small pool boots as it always did. A cap the operator SET that the pool cannot carry is refused
+         * with {@link IllegalArgumentException} ({@link #requirePoolHeadroom}).
+         */
+        public static Config forPool(Function<String, String> env, int poolSize) {
+            Config c = fromEnv(env);
+            String set = env.apply(ENV_MAX_SESSIONS);
+            if (set != null && !set.isBlank()) {
+                c.requirePoolHeadroom(poolSize);
+                return c;
+            }
+            return c.withMaxSessions(Math.min(c.maxSessions(), carriedSessions(poolSize)));
+        }
+
+        /** {@link #forPool} for a pool whose size is known (HikariCP); any other pool is not clamped. */
+        public static Config forDataSource(Function<String, String> env, DataSource dataSource) {
+            return dataSource instanceof com.zaxxer.hikari.HikariDataSource hikari && hikari.getMaximumPoolSize() > 0
+                ? forPool(env, hikari.getMaximumPoolSize()) : fromEnv(env);
+        }
+
+        /**
          * Refuses a session cap the pool cannot carry. Each session holds one pooled connection for up to the
          * total bound, and opening one needs a second for the header read; the rest of the engine needs the others.
          * So the cap may not exceed half the pool, and the pool needs two connections beyond it.
@@ -179,6 +213,7 @@ public final class TenantExportSessions implements AutoCloseable {
          *                                  pool size that carries the cap
          */
         public void requirePoolHeadroom(int poolSize) {
+            if (maxSessions == 0) return;
             int needed = Math.max(2 * maxSessions, maxSessions + 2);
             if (poolSize < needed) {
                 throw new IllegalArgumentException(ENV_MAX_SESSIONS + "=" + maxSessions + " needs NX_POOL_SIZE of at least "
@@ -468,7 +503,11 @@ public final class TenantExportSessions implements AutoCloseable {
         }
     }
 
-    /** Ends every session and stops the sweep; the engine's stop calls it, so no held connection outlives the pool. */
+    /**
+     * Ends every session and stops the sweep; the engine's stop calls it, so no held connection outlives the pool.
+     * Expiries a request handed to the sweeper are finished first (the sweeper is shut down, not cut off, and
+     * given a few seconds), because those sessions are no longer in the map and nothing else would end them.
+     */
     @Override
     public void close() {
         List<Session> all;
@@ -480,9 +519,27 @@ public final class TenantExportSessions implements AutoCloseable {
             toStop = sweeper;
             sweeper = null;
         }
-        if (toStop != null) toStop.shutdownNow();
+        if (toStop != null) {
+            toStop.shutdown();   // queued hand-offs still run; the periodic sweep does not
+            try {
+                if (!toStop.awaitTermination(5, TimeUnit.SECONDS)) {
+                    log.warn("event=export_sweeper_close_timeout; ending what is queued by interrupting it");
+                    toStop.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                toStop.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
         for (Session s : all) {
             endHeld(s.held, "engine_stop", s.owner);
+        }
+    }
+
+    /** The sweep's executor, or null before the first open; a test occupies it to queue a hand-off behind it. */
+    ScheduledExecutorService sweeperForTests() {
+        synchronized (lock) {
+            return sweeper;
         }
     }
 

@@ -1086,7 +1086,7 @@ public final class NexusService {
 
         // RDR-248 (nexus-csayy.2): the tenant export session routes. Always registered; sessions come from the env.
         this.exportSessions = new dev.nexus.service.db.TenantExportSessions(dataSource,
-                dev.nexus.service.db.TenantExportSessions.Config.fromEnv(System::getenv), java.time.Clock.systemUTC());
+                dev.nexus.service.db.TenantExportSessions.Config.forDataSource(System::getenv, dataSource), java.time.Clock.systemUTC());
         server.createContext(dev.nexus.service.http.TenantExportHandler.PATH,
                 new dev.nexus.service.http.TenantExportHandler(() -> exportSessions, versionHandler::engineVersion,
                         versionHandler::schemaChangesetCount)).getFilters().addAll(authFilter);

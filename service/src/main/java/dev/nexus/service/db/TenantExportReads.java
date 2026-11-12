@@ -105,7 +105,7 @@ public final class TenantExportReads {
     private final int lockTimeoutMs;
     private final int budgetMs;
 
-    /** Test seam: runs inside the page's transaction just before its COPY statement is rendered; null in production. */
+    /** Test seam: runs inside the page's transaction after the row count and before the COPY's time bound is set; null in production. */
     java.util.function.Consumer<DSLContext> beforeCopyForTests;
     /** Test seam: wraps the page's COPY sink (a test's sink can fail where the real one cannot); null in production. */
     java.util.function.UnaryOperator<java.io.OutputStream> sinkWrapperForTests;
@@ -171,8 +171,8 @@ public final class TenantExportReads {
                     .fetchOne(0, Long.class);
             }
             var select = pageSelect(ctx, table, columns, tenant, after, maxRows);
-            rebound(txn);
             if (beforeCopyForTests != null) beforeCopyForTests.accept(ctx);
+            rebound(txn);
             String copy = copyStatement(ctx, select);
             BinaryCopyPage sink = new BinaryCopyPage(targetBytes, maxRows);
             java.io.OutputStream target = sinkWrapperForTests == null ? sink : sinkWrapperForTests.apply(sink);

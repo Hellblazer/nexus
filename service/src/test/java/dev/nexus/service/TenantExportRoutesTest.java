@@ -556,7 +556,8 @@ class TenantExportRoutesTest {
         assertThat(call("POST", PATH, A_TOKEN).statusCode()).isEqualTo(200);
     }
 
-    // ── bad percent-encoding: the raw bytes, not URL-encoded values ──────────────────────────────
+    // ── bad percent-encoding: the raw bytes, not URL-encoded values. The JDK server answers a malformed escape
+    //    with its own bare 400 before the handler runs; this pins that nothing on the wire answers 500. ──────────────────────────────
 
     /** One GET with the request target written byte for byte, so a malformed escape reaches the server as sent. */
     private String[] rawGet(String target, String token) throws Exception {
@@ -572,7 +573,7 @@ class TenantExportRoutesTest {
     }
 
     @Test
-    void aBadPercentEncodingInTableOrAfterIsA400NeverA500() throws Exception {
+    void aBadPercentEncodingGetsTheTransports400AndNeverA500() throws Exception {
         var id = open(A_TOKEN).get("session_id").asText();
         String rows = PATH + "/" + id + "/rows";
         for (String query : List.of("?table=%zz", "?table=%", "?table=%2", "?table=memory&after=%",

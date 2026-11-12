@@ -219,6 +219,38 @@ class MainBootEnvValidationIntegrationTest {
         assertThat(ok.reachedMigration()).as("5 sessions fit the default pool of 10:\n" + ok.output()).isTrue();
     }
 
+    /**
+     * The engine-substrate test modules boot the real jar at NX_POOL_SIZE 2 or 3 with no NX_EXPORT_* setting
+     * (21 Python modules do), and so may a small deployment: the default session cap is clamped to what the pool
+     * carries and the boot goes on. A pool of 2 carries no session (export is off, said once); a pool of 3 carries one.
+     * A cap SET that the pool cannot carry still refuses the boot.
+     */
+    @Test
+    void aSmallPoolWithNoExportSetting_boots_andOnlyAnExplicitCapThePoolCannotCarryIsRefused() throws Exception {
+        Boot two = bootWith(java.util.Map.of("NX_POOL_SIZE", "2"), MIGRATION_START);
+        assertThat(two.reachedMigration()).as("pool 2, default cap:\n" + two.output()).isTrue();
+        assertThat(lines(two, "event=export_disabled_by_pool_size")).as(two.output()).hasSize(1);
+        assertThat(two.output()).doesNotContain("event=export_env_invalid");
+
+        Boot three = bootWith(java.util.Map.of("NX_POOL_SIZE", "3"), MIGRATION_START);
+        assertThat(three.reachedMigration()).as("pool 3, default cap:\n" + three.output()).isTrue();
+        assertThat(lines(three, "event=export_capped_by_pool_size")).as(three.output()).hasSize(1);
+        assertThat(three.output()).doesNotContain("event=export_env_invalid").doesNotContain("event=export_disabled_by_pool_size");
+
+        Boot four = bootWith(java.util.Map.of("NX_POOL_SIZE", "4"), MIGRATION_START);
+        assertThat(four.reachedMigration()).as("pool 4 carries the default cap:\n" + four.output()).isTrue();
+        assertThat(four.output()).doesNotContain("event=export_capped_by_pool_size").doesNotContain("event=export_disabled");
+
+        Boot explicitOne = bootWith(java.util.Map.of("NX_POOL_SIZE", "3", "NX_EXPORT_MAX_SESSIONS", "1"), MIGRATION_START);
+        assertThat(explicitOne.reachedMigration()).as("pool 3 carries a set cap of 1:\n" + explicitOne.output()).isTrue();
+
+        Boot explicitTwo = bootWith(java.util.Map.of("NX_POOL_SIZE", "3", "NX_EXPORT_MAX_SESSIONS", "2"), MIGRATION_START);
+        assertThat(explicitTwo.reachedMigration()).as(explicitTwo.output()).isFalse();
+        assertThat(explicitTwo.exitCode()).as(explicitTwo.output()).isEqualTo(1);
+        assertThat(lines(explicitTwo, "event=export_env_invalid")).as(explicitTwo.output()).hasSize(1);
+        assertThat(lines(explicitTwo, "event=export_env_invalid").get(0)).contains("NX_POOL_SIZE of at least 4");
+    }
+
     // ── the test-only tenant reset route's bind check (nexus-0bl77, behavioural in nexus-vr8wk) ──────────
 
     private static final String BIND_REFUSED = "event=tenant_reset_route_bind_refused";
