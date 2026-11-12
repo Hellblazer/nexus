@@ -42,7 +42,8 @@ with nothing written to the operator's ~/.claude. Five scenarios, each in its ow
   login shell is respawned there, remain-on-exit is released), rs_alpha last, no failure word in the log.
   Each is told a code word first (that gives it the transcript ``claude --resume`` needs) and must still
   answer its own word after the resume. Checked before the roll: claude really is rs_direct's pane process,
-  and rs_alpha's is a shell.
+  and rs_alpha's is a shell. After the roll each must have been woken (a ``woken by`` log line: mail for
+  rs_alpha, which has the channel, or typed; typed for rs_direct) with the wake prompt in its transcript.
 
 Shared by every scenario:
 
@@ -193,6 +194,8 @@ REPO = Path(__file__).resolve().parents[3]
 #: how its positive controls run.
 SCRIPT = Path(os.environ.get("NX_RESTART_SANDBOX_SCRIPT") or REPO / "scripts" / "claude-restart-sessions")
 CHANNEL_FLAGS = "--channels plugin:conexus@nexus-plugins"
+#: The opening of the wake prompt claude-restart-sessions gives a resumed session (wake_text).
+WAKE_MARK = "You were restarted onto conexus"
 MARKET = "nexus-plugins"
 #: The branch the sandbox marketplace publishes on (its bare repo's HEAD).
 MARKET_BRANCH = "plugins"
@@ -1525,12 +1528,22 @@ def scenario_pane(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
     if sb.tmux("show-options", "-p", "-t", pane, "remain-on-exit").stdout.strip():
         failures.append(f"pane: remain-on-exit is still set on {pane}")
     for name, word in spec.words.items():
-        now = sb.wait_status(name, {"idle"}, 120)
+        now = sb.wait_status(name, {"idle"}, 240)  # the wake's own turn ends first
         was = before[name]
         if now.get("sessionId") != was.get("sessionId") or now.get("pid") == was.get("pid"):
             failures.append(f"{name}: not resumed as the same session on a new process (was {was.get('pid')}, "
                             f"now {now.get('pid')}, session {was.get('sessionId')} -> {now.get('sessionId')})")
             continue
+        # The wake (Sam, 2026-11-11): a resumed session gets one prompt instead of sitting idle. rs_alpha has the
+        # channel (mailed, typed if no turn starts), rs_direct has none (typed); the log says which, and the
+        # wake text is a user entry in the resumed transcript.
+        how = re.search(rf"^\S+ {re.escape(name)}: woken by (mail|a typed prompt)$", log, re.MULTILINE)
+        if not how:
+            failures.append(f"{name}: the log has no 'woken by' line for it after the resume")
+        else:
+            notes.append(f"{name} woken by {how.group(1)}")
+        if not any(e.get("type") == "user" and WAKE_MARK in json.dumps(e) for e in sb.events(str(was.get("sessionId")))):
+            failures.append(f"{name}: no wake prompt ({WAKE_MARK!r}) in its resumed transcript")
         # A resume brings the transcript back: the session still knows the word it was told before the roll.
         reply = sb.prompt(name, "What is the project code word for this task? Reply with only the word.").upper()
         others = [w for n, w in spec.words.items() if n != name]
