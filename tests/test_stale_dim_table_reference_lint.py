@@ -383,7 +383,13 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # ── tests: wire-compat / straddle-era fixtures mirroring the src/java
     #    files above ──────────────────────────────────────────────────────
     "tests/daemon/test_legacy_chash_guard.py": (
-        33,
+        9,
+        "Tests of the straddle-era legacy-chash guard (nexus-f3yqd): they seed and assert the pre-vectors-004 "
+        "schema, where chunks live in chunks_384/768/1024 and nexus.chunks does not exist, because the guard's "
+        "job is to count the legacy rows in exactly that shape. Real-era fixtures, not stale debris."
+    ),
+    "tests/daemon/test_legacy_chash_guard_backup.py": (
+        24,
         "Tests of the straddle-era legacy-chash guard (nexus-f3yqd): they seed and assert the pre-vectors-004 "
         "schema, where chunks live in chunks_384/768/1024 and nexus.chunks does not exist, because the guard's "
         "job is to count the legacy rows in exactly that shape. Real-era fixtures, not stale debris."

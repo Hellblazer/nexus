@@ -73,7 +73,10 @@ def _legacy_chash_guard_finds_no_cluster_to_ask(request: pytest.FixtureRequest, 
     """nexus-f3yqd: the supervisor's step 1.75 asks the bundled Postgres whether the engine's boot would delete legacy
     chash rows, and a start that cannot ask now waits instead of going on. The supervisor tests here fake Postgres and
     the engine, so the question would reach a port nobody listens on; it is answered "no changelog" (nothing to
-    delete). The guard's own tests (``test_legacy_chash_guard.py``) are left alone: they set their own."""
-    if request.module.__name__.rsplit(".", 1)[-1] == "test_legacy_chash_guard":
+    delete). The guard's own tests (``test_legacy_chash_guard*.py``) are left alone: they set their own."""
+    if request.module.__name__.rsplit(".", 1)[-1].startswith("test_legacy_chash_guard"):
         return
-    monkeypatch.setattr("nexus.daemon.legacy_chash_guard.bundled_run_sql", lambda *_a, **_k: (lambda _sql: "f"))
+    def no_changelog(sql: str) -> str:  # the role may see every row; some cluster; no databasechangelog
+        return "t" if "rolsuper" in sql else "1" if "system_identifier" in sql else "f"
+
+    monkeypatch.setattr("nexus.daemon.legacy_chash_guard.bundled_run_sql", lambda *_a, **_k: no_changelog)

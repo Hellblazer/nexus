@@ -668,39 +668,24 @@ def still_migrating_message(waited_s: float, config_dir: Path) -> str:
 
 def _legacy_chash_refusal(config_dir: Path):
     """A pending legacy-chash refusal as a start error (exit 75), or None (nexus-f3yqd)."""
-    from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
-    from nexus.daemon.storage_service_daemon import LegacyChashStartRefused  # noqa: PLC0415 — deferred import
+    from nexus.daemon.legacy_chash_cli import legacy_chash_refusal  # noqa: PLC0415 — deferred import
 
-    record = _guard.pending_refusal(config_dir)
-    return LegacyChashStartRefused(_guard.refusal_text(record)) if record else None
+    return legacy_chash_refusal(config_dir)
 
 
 def _clear_legacy_chash_refusal(config_dir: Path, legacy_backup: Path | None) -> None:
     """The user's next start clears a pending legacy-chash refusal with a verified backup of this cluster, or is
     refused again with exit 75 (nexus-f3yqd; wren: explicit, never a file merely appearing)."""
-    from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
+    from nexus.daemon.legacy_chash_cli import clear_legacy_chash_refusal  # noqa: PLC0415 — deferred import
 
-    if _guard.pending_refusal(config_dir) is None:
-        return
-    try:
-        accepted = _guard.try_clear(config_dir, pg_restore=_guard.pg_restore_path(config_dir), explicit=legacy_backup)
-    except _guard.PgRestoreUnavailable as exc:
-        refused = _legacy_chash_refusal(config_dir)
-        assert refused is not None  # try_clear only runs on a pending refusal
-        refused.args = (f"Cannot check your backup: pg_restore could not be run ({exc}). That is not a problem with "
-                        f"the backup; fix the Postgres bundle (`nx doctor`), then start again.\n{refused.args[0]}",)
-        raise refused from exc
-    if accepted is not None:
-        click.echo(f"Legacy chash rows: the backup {accepted} reads back with this store's marker table and chunk "
-                   "data; starting the engine, which deletes the legacy rows at its first start.", err=True)
-        return
-    refused = _legacy_chash_refusal(config_dir)
-    if refused is not None:
-        if legacy_backup is not None:
-            refused.args = (f"{refused.args[0]}\nThe backup you named, {legacy_backup}, was not accepted: it must be "
-                            "newer than the refusal, and `pg_restore -l` must list the marker table the refusal "
-                            "created and the nexus chunk and manifest table data.",)
-        raise refused
+    clear_legacy_chash_refusal(config_dir, legacy_backup)
+
+
+def _legacy_chash_waiting_note(config_dir: Path) -> str:
+    """Why the supervisor is waiting (it could not ask Postgres), as text to add to a timeout error, or ''."""
+    from nexus.daemon.legacy_chash_cli import waiting_note  # noqa: PLC0415 — deferred import
+
+    return waiting_note(config_dir)
 
 
 def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None, legacy_backup: Path | None = None):
@@ -928,7 +913,7 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None, 
     if local_entries(config_dir):
         raise StorageServiceStartError(still_migrating_message(60.0, config_dir), still_starting=True)
     raise StorageServiceStartError(
-        "Storage service supervisor did not become ready within 60s. "
+        f"Storage service supervisor did not become ready within 60s.{_legacy_chash_waiting_note(config_dir)} "
         f"Check {supervisor_log} (supervisor) and "
         f"{', '.join(str(path) for path in engine_logs)} (engine), "
         "or run 'nx daemon service start --foreground' to see the error.",
@@ -1071,7 +1056,7 @@ def _start_via_autostart_unit(
     last_error = _ssd.last_supervisor_error_line(error_log, error_mark)
     detail = (
         f"The supervisor reported: {last_error}\n" + _migration_halt_cause(last_error, engine_marks)
-        if last_error else ""
+        if last_error else (_legacy_chash_waiting_note(config_dir).lstrip() + "\n").lstrip()
     )
     raise _ssd.StorageServiceStartError(
         f"The autostart unit {unit_name} was started but the storage service "
@@ -1116,7 +1101,8 @@ def _start_via_autostart_unit(
     default=None,
     help=(
         "A dump written by `nx backup --to PATH` after a legacy-chash refusal, when it is not in ~/nexus-backups/. "
-        "It must be newer than the refusal and hold the chunk rows."
+        "It must be newer than the refusal, hold the marker schema the refusal created and the chunk and manifest "
+        "data, and read back to its end."
     ),
 )
 def service_start_cmd(

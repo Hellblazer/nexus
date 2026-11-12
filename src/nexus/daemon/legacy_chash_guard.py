@@ -18,12 +18,16 @@ for its owner):
    half its length, anything else is carried as its UTF-8 bytes), so a value that decodes to exactly 32 bytes survives
    and is not counted.
 4. A count above 0: refuse. The refusal creates a marker schema ``nx_legacy_guard_<token>`` in the cluster, is
-   written to ``legacy-chash-guard.json`` in the config directory, Postgres stays up so ``nx backup`` can dump it, and
-   the start exits 75. A dump clears the refusal only when ``pg_restore -l`` lists that marker schema (so it is a dump
-   of this cluster taken after the refusal) and the table data the engine would delete.
+   written to ``legacy-chash-guard.json`` in the config directory (with the data directory and ``system_identifier`` it
+   is about), Postgres stays up so ``nx backup`` can dump it, and the start exits 75. A dump clears the refusal only
+   when ``pg_restore -l`` lists that marker schema (so it is a dump of this cluster taken after the refusal) and the
+   table data the engine would delete, and ``pg_restore -a`` reads it to its end (``legacy_chash_backup``). While the
+   refusal stands, the supervisor's wait keeps the marker schema in place and retires the record when the cluster is
+   another one or no longer at risk.
 
-Not being able to ask (Postgres in crash recovery, a timeout, no superuser password) is not a refusal and demands no
-backup: the supervisor waits and asks again. The one exception is a marker, keyed to the cluster's data directory and
+Not being able to ask (Postgres in crash recovery, a timeout, no superuser password, a role that cannot see every row)
+is not a refusal and demands no backup: the supervisor waits and asks again, and says why in
+``legacy-chash-guard-wait.json`` (shown by the CLI). The one exception is a marker, keyed to the cluster's data directory and
 written only after a gate run SAW the deleting changesets applied, or saw no changelog and then a healthy engine.
 
 Nothing here runs ``nx backup`` (its pin forbids it) or imports its module. Specified by wren (engine).
@@ -34,9 +38,8 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import re
 import secrets
-import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -44,23 +47,32 @@ from pathlib import Path
 
 import structlog
 
+from nexus.daemon.legacy_chash_backup import (
+    MANIFEST as MANIFEST,
+    MAX_DUMPS_PER_ATTEMPT as MAX_DUMPS_PER_ATTEMPT,
+    SENTINEL_NAME,
+    SENTINEL_PREFIX,
+    PgRestoreUnavailable as PgRestoreUnavailable,
+    backup_dir as backup_dir,
+    holds_required_data as holds_required_data,
+    rejected_paths,
+    verified_backup_since as verified_backup_since,
+)
+
 _log = structlog.get_logger(__name__)
 
 GUARD_FILENAME: str = "legacy-chash-guard.json"
 MARKER_FILENAME: str = "legacy-chash-guard-seen.json"
-#: nx backup's default directory under the home directory (its own constant cannot be imported: the backup pin).
-BACKUP_DIRNAME: str = "nexus-backups"
+WAIT_FILENAME: str = "legacy-chash-guard-wait.json"
 DELETING_CHANGESET: str = "hygiene-001-5"
 MANIFEST_CHANGESET: str = "hygiene-001-8"
 EXIT_REFUSED: int = 75
-SENTINEL_PREFIX: str = "nx_legacy_guard_"
-_SENTINEL_NAME = re.compile(rf"{SENTINEL_PREFIX}[0-9a-f]{{12}}")
-MANIFEST: str = "catalog_document_chunks"
 SHARDED_CHUNKS: tuple[str, ...] = ("chunks_384", "chunks_768", "chunks_1024")
 _CHASH_TABLES: tuple[str, ...] = ("chunks", *SHARDED_CHUNKS, MANIFEST)
-#: One ``pg_restore -l`` gets this long, and one attempt looks at this many dumps, newest first (cost bound).
-RESTORE_LIST_TIMEOUT_S: float = 60.0
-MAX_DUMPS_PER_ATTEMPT: int = 5
+#: A count stops here (a huge store must not run the query into its timeout); a count at the cap reads "at least".
+COUNT_CAP: int = 1_000_000
+#: A wait status older than this is from a supervisor that is gone.
+WAIT_FRESH_S: float = 30.0
 
 #: Runs one SQL statement and returns its tuple-only output (psql -tA); raises on an SQL or connection error.
 RunSql = Callable[[str], str]
@@ -75,23 +87,21 @@ class GuardCannotAsk(RuntimeError):
     supervisor waits and asks again; no backup is demanded for it."""
 
 
-class PgRestoreUnavailable(RuntimeError):
-    """``pg_restore`` could not be run, so no dump could be read: the user's dump is not at fault."""
-
-
 @dataclass(frozen=True)
 class Verdict:
     """``proceed`` with a reason, or a refusal with the counts per table.
 
     ``kind`` says what the check saw: ``no_changelog``, ``no_tables``, ``applied`` (both deleting changesets ran),
     ``clean`` (nothing to delete yet), ``refuse``, ``cleared`` or ``marker``. ``required`` is what a backup must hold
-    as table data: ``(table, prefix_ok)`` pairs, ``prefix_ok`` for a partitioned parent whose data sits in leaves."""
+    as table data: ``(table, prefix_ok)`` pairs, ``prefix_ok`` for a partitioned parent whose data sits in leaves.
+    ``cluster`` is the cluster's ``system_identifier``: what a record is bound to."""
 
     proceed: bool
     reason: str
     counts: dict[str, int]
     kind: str = ""
     required: tuple[tuple[str, bool], ...] = field(default_factory=tuple)
+    cluster: str = ""
 
 
 def _bool(out: str) -> bool:
@@ -107,10 +117,23 @@ def _predicate(dtype: str) -> str:
     return f"({width} <> 32 OR chash IS NULL)"
 
 
+def _count(run_sql: RunSql, table: str, dtype: str) -> int:
+    """Rows the engine would delete, bounded: an EXISTS first (most stores answer 0 at once), then a count that stops
+    at ``COUNT_CAP`` so a huge store cannot run the query into its timeout."""
+    where = f"FROM nexus.{table} WHERE {_predicate(dtype)}"
+    if not _bool(run_sql(f"SELECT EXISTS (SELECT 1 {where})")):
+        return 0
+    return int(run_sql(f"SELECT count(*) FROM (SELECT 1 {where} LIMIT {COUNT_CAP}) capped").strip() or 0)
+
+
 def check(run_sql: RunSql) -> Verdict:
     """Ask the cluster whether starting an engine would delete legacy rows."""
+    if not _bool(run_sql("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")):
+        # Without it the chunk table's row-level security (and the catalog views) hide rows: every count reads 0.
+        raise RuntimeError("the guard's database role is neither superuser nor BYPASSRLS, so it cannot see every row")
+    sid = run_sql("SELECT system_identifier FROM pg_control_system()").strip()
     if not _bool(run_sql("SELECT to_regclass('public.databasechangelog') IS NOT NULL")):
-        return Verdict(True, "no engine has run against this store (no changelog)", {}, "no_changelog")
+        return Verdict(True, "no engine has run against this store (no changelog)", {}, "no_changelog", cluster=sid)
     ran = {s.strip() for s in run_sql(
         "SELECT id FROM public.databasechangelog "
         f"WHERE id IN ('{DELETING_CHANGESET}', '{MANIFEST_CHANGESET}')"
@@ -118,37 +141,33 @@ def check(run_sql: RunSql) -> Verdict:
     chunks_done = DELETING_CHANGESET in ran
     manifest_done = chunks_done and MANIFEST_CHANGESET in ran
     if manifest_done:
-        return Verdict(True, f"{DELETING_CHANGESET} and {MANIFEST_CHANGESET} already ran", {}, "applied")
+        return Verdict(True, f"{DELETING_CHANGESET} and {MANIFEST_CHANGESET} already ran", {}, "applied", cluster=sid)
     types: dict[str, str] = {}
     names = ", ".join(f"'{t}'" for t in _CHASH_TABLES)
-    for line in run_sql(
-        "SELECT table_name || '|' || data_type FROM information_schema.columns "
-        f"WHERE table_schema = 'nexus' AND column_name = 'chash' AND table_name IN ({names})"
+    for line in run_sql(  # the catalogs, not information_schema: that view hides what the role cannot touch
+        "SELECT c.relname || '|' || format_type(a.atttypid, a.atttypmod) FROM pg_attribute a "
+        "JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'nexus' AND a.attname = 'chash' AND NOT a.attisdropped AND c.relkind IN ('r', 'p') "
+        f"AND c.relname IN ({names})"
     ).splitlines():
         table, _, dtype = line.strip().partition("|")
         if table:
             types[table] = dtype
     chunk_tables = ["chunks"] if "chunks" in types else [t for t in SHARDED_CHUNKS if t in types]
     if not chunk_tables and MANIFEST not in types:
-        return Verdict(True, "no chunk tables: a store from before the engine's schema", {}, "no_tables")
+        return Verdict(True, "no chunk tables: a store from before the engine's schema", {}, "no_tables", cluster=sid)
     targets = ([] if chunks_done else chunk_tables) + ([MANIFEST] if MANIFEST in types else [])
-    counts: dict[str, int] = {}
-    for table in targets:
-        counts[table] = int(run_sql(f"SELECT count(*) FROM nexus.{table} WHERE {_predicate(types[table])}").strip() or 0)
+    counts = {table: _count(run_sql, table, types[table]) for table in targets}
     if any(counts.values()):
         required = tuple((t, t == "chunks") for t in targets if t == MANIFEST or t in SHARDED_CHUNKS
                          or counts.get(t))
         return Verdict(False, f"{DELETING_CHANGESET} would delete these rows at engine start", counts, "refuse",
-                       required)
-    return Verdict(True, "no row with a legacy-width chash", counts, "clean")
+                       required, sid)
+    return Verdict(True, "no row with a legacy-width chash", counts, "clean", cluster=sid)
 
 
 def guard_path(config_dir: Path) -> Path:
     return config_dir / GUARD_FILENAME
-
-
-def backup_dir(home: Path | None = None) -> Path:
-    return (home or Path.home()) / BACKUP_DIRNAME
 
 
 def _write_json(path: Path, record: dict) -> None:
@@ -162,10 +181,12 @@ def _write_json(path: Path, record: dict) -> None:
 
 
 def record_refusal(
-    config_dir: Path, verdict: Verdict, *, sentinel: str | None = None, now: datetime | None = None,
+    config_dir: Path, verdict: Verdict, *, sentinel: str | None = None, pg_data: str = "",
+    now: datetime | None = None,
 ) -> dict:
     """Write (or keep) the refusal record. An existing unresolved record keeps its first ``refused_at``, its marker
-    table and its rejected dumps, so a backup taken after the first refusal still counts on every later start."""
+    schema and its rejected dumps, so a backup taken after the first refusal still counts on every later start. The
+    record names the cluster it is about (data directory and ``system_identifier``)."""
     prior = pending_refusal(config_dir) or {}
     record = {
         "refused_at": prior.get("refused_at") or (now or datetime.now(UTC)).isoformat(),
@@ -173,12 +194,26 @@ def record_refusal(
         "sentinel": prior.get("sentinel") or sentinel,
         "required": [list(r) for r in verdict.required],
         "rejected": prior.get("rejected") or {},
+        "cluster": {"pg_data": pg_data, "system_identifier": verdict.cluster},
     }
     _write_json(guard_path(config_dir), record)
     return record
 
 
+def _cluster_matches(record: dict, pg_data: str, sid: str) -> bool:
+    """Is this record about the cluster in front of us? The ``system_identifier`` decides when both sides have one
+    (a moved data directory is the same cluster); else the data directory; a record that names neither matches."""
+    bound = record.get("cluster") or {}
+    if bound.get("system_identifier") and sid:
+        return bound["system_identifier"] == sid
+    if bound.get("pg_data") and pg_data:
+        return bound["pg_data"] == pg_data
+    return True
+
+
 # ── the marker schema ─────────────────────────────────────────────────────────────────────────────────────────────
+
+_SENTINEL_COMMENT = "nexus legacy-chash guard: a backup of this store must hold this schema"
 
 
 def create_sentinel(run_sql: RunSql) -> str:
@@ -187,12 +222,23 @@ def create_sentinel(run_sql: RunSql) -> str:
     and no table (nothing here is persistent state: it is dropped when the refusal clears)."""
     name = f"{SENTINEL_PREFIX}{secrets.token_hex(6)}"
     run_sql(f"CREATE SCHEMA {name}")
-    run_sql(f"COMMENT ON SCHEMA {name} IS 'nexus legacy-chash guard: a backup of this store must hold this schema'")
+    run_sql(f"COMMENT ON SCHEMA {name} IS '{_SENTINEL_COMMENT}'")
     return name
 
 
+def ensure_sentinel(run_sql: RunSql, name: str) -> None:
+    """The record's marker schema exists in the cluster (it is gone after a restore-swap or a hand clean-up)."""
+    if _valid_sentinel(name):  # the name came from a file: never splice anything else into SQL
+        run_sql(f"CREATE SCHEMA IF NOT EXISTS {name}")
+        run_sql(f"COMMENT ON SCHEMA {name} IS '{_SENTINEL_COMMENT}'")
+
+
+def _valid_sentinel(name: object) -> bool:
+    return isinstance(name, str) and SENTINEL_NAME.fullmatch(name) is not None
+
+
 def drop_sentinel(run_sql: RunSql, name: str) -> None:
-    if _SENTINEL_NAME.fullmatch(name):  # the name came from a file: never splice anything else into SQL
+    if _valid_sentinel(name):
         run_sql(f"DROP SCHEMA IF EXISTS {name} CASCADE")
 
 
@@ -204,130 +250,66 @@ def _release_sentinel(config_dir: Path, run_sql: RunSql) -> None:
         return
     try:
         drop_sentinel(run_sql, name)
-        record["sentinel_dropped"] = True
-        _write_json(guard_path(config_dir), record)
-    except Exception as exc:  # noqa: BLE001 — a leftover empty table is harmless; the next gate run tries again
+        _update_record(config_dir, record.get("refused_at"), sentinel_dropped=True)
+    except Exception as exc:  # noqa: BLE001 — a leftover empty schema is harmless; the next gate run tries again
         _log.warning("legacy_chash_guard_sentinel_not_dropped", sentinel=name, error=str(exc))
 
 
-# ── backups ──────────────────────────────────────────────────────────────────────────────────────────────────────
-
-
-def _lists_table_data(listing: str, schema: str, table: str, *, prefix_ok: bool = False) -> bool:
-    tail = r"(?:_\S+)?" if prefix_ok else ""
-    return bool(re.search(rf"TABLE DATA {re.escape(schema)} {re.escape(table)}{tail}(?:\s|$)", listing))
-
-
-def holds_required_data(listing: bytes | str, record: dict) -> bool:
-    """Does this ``pg_restore -l`` listing show a dump of THIS cluster (the marker schema) that holds the table data the
-    engine would delete?"""
-    text = listing.decode("utf-8", "replace") if isinstance(listing, bytes) else listing
-    sentinel = record.get("sentinel")
-    if not sentinel or not _SENTINEL_NAME.fullmatch(sentinel) or not re.search(
-        rf"\bSCHEMA - {re.escape(sentinel)}(?:\s|$)", text
-    ):
-        return False
-    required = record.get("required") or [[MANIFEST, False]]
-    return all(_lists_table_data(text, "nexus", t, prefix_ok=bool(p)) for t, p in required)
-
-
-def _restore_env(pg_restore: Path) -> dict[str, str]:
-    from nexus.db.pg_provision import _bundle_lib_env  # noqa: PLC0415 — deferred: heavy import
-
-    return _bundle_lib_env([str(pg_restore)], None)
-
-
-def _dump_key(dump: Path) -> str:
-    stat = dump.stat()
-    return f"{dump}|{stat.st_mtime_ns}|{stat.st_size}"
-
-
-def verified_backup_since(
-    record: dict, *, pg_restore: Path, home: Path | None = None, explicit: Path | None = None,
-    runner: Callable[..., subprocess.CompletedProcess] | None = None,
-) -> Path | None:
-    """The newest dump written after the refusal whose ``pg_restore -l`` lists the marker schema and the data the engine
-    would delete, or None. Looks in ``~/nexus-backups/``, or only at ``explicit`` (``--legacy-backup``). A dump already
-    rejected (same path, mtime and size) is not read again; one attempt reads at most ``MAX_DUMPS_PER_ATTEMPT``.
-    Raises :class:`PgRestoreUnavailable` when ``pg_restore`` cannot run, which says nothing about any dump."""
-    if runner is None:
-        from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred
-
-        runner = run_bounded
-    try:
-        since = datetime.fromisoformat(record["refused_at"]).timestamp()
-    except (KeyError, ValueError):
-        return None
-    rejected: dict = record.setdefault("rejected", {})
-    try:
-        pool = [explicit] if explicit is not None else list(backup_dir(home).glob("*.dump"))
-        candidates = sorted((p for p in pool if p.is_file() and p.stat().st_mtime > since),
-                            key=lambda p: p.stat().st_mtime, reverse=True)
-        candidates = [p for p in candidates if _dump_key(p) not in rejected][:MAX_DUMPS_PER_ATTEMPT]
-    except OSError:
-        return None
-    env = _restore_env(pg_restore)
-    for dump in candidates:
-        try:
-            done = runner([str(pg_restore), "-l", str(dump)], timeout=RESTORE_LIST_TIMEOUT_S, env=env, text=False)
-        except subprocess.TimeoutExpired:
-            _log.warning("legacy_chash_guard_backup_listing_timed_out", path=str(dump))
-            continue
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise PgRestoreUnavailable(f"{pg_restore}: {exc}") from exc
-        if done.returncode in (126, 127):  # the shell's "cannot execute" / "not found": the loader, not the dump
-            tail = (done.stderr or b"")
-            tail = tail.decode("utf-8", "replace") if isinstance(tail, bytes) else tail
-            raise PgRestoreUnavailable(f"{pg_restore} exited {done.returncode}: {tail.strip()[-200:]}")
-        if done.returncode == 0 and holds_required_data(done.stdout, record):
-            return dump
-        reason = "unreadable" if done.returncode else "does not hold this store's marker schema and chunk data"
-        rejected[_dump_key(dump)] = reason
-        _log.warning("legacy_chash_guard_backup_rejected", path=str(dump), returncode=done.returncode, reason=reason)
-    return None
+# ── the record: states and updates ───────────────────────────────────────────────────────────────────────────────
 
 
 def mark_cleared(config_dir: Path, backup: Path, *, now: datetime | None = None) -> None:
-    """Keep the record as history: when and by which backup the refusal cleared."""
+    """Keep the record as history: when and by which backup the refusal cleared. A record another start already
+    cleared keeps its first clearance."""
     try:
         record = json.loads(guard_path(config_dir).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         record = {}
+    if record.get("cleared_at"):
+        return
     record.update({"cleared_at": (now or datetime.now(UTC)).isoformat(), "cleared_by": str(backup)})
     _write_json(guard_path(config_dir), record)
 
 
+def _label(table: str) -> str:
+    return {"chunks": "chunk rows", MANIFEST: "manifest rows"}.get(table, f"chunk rows in {table}")
+
+
+def _rows(n: int) -> str:
+    return f"at least {n:,}" if n >= COUNT_CAP else f"{n}"
+
+
 def refusal_text(record: dict, *, home: Path | None = None) -> str:
-    """What the user reads: the counts, what would happen, the marker schema's purpose, and the command to run."""
+    """What the user reads: what is at risk and why, the command to run, the marker schema's purpose, and which dumps
+    were looked at and not accepted."""
     counts = record.get("counts") or {}
-    rows = ", ".join(f"{n} {_label(t)}" for t, n in counts.items() if n)
+    rows = ", ".join(f"{_rows(n)} {_label(t)}" for t, n in counts.items() if n)
     sentinel = record.get("sentinel")
     marker = (
         f"This refusal created the empty schema {sentinel} in your nexus database: a backup counts only if it contains "
         "that schema, which proves it is a dump of this store taken after the refusal (a dump of another store, or an "
-        "older one, is not accepted). "
+        "older one, is not accepted), and nexus reads the whole dump back before it goes on. "
         if sentinel else
-        "The marker schema that binds a backup to this store could not be created yet; the supervisor retries it, and "
-        "no backup is accepted until it exists. "
+        "The marker schema that binds a backup to this store could not be created yet; the supervisor retries it every "
+        "few seconds, and no backup is accepted until it exists. "
+    )
+    tried = rejected_paths(record)
+    checked = (
+        "Checked and not accepted: " + "; ".join(f"{path} ({why})" for path, why in tried[-5:]) + ". " if tried else ""
     )
     return (
-        f"Not starting the engine: this store still holds rows with legacy-width chash keys ({rows}). The engine's "
-        f"{record.get('changeset', DELETING_CHANGESET)} migration deletes them at its first start, and that cannot be "
-        "undone, so nexus will not start it until a copy exists.\n"
-        f"Run `nx backup` now (Postgres is left running for it); it writes a verified dump to {backup_dir(home)}/. "
-        f"{marker}"
+        f"Not starting the engine. Your database holds {rows} that the engine's next start deletes for good: they use "
+        "an old key format the current engine cannot read, so those chunks and their manifest rows could be recovered "
+        "only from a copy.\n"
+        "Make the copy first: run `nx backup` (Postgres is left running for it; it writes a verified dump to "
+        f"{backup_dir(home)}/).\nBackup guide: https://github.com/Hellblazer/nexus/blob/main/docs/operations/backup-restore.md\n"
+        f"{marker}{checked}"
         "Then start again (`nx daemon service start`, or `nx upgrade`): the start goes on once a dump written after "
-        f"this refusal ({record.get('refused_at')}) reads back with the marker schema and the chunk and manifest data. "
-        "A dump written elsewhere (`nx backup --to PATH`): `nx daemon service start --legacy-backup PATH`. The refusal "
-        "stands until a backup clears it, even if the rows have been removed since."
+        f"this refusal ({record.get('refused_at')}) passes those checks. A dump written elsewhere "
+        "(`nx backup --to PATH`): `nx daemon service start --legacy-backup PATH`. The refusal stands until a backup "
+        f"clears it, even if the rows have been removed since. (The deleting migration is "
+        f"{record.get('changeset', DELETING_CHANGESET)}.)"
     )
-
-
-_LABELS = {"chunks": "chunk rows", MANIFEST: "manifest rows"}
-
-
-def _label(table: str) -> str:
-    return _LABELS.get(table, f"chunk rows in {table}")
 
 
 def read_record(config_dir: Path) -> dict | None:
@@ -341,30 +323,58 @@ def read_record(config_dir: Path) -> dict | None:
 def pending_refusal(config_dir: Path) -> dict | None:
     """The unresolved refusal, if any (for the CLI's start wait)."""
     record = read_record(config_dir)
-    return record if record and record.get("refused_at") and not record.get("cleared_at") else None
+    live = record and record.get("refused_at") and not record.get("cleared_at") and not record.get("retired_at")
+    return record if live else None
 
 
 def is_cleared(config_dir: Path) -> bool:
     record = read_record(config_dir)
-    return bool(record and record.get("cleared_at") and not record.get("spent_at"))
+    return bool(record and record.get("cleared_at") and not record.get("spent_at") and not record.get("retired_at"))
+
+
+def _update_record(config_dir: Path, refused_at: object, *, only_pending: bool = False, **fields: object) -> bool:
+    """Re-read the record and write ``fields`` into it, only when it is still the refusal ``refused_at`` (a record
+    another start replaced, retired or cleared is not overwritten from a stale copy). Returns whether it wrote."""
+    record = read_record(config_dir)
+    if not record or record.get("refused_at") != refused_at or (only_pending and record.get("cleared_at")):
+        return False
+    record.update(fields)
+    try:
+        _write_json(guard_path(config_dir), record)
+    except OSError as exc:
+        _log.warning("legacy_chash_guard_record_not_updated", error=str(exc))
+        return False
+    return True
 
 
 def _spend_clearance(config_dir: Path) -> None:
     """The deleting changesets were seen applied: the clearance did its job. A later refusal (a restored older
     database under this config directory) needs a backup of its own. Best effort."""
     record = read_record(config_dir)
-    if not record or not record.get("cleared_at") or record.get("spent_at"):
+    if record and record.get("cleared_at") and not record.get("spent_at"):
+        _update_record(config_dir, record.get("refused_at"), spent_at=datetime.now(UTC).isoformat())
+
+
+def retire_record(config_dir: Path, reason: str, run_sql: RunSql | None = None) -> None:
+    """A record that no longer describes this cluster or this risk is retired, never applied: it stays on disk as
+    history. ``run_sql`` (when the marker schema is in the cluster at hand) drops the schema."""
+    record = read_record(config_dir)
+    if not record or record.get("retired_at"):
         return
-    record["spent_at"] = datetime.now(UTC).isoformat()
-    try:
-        _write_json(guard_path(config_dir), record)
-    except OSError as exc:
-        _log.warning("legacy_chash_guard_clearance_not_spent", error=str(exc))
+    name = record.get("sentinel")
+    if run_sql is not None and name and not record.get("sentinel_dropped"):
+        try:
+            drop_sentinel(run_sql, name)
+        except Exception as exc:  # noqa: BLE001 — a leftover empty schema is harmless
+            _log.warning("legacy_chash_guard_sentinel_not_dropped", sentinel=name, error=str(exc))
+    _update_record(config_dir, record.get("refused_at"), retired_at=datetime.now(UTC).isoformat(),
+                   retired_reason=reason)
+    _log.warning("legacy_chash_guard_record_retired", reason=reason)
 
 
 def try_clear(
     config_dir: Path, *, pg_restore: Path, explicit: Path | None = None, home: Path | None = None,
-    runner: Callable[..., subprocess.CompletedProcess] | None = None,
+    runner=None,
 ) -> Path | None:
     """The user's next start: clear a pending refusal with a verified backup of this cluster. Returns the backup
     it accepted (recorded in the guard file), or None when the refusal stands. Raises :class:`PgRestoreUnavailable`
@@ -374,13 +384,110 @@ def try_clear(
         return None
     try:
         found = verified_backup_since(record, pg_restore=pg_restore, home=home, explicit=explicit, runner=runner)
-    finally:
-        with contextlib.suppress(OSError):  # remember which dumps were rejected, so the next call skips them
-            _write_json(guard_path(config_dir), record)
+    finally:  # remember which dumps were rejected, so the next call skips them, without undoing a concurrent clear
+        current = read_record(config_dir)
+        if current and current.get("refused_at") == record.get("refused_at"):
+            _update_record(config_dir, record.get("refused_at"),
+                           rejected={**(current.get("rejected") or {}), **record.get("rejected", {})})
     if found is not None:
         mark_cleared(config_dir, found)
         _log.info("legacy_chash_guard_cleared", backup=str(found))
     return found
+
+
+def reconcile_pending(config_dir: Path, run_sql: RunSql, pg_data: str, *, recheck: bool) -> str:
+    """Keep a pending refusal satisfiable and true. Returns ``none`` (no pending record), ``retired`` or ``pending``.
+
+    A record about another cluster (a store wiped or re-initialised under this config directory, a restore-swap) is
+    retired. The marker schema is (re)created when it is missing, so a backup can hold it. With ``recheck`` the check
+    runs again, and a store no longer at risk (the rows were removed by hand) retires the record. Errors propagate: the
+    caller is best-effort."""
+    record = pending_refusal(config_dir)
+    if record is None:
+        return "none"
+    sid = run_sql("SELECT system_identifier FROM pg_control_system()").strip()
+    if not _cluster_matches(record, pg_data, sid):
+        retire_record(config_dir, "the refusal was recorded for another cluster")
+        return "retired"
+    name = record.get("sentinel")
+    if not name:
+        name = create_sentinel(run_sql)
+    else:
+        ensure_sentinel(run_sql, name)
+    _update_record(config_dir, record.get("refused_at"), only_pending=True, sentinel=name,
+                   cluster={"pg_data": pg_data, "system_identifier": sid})
+    if recheck:
+        verdict = check(run_sql)
+        if verdict.proceed:
+            retire_record(config_dir, f"no longer at risk: {verdict.reason}", run_sql)
+            return "retired"
+    return "pending"
+
+
+def wait_round(
+    config_dir: Path, creds: dict[str, str], state: dict, *, recheck_every_s: float = 60.0,
+    clock: Callable[[], float] = time.monotonic,
+) -> str:
+    """One round of the supervisor's wait for a backup: :func:`reconcile_pending`, with the full recheck once every
+    ``recheck_every_s``. Best effort: ``unknown`` when the cluster could not be asked."""
+    from nexus.redact import redact_credentials  # noqa: PLC0415 — deferred
+
+    try:
+        now = clock()
+        due = now - state.get("checked", float("-inf")) >= recheck_every_s
+        outcome = reconcile_pending(config_dir, bundled_run_sql(config_dir, creds), creds.get("PG_DATA", "").strip(),
+                                    recheck=due)
+        if due:
+            state["checked"] = now
+        return outcome
+    except Exception as exc:  # noqa: BLE001 — the wait goes on; the next round asks again
+        _log.warning("legacy_chash_guard_wait_round_failed", error=redact_credentials(str(exc)))
+        return "unknown"
+
+
+# ── the wait the user can see ────────────────────────────────────────────────────────────────────────────────────
+
+
+def waiting_text(cause: str, log_path: Path | str) -> str:
+    return (
+        "The engine has not started yet: nexus could not check your database for legacy rows that its first start "
+        f"would delete ({cause}). Nothing is wrong with your data and no backup is needed for this; nexus asks again "
+        f"every few seconds. Check `nx doctor`, and the log at {log_path}."
+    )
+
+
+def write_wait_status(config_dir: Path, cause: str, log_path: Path | str) -> str:
+    """Record why the engine is waiting (the CLI shows it); returns the text. Best effort."""
+    prior = _read_wait(config_dir) or {}
+    status = {"cause": cause, "since": prior.get("since") or datetime.now(UTC).isoformat(), "log": str(log_path)}
+    try:
+        _write_json(config_dir / WAIT_FILENAME, status)
+    except OSError as exc:
+        _log.warning("legacy_chash_guard_wait_status_not_written", error=str(exc))
+    return waiting_text(cause, log_path)
+
+
+def _read_wait(config_dir: Path) -> dict | None:
+    try:
+        status = json.loads((config_dir / WAIT_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return status if isinstance(status, dict) else None
+
+
+def clear_wait_status(config_dir: Path) -> None:
+    with contextlib.suppress(OSError):
+        (config_dir / WAIT_FILENAME).unlink()
+
+
+def wait_status_text(config_dir: Path) -> str | None:
+    """The reason a live supervisor is waiting, or None (no status, or one older than ``WAIT_FRESH_S``)."""
+    status = _read_wait(config_dir)
+    try:
+        fresh = time.time() - (config_dir / WAIT_FILENAME).stat().st_mtime <= WAIT_FRESH_S
+    except OSError:
+        return None
+    return waiting_text(status.get("cause", "unknown"), status.get("log", "")) if status and fresh else None
 
 
 # ── the marker that a store was seen past the deleting changesets ────────────────────────────────────────────────
@@ -407,9 +514,10 @@ def write_marker(config_dir: Path, pg_data: str, evidence: str, *, now: datetime
 def gate(config_dir: Path, run_sql: RunSql, *, pg_data: str = "") -> Verdict:
     """The supervisor's step before it spawns an engine. Proceeds, or raises :class:`LegacyChashRefused` (rows
     would be deleted, no backup yet) or :class:`GuardCannotAsk` (the cluster could not be asked, and no marker says
-    it was seen safe). A refusal the user cleared with a verified backup lets the start go on: the rows are still
-    there until the engine's first boot deletes them, which is what the backup was taken for. After a refuse verdict
-    nothing fails open: a record or marker schema that cannot be written is logged and the refusal is raised anyway."""
+    it was seen safe). A refusal the user cleared with a verified backup of this cluster lets the start go on: the
+    rows are still there until the engine's first boot deletes them, which is what the backup was taken for. A record
+    about another cluster is retired, never applied. After a refuse verdict nothing fails open: a record or marker
+    schema that cannot be written is logged and the refusal is raised anyway."""
     from nexus.redact import redact_credentials  # noqa: PLC0415 — deferred
 
     try:
@@ -419,15 +527,24 @@ def gate(config_dir: Path, run_sql: RunSql, *, pg_data: str = "") -> Verdict:
         if marker is not None:
             _log.warning("legacy_chash_guard_proceeding_on_marker", evidence=marker.get("evidence"),
                          error=redact_credentials(str(exc)))
+            clear_wait_status(config_dir)
             return Verdict(True, "could not ask; this store was seen past the deleting changesets", {}, "marker")
         raise GuardCannotAsk(redact_credentials(f"{type(exc).__name__}: {exc}")) from exc
+    clear_wait_status(config_dir)
     if verdict.proceed:
         if verdict.kind == "applied":
             write_marker(config_dir, pg_data, "applied")
+        if pending_refusal(config_dir) is not None:
+            retire_record(config_dir, f"no longer at risk: {verdict.reason}", run_sql)
         _release_sentinel(config_dir, run_sql)
         if verdict.kind == "applied":
             _spend_clearance(config_dir)
         return verdict
+    record = read_record(config_dir) or {}
+    if (is_cleared(config_dir) or pending_refusal(config_dir) is not None) and not _cluster_matches(
+        record, pg_data, verdict.cluster
+    ):
+        retire_record(config_dir, "the refusal was recorded for another cluster")
     if is_cleared(config_dir):
         _log.warning("legacy_chash_guard_proceeding_after_backup", counts=verdict.counts,
                      backup=(read_record(config_dir) or {}).get("cleared_by"))
@@ -435,13 +552,15 @@ def gate(config_dir: Path, run_sql: RunSql, *, pg_data: str = "") -> Verdict:
         return Verdict(True, "a verified backup cleared the refusal", verdict.counts, "cleared", verdict.required)
     prior = pending_refusal(config_dir) or {}
     sentinel = prior.get("sentinel")
-    if not sentinel:
-        try:
-            sentinel = create_sentinel(run_sql)
-        except Exception as exc:  # noqa: BLE001 — still a refusal; no backup is accepted until a marker exists
-            _log.error("legacy_chash_guard_sentinel_not_created", error=redact_credentials(str(exc)))
     try:
-        record = record_refusal(config_dir, verdict, sentinel=sentinel)
+        if sentinel:
+            ensure_sentinel(run_sql, sentinel)
+        else:
+            sentinel = create_sentinel(run_sql)
+    except Exception as exc:  # noqa: BLE001 — still a refusal; no backup is accepted until a marker exists
+        _log.error("legacy_chash_guard_sentinel_not_created", error=redact_credentials(str(exc)))
+    try:
+        record = record_refusal(config_dir, verdict, sentinel=sentinel, pg_data=pg_data)
     except Exception as exc:  # noqa: BLE001 — after a refuse verdict nothing fails open
         _log.error("legacy_chash_guard_record_not_written", error=str(exc))
         record = {"refused_at": datetime.now(UTC).isoformat(), "counts": verdict.counts,

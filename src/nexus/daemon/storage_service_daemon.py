@@ -2198,6 +2198,8 @@ class StorageServiceSupervisor:
         from nexus.db.pg_provision import SUPERUSER_PASS_KEY  # noqa: PLC0415 — deferred import
 
         if not pg_data and not self._creds.get(SUPERUSER_PASS_KEY):
+            _log.info("legacy_chash_guard_skipped", reason="no PG_DATA and no PG_SUPERUSER_PASS in pg_credentials: "
+                      "managed/BYO Postgres, or a bundled cluster whose credentials lost both")
             return
         self._guard_saw_no_changelog = None
         try:
@@ -3758,6 +3760,7 @@ def _wait_for_legacy_backup(
     # `--foreground` has no CLI wrapper to print the refusal: say it on stderr, where a terminal or the unit's log reads it.
     sys.stderr.write(f"Error: {exc}\n")
     sys.stderr.flush()
+    round_state: dict = {}
     while True:
         deadline = time.monotonic() + _BELOW_FLOOR_RECHECK_S
         while (left := deadline - time.monotonic()) > 0:
@@ -3765,6 +3768,11 @@ def _wait_for_legacy_backup(
                 return _ClusterFloorWait.STOPPED
         if stop_requested.is_set():
             return _ClusterFloorWait.STOPPED
+        # Keep the refusal satisfiable and true: the marker schema in place, a record about another cluster or a store
+        # no longer at risk retired (then the start asks the guard afresh).
+        if _guard.wait_round(sup._config_dir, sup._creds, round_state) == "retired":
+            flush_logging()
+            return _ClusterFloorWait.RETRY
         if _guard.is_cleared(sup._config_dir):
             _log.info("storage_service_legacy_chash_cleared")
             flush_logging()
@@ -3786,11 +3794,14 @@ def _wait_for_guard_cannot_ask(
 
     if not isinstance(exc.__cause__, _guard.GuardCannotAsk):
         return None
+    text = _guard.write_wait_status(sup._config_dir, str(exc.__cause__), sup._config_dir / "logs" / "storage_service.log")
     if not getattr(sup, "_guard_cannot_ask_logged", False):
         sup._guard_cannot_ask_logged = True
         _log.warning("storage_service_legacy_chash_guard_cannot_ask", error=str(exc),
                      msg="waiting and asking again; the engine is not started unasked")
         flush_logging()
+        sys.stderr.write(text + "\n")  # `--foreground` and the unit's log: the refusal's twin for a wait
+        sys.stderr.flush()
     if stop_requested.wait(_GUARD_RETRY_S):
         return _ClusterFloorWait.STOPPED
     return _ClusterFloorWait.RETRY
