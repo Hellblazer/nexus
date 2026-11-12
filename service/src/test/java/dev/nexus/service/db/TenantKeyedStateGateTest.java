@@ -472,6 +472,8 @@ public class TenantKeyedStateGateTest {
             + "labels are fixed by the engine (route names and four classes), no key name or client text is kept, and "
             + "a request's tenant is never recorded in it, so a tenant reset has nothing to drop";
         private static final String TEST_HOOK = "a test-only hook, null in production";
+        private static final String EXPORT_REGISTRY = "the tenant export's schema registry (nexus-csayy.1): "
+            + "table and column names fixed at class load, the same for every tenant; not keyed by tenant";
         private static final String CONFIG = "process configuration set at boot or swapped as a whole; not keyed by "
             + "tenant";
         private static final String TEMPLATE = "tuple template schema, parsed at boot and immutable; "
@@ -707,6 +709,21 @@ public class TenantKeyedStateGateTest {
                 + "the start of every runner pass; the runner keeps nothing per tenant between passes");
             notKeyed.put("ReembedHandler.servedModels", "a supplier of the models the embedder router serves, an "
                 + "install-wide fact read on each plan and start (the list GET /version reports); it keeps no copy");
+            notKeyed.put("TenantExport.Reference.columns", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.Reference.parentColumns", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.ExportTable.primaryKey", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.ExportTable.references", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.ExportTable.triggers", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.ExportTable.loadsAfter", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.ExportTable.triggerMaintained", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.ExportTable.notReferences", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.Entry.pk", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.Entry.refs", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.Entry.triggers", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.Entry.loadsAfter", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.Entry.maintained", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.Entry.notRefs", EXPORT_REGISTRY);
+            notKeyed.put("TenantExport.BY_NAME", EXPORT_REGISTRY);
             notKeyed.put("ChunkReaper.tenants", "a supplier of the tenant list, re-read from service_tokens on "
                 + "every pass; the reaper keeps no copy");
             notKeyed.put("Rdr192BackfillGate.emptyTenant", "a predicate that reads PG on each call; it caches nothing");

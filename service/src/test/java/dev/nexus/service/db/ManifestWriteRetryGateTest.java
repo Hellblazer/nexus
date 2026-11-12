@@ -100,6 +100,8 @@ class ManifestWriteRetryGateTest {
             + " writes nothing"),
         Map.entry("SchemaMigrator", "names the table in the chash-length constraint map: DDL bookkeeping, no DML"),
         Map.entry("ValidateConstraintsJobs", "nexus-f3yqd: names nexus.catalog_document_chunks as a table its refusal reports on; no DML"),
+        Map.entry("TenantExport", "nexus-csayy.1: the tenant export's table registry names the table and its columns;"
+            + " it holds no DML"),
         Map.entry("ChashConstraintValidator", "nexus-f3yqd: VALIDATE CONSTRAINT of the chash width CHECK on the table (DDL, "
             + "and a SELECT count of its non-conformant rows); it changes no row"),
         Map.entry("ValidateConstraintsHandler", "javadoc naming the table whose CHECK the job validates; no DML"),

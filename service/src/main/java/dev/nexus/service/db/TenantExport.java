@@ -294,8 +294,10 @@ public final class TenantExport {
             .fk(CHUNK_KEY, "chunks", CHUNK_KEY)
             // The stamp triggers fire on delete and update only; the chunk_index default fires only when
             // the inserted value is null, which an exported row never is.
-            .trigger("trg_catalog_chunks_stamp_on_delete", "AFTER DELETE FOR EACH STATEMENT")
-            .trigger("trg_catalog_chunks_stamp_on_update", "AFTER UPDATE FOR EACH STATEMENT")
+            .trigger("trg_catalog_chunks_stamp_on_delete",
+                "AFTER DELETE REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT")
+            .trigger("trg_catalog_chunks_stamp_on_update",
+                "AFTER UPDATE REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT")
             .trigger("trg_catalog_document_chunks_chunk_index_default", "BEFORE INSERT FOR EACH ROW")
             .build(),
         derived("chunk_orphaned_at").pk("tenant_id text", "collection text", "chash bytea")
@@ -344,8 +346,10 @@ public final class TenantExport {
             .fk("tenant_id,topic_id", "topics", "tenant_id,id")
             .fk("tenant_id,source_collection,doc_id,embedding_model", "chunks", CHUNK_KEY)
             .fk("tenant_id,source_collection", "catalog_collections", "tenant_id,name")
-            .trigger("trg_topic_assignments_doc_count_del", "AFTER DELETE FOR EACH STATEMENT")
-            .trigger("trg_topic_assignments_doc_count_ins", "AFTER INSERT FOR EACH STATEMENT")
+            .trigger("trg_topic_assignments_doc_count_del",
+                "AFTER DELETE REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT")
+            .trigger("trg_topic_assignments_doc_count_ins",
+                "AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT")
             .build(),
         data("topic_links").pk("tenant_id text", "from_topic_id bigint", "to_topic_id bigint")
             .fk("tenant_id,from_topic_id", "topics", "tenant_id,id")
