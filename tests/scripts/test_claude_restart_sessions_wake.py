@@ -341,6 +341,8 @@ def test_revive_wakes_each_session_it_resumed(crs, monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(crs, "alive", lambda pid: pid == 42)
     monkeypatch.setattr(crs, "_ps_args", lambda _pid: "")
     monkeypatch.setattr(crs, "prompt_count", lambda _sid: 0)
+    # no real tmux: the CI pytest hosts have none, and a dev box's own server is not this test's business
+    monkeypatch.setattr(crs, "tmux_run", lambda *a: subprocess.CompletedProcess(["tmux", *a], 0, "", ""))
     woken: list[dict] = []
     monkeypatch.setattr(crs, "wake", lambda r: woken.append(r) or "typed")
     a = argparse.Namespace(since=60, only=[], skip=[], flags="", dry_run=False, tmux_session="claude",

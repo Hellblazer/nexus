@@ -1973,7 +1973,7 @@ def revive(a: argparse.Namespace) -> int:
     if not a.dry_run:
         log(f"=== revive: sessions written in the {a.since} min before boot "
             f"({time.strftime('%m-%d %H:%M', time.localtime(before))})")
-        if subprocess.run(["tmux", "has-session", "-t", a.tmux_session], capture_output=True).returncode != 0:
+        if tmux_run("has-session", "-t", a.tmux_session).returncode != 0:  # a missing tmux reads as no session
             tmux("new-session", "-d", "-s", a.tmux_session)
     launched: dict[str, str] = {}
     for s in found:
