@@ -7,7 +7,7 @@ priority: high
 author: wren and linda (for Sam)
 created: 2026-11-10
 related_issues: [nexus-f3yqd.8, nexus-f3yqd]
-related_rdrs: [RDR-225, RDR-227, RDR-229, RDR-230, RDR-246]
+related_rdrs: [RDR-225, RDR-227, RDR-229, RDR-230]
 reviewed-by:
 ---
 
@@ -112,7 +112,7 @@ becomes a label) is the prior draft on the reader side and is read with it.
   partial indexes. This RDR revisits its Alternatives 3 and 4.
 - **RDR-230** (event-keyed reindex and recall canary) reads index state; any
   layout change has to keep its canary meaningful.
-- **RDR-246** / nexus-f3yqd.2 (data moves as background jobs, dml_utils) is the
+- **The background-job design** of nexus-f3yqd.2 (data moves as background jobs, dml_utils; its RDR is not yet on develop) is the
   mechanism any row-moving upgrade must use.
 
 ## Context
@@ -590,7 +590,7 @@ and a rule is chosen, for example a per-request cap on exact rows.
 - The `pci_` build, keep and adopt path: `PciReconciler`, `PciReconcilePlanner`,
   `PciBuilderSession`, `PciCatalog` (engine 0.1.186).
 - Progress reporting: `boot_work` in `GET /v1/status` (nexus-f3yqd.3).
-- Background data moves: RDR-246 / nexus-f3yqd.2 (dml_utils, pg_background).
+- Background data moves: nexus-f3yqd.2 (dml_utils, pg_background).
 
 ### Decision Rationale
 
@@ -647,7 +647,7 @@ reason:
   being renamed moves rows; creating a collection becomes partition DDL that
   needs the table owner. Rejected: row moves are the shape Sam objected to on
   2026-11-10, and Option C, sequenced gets one graph per row without them. Row
-  moves would be acceptable only as an RDR-246 background job with progress; that
+  moves would be acceptable only as a nexus-f3yqd.2 background job with progress; that
   is not the choice.
 - **Option C, one-statement drop.** Pros: one graph per row, no row moves. Cons:
   the drop takes an exclusive lock on every partition of `nexus.chunks` with no
@@ -770,7 +770,7 @@ in either form):
    failed one in the same pass (done in 0.1.186). This keeps a 1M-row
    collection off the exact path.
 5. The by-chash index-scan fix (done: nexus-f3yqd.8, engine 0.1.187).
-6. The `DROP` itself, as an ordered RDR-246 background job that waits until every
+6. The `DROP` itself, as an ordered nexus-f3yqd.2 background job that waits until every
    collection at or above B has a valid `pci_` index.
 
 ### Minimum Viable Validation
@@ -804,7 +804,7 @@ and job 2's state and attempts.
 
 ### New Dependencies
 
-None. Job 2 runs as a background job in RDR-246's machinery.
+None. Job 2 runs as a background job in nexus-f3yqd.2's background-job machinery.
 
 ## Test Plan
 
