@@ -237,6 +237,19 @@ reading one snapshot:
 Because each page names where it ended, a client that loses a request asks again from the same key: a
 dropped connection costs one page, not the export. One export session per tenant at a time.
 
+**Not a client walk (RDR-241).** RDR-241 (draft) bars client code from paging through every document of a
+tenant to answer a question or change rows, leaves a client walk standing only where a person typed a
+command whose job is to read every row (export), and lists "the export and recovery bundle as streamed
+routes" in its Step 5. This export is that route in the only shape the cloud edge allows (A1: 60 seconds an
+exchange, 20 MB a body). What RDR-241 forbids is a client walking live tables whose size and state it does
+not control: each page then costs more as the tenant grows, and the walk reads a table that is changing
+under it. Here the engine holds one snapshot and the client pages that, through routes that exist only for
+the export. A page is cut by bytes, so its cost does not depend on the tenant's size; every page reads the
+same state; the table whitelist is the registry's; and the engine, not the client, bounds the session (idle
+10 minutes, 60 minutes in all). RDR-241's ratchet of walk shapes lists no call of these routes, and
+RDR-241 Step 5 should read "streamed" as "a session of short requests over an engine-held snapshot" when
+it lands.
+
 **Client (`nx backup`, cloud arm).** In managed mode `resolve_target` no longer refuses. The verb opens a
 session, pulls every table page by page into `~/nexus-backups/nexus-<tenant>-<UTC stamp>.nxtenant.partial`
 (mode 0600) as one framed file (the header, a frame per table made of its pages, and a trailer of

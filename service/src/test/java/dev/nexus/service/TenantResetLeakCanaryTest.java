@@ -181,7 +181,8 @@ class TenantResetLeakCanaryTest {
         "CatalogRepository.ghostSweepCheckedTenants", "ghostSweepCheckedTenants",
         "NexusService.dataSweepFailuresByTenant", "dataSweepFailuresByTenant",
         "TupleWaitRegistry", "TupleWaitRegistry.groups",
-        "MintRateLimiter", "MintRateLimiter.credentials"));
+        "MintRateLimiter", "MintRateLimiter.credentials",
+        "TenantExportSessions", "TenantExportSessions.byOwner"));
 
     /** The evictors the census names that this canary does NOT feed, each with why. A new evictor lands in neither
      *  this map nor {@link #FED} and fails {@code theCataloguesEvictorsAreEachFed...} until it is placed in one. */
@@ -221,7 +222,8 @@ class TenantResetLeakCanaryTest {
         ".ghostSweepCheckedTenants[]", "ghostSweepCheckedTenants",
         ".dataSweepFailuresByTenant", "dataSweepFailuresByTenant",
         ".groups", "TupleWaitRegistry.groups",
-        ".credentials[].tenants", "MintRateLimiter.credentials");
+        ".credentials[].tenants", "MintRateLimiter.credentials",
+        ".byOwner", "TenantExportSessions.byOwner");
 
     /** The structures a walk's hits sit in, as stable names, so before and after, X and Y compare. */
     private static TreeSet<String> kinds(TenantLeakWalker.Result r) {
@@ -270,6 +272,10 @@ class TenantResetLeakCanaryTest {
         var coll = post("/v1/catalog/collections/upsert", raw,
             "{\"name\":\"knowledge__canary-" + shortId() + "__voyage-context-3__v1\",\"content_type\":\"knowledge\",\"owner_id\":\"canary\",\"embedding_model\":\"voyage-context-3\"}");
         assertThat(coll.statusCode()).as(coll.body()).isEqualTo(200);
+
+        // nexus-csayy.2: an open tenant export session holds the tenant in TenantExportSessions.byOwner.
+        var export = post("/v1/tenant/export", raw, "{}");
+        assertThat(export.statusCode()).as(export.body()).isEqualTo(200);
 
         String subspace = "directory/canary-" + shortId();
         return CompletableFuture.supplyAsync(() -> {

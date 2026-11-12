@@ -279,6 +279,14 @@ class VersionHandlerReleaseVersionTest {
     }
 
     @Test
+    void versionAdvertisesTheTenantExportRoutesAndTheirFormatVersion() {
+        var body = new StringBuilder();
+        VersionHandler.appendTenantExportCapabilityField(body);
+        assertThat(body.toString())
+            .isEqualTo(",\"tenant_export_supported\":true,\"tenant_export_format_version\":1");
+    }
+
+    @Test
     void versionAdvertisesTheManifestFillJobAsItsOwnFlag() {
         var body = new StringBuilder();
         VersionHandler.appendCatalogManifestFillJobCapabilityField(body);

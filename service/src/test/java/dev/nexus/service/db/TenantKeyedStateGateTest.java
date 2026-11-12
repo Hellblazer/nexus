@@ -718,6 +718,7 @@ public class TenantKeyedStateGateTest {
                     "Entry.maintained", "Entry.notRefs", "BY_NAME")) {
                 notKeyed.put("TenantExport." + f, EXPORT_REGISTRY);
             }
+            TenantExportKeyedStateTable.fill(keyed, notKeyed, RESULT);   // nexus-csayy.2 (RDR-248)
             notKeyed.put("ChunkReaper.tenants", "a supplier of the tenant list, re-read from service_tokens on "
                 + "every pass; the reaper keeps no copy");
             notKeyed.put("Rdr192BackfillGate.emptyTenant", "a predicate that reads PG on each call; it caches nothing");

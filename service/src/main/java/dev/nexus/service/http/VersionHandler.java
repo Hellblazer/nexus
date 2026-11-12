@@ -54,6 +54,8 @@ import java.util.function.Supplier;
  *  "catalog_index_run_census_supported":true,
  *  "catalog_next_seq_drift_read_supported":true,
  *  "chash_constraints_validate_job_supported":true,
+ *  "tenant_export_supported":true,
+ *  "tenant_export_format_version":1,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -674,6 +676,17 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-csayy.2 (RDR-248): the tenant export routes ({@code POST /v1/tenant/export}, {@code GET
+     * /v1/tenant/export/{id}/rows}, {@code DELETE /v1/tenant/export/{id}}) and the export format version they
+     * write. A client that needs the export refuses an engine without the flag, or one whose version it does
+     * not know.
+     */
+    static void appendTenantExportCapabilityField(StringBuilder body) {
+        body.append(",\"tenant_export_supported\":true")
+            .append(",\"tenant_export_format_version\":").append(TenantExportHandler.FORMAT_VERSION);
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -817,6 +830,21 @@ public final class VersionHandler implements HttpHandler {
         return fresh;
     }
 
+    /**
+     * The memoized count of distinct applied changesets, the value {@code /version} reports as
+     * {@code schema_changeset_count}; null when the journal read failed. The tenant export header reports the
+     * same value (nexus-csayy.2), from the same memo, so it never opens a second read of the journal.
+     */
+    public Long schemaChangesetCount() {
+        SchemaIdentity schema = schemaIdentity();
+        return schema.error == null ? schema.count : null;
+    }
+
+    /** The engine's release identity, or its app version on an unstamped build (the export header's engine version). */
+    public String engineVersion() {
+        return releaseVersion != null ? releaseVersion : appVersion;
+    }
+
     @Override
     public void handle(HttpExchange exchange) throws IOException {
         if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
@@ -891,6 +919,8 @@ public final class VersionHandler implements HttpHandler {
         appendCatalogNextSeqDriftReadCapabilityField(body);
         // nexus-f3yqd (0.1.190): POST /v1/admin/validate-constraints, the user-started VALIDATE CONSTRAINT job.
         appendChashConstraintsValidateJobCapabilityField(body);
+        // nexus-csayy.2 (RDR-248): the tenant export session routes and their format version.
+        appendTenantExportCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

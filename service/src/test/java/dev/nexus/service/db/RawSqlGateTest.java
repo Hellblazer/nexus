@@ -406,6 +406,15 @@ class RawSqlGateTest {
             // CatalogRepository#purgeTrash's post-commit VACUUM step is the only caller.
             "vacuumAnalyze", Map.of(
                 ".execute(\"VACUUM (ANALYZE) \" + table)", 1))),
+        Map.entry("TenantExportReads.java", Map.of(
+            // SANCTIONED RAW (nexus-csayy.2): SET TRANSACTION SNAPSHOT has no typed jOOQ form and no function form, and
+            // it must be the FIRST statement of the transaction that imports the export session's snapshot (Postgres
+            // refuses it after any query), so it cannot be folded into a later statement. The id is Postgres's own text
+            // (pg_export_snapshot), checked against SNAPSHOT_ID before it reaches the statement, so the concatenation
+            // is not an injection surface. Plain JDBC Statement.execute, not jOOQ's execute(String). Single-homed:
+            // every header and page read of the tenant export goes through importSnapshot.
+            "importSnapshot", Map.of(
+                ".execute(\"SET TRANSACTION SNAPSHOT '\" + snapshotId + \"'\")", 1))),
         Map.entry("PciBuilderSession.java", Map.of(
             // SANCTIONED RAW (RDR-227, nexus-43ulx.16): CREATE INDEX CONCURRENTLY has no typed jOOQ form and cannot
             // run inside a function or a transaction block, so a SECURITY DEFINER wrapper is out and the builder
