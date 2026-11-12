@@ -128,7 +128,7 @@ public final class Main {
                 log.warn("event=export_disabled_by_pool_size pool_size={} every export open answers 503 "
                         + "export_capacity_full; raise NX_POOL_SIZE to 3 or more to enable it", poolSize);
             } else if (exportConfig.maxSessions() < dev.nexus.service.db.TenantExportSessions.Config.defaults().maxSessions()
-                    && (System.getenv(dev.nexus.service.db.TenantExportSessions.ENV_MAX_SESSIONS) == null)) {
+                    && java.util.Objects.requireNonNullElse(System.getenv(dev.nexus.service.db.TenantExportSessions.ENV_MAX_SESSIONS), "").isBlank()) {
                 log.warn("event=export_capped_by_pool_size pool_size={} max_sessions={}", poolSize,
                         exportConfig.maxSessions());
             }

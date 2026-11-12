@@ -392,7 +392,7 @@ public final class TenantExportReads {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             PgSession.GucBatch stamp = PgSession.gucBatch(ctx).stamp(TenantScope.DEFAULT_TENANT_GUC, tenant);
             PgSession.setLockTimeout(stamp, lockTimeoutMs);
-            stamp.set("statement_timeout", Integer.toString(budgetMs));   // the read's time budget, restarted per statement
+            stamp.set("statement_timeout", Integer.toString(budgetMs));   // the read's time budget; a page's rebound() spends what is left of it, a header statement gets it whole
             long deadline = System.nanoTime() + budgetMs * 1_000_000L;
             stamp.apply(conn);
             txn = new Txn(conn, ctx, deadline);
