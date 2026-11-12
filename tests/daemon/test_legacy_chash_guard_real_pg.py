@@ -44,10 +44,26 @@ def _psql(state: dict, db: str, sql: str) -> str:
     return out.stdout
 
 
+@pytest.fixture(scope="module")
+def substrate_cluster() -> dict:
+    """The test substrate's Postgres cluster, without a tenant: these tests make their own databases in it and never
+    touch the engine's tables, so minting a tenant per test would only count against the tenant ceiling
+    (tests/storage_touch_ceiling.toml). Skips where ``t2_service_env`` would, and boots the substrate the same way."""
+    from tests.db._service_fixture import jar_freshness_skip_reason  # noqa: PLC0415 — deferred: the conftest's own import
+
+    if (
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and not os.environ.get("NX_T2_SUBSTRATE_EXPECTED")
+        and jar_freshness_skip_reason() is not None
+    ):
+        pytest.skip("engine substrate: service JAR not provisioned on CI "
+                    "(tracked; NX_T2_SUBSTRATE_EXPECTED=1 re-arms fail-loud)")
+    return _engine_substrate.ensure_engine()
+
+
 @pytest.fixture
-def scratch_db(t2_service_env):
-    state = _engine_substrate._state
-    assert state, "the engine substrate is up (t2_service_env)"
+def scratch_db(substrate_cluster):
+    state = substrate_cluster
     name = f"guard_{uuid.uuid4().hex[:10]}"
     _psql(state, "postgres", f"CREATE DATABASE {name}")
     try:
