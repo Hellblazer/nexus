@@ -12,6 +12,7 @@ import dev.nexus.service.db.ChashConstraintValidator.Step;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -274,8 +275,9 @@ class ChashValidateCancelTest {
                     .set(CHUNKS.EMBEDDING_MODEL, MODEL).set(CHUNKS.CHUNK_TEXT, "row " + i)
                     .set(CHUNKS.EMBEDDING_768, Vector.of(new float[768])).execute();
             }
-            leaf = ctx.resultQuery("select c.relname::text from pg_class c where c.oid = (select tableoid from nexus.chunks limit 1)")
-                .fetchOne(0, String.class);
+            Long leafOid = ctx.select(DSL.field(DSL.name("tableoid")).cast(SQLDataType.BIGINT)).from(CHUNKS).limit(1)
+                .fetchOne(0, Long.class);
+            leaf = relname(ctx, leafOid);
         }
         AtomicInteger validates = new AtomicInteger();
         AtomicInteger afterStall = new AtomicInteger();
@@ -394,8 +396,14 @@ class ChashValidateCancelTest {
         System.setProperty(ChashConstraintValidator.RETRY_BACKOFF_PROPERTY, "15000");
         String partition;
         try (Connection su = pg.createConnection("")) {
-            partition = DSL.using(su, SQLDialect.POSTGRES).resultQuery("select c.relname::text from pg_inherits i join pg_class c "
-                + "on c.oid = i.inhrelid where i.inhparent = 'nexus.chunks'::regclass order by 1 limit 1").fetchOne(0, String.class);
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            Long chunksOid = ctx.select(DSL.function("to_regclass", Object.class, DSL.inline("nexus.chunks")).cast(SQLDataType.BIGINT))
+                .fetchOne(0, Long.class);
+            var inherits = DSL.table(DSL.name("pg_catalog", "pg_inherits"));
+            List<String> leaves = ctx.select(DSL.field(DSL.name("inhrelid")).cast(SQLDataType.BIGINT)).from(inherits)
+                .where(DSL.field(DSL.name("inhparent")).cast(SQLDataType.BIGINT).eq(chunksOid))
+                .fetch(0, Long.class).stream().map(o -> relname(ctx, o)).sorted().toList();
+            partition = leaves.get(0);
         }
         Connection held = pg.createConnection("");
         held.setAutoCommit(false);
@@ -437,5 +445,11 @@ class ChashValidateCancelTest {
         long validated = r.steps.stream().filter(s -> s.outcome() == Outcome.VALIDATED).count();
         assertThat(validated).isPositive();
         assertThat(validatedCount()).as("what the steps validated stays validated").isEqualTo(validated);
+    }
+
+    /** The name of the relation with this oid, read through typed jOOQ over pg_class. */
+    private static String relname(org.jooq.DSLContext ctx, Long oid) {
+        return ctx.select(DSL.field(DSL.name("relname")).cast(SQLDataType.VARCHAR)).from(DSL.table(DSL.name("pg_catalog", "pg_class")))
+            .where(DSL.field(DSL.name("oid")).cast(SQLDataType.BIGINT).eq(oid)).fetchOne(0, String.class);
     }
 }

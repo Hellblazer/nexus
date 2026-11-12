@@ -616,6 +616,8 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("ChashConstraintValidator.planRows", TEST_HOOK);
             notKeyed.put("ChashConstraintValidator.activeController", "the controller session of the run in flight (a connection "
                 + "handle), kept so the shutdown can cancel its statement; no tenant's rows, cleared when the run ends");
+            notKeyed.put("ChashConstraintValidator.activeListener", "the listener of the run in flight, kept so a cancel can "
+                + "check that it names this run; no tenant's rows, cleared when the run ends");
             notKeyed.put("ChashConstraintValidator.activeStep", "the step session in flight (a connection handle), kept so the "
                 + "shutdown can cancel its statement; it holds no tenant's rows and is cleared when the step ends");
             notKeyed.put("AdminDdlSession.resendAdminForTests", TEST_HOOK);
