@@ -1,10 +1,12 @@
-# Backup and restore of the local engine's database
+# Backup and restore
 
-`nx backup` writes one file holding the local engine's whole database. It is a verb you run. Nothing runs it for you: `nx upgrade`, `nx doctor`, `nx init`, `nx self`, the hooks and the daemons never call it, and a test fails on a Python import, a subprocess command line or a hook or script line under the repository's code directories that would (it cannot see a command assembled at run time). Bead nexus-f3yqd.4.
+This page has two parts. [Local mode](#taking-a-backup) backs up the local engine's whole database with `pg_dump` and restores it by hand into a fresh database. [Cloud mode](#cloud-tenant-backups-managed-mode) backs up your own tenant of the managed service into one `.nxtenant` file and checks it offline.
+
+`nx backup` in local mode writes one file holding the local engine's whole database. It is a verb you run. Nothing runs it for you: `nx upgrade`, `nx doctor`, `nx init`, `nx self`, the hooks and the daemons never call it, and a test fails on a Python import, a subprocess command line or a hook or script line under the repository's code directories that would (it cannot see a command assembled at run time). Bead nexus-f3yqd.4.
 
 There is no automatic backup; this file is the only copy besides the live database. Copy it to another disk or machine.
 
-Local mode only. In managed (cloud) mode `nx backup` refuses: cloud backups are on the conexus side.
+The rest of this part is local mode. In managed (cloud) mode `nx backup` takes the cloud arm, described [below](#cloud-tenant-backups-managed-mode).
 
 ## Taking a backup
 
@@ -219,3 +221,46 @@ Windows (PowerShell):
 ## Why these commands are trustworthy
 
 The commands above are not hand-typed twice. `nexus.backup.pg_backup.restore_sections` renders them, `nx backup` prints the restore commands with the real bundle path, and `tests/test_nx_backup.py` reads the fenced blocks on this page, puts in scratch database names, fills in the placeholders and runs them (the restore, the connection check, the swap, the undo, both drops) against a real dump on a real test cluster, with nothing on PATH. A drift between this page and the code turns that test red. The start-Postgres command is compared with the argv the engine's own start code builds. The Windows blocks are compared with the renderer's output on every platform, but the test executes only the macOS and Linux blocks; the Windows ones have not been run against a real dump.
+
+## Cloud tenant backups (managed mode)
+
+RDR-248, beads nexus-csayy.2 (the engine's routes) and nexus-csayy.3 (the client). A cloud user holds a token, not the database, so the engine writes the backup: it reads ONE consistent snapshot of your tenant and serves it in pages, and `nx backup` joins the pages into one file. It is still a verb you run; nothing runs it for you, and the only-copy sentence above applies to this file too.
+
+```
+nx backup                                   # ~/nexus-backups/nexus-<tenant>-<UTC yyyymmddThhmmssZ>.nxtenant
+nx backup --to /Volumes/Big/before-move.nxtenant
+nx backup --check ~/nexus-backups/nexus-acme-20261112T190000Z.nxtenant
+```
+
+### What you need
+
+- A managed install (`nx config` shows a `service_url`) and a **tenant or data token** for your tenant. The engine's operator (root) token is refused by the export routes with `export_scope_forbidden`; the verb says so and names what to use instead (`nx config set service_token <token>`). A data token from `mint_token` is re-minted on its own.
+- An engine that has the export routes: engine 0.1.191 or later. The verb reads `tenant_export_supported` from the engine's `/version` first. An engine without it is refused before any session opens, naming 0.1.191. Who upgrades the managed engine is the operator's decision, not the client's.
+
+### What the file holds
+
+Every `data` and `derived` table of your tenant from one snapshot: the catalog (documents, links, chunk manifests, collections), T3 chunks with their embeddings, T2 notes, plans, document aspects and highlights, taxonomy, the rebuildable telemetry and frecency tables, and the `embedding_models` rows the chunks refer to. A sensitive document (RDR-243) is in the file like everything else, and the verb says how many the file holds; the file is created readable by you only (mode 0600; the directory it creates 0700), so keep it that way.
+
+It leaves out operational state: tuples and their claims and deliveries (their ids hash the tenant, so they cannot move), in-flight PDF and re-embed jobs, session scratch (T1), and the request ledger, tier writes, routing events and the other logs. The verb prints this after every run. No credential is in the file: tokens live in global tables the export cannot read.
+
+### How a run goes
+
+1. `GET /version`: the export flag and format. Then `POST /v1/tenant/export` opens your session (one per tenant). The engine holds a read-only snapshot for it and reads no table, so other tenants and tenant creation are not held up.
+2. Every table, from its first page, page by page (each page about 16 MB, cut by bytes), each checked on arrival: its SHA-256 and its row count against the engine's headers. A failed page is asked for again from the same key, up to five tries with waits of 1, 2, 4 and 8 seconds (an engine `Retry-After` is obeyed instead). When the tries run out the session is closed, the partial file removed and the verb says to run it again.
+3. A token that expires mid-run is replaced (re-minted, or re-read from config) and the SAME page is asked for again: the session belongs to your tenant, not to the token.
+4. If the engine forgets the session (it restarted, or the request reached another instance), the verb starts over with a new one, at most twice. A session is also ended by the engine 10 minutes after its last page and 60 minutes after it opened. If that happens, the verb names the 60-minute limit; a tenant whose export needs longer than that fails loudly instead of holding the database's snapshot open (RDR-248 A5).
+5. The session is closed (DELETE), the file is checked again from disk, and only then moved into its name. An existing destination is refused, never overwritten, at the start and again at the move.
+
+Ctrl-C, SIGTERM and SIGHUP stop the run, send a best-effort DELETE so the engine drops the snapshot at once instead of after its idle bound, and remove the partial file (`.<name>.partial-<pid>` beside the destination). A killed process (SIGKILL) cannot clean up: remove a leftover partial by hand; the engine closes the abandoned session itself, and the next run deletes it first if it is still listed.
+
+How long it takes is the connection's rate: the database reads a large tenant in about a minute and a half; the rest is the transfer (about 6 minutes for 3.8 GB at 10 MB/s). The first real cloud run records the actual rate (RDR-248 Activation Step 2).
+
+### Checking a file
+
+`nx backup --check FILE` reads the file and contacts nothing (no engine, no token, either mode). It checks the frame structure, each page's SHA-256 and row count, each table's count and SHA-256 against the file's trailer, and one SHA-256 over the whole file, then prints the header: tenant, engine version, export format, schema changeset count, snapshot time, and every table with its class, rows and pages. A file that does not verify is refused naming the table at fault, and nothing is printed as OK. A truncated copy (an interrupted download of the file, a full disk) reads "the file is truncated in ..."; a flipped byte in a page, "table X page N: its hash is ...".
+
+The `.nxtenant` layout is described in `src/nexus/backup/tenant_file.py` (a magic, then header, table, page and trailer frames; each page is the engine's own binary COPY stream, kept byte for byte).
+
+### Restoring
+
+There is no restore command for a cloud backup yet. RDR-248 Phase 2 adds `nx backup restore FILE`, which loads a file into an EMPTY tenant (it can never overwrite data) through an engine import session. Until it ships, a restore is an operator task done from the file: keep it, and ask your operator. The local `pg_restore` runbook above is for the local engine's whole database and does not apply to a `.nxtenant` file.

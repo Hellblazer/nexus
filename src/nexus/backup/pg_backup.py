@@ -58,8 +58,8 @@ LOCK_WAIT_TIMEOUT = "60s"
 _VERIFY_TIMEOUT_S = 300.0
 
 MANAGED_REFUSAL = (
-    "nx backup backs up the LOCAL engine's database only. This install is in managed (cloud) mode: "
-    "cloud backups are on the conexus side, not something you run here."
+    "This resolver finds the LOCAL engine's database, and this install is in managed (cloud) mode, which has "
+    "none. `nx backup` takes the cloud arm there (an export of your tenant); nothing should reach here."
 )
 NOT_RUNNING_REFUSAL = (
     "The local database is not accepting connections on 127.0.0.1:{port}, so there is nothing to "

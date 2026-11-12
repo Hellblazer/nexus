@@ -35,10 +35,17 @@ REPO = Path(__file__).resolve().parent.parent
 SCAN_ROOTS = (
     "src", "conexus", "sn", "scripts", "mcpb", "dt", "prose-edit", "tool-spill", "bench", "infra", ".github",
 )
-#: Files allowed to mention the verb however they like: the verb, its library, and cli.py (which imports the verb).
-_SELF = {"src/nexus/commands/backup_cmd.py", "src/nexus/backup/pg_backup.py"}
+#: Files allowed to mention the verb however they like: the verb, its libraries (the local dump, and the cloud
+#: arm's session driver and file format, nexus-csayy.3), and cli.py (which imports the verb).
+_SELF = {
+    "src/nexus/commands/backup_cmd.py", "src/nexus/backup/pg_backup.py",
+    "src/nexus/backup/cloud_export.py", "src/nexus/backup/tenant_file.py",
+}
+_VERB_AND_ARM = "src/nexus/commands/backup_cmd.py"
 _MODULES = {
-    "nexus.backup.pg_backup": {"src/nexus/commands/backup_cmd.py"},
+    "nexus.backup.pg_backup": {_VERB_AND_ARM},
+    "nexus.backup.cloud_export": {_VERB_AND_ARM},
+    "nexus.backup.tenant_file": {_VERB_AND_ARM},
     "nexus.commands.backup_cmd": {"src/nexus/cli.py"},
 }
 _SKIP_DIRS = {"__pycache__", "node_modules", ".venv", "target", ".git", "dist", "build"}
@@ -222,6 +229,8 @@ def test_nothing_but_the_cli_verb_reaches_the_backup_entry_point() -> None:
 def test_the_files_the_scan_trusts_still_exist() -> None:
     assert (REPO / "src/nexus/commands/backup_cmd.py").is_file()
     assert (REPO / "src/nexus/backup/pg_backup.py").is_file()
+    assert (REPO / "src/nexus/backup/cloud_export.py").is_file()
+    assert (REPO / "src/nexus/backup/tenant_file.py").is_file()
     assert "backup_cmd" in (REPO / "src/nexus/cli.py").read_text(encoding="utf-8")
 
 
@@ -232,6 +241,10 @@ _PLANTED = [
     ("src/nexus/upgrade_ladder/x.py", "from nexus.backup import pg_backup\n", "imports nexus.backup.pg_backup"),
     ("src/nexus/upgrade_ladder/x.py", "import nexus.backup.pg_backup\n", "imports nexus.backup.pg_backup"),
     ("src/nexus/upgrade_ladder/x.py", "from nexus.commands.backup_cmd import backup\n", "imports nexus.commands.backup_cmd"),
+    ("src/nexus/upgrade_ladder/x.py", "from nexus.backup.cloud_export import run_export\n", "imports nexus.backup.cloud_export"),
+    ("src/nexus/upgrade_ladder/x.py", "from nexus.backup import cloud_export\n", "imports nexus.backup.cloud_export"),
+    ("src/nexus/upgrade_ladder/x.py", "from nexus.backup.tenant_file import verify_file\n", "imports nexus.backup.tenant_file"),
+    ("src/nexus/upgrade_ladder/x.py", "import importlib\nimportlib.import_module('nexus.backup.cloud_export')\n", "imports nexus.backup.cloud_export"),
     ("src/nexus/upgrade_ladder/x.py", "import importlib\nimportlib.import_module('nexus.backup.pg_backup')\n", "imports nexus.backup.pg_backup"),
     ("src/nexus/upgrade_ladder/x.py", "import subprocess\nsubprocess.run(['nx', 'backup'])\n", "(argv)"),
     ("src/nexus/upgrade_ladder/x.py", "main(['backup'])\n", "(argv)"),
