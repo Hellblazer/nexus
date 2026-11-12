@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F30 (nexus-f3yqd.6): the doctor's three index-run rows read the engine's census routes (engine 0.1.190).
+"""F30 (nexus-f3yqd.6): the doctor's three index-run rows read the engine's census routes (engine 0.1.189).
 
 The rows run in the default sweep and under ``--check-index-runs`` from two bounded requests and no catalog walk
 (``catalog_index_run_census_supported``, ``catalog_next_seq_drift_read_supported``). Every way the engine cannot say (a
@@ -258,7 +258,7 @@ def test_a_census_the_engine_computed_by_other_rules_says_so_on_the_census_rows_
 # ── no routes: three not-checked rows that say what they need ───────────────
 
 
-_ADVERTISE = "does not advertise the census routes (engine 0.1.190 or later; on the managed service, also the edge's /version allowlist)"
+_ADVERTISE = "does not advertise the census routes (engine 0.1.189 or later; on the managed service, also the edge's /version allowlist)"
 
 
 class _ProbeReader:
@@ -303,7 +303,7 @@ def test_a_reader_that_does_not_read_the_routes_says_so(monkeypatch: pytest.Monk
     for label in _LABELS:
         (r,) = rows[label]
         assert _is_not_checked(r) and "this catalog reader does not read the census routes" in r.detail, r.detail
-        assert "engine 0.1.190" not in r.detail
+        assert "engine 0.1.189" not in r.detail
 
 
 @pytest.mark.parametrize("reader", [

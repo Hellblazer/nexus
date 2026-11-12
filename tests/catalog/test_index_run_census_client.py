@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``HttpCatalogClient.index_run_census`` and ``next_seq_drift`` (nexus-f3yqd.6, F30): the engine's two bounded census
 reads behind the doctor's index-run rows (``GET /v1/catalog/index-run/census`` and ``GET
-/v1/catalog/owners/next_seq_drift``, engine 0.1.190; flags ``catalog_index_run_census_supported`` and
+/v1/catalog/owners/next_seq_drift``, engine 0.1.189; flags ``catalog_index_run_census_supported`` and
 ``catalog_next_seq_drift_read_supported``).
 
 ``None`` means "cannot say", never "none found": no flag (no request is sent), a 403, 404 or 503, any error, or a body

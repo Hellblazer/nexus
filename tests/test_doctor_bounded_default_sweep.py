@@ -32,7 +32,7 @@ _INDEX_RUN_LABELS = ("stale index-run fences", "failed index runs with hidden ch
 
 
 class _OldEngineCatalog:
-    """A catalog reader of an engine before 0.1.190: it advertises neither census route."""
+    """A catalog reader of an engine before 0.1.189: it advertises neither census route."""
 
     def index_run_routes_supported(self) -> bool:
         return False

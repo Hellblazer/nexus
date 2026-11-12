@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The wire contract of ``nx doctor``'s bounded engine routes (nexus-f3yqd.6): the 0.1.189 stub-metadata and chash
-conformance bodies, and the 0.1.190 census routes (``GET /v1/catalog/index-run/census``, ``GET
+conformance bodies, and the 0.1.189 census routes (``GET /v1/catalog/index-run/census``, ``GET
 /v1/catalog/owners/next_seq_drift``). Constants, body validators and readers, kept out of the over-cap
 ``http_catalog_client`` module, whose methods call them."""
 from __future__ import annotations
@@ -12,7 +12,7 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-#: The index-run census read's client timeout (engine 0.1.190, nexus-f3yqd.6). The engine runs its three buckets in
+#: The index-run census read's client timeout (engine 0.1.189, nexus-f3yqd.6). The engine runs its three buckets in
 #: series, each under the smaller of its own 10 s bound and what is left of one 25 s budget for the call
 #: (``IndexRunCensusReads.CALL_BUDGET_MS``), so it answers inside about 25 s, a bucket out of time as ``timed_out``.
 #: This is above that and under the public edge's roughly 30 s cut. A cut, by the edge or by this timeout, is an error
@@ -155,7 +155,7 @@ def _valid_next_seq_drift(body: object) -> dict | None:
 
 
 def read_index_run_census(http_get: Callable[..., Any], flags: dict, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | object | None:
-    """The engine's bounded census of the index-run fence (``GET /v1/catalog/index-run/census``, engine 0.1.190,
+    """The engine's bounded census of the index-run fence (``GET /v1/catalog/index-run/census``, engine 0.1.189,
     nexus-f3yqd.6): ``{"stale": ..., "fence": ..., "failed_hidden": ...}``, each bucket either the engine's object
     (see ``IndexRunCensusReads``) or ``{"timed_out": True}`` when that bucket could not be read in time (the
     others still answer). A bucket's ``capped`` means more exist than *limit*, so its count reads "at least".
@@ -184,7 +184,7 @@ def read_index_run_census(http_get: Callable[..., Any], flags: dict, limit: int 
 
 def read_next_seq_drift(http_get: Callable[..., Any], flags: dict, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | None:
     """The owners whose ``next_seq`` trails their highest child, read without flooring them (``GET
-    /v1/catalog/owners/next_seq_drift``, engine 0.1.190, nexus-f3yqd.6): ``{"checked", "drifted", "capped",
+    /v1/catalog/owners/next_seq_drift``, engine 0.1.189, nexus-f3yqd.6): ``{"checked", "drifted", "capped",
     "examples": [{"owner", "next_seq", "highest_child_seq"}]}``. ``drifted`` counts every drifted owner;
     ``examples`` lists at most *limit* of them and ``capped`` says it holds fewer than ``drifted``.
 

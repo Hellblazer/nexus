@@ -1268,20 +1268,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     def index_run_routes_supported(self) -> bool:
         """Does the engine answer both doctor census routes (``GET /version``'s ``catalog_index_run_census_supported``
-        and ``catalog_next_seq_drift_read_supported``, engine 0.1.190, nexus-f3yqd.6)? Only JSON ``true`` counts, so an
+        and ``catalog_next_seq_drift_read_supported``, engine 0.1.189, nexus-f3yqd.6)? Only JSON ``true`` counts, so an
         engine before them, or a public edge whose ``/version`` allowlist does not list them, reads False."""
         flags = self._version_flags()
         return (flags.get("catalog_index_run_census_supported") is True
                 and flags.get("catalog_next_seq_drift_read_supported") is True)
 
     def index_run_census(self, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | object | None:
-        """The engine's bounded index-run census (``GET /v1/catalog/index-run/census``, engine 0.1.190): see
+        """The engine's bounded index-run census (``GET /v1/catalog/index-run/census``, engine 0.1.189): see
         :func:`nexus.catalog.doctor_route_wire.read_index_run_census`. ``None`` is "cannot say"."""
         return read_index_run_census(self._get, self._version_flags(), limit)
 
     def next_seq_drift(self, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | None:
         """The owners whose ``next_seq`` trails their highest child (``GET /v1/catalog/owners/next_seq_drift``, engine
-        0.1.190): see :func:`nexus.catalog.doctor_route_wire.read_next_seq_drift`. ``None`` is "cannot say"."""
+        0.1.189): see :func:`nexus.catalog.doctor_route_wire.read_next_seq_drift`. ``None`` is "cannot say"."""
         return read_next_seq_drift(self._get, self._version_flags(), limit)
 
     def chash_conformance_report(self, dim: int) -> dict:

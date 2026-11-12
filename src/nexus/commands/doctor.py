@@ -3159,7 +3159,7 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="Run only the three index-run rows (stale index-run fences, failed index runs with hidden chunks, "
          "tumbler allocator drift), which the default sweep also runs. They read the engine's census routes "
-         "(two bounded requests); an engine before 0.1.190 reports them not checked.",
+         "(two bounded requests); an engine before 0.1.189 reports them not checked.",
 )
 @click.option(
     "--check-plan-library",

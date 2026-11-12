@@ -13231,7 +13231,7 @@ _INDEX_RUN_LABELS = (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL, _NEXT_SEQ_LABEL)
 #: Why the rows are not checked when the reader answers its /version without both census flags. It says only what is
 #: known: an older engine and a public edge that has not allowlisted the flags look the same from here. Retrying
 #: changes nothing until the engine (or the edge's allowlist) does.
-_CENSUS_NOT_ADVERTISED = ("this engine's /version does not advertise the census routes (engine 0.1.190 or later; "
+_CENSUS_NOT_ADVERTISED = ("this engine's /version does not advertise the census routes (engine 0.1.189 or later; "
                           "on the managed service, also the edge's /version allowlist)")
 #: The engine echoed a threshold or floor that is not the client's (``INDEX_RUN_CENSUS_RULES_DIFFER``).
 _CENSUS_RULES_DIFFER = ("the engine judges stale fences by a different threshold or floor than this client "
@@ -13314,13 +13314,13 @@ def _next_seq_drift_rows_from_route(label: str, drift: dict) -> list[HealthResul
 
 def _check_index_run_routes() -> list[HealthResult]:
     """The three index-run rows (stale index-run fences, failed runs with hidden chunks, tumbler allocator drift) read
-    from the engine's census routes (engine 0.1.190, nexus-f3yqd.6): two bounded requests, no catalog walk. Always
+    from the engine's census routes (engine 0.1.189, nexus-f3yqd.6): two bounded requests, no catalog walk. Always
     returns the three labels (the stale-fence row may carry more than one row), and never raises.
 
     An engine that does not advertise both ``catalog_index_run_census_supported`` and
     ``catalog_next_seq_drift_read_supported`` (an older engine, or a public edge whose ``/version`` allowlist does
     not list them) gets three not-checked rows that say only that its /version does not advertise the routes (engine
-    0.1.190 or later; on the managed service, also the edge's allowlist); a /version probe that itself failed gets
+    0.1.189 or later; on the managed service, also the edge's allowlist); a /version probe that itself failed gets
     rows that say so and that the next run asks again. Every way the engine
     cannot say with the flags set (a 404 or 503, a bucket that timed out, a malformed body, a failed request, no
     catalog reader) is likewise a not-checked row: ok and skipped, never a warning, never "none"."""
@@ -13383,7 +13383,7 @@ def _check_index_run_routes() -> list[HealthResult]:
 
 def run_index_run_checks() -> list[HealthResult]:
     """``nx doctor --check-index-runs``: the three index-run rows alone, read from the engine's census routes as the
-    default sweep reads them (:func:`_check_index_run_routes`; engine 0.1.190 or later)."""
+    default sweep reads them (:func:`_check_index_run_routes`; engine 0.1.189 or later)."""
     return _check_index_run_routes()
 
 
@@ -13398,7 +13398,7 @@ def run_health_checks(
 
     The three index-run rows (stale index-run fences, failed runs with hidden chunks, allocator drift) are read from
     the engine's two census routes: two bounded requests, no catalog walk (the walk took 22 s on a laptop tenant;
-    :func:`_check_index_run_routes`, F30, nexus-f3yqd.6). An engine before 0.1.190 gets three not-checked rows that
+    :func:`_check_index_run_routes`, F30, nexus-f3yqd.6). An engine before 0.1.189 gets three not-checked rows that
     say so.
 
     ``git_hooks_scope``: forwarded to :func:`_check_git_hooks` (nexus-jds59)
@@ -13494,7 +13494,7 @@ def run_health_checks(
     # nexus-5xn3k.6 (bead-text amendment): a document's fence never
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).
-    # F30 (nexus-f3yqd.6): the three index-run rows come from the engine's two census routes (0.1.190), not from a
+    # F30 (nexus-f3yqd.6): the three index-run rows come from the engine's two census routes (0.1.189), not from a
     # walk of every catalog document (22 s on a laptop tenant); an engine without them leaves three not-checked rows.
     index_run_rows: dict[str, list[HealthResult]] = {}
     for row in _step("_check_index_run_routes", lambda: _check_index_run_routes()):

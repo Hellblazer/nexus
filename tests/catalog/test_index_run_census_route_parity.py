@@ -5,7 +5,7 @@
 ``_next_seq_drift_rows_over``, and ``heal_manifest_gaps(dry_run=True).reconciled`` behind ``_failed_hidden_rows_over``) to
 the tables the engine's Java tests hold its SQL to, so the SQL and the oracle agree. This module holds the third leg: for
 each case the engine's answer is rebuilt from the table's expected numbers (what the SQL is proven to return), fed through
-the rows a default ``nx doctor`` runs against engine 0.1.190, and the rows must equal the oracle's, text and marks. A
+the rows a default ``nx doctor`` runs against engine 0.1.189, and the rows must equal the oracle's, text and marks. A
 change to the rendering of either path that the other does not follow, or to the table that the route rows do not follow,
 fails here.
 """
