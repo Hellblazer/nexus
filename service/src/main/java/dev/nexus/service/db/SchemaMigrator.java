@@ -788,11 +788,7 @@ public final class SchemaMigrator {
 
     // ── nexus-q81g7: session pin, walk-start diagnostics, split-history refusal ──
 
-    /**
-     * Pins the session's {@code TimeZone} to UTC (nexus-rph82; see the comment at the call site in
-     * {@link #migrate}). Package-private so a caller outside {@code migrate} (a test tool) opens its
-     * session exactly as a walk does.
-     */
+    /** Pins the session's {@code TimeZone} to UTC (nexus-rph82; see {@link #migrate}), shared with a test tool. */
     static void pinSessionTimeZoneToUtc(Connection conn) throws SQLException {
         try {
             DSL.using(conn, SQLDialect.POSTGRES)
@@ -807,8 +803,7 @@ public final class SchemaMigrator {
     /**
      * The Liquibase {@link Database} a walk runs on, with its bookkeeping pinned to {@code public}. Extracted
      * verbatim from {@link #migrate} so a caller outside {@code migrate} (a test tool) builds it identically.
-     *
-     * <p>Callers pin the session first ({@link #pinSessionTimeZoneToUtc}, {@link #pinSearchPathToPublic}):
+     * Callers pin the session first ({@link #pinSessionTimeZoneToUtc}, {@link #pinSearchPathToPublic}):
      * Liquibase leaves a search_path that already starts with the default schema alone.
      */
     static Database openLiquibaseDatabase(Connection conn) throws LiquibaseException {
