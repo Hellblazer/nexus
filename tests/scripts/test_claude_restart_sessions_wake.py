@@ -12,8 +12,10 @@ import argparse
 import importlib.machinery
 import importlib.util
 import json
+import os
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -109,7 +111,7 @@ class Box:
         monkeypatch.setattr(crs, "pane_has_draft", lambda _p: draft)
         monkeypatch.setattr(crs, "withdraw_ask", lambda *a: self.withdrawn.append(a) or withdraw)
         monkeypatch.setattr(crs, "plugin_versions", lambda: {"conexus@nexus-plugins": "8.2.0"})
-        monkeypatch.setattr(crs, "TMP", tmp_path)
+        monkeypatch.setattr(crs, "WAKE_DIR", tmp_path / "restart-wake")
         monkeypatch.setattr(crs, "UNWITHDRAWN", [])
         monkeypatch.setattr(crs, "WAKE_IDLE_WAIT", 0)
         monkeypatch.setattr(crs, "WAKE_BUSY_WAIT", 0)
@@ -120,8 +122,8 @@ class Box:
 
     def typed_text(self) -> str:
         """What the typed pointer points at: the line is short, the text is in the file it names."""
-        assert self.typed == [f"Read {self.tmp / 'rw-sid-new.txt'}"]
-        return (self.tmp / "rw-sid-new.txt").read_text(encoding="utf-8")
+        assert self.typed == [f"Read {self.tmp / 'restart-wake' / 'rw-sid-new.txt'}"]
+        return (self.tmp / "restart-wake" / "rw-sid-new.txt").read_text(encoding="utf-8")
 
 
 def test_the_wake_text_names_the_version_the_script_and_the_board(crs, monkeypatch) -> None:
@@ -319,4 +321,17 @@ def test_revive_wakes_each_session_it_resumed(crs, monkeypatch, tmp_path) -> Non
 
 def test_the_typed_line_in_production_is_short(crs) -> None:
     # long send-keys text arrives truncated (only the last 50-65 characters, ask_line): the line points at a file
-    assert crs.TMP == Path("/tmp") and len(f"Read {crs.TMP / 'rw-0123abcd.txt'}") < 50
+    assert crs.WAKE_DIR == Path.home() / ".claude" / "restart-wake"
+    assert len("Read ~/.claude/restart-wake/rw-0123abcd.txt") < 50
+
+
+def test_a_typed_wake_file_lives_in_home_and_old_ones_are_pruned(crs, monkeypatch, tmp_path) -> None:
+    box = Box(crs, monkeypatch, tmp_path, channel=False)
+    stale = tmp_path / "restart-wake" / "rw-deadbeef.txt"
+    stale.parent.mkdir()
+    stale.write_text("old", encoding="utf-8")
+    os.utime(stale, (time.time() - 2 * 86400,) * 2)
+    fresh = tmp_path / "restart-wake" / "rw-cafef00d.txt"
+    fresh.write_text("today", encoding="utf-8")
+    assert crs.wake(box.s) == "typed"
+    assert not stale.exists() and fresh.exists() and "board entry" in box.typed_text()

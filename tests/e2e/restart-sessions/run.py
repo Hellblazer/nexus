@@ -1543,7 +1543,10 @@ def scenario_pane(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
             failures.append(f"{name}: expected one 'woken by {want}' log line after the resume, found {how}")
         else:
             notes.append(f"{name} woken by {want}")
-        if not any(e.get("type") == "user" and WAKE_MARK in json.dumps(e) for e in sb.events(str(was.get("sessionId")))):
+        # mail arrives through the UserPromptSubmit hook as an `attachment` entry; a typed pointer as a `user`
+        # entry and the file's text in the Read result
+        if not any(e.get("type") in ("user", "attachment") and WAKE_MARK in json.dumps(e)
+                   for e in sb.events(str(was.get("sessionId")))):
             failures.append(f"{name}: no wake prompt ({WAKE_MARK!r}) in its resumed transcript")
         elif name in spec.channel:
             # the mail is unattested: the session is told to check the script's marker first (origin_note)

@@ -12,7 +12,8 @@ not pile up one per restart. Once every restart is done, each resumed session ge
 wake prompt, saying what it was restarted onto and to re-read its board entry: as conexus
 mail with the same origin note and marker as every ask from here when it has the channel
 (typed instead only when no turn starts within a minute and the mail is confirmed
-withdrawn), else typed as a short pointer to a file, and typed only into an empty prompt.
+withdrawn), else typed as a short pointer to ~/.claude/restart-wake/rw-<id>.txt, and
+typed only into an empty prompt.
 --no-wake leaves it idle as before.
 
 It always runs detached inside the tmux server (tmux run-shell -b), so it can
@@ -1577,11 +1578,25 @@ def _mail_wake(s: dict, text: str) -> tuple[str, str, Path | None]:
     return ("maybe", "", marker) if marker is not None else ("failed", "", None)
 
 
+#: Where the typed wake's text is written: inside HOME, one file per session id, overwritten each round, so the
+#: session can read it whenever its turn gets to it (a file removed at the end of the run would race that read).
+WAKE_DIR = Path.home() / ".claude" / "restart-wake"
+
+
 def _type_wake(s: dict, text: str) -> str:
     """Type a short pointer to the wake text (long send-keys text arrives truncated: see ask_line)."""
-    note = TMP / f"rw-{s['sessionId'][:8]}.txt"
+    WAKE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cutoff = time.time() - 86400
+    for old in WAKE_DIR.glob("rw-*.txt"):  # a session that is gone leaves its file; a day is long enough
+        try:
+            if old.is_file() and old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+    note = WAKE_DIR / f"rw-{s['sessionId'][:8]}.txt"
     note.write_text(text + "\n", encoding="utf-8")
-    if submit(s["pane"], f"Read {note}", Path(s["file"])):
+    shown = f"~/{note.relative_to(Path.home())}" if note.is_relative_to(Path.home()) else str(note)
+    if submit(s["pane"], f"Read {shown}", Path(s["file"])):
         log(f"{label(s)}: woken by a typed prompt")
         return "typed"
     log(f"WARN {label(s)}: the typed wake did not start a turn; check pane {s['pane']}")
