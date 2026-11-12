@@ -9,8 +9,8 @@
 -- for the caller to write with memory_put. Nothing here writes: two adds to one RDR at
 -- the same moment can take the same number, so the caller reads the title back before
 -- writing and runs this again if it is taken. The finding is returned as given; it is
--- a value in a table, never shell text. The record is the one `nx rdr preamble
--- rdr-research -- add` writes: title, content lines and tags.
+-- a value in a table, never shell text. It replaced the retired bare-argument CLI add
+-- (RDR-240 TD7) and returns the same record: title, content lines and tags.
 
 local args = ...
 

@@ -715,7 +715,9 @@ def _drive_enrich_bib(world: CanaryWorld) -> None:
 
     for source in ("s2", "openalex"):
         for collection in world.collections:
-            enrich_mod.run_bib_enrichment(collection, delay=0, source=source)
+            # "any": the corpus is knowledge notes, and the canary wants the widest reach, not
+            # the paper-only default (GH #1611 item 5).
+            enrich_mod.run_bib_enrichment(collection, delay=0, source=source, content_type="any")
 
 
 @driver("nexus.commands.enrich:_dt_crossref_bib")
@@ -737,7 +739,7 @@ def _drive_dt_crossref(world: CanaryWorld) -> None:
 
     mp.setattr("nexus.mcp_client.devonthink.dt_resolve_doi", resolve)
     for collection in world.collections:
-        enrich_mod.run_bib_enrichment(collection, delay=0, source="dt")
+        enrich_mod.run_bib_enrichment(collection, delay=0, source="dt", content_type="any")
     assert any(
         '"crossref-via-dt"' in r and world.canary_control in r for r in world.capture.requests
     ), "harness: the CrossRef gap-fill never asked about the control document's DOI, so the leg did not run"
@@ -1483,26 +1485,30 @@ def _exclude_cases() -> list[Any]:
     ]
 
 
-@pytest.mark.sensitivity_reads
-@pytest.mark.parametrize("surface", _exclude_cases())
-def test_harness_a_read_path_that_ignores_the_posture_turns_every_exclude_row_red(
-    surface: Surface, t2_service_env: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+def _every_exclude_row_goes_red_when_a_read_path_ignores_the_posture(
+    surface: Surface, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, route: bool,
 ) -> None:
-    """The mutation, in the suite: ``HttpVectorClient.search_per_collection`` (the route the cross-corpus
-    pools and the MCP search take) is made to send ``include`` whatever the caller passed, which is what
+    """The mutation: the client method a search read goes through (``search_per_collection`` with the
+    per-collection route opted in, else ``search``, the batched ``/v1/vectors/search`` read that is the
+    default since nexus-tu8wp.3) is made to send ``include`` whatever the caller passed, which is what
     hard-coding ``sensitivity="include"`` at its ``search_engine`` call site does. Every Phase 2 row must
     go red: with the engine filter gone, the canary text, the sensitive chunk's id or the surface's own
     report of it reaches a payload. A row that stays green here would pass with its filter deleted."""
     import nexus.db.http_vector_client as hvc  # noqa: PLC0415 - after the substrate is pinned
 
+    if route:
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")
+    else:
+        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
     world = build_world(monkeypatch, workdir=tmp_path)
-    current = hvc.HttpVectorClient.search_per_collection
+    method = "search_per_collection" if route else "search"
+    current = getattr(hvc.HttpVectorClient, method)
 
     def include_always(self: Any, *a: Any, **kw: Any) -> Any:
         kw["sensitivity"] = "include"
         return current(self, *a, **kw)
 
-    monkeypatch.setattr(hvc.HttpVectorClient, "search_per_collection", include_always)
+    monkeypatch.setattr(hvc.HttpVectorClient, method, include_always)
     # RDR-243 Phase 3 (nexus-rfvyy.8.2): the MCP search tools now withhold a sensitive hit at their output whatever
     # the read asked for, so with the engine filter deleted that second layer would hide the leak this mutation is
     # meant to show. The mutation removes both layers: the output posture reads ``flag`` for the run.
@@ -1516,8 +1522,25 @@ def test_harness_a_read_path_that_ignores_the_posture_turns_every_exclude_row_re
     else:
         red = judge(world, surface.name, reads=True, pool=True) or ""
     assert any(k in red for k in ("sensitive", "engine")), (
-        f"row {surface.name!r} stayed green with every search read as include: {red!r}"
+        f"row {surface.name!r} stayed green on the {'route' if route else 'batched /search'} path "
+        f"with every search read as include: {red!r}"
     )
+
+
+@pytest.mark.sensitivity_reads
+@pytest.mark.parametrize("surface", _exclude_cases())
+def test_harness_a_read_path_that_ignores_the_posture_turns_every_exclude_row_red(
+    surface: Surface, t2_service_env: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The mutation, in the suite, on both read paths in one tenant: first the per-collection route (opt-in
+    since nexus-tu8wp.3, so this phase opts in) with ``search_per_collection`` sending ``include``, then the
+    default batched ``/v1/vectors/search`` path (route off) with ``search`` sending ``include``. Each phase
+    builds its own world in its own undo scope, and each must turn the row red."""
+    for route in (True, False):
+        workdir = tmp_path / ("route" if route else "batched")
+        workdir.mkdir()
+        with pytest.MonkeyPatch.context() as mp:
+            _every_exclude_row_goes_red_when_a_read_path_ignores_the_posture(surface, mp, workdir, route=route)
 
 
 # --------------------------------------------------------------------------- #

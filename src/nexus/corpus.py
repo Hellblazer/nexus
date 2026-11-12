@@ -863,6 +863,24 @@ def split_candidate_collection_name(name: str) -> tuple[str, str]:
     return m.group(1), m.group(2)
 
 
+def candidate_knowledge_subject(name: str) -> str:
+    """The subject of a ``--collection`` argument when it names a knowledge collection, else ``""`` (GH #1611).
+
+    A bare name (``delos``, which :func:`t3_collection_name` makes ``knowledge__delos__...``) is its own subject;
+    ``knowledge__delos`` and ``knowledge__delos__<model>__v<n>`` give ``delos``. A ``docs__``/``code__``/``rdr__`` name
+    has no subject (its second segment is a tumbler-derived owner id such as ``1-48``), nor does a name with an empty
+    subject. Parses a CANDIDATE string with :func:`split_candidate_collection_name`, as the argument may name a
+    collection not registered yet; never a read of an existing collection's attributes.
+    """
+    first, rest = split_candidate_collection_name(name)
+    if not first:
+        return name
+    if first != "knowledge":
+        return ""
+    subject, _ = split_candidate_collection_name(rest)
+    return subject or rest  # no further "__": the remainder is the subject
+
+
 #: The candidate-string-derivation PRIMITIVES tests/test_collection_name_
 #: parse_census.py's fifth pattern class counts callers of, outside this
 #: module (RDR-204 Phase 3 fix round, nexus-ft04v.28 item 6). SINGLE-

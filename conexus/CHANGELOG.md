@@ -1,5 +1,9 @@
 # Changelog
 
+## [8.2.0] - 2026-11-12
+
+Plugin version aligned with conexus 8.2.0. No plugin-surface changes were pending at this pin.
+
 ## [8.1.3] - 2026-11-11
 
 Plugin version aligned with conexus 8.1.3. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).

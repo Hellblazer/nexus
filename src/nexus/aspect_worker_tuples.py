@@ -14,7 +14,11 @@ its batch form); this module owns the rest:
   found, else an ``inp`` too. Every slot is visited on every call, so a claim
   left live by a failed ``ack`` comes back to its own slot;
 * a bounded renewer that renews every held claim every ``renew_every_s``
-  only while extraction is inside its deadline;
+  from the start of ``process()`` until its last verdict, only while the
+  batch is inside its deadline (the engine refuses renew, ack, nack and the
+  write fence once ``lease_until`` has passed, with no resurrection, so a
+  window with no renewal is a window in which a stall lapses the claim; the
+  one window left is the claim call itself, before ``process()`` starts);
 * the verdict map: success -> ``complete_aspect`` with the claim pair (a fenced
   upsert, then ``ack``); a missing catalog document, an unsupported collection
   or a permanent read failure -> ``ack`` as dropped; a retryable failure
@@ -63,8 +67,10 @@ LEASE_S: int = 600
 PARK_TIMEOUT_S: int = 25
 #: How often the renewer renews, against the 600 s lease.
 RENEW_INTERVAL_S: float = 120.0
-#: Added to the extractor's worst case before the renewer stops (T3 reads, the
-#: manifest lookup and the persist are outside the extractor's own timeouts).
+#: Added to the extractor's worst case before the renewer stops. The deadline counts from the start of
+#: ``process()``, so this margin also covers the per-claim catalog checks and the write, ack and nack loop
+#: (and T3 reads, the manifest lookup and the persist, outside the extractor's own timeouts). It is not the
+#: only backstop: once the renewer stops, a claim still lives up to ``LEASE_S`` (600 s) past its last renewal.
 RENEW_DEADLINE_MARGIN_S: float = 120.0
 #: ``tuple`` claims re-probe an engine that lacked the template after this long
 #: (an engine upgrade does not restart the aspect-worker daemon).
@@ -146,7 +152,9 @@ class ClaimRenewer:
     has not passed since :meth:`start`; then it stops renewing and the leases
     lapse (a wedged extraction releases its tasks instead of holding them
     until retention). ``renew(claim)`` raises a lapse error for a claim that is
-    no longer ours; that claim is dropped from the set and logged."""
+    no longer ours; that claim is dropped from the set and logged. *held*, when
+    given, says whether a claim is still held; a finished one is dropped without
+    a call and without a log line."""
 
     def __init__(
         self,
@@ -157,9 +165,11 @@ class ClaimRenewer:
         deadline_s: float,
         lapse_errors: tuple[type[BaseException], ...],
         clock: Callable[[], float] = time.monotonic,
+        held: Callable[[HeldClaim], bool] | None = None,
     ) -> None:
         self._claims = list(claims)
         self._renew = renew
+        self._is_held = held
         self._interval_s = interval_s
         self._deadline_s = deadline_s
         self._lapse_errors = lapse_errors
@@ -194,10 +204,16 @@ class ClaimRenewer:
                 return
             self.rounds += 1
             for claim in list(self._claims):
+                if self._is_held is not None and not self._is_held(claim):
+                    # Acked, nacked, released or forgotten: finished, so there is nothing to renew.
+                    self._claims.remove(claim)
+                    continue
                 try:
                     self._renew(claim)
                 except self._lapse_errors:
                     self._claims.remove(claim)
+                    if self._is_held is not None and not self._is_held(claim):
+                        continue  # finished between the check and the call: not a lost claim
                     _log.warning(
                         "aspect_worker_renew_claim_lost",
                         task_id=claim.task_id, claimant=claim.claimant,
@@ -352,8 +368,32 @@ class TupleQueueSide:
     # ── finishing ─────────────────────────────────────────────────────────
 
     def process(self, claims: list[HeldClaim]) -> None:
-        """Extract the claimed tasks and give each its verdict."""
+        """Extract the claimed tasks and give each its verdict.
+
+        The renewer runs from the start of this call to the last verdict: the catalog checks, the
+        extraction and the write, ack and nack loop are all inside it, so no window between this
+        call's start and a claim's own terminal call goes unrenewed. (The time between ``claimed_at``
+        and this call, the rest of ``claim_batch``, is not covered.) Its deadline counts from the
+        start of this call, not from the extraction; ``RENEW_DEADLINE_MARGIN_S`` covers the checks
+        and the verdict loop with the other work outside the extractor's own timeouts."""
         self._abandon.clear()
+        if not claims:
+            return
+        renewer = ClaimRenewer(
+            claims, self._renew_one,
+            interval_s=self._renew_every_s,
+            deadline_s=self._deadline_s(len(claims)),
+            lapse_errors=_lapse_errors(),
+            clock=self._clock,
+            held=self._is_held,
+        )
+        renewer.start()
+        try:
+            self._serve(claims)
+        finally:
+            renewer.stop()
+
+    def _serve(self, claims: list[HeldClaim]) -> None:
         ready: list[HeldClaim] = []
         for claim in claims:
             if claim.row is None:
@@ -380,20 +420,10 @@ class TupleQueueSide:
         if not ready:
             return
 
-        renewer = ClaimRenewer(
-            ready, self._renew_one,
-            interval_s=self._renew_every_s,
-            deadline_s=self._deadline_s(len(ready)),
-            lapse_errors=_lapse_errors(),
-            clock=self._clock,
-        )
-        renewer.start()
         try:
             results = self._extract(ready)
         except Exception as exc:  # noqa: BLE001 — the extract callable routes its own errors; this is the backstop
             results = [ExtractRaised(exc)] * len(ready)
-        finally:
-            renewer.stop()
 
         if len(results) < len(ready):
             # An extractor that returned fewer results than claims: the unmatched
@@ -688,6 +718,10 @@ class TupleQueueSide:
 
     def _release(self, claim: HeldClaim) -> bool:
         return self._finish(claim, "release", lambda t: t.release(claim.claim_id, claim.claimant))
+
+    def _is_held(self, claim: HeldClaim) -> bool:
+        with self._held_lock:
+            return claim.claim_id in self._held
 
     def _renew_one(self, claim: HeldClaim) -> Any:
         return self._call(lambda t: t.renew(claim.claim_id, claim.claimant, self._lease_s))

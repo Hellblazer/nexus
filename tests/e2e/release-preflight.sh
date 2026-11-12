@@ -18,8 +18,13 @@
 #   wire-ledger-shipped    on a release tree, no ## Unshipped wire-ledger entry may ship in it (release skill Step 4b)
 #   ci-evidence-contexts   the required-context drift tests, run with `-m ""` so the live check executes
 #   mandatory-pins         the GitHub-backed mandatory_regression_pin tests, under the operator's real HOME
-#   pin sweep              lint bucket (+ non-vacuity floor), the non-lint pin tests, wire-contract
-#                          pairing, ruff over src (the CI lint job scope)
+#   pin sweep              the non-lint pin tests, wire-contract pairing, ruff over src
+#
+# NO LINT BUCKET (nexus-jh1f2 cut 3, Sam 2026-11-10). The `-m lint` bucket was about
+# 15 of this file's ~19 minutes. PR CI's test-lint job runs it on the release PR and
+# feeds pytest-gate, main's required check, and develop CI ran it on the parent; the
+# two lint reds a release preflight caught in the audit window (7.98.0, 7.88.0) are
+# both tests test-lint runs. Do not add it back here.
 #
 # ADMISSION CRITERIA -- a check belongs here only if it is genuinely release-
 # BLOCKING and deterministic (no ambient service, no sandbox HOME). Anything
@@ -119,30 +124,6 @@ check () { # name, command...
   fi
 }
 
-# The lint leg (step 4 below). It fails on pytest's exit status first, then on a passed
-# count under the floor. NO_COLOR keeps colour codes out of the captured summary (they are
-# also stripped below, so the passed-count match sees plain text either way).
-lint_leg_check () {
-  local out plain rc
-  # NX_TEST_T2_SUBSTRATE=none, as ci.yml's test-lint job runs it ("pure-Python AST/regex/
-  # manifest scanners with no T2 dependency"): measured 2026-10-25 under none, 2208
-  # passed and 4 skipped (none for the substrate), so no engine and no suite lease.
-  out="$(NX_TEST_T2_SUBSTRATE=none NO_COLOR=1 uv run pytest -m lint -q 2>&1)"
-  rc=$?
-  plain="$(printf '%s' "$out" | sed -e 's/\x1b\[[0-9;]*m//g')"
-  # pytest's own verdict first (nexus-nuyju): "1 failed, 2294 passed" still matches the
-  # passed-count regex below, so before this the leg passed a red lint bucket. On
-  # 2026-11-01 the 7.93.0 preflight passed this leg over a failing module-seam lint.
-  [ "$rc" -eq 0 ] || { printf '%s\n' "$plain" | tail -25; return 1; }
-  # No `| grep -q` here: that is the very pattern this leg lints for. Match
-  # against the captured variable instead, exactly as the lint's own remedy
-  # text prescribes.
-  [[ "$plain" =~ ([0-9]+)\ passed ]] || { printf '%s\n' "$plain" | tail -3; return 1; }
-  # Non-vacuity floor (nexus-wixar): a mass-skip exits 0, so read the PASSED
-  # count off the summary and fail below 400 (ci.yml's test-lint step, same floor).
-  [ "${BASH_REMATCH[1]}" -ge 400 ] || { echo "lint leg passed only ${BASH_REMATCH[1]} tests (floor 400) -- a mass-skip"; return 1; }
-}
-
 # Sourced with RELEASE_PREFLIGHT_SOURCE_ONLY=1, the script defines its helpers and
 # stops (tests/test_release_preflight_lease_detail.py drives `check` that way).
 [ "${RELEASE_PREFLIGHT_SOURCE_ONLY:-}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ] && return 0
@@ -154,6 +135,12 @@ lint_leg_check () {
 # frozen at the tag and a same-tag re-run reads the identical tree, so the
 # remedy is a whole new tag rather than a retry.
 git fetch --tags --force --quiet origin 2>/dev/null || echo "  [warn] could not fetch remote refs -- tag/branch checks may be stale"
+
+# The verdict marker (nexus-jh1f2 review r1): a PASS records the HEAD it judged and whether the
+# tree was clean, and the battery's --skip-preflight refuses unless that HEAD is the one it is
+# about to test on a clean tree. Cleared first, so a red or an interrupted run leaves no pass behind.
+VERDICT_MARKER="$(git rev-parse --path-format=absolute --git-path release-preflight-verdict 2>/dev/null || true)"
+[ -z "$VERDICT_MARKER" ] || rm -f "$VERDICT_MARKER"
 
 echo "== release preflight =="
 
@@ -199,17 +186,9 @@ mandatory_pins_run () {
 }
 check "mandatory-pins"            mandatory_pins_run
 
-# 4. The pin sweep: every cheap ratchet, ledger, parity and reference-rot check
-#    this repo carries. `-m lint` is deselected by the default addopts, so NO
-#    local battery step runs it -- but ci.yml's test-lint feeds pytest-gate,
-#    which is main's required check. A line-pinned exemption list in
-#    test_pipefail_early_exit_consumer_lint.py restale-izes on ANY edit that
-#    shifts lines in a covered script, so this reds from ordinary edits, not
-#    just from new violations. ~2 min: by far the most expensive item here,
-#    and admitted anyway because the alternative is discovering it as a failed
-#    required check on the release PR.
-#    lint_leg_check is defined with the helpers above, so the source-only tests reach it.
-check "lint-leg+floor"            lint_leg_check
+# 4. The pin sweep: the cheap ratchet, ledger, parity and reference-rot checks
+#    that are NOT lint-marked. The lint-marked ones run in PR CI's test-lint job
+#    (see the header: no lint bucket here).
 #    The pin tests that are NOT lint-marked (engine version, release ledgers,
 #    PG bundle parity, deadline ordering).
 #    NX_TEST_T2_SUBSTRATE=none: none of them needs the engine (120 passed, 0 skipped
@@ -260,5 +239,9 @@ fi
 if [ "$SKIP" -gt 0 ]; then
   echo "PREFLIGHT UNVERIFIED -- a dependency was absent; 'could not check' is not 'fine'."
   exit 2
+fi
+if [ -n "$VERDICT_MARKER" ]; then
+  if [ -z "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then clean=yes; else clean=no; fi
+  printf 'head=%s\nclean=%s\n' "$(git rev-parse HEAD)" "$clean" > "$VERDICT_MARKER"
 fi
 echo "PREFLIGHT PASSED"

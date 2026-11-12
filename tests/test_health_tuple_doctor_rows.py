@@ -508,7 +508,10 @@ class TestCheckTupleTableBloat:
     def test_past_twice_the_trigger_is_a_hard_finding_with_the_vacuum_fix(self, tmp_path) -> None:
         r = self._bloat_with(tmp_path, "tuples|1|101||\n")
         assert r.ok is False and "exceeds" in r.detail
-        assert r.fix_suggestions == ["VACUUM ANALYZE nexus.tuples;"]
+        assert r.fix_suggestions == [
+            "nx doctor --fix   (runs VACUUM ANALYZE nexus.tuples with this install's admin credentials; "
+            "--fix --dry-run lists it first)"
+        ]
 
     def test_the_floor_scales_with_live_rows(self, tmp_path) -> None:
         # live=10000: floor 2 x (50 + 100) = 300. 299 dead is 2.9%, never judged;
@@ -519,7 +522,10 @@ class TestCheckTupleTableBloat:
     def test_an_unjudged_table_does_not_mask_a_judged_one(self, tmp_path) -> None:
         r = self._bloat_with(tmp_path, "tuples|1|49||\ntuple_claim_log|10|900||\n")
         assert r.ok is False and r.detail.startswith("tuple_claim_log ")
-        assert r.fix_suggestions == ["VACUUM ANALYZE nexus.tuple_claim_log;"]
+        assert r.fix_suggestions == [
+            "nx doctor --fix   (runs VACUUM ANALYZE nexus.tuple_claim_log with this install's admin credentials; "
+            "--fix --dry-run lists it first)"
+        ]
 
     def test_a_healthy_box_carries_no_floor_note(self, tmp_path) -> None:
         r = self._bloat_with(tmp_path, "tuples|10000|1000||\n")  # floor 300, judged, 9.1%

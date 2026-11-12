@@ -281,3 +281,45 @@ class TestCheckFromAddressIsOwn:
     def test_the_shape_check_still_runs_first(self, tmp_path) -> None:
         with pytest.raises(DirectoryResolutionError, match="neither a session id nor an agent id"):
             check_from_address_is_own("not-a-valid-shape", state_dir=tmp_path, claude_pid=4242)
+
+
+class TestANameNoSessionCanHold:
+    """nexus-3ceda.7: a `to` that no session can hold as a name is refused before any directory read.
+    The probe battery found its old error ("no template registered for subspace 'directory/<to>'")
+    sent agents to tools that do not exist on every model tried (8 of 9 runs)."""
+
+    class _NoReads:
+        def __getattr__(self, name: str) -> Any:
+            raise AssertionError(f"the directory was read ({name}) for a name no session can hold")
+
+    @pytest.mark.parametrize("to", ["Seminar seat: Bullock", "two words", "a/b", "-leading-dash", "ünïcode"])
+    def test_refused_naming_the_rule_and_the_session_id_route(self, to: str) -> None:
+        with pytest.raises(DirectoryResolutionError) as exc_info:
+            resolve_send_address(to, self._NoReads())
+        msg = str(exc_info.value)
+        assert repr(to) in msg and "session id" in msg and "letters, digits" in msg, msg
+        assert 'tuple_list(prefix="directory/")' in msg, "name the tool that lists the names sessions hold"
+        assert "template" not in msg
+
+    @pytest.mark.parametrize("to", ["tamsin", "nexus_3dc", "kimi.nexus-edb", "a1"])
+    def test_a_name_a_session_can_hold_still_reads_the_directory(self, to: str) -> None:
+        with pytest.raises(AssertionError, match="the directory was read"):
+            resolve_send_address(to, self._NoReads())
+
+    def test_the_rule_matches_the_engines_address_segment_pattern(self) -> None:
+        """The engine refuses a directory/<name> outside its ADDRESS_SEGMENT_PATTERN; keep the two equal."""
+        import re  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        from nexus.tuple_directory import SAFE_NAME_RE  # noqa: PLC0415
+
+        java = (Path(__file__).resolve().parents[1] / "service/src/main/java/dev/nexus/service/tuples/TemplateRegistry.java").read_text()
+        m = re.search(r'ADDRESS_SEGMENT_PATTERN = Pattern\.compile\("([^"]+)"\)', java)
+        assert m, "the engine's pattern moved: update this pin"
+        assert SAFE_NAME_RE.pattern == f"^{m.group(1)}$"
+
+    def test_the_rule_is_the_one_sessions_lease_names_under(self) -> None:
+        from nexus.mcp import subscriptions  # noqa: PLC0415 — the lease side of the same rule
+        from nexus.tuple_directory import SAFE_NAME_RE  # noqa: PLC0415
+
+        assert subscriptions._SAFE_INSTANCE_NAME is SAFE_NAME_RE

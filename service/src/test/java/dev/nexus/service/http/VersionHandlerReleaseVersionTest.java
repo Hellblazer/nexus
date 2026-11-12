@@ -250,6 +250,48 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"catalog_manifest_fillable_supported\":true");
     }
 
+    @Test
+    void versionAdvertisesTheStubMetadataReadAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogStubMetadataCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_stub_metadata_supported\":true");
+    }
+
+    @Test
+    void versionAdvertisesTheChashConformanceConstraintsReadAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendChashConformanceConstraintsCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"chash_conformance_constraints_supported\":true");
+    }
+
+    @Test
+    void versionAdvertisesTheManifestForeignCollectionReadAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogManifestForeignCollectionCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_manifest_foreign_collection_supported\":true");
+    }
+
+    @Test
+    void versionAdvertisesTheManifestFillJobAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogManifestFillJobCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_manifest_fill_job_supported\":true");
+    }
+
+    @Test
+    void versionAdvertisesTheIndexRunCensusAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogIndexRunCensusCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_index_run_census_supported\":true");
+    }
+
+    @Test
+    void versionAdvertisesTheNextSeqDriftReadAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogNextSeqDriftReadCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_next_seq_drift_read_supported\":true");
+    }
+
     // ── nexus-jypmj (RDR-232): the chash_allow restriction on the vector search routes ──
 
     @Test

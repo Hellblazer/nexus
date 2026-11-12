@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -36,8 +37,20 @@ def info_logs():
 
 
 class _Reader:
+    """*held* answers ``resolve_many``: tumbler -> the physical_collection of that row (a tumbler left out is a row the
+    read does not return)."""
+
+    def __init__(self, held: dict[str, str] | None = None, *, fail: bool = False) -> None:
+        self.held, self.fail, self.resolved = held or {}, fail, []
+
     def owner_for_repo(self, repo_hash):  # noqa: ANN001, ARG002
         return "1.7"
+
+    def resolve_many(self, doc_ids):  # noqa: ANN001
+        self.resolved.append(list(doc_ids))
+        if self.fail:
+            raise RuntimeError("engine unreachable")
+        return {t: SimpleNamespace(physical_collection=self.held[t]) for t in doc_ids if t in self.held}
 
     def close(self) -> None:
         pass
@@ -47,6 +60,10 @@ class _Writer:
     def __init__(self, outcome: dict | None = None) -> None:
         self.rows: list[dict] = []
         self.outcome = outcome
+        self.flagged: list[str] = []
+
+    def set_sensitivity(self, tumblers, flag, *, reason=""):  # noqa: ANN001, ARG002
+        self.flagged.extend(tumblers)
 
     def reconcile_stage(self, owner, run_id, walk, expected_rows, rows):  # noqa: ANN001, ARG002
         self.rows.extend(rows)
@@ -65,10 +82,11 @@ class _Writer:
         pass
 
 
-def _hook(root: Path, files, writer: _Writer, **kw):
+def _hook(root: Path, files, writer: _Writer, *, reader: _Reader | None = None, **kw):
     from nexus.indexer import _catalog_hook
 
-    with patch("nexus.catalog.factory.make_catalog_reader", lambda **k: _Reader()), patch(
+    reader = reader or _Reader()
+    with patch("nexus.catalog.factory.make_catalog_reader", lambda **k: reader), patch(
         "nexus.catalog.factory.make_catalog_writer", lambda **k: writer,
     ):
         return _catalog_hook(repo=root, repo_name="r", repo_hash="abcd1234", head_hash="h", indexed_files=files, **kw)
@@ -163,6 +181,154 @@ def test_the_hook_names_a_row_the_commit_did_not_answer_as_no_outcome_row(tmp_pa
     ids = _hook(tmp_path, [(a, "code", "code__r"), (b, "code", "code__r")], writer, unregistered=unregistered)
     assert ids == {a: "1.7.1"}
     assert unregistered == {b: "no_outcome_row"}
+
+
+# ── GH #1611: a row another owner holds in ANOTHER collection takes none of this run's chunks ───────────────────
+
+def _foreign(path: str, tumbler: str, **kw) -> dict:
+    return _row(path, "foreign_owner", tumbler, owner="1.7", other_owner="1.23", **kw)
+
+
+def test_a_foreign_owner_row_in_another_collection_gets_no_document_id_and_is_named(tmp_path: Path) -> None:
+    """The engine resolved the file onto a live row of another owner (a curator's ``nx index pdf --collection``
+    document) whose physical_collection is that owner's collection. Chunks this run wrote under its tumbler landed in
+    the repo's collection, where the row does not say they are, and the curator collection's live count lost them.
+    The file is the other owner's document: it gets no document id here and is listed in ``foreign``."""
+    a, b = tmp_path / "a.py", tmp_path / "paper.pdf"
+    applied = reconcile_run.apply_outcome(
+        _outcome(_row("a.py", "created", "1.7.1"), _foreign("paper.pdf", "1.23.96")),
+        rel_to_abs={"a.py": a, "paper.pdf": b}, staged={"a.py": _STAGED, "paper.pdf": _STAGED},
+        foreign_collections={"1.23.96": "knowledge__curator"})
+    assert applied.file_to_doc_id == {a: "1.7.1"}
+    assert applied.foreign == {b: "1.23.96"}
+    assert applied.reconciled == []
+    assert applied.refused == {} and applied.missing == []
+
+
+@pytest.mark.parametrize("held_in", [_STAGED["physical_collection"], ""], ids=["same-collection", "no-collection"])
+def test_a_foreign_owner_row_that_holds_this_runs_collection_or_none_is_adopted_as_before(
+        tmp_path: Path, held_in: str) -> None:
+    """The nexus-53cae curator rows of repo files: another owner's row whose chunks live in the collection this run
+    writes the file to (or that holds none yet). The file keeps that tumbler and is listed in ``reconciled``; its row is
+    left as it is. Skipping these would leave the repo's own copy unindexed with the base advanced."""
+    b = tmp_path / "notes.md"
+    applied = reconcile_run.apply_outcome(
+        _outcome(_foreign("notes.md", "1.23.5")), rel_to_abs={"notes.md": b}, staged={"notes.md": _STAGED},
+        foreign_collections={"1.23.5": held_in})
+    assert applied.file_to_doc_id == {b: "1.23.5"}
+    assert applied.reconciled == [(b, "1.23.5")]
+    assert applied.foreign == {} and applied.refused == {}
+
+
+def test_a_foreign_owner_row_the_read_did_not_answer_is_refused_not_adopted_or_skipped(tmp_path: Path) -> None:
+    """Without the other row's collection the run cannot tell which shape it is in: it is refused (a failure that
+    holds the --since-head base and is retried), never silently adopted (the #1611 split) or silently skipped."""
+    b = tmp_path / "paper.pdf"
+    applied = reconcile_run.apply_outcome(
+        _outcome(_foreign("paper.pdf", "1.23.96")), rel_to_abs={"paper.pdf": b}, staged={"paper.pdf": _STAGED},
+        foreign_collections={})
+    assert applied.refused == {b: "foreign_owner_row_unreadable"}
+    assert applied.file_to_doc_id == {} and applied.foreign == {} and applied.reconciled == []
+
+
+def test_a_same_owner_row_found_by_uri_keeps_its_document_id(tmp_path: Path) -> None:
+    a = tmp_path / "a.py"
+    applied = reconcile_run.apply_outcome(
+        _outcome(_row("a.py", "same_owner_by_uri", "1.7.9")), rel_to_abs={"a.py": a}, staged={"a.py": _STAGED})
+    assert applied.file_to_doc_id == {a: "1.7.9"}
+    assert applied.reconciled == [(a, "1.7.9")]
+    assert applied.foreign == {}
+
+
+def test_a_skipped_foreign_document_is_not_flagged_by_this_run_but_an_adopted_one_still_is(tmp_path: Path) -> None:
+    """``sensitivity_pending`` names the target of every sensitive-glob row the commit left unflagged, a skipped
+    foreign row included. This run does not index a skipped file, so it does not flag the other owner's document
+    for it; an adopted row (indexed by this run) keeps being raised."""
+    skipped, adopted = tmp_path / "paper.pdf", tmp_path / "notes.md"
+    staged = {**_STAGED, "sensitive": True}
+    applied = reconcile_run.apply_outcome(
+        _outcome(_foreign("paper.pdf", "1.23.96", sensitive=False), _foreign("notes.md", "1.23.5", sensitive=False),
+                 sensitivity_pending=["1.23.96", "1.23.5"]),
+        rel_to_abs={"paper.pdf": skipped, "notes.md": adopted}, staged={"paper.pdf": staged, "notes.md": staged},
+        foreign_collections={"1.23.96": "knowledge__curator", "1.23.5": "c"})
+    assert applied.foreign == {skipped: "1.23.96"}
+    assert applied.sensitivity_pending == {"1.23.5": [adopted]}
+
+
+def test_the_hook_skips_a_foreign_owner_file_in_another_collection_loudly(tmp_path: Path, capsys) -> None:
+    a, b = tmp_path / "a.py", tmp_path / "paper.pdf"
+    a.write_text("a\n")
+    b.write_bytes(b"%PDF-1.4\n")
+    writer = _Writer(_outcome(_row("a.py", "created", "1.7.1"), _foreign("paper.pdf", "1.23.96")))
+    reader = _Reader({"1.23.96": "knowledge__curator"})
+    unregistered: dict[Path, str] = {}
+    with structlog.testing.capture_logs() as logs:
+        ids = _hook(tmp_path, [(a, "code", "code__r"), (b, "pdf", "docs__r")], writer, reader=reader,
+                    unregistered=unregistered)
+    assert ids == {a: "1.7.1"}
+    assert unregistered == {b: "foreign_owner:1.23.96"}
+    assert reader.resolved == [["1.23.96"]], "one batched read of the foreign rows"
+    ev = [e for e in logs if e.get("event") == "catalog_register_skipped_foreign_owner"]
+    assert len(ev) == 1 and ev[0]["log_level"] == "warning" and ev[0]["tumbler"] == "1.23.96", logs
+    assert ev[0]["held_in"] == "knowledge__curator" and ev[0]["written_to"] == "docs__r", ev
+    err = capsys.readouterr().err
+    assert "1 held by another owner's document in another collection, not written: paper.pdf" in err, err
+
+
+def test_the_summary_names_the_first_few_skipped_files_and_counts_the_rest(tmp_path: Path, capsys) -> None:
+    names = [f"p{i}.pdf" for i in range(5)]
+    files = []
+    for n in names:
+        (tmp_path / n).write_bytes(b"%PDF-1.4\n")
+        files.append((tmp_path / n, "pdf", "docs__r"))
+    writer = _Writer(_outcome(*[_foreign(n, f"1.23.{i}") for i, n in enumerate(names)]))
+    reader = _Reader({f"1.23.{i}": "knowledge__curator" for i in range(5)})
+    _hook(tmp_path, files, writer, reader=reader, unregistered={})
+    err = capsys.readouterr().err
+    assert "5 held by another owner's document in another collection, not written: p0.pdf, p1.pdf, p2.pdf, +2 more" in err, err
+
+
+def test_the_hook_adopts_a_foreign_owner_row_that_holds_the_runs_collection(tmp_path: Path, capsys) -> None:
+    b = tmp_path / "notes.md"
+    b.write_text("# n\n")
+    writer = _Writer(_outcome(_foreign("notes.md", "1.23.5")))
+    unregistered: dict[Path, str] = {}
+    with structlog.testing.capture_logs() as logs:
+        ids = _hook(tmp_path, [(b, "prose", "docs__r")], writer, reader=_Reader({"1.23.5": "docs__r"}),
+                    unregistered=unregistered)
+    assert ids == {b: "1.23.5"} and unregistered == {}
+    assert [e for e in logs if e.get("event") == "catalog_register_reconciled_onto_existing_row"
+            and e["tumbler"] == "1.23.5"]
+    assert not [e for e in logs if e.get("event") == "catalog_register_skipped_foreign_owner"]
+    assert "reconciled onto an existing row by source URI" in capsys.readouterr().err
+
+
+def test_the_hook_refuses_a_foreign_owner_file_whose_row_cannot_be_read(tmp_path: Path) -> None:
+    b = tmp_path / "paper.pdf"
+    b.write_bytes(b"%PDF-1.4\n")
+    writer = _Writer(_outcome(_foreign("paper.pdf", "1.23.96")))
+    unregistered: dict[Path, str] = {}
+    with structlog.testing.capture_logs() as logs:
+        ids = _hook(tmp_path, [(b, "pdf", "docs__r")], writer, reader=_Reader(fail=True), unregistered=unregistered)
+    assert ids == {}
+    assert unregistered == {b: "register_refused"}, "a failure (holds the base, retried), not a deliberate skip"
+    assert [e for e in logs if e.get("event") == "catalog_foreign_owner_rows_unreadable"]
+    assert [e for e in logs if e.get("event") == "catalog_hook_register_refused"
+            and e["reason"] == "foreign_owner_row_unreadable"], logs
+
+
+def test_a_skipped_foreign_sensitive_glob_file_is_not_reported_as_an_unset_flag(tmp_path: Path) -> None:
+    """The run's ``--sensitive-glob`` check reads ``wanted - confirmed``: a file left to another owner's document is
+    neither indexed nor flagged, so it must not read as "the flag could not be set"."""
+    b = tmp_path / "secret.pdf"
+    b.write_bytes(b"%PDF-1.4\n")
+    writer = _Writer(_outcome(_foreign("secret.pdf", "1.23.96"), sensitivity_pending=["1.23.96"]))
+    wanted: set[Path] = set()
+    confirmed: set[Path] = set()
+    _hook(tmp_path, [(b, "pdf", "docs__r")], writer, reader=_Reader({"1.23.96": "knowledge__curator"}),
+          unregistered={}, sensitive_globs=("secret*",), sensitive_wanted=wanted, sensitive_confirmed=confirmed)
+    assert wanted - confirmed == set()
+    assert writer.flagged == [], "the other owner's document is not flagged by this run"
 
 
 # ── per-item log events from the outcome ────────────────────────────────────────────────────────────────────────

@@ -230,6 +230,9 @@ jobs:
       # tests/test_docs_only_predicate_git_direct.py executes.
       integration_files: ${{ steps.integration.outputs.integration_files }}
       integration_any: ${{ steps.integration.outputs.integration_any }}
+      # nexus-jh1f2 cut 4: the affected-integration job's shard list, [1,2,3] on a pull
+      # request into main (every integration file runs there), [1] everywhere else.
+      integration_shards: ${{ steps.integration.outputs.integration_shards }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -386,6 +389,16 @@ jobs:
               mode="all"
             fi
           fi
+          # nexus-jh1f2 cut 4 (Sam 2026-11-10): a pull request into main (a release PR) runs
+          # the whole integration family here, three shards wide. It replaced the release
+          # battery's lsg pytest family, which ran the same tests serially on the laptop
+          # (about 26 min, the battery's long pole); lsg keeps only its smoke leg.
+          shards='[1]'
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.base_ref }}" = "main" ]; then
+            mode="all"
+            shards='[1,2,3]'
+          fi
+          echo "integration_shards=$shards" >> "$GITHUB_OUTPUT"
           if [ "$mode" = all ]; then
             sel="$(python3 scripts/select_affected_integration_tests.py --repo . --all)"
           else
@@ -641,6 +654,30 @@ jobs:
         python-version: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') && fromJSON('["3.12", "3.13"]') || fromJSON('["3.12"]') }}
 
     steps:
+      # labrun-owz: fail at once, naming the binary, when the pool host lacks one this job
+      # needs, instead of a red deep in the run (a missing uuidgen reached the tests first).
+      # Linux pool (lab-6c18g); every name checked on chas and qwent 2026-11-11. Runs on the pool only: a hosted fallback (NX_CI_POOL=off, a fork PR, a hosted
+      # matrix leg) provisions its own tools. The list is kept here, next to the step;
+      # tests/test_ci_host_probe.py keeps it non-empty. Why each name is listed:
+      #   bash git curl tar gzip xz unzip: checkout, uv, and the PG-bundle and model fetch-and-unpack steps
+      #   python3: the bare-python3 steps (scripts/ddl_ratchet.py and others)
+      #   rg: the docs and lint tests; the pool has no sudo to apt-install it (see the ripgrep step)
+      #   ps pgrep setsid flock timeout ipcs: the suite's process control, suite lease and xdist shm cap
+      #   uuidgen: the session-id tests (the labrun-owz incident); shellcheck: the gates that fail on CI without it
+      #   sha256sum: bundle and artifact digests. lsof is absent on chas; the tests that use it guard for it
+      - name: Host binaries present (labrun-owz)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          NX_CI_HOST_BINARIES: bash git curl tar gzip xz unzip python3 rg ps pgrep setsid flock timeout ipcs uuidgen shellcheck sha256sum
+        run: |
+          set -u
+          [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
+          missing=0
+          for b in $NX_CI_HOST_BINARIES; do
+            command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          exit "$missing"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         # NO fetch-tags/fetch-depth here, deliberately (nexus-dhs30). The
         # engine-tag reader is exercised HERMETICALLY by
@@ -822,7 +859,7 @@ jobs:
 
       - name: Install ripgrep
         # The pool runners have no sudo and carry ripgrep preinstalled.
-        run: command -v rg >/dev/null || sudo apt-get install -y ripgrep
+        run: scripts/ci_install_ripgrep.sh
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # nexus-eqxxh: the engine substrate boots the SAME jar the write-seam
@@ -1330,7 +1367,7 @@ jobs:
           key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
 
       - name: Install ripgrep
-        run: sudo apt-get install -y ripgrep
+        run: scripts/ci_install_ripgrep.sh
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # The engine binds its port only after Bge768Embedder loads; see the
@@ -1514,14 +1551,27 @@ jobs:
     # for the same selection, and every selected file that collects tests must
     # execute at least one, unless allowlisted. A selection whose files carry
     # only carved-out marks collects nothing and says so.
-    name: pytest (integration, affected)
+    name: ${{ strategy.job-total > 1 && format('pytest (integration, affected, shard {0}/{1})', matrix.shard, strategy.job-total) || 'pytest (integration, affected)' }}
     runs-on: ubuntu-latest
     needs: [changes, service-jar]
     if: success() && needs.changes.outputs.integration_any == 'true'
     # Worst case is the whole family. The nightly's pytest step for it took
     # 38 minutes on this runner class (run 37197448487, 2026-10-04: 789 passed
-    # in 2301 s), so 60 leaves room for setup and a cold cache.
+    # in 2301 s), so 60 leaves room for setup and a cold cache. A release PR
+    # splits that family three ways (cut 4 below). Measured on chas 2026-11-11
+    # (1168 executed, 15 skipped, 3282 s of test time): tests/test_indexer_e2e.py
+    # alone is 1322 s, so its shard is about 22 minutes of tests plus setup and
+    # the others about 16; tests/integration_durations.json holds the per-file times.
     timeout-minutes: 60
+    # nexus-jh1f2 cut 4: one shard on develop and interior PRs; three on a pull request into
+    # main, where the selection is every integration file (about 1180 tests). Each shard
+    # takes its files from scripts/split_integration_files.py, balanced on collected test
+    # count, and checks non-vacuity over its own files. pytest-gate reads the matrix's
+    # combined result, so every shard must succeed.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.changes.outputs.integration_shards || '[1]') }}
     env:
       NX_T2_SUBSTRATE_EXPECTED: "1"
       # Must equal LSG_PYTEST_MARK_EXPR in tests/e2e/lib/mandatory_pins.sh
@@ -1621,7 +1671,7 @@ jobs:
           key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
 
       - name: Install ripgrep
-        run: sudo apt-get install -y ripgrep
+        run: scripts/ci_install_ripgrep.sh
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         uses: ./.github/actions/prime-bge-onnx
@@ -1638,14 +1688,12 @@ jobs:
         id: collect
         run: |
           set -euo pipefail
-          tr ' ' '\n' <<< "$INTEGRATION_FILES" | sed '/^$/d' > integration-selected.txt
-          echo "selected files:"
-          cat integration-selected.txt
-          files=(); while IFS= read -r f; do files+=("$f"); done < integration-selected.txt
-          [ "${#files[@]}" -gt 0 ] || { echo "::error::integration_any=true but the selection is empty"; exit 1; }
+          tr ' ' '\n' <<< "$INTEGRATION_FILES" | sed '/^$/d' > integration-all.txt
+          all=(); while IFS= read -r f; do all+=("$f"); done < integration-all.txt
+          [ "${#all[@]}" -gt 0 ] || { echo "::error::integration_any=true but the selection is empty"; exit 1; }
           set +e
           NX_TEST_T2_SUBSTRATE=none uv run pytest -o addopts="" -m "$INTEGRATION_MARK_EXPR" \
-            --collect-only -q "${files[@]}" > integration-collect.txt
+            --collect-only -q "${all[@]}" > integration-collect.txt
           rc=$?
           set -e
           # 0 = collected, 5 = nothing matched the expression; anything else
@@ -1655,11 +1703,28 @@ jobs:
             echo "::error::pytest --collect-only exited $rc on the affected selection"
             exit 1
           fi
-          collected="$(grep -cE '^[^ ]+\.py::' integration-collect.txt || true)"
+          # nexus-jh1f2 cut 4: this shard's files, then this shard's collected count.
+          python3 scripts/split_integration_files.py --shard "${{ matrix.shard }}" --of "${{ strategy.job-total }}" \
+            --collected integration-collect.txt --durations tests/integration_durations.json \
+            < integration-all.txt > integration-selected.txt
+          echo "shard ${{ matrix.shard }}/${{ strategy.job-total }} files:"
+          cat integration-selected.txt
+          collected=0
+          while IFS= read -r f; do
+            n="$(awk -F'::' -v f="$f" '$1 == f { n++ } END { print n + 0 }' integration-collect.txt)"
+            collected=$((collected + n))
+          done < integration-selected.txt
+          if [ -s integration-selected.txt ]; then
+            echo "empty=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "this shard got no files (fewer files than shards); nothing to run"
+            echo "empty=true" >> "$GITHUB_OUTPUT"
+          fi
           echo "collected=$collected" >> "$GITHUB_OUTPUT"
-          echo "collected $collected integration tests"
+          echo "collected $collected integration tests in this shard"
 
       - name: Run the affected integration tests
+        if: steps.collect.outputs.empty != 'true'
         env:
           # Same reason as the nightly's ungated-integration step: these files
           # self-provision a throwaway engine substrate and write to it.
@@ -1687,6 +1752,72 @@ jobs:
             --junit integration-affected.xml \
             --selected integration-selected.txt \
             --collected "${{ steps.collect.outputs.collected }}"
+
+      # nexus-jh1f2 cut 4 review r1: on a release PR the shards' files and JUnit go to
+      # integration-release-floor, which checks the whole family (every file in exactly one
+      # shard, the executed floor, the skip budget) where no single shard can see it.
+      - name: Keep this shard's files and JUnit (release PRs)
+        if: always() && strategy.job-total > 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: integration-shard-${{ matrix.shard }}
+          path: |
+            integration-selected.txt
+            integration-affected.xml
+            integration-all.txt
+          if-no-files-found: error
+          retention-days: 7
+          # A re-run of a flaked shard (or of all jobs) uploads under the same name; without
+          # this the second upload fails on a name conflict and the release PR cannot go green.
+          overwrite: true
+
+      # The carve-outs the old lsg pytest family counted exactly: a test newly marked
+      # lived_in, keyed_voyage or mandatory_regression_pin leaves this family silently, so
+      # each count must equal the expected number the gate scripts hold. Once per release PR.
+      - name: Carve-out counts (release PRs, nexus-jh1f2)
+        if: strategy.job-total > 1 && matrix.shard == 1
+        run: |
+          set -euo pipefail
+          . tests/e2e/lib/mandatory_pins.sh
+          lived_exp="$(sed -nE 's/^LIVED_IN_EXPECTED=([0-9]+).*/\1/p' tests/e2e/local-service-gate.sh)"
+          keyed_exp="$(sed -nE 's/^KEYED_VOYAGE_EXPECTED=([0-9]+).*/\1/p' tests/e2e/local-service-gate.sh)"
+          [ -n "$lived_exp" ] && [ -n "$keyed_exp" ] || { echo "::error::could not read the carve-out counts from local-service-gate.sh"; exit 1; }
+          count() { NX_TEST_T2_SUBSTRATE=none uv run pytest "$@" --collect-only -q 2>/dev/null | grep -cE '^[^ ]+\.py::' || true; }
+          lived="$(count -m "integration and lived_in")"
+          keyed="$(count -m "integration and keyed_voyage")"
+          pins="$(count -o addopts="" -m "$MANDATORY_PIN_MARK_EXPR")"
+          echo "lived_in $lived (expected $lived_exp), keyed_voyage $keyed (expected $keyed_exp), pins $pins (expected $MANDATORY_PIN_EXPECTED)"
+          bad=0
+          [ "$lived" -eq "$lived_exp" ] || { echo "::error::lived_in carve-out is $lived tests, expected $lived_exp (bump LIVED_IN_EXPECTED in local-service-gate.sh consciously)"; bad=1; }
+          [ "$keyed" -eq "$keyed_exp" ] || { echo "::error::keyed_voyage carve-out is $keyed tests, expected $keyed_exp (KEYED_VOYAGE_EXPECTED)"; bad=1; }
+          [ "$pins" -eq "$MANDATORY_PIN_EXPECTED" ] || { echo "::error::mandatory_regression_pin is $pins tests, expected $MANDATORY_PIN_EXPECTED (tests/e2e/lib/mandatory_pins.sh)"; bad=1; }
+          exit "$bad"
+
+  integration-release-floor:
+    # nexus-jh1f2 cut 4 review r1: the floor and skip budget the old lsg pytest family
+    # carried, over all three release-PR shards together. Floor and budget come from the
+    # 2026-11-11 chas run of exactly this selection (1168 executed, 15 skipped); a drop
+    # under the floor or a skip wave over the budget fails the release PR, as it failed lsg.
+    name: integration release floor (all shards)
+    runs-on: ubuntu-latest
+    needs: [changes, test-integration-affected]
+    if: ${{ !cancelled() && needs.changes.outputs.integration_shards != '' && needs.changes.outputs.integration_shards != '[1]' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+      - name: Fetch every shard's files and JUnit
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: integration-shard-*
+          path: shards
+      - name: The family's floor, skip budget and file coverage
+        run: |
+          set -euo pipefail
+          first=""
+          for d in shards/integration-shard-*; do [ -f "$d/integration-all.txt" ] && { first="$d"; break; }; done
+          [ -n "$first" ] || { echo "::error::no shard uploaded its files and JUnit"; exit 1; }
+          python3 scripts/assert_integration_affected_ran.py --aggregate shards --all "$first/integration-all.txt" \
+            --min-executed 1100 --max-skipped 40
 
   pytest-gate:
     # nexus-n0ful: required-check fan-in over the sharded `test` matrix.
@@ -1740,7 +1871,7 @@ jobs:
     # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, mcpb-resolve-gate, constraints-resolve-gate]
+    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, integration-release-floor, mcpb-resolve-gate, constraints-resolve-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1756,6 +1887,8 @@ jobs:
           release_ledger_result="${{ needs.release-ledger-gate.result }}"
           integration_any="${{ needs.changes.outputs.integration_any }}"
           integration_result="${{ needs.test-integration-affected.result }}"
+          integration_shards="${{ needs.changes.outputs.integration_shards }}"
+          integration_floor_result="${{ needs.integration-release-floor.result }}"
           mcpb_result="${{ needs.mcpb-resolve-gate.result }}"
           constraints_result="${{ needs.constraints-resolve-gate.result }}"
           event_name="${{ github.event_name }}"
@@ -1903,6 +2036,30 @@ jobs:
               ;;
             *)
               echo "::error::unrecognised integration_any '$integration_any' from the changes job — failing loud instead of guessing"
+              exit 1
+              ;;
+          esac
+
+          # nexus-jh1f2 cut 4 review r1: a release PR's three shards must also pass the
+          # whole-family floor; one shard everywhere else, where the floor job skips.
+          case "$integration_shards" in
+            '[1]')
+              case "$integration_floor_result" in
+                skipped|success) ;;
+                *)
+                  echo "::error::integration-release-floor reported '$integration_floor_result' on a one-shard run"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            '[1,2,3]')
+              if [ "$integration_floor_result" != "success" ]; then
+                echo "::error::a release PR's integration shards need integration-release-floor, which reported '$integration_floor_result' instead of success"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::unrecognised integration_shards '$integration_shards' from the changes job — failing loud instead of guessing"
               exit 1
               ;;
           esac
@@ -2344,6 +2501,30 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     steps:
+      # labrun-owz: fail at once, naming the binary, when the pool host lacks one this job
+      # needs, instead of a red deep in the run (a missing uuidgen reached the tests first).
+      # macOS pool (lab-mac-s); every name checked on hellmini 2026-11-11. Runs on the pool only: a hosted fallback (NX_CI_POOL=off, a fork PR, a hosted
+      # matrix leg) provisions its own tools. The list is kept here, next to the step;
+      # tests/test_ci_host_probe.py keeps it non-empty. Why each name is listed:
+      #   bash git curl tar shasum: checkout and the bundle fetch and digest; python3: the bare-python3 steps
+      #   make cc and the Homebrew bison/flex kegs: scripts/build_pg_bundle.sh on a cache miss
+      #   uuidgen: the session-id tests
+      - name: Host binaries present (labrun-owz)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          NX_CI_HOST_BINARIES: bash git curl tar shasum uuidgen python3 make cc
+        run: |
+          set -u
+          [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
+          missing=0
+          for b in $NX_CI_HOST_BINARIES; do
+            command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          for k in bison flex; do
+            [ -x "/opt/homebrew/opt/$k/bin/$k" ] || { echo "host missing: Homebrew $k keg (/opt/homebrew/opt/$k)"; missing=1; }
+          done
+          exit "$missing"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)

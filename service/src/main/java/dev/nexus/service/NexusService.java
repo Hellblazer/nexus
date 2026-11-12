@@ -346,6 +346,13 @@ public final class NexusService {
      */
     private final dev.nexus.service.http.EngineJobs<Void> reconcileJobs =
         dev.nexus.service.http.EngineJobs.reconcile(System::currentTimeMillis);
+    /**
+     * nexus-f3yqd (R2): the manifest fill jobs, scoped to tenant plus kind (tenant-keyed: a job holds its tenant's
+     * progress; {@code EngineJobs.manifestFill} is the evictor the tenant reset route runs). The catalog handler runs
+     * {@code POST /v1/catalog/manifest/fill} on it.
+     */
+    private final dev.nexus.service.http.EngineJobs<dev.nexus.service.http.ManifestFillJobs.Progress> manifestFillJobs =
+        dev.nexus.service.http.ManifestFillJobs.registry(System::currentTimeMillis);
     /** Test seam: when set, the chunk-keys routes use this sweep instead of the one built over the vector repository. */
     private volatile dev.nexus.service.vectors.ChunkKeySweep chunkKeysSweepForTests;
     /** Test seam (nexus-v75nw): when set, replaces the credential lookup an apply job makes at each boundary. */
@@ -757,6 +764,15 @@ public final class NexusService {
                         () -> { var v = chunksLeavesCanary; return v == null ? null : v.get(); }));
         chunksLeavesCtx.getFilters().addAll(authFilter);
 
+        // /v1/schema/chash-conformance — whether the two poison tables' chash width CHECKs are validated, read from
+        // pg_constraint in one catalog statement (nexus-f3yqd), for nx doctor's chash row. Any authenticated token reads it
+        // (a managed user's doctor holds a tenant data token); only the root token sees the partition counts, which would
+        // reveal how many tenants share the engine.
+        var chashConformanceCtx = server.createContext(dev.nexus.service.http.ChashConformanceHandler.PATH,
+                new dev.nexus.service.http.ChashConformanceHandler(
+                        new dev.nexus.service.db.ChashConformanceConstraints(tenantScope)));
+        chashConformanceCtx.getFilters().addAll(authFilter);
+
         // /v1/requests/<id> — RDR-222 Phase 1 request status (bead nexus-yye8l.4). The one
         // RequestLedger instance; the keyed sweep forms (nexus-yye8l.5) take this same one.
         var requestLedger = new dev.nexus.service.db.RequestLedger(tenantScope, dataSource);
@@ -821,7 +837,7 @@ public final class NexusService {
             ? new dev.nexus.service.db.CombinedWriteService(tenantScope, catalogRepo, docEmbedderRouter)
             : null;
         var catalogCtx = server.createContext("/v1/catalog",
-                new CatalogHandler(catalogRepo, combinedWriteService, reconcileJobs, chunkKeyAllowlistCheck));
+                new CatalogHandler(catalogRepo, combinedWriteService, reconcileJobs, chunkKeyAllowlistCheck, manifestFillJobs));
         catalogCtx.getFilters().addAll(authFilter);
 
         // /v1/tenants/* + /v1/service-tokens/* — token lifecycle admin (bead nexus-gmiaf.32.3).
@@ -1098,7 +1114,8 @@ public final class NexusService {
             dev.nexus.service.db.TenantKeyedState.of("NexusService.dataSweepFailuresByTenant",
                 t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0),
             dev.nexus.service.db.TenantKeyedState.of("ChunkKeysSweepJobs", chunkKeysJobs::evictTenant),
-            dev.nexus.service.db.TenantKeyedState.of("EngineJobs.reconcile", reconcileJobs::evictTenant));
+            dev.nexus.service.db.TenantKeyedState.of("EngineJobs.reconcile", reconcileJobs::evictTenant),
+            dev.nexus.service.db.TenantKeyedState.of("EngineJobs.manifestFill", manifestFillJobs::evictTenant));
     }
 
     /** The evictors the tenant reset route runs, in order; empty-safe, built whether or not the route is enabled. */
@@ -1340,6 +1357,11 @@ public final class NexusService {
 
     dev.nexus.service.http.EngineJobs<Void> reconcileJobsForTests() {
         return reconcileJobs;
+    }
+
+    /** Test seam (nexus-f3yqd): the registry the manifest fill jobs live in, to stop one at a batch boundary. */
+    dev.nexus.service.http.EngineJobs<dev.nexus.service.http.ManifestFillJobs.Progress> manifestFillJobsForTests() {
+        return manifestFillJobs;
     }
 
     /** The sink bound now (see {@link #chunkKeysAudit(dev.nexus.service.http.ChunkKeysAdminHandler.Audit)}). */
@@ -2168,6 +2190,7 @@ public final class NexusService {
         sweepScheduler.shutdownNow();
         chunkKeysJobs.shutdown();
         reconcileJobs.shutdown();
+        manifestFillJobs.shutdown();
         // The runner's executor too; an in-flight batch is interrupted, and a job left running resumes from its
         // cursor on the next boot.
         if (reembedExecutor != null) {

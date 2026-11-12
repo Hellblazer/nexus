@@ -24,6 +24,10 @@ The link generators (``generate_*_links``) are replaced by recorders for the who
 recorder lets the test see which tumblers the hook handed them (the ``new_tumblers`` and relink lists). The commit's
 outcome is captured from ``reconcile_run.stage_and_commit`` so each case can be shown to have reached the arm it is for.
 
+One deliberate divergence from that path (GH #1611): a file another owner's live row holds in a collection other than
+the one the run writes it to (``id_foreign``) is left to that owner, so the golden has no ``file_to_doc_id`` row for it;
+the client path gave it that row's tumbler, and its chunks landed where the row does not say they are.
+
 Each fixture case lives under its own top-level directory; a difference is attributed to the case of its row. Every
 case must match.
 
@@ -338,8 +342,12 @@ def _run_hook(c: Copy, offered: list[F], *, head: str, complete: bool, keep: lis
         keep_paths=[c.path(r) for r in keep] or None, deleted_relpaths=list(deleted) or None,
         sensitive_globs=globs, sensitive_wanted=wanted, sensitive_confirmed=confirmed,
     )
-    assert not unreg, f"the hook left files unregistered: {unreg}"
-    return {"file_to_doc": {str(p.relative_to(c.repo)): t for p, t in file_to_doc.items()},
+    # GH #1611: a file another owner's row holds in ANOTHER collection is left to that owner on purpose (the one
+    # deliberate divergence from the client path this golden was written from); nothing else may be left unregistered.
+    assert not {p: why for p, why in unreg.items() if not why.startswith("foreign_owner:")}, \
+        f"the hook left files unregistered: {unreg}"
+    return {"unregistered": {str(p.relative_to(c.repo)): why for p, why in unreg.items()},
+            "file_to_doc": {str(p.relative_to(c.repo)): t for p, t in file_to_doc.items()},
             "stale": stale, "cdh": cdh, "fence": fence, "confirmed": {str(p.relative_to(c.repo)) for p in confirmed},
             "outcome": (captured or [None])[-1]}
 
@@ -631,6 +639,12 @@ def test_the_hook_leaves_what_the_client_path_left(tmp_path: Path, t2_tenant: st
         actions = {r["file_path"]: r["action"] for r in outcome["rows"]}
         wrong = {rel: (want, actions.get(rel)) for rel, want in EXPECTED_ACTIONS.items() if actions.get(rel) != want}
         assert not wrong, f"fixture paths that did not reach their arm (want, got): {wrong}"
+        # GH #1611: id_foreign/x.txt is held by another owner's row in another collection (docs__rdr193foreign, the
+        # run writes docs__rdr193parity): the client path gave the file that row's tumbler, the hook leaves it to the
+        # other owner, so it has no document id here and the golden has no file_to_doc_id row for it.
+        assert set(run["unregistered"]) == {"id_foreign/x.txt"}, run["unregistered"]
+        assert run["unregistered"]["id_foreign/x.txt"].startswith("foreign_owner:"), run["unregistered"]
+        assert "id_foreign/x.txt" not in run["file_to_doc"] and "id_same_owner/x.txt" in run["file_to_doc"]
         key = snap.key_of
         renamed_olds = {key[r["old"]] for r in outcome["renamed"]}
         for rel in ("ren_single/a.txt", "ren_onto_earlier/a.txt", "ren_two_onto_one/m1.txt", "ren_two_onto_one/m2.txt",

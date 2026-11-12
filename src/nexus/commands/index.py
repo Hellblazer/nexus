@@ -3119,14 +3119,16 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
 @click.argument("path", type=click.Path(exists=True, path_type=Path), required=False, default=None)
 @click.option("--dir", "dir_path", type=click.Path(exists=True, file_okay=False, path_type=Path),
               default=None, help="Index all PDFs in a directory.")
-@click.option("--corpus", default="default", show_default=True, help="Corpus name for docs__ collection.")
+@click.option("--corpus", default=None,
+              help="Corpus name: the docs__ collection without --collection, and the catalog owner the PDFs "
+                   "register under. Default: the --collection subject when --collection is given, else 'default'.")
 @click.option(
     "--collection",
     default=None,
     help=(
         "T3 collection name. Bare names (e.g. 'knowledge') are auto-normalized "
         "to knowledge__<name>; qualified names (e.g. knowledge__delos) pass through. "
-        "Overrides --corpus when set."
+        "Without --corpus, its subject (delos) is also the corpus."
     ),
 )
 @click.option(
@@ -3228,7 +3230,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
 )
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
 @click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
-def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, re_embed: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str | None, streaming: str, source_uri: str | None, allow_degraded_extraction: bool, sensitive: bool = False, ack_external_embedder: bool = False) -> None:
+def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, collection: str | None, dry_run: bool, force: bool, re_embed: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str | None, streaming: str, source_uri: str | None, allow_degraded_extraction: bool, sensitive: bool = False, ack_external_embedder: bool = False) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
 
@@ -3237,7 +3239,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     _log = structlog.get_logger(__name__)
 
     from nexus.config import get_pdf_extractor, note_formula_oom_ignored, resolve_extractor  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
-    from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.corpus import candidate_knowledge_subject, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         CredentialsMissingError,
@@ -3253,6 +3255,12 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     )
     from nexus.pdf_extractor import MINERU_RUN_STOPPING, mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
     from nexus.sensitive_write import SensitiveFlagNotSetError  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+
+    # GH #1611 gap 4: the corpus is also the curator owner a PDF registers under, so with only --collection it is
+    # that collection's subject (knowledge__delos -> delos), never the literal "default". Only a knowledge collection
+    # has a subject there: a docs__/code__ name's owner segment is a tumbler-derived id (``1-48``), not a subject.
+    if corpus is None:
+        corpus = (candidate_knowledge_subject(collection) if collection else "") or "default"
 
     # Local wrapper: convert the typed credential/identity errors into a
     # Click exception so the CLI shows a friendly message + exits non-zero

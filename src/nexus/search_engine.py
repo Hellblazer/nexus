@@ -1991,7 +1991,8 @@ def search_cross_corpus(
     # nexus-tu8wp.2: the engine-side per-collection top-K. One request per
     # embedding-model group replaces the batch-and-over-fetch fan-out of
     # _search_batch; see _search_group_per_collection.
-    # NX_SEARCH_PER_COLLECTION=0 turns the route off without a client release.
+    # Opt-in (nexus-tu8wp.3): the route is used only when NX_SEARCH_PER_COLLECTION
+    # is 1/true/on/yes; it measured ~2x slower than the batched path on the cloud.
     per_collection_route = (
         getattr(t3, "supports_per_collection_search", False) is True
         and per_collection_route_enabled()

@@ -2,13 +2,15 @@
 """Shakedown 7.94.0 class A: ``nx doctor`` did not finish on a managed tenant of 43.7k catalog documents.
 
 Three full catalog walks ran through the paged HTTP client in one doctor run: the stale-index-run row
-and the failed-run row shared one, ``_check_next_seq_drift`` made its own, and the pending-rungs row
+and the failed-run row shared one, the allocator-drift row made its own, and the pending-rungs row
 reached the manifest-section-labels rung's ``detect()``, whose dry run lists every document and reads
 manifests and T3 per batch (a 15-minute walk of shared capacity; nexus-75w5d refused it for ``nx upgrade
---auto`` and left doctor walking).
+--auto`` and left doctor walking). The three index-run rows now read the engine's census routes (nexus-f3yqd.6),
+so neither a default run nor ``--check-index-runs`` walks.
 
 These tests run the real ``run_health_checks`` with every other row stubbed, over a fake catalog of
-43,700 documents that counts ``all_documents`` calls and the pages the HTTP client would fetch.
+43,700 documents that counts ``all_documents`` calls and the pages the HTTP client would fetch. The fake has no
+census routes, so the three rows report not checked and say what they need.
 """
 from __future__ import annotations
 
@@ -65,7 +67,7 @@ class _NoCollections:
         return []
 
 
-KEEP = ("_check_stale_indexing_runs", "_check_failed_runs_hidden_chunks", "_check_next_seq_drift", "_check_pending_rungs")
+KEEP = ("_check_index_run_routes", "_check_pending_rungs")
 
 
 def _doctor_over(monkeypatch: pytest.MonkeyPatch, cat: CountingCatalog, *, managed: bool, rung_reads: list,
@@ -86,20 +88,20 @@ def _doctor_over(monkeypatch: pytest.MonkeyPatch, cat: CountingCatalog, *, manag
         record_fn=lambda: None, managed_fn=lambda: managed, stale_zero_fn=lambda: False,
     )
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
-    # The default sweep never walks (F30); `nx doctor --check-index-runs` runs the three rows over one walk.
+    # Neither the default sweep nor `nx doctor --check-index-runs` walks (F30): the three rows read the census routes.
     results = health.run_index_run_checks() if index_runs else health.run_health_checks()[0]
     return {r.label: r for r in results}
 
 
 @pytest.mark.usefixtures("cloud_mode")
 def test_a_default_doctor_run_does_not_walk_the_catalog(monkeypatch) -> None:
-    """F30 (nexus-f3yqd.6): the default sweep names --check-index-runs instead of reading every document."""
+    """F30 (nexus-f3yqd.6): the default sweep reads the census routes (here an engine without them) instead of every document."""
     cat = CountingCatalog()
     rows = _doctor_over(monkeypatch, cat, managed=True, rung_reads=[])
     assert cat.calls == 0, f"{cat.calls} full catalog walks in a default doctor run"
     for label in ("stale index-run fences", "failed index runs with hidden chunks", "tumbler allocator drift"):
-        assert rows[label].ok is True and rows[label].skipped is True, rows[label]
-        assert "nx doctor --check-index-runs" in rows[label].detail, rows[label]
+        assert rows[label].ok is True and rows[label].skipped is True and not rows[label].warn, rows[label]
+        assert "census routes" in rows[label].detail, rows[label]
     # The rung's dry run lists every document and reads manifests: on a managed service doctor skips it.
     assert cat.stats_calls == 0
     ladder = rows["Upgrade ladder"]
@@ -109,29 +111,12 @@ def test_a_default_doctor_run_does_not_walk_the_catalog(monkeypatch) -> None:
 
 
 @pytest.mark.usefixtures("cloud_mode")
-def test_check_index_runs_walks_the_catalog_once(monkeypatch) -> None:
+def test_check_index_runs_does_not_walk_the_catalog_either(monkeypatch) -> None:
     cat = CountingCatalog()
     rows = _doctor_over(monkeypatch, cat, managed=True, rung_reads=[], index_runs=True)
-    # One shared walk feeds the stale-run row, the failed-run row and the allocator-drift row.
-    assert cat.calls == 1, f"{cat.calls} full catalog walks in one --check-index-runs run"
-    assert cat.pages == math.ceil(DOCUMENTS / PAGE)
-    # The three shared rows still answered from the one walk (non-vacuous: they read the list, not skipped).
-    assert rows["stale index-run fences"].detail and "skipped" not in rows["stale index-run fences"].detail
-    assert "skipped" not in rows["tumbler allocator drift"].detail
-
-
-@pytest.mark.usefixtures("cloud_mode")
-def test_a_failed_shared_walk_is_not_walked_again_by_each_row(monkeypatch) -> None:
-    class FailingCatalog(CountingCatalog):
-        def all_documents(self, limit: int = 0, **_kw):
-            self.calls += 1
-            raise RuntimeError("edge saturated")
-
-    cat = FailingCatalog()
-    rows = _doctor_over(monkeypatch, cat, managed=True, rung_reads=[], index_runs=True)
-    assert cat.calls == 2, "one shared walk, retried once, then every row degrades without walking"
-    for label in ("stale index-run fences", "tumbler allocator drift"):
-        assert "skipped" in rows[label].detail, (label, rows[label].detail)
+    assert cat.calls == 0, f"{cat.calls} full catalog walks in one --check-index-runs run"
+    for label in ("stale index-run fences", "failed index runs with hidden chunks", "tumbler allocator drift"):
+        assert rows[label].skipped is True and "census routes" in rows[label].detail, rows[label]
 
 
 def test_a_local_engine_does_not_scan_in_doctor_either(monkeypatch) -> None:
@@ -150,13 +135,3 @@ def test_a_local_engine_does_not_scan_in_doctor_either(monkeypatch) -> None:
     (row,) = health._check_pending_rungs()
     assert cat.calls == 0, "doctor walked the catalog on a local engine"
     assert row.warn and not row.ok and "not checked" in row.detail
-
-
-@pytest.mark.parametrize("check", ["_check_stale_indexing_runs", "_check_failed_runs_hidden_chunks", "_check_next_seq_drift"])
-def test_the_shared_walk_parameter_has_a_precise_type(check: str) -> None:
-    """The three rows take the doctor run's one walk: a list of documents, the failed-walk marker, or None (called alone).
-    It was annotated ``object``, which a type checker reads as 'anything'."""
-    import typing
-
-    hint = typing.get_type_hints(getattr(health, check))["documents"]
-    assert {typing.get_origin(a) or a for a in typing.get_args(hint)} == {list, health._WalkFailed, type(None)}, hint

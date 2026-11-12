@@ -2674,7 +2674,8 @@ class TestEnrichWiring:
             "--collection", "knowledge__fixture-subject", "--enrich",
         ])
         assert result.exit_code == 0, result.output
-        assert calls == [("knowledge__fixture-subject__voyage-context-3__v1", {"source": "dt"})]  # nexus-t952k
+        # nexus-t952k; GH #1611: a DT record is not always catalogued as a paper, so this verb looks every type up
+        assert calls == [("knowledge__fixture-subject__voyage-context-3__v1", {"source": "dt", "content_type": "any"})]
         assert "Enriching bibliographic metadata" in result.output
 
     def test_a_catalog_failure_in_enrichment_keeps_the_index_summary(
@@ -3033,7 +3034,7 @@ class TestEnrichUnchangedRecord:
 
         assert result.exit_code == 0, result.output
         assert "skipped: index fresh (use --force)" in result.output
-        assert calls == [("knowledge__fixture-subject__voyage-context-3__v1", {"source": "dt"})]
+        assert calls == [("knowledge__fixture-subject__voyage-context-3__v1", {"source": "dt", "content_type": "any"})]
 
 
 class TestAnUnexpectedExceptionFailsOneRecordNotTheBatch:

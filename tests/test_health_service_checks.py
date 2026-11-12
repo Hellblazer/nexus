@@ -3088,11 +3088,7 @@ class TestCheckStaleIndexingRuns:
 
     def _run(self, monkeypatch, entries):
         import nexus.health as h
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda *a, **k: self._cat(entries), raising=False,
-        )
-        return h._check_stale_indexing_runs()[0]
+        return h._stale_fence_rows_over(list(entries), self._cat(entries))[0]
 
     def _iso_hours_ago(self, hours: float) -> str:
         from datetime import UTC, datetime, timedelta
@@ -3171,16 +3167,6 @@ class TestCheckStaleIndexingRuns:
         assert "predates the index-run fence" in r.detail
         assert "none (" not in r.detail
 
-    def test_catalog_unavailable_degrades_to_skip(self, monkeypatch) -> None:
-        import nexus.health as h
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda *a, **k: None, raising=False,
-        )
-        r = h._check_stale_indexing_runs()[0]
-        assert r.ok is True
-        assert "no catalog" in r.detail
-
 
 def _assert_null_fence_scope_stated(detail: str) -> None:
     """nexus-3ajpd: the one-time re-index is scoped, not universal. The row
@@ -3196,7 +3182,7 @@ def _assert_null_fence_scope_stated(detail: str) -> None:
 
 class TestDoctorFenceCoverageDistinction:
     """nexus-vw594 F3 (production test #4, root cause of nexus-biq4x):
-    ``_check_stale_indexing_runs`` must distinguish "index_state reported
+    ``_stale_fence_rows_over`` (the oracle of the census's fence rule) must distinguish "index_state reported
     but NULL on every row" (a fence-aware engine that simply has nothing
     stamped) from "index_state key never sent" (a genuinely pre-fence
     engine) — ``dict.get("index_state")`` alone cannot tell these apart
@@ -3270,11 +3256,7 @@ class TestDoctorFenceCoverageDistinction:
 
     def _run_all(self, monkeypatch, entries):
         import nexus.health as h
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda *a, **k: self._cat(entries), raising=False,
-        )
-        return h._check_stale_indexing_runs()
+        return h._stale_fence_rows_over(list(entries), self._cat(entries))
 
     def test_reported_null_after_fence_release_warns(self, monkeypatch) -> None:
         """The producer-regression signature: index_state reported-but-NULL,
@@ -3959,45 +3941,11 @@ class TestCheckNextSeqDrift:
     owner never written to again sits drifted indefinitely.
     """
 
-    def _cat(self, owners, tumblers):
-        cat = MagicMock()
-        cat.list_owners.return_value = owners
-        cat.all_documents.return_value = [
-            type("E", (), {"tumbler": t})() for t in tumblers
-        ]
-        return cat
-
     def _run(self, monkeypatch, owners, tumblers):
         import nexus.health as h
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda *a, **k: self._cat(owners, tumblers), raising=False,
-        )
-        return h._check_next_seq_drift()[0]
-
-    def test_corpus_walked_once_regardless_of_owner_count(self, monkeypatch) -> None:
-        """The quadratic-scan tripwire (nexus-ohxzu, 2026-08-02).
-
-        The per-owner helper re-walked all_documents PER OWNER — 65 owners x
-        ~22k docs = ~1.4M records over the managed API, measured at 218s of a
-        224s doctor. The single-pass rewrite computes every owner's max in one
-        walk; this pins call-count == 1 so the loop can never regress back
-        inside the owner iteration.
-        """
-        owners = [
-            {"tumbler_prefix": f"1.{i}", "next_seq": 1} for i in range(1, 26)
-        ]
-        cat = self._cat(owners, ["1.1.1", "1.25.1"])
-        import nexus.health as h
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda *a, **k: cat, raising=False,
-        )
-        h._check_next_seq_drift()
-        assert cat.all_documents.call_count == 1, (
-            f"all_documents called {cat.all_documents.call_count}x for "
-            f"{len(owners)} owners — the O(owners x corpus) scan is back"
-        )
+        return h._next_seq_drift_rows_over(
+            owners, [type("E", (), {"tumbler": tm})() for tm in tumblers],
+        )[0]
 
     def test_multiple_owners_disambiguated_in_one_shared_walk(self, monkeypatch) -> None:
         """Cross-owner correctness under the shared-dict pass (critic,
@@ -4020,24 +3968,6 @@ class TestCheckNextSeqDrift:
         assert "1.14" not in r.detail, (
             f"clean owner leaked into the drift report: {r.detail}"
         )
-
-    def test_scan_failure_retries_once_then_skips_loudly(self, monkeypatch) -> None:
-        """The shared walk's blast radius (reviewer Important, e265d1b8): a
-        mid-walk failure blanks drift visibility for EVERY owner, so the
-        check retries once and the concession names the scope. Pins
-        call_count == 2 (exactly one retry) and the all-owners detail text.
-        """
-        import nexus.health as h
-        cat = MagicMock()
-        cat.list_owners.return_value = [{"tumbler_prefix": "1.12", "next_seq": 3}]
-        cat.all_documents.side_effect = RuntimeError("mid-walk blip")
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda *a, **k: cat, raising=False,
-        )
-        r = h._check_next_seq_drift()[0]
-        assert r.ok is True and "ANY owner" in r.detail
-        assert cat.all_documents.call_count == 2
 
     def test_drifted_owner_is_named(self, monkeypatch) -> None:
         r = self._run(
@@ -4152,11 +4082,7 @@ class TestDoctorFenceNonRepoOwners:
 
     def _run(self, monkeypatch, entries, owners):
         import nexus.health as h
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_reader",
-            lambda *a, **k: self._cat(entries, owners), raising=False,
-        )
-        return h._check_stale_indexing_runs()[0]
+        return h._stale_fence_rows_over(list(entries), self._cat(entries, owners))[0]
 
     def _entries(self):
         return [
@@ -4193,9 +4119,7 @@ class TestDoctorFenceNonRepoOwners:
             def list_owners(self, *, include_deactivated=False):
                 raise _NoOwners("owner table unavailable")
 
-        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader",
-                            lambda *a, **k: _Cat(), raising=False)
-        r = h._check_stale_indexing_runs()[0]
+        r = h._stale_fence_rows_over(list(entries), _Cat())[0]
         assert r.ok is False
         assert "non-repo owner" not in r.detail
         assert not r.fix_suggestions[0].startswith("nx catalog reconcile-fences")

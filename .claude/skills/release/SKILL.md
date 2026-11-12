@@ -89,16 +89,19 @@ This gate exists because the engine silently drifted 22 `service/` commits / 4 d
 
 ### 0c. PREFLIGHT — run the cheap blockers FIRST, all of them
 
-> Budget MINUTES (the lint bucket alone is ~2 minutes). Build the gate jar first
-> (`scripts/build-gate-jar.sh`) or the lint bucket's substrate-backed tests fail
-> for that reason alone.
+> Budget a few minutes. The `-m lint` bucket is NOT in it any more (nexus-jh1f2
+> cut 3, Sam 2026-11-10): it was about 15 of the old ~19 minutes, and PR CI's
+> `test-lint` job runs it on the release PR and feeds `pytest-gate`, main's
+> required check.
 
 ```bash
 ./tests/e2e/release-preflight.sh
 ```
 
-Run this BEFORE step 1 and before any expensive leg. It is the ONE preflight
-(the former pin-sweep script is folded into it) and it evaluates every
+Run this BEFORE step 1 and before any expensive leg, ONCE: Step 1 then runs the
+battery with `--skip-preflight` on the same sha, so the same checks never run
+twice on one tree (the 8.1.0 cut ran them twice, 38 minutes). It is the ONE
+preflight (the former pin-sweep script is folded into it) and it evaluates every
 seconds-scale, deterministic, release-BLOCKING check in one pass without
 aborting on the first red -- it reports every failure it finds, so one cycle
 surfaces the whole fix list. The checks:
@@ -118,8 +121,9 @@ surfaces the whole fix list. The checks:
 - `mandatory-pins` -- the GitHub-backed `mandatory_regression_pin` tests under
   the operator's REAL HOME (they need `gh` auth, so they cannot run inside the
   local-service gate's fenced HOME), exact count asserted, zero skip budget;
-- the pin sweep -- the `-m lint` bucket with its non-vacuity floor, the pin tests
-  that are not lint-marked, `check_wire_contract_pairing.py`, and `ruff check src`.
+- the pin sweep -- the pin tests that are not lint-marked,
+  `check_wire_contract_pairing.py`, and `ruff check src`. The lint-marked ones run
+  in PR CI's `test-lint`; a lint red shows there about 12 minutes into the PR's run.
 
 WHY (the 7.15.0 cut, 2026-08-22). The battery was ordered expensive-first and
 abort-on-first-red, so each blocker cost a full replay and hid every other one.
@@ -182,12 +186,12 @@ through the Plugin-only fast lane below: offer that. The retired
 `plugin-vX.Y.Z-n` tags are not an option; do not revive them. Source: memory
 `feedback_release_and_develop_ci` § peer_holdouts_from_a_release_go_to_sam.
 
-### 1. Run unit + integration suite
+### 1. Run the release battery
 
 ```bash
-tests/e2e/release-battery.sh         # preflight, then the legs below in ONE parallel run: per-leg logs, verdict table, exit 1 on any red; the unit suite still runs SERIAL to it
-uv run pytest -n auto && uv run pytest -m lint   # unit suite and the lint bucket (two runs)
-tests/e2e/local-service-gate.sh      # leg lsg: integration incl. the local-service functional gate
+tests/e2e/release-battery.sh --skip-preflight   # Step 0c passed on this HEAD (it refuses otherwise); runs the legs below in ONE parallel run: per-leg logs, verdict table, exit 1 on any red
+# The lines below are WHAT THE BATTERY RUNS, for reading and for rerunning one red leg alone. Do not run them as well.
+env NX_GATE_SMOKE_ONLY=1 tests/e2e/local-service-gate.sh   # leg lsg: the throwaway service as shipped boots and serves (14 smoke probes + the engine log); the integration pytest family runs in PR CI
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # leg pkgup: ONE-engine convergence MVV (nexus-cfgo9)
 tests/e2e/fresh-install-mvv.sh       # leg mvv: VIRGIN-journey gate (nexus-nolqs) — see below
 tests/e2e/constraints-resolve-gate.sh   # leg resolve: the shipped constraints.txt + overrides.txt RESOLVE (uv pip compile, no install): 22 compiles on Linux x86_64/aarch64 py3.12/3.13 (cpu; [pdf] also cu130 and cu126), Windows x64 and macOS 14 arm64, default and [pdf], plus a macOS 13 negative control (nexus-2k66t.4.4); network; needs a uv that knows --torch-backend cu130 and cu126 (the gate probes and says so); offline self-test tests/e2e/constraints_resolve_gate_test.sh
@@ -195,10 +199,32 @@ tests/e2e/plugin-out-of-repo-gate.sh --all   # leg plugins: the four plugin dirs
 tests/e2e/hook-cli-skew/run.sh       # every hooks.json entry vs every published CLI from 7.55.0 (nexus-rcoze); standalone since cleanup step 11, no longer a battery leg
 ```
 
-All must pass. Integration is excluded from CI and is the last line of defense before tag-push.
+All must pass.
+
+**No hand unit suite, and no integration pytest family here** (nexus-jh1f2 cuts
+4 and 5, Sam 2026-11-10). PR CI runs both on the release tree: the 12 unit shards
+(3.12 and 3.13), and, on a pull request into main, EVERY integration file
+(`pytest (integration, affected, shard k/3)`, about 1180 tests), with the same
+non-vacuity check as on develop. A hand unit suite on the same tree is the
+"never test the same tree twice" duplicate (nexus-fp7ez; its one catch in the
+audit window, aba1742e8, is a unit test the PR shards run), and it held a lab-l
+grant the release's shards needed. The lsg pytest family ran those integration
+tests serially for about 26 minutes and was the battery's long pole; the nightly
+local-service gate still runs the whole family with lsg's floor, skip budget and
+carve-out counts. What the move gives up, as the audit's table said when Sam
+approved it: a run on the laptop's platform (PR CI is Linux) with the operator's
+substrates, and the `NX_GATE_SERVICE_EXPECTED` pin that turns
+`test_mcp_server_round_trip`'s no-service skip into a failure. On a release PR
+whose `service/` is byte-identical to the pinned engine tag, service-ci skips the
+Java suite (cut 6), but only when it finds a green `Java tests + jOOQ codegen drift
+guard` run on a commit with that tree; otherwise the suite runs. A change to
+`service-ci.yml` on the release branch also runs it, so the first release after
+this change still runs Java once.
 
 **Reading the battery's table, which is where a vacuous pass hides.** The
-driver runs about 30 minutes on this box. Reds never stop it and it prints one
+driver's long pole is now the smoke-only lsg leg and dual (minutes, not the
+26-minute pytest family it used to be; the next cut's battery log gives the new
+figure). Reds never stop it and it prints one
 table at the end, so the verdict you act on is the table, not the exit. **A leg
 with no verdict line is MISSING, never passed** — implemented in
 `release-battery.sh` (`LEG_STATUS[$leg]="MISSING"`), and it is the rule that
@@ -284,7 +310,9 @@ fixtures (`_isolate_service_endpoint_env`, `_isolate_config_dir`,
 at self-provisioned substrates the suite manages itself; `NX_SERVICE_HOST`/
 `PORT` is harmless legacy env, not a pin. The two proofs are kept separate:
 - The pytest FLOOR/BUDGET family is the functional surface of local mode,
-  proven against those self-provisioned substrates. Historically it only ran
+  proven against those self-provisioned substrates. Since nexus-jh1f2 cut 4 the
+  release battery no longer runs it (`NX_GATE_SMOKE_ONLY=1`): the nightly gate
+  runs it with this guard, and a release PR runs the same files in PR CI. Historically it only ran
   when a dev-box service HAPPENED to be alive against a lived-in install — an
   ambient, irreproducible gate that silently degraded to 74/516 tests the day
   the ambient service died. A vacuity guard now asserts pinned passed/skipped
@@ -1251,13 +1279,14 @@ lab-remote -c lab-l -- python3 scripts/watched_pytest.py --stall 180 --status /t
 tests/e2e/release-battery.sh --plugin-only vX.Y.Z
 ```
 
-The battery runs the eligibility gate again, then the preflight (which holds the
-lint bucket and the pin tests, so Step 1's separate lint run is covered), the
+The battery runs the eligibility gate again, then the preflight (the pin tests; the
+lint bucket left it, nexus-jh1f2 cut 3, and runs in PR CI's `test-lint`), the
 hook-CLI skew leg and the plugin-lockstep leg. `lsg`, `pkgup`, `mvv`, `dual` and
 `resolve` are shown as `SKIPPED(plugin-only: ...)`, never omitted, and the closing
 line names the mode and the skipped count; a plain `RELEASE BATTERY PASSED` is
-not what this lane prints. **Accepted risk:** those five legs, and Step 1's
-integration suite, are skipped because the wheel and the engine are identical to
+not what this lane prints. **Accepted risk:** those five legs are skipped (the
+integration family is not: the lane's PR into main runs every integration file in
+three shards, cut 4); they are skipped because the wheel and the engine are identical to
 the base tag's but for the version, not because their inputs are identical:
 `resolve`, `mvv`, `pkgup` and `dual` also depend on package indexes and keys that
 change with time, so a dependency or index break since the base tag goes
@@ -1336,8 +1365,8 @@ push its tags once their gates are green (engine-release skill Step 4 states the
 - **Holding a release on the curation report (Step 12a).** The report never blocks: a red section, a non-zero exit or a missing verb goes in the ship record and the release is done. Acting on what it lists is Sam's decision, not a release step.
 - **Freehanding a version surface or a tag from memory of AGENTS.md instead of invoking this skill.** It skips the pre-push and post-publish verification that catches a failed publish (v4.32.13: the tag's workflow failed, PyPI was skipped, and the release was declared done anyway). Invoke `release` (or `engine-release`) before touching either.
 - **Bumping only `pyproject.toml` and missing the four plugin manifests.** CI parity check catches this late. Run the Step 8 pre-push check.
-- **Skipping the integration suite.** Unit-only is what CI runs; integration is your last gate against keyed-API regressions before tag-push.
-- **Running the full unit suite CONCURRENTLY with the E2E gates.** (2026-08-17, 7.9.0 battery.) The E2E gates parallelize safely among THEMSELVES, but their teardown phases (`nx daemon service stop --with-pg`, gate cleanup, the engine-substrate orphan sweep) share a machine-wide blast radius with the unit suite's self-provisioned engine substrates — the suite ran clean to ~75% then block-failed the moment a sandbox teardown fired. Sequence: E2E gates in parallel, the unit suite SERIAL (before or after). A block-shaped mass failure under concurrency is contention-shaped, but the quiet re-run of the failed set is mandatory evidence either way.
+- **Merging a release PR whose integration shards did not all run.** On a pull request into main, CI runs every integration file in three shards (nexus-jh1f2 cut 4); `pytest-gate` needs all three green. A release PR CI where `pytest (integration, affected, shard k/3)` is missing or skipped is not evidence: re-run it.
+- **Running the full unit suite CONCURRENTLY with the E2E gates** (the plugin-only lane still runs one by hand; the full release path no longer does, nexus-jh1f2 cut 5). (2026-08-17, 7.9.0 battery.) The E2E gates parallelize safely among THEMSELVES, but their teardown phases (`nx daemon service stop --with-pg`, gate cleanup, the engine-substrate orphan sweep) share a machine-wide blast radius with the unit suite's self-provisioned engine substrates — the suite ran clean to ~75% then block-failed the moment a sandbox teardown fired. Sequence: E2E gates in parallel, the unit suite SERIAL (before or after). A block-shaped mass failure under concurrency is contention-shaped, but the quiet re-run of the failed set is mandatory evidence either way.
 - **Using `gh release create` after `git push origin vX.Y.Z`.** Duplicate release. The Release workflow already creates one.
 - **Forgetting `uv sync`.** `uv.lock` not updated; CI fails or local install resolves differently.
 - **Forgetting the coordinated install after tag-push (Step 12).** Local `nx` stays on the old version; the post-merge "verify locally" step lies. The opposite slip is also a mistake: running `scripts/reinstall-tool.sh` or `nx upgrade` in one session while others are live.

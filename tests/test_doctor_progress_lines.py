@@ -91,9 +91,10 @@ def test_the_supplementary_checks_run_as_steps(monkeypatch) -> None:
 
 
 def test_the_default_sweep_has_no_catalog_document_walk() -> None:
-    """F30 (nexus-f3yqd.6): the walk was the default sweep's longest named step (22 s on a laptop tenant); it now
-    runs only under `nx doctor --check-index-runs`."""
+    """F30 (nexus-f3yqd.6): the walk was the default sweep's longest named step (22 s on a laptop tenant); the three
+    index-run rows now read the engine's census routes, in the sweep and under `nx doctor --check-index-runs`."""
     import inspect
 
-    assert "_walk_documents_for_doctor" not in inspect.getsource(health.run_health_checks)
-    assert "_walk_documents_for_doctor()" in inspect.getsource(health.run_index_run_checks)
+    assert not hasattr(health, "_walk_documents_for_doctor") and not hasattr(health, "_WALK_FAILED")
+    assert "_check_index_run_routes" in inspect.getsource(health.run_health_checks)
+    assert "_check_index_run_routes" in inspect.getsource(health.run_index_run_checks)

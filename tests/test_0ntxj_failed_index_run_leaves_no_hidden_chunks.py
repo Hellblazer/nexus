@@ -159,7 +159,8 @@ def test_doctor_names_unhealed_hidden_chunks_and_reconcile_repairs_them(t2_servi
     from click.testing import CliRunner
 
     from nexus.cli import main
-    from nexus.health import _check_failed_runs_hidden_chunks
+    from nexus.catalog.factory import make_catalog_reader
+    from nexus.health import _failed_hidden_rows_over
 
     md = tmp_path / "ntxj-killed.md"
     md.write_text(f"# ntxj killed\n\n{_BODY}\n")
@@ -169,7 +170,8 @@ def test_doctor_names_unhealed_hidden_chunks_and_reconcile_repairs_them(t2_servi
     stored, visible = _stored_and_visible(client)
     assert stored and not visible, "control: the chunks are stored and hidden"
 
-    [row] = _check_failed_runs_hidden_chunks()
+    cat = make_catalog_reader()
+    [row] = _failed_hidden_rows_over(list(cat.all_documents(limit=0)), cat)
     assert row.warn and not row.ok, row
     assert row.detail.startswith("1 of 1 failed document(s)"), row.detail
 
@@ -180,7 +182,8 @@ def test_doctor_names_unhealed_hidden_chunks_and_reconcile_repairs_them(t2_servi
 
     stored, visible = _stored_and_visible(client)
     assert visible == stored
-    [row] = _check_failed_runs_hidden_chunks()
+    cat = make_catalog_reader()
+    [row] = _failed_hidden_rows_over(list(cat.all_documents(limit=0)), cat)
     assert row.ok, row
 
 

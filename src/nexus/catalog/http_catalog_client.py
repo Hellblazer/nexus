@@ -268,6 +268,26 @@ _COMBINED_WRITE_EMBED_TIMEOUT_S = 600.0
 #: still cut off well under the 30 s client-wide default.
 _SECTION_LABEL_FILLABLE_TIMEOUT_S = 15.0
 
+#: :meth:`HttpCatalogClient.stub_metadata`'s answer when the engine's bounded read timed out (a 503): the doctor row
+#: reports itself not checked, with that reason, rather than rerunning the slow scan.
+STUB_METADATA_TIMED_OUT = object()
+#: The stub-metadata read's client timeout: above the engine's 25 s call budget (PdfStubMetadataReads.BUDGET_MS), so
+#: the engine's per-collection ``timed_out`` rows arrive instead of a client-side timeout, and under the public edge's
+#: roughly 30 s cut.
+STUB_METADATA_TIMEOUT_S = 28.0
+from nexus.catalog.doctor_route_wire import (  # noqa: F401 — the constants are re-exported: callers import them here
+    INDEX_RUN_CENSUS_MAX_LIMIT,
+    INDEX_RUN_CENSUS_RULES_DIFFER,
+    INDEX_RUN_CENSUS_TIMEOUT_S,
+    INDEX_RUN_FENCE_FLOOR_ISO,
+    INDEX_RUN_STALE_THRESHOLD_S,
+    NEXT_SEQ_DRIFT_TIMEOUT_S,
+    chash_body_validated,
+    parse_stub_metadata,
+    read_index_run_census,
+    read_next_seq_drift,
+)
+
 #: The engine's caps on the RDR-223 append routes (Phase 1, P1.3/P1.4). Refused here, locally and
 #: before any round trip, so a violation reads as a client bug naming the cap instead of a 400
 #: that arrives after an embed budget was set aside. ``sweep_chashes`` at most this many per
@@ -1163,6 +1183,106 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "documents": [{"tumbler": d["tumbler"], "physical_collection": d.get("physical_collection") or ""}
                           for d in documents],
         }
+
+    def _get_unprefixed(self, path: str, *, idempotent: bool = True, timeout: float | None = None) -> Any:
+        """A GET outside ``/v1/catalog`` (the mixin's own ``_get``), for an engine route this client reads."""
+        return super()._get(path, idempotent=idempotent, timeout=timeout)
+
+    def chash_constraints_validated(self) -> bool | None:
+        """Whether the chash width CHECKs on ``nexus.chunks`` and ``nexus.catalog_document_chunks`` are validated
+        (``GET /v1/schema/chash-conformance``, engine 0.1.189, nexus-f3yqd.6). Reads only ``all_validated`` and each
+        constraint's ``table``, ``present``, ``validated`` and ``definition_matches`` (the CHECK's expression is the
+        width predicate, not only its name).
+
+        ``True`` only when both poison tables are listed, every listed constraint is present and validated, and
+        ``all_validated`` is true: no row of
+        those tables can then be non-conformant. ``False`` is an answer that is not that (every store until the
+        engine's VALIDATE job runs). ``None`` is no answer: no ``chash_conformance_constraints_supported`` flag (no
+        request is sent), a 403, 404 or 503, an error, or a malformed body. A caller scans on anything but ``True``.
+        """
+        if self._version_flags().get("chash_conformance_constraints_supported") is not True:
+            return None
+        try:
+            body = self._get_unprefixed(
+                "/v1/schema/chash-conformance", idempotent=False, timeout=_SECTION_LABEL_FILLABLE_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller scans instead
+            _log.info("http_catalog_client.chash_conformance_unavailable", error=str(exc))
+            return None
+        return chash_body_validated(body)
+
+    def stub_metadata(self, limit: int = 1000) -> list[dict] | object | None:
+        """Per knowledge/docs collection, the bounded count of PDF chunks still carrying the upload placeholder
+        metadata (``GET /stub-metadata``, engine 0.1.189, nexus-f3yqd.6): ``[{"collection", "stub_chunks", "capped",
+        "examples"}]``, or ``{"collection", "timed_out": True}`` for a collection the engine's bound cut off. ``capped`` means more than *limit* exist, so ``stub_chunks`` reads as "at least"; ``examples``
+        are owning-document names (source URI, else file path).
+
+        ``None`` means scan as before: the engine does not advertise ``catalog_stub_metadata_supported`` (no request
+        is sent then), the route answers 403 or 404 or another error, the request fails, or the body is malformed.
+        A 503 (the engine's statement bound on the collection list, or the service unavailable) returns
+        :data:`STUB_METADATA_TIMED_OUT`, so a caller reports the row not checked instead of running the slow scan the
+        route replaces.
+        """
+        if self._version_flags().get("catalog_stub_metadata_supported") is not True:
+            return None
+        try:
+            result = self._get("/stub-metadata", idempotent=False, timeout=STUB_METADATA_TIMEOUT_S, limit=limit)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            _log.info("http_catalog_client.stub_metadata_unavailable", status=status)
+            return STUB_METADATA_TIMED_OUT if status == 503 else None
+        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller scans instead
+            _log.info("http_catalog_client.stub_metadata_unavailable", error=str(exc))
+            return None
+        return parse_stub_metadata(result)
+
+    def manifest_foreign_collection(self, limit: int = 1000) -> dict | None:
+        """The live documents whose manifest names chunks outside their own ``physical_collection``, from one bounded
+        engine read (``GET /manifest/foreign_collection``, GH #1611): ``{"count": n, "capped": bool, "documents":
+        [{"tumbler", "physical_collection", "collections", "chunks"}]}``, at most *limit* documents; ``count`` is every
+        such document and ``capped`` means the list holds fewer. ``collections`` are the other collections the manifest
+        names, ``chunks`` the manifest rows that name them.
+
+        ``None`` is "cannot say", never "none": the route answers 404 (an engine from before it) or 503 (its own
+        statement timeout), the request fails, or the body is malformed or inconsistent (an uncapped list whose length
+        is not ``count``). Sent once with a bound of its own, as :meth:`sensitive_documents` is. No capability flag
+        gates it: a 404 says the same thing.
+        """
+        try:
+            result = self._get(
+                "/manifest/foreign_collection", idempotent=False, timeout=_SECTION_LABEL_FILLABLE_TIMEOUT_S, limit=limit)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            _log.info("http_catalog_client.manifest_foreign_collection_unavailable", status=status)
+            return None
+        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller reports "cannot say"
+            _log.info("http_catalog_client.manifest_foreign_collection_unavailable", error=str(exc))
+            return None
+        from nexus.catalog.foreign_collection_doctor import parse_foreign_collection_body  # noqa: PLC0415 — kept out of this over-cap module
+
+        return parse_foreign_collection_body(result)
+
+    def version_probe_failed(self) -> bool:
+        """Did the last ``GET /version`` probe fail (an error, not an answer without a flag)? Then every capability
+        reads unsupported although the engine said nothing about it. Read after a capability call."""
+        return self._version_probe_failed
+
+    def index_run_routes_supported(self) -> bool:
+        """Does the engine answer both doctor census routes (``GET /version``'s ``catalog_index_run_census_supported``
+        and ``catalog_next_seq_drift_read_supported``, engine 0.1.189, nexus-f3yqd.6)? Only JSON ``true`` counts, so an
+        engine before them, or a public edge whose ``/version`` allowlist does not list them, reads False."""
+        flags = self._version_flags()
+        return (flags.get("catalog_index_run_census_supported") is True
+                and flags.get("catalog_next_seq_drift_read_supported") is True)
+
+    def index_run_census(self, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | object | None:
+        """The engine's bounded index-run census (``GET /v1/catalog/index-run/census``, engine 0.1.189): see
+        :func:`nexus.catalog.doctor_route_wire.read_index_run_census`. ``None`` is "cannot say"."""
+        return read_index_run_census(self._get, self._version_flags(), limit)
+
+    def next_seq_drift(self, limit: int = INDEX_RUN_CENSUS_MAX_LIMIT) -> dict | None:
+        """The owners whose ``next_seq`` trails their highest child (``GET /v1/catalog/owners/next_seq_drift``, engine
+        0.1.189): see :func:`nexus.catalog.doctor_route_wire.read_next_seq_drift`. ``None`` is "cannot say"."""
+        return read_next_seq_drift(self._get, self._version_flags(), limit)
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead
@@ -3332,6 +3452,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     _CAPABILITY_TTL_S: float = 300.0
     _version_flags_cache: dict[str, Any] | None = None
     _version_flags_fetched_at: float | None = None
+    #: Whether the last ``GET /version`` probe raised (its ``{}`` then says nothing about the engine).
+    _version_probe_failed: bool = False
     #: The clock the interval is measured on; a test replaces it on the instance.
     _capability_clock = staticmethod(time.monotonic)
 
@@ -3349,8 +3471,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         except Exception as exc:  # noqa: BLE001 — a capability probe never raises; the caller takes the unsupported path
             _log.warning("http_catalog_client.version_probe_failed", error=str(exc))
             flags: dict[str, Any] = {}
+            self._version_probe_failed = True
         else:
             flags = body if isinstance(body, dict) else {}
+            self._version_probe_failed = False
         self._version_flags_cache = flags
         self._version_flags_fetched_at = self._capability_clock()
         return flags

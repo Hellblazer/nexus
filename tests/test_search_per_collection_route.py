@@ -57,11 +57,12 @@ _EDGE_HEADERS = {"Server": "awselb/2.0"}
 @pytest.fixture(autouse=True)
 def _fresh_process_state(monkeypatch):
     """The route's process-wide state: the mixed-model group memo, the
-    "route absent already logged" flag and the kill-switch env. Each test
-    starts as a fresh process would."""
+    "route absent already logged" flag and the opt-in env. The route is off by
+    default (nexus-tu8wp.3); this file exercises it, so each test starts with
+    it opted in and the opt-in tests override."""
     monkeypatch.setattr(se, "_mixed_model_groups", {})
     monkeypatch.setattr(hvc, "_per_collection_absent_warned", False)
-    monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+    monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")
 
 
 class _FakeEngine:
@@ -530,12 +531,36 @@ class TestRouteFailureFallsBackByStatus:
         assert [kw["status"] for e, kw in debugs if "route_absent" in e] == [404]
 
 
-# ── kill switch ──────────────────────────────────────────────────────────────
+# ── opt-in switch (nexus-tu8wp.3: default off, measured 2x slower than batched) ──
 
 
-class TestKillSwitch:
-    @pytest.mark.parametrize("value", ["0", "false", "FALSE", "off", "Off", "no", " 0 "])
-    def test_the_env_switch_turns_the_route_off_and_the_batched_path_serves(
+class TestOptInSwitch:
+    @pytest.mark.parametrize(
+        ("value", "on"),
+        [("1", True), ("true", True), ("TRUE", True), (" True ", True), ("on", True),
+         ("ON", True), ("yes", True), (" Yes ", True),
+         ("", False), ("0", False), ("false", False), ("off", False), ("no", False),
+         ("2", False), ("anything", False), ("enabled", False)],
+    )
+    def test_only_the_documented_values_turn_the_route_on(self, monkeypatch, value, on):
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, value)
+        assert hvc.per_collection_route_enabled() is on
+
+    def test_unset_is_off(self, monkeypatch):
+        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+        assert hvc.per_collection_route_enabled() is False
+
+    def test_unset_the_batched_path_serves_and_the_route_is_never_called(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+        results = _search(engine, cols)
+        assert _ROUTE not in engine.paths()
+        assert _SEARCH in engine.paths()
+        assert len(results) == 6
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "FALSE", "off", "no", "anything"])
+    def test_any_other_value_leaves_the_route_off_and_the_batched_path_serves(
         self, monkeypatch, value,
     ):
         cols = _cols("code", _BGE, 2)
@@ -546,8 +571,8 @@ class TestKillSwitch:
         assert _SEARCH in engine.paths()
         assert len(results) == 6
 
-    @pytest.mark.parametrize("value", ["", "1", "true", "on", "yes", "anything"])
-    def test_any_other_value_leaves_the_route_on(self, monkeypatch, value):
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", " on ", "yes", "Yes"])
+    def test_the_documented_values_turn_the_route_on(self, monkeypatch, value):
         cols = _cols("code", _BGE, 2)
         engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
         monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, value)
@@ -558,12 +583,13 @@ class TestKillSwitch:
     def test_the_switch_is_read_on_every_search(self, monkeypatch):
         cols = _cols("code", _BGE, 2)
         engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")
         _search(engine, cols)
         assert engine.paths().count(_ROUTE) == 1
         monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "0")
         _search(engine, cols)
         assert engine.paths().count(_ROUTE) == 1
-        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV)
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")
         _search(engine, cols)
         assert engine.paths().count(_ROUTE) == 2
 

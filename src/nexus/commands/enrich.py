@@ -159,10 +159,26 @@ class _CollectionDocuments:
     # Titled documents not yet enriched whose manifest names no chunk this
     # collection serves: nothing to read a lookup from, so none is made.
     no_chunks: int = 0
+    # Documents not yet enriched whose catalog content type is not the one asked
+    # for (GH #1611 item 5): a note or a markdown file is not a bibliographic record.
+    other_type: int = 0
+
+
+# Catalog content types that name a bibliographic record. ``pdf`` is the legacy
+# spelling of ``paper`` (link_generator._PDF_CORPUS_SOURCE_TYPES reads both).
+_PAPER_CONTENT_TYPES: frozenset[str] = frozenset({"paper", "pdf"})
+
+# The catalog content types ``nx enrich bib --content-type`` accepts (the types the indexers and ``nx catalog register``
+# write), and ``any`` for every type. A typo is refused at the CLI: it would otherwise match no document and read as
+# an empty collection. A set, sorted: this is a vocabulary, not the prefix-to-type map of
+# ``metadata_schema`` (``tests/test_z0o2p12_note_write.py::TestContentTypeMap`` scans tuples and lists for a second
+# copy of that map and must not read this as one).
+BIB_CONTENT_TYPE_CHOICES: tuple[str, ...] = tuple(sorted(
+    {"paper", "pdf", "markdown", "prose", "code", "rdr", "knowledge", "any"}))
 
 
 def _catalog_collection_documents(
-    collection: str, id_field: str, served: set[str],
+    collection: str, id_field: str, served: set[str], content_type: str = "paper",
 ) -> _CollectionDocuments:
     """nexus-6pfgb.21: the collection's live catalog documents, split by whether
     the catalog row already holds the backend's id (*id_field*).
@@ -172,14 +188,24 @@ def _catalog_collection_documents(
     collection costs one catalog listing (the caller has already scanned T3 for
     *served*) and no chunk-to-owner reverse lookup. A document with no catalog
     title cannot be looked up and is counted in ``untitled``; a titled one with no
-    served chunk in ``no_chunks``. ``--limit`` does not bound this read.
+    served chunk in ``no_chunks``. Only documents of *content_type* are looked up
+    (``paper`` also takes the legacy ``pdf``; ``any`` takes every type); the rest
+    are counted in ``other_type``. ``--limit`` does not bound this read.
     Raises ``click.ClickException`` when the catalog cannot answer, as
     :func:`_catalog_documents_for_chunks` does.
     """
     reader = _open_catalog_reader()
     try:
         entries = reader.list_by_collection(collection, limit=1_000_000)
-        pending = [e for e in entries if not getattr(e, id_field, "")]
+        unenriched = [e for e in entries if not getattr(e, id_field, "")]
+        wanted = (
+            None if content_type == "any"
+            else _PAPER_CONTENT_TYPES if content_type == "paper" else frozenset({content_type})
+        )
+        pending = [
+            e for e in unenriched
+            if wanted is None or (getattr(e, "content_type", "") or "") in wanted
+        ]
         titled = [e for e in pending if e.title]
         manifests = reader.get_manifests([str(e.tumbler) for e in titled]) if titled else {}
     except Exception as exc:  # noqa: BLE001 — surfaced to the operator as a ClickException
@@ -203,8 +229,8 @@ def _catalog_collection_documents(
             to_look_up[tumbler] = (entry, chunk_ids)
     return _CollectionDocuments(
         to_look_up=to_look_up, total=len(entries),
-        enriched=len(entries) - len(pending), untitled=len(pending) - len(titled),
-        no_chunks=len(titled) - len(to_look_up),
+        enriched=len(entries) - len(unenriched), untitled=len(pending) - len(titled),
+        no_chunks=len(titled) - len(to_look_up), other_type=len(unenriched) - len(pending),
     )
 
 
@@ -478,9 +504,21 @@ def enrich() -> None:
         "it leaves empty, with bib_enriched_at and no id."
     ),
 )
+@click.option(
+    "--content-type",
+    type=click.Choice(BIB_CONTENT_TYPE_CHOICES),
+    default="paper",
+    show_default=True,
+    help=(
+        "Look up only the collection's catalog documents of this content type. "
+        "``paper`` (the default) also takes the legacy ``pdf`` type; ``any`` "
+        "looks up every titled document, notes and markdown included. A miss "
+        "writes nothing, so a non-paper document is looked up again on every run."
+    ),
+)
 def enrich_bib(
     collection: str, delay: float, limit: int, source: str,
-    backfill_catalog: bool,
+    backfill_catalog: bool, content_type: str,
 ) -> None:
     """Backfill bibliographic metadata for the documents in COLLECTION.
 
@@ -535,7 +573,9 @@ def enrich_bib(
     if backfill_catalog:
         _backfill_catalog_from_chunks(collection)
         return
-    run_bib_enrichment(collection, delay=delay, limit=limit, source=source)
+    run_bib_enrichment(
+        collection, delay=delay, limit=limit, source=source, content_type=content_type,
+    )
 
 
 def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
@@ -704,6 +744,7 @@ def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
 
 def run_bib_enrichment(
     collection: str, *, delay: float = 0.5, limit: int = 0, source: str = "auto",
+    content_type: str = "paper",
 ) -> None:
     """Core of ``nx enrich bib``; also invoked by ``nx dt index --enrich``
     (RDR-139 Layer C) to run a DT-CrossRef gap-fill pass over a freshly
@@ -782,7 +823,7 @@ def run_bib_enrichment(
     # the chunk-to-owner reverse lookup runs on ITS chunks alone, so a fully
     # enriched collection costs one listing.
     served = set(all_chunk_ids)
-    found = _catalog_collection_documents(collection, id_field, served)
+    found = _catalog_collection_documents(collection, id_field, served, content_type)
     owners: dict[str, list[str]] = {}
     if found.to_look_up:
         owners, _held_entries = _catalog_documents_for_chunks(
@@ -822,6 +863,12 @@ def run_bib_enrichment(
         docs_to_process = eligible[:limit] + flagged
 
     notes = ""
+    if found.other_type:
+        notes += (
+            f", {found.other_type} not "
+            + ("papers" if content_type == "paper" else f"of type {content_type}")
+            + " (not looked up; --content-type any looks them up)"
+        )
     if found.untitled:
         notes += f", {found.untitled} without a catalog title (not looked up)"
     if found.no_chunks:

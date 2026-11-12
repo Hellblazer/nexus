@@ -70,7 +70,9 @@ defect that rides with it (Gap 4), not a present slowdown.
 
 ### Enumerated gaps
 
-This RDR closes Gaps 1, 2 and 4. Gap 3 is recorded here because the August
+This RDR, as accepted (Parts A and A4), closes Gaps 1 and 4. Gap 2 (taxonomy
+discover) belongs to Part B, held at accept, and no step in this acceptance
+closes it. Gap 3 is recorded here because the August
 draft claimed to close it; this revision does not, and says why under Gap 3.
 
 #### Gap 1: Catalog registration is a client-side reconcile loop over a downloaded copy of the catalog
@@ -626,8 +628,9 @@ These figures are "the baseline" cited below.
 - [ ] A Java HDBSCAN port reproduces sklearn on the parity fixture (adjusted
   Rand index, ARI, a 0-to-1 agreement score between two clusterings, at
   least 0.90; 16 clusters with the largest 40 capped; [359, 23] uncapped).
-  **Status**: Unverified, gated at Step 10 (Phase 3) with that pass or fail
-  bar. **Method**: Spike (at implementation)
+  **Status**: Unverified; held with Part B (Step 10 is outside this
+  acceptance and is not claimed by its Done). **Method**: Spike (at
+  implementation)
 - [ ] A 20,000-row commit finishes under 30 s on the test substrate.
   **Status**: Unverified, gated at Step 2 (Phase 1).
   **Method**: Spike (at implementation)
@@ -945,7 +948,7 @@ stage calls, one commit, and polls.
 - `catalog/http_catalog_client.py`: `reconcile_stage`, `reconcile_commit`
   (submit and poll under the shared job contract), `links_upsert_many`,
   `links_same_content`, `resolve_or_register`, added to
-  `_SERVICE_ONLY_WRITE_OPS` (`catalog/factory.py:417`).
+  `_SERVICE_ONLY_WRITE_OPS` (`catalog/factory.py:429`).
 - `indexer.py` `_catalog_hook` keeps the walk, `stat`, sha256, the
   ephemeral-path guard, the nexus-rqsh1 guard and classification, and
   builds `base_metadata` and `stamp` for each file. It replaces the
@@ -1301,19 +1304,22 @@ answer (`ChunkKeysSweepJobs`).
   the hook and housekeeping, O(changed) pages and O(missing) serial writes
   to stage calls, one commit and polls. A delta run loses its owner read in
   the hook and its per-file writes. Link generation goes from tenant-wide
-  type lists and two round trips per edge to one write per generator and
-  one scoped read. Whether that removes the 4-6 s and 1-5 s parts of the
+  type lists and two round trips per edge to: each file-path linker zero
+  list reads and one write per 1000 edges, the dependency linker two scoped
+  reads and one write, the PDF linker one `same_content` call. Whether that removes the 4-6 s and 1-5 s parts of the
   baseline is measured at Step 7, not assumed, because the baseline does
   not split list time from probes and frontmatter reads. `nx index md` and
-  `store put` identity resolution becomes one request. Discover's egress
+  `store put` identity resolution becomes one request. (Part B, held:) Discover's egress
   goes to near zero and its round trips to a submit and polls (the relabel
   still pulls a few sample texts per topic, by design). The client sheds
   the reconcile machine, sklearn from the discover path, and the
   cross-process centroid-cache staleness noted at
   `http_centroid_store.py:97-133`.
-- Negative: two engine cuts; a Java HDBSCAN port with a parity obligation;
-  two landing tables and a job registry as operational surfaces; tumbler
-  minting in two places, held together by a drift test.
+- Negative: one engine cut in this acceptance (cut 1,
+  engine-service-v0.1.185); a second cut and the Java HDBSCAN port with its
+  parity obligation belong to held Part B; two landing tables and a job
+  registry as operational surfaces; tumbler minting in two places, held
+  together by a drift test.
 - Behaviour changes, declared:
   - Path links resolve by the file's identity, so cross-repository links
     and links to stale-owner rows with no `source_uri` are dropped.
@@ -1352,7 +1358,8 @@ answer (`ChunkKeysSweepJobs`).
   **Mitigation**: the predictable row errors are classified refusals; Step
   2 tests that a refused row leaves the rest committed.
 - **Risk**: the Java port diverges from sklearn.
-  **Mitigation**: the parity fixture gate at Step 10 blocks Phase 3.
+  **Mitigation**: held with Part B; the Step 10 parity gate will block
+  Phase 3 when that part is taken up.
 
 ### Failure Modes
 
@@ -1389,13 +1396,16 @@ answer (`ChunkKeysSweepJobs`).
 ### Minimum Viable Validation
 
 A warm full `nx index repo` of this repository against a local engine built
-from the Phase 1 tree makes exactly one commit request, `ceil(N/1000)` stage
+from the tree makes exactly one commit request, `ceil(N/1000)` stage
 requests, zero single `update`, `register`, `delete` or `link` requests, and
 zero `GET /list?content_type=` requests without an owner filter (counted at
-the HTTP client), and leaves catalog row and link state identical to the old
-path on the same tree. Then a delta run with one changed RDR does the same
-with `walk=partial` and the linking stage costs at most one scoped read and
-one write per generator.
+the HTTP client), and leaves catalog row and link state identical to
+`tests/fixtures/rdr193_reconcile_parity_expected.json`'s rules on the same
+tree (Step 6 deleted the old path). Then a delta run with one changed RDR
+uses `walk=partial`, and its linking stage costs: each file-path linker zero
+list reads and one write per 1000 edges; the dependency linker two scoped
+reads and one write; the PDF linker one `same_content` call; resolve calls
+are reported separately.
 
 ### Phase 1: Engine half of Parts A, A4 and B1 (engine cut 1; B1 held)
 
@@ -1512,7 +1522,7 @@ conexus, whose Liquibase walk on a point-in-time fork of production is the
 pre-deploy gate) and 6.1 (the client-path gate through the edge). The
 `--candidate-migration` leg the August draft named no longer exists.
 
-### Phase 2: Client half of Parts A, A4 and B1 (B1 held)
+### Phase 2 (CLOSED, 2026-11-10): Client half of Parts A, A4 and B1 (B1 held)
 
 #### Step 6: Reconcile client
 
@@ -1551,6 +1561,12 @@ ships Steps 6 and 7 (paired release). Step 8 is held with Part B and takes its
 floor bump in the release that ships Part B.
 
 ### Phase 3: Part B2 engine (engine cut 2; held)
+
+Held Part B carry-list: five implementation-time items found while
+Parts A and A4 were built (B1's supersession and predicates, the
+too_large heap share, Step 4's engine cut, taxonomy-022, the EngineJobs
+evictor gate) are tracked in a comment on epic nexus-u5m5g (2026-11-11).
+The un-hold starts there.
 
 #### Step 10: Clustering port
 
@@ -1628,9 +1644,11 @@ None. The clustering port is new Java code with no new library.
   another. **Verify**: the link targets this repository's document.
 - **Scenario**: two PDFs with the same content in different collections.
   **Verify**: one `same-as` link to the text-least tumbler.
-- **Scenario**: the engine restarts during a commit and during a discover.
+- **Scenario**: the engine restarts during a commit (the discover half is
+  held with Part B).
   **Verify**: 404, one resubmit, correct final state.
-- **Scenario**: discover over a collection with a sensitive document.
+- **Scenario** (held with Part B): discover over a collection with a
+  sensitive document.
   **Verify**: none of its chunks in any topic, none of its terms in a
   label.
 
@@ -1641,8 +1659,11 @@ None. The clustering port is new Java code with no new library.
 Java tests on testcontainers PG for every function and route (Phases 1
 and 3); Python contract tests that count requests at the HTTP client
 (Phases 2 and 4); the parity fixture for clustering; the parity fixtures of
-old and new reconcile paths. Done means every listed test passes and the
-Minimum Viable Validation's counts hold on this repository.
+old and new reconcile paths. Done for this acceptance is Steps 0-3, 5-7 and
+9: every test listed for those steps passes and the Minimum Viable
+Validation's counts hold on this repository. The Phase 3 and 4 tests, the
+clustering parity fixture and the two discover Test Plan scenarios belong to
+held Part B.
 
 ### Performance Expectations
 
@@ -1665,11 +1686,13 @@ and the document says so where the gap is stated.
 
 ### Assumption Verification
 
-Three load-bearing claims are unverified and gated at named steps with
-pass or fail bars: commit parity (Step 2), the 20,000-row commit time
-(Step 2) and HDBSCAN parity (Step 10). Three counts are measured at Step 0
-before the identity tests are written. One mechanism is inferred, not read:
-whether `unlink` deletes softly or hard (checked at Step 3). Every other
+Three load-bearing claims were gated at named steps with pass or fail
+bars. Two passed at Step 2: commit parity (the parity fixture, 31 cases,
+0 differences) and the 20,000-row commit time (8.5 s insert, 9.2 s update,
+against a 30 s bar). The third, HDBSCAN parity (Step 10), is held with
+Part B. Three counts were measured at Step 0 before the identity tests were
+written (T2 `nexus/rdr193-identity-measurement`). One mechanism is inferred,
+not read: whether `unlink` deletes softly or hard (checked at Step 3). Every other
 claim is verified by source reading or spike (research-1 to research-38).
 
 #### API Verification
@@ -1838,3 +1861,5 @@ which removes Steps 4, 8 and 10-12 from this RDR's acceptance.
   terms defined.
 - 2026-11-08: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `962a93b3c`; critique `nexus_rdr/193-gate-critique-2026-11-08-r3`.
 - 2026-11-08: Accepted by Sam (Parts A and A4; Part B held). Residual dispositions: the two BLOCKS-PLANNING residuals by c8a4921eb and 6d05bc01e (fix check `nexus_rdr/193-fix-check-6d05bc01e`, after `-c8a4921eb` failed once); the three round-3 DISCOVER-AT-IMPLEMENTATION residuals and the five carried from fix check 962a93b3c by nexus-blbd3 (two of those five held with Part B).
+- 2026-11-10: held-scope wording amended to the reviewed Phase 2 code (standing grant 3; residual 8, nexus-u5m5g.9): Gaps closed by this acceptance are 1 and 4; one engine cut; the Java HDBSCAN check, the Step 10 gate, discover egress and both discover Test Plan scenarios marked held with Part B; Done stated as Steps 0-3, 5-7 and 9; the Minimum Viable Validation restated (residual 5) against the parity fixture's rules; factory line reference 417 to 429. Step 9 is not reworded here: its re-scope (no pin change; 0.1.186 already pinned) is recorded on nexus-u5m5g.10.
+- 2026-11-11: Assumption Verification amended to the measured results (standing grant 3; nexus-blbd3): the two Step 2 claims passed (parity fixture 31 cases, 0 differences; 20,000-row commit 8.5 s insert and 9.2 s update against the 30 s bar, nexus-u5m5g.3), HDBSCAN parity marked held with Part B, and the Step 0 counts given their record. The held Part B carry-list moved from nexus-blbd3 to epic nexus-u5m5g, named at Phase 3.

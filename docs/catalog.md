@@ -526,7 +526,7 @@ nx catalog gc                           # delete entries missed in 2+ index runs
 nx catalog gc --dry-run                 # preview
 ```
 
-The indexer automatically tracks `miss_count` for each catalog entry. Files deleted or renamed are detected: renames (same content hash at a new path) transfer links to the new entry; true deletions are evicted after 2 consecutive missed index runs. `gc` provides the manual escape hatch.
+The indexer automatically tracks `miss_count` for each catalog entry. Files deleted or renamed are detected: renames (same content hash at a new path) transfer links to the new entry; true deletions are evicted after 2 consecutive missed index runs, except that a complete `nx index repo` run from the owner's main checkout retires, in that run, a file git no longer tracks and that is gone from disk (GH #1610). `gc` provides the manual escape hatch.
 
 ### Ghost and dormant collections
 

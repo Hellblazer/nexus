@@ -12,6 +12,7 @@ the per-leg query strings are distinct.
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,8 @@ _spec.loader.exec_module(drv)
 def _fresh_process_state(monkeypatch):
     monkeypatch.setattr(se, "_mixed_model_groups", {})
     monkeypatch.setattr(hvc, "_per_collection_absent_warned", False)
+    # the route is opt-in (nexus-tu8wp.3) and the script must opt in itself for its route runs, so the
+    # tests start from the default: unset
     monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
 
 
@@ -61,7 +64,7 @@ def _world(monkeypatch, *, route: bool):
 
 def _estimate(cols):
     def estimate(shape):
-        n, rerank = drv.SHAPES[shape]
+        n, rerank, _limit = drv.SHAPES[shape]
         return rp.estimate_batched_calls(cols, n, deep=rerank)
 
     return estimate
@@ -200,17 +203,37 @@ def test_a_batched_run_that_reaches_the_route_is_not_a_baseline(monkeypatch):
     def always_route(_route_on: bool) -> HttpVectorClient:
         return HttpVectorClient()  # supports_per_collection_search left True for both paths
 
+    def opted_in_search(*a, **kw):
+        # the script clears the opt-in for a batched run (nexus-tu8wp.3), so a baseline that still
+        # reaches the route needs something to put it back: the guard under test is the Recorder's
+        os.environ[hvc.PER_COLLECTION_ROUTE_ENV] = "1"
+        return search_cross_corpus(*a, **kw)
+
     with pytest.raises(drv.RouteNotServedError, match="not a batched baseline"):
         drv.measure_latency(
             shapes=["mcp"], rounds=1, warmup=0, cols=cols, make_client=always_route,
-            search=search_cross_corpus, diag_type=SearchDiagnostics, emit=lambda _l: None,
+            search=opted_in_search, diag_type=SearchDiagnostics, emit=lambda _l: None,
             pause_s=0.0, sleep=lambda _s: None,
         )
 
 
+def test_a_batched_run_on_a_route_capable_client_stays_off_the_route_because_the_env_is_cleared(monkeypatch):
+    engine, cols, _make = _world(monkeypatch, route=True)
+    monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")  # the caller opted in; a batched leg must not inherit it
+
+    def always_route(_route_on: bool) -> HttpVectorClient:
+        return HttpVectorClient()
+
+    run = drv.run_one(
+        path="batched", shape="mcp", round_no=0, query="q", cols=cols, make_client=always_route,
+        search=search_cross_corpus, diag_type=SearchDiagnostics,
+    )
+    assert run.search_calls >= 1 and run.route_calls == 0
+
+
 def test_the_exit_code_for_an_unserved_route_is_three(monkeypatch):
     engine, cols, make_client = _world(monkeypatch, route=False)
-    monkeypatch.setattr(drv, "_live_world", lambda: (cols, make_client, search_cross_corpus, SearchDiagnostics))
+    monkeypatch.setattr(drv, "_live_world", lambda: (cols, {"mcp": cols, "cli": cols}, make_client, search_cross_corpus, SearchDiagnostics))
     module_time(monkeypatch, drv).sleep = lambda _s: None
     assert drv.main(["latency", "--rounds", "1", "--warmup", "0", "--shapes", "mcp", "--pause", "0"]) == 3
     assert drv.EXIT_ROUTE_NOT_SERVED == 3
@@ -232,6 +255,89 @@ def test_failed_collections_are_recorded_with_their_error_kind(monkeypatch):
     assert res["failed"] and res["isolated"] == [(cols[0], "statement_timeout")]
     assert any("statement_timeout" in line for line in lines)
     assert res["route_served"] == 2 and res["search_calls"] == 0
+
+
+# ── nexus-tu8wp.3: the route is opt-in, so the script owns the env ───────────
+
+
+def _env_spy(seen: list[tuple[bool, str | None]]):
+    """A search that records ``(client asks for the route, NX_SEARCH_PER_COLLECTION)`` as it runs."""
+    def spy(*a, **kw):
+        seen.append((kw["t3"].supports_per_collection_search, os.environ.get(hvc.PER_COLLECTION_ROUTE_ENV)))
+        return search_cross_corpus(*a, **kw)
+
+    return spy
+
+
+def test_the_scripts_env_name_is_the_clients_opt_in():
+    assert drv.ROUTE_ENV == hvc.PER_COLLECTION_ROUTE_ENV
+
+
+@pytest.mark.parametrize("prior", [None, "0", "1", "garbage"])
+@pytest.mark.parametrize("on", [True, False])
+def test_route_env_sets_or_clears_for_the_block_and_restores_the_callers_value(monkeypatch, prior, on):
+    if prior is None:
+        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, prior)
+    with drv.route_env(on):
+        assert hvc.per_collection_route_enabled() is on
+        assert os.environ.get(hvc.PER_COLLECTION_ROUTE_ENV) == ("1" if on else None)
+    assert os.environ.get(hvc.PER_COLLECTION_ROUTE_ENV) == prior
+
+
+def test_route_env_restores_when_the_block_raises(monkeypatch):
+    monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "0")
+    with pytest.raises(RuntimeError), drv.route_env(True):
+        raise RuntimeError("boom")
+    assert os.environ[hvc.PER_COLLECTION_ROUTE_ENV] == "0"
+
+
+@pytest.mark.parametrize("caller_env", [None, "1", "0"], ids=["unset", "caller-on", "caller-off"])
+def test_latency_route_runs_see_the_opt_in_and_batched_runs_do_not(monkeypatch, caller_env):
+    """Whatever the caller's environment says, a route run runs with the opt-in set and a batched run
+    without it, and the caller's value is back afterwards."""
+    engine, cols, make_client = _world(monkeypatch, route=True)
+    if caller_env is not None:
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, caller_env)
+    seen: list[tuple[bool, str | None]] = []
+    drv.measure_latency(
+        shapes=["mcp"], rounds=2, warmup=0, cols=cols, make_client=make_client,
+        search=_env_spy(seen), diag_type=SearchDiagnostics, emit=lambda _l: None,
+        pause_s=0.0, sleep=lambda _s: None,
+    )
+    assert len(seen) == 4
+    assert [env for route, env in seen if route] == ["1", "1"]
+    assert [env for route, env in seen if not route] == [None, None]
+    assert os.environ.get(hvc.PER_COLLECTION_ROUTE_ENV) == caller_env
+
+
+def test_concurrency_workers_see_the_opt_in_and_it_is_restored(monkeypatch):
+    engine, cols, make_client = _world(monkeypatch, route=True)
+    monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+    seen: list[tuple[bool, str | None]] = []
+    drv.measure_concurrency(
+        ks=[3], shape="mcp", cols=cols, make_client=make_client,
+        search=_env_spy(seen), diag_type=SearchDiagnostics, emit=lambda _l: None,
+        pause_s=0.0, sleep=lambda _s: None,
+    )
+    assert seen == [(True, "1")] * 3
+    assert hvc.PER_COLLECTION_ROUTE_ENV not in os.environ
+
+
+def test_lexical_searches_see_the_opt_in_and_it_is_restored(monkeypatch):
+    engine, cols, make_client = _world(monkeypatch, route=True)
+    engine.serve_lexical = True
+    monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "")
+    monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+    seen: list[tuple[bool, str | None]] = []
+    drv.measure_lexical(
+        rounds=1, warmup=0, ks=(2,), cols=cols, make_client=make_client, search=_env_spy(seen),
+        diag_type=SearchDiagnostics, emit=lambda _l: None, pause_s=0.0, sleep=lambda _s: None,
+    )
+    assert len(seen) == 4, "one field and one nofield round, then two concurrent searches"
+    assert {env for _route, env in seen} == {"1"}
+    assert hvc.PER_COLLECTION_ROUTE_ENV not in os.environ
 
 
 # ── nexus-pq3wr: the --lexical mode ──────────────────────────────────────────

@@ -826,11 +826,6 @@ _RESEARCH_CONTEXT_CASES = [
     {"name": "with_id_prints_the_rdr_header", "files": [("rdr-001-hello-world.md", _HELLO,
                                                           "## Research Findings\n\n- Finding A\n- Finding B")],
      "rows": None, "argv": ["--", "1"], "has": ["### RDR 1:", "Hello World", "Research Findings"], "lacks": []},
-    # `add <id>` with no finding text still prints RDR context rather than
-    # attempting a T2 write.
-    {"name": "add_word_with_only_an_id_falls_through_to_context",
-     "files": [("rdr-001-hello-world.md", _HELLO, "")], "rows": None,
-     "argv": ["--", "add", "1"], "has": ["RDR 1"], "lacks": []},
     # Regression (2026-07-22, caught on RDR-188): `nx memory list` rows are
     # "[id] <project>/<title>  (...)", and the old ^-anchored title regex
     # matched NOTHING, so every preamble reported "No research findings
@@ -862,63 +857,9 @@ def test_rdr_research_context(rdr_env, monkeypatch, case):
     _assert_output(case["name"], result.output, has=case["has"], lacks=case["lacks"])
 
 
-#: nexus-zu1q0: the next sequence number is derived from existing
-#: ``<id>-research-*`` titles, and an add never silently upserts over one.
-_RESEARCH_ADD_CASES = [
-    {"name": "seq_1_when_no_prior_findings", "entries": {}, "hidden": frozenset(),
-     "args": ["add", "201", "first", "finding"], "out_has": ["201-research-1"],
-     "put_titles": ["201-research-1"], "stored_has": {"201-research-1": "first finding"}, "absent": []},
-    # Live titles below 100 are zero-padded; an unpadded `97` must join that
-    # sequence, never fork a bare `97-research-1` namespace beside it.
-    {"name": "unpadded_id_joins_zero_padded_legacy_titles",
-     "entries": {"097-research-9": "finding: ninth\n"}, "hidden": frozenset(),
-     "args": ["add", "97", "tenth", "finding"], "out_has": ["097-research-10"], "put_titles": None,
-     "stored_has": {"097-research-10": "tenth finding"}, "absent": ["97-research-1"]},
-    {"name": "advances_past_an_existing_seq", "entries": {"201-research-1": "finding: first\n"},
-     "hidden": frozenset(), "args": ["add", "201", "second", "finding"], "out_has": ["201-research-2"],
-     "put_titles": None, "stored_has": {"201-research-1": "first", "201-research-2": "second finding"},
-     "absent": []},
-    # A stale seq-scan that misses a concurrently-created seq-2 must not upsert
-    # over it: the command advances to seq 3.
-    {"name": "never_overwrites_a_title_the_scan_missed",
-     "entries": {"201-research-1": "finding: first\n", "201-research-2": "finding: concurrent\n"},
-     "hidden": frozenset({"201-research-2"}), "args": ["add", "201", "third", "finding"],
-     "out_has": ["201-research-3"], "put_titles": None,
-     "stored_has": {"201-research-2": "concurrent", "201-research-3": "third finding"}, "absent": []},
-    {"name": "accepts_an_rdr_prefixed_id_token", "entries": {}, "hidden": frozenset(),
-     "args": ["add", "RDR-97", "some", "finding"], "out_has": [], "put_titles": ["097-research-1"],
-     "stored_has": {}, "absent": []},
-]
-
-
-@pytest.mark.parametrize("case", _table(_RESEARCH_ADD_CASES))
-def test_rdr_research_add(monkeypatch, case):
-    name = case["name"]
-    fake = _use_t2(monkeypatch, case["entries"], hidden=case["hidden"])
-    result = _preamble("rdr-research", "--", *case["args"])
-    assert result.exit_code == 0, f"[{name}] {result.output}"
-    _assert_output(name, result.output, has=case["out_has"])
-    if case["put_titles"] is not None:
-        assert [t for t, _ in fake.put_calls] == case["put_titles"], f"[{name}] {result.output}"
-    for title, text in case["stored_has"].items():
-        assert text in fake._store[title], f"[{name}] {title} lacks {text!r}: {fake._store}"
-    for title in case["absent"]:
-        assert title not in fake._store, f"[{name}] unexpected {title} in {sorted(fake._store)}"
-
-
-def test_two_consecutive_research_adds_never_collide(monkeypatch):
-    """The exact repro shape from nexus-zu1q0: two back-to-back `add` calls
-    against the same RDR each claim a distinct sequence number, sharing one
-    client across both invocations (as two consecutive CLI calls would)."""
-    fake = _use_t2(monkeypatch, {})
-    r1 = _preamble("rdr-research", "--", "add", "201", "finding", "one")
-    r2 = _preamble("rdr-research", "--", "add", "201", "finding", "two")
-    assert r1.exit_code == 0, r1.output
-    assert r2.exit_code == 0, r2.output
-    assert "201-research-1" in r1.output
-    assert "201-research-2" in r2.output
-    assert "finding one" in fake._store["201-research-1"]
-    assert "finding two" in fake._store["201-research-2"]
+# The CLI add that wrote research records is retired (RDR-240 TD7, nexus-qo7ie.33); the research_add
+# procedure builds them (tests/test_procedure_research_add.py) and the refusal is pinned in
+# tests/test_rdr_research_bare_add_refused.py. The sequence scan stays: the rdr-fix preamble uses it.
 
 
 def test_next_seq_sees_titles_with_a_summary_suffix():
@@ -1602,7 +1543,7 @@ _FIX_STATE_CASES = [
              "Sites: L471, L254-257, L612", "git diff {gated}..HEAD -- docs/rdr/rdr-204-example.md",
              "{fixed}", "fix one",
              "204-research-4",  # the next research seq is the pre-edit entry's title
-             "nx rdr preamble rdr-research -- add 204", "nothing else", "inferred, not read", "census",
+             "/conexus:rdr-research add 204", "nothing else", "inferred, not read", "census",
              "204-fix-check-{fixed}",
              # nexus-yjf5l.5 (R2): the serial precondition (fix, check, then
              # Layer 1 and Layer 3, never a parallel dispatch) is printed here.

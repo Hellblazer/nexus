@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The vocabulary of an RDR research record, read from ``rdr-research-vocab.toml`` (RDR-240 TD7, nexus-qo7ie.33).
 
-``nx rdr preamble rdr-research -- add`` checks its ``--classification`` and ``--method``
-against these, and the ``research_add`` procedure reads the same table through
+``nx rdr``'s gate preamble names these in its assumption audit, and the ``research_add`` procedure reads the same table through
 ``tables.get``, so the two cannot disagree.
 """
 from __future__ import annotations

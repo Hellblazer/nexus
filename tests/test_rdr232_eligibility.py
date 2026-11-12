@@ -243,14 +243,16 @@ def test_adding_a_route_to_the_trusted_set_makes_that_route_count(route, monkeyp
 
 
 @pytest.mark.parametrize("route", ["explicit", "heuristic", "model-assisted"])
-def test_a_discounted_route_is_refused_with_its_own_reason_and_still_serves_listing(route) -> None:
-    """A lookup is no longer served by it: the recorded synthesis kind narrows (nexus-indyo)."""
+def test_a_discounted_route_is_refused_with_its_own_reason_for_every_request(route) -> None:
+    """Neither a lookup nor a listing is served by it any more: the recorded synthesis kind narrows both
+    (nexus-indyo for lookups, nexus-a4g2a for listings)."""
     row = _row(910, "grown-synth", kind=S, tags="ad-hoc,grown", provenance="grown", route=route)
     out, filt = _match([row], [(910, 0.05)], S)
     assert out == []
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unreviewed_route": 1}
-    out, _ = _match([row], [(910, 0.05)], D)
-    assert _ids(out) == [910]
+    out, filt = _match([row], [(910, 0.05)], D)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_not_discovery": 1}
     out, filt = _match([row], [(910, 0.05)], L)
     assert out == []
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_not_lookup": 1}
@@ -629,10 +631,12 @@ def test_scenario_4_an_unknown_grown_plan_is_not_selected_for_a_synthesis_reques
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"untrusted_unknown_plan": 1}
 
 
-def test_scenario_4_the_same_grown_plan_still_serves_a_lookup_and_a_listing() -> None:
+def test_scenario_4_a_grown_plan_with_no_recorded_kind_serves_no_lookup_or_listing() -> None:
+    # nexus-a4g2a: it used to serve both; a grown plan nothing classified now serves neither.
     for request in (L, D):
-        out, _ = _match([GROWN_UNKNOWN], [(901, 0.05)], request)
-        assert _ids(out) == [901], request
+        out, filt = _match([GROWN_UNKNOWN], [(901, 0.05)], request)
+        assert out == [], request
+        assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_unrecorded": 1}, request
 
 
 @pytest.mark.parametrize("request_kind", [S, C, A, B])
@@ -669,11 +673,12 @@ def test_a_tag_only_grown_row_is_refused_for_lookup_and_listing_as_unattested(ro
 
 
 def test_the_declared_grown_row_beside_a_tag_only_one_still_serves_lookup_and_listing() -> None:
-    for request in (L, D):
+    # The declared row recorded the request's own kind (nexus-a4g2a: an unrecorded one serves neither).
+    for request, declared in ((L, GROWN_LOOKUP), (D, GROWN_DISCOVERY)):
         out, filt = _match(
-            [TAG_ONLY_GROWN, GROWN_UNKNOWN], [(517, 0.04), (901, 0.05)], request,
+            [TAG_ONLY_GROWN, declared], [(517, 0.04), (declared["id"], 0.05)], request,
         )
-        assert _ids(out) == [901], request
+        assert _ids(out) == [declared["id"]], request
         assert filt.excluded_plan_ids == [517]
 
 
@@ -1013,9 +1018,9 @@ def _as_match(row: dict, confidence: float = 0.35) -> Match:
 
 
 def test_eligible_matches_drops_the_wrong_shape_plans() -> None:
-    ms = [_as_match(LOOKUP_473), _as_match(SYNTH_12), _as_match(GROWN_UNKNOWN)]
+    ms = [_as_match(LOOKUP_473), _as_match(SYNTH_12), _as_match(GROWN_LOOKUP)]
     assert _ids(el.eligible_matches(S, ms)) == [12]
-    assert _ids(el.eligible_matches(L, ms)) == [473, 901], "a lookup is offered no synthesis plan (nexus-jypmj.11)"
+    assert _ids(el.eligible_matches(L, ms)) == [473, 902], "a lookup is offered no synthesis plan (nexus-jypmj.11)"
     assert el.eligible_matches(S, None) == [] and el.eligible_matches(S, []) == []
 
 
@@ -1313,11 +1318,11 @@ def test_a_known_kind_with_no_decision_is_not_recorded() -> None:
 def test_a_verbatim_repeat_does_not_bypass_eligibility() -> None:
     """The verbatim-repeat override lifts the confidence floors and nothing else (nexus-7g0rg). A grown plan of
     unknown kind answering its own question word for word is refused for a synthesis request all the same."""
-    row = dict(GROWN_UNKNOWN, query="q")  # the matcher's intent below is "q"
-    out, filt = _match([row], [(901, 0.9)], S)
-    assert out == [] and filt.excluded_plan_ids == [901]
-    out, _ = _match([row], [(901, 0.9)], L)
-    assert _ids(out) == [901] and out[0].confidence == 1.0, "the override did fire for the lookup request"
+    row = dict(GROWN_LOOKUP, query="q")  # the matcher's intent below is "q"
+    out, filt = _match([row], [(902, 0.9)], S)
+    assert out == [] and filt.excluded_plan_ids == [902]
+    out, _ = _match([row], [(902, 0.9)], L)
+    assert _ids(out) == [902] and out[0].confidence == 1.0, "the override did fire for the lookup request"
 
 
 def test_the_tag_words_are_the_matchers() -> None:
@@ -1342,23 +1347,12 @@ def test_a_grown_plan_that_recorded_another_kind_does_not_serve_a_lookup(row) ->
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_not_lookup": 1}
 
 
-@pytest.mark.parametrize("row", [GROWN_UNKNOWN, GROWN_LOOKUP, GROWN_LOOKUP_HEURISTIC], ids=lambda r: r["name"])
-def test_a_grown_plan_that_recorded_lookup_or_nothing_still_serves_a_lookup(row) -> None:
-    out, _ = _match([row], [(row["id"], 0.05)], L)
-    assert _ids(out) == [row["id"]]
-
-
 def test_the_recorded_kind_does_not_widen_a_grown_plan() -> None:
     """The narrowing reads the recorded kind; it does not trust it. A grown plan that recorded synthesis is still
     refused for a synthesis request (unreviewed route), as before nexus-indyo."""
     out, filt = _match([GROWN_SYNTHESIS], [(904, 0.05)], S)
     assert out == [] and filt.excluded_plan_ids == [904]
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unreviewed_route": 1}
-
-
-def test_discovery_requests_are_unchanged_by_the_lookup_narrowing() -> None:
-    out, _ = _match([GROWN_SYNTHESIS], [(904, 0.05)], D)
-    assert _ids(out) == [904]
 
 
 def test_the_lookup_narrowing_runs_in_shadow_like_the_matrix() -> None:
@@ -1462,8 +1456,9 @@ def test_the_unattested_refusal_holds_on_every_branch() -> None:
 @pytest.mark.parametrize("request_kind", [L, D])
 def test_grown_and_curated_plans_keep_serving_lookups_and_listings(request_kind: K) -> None:
     curated = LOOKUP_473 if request_kind is L else DISC_13
-    out, _ = _match([GROWN_UNKNOWN, curated], [(901, 0.05), (curated["id"], 0.3)], request_kind)
-    assert _ids(out) == [901, curated["id"]]
+    grown = GROWN_LOOKUP if request_kind is L else GROWN_DISCOVERY  # recorded its own kind (nexus-a4g2a)
+    out, _ = _match([grown, curated], [(grown["id"], 0.05), (curated["id"], 0.3)], request_kind)
+    assert _ids(out) == [grown["id"], curated["id"]]
 
 
 def test_an_undeclared_builtin_is_refused_under_the_builtins_own_reason_not_unattested_plan() -> None:
@@ -1705,3 +1700,85 @@ def test_nx_answer_hands_the_filter_the_cwd_name_and_the_primary_checkouts_name(
     _, _, seen = _drive(LOOKUP_Q, [LOOKUP_473], [(473, 0.1)])
     filt = seen[0]["eligibility"]
     assert filt.request_projects == frozenset({Path.cwd().name, "nexus"})
+
+
+# ── nexus-a4g2a: a grown plan with no recorded kind serves no lookup; discovery takes only recorded discovery ──────
+# halcyon's decision, 2026-11-11, rule 6 (option A on the bead): a stated guard, not a measured effect. With five
+# grown plans in the library (517, 594-597) and none accruing since 2026-11-07, nothing could be measured; the
+# exclusions are counted by reason so the cost shows once grown plans accrue. It only narrows: the worst case is an
+# inline replan. The bead's own example may now be excluded: grown plan 585 served discovery run 794 well
+# (0.064 USD); it is excluded unless it recorded discovery, and its row is gone, so its recorded kind is
+# unknown. Case 2 (a request mislabelled lookup, or discovery, on a plan of another shape) stays open.
+GROWN_UNTRUSTED_CLAIM = _row(907, "grown-untrusted", kind=L, tags="ad-hoc", provenance="curated")
+
+
+def test_a_grown_plan_that_recorded_no_kind_does_not_serve_a_lookup() -> None:
+    out, filt = _match([GROWN_UNKNOWN], [(901, 0.05)], L)
+    assert out == [] and filt.excluded_plan_ids == [901]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_unrecorded": 1}
+
+
+@pytest.mark.parametrize("row", [GROWN_LOOKUP, GROWN_LOOKUP_HEURISTIC], ids=lambda r: r["name"])
+def test_a_grown_plan_that_recorded_lookup_still_serves_a_lookup(row) -> None:
+    # Case 2 (a mislabelled lookup) is parked: a recorded lookup still admits.
+    out, _ = _match([row], [(row["id"], 0.05)], L)
+    assert _ids(out) == [row["id"]]
+
+
+def test_an_untrusted_curated_claim_serves_no_lookup_and_names_its_defect() -> None:
+    out, filt = _match([GROWN_UNTRUSTED_CLAIM], [(907, 0.05)], L)
+    assert out == [] and filt.to_wire()["branches"]["cosine"]["reasons"] == {"untrusted_curated_claim": 1}
+
+
+def test_a_discovery_request_takes_a_grown_plan_that_recorded_discovery() -> None:
+    out, _ = _match([GROWN_DISCOVERY], [(906, 0.05)], D)
+    assert _ids(out) == [906]
+
+
+@pytest.mark.parametrize(
+    ("row", "reason"),
+    [
+        pytest.param(GROWN_SYNTHESIS, "grown_route_not_discovery", id="recorded-synthesis"),
+        pytest.param(GROWN_COMPARISON, "grown_route_not_discovery", id="recorded-comparison"),
+        pytest.param(GROWN_LOOKUP, "grown_route_not_discovery", id="recorded-lookup"),
+        pytest.param(GROWN_UNKNOWN, "grown_route_unrecorded", id="recorded-nothing"),
+    ],
+)
+def test_a_discovery_request_refuses_a_grown_plan_that_recorded_anything_else(row, reason) -> None:
+    out, filt = _match([row], [(row["id"], 0.05)], D)
+    assert out == [] and filt.excluded_plan_ids == [row["id"]]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {reason: 1}
+
+
+@pytest.mark.parametrize("enforce", [True, False], ids=["enforced", "shadow"])
+def test_a_discovery_refusal_reports_the_recorded_kind_that_caused_it(enforce) -> None:
+    _, filt = _match([GROWN_SYNTHESIS, GROWN_COMPARISON], [(904, 0.05), (905, 0.06)], D, enforce=enforce)
+    assert filt.to_wire()["refused_recorded_kinds"] == {"comparison": 1, "synthesis": 1}
+
+
+def test_the_new_guard_runs_in_shadow_like_the_matrix() -> None:
+    out, filt = _match([GROWN_UNKNOWN], [(901, 0.05)], L, enforce=False)
+    assert _ids(out) == [901]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_unrecorded": 1}
+
+
+def test_the_new_reasons_are_in_the_closed_vocabulary() -> None:
+    assert {"grown_route_unrecorded", "grown_route_not_discovery"} <= el.REASONS
+
+
+def test_an_untrusted_curated_claim_serves_no_listing_either() -> None:
+    out, filt = _match([GROWN_UNTRUSTED_CLAIM], [(907, 0.05)], D)
+    assert out == [] and filt.to_wire()["branches"]["cosine"]["reasons"] == {"untrusted_curated_claim": 1}
+
+
+@pytest.mark.parametrize(
+    ("row", "request_kind"),
+    [pytest.param(GROWN_LOOKUP, L, id="trusted-lookup-serves-a-lookup"),
+     pytest.param(GROWN_DISCOVERY, D, id="trusted-discovery-serves-a-listing")],
+)
+def test_a_grown_plan_on_a_trusted_route_is_not_read_as_unrecorded(monkeypatch, row, request_kind) -> None:
+    # Review r1 of 45969ecb0: a trusted route keeps the plan's known kind (recorded_kind stays None); the guard is for
+    # unknown-kind grown plans only, so the matrix decides and the plan serves its own kind.
+    monkeypatch.setattr(el, "TRUSTED_ROUTES", frozenset({"explicit"}))
+    out, _ = _match([row], [(row["id"], 0.05)], request_kind)
+    assert _ids(out) == [row["id"]]

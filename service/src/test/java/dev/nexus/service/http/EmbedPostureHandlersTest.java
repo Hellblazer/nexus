@@ -388,6 +388,13 @@ class EmbedPostureHandlersTest {
                 router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
         assertThat(body.get("catalog_sensitive_list_supported").asBoolean()).isTrue();
         assertThat(body.get("catalog_manifest_fillable_supported").asBoolean()).isTrue();
+        assertThat(body.get("catalog_stub_metadata_supported").asBoolean()).isTrue();
+        assertThat(body.get("chash_conformance_constraints_supported").asBoolean()).isTrue();
+        assertThat(body.get("catalog_manifest_foreign_collection_supported").asBoolean()).isTrue();
+        assertThat(body.get("catalog_manifest_fill_job_supported").asBoolean()).isTrue();
+        // nexus-f3yqd: the two census routes, each flag its own
+        assertThat(body.get("catalog_index_run_census_supported").asBoolean()).isTrue();
+        assertThat(body.get("catalog_next_seq_drift_read_supported").asBoolean()).isTrue();
     }
 
     @Test

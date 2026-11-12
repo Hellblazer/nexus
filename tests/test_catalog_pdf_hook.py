@@ -309,6 +309,140 @@ class TestPdfCatalogHookTitleBackfill:
         assert only_document().title == "Attention Is All You Need"
 
 
+    def test_real_title_equal_to_the_normalised_stem_lands(self, tmp_path, monkeypatch):
+        """GH #1611 bug 3: a PDF whose real title (its own metadata or first H1) reads exactly like the
+        title-cased stem was treated as the stem placeholder and never written. The hook now takes the
+        title's source: a title that did not come from the stem fallback is written."""
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        p = Path("/data/attention-is-all-you-need.pdf")
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="")   # pre-flight shape
+        assert only_document().title == "attention-is-all-you-need"
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="Attention Is All You Need",
+                          title_is_fallback=False)
+        assert only_document().title == "Attention Is All You Need"
+
+    def test_a_stem_fallback_title_is_still_a_placeholder(self, tmp_path, monkeypatch):
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        p = Path("/data/attention-is-all.pdf")
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="")
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="Attention Is All",
+                          title_is_fallback=True)
+        assert only_document().title == "attention-is-all"
+        _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="Attention Is All You Need",
+                          title_is_fallback=False)
+        assert only_document().title == "Attention Is All You Need"
+
+
+class TestPdfCatalogHookLeavesAnotherOwnersRowAlone:
+    """GH #1611, reverse order: a repo run registered the PDF first (owner 1.7), then ``nx index pdf --collection K``
+    runs under the curator owner 1.9. ``by_source_uri`` is not owner-scoped, so the hook found the repo's row and
+    stamped ``physical_collection=K`` (and the title, author, year, meta) onto it: the repo owner's document pointed at
+    a collection holding chunks of a row it does not own, the same split the repo-side skip prevents."""
+
+    class _Reader:
+        def __init__(self, by_uri, by_path=None) -> None:
+            self.by_uri, self.by_path = by_uri, by_path
+
+        def curator_owner_tumbler_by_name(self, name):  # noqa: ANN001, ARG002
+            from nexus.catalog.tumbler import Tumbler
+            return Tumbler.parse("1.9")
+
+        def by_source_uri(self, uri):  # noqa: ANN001, ARG002
+            return self.by_uri
+
+        def by_file_path(self, owner, path):  # noqa: ANN001, ARG002
+            return self.by_path
+
+        def close(self) -> None:
+            pass
+
+    class _Writer:
+        def __init__(self) -> None:
+            self.updates: list = []
+            self.registers: list = []
+
+        def register_owner(self, *a, **k):  # noqa: ANN002, ANN003
+            raise AssertionError("the owner exists")
+
+        def update(self, tumbler, **fields):  # noqa: ANN001
+            self.updates.append((str(tumbler), fields))
+
+        def register(self, **kw):  # noqa: ANN003
+            self.registers.append(kw)
+            return None
+
+        def close(self) -> None:
+            pass
+
+    @staticmethod
+    def _entry(tumbler: str, collection: str):
+        from types import SimpleNamespace
+        return SimpleNamespace(tumbler=tumbler, title="Paper", physical_collection=collection, content_type="pdf",
+                               meta={}, author="", year=0)
+
+    def _run(self, monkeypatch, reader, writer, **kw):
+        from structlog.testing import capture_logs
+
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda **k: reader)
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda **k: writer)
+        with capture_logs() as cap:
+            _catalog_pdf_hook(
+                pdf_path=Path("/data/shared.pdf"), collection_name="knowledge__curator", title="Paper",
+                corpus="curator", source_uri="file:///data/shared.pdf", **kw)
+        return cap
+
+    @pytest.mark.parametrize("held_in", ["knowledge__curator", ""])
+    def test_a_row_of_another_owner_in_this_runs_collection_or_none_is_updated_as_before(self, monkeypatch, held_in):
+        """Review r2: only a row held in another, non-empty collection is left alone. A PDF registered under corpus
+        "default" before the --collection corpus change is another owner's row by URI but sits in this run's
+        collection; its title, meta and extraction record are still written."""
+        reader = self._Reader(by_uri=self._entry("1.7.5", held_in))
+        writer = self._Writer()
+        cap = self._run(monkeypatch, reader, writer)
+        assert [t for t, _ in writer.updates] == ["1.7.5"], writer.updates
+        assert not [e for e in cap if e.get("event") == "catalog_pdf_hook_skipped_foreign_owner_row"]
+
+    def test_a_row_of_another_owner_found_by_source_uri_is_not_written_and_is_named(self, monkeypatch):
+        reader = self._Reader(self._entry("1.7.3", "docs__repo"))
+        writer = self._Writer()
+        cap = self._run(monkeypatch, reader, writer)
+        assert writer.updates == [] and writer.registers == [], "nothing is written onto, or minted beside, the repo's row"
+        ev = [e for e in cap if e.get("event") == "catalog_pdf_hook_skipped_foreign_owner_row"]
+        assert len(ev) == 1 and ev[0]["log_level"] == "warning" and ev[0]["tumbler"] == "1.7.3", cap
+
+    def test_this_owners_own_row_found_by_source_uri_is_still_repointed(self, monkeypatch):
+        """Control: the same hook over a row of THIS owner (1.9) writes as before."""
+        reader = self._Reader(self._entry("1.9.4", "knowledge__old"))
+        writer = self._Writer()
+        cap = self._run(monkeypatch, reader, writer)
+        assert [t for t, _ in writer.updates] == ["1.9.4"]
+        assert writer.updates[0][1]["physical_collection"] == "knowledge__curator"
+        assert not [e for e in cap if e.get("event") == "catalog_pdf_hook_skipped_foreign_owner_row"]
+
+    def test_a_foreign_row_by_uri_does_not_hide_this_owners_row_by_path(self, monkeypatch):
+        reader = self._Reader(self._entry("1.7.3", "docs__repo"), by_path=self._entry("1.9.8", "knowledge__old"))
+        writer = self._Writer()
+        self._run(monkeypatch, reader, writer)
+        assert [t for t, _ in writer.updates] == ["1.9.8"], "this owner's own row is the one updated"
+
+    def test_the_owner_prefix_is_a_whole_segment_not_a_string_prefix(self, monkeypatch):
+        """1.90.1 is not under owner 1.9."""
+        reader = self._Reader(self._entry("1.90.1", "docs__other"))
+        writer = self._Writer()
+        self._run(monkeypatch, reader, writer)
+        assert writer.updates == [] and writer.registers == []
+
+
 # ── RDR-237 (nexus-tr1rj.3): the extraction record on the catalog document ───────────────────
 
 _DEGRADED = {"extraction_method": "mineru+degraded", "extraction_pages": {"mineru-no-formula": [3, 7], "pymupdf-text": [12]}}

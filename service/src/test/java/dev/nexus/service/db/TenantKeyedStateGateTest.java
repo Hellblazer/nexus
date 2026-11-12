@@ -451,6 +451,7 @@ public class TenantKeyedStateGateTest {
         private static final String DATA_SWEEP = "NexusService.dataSweepFailuresByTenant";
         private static final String CHUNK_KEYS_JOBS = "ChunkKeysSweepJobs";
         private static final String RECONCILE_JOBS = "EngineJobs.reconcile";
+        private static final String MANIFEST_FILL_JOBS = "EngineJobs.manifestFill";
 
         private static final String HANDLE =
             "a TenantScope handle: it holds the DataSource wrapper only, the tenant is a per-call argument";
@@ -532,6 +533,9 @@ public class TenantKeyedStateGateTest {
             keyed.put("EngineJobs.Job.tenant", RECONCILE_JOBS);   // the value of jobs
             keyed.put("EngineJobs.Job.outcome", RECONCILE_JOBS);   // the value of jobs: the tenant's result
             keyed.put("EngineJobs.Outcome.body", RECONCILE_JOBS);   // the result, held by the job's outcome
+            // The manifest fill instance (nexus-f3yqd, R2) is a third EngineJobs instance, evicted as EngineJobs.manifestFill:
+            // what its jobs keep on each job is the job's progress, a latest-snapshot slot the work replaces whole.
+            keyed.put("ManifestFillJobs.Progress.snapshot", MANIFEST_FILL_JOBS);   // a job's progress: counts and a cursor
 
             // Not keyed: each with the reason it holds nothing a reset must clear.
             notKeyed.put("EngineJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
@@ -573,6 +577,16 @@ public class TenantKeyedStateGateTest {
                     + "with its response; nothing keeps it between requests");
             }
             notKeyed.put("CatalogSensitiveReads.Page.documents", RESULT);   // nexus-f3yqd: one sensitive-list call's documents
+            notKeyed.put("PdfStubMetadataReads.Page.collections", RESULT);   // nexus-f3yqd: one stub-metadata call's collections
+            notKeyed.put("PdfStubMetadataReads.CollectionStubs.examples", RESULT);   // nexus-f3yqd: one collection's example names in that answer
+            notKeyed.put("ChashConformanceConstraints.Report.constraints", RESULT);   // nexus-f3yqd: one chash-conformance call's entries (no tenant data: pg_catalog)
+            notKeyed.put("ManifestForeignCollectionReads.Page.documents", RESULT);   // GH #1611: one foreign-collection call's documents
+            notKeyed.put("ManifestForeignCollectionReads.Doc.collections", RESULT);   // GH #1611: one listed document's other collections
+            // nexus-f3yqd: the census and drift answers' example lists, each built for one request and dropped with its response
+            notKeyed.put("IndexRunCensusReads.Stale.examples", RESULT);
+            notKeyed.put("IndexRunCensusReads.PostAnchor.examples", RESULT);
+            notKeyed.put("IndexRunCensusReads.FailedHidden.examples", RESULT);
+            notKeyed.put("NextSeqDriftReads.Page.examples", RESULT);
             notKeyed.put("CatalogRepository.Rewritten.ledger", "a component of one stale-note repair batch's result, "
                 + "the ledger of the rows that call changed, built for that request and returned in its response "
                 + "(nexus-bivz3.24); nothing keeps it between requests");

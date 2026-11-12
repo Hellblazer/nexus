@@ -74,7 +74,7 @@ class ManifestWriteRetryGateTest {
 
     private static final Path MAIN = Path.of("src", "main", "java");
     private static final Path DB = MAIN.resolve(Path.of("dev", "nexus", "service", "db"));
-    private static final List<String> SCANNED = List.of("CatalogRepository", "ChashRepository");
+    private static final List<String> SCANNED = List.of("CatalogRepository", "ChashRepository", "ManifestFill");
 
     /** Retried manifest-writing methods, as {@code File#method}. */
     private static final TreeSet<String> EXPECTED_RETRIED = new TreeSet<>(List.of(
@@ -88,7 +88,9 @@ class ManifestWriteRetryGateTest {
         "CatalogRepository#renameCollectionTxn",
         "CatalogRepository#rehomeCollection",
         "CatalogRepository#purgeTrash",
-        "ChashRepository#renameCollection"));
+        "ChashRepository#renameCollection",
+        // nexus-f3yqd (R2): the manifest fill job's batch attempt (normal, and skip mode), one UPDATE of labels and spans, retried like the other writers
+        "ManifestFill#once"));
 
     /** Files that mention the table without writing it, each with the reason. A pinned allowlist. */
     private static final Map<String, String> READ_ONLY_REFERENCES = new TreeMap<>(Map.ofEntries(
@@ -105,10 +107,19 @@ class ManifestWriteRetryGateTest {
         Map.entry("ReembedSourceReader", "RDR-210 Phase 6 Step 2 (nexus-f98bg): selects only (EXISTS and count over the manifest to"
             + " find a source's candidate documents and what a cutover's delete would destroy); the re-embed move"
             + " writes the manifest through CatalogRepository"),
+        Map.entry("IndexRunCensusReads", "nexus-f3yqd: a jOOQ SELECT EXISTS over the manifest (does a failed document keep any"
+            + " manifest row); it writes nothing"),
         Map.entry("ChunkOwnerLabel", "nexus-6pfgb.39: a jOOQ SELECT subquery over the manifest joined to its live document (the"
             + " owner label of a gc-audit chunk); it builds a Select and writes nothing"),
         Map.entry("ManifestFillableCount", "nexus-f3yqd: one jOOQ SELECT over the manifest joined to its live document and chunk row"
             + " (the strict count of the rows the label and span rungs would fill); it writes nothing"),
+        Map.entry("PdfStubMetadataReads", "nexus-f3yqd: one jOOQ SELECT over the registry, the documents, the manifest and the chunk rows"
+            + " (the PDF chunks that still carry the upload placeholder metadata, per collection, with a NOT EXISTS over an"
+            + " earlier manifest position of the same chunk); it writes nothing"),
+        Map.entry("ChashConformanceConstraints", "nexus-f3yqd: names the manifest table only to name its chash width CHECK;"
+            + " the one statement reads pg_catalog (pg_constraint, pg_class, pg_inherits) and never reads or writes the table"),
+        Map.entry("ManifestForeignCollectionReads", "GH #1611: one jOOQ SELECT over the manifest joined to its live document (the"
+            + " documents whose manifest names a collection other than their own, grouped by document); it writes nothing"),
         Map.entry("ManifestFillablePredicates", "nexus-f3yqd: jOOQ conditions over the manifest, its documents and chunk rows (the"
             + " guards the two rung counts share, with a NOT EXISTS over the other holders of a chash); it builds"
             + " conditions and writes nothing"),

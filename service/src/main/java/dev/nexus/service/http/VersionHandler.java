@@ -48,6 +48,11 @@ import java.util.function.Supplier;
  *  "route_c_manifest_keys_supported":true,
  *  "catalog_sensitive_list_supported":true,
  *  "catalog_manifest_fillable_supported":true,
+ *  "catalog_stub_metadata_supported":true,
+ *  "chash_conformance_constraints_supported":true,
+ *  "catalog_manifest_foreign_collection_supported":true,
+ *  "catalog_index_run_census_supported":true,
+ *  "catalog_next_seq_drift_read_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -578,6 +583,81 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-f3yqd capability advertisement: does {@code POST /v1/catalog/manifest/fill} (and its poll, {@code GET
+     * /v1/catalog/manifest/fill/{job_id}}) fill, as a background job, exactly the manifest rows {@code GET
+     * /v1/catalog/manifest/fillable} counts as fillable? Always present, always {@code true} on an engine carrying the
+     * change; a client that finds it absent (or a 404 on the route) walks the catalog itself. Cloud clients see it only
+     * once the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff;
+     * engine-release pre-tag check 3e).
+     */
+    static void appendCatalogManifestFillJobCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_manifest_fill_job_supported\":true");
+    }
+
+    /**
+     * nexus-f3yqd capability advertisement: does {@code GET /v1/catalog/stub-metadata?limit=N} count, per knowledge and
+     * docs collection and up to a bound, the PDF chunks that still carry the upload placeholder metadata, and name a few
+     * of the documents that own them?
+     *
+     * <p>A route, so an old engine answers 404 and a client can tell; the flag lets the doctor learn it from
+     * {@code /version} first instead of by a probe that 404s. Always present, always {@code true} on an engine carrying
+     * the change. Cloud clients see it only once the public conexus edge allowlists it (the
+     * {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendCatalogStubMetadataCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_stub_metadata_supported\":true");
+    }
+
+    /**
+     * nexus-f3yqd capability advertisement: does {@code GET /v1/schema/chash-conformance} report whether the chash width CHECK
+     * constraints are validated, from {@code pg_constraint} in one catalog statement?
+     *
+     * <p>Readable by any authenticated token (a tenant token included; the partition counts are the root token's), so a
+     * managed user's doctor can use it; an engine before the change answers 404. The flag lets the doctor learn it from
+     * {@code /version} first instead of by a probe. Always present, always {@code true} on an
+     * engine carrying the change. Cloud clients see it only once the public conexus edge allowlists it (the
+     * {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendChashConformanceConstraintsCapabilityField(StringBuilder body) {
+        body.append(",\"chash_conformance_constraints_supported\":true");
+    }
+
+    /**
+     * GH #1611 capability advertisement: does {@code GET /v1/catalog/manifest/foreign_collection} list the live documents
+     * whose manifest names chunks in a collection other than their {@code physical_collection}, under the bounded-read
+     * statement timeout? An engine before the change answers 404. Always present, always {@code true} on an engine
+     * carrying the change. Cloud clients see it only once the public conexus edge allowlists it (the
+     * {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendCatalogManifestForeignCollectionCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_manifest_foreign_collection_supported\":true");
+    }
+
+    /**
+     * nexus-f3yqd capability advertisement: does {@code GET /v1/catalog/index-run/census?limit=N} answer the stale
+     * index-run fences, the unstamped-document baseline and the failed documents with ownerless chunks that {@code nx
+     * doctor} otherwise reads from a walk of every document?
+     *
+     * <p>A route, so an old engine answers 404 and a client can tell; the flag lets the doctor learn it from {@code
+     * /version} first. Always present, always {@code true} on an engine carrying the change. Cloud clients see it only
+     * once the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff;
+     * engine-release pre-tag check 3e).
+     */
+    static void appendCatalogIndexRunCensusCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_index_run_census_supported\":true");
+    }
+
+    /**
+     * nexus-f3yqd capability advertisement: does {@code GET /v1/catalog/owners/next_seq_drift?limit=N} list the owners
+     * whose {@code next_seq} trails their highest child without flooring them (the read-only form of {@code POST
+     * /owners/sweep_next_seq_drift})? A flag of its own, separate from the census's. Always present, always {@code true}
+     * on an engine carrying the change; cloud clients see it only once the public edge allowlists it.
+     */
+    static void appendCatalogNextSeqDriftReadCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_next_seq_drift_read_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -784,6 +864,15 @@ public final class VersionHandler implements HttpHandler {
         // nexus-f3yqd: GET /v1/catalog/sensitive, and GET /v1/catalog/manifest/fillable (the strict bounded count).
         appendCatalogSensitiveListCapabilityField(body);
         appendCatalogManifestFillableCapabilityField(body);
+        appendCatalogStubMetadataCapabilityField(body);
+        appendChashConformanceConstraintsCapabilityField(body);
+        // GH #1611: GET /v1/catalog/manifest/foreign_collection (documents with manifest chunks outside their collection).
+        appendCatalogManifestForeignCollectionCapabilityField(body);
+        // nexus-f3yqd (R2): POST /v1/catalog/manifest/fill, the engine-side fill job.
+        appendCatalogManifestFillJobCapabilityField(body);
+        // nexus-f3yqd: GET /v1/catalog/index-run/census and GET /v1/catalog/owners/next_seq_drift (the doctor's bounded reads).
+        appendCatalogIndexRunCensusCapabilityField(body);
+        appendCatalogNextSeqDriftReadCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

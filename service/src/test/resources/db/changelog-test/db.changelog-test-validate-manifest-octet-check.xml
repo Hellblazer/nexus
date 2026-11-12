@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd: VALIDATE catalog_document_chunks_chash_octet_check on nexus.catalog_document_chunks, in Liquibase XML instead of a Java SQL string (Sam's rule, nexus-zrcj7: no
+    SQL strings in Java, tests included). The jOOQ constraint DSL has no VALIDATE. It is how a test plays the chash re-key
+    rung's VALIDATE of the octet-width CHECK; the companion of db.changelog-test-chash-octet-checks-readd.xml (which returns
+    the constraints NOT VALID). 
+
+    A constraint that is absent is skipped (MARK_RAN); one that is already valid is a no-op. runAlways: every call runs
+    again; bookkeeping in the caller's table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="validate-manifest-octet-check" author="nexus-f3yqd" runAlways="true">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">
+                SELECT count(*) FROM pg_constraint
+                 WHERE conrelid = 'nexus.catalog_document_chunks'::regclass AND conname = 'catalog_document_chunks_chash_octet_check'
+            </sqlCheck>
+        </preConditions>
+        <sql>ALTER TABLE nexus.catalog_document_chunks VALIDATE CONSTRAINT catalog_document_chunks_chash_octet_check</sql>
+    </changeSet>
+</databaseChangeLog>

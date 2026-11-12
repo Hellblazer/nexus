@@ -47,6 +47,7 @@ from tests.test_search_per_collection_route import (  # type: ignore[import-not-
     _BGE,
     _MINI,
     _ROUTE,
+    _SEARCH,
     _FakeEngine,
     _cols,
     _rows,
@@ -317,12 +318,20 @@ def test_the_engine_decides_what_a_read_returns_the_client_adds_no_clean_inferen
 
 
 class _VersionedEngine(_FakeEngine):
-    """The route fake of tests/test_search_per_collection_route.py, plus ``GET /version`` and the thread of each route request."""
+    """The route fake of tests/test_search_per_collection_route.py, plus ``GET /version`` and the thread of each
+    read request (the route's, or the batched ``/v1/vectors/search`` it serves with the route off)."""
 
     def __init__(self, monkeypatch, data):
         super().__init__(monkeypatch, data)
         self.route_threads: list[int] = []
         monkeypatch.setattr(hvc, "_request", self._request_with_version)
+
+    def search_calls(self) -> list[dict]:
+        """The batched ``/v1/vectors/search`` bodies (the default read path since nexus-tu8wp.3)."""
+        return [b for p, b in self.calls if p == _SEARCH]
+
+    def read_calls(self, route: bool) -> list[dict]:
+        return self.route_calls() if route else self.search_calls()
 
     def _request_with_version(self, method, path, *, tenant, timeout, body):
         if path == "/version":
@@ -330,18 +339,20 @@ class _VersionedEngine(_FakeEngine):
             return dict(_VERSION_OK)
         if method == "GET" and path.startswith("/v1/vectors/stats"):
             return []  # the collection-routing listing the MCP search prefetches
-        if path == _ROUTE:
+        if path in (_ROUTE, _SEARCH):
             self.route_threads.append(threading.get_ident())
         return self._request(method, path, tenant=tenant, timeout=timeout, body=body)
 
 
-@pytest.mark.sensitivity_reads
-@pytest.mark.t2_tenant
-def test_under_llm_bound_an_mcp_search_sends_exclude_from_every_pool_task(monkeypatch):
+def _mcp_search_sends_exclude_from_every_pool_task(monkeypatch, route: bool) -> None:
     monkeypatch.delenv("NX_SENSITIVITY_POSTURE", raising=False)  # the suite's blanket: this test owns its posture
     monkeypatch.setattr(se, "_mixed_model_groups", {})
     monkeypatch.setattr(hvc, "_per_collection_absent_warned", False)
-    monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+    # the route is opt-in (nexus-tu8wp.3): on, the reads are route requests; off (the default), batched /search
+    if route:
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")
+    else:
+        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
     bge, mini = _cols("docs", _BGE, 2), _cols("docs", _MINI, 2)
     engine = _VersionedEngine(monkeypatch, {c: _rows("r", 4, 0.2) for c in bge + mini})
     monkeypatch.setattr(core, "_get_t3", lambda: engine.client)
@@ -357,28 +368,47 @@ def test_under_llm_bound_an_mcp_search_sends_exclude_from_every_pool_task(monkey
                 core.search(query="anything", corpus="knowledge", threshold=float("inf"))
         finally:
             core._page_cache_invalidate()
-        return engine.route_calls()
+        return engine.read_calls(route)
 
+    path = "route" if route else "batched /search"
     bound = run(llm_bound("nx_answer_operators"))
-    assert len(bound) == 2, "the pool ran: one route request per embedding-model group"
+    other = engine.search_calls() if route else engine.route_calls()
+    assert other == [], f"{path}: the read went down the path under test and no other"
+    assert len(bound) == 2, f"{path}: the pool ran: one read request per embedding-model group"
     assert {tuple(b["collections"]) for b in bound} == {tuple(bge), tuple(mini)}
-    assert [b.get("sensitivity") for b in bound] == ["exclude", "exclude"]
-    assert any(t != threading.get_ident() for t in engine.route_threads), "the route requests ran on pool threads"
+    assert [b.get("sensitivity") for b in bound] == ["exclude", "exclude"], f"{path}: exclude on every pool task"
+    assert any(t != threading.get_ident() for t in engine.route_threads), f"{path}: the read requests ran on pool threads"
 
     default = run(contextlib.nullcontext())
     assert len(default) == 2
-    assert all("sensitivity" not in b for b in default), "outside the scope the request is what it always was"
+    assert all("sensitivity" not in b for b in default), f"{path}: outside the scope the request is what it always was"
 
     # A child of a scoped parent has no ContextVar, only the environment the parent exported.
     monkeypatch.setenv("NX_SENSITIVITY_POSTURE", "llm_bound")
     from_env = run(contextlib.nullcontext())
-    assert [b.get("sensitivity") for b in from_env] == ["exclude", "exclude"]
+    assert [b.get("sensitivity") for b in from_env] == ["exclude", "exclude"], f"{path}: exclude from the exported posture"
 
 
-def test_the_posture_reaches_a_pool_worker_that_did_not_inherit_the_context(monkeypatch):
+@pytest.mark.sensitivity_reads
+@pytest.mark.t2_tenant
+def test_under_llm_bound_an_mcp_search_sends_exclude_from_every_pool_task(monkeypatch):
+    """One tenant, both read paths: the per-collection route (opt-in since nexus-tu8wp.3) and the batched
+    ``/v1/vectors/search`` path that is the default. Each runs in its own undo scope against its own fake engine."""
+    for route in (True, False):
+        with pytest.MonkeyPatch.context() as mp:
+            _mcp_search_sends_exclude_from_every_pool_task(mp, route)
+
+
+@pytest.mark.parametrize("route", [True, False], ids=["route-on", "route-off-batched"])
+def test_the_posture_reaches_a_pool_worker_that_did_not_inherit_the_context(monkeypatch, route):
     """A7: a worker thread does not inherit the ContextVar. The value is a call argument, so a bare
-    ``threading.Thread`` worker, which gets no context copy, still sends it."""
+    ``threading.Thread`` worker, which gets no context copy, still sends it, on the route (opt-in since
+    nexus-tu8wp.3) and on the batched ``/v1/vectors/search`` path that is the default."""
     monkeypatch.setattr(se, "_mixed_model_groups", {})
+    if route:
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")
+    else:
+        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
     cols = _cols("docs", _BGE, 2)
     engine = _VersionedEngine(monkeypatch, {c: _rows("r", 2, 0.2) for c in cols})
     seen: list = []
@@ -392,7 +422,9 @@ def test_the_posture_reaches_a_pool_worker_that_did_not_inherit_the_context(monk
     t.start()
     t.join()
     assert seen == [True]
-    assert [b.get("sensitivity") for b in engine.route_calls()] == ["exclude"]
+    sent = engine.read_calls(route)
+    assert len(sent) == 1, "one embedding-model group, one read request on the path under test"
+    assert [b.get("sensitivity") for b in sent] == ["exclude"]
 
 
 # ── 5. the MCP schemas ───────────────────────────────────────────────────────

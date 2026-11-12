@@ -63,3 +63,34 @@ def test_search_results_collapse_by_chunk_text_hash_and_record_the_other_collect
     assert out[0].metadata["also_in"] == ["rdr__1-46__bge-base-en-v15-768__v1"]
     assert out[0].metadata["also_in_ids"] == ["c2", "c4"]
     assert "also_in" not in out[1].metadata
+
+
+# The review of 0f2e04cae: the collapse judged sensitivity on the kept row only. A dropped copy that
+# is sensitive now makes the kept row sensitive (the text is the same chunk), and its collection and
+# id are not named in also_in, on both the SearchResult and the row form.
+
+
+def test_a_sensitive_dropped_copy_makes_the_kept_result_sensitive_and_is_not_named() -> None:
+    kept = SearchResult(id="c1", content="t", distance=0.1, collection="docs__1-1",
+                        metadata={"chunk_text_hash": "aa" * 32, "sensitive": False})
+    secret = SearchResult(id="c2", content="t", distance=0.2, collection="knowledge__medical",
+                          metadata={"chunk_text_hash": "aa" * 32, "sensitive": True,
+                                    "sensitive_owners": ["1.9.4"]})
+    open_copy = SearchResult(id="c3", content="t", distance=0.3, collection="docs__1-2",
+                             metadata={"chunk_text_hash": "aa" * 32, "sensitive": False})
+    (out,) = _collapse_identical_chunk_results([kept, secret, open_copy])
+    assert out.id == "c1"
+    assert out.metadata["sensitive"] is True
+    assert out.metadata["sensitive_owners"] == ["1.9.4"]
+    assert out.metadata["also_in"] == ["docs__1-2"], "the sensitive copy's collection is not disclosed"
+    assert out.metadata["also_in_ids"] == ["c3"]
+
+
+def test_a_sensitive_dropped_row_makes_the_kept_row_sensitive_and_is_not_named() -> None:
+    rows = [
+        {**_row("1.53.4", "rdr__1-53", "aa" * 32, 0.1), "sensitive": False},
+        {**_row("1.9.4", "knowledge__medical", "aa" * 32, 0.2), "sensitive": True, "sensitive_owners": ["1.9.4"]},
+    ]
+    (out,) = _collapse_identical_chunk_rows(rows)
+    assert out["sensitive"] is True and out["sensitive_owners"] == ["1.9.4"]
+    assert "also_in" not in out and "also_in_ids" not in out

@@ -19,7 +19,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
@@ -296,6 +296,16 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
             "The nexus backing service may be unreachable — check the daemon is "
             "running with `nx doctor` (and `nx daemon service status`).")
         )
+    if tool.startswith("tuple_"):
+        from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — only on the error path
+
+        if isinstance(e, UnknownSubspaceError):
+            # nexus-3ceda.7: the probe battery's one stuck case. Told only the engine's text, an
+            # agent reached for a tool that does not exist (3 runs of 3).
+            return _fail(
+                f"Error: {text}\n"
+                "Call tuple_registry to list the registered subspace templates, then use a subspace that matches one."
+            )
     return _fail(f"Error: {text}")
 
 
@@ -3414,8 +3424,10 @@ def _search_render(
         where: Metadata filter (KEY=VALUE, comma-separated). Ops: = >= <= > < !=
         cluster_by: "semantic" for topic/Ward clustering (default), empty to disable
         topic: Pre-filter to documents in this topic label (from nx taxonomy discover)
-        structured: Return ``{ids, tumblers, distances, collections}`` dict instead
-            of human-readable string.  Used by the plan runner so ``$stepN.ids``
+        structured: Return the ``{ids, tumblers, distances, hybrid_scores, collections,
+            chunk_collections, chunk_text_hash}`` dict (plus ``also_in``/``also_in_ids`` when a
+            row stands for identical chunks in other collections, and ``next_offset`` when more
+            rows may follow; GH #1524) instead of human-readable string.  Used by the plan runner so ``$stepN.ids``
             references resolve to actual chunk IDs.
         threshold: Override the per-collection distance threshold uniformly
             (raw cosine distance, lower is stricter). Pass ``float('inf')``
@@ -3504,150 +3516,167 @@ def _search_render(
         # document was flagged (the flag can be set from another process) would otherwise be served under
         # ``exclude`` for up to the TTL. Page turns under ``exclude`` re-run the retrieval.
         use_page_cache = sensitivity != "exclude"
-        cached = _page_cache_get(cache_key, need) if use_page_cache else None
-        #: nexus-ml9vu: the row-preferred model resolver the retrieval builds,
-        #: handed to the boosts so the calibration reads the same rows.
-        model_of_out: list = []
-        if cached is not None:
-            results, diag, rerank_note = cached
-        else:
-            results = None
-        if results is None:
-            # nexus-zdzm5 (RDR-217 A2): a lexical row's vector distance is
-            # usually the worst in its window, and RDR-217 forbids ordering
-            # across the two legs by distance. Only the server rerank scores
-            # rows on their text, and this path never asked for it, so
-            # lexical=true changed the page's scores and not its rows. Ask
-            # for it whenever lexical is on (the CLI already reranks the
-            # multi-collection case; see search_cmd.py).
-            lexical_rerank = lexical and bool(getattr(t3, "supports_server_rerank", False))
-            rerank_meta: dict = {}
-            # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
-            # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
-            # nexus-vpa9q: telemetry and taxonomy both go through the pooled
-            # shared T2 client; no per-call T2Database.
-            results = search_cross_corpus(
-                query, target, n_results=fetch_n, t3=t3, where=where_dict,
-                cluster_by=cluster_by or None,
-                catalog=_get_catalog(),
-                link_boost=False,
-                taxonomy=_search_taxonomy(),
-                topic=topic or None,
-                threshold_override=threshold,
-                lexical=lexical,
-                telemetry=_search_telemetry_sink(),
-                diagnostics_out=diag,
-                rerank=lexical_rerank,
-                rerank_meta_out=rerank_meta if lexical_rerank else None,
-                content_chars=_MCP_CONTENT_CHARS,
-                # nexus-ann50: measured without server rerank only; a reranked
-                # page is pool-sensitive (nexus-abdp2), so it keeps the full k.
-                per_collection_k_cap=None if lexical_rerank else _MCP_PER_COLLECTION_K,
-                model_of_out=model_of_out,
-                sensitivity=sensitivity,
-            )
-            # hybrid scoring + RDR-055 E2 quality boost — parity
-            # with the CLI (search_cmd.py), which has applied both since
-            # RDR-055 / the frecency-scoring work. Before this fix the MCP
-            # path ranked by raw vector distance only and never read
-            # frecency_score or bib_citation_count at all.
-            _cluster_order = [_row_key(r) for r in results] if clustered else None
-            # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): rows the engine held back from a text-exporting reranker keep
-            # the slot it merged them into; read before apply_ranking_boosts re-sorts the list.
-            held_slots = _engine_held_slots(results) if lexical_rerank else []
-            results = apply_ranking_boosts(
-                results,
-                hybrid=cfg.get("search", {}).get("hybrid_default", False),
-                tuning=get_tuning_config(),
-                catalog=_get_catalog(),
-                window=boost_window,
-                model_of=model_of_out[-1] if model_of_out else None,
-            )
-            if lexical_rerank:
-                # Same consumption as the CLI's: scored rows lead in server
-                # relevance order; rows beyond the engine's rerank cap follow
-                # in boosted order, since the two scales differ. RDR-210
-                # Technical Design 12 (nexus-hf29s): when a collection
-                # DEGRADED and others were scored, "scored rows lead" would
-                # sink the degraded family's rows, so every row stays in the
-                # calibrated hybrid_score order apply_ranking_boosts set.
-                # An all-sensitive collection's "no rerank performed" degrade is the engine holding every row back,
-                # not a failure: it is not a degrade here (fix r1, review S2) and does not flip the page to the
-                # calibrated order.
-                benign = _benign_held_degrades(rerank_meta, results)
-                degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded") and c not in benign)
-                scored = [r for r in results if "rerank_score" in r.metadata]
-                partial_rerank = bool(degraded) and bool(scored)
-                if partial_rerank:
-                    # apply_ranking_boosts already ordered the rows (calibrated
-                    # window order, then distance order past the window).
-                    pass
-                else:
-                    for r in scored:
-                        r.hybrid_score = float(r.metadata["rerank_score"])
-                    scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
-                    held_ids = {id(r) for _slot, r in held_slots}
-                    # Held rows return to the engine's slots (a sensitive top-1 stays top-1).
-                    results = _restore_held_slots(
-                        scored + [r for r in results if "rerank_score" not in r.metadata and id(r) not in held_ids],
-                        held_slots,
-                    )
-                if benign and not degraded:
-                    rerank_note = (
-                        f"{len(benign)} collection(s) not reranked: every candidate row is sensitive and is held "
-                        "back from the reranker"
-                    )
-                if degraded:
-                    rerank_note = (
-                        f"lexical rerank degraded in {len(degraded)} collection(s) "
-                        f"({', '.join(degraded[:3])}{', ...' if len(degraded) > 3 else ''}); "
-                        + (
-                            "all rows are in calibrated distance order"
-                            if partial_rerank
-                            else "their lexical rows are in vector-distance order and may be cut"
-                        )
-                    )
-            if clustered:
-                # apply_ranking_boosts sorts by hybrid_score globally, which
-                # would scatter same-cluster results apart — the text
-                # renderer below assumes cluster labels appear CONTIGUOUSLY
-                # (the `current_cluster` grouping further down). Boosted
-                # hybrid_score values are kept on each result; only the
-                # display ORDER is restored to the cluster-grouped order
-                # search_cross_corpus produced.
-                # By row, not by id (nexus-tko2w): a chunk several documents hold comes back
-                # once per document with the same id and a different ``doc_id``, and an
-                # id-keyed map would keep one of the two and return it twice.
-                _by_row: dict[tuple, list] = {}
-                for r in results:
-                    _by_row.setdefault(_row_key(r), []).append(r)
-                results = [_by_row[k].pop(0) for k in _cluster_order if _by_row.get(k)]
+        # GH #1524: the page is cut from the collapsed list (one row per identical chunk across
+        # collections, the best-ranked kept and the others named on it, as query() does), but the page
+        # cache holds the rows as fetched: its "exhausted" test compares that count with the fetch
+        # depth, and a collapsed count would read a full window as the end of the corpus. When the
+        # collapse leaves fewer rows than the page needs and the engine was not exhausted, fetch
+        # again, deeper (critique of 0f2e04cae).
+        raw_n = 0
+        for _round in range(_COLLAPSE_REFETCH_ROUNDS + 1):
+            cached = _page_cache_get(cache_key, need) if (use_page_cache and _round == 0) else None
+            #: nexus-ml9vu: the row-preferred model resolver the retrieval builds,
+            #: handed to the boosts so the calibration reads the same rows.
+            model_of_out: list = []
+            if cached is not None:
+                results, diag, rerank_note = cached
+            else:
+                results = None
+            if results is None:
+                diag = []
+                rerank_note = None
+                # nexus-zdzm5 (RDR-217 A2): a lexical row's vector distance is
+                # usually the worst in its window, and RDR-217 forbids ordering
+                # across the two legs by distance. Only the server rerank scores
+                # rows on their text, and this path never asked for it, so
+                # lexical=true changed the page's scores and not its rows. Ask
+                # for it whenever lexical is on (the CLI already reranks the
+                # multi-collection case; see search_cmd.py).
+                lexical_rerank = lexical and bool(getattr(t3, "supports_server_rerank", False))
+                rerank_meta: dict = {}
+                # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
+                # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
+                # nexus-vpa9q: telemetry and taxonomy both go through the pooled
+                # shared T2 client; no per-call T2Database.
+                results = search_cross_corpus(
+                    query, target, n_results=fetch_n, t3=t3, where=where_dict,
+                    cluster_by=cluster_by or None,
+                    catalog=_get_catalog(),
+                    link_boost=False,
+                    taxonomy=_search_taxonomy(),
+                    topic=topic or None,
+                    threshold_override=threshold,
+                    lexical=lexical,
+                    telemetry=_search_telemetry_sink(),
+                    diagnostics_out=diag,
+                    rerank=lexical_rerank,
+                    rerank_meta_out=rerank_meta if lexical_rerank else None,
+                    content_chars=_MCP_CONTENT_CHARS,
+                    # nexus-ann50: measured without server rerank only; a reranked
+                    # page is pool-sensitive (nexus-abdp2), so it keeps the full k.
+                    per_collection_k_cap=None if lexical_rerank else _MCP_PER_COLLECTION_K,
+                    model_of_out=model_of_out,
+                    sensitivity=sensitivity,
+                )
+                # hybrid scoring + RDR-055 E2 quality boost — parity
+                # with the CLI (search_cmd.py), which has applied both since
+                # RDR-055 / the frecency-scoring work. Before this fix the MCP
+                # path ranked by raw vector distance only and never read
+                # frecency_score or bib_citation_count at all.
+                _cluster_order = [_row_key(r) for r in results] if clustered else None
+                # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): rows the engine held back from a text-exporting reranker keep
+                # the slot it merged them into; read before apply_ranking_boosts re-sorts the list.
+                held_slots = _engine_held_slots(results) if lexical_rerank else []
+                results = apply_ranking_boosts(
+                    results,
+                    hybrid=cfg.get("search", {}).get("hybrid_default", False),
+                    tuning=get_tuning_config(),
+                    catalog=_get_catalog(),
+                    window=boost_window,
+                    model_of=model_of_out[-1] if model_of_out else None,
+                )
                 if lexical_rerank:
-                    # The restore above would put a lexical row back in its
-                    # distance position (review finding on a463fa4ce). Keep
-                    # clusters contiguous, but order the clusters by their
-                    # best rerank score and each cluster's rows by score,
-                    # scored rows first.
-                    def _score(r) -> float:
-                        if partial_rerank:
-                            # Mixed scales: the calibrated hybrid_score orders
-                            # every row (Technical Design 12, nexus-hf29s).
-                            return r.hybrid_score
-                        s = r.metadata.get("rerank_score")
-                        return float(s) if s is not None else float("-inf")
-
-                    groups: dict[str, list] = {}
+                    # Same consumption as the CLI's: scored rows lead in server
+                    # relevance order; rows beyond the engine's rerank cap follow
+                    # in boosted order, since the two scales differ. RDR-210
+                    # Technical Design 12 (nexus-hf29s): when a collection
+                    # DEGRADED and others were scored, "scored rows lead" would
+                    # sink the degraded family's rows, so every row stays in the
+                    # calibrated hybrid_score order apply_ranking_boosts set.
+                    # An all-sensitive collection's "no rerank performed" degrade is the engine holding every row back,
+                    # not a failure: it is not a degrade here (fix r1, review S2) and does not flip the page to the
+                    # calibrated order.
+                    benign = _benign_held_degrades(rerank_meta, results)
+                    degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded") and c not in benign)
+                    scored = [r for r in results if "rerank_score" in r.metadata]
+                    partial_rerank = bool(degraded) and bool(scored)
+                    if partial_rerank:
+                        # apply_ranking_boosts already ordered the rows (calibrated
+                        # window order, then distance order past the window).
+                        pass
+                    else:
+                        for r in scored:
+                            r.hybrid_score = float(r.metadata["rerank_score"])
+                        scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
+                        held_ids = {id(r) for _slot, r in held_slots}
+                        # Held rows return to the engine's slots (a sensitive top-1 stays top-1).
+                        results = _restore_held_slots(
+                            scored + [r for r in results if "rerank_score" not in r.metadata and id(r) not in held_ids],
+                            held_slots,
+                        )
+                    if benign and not degraded:
+                        rerank_note = (
+                            f"{len(benign)} collection(s) not reranked: every candidate row is sensitive and is held "
+                            "back from the reranker"
+                        )
+                    if degraded:
+                        rerank_note = (
+                            f"lexical rerank degraded in {len(degraded)} collection(s) "
+                            f"({', '.join(degraded[:3])}{', ...' if len(degraded) > 3 else ''}); "
+                            + (
+                                "all rows are in calibrated distance order"
+                                if partial_rerank
+                                else "their lexical rows are in vector-distance order and may be cut"
+                            )
+                        )
+                if clustered:
+                    # apply_ranking_boosts sorts by hybrid_score globally, which
+                    # would scatter same-cluster results apart — the text
+                    # renderer below assumes cluster labels appear CONTIGUOUSLY
+                    # (the `current_cluster` grouping further down). Boosted
+                    # hybrid_score values are kept on each result; only the
+                    # display ORDER is restored to the cluster-grouped order
+                    # search_cross_corpus produced.
+                    # By row, not by id (nexus-tko2w): a chunk several documents hold comes back
+                    # once per document with the same id and a different ``doc_id``, and an
+                    # id-keyed map would keep one of the two and return it twice.
+                    _by_row: dict[tuple, list] = {}
                     for r in results:
-                        # Topic grouping labels rows _topic_label, Ward
-                        # clustering _cluster_label (search_engine.py).
-                        key = r.metadata.get("_cluster_label") or r.metadata.get("_topic_label", "")
-                        groups.setdefault(key, []).append(r)
-                    ordered = sorted(groups.values(), key=lambda g: max(_score(r) for r in g), reverse=True)
-                    results = [r for g in ordered for r in sorted(g, key=_score, reverse=True)]
-            # Non-clustered results are now ranked by hybrid_score
-            # (apply_ranking_boosts' own sort) rather than raw distance.
-            if use_page_cache:
-                _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
+                        _by_row.setdefault(_row_key(r), []).append(r)
+                    results = [_by_row[k].pop(0) for k in _cluster_order if _by_row.get(k)]
+                    if lexical_rerank:
+                        # The restore above would put a lexical row back in its
+                        # distance position (review finding on a463fa4ce). Keep
+                        # clusters contiguous, but order the clusters by their
+                        # best rerank score and each cluster's rows by score,
+                        # scored rows first.
+                        def _score(r) -> float:
+                            if partial_rerank:
+                                # Mixed scales: the calibrated hybrid_score orders
+                                # every row (Technical Design 12, nexus-hf29s).
+                                return r.hybrid_score
+                            s = r.metadata.get("rerank_score")
+                            return float(s) if s is not None else float("-inf")
+
+                        groups: dict[str, list] = {}
+                        for r in results:
+                            # Topic grouping labels rows _topic_label, Ward
+                            # clustering _cluster_label (search_engine.py).
+                            key = r.metadata.get("_cluster_label") or r.metadata.get("_topic_label", "")
+                            groups.setdefault(key, []).append(r)
+                        ordered = sorted(groups.values(), key=lambda g: max(_score(r) for r in g), reverse=True)
+                        results = [r for g in ordered for r in sorted(g, key=_score, reverse=True)]
+                # Non-clustered results are now ranked by hybrid_score
+                # (apply_ranking_boosts' own sort) rather than raw distance.
+                if use_page_cache:
+                    _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
+            raw_n = len(results)
+            exhausted = raw_n < fetch_n if cached is None else _page_cache_exhausted(cache_key)
+            collapsed = _collapse_identical_chunk_results(results)
+            if len(collapsed) >= need or exhausted or _round == _COLLAPSE_REFETCH_ROUNDS:
+                break
+            fetch_n = 2 * max(fetch_n, 0 if cached is None else _page_cache_depth(cache_key))
+        results = collapsed
         if not results:
             if structured:
                 return _structured_no_results(diag)
@@ -3754,6 +3783,15 @@ def _search_render(
                 **({"warnings": [w for w in (_failed_collections_note(diag), rerank_note, _chash_allow_note(diag)) if w]}
                    if (_failed_collections_note(diag) or rerank_note or _chash_allow_note(diag)) else {}),
                 **({"chash_allow_dropped": _chash_allow_dropped(diag)} if _chash_allow_dropped(diag) else {}),
+                # GH #1524: aligned with ``ids``; present only when a row stands for a chunk other
+                # collections hold too, so a page with no copies keeps its documented shape.
+                **({"also_in": [list(r.metadata.get("also_in", [])) for r in shown],
+                    "also_in_ids": [list(r.metadata.get("also_in_ids", [])) for r in shown]}
+                   if any(r.metadata.get("also_in") or r.metadata.get("also_in_ids") for r in shown) else {}),
+                # The text footer's "next"/"may have more", for a caller of the dict: present when more
+                # rows may follow this page, so a page the collapse left short is never read as the end.
+                **({"next_offset": offset + len(page)}
+                   if (offset + len(page) < total or not exhausted) else {}),
                 **posture.structured_keys(),
             }
 
@@ -3826,6 +3864,8 @@ def _search_render(
             # resolved with the display title; the chunk row's are the last writer's.
             note = hit_annotation_line(r.metadata)
             note_line = f"\n  {note}" if note else ""
+            if r.metadata.get("also_in"):  # GH #1524: the same chunk, in the other collections
+                note_line += f"\n  also in: {', '.join(r.metadata['also_in'])}"
             badge = f" {_SENSITIVE_BADGE}" if posture.flagged(_idx) else ""
             lines.append(f"[{dist}]{badge} {label}{flag}{note_line}\n  {snippet}")
 
@@ -3847,7 +3887,7 @@ def _search_render(
         shown_end = offset + len(page)
         if shown_end < total:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
-        elif total >= fetch_n:
+        elif not exhausted:  # whether the fetch held the whole pool, not the collapsed count (GH #1524)
             lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
         else:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
@@ -3896,7 +3936,9 @@ def search(
         description=(
             "Return the {ids, tumblers, distances, hybrid_scores, collections, "
             "chunk_collections, chunk_text_hash} dict instead of the human-readable "
-            "string; the plan runner uses this so $stepN.ids resolves."
+            "string (plus also_in and also_in_ids, aligned with ids, when a row stands for "
+            "identical chunks in other collections, and next_offset when more rows may "
+            "follow); the plan runner uses this so $stepN.ids resolves."
         ),
     )] = False,
     threshold: Annotated[float | None, Field(
@@ -3944,6 +3986,12 @@ def search(
     - `cluster_by` defaults to "" (no clustering).
     - The text and `structured=True` can disagree on ranking order within a
       page: text applies a per-file diversity cap, the dict does not.
+    - Identical chunk text in several collections is returned once, with the
+      other collections named: `also in:` in the text; `also_in` and
+      `also_in_ids` (collections, their documents; aligned with `ids`) in the
+      dict when a row has copies. A sensitive copy makes the row sensitive.
+    - The dict has `next_offset` while more rows may follow; absent on the
+      last page. A short page can still have one.
     """
     # nexus-zdzm5: the documented page cap was not enforced; limit=301
     # returned 301 rows (118 KB). Refuse, and say how to page instead.
@@ -3969,6 +4017,8 @@ def search(
 #: them without holding stale results past content changes. Thread-safe via
 #: the lock (MCP tools can run concurrently).
 _PAGE_LOOKAHEAD_PAGES = 2
+#: GH #1524: extra, deeper fetches when collapsing identical chunks leaves a page short.
+_COLLAPSE_REFETCH_ROUNDS = 2
 
 #: nexus-tao37: the MCP search and query tools show at most 300 characters of a row
 #: (search's snippet is 200, query's is 300), so they ask the engine for no more.
@@ -4003,6 +4053,22 @@ def _page_cache_get(key: tuple, need: int) -> tuple[list, list, str | None] | No
             # belongs to (a separate read could see a newer entry's).
             return results, _page_cache.get("diag") or [], _page_cache.get("note")
         return None
+
+
+def _page_cache_depth(key: tuple) -> int:
+    """The fetch depth of the cached entry for *key*, 0 when there is none: a refetch goes deeper
+    than the entry it replaces, never shallower (GH #1524)."""
+    with _page_cache_lock:
+        return int(_page_cache.get("fetch_n", 0)) if _page_cache.get("key") == key else 0
+
+
+def _page_cache_exhausted(key: tuple) -> bool:
+    """Whether the cached entry for *key* holds the whole pool: its fetch came back short of the depth
+    it asked for. A cache hit whose collapsed rows fall short of a page needs no refetch then (GH #1524)."""
+    with _page_cache_lock:
+        if _page_cache.get("key") != key:
+            return False
+        return len(_page_cache.get("results") or []) < _page_cache.get("fetch_n", 0)
 
 
 def _page_cache_put(
@@ -4438,6 +4504,21 @@ def _dedup_by_id(rows: list[dict]) -> list[dict]:
     return _collapse_identical_chunk_rows(deduped)
 
 
+def _absorb_dropped_copy_sensitivity(kept: dict, dropped: Mapping[str, Any]) -> bool:
+    """A dropped copy of the kept chunk that is sensitive makes the kept one sensitive: the text is the
+    same chunk, so the output posture (RDR-243) must judge it as the sensitive copy, and the copy's
+    collection and id stay out of ``also_in`` (review of 0f2e04cae). *kept* is a row or a result's
+    metadata, mutated in place; returns whether the dropped copy was sensitive."""
+    sensitive, owners = _hit_facts(dropped)
+    if not sensitive:
+        return False
+    kept["sensitive"] = True
+    merged = list(kept.get("sensitive_owners") or [])
+    merged += [o for o in owners if o not in merged]
+    kept["sensitive_owners"] = merged
+    return True
+
+
 def _collapse_identical_chunk_rows(rows: list[dict]) -> list[dict]:
     """GH #1524 (nexus-20uv3): a chunk is content-addressed, so the same text
     indexed in five collections (the RDR template's README, byte-identical
@@ -4456,6 +4537,8 @@ def _collapse_identical_chunk_rows(rows: list[dict]) -> list[dict]:
         if kept is None:
             kept_by_chash[chash] = r
             out.append(r)
+            continue
+        if _absorb_dropped_copy_sensitivity(kept, r):
             continue
         other = r.get("collection", "")
         if other and other != kept.get("collection", ""):
@@ -4505,14 +4588,20 @@ def _collapse_identical_chunk_results(results: list) -> list:
                 owners_kept.add((chash, owner))
                 out.append(r)
             continue
+        if _absorb_dropped_copy_sensitivity(kept.metadata, r.metadata or {}):
+            continue
         if r.collection and r.collection != kept.collection:
             also = kept.metadata.setdefault("also_in", [])
             if r.collection not in also:
                 also.append(r.collection)
-        if r.id and r.id != kept.id:
+        # The dropped copy's identity: its own id when it differs, else the document it speaks for.
+        # A search row's id is the chunk id, the same for identical text in every collection, so the
+        # copy is told apart by its owning document (review of 9661bcc29).
+        other_id = r.id if (r.id and r.id != kept.id) else (owner if owner and owner != _row_key(kept)[2] else "")
+        if other_id:
             ids = kept.metadata.setdefault("also_in_ids", [])
-            if r.id not in ids:
-                ids.append(r.id)
+            if other_id not in ids:
+                ids.append(other_id)
     return out
 
 
@@ -9537,38 +9626,30 @@ def tuple_subscribe(
 ) -> str:
     """Add `subspace` to this session's MCP server's subscription list (RDR-211, RDR-213).
 
-    The session's MCP server waits on its board topics and its own mailbox
-    (`mailbox/<session id>`) and pushes what arrives through the Claude
-    Code channel: the lifespan waiter (`mcp/channel.py`) sends a
-    notification carrying a REFERENCE only (subspace, tuple id) -- never
-    the body, never a claim -- which this session claims itself with
-    `tuple_in` (RDR-213: the waiter never claims mail, and `tuple_in`
-    returns the body WITH the claim, so there is no separate `tuple_rd`
-    read step first). With the plugin's hooks loaded, the notification
-    itself fires `UserPromptSubmit` and the drain hook claims, acks and
-    renders the body with THAT prompt before the session's own turn, so
-    the session claims for itself only when that rendering did not
-    already happen. `tuple_subscriptions` lists the current set.
-    Only board topics and the session's own mailbox are ever delivered: a
-    queue or a lock is refused naming `in`; a second `mailbox/<name>` is
+    The server waits on its board topics and its own mailbox
+    (`mailbox/<session id>`) and pushes what arrives through the Claude Code
+    channel. The notification carries a REFERENCE only (subspace, tuple id),
+    never the body or a claim; the session claims the row itself with
+    `tuple_in`, which returns the body with the claim (no `tuple_rd` first).
+    With the plugin's hooks loaded, the notification fires `UserPromptSubmit`
+    and the drain hook claims, acks and renders the body with that prompt, so
+    the session claims only rows it did not render. `tuple_subscriptions`
+    lists the set. Only board topics and the own mailbox are delivered: a
+    queue or a lock is refused naming `in`, and a second `mailbox/<name>` is
     refused once this session leases a name. At most 32 board topics.
 
-    A board subscription starts 30 seconds before the subscribe call (a
-    clock-skew margin): posts from that window on are pushed, at most 100
-    per wait, one notification per wait naming the count, the first and
-    last tuple id and the `tuple_rd` call that reads them. Older posts
-    are read with `tuple_rd`, never pushed. Mail sent to the mailbox
-    before the subscribe is delivered too, until it is claimed or
-    expires, each row announced at most 5 times (`max_announces`, 150 s
-    apart).
+    A board subscription starts 30 seconds before the subscribe call (clock
+    skew): posts from then on are pushed, at most 100 per wait, one
+    notification per wait naming the count, the first and last tuple id and
+    the `tuple_rd` call that reads them; older posts are read with `tuple_rd`.
+    Mail sent to the mailbox before the subscribe is delivered too, until it
+    is claimed or expires, each row announced at most 5 times
+    (`max_announces`, 150 s apart).
 
-    Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>`
-    lease so `mailbox_send` resolves that name to this session. It is NOT
-    a second delivered mailbox: nothing is pushed or drained for it; only
-    this session's own mailbox and its board topics ever are.
-
-    A `/resume` (same session id) restores this list; a `/clear` (a new
-    session id) starts clean.
+    Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>` lease so
+    `mailbox_send` resolves that name to this session; nothing is pushed or
+    drained for it. A `/resume` (same session id) restores this list; a
+    `/clear` (new session id) starts clean.
     """
     # RDR-208 Phase 3 (bead nexus-galkv.20): a leased name stopped being a
     # second delivered mailbox here -- see SubscriptionSet's own docstring.

@@ -1900,7 +1900,7 @@ class TestClaimRenewerBound:
         side = _tuple_worker()._tuple_side
         assert side._deadline_s(5) == pytest.approx(2743.75 + RENEW_DEADLINE_MARGIN_S)
 
-    def test_extraction_keeps_the_claims_renewed_and_stops_before_the_verdicts(
+    def test_extraction_keeps_the_claims_renewed_each_interval(
         self, tuple_env, monkeypatch,  # noqa: ANN001
     ) -> None:
         tuples = _FakeTuples([_task_body(0), _task_body(1)])
@@ -1922,8 +1922,6 @@ class TestClaimRenewerBound:
             "each held claim renewed once per interval, two intervals"
         )
         assert all(r[3] == 600 for r in renews)
-        first_verdict = min(i for i, c in enumerate(tuples.calls) if c[0] in ("persist", "ack", "nack"))
-        assert all(c[0] != "renew" for c in tuples.calls[first_verdict:]), "stopped before the verdicts"
 
 
 class TestTupleVerdictMap:

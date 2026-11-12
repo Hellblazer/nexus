@@ -61,7 +61,13 @@ import java.util.*;
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
  *   GET   /v1/catalog/manifest/fillable?kind=labels|spans&limit=N  strict bounded count of the manifest rows the two upgrade rungs would fill (nexus-f3yqd)
+ *   POST  /v1/catalog/manifest/fill      fill exactly those rows as a background job: 202 {job_id, created} (nexus-f3yqd, R2)
+ *   GET   /v1/catalog/manifest/fill/{job_id}  the fill job: state, stage, done_rows, total_rows, filled, cursor, counts (nexus-f3yqd, R2)
+ *   GET   /v1/catalog/manifest/foreign_collection?limit=N  live documents whose manifest names chunks outside their physical_collection (GH #1611)
  *   GET   /v1/catalog/sensitive?limit=N  the tenant's live sensitive documents, listed up to N, with the total (nexus-f3yqd)
+ *   GET   /v1/catalog/stub-metadata?limit=N  per knowledge/docs collection, the PDF chunks still carrying the upload placeholder metadata, up to N (nexus-f3yqd)
+ *   GET   /v1/catalog/index-run/census?limit=N  bounded census of stale index-run fences, unstamped documents and failed documents with ownerless chunks (nexus-f3yqd)
+ *   GET   /v1/catalog/owners/next_seq_drift?limit=N  read-only list of the owners whose next_seq trails their highest child; the sweep below floors them (nexus-f3yqd)
  *   GET   /v1/catalog/manifest/section_label_fillable?limit=N  bounded count of legacy manifest rows the manifest-section-labels rung could still fill (nexus-l4hds)
  *   GET   /v1/catalog/manifest/null_collection  read-only count of pre-backfill (collection IS NULL) manifest rows (T2 nexus/chroma-residue-plan-2026-08-10 §C2)
  *   GET   /v1/catalog/chash/conformance   per-table chash width-conformance report (tenant-scoped, RDR-180 nexus-du2dw)
@@ -137,6 +143,12 @@ public final class CatalogHandler implements HttpHandler {
     private final CatalogLinksHandler linkRoutes;
     /** nexus-f3yqd: the bounded read routes of engine 0.1.188 (the sensitive list, the strict fillable count). */
     private final CatalogBoundedReadRoutes boundedReads;
+    /** nexus-f3yqd: {@code GET /stub-metadata}, the doctor's PDF placeholder-metadata read. */
+    private final CatalogStubMetadataRoute stubMetadataRoute;
+    /** nexus-f3yqd: the two census routes of engine 0.1.190 (the index-run census, the read-only next_seq drift). */
+    private final CatalogCensusRoutes censusRoutes;
+    /** nexus-f3yqd R2: the manifest fill job routes ({@link CatalogManifestFillRoutes}). */
+    private final CatalogManifestFillRoutes manifestFill;
     /** The statement timeout a reconcile commit runs under: the reconcile instance's maximum runtime, never more. */
     private final java.time.Duration reconcileStatementTimeout;
 
@@ -198,6 +210,24 @@ public final class CatalogHandler implements HttpHandler {
                    dev.nexus.service.db.CombinedWriteService combinedWriteService,
                    EngineJobs<Void> reconcileJobs, java.time.Duration reconcileStatementTimeout,
                    ChunkKeyAllowlistCheck chunkKeyCheck) {
+        this(repo, combinedWriteService, reconcileJobs, reconcileStatementTimeout, chunkKeyCheck, null);
+    }
+
+    /**
+     * Production wiring of the manifest fill jobs (nexus-f3yqd, R2): {@code manifestFillJobs} is the registry the
+     * fill runs on ({@code NexusService} passes its tenant-evicted instance); null answers the fill routes 503.
+     */
+    public CatalogHandler(CatalogRepository repo,
+                          dev.nexus.service.db.CombinedWriteService combinedWriteService,
+                          EngineJobs<Void> reconcileJobs, ChunkKeyAllowlistCheck chunkKeyCheck,
+                          EngineJobs<ManifestFillJobs.Progress> manifestFillJobs) {
+        this(repo, combinedWriteService, reconcileJobs, RECONCILE_STATEMENT_TIMEOUT, chunkKeyCheck, manifestFillJobs);
+    }
+
+    CatalogHandler(CatalogRepository repo,
+                   dev.nexus.service.db.CombinedWriteService combinedWriteService,
+                   EngineJobs<Void> reconcileJobs, java.time.Duration reconcileStatementTimeout,
+                   ChunkKeyAllowlistCheck chunkKeyCheck, EngineJobs<ManifestFillJobs.Progress> manifestFillJobs) {
         if (reconcileStatementTimeout == null || reconcileStatementTimeout.isZero() || reconcileStatementTimeout.isNegative()
                 || reconcileStatementTimeout.compareTo(java.time.Duration.ofMillis(Integer.MAX_VALUE)) > 0) {
             throw new IllegalArgumentException("the reconcile statement timeout must be positive and at most "
@@ -207,7 +237,13 @@ public final class CatalogHandler implements HttpHandler {
         this.repo = repo;
         this.linkRoutes = new CatalogLinksHandler(new dev.nexus.service.db.CatalogLinksRepository(repo));
         this.boundedReads = new CatalogBoundedReadRoutes(
-            new dev.nexus.service.db.CatalogSensitiveReads(repo), new dev.nexus.service.db.ManifestFillableCount(repo));
+            new dev.nexus.service.db.CatalogSensitiveReads(repo), new dev.nexus.service.db.ManifestFillableCount(repo),
+            new dev.nexus.service.db.ManifestForeignCollectionReads(repo));
+        this.stubMetadataRoute = new CatalogStubMetadataRoute(new dev.nexus.service.db.PdfStubMetadataReads(repo));
+        this.censusRoutes = new CatalogCensusRoutes(
+            new dev.nexus.service.db.IndexRunCensusReads(repo), new dev.nexus.service.db.NextSeqDriftReads(repo));
+        this.manifestFill = new CatalogManifestFillRoutes(new dev.nexus.service.db.ManifestFill(repo),
+            new dev.nexus.service.db.ManifestFillableCount(repo), manifestFillJobs);
         this.combinedWriteService = combinedWriteService;
         this.reconcileJobs = reconcileJobs;
         this.reconcileStatementTimeout = reconcileStatementTimeout;
@@ -276,7 +312,10 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/null_collection" -> handleManifestNullCollection(exchange, tenant, method);
                 case "/manifest/section_label_fillable" -> handleManifestSectionLabelFillable(exchange, tenant, method);
                 case "/manifest/fillable"     -> handleManifestFillable(exchange, tenant, method);
+                case "/manifest/fill"         -> handleManifestFill(exchange, tenant, method);
                 case "/sensitive"             -> handleSensitiveList(exchange, tenant, method);
+                case "/stub-metadata"         -> handleStubMetadata(exchange, tenant, method);
+                case "/manifest/foreign_collection" -> handleManifestForeignCollection(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /docs/orphaned already
                 // existed; links had no equivalent, which is why the client
@@ -300,11 +339,13 @@ public final class CatalogHandler implements HttpHandler {
                 case "/index-run/begin-many"  -> handleIndexRunBeginMany(exchange, tenant, method);
                 case "/index-run/complete"    -> handleIndexRunComplete(exchange, tenant, method);
                 case "/index-run/fail"        -> handleIndexRunFail(exchange, tenant, method);
+                case "/index-run/census"      -> handleIndexRunCensus(exchange, tenant, method);
 
                 // ── Owners ────────────────────────────────────────────────────
                 case "/owners/upsert"         -> handleOwnerUpsert(exchange, tenant, method);
                 case "/owners/list"           -> handleOwnerList(exchange, tenant, method);
                 case "/owners/sweep_next_seq_drift" -> handleOwnersSweepNextSeqDrift(exchange, tenant, method);
+                case "/owners/next_seq_drift" -> handleNextSeqDriftRead(exchange, tenant, method);
                 case "/owners/by_repo"        -> handleOwnerByRepo(exchange, tenant, method);
                 case "/owners/by_name"        -> handleOwnerByName(exchange, tenant, method);
                 case "/owners/head_hash"      -> handleOwnerHeadHash(exchange, tenant, method);
@@ -383,6 +424,8 @@ public final class CatalogHandler implements HttpHandler {
                 default -> {
                     if (op.startsWith(RECONCILE_POLL_PREFIX)) {
                         handleReconcilePoll(exchange, tenant, method, op.substring(RECONCILE_POLL_PREFIX.length()));
+                    } else if (op.startsWith(CatalogManifestFillRoutes.POLL_PREFIX)) {
+                        manifestFill.poll(exchange, tenant, method, op.substring(CatalogManifestFillRoutes.POLL_PREFIX.length()));
                     } else {
                         HttpUtil.send(exchange, 404, "{\"error\":\"not found: " + op + "\"}");
                     }
@@ -2377,6 +2420,16 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(report));
     }
 
+    /** GET /v1/catalog/owners/next_seq_drift?limit=N (nexus-f3yqd): the read-only form of the sweep above; the body is {@link CatalogCensusRoutes#nextSeqDrift}. */
+    private void handleNextSeqDriftRead(HttpExchange exchange, String tenant, String method) throws IOException {
+        censusRoutes.nextSeqDrift(exchange, tenant, method);
+    }
+
+    /** GET /v1/catalog/index-run/census?limit=N (nexus-f3yqd): the body is {@link CatalogCensusRoutes#indexRunCensus}. */
+    private void handleIndexRunCensus(HttpExchange exchange, String tenant, String method) throws IOException {
+        censusRoutes.indexRunCensus(exchange, tenant, method);
+    }
+
     private void handleOwnerByRepo(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         String repoHash = queryParam(exchange, "repo_hash");
@@ -3690,9 +3743,24 @@ public final class CatalogHandler implements HttpHandler {
         boundedReads.fillable(exchange, tenant, method);
     }
 
+    /** POST /v1/catalog/manifest/fill (nexus-f3yqd, R2): starts the fill job; see {@link CatalogManifestFillRoutes}. The poll, GET /manifest/fill/{job_id}, is the default branch above. */
+    private void handleManifestFill(HttpExchange exchange, String tenant, String method) throws IOException {
+        manifestFill.start(exchange, tenant, method);
+    }
+
+    /** GET /v1/catalog/manifest/foreign_collection?limit=N (GH #1611): the body is {@link CatalogBoundedReadRoutes#foreignCollection}. */
+    private void handleManifestForeignCollection(HttpExchange exchange, String tenant, String method) throws IOException {
+        boundedReads.foreignCollection(exchange, tenant, method);
+    }
+
     /** GET /v1/catalog/sensitive?limit=N (nexus-f3yqd): the body is {@link CatalogBoundedReadRoutes#sensitive}. */
     private void handleSensitiveList(HttpExchange exchange, String tenant, String method) throws IOException {
         boundedReads.sensitive(exchange, tenant, method);
+    }
+
+    /** GET /v1/catalog/stub-metadata?limit=N (nexus-f3yqd): the body is {@link CatalogStubMetadataRoute#stubMetadata}. */
+    private void handleStubMetadata(HttpExchange exchange, String tenant, String method) throws IOException {
+        stubMetadataRoute.stubMetadata(exchange, tenant, method);
     }
 
     /**

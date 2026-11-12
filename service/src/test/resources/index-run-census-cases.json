@@ -1,0 +1,1700 @@
+{
+ "_comment": "The index-run census as the client's two doctor rows (nexus.health._check_stale_indexing_runs and _check_failed_runs_hidden_chunks, run as a doctor run runs them over the live walk) and the engine route GET /v1/catalog/index-run/census both compute it; tests/catalog/test_index_run_census_cases.py runs this table through the client rows and IndexRunCensusParityTest runs it through the route, so a change to either side's rule on what this table varies fails one of the two. 'now' is the clock both halves are held to. WHAT IT PINS. stale: a document is stale when its fence is 'indexing' and index_started_at is 6 h or more before now (inclusive; none recorded is not stale; other states and tombstones never are); notes counts the stale documents of content type knowledge (the client counts their distinct names, source_uri else the tumbler, and a live document's name is unique). fence: checked (documents carrying a state), reported_null, undated_reported_null, floor_candidates (no state, indexed_at strictly after the floor, 2026-08-07T16:00:35Z), the baseline (the earliest indexed_at among COMPLETE documents that share an index_run_id with a second document that has a usable indexed_at, else the earliest indexed_at of any COMPLETE document; an indexing or failed document never dates it) and post_anchor (unstamped documents indexed strictly after both the floor and the baseline), named by source_uri. failed_hidden: of the failed documents (tombstones excepted), those the heal would rebuild: no manifest row, a content hash (metadata.content_hash, else index_content_hash) and a registered collection, with n >= 1 chunk rows of that collection carrying the hash and chunk_count 0 or n <= chunk_count. 'documents' hold every column the rows read; 'collections' are the registered ones and 'chunk_groups' the chunk rows carrying a content_hash. WHAT IT DOES NOT PIN (Java tests only): the limit and its capped flag, tenants, the partial index, timeouts, the clients' run-id ledger and candidate caps (5,000 and 1,000), a non-string content_hash.",
+ "now": "2026-11-11T12:00:00Z",
+ "constants": {
+  "stale_threshold_s": 21600,
+  "floor": "2026-08-07T16:00:35Z"
+ },
+ "scenarios": [
+  {
+   "id": "stale-threshold-edges",
+   "documents": [
+    {
+     "tumbler": "1.1.1",
+     "content_type": "code",
+     "source_uri": "file:///r/1.1.1.py",
+     "file_path": "/r/1.1.1.py",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T06:00:00Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "1.1.2",
+     "content_type": "code",
+     "source_uri": "file:///r/1.1.2.py",
+     "file_path": "/r/1.1.2.py",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T06:00:30Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "1.1.3",
+     "content_type": "code",
+     "source_uri": "file:///r/1.1.3.py",
+     "file_path": "/r/1.1.3.py",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-10T06:00:00Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "1.1.4",
+     "content_type": "code",
+     "source_uri": "file:///r/1.1.4.py",
+     "file_path": "/r/1.1.4.py",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "1.1.5",
+     "content_type": "code",
+     "source_uri": "file:///r/1.1.5.py",
+     "file_path": "/r/1.1.5.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": "2026-11-09T20:00:00Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "1.1.6",
+     "content_type": "code",
+     "source_uri": "file:///r/1.1.6.py",
+     "file_path": "/r/1.1.6.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": "2026-11-09T20:00:00Z",
+     "indexed_at": "2026-11-09T21:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "1.1.7",
+     "content_type": "code",
+     "source_uri": "file:///r/1.1.7.py",
+     "file_path": "/r/1.1.7.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": "2026-11-09T20:00:00Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "stale": {
+     "count": 2,
+     "notes": 0,
+     "names": [
+      "file:///r/1.1.1.py",
+      "file:///r/1.1.3.py"
+     ]
+    }
+   }
+  },
+  {
+   "id": "stale-notes-are-the-knowledge-documents",
+   "documents": [
+    {
+     "tumbler": "1.2.1",
+     "content_type": "knowledge",
+     "source_uri": "nx-note://one",
+     "file_path": "",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T04:00:00Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "1.2.2",
+     "content_type": "knowledge",
+     "source_uri": "",
+     "file_path": "",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T03:00:00Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "1.2.3",
+     "content_type": "code",
+     "source_uri": "file:///r/1.2.3.py",
+     "file_path": "/r/1.2.3.py",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T02:00:00Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "1.2.4",
+     "content_type": "knowledge",
+     "source_uri": "nx-note://fresh",
+     "file_path": "",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T11:00:00Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "stale": {
+     "count": 3,
+     "notes": 2,
+     "names": [
+      "nx-note://one",
+      "1.2.2",
+      "file:///r/1.2.3.py"
+     ]
+    }
+   }
+  },
+  {
+   "id": "stale-ignores-tombstones",
+   "documents": [
+    {
+     "tumbler": "1.3.1",
+     "content_type": "code",
+     "source_uri": "file:///r/1.3.1.py",
+     "file_path": "/r/1.3.1.py",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T00:00:00Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "1.3.2",
+     "content_type": "code",
+     "source_uri": "file:///r/1.3.2.py",
+     "file_path": "/r/1.3.2.py",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T00:00:00Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": true
+    }
+   ],
+   "expect": {
+    "stale": {
+     "count": 1,
+     "notes": 0,
+     "names": [
+      "file:///r/1.3.1.py"
+     ]
+    }
+   }
+  },
+  {
+   "id": "fence-proven-anchor",
+   "documents": [
+    {
+     "tumbler": "2.1.1",
+     "content_type": "code",
+     "source_uri": "file:///r/2.1.1.py",
+     "file_path": "/r/2.1.1.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-20T10:00:00Z",
+     "index_run_id": "rA",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.1.2",
+     "content_type": "code",
+     "source_uri": "file:///r/2.1.2.py",
+     "file_path": "/r/2.1.2.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-20T10:00:05Z",
+     "index_run_id": "rA",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.1.3",
+     "content_type": "code",
+     "source_uri": "file:///r/2.1.3.py",
+     "file_path": "/r/2.1.3.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-09T09:00:00Z",
+     "index_run_id": "rB",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.1.4",
+     "content_type": "code",
+     "source_uri": "file:///r/2.1.4.py",
+     "file_path": "/r/2.1.4.py",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T11:00:00Z",
+     "indexed_at": "2026-08-01T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.1.5",
+     "content_type": "code",
+     "source_uri": "file:///r/2.1.5.py",
+     "file_path": "/r/2.1.5.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": "2026-08-08T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.1.6",
+     "content_type": "code",
+     "source_uri": "file:///r/2.1.6.py",
+     "file_path": "/r/2.1.6.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-25T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.1.7",
+     "content_type": "code",
+     "source_uri": "file:///r/2.1.7.py",
+     "file_path": "/r/2.1.7.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-15T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.1.8",
+     "content_type": "code",
+     "source_uri": "file:///r/2.1.8.py",
+     "file_path": "/r/2.1.8.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-01T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.1.9",
+     "content_type": "code",
+     "source_uri": "file:///r/2.1.9.py",
+     "file_path": "/r/2.1.9.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-20T10:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.1.10",
+     "content_type": "code",
+     "source_uri": "file:///r/2.1.10.py",
+     "file_path": "/r/2.1.10.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-07T16:00:35Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.1.11",
+     "content_type": "code",
+     "source_uri": "file:///r/2.1.11.py",
+     "file_path": "/r/2.1.11.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "fence": {
+     "checked": 5,
+     "reported_null": 6,
+     "undated_reported_null": 1,
+     "floor_candidates": 3,
+     "anchor_kind": "proven",
+     "anchor_at": "2026-08-20T10:00:00Z",
+     "earliest_stamped_at": "2026-08-09T09:00:00Z",
+     "proven_at": "2026-08-20T10:00:00Z",
+     "post_anchor": [
+      "file:///r/2.1.6.py"
+     ]
+    }
+   }
+  },
+  {
+   "id": "fence-weak-anchor-when-no_run_is_shared",
+   "documents": [
+    {
+     "tumbler": "2.2.1",
+     "content_type": "code",
+     "source_uri": "file:///r/2.2.1.py",
+     "file_path": "/r/2.2.1.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-12T00:00:00Z",
+     "index_run_id": "r1",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.2.2",
+     "content_type": "code",
+     "source_uri": "file:///r/2.2.2.py",
+     "file_path": "/r/2.2.2.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-30T00:00:00Z",
+     "index_run_id": "r2",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.2.3",
+     "content_type": "code",
+     "source_uri": "file:///r/2.2.3.py",
+     "file_path": "/r/2.2.3.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-09-02T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.2.6",
+     "content_type": "code",
+     "source_uri": "file:///r/2.2.6.py",
+     "file_path": "/r/2.2.6.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-09-03T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.2.4",
+     "content_type": "code",
+     "source_uri": "file:///r/2.2.4.py",
+     "file_path": "/r/2.2.4.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-09-05T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.2.5",
+     "content_type": "code",
+     "source_uri": "file:///r/2.2.5.py",
+     "file_path": "/r/2.2.5.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-10T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "fence": {
+     "checked": 4,
+     "reported_null": 2,
+     "undated_reported_null": 0,
+     "floor_candidates": 2,
+     "anchor_kind": "earliest",
+     "anchor_at": "2026-08-12T00:00:00Z",
+     "earliest_stamped_at": "2026-08-12T00:00:00Z",
+     "proven_at": null,
+     "post_anchor": [
+      "file:///r/2.2.4.py"
+     ]
+    }
+   }
+  },
+  {
+   "id": "fence-a-shared-run-needs-two-usable-stamps",
+   "documents": [
+    {
+     "tumbler": "2.3.1",
+     "content_type": "code",
+     "source_uri": "file:///r/2.3.1.py",
+     "file_path": "/r/2.3.1.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-12T00:00:00Z",
+     "index_run_id": "rX",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.3.2",
+     "content_type": "code",
+     "source_uri": "file:///r/2.3.2.py",
+     "file_path": "/r/2.3.2.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "rX",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.3.3",
+     "content_type": "code",
+     "source_uri": "file:///r/2.3.3.py",
+     "file_path": "/r/2.3.3.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-13T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "fence": {
+     "checked": 2,
+     "reported_null": 1,
+     "undated_reported_null": 0,
+     "floor_candidates": 1,
+     "anchor_kind": "earliest",
+     "anchor_at": "2026-08-12T00:00:00Z",
+     "earliest_stamped_at": "2026-08-12T00:00:00Z",
+     "proven_at": null,
+     "post_anchor": [
+      "file:///r/2.3.3.py"
+     ]
+    }
+   }
+  },
+  {
+   "id": "fence-no-baseline-with-candidates",
+   "documents": [
+    {
+     "tumbler": "2.4.1",
+     "content_type": "code",
+     "source_uri": "file:///r/2.4.1.py",
+     "file_path": "/r/2.4.1.py",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T11:00:00Z",
+     "indexed_at": "2026-09-01T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.4.2",
+     "content_type": "code",
+     "source_uri": "file:///r/2.4.2.py",
+     "file_path": "/r/2.4.2.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-09-10T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.4.3",
+     "content_type": "code",
+     "source_uri": "file:///r/2.4.3.py",
+     "file_path": "/r/2.4.3.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-09-11T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.4.4",
+     "content_type": "code",
+     "source_uri": "file:///r/2.4.4.py",
+     "file_path": "/r/2.4.4.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-07-01T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.4.5",
+     "content_type": "code",
+     "source_uri": "file:///r/2.4.5.py",
+     "file_path": "/r/2.4.5.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "fence": {
+     "checked": 1,
+     "reported_null": 4,
+     "undated_reported_null": 1,
+     "floor_candidates": 2,
+     "anchor_kind": null,
+     "anchor_at": null,
+     "earliest_stamped_at": null,
+     "proven_at": null,
+     "post_anchor": []
+    }
+   }
+  },
+  {
+   "id": "fence-quiet-corpus",
+   "documents": [
+    {
+     "tumbler": "2.5.1",
+     "content_type": "code",
+     "source_uri": "file:///r/2.5.1.py",
+     "file_path": "/r/2.5.1.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-07-01T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.5.2",
+     "content_type": "code",
+     "source_uri": "file:///r/2.5.2.py",
+     "file_path": "/r/2.5.2.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-07-02T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.5.3",
+     "content_type": "code",
+     "source_uri": "file:///r/2.5.3.py",
+     "file_path": "/r/2.5.3.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "fence": {
+     "checked": 0,
+     "reported_null": 3,
+     "undated_reported_null": 1,
+     "floor_candidates": 0,
+     "anchor_kind": null,
+     "anchor_at": null,
+     "earliest_stamped_at": null,
+     "proven_at": null,
+     "post_anchor": []
+    }
+   }
+  },
+  {
+   "id": "fence-unstamped-all-before-the-baseline",
+   "documents": [
+    {
+     "tumbler": "2.6.1",
+     "content_type": "code",
+     "source_uri": "file:///r/2.6.1.py",
+     "file_path": "/r/2.6.1.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-20T10:00:00Z",
+     "index_run_id": "rA",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.6.2",
+     "content_type": "code",
+     "source_uri": "file:///r/2.6.2.py",
+     "file_path": "/r/2.6.2.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-20T10:00:05Z",
+     "index_run_id": "rA",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.6.3",
+     "content_type": "code",
+     "source_uri": "file:///r/2.6.3.py",
+     "file_path": "/r/2.6.3.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-10T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.6.4",
+     "content_type": "code",
+     "source_uri": "file:///r/2.6.4.py",
+     "file_path": "/r/2.6.4.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "fence": {
+     "checked": 2,
+     "reported_null": 2,
+     "undated_reported_null": 1,
+     "floor_candidates": 1,
+     "anchor_kind": "proven",
+     "anchor_at": "2026-08-20T10:00:00Z",
+     "earliest_stamped_at": "2026-08-20T10:00:00Z",
+     "proven_at": "2026-08-20T10:00:00Z",
+     "post_anchor": []
+    }
+   }
+  },
+  {
+   "id": "fence-ignores-tombstones",
+   "documents": [
+    {
+     "tumbler": "2.7.1",
+     "content_type": "code",
+     "source_uri": "file:///r/2.7.1.py",
+     "file_path": "/r/2.7.1.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-20T10:00:00Z",
+     "index_run_id": "rA",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.7.2",
+     "content_type": "code",
+     "source_uri": "file:///r/2.7.2.py",
+     "file_path": "/r/2.7.2.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-20T10:00:05Z",
+     "index_run_id": "rA",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.7.3",
+     "content_type": "code",
+     "source_uri": "file:///r/2.7.3.py",
+     "file_path": "/r/2.7.3.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-01T00:00:00Z",
+     "index_run_id": "rZ",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": true
+    },
+    {
+     "tumbler": "2.7.4",
+     "content_type": "code",
+     "source_uri": "file:///r/2.7.4.py",
+     "file_path": "/r/2.7.4.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-25T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.7.5",
+     "content_type": "code",
+     "source_uri": "file:///r/2.7.5.py",
+     "file_path": "/r/2.7.5.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-26T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": true
+    }
+   ],
+   "expect": {
+    "fence": {
+     "checked": 2,
+     "reported_null": 1,
+     "undated_reported_null": 0,
+     "floor_candidates": 1,
+     "anchor_kind": "proven",
+     "anchor_at": "2026-08-20T10:00:00Z",
+     "earliest_stamped_at": "2026-08-20T10:00:00Z",
+     "proven_at": "2026-08-20T10:00:00Z",
+     "post_anchor": [
+      "file:///r/2.7.4.py"
+     ]
+    }
+   }
+  },
+  {
+   "id": "fence-documents-that-are-not-complete-prove-no-baseline",
+   "documents": [
+    {
+     "tumbler": "2.8.1",
+     "content_type": "code",
+     "source_uri": "file:///r/2.8.1.py",
+     "file_path": "/r/2.8.1.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-20T10:00:00Z",
+     "index_run_id": "rA",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.8.2",
+     "content_type": "code",
+     "source_uri": "file:///r/2.8.2.py",
+     "file_path": "/r/2.8.2.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-08-22T10:00:00Z",
+     "index_run_id": "rB",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.8.3",
+     "content_type": "code",
+     "source_uri": "file:///r/2.8.3.py",
+     "file_path": "/r/2.8.3.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": "2026-08-08T00:00:00Z",
+     "index_run_id": "rN",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.8.4",
+     "content_type": "code",
+     "source_uri": "file:///r/2.8.4.py",
+     "file_path": "/r/2.8.4.py",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T11:00:00Z",
+     "indexed_at": "2026-08-08T00:00:01Z",
+     "index_run_id": "rN",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.8.5",
+     "content_type": "code",
+     "source_uri": "file:///r/2.8.5.py",
+     "file_path": "/r/2.8.5.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-15T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "2.8.6",
+     "content_type": "code",
+     "source_uri": "file:///r/2.8.6.py",
+     "file_path": "/r/2.8.6.py",
+     "chunk_count": 3,
+     "index_state": null,
+     "index_started_at": null,
+     "indexed_at": "2026-08-25T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "fence": {
+     "checked": 4,
+     "reported_null": 2,
+     "undated_reported_null": 0,
+     "floor_candidates": 2,
+     "anchor_kind": "earliest",
+     "anchor_at": "2026-08-20T10:00:00Z",
+     "earliest_stamped_at": "2026-08-20T10:00:00Z",
+     "proven_at": null,
+     "post_anchor": [
+      "file:///r/2.8.6.py"
+     ]
+    }
+   }
+  },
+  {
+   "id": "failed-the-heal-rule-case-by-case",
+   "collections": [
+    "c1",
+    "c2"
+   ],
+   "chunk_groups": [
+    {
+     "collection": "c1",
+     "hash": "h1",
+     "count": 3
+    },
+    {
+     "collection": "c1",
+     "hash": "h2",
+     "count": 2
+    },
+    {
+     "collection": "c1",
+     "hash": "h3",
+     "count": 4
+    },
+    {
+     "collection": "c1",
+     "hash": "h4",
+     "count": 2
+    },
+    {
+     "collection": "c1",
+     "hash": "h5",
+     "count": 3
+    },
+    {
+     "collection": "c1",
+     "hash": "h8",
+     "count": 3
+    },
+    {
+     "collection": "c2",
+     "hash": "h10",
+     "count": 3
+    },
+    {
+     "collection": "c1",
+     "hash": "h11",
+     "count": 3
+    },
+    {
+     "collection": "c1",
+     "hash": "h12",
+     "count": 3
+    }
+   ],
+   "documents": [
+    {
+     "tumbler": "3.1.1",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.1.py",
+     "file_path": "/r/3.1.1.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "h1"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.2",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.2.py",
+     "file_path": "/r/3.1.2.py",
+     "chunk_count": 5,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "h2",
+     "meta": {},
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.3",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.3.py",
+     "file_path": "/r/3.1.3.py",
+     "chunk_count": 2,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "h3"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.4",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.4.py",
+     "file_path": "/r/3.1.4.py",
+     "chunk_count": 0,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "h4"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.5",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.5.py",
+     "file_path": "/r/3.1.5.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "h5"
+     },
+     "collection": "c1",
+     "manifest_rows": 2,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.6",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.6.py",
+     "file_path": "/r/3.1.6.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "h6"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.7",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.7.py",
+     "file_path": "/r/3.1.7.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.8",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.8.py",
+     "file_path": "/r/3.1.8.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "h8"
+     },
+     "collection": "",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.9",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.9.py",
+     "file_path": "/r/3.1.9.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "h9"
+     },
+     "collection": "ghost",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.10",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.10.py",
+     "file_path": "/r/3.1.10.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "h10"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.11",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.11.py",
+     "file_path": "/r/3.1.11.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "h11"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.12",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.12.py",
+     "file_path": "/r/3.1.12.py",
+     "chunk_count": 3,
+     "index_state": "indexing",
+     "index_started_at": "2026-11-11T11:00:00Z",
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "h12"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.1.13",
+     "content_type": "code",
+     "source_uri": "file:///r/3.1.13.py",
+     "file_path": "/r/3.1.13.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "h1"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": true
+    }
+   ],
+   "expect": {
+    "failed_hidden": {
+     "failed": 10,
+     "count": 3,
+     "hidden": [
+      "3.1.1",
+      "3.1.2",
+      "3.1.4"
+     ]
+    }
+   }
+  },
+  {
+   "id": "failed-the-meta-hash-wins-over-the-fence-hash",
+   "collections": [
+    "c1"
+   ],
+   "chunk_groups": [
+    {
+     "collection": "c1",
+     "hash": "hm",
+     "count": 3
+    },
+    {
+     "collection": "c1",
+     "hash": "hf",
+     "count": 5
+    },
+    {
+     "collection": "c1",
+     "hash": "hg",
+     "count": 2
+    },
+    {
+     "collection": "c1",
+     "hash": "hm2",
+     "count": 3
+    }
+   ],
+   "documents": [
+    {
+     "tumbler": "3.5.1",
+     "content_type": "code",
+     "source_uri": "file:///r/3.5.1.py",
+     "file_path": "/r/3.5.1.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "hf",
+     "meta": {
+      "content_hash": "hm"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.5.2",
+     "content_type": "code",
+     "source_uri": "file:///r/3.5.2.py",
+     "file_path": "/r/3.5.2.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "hg",
+     "meta": {
+      "content_hash": ""
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.5.3",
+     "content_type": "code",
+     "source_uri": "file:///r/3.5.3.py",
+     "file_path": "/r/3.5.3.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "hg",
+     "meta": {
+      "content_hash": "hz"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.5.4",
+     "content_type": "code",
+     "source_uri": "file:///r/3.5.4.py",
+     "file_path": "/r/3.5.4.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "hf",
+     "meta": {
+      "content_hash": "hm2"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "failed_hidden": {
+     "failed": 4,
+     "count": 3,
+     "hidden": [
+      "3.5.1",
+      "3.5.2",
+      "3.5.4"
+     ]
+    }
+   }
+  },
+  {
+   "id": "failed-documents-sharing-a-hash-share-its-rows",
+   "collections": [
+    "c1"
+   ],
+   "chunk_groups": [
+    {
+     "collection": "c1",
+     "hash": "hs",
+     "count": 3
+    }
+   ],
+   "documents": [
+    {
+     "tumbler": "3.2.1",
+     "content_type": "code",
+     "source_uri": "file:///r/3.2.1.py",
+     "file_path": "/r/3.2.1.py",
+     "chunk_count": 3,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "hs"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.2.2",
+     "content_type": "code",
+     "source_uri": "file:///r/3.2.2.py",
+     "file_path": "/r/3.2.2.py",
+     "chunk_count": 4,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "hs"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.2.3",
+     "content_type": "code",
+     "source_uri": "file:///r/3.2.3.py",
+     "file_path": "/r/3.2.3.py",
+     "chunk_count": 2,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "hs"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "failed_hidden": {
+     "failed": 3,
+     "count": 2,
+     "hidden": [
+      "3.2.1",
+      "3.2.2"
+     ]
+    }
+   }
+  },
+  {
+   "id": "failed-none-hidden",
+   "collections": [
+    "c1"
+   ],
+   "chunk_groups": [
+    {
+     "collection": "c1",
+     "hash": "hz",
+     "count": 2
+    }
+   ],
+   "documents": [
+    {
+     "tumbler": "3.3.1",
+     "content_type": "code",
+     "source_uri": "file:///r/3.3.1.py",
+     "file_path": "/r/3.3.1.py",
+     "chunk_count": 2,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "hz"
+     },
+     "collection": "c1",
+     "manifest_rows": 2,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.3.2",
+     "content_type": "code",
+     "source_uri": "file:///r/3.3.2.py",
+     "file_path": "/r/3.3.2.py",
+     "chunk_count": 2,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {
+      "content_hash": "hy"
+     },
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "failed_hidden": {
+     "failed": 2,
+     "count": 0,
+     "hidden": []
+    }
+   }
+  },
+  {
+   "id": "failed-none-at-all",
+   "collections": [
+    "c1"
+   ],
+   "chunk_groups": [],
+   "documents": [
+    {
+     "tumbler": "3.4.1",
+     "content_type": "code",
+     "source_uri": "file:///r/3.4.1.py",
+     "file_path": "/r/3.4.1.py",
+     "chunk_count": 3,
+     "index_state": "complete",
+     "index_started_at": null,
+     "indexed_at": "2026-09-01T00:00:00Z",
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": false
+    },
+    {
+     "tumbler": "3.4.2",
+     "content_type": "code",
+     "source_uri": "file:///r/3.4.2.py",
+     "file_path": "/r/3.4.2.py",
+     "chunk_count": 2,
+     "index_state": "failed",
+     "index_started_at": null,
+     "indexed_at": null,
+     "index_run_id": "",
+     "index_content_hash": "",
+     "meta": {},
+     "collection": "c1",
+     "manifest_rows": 0,
+     "deleted": true
+    }
+   ],
+   "expect": {
+    "failed_hidden": {
+     "failed": 0,
+     "count": 0,
+     "hidden": []
+    }
+   }
+  }
+ ]
+}

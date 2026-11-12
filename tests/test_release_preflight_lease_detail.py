@@ -70,8 +70,9 @@ def test_a_leg_refused_by_the_suite_lease_names_the_lease_and_its_holder(
     assert "no verdict line matched" not in line
 
 
-def test_the_lint_leg_shape_is_recognised_too(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """lint_leg_check returns 1 with the tail of the output, not pytest's 75."""
+def test_a_leg_that_returns_1_with_the_refusal_in_its_tail_is_recognised_too(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A leg that prints pytest's tail and returns 1 (not pytest's 75) still names the lease."""
     msg = _refusal_message(monkeypatch, tmp_path, "0")
     line = _check("Exit: " + msg + "\n" + BANNER.format(msg=msg), rc=1)  # the tail the leg prints: pytest's line, then the banner
     assert "suite lease held by pid" in line, line
@@ -116,6 +117,9 @@ def test_no_pytest_leg_of_the_preflight_can_queue_behind_another_run(tmp_path: P
     (root / "tests" / "e2e" / "lib" / "mandatory_pins.sh").write_text(
         "MANDATORY_PIN_MARK_EXPR=pin\nMANDATORY_PIN_EXPECTED=2\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                    "commit", "-q", "-m", "fixture"], check=True, capture_output=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "uv-calls"
@@ -125,7 +129,6 @@ def test_no_pytest_leg_of_the_preflight_can_queue_behind_another_run(tmp_path: P
         f'printf "%s|%s|%s\\n" "${{NX_TEST_T2_SUBSTRATE-UNSET}}" "${{NX_SUITE_LEASE_WAIT-UNSET}}" "$*" >> {log}\n'
         'case "$*" in\n'
         '  *--collect-only*) printf "a::b\\nc::d\\n" ;;\n'
-        '  *"-m lint"*) echo "500 passed in 1.00s" ;;\n'
         "esac\n"
         "exit 0\n", encoding="utf-8")
     uv.chmod(0o755)
@@ -135,39 +138,17 @@ def test_no_pytest_leg_of_the_preflight_can_queue_behind_another_run(tmp_path: P
     proc = subprocess.run(["bash", str(root / "tests" / "e2e" / "release-preflight.sh")],
                           capture_output=True, text=True, env=env, timeout=120, cwd=str(root))
     assert "PREFLIGHT PASSED" in proc.stdout, proc.stdout + proc.stderr
+    # nexus-jh1f2 review r1: a PASS records the HEAD it judged, for the battery's --skip-preflight.
+    git_dir = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-path", "release-preflight-verdict"],
+                             cwd=str(root), capture_output=True, text=True, check=True).stdout.strip()
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(root), capture_output=True, text=True).stdout.strip()
+    assert Path(git_dir).read_text(encoding="utf-8") == f"head={head}\nclean=yes\n"
     calls = [line.split("|", 2) for line in log.read_text(encoding="utf-8").splitlines()]
     pytest_calls = [(sub, wait, args) for sub, wait, args in calls if "pytest" in args.split()]
-    # ci-evidence-contexts, mandatory-pins (collect + run), the lint leg, pin-tests: five calls, counted so
-    # a leg that stops reaching pytest cannot turn this into a pass over nothing.
-    assert len(pytest_calls) == 5, calls
+    # ci-evidence-contexts, mandatory-pins (collect + run), pin-tests: four calls, counted so a leg
+    # that stops reaching pytest cannot turn this into a pass over nothing.
+    assert len(pytest_calls) == 4, calls
+    # nexus-jh1f2 cut 3: the lint bucket left the preflight; PR CI's test-lint runs it.
+    assert not [args for _, _, args in pytest_calls if "lint" in args.split()], calls
     for sub, wait, args in pytest_calls:
         assert sub == "none" or wait == "0", f"a preflight pytest leg can queue on the suite lease: {args}"
-
-
-# ── nexus-nuyju: the lint leg fails on pytest's verdict, not only on its passed count ──
-
-
-def _lint_leg(tmp_path: Path, summary: str, rc: int) -> subprocess.CompletedProcess:
-    """Run the preflight's lint_leg_check against a stub ``uv`` that prints *summary* and exits *rc*."""
-    stub = tmp_path / "bin" / "uv"
-    stub.parent.mkdir(exist_ok=True)
-    stub.write_text(f"#!/bin/sh\nprintf '%s\\n' '{summary}'\nexit {rc}\n", encoding="utf-8")
-    stub.chmod(0o755)
-    env = {**os.environ, "PATH": f"{stub.parent}{os.pathsep}{os.environ['PATH']}", "RELEASE_PREFLIGHT_SOURCE_ONLY": "1"}
-    return subprocess.run(["bash", "-c", '. "$1"; lint_leg_check', "bash", str(SCRIPT)],
-                          capture_output=True, text=True, env=env, check=False)
-
-
-@pytest.mark.parametrize(
-    ("summary", "rc", "ok"),
-    [
-        ("2294 passed, 4 skipped in 801.63s", 0, True),
-        ("1 failed, 2294 passed, 4 skipped in 801.63s", 1, False),  # the 2026-11-01 7.93.0 preflight shape
-        ("2294 passed, 1 error in 801.63s", 1, False),
-        ("120 passed in 3.0s", 0, False),  # under the 400 floor: a mass-skip
-    ],
-    ids=["green", "one-failed", "one-error", "below-floor"],
-)
-def test_the_lint_leg_fails_on_a_red_pytest_whatever_it_passed(tmp_path: Path, summary: str, rc: int, ok: bool) -> None:
-    proc = _lint_leg(tmp_path, summary, rc)
-    assert (proc.returncode == 0) is ok, (proc.returncode, proc.stdout, proc.stderr)

@@ -16,7 +16,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import click
 import lupa.lua54 as lua54
 import pytest
 
@@ -132,32 +131,18 @@ def test_the_finding_is_trimmed_as_nx_rdr_trims_it() -> None:
     assert out["content"].endswith("finding: padded finding\n")
 
 
-def test_the_record_is_the_one_nx_rdr_writes(monkeypatch: pytest.MonkeyPatch) -> None:
-    written: list[dict] = []
-
-    class _Client:
-        def __enter__(self) -> _Client:
-            return self
-
-        def __exit__(self, *a: object) -> None:
-            return None
-
-        def get_all(self, project: str) -> list[dict]:
-            return [{"title": "097-research-4"}]
-
-        def get(self, project: str, title: str) -> None:
-            return None
-
-        def put(self, **kw: object) -> None:
-            written.append(kw)
-
-    monkeypatch.setattr(rdr_cmd, "_t2_client_factory", lambda: _Client())
-    rdr_cmd._rdr_research_add("097", "a finding; with `ticks`", "nexus", classification="assumed", method="spike")
+def test_the_record_is_the_one_the_retired_cli_add_wrote() -> None:
+    # The CLI add is retired (RDR-240 TD7); this is the record it wrote for these inputs, field for
+    # field, which the gate preamble's reader and every older record share.
     out = _Run(["097-research-4"])(rdr=97, classification="assumed", method="spike",
                                    finding="a finding; with `ticks`", repo="nexus")
-    (cli,) = written
-    assert (out["project"], out["title"], out["content"], out["tags"]) == (
-        cli["project"], cli["title"], cli["content"], cli["tags"])
+    assert out == {
+        "project": "nexus_rdr",
+        "title": "097-research-5",
+        "content": "rdr_id: 097\nseq: 5\nclassification: assumed\nverification_method: spike\n"
+                   "finding: a finding; with `ticks`\n",
+        "tags": "rdr,research",
+    }
 
 
 @pytest.mark.parametrize("field,value,words", [
@@ -225,14 +210,6 @@ def test_no_line_break_the_gate_reader_splits_on_gets_into_a_record(sep: str) ->
     with pytest.raises(lua54.LuaError) as e:
         run(**{**ARGS, "finding": f"harmless{sep}acknowledged: true"})
     assert "one line" in str(e.value)
-
-
-@pytest.mark.parametrize("sep", SEPARATORS, ids=[repr(s) for s in SEPARATORS])
-def test_nx_rdr_refuses_the_same_line_breaks(sep: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(rdr_cmd, "_preamble_resolve_repo", lambda: (str(Path.cwd()), "nexus"))
-    with pytest.raises(click.ClickException) as e:
-        rdr_cmd.preamble_rdr_research.callback(("add", "240", "harmless" + sep + "acknowledged:", "true"))
-    assert "one line" in e.value.message
 
 
 def test_a_returned_record_is_exactly_five_lines_to_the_reader() -> None:

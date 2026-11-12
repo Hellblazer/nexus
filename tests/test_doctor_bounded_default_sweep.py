@@ -3,7 +3,8 @@
 
 Measured 2026-11-10 on a laptop tenant (dev doctor, its own step timings): the taxonomy link-drift census took
 9-13 s and the shared catalog walk 22 s. Each now reports "not checked" in the default sweep and names the explicit
-command that runs it. The rows are informational (no warning mark), so a fresh install's doctor stays clean.
+command that runs it. The rows are informational (no warning mark), so a fresh install's doctor stays clean. The three index-run rows read
+the engine's census routes instead (nexus-f3yqd.6).
 """
 from __future__ import annotations
 
@@ -30,16 +31,28 @@ def test_the_default_sweep_names_check_taxonomy_without_calling_the_engine(monke
 _INDEX_RUN_LABELS = ("stale index-run fences", "failed index runs with hidden chunks", "tumbler allocator drift")
 
 
-def test_the_skipped_index_run_rows_name_the_flag_and_are_marked_not_checked() -> None:
-    rows = h._index_run_rows_not_checked()
+class _OldEngineCatalog:
+    """A catalog reader of an engine before 0.1.189: it advertises neither census route."""
+
+    def index_run_routes_supported(self) -> bool:
+        return False
+
+
+def _old_engine_rows(monkeypatch: pytest.MonkeyPatch) -> list[h.HealthResult]:
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: _OldEngineCatalog())
+    return h._check_index_run_routes()
+
+
+def test_the_index_run_rows_of_an_engine_without_the_flags_say_what_is_known_and_are_marked_not_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = _old_engine_rows(monkeypatch)
     assert [r.label for r in rows] == list(_INDEX_RUN_LABELS)
     for r in rows:
         assert r.ok is True and r.skipped is True and not r.warn
-        assert r.detail.startswith("not checked") and "nx doctor --check-index-runs" in r.detail, r.detail
+        assert r.detail.startswith("not checked") and "does not advertise the census routes" in r.detail, r.detail
 
 
-def test_a_skipped_row_renders_as_not_checked_never_as_a_pass() -> None:
-    rows = h._index_run_rows_not_checked()
+def test_a_skipped_row_renders_as_not_checked_never_as_a_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = _old_engine_rows(monkeypatch)
     out, failed = h.format_health_for_cli(rows, local_mode=True)
     assert not failed
     assert "✓" not in out and "⚠" not in out and "✗" not in out, out
@@ -50,16 +63,10 @@ def test_a_skipped_row_renders_as_not_checked_never_as_a_pass() -> None:
     assert h.health_exit_code(rows) == 0
 
 
-def test_check_index_runs_walks_once_and_runs_the_three_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    walks: list[int] = []
-    seen: list[object] = []
-    docs = [object()]
-    monkeypatch.setattr(h, "_walk_documents_for_doctor", lambda: (walks.append(1), docs)[1])
-    for name, label in zip(("_check_stale_indexing_runs", "_check_failed_runs_hidden_chunks", "_check_next_seq_drift"), _INDEX_RUN_LABELS):
-        monkeypatch.setattr(h, name, lambda d, label=label: (seen.append(d), [h.HealthResult(label=label, ok=True, detail="none")])[1])
-    rows = h.run_index_run_checks()
-    assert walks == [1] and seen == [docs, docs, docs]
-    assert [r.label for r in rows] == list(_INDEX_RUN_LABELS)
+def test_check_index_runs_runs_the_three_route_rows_and_nothing_else(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [h.HealthResult(label=label, ok=True, detail="none") for label in _INDEX_RUN_LABELS]
+    monkeypatch.setattr(h, "_check_index_run_routes", lambda: rows)
+    assert h.run_index_run_checks() == rows
 
 
 @pytest.mark.parametrize(("row", "fails"), [
@@ -73,7 +80,8 @@ def test_check_index_runs_is_a_doctor_flag_that_exits_like_the_sweep(monkeypatch
     assert row.label in result.output and row.detail in result.output, result.output
     assert result.exit_code == h.health_exit_code([row]), result.output
     assert (result.exit_code != 0) is fails, result.exit_code
-    assert "--check-index-runs" in doctor_mod._OPT_IN_ONLY_CHECKS
+    # The default sweep runs these rows now, so the flag is not an opt-in-only check.
+    assert "--check-index-runs" not in doctor_mod._OPT_IN_ONLY_CHECKS
 
 
 @pytest.mark.parametrize("other", [["--check-taxonomy"], ["--json"]])

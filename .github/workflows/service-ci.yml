@@ -36,6 +36,8 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  # nexus-jh1f2 cut 6: the release-tag step reads the Java check-run on the tag's tree.
+  checks: read
 
 concurrency:
   group: service-ci-${{ github.ref }}
@@ -76,6 +78,54 @@ jobs:
               - 'service/**'
               - '.github/workflows/service-ci.yml'
 
+      # nexus-jh1f2 cut 6 (Sam 2026-11-10): on a release PR (a pull request into main) whose
+      # service/ tree is byte-identical to the engine tag the release pins
+      # (REQUIRED_ENGINE_VERSION), and a green "Java tests + jOOQ codegen drift guard" check-run
+      # exists on a commit with that same service/ tree, the suite is not run again: 20 release
+      # PRs re-ran it with 0 failures, holding a lab-16c16g slot the release's pytest shards
+      # need. The evidence is looked up, not assumed (review r1): engine-service-release.yml
+      # builds with -DskipTests, and a develop run can be cancelled. Any service/ difference, a
+      # change to this workflow, a pinned tag missing from the checkout, or no green run on the
+      # tag's tree runs the suite as before.
+      - name: Is service/ the pinned engine tag's tree? (release PRs, nexus-jh1f2 cut 6)
+        id: release_tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JAVA_CHECK: "Java tests + jOOQ codegen drift guard"
+        run: |
+          set -euo pipefail
+          same=false
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.base_ref }}" = "main" ]; then
+            ver="$(python3 -c "import re,pathlib; m=re.search(r'^REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', pathlib.Path('src/nexus/engine_version.py').read_text(), re.M); print('.'.join(m.groups()) if m else '')")"
+            tag="engine-service-v${ver}"
+            if [ -z "$ver" ]; then
+              echo "::warning::REQUIRED_ENGINE_VERSION not parseable; the Java suite runs"
+            elif ! git rev-parse -q --verify "refs/tags/${tag}^{commit}" >/dev/null; then
+              echo "::warning::the pinned ${tag} is not in this checkout; the Java suite runs"
+            elif git diff --quiet "$tag" HEAD -- service/ \
+                && git diff --quiet "${{ github.event.pull_request.base.sha }}...HEAD" -- .github/workflows/service-ci.yml; then
+              # Walk back from the tag while service/ is the same tree (at most 50 commits), and
+              # take the first commit whose Java check-run succeeded.
+              tree="$(git rev-parse "${tag}:service")"
+              evidence=""
+              for c in $(git rev-list -n 50 "$tag"); do
+                [ "$(git rev-parse "${c}:service" 2>/dev/null)" = "$tree" ] || break
+                n="$(gh api -X GET "repos/${{ github.repository }}/commits/${c}/check-runs" -f check_name="$JAVA_CHECK" \
+                      --jq '[.check_runs[] | select(.conclusion == "success")] | length' 2>/dev/null || true)"
+                if [ "${n:-0}" -gt 0 ] 2>/dev/null; then evidence="$c"; break; fi
+              done
+              if [ -n "$evidence" ]; then
+                same=true
+                echo "service/ is byte-identical to ${tag}; '${JAVA_CHECK}' passed on ${evidence}, which has that tree."
+              else
+                echo "::warning::service/ equals ${tag} but no green '${JAVA_CHECK}' run was found on that tree; the Java suite runs"
+              fi
+            else
+              echo "service/ differs from ${tag} (or this workflow changed); the Java suite runs."
+            fi
+          fi
+          echo "same=$same" >> "$GITHUB_OUTPUT"
+
       - name: Report the decision (fail loud, never default-skip)
         # State the skip out loud. A gate that silently declines to run reads
         # identically to one that ran and passed.
@@ -107,10 +157,25 @@ jobs:
         run: |
           set -euo pipefail
           service="${{ steps.filter.outputs.service }}"
+          same="${{ steps.release_tag.outputs.same }}"
+          case "$same" in
+            true|false) ;;
+            *)
+              echo "::error::the release-tag step produced no usable answer ('$same') — refusing to guess whether the Java suite may skip"
+              exit 1
+              ;;
+          esac
+          if [ "$service" = true ] && [ "$same" = true ]; then
+            echo "service/ equals the pinned engine tag — the Java suite is SKIPPED (reports success); the tag's tree was tested."
+            service=false_tag
+          fi
           case "$service" in
             true)
               echo "service/** changed — the Java suite WILL run."
               echo "service=true" >> "$GITHUB_OUTPUT"
+              ;;
+            false_tag)
+              echo "service=false" >> "$GITHUB_OUTPUT"
               ;;
             false)
               echo "service/** unchanged — the Java suite is SKIPPED (reports success)."
@@ -185,6 +250,27 @@ jobs:
       NX_TEST_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-java
 
     steps:
+      # labrun-owz: fail at once, naming the binary, when the pool host lacks one this job
+      # needs, instead of a red deep in the run (a missing uuidgen reached the tests first).
+      # Linux pool (lab-16c16g). Runs on the pool only: a hosted fallback (NX_CI_POOL=off, a fork PR, a hosted
+      # matrix leg) provisions its own tools. The list is kept here, next to the step;
+      # tests/test_ci_host_probe.py keeps it non-empty. Why each name is listed:
+      #   bash git curl tar: checkout and the Maven wrapper; python3: scripts/ddl_ratchet.py after the suite
+      #   docker and a running daemon (docker info): Testcontainers' Postgres
+      - name: Host binaries present (labrun-owz)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          NX_CI_HOST_BINARIES: bash git curl tar python3 docker
+        run: |
+          set -u
+          [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
+          missing=0
+          for b in $NX_CI_HOST_BINARIES; do
+            command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          docker info >/dev/null 2>&1 || { echo "host missing: a running docker daemon (docker info failed)"; missing=1; }
+          exit "$missing"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           # The job token must not sit in the workspace's .git/config after the job

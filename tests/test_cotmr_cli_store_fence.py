@@ -209,13 +209,15 @@ class TestAcquireGateJourneyDoctorClean:
         self, catalog_env: Path, tmp_path: Path,
     ) -> None:
         import nexus.health as h
+        from nexus.catalog.factory import make_catalog_reader
 
         title = "cotmr-acquire-gate-journey"
         result = _invoke_store_put(tmp_path, _real_t3(), title, "acquire gate journey body")
         assert result.exit_code == 0, result.output
         assert _index_state_for(title) == "complete"
 
-        results = h._check_stale_indexing_runs()
+        cat = make_catalog_reader()
+        results = h._stale_fence_rows_over(list(cat.all_documents(limit=0)), cat)
         warns = [r for r in results if r.warn]
         assert not warns, (
             f"the acquire-gate journey (CLI store put) must not trip the "
@@ -240,6 +242,7 @@ class TestAcquireGateJourneyDoctorClean:
         document and write its note with ``write_note`` and no ``content_hash``,
         the exact pre-cotmr gap."""
         import nexus.health as h
+        from nexus.catalog.factory import make_catalog_reader
         from nexus.catalog.note_write import write_note
         from nexus.catalog.store_hook import (
             catalog_store_hook_tracked,
@@ -260,7 +263,8 @@ class TestAcquireGateJourneyDoctorClean:
             "a note written with no fence and no stamp must keep a NULL index_state"
         )
 
-        results = h._check_stale_indexing_runs()
+        cat = make_catalog_reader()
+        results = h._stale_fence_rows_over(list(cat.all_documents(limit=0)), cat)
         warns = [r for r in results if r.warn and r.ok is False]
         assert warns, (
             f"an artificially-unfenced document must still trip the "

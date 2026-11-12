@@ -192,6 +192,10 @@ class TenantResetLeakCanaryTest {
         "EngineJobs.reconcile", "its jobs are filled by the catalog reconcile commit route (POST "
             + "/v1/catalog/reconcile/commit), which needs a staged run, and this canary's workload stages none. "
             + "EngineJobsTest and TenantKeyedEvictorsTest cover its evictor",
+        "EngineJobs.manifestFill", "its jobs are filled by the manifest fill route (POST "
+            + "/v1/catalog/manifest/fill), which needs manifest rows with chunk labels or spans to fill, and this "
+            + "canary's workload writes none. ManifestFillConcurrencyTest and TenantResetRouteTest cover its jobs "
+            + "and its evictor",
         "ChunkReaper", "its timeout streaks and resume cursors are filled by a reaper pass over a T3 collection, "
             + "which needs a vector backend this engine does not have; TenantKeyedEvictorsTest covers its evictor",
         "OwnerlessLogLimiter", "this evictor drops the log windows of two holders, the vector repository's "

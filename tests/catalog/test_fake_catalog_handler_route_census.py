@@ -185,6 +185,16 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "the census checks both directions, so a stale exclusion here fails "
         "just as loudly as a missing one"
     ),
+    "/manifest/foreign_collection": (
+        "GH #1611: engine route for the doctor's foreign-collection row; the "
+        "client method (HttpCatalogClient.manifest_foreign_collection) is "
+        "tested against a stubbed transport, as sensitive_documents is, so "
+        "the fake serves no branch for it. Its wire shape (count, limit, "
+        "capped, documents of {tumbler, physical_collection, collections, "
+        "chunks}, the 400 on a limit outside 1..10000 and the 503 on a "
+        "statement timeout) is validated Java-side by "
+        "ManifestForeignCollectionRouteTest"
+    ),
     "/manifest/fillable": (
         "nexus-f3yqd: DELIBERATELY engine-only for now (engine 0.1.188, route "
         "R1 of T2 nexus/rung-detect-route-spec-2026-11-10) — the client half "
@@ -196,6 +206,26 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "the 503 on a statement timeout — is validated Java-side by "
         "ManifestFillableRouteTest. The older /manifest/section_label_fillable "
         "stays faked for old clients. When the client method lands, DELETE "
+        "this entry and fake the route instead; the census checks both "
+        "directions, so a stale exclusion here fails just as loudly as a "
+        "missing one"
+    ),
+    "/manifest/fill": (
+        "nexus-f3yqd: DELIBERATELY engine-only for now (engine 0.1.188, route "
+        "R2 of T2 nexus/rung-detect-route-spec-2026-11-10) — the client half "
+        "(the rungs' converge step starting the fill and polling it, and the "
+        "policy flag for an unattended run against a managed service) is a "
+        "separate change, so there is no HttpCatalogClient method to fake "
+        "yet; adding the Python half here would make this commit a "
+        "both-halves wire-contract commit (docs/wire-contract-pending.md). "
+        "Its wire shape — the 202 {job_id, created}, the 400 on a bad kind, "
+        "dry_run or batch_rows, the 409 for the other dry_run, and the poll "
+        "GET /manifest/fill/{job_id} (state, stage, done_rows, total_rows, "
+        "filled, cursor, counts, safe_to_stop, on_stop), which carries its id "
+        "in the path and is dispatched from the handler's default branch, so "
+        "the census does not see it as a case label — is validated Java-side "
+        "by ManifestFillRoutesTest, ManifestFillJobTest and "
+        "ManifestFillConcurrencyTest. When the client method lands, DELETE "
         "this entry and fake the route instead; the census checks both "
         "directions, so a stale exclusion here fails just as loudly as a "
         "missing one"

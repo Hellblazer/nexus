@@ -67,6 +67,7 @@ import structlog
 from nexus.clock import SYSTEM, Clock
 from nexus.clock import wait as clock_wait
 from nexus.db.t2.http_tuple_store import SchemaViolationError
+from nexus.tuple_directory import SAFE_NAME_RE
 from nexus.tuple_templates import resolve_tuple_template
 
 _log = structlog.get_logger(__name__)
@@ -80,7 +81,7 @@ _STATE_SUBDIR = "tuple-watch"
 #: `directory/<name>` lease key, so a name outside this charset -- a
 #: newline, a slash, a leading `.`/`-`/`_` -- is refused rather than
 #: sanitised.
-_SAFE_INSTANCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_SAFE_INSTANCE_NAME = SAFE_NAME_RE  # one rule for leasing a name and sending to one (nexus-3ceda.7)
 
 #: Matches ``directory.yaml``'s own ``retention_seconds`` -- a re-send can
 #: never move a directory entry's expiry past its own ``created_at`` plus

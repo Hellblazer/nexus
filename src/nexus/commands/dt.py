@@ -1633,7 +1633,10 @@ def index_cmd(
         for coll in sorted(touched_collections):
             click.echo(f"\nEnriching bibliographic metadata: {coll}")
             try:
-                run_bib_enrichment(coll, source="dt")
+                # content_type="any": this is the verb's own opt-in over the records it just indexed (a DT record is
+                # not always catalogued as a paper), so the paper-only default of ``nx enrich bib`` (GH #1611) does not
+                # apply, and this verb has no --content-type to widen it.
+                run_bib_enrichment(coll, source="dt", content_type="any")
             except click.ClickException as exc:
                 click.echo(
                     f"Warning: bibliographic enrichment of {coll} did not run "

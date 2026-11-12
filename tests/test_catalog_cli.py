@@ -1177,7 +1177,7 @@ class TestOwnersCommand:
         (SHAKEOUT-7.1.1 agent C measured 65/65) but the CLI's --json
         hand-projection dropped it at src/nexus/commands/catalog_cmds/owners.py.
         next_seq is the surface nexus-0ehwe item 3 named a non-negotiable
-        prerequisite for drift audits (health.py's _check_next_seq_drift). This
+        prerequisite for drift audits (health.py's _drifted_owners). This
         is the LAYER TEST at the CLI boundary — through the real
         ``initialized_catalog`` service catalog, not a unit test of
         list_owners() itself, which was never the broken layer.

@@ -181,6 +181,9 @@ _BASE_VALUES = {
     # nexus-rpaat: no integration tests affected, so that job skipped.
     "needs.changes.outputs.integration_any": "false",
     "needs.test-integration-affected.result": "skipped",
+    # nexus-jh1f2 cut 4: one integration shard, so the whole-family floor job skips.
+    "needs.changes.outputs.integration_shards": "[1]",
+    "needs.integration-release-floor.result": "skipped",
     # nexus-zzkko: the always-run mcpb resolve gate (resolves only when its inputs changed).
     "needs.mcpb-resolve-gate.result": "success",
     "needs.constraints-resolve-gate.result": "success",

@@ -56,10 +56,16 @@ public final class PgSession {
         "enable_sort",
         // nexus-zrcj7 (T2 critic follow-up, 2026-09-04): EXPLAIN-based plan-shape test
         // discipline (a positive "must use the HNSW index" assertion) needs every
-        // non-index access path penalized, hash joins included -- this GUC is set only
-        // from test code (PlainSearchTextGatedSearchExplainTest et al.), never from
-        // production PgVectorRepository dispatch paths.
+        // non-index access path penalized, hash joins included -- set from test code
+        // (PlainSearchTextGatedSearchExplainTest et al.), and, since nexus-f3yqd, by the
+        // manifest fill job's batch transaction alone (ManifestFill#pinPlanner: no hash or
+        // merge join and no sequential scan, so its co-owner anti-joins probe
+        // idx_catalog_chunks_chash per window row instead of hashing the whole tenant's
+        // manifest; ManifestFill#pinWindow: no sort, so its window stays an ordered index
+        // scan that stops at its LIMIT). No other production path sets them.
         "enable_hashjoin",
+        "enable_mergejoin",
+        "enable_incremental_sort",
         // nexus-mz9jv: the collection-stats statement is a few ms of executor work whose inflated cost
         // estimate tripped JIT compilation (190 to 270 ms per call); see disableJit.
         "jit"

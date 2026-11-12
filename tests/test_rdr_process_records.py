@@ -140,28 +140,6 @@ class TestLayerTwoCensus:
         assert "[seq 2] acked one (docs_only) acknowledged" in out
         assert "[seq 2] acked one (docs_only) HIGH RISK" not in out
 
-    def test_research_add_records_classification_and_method(self, monkeypatch):
-        fake = _FakeT2ResearchClient()
-        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
-        res = _runner().invoke(rdr, [
-            "preamble", "rdr-research", "--", "add", "209",
-            "--classification", "verified", "--method", "spike", "the", "finding",
-        ])
-        assert res.exit_code == 0, res.output
-        content = fake._store["209-research-1"]
-        assert "classification: verified\n" in content and "verification_method: spike\n" in content
-        assert "finding: the finding\n" in content
-        assert "--classification" not in content
-
-    def test_research_add_refuses_a_value_outside_the_vocabulary(self, monkeypatch):
-        fake = _FakeT2ResearchClient()
-        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
-        res = _runner().invoke(rdr, [
-            "preamble", "rdr-research", "--", "add", "209", "--classification", "true", "x",
-        ])
-        assert res.exit_code != 0
-        assert fake.put_calls == []
-
 
 class TestAuditProcessRows:
     """Items 3, 4 and 10 as audit rows."""
@@ -266,17 +244,6 @@ class TestReviewRoundFixes:
         monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
         res = _runner().invoke(rdr, ["preamble", "rdr-verdict", "--", "207", "207-gate-critique-2026-09-12-r2"])
         assert "Gate round 2" in res.output, res.output
-
-    def test_research_add_accepts_the_equals_form(self, monkeypatch):
-        fake = _FakeT2ResearchClient()
-        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
-        res = _runner().invoke(rdr, [
-            "preamble", "rdr-research", "--", "add", "209", "--classification=verified", "--method=spike", "the", "finding",
-        ])
-        assert res.exit_code == 0, res.output
-        content = fake._store["209-research-1"]
-        assert "classification: verified\n" in content and "verification_method: spike\n" in content
-        assert "=" not in content.split("finding:")[1]
 
     def test_a_declared_dispatch_count_above_the_verdict_lines_is_not_trusted(self):
         lines = rdr_mod._fix_check_pointer_lines(

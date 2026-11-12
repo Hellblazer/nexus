@@ -1102,7 +1102,7 @@ def test_collection_documents_counts_a_titled_pending_document_with_no_served_ch
     from nexus.commands.enrich import _catalog_collection_documents
 
     def _entry(t: str, title: str, bib_id: str = "") -> SimpleNamespace:
-        return SimpleNamespace(tumbler=t, title=title, bib_semantic_scholar_id=bib_id)
+        return SimpleNamespace(tumbler=t, title=title, content_type="paper", bib_semantic_scholar_id=bib_id)
 
     reader = MagicMock()
     reader.list_by_collection.return_value = [
@@ -1118,3 +1118,76 @@ def test_collection_documents_counts_a_titled_pending_document_with_no_served_ch
 
     assert list(found.to_look_up) == ["1.1.3"]
     assert (found.total, found.enriched, found.untitled, found.no_chunks) == (4, 1, 1, 1)
+
+
+def test_collection_documents_look_up_papers_only_by_default() -> None:
+    """GH #1611 item 5: a knowledge note or markdown file in a paper collection is not a
+    bibliographic record. By default only paper documents (and the legacy ``pdf`` type) are
+    looked up; the rest are counted in other_type and cost no manifest read. A miss writes
+    nothing, so without this filter every note was looked up again on every run.
+    ``content_type="any"`` restores the old reach."""
+    from nexus.commands.enrich import _catalog_collection_documents  # noqa: PLC0415 — deferred, as the test above
+
+    def _entry(t: str, title: str, ctype: str) -> SimpleNamespace:
+        return SimpleNamespace(tumbler=t, title=title, content_type=ctype, bib_semantic_scholar_id="")
+
+    reader = MagicMock()
+    reader.list_by_collection.return_value = [
+        _entry("1.1.1", "A paper", "paper"), _entry("1.1.2", "An old pdf", "pdf"),
+        _entry("1.1.3", "A note", "knowledge"), _entry("1.1.4", "Readme", "markdown"),
+    ]
+    reader.get_manifests.side_effect = lambda ts: {
+        t: [SimpleNamespace(chash="c" + t, collection=None)] for t in ts}
+    served = {"c1.1.1", "c1.1.2", "c1.1.3", "c1.1.4"}
+    with patch("nexus.commands.enrich._open_catalog_reader", return_value=reader):
+        found = _catalog_collection_documents("knowledge__test", "bib_semantic_scholar_id", served)
+    assert sorted(found.to_look_up) == ["1.1.1", "1.1.2"]
+    assert (found.total, found.other_type) == (4, 2)
+    assert sorted(reader.get_manifests.call_args.args[0]) == ["1.1.1", "1.1.2"]
+
+    with patch("nexus.commands.enrich._open_catalog_reader", return_value=reader):
+        found = _catalog_collection_documents(
+            "knowledge__test", "bib_semantic_scholar_id", served, content_type="any")
+    assert sorted(found.to_look_up) == ["1.1.1", "1.1.2", "1.1.3", "1.1.4"]
+    assert found.other_type == 0
+
+
+def test_enrich_bib_reports_documents_of_another_type() -> None:
+    """The progress line says how many documents were left out for their content type."""
+    found = _CollectionDocuments(to_look_up={}, total=3, enriched=0, untitled=0, other_type=3)
+
+    result, _backend, _lookup = _enrich_with({"c1": {"title": "x"}}, found, {})
+
+    assert "3 not papers (not looked up; --content-type any looks them up)" in result.output
+
+
+@pytest.mark.parametrize("argv,expected", [
+    ([], "paper"),                                    # the default
+    (["--content-type", "any"], "any"),
+    (["--content-type", "knowledge"], "knowledge"),
+])
+@patch("nexus.commands.enrich.run_bib_enrichment")
+@patch("nexus.db.make_t3")
+def test_enrich_bib_forwards_content_type_to_the_core(
+    mock_t3_factory: MagicMock, mock_run: MagicMock, argv: list[str], expected: str,
+) -> None:
+    """GH #1611: ``--content-type`` reached ``run_bib_enrichment`` only by the keyword the CLI passes; nothing
+    pinned that. A dropped keyword would read as the default (papers only) and look like a working flag."""
+    mock_t3_factory.return_value = MagicMock(spec=HttpVectorClient)
+    result = CliRunner().invoke(enrich, ["bib", "knowledge__test", *argv])
+    assert result.exit_code == 0, result.output
+    mock_run.assert_called_once()
+    assert mock_run.call_args.kwargs["content_type"] == expected
+
+
+@patch("nexus.commands.enrich.run_bib_enrichment")
+@patch("nexus.db.make_t3")
+def test_enrich_bib_refuses_an_unknown_content_type_before_any_lookup(
+    mock_t3_factory: MagicMock, mock_run: MagicMock,
+) -> None:
+    """A typo (``papers``) matched no document and read as an empty collection; the CLI refuses it."""
+    mock_t3_factory.return_value = MagicMock(spec=HttpVectorClient)
+    result = CliRunner().invoke(enrich, ["bib", "knowledge__test", "--content-type", "papers"])
+    assert result.exit_code == 2, result.output
+    assert "papers" in result.output and "paper" in result.output
+    mock_run.assert_not_called()

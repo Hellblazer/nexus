@@ -147,6 +147,15 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
         "NX_LOCAL+SANDBOX: nx store put / index md / collection list run by the rehearsal driver under a throwaway HOME "
         "and NEXUS_CONFIG_DIR with NX_LOCAL=1; two of the four matches are prose",
     ),
+    # nexus-3ceda.7: the agent-error probe battery. capture refuses unless nexus is in local mode with a
+    # loopback endpoint (local_engine_refusal, tested), and its supported route is
+    # tests/scripts/probe_capture_entry.py under the suite's self-provisioned engine. Every probe is a read or a
+    # call refused before any write. Two of the four matches are prose and a probe definition.
+    "scripts/agent_error_probes.py": (
+        4,
+        "NX_LOCAL: capture refuses anything but a local loopback engine; probes are reads or refused writes; "
+        "two of the four matches are prose and a probe definition",
+    ),
     # nexus-cnzei.5: imports nexus.mcp.core only to read each tool's
     # signature and schema for the committed wire snapshot; it calls no tool
     # and writes nothing, so it touches no tenant.
@@ -304,6 +313,17 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     "scripts/bundle_sandbox_probe.py": (
         1, "READ-ONLY: operator_extract/operator_summarize only (lines 98-113).",
+    ),
+    "scripts/measure_search_per_collection.py": (
+        2, "READ-ONLY: both hits name nexus.mcp.core for the MCP tool's per_collection_k_cap constant "
+           "(a docstring line and the comment on the lazy import); the script only searches and lists "
+           "collections, writes nothing, and runs on the live cloud only in an announced window "
+           "(nexus-tu8wp.3).",
+    ),
+    "scripts/search_page_parity.py": (
+        2, "READ-ONLY: lazy imports of nexus.mcp.core's search signature (its default corpora, read by "
+           "inspect.signature, never called) and _MCP_PER_COLLECTION_K; no store_put, index or collection "
+           "write path (nexus-tu8wp.3).",
     ),
     "scripts/spikes/bench_rdr089_sql_fast_path.py": (
         3, "READ-ONLY: operator_filter/operator_groupby/operator_aggregate imports.",

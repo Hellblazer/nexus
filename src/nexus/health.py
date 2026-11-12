@@ -6678,12 +6678,27 @@ def _check_service_autostart_drift() -> list[HealthResult]:
     )]
 
 
+def _chash_constraints_validated_by_engine() -> bool | None:
+    """The engine's answer to whether the chash width CHECKs on both poison tables are validated, or None when it
+    cannot say (an engine before 0.1.189, no catalog reader, any error). Never raises."""
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        probe = getattr(cat, "chash_constraints_validated", None)
+        return probe() if callable(probe) else None
+    except Exception as exc:  # noqa: BLE001 — an optional fast path; the scan is the answer of record
+        _log.debug("chash_constraints_probe_failed", error=str(exc))
+        return None
+
+
 def _check_migration_state(
     creds_path: Path | None = None,
     psql_bin: Path | None = None,
     psql_runner=None,  # injectable for unit tests
     diag_credentials=None,  # injectable: DiagCredentials | None
     diag_runner=None,  # injectable: run_diagnostic_sql psql_runner seam
+    constraints_validated=None,  # injectable: () -> bool | None, the engine's chash constraint state
 ) -> list[HealthResult]:
     """Verify Liquibase migration state on the nx-managed Postgres.
 
@@ -6708,6 +6723,10 @@ def _check_migration_state(
 
     Gated on pg_credentials being present (service/PG mode configured).
     """
+    # The engine's constraint state stands in for the scan only where the engine is the store the scan reads: the
+    # default credentials of a local install. An explicit creds_path (upgrade_finish's gate, another config dir) or a
+    # managed config beside leftover local credentials always scans.
+    engine_is_scanned_store = creds_path is None
     # Resolve creds_path default.
     if creds_path is None:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
@@ -7032,153 +7051,166 @@ def _check_migration_state(
                 )
                 return True
 
-        try:
-            poison_tables = POISON_CHASH_TABLES
-            # Amendment A6 (nexus-9bufb): view-era statements first — counts
-            # by construction via nexus.diag_chash_conformance. An engine one
-            # generation behind (no view yet) fails the first set; the legacy
-            # direct-table statements still work there because the legacy
-            # grants era carries full-table SELECT — fall back LOUDLY (log),
-            # never silently.
-            try:
-                counts = _run_diag(chash_conformance_statements())
-                view_era = True
-            except DiagnosticSqlViolation:
-                # A LINT failure is a product defect, never an engine-
-                # generation skew — re-raise to the outer handler (review
-                # 47dcb65e Critical: DiagnosticSqlViolation subclasses
-                # ValueError, so without this it would be silently retried
-                # against the legacy statements and mislabeled as fallback).
-                raise
-            except (RuntimeError, ValueError) as view_exc:
-                _log.warning(
-                    "chash_probe_view_fallback_legacy",
-                    error=str(view_exc)[:200],
-                    # GH #1402: do NOT assert the cause here — the view path
-                    # also fails on a live view when nexus_diag lacks the
-                    # owner-granted view SELECT or the view owner lost table
-                    # access (ownership fragmentation). The error field
-                    # carries the real cause.
-                    note="view-path probe failed — falling back to legacy "
-                         "direct-table statements (view absent on pre-A6 "
-                         "engines, or view/owner grant gap — see error)",
-                )
-                try:
-                    counts = _run_diag(legacy_chash_conformance_statements())
-                except DiagnosticSqlViolation:
-                    raise
-                except (RuntimeError, ValueError) as direct_exc:
-                    # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
-                    # straddle in the poison gate. The view is absent AND the
-                    # unified-name direct fallback also failed — on a
-                    # straddle-era box (past A6, before the RDR-191 unify)
-                    # the unified nexus.chunks relation genuinely does not
-                    # exist yet, so this direct COUNT fails the same way the
-                    # view-path did. Existence-gate before retrying against
-                    # the pre-unify per-dim direct statements; a genuinely
-                    # broken current-era store re-raises the ORIGINAL error
-                    # rather than being silently reinterpreted.
-                    if _probe_unified_schema_exists():
-                        raise
-                    _log.warning(
-                        "chash_probe_direct_fallback_retrying_legacy_era",
-                        error=str(direct_exc)[:200],
-                        note="unified-name direct fallback failed and "
-                             "nexus.chunks does not exist yet — retrying "
-                             "against the pre-RDR-191 per-dim table names",
-                    )
-                    counts = _run_diag(
-                        legacy_chash_conformance_statements(LEGACY_POISON_CHASH_TABLES),
-                    )
-                    poison_tables = LEGACY_POISON_CHASH_TABLES
+        # F30 (nexus-f3yqd.6): validated width CHECKs on both poison tables mean no row of either can be
+        # non-conformant, and a CHECK holds for every tenant's rows, so the engine's constraint state answers the
+        # whole-store question the scan below asks (engine 0.1.189). The debt tables carry no CHECK, so their probe
+        # still runs. Anything other than True scans as before, with nothing said about the skipped read.
+        if constraints_validated is None and engine_is_scanned_store:
+            from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
-            # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
-            # straddle in the poison gate (the confirmed shape, GH #1414
-            # class recurrence). The unified view-path query above can
-            # execute successfully yet return a NULL aggregate (blank psql
-            # line) for a table whose relation was created by RDR-191 —
-            # the deployed view was built by an OLDER engine's own
-            # provisioning and still carries rows keyed by the pre-unify
-            # per-dim names, so the unified WHERE filter matches no row.
-            # Existence-gate before reinterpreting: consulted UNCONDITIONALLY
-            # on a blank leg (never skipped), because the answer decides
-            # which of TWO distinct straddle windows this is.
-            if view_era and any(not c.strip() for c in counts):
-                if _probe_unified_schema_exists():
-                    # nexus-o8dil (2026-08-14, review round 2 SIGNIFICANT 1):
-                    # nexus.chunks EXISTS — the engine has already migrated —
-                    # yet the leg came back blank, so the deployed VIEW is
-                    # stale (still per-dim shaped): view re-provisioning only
-                    # happens via the chash-rekey rung's re-provision step or
-                    # `nx init`, never automatically after a bare
-                    # engine binary swap. This store IS measurable, just not
-                    # through the stale view — fall through to the SAME
-                    # direct unified-table statements used when the
-                    # view-path raises outright, instead of surfacing a
-                    # generic "could not probe" WARN for a store that is
-                    # provably current-era.
+            if is_local_mode():
+                constraints_validated = _chash_constraints_validated_by_engine
+        if constraints_validated is not None and constraints_validated() is True:
+            nonconforming = 0
+            view_era = True  # the debt probe below runs; its failure reports UNKNOWN, never a silent omission
+        else:
+            try:
+                poison_tables = POISON_CHASH_TABLES
+                # Amendment A6 (nexus-9bufb): view-era statements first — counts
+                # by construction via nexus.diag_chash_conformance. An engine one
+                # generation behind (no view yet) fails the first set; the legacy
+                # direct-table statements still work there because the legacy
+                # grants era carries full-table SELECT — fall back LOUDLY (log),
+                # never silently.
+                try:
+                    counts = _run_diag(chash_conformance_statements())
+                    view_era = True
+                except DiagnosticSqlViolation:
+                    # A LINT failure is a product defect, never an engine-
+                    # generation skew — re-raise to the outer handler (review
+                    # 47dcb65e Critical: DiagnosticSqlViolation subclasses
+                    # ValueError, so without this it would be silently retried
+                    # against the legacy statements and mislabeled as fallback).
+                    raise
+                except (RuntimeError, ValueError) as view_exc:
+                    _log.warning(
+                        "chash_probe_view_fallback_legacy",
+                        error=str(view_exc)[:200],
+                        # GH #1402: do NOT assert the cause here — the view path
+                        # also fails on a live view when nexus_diag lacks the
+                        # owner-granted view SELECT or the view owner lost table
+                        # access (ownership fragmentation). The error field
+                        # carries the real cause.
+                        note="view-path probe failed — falling back to legacy "
+                             "direct-table statements (view absent on pre-A6 "
+                             "engines, or view/owner grant gap — see error)",
+                    )
                     try:
-                        direct_counts = _run_diag(legacy_chash_conformance_statements())
+                        counts = _run_diag(legacy_chash_conformance_statements())
                     except DiagnosticSqlViolation:
                         raise
                     except (RuntimeError, ValueError) as direct_exc:
+                        # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
+                        # straddle in the poison gate. The view is absent AND the
+                        # unified-name direct fallback also failed — on a
+                        # straddle-era box (past A6, before the RDR-191 unify)
+                        # the unified nexus.chunks relation genuinely does not
+                        # exist yet, so this direct COUNT fails the same way the
+                        # view-path did. Existence-gate before retrying against
+                        # the pre-unify per-dim direct statements; a genuinely
+                        # broken current-era store re-raises the ORIGINAL error
+                        # rather than being silently reinterpreted.
+                        if _probe_unified_schema_exists():
+                            raise
                         _log.warning(
-                            "chash_probe_direct_fallback_for_stale_view_failed",
+                            "chash_probe_direct_fallback_retrying_legacy_era",
                             error=str(direct_exc)[:200],
-                            note="nexus.chunks exists but the view-path leg "
-                                 "was blank (stale per-dim view) and the "
-                                 "direct unified-table fallback also failed",
+                            note="unified-name direct fallback failed and "
+                                 "nexus.chunks does not exist yet — retrying "
+                                 "against the pre-RDR-191 per-dim table names",
                         )
-                    else:
-                        _log.info(
-                            "chash_probe_direct_fallback_for_stale_view",
-                            note="the diag view is stale (still per-dim "
-                                 "shaped) though the schema has already "
-                                 "migrated; measured via direct "
-                                 "unified-table counts instead",
+                        counts = _run_diag(
+                            legacy_chash_conformance_statements(LEGACY_POISON_CHASH_TABLES),
                         )
-                        counts = direct_counts
-                else:
-                    try:
-                        legacy_view_counts = _run_diag(
-                            legacy_era_chash_conformance_statements(),
-                        )
-                    except DiagnosticSqlViolation:
-                        raise
-                    except (RuntimeError, ValueError) as legacy_view_exc:
-                        _log.warning(
-                            "chash_probe_legacy_era_view_fallback_failed",
-                            error=str(legacy_view_exc)[:200],
-                        )
-                        legacy_view_counts = None
-                    if legacy_view_counts is not None and not any(
-                        not c.strip() for c in legacy_view_counts
-                    ):
-                        _log.info(
-                            "chash_probe_legacy_era_view_match",
-                            note="the unified-name view query returned a "
-                                 "NULL aggregate; the store verified via "
-                                 "the pre-RDR-191 per-dim table names "
-                                 "instead (RDR-191 straddle window)",
-                        )
-                        counts = legacy_view_counts
                         poison_tables = LEGACY_POISON_CHASH_TABLES
 
-            nonconforming = parse_conformance_sum(poison_tables, counts)
-        except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
-            # Probe failure (schema variant missing a table), lint refusal,
-            # or non-numeric output — a WARN, never a false poison-clean.
-            nonconforming = -1
-            results.append(HealthResult(
-                label=CHASH_CONFORMANCE_LABEL,
-                ok=False,
-                detail=(
-                    "could not probe chash length across chunk tables via the "
-                    f"nexus_diag path ({exc}) — the pre-upgrade poison check "
-                    "did not run"
-                ),
-                warn=True,
-            ))
+                # nexus-o8dil (2026-08-14): RDR-191 F14a mirror-direction
+                # straddle in the poison gate (the confirmed shape, GH #1414
+                # class recurrence). The unified view-path query above can
+                # execute successfully yet return a NULL aggregate (blank psql
+                # line) for a table whose relation was created by RDR-191 —
+                # the deployed view was built by an OLDER engine's own
+                # provisioning and still carries rows keyed by the pre-unify
+                # per-dim names, so the unified WHERE filter matches no row.
+                # Existence-gate before reinterpreting: consulted UNCONDITIONALLY
+                # on a blank leg (never skipped), because the answer decides
+                # which of TWO distinct straddle windows this is.
+                if view_era and any(not c.strip() for c in counts):
+                    if _probe_unified_schema_exists():
+                        # nexus-o8dil (2026-08-14, review round 2 SIGNIFICANT 1):
+                        # nexus.chunks EXISTS — the engine has already migrated —
+                        # yet the leg came back blank, so the deployed VIEW is
+                        # stale (still per-dim shaped): view re-provisioning only
+                        # happens via the chash-rekey rung's re-provision step or
+                        # `nx init`, never automatically after a bare
+                        # engine binary swap. This store IS measurable, just not
+                        # through the stale view — fall through to the SAME
+                        # direct unified-table statements used when the
+                        # view-path raises outright, instead of surfacing a
+                        # generic "could not probe" WARN for a store that is
+                        # provably current-era.
+                        try:
+                            direct_counts = _run_diag(legacy_chash_conformance_statements())
+                        except DiagnosticSqlViolation:
+                            raise
+                        except (RuntimeError, ValueError) as direct_exc:
+                            _log.warning(
+                                "chash_probe_direct_fallback_for_stale_view_failed",
+                                error=str(direct_exc)[:200],
+                                note="nexus.chunks exists but the view-path leg "
+                                     "was blank (stale per-dim view) and the "
+                                     "direct unified-table fallback also failed",
+                            )
+                        else:
+                            _log.info(
+                                "chash_probe_direct_fallback_for_stale_view",
+                                note="the diag view is stale (still per-dim "
+                                     "shaped) though the schema has already "
+                                     "migrated; measured via direct "
+                                     "unified-table counts instead",
+                            )
+                            counts = direct_counts
+                    else:
+                        try:
+                            legacy_view_counts = _run_diag(
+                                legacy_era_chash_conformance_statements(),
+                            )
+                        except DiagnosticSqlViolation:
+                            raise
+                        except (RuntimeError, ValueError) as legacy_view_exc:
+                            _log.warning(
+                                "chash_probe_legacy_era_view_fallback_failed",
+                                error=str(legacy_view_exc)[:200],
+                            )
+                            legacy_view_counts = None
+                        if legacy_view_counts is not None and not any(
+                            not c.strip() for c in legacy_view_counts
+                        ):
+                            _log.info(
+                                "chash_probe_legacy_era_view_match",
+                                note="the unified-name view query returned a "
+                                     "NULL aggregate; the store verified via "
+                                     "the pre-RDR-191 per-dim table names "
+                                     "instead (RDR-191 straddle window)",
+                            )
+                            counts = legacy_view_counts
+                            poison_tables = LEGACY_POISON_CHASH_TABLES
+
+                nonconforming = parse_conformance_sum(poison_tables, counts)
+            except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
+                # Probe failure (schema variant missing a table), lint refusal,
+                # or non-numeric output — a WARN, never a false poison-clean.
+                nonconforming = -1
+                results.append(HealthResult(
+                    label=CHASH_CONFORMANCE_LABEL,
+                    ok=False,
+                    detail=(
+                        "could not probe chash length across chunk tables via the "
+                        f"nexus_diag path ({exc}) — the pre-upgrade poison check "
+                        "did not run"
+                    ),
+                    warn=True,
+                ))
     if nonconforming > 0:
         results.append(HealthResult(
             label=CHASH_CONFORMANCE_LABEL,
@@ -8835,6 +8867,61 @@ def _check_tuple_lock_held(
 _TUPLE_BLOAT_LABEL = "tuples.dead_tuple_ratio"
 
 
+_TUPLE_BLOAT_SQL = (
+    "SELECT relname, n_live_tup, n_dead_tup, last_autovacuum, last_autoanalyze "
+    "FROM pg_stat_user_tables "
+    "WHERE schemaname = 'nexus' AND relname IN ('tuples', 'tuple_claim_log') "
+    "ORDER BY relname;"
+)
+
+
+def _tuple_admin_conn(
+    creds_path: Path | None, psql_bin: Path | None, label: str,
+) -> tuple[Path, str, int, str, str, str] | HealthResult:
+    """``(psql, host, port, dbname, user, password)`` from this install's local ``pg_credentials``, or the
+    row that says why there is none (a managed deployment, an unconfigured box, no psql)."""
+    if creds_path is None:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+
+    if not creds_path.exists():
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+        if not is_local_mode():
+            return _managed_not_probeable(label)
+        return HealthResult(label=label, ok=False, warn=True, detail=_LOCAL_MODE_NOT_CONFIGURED_DETAIL)
+
+    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
+        _read_credentials,
+        discover_pg_binaries,
+        PgBinaryNotFoundError,
+    )
+
+    creds = _read_credentials(creds_path)
+    host = "127.0.0.1"
+    try:
+        port = int(creds.get("PG_PORT", 0))
+    except ValueError:
+        port = 0
+    if port <= 0:
+        return HealthResult(label=label, ok=False, warn=True, detail="pg_credentials missing PG_PORT; cannot connect")
+
+    db_url = creds.get("NX_DB_ADMIN_URL", "")
+    dbname = "nexus"
+    if "/" in db_url:
+        dbname = db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
+    user = creds.get("NX_DB_ADMIN_USER", "nexus_admin")
+    password = creds.get("NX_DB_ADMIN_PASS", "")
+
+    if psql_bin is None:
+        try:
+            psql_bin = discover_pg_binaries().psql
+        except PgBinaryNotFoundError as exc:
+            return HealthResult(label=label, ok=False, warn=True, detail=f"psql binary not found: {exc}")
+
+    return psql_bin, host, port, dbname, user, password
+
+
 def _check_tuple_table_bloat(
     creds_path: Path | None = None,
     psql_bin: Path | None = None,
@@ -8859,52 +8946,12 @@ def _check_tuple_table_bloat(
     label = _TUPLE_BLOAT_LABEL
     route_predates_floor = _tuple_route_predates_floor()
 
-    if creds_path is None:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
-        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
-        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+    conn = _tuple_admin_conn(creds_path, psql_bin, label)
+    if isinstance(conn, HealthResult):
+        return [conn]
+    psql_bin, host, port, dbname, user, password = conn
 
-    if not creds_path.exists():
-        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
-        if not is_local_mode():
-            return [_managed_not_probeable(label)]
-        return [HealthResult(label=label, ok=False, warn=True, detail=_LOCAL_MODE_NOT_CONFIGURED_DETAIL)]
-
-    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
-        _read_credentials,
-        discover_pg_binaries,
-        PgBinaryNotFoundError,
-    )
-
-    creds = _read_credentials(creds_path)
-    host = "127.0.0.1"
-    try:
-        port = int(creds.get("PG_PORT", 0))
-    except ValueError:
-        port = 0
-    if port <= 0:
-        return [HealthResult(label=label, ok=False, warn=True, detail="pg_credentials missing PG_PORT; cannot connect")]
-
-    db_url = creds.get("NX_DB_ADMIN_URL", "")
-    dbname = "nexus"
-    if "/" in db_url:
-        dbname = db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
-    user = creds.get("NX_DB_ADMIN_USER", "nexus_admin")
-    password = creds.get("NX_DB_ADMIN_PASS", "")
-
-    if psql_bin is None:
-        try:
-            psql_bin = discover_pg_binaries().psql
-        except PgBinaryNotFoundError as exc:
-            return [HealthResult(label=label, ok=False, warn=True, detail=f"psql binary not found: {exc}")]
-
-    sql = (
-        "SELECT relname, n_live_tup, n_dead_tup, last_autovacuum, last_autoanalyze "
-        "FROM pg_stat_user_tables "
-        "WHERE schemaname = 'nexus' AND relname IN ('tuples', 'tuple_claim_log') "
-        "ORDER BY relname;"
-    )
-    proc = _run_psql(psql_bin, host, port, dbname, user, password, sql, psql_runner=psql_runner)
+    proc = _run_psql(psql_bin, host, port, dbname, user, password, _TUPLE_BLOAT_SQL, psql_runner=psql_runner)
     if proc.returncode != 0:
         stderr_snip = (proc.stderr or "").strip()[:300]
         return [HealthResult(
@@ -8970,13 +9017,76 @@ def _check_tuple_table_bloat(
                 f"{worst_table} dead-tuple ratio {worst_ratio:.2%} exceeds "
                 f"{_TUPLE_DEAD_RATIO_WARN:.0%}: " + "; ".join(details)
             ),
-            fix_suggestions=[f"VACUUM ANALYZE nexus.{worst_table};"],
+            # GH #1609: the VACUUM runs through `nx doctor --fix` with this install's admin credentials; a user
+            # need not have the database password or write SQL.
+            fix_suggestions=[
+                f"nx doctor --fix   (runs VACUUM ANALYZE nexus.{worst_table} with this install's admin credentials; "
+                "--fix --dry-run lists it first)"
+            ],
         )]
     note = (
         "; a ratio counts only past twice the table's autovacuum trigger"
         if skipped else ""
     )
     return [HealthResult(label=label, ok=True, detail=("; ".join(details) or "none") + note)]
+
+
+def vacuum_tuple_tables(
+    *, dry_run: bool, creds_path: Path | None = None, psql_bin: Path | None = None, psql_runner=None,
+) -> list[str]:
+    """``nx doctor --fix``'s dead-tuple VACUUM (GH #1609): ``VACUUM ANALYZE`` on each tuple-space table the
+    tuples.dead_tuple_ratio row would fail (dead rows past twice its autovacuum trigger and a ratio over
+    :data:`_TUPLE_DEAD_RATIO_WARN`), through this install's local admin credentials. *dry_run* lists them and
+    runs nothing. Returns the lines to print; none when nothing is over the line.
+
+    Local only: a managed service's database is its operator's, so nothing is run there."""
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+    if not is_local_mode():
+        return ["Dead-tuple VACUUM skipped: a managed service's database is its operator's to vacuum."]
+    conn = _tuple_admin_conn(creds_path, psql_bin, _TUPLE_BLOAT_LABEL)
+    if isinstance(conn, HealthResult):
+        return [f"Dead-tuple VACUUM skipped: {conn.detail}"]
+    psql, host, port, dbname, user, password = conn
+    try:
+        proc = _run_psql(psql, host, port, dbname, user, password, _TUPLE_BLOAT_SQL, psql_runner=psql_runner)
+    except OSError as exc:
+        return [f"Dead-tuple VACUUM skipped: psql could not run ({exc})."]
+    if proc.returncode != 0:
+        return [f"Dead-tuple VACUUM skipped: the engine did not answer (psql exit {proc.returncode})."]
+    over: list[tuple[str, float]] = []
+    for line in (ln.strip() for ln in proc.stdout.splitlines()):
+        parts = line.split("|")
+        if len(parts) != 5:
+            continue
+        relname = parts[0]
+        try:
+            live, dead = int(parts[1] or 0), int(parts[2] or 0)
+        except ValueError:
+            continue
+        ratio = dead / (live + dead) if live + dead else 0.0
+        # Only the two tuple-space tables the query names, by construction; the name is checked anyway before
+        # it is put into SQL.
+        if relname in ("tuples", "tuple_claim_log") and dead > _tuple_dead_rows_floor(live) and ratio > _TUPLE_DEAD_RATIO_WARN:
+            over.append((relname, ratio))
+    lines: list[str] = []
+    for relname, ratio in over:
+        if dry_run:
+            lines.append(f"--fix would VACUUM ANALYZE nexus.{relname} (dead-tuple ratio {ratio:.2%}).")
+            continue
+        try:
+            done = _run_psql(psql, host, port, dbname, user, password, f"VACUUM ANALYZE nexus.{relname};",
+                             psql_runner=psql_runner)
+        except OSError as exc:
+            lines.append(f"VACUUM of nexus.{relname} failed: psql could not run ({exc})")
+            continue
+        if done.returncode != 0:
+            lines.append(
+                f"VACUUM of nexus.{relname} failed (psql exit {done.returncode}): {(done.stderr or '').strip()[:300]}"
+            )
+        else:
+            lines.append(f"Vacuumed nexus.{relname} (dead-tuple ratio {ratio:.2%}).")
+    return lines
 
 
 _TUPLE_SWEEP_LABEL = "tuples.sweep_freshness"
@@ -10803,6 +10913,13 @@ def _check_manifest_null_collection() -> list[HealthResult]:
     return [HealthResult(label=label, ok=False, warn=True, detail=detail, fix_suggestions=fix_suggestions)]
 
 
+def _check_manifest_foreign_collection() -> list[HealthResult]:
+    """GH #1611: see :mod:`nexus.catalog.foreign_collection_doctor` (kept there: this file is over its size cap)."""
+    from nexus.catalog.foreign_collection_doctor import check_manifest_foreign_collection  # noqa: PLC0415 — deferred: cheap either way
+
+    return check_manifest_foreign_collection()
+
+
 #: RDR-180 (bead nexus-du2dw): the label for the ENGINE-ROUTE chash
 #: conformance check, deliberately DISTINCT from ``CHASH_CONFORMANCE_LABEL``
 #: (``nexus.db.chash_tables``, "Chunk chash conformance") — that label is
@@ -10883,6 +11000,23 @@ def _check_chash_conformance_report() -> list[HealthResult]:
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=f"SKIPPED (catalog reader unavailable: {exc}) — not a clean-store signal",
+        )]
+
+    # F30 (nexus-f3yqd.6): validated width CHECKs on both covered tables mean no row can be non-conformant, so one
+    # catalog read stands in for the per-dim scans (engine 0.1.189). Anything else scans as before, with no warning.
+    try:
+        probe = getattr(cat, "chash_constraints_validated", None)
+        validated = probe() if callable(probe) else None
+    except Exception as exc:  # noqa: BLE001 — an optional fast path; the scans are the answer of record
+        _log.debug("doctor_chash_constraints_probe_failed", error=str(exc))
+        validated = None
+    if validated is True:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                "clean: the chash width CHECKs on nexus.chunks and nexus.catalog_document_chunks are validated, "
+                "so no row of either table can be non-conformant (read from the engine's constraint state, not a scan)"
+            ),
         )]
 
     import httpx  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
@@ -11423,7 +11557,7 @@ _PRODUCER_FENCE_RELEASE_DT = datetime(2026, 8, 7, 16, 0, 35, tzinfo=UTC)
 #: NOT the anchor on its own — a LOWER BOUND on it (nexus-oiu1t). No client
 #: can have had full producer coverage before the release that carried it, so
 #: no evidence-derived anchor may ever fall below this. See
-#: ``_check_stale_indexing_runs`` for the install-local anchor this floors.
+#: ``_fence_facts_from_documents`` for the install-local anchor this floors.
 
 #: How many post-anchor unstamped identifiers are NAMED in the WARN detail.
 _MAX_NAMED_UNSTAMPED = 10
@@ -11452,47 +11586,77 @@ _MAX_TRACKED_RUN_IDS = 5000
 _MAX_TRACKED_UNSTAMPED = 1000
 
 
-def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None) -> list[HealthResult]:
-    """Name documents stranded in ``index_state='indexing'`` beyond a
-    threshold (nexus-5xn3k.6, bead-text amendment 2026-08-02 —
-    substantive-critic on .3's client diff, T2 nexus/5xn3k3-critique-2026-08-02).
+def _repo_candidates_with_missing_files(
+    cat: Any, idents: list[str], prefixes: dict[str, str], files: dict[str, str],
+) -> list[tuple[str, str, str]]:
+    """``(owner prefix, ident, file_path)`` for each named repo document whose file is gone (GH #1610).
 
-    DISTINCT AXIS from the now-retired ``_check_dangling_manifests``
-    (memo §3.2/§4, ``manifest_verify_all`` — both RETIRED RDR-191 Phase 6,
-    nexus-o8dil.33): that check found MISSING-CHUNK aggregates — it said
-    nothing about a document whose fence was never cleared, and this check
-    is independent of it either way. ``'indexing'`` is the correct, SAFE
-    state for an in-flight or crashed run
-    (memo §3.5 / nexus-lcmbp non-goal: a document in ``'indexing'`` always
-    re-indexes, never silently skips) but nothing bounds how LONG it can sit
-    there. A rolling engine deploy that straddles one multi-batch run's
-    begin/complete pair (begin lands on an upgraded pod, complete 404s
-    against a not-yet-upgraded pod) strands a document in ``'indexing'``
-    until a FUTURE full re-index happens to route both calls through
-    upgraded pods; every intervening ``nx index`` pass re-chunks and
-    re-embeds it at full cost with no signal distinguishing "still catching
-    up" from "stuck."
-
-    Formerly surfaced ALONGSIDE the manifest_verify_all check, never folded
-    into it — they detected different failure classes (missing chunks vs. a
-    fence that never cleared). That sibling check no longer runs; this one
-    is unaffected.
-
-    Walks the full corpus once (``all_documents(limit=0)``) — the same cost
-    class doctor already pays in ``_check_next_seq_drift`` (nexus-ohxzu).
-    Read-only; degrades to a skip; never crashes the command it diagnoses.
-    """
-    label = _STALE_FENCES_LABEL
+    A relative ``file_path`` resolves against its owner's repo root, as ``nx catalog prune-stale`` resolves it.
+    A document is judged only when that root is a directory on this machine: a repo cloned elsewhere, an owner
+    with no recorded root, or an unreadable owner table proves nothing, and the document keeps the old remedy."""
+    if not idents:
+        return []
     try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        roots = cat.owners_with_roots()
+    except Exception as exc:  # noqa: BLE001 — best-effort classification, must not crash `nx doctor`
+        _log.debug("doctor_fence_owner_roots_unavailable", error=str(exc))
+        return []
+    missing: list[tuple[str, str, str]] = []
+    for ident in idents:
+        fp, prefix = files.get(ident, ""), prefixes.get(ident, "")
+        root = roots.get(prefix, "")
+        if not fp or "/" not in fp or not root or not Path(root).is_dir():
+            continue
+        resolved = Path(fp) if fp.startswith("/") else Path(root) / fp
+        # os.path.exists, not Path.exists: on Python 3.12 the latter re-raises EACCES, and one unreadable
+        # directory must not take the row down. An unreadable path reads as present, so it is not judged gone.
+        try:
+            os.stat(resolved)
+        except FileNotFoundError:
+            missing.append((prefix, ident, fp))
+        except OSError:
+            continue
+    return missing
 
-        cat = make_catalog_reader()
-        if cat is None:
-            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.debug("doctor_stale_indexing_check_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
 
+@dataclass
+class _FenceFacts:
+    """What the stale-fence row renders, whichever way it was learned: a walk of every document
+    (:func:`_fence_facts_from_documents`, the oracle) or the engine's census (:func:`_stale_fence_rows_from_census`). The row's
+    wording and rules live in :func:`_stale_fence_rows` alone, so the two sources cannot say different things about
+    the same numbers."""
+
+    stale_total: int  # documents stranded in 'indexing' past the threshold (a floor when ``stale_capped``)
+    stale_shown: list[tuple[str, str, bool]]  # (name, age text, is a note): the at most 10 the row names
+    stale_notes: int
+    checked: int
+    reported_null: int
+    undated_reported_null: int
+    candidates_total: int  # unstamped documents indexed after the coverage floor
+    candidates_truncated: int  # of those, the ones a walk's tracking cap left unattributed (a census has none)
+    post_anchor: list[tuple[str, datetime]]  # (name, indexed_at) of the unstamped documents after the baseline
+    post_anchor_count: int  # the exact count; ``post_anchor`` may hold fewer
+    candidate_prefix: dict[str, str]
+    candidate_file: dict[str, str]
+    anchor: datetime | None
+    proven: bool  # the baseline is a batched run's, not the earliest stamp's
+    run_ids_dropped: int
+    not_reported: int  # documents whose engine did not report ``index_state`` at all (a walk's count; a census has none)
+    stale_capped: bool = False
+
+
+def _fence_facts_from_documents(documents: list[Any]) -> _FenceFacts:
+    """The fence numbers of a list of catalog documents: the Python oracle for the rule the engine's census
+    (``GET /v1/catalog/index-run/census``) computes in SQL, which ``index-run-census-cases.json`` holds the SQL to
+    (nexus-5xn3k.6, nexus-apig6, nexus-oiu1t, nexus-2sa6w, nexus-f3yqd.6). Pure: no catalog, no request.
+
+    Documents stranded in ``index_state='indexing'`` beyond a threshold (a fence that never cleared: ``'indexing'``
+    is the correct, SAFE state for an in-flight or crashed run, but nothing bounds how LONG it can sit there, and
+    every intervening ``nx index`` re-chunks and re-embeds at full cost); and the NULL-fence census with its
+    baseline (the install's own evidence that a fenced producer ran) and the unstamped documents indexed after it.
+    ``nx doctor`` no longer walks the catalog to get these (the engine answers them from the census route), so this
+    runs only where a test holds the engine's rule to the Python one.
+    """
     now = datetime.now(UTC)
     stale: list[tuple[str, str]] = []  # (identifier, age)
     # nexus-z0o2p.34: the stale documents that are NOTES (content_type "knowledge": MCP store_put,
@@ -11519,6 +11683,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
     # remedy can be split by owner kind below -- `nx index <path> --force`
     # applies to a repo file and to nothing else.
     candidate_prefix: dict[str, str] = {}
+    candidate_file: dict[str, str] = {}
     # nexus-oiu1t: the install's OWN evidence that it has run a fenced
     # producer — the earliest document carrying a real index_state. A fact
     # about THIS install, unlike a release-tag date, which assumes the user
@@ -11553,132 +11718,109 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
     # never claims they predate coverage when nothing establishes that
     # (code-review-expert, 2026-08-11).
     undated_reported_null = 0
-    try:
-        # nexus-ft7eg: share this walk with _check_next_seq_drift
-        # (_highest_child_seqs' identical `all_documents(limit=0)` scan) —
-        # doctor currently pays for the full-corpus walk TWICE per run.
-        for entry in _doc_list(cat, documents):
-            reported = bool(getattr(entry, "index_state_reported", True))
-            state = getattr(entry, "index_state", None)
-            if not reported:
-                # Genuinely pre-fence engine — the wire never carried the
-                # key. Unknown, not evidence either way.
-                not_reported += 1
-                continue
-            if state is None:
-                # Fence-aware engine, but this document has never been
-                # stamped (unfenced producer, or simply not re-indexed
-                # since full producer coverage shipped —
-                # §_PRODUCER_FENCE_RELEASE_DT below tells these two apart).
-                reported_null += 1
-                indexed_at = str(getattr(entry, "indexed_at", "") or "")
-                ia_dt = None
-                if indexed_at:
-                    try:
-                        ia_dt = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
-                    except ValueError:
-                        ia_dt = None
-                if ia_dt is None:
-                    undated_reported_null += 1
-                elif ia_dt > _PRODUCER_FENCE_RELEASE_DT:
-                    if len(candidates) < _MAX_TRACKED_UNSTAMPED:
-                        ident = (
-                            str(getattr(entry, "source_uri", "") or "")
-                            or str(getattr(entry, "tumbler", "") or "")
-                            or "?"
-                        )
-                        candidates.append((ident, ia_dt))
-                        _tumbler = str(getattr(entry, "tumbler", "") or "")
-                        candidate_prefix[ident] = ".".join(_tumbler.split(".")[:2])
-                    else:
-                        candidates_truncated += 1
-                continue
-            checked += 1
-            # nexus-oiu1t: a real index_state is proof that a fence ran on
-            # this document.
-            #
-            # ONLY 'complete' rows may date that proof (code-review-expert,
-            # 2026-08-11; verified in service/.../db/CatalogRepository.java).
-            # beginIndexRun writes INDEX_STATE/INDEX_RUN_ID/INDEX_STARTED_AT
-            # and completeIndexRun writes INDEX_STATE/INDEX_CONTENT_HASH/
-            # CHUNK_COUNT — NEITHER writes INDEXED_AT, which only the
-            # manifest-write/register path sets. So on a row stuck at
-            # 'indexing' or 'failed' (a crashed or in-flight run), indexed_at
-            # is a leftover from that document's PRIOR, unrelated successful
-            # index. Dating either anchor from it puts the anchor earlier than
-            # any evidence supports — and for the ledger it would let a
-            # CRASHED begin-many batch assert a regression, unhedged, against
-            # documents written before coverage was ever proven. Reopening the
-            # over-claiming class through a new door.
-            #
-            # NOTE the guard is an `if`, NOT an early `continue`: the
-            # stale-'indexing' detection below is this function's ORIGINAL
-            # purpose and must still see every non-complete row. A `continue`
-            # here silently disabled it (caught by
-            # TestCheckStaleIndexingRuns::test_stale_indexing_document_is_reported).
-            if state == "complete":
-                stamped_at = str(getattr(entry, "indexed_at", "") or "")
-                if stamped_at:
-                    try:
-                        st_dt = datetime.fromisoformat(stamped_at.replace("Z", "+00:00"))
-                    except ValueError:
-                        st_dt = None
-                    if st_dt is not None:
-                        if (earliest_stamped_dt is None
-                                or st_dt < earliest_stamped_dt):
-                            earliest_stamped_dt = st_dt
-                        # nexus-2sa6w: ledger the run id so a SHARED one can
-                        # prove begin-many, hence a full-coverage client.
-                        rid = str(getattr(entry, "index_run_id", "") or "")
-                        if rid:
-                            slot = run_ids.get(rid)
-                            if slot is not None:
-                                slot[0] += 1
-                                if st_dt < slot[1]:
-                                    slot[1] = st_dt
-                            elif len(run_ids) < _MAX_TRACKED_RUN_IDS:
-                                run_ids[rid] = [1, st_dt]
-                            else:
-                                run_ids_dropped += 1
-            if state != "indexing":
-                continue
-            started = getattr(entry, "index_started_at", "") or ""
-            if not started:
-                continue
-            try:
-                started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            age_hours = (now - started_dt).total_seconds() / 3600.0
-            if age_hours >= _STALE_INDEXING_THRESHOLD_HOURS:
-                ident = (
-                    str(getattr(entry, "source_uri", "") or "")
-                    or str(getattr(entry, "tumbler", "") or "")
-                    or "?"
-                )
-                stale.append((ident, f"{age_hours:.1f}h"))
-                if str(getattr(entry, "content_type", "") or "") == "knowledge":
-                    stale_notes.add(ident)
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.debug("doctor_stale_indexing_scan_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (corpus scan failed)")]
-
-    # nexus-vw594 F3 fix-round CRITICAL (substantive-critic, T2
-    # nexus/vw594-critique-2026-08-05 [21445]): this check MUST run
-    # UNCONDITIONALLY — never nested inside `if checked == 0`. The prior
-    # shape nested the reported_null/vw594-signature detection inside
-    # that guard, so a mixed corpus where ONE document has a genuine
-    # fenced run (checked > 0 — e.g. the very first `nx index repo` post-
-    # deploy) fell through to the generic "none (N checked)" ok=True
-    # branch WITHOUT EVER INSPECTING reported_null, even when a SECOND
-    # document in the same corpus was reported-but-NULL and indexed
-    # after the fence shipped. That is nexus-biq4x's silent-green bug
-    # reborn under a new trigger (checked > 0 instead of "engine predates
-    # the fence"); the critic reproduced it against this function with a
-    # real 2-doc mixed fixture. `results` collects every WARN-worthy
-    # finding independently; the summary branches below only run when
-    # NONE fired.
-    results: list[HealthResult] = []
+    for entry in documents:
+        reported = bool(getattr(entry, "index_state_reported", True))
+        state = getattr(entry, "index_state", None)
+        if not reported:
+            # Genuinely pre-fence engine — the wire never carried the
+            # key. Unknown, not evidence either way.
+            not_reported += 1
+            continue
+        if state is None:
+            # Fence-aware engine, but this document has never been
+            # stamped (unfenced producer, or simply not re-indexed
+            # since full producer coverage shipped —
+            # §_PRODUCER_FENCE_RELEASE_DT below tells these two apart).
+            reported_null += 1
+            indexed_at = str(getattr(entry, "indexed_at", "") or "")
+            ia_dt = None
+            if indexed_at:
+                try:
+                    ia_dt = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
+                except ValueError:
+                    ia_dt = None
+            if ia_dt is None:
+                undated_reported_null += 1
+            elif ia_dt > _PRODUCER_FENCE_RELEASE_DT:
+                if len(candidates) < _MAX_TRACKED_UNSTAMPED:
+                    ident = (
+                        str(getattr(entry, "source_uri", "") or "")
+                        or str(getattr(entry, "tumbler", "") or "")
+                        or "?"
+                    )
+                    candidates.append((ident, ia_dt))
+                    _tumbler = str(getattr(entry, "tumbler", "") or "")
+                    candidate_prefix[ident] = ".".join(_tumbler.split(".")[:2])
+                    candidate_file[ident] = str(getattr(entry, "file_path", "") or "")
+                else:
+                    candidates_truncated += 1
+            continue
+        checked += 1
+        # nexus-oiu1t: a real index_state is proof that a fence ran on
+        # this document.
+        #
+        # ONLY 'complete' rows may date that proof (code-review-expert,
+        # 2026-08-11; verified in service/.../db/CatalogRepository.java).
+        # beginIndexRun writes INDEX_STATE/INDEX_RUN_ID/INDEX_STARTED_AT
+        # and completeIndexRun writes INDEX_STATE/INDEX_CONTENT_HASH/
+        # CHUNK_COUNT — NEITHER writes INDEXED_AT, which only the
+        # manifest-write/register path sets. So on a row stuck at
+        # 'indexing' or 'failed' (a crashed or in-flight run), indexed_at
+        # is a leftover from that document's PRIOR, unrelated successful
+        # index. Dating either anchor from it puts the anchor earlier than
+        # any evidence supports — and for the ledger it would let a
+        # CRASHED begin-many batch assert a regression, unhedged, against
+        # documents written before coverage was ever proven. Reopening the
+        # over-claiming class through a new door.
+        #
+        # NOTE the guard is an `if`, NOT an early `continue`: the
+        # stale-'indexing' detection below is this function's ORIGINAL
+        # purpose and must still see every non-complete row. A `continue`
+        # here silently disabled it (caught by
+        # TestCheckStaleIndexingRuns::test_stale_indexing_document_is_reported).
+        if state == "complete":
+            stamped_at = str(getattr(entry, "indexed_at", "") or "")
+            if stamped_at:
+                try:
+                    st_dt = datetime.fromisoformat(stamped_at.replace("Z", "+00:00"))
+                except ValueError:
+                    st_dt = None
+                if st_dt is not None:
+                    if (earliest_stamped_dt is None
+                            or st_dt < earliest_stamped_dt):
+                        earliest_stamped_dt = st_dt
+                    # nexus-2sa6w: ledger the run id so a SHARED one can
+                    # prove begin-many, hence a full-coverage client.
+                    rid = str(getattr(entry, "index_run_id", "") or "")
+                    if rid:
+                        slot = run_ids.get(rid)
+                        if slot is not None:
+                            slot[0] += 1
+                            if st_dt < slot[1]:
+                                slot[1] = st_dt
+                        elif len(run_ids) < _MAX_TRACKED_RUN_IDS:
+                            run_ids[rid] = [1, st_dt]
+                        else:
+                            run_ids_dropped += 1
+        if state != "indexing":
+            continue
+        started = getattr(entry, "index_started_at", "") or ""
+        if not started:
+            continue
+        try:
+            started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        age_hours = (now - started_dt).total_seconds() / 3600.0
+        if age_hours >= _STALE_INDEXING_THRESHOLD_HOURS:
+            ident = (
+                str(getattr(entry, "source_uri", "") or "")
+                or str(getattr(entry, "tumbler", "") or "")
+                or "?"
+            )
+            stale.append((ident, f"{age_hours:.1f}h"))
+            if str(getattr(entry, "content_type", "") or "") == "knowledge":
+                stale_notes.add(ident)
 
     # nexus-oiu1t: derive the anchor from THIS INSTALL's evidence, floored by
     # the release that first carried full coverage. A release-tag date alone
@@ -11707,12 +11849,57 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
     anchor = proven_anchor if proven_anchor is not None else earliest_stamped_dt
     post_anchor = [c for c in candidates if anchor is not None and c[1] > anchor]
 
+    return _FenceFacts(
+        stale_total=len(stale),
+        stale_shown=[(ident, age, ident in stale_notes) for ident, age in stale[:10]],
+        stale_notes=len(stale_notes),
+        checked=checked, reported_null=reported_null, undated_reported_null=undated_reported_null,
+        candidates_total=len(candidates) + candidates_truncated, candidates_truncated=candidates_truncated,
+        post_anchor=post_anchor, post_anchor_count=len(post_anchor),
+        candidate_prefix=candidate_prefix, candidate_file=candidate_file,
+        anchor=anchor, proven=proven_anchor is not None, run_ids_dropped=run_ids_dropped,
+        not_reported=not_reported,
+    )
+
+
+def _stale_fence_rows_over(documents: list[Any], cat: Any = None) -> list[HealthResult]:
+    """The oracle's stale-fence row: :func:`_fence_facts_from_documents` rendered by :func:`_stale_fence_rows`, the
+    function the route-fed row renders through. *cat* is read for owner kinds and repo roots only (``None``: none)."""
+    return _stale_fence_rows(cat, _STALE_FENCES_LABEL, _fence_facts_from_documents(documents))
+
+
+def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult]:
+    """The stale-fence row (stale ``indexing`` fences, the NULL-fence census and its baseline) rendered from *f*.
+    *cat* is read for owner kinds and repo roots only, to classify the named post-baseline documents."""
+    checked, reported_null, undated_reported_null = f.checked, f.reported_null, f.undated_reported_null
+    candidates_truncated, run_ids_dropped = f.candidates_truncated, f.run_ids_dropped
+    post_anchor, anchor, candidate_prefix, candidate_file = f.post_anchor, f.anchor, f.candidate_prefix, f.candidate_file
+    proven_anchor = anchor if f.proven else None
+
+    # nexus-vw594 F3 fix-round CRITICAL (substantive-critic, T2
+    # nexus/vw594-critique-2026-08-05 [21445]): this check MUST run
+    # UNCONDITIONALLY — never nested inside `if checked == 0`. The prior
+    # shape nested the reported_null/vw594-signature detection inside
+    # that guard, so a mixed corpus where ONE document has a genuine
+    # fenced run (checked > 0 — e.g. the very first `nx index repo` post-
+    # deploy) fell through to the generic "none (N checked)" ok=True
+    # branch WITHOUT EVER INSPECTING reported_null, even when a SECOND
+    # document in the same corpus was reported-but-NULL and indexed
+    # after the fence shipped. That is nexus-biq4x's silent-green bug
+    # reborn under a new trigger (checked > 0 instead of "engine predates
+    # the fence"); the critic reproduced it against this function with a
+    # real 2-doc mixed fixture. `results` collects every WARN-worthy
+    # finding independently; the summary branches below only run when
+    # NONE fired.
+    results: list[HealthResult] = []
+
     # GH #1512 (nexus-kt7f4): a candidate under a NON-repo owner (the curator
     # owner of the knowledge store, 1.1.*) has no file path, so the repo
     # remedy cannot apply; those get their own count and remedy. Owner kinds
     # come from the owner table; a table that cannot be read leaves every
     # candidate classified as a repo file, the pre-GH-1512 behaviour.
     non_repo_count = 0
+    missing_files: list[tuple[str, str, str]] = []
     if post_anchor:
         try:
             owner_types = {
@@ -11726,8 +11913,16 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
             1 for ident, _at in post_anchor
             if owner_types.get(candidate_prefix.get(ident, ""), "repo") != "repo"
         )
+        # GH #1610: a repo document whose file is gone from its repo cannot be re-indexed, so `--force` cannot clear
+        # it; such files are counted apart and pointed at `nx catalog prune-stale`.
+        missing_files = _repo_candidates_with_missing_files(
+            cat,
+            [ident for ident, _at in post_anchor
+             if owner_types.get(candidate_prefix.get(ident, ""), "repo") == "repo"],
+            candidate_prefix, candidate_file,
+        )
 
-    if post_anchor:
+    if f.post_anchor_count > 0:
         # A document landed AFTER this install demonstrably had a fully-fenced
         # client and still carries no stamp — a NEW producer regression. Never
         # ok=True for this (nexus-biq4x's misdiagnosis was exactly rendering
@@ -11738,7 +11933,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
         # unqualified `nx index <path> --force`, which on a corpus indexed
         # before v7.3.0 reads as "re-embed all 462 of your documents" —
         # contradicting vw594's own no-backfill decision.
-        post_anchor_count = len(post_anchor)
+        post_anchor_count = f.post_anchor_count
         names = "; ".join(
             f"{ident} ({at.isoformat()})"
             for ident, at in post_anchor[:_MAX_NAMED_UNSTAMPED]
@@ -11815,13 +12010,23 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
                     if run_ids_dropped and proven_anchor is None else ""
                 )
                 + f"{legacy_note}{undated_note}{non_repo_note}"
+                + (
+                    f" {len(missing_files)} of the named repo document(s) name a file that is no longer in its "
+                    f"repo (e.g. {missing_files[0][2]}): `nx index --force` cannot re-index a file that is gone, "
+                    "and `nx catalog prune-stale` removes these entries (GH #1610)."
+                    if missing_files else ""
+                )
             ),
             fix_suggestions=(
                 [
                     "nx catalog reconcile-fences --dry-run   (the non-repo "
                     "document(s): stamp the whole ones, then drop --dry-run)",
                 ] if non_repo_count else []
-            ) + (
+            ) + [
+                f"nx catalog prune-stale --owner {prefix}   (the document(s) whose file is gone: lists them; "
+                "then add --no-dry-run --confirm)"
+                for prefix in sorted({p for p, _ident, _fp in missing_files})
+            ] + ([] if len(post_anchor) - non_repo_count - len(missing_files) <= 0 else (
                 [
                     "nx index <path> --force   (re-index ONLY the named "
                     "document(s) above — this clears the symptom, not the "
@@ -11833,9 +12038,9 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
                     "ONLY the named document(s) above — this clears the "
                     "symptom, not the unfenced producer)",
                 ]
-            ),
+            )),
         ))
-    elif anchor is None and (candidates or candidates_truncated):
+    elif anchor is None and f.candidates_total > 0:
         # nexus-oiu1t: post-floor unstamped documents exist, but NO document in
         # this corpus has ever been stamped — nothing establishes whether this
         # install has run a fully-fenced client at all. A late upgrader and a
@@ -11847,7 +12052,7 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
         # that a warning existed, but that it ASSERTED a producer bug it could
         # not prove and prescribed re-embedding the whole corpus; so this arm
         # states the ambiguity and prescribes ONE document.
-        ambiguous_total = len(candidates) + candidates_truncated
+        ambiguous_total = f.candidates_total
         results.append(HealthResult(
             label=label, ok=False, warn=True,
             detail=(
@@ -11874,20 +12079,20 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
             ],
         ))
 
-    if stale:
+    if f.stale_total > 0:
         names = "; ".join(
-            f"{ident} ({age}{', note' if ident in stale_notes else ''})"
-            for ident, age in stale[:10])
-        if len(stale) > 10:
-            names += f"; +{len(stale) - 10} more"
+            f"{ident} ({age}{', note' if is_note else ''})"
+            for ident, age, is_note in f.stale_shown)
+        if f.stale_total > len(f.stale_shown):
+            names += f"; +{f.stale_total - len(f.stale_shown)} more"
         note_hint = ""
         suggestions = [
             "nx index <path>   (a normal re-index clears the fence; "
             "--force is not required)",
         ]
-        if stale_notes:
+        if f.stale_notes:
             note_hint = (
-                f" {len(stale_notes)} of them are notes (marked 'note'): a note killed in a "
+                f" {f.stale_notes} of them are notes (marked 'note'): a note killed in a "
                 "post-store chain, or whose completion stamp failed, is whole and owned but "
                 "stays 'indexing', and no command reruns it. Put it again with the same title "
                 "(`nx store put`, MCP `store_put`, `nx memory promote`): the re-put is an "
@@ -11896,14 +12101,14 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
             suggestions = [
                 "nx store put - --title <title> -c <subject> < note.txt   (re-put a stranded "
                 "note: it fires the chains and stamps it; also MCP store_put, nx memory promote)",
-                *(suggestions if len(stale_notes) < len(stale) else []),
+                *(suggestions if f.stale_notes < f.stale_total else []),
             ]
         results.append(HealthResult(
             label=label,
             ok=False,
             warn=True,
             detail=(
-                f"{len(stale)} document(s) stranded in index_state='indexing' "
+                f"{'at least ' if f.stale_capped else ''}{f.stale_total} document(s) stranded in index_state='indexing' "
                 f"beyond {_STALE_INDEXING_THRESHOLD_HOURS:.0f}h: {names}. A "
                 "normal re-index run now clears this automatically, even "
                 "when the document's content is unchanged (nexus-cp46b) — "
@@ -11968,11 +12173,12 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
     # scanned had nothing to say at all. Either way there is nothing this
     # check can assess — say so rather than render an all-clear it cannot
     # actually support.
-    return [HealthResult(
-        label=label, ok=True,
-        detail="skipped (engine does not report index_state — predates "
-               "the index-run fence)",
-    )]
+    if f.not_reported > 0:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="skipped (engine does not report index_state — predates the index-run fence)",
+        )]
+    return [HealthResult(label=label, ok=True, detail="none (no catalog document)")]
 
 
 #: Collection prefixes that can hold PDF chunks. ``code__`` never does, and
@@ -12173,6 +12379,26 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
     return stubs, coverage
 
 
+_STUB_ROUTE_TIMED_OUT = object()
+
+
+def _pdf_stub_route() -> list[dict] | object | None:
+    """The engine's bounded stub-metadata count (``HttpCatalogClient.stub_metadata``), ``_STUB_ROUTE_TIMED_OUT`` when
+    its read timed out, or ``None`` (scan as before) for an engine without it or any failure to ask."""
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.catalog.http_catalog_client import STUB_METADATA_TIMED_OUT  # noqa: PLC0415 — deferred to avoid circular import
+
+        bounded = getattr(make_catalog_reader(), "stub_metadata", None)
+        answer = bounded() if callable(bounded) else None
+    except Exception as exc:  # noqa: BLE001 — an optional fast path; the scan is the answer of record
+        _log.debug("doctor_pdf_stub_route_failed", error=str(exc))
+        return None
+    if answer is STUB_METADATA_TIMED_OUT:
+        return _STUB_ROUTE_TIMED_OUT
+    return answer if isinstance(answer, list) else None
+
+
 def _check_pdf_stub_metadata() -> list[HealthResult]:
     """Count PDF chunks whose extraction metadata never landed
     (nexus-rte90, indexing-brittleness P0.6; the defect is nexus-w94eo).
@@ -12214,6 +12440,27 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             detail="not applicable (no knowledge or docs collections)",
         )]
 
+    # F30 (nexus-f3yqd.6): an engine with the bounded route (0.1.189) counts every collection it lists in one read;
+    # only a collection it does not list is scanned. Without the route the scan runs as before.
+    route = _pdf_stub_route()
+    if route is _STUB_ROUTE_TIMED_OUT:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"NOT CHECKED: the engine answered 503 to its bounded read of the {len(names)} knowledge/docs "
+                "collection(s) (its statement bound, or the service unavailable); the next `nx doctor` asks again."
+            ),
+        )]
+    route_hits: list[dict] = []
+    route_timed_out: list[str] = []
+    names_to_scan = names
+    if isinstance(route, list):
+        listed = set(names)
+        route_hits = [r for r in route if r["collection"] in listed and not r.get("timed_out") and r["stub_chunks"] > 0]
+        route_timed_out = [r["collection"] for r in route if r["collection"] in listed and r.get("timed_out")]
+        covered = {r["collection"] for r in route}
+        names_to_scan = [n for n in names if n not in covered]
+
     from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — only this check fans out
 
     def _scan(name: str) -> tuple[str, dict[str, int] | None, _StubScanCoverage]:
@@ -12224,8 +12471,11 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             _log.debug("doctor_pdf_stub_metadata_collection_failed", collection=name, error=str(exc))
             return name, None, _StubScanCoverage()
 
-    with ThreadPoolExecutor(max_workers=_PDF_STUB_WORKERS) as pool:
-        scanned = list(pool.map(_scan, names))
+    if names_to_scan:
+        with ThreadPoolExecutor(max_workers=_PDF_STUB_WORKERS) as pool:
+            scanned = list(pool.map(_scan, names_to_scan))
+    else:
+        scanned = []
 
     unreadable = [n for n, found, _ in scanned if found is None]
     samples_over = [n for n, found, cover in scanned if found is not None and cover.samples_over]
@@ -12238,6 +12488,11 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
     }
 
     gaps = ""
+    if route_timed_out:
+        shown = ", ".join(route_timed_out[:5])
+        more = f" (+{len(route_timed_out) - 5} more)" if len(route_timed_out) > 5 else ""
+        gaps += (f" NOT CHECKED: the engine's bounded read did not finish in time for {len(route_timed_out)} "
+                 f"collection(s): {shown}{more}; the next `nx doctor` asks again.")
     if unreadable:
         shown = ", ".join(unreadable[:5])
         more = f" (+{len(unreadable) - 5} more)" if len(unreadable) > 5 else ""
@@ -12266,11 +12521,39 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             "sample skips is not seen; `nx catalog backfill-meta` makes the scan exact."
         )
 
-    if stubs:
+    if stubs or route_hits:
         documents = {k: n for k, n in stubs.items() if not k[1].startswith(_PDF_STUB_NO_URI)}
         unowned = {k: n for k, n in stubs.items() if k[1].startswith(_PDF_STUB_NO_URI)}
         parts: list[str] = []
         fixes: list[str] = []
+        if route_hits:
+            total = sum(r["stub_chunks"] for r in route_hits)
+            at_least = any(r["capped"] for r in route_hits)
+            listing = "; ".join(
+                f"{r['collection']}: {r['stub_chunks']}{' or more' if r['capped'] else ''} chunk(s)"
+                + (f", e.g. {', '.join(r['examples'][:3])}" if r["examples"] else "")
+                for r in sorted(route_hits, key=lambda r: -r["stub_chunks"])[:_PDF_STUB_MAX_NAMED]
+            )
+            parts.append(
+                f"{'at least ' if at_least else ''}{total} PDF chunk(s) in {len(route_hits)} collection(s) still carry "
+                "the upload placeholder metadata (empty title, no extraction_method): the extraction enrichment "
+                "never landed, or a late write overwrote it (nexus-w94eo). Readers keyed on the chunk title skip "
+                f"them. {listing}."
+            )
+            fixes += [
+                "nx index pdf <path> --force        (file-backed document)",
+                "nx dt index --uuid <uuid> --force  (DEVONthink record)",
+                "nx enrich bib <collection>         (after the re-index)",
+            ]
+            if any(e.startswith(_PDF_STUB_NO_URI) for r in route_hits for e in r["examples"]):
+                parts.append(
+                    "An example named by content_hash belongs to a document registered without a source URI, so it "
+                    "cannot be named for a re-index (RDR-192 Step 5, nexus-wbfpw.10)."
+                )
+                fixes.append(
+                    "no source URI: find the owning document (nx catalog show) "
+                    "and update it with a file path or source URI"
+                )
         if documents:
             total = sum(documents.values())
             named = sorted(documents.items(), key=lambda kv: -kv[1])[:_PDF_STUB_MAX_NAMED]
@@ -12283,11 +12566,11 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
                 "write overwrote it (nexus-w94eo). Readers keyed on the chunk "
                 f"title skip them. {listing}{more}."
             )
-            fixes += [
+            fixes += [f for f in (
                 "nx index pdf <path> --force        (file-backed document)",
                 "nx dt index --uuid <uuid> --force  (DEVONthink record)",
                 "nx enrich bib <collection>         (after the re-index)",
-            ]
+            ) if f not in fixes]
         if unowned:
             named = sorted(unowned.items(), key=lambda kv: -kv[1])[:_PDF_STUB_MAX_NAMED]
             listing = "; ".join(f"{col}: {src} ({n})" for (col, src), n in named)
@@ -12311,7 +12594,7 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             detail=" ".join(parts) + gaps,
             fix_suggestions=fixes,
         )]
-    if unreadable or samples_over or stubs_over:
+    if route_timed_out or unreadable or samples_over or stubs_over:
         return [HealthResult(
             label=label,
             ok=False,
@@ -12328,147 +12611,88 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
     )]
 
 
-def _check_next_seq_drift(documents: list[Any] | _WalkFailed | None = None) -> list[HealthResult]:
-    """Name owners whose tumbler allocator has fallen BEHIND its own children
-    (nexus-0ehwe item 4).
+def _drifted_owners(
+    owners: list[dict], documents: list[Any], tombstoned: list[str] | tuple[str, ...] = (),
+) -> tuple[int, list[tuple[str, int, int]]]:
+    """``(owners checked, [(owner, next_seq, highest child)] drifted)``: the Python oracle for the rule the engine's
+    ``GET /v1/catalog/owners/next_seq_drift`` computes in SQL and ``next-seq-drift-cases.json`` holds it to
+    (nexus-0ehwe item 4, nexus-f3yqd.6). Pure: no catalog, no request.
 
-    THE WEDGE THIS SURFACES. ``registerDocument`` claims
-    ``catalog_owners.next_seq`` and inserts; the INSERT's only ON CONFLICT
-    arbiter is ``(tenant_id, source_uri)``, but the only unique key on
-    ``catalog_documents`` is ``(tenant_id, tumbler)`` — so a tumbler collision
-    has no arm and escapes as a bare 409. Pre-fix the counter's increment shared
-    the failing transaction and rolled back WITH it, making one drifted owner a
-    PERMANENT, TOTAL outage for that owner (nexus-pbawi, owner 1.12, fixed by
-    hand).
+    THE WEDGE THIS SURFACES. ``registerDocument`` claims ``catalog_owners.next_seq`` and inserts; the INSERT's only
+    ON CONFLICT arbiter is ``(tenant_id, source_uri)``, but the only unique key on ``catalog_documents`` is
+    ``(tenant_id, tumbler)``, so a tumbler collision has no arm and escapes as a bare 409. Pre-fix the counter's
+    increment shared the failing transaction and rolled back WITH it, making one drifted owner a PERMANENT, TOTAL
+    outage for that owner (nexus-pbawi, owner 1.12, fixed by hand). The engine now floors the claim past any drift,
+    so a drifted owner self-heals on its next registration; this row exists because self-healing is silent.
 
-    The engine now floors the claim past any drift, so a drifted owner
-    SELF-HEALS on its next registration rather than wedging. This check exists
-    because self-healing is silent: it reports which owners are ALREADY below
-    their high-water mark, so the blast radius is known rather than guessed, and
-    so an owner that never gets written to again does not sit drifted forever.
-
-    Counts TOMBSTONED children: the ``(tenant_id, tumbler)`` PK does not exclude
-    soft-deleted rows the way the partial ``source_uri`` index does, so a
-    deleted document's tumbler is still taken.
-
-    Read-only, per the RDR-185 rung shape. Degrades to a skip — a doctor check
-    must never crash the command it is diagnosing.
+    Counts TOMBSTONED children (*tombstoned*, their tumblers): the ``(tenant_id, tumbler)`` PK does not exclude
+    soft-deleted rows the way the partial ``source_uri`` index does, so a deleted document's tumbler is still taken.
     """
-    label = _NEXT_SEQ_LABEL
-    try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
-
-        cat = make_catalog_reader()
-        if cat is None:
-            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
-        # nexus-cw262 (round-3 critique, T2 21467 Significant-3): list_owners()
-        # defaults to excluding deactivated owners now that the flag exists —
-        # include_deactivated=True preserves this check's PRIOR coverage
-        # (every owner, always) rather than silently narrowing it. Mirrors
-        # CatalogRepository.sweepNextSeqDrift's own deliberate choice to keep
-        # covering deactivated owners: "a deactivated owner can still receive
-        # late-arriving writes via an explicit tumbler_prefix (e.g. ETL
-        # replay)" — next_seq drift-floor visibility is orthogonal to owner
-        # liveness, same as the engine-side sweep this check watches.
-        owners = cat.list_owners(include_deactivated=True)
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.debug("doctor_next_seq_check_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (catalog unavailable)")]
-
-    if not owners:
-        return [HealthResult(label=label, ok=True, detail="skipped (no owners)")]
-    if not any("next_seq" in o for o in owners):
-        # NON-VACUITY: an engine that predates nexus-0ehwe item 3 omits the
-        # field entirely, and every owner would then read as drift-free. Say so
-        # rather than render an all-clear this check cannot actually support.
-        return [HealthResult(
-            label=label, ok=True,
-            detail="skipped (engine does not report next_seq — needs the "
-                   "nexus-0ehwe engine change)",
-        )]
-
-    # ONE corpus pass for every owner at once. This loop called
-    # _highest_child_seq (a full all_documents walk) PER OWNER — 65 owners x
-    # ~22k documents = ~1.4M records over the managed API per doctor run,
-    # measured at 218s of a 224s doctor (nexus-ohxzu). The max-seq for every
-    # prefix falls out of a single walk.
-    # One shared walk serves all owners, which also means one mid-walk
-    # failure would blank drift visibility for EVERY owner (the old
-    # per-owner walks failed independently). Retry once before conceding,
-    # and say so at WARNING — a check with a total-outage history
-    # (nexus-pbawi) must not vanish at debug level.
-    highs: dict[str, int] | None = None
-    # The doctor run's shared walk (*documents*) was already retried by _walk_documents_for_doctor, and a
-    # walk that failed there is not repeated here; called alone, the row walks and retries as before.
-    for attempt in (1, 2):
-        try:
-            highs = _highest_child_seqs(cat, documents)
-            break
-        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-            _log.warning(
-                "doctor_next_seq_scan_failed", attempt=attempt, error=str(exc),
-            )
-            if documents is not None:
-                break  # a shared list, or a shared walk that failed, does not change on a retry
-    if highs is None:
-        return [HealthResult(
-            label=label, ok=True,
-            detail="skipped (corpus scan failed twice — drift not assessed "
-                   "for ANY owner this run)",
-        )]
-    # nexus-f3yqd.6: tombstoned children count, as the docstring says and the engine's sweep does.
-    trash = _tombstoned_tumblers(cat)
-    for tumbler in trash or []:
+    highs = _highest_child_seqs(documents)
+    for tumbler in tombstoned:
         prefix, dot, tail = tumbler.rpartition(".")
         if dot and tail.isdigit() and int(tail) > highs.get(prefix, 0):
             highs[prefix] = int(tail)
-    unread = "" if trash is not None else "; tombstoned children not read, so drift a deleted child causes is not seen"
-
     drifted: list[tuple[str, int, int]] = []
     checked = 0
     for owner in owners:
         prefix = str(owner.get("tumbler_prefix", ""))
         if not prefix or "next_seq" not in owner:
             continue
-        try:
-            next_seq = int(owner.get("next_seq") or 0)
-            high = highs.get(prefix, 0)
-        except Exception as exc:  # noqa: BLE001 — one unreadable owner must not end the sweep
-            _log.debug("doctor_next_seq_owner_skipped", owner=prefix, error=str(exc))
-            continue
         checked += 1
-        # STRICTLY less-than. ``next_seq`` holds the LAST CLAIMED sequence, not
-        # the next one to hand out: CatalogRepository.claimNextSeq computes
-        # ``claim = max(next_seq, high_water) + 1`` and stores ``claim``, so
-        # after every successful registration ``next_seq == highest child`` by
-        # construction. Equality is the healthy steady state of every owner
-        # that has ever been written to; only a counter that has fallen BELOW
-        # its own high-water mark is drift, which is what this docstring says
-        # and what the engine's own ``next_seq_drift_healed`` log keys on
-        # (it fires when ``claim != next_seq + 1``, i.e. high_water > next_seq).
-        #
-        # This was ``<=`` (nexus-k5sdi), which flagged every healthy owner. It
-        # went unnoticed because the check skipped entirely against engines that
-        # did not report next_seq, and no test covered the equality boundary.
+        next_seq = int(owner.get("next_seq") or 0)
+        high = highs.get(prefix, 0)
+        # STRICTLY less-than. ``next_seq`` holds the LAST CLAIMED sequence, not the next one to hand out:
+        # CatalogRepository.claimNextSeq computes ``claim = max(next_seq, high_water) + 1`` and stores ``claim``, so
+        # after every successful registration ``next_seq == highest child`` by construction. Equality is the
+        # healthy steady state of every owner that has ever been written to; only a counter that has fallen BELOW
+        # its own high-water mark is drift, which is what the engine's own ``next_seq_drift_healed`` log keys on
+        # (it fires when ``claim != next_seq + 1``, i.e. high_water > next_seq). This was ``<=`` (nexus-k5sdi),
+        # which flagged every healthy owner; no test covered the equality boundary.
         if high and next_seq < high:
             drifted.append((prefix, next_seq, high))
+    return checked, drifted
 
-    if checked == 0:
-        return [HealthResult(label=label, ok=True, detail="skipped (no owner was readable)")]
-    if not drifted:
+
+def _next_seq_drift_rows_over(
+    owners: list[dict], documents: list[Any], tombstoned: list[str] | tuple[str, ...] = (),
+) -> list[HealthResult]:
+    """The oracle's allocator-drift row: :func:`_drifted_owners` rendered by :func:`_next_seq_drift_rows`, the
+    function the route-fed row renders through."""
+    if owners and not any("next_seq" in o for o in owners):
+        # NON-VACUITY: an engine that predates nexus-0ehwe item 3 omits the field entirely, and every owner would then
+        # read as drift-free. Say so rather than render an all-clear this row cannot support.
         return [HealthResult(
-            label=label, ok=True, detail=f"none ({checked} owner(s) checked{unread})",
+            label=_NEXT_SEQ_LABEL, ok=True,
+            detail="skipped (engine does not report next_seq — needs the nexus-0ehwe engine change)",
+        )]
+    checked, drifted = _drifted_owners(owners, documents, tombstoned)
+    return _next_seq_drift_rows(_NEXT_SEQ_LABEL, checked=checked, drifted=drifted, drifted_total=len(drifted))
+
+
+def _next_seq_drift_rows(
+    label: str, *, checked: int, drifted: list[tuple[str, int, int]], drifted_total: int,
+) -> list[HealthResult]:
+    """The allocator-drift row from its numbers: *checked* owners, *drifted* the ``(owner, next_seq, highest child)``
+    it names and *drifted_total* how many owners drifted (more than it names when the engine's census was capped)."""
+    if checked == 0:
+        return [HealthResult(label=label, ok=True, detail="skipped (no owners)")]
+    if not drifted_total:
+        return [HealthResult(
+            label=label, ok=True, detail=f"none ({checked} owner(s) checked)",
         )]
 
     names = "; ".join(
         f"{p} (next_seq={ns}, highest child={hi})" for p, ns, hi in drifted
     )
+    if drifted_total > len(drifted):
+        names += f"; +{drifted_total - len(drifted)} more"
     return [HealthResult(
         label=label,
         ok=False,
         warn=True,
         detail=(
-            f"{len(drifted)} owner(s) whose allocator is at or below their "
+            f"{drifted_total} owner(s) whose allocator is at or below their "
             f"highest existing tumbler: {names}. The engine floors past this on "
             "the next registration, so these self-heal when next written to."
         ),
@@ -12478,102 +12702,54 @@ def _check_next_seq_drift(documents: list[Any] | _WalkFailed | None = None) -> l
     )]
 
 
-class _WalkFailed:
-    """Passed to the document-list rows when the doctor run's one catalog walk failed, so no row walks again."""
+def _failed_hidden_rows_over(documents: list[Any], cat: Any) -> list[HealthResult]:
+    """The oracle's failed-runs row over *documents*: the failed ones (``index_state='failed'``) whose stored chunks
+    have no manifest owner (nexus-0ntxj, nexus-f3yqd.6).
 
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return "<catalog walk failed>"
+    An index run upserts chunks before their manifest rows. When it fails between the two, the chunks stay stored
+    with no owner, and engine v0.1.137's live(c) hides them from every read (measured 2026-09-28, shakeout 7.64.1:
+    FootPrintRAGVA 1.82.146/147, 395 chunks, repaired by hand with ``nx catalog reconcile``). Since RDR-223 every
+    writer sends a chunk with its owner row, so a failed run no longer leaves ownerless chunks; this row finds what
+    remains: a failed document written before the combined write, or by a client older than it. It covers documents
+    with no manifest yet (a failed first run); a failed re-index keeps its old, readable manifest and is not counted.
 
-
-#: The shared walk failed (twice): each row degrades to a "skipped" row instead of re-walking a catalog
-#: that just failed to list (a re-walk from each of three rows is the load that saturated the edge).
-_WALK_FAILED = _WalkFailed()
-
-
-def _doc_list(cat: Any, documents: list[Any] | _WalkFailed | None) -> Any:
-    """The document list a row reads: the run's shared walk when given, its own walk when called alone
-    (``documents is None``), and a raise (each row's handler reports "skipped") when the shared walk failed."""
-    if documents is _WALK_FAILED:
-        raise RuntimeError("the catalog walk failed earlier in this doctor run")
-    return documents if documents is not None else cat.all_documents(limit=0)
-
-
-def _walk_documents_for_doctor() -> list | None:
-    """Every catalog document, walked ONCE per doctor run for the rows that read the whole list (stale
-    index-run fences, failed runs with hidden chunks, tumbler allocator drift), or ``None`` when the walk
-    cannot run (``run_health_checks`` then hands the rows :data:`_WALK_FAILED`, so none walks again).
-
-    One walk is 44 paged requests on a 43.7k-document tenant; three rows each walking were three times
-    that, plus the upgrade ladder's own scan (shakedown 7.94.0 class A, nexus-mq980). A mid-walk failure
-    blanks all three rows, so it is retried once and said at WARNING, as the drift row did when it
-    walked alone (nexus-pbawi).
+    Runs the shared heal core in dry-run mode over the failed documents, so the count is the number of documents
+    ``nx catalog reconcile`` would repair: ``heal_manifest_gaps(dry_run=True).reconciled``, the number the engine's
+    ``failed_hidden.count`` equals (``index-run-census-cases.json`` holds the SQL to it). ``nx doctor`` reads the
+    engine's census instead of running this, so it runs only where a test holds the engine's rule to the heal's.
     """
-    try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: manifest_heal imports the indexer
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
 
-        cat = make_catalog_reader()
-    except Exception as exc:  # noqa: BLE001 — best-effort: each row degrades on its own
-        _log.debug("doctor_document_walk_failed", error=str(exc))
-        return None
-    if cat is None:
-        return None
-    for attempt in (1, 2):
-        try:
-            return list(cat.all_documents(limit=0))
-        except Exception as exc:  # noqa: BLE001 — best-effort: each row degrades on its own
-            _log.warning("doctor_document_walk_failed", attempt=attempt, error=str(exc))
-    return None
+    failed = [e for e in documents if getattr(e, "index_state", None) == "failed"]
+    if not failed:
+        return _failed_hidden_rows(_HIDDEN_CHUNKS_LABEL, failed=0, hidden=0, capped=False)
+    result = heal_manifest_gaps(failed, cat, make_t3, None, dry_run=True)
+    return _failed_hidden_rows(_HIDDEN_CHUNKS_LABEL, failed=len(failed), hidden=result.reconciled, capped=False)
 
 
-def _check_failed_runs_hidden_chunks(documents: list[Any] | _WalkFailed | None = None) -> list[HealthResult]:
-    """Name failed documents whose stored chunks have no manifest owner
-    (nexus-0ntxj).
-
-    An index run upserts chunks before their manifest rows. When it fails
-    between the two, the chunks stay stored with no owner, and engine
-    v0.1.137's live(c) hides them from every read. Measured 2026-09-28
-    (shakeout 7.64.1): FootPrintRAGVA 1.82.146/147, 395 chunks, repaired
-    by hand with ``nx catalog reconcile``. Since RDR-223 every writer sends a chunk with its
-    owner row, so a failed run no longer leaves ownerless chunks and ``_fence_fail`` no longer heals
-    (the heal was retired, nexus-z0o2p.35); this row finds what remains: a failed document written
-    before the combined write, or by a client older than it. Like the old heal, it covers documents
-    with no manifest yet (a failed first run); a failed re-index keeps its old, readable manifest
-    and is not counted.
-
-    Walks the corpus for ``index_state='failed'`` documents, then runs the
-    shared heal core in dry-run mode over just those, so the count is the
-    number of documents ``nx catalog reconcile`` would repair. Read-only;
-    degrades to a skip.
-    """
-    label = _HIDDEN_CHUNKS_LABEL
-    try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
-        from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: manifest_heal imports the indexer
-        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
-
-        cat = make_catalog_reader()
-        if cat is None:
-            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
-        failed = [
-            e for e in _doc_list(cat, documents)
-            if getattr(e, "index_state", None) == "failed"
-        ]
-        if not failed:
-            return [HealthResult(label=label, ok=True, detail="not applicable (no failed index runs)")]
-        result = heal_manifest_gaps(failed, cat, make_t3, None, dry_run=True)
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.debug("doctor_failed_runs_hidden_chunks_check_failed", error=str(exc))
-        return [HealthResult(label=label, ok=True, detail="skipped (catalog or T3 unavailable)")]
-
-    if not result.reconciled:
+def _failed_hidden_rows(label: str, *, failed: int, hidden: int, capped: bool) -> list[HealthResult]:
+    """The failed-runs row from its two numbers: *failed* documents in ``index_state='failed'`` and *hidden*, how
+    many of them ``heal_manifest_gaps(dry_run=True)`` would rebuild (``reconciled``). *capped* is the engine census's:
+    it examined only *failed* of the failed documents (which ones is the planner's: the query has no ORDER BY), so
+    *hidden* is a floor and zero is not "none"."""
+    if failed == 0:
+        return [HealthResult(label=label, ok=True, detail="not applicable (no failed index runs)")]
+    if not hidden:
+        if capped:
+            return [HealthResult(
+                label=label, ok=True, skipped=True,
+                detail=(f"not fully checked: the engine examined {failed} of the failed documents (it has no order, so "
+                        "which ones is its own), none with stored chunks hidden, and there are more it did not examine"),
+            )]
         return [HealthResult(
             label=label, ok=True,
-            detail=f"none ({len(failed)} failed document(s), none with stored chunks hidden)",
+            detail=f"none ({failed} failed document(s), none with stored chunks hidden)",
         )]
     return [HealthResult(
         label=label, ok=False, warn=True,
         detail=(
-            f"{result.reconciled} of {len(failed)} failed document(s) have "
+            f"{'at least ' if capped else ''}{hidden} of {failed}{'+' if capped else ''} failed document(s) have "
             "chunks stored with no manifest owner, so every read hides them"
         ),
         fix_suggestions=[
@@ -12583,48 +12759,11 @@ def _check_failed_runs_hidden_chunks(documents: list[Any] | _WalkFailed | None =
     )]
 
 
-#: Page size for the tombstone read in :func:`_tombstoned_tumblers`.
-_TRASH_PAGE = 500
-
-
-def _tombstoned_tumblers(cat: Any) -> list[str] | None:
-    """Every tombstoned document's tumbler (``GET /trash``, paged), or ``None`` when it cannot be read.
-
-    The live walk filters ``deleted_at IS NULL``, but a tombstoned tumbler is still taken (the unique key is
-    ``(tenant_id, tumbler)``) and the engine's ``highestChildSeq`` counts it (nexus-f3yqd.6)."""
-    tumblers: list[str] = []
-    seen: set[str] = set()
-    offset = 0
-    try:
-        while True:
-            page = cat.list_trash(limit=_TRASH_PAGE, offset=offset)
-            if not isinstance(page, list):
-                return None
-            batch = [str(d.get("tumbler", "") or "") for d in page if isinstance(d, dict)]
-            # A short page ends it; so does an empty one, or a repeat of the last page's first row (an engine
-            # that ignored ``offset`` would otherwise loop for ever).
-            if not batch or (tumblers and batch[0] in seen):
-                return tumblers
-            tumblers.extend(batch)
-            seen.update(batch)
-            if len(page) < _TRASH_PAGE:
-                return tumblers
-            offset += len(page)
-    except Exception as exc:  # noqa: BLE001 — an unreadable trash narrows the row, never crashes it
-        _log.warning("doctor_next_seq_trash_unread", error=str(exc))
-        return None
-
-
-def _highest_child_seqs(cat: Any, documents: list[Any] | _WalkFailed | None = None) -> dict[str, int]:
-    """Highest numeric child sequence per owner prefix, tombstones INCLUDED.
-
-    One ``all_documents`` walk for ALL owners, or none when *documents* (the doctor run's shared walk) is given. The predecessor
-    (``_highest_child_seq(cat, prefix)``) re-walked the full corpus per
-    owner — O(owners x documents) over the managed API (nexus-ohxzu:
-    218s of a 224s doctor on 65 owners x ~22k docs).
-    """
+def _highest_child_seqs(documents: list[Any]) -> dict[str, int]:
+    """Highest numeric child sequence per owner prefix among *documents* (a child is ``<prefix>.<digits>``; a deeper
+    address and a non-digit tail are not children)."""
     best: dict[str, int] = {}
-    for entry in _doc_list(cat, documents):
+    for entry in documents:
         tumbler = str(getattr(entry, "tumbler", "") or "")
         prefix, dot, tail = tumbler.rpartition(".")
         if not dot or not tail.isdigit():
@@ -12724,7 +12863,7 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
     from ``topic_assignments`` and self-heals on the engine's next restart.
     This check exists because that healing is SILENT until the operator
     restarts: it names the blast radius so it is known rather than guessed,
-    the same framing as :func:`_check_next_seq_drift`. The remedy this check
+    the same framing as :func:`_drifted_owners`. The remedy this check
     names is repeatable and does not require a restart: `nx taxonomy audit
     --fix-doc-count` calls the SAME engine-side recount on demand (`--yes`
     to apply, dry-run by default) — useful when drift reappears from a fresh
@@ -12735,7 +12874,7 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
     Critical/Important finding on the prior version of this check, which
     looped one HTTP GET per topic via ``count_assignments`` against an
     unbounded ``get_all_topics()``: the exact N+1-per-item anti-pattern
-    :func:`_check_next_seq_drift`'s own header documents as a past incident,
+    :func:`_drifted_owners`'s own header documents as a past incident,
     "65 owners x ~22k documents ... measured at 218s of a 224s doctor",
     nexus-ohxzu). This check now calls
     :meth:`HttpTaxonomyStore.get_doc_count_drift` exactly ONCE — the engine
@@ -12749,7 +12888,7 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
     connectivity failure, an empty drift set, or a pre-route engine (the
     ``/topics/doc_count_drift`` route the check depends on) — a pre-route
     engine must report the row as UNREAD, never clean (mirrors
-    :func:`_check_next_seq_drift`'s own next_seq-absent skip). A doctor check
+    :func:`_drifted_owners`'s own next_seq-absent skip). A doctor check
     must never crash the command it is diagnosing.
     """
     import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
@@ -13082,25 +13221,170 @@ _HIDDEN_CHUNKS_LABEL = "failed index runs with hidden chunks"
 _NEXT_SEQ_LABEL = "tumbler allocator drift"
 
 
-def _index_run_rows_not_checked() -> list[HealthResult]:
-    """The default sweep's index-run rows (F30, nexus-f3yqd.6): marked not checked (``[ ]``), never a pass or
-    a warning, so a fresh install's doctor stays clean, and each names the flag that runs it."""
-    detail = ("not checked in the default sweep (it reads every catalog document); "
-              "run `nx doctor --check-index-runs`")
-    return [HealthResult(label=label, ok=True, detail=detail, skipped=True)
-            for label in (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL, _NEXT_SEQ_LABEL)]
+def _not_checked_row(label: str, why: str, *, retry: bool = True) -> HealthResult:
+    """A row the engine's census could not answer: not checked (``[ ]``), never a pass or a warning."""
+    return HealthResult(label=label, ok=True, skipped=True,
+                        detail=f"not checked: {why}" + ("; the next `nx doctor` asks again." if retry else ""))
+
+
+_INDEX_RUN_LABELS = (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL, _NEXT_SEQ_LABEL)
+#: Why the rows are not checked when the reader answers its /version without both census flags. It says only what is
+#: known: an older engine and a public edge that has not allowlisted the flags look the same from here. Retrying
+#: changes nothing until the engine (or the edge's allowlist) does.
+_CENSUS_NOT_ADVERTISED = ("this engine's /version does not advertise the census routes (engine 0.1.189 or later; "
+                          "on the managed service, also the edge's /version allowlist)")
+#: The engine echoed a threshold or floor that is not the client's (``INDEX_RUN_CENSUS_RULES_DIFFER``).
+_CENSUS_RULES_DIFFER = ("the engine judges stale fences by a different threshold or floor than this client "
+                        "(engine and client from different releases)")
+#: A reader that does not read the routes at all (not the HTTP catalog client).
+_CENSUS_READER_CANNOT = "this catalog reader does not read the census routes"
+#: The /version probe itself failed, which says nothing about the engine: asking again can answer.
+_CENSUS_PROBE_FAILED = "the engine's /version could not be read"
+
+
+_CENSUS_UNANSWERED = ("the engine did not answer its bounded census read (an engine without the route, a public edge that "
+                      "does not list it, an error or a timeout)")
+
+
+def _census_instant(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _stale_fence_rows_from_census(cat: Any, label: str, census: dict) -> list[HealthResult]:
+    """The stale-fence row from the engine's ``stale`` and ``fence`` buckets (``HttpCatalogClient.index_run_census``),
+    rendered by :func:`_stale_fence_rows`, the function the oracle's row renders through. A bucket that timed out is
+    not checked: the other bucket's findings still show, and the row never says "none" for what was not read."""
+    stale, fence = census["stale"], census["fence"]
+    stale_out, fence_out = bool(stale.get("timed_out")), bool(fence.get("timed_out"))
+    if stale_out and fence_out:
+        return [_not_checked_row(label, "the engine's bounded reads of the stale fences and the unstamped documents "
+                                        "did not finish in time")]
+    shown: list[tuple[str, str, bool]] = []
+    post_anchor: list[tuple[str, datetime]] = []
+    prefixes: dict[str, str] = {}
+    files: dict[str, str] = {}
+    anchor: datetime | None = None
+    if not stale_out:
+        shown = [(e["source_uri"] or e["tumbler"] or "?", f"{e['age_s'] / 3600.0:.1f}h", e["note"])
+                 for e in stale["examples"]]
+    if not fence_out:
+        if fence["anchor"]["kind"]:
+            anchor = _census_instant(fence["anchor"]["at"])
+        for e in fence["post_anchor"]["examples"]:
+            ident = e["source_uri"] or e["tumbler"] or "?"
+            post_anchor.append((ident, _census_instant(e["indexed_at"])))
+            prefixes[ident] = ".".join(e["tumbler"].split(".")[:2])
+            files[ident] = e["file_path"] or ""
+    facts = _FenceFacts(
+        stale_total=0 if stale_out else stale["count"], stale_capped=not stale_out and stale["capped"],
+        stale_shown=shown, stale_notes=0 if stale_out else stale["notes"],
+        checked=0 if fence_out else fence["checked"], reported_null=0 if fence_out else fence["reported_null"],
+        undated_reported_null=0 if fence_out else fence["undated_reported_null"],
+        candidates_total=0 if fence_out else fence["floor_candidates"], candidates_truncated=0,
+        post_anchor=post_anchor, post_anchor_count=0 if fence_out else fence["post_anchor"]["count"],
+        candidate_prefix=prefixes, candidate_file=files,
+        anchor=anchor, proven=not fence_out and fence["anchor"]["kind"] == "proven", run_ids_dropped=0,
+        not_reported=0,
+    )
+    rows = _stale_fence_rows(cat, label, facts)
+    if not (stale_out or fence_out):
+        return rows
+    rows = [r for r in rows if not r.ok]  # only findings: an ok summary would say "none" for a bucket not read
+    rows.append(_not_checked_row(
+        label, "the engine's bounded read of the " + ("stale fences" if stale_out else "unstamped documents")
+        + " did not finish in time"))
+    return rows
+
+
+def _failed_hidden_rows_from_census(label: str, bucket: dict) -> list[HealthResult]:
+    """The failed-runs row from the engine's ``failed_hidden`` bucket: ``count`` is what the heal's dry run would
+    rebuild. A capped bucket examined only the first ``failed`` failed documents, so its zero is "not fully checked"."""
+    if bucket.get("timed_out"):
+        return [_not_checked_row(label, "the engine's bounded read of the failed documents did not finish in time")]
+    return _failed_hidden_rows(label, failed=bucket["failed"]["count"], hidden=bucket["count"],
+                               capped=bucket["failed"]["capped"] or bucket["capped"])
+
+
+def _next_seq_drift_rows_from_route(label: str, drift: dict) -> list[HealthResult]:
+    """The allocator-drift row from the engine's read-only drift list (``HttpCatalogClient.next_seq_drift``)."""
+    return _next_seq_drift_rows(
+        label, checked=drift["checked"], drifted_total=drift["drifted"],
+        drifted=[(e["owner"], e["next_seq"], e["highest_child_seq"]) for e in drift["examples"]])
+
+
+def _check_index_run_routes() -> list[HealthResult]:
+    """The three index-run rows (stale index-run fences, failed runs with hidden chunks, tumbler allocator drift) read
+    from the engine's census routes (engine 0.1.189, nexus-f3yqd.6): two bounded requests, no catalog walk. Always
+    returns the three labels (the stale-fence row may carry more than one row), and never raises.
+
+    An engine that does not advertise both ``catalog_index_run_census_supported`` and
+    ``catalog_next_seq_drift_read_supported`` (an older engine, or a public edge whose ``/version`` allowlist does
+    not list them) gets three not-checked rows that say only that its /version does not advertise the routes (engine
+    0.1.189 or later; on the managed service, also the edge's allowlist); a /version probe that itself failed gets
+    rows that say so and that the next run asks again. Every way the engine
+    cannot say with the flags set (a 404 or 503, a bucket that timed out, a malformed body, a failed request, no
+    catalog reader) is likewise a not-checked row: ok and skipped, never a warning, never "none"."""
+    def _all_not_checked(why: str, *, retry: bool = True) -> list[HealthResult]:
+        return [_not_checked_row(label, why, retry=retry) for label in _INDEX_RUN_LABELS]
+
+    try:
+        from nexus.catalog.http_catalog_client import (  # noqa: PLC0415 — deferred to avoid circular import
+            INDEX_RUN_CENSUS_MAX_LIMIT,
+            INDEX_RUN_CENSUS_RULES_DIFFER,
+        )
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return _all_not_checked("no catalog reader")
+        supported = getattr(cat, "index_run_routes_supported", None)
+        if not callable(supported):
+            return _all_not_checked(_CENSUS_READER_CANNOT, retry=False)
+        if supported() is not True:
+            probe_failed = getattr(cat, "version_probe_failed", None)
+            if callable(probe_failed) and probe_failed() is True:
+                return _all_not_checked(_CENSUS_PROBE_FAILED)
+            return _all_not_checked(_CENSUS_NOT_ADVERTISED, retry=False)
+    except Exception as exc:  # noqa: BLE001 — a row that cannot be read is not checked, never a crash
+        _log.debug("doctor_index_run_routes_unavailable", error=str(exc))
+        return _all_not_checked("the catalog reader could not be built")
+
+    def _ask(method: str) -> Any:
+        try:
+            answer = getattr(cat, method)(limit=INDEX_RUN_CENSUS_MAX_LIMIT)
+        except Exception as exc:  # noqa: BLE001 — "cannot say" is a not-checked row, never a crash
+            _log.debug("doctor_index_run_route_failed", method=method, error=str(exc))
+            return None
+        if answer is INDEX_RUN_CENSUS_RULES_DIFFER:
+            return answer
+        return answer if isinstance(answer, dict) else None
+
+    census, drift = _ask("index_run_census"), _ask("next_seq_drift")
+    if census is INDEX_RUN_CENSUS_RULES_DIFFER:
+        # No bucket of it is read, so the stale-fence and failed-runs rows say why; the drift list has no such rule.
+        rows = [_not_checked_row(label, _CENSUS_RULES_DIFFER, retry=False) for label in (_STALE_FENCES_LABEL, _HIDDEN_CHUNKS_LABEL)]
+        census = None
+    else:
+        rows = []
+    try:
+        if census is not None:
+            rows += _stale_fence_rows_from_census(cat, _STALE_FENCES_LABEL, census)
+            rows += _failed_hidden_rows_from_census(_HIDDEN_CHUNKS_LABEL, census["failed_hidden"])
+        elif not rows:
+            rows += [_not_checked_row(_STALE_FENCES_LABEL, _CENSUS_UNANSWERED),
+                     _not_checked_row(_HIDDEN_CHUNKS_LABEL, _CENSUS_UNANSWERED)]
+        rows += (_next_seq_drift_rows_from_route(_NEXT_SEQ_LABEL, drift) if drift
+                 else [_not_checked_row(_NEXT_SEQ_LABEL, _CENSUS_UNANSWERED.replace("census", "next_seq drift"))])
+    except Exception as exc:  # noqa: BLE001 — a body the client accepted but the row cannot render is not a crash
+        _log.warning("doctor_index_run_routes_render_failed", error=str(exc))
+        return _all_not_checked(_CENSUS_UNANSWERED)
+    return rows
 
 
 def run_index_run_checks() -> list[HealthResult]:
-    """``nx doctor --check-index-runs``: the three rows over one catalog walk."""
-    documents: list[Any] | _WalkFailed | None = _walk_documents_for_doctor()
-    if documents is None:
-        documents = _WALK_FAILED
-    return [
-        *_check_stale_indexing_runs(documents),
-        *_check_failed_runs_hidden_chunks(documents),
-        *_check_next_seq_drift(documents),
-    ]
+    """``nx doctor --check-index-runs``: the three index-run rows alone, read from the engine's census routes as the
+    default sweep reads them (:func:`_check_index_run_routes`; engine 0.1.189 or later)."""
+    return _check_index_run_routes()
 
 
 def run_health_checks(
@@ -13112,9 +13396,10 @@ def run_health_checks(
 ) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
-    The three rows that read every catalog document (stale index-run fences, failed runs with hidden chunks,
-    allocator drift; one walk, 22 s measured on a laptop tenant) report "not checked" here and name
-    ``nx doctor --check-index-runs``, which runs them through :func:`run_index_run_checks` (F30, nexus-f3yqd.6).
+    The three index-run rows (stale index-run fences, failed runs with hidden chunks, allocator drift) are read from
+    the engine's two census routes: two bounded requests, no catalog walk (the walk took 22 s on a laptop tenant;
+    :func:`_check_index_run_routes`, F30, nexus-f3yqd.6). An engine before 0.1.189 gets three not-checked rows that
+    say so.
 
     ``git_hooks_scope``: forwarded to :func:`_check_git_hooks` (nexus-jds59)
     to restrict the git-hooks stanza-drift walk to repos at or under the
@@ -13192,6 +13477,8 @@ def run_health_checks(
     # explicitly, EXPLICITLY NOT RETIRED (RDR-191 Decision item 4's own
     # carve-out; see the check's own docstring).
     results.extend(_step("_check_manifest_null_collection", lambda: _check_manifest_null_collection()))
+    # GH #1611: documents whose manifest names chunks outside their physical_collection; one bounded engine read.
+    results.extend(_step("check_manifest_foreign_collection", lambda: _check_manifest_foreign_collection()))
     # RDR-180 (bead nexus-du2dw): managed/cloud-mode chash width-conformance
     # coverage via the engine route — the local nexus_diag psql probe inside
     # _check_migration_state (above) is LOCAL-ONLY by design (nexus-y3wuu)
@@ -13207,25 +13494,22 @@ def run_health_checks(
     # nexus-5xn3k.6 (bead-text amendment): a document's fence never
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).
-    # nexus-0ntxj: one corpus walk feeds both index-run rows (the second
-    # row would otherwise add a walk; nexus-ft7eg tracks the others). A
-    # failed walk here passes None and each check walks, and degrades, alone.
-    # Shakedown 7.94.0 class A: the allocator-drift row below reads the same list, so ONE walk feeds all
-    # three rows (it walked on its own before).
-    # nexus-mjmjl: the corpus walk is the sweep's longest stretch on a big tenant; a named step.
-    # F30 (nexus-f3yqd.6): no catalog walk here; `nx doctor --check-index-runs` runs these rows.
-    not_checked = {r.label: r for r in _index_run_rows_not_checked()}
-    results.append(not_checked[_STALE_FENCES_LABEL])
+    # F30 (nexus-f3yqd.6): the three index-run rows come from the engine's two census routes (0.1.189), not from a
+    # walk of every catalog document (22 s on a laptop tenant); an engine without them leaves three not-checked rows.
+    index_run_rows: dict[str, list[HealthResult]] = {}
+    for row in _step("_check_index_run_routes", lambda: _check_index_run_routes()):
+        index_run_rows.setdefault(row.label, []).append(row)
+    results.extend(index_run_rows.get(_STALE_FENCES_LABEL, []))
     # nexus-0ntxj: a failed run's chunks stored with no manifest owner are
-    # hidden by live(c). Degrades internally.
-    results.append(not_checked[_HIDDEN_CHUNKS_LABEL])
+    # hidden by live(c).
+    results.extend(index_run_rows.get(_HIDDEN_CHUNKS_LABEL, []))
     # nexus-rte90: PDF chunks left with the upload placeholder metadata
     # (nexus-w94eo). Degrades internally.
     results.extend(_step("_check_pdf_stub_metadata", lambda: _check_pdf_stub_metadata()))
     # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
     # their own children. Self-healing is silent, so the blast radius must
     # be reportable rather than guessed.
-    results.append(not_checked[_NEXT_SEQ_LABEL])
+    results.extend(index_run_rows.get(_NEXT_SEQ_LABEL, []))
     # nexus-c0g6e (GH #1529): topics whose cached doc_count disagrees with
     # the real topic_assignments count (6.18.1-era import drift, predating
     # taxonomy-013's recompute triggers). Self-heals on the engine's next

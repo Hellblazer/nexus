@@ -691,11 +691,18 @@ def resolve_pdf_title(metadata: dict, pdf_path: Path, text: str | None) -> str:
     the stem (``papers/2512.11001.pdf`` -> ``"2512.11001"``) even though its
     markdown opens with ``# <title>``; passing the extracted text lets the
     H1 win when the PDF declares no title. Used by ``doc_indexer._pdf_chunks``
-    and the streaming post-pass in ``pipeline_stages``.
+    and the streaming post-pass in ``pipeline_stages``. :func:`pdf_title_source` also says which link answered.
     """
+    return pdf_title_source(metadata, pdf_path, text)[0]
+
+
+def pdf_title_source(metadata: dict, pdf_path: Path, text: str | None) -> tuple[str, str]:
+    """:func:`resolve_pdf_title`'s title and which link of the chain gave it: ``"metadata"``, ``"h1"`` or
+    ``"stem"`` (the filename fallback). The catalog hook needs the source because a real title can read
+    exactly like the title-cased stem (GH #1611), and only a ``"stem"`` title is a placeholder."""
     extracted = str(metadata.get("pdf_title") or "").strip()
     if extracted and not _pdf_title_is_placeholder(extracted, pdf_path):
-        return extracted
+        return extracted, "metadata"
     if text:
         for line in text.splitlines():
             stripped = line.strip()
@@ -703,9 +710,13 @@ def resolve_pdf_title(metadata: dict, pdf_path: Path, text: str | None) -> str:
                 # Only the FIRST H1 is a title candidate; a section-heading
                 # H1 means there is no title heading at all.
                 if _h1_is_section_heading(stripped[2:]):
-                    return derive_title(pdf_path, body=None)
+                    return derive_title(pdf_path, body=None), "stem"
                 break
-    return derive_title(pdf_path, body=text)
+    # derive_title reads the first non-empty H1 out of *body* when there is one (the document's own title),
+    # else falls to the normalised stem; the same rule decides the source here.
+    h1 = next((t for t in (ln.strip()[2:].strip() for ln in (text or "").splitlines() if ln.strip().startswith("# "))
+               if t), "")
+    return derive_title(pdf_path, body=text), ("h1" if h1 else "stem")
 
 
 def _path_glob_match(parts: tuple[str, ...], segs: list[str]) -> bool:

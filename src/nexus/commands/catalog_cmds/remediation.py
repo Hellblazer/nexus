@@ -460,7 +460,8 @@ def prune_stale_cmd(
     dry_run: bool,
     confirm: bool,
 ) -> None:
-    """Drop catalog entries whose ``file_path`` is absolute and missing on disk.
+    """Drop catalog entries whose file is missing on disk (an absolute ``file_path``, or a relative one under its
+    owner's repo root).
 
     Catalog-side counterpart to ``nx t3 prune-stale`` (#349). Pairs
     naturally with ``nx catalog remediate-paths --rdr-prefix-mode``: run

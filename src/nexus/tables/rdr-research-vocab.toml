@@ -1,6 +1,6 @@
 # RDR-240 Technical Design 7 (nexus-qo7ie.33): the vocabulary of an RDR research record.
 # A record's classification says how far the finding is established, and its
-# verification method says how it was checked. `nx rdr preamble rdr-research -- add`
+# verification method says how it was checked. `nx rdr` (the gate's assumption audit)
 # and the research_add procedure (src/nexus/procedures/research_add.lua, through
 # tables.get) both read this one table; it replaced two Python constants in
 # src/nexus/commands/rdr.py. Python reads it through nexus.tables.rdr_research_vocab.

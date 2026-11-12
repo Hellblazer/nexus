@@ -582,7 +582,7 @@ def engine(monkeypatch):
 
     monkeypatch.setattr(se, "_mixed_model_groups", {})
     monkeypatch.setattr(hvc, "_per_collection_absent_warned", False)
-    monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+    monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")  # opt-in route (nexus-tu8wp.3)
     cols = _cols("rdr", _BGE, 1)
     return _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols}), cols
 
@@ -967,7 +967,7 @@ def _make_hash_engine(monkeypatch, *, honour: bool):
 
     monkeypatch.setattr(se, "_mixed_model_groups", {})
     monkeypatch.setattr(hvc, "_per_collection_absent_warned", False)
-    monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+    monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")  # opt-in route (nexus-tu8wp.3)
     (col,) = _cols("rdr", _BGE, 1)
     fake = _FakeEngine(monkeypatch, {col: [(IN_A, 0.10), (IN_B, 0.11), (OUT, 0.12)]})
     if honour:

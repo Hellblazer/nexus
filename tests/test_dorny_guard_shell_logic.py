@@ -204,10 +204,11 @@ class TestServiceCiChangesGuard:
     this test covers the guard's own logic regardless)."""
 
     @staticmethod
-    def _script(service: str) -> str:
+    def _script(service: str, same: str = "false") -> str:
         doc = _load(SERVICE_CI_YML)
         step = _find_step(doc, "changes", "Report the decision")
-        return _render(step["run"], {"steps.filter.outputs.service": service})
+        return _render(step["run"], {"steps.filter.outputs.service": service,
+                                     "steps.release_tag.outputs.same": same})
 
     @pytest.mark.parametrize("bad", MALFORMED_INPUTS)
     def test_rejects_malformed_service(self, bad: str) -> None:
@@ -232,6 +233,23 @@ class TestServiceCiChangesGuard:
             # is wired to (steps.decide.outputs.service) -- not merely
             # print a message and let the raw dorny value flow around it.
             assert _read_output(out).get("service") == good
+
+    @pytest.mark.parametrize("service", VALID_INPUTS)
+    def test_a_release_pr_at_the_pinned_tag_skips_the_suite(self, service: str) -> None:
+        """nexus-jh1f2 cut 6: service/ equal to the pinned engine tag publishes service=false."""
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "gh_output"
+            proc = _run(self._script(service, same="true"), github_output=out)
+            assert proc.returncode == 0, (proc.stdout, proc.stderr)
+            assert _read_output(out).get("service") == "false"
+
+    @pytest.mark.parametrize("bad", MALFORMED_INPUTS)
+    def test_rejects_a_malformed_release_tag_answer(self, bad: str) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "gh_output"
+            proc = _run(self._script("true", same=bad), github_output=out)
+            assert proc.returncode == 1, (bad, proc.stdout, proc.stderr)
+            assert "service" not in _read_output(out)
 
     def test_job_output_is_wired_to_the_validated_step_not_the_raw_filter(self) -> None:
         """Structural pin for the side-channel fix: `changes.outputs.service`

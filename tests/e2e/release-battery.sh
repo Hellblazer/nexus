@@ -8,7 +8,7 @@
 # plugins nexus-z7ddd):
 #   mvv    tests/e2e/fresh-install-mvv.sh                              the core install invariant
 #   pkgup  tests/e2e/migration-rehearsal/run.sh --package-upgrade    package-upgrade convergence
-#   lsg    tests/e2e/local-service-gate.sh                            the local-service gate
+#   lsg    NX_GATE_SMOKE_ONLY=1 tests/e2e/local-service-gate.sh       the local-service gate, smoke leg only (nexus-jh1f2)
 #   dual   tests/e2e/dual-embedder-gate.sh                            the keyed bge + Voyage engine (needs a key)
 #   resolve tests/e2e/constraints-resolve-gate.sh                     the shipped lock resolves on every supported
 #                                                                     target (uv pip compile, off-host; network)
@@ -58,8 +58,9 @@
 #   lockstep  tests/e2e/plugin-lockstep-tests.sh         the plugin/CLI lockstep tests
 # The closing line then names the mode, and a plugin-only run never prints a bare
 # "RELEASE BATTERY PASSED". The unit suite is not a leg here or in the full mode
-# (the release skill runs it serial to the battery); the lint bucket and the pin
-# tests are inside the preflight. --only and --plan compose.
+# (PR CI runs it on the release tree; the plugin-only lane also runs it by hand,
+# serial to the battery); the pin tests are inside the preflight and the lint
+# bucket runs in PR CI's test-lint (nexus-jh1f2 cut 3). --only and --plan compose.
 set -uo pipefail
 (( BASH_VERSINFO[0] >= 4 )) || { echo "bash >= 4 required (found $BASH_VERSION)" >&2; exit 2; }
 export NO_COLOR=1
@@ -96,6 +97,20 @@ if [ "$PLUGIN_ONLY" = 1 ]; then
     || { echo "--skip-preflight does not compose with --plugin-only: the preflight is the only full-tree gate this mode keeps" >&2; exit 2; }
   [[ "$PLUGIN_ONLY_BASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || { echo "--plugin-only wants the last client tag as vX.Y.Z (got '$PLUGIN_ONLY_BASE')" >&2; exit 2; }
+fi
+# --skip-preflight trusts an earlier preflight only when it passed on THIS HEAD with a clean tree
+# (nexus-jh1f2 review r1): release-preflight.sh writes the marker; any commit after it, or an
+# uncommitted change, means the preflight runs again (about three minutes since cut 3).
+if [ "$SKIP_PREFLIGHT" = 1 ] && [ "$PLAN_ONLY" != 1 ]; then
+  marker="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path release-preflight-verdict 2>/dev/null || true)"
+  head_now="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  dirty_now="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no 2>/dev/null || echo unknown)"
+  if [ -z "$marker" ] || [ ! -f "$marker" ] || ! grep -qx "head=$head_now" "$marker" \
+      || ! grep -qx "clean=yes" "$marker" || [ -n "$dirty_now" ]; then
+    echo "--skip-preflight: no passing preflight is recorded for HEAD ${head_now:-?} on a clean tree;" \
+      "run tests/e2e/release-preflight.sh on this commit first" >&2
+    exit 2
+  fi
 fi
 # >>> BEGIN moving-tree guard (nexus-57cvk) -- extracted verbatim by
 # tests/test_release_battery_refuses_moving_tree.py; keep both markers.
@@ -237,7 +252,9 @@ define_leg() {  # define_leg <name> <phase> <verdict-regex> <command...>
 [ "$SKIP_PREFLIGHT" = 1 ] || \
 define_leg preflight  serial "PREFLIGHT (PASSED|FAILED)"                 tests/e2e/release-preflight.sh
 # Group, longest first so the slots pack.
-define_leg lsg        group  "LOCAL-SERVICE GATE (PASSED|FAILED)"       tests/e2e/local-service-gate.sh
+# lsg runs smoke-only (nexus-jh1f2 cut 4): the integration pytest family runs in PR CI on the
+# release PR (every integration file, sharded x3) and in the nightly local-service gate.
+define_leg lsg        group  "LOCAL-SERVICE GATE (PASSED|FAILED)"       env NX_GATE_SMOKE_ONLY=1 tests/e2e/local-service-gate.sh
 define_leg pkgup      group  "PACKAGE-UPGRADE CONVERGENCE MVV (PASSED|FAILED)"   tests/e2e/migration-rehearsal/run.sh --package-upgrade
 define_leg mvv        group  "FRESH-INSTALL MVV (PASSED|FAILED)"        tests/e2e/fresh-install-mvv.sh
 # nexus-oc2bk (RDR-210 P5.2): keyed bge + Voyage engine, release battery and by hand only, never nightly (Sam, Q3).

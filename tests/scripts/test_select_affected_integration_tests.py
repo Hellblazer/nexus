@@ -258,12 +258,13 @@ def repo(tree: pathlib.Path) -> pathlib.Path:
     return tree
 
 
-def _run_step(repo: pathlib.Path, event: str, base: str) -> dict[str, str]:
+def _run_step(repo: pathlib.Path, event: str, base: str, base_ref: str = "develop") -> dict[str, str]:
     script = _render(
         {
             "github.event_name": event,
             "github.event.pull_request.base.sha": base,
             "github.event.before": base,
+            "github.base_ref": base_ref if event == "pull_request" else "",
         }
     )
     out = repo / ".gh_output"
@@ -279,6 +280,7 @@ def test_step_push_selects_importers(repo: pathlib.Path) -> None:
     (repo / "src/nexus/other.py").write_text("Y = 2\n")
     _commit_all(repo, "change")
     assert _run_step(repo, "push", before) == {
+        "integration_shards": "[1]",
         "integration_files": "tests/test_c_integration.py",
         "integration_any": "true",
     }
@@ -301,6 +303,7 @@ def test_step_doc_change_selects_nothing(repo: pathlib.Path) -> None:
     (repo / "docs/x.md").write_text("x\n")
     _commit_all(repo, "docs")
     assert _run_step(repo, "push", before) == {
+        "integration_shards": "[1]",
         "integration_files": "",
         "integration_any": "false",
     }
@@ -311,6 +314,27 @@ def test_step_unusable_base_selects_everything(repo: pathlib.Path, base: str) ->
     out = _run_step(repo, "push", base)
     assert out["integration_any"] == "true"
     assert out["integration_files"].split() == sel.select_all(repo)
+
+
+def test_step_a_release_pr_selects_everything_in_three_shards(repo: pathlib.Path) -> None:
+    """nexus-jh1f2 cut 4: a pull request into main runs the whole family, even for a doc-only diff."""
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "docs").mkdir()
+    (repo / "docs/x.md").write_text("x\n")
+    _commit_all(repo, "docs")
+    out = _run_step(repo, "pull_request", base, base_ref="main")
+    assert out["integration_shards"] == "[1,2,3]"
+    assert out["integration_any"] == "true"
+    assert out["integration_files"].split() == sel.select_all(repo)
+
+
+def test_step_a_pr_into_develop_keeps_the_diff_and_one_shard(repo: pathlib.Path) -> None:
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "docs").mkdir()
+    (repo / "docs/x.md").write_text("x\n")
+    _commit_all(repo, "docs")
+    out = _run_step(repo, "pull_request", base, base_ref="develop")
+    assert out == {"integration_shards": "[1]", "integration_files": "", "integration_any": "false"}
 
 
 def test_step_selector_change_selects_everything(repo: pathlib.Path) -> None:
@@ -350,6 +374,53 @@ def test_fanin_tolerates_skip_when_nothing_selected(result: str) -> None:
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
 
 
+@pytest.mark.parametrize("floor", ["failure", "skipped", "cancelled"])
+def test_fanin_fails_a_release_pr_whose_floor_did_not_pass(floor: str) -> None:
+    """nexus-jh1f2 cut 4 review r1: three shards need integration-release-floor green."""
+    proc = _run(_pytest_gate_script(**{
+        "needs.changes.outputs.integration_any": "true",
+        "needs.test-integration-affected.result": "success",
+        "needs.changes.outputs.integration_shards": "[1,2,3]",
+        "needs.integration-release-floor.result": floor,
+    }))
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "integration-release-floor" in proc.stdout + proc.stderr
+
+
+def test_fanin_passes_a_release_pr_whose_floor_passed() -> None:
+    proc = _run(_pytest_gate_script(**{
+        "needs.changes.outputs.integration_any": "true",
+        "needs.test-integration-affected.result": "success",
+        "needs.changes.outputs.integration_shards": "[1,2,3]",
+        "needs.integration-release-floor.result": "success",
+    }))
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+
+
+@pytest.mark.parametrize("shards", ["", "[1,2]", "maybe"])
+def test_fanin_fails_on_an_unrecognised_shard_list(shards: str) -> None:
+    proc = _run(_pytest_gate_script(**{"needs.changes.outputs.integration_shards": shards}))
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+
+
+def test_the_floor_job_is_wired_into_pytest_gate() -> None:
+    doc = yaml.safe_load(CI_YML.read_text())
+    assert "integration-release-floor" in doc["jobs"]["pytest-gate"]["needs"]
+    floor = doc["jobs"]["integration-release-floor"]
+    assert floor["needs"] == ["changes", "test-integration-affected"]
+    assert "!cancelled()" in floor["if"] and "'[1]'" in floor["if"]
+    # The shard upload and the floor's download agree on names, and a re-run can re-upload.
+    (upload,) = [s for s in doc["jobs"]["test-integration-affected"]["steps"]
+                 if "upload-artifact" in str(s.get("uses", ""))]
+    assert upload["with"]["name"] == "integration-shard-${{ matrix.shard }}"
+    assert upload["with"]["overwrite"] is True
+    assert {"integration-selected.txt", "integration-affected.xml", "integration-all.txt"} <= set(upload["with"]["path"].split())
+    (download,) = [s for s in floor["steps"] if "download-artifact" in str(s.get("uses", ""))]
+    assert download["with"]["pattern"] == "integration-shard-*" and "merge-multiple" not in download["with"]
+    run = next(s["run"] for s in floor["steps"] if "run" in s and "--aggregate" in s["run"])
+    assert "--min-executed 1100" in run and "--max-skipped 40" in run
+
+
 @pytest.mark.parametrize("any_", ["", "maybe"])
 def test_fanin_fails_on_unrecognised_selection_flag(any_: str) -> None:
     proc = _run(_pytest_gate_script(**{
@@ -370,17 +441,17 @@ def _job_step(name_prefix: str) -> str:
 
 def _run_job_step(
     tmp: pathlib.Path, name_prefix: str, *, stub_out: str, stub_rc: int,
-    collected: str = "0", files: str = "tests/test_a.py tests/test_b.py",
+    collected: str = "0", files: str = "tests/test_a.py tests/test_b.py", shard: int = 1, of: int = 1,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
     bindir = tmp / "bin"
     bindir.mkdir(exist_ok=True)
     stub = bindir / "uv"
     stub.write_text(f"#!/usr/bin/env bash\ncat <<'OUT'\n{stub_out}\nOUT\nexit {stub_rc}\n")
     stub.chmod(0o755)
-    script = _GH_EXPR.sub(
-        lambda m: {"steps.collect.outputs.collected": collected}[m.group(1).strip()],
-        _job_step(name_prefix),
-    )
+    values = {"steps.collect.outputs.collected": collected, "matrix.shard": str(shard), "strategy.job-total": str(of)}
+    script = _GH_EXPR.sub(lambda m: values[m.group(1).strip()], _job_step(name_prefix))
+    (tmp / "scripts").mkdir(exist_ok=True)
+    shutil.copy(REPO_ROOT / "scripts" / "split_integration_files.py", tmp / "scripts" / "split_integration_files.py")
     out = tmp / "gh_output"
     out.write_text("")
     env = dict(
@@ -404,7 +475,7 @@ _COLLECT_OUT = (
 def test_collect_step_counts_node_ids_only(tmp_path: pathlib.Path) -> None:
     proc, out = _run_job_step(tmp_path, "Collect", stub_out=_COLLECT_OUT, stub_rc=0)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert out == {"collected": "2"}
+    assert out == {"empty": "false", "collected": "2"}
     assert (tmp_path / "integration-selected.txt").read_text().split() == [
         "tests/test_a.py", "tests/test_b.py",
     ]
@@ -413,7 +484,7 @@ def test_collect_step_counts_node_ids_only(tmp_path: pathlib.Path) -> None:
 def test_collect_step_accepts_nothing_matched(tmp_path: pathlib.Path) -> None:
     proc, out = _run_job_step(tmp_path, "Collect", stub_out="no tests ran", stub_rc=5)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert out == {"collected": "0"}
+    assert out == {"empty": "false", "collected": "0"}
 
 
 def test_collect_step_fails_on_collection_error(tmp_path: pathlib.Path) -> None:
@@ -424,6 +495,37 @@ def test_collect_step_fails_on_collection_error(tmp_path: pathlib.Path) -> None:
 def test_collect_step_fails_on_empty_selection(tmp_path: pathlib.Path) -> None:
     proc, _ = _run_job_step(tmp_path, "Collect", stub_out="", stub_rc=0, files="")
     assert proc.returncode == 1
+
+
+def test_collect_step_keeps_this_shards_files_and_counts_only_them(tmp_path: pathlib.Path) -> None:
+    """nexus-jh1f2 cut 4: shard k of N runs its own files, and its non-vacuity count is theirs alone."""
+    collect = "tests/test_a.py::t1\ntests/test_a.py::t2\ntests/test_b.py::t1\n\n3 tests collected in 0.1s"
+    selections, counts = [], []
+    for k in (1, 2):
+        shard_dir = tmp_path / f"s{k}"
+        shard_dir.mkdir()
+        proc, out = _run_job_step(shard_dir, "Collect", stub_out=collect, stub_rc=0, shard=k, of=2)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        selections.append((shard_dir / "integration-selected.txt").read_text().split())
+        counts.append(int(out["collected"]))
+        assert out["empty"] == "false"
+    assert sorted(f for s in selections for f in s) == ["tests/test_a.py", "tests/test_b.py"]
+    assert sorted(counts) == [1, 2]
+
+
+def test_collect_step_marks_a_shard_with_no_files_empty(tmp_path: pathlib.Path) -> None:
+    proc, out = _run_job_step(tmp_path, "Collect", stub_out="tests/test_a.py::t1\n", stub_rc=0,
+                              files="tests/test_a.py", shard=3, of=3)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert out == {"empty": "true", "collected": "0"}
+    assert (tmp_path / "integration-selected.txt").read_text() == ""
+
+
+def test_the_run_step_is_skipped_for_an_empty_shard() -> None:
+    doc = yaml.safe_load(CI_YML.read_text())
+    (step,) = [s for s in doc["jobs"]["test-integration-affected"]["steps"]
+               if s.get("name", "").startswith("Run the affected")]
+    assert step.get("if") == "steps.collect.outputs.empty != 'true'"
 
 
 def _seed_selection(tmp: pathlib.Path) -> None:
@@ -490,3 +592,38 @@ def test_collected_family_meets_floor_and_is_visible_to_the_selector() -> None:
     collected_files = {i.split("::", 1)[0] for i in ids}
     universe = set(sel.select_all(REPO_ROOT)) | set(sel.COVERED_ELSEWHERE)
     assert collected_files <= universe, sorted(collected_files - universe)
+
+
+# -- nexus-jh1f2 cut 4 review r1: the carve-out counts on a release PR's shard 1 --------------
+
+
+def _run_carveout(tmp: pathlib.Path, lived: int, keyed: int, pins: int) -> subprocess.CompletedProcess[str]:
+    (tmp / "tests" / "e2e" / "lib").mkdir(parents=True, exist_ok=True)
+    (tmp / "tests" / "e2e" / "local-service-gate.sh").write_text("LIVED_IN_EXPECTED=98  # note\nKEYED_VOYAGE_EXPECTED=3\n")
+    (tmp / "tests" / "e2e" / "lib" / "mandatory_pins.sh").write_text(
+        'MANDATORY_PIN_MARK_EXPR="integration and mandatory_regression_pin"\nMANDATORY_PIN_EXPECTED=4\n')
+    bindir = tmp / "bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "uv"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'case "$*" in *lived_in*) n={lived} ;; *keyed_voyage*) n={keyed} ;; *mandatory*) n={pins} ;; *) n=0 ;; esac\n'
+        'for i in $(seq 1 "$n"); do echo "tests/test_x.py::t$i"; done\necho "$n tests collected"\n')
+    stub.chmod(0o755)
+    script = _GH_EXPR.sub(lambda m: {"strategy.job-total": "3", "matrix.shard": "1"}[m.group(1).strip()],
+                          _job_step("Carve-out counts"))
+    env = dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    return subprocess.run(["bash", "-c", script], cwd=tmp, env=env, capture_output=True, text=True)
+
+
+def test_carveout_counts_pass_when_they_match(tmp_path: pathlib.Path) -> None:
+    proc = _run_carveout(tmp_path, 98, 3, 4)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize(("lived", "keyed", "pins", "named"),
+                         [(99, 3, 4, "lived_in"), (98, 2, 4, "keyed_voyage"), (98, 3, 5, "mandatory_regression_pin")])
+def test_carveout_counts_fail_on_any_drift(tmp_path: pathlib.Path, lived: int, keyed: int, pins: int, named: str) -> None:
+    proc = _run_carveout(tmp_path, lived, keyed, pins)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"::error::{named}" in proc.stdout

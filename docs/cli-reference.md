@@ -159,7 +159,7 @@ The cause after each name is `register_failed` (the hook could not build the fil
 
 | Flag | Description |
 |------|-------------|
-| `--corpus NAME` | Corpus name for the `docs__` collection (default: `default`) |
+| `--corpus NAME` | Corpus name for the `docs__` collection, and the curator owner a `pdf` registers under (default: `default`). `nx index pdf` with only `--collection` naming a `knowledge__` collection (or a bare name) takes that collection's subject instead (`--collection knowledge__delos` registers under owner `delos`); a `docs__` or `code__` `--collection` leaves it `default`, and an explicit `--corpus` always wins. `nx index md` has no such rule: its default stays `default` |
 | `--collection NAME` | T3 collection name, overriding `--corpus` when set. Bare names are normalized through `t3_collection_name()` (e.g. `delos` becomes the conformant `docs__delos__<model>__vN` shape); a fully-qualified name (e.g. `knowledge__delos`) is honoured as given |
 | `--sensitive` | Mark the document sensitive (RDR-243, [Sensitive documents](sensitivity.md)): kept from every model-bound surface; one-way, cleared only by `nx catalog sensitive --clear --reason`. Refuses before the register call unless the engine advertises `catalog_sensitivity_supported`. A `pdf` is never sent to any MinerU URL (loopback included; extraction runs as the local subprocess). Cannot be combined with `--enrich` |
 | `--ack-external-embedder` | With `--sensitive`: accept an external embedder. Without it, local mode writes a sensitive document to the bge collection of the same subject (`<prefix>__<subject>__bge-base-en-v15-768__v1` for `knowledge__`, `docs__`, `rdr__` and `code__`), cloud mode refuses (every cloud collection embeds through Voyage; with the flag a one-line disclosure names the endpoint and Voyage), and a document already registered in a Voyage collection refuses rather than moves |
@@ -730,6 +730,7 @@ The unit is the catalog document, not the chunk title (nexus-6pfgb.21): a T3 chu
 | `--source {auto\|s2\|openalex\|dt}` | Bibliographic backend (default: `auto`) |
 | `--delay SECONDS` | Delay between API calls (default: 0.5s). Increase to avoid rate limiting |
 | `--limit N` | Maximum number of documents to look up (default: 0 = unlimited). Bounds the backend calls only, not the manifest read or the chunk-owner lookup |
+| `--content-type {any\|code\|knowledge\|markdown\|paper\|pdf\|prose\|rdr}` | Look up only the collection's catalog documents of this type (default: `paper`, which also takes the legacy `pdf` type). `any` looks up every titled document, notes and markdown included, which is what the command did before GH #1611; a miss writes nothing, so a non-paper document looked up this way is looked up again on every run. The documents left out are counted in the run's summary (`N not papers (not looked up; --content-type any looks them up)`). `nx dt index --enrich` always looks up every type, since a DEVONthink record is not always catalogued as a paper |
 | `--backfill-catalog` | A recovery tool: fill the catalog write from ALREADY-enriched chunk metadata — no external API calls. When in doubt prefer `nx enrich bib` (the API lookup). Populates the catalog Document rows' `bib_*` fields (surfaced by `catalog_search` / `catalog_list` / `nx catalog show`) for collections enriched before those columns had a writer. Fill-only per backend id: a document whose catalog row already holds that backend's id is left as it is (counted in the summary), but a row holding only the OTHER backend's id is filled and its author, year and venue are overwritten. A chunk row is evidence for a document only when BOTH exactly one live document holds the chunk (per the catalog manifest) AND the row names that document as its LAST INDEXER: a note's row by `catalog_doc_id`, an indexed file's row by `content_hash` equal to the document's own (`index_content_hash`, else `meta.content_hash`); the chunks the indexers write carry `content_hash` and no `catalog_doc_id`. That names who last indexed the row, not who wrote its `bib_*`: a re-index restamps `content_hash` and keeps the `bib_*`, so a bib a former co-holder wrote and a later re-index kept cannot be told apart, and may be copied onto the indexing document's empty catalog row. A chunk that is unheld, shared, or whose row names another document as its last indexer is skipped and counted, never matched to a catalog row by title. Every such chunk of a document is read; a document whose chunks disagree on the id is skipped and named in the summary. The write is by tumbler |
 
 Enrichment also writes the same bib fields to the matching **catalog**
@@ -1563,7 +1564,7 @@ nx catalog gc                          # report-only (default is --dry-run)
 nx catalog gc --no-dry-run --confirm   # actually delete
 ```
 
-Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). **Not reversible in-product**: the pre-delete JSONL backup snapshots died with the local catalog in 7.0.0 (nexus-i711w).
+Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs; a complete `nx index repo` run from the main checkout already retires a file that is gone from the repository in one run, GH #1610). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). **Not reversible in-product**: the pre-delete JSONL backup snapshots died with the local catalog in 7.0.0 (nexus-i711w).
 
 ### nx catalog list-backups / vacuum-backups (removed)
 
@@ -3792,13 +3793,17 @@ section ends by naming the flags a default run still does NOT cover
 `--check-tier-discipline`, `--check-storage-boundary`,
 `--check-post-store-hooks`, `--check-mineru`, `--check-wal-retention`,
 `--check-collection-shape`, `--check-embeddings`, `--check-assignments`,
-`--check-references`, `--check-index-runs`) so the blind spots stay explicit.
+`--check-references`) so the blind spots stay explicit.
 
 **Rows the default sweep does not read the whole catalog for (F30, nexus-f3yqd.6).** A default run must stay
-fast as the catalog grows (measured on a laptop tenant: 2 m 16 s before this change). The three rows that read
-every catalog document (stale index-run fences, failed index runs with hidden chunks, tumbler allocator drift)
-print `[ ]` and `not checked in the default sweep` and name `nx doctor --check-index-runs`, which reads the catalog once and
-runs all three. The supplementary taxonomy row prints `not checked` and names `nx doctor --check-taxonomy`. These
+fast as the catalog grows (measured on a laptop tenant: 2 m 16 s before this change). The three index-run rows
+(stale index-run fences, failed index runs with hidden chunks, tumbler allocator drift) are read from the engine's
+two census routes (`GET /v1/catalog/index-run/census`, `GET /v1/catalog/owners/next_seq_drift`, engine 0.1.189):
+two bounded requests and no walk of the catalog. An engine that does not advertise `catalog_index_run_census_supported`
+and `catalog_next_seq_drift_read_supported` gets three `[ ]` `not checked` rows that say its `/version` does not advertise the census routes (engine 0.1.189 or later; on the managed service, also the edge's `/version` allowlist). A `/version` probe that itself failed says so and asks again on the next run.
+Whatever the engine cannot answer (a bucket that timed out, a 404 or 503) prints `[ ]` `not checked`, and a capped
+failed-runs census with nothing found prints `not fully checked`, never `none`. The supplementary taxonomy row prints
+`not checked` and names `nx doctor --check-taxonomy`. These
 lines are marked not checked (`[ ]`, and `"status": "skipped"` under `--json`): neither a pass nor a warning,
 and they do not change the exit code. The section is printed on the human-readable path
 only. Under `--json` the main sweep's rows keep their shape, with one addition: a row not checked this run has `"status": "skipped"`, counted in `summary.skipped`.
@@ -3834,7 +3839,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 |------|-------------|
 | `--check-search` | Run probes 3a and 3b: the name-resolution canary from `tests/fixtures/name_canaries.py`, then a retrieval probe that queries each collection with one of its own chunks and checks that some other chunk survives the distance threshold. A collection whose nearest real neighbours all fall past its threshold is a warning row naming that distance, the threshold, and the sample it rests on. Exits 2 only when a surface raises or a collection's embedding model disagrees with its name (RDR-087 Phase 3) |
 | `--check-resources` | Probe POSIX semaphore headroom and report orphan multiprocessing-tracker pressure. Exits 2 with `Errno 28` when the namespace is exhausted (MinerU workers / trackers re-parented to init after ungraceful MCP shutdowns) |
-| `--check-index-runs` | Read every catalog document once and run the three rows a default run skips: stale index-run fences, failed index runs with hidden chunks, and tumbler allocator drift (which counts tombstoned children, as the engine's own sweep does). Exits as the default sweep does on a failing row |
+| `--check-index-runs` | Run only the three index-run rows (they also run in the default sweep), read from the engine's census routes (engine 0.1.189 or later; an older engine prints them not checked): stale index-run fences, failed index runs with hidden chunks, and tumbler allocator drift (which counts tombstoned children, as the engine's own sweep does). Exits as the default sweep does on a failing row |
 | `--check-taxonomy` | Verify the `topic_links` ≡ projection-assignment invariant (GH #252) against the ENGINE. Exits 1 on drift or an engine-side error, 2 when no engine answers or the deployed engine lacks the `/links/drift` route (unverifiable is not a pass; the frozen-SQLite fallback was deleted 2026-08-29 — there is no path back to that era) |
 | `--check-tier-discipline` | Audit tier-write activity for the current session: prints the tier-write summary and warns when a substantive session has no write-back (Phase 1B nexus-a52i) |
 | `--check-mcp-logs` | Summarize ERROR/CRITICAL events in nexus's OWN structured MCP log (`<NEXUS_CONFIG_DIR>/logs/mcp.log` plus rotations), counted by event name with the most-recent example per event. Until 7.11.0 this scanned ONLY Claude Code's per-server cache, so nexus's own error signatures had no automated consumer at all; that cache scan survives as a clearly-labeled secondary section, since it carries a distinct signal the nexus-side log cannot (client-side stdio transport death: `STDIO connection dropped`, `stdio transport error`, macOS only, skips cleanly elsewhere — RDR-094 Phase H, nexus-50u5) |
@@ -3855,7 +3860,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 
 **Garbage sweep (7.32.0; Sam, 2026-09-05).** Two rows on every run. `Local garbage` reaps, in place, the litter nothing else touches: `t1_mint_<session>.lock` files older than a day whose session holds no lease (706 had accumulated since July), rotated logs (`*.log.N`) older than 14 days, and `operator-timeout-*` / `operator-budget-*` dispatch dumps older than 7. `Catalog garbage` counts orphaned links (an endpoint that resolves to no live document) and tombstoned documents plus stranded chunks past **one** day; a non-zero count is a ⚠ that offers `nx doctor --fix --dry-run` (counts what would go, deletes nothing) before `nx doctor --fix` (deletes them permanently), and an unreachable engine is a ⚠ too, never a clean row. Each litter class this repo produces is a row in `nexus.garbage`; a new class is a new row there, not a new command.
 
-The `--fix` flag permanently deletes the catalog garbage the sweep counted (there is no undo; `--fix --dry-run` shows the counts and deletes nothing): it deletes every orphaned link, then runs the one-day `purge-trash` (it fails loud on an engine error), then runs the HNSW `search_ef` step, which does nothing on the service-backed store (pgvector tunes HNSW on the server, through the engine's `NX_HNSW_EF_SEARCH`); in cloud mode it prints that tuning is server-side.
+The `--fix` flag permanently deletes the catalog garbage the sweep counted (there is no undo; `--fix --dry-run` shows the counts and deletes nothing): it deletes every orphaned link, then runs the one-day `purge-trash` (it fails loud on an engine error), then, on a local install, runs `VACUUM ANALYZE` on each tuple-space table the `tuples.dead_tuple_ratio` row would fail, through the install's own admin credentials (`pg_credentials`), so no database password or SQL is needed (GH #1609; `--fix --dry-run` lists it, a managed service is left to its operator, and a failed VACUUM fails the command), then runs the HNSW `search_ef` step, which does nothing on the service-backed store (pgvector tunes HNSW on the server, through the engine's `NX_HNSW_EF_SEARCH`); in cloud mode it prints that tuning is server-side.
 
 **`Beads PRIME.md (user-level)`** (nexus-cnzei.8). Reports `[]` (no row at
 all) when neither `bd` nor the beads Claude Code plugin is detected on this
@@ -5628,7 +5633,7 @@ Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset o
 | `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
 | `--json` | Output as a JSON array |
 
-Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` prints the same marker when it stops at `--max-rows` with rows left. `--newest` asks the engine for a descending read (nexus-kp5q3), so it returns the real newest rows whatever the subspace size; asking for more than the engine's read cap (300 by default) returns the newest cap-many rows with the marker and a note naming the cap, exit 0. Only against an engine that predates the read does it page oldest-first, print the marker at `--max-rows` and exit 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea). Each row prints `sender_session` (text and JSON) when the engine sent the key: the session the engine recorded for the write, null when it recorded none, absent from an engine at v0.1.162 or earlier. It is the raw stamp, with no `unverified`/`unattested` mark; the drain hook and the channel apply those (see [Tuple Space](tuple-space.md)).
+Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` prints the same marker when it stops at `--max-rows` with rows left. `--newest` asks the engine for a descending read (nexus-kp5q3), so it returns the real newest rows whatever the subspace size; asking for more than the engine's read cap (300 by default) returns the newest cap-many rows with the marker and a note naming the cap, exit 0. Only against an engine that predates the read does it page oldest-first, print the marker at `--max-rows` and exit 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea). Each row prints `sender_session` (text and JSON) when the engine sent the key: the session the engine recorded for the write, null when it recorded none, absent from an engine at v0.1.162 or earlier. It is the raw stamp, with no `unverified`/`unattested` mark; the drain hook and the channel apply those (see [Tuple Space](tuple-space.md)). Each row also prints `announced_at` and `announce_count`, the row's mailbox announce budget (the same fields the MCP `tuple_rd` and `tuple_in` tools return; GitHub #1567).
 
 ### nx tuple in
 
@@ -6519,7 +6524,7 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   library_check, builtins_checked, undeclared_builtins, undeclared_builtin_names, branches,
   excluded_total, excluded_plan_ids, returned, selected, fallback_reason, enforced_reasons,
   enforced_excluded_total, refused_recorded_kinds}`. `refused_recorded_kinds` maps each kind a
-  grown plan recorded to the number of its `grown_route_not_lookup` exclusions, counted like
+  grown plan recorded to the number of its `grown_route_not_lookup` and `grown_route_not_discovery` exclusions, counted like
   `excluded` (one plan found by two branches counts twice); `{}` when there were none.
   `request_kind` and `kind_decision` are those of `request_coverage`. `branches` has
   `cosine`, `category_route` (the below-floor category route) and `fts` (the FTS5
@@ -6532,7 +6537,10 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `eligibility.TRUSTED_ROUTES` is empty until a reviewed decision, nexus-jypmj.2.8,
   names a route, so every grown plan reads as unknown-kind), `grown_route_not_lookup`
   (a lookup request refusing a grown plan whose discounted recorded kind is not lookup: the
-  recorded kind never widens eligibility but does narrow it, nexus-indyo), `unattested_plan`
+  recorded kind never widens eligibility but does narrow it, nexus-indyo), `grown_route_not_discovery`
+  (a discovery/listing request refusing a grown plan that recorded another kind, nexus-a4g2a),
+  `grown_route_unrecorded` (a lookup or discovery/listing request refusing a grown plan that recorded no kind;
+  a curated claim without the builtin tag is refused there under `untrusted_curated_claim`, nexus-a4g2a), `unattested_plan`
   (a lookup or discovery/listing request refusing a plan that declares no answer kind, such as a
   user-saved one; the other request kinds refuse it under their own reasons, nexus-rflvp),
   `saved_unknown_plan` (a saved plan of unknown kind serves no request), `saved_other_project` (a saved

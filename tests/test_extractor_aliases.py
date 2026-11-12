@@ -293,6 +293,20 @@ def test_the_title_chain_ignores_the_removed_extractors_title_key() -> None:
     assert resolve_pdf_title({"docling_title": "Stale Title"}, path, "plain text") == "2512.11001"
 
 
+def test_the_title_chain_names_its_source() -> None:
+    """GH #1611 bug 3: the catalog hook needs to know whether a title came from the stem fallback, because a
+    real title can read exactly like the title-cased stem."""
+    from nexus.indexer_utils import pdf_title_source, resolve_pdf_title
+
+    path = Path("/data/attention-is-all-you-need.pdf")
+    real = {"pdf_title": "Attention Is All You Need"}
+    assert pdf_title_source(real, path, None) == ("Attention Is All You Need", "metadata")
+    assert pdf_title_source({}, path, "# Attention Is All You Need\n\nBody.\n") == ("Attention Is All You Need", "h1")
+    assert pdf_title_source({}, path, "plain text") == (resolve_pdf_title({}, path, "plain text"), "stem")
+    for meta, text in ((real, None), ({}, "# Heading\n"), ({}, "plain")):
+        assert pdf_title_source(meta, path, text)[0] == resolve_pdf_title(meta, path, text)
+
+
 def test_no_extraction_path_writes_the_removed_title_key(tmp_path: Path) -> None:
     from nexus.pdf_extractor import PDFExtractor
 

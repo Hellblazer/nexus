@@ -138,7 +138,11 @@ class ManifestInsertGateTest {
      */
     private static final Map<String, Set<String>> ALLOWED_UPDATE_SITES = Map.of(
         "CatalogRepository.java", Set.of("renameCollectionTxn"),
-        "ChashRepository.java", Set.of("renameCollection"));
+        "ChashRepository.java", Set.of("renameCollection"),
+        // nexus-f3yqd (R2): the manifest fill job's two UPDATEs write section labels and span columns of existing rows;
+        // they re-point and re-home nothing. Their caller, ManifestFill.apply, takes the shared gate for every collection
+        // of the batch's key range before either runs (ManifestFillConcurrencyTest holds it exclusive and shows the batch wait).
+        "ManifestFill.java", Set.of("applyLabels", "applySpans"));
 
     @Test
     void exactlyOneInsertIntoCatalogDocumentChunksSite() throws IOException {

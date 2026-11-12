@@ -40,7 +40,8 @@ def test_nx_rdr_keeps_no_copy_of_the_vocabulary() -> None:
 
 
 @pytest.mark.parametrize("flag,value", [("--classification", "guessed"), ("--method", "intuition")])
-def test_nx_rdr_refuses_a_value_outside_the_table(flag: str, value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_retired_add_names_the_tables_values(flag: str, value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The CLI add is retired (RDR-240 TD7); its refusal names the procedure's vocabulary, from the table.
     monkeypatch.setattr(rdr_cmd, "_preamble_resolve_repo", lambda: (str(Path.cwd()), "nexus"))
     with pytest.raises(click.ClickException) as e:
         rdr_cmd.preamble_rdr_research.callback(("add", "240", flag, value, "a", "finding"))
@@ -49,7 +50,7 @@ def test_nx_rdr_refuses_a_value_outside_the_table(flag: str, value: str, monkeyp
 
 
 def test_nx_rdr_reads_the_table_not_a_copy(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Swap the table's domain: the CLI must follow it.
+    # Swap the table's domain: the refusal's vocabulary must follow it.
     monkeypatch.setattr(vocab, "CLASSIFICATIONS", ("probe_only",))
     monkeypatch.setattr(rdr_cmd, "_preamble_resolve_repo", lambda: (str(Path.cwd()), "nexus"))
     with pytest.raises(click.ClickException) as e:

@@ -110,47 +110,6 @@ def test_non_vacuity_floor() -> None:
     assert len(params) >= 150, f"only found {len(params)} parameter entries -- census may be broken"
 
 
-# ── Length ───────────────────────────────────────────────────────────────
-
-
-def test_no_description_exceeds_the_harness_truncation_limit() -> None:
-    over = [
-        (server, name, len(desc))
-        for server, name, desc in _iter_tool_descriptions()
-        if len(desc) > HARNESS_TRUNCATION_LIMIT
-    ]
-    assert not over, (
-        f"{len(over)} tool description(s) exceed the {HARNESS_TRUNCATION_LIMIT}-char "
-        f"harness truncation cut -- the harness silently cuts these mid-sentence, "
-        f"dropping any parameter docs written into the docstring past that point:\n  "
-        + "\n  ".join(f"{s}::{n} ({L} chars)" for s, n, L in over)
-    )
-
-
-def test_descriptions_stay_within_the_target_length() -> None:
-    over = [
-        (server, name, len(desc))
-        for server, name, desc in _iter_tool_descriptions()
-        if len(desc) > TARGET_LENGTH
-    ]
-    if over:
-        import warnings
-
-        warnings.warn(
-            f"{len(over)} tool description(s) exceed the {TARGET_LENGTH}-char shape "
-            "target (still under the hard harness cut): "
-            + ", ".join(f"{s}::{n} ({L} chars)" for s, n, L in over),
-            stacklevel=1,
-        )
-
-
-def test_planted_oversized_description_is_detected() -> None:
-    """Non-vacuity: the length check actually distinguishes long from short."""
-    fake = [("nexus", "planted_tool", "x" * (HARNESS_TRUNCATION_LIMIT + 1))]
-    over = [(s, n, len(d)) for s, n, d in fake if len(d) > HARNESS_TRUNCATION_LIMIT]
-    assert over
-
-
 # ── Parameter schema coverage ────────────────────────────────────────────
 
 

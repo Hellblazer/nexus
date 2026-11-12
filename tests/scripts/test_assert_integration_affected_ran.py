@@ -144,3 +144,63 @@ def test_testcase_outside_the_selection_fails(tmp_path: pathlib.Path) -> None:
     j = _junit(tmp_path, [("tests.test_a", "t1", False), ("weird.module", "t2", False)])
     problems = chk.check(j, ["tests/test_a.py"], collected=2)
     assert any("belong to no selected file" in p for p in problems)
+
+
+# -- nexus-jh1f2 cut 4 review r1: the release-PR floor over every shard ------------------------
+
+
+def _shard(root: pathlib.Path, name: str, files: list[str], cases: list[tuple[str, str, bool | str]]) -> None:
+    d = root / name
+    d.mkdir(parents=True)
+    (d / "integration-selected.txt").write_text("".join(f"{f}\n" for f in files))
+    _junit(d, cases).rename(d / "integration-affected.xml")
+
+
+def _agg(root: pathlib.Path, all_files: list[str], floor: int, budget: int) -> subprocess.CompletedProcess[str]:
+    (root / "all.txt").write_text("".join(f"{f}\n" for f in all_files))
+    return subprocess.run([sys.executable, str(SCRIPT), "--aggregate", str(root / "shards"), "--all", str(root / "all.txt"),
+                           "--min-executed", str(floor), "--max-skipped", str(budget)],
+                          capture_output=True, text=True, check=False)
+
+
+def _two_shards(root: pathlib.Path) -> list[str]:
+    _shard(root / "shards", "integration-shard-1", ["tests/test_a.py"],
+           [("tests.test_a", "t1", False), ("tests.test_a", "t2", False), ("tests.test_a", "t3", True)])  # True = skipped
+    _shard(root / "shards", "integration-shard-2", ["tests/test_b.py"], [("tests.test_b", "t1", False)])
+    return ["tests/test_a.py", "tests/test_b.py"]
+
+
+def test_aggregate_passes_at_the_floor_and_budget(tmp_path: pathlib.Path) -> None:
+    files = _two_shards(tmp_path)
+    proc = _agg(tmp_path, files, floor=3, budget=1)
+    assert proc.returncode == 0, proc.stdout
+    assert "all shards: 3 executed (floor 3), 1 skipped (budget 1)" in proc.stdout
+
+
+def test_aggregate_fails_under_the_floor(tmp_path: pathlib.Path) -> None:
+    proc = _agg(tmp_path, _two_shards(tmp_path), floor=4, budget=5)
+    assert proc.returncode == 1 and "under the floor" in proc.stdout
+
+
+def test_aggregate_fails_over_the_skip_budget(tmp_path: pathlib.Path) -> None:
+    proc = _agg(tmp_path, _two_shards(tmp_path), floor=0, budget=0)
+    assert proc.returncode == 1 and "over the budget" in proc.stdout
+
+
+def test_aggregate_fails_when_a_selected_file_ran_in_no_shard(tmp_path: pathlib.Path) -> None:
+    files = _two_shards(tmp_path)
+    proc = _agg(tmp_path, [*files, "tests/test_c.py"], floor=0, budget=5)
+    assert proc.returncode == 1 and "ran in no shard" in proc.stdout
+
+
+def test_aggregate_fails_when_a_file_ran_in_two_shards(tmp_path: pathlib.Path) -> None:
+    files = _two_shards(tmp_path)
+    _shard(tmp_path / "shards", "integration-shard-3", ["tests/test_b.py"], [("tests.test_b", "t1", False)])
+    proc = _agg(tmp_path, files, floor=0, budget=5)
+    assert proc.returncode == 1 and "ran in two shards" in proc.stdout
+
+
+def test_aggregate_fails_with_no_shards(tmp_path: pathlib.Path) -> None:
+    (tmp_path / "shards").mkdir()
+    proc = _agg(tmp_path, ["tests/test_a.py"], floor=0, budget=0)
+    assert proc.returncode == 1 and "no shard directories" in proc.stdout

@@ -93,7 +93,8 @@ def reconcile_fences(reader, writer, *, dry_run: bool, limit: int, echo=click.ec
         f"{verb} {counts['stamped']} of {counts['candidates']} non-repo document(s) with no fence; "
         f"{counts['refused']} refused (manifest not whole in T3), "
         f"{counts['empty_manifest']} with an empty manifest left alone; "
-        f"{counts['skipped_repo']} repo document(s) skipped (use `nx index <path> --force`)."
+        f"{counts['skipped_repo']} repo document(s) skipped (use `nx index <path> --force`, or "
+        "`nx catalog prune-stale` for a file no longer in its repo)."
     )
     return counts
 

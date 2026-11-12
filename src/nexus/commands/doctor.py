@@ -2929,7 +2929,6 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
     "--check-storage-boundary", "--check-post-store-hooks",
     "--check-mineru", "--check-wal-retention", "--check-collection-shape",
     "--check-embeddings", "--check-assignments", "--check-references",
-    "--check-index-runs",
 )
 
 
@@ -3081,7 +3080,8 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="DELETE catalog garbage, permanently: orphaned links, tombstoned documents "
          "past 1 day and their stranded chunks (no undo; preview the counts with "
-         "--fix --dry-run). Then HNSW ef tuning on local collections (local mode only).",
+         "--fix --dry-run). Then, on a local install, VACUUM ANALYZE the tuple-space tables "
+         "the dead-tuple row would fail, and HNSW ef tuning on local collections.",
 )
 @click.option(
     "--fix-paths",
@@ -3157,9 +3157,9 @@ def _engine_work_lines() -> list[str]:
     "check_index_runs",
     is_flag=True,
     default=False,
-    help="Read every catalog document once and report stale index-run fences, failed index runs with "
-         "hidden chunks and tumbler allocator drift. The default sweep skips these rows because the read "
-         "grows with the catalog.",
+    help="Run only the three index-run rows (stale index-run fences, failed index runs with hidden chunks, "
+         "tumbler allocator drift), which the default sweep also runs. They read the engine's census routes "
+         "(two bounded requests); an engine before 0.1.189 reports them not checked.",
 )
 @click.option(
     "--check-plan-library",
@@ -3792,6 +3792,11 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             f" {TRASH_MAX_AGE_DAYS} day ago, and the {preview.stranded_chunks} chunk(s) those documents"
             " left behind. Nothing was deleted; run `nx doctor --fix` to delete them."
         )
+        # GH #1609: the dead-tuple VACUUM --fix would run.
+        from nexus.health import vacuum_tuple_tables  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        for line in vacuum_tuple_tables(dry_run=True):
+            click.echo(line)
         return
 
     if fix:
@@ -3812,6 +3817,15 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             f"{reclaimed.trash_documents} tombstoned document(s), "
             f"{reclaimed.stranded_chunks} stranded chunk(s) (older than {TRASH_MAX_AGE_DAYS} day)."
         )
+        # GH #1609: the tuples.dead_tuple_ratio row's VACUUM, through this install's local admin credentials, so a
+        # user needs neither the database password nor SQL. A failed VACUUM fails the command.
+        from nexus.health import vacuum_tuple_tables  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        vacuum_lines = vacuum_tuple_tables(dry_run=False)
+        for line in vacuum_lines:
+            click.echo(line)
+        if any(line.startswith("VACUUM of ") for line in vacuum_lines):
+            raise click.ClickException("a dead-tuple VACUUM failed; see the line above")
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
@@ -4724,8 +4738,9 @@ def _format_quota_report(report: dict) -> str:
 
 
 def _run_check_index_runs() -> None:
-    """``nx doctor --check-index-runs`` (F30, nexus-f3yqd.6): the three rows the default sweep skips, over one
-    catalog walk, printed and exit-coded as the main sweep prints and exit-codes its rows."""
+    """``nx doctor --check-index-runs`` (F30, nexus-f3yqd.6): the three index-run rows alone, read from the engine's
+    census routes (the default sweep reads them too), printed and exit-coded as the main sweep prints and exit-codes
+    its rows."""
     from nexus.config import is_local_mode  # noqa: PLC0415 — deferred, keeps CLI startup fast
     from nexus.health import format_health_for_cli, health_exit_code, run_index_run_checks  # noqa: PLC0415 — deferred, keeps CLI startup fast
 

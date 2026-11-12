@@ -1324,8 +1324,14 @@ def _catalog_pdf_hook(
     chunk_count: int = 0,
     source_uri: str = "",
     extraction: Mapping[str, Any] | None = None,
+    title_is_fallback: bool | None = None,
 ) -> None:
     """Register PDF document in catalog after successful indexing. Silently skipped if absent.
+
+    *title_is_fallback* says whether *title* came from the filename-stem fallback
+    (:func:`~nexus.indexer_utils.pdf_title_source`). A title that did not is written over a stem
+    placeholder even when it reads exactly like the title-cased stem (GH #1611). ``None`` (a caller
+    that does not know) keeps the older test: a title equal to either stem form is a placeholder.
 
     *extraction* (RDR-237, :func:`extraction_record`) is merged into the catalog document's
     ``meta`` on BOTH branches, the update of an existing row and the registration of a new one
@@ -1426,8 +1432,29 @@ def _catalog_pdf_hook(
         # through to the plain by_file_path lookup only when source_uri is
         # absent preserves prior behaviour for every non-DT ingest path.
         existing = reader.by_source_uri(source_uri) if source_uri else None
+        # GH #1611: by_source_uri is not owner-scoped. A live row of ANOTHER owner holding this URI (a repo run
+        # registered the PDF first) is that owner's document: stamping this run's collection, title or meta onto it
+        # would point its row at chunks it does not own. Left alone and named; this owner's own row by path, if any,
+        # is still the one updated.
+        # Only a row held in ANOTHER, non-empty collection is left alone, as on the repo side (reconcile_run):
+        # a foreign row already in this run's collection (a PDF registered under corpus "default" before the
+        # --collection corpus change, say) is updated as before.
+        _foreign_by_uri = None
+        if existing is not None and not str(existing.tumbler).startswith(f"{owner}."):
+            _held_in = getattr(existing, "physical_collection", "") or ""
+            if _held_in and _held_in != collection_name:
+                _foreign_by_uri, existing = existing, None
         if existing is None:
             existing = reader.by_file_path(owner, file_path_str)
+        if existing is None and _foreign_by_uri is not None:
+            _log.warning(
+                "catalog_pdf_hook_skipped_foreign_owner_row",
+                tumbler=str(_foreign_by_uri.tumbler), owner=str(owner), file_path=file_path_str,
+                source_uri=source_uri, held_in=getattr(_foreign_by_uri, "physical_collection", ""),
+                collection=collection_name,
+            )
+            _not_recorded("foreign_owner_row")
+            return
 
         # Known TOCTOU window (Reviewer B/I-3): this stat happens AFTER
         # the PDF was extracted + chunked earlier in the pipeline. A
@@ -1475,7 +1502,8 @@ def _catalog_pdf_hook(
             from nexus.indexer_utils import derive_title  # noqa: PLC0415 - circular-dep avoidance (nexus.indexer_utils)
             _placeholders = {"", pdf_path.stem, derive_title(pdf_path, body=None)}
             existing_title = (existing.title or "").strip()
-            if title and title not in _placeholders and existing_title in _placeholders:
+            title_is_placeholder = (title in _placeholders) if title_is_fallback is None else bool(title_is_fallback)
+            if title and not title_is_placeholder and existing_title in _placeholders:
                 update_kwargs["title"] = title
             if author and not (getattr(existing, "author", "") or "").strip():
                 update_kwargs["author"] = author
@@ -2585,9 +2613,13 @@ def pipeline_index_pdf(
         # (unlike the fence calls above) writes unconditionally regardless of
         # *doc_id*, so it needs its own explicit gate, not just an empty
         # *doc_id* check.
-        from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 - circular-dep avoidance (nexus.indexer_utils)
+        from nexus.indexer_utils import pdf_title_source  # noqa: PLC0415 - circular-dep avoidance (nexus.indexer_utils)
         _meta = getattr(extraction_result, "metadata", None) or {}
-        title = title_override or resolve_pdf_title(_meta, pdf_path, getattr(extraction_result, "text", None))
+        if title_override:
+            title, title_is_fallback = title_override, False
+        else:
+            title, _source = pdf_title_source(_meta, pdf_path, getattr(extraction_result, "text", None))
+            title_is_fallback = _source == "stem"
         author = str(_meta.get("pdf_author") or _meta.get("author") or "")
         if extraction_stats is not None:
             # RDR-236 Phase 4 Step 1: no chunk row carries the title or author, so the run summary
@@ -2616,6 +2648,7 @@ def pipeline_index_pdf(
                 chunk_count=total_chunks,
                 source_uri=source_uri,
                 extraction=extraction_record(_meta),
+                title_is_fallback=title_is_fallback,
             )
             if enrich and not sensitive:  # RDR-243 rows 7 and 8: a sensitive document's title is never sent
                 # Best effort as a whole, the lookup included: ``enrich`` catches only httpx and
