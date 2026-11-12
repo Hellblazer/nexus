@@ -457,7 +457,7 @@ class TestCancel:
         engine.polls = [(200, _cancelled())]
         lines: list[str] = []
         assert job.doctor_fix_lines(client, dry_run=False, echo=lines.append, clock=_clock()) is False
-        assert "--job j1 --cancel" in lines[0] and "cancelled" in lines[-1]
+        assert "--job j1 --cancel" in lines[0] and "cancelled by another caller" in lines[-1]
 
     def test_progress_says_the_job_is_stopping(self) -> None:
         assert "stopping (cancelled)" in job.progress_line(_progress(stopping="cancelled")).lower()
@@ -537,7 +537,22 @@ class TestCancelVerb:
     def test_following_a_job_someone_cancelled_exits_1(self, engine) -> None:
         engine.polls = [(200, _cancelled())]
         r = self._invoke("--job", "j1")
-        assert r.exit_code == 1 and "cancelled" in r.stdout
+        assert r.exit_code == 1 and "cancelled by another caller" in r.stdout
+
+    def test_a_start_that_joined_a_job_another_caller_cancelled_exits_1(self, engine) -> None:
+        """marginalia's rehearsal: a start lands just before another caller's cancel, joins (created false), and the
+        job ends cancelled. That is not this user's cancel."""
+        engine.start_body = {"job_id": "j1", "created": False}
+        engine.polls = [(200, _cancelled())]
+        r = self._invoke()
+        assert r.exit_code == 1, r.output
+        assert "already running" in r.stdout and "cancelled by another caller" in r.stdout
+        assert "start it again" in r.stdout
+
+    def test_your_own_cancel_does_not_blame_another_caller(self, engine) -> None:
+        engine.cancel = (202, _progress(stopping="cancelled"))
+        engine.polls = [(200, _cancelled())]
+        assert "another caller" not in self._invoke("--job", "j1", "--cancel").stdout
 
 
 class TestDoctorWiring:

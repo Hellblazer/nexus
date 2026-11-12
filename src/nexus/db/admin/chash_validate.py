@@ -367,14 +367,18 @@ def _count(value: Any, listed: int) -> int:
     return max(value, listed) if isinstance(value, int) and not isinstance(value, bool) else listed
 
 
-def verdict(body: dict[str, Any]) -> Verdict:
-    """Read a finished job by its entries' reasons; ``done`` alone means nothing."""
+def verdict(body: dict[str, Any], *, cancelled_here: bool = False) -> Verdict:
+    """Read a finished job by its entries' reasons; ``done`` alone means nothing. *cancelled_here*: this command sent
+    the cancel. Otherwise a cancelled job was cancelled by another caller, even one this command started or joined
+    (a start that joins a running job just before someone else cancels it gets ``created: false``)."""
     if was_cancelled(body):
+        who = "" if cancelled_here else " by another caller"
+        again = "" if cancelled_here else "; start it again with `nx t3 validate-chash-checks`"
         if body.get("dry_run"):
-            return Verdict(False, "the dry run was cancelled; nothing was changed")
+            return Verdict(False, f"the dry run was cancelled{who}; nothing was changed{again}")
         n = body.get("validated_count", len(body.get("validated") or []))
-        return Verdict(False, f"the validate job was cancelled after validating {n} CHECK(s); a CHECK already "
-                              "validated stays validated, and a rerun starts again at the table it was on")
+        return Verdict(False, f"the validate job was cancelled{who} after validating {n} CHECK(s); a CHECK already "
+                              f"validated stays validated, and a rerun starts again at the table it was on{again}")
     if body.get("state") == "failed":
         return Verdict(False, f"the validate job failed: {body.get('error') or body.get('reason') or 'no reason given'}"
                               "; run this again")

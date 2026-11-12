@@ -94,7 +94,7 @@ def validate_chash_checks_cmd(dry_run: bool, job_id: str | None, no_wait: bool, 
     finally:
         client.close()
     assert body is not None  # every path above set it, returned or exited
-    verdict = job.verdict(body)
+    verdict = job.verdict(body, cancelled_here=cancel)
     if as_json:
         click.echo(json.dumps(body, indent=2, default=str))
     else:
