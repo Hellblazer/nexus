@@ -28,10 +28,10 @@ EXIT_CANNOT = 3
 
 
 def _client() -> Any:
-    """A catalog client of its own (the shared handle is a proxy). Patched in tests."""
-    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deferred: CLI startup cost
+    """A catalog client of its own, from the factory (the shared handle is a proxy). Patched in tests."""
+    from nexus.catalog.factory import make_catalog_admin_client  # noqa: PLC0415 — deferred: CLI startup cost
 
-    return HttpCatalogClient()
+    return make_catalog_admin_client()
 
 
 def _fail(message: str, code: int) -> NoReturn:
