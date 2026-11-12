@@ -2191,7 +2191,8 @@ class StorageServiceSupervisor:
     def _legacy_chash_guard(self) -> None:
         """Refuse the spawn while legacy rows would be deleted and no verified backup cleared it (nexus-f3yqd).
         Bundled cluster only: ``PG_DATA`` in ``pg_credentials``, or the superuser password only a bundled provision
-        writes. A guard that could not ask raises a start error whose cause is :class:`GuardCannotAsk`; the run loop
+        writes. Managed and bring-your-own Postgres are exempt by Sam's decision (their operator owns backups); the
+        skip is logged. A guard that could not ask raises a start error whose cause is :class:`GuardCannotAsk`; the run loop
         waits and asks again (:func:`_wait_for_guard_cannot_ask`), it never starts the engine unasked."""
         pg_data = self._creds.get("PG_DATA", "").strip()
         from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
