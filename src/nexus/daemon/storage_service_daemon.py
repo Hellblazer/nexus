@@ -2190,17 +2190,38 @@ class StorageServiceSupervisor:
 
     def _legacy_chash_guard(self) -> None:
         """Refuse the spawn while legacy rows would be deleted and no verified backup cleared it (nexus-f3yqd).
-        Bundled cluster only. A guard that cannot run its queries logs an error and lets the start go on."""
-        if not self._creds.get("PG_DATA", "").strip():
+        Bundled cluster only: ``PG_DATA`` in ``pg_credentials``, or the superuser password only a bundled provision
+        writes. A guard that could not ask raises a start error whose cause is :class:`GuardCannotAsk`; the run loop
+        waits and asks again (:func:`_wait_for_guard_cannot_ask`), it never starts the engine unasked."""
+        pg_data = self._creds.get("PG_DATA", "").strip()
+        from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
+        from nexus.db.pg_provision import SUPERUSER_PASS_KEY  # noqa: PLC0415 — deferred import
+
+        if not pg_data and not self._creds.get(SUPERUSER_PASS_KEY):
+            return
+        self._guard_saw_no_changelog = None
+        try:
+            verdict = _guard.gate(
+                self._config_dir, _guard.bundled_run_sql(self._config_dir, self._creds), pg_data=pg_data,
+            )
+        except _guard.LegacyChashRefused as exc:
+            raise StorageServiceStartError(str(exc)) from exc
+        except _guard.GuardCannotAsk as exc:
+            raise StorageServiceStartError(
+                f"Not starting the engine yet: the legacy-chash guard could not ask Postgres ({exc}). Retrying."
+            ) from exc
+        if verdict.kind == "no_changelog":
+            self._guard_saw_no_changelog = pg_data
+
+    def _legacy_chash_note_healthy(self) -> None:
+        """A store the guard found with no changelog is now past its first engine boot: remember it (marker)."""
+        pg_data = getattr(self, "_guard_saw_no_changelog", None)
+        if pg_data is None:
             return
         from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
 
-        try:
-            _guard.gate(self._config_dir, _guard.bundled_run_sql(self._config_dir, self._creds))
-        except _guard.LegacyChashRefused as exc:
-            raise StorageServiceStartError(str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001 — a guard that cannot ask must not block every start
-            _log.error("legacy_chash_guard_could_not_check", error=str(exc))
+        _guard.write_marker(self._config_dir, pg_data, "no_changelog")
+        self._guard_saw_no_changelog = None
 
     def _release_stale_changelog_lock(self, *, reason: str) -> None:
         """Best-effort: terminate orphaned admin backends and release a
@@ -2944,6 +2965,9 @@ class StorageServiceSupervisor:
         except StorageServiceStartError:
             self._stop_service()
             raise
+
+        # nexus-f3yqd: a store seen with no changelog now has a healthy engine past its first boot.
+        self._legacy_chash_note_healthy()
 
         # Step 4: publish lease ONLY after service is healthy.
         self._publish(port)
@@ -3731,6 +3755,9 @@ def _wait_for_legacy_backup(
     _log.error("storage_service_legacy_chash_refused", error=str(exc),
                msg="waiting for a verified backup; Postgres stays up for nx backup")
     flush_logging()
+    # `--foreground` has no CLI wrapper to print the refusal: say it on stderr, where a terminal or the unit's log reads it.
+    sys.stderr.write(f"Error: {exc}\n")
+    sys.stderr.flush()
     while True:
         deadline = time.monotonic() + _BELOW_FLOOR_RECHECK_S
         while (left := deadline - time.monotonic()) > 0:
@@ -3742,6 +3769,31 @@ def _wait_for_legacy_backup(
             _log.info("storage_service_legacy_chash_cleared")
             flush_logging()
             return _ClusterFloorWait.RETRY
+
+
+_GUARD_RETRY_S: float = 5.0
+"""How long a supervisor that could not ask the legacy-chash guard's questions waits before asking again."""
+
+
+def _wait_for_guard_cannot_ask(
+    sup: StorageServiceSupervisor, exc: BaseException, stop_requested: threading.Event, flush_logging,
+) -> str | None:
+    """The legacy-chash guard could not ask Postgres (nexus-f3yqd): crash recovery, a timeout, a missing superuser
+    password. The engine must not start unasked and the supervisor must not exit (the OS would restart it in a loop),
+    so it waits and the run loop starts over. No refusal is recorded and no backup is asked for. None when ``exc`` is
+    not that case."""
+    from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
+
+    if not isinstance(exc.__cause__, _guard.GuardCannotAsk):
+        return None
+    if not getattr(sup, "_guard_cannot_ask_logged", False):
+        sup._guard_cannot_ask_logged = True
+        _log.warning("storage_service_legacy_chash_guard_cannot_ask", error=str(exc),
+                     msg="waiting and asking again; the engine is not started unasked")
+        flush_logging()
+    if stop_requested.wait(_GUARD_RETRY_S):
+        return _ClusterFloorWait.STOPPED
+    return _ClusterFloorWait.RETRY
 
 
 def _supervise_until_stopped(
@@ -3794,6 +3846,8 @@ def _supervise_until_stopped(
             waited = _wait_for_cluster_at_floor(sup, exc, stop_requested, flush_logging)
             if waited is None:
                 waited = _wait_for_legacy_backup(sup, exc, stop_requested, flush_logging)
+            if waited is None:
+                waited = _wait_for_guard_cannot_ask(sup, exc, stop_requested, flush_logging)
             if waited is None:
                 raise
             if waited == _ClusterFloorWait.RETRY:

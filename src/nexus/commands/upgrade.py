@@ -804,6 +804,9 @@ def _cycle_storage_service_to_current(
 #: PG start, so a slow start reaches us as start's own verdict, not as our timeout.
 _START_TIMEOUT_S = 150
 
+#: `nx daemon service start`'s exit when the legacy-chash guard refuses the engine start (nexus-f3yqd).
+_LEGACY_CHASH_REFUSED = 75
+
 #: What ``nx daemon service start`` says when the service has not published a lease in time.
 #: Both cases exit 2, so the text decides, following the rule ``start`` itself uses for
 #: StorageServiceStartError(still_starting=...) in nexus/commands/daemon.py: the detached
@@ -862,6 +865,12 @@ def _restart(nx, run, discover, installed: str, *, auto_mode: bool) -> str | Non
         return _restart_failed(_join(stop_problem, f"starting it failed ({type(exc).__name__}: {exc})"), "",
                                auto_mode=auto_mode)
     said = (getattr(started, "stderr", "") or "").strip()
+    if started.returncode == _LEGACY_CHASH_REFUSED:
+        return _restart_failed(
+            _join(stop_problem, "the legacy-chash guard refused to start the engine (exit 75): the store holds rows "
+                  "the engine's first boot would delete"),
+            said, auto_mode=auto_mode, remedy="`nx backup`, then `nx daemon service start`",
+        )
     if started.returncode != 0:
         if any(m in said for m in _STILL_STARTING) and not any(m in said for m in _FAILED_START):
             return _still_starting(installed, auto_mode=auto_mode)

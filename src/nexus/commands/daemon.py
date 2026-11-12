@@ -679,21 +679,27 @@ def _clear_legacy_chash_refusal(config_dir: Path, legacy_backup: Path | None) ->
     """The user's next start clears a pending legacy-chash refusal with a verified backup of this cluster, or is
     refused again with exit 75 (nexus-f3yqd; wren: explicit, never a file merely appearing)."""
     from nexus.daemon import legacy_chash_guard as _guard  # noqa: PLC0415 — deferred import
-    from nexus.db.pg_provision import discover_pg_binaries  # noqa: PLC0415 — deferred import
 
     if _guard.pending_refusal(config_dir) is None:
         return
-    pg_restore = discover_pg_binaries(config_dir).bin_dir / ("pg_restore.exe" if os.name == "nt" else "pg_restore")
-    accepted = _guard.try_clear(config_dir, pg_restore=pg_restore, explicit=legacy_backup)
+    try:
+        accepted = _guard.try_clear(config_dir, pg_restore=_guard.pg_restore_path(config_dir), explicit=legacy_backup)
+    except _guard.PgRestoreUnavailable as exc:
+        refused = _legacy_chash_refusal(config_dir)
+        assert refused is not None  # try_clear only runs on a pending refusal
+        refused.args = (f"Cannot check your backup: pg_restore could not be run ({exc}). That is not a problem with "
+                        f"the backup; fix the Postgres bundle (`nx doctor`), then start again.\n{refused.args[0]}",)
+        raise refused from exc
     if accepted is not None:
-        click.echo(f"Legacy chash rows: the backup {accepted} reads back with the chunk rows; starting the engine, "
-                   "which deletes them at its first start.", err=True)
+        click.echo(f"Legacy chash rows: the backup {accepted} reads back with this store's marker table and chunk "
+                   "data; starting the engine, which deletes the legacy rows at its first start.", err=True)
         return
     refused = _legacy_chash_refusal(config_dir)
     if refused is not None:
         if legacy_backup is not None:
             refused.args = (f"{refused.args[0]}\nThe backup you named, {legacy_backup}, was not accepted: it must be "
-                            "newer than the refusal and `pg_restore -l` must list the nexus chunks table data.",)
+                            "newer than the refusal, and `pg_restore -l` must list the marker table the refusal "
+                            "created and the nexus chunk and manifest table data.",)
         raise refused
 
 
@@ -1156,6 +1162,8 @@ def service_start_cmd(
         config_dir = config_dir.absolute()  # a relative path must not be re-read from the new cwd
         enter_stable_daemon_cwd()
         try:
+            if legacy_backup is not None:  # nexus-f3yqd: --legacy-backup counts here too, not only on a detached start
+                _clear_legacy_chash_refusal(config_dir, legacy_backup)
             code = run_storage_supervisor(config_dir=config_dir)
         except StorageServiceStartError as exc:
             click.echo(f"Error: {exc}", err=True)

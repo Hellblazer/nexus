@@ -254,6 +254,13 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # file was deleted at nexus-lgdel.l1 (the upgrade rung it implemented
     # retired with it), so the entry retires too rather than pointing at a
     # nonexistent path.
+    "src/nexus/daemon/legacy_chash_guard.py": (
+        4,
+        "Straddle-era guard (nexus-f3yqd): before an engine's first boot deletes legacy-width chash rows, it counts "
+        "them in a store from before vectors-004, whose chunks live in chunks_384/768/1024 and not nexus.chunks. It "
+        "must name those tables to count and to require them in the user's backup. Straddle-era handling, the "
+        "category this allowlist names for src/nexus."
+    ),
     "src/nexus/db/chash_tables.py": (
         12,
         "Legacy-era chash-bearing-table emitters (CHASH_BEARING_TABLES, "
@@ -375,6 +382,12 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     # ── tests: wire-compat / straddle-era fixtures mirroring the src/java
     #    files above ──────────────────────────────────────────────────────
+    "tests/daemon/test_legacy_chash_guard.py": (
+        33,
+        "Tests of the straddle-era legacy-chash guard (nexus-f3yqd): they seed and assert the pre-vectors-004 "
+        "schema, where chunks live in chunks_384/768/1024 and nexus.chunks does not exist, because the guard's "
+        "job is to count the legacy rows in exactly that shape. Real-era fixtures, not stale debris."
+    ),
     "tests/test_collection_purge.py": (
         9,
         "Fixture dicts for collection_purge.py's straddle-window wire-compat "
