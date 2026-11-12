@@ -42,8 +42,8 @@ with nothing written to the operator's ~/.claude. Five scenarios, each in its ow
   login shell is respawned there, remain-on-exit is released), rs_alpha last, no failure word in the log.
   Each is told a code word first (that gives it the transcript ``claude --resume`` needs) and must still
   answer its own word after the resume. Checked before the roll: claude really is rs_direct's pane process,
-  and rs_alpha's is a shell. After the roll each must have been woken (a ``woken by`` log line: mail for
-  rs_alpha, which has the channel, or typed; typed for rs_direct) with the wake prompt in its transcript.
+  and rs_alpha's is a shell. After the roll each must have been woken exactly once (one ``woken by`` log line:
+  mail for rs_alpha, which has the channel; a typed pointer for rs_direct), with the wake text in its transcript.
 
 Shared by every scenario:
 
@@ -1535,15 +1535,21 @@ def scenario_pane(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
                             f"now {now.get('pid')}, session {was.get('sessionId')} -> {now.get('sessionId')})")
             continue
         # The wake (Sam, 2026-11-11): a resumed session gets one prompt instead of sitting idle. rs_alpha has the
-        # channel (mailed, typed if no turn starts), rs_direct has none (typed); the log says which, and the
-        # wake text is a user entry in the resumed transcript.
-        how = re.search(rf"^\S+ {re.escape(name)}: woken by (mail|a typed prompt)$", log, re.MULTILINE)
-        if not how:
-            failures.append(f"{name}: the log has no 'woken by' line for it after the resume")
+        # channel and must take the mailed wake (the typed fallback would mean the mail path failed); rs_direct
+        # has none and gets the typed pointer. The log says which, once, and the wake text is in the transcript.
+        how = re.findall(rf"^\S+ {re.escape(name)}: woken by (mail|a typed prompt)$", log, re.MULTILINE)
+        want = "mail" if name in spec.channel else "a typed prompt"
+        if how != [want]:
+            failures.append(f"{name}: expected one 'woken by {want}' log line after the resume, found {how}")
         else:
-            notes.append(f"{name} woken by {how.group(1)}")
+            notes.append(f"{name} woken by {want}")
         if not any(e.get("type") == "user" and WAKE_MARK in json.dumps(e) for e in sb.events(str(was.get("sessionId")))):
             failures.append(f"{name}: no wake prompt ({WAKE_MARK!r}) in its resumed transcript")
+        elif name in spec.channel:
+            # the mail is unattested: the session is told to check the script's marker first (origin_note)
+            checked = any("test -f" in json.dumps(e) and "restart-asks" in json.dumps(e)
+                          for e in sb.events(str(was.get("sessionId"))) if e.get("type") == "assistant")
+            notes.append(f"{name} {'ran' if checked else 'did NOT run'} the marker check on the mailed wake")
         # A resume brings the transcript back: the session still knows the word it was told before the roll.
         reply = sb.prompt(name, "What is the project code word for this task? Reply with only the word.").upper()
         others = [w for n, w in spec.words.items() if n != name]
