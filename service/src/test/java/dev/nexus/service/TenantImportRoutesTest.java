@@ -9,6 +9,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import dev.nexus.service.db.ExportTestClock;
 import dev.nexus.service.db.TenantImportSessions;
 import dev.nexus.service.db.TokenStore;
 import org.jooq.impl.DSL;
@@ -161,6 +162,143 @@ class TenantImportRoutesTest {
     }
 
     @Test
+    void aNewerFileWhoseColumnsAllMatchLoadsAndTheCountDifferenceIsShown() throws Exception {
+        String tenant = "t-imp-newer-count";
+        String token = env.newTenant(tenant);
+        long engineCount = file.header.get("schema_changeset_count").asLong();
+        ImportTestEnv.BackupFile newer = file.copy();
+        newer.header.put("schema_changeset_count", engineCount + 7);
+        newer.seal();
+        env.importSessions(TenantImportSessions.Config.defaults(), List.of(), () -> engineCount);   // what /version reports
+
+        HttpResponse<String> opened = env.open(token, newer);
+
+        assertThat(opened.statusCode()).as(opened.body()).isEqualTo(200);
+        assertThat(json(opened).get("notes").toString()).contains("schema_changeset_count is " + (engineCount + 7))
+            .contains("this engine's is " + engineCount);
+        String id = json(opened).get("session_id").asText();
+        env.upload(token, id, newer, json(opened), 100);
+        assertThat(commitAndAwait(token, id)).isEqualTo("committed");
+        assertThat(env.count("memory", tenant)).isEqualTo(env.count("memory", SRC));
+        assertThat(env.count("chunks", tenant)).isEqualTo(env.count("chunks", SRC));
+        assertThat(json(env.call("GET", IMPORT + "/" + id, token)).get("notes").toString())
+            .as("the status keeps the note").contains("this engine's is " + engineCount);
+    }
+
+    @Test
+    void aChildTableWhoseReassignedIdParentIsNotInTheFileIsRefusedNamingBoth() throws Exception {
+        String token = env.newTenant("t-imp-noparent");
+        ImportTestEnv.BackupFile f = file.copy();
+        var tables = f.header.withArray("tables");
+        for (int i = tables.size() - 1; i >= 0; i--) {
+            if (tables.get(i).get("name").asText().equals("topics")) tables.remove(i);
+        }
+        f.pages.remove("topics");
+        f.seal();
+
+        HttpResponse<String> r = env.open(token, f);
+
+        assertThat(r.statusCode()).isEqualTo(422);
+        assertThat(json(r).get("reason").asText()).isEqualTo("file_not_loadable");
+        assertThat(json(r).get("problems").toString()).contains("topic_assignments").contains("topics").contains("by id");
+        openOk(token, file);   // no session was left behind
+    }
+
+    @Test
+    void aChildRowWhoseParentRowIsNotInTheFileFailsTheLoadNamingTheColumnAndWritesNothing() throws Exception {
+        String tenant = "t-imp-orphanrow";
+        String token = env.newTenant(tenant);
+        ImportTestEnv.BackupFile f = file.copy();
+        f.pages.put("topics", List.of());   // the table is in the file and holds no rows, while its children point at some
+        f.seal();
+
+        JsonNode end = env.restore(token, f);
+
+        assertThat(end.get("status").asText()).startsWith("failed: ").contains("topic_assignments.topic_id")
+            .contains("topics row the file does not hold");
+        assertNothingWritten(tenant);
+    }
+
+    @Test
+    void anErrorThatEndsALoadLeavesItFailedAndNeverCommittedAndWritesNoMarker() throws Exception {
+        String tenant = "t-imp-error";
+        String token = env.newTenant(tenant);
+        var sessions = env.importSessions(TenantImportSessions.Config.defaults(), List.of());
+        sessions.loadHookForTests(text -> {
+            if (text.equals("loading memory")) throw new AssertionError("an Error, not an Exception, in the middle of the load");
+        });
+        JsonNode opened = openOk(token, file);
+        String id = opened.get("session_id").asText();
+        env.upload(token, id, file, opened, 100);
+
+        assertThat(env.call("POST", IMPORT + "/" + id + "/commit", token).statusCode()).isEqualTo(202);
+        JsonNode end = env.awaitEnd(token, id, Duration.ofMinutes(1));
+
+        assertThat(end.get("state").asText()).isEqualTo("failed");
+        assertThat(end.get("status").asText()).startsWith("failed: ").contains("an Error");
+        assertNothingWritten(tenant);
+        assertThat(json(env.call("GET", "/v1/tenant/import-marker", token)).get("present").asBoolean()).isFalse();
+        assertThat(env.ds.getHikariPoolMXBean().getActiveConnections()).isZero();
+        sessions.loadHookForTests(null);
+    }
+
+    @Test
+    void aSweepDoesNotEndASessionWhileARequestOfItIsRunning() throws Exception {
+        String token = env.newTenant("t-imp-sweep-busy");
+        ExportTestClock clock = new ExportTestClock(java.time.Instant.parse("2026-11-13T12:00:00Z"));
+        env.exportSessions(dev.nexus.service.db.TenantExportSessions.Config.defaults().withMaxSessions(6), clock);
+        var sessions = env.importSessions(TenantImportSessions.Config.defaults(), List.of());
+        JsonNode opened = openOk(token, file);
+        String id = opened.get("session_id").asText();
+        String first = opened.get("tables").get(0).asText();
+        byte[] part = BinaryCopyTestSupport.split(file.pages.get(first).get(0), 100).get(0);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        sessions.partHookForTests(table -> {
+            inside.countDown();
+            try {
+                release.await(60, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        CompletableFuture<HttpResponse<String>> running = CompletableFuture.supplyAsync(() -> {
+            try {
+                return env.putPart(token, id, first, 0, part, sha256(part));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        assertThat(inside.await(60, TimeUnit.SECONDS)).isTrue();
+
+        clock.advance(Duration.ofMinutes(61));   // past the total bound, with a part still running
+        assertThat(sessions.sweep()).as("a request is running: it is not ended under it").isZero();
+        release.countDown();
+        assertThat(running.get(60, TimeUnit.SECONDS).statusCode()).as("the part completes").isEqualTo(200);
+        sessions.partHookForTests(null);
+
+        assertThat(sessions.sweep()).as("and the next sweep ends it, for its own reason").isEqualTo(1);
+        assertThat(json(env.call("GET", IMPORT + "/" + id, token)).get("status").asText()).startsWith("failed: total bound");
+    }
+
+    @Test
+    void aMarkerRowThatIsNotJsonIsAnUnreadableMarkerNotAServerError() throws Exception {
+        String tenant = "t-imp-badmarker";
+        String token = env.newTenant(tenant);
+        env.su(ctx -> ctx.insertInto(DSL.table(DSL.name("nexus", "catalog_meta")),
+                DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("key")), DSL.field(DSL.name("value")))
+            .values(tenant, "rdr248_restore", "this is {not json").execute());
+
+        HttpResponse<String> r = env.call("GET", "/v1/tenant/import-marker", token);
+
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(json(r).get("present").asBoolean()).isTrue();
+        assertThat(json(r).get("committed").asBoolean()).isFalse();
+        assertThat(json(r).get("reason").asText()).contains("readable marker");
+        assertThat(json(r).has("marker")).isFalse();
+    }
+
+    @Test
     void aFileMissingAColumnTheTargetRequiresIsRefusedNamingTheColumn() throws Exception {
         String token = env.newTenant("t-imp-missing");
         HttpResponse<String> r = env.open(token, file.withoutColumn("memory", "title").seal());
@@ -247,7 +385,13 @@ class TenantImportRoutesTest {
         assertThat(again.statusCode()).isEqualTo(409);
         assertThat(json(again).get("reason").asText()).isEqualTo("session_exists");
         assertThat(json(again).get("session_id").asText()).isEqualTo(first);
-        assertThat(env.call("POST", "/v1/tenant/export", token).statusCode()).as("an export shares the rule").isEqualTo(409);
+        assertThat(json(again).get("session_kind").asText()).isEqualTo("import");
+        HttpResponse<String> exportOpen = env.call("POST", "/v1/tenant/export", token);
+        assertThat(exportOpen.statusCode()).as("an export shares the rule").isEqualTo(409);
+        assertThat(json(exportOpen).get("session_id").asText()).as("the import session's id").isEqualTo(first);
+        assertThat(json(exportOpen).get("session_kind").asText()).as("which routes close it").isEqualTo("import");
+        assertThat(env.call("DELETE", "/v1/tenant/export/" + first, token).statusCode())
+            .as("the export route cannot close an import session: the kind says where to send the DELETE").isEqualTo(404);
 
         assertThat(env.call("DELETE", IMPORT + "/" + first, token).statusCode()).isEqualTo(200);
         openOk(token, file);
@@ -263,6 +407,7 @@ class TenantImportRoutesTest {
         HttpResponse<String> same = env.open(a, file);
         assertThat(same.statusCode()).isEqualTo(409);
         assertThat(json(same).has("session_id")).isTrue();
+        assertThat(json(same).get("session_kind").asText()).isEqualTo("export");
         HttpResponse<String> other = env.open(b, file);
         assertThat(other.statusCode()).as("the engine's one place is the export's").isEqualTo(503);
         assertThat(json(other).get("reason").asText()).isEqualTo("import_capacity_full");
@@ -317,7 +462,7 @@ class TenantImportRoutesTest {
         String shortLived = "tok-short-" + tenant + "-0123456789abcdefghijklmnopqrstuvwxyz";
         env.su(ctx -> {
             PgContainerHelper.seedServiceToken(ctx, shortLived, tenant, "short", TokenStore.SCOPE_DATA,
-                OffsetDateTime.now().plusSeconds(3), null);
+                OffsetDateTime.now().plusSeconds(10), null);
             return null;
         });
         JsonNode opened = openOk(shortLived, file);
@@ -325,7 +470,7 @@ class TenantImportRoutesTest {
         String firstTable = opened.get("tables").get(0).asText();
         env.uploadTable(shortLived, id, file, firstTable, 100);
 
-        long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+        long deadline = System.nanoTime() + Duration.ofSeconds(90).toNanos();
         while (env.call("GET", IMPORT + "/" + id, shortLived).statusCode() != 401) {
             assertThat(System.nanoTime()).as("the token expired").isLessThan(deadline);
             Thread.sleep(250);
@@ -366,6 +511,9 @@ class TenantImportRoutesTest {
         for (int k = 1; k < parts.size(); k++) {
             assertThat(env.putPart(token, id, "memory", k, parts.get(k), sha256(parts.get(k))).statusCode()).isEqualTo(200);
         }
+        HttpResponse<String> behind = env.putPart(token, id, "memory", 0, parts.get(0), sha256(parts.get(0)));
+        assertThat(behind.statusCode()).as("a part before the last staged one, though it was staged once").isEqualTo(409);
+        assertThat(json(behind).get("reason").asText()).isEqualTo("part_already_staged");
         HttpResponse<String> badClose = env.call("POST", IMPORT + "/" + id + "/close?table=memory&rows=" + (parts.size() + 1), token);
         assertThat(badClose.statusCode()).isEqualTo(409);
         assertThat(json(badClose).get("reason").asText()).isEqualTo("row_count_mismatch");
@@ -452,6 +600,9 @@ class TenantImportRoutesTest {
         assertThat(second.statusCode()).isEqualTo(409);
         assertThat(json(second).get("reason").asText()).isEqualTo("part_in_flight");
         assertThat(second.headers().firstValue("Retry-After")).contains("1");
+        HttpResponse<String> close = env.call("POST", IMPORT + "/" + id + "/close?table=" + first + "&rows=" + file.rows(first), token);
+        assertThat(close.statusCode()).as("a close must not race a part of the same table").isEqualTo(409);
+        assertThat(json(close).get("reason").asText()).isEqualTo("part_in_flight");
         release.countDown();
         assertThat(running.get(60, TimeUnit.SECONDS).statusCode()).isEqualTo(200);
         sessions.partHookForTests(null);

@@ -90,7 +90,7 @@ class RestoreLoadLockTest {
     }
 
     @Test
-    void checkRestoreFalseSkipsTheCheckAsTheWalkDoes() throws Exception {
+    void checkRestoreFalseSkipsTheCheckForTheDoctorAndForOperators() throws Exception {
         try (Connection load = connect(false); Connection create = connect(true)) {
             assertThat(RestoreLoadLock.tryExclusive(dsl(load))).isTrue();
             assertThat(PartitionScratch.createTenantPartitions(dsl(create), "chunks", "t-lock-walk", true, false))

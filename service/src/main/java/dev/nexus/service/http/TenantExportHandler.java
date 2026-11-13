@@ -218,6 +218,7 @@ public final class TenantExportHandler implements HttpHandler {
         } catch (TenantExportSessions.SessionExistsException e) {
             ObjectNode body = errorBody("export_session_exists", e.getMessage());
             if (e.sessionId() != null) body.put("session_id", e.sessionId());
+            if (e.kind() != null) body.put("session_kind", e.kind());   // an import session is closed on /v1/tenant/import/{id}
             HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(body));
             return;
         } catch (TenantExportSessions.CapacityFullException e) {

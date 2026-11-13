@@ -135,14 +135,32 @@ class TenantImportPlanTest {
     }
 
     @Test
-    void plainTypeNamesAreAcceptedAndNothingElse() {
-        for (String ok : List.of("bigint", "text", "boolean", "timestamp with time zone", "character varying(255)",
-                "numeric(10,2)", "bigint[]", "double precision", "vector(768)", "public.vector(768)")) {
+    void onlyTypeNamesOnTheAllowlistAreAcceptedWithAtMostOneModifierAndArrayBrackets() {
+        for (String ok : List.of("bigint", "text", "boolean", "timestamp with time zone", "timestamp(6) with time zone",
+                "character varying(255)", "numeric(10,2)", "numeric(10, 2)", "bigint[]", "text[][]", "double precision",
+                "vector(768)", "halfvec(1024)", "jsonb", "uuid", "bytea")) {
             assertThat(TenantImportPlan.plainType(ok)).as(ok).isTrue();
         }
-        for (String bad : List.of("", "text; drop", "text'", "\"x\"", "text --", "a(b)", "int, int", "x".repeat(81))) {
+        for (String bad : List.of("", "text; drop", "text'", "\"x\"", "text --", "a(b)", "int, int", "x".repeat(81),
+                "public.vector(768)", "pg_catalog.text", "mytype", "text text", "bigint(1)(2)", "numeric(1,2,3)", "text()",
+                "boolean); drop table nexus.memory; --", "timestamp with time zone; select 1", "Text", "text\n")) {
             assertThat(TenantImportPlan.plainType(bad)).as(bad).isFalse();
         }
+    }
+
+    @Test
+    void aChildWhoseReassignedIdParentIsNotInTheFileIsRefusedForDataAndSkippedForDerived() {
+        // memory + a derived child of nx_answer_runs without nx_answer_runs, and a data child of topics without topics
+        Map<String, List<TargetColumn>> t = targets();
+        List<Column> assignments = List.of(new Column("tenant_id", "text"), new Column("topic_id", "bigint"));
+        t.put("topic_assignments", target(assignments));
+        List<FileTable> f = new ArrayList<>(file());
+        f.removeIf(x -> x.name().equals("nx_answer_runs"));
+        f.add(new FileTable("topic_assignments", assignments));
+        Plan plan = TenantImportPlan.analyze(f, t, List.of());
+        assertThat(plan.refusals()).singleElement().asString().contains("topic_assignments").contains("topics").contains("by id");
+        assertThat(plan.tables().get("nx_answer_steps").skipReason()).contains("nx_answer_runs").contains("by id");
+        assertThat(plan.tables().get("memory").loads()).isTrue();
     }
 
     @Test

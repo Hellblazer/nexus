@@ -345,8 +345,15 @@ final class ImportTestEnv implements AutoCloseable {
     /** The import sessions of this test: its own limits, the singleton lock declared, and an optional retired list. */
     dev.nexus.service.db.TenantImportSessions importSessions(dev.nexus.service.db.TenantImportSessions.Config config,
                                                              List<dev.nexus.service.db.TenantExport.Retired> retired) {
+        return importSessions(config, retired, () -> null);
+    }
+
+    /** As above, with the engine's schema changeset count a test names (the open compares the file's with it). */
+    dev.nexus.service.db.TenantImportSessions importSessions(dev.nexus.service.db.TenantImportSessions.Config config,
+                                                             List<dev.nexus.service.db.TenantExport.Retired> retired,
+                                                             java.util.function.Supplier<Long> engineChangesets) {
         var sessions = new dev.nexus.service.db.TenantImportSessions(service::exportSessions, ds, config,
-            dev.nexus.service.db.CollectionRegistry::evictTenant, service.importWiring()::singletonLockHeld, () -> null, retired);
+            dev.nexus.service.db.CollectionRegistry::evictTenant, service.importWiring()::singletonLockHeld, engineChangesets, retired);
         service.importWiring().sessions(sessions);
         return sessions;
     }

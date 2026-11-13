@@ -322,7 +322,17 @@ public final class TenantImportHandler implements HttpHandler {
         String json = sessions.get().readMarker(tenant);
         ObjectNode out = MAPPER.createObjectNode();
         out.put("present", json != null);
-        if (json != null) out.set("marker", MAPPER.readTree(json));
+        if (json != null) {
+            try {
+                out.set("marker", MAPPER.readTree(json));
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                // the key's value is data a restore carries, so it can be anything: an unreadable marker names no file, which a
+                // client reads as "not committed by this file"
+                out.put("present", true);
+                out.put("committed", false);
+                out.put("reason", "the rdr248_restore row does not hold a readable marker");
+            }
+        }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
     }
 

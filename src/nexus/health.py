@@ -7912,10 +7912,16 @@ def _check_tenant_model_partitions(
         more = len(tenants) - _PARTITION_GAPS_SHOWN
         fixes = [
             "As the table owner: SELECT nexus.create_tenant_partitions('nexus.chunks'::regclass, "
-            f"{_sql_literal(t)}), nexus.create_tenant_partitions('nexus.taxonomy_centroids'::regclass, "
-            f"{_sql_literal(t)});"
+            f"{_sql_literal(t)}, p_check_restore => false), nexus.create_tenant_partitions('nexus.taxonomy_centroids'::regclass, "
+            f"{_sql_literal(t)}, p_check_restore => false);"
             for t in tenants[:_PARTITION_GAPS_SHOWN]
         ]
+        # vectors-059 (RDR-248): a tenant restore load holds a lock that makes the function refuse its DDL path at once, so a
+        # recovery that must work while a load runs passes p_check_restore => false; an engine older than that has no parameter
+        fixes.append(
+            "The statement skips the check that refuses while a tenant restore is loading; an engine older than changeset "
+            "vectors-059 has no p_check_restore parameter, so drop that argument there"
+        )
         fixes.append(
             "A tenant removed on purpose (nexus.drop_tenant_partitions drops its leaves and keeps its tokens) is "
             "not a fault: finish the removal runbook by deleting its service_tokens rows instead"

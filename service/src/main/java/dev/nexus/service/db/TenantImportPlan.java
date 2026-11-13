@@ -86,14 +86,29 @@ public final class TenantImportPlan {
 
     /**
      * A retired column's type is the only type text taken from the file (a known column's is the target's own). It
-     * becomes the type of a stage column, so it must be a plain type name: words, an optional schema, an optional
-     * length or precision in digits, and array brackets. Anything else, a quote or a semicolon included, is refused.
+     * becomes the type of a stage column, so it is checked against an allowlist of the type names {@code format_type}
+     * prints, each with at most one {@code (n)} or {@code (p,s)} modifier and any number of {@code []}: nothing else
+     * reaches a statement, a quote or a semicolon included.
      */
-    private static final Pattern PLAIN_TYPE = Pattern.compile(
-        "[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)?( [a-z]+)*(\\([0-9]+(, ?[0-9]+)?\\))?( [a-z]+)*(\\[\\])*");
+    private static final java.util.Set<String> TYPE_NAMES = java.util.Set.of(
+        "bigint", "integer", "smallint", "boolean", "text", "bytea", "uuid", "jsonb", "json", "real", "double precision",
+        "numeric", "character varying", "character", "date", "interval", "inet", "cidr", "macaddr", "tsvector", "oid", "name",
+        "bit", "bit varying", "money", "vector", "halfvec",
+        "timestamp with time zone", "timestamp without time zone", "time with time zone", "time without time zone");
+
+    private static final Pattern MODIFIER = Pattern.compile("\\(\\d{1,5}(, ?\\d{1,5})?\\)");
 
     public static boolean plainType(String type) {
-        return type != null && type.length() <= 80 && PLAIN_TYPE.matcher(type).matches();
+        if (type == null || type.length() > 60) return false;
+        String t = type;
+        while (t.endsWith("[]")) t = t.substring(0, t.length() - 2);
+        java.util.regex.Matcher m = MODIFIER.matcher(t);
+        if (m.find()) {
+            String without = t.substring(0, m.start()) + t.substring(m.end());   // "timestamp(6) with time zone" and "vector(768)"
+            if (MODIFIER.matcher(without).find()) return false;
+            t = without.replace("  ", " ").trim();
+        }
+        return TYPE_NAMES.contains(t);
     }
 
     /**
@@ -188,6 +203,21 @@ public final class TenantImportPlan {
             }
             byName.put(e.name(), new TablePlan(e, f.columns(), load, retiredCols, defaulted, skipped.get(e.name()),
                 liveByName.containsKey("tenant_id")));
+        }
+        // A child that refers by reassigned id to a parent the file does not carry cannot be remapped: its ids would pass
+        // through unchanged and could name another tenant's rows. Data refuses, derived is skipped (it is rebuildable).
+        for (ExportTable e : inOrder) {
+            if (skipped.containsKey(e.name())) continue;
+            for (Reference r : e.references()) {
+                if (!r.foreignKey() || fileByName.containsKey(r.parentName())) continue;
+                Optional<ExportTable> parent = TenantExport.entry(r.parentTable());
+                if (parent.isEmpty() || parent.get().reassignedId() == null
+                        || !r.parentColumns().contains(parent.get().reassignedId())) continue;
+                mismatch(e, "table " + e.name() + " refers to " + r.parentName() + " by id, and the file does not carry "
+                    + r.parentName() + ": its ids could not be remapped", refusals, skipped);
+                if (skipped.containsKey(e.name())) byName.put(e.name(), byName.get(e.name()).skipped(skipped.get(e.name())));
+                break;
+            }
         }
         // a skipped table skips every table that refers to it (skipping nx_answer_runs skips nx_answer_steps)
         boolean grew = true;

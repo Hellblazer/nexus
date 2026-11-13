@@ -252,14 +252,21 @@ public final class TenantExportSessions implements AutoCloseable {
     /** The tenant already has an export session ({@code sessionId} is its id, which only that tenant can see). */
     public static final class SessionExistsException extends RuntimeException {
         private final String sessionId;
+        private final String kind;
 
-        SessionExistsException(String sessionId) {
+        SessionExistsException(String sessionId, String kind) {
             super("this tenant already has an export or import session");
             this.sessionId = sessionId;
+            this.kind = kind;
         }
 
         public String sessionId() {
             return sessionId;
+        }
+
+        /** {@code "export"} or {@code "import"}: which routes close {@link #sessionId()} ({@code DELETE /v1/tenant/<kind>/{id}}); null while one is still opening. */
+        public String kind() {
+            return kind;
         }
     }
 
@@ -384,10 +391,10 @@ public final class TenantExportSessions implements AutoCloseable {
         handOff(expired);
         synchronized (lock) {
             Session existing = byOwner.get(tenant);
-            if (existing != null) throw new SessionExistsException(existing.id);
+            if (existing != null) throw new SessionExistsException(existing.id, "export");
             Slot importing = importSlots.get(tenant);
-            if (importing != null) throw new SessionExistsException(importing.id());
-            if (opening.contains(tenant)) throw new SessionExistsException(null);
+            if (importing != null) throw new SessionExistsException(importing.id(), "import");
+            if (opening.contains(tenant)) throw new SessionExistsException(null, null);
             if (byOwner.size() + opening.size() + importSlots.size() >= config.maxSessions()) {
                 throw new CapacityFullException(config.retryAfterSeconds());
             }
@@ -442,10 +449,10 @@ public final class TenantExportSessions implements AutoCloseable {
         handOff(expired);
         synchronized (lock) {
             Session existing = byOwner.get(tenant);
-            if (existing != null) throw new SessionExistsException(existing.id);
+            if (existing != null) throw new SessionExistsException(existing.id, "export");
             Slot held = importSlots.get(tenant);
-            if (held != null) throw new SessionExistsException(held.id());
-            if (opening.contains(tenant)) throw new SessionExistsException(null);
+            if (held != null) throw new SessionExistsException(held.id(), "import");
+            if (opening.contains(tenant)) throw new SessionExistsException(null, null);
             if (byOwner.size() + opening.size() + importSlots.size() >= config.maxSessions()) {
                 throw new CapacityFullException(config.retryAfterSeconds());
             }

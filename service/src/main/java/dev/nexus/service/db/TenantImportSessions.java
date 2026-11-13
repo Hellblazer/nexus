@@ -206,6 +206,8 @@ public final class TenantImportSessions implements AutoCloseable {
         private long stagedBytes;
         private volatile String cancelReason;
         private boolean ended;
+        /** True once the load's COMMIT has returned: from then on the outcome is committed, whatever else races it. */
+        private boolean committed;
         private TenantImportReport report;
         private final List<String> notes = new ArrayList<>();
 
@@ -353,7 +355,7 @@ public final class TenantImportSessions implements AutoCloseable {
         try {
             slot = shared.reserveSlot(tenant, id);
         } catch (TenantExportSessions.SessionExistsException e) {
-            Map<String, Object> extra = e.sessionId() == null ? Map.of() : Map.of("session_id", e.sessionId());
+            Map<String, Object> extra = e.sessionId() == null ? Map.of() : Map.of("session_id", e.sessionId(), "session_kind", e.kind());
             throw new RefusedException(409, "session_exists", e.getMessage() + " (DELETE the session id given to close it)",
                 null, extra);
         } catch (TenantExportSessions.CapacityFullException e) {
@@ -445,16 +447,17 @@ public final class TenantImportSessions implements AutoCloseable {
 
     /** The tenant's active session {@code id}; {@code touch} restarts its idle clock. */
     private Session active(String tenant, String id, boolean touch) {
-        List<Session> expired;
         Session s;
         synchronized (lock) {
             s = byTenant.get(tenant);
             if (s != null && !s.id.equals(id)) s = null;
             if (s != null && touch) s.lastActive = now();
         }
-        expired = expireDue();
-        for (Session e : expired) endExpired(e);
-        if (s == null || expired.contains(s)) throw noSuchSession();
+        boolean mineEnded = false;
+        for (Due d : expireDue()) {
+            if (endExpired(d) && d.session() == s) mineEnded = true;
+        }
+        if (s == null || mineEnded) throw noSuchSession();
         return s;
     }
 
@@ -544,6 +547,17 @@ public final class TenantImportSessions implements AutoCloseable {
      */
     public boolean closeTable(String tenant, String id, String table, long rows) {
         Session s = active(tenant, id, true);
+        if (!s.gate.tryAcquire()) {   // a close must not race a part of the same table that is still being staged
+            throw new RefusedException(409, "part_in_flight", "another request of this session is running", 1, Map.of());
+        }
+        try {
+            return closeTableLocked(s, table, rows);
+        } finally {
+            s.gate.release();
+        }
+    }
+
+    private boolean closeTableLocked(Session s, String table, long rows) {
         synchronized (lock) {
             if (s.ended || s.state != State.STAGING) {
                 throw new RefusedException(409, "not_staging", "this session is no longer taking tables: " + s.status);
@@ -650,6 +664,7 @@ public final class TenantImportSessions implements AutoCloseable {
     private void runLoad(Session s) {
         String failure = null;
         TenantImportReport report = null;
+        Error fatal = null;
         try {
             PgSession.setLocal(s.ctx, "statement_timeout", Long.toString(config.loadMax().toMillis()));
             Map<String, Long> staged = new HashMap<>();
@@ -673,33 +688,40 @@ public final class TenantImportSessions implements AutoCloseable {
                 throw new TenantImportLoad.LoadFailedException("the commit was not confirmed (" + e.getMessage()
                     + "); read /v1/tenant/import-marker to learn whether it landed");
             }
+            synchronized (lock) {   // the one place a load becomes committed: after the COMMIT returned
+                s.report = report;
+                s.committed = true;
+            }
         } catch (TenantImportLoad.LoadFailedException e) {
             failure = e.getMessage();
-        } catch (RuntimeException e) {
-            failure = s.cancelReason != null ? s.cancelReason : describe(e);
-            log.warn("event=import_load_failed session={} tenant={} error={}", s.id, s.tenant, e.toString());
-        } finally {
-            try {
-                if (failure != null) {
-                    finish(s, State.FAILED, "failed: " + failure, null);
-                } else {
-                    finish(s, State.COMMITTED, "committed", report);
-                }
-            } finally {
-                s.gate.release();
-            }
+        } catch (Throwable t) {   // an Error too: the outcome is recorded as failed, never left to read committed
+            failure = s.cancelReason != null ? s.cancelReason : describe(t);
+            if (t instanceof Error err) fatal = err;
+            log.warn("event=import_load_failed session={} tenant={} error={}", s.id, s.tenant, t.toString());
         }
-        if (failure == null) {
+        boolean committed;
+        try {
+            synchronized (lock) {
+                committed = s.committed;
+            }
+            // finish() itself turns any end of a committed session into committed, so an abort, an eviction or an expiry that
+            // raced the COMMIT cannot overwrite it
+            finish(s, committed ? State.COMMITTED : State.FAILED, committed ? "committed" : "failed: " + failure, report);
+        } finally {
+            s.gate.release();
+        }
+        if (committed) {
             try {
                 onCommitted.accept(s.tenant);
             } catch (RuntimeException e) {
                 log.warn("event=import_post_commit_hook_failed session={} tenant={} error={}", s.id, s.tenant, e.getMessage());
             }
             log.info("event=import_committed session={} tenant={} rows={} dropped={}", s.id, s.tenant,
-                report.insertedRows(), report.droppedRows());
+                s.report.insertedRows(), s.report.droppedRows());
         } else {
             log.warn("event=import_failed session={} tenant={} reason={}", s.id, s.tenant, failure);
         }
+        if (fatal != null) throw fatal;
     }
 
     private static String describe(Throwable e) {
@@ -826,6 +848,11 @@ public final class TenantImportSessions implements AutoCloseable {
         synchronized (lock) {
             if (s.ended) return;
             s.ended = true;
+            if (s.committed) {   // the COMMIT returned: nothing that raced it (abort, eviction, expiry) can make it a failure
+                end = State.COMMITTED;
+                status = "committed";
+                report = s.report;
+            }
             s.state = end;
             s.status = status;
             s.report = report;
@@ -863,12 +890,16 @@ public final class TenantImportSessions implements AutoCloseable {
 
     // ── bounds ──────────────────────────────────────────────────────────────────────────────────
 
+    /** A session past a bound, with the reason it is closed for. */
+    private record Due(Session session, String reason) {
+    }
+
     /** Sessions past a bound that can be ended now; a load past its bound is cancelled instead. */
-    private List<Session> expireDue() {
+    private List<Due> expireDue() {
         Instant now = now();
         Duration idle = exports.get().config().idleBound();
         Duration total = exports.get().config().totalBound();
-        List<Session> due = new ArrayList<>();
+        List<Due> due = new ArrayList<>();
         List<Session> overLoad = new ArrayList<>();
         synchronized (lock) {
             for (Session s : byTenant.values()) {
@@ -881,14 +912,11 @@ public final class TenantImportSessions implements AutoCloseable {
                 boolean totalOver = s.firstCommitAt == null && !now.isBefore(s.openedAt.plus(total));
                 boolean waitOver = s.firstCommitAt != null && !now.isBefore(s.firstCommitAt.plus(config.loadMax()));
                 if (totalOver) {
-                    s.cancelReason = "total bound: the upload passed " + total.toMinutes() + " minutes";
-                    due.add(s);
+                    due.add(new Due(s, "total bound: the upload passed " + total.toMinutes() + " minutes"));
                 } else if (waitOver) {
-                    s.cancelReason = "restore-wait bound: another restore held the load for " + config.loadMax().toMinutes() + " minutes";
-                    due.add(s);
+                    due.add(new Due(s, "restore-wait bound: another restore held the load for " + config.loadMax().toMinutes() + " minutes"));
                 } else if (idleOver) {
-                    s.cancelReason = "idle bound: no part for " + idle.toMinutes() + " minutes";
-                    due.add(s);
+                    due.add(new Due(s, "idle bound: no part for " + idle.toMinutes() + " minutes"));
                 }
             }
             outcomes.values().removeIf(o -> now.isAfter(o.endedAt().plus(config.outcomeRetention())));
@@ -900,17 +928,14 @@ public final class TenantImportSessions implements AutoCloseable {
         return due;
     }
 
-    private void endExpired(Session s) {
-        if (!s.gate.tryAcquire()) {
-            synchronized (lock) {
-                s.cancelReason = null;   // a request is running: the next sweep tries again
-            }
-            return;
-        }
+    /** Ends a session past a bound for the reason {@code expireDue} found; false when a request holds it (the next sweep tries again). */
+    private boolean endExpired(Due d) {
+        Session s = d.session();
+        if (!s.gate.tryAcquire()) return false;
         try {
-            String reason = s.cancelReason;
-            log.info("event=import_session_closed session={} tenant={} reason={}", s.id, s.tenant, reason);
-            finish(s, State.FAILED, "failed: " + reason, null);
+            log.info("event=import_session_closed session={} tenant={} reason={}", s.id, s.tenant, d.reason());
+            finish(s, State.FAILED, "failed: " + d.reason(), null);
+            return true;
         } finally {
             s.gate.release();
         }
@@ -918,10 +943,11 @@ public final class TenantImportSessions implements AutoCloseable {
 
     /** Applies every bound now; returns how many sessions it ended. The background sweep calls this. */
     public int sweep() {
-        List<Session> due = expireDue();
-        int before = due.size();
-        for (Session s : due) endExpired(s);
-        return before;
+        int ended = 0;
+        for (Due d : expireDue()) {
+            if (endExpired(d)) ended++;
+        }
+        return ended;
     }
 
     private void startSweeperLocked() {

@@ -20,10 +20,12 @@
     takes no lock and is not delayed by a load. A load that finds a tenant create holding the key shared retries
     its try-lock for a few seconds and then answers restore_busy.
 
-    p_check_restore = false skips the check. The RDR-225 migration walk (vectors-030) passes p_force = false for the
-    *_new parents; it runs inside a Liquibase migration, before the engine serves, where no load can exist, and it
-    is an applied changeset that is not edited (a checksum change refuses boot), so it keeps resolving to this
-    function with the default. Nothing in the engine passes false.
+    p_check_restore = false skips the check. It is the escape for a recovery that must work while a load runs: the
+    doctor's printed recovery statement for a tenant with missing leaves passes it, and so may an operator. Nothing in
+    the engine passes false. The RDR-225 migration walk (vectors-030) calls the function with p_force = false for the
+    *_new parents and never names the new parameter: it is an applied changeset that is not edited (a checksum change
+    refuses boot), runs inside a Liquibase migration before the engine serves, where no load can exist, and so gets
+    the default.
 
     THE SIGNATURE CHANGE. Postgres cannot add a parameter with CREATE OR REPLACE, and keeping the three-argument
     function beside the new one makes every two-argument call (the service_tokens trigger) ambiguous. So the

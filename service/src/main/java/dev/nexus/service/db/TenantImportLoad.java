@@ -218,7 +218,8 @@ final class TenantImportLoad {
         List<Field<?>> targets = new ArrayList<>();
         List<Field<?>> values = new ArrayList<>();
         List<Object[]> joins = new ArrayList<>();   // {leftJoin?, Table, Condition}
-        boolean dropRows = false;
+        String dropColumn = null;
+        Stage dropParent = null;
         for (String column : columns) {
             targets.add(DSL.field(DSL.name(column)));
             if ("tenant_id".equals(column)) {
@@ -237,7 +238,10 @@ final class TenantImportLoad {
                 SoftExpr x = softExpression(r, ps, column);
                 joins.addAll(x.joins());
                 values.add(x.value());
-                if (r.softRule() == SoftRule.DROP_ROW) dropRows = true;
+                if (r.softRule() == SoftRule.DROP_ROW) {
+                    dropColumn = column;
+                    dropParent = ps;
+                }
                 softs.add(countSoft(ctx, e, r, ps, column, st));
             } else {
                 values.add(sf(column));
@@ -251,20 +255,23 @@ final class TenantImportLoad {
         }
         var insert = ctx.insertInto(DSL.table(DSL.name(e.schema(), e.table())), targets).select(select);
         long inserted = e.seededKeys().isEmpty() ? insert.execute() : insert.onConflictDoNothing().execute();
-        long gap = staged - inserted;
         long seededMatching = e.seededKeys().isEmpty() ? 0 : seededStageRows(ctx, tenant, e, st);
-        long dropped = 0;
-        long seededSkipped = 0;
-        if (dropRows) {
-            dropped = gap;
-        } else if (gap != 0) {
-            if (gap < 0 || gap > seededMatching) {
-                throw new LoadFailedException("verification: " + e.name() + " staged " + staged + " rows and the load wrote "
-                    + inserted);
-            }
-            seededSkipped = gap;
+        // rows the soft-reference rule dropped are counted on their own (the staged rows with no entry in the parent's map), so
+        // the arithmetic below checks them instead of being filled in by whatever is left over
+        long dropped = dropColumn == null ? 0 : unmappedStageRows(ctx, st, dropColumn, dropParent);
+        long seededSkipped = staged - inserted - dropped;
+        if (seededSkipped < 0 || (e.seededKeys().isEmpty() ? seededSkipped != 0 : seededSkipped > seededMatching)) {
+            throw new LoadFailedException("verification: " + e.name() + " staged " + staged + " rows, the load wrote " + inserted
+                + ", dropped " + dropped + " and kept " + seededSkipped + " of the engine's own");
         }
         return new TableResult(e.name(), staged, inserted, seededSkipped, dropped);
+    }
+
+    /** Staged rows whose {@code column} has no old id in {@code parent}'s map: the rows an inner join to the map leaves out. */
+    private static long unmappedStageRows(DSLContext ctx, Stage st, String column, Stage parent) {
+        Table<?> m = mapTable(parent).as("um");
+        return ctx.fetchCount(ctx.selectOne().from(TenantImportStaging.stageTable(st).as("s")).leftJoin(m)
+            .on(mapOld("um").eq(sl(column))).where(mapOld("um").isNull()));
     }
 
     private static long seededStageRows(DSLContext ctx, String tenant, ExportTable e, Stage st) {
