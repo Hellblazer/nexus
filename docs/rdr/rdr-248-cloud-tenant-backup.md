@@ -267,10 +267,14 @@ import is a session of short requests too. Evidence for each rule is in T2 `nexu
 file and line references below are to `service/src/main/java/dev/nexus/service` unless a path says otherwise.
 
 *Who and where.* The caller's own tenant token, as for export; every route of a session answers only that tenant
-and gives any other "no such session". It loads into the caller's own tenant, which exists because the operator
+and gives any other "no such session". A session belongs to the tenant, not to the token: a request with an expired
+token gets the usual 401, and the same session goes on under a new token of that tenant. It loads into the caller's own tenant, which exists because the operator
 ran tenant create (`POST /v1/tenants/create`), the only way a tenant's `chunks` leaves come to exist; rows never
 make a tenant. Sessions live in the engine's memory, which is sound because one engine runs per database: a
 second engine is refused at boot (`EngineSingletonLock`, `Main.java:237-240`; one replica, `docs/runbooks/rdr-225-cloud-deploy.md:48-49`).
+That lock has an opt-out (`NX_ENGINE_SINGLETON_LOCK=off`) and is skipped behind pgbouncer
+(`EngineSingletonLock.java:96-97, 145-148`); the import routes refuse to open a session when it is not held, so a
+second engine is a refusal, not two session registries.
 One import session per tenant, and import sessions share the export sessions' per-engine cap
 (`TenantExportSessions.java:180-199`), each holding one dedicated connection from the pool.
 
@@ -304,27 +308,40 @@ The response is the session id and the client part size the engine accepts.
 about 1.1 Mbps; the 20 MB edge cap would need 2.7 Mbps). The client re-cuts each exported page at row boundaries
 into parts, each a complete binary COPY stream (header, rows, trailer), and sends its SHA-256 in a header.
 Before any upload the client verifies the whole file (every page's SHA-256 and the trailer's counts, the same check
-as `nx backup --check`), so a damaged file is refused before it costs the cloud anything. On the engine each part
-is one savepoint in the session's held transaction: the part's SHA-256 is checked, then `COPY ... FROM STDIN
-(FORMAT binary)` into the table's stage (a temp table with the FILE's columns, from the header; never `CREATE
-TABLE ... AS` from the target, which would lock every `chunks` partition until commit). Parts of a table arrive
-in order. Part k is idempotent: a repeat of the last staged part with the same SHA-256 answers 200 and stages
-nothing; a different SHA-256 for a staged part, or a gap, is refused; a part that fails mid-COPY rolls back to its
-savepoint and may be sent again. Tables arrive in load order, and a table is closed by the client sending its
-row count from the trailer; the engine refuses the close unless the staged count equals it. That staged-count
-check against the trailer, plus each part's own SHA-256, is the integrity check of the transfer (S3): the page
-hashes were already checked by the client against the file, and the engine never sees the original pages.
+as `nx backup --check`), so a damaged file is refused before it costs the cloud anything. On the engine a part is read whole into memory (at most 8 MiB) and its SHA-256 checked before anything touches
+the session's transaction, so a part damaged in transit is refused and sent again without cost. A part that
+passes is copied with `COPY ... FROM STDIN (FORMAT binary)` into the table's stage (a temp table with the FILE's
+columns, from the header; never `CREATE TABLE ... AS` from the target, which would lock every `chunks` partition
+until commit), with no savepoint: a savepoint per part would hold one subtransaction id per part until the
+transaction ends, and past 64 of them every other backend's snapshot on the shared database reads `pg_subtrans`
+(a nexus-size file is about 480 parts). A COPY of a part whose hash passed fails only on a malformed stream, so it
+fails the session (`failed: part T/k: <error>`) and the client starts over. One part is in flight per session: a
+request that arrives while another runs (a retry after the edge cut the first at 60 s) gets 409 `part_in_flight`
+and the client asks again. Parts of a table arrive in order: a repeat of the last staged part with the same
+SHA-256 answers 200 and stages nothing; a different SHA-256 for a staged part, or a gap, is refused. The engine
+counts staged bytes and refuses the part that would pass `NX_IMPORT_MAX_BYTES`, so the cap holds whatever the
+open declared. Tables arrive in load order, and a table is closed by the client sending its row count from the
+trailer; the engine refuses the close unless the staged count equals it. That staged-count check against the
+trailer, plus each part's own SHA-256, is the integrity check of the transfer (S3): the page hashes were already
+checked by the client against the file, and the engine never sees the original pages. The held transaction is
+READ COMMITTED, so the load's re-check below sees writes committed during the upload.
 
 *3. Commit: `POST /v1/tenant/import/{id}/commit`* returns 202 at once and runs the load on the session's held
-connection. Admission (Sam, 2026-11-11, bound it): the commit takes the engine's restore-load advisory lock
-(`pg_try_advisory_lock`, one key for the database); if another load holds it, 503 `restore_busy` with a
-retry-after, and the upload stays staged until its idle bound. Tenant create checks the same key: the partition
-function `create_tenant_partitions` (`vectors-030`, the slow path that runs DDL; the fast path at :378-386 takes
-no lock and is unaffected) takes it shared with `pg_try_advisory_xact_lock_shared` before its DDL, and while a load
-holds it, fails as it already fails on a lock timeout. TokenStore's existing bound (`TokenStore.java:83-84`, 3
-attempts, about 3.8 s) then answers 503 `tenant_creation_busy`, with a retry-after of 30 s while a load holds the
-key (2 s otherwise). A load that finds a tenant create holding the key shared waits up to 5 s for it, then
-answers `restore_busy`. The load, in that one transaction, in load order:
+connection. Admission (Sam, 2026-11-11, bound it): the load's first statement takes the restore-load advisory lock with
+`pg_try_advisory_xact_lock` (one key for the database), so it is released by the transaction's end on every
+path; if another load holds it, the commit answers 503 `restore_busy` with a 60 s retry-after. A refused commit
+counts as activity for the idle bound, and the upload's total bound stops at the first commit attempt, so a user
+who meets `restore_busy` after a long upload keeps it staged for up to 60 more minutes of retries. Tenant create
+checks the same key: a new changeset redefines `create_tenant_partitions` (today only in `vectors-030`:349-403) so
+its slow path, the one that runs DDL (the fast path at :378-386 takes no lock and is unaffected), first calls
+`pg_try_advisory_xact_lock_shared` on the restore key (a different key from its per-tenant lock at :387-389) and
+raises `lock_not_available` when a load holds it. TokenStore retries that as it retries a lock timeout
+(`TokenStore.java:83-84`, 3 attempts with 200-400 ms backoff), so the answer comes within about 1 s: 503
+`tenant_creation_busy`, whose Retry-After the handler sets to 30 s when `pg_locks` shows the restore key held,
+and keeps at 2 s otherwise (`HttpUtil.java:630-636, 843` today returns a constant 2). A load that finds a tenant
+create holding the key shared retries the lock for up to 5 s, then answers `restore_busy`. When a session ends,
+its dedicated connection is closed and evicted from the pool, never returned: temp tables and session settings
+would otherwise outlive it. The load, in that one transaction, in load order:
 1. **Re-check emptiness** inside the load transaction, with the same seeded-row rule: writes that landed during
    the upload refuse the load (`failed: tenant not empty: <table>`) and nothing is written.
 2. For a table with a reassigned id, build a temp map of old id to new id from the table's own sequence
@@ -334,14 +351,14 @@ answers `restore_busy`. The load, in that one transaction, in load order:
    non-deferrable self foreign key `topics.parent_id` is checked at the end of each statement, so one statement
    satisfies it; a table split over statements loads parents first, `TenantExport.java:131-141`), with the
    caller's tenant, new ids from the map, and every referring column rewritten through its parent's map: foreign
-   keys, the unenforced `nx_answer_runs.plan_id` and `taxonomy_centroids.topic_id`, the jsonb path
-   `nx_answer_runs.run_summary` `run.plan_id`, and the array `memory_summaries.source_ids` (S1, below). Seeded
-   rows load with `ON CONFLICT DO NOTHING` on their key; for `embedding_profile` the file's row must equal the
-   seeded one, or the load fails naming the key (a different profile means the restored vectors do not match
+   keys, and the soft references by the rule in *S1* below. Seeded
+   rows load with `ON CONFLICT DO NOTHING` on their key; for `embedding_profile` every non-tenant column of the file's row must equal
+   the seeded one, or the load fails naming the key and the column (a different profile means the restored vectors do not match
    the engine's embedder).
-4. **Verify** (S3): each table's inserted count equals its staged count; for each referring column, no row
-   points at an id outside the new map (a join count of zero); for `memory_summaries.source_ids`, the count of ids
-   dropped is reported, not failed. Column checksums are a round-trip test check only, because trigger-maintained
+4. **Verify** (S3): for each table, inserted rows plus seeded rows skipped by `ON CONFLICT` plus rows dropped by
+   the soft-reference rule equal the staged count (skipped `derived` tables are not loaded and not counted); every
+   foreign key holds by construction; for each soft reference, every value is a new id, one of its sentinels, or
+   the column's stated dangling value, and the counts of each are reported. Column checksums are a round-trip test check only, because trigger-maintained
    columns and reassigned ids change by design.
 5. Upsert `catalog_meta(tenant, 'rdr248_restore', <JSON: the file's header SHA-256, session id, UTC time, row
    counts>)` as the transaction's last write (an upsert, because a file taken after an earlier restore carries
@@ -362,21 +379,33 @@ status reads `failed: aborted`. The export keeps its 60-minute cap (Sam, 2026-11
 benign for 60 minutes at that window's write rate, not as a basis for a longer cap, and no xmin-age alarm is
 added (the cap is the bound).
 
-*S1, `memory_summaries.source_ids`.* The array holds `memory.id` values of the memories a rollup summarised, as
-provenance, with no foreign key on purpose (`memory-004-quarantine-and-rollup.xml:33-40, 122`). A rollup keeps its
-sources (`MemoryRepository.java:809` marks them `rolled_up_at`); only a later `nx memory reap` deletes them
-(`MemoryRepository.java:722`). The export does not filter quarantined rows, so unreaped sources are in the file
-and remap through `memory`'s map. Ids whose source was reaped before the export have no map entry: they are
-dropped from the array, and the status and the verb report how many. Remapping, not restoring the old ids, is
-the choice because an old id in a new tenant names some other memory or none. The parity census
-(`everyIdShapedColumnOfAnExportedTableIsClassified`) covers bigint, bigint[] and jsonb today; it is widened to
-integer and integer[], so an id column of either type is classified as a reference or as not one.
+*S1, soft references.* A soft reference holds a reassigned id with no foreign key, so the load decides what a
+value with no map entry becomes. The registry carries the rule per column, and the census test fails on a soft
+reference without one:
+
+| Column | Sentinels passed through | A value with no map entry (its parent was gone before the export) |
+| --- | --- | --- |
+| `memory_summaries.source_ids` (bigint[], NOT NULL, non-empty, provenance) | none | negated: `-old_id`, so the array keeps its length and the CHECK `cardinality > 0` (`memory-004`:128) holds; a negative id names no memory, which is what a reaped source already is |
+| `nx_answer_runs.plan_id` (nullable) | NULL, 0 (plan miss, `TelemetryRepository.java:1379`) | NULL (a deleted plan is not a miss) |
+| `nx_answer_runs.run_summary` `run.plan_id` (jsonb) | null, 0 | null |
+| `taxonomy_centroids.topic_id` (NOT NULL, part of the key; `derived`) | none | the row is dropped and counted |
+
+The array holds the `memory.id` values a rollup summarised, as provenance (`memory-004-quarantine-and-rollup.xml:33-40,
+122`). A rollup keeps its sources (`MemoryRepository.java:809`); a later `nx memory reap` deletes them
+(`MemoryRepository.java:722`), so a summary whose sources were all reaped is the normal state, and the export does
+not filter quarantined rows, so unreaped sources are in the file and remap. Remapping, not restoring old ids, is the
+choice because an old positive id in a new tenant names some other memory or none. The parity census
+(`everyIdShapedColumnOfAnExportedTableIsClassified`) covers bigint, bigint[] and jsonb today and is widened to
+integer and integer[]. Text and uuid columns stay outside it: every reassigned key is a BIGSERIAL, and an id
+written into text or uuid would be a schema choice a reviewer sees.
 
 *Derived tables and cross-release (N2).* A `derived` table is rebuildable, so it never refuses a restore: when
 the target already holds rows for it (a first search writes `search_telemetry`), or a file column of it does not
-match, it is skipped and named in the status. The registry gains a retired list: a table or column removed by a
+match, it is skipped and named in the status, together with every table that refers to it (skipping
+`nx_answer_runs` skips `nx_answer_steps`). The registry gains a retired list: a table or column removed by a
 later migration is entered there with the changeset that removed it, and a file's data in a retired table or
-column is skipped and reported, not refused. A `data` column that is missing and not retired still refuses, by
+column is skipped and reported, not refused. The parity test cannot see a column that is gone; the committed
+fixture's test is what catches a drop that was not entered in the retired list. A `data` column that is missing and not retired still refuses, by
 name. Supported cloud-to-local cases are Sam's decision (ask `rdr248-cloud-to-local`).
 The committed fixture (Step 6) is not silently regenerable: its test pins the fixture's SHA-256 and its header's
 `engine_version`, so a regenerated fixture fails until a reviewed change edits both, and the change must say why.
@@ -475,8 +504,17 @@ exporter; every new table needs a new exporter.
   database every tenant shares, and the engine has no disk or WAL check.
   **Mitigation**: the per-file byte cap `NX_IMPORT_MAX_BYTES`, one load at a time, and the decision in ask
   `rdr248-import-capacity` (Sam).
+- **Risk**: an import holds a write transaction with an assigned transaction id for up to two hours (60 minutes of
+  upload, then the load), which holds back vacuum on the shared database longer than the export's read snapshot,
+  and is a hold A5 did not observe.
+  **Mitigation**: one load per database, the bounds, and the Step 6 scale run and Activation Step 2 record the
+  hold's time and the database's oldest-xmin age during it.
+- **Risk**: a write to the tenant during the load itself (after the re-check) lands beside the restored rows; no
+  table lock prevents it.
+  **Mitigation**: none in code; the runbook's rule that the tenant is not used until the verb reports. Residual,
+  stated.
 - **Risk**: a memory summary's `source_ids` names memories reaped before the export.
-  **Mitigation**: those ids are dropped and counted in the outcome; they were provenance only.
+  **Mitigation**: those ids are negated and counted in the outcome; they were provenance only.
 
 - **Risk**: a page of a table keyed by `id` alone costs the cheaper of a key-order scan over the shared
   table and a sort of the tenant's remaining rows (no `(tenant_id, id)` index exists), so a tenant holding a
@@ -501,6 +539,8 @@ exporter; every new table needs a new exporter.
 - The engine restarts during or after a load: the in-memory outcome is lost; the verb reads
   `/v1/tenant/import/last`, which names the file's header SHA-256 only when the load committed.
 - A tenant create arrives during a load: `tenant_creation_busy` with a 30 s retry-after.
+- The database runs out of disk or WAL space during the load: the transaction fails and rolls back, and the status
+  reports the database error; what prevents it is ask `rdr248-import-capacity`.
 - Registry out of date: the parity test fails in CI before release.
 
 ## Implementation Plan
@@ -582,8 +622,14 @@ None.
   holds is covered by `seededKeys` (a new lazily written row fails this test), and a restore into it succeeds.
 - **Scenario**: a write to the tenant during the upload — **Verify**: the load's re-check refuses it and
   nothing is written.
-- **Scenario**: a summary whose sources were reaped before the export — **Verify**: its `source_ids` hold
-  only remapped ids, and the outcome reports the count dropped.
+- **Scenario**: a summary whose sources were partly and one whose sources were all reaped before the export, a run
+  whose plan was deleted, a run with plan_id 0, and a centroid whose topic is gone — **Verify**: the load commits;
+  remapped ids are new ids, reaped ones negated, the deleted plan NULL, the 0 kept, the centroid dropped, and each
+  count reported.
+- **Scenario**: restore into the local default tenant, whose `embedding_profile` rows the boot wrote — **Verify**:
+  equal rows load; a file whose row differs in one column is refused naming it.
+- **Scenario**: a part sent while the same part is still in flight — **Verify**: 409 `part_in_flight`; parts past
+  `NX_IMPORT_MAX_BYTES` are refused whatever the open declared.
 - **Scenario**: a file with a retired column and a derived table whose target already has rows — **Verify**:
   both are skipped and reported, and the rest loads.
 - **Scenario**: abort before commit and during the load, and a load past `NX_IMPORT_LOAD_MAX` — **Verify**:
@@ -591,8 +637,9 @@ None.
 - **Scenario**: another tenant's token on a session's rows, commit or status route — **Verify**: "no such
   session".
 - **Scenario**: tenant create during an import load (the test holds the load open between its `chunks`
-  insert and commit) — **Verify**: it waits, then gets a retry-after, and succeeds after commit; a second
-  restore load on the same engine is not admitted until the first ends.
+  insert and commit) — **Verify**: it gets `tenant_creation_busy` with a 30 s retry-after within 1 s, and
+  succeeds after commit; a tenant create for a tenant whose leaves exist is not delayed; a second restore load
+  in the same database gets `restore_busy` until the first ends.
 - **Scenario**: the committed fixture file from the implementing engine — **Verify**: it loads on the
   current engine.
 - **Scenario**: a commit at scale (a synthetic tenant of at least 500,000 chunks, local) — **Verify**: it
@@ -628,8 +675,9 @@ cloud round trip (Activation Step 2) records the real rate. Export session bound
 total 60 minutes (Sam, 2026-11-11), refused-with-retry when an engine already has its cap of concurrent
 sessions. 60 minutes is the hold A5 observed as benign at that window's write rate; an export that
 would run longer fails, naming the limit. Import bounds (Phase 2 design): upload idle 10 minutes and 60 minutes
-in all; the load `NX_IMPORT_LOAD_MAX`, default 60 minutes until the Step 6 scale run sets it with a 2x margin;
-parts of at most 8 MiB.
+in all, so a nexus-size file (3.82 GB) needs about 1.1 MB/s sustained, and a slower link fails at the bound,
+naming it; the load `NX_IMPORT_LOAD_MAX`, default 60 minutes until the Step 6 scale run sets it with a 2x margin;
+parts of at most 8 MiB. An import holds one of the engine's export/import session slots for up to two hours.
 
 **Gate N1 scale run (nexus-csayy.4, 2026-11-12, local engine on chas, `tests/e2e/export_scale_run.py`).** One tenant
 of 500,000 bge-768 chunks (distinct vectors, about 1 KB of text each), 500,000 manifest rows over 50,000 documents,
@@ -717,7 +765,8 @@ every exchange at 60 s); the design was changed to sessions of short requests, a
 the text still assumes one long stream. The first draft's "60 tables" came from a changeset count; the
 live catalog says 50 parent tables plus 40 chunk leaves, and the registry is built from the live catalog.
 Gate round 1 found the import commit and the changeset rule contradicting the cloud limits; both were
-redesigned (asynchronous commit; a column-compatibility rule keyed on the changeset count). No other
+redesigned (asynchronous commit; a column-compatibility rule, with the changeset count advisory since the
+Phase 2 design). No other
 contradictions found between research findings, design principles, and proposed solution.
 
 ### Assumption Verification
@@ -726,7 +775,7 @@ A2 to A7 are verified (research records 248-research-1 to -14): A2, A3 and A6 by
 scale by a local spike, A5 and A7 by a read-only cloud window, A1 refuted and designed around. Left for
 implementation, not assumed in the design: the column types the spike did not exercise (bigint[],
 smallint, uuid, the identity column), which the Step 4 and 6 tests seed; the commit's time at scale, measured
-in Step 6 and used for the load's statement timeout; and the cloud edge's transfer rate, which sets an
+in Step 6 and used to set the load's total bound `NX_IMPORT_LOAD_MAX`; and the cloud edge's transfer rate, which sets an
 export's time but no design choice and is recorded at Activation Step 2.
 
 #### API Verification
@@ -749,8 +798,9 @@ release (Activation Step 1); the cloud export is Activation Step 2.
 ### Cross-Cutting Concerns
 
 - **Versioning**: the file header carries a format version, the schema's changeset count and every
-  table's columns; import loads a file from an older or equal schema whose columns all exist in the
-  target, and refuses a newer schema or a missing table or column, naming it. The routes are an additive wire change, recorded in the wire-contract ledger.
+  table's columns; import loads a file whose `data` columns all exist in the target (or are retired),
+  skipping retired and mismatched `derived` ones, and refuses a missing `data` table or column, naming it; a
+  newer changeset count is shown, not refused. The routes are an additive wire change, recorded in the wire-contract ledger.
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A (no new dependency).
 - **Deployment model**: an engine release and a cloud deploy, both on Sam's go; the client refuses an
@@ -779,3 +829,4 @@ tenants. Nothing to trim.
 - 2026-11-12: Performance Expectations amended with the gate N1 scale run (nexus-csayy.4), and again with the page-plan fix and its before/after numbers.
 - 2026-11-12: Phase 1 review gate (nexus-csayy.4): the not-a-client-walk paragraph corrected for id-keyed tables; Risks gains the id-keyed page cost with its owner and trigger; Activation Step 2 names what it records. Amended under standing grant 3.
 - 2026-11-13: Phase 2 design (nexus-csayy.5): the Import session, Restore verb, Risks, Failure Modes, Test Plan and import bounds revised to settle gate S1-S3, S5, S6, N2 and the fix-check items (seeded rows, part protocol, in-load re-check, restore marker, load bound and abort, advisory-lock admission against tenant create, source_ids remap, derived and retired skips). Evidence in T2 `nexus/rdr248-phase2-evidence-2026-11-13`. Two decisions left with Sam as asks: supported cloud-to-local cases and import capacity.
+- 2026-11-13: Phase 2 design check (substantive-critic, T2 `nexus_rdr/248-phase2-design-check`): B1 settled with a per-column soft-reference rule (sentinels, dangling values, `source_ids` negated); D1-D11 folded in (no per-part savepoints, transaction-scoped admission lock, a 1 s tenant-create answer, the verify count identity, a refused commit keeps its upload, staged-byte cap, one part in flight, derived dependents skipped together, the embedding_profile comparison, stale lines, token expiry); O1-O7 stated as risks or notes.
