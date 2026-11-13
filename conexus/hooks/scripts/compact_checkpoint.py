@@ -108,14 +108,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 #: The plugin's sibling modules, bound by ``_load_siblings`` inside ``main``'s guard.
 _cli_lookup = None
 _endpoint_resolve = None
+_session_facts = None
 
 
 def _load_siblings() -> None:
-    global _cli_lookup, _endpoint_resolve
+    global _cli_lookup, _endpoint_resolve, _session_facts
     import _cli_lookup as cli_lookup  # noqa: PLC0415 -- must follow the sys.path insert
     import _endpoint_resolve as endpoint_resolve  # noqa: PLC0415
+    import _session_facts as session_facts  # noqa: PLC0415
 
-    _cli_lookup, _endpoint_resolve = cli_lookup, endpoint_resolve
+    _cli_lookup, _endpoint_resolve, _session_facts = cli_lookup, endpoint_resolve, session_facts
 
 
 #: Wall clock for ``nx command-context continuation`` (measured 5.4 s); hooks.json gives
@@ -627,14 +629,18 @@ def _session_worktrees(
     ``<name>`` or ``<name>-<topic>`` (``nexus-wt/marlowe-owner-onestmt``); ``linda_2`` is
     not a topic of ``linda``. Candidates rank by, in order:
 
-    1. the launch ``cwd`` is inside it (a session started in its own worktree);
-    2. the board entry names its path (``nexus-wt/marlowe-rdr189-p13``);
-    3. its branch carries a bead a board ``ref:`` line names, or a child of one (the
+    1. a board ``worktree:`` line names its path (nexus-ct74m);
+    2. a commit was made in it most recently, by its own reflog
+       (:func:`_session_facts.last_commit_time`): the session's newest commit, not its cwd, says
+       where it works (nexus-ct74m: tamsin's checkpoint named the cwd's worktree, a day stale);
+    3. the launch ``cwd`` is inside it (a session started in its own worktree);
+    4. the board entry names its path (``nexus-wt/marlowe-rdr189-p13``);
+    5. its branch carries a bead a board ``ref:`` line names, or a child of one (the
        convention is ``feature/<bead-id>-<slug>``; ``ref: nexus-z1d0l.1`` names
        ``feature/nexus-z1d0l.1.3-x``, and ``ref: nexus-z1d0l.1.3`` does not name
        ``feature/nexus-z1d0l.1-x``);
-    4. its directory is exactly ``<name>`` (7.92.0's only rule);
-    5. it was active most recently (:func:`_last_active`).
+    6. its directory is exactly ``<name>`` (7.92.0's only rule);
+    7. it was active most recently (:func:`_last_active`).
 
     The rest come back as ``(path, branch, last_active)`` so the checkpoint can list them.
     Never raises: a failure keeps the launch directory.
@@ -668,9 +674,11 @@ def _session_worktrees(
         def ref_named(branch: str) -> bool:
             return any(re.search(rf"(?:^|/){re.escape(bead)}(?:$|[-/.])", branch) for bead in ref_ids)
 
+        declared = {canon(p) for p in _session_facts.board_worktree(board)}
         ranked = sorted(
             ((path, branch, _last_active(path)) for path, branch in candidates),
-            key=lambda row: (inside(row[0]), path_named(row[0]), ref_named(row[1]), Path(row[0]).name == name, row[2]),
+            key=lambda row: (canon(row[0]) in declared, _session_facts.last_commit_time(row[0]), inside(row[0]),
+                             path_named(row[0]), ref_named(row[1]), Path(row[0]).name == name, row[2]),
             reverse=True,
         )
     except Exception as exc:  # noqa: BLE001 -- a lookup failure keeps the launch directory, never the checkpoint
@@ -767,6 +775,87 @@ def _summarized(text: str) -> bool:
     return _SUMMARY_RE.search(text) is not None
 
 
+#: Wall clock for one fact lookup (bd, git ls-remote, gh); they run beside continuation.
+_FACT_TIMEOUT_S = 6.0
+#: The most CI runs and PRs one checkpoint looks up.
+_MAX_REMOTE_LOOKUPS = 6
+_CRON_NOTE = ("session-only crons and reminders live inside Claude Code and no file shows them: "
+              "run CronList after this compaction")
+
+
+def _board_facts(board: str, cwd: str | None) -> tuple[list[str], list[str]]:
+    """``(lines, unchecked)``: the board's ref, waiting_on, due and worktree lines checked against the facts."""
+    sf = _session_facts
+    wanted = sf.board_wants(board)
+    git, bd, gh = (_cli_lookup.resolve(t) for t in ("git", "bd", "gh"))
+    facts = sf.Facts()
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 -- only pre needs it
+
+    runs = sorted(wanted.runs)[:_MAX_REMOTE_LOOKUPS]
+    prs = sorted(wanted.prs)[:_MAX_REMOTE_LOOKUPS]
+    with ThreadPoolExecutor(max_workers=4 + len(runs) + len(prs)) as pool:
+        beads = pool.submit(sf.resolve_beads, wanted.beads, bd, cwd, _FACT_TIMEOUT_S)
+        tags = pool.submit(sf.resolve_tags, wanted.engine_tags | wanted.client_tags, git, cwd, _FACT_TIMEOUT_S)
+        run_jobs = {r: pool.submit(sf.resolve_run, r, gh, cwd, _FACT_TIMEOUT_S) for r in runs}
+        pr_jobs = {n: pool.submit(sf.resolve_pr, n, gh, cwd, _FACT_TIMEOUT_S) for n in prs}
+        facts.beads, why_beads = beads.result()
+        facts.tags, why_tags = tags.result()
+        for r, job in run_jobs.items():
+            if (got := job.result()) is not None:
+                facts.runs[r] = got
+        for n, job in pr_jobs.items():
+            if (state := job.result()) is not None:
+                facts.prs[n] = state
+    unchecked = [w for w in (why_beads, why_tags) if w]
+    if len(facts.runs) < len(runs) or len(facts.prs) < len(prs):
+        unchecked.append("some CI runs or PRs not checked: gh missing, failed or timed out")
+    return sf.verify(board, facts, _now()), unchecked
+
+
+def _running_lines(session_id: str, worktrees: list[str], cwd: str | None) -> list[str]:
+    """What runs for this session: background tasks, processes in its worktrees, durable crons."""
+    sf = _session_facts
+    table = sf.process_table()
+    # The hook's own line (its parents, and the continuation it runs beside this listing) is not the session's work.
+    mine = sf.ancestors(table, os.getpid()) | {p.pid for p in sf.descendants(table, os.getpid())}
+    tasks = sf.background_tasks(session_id, _claude_dir() / "sessions", table, exclude=mine)
+    task_pids = {q.pid for t in tasks for q in [t, *sf.descendants(table, t.pid)]}
+    claude = sf.claude_pid(session_id, _claude_dir() / "sessions")
+    skip = mine | task_pids | ({claude} if claude else set())
+    procs = sf.worktree_processes(table, sf.process_cwds() if worktrees else {}, worktrees, skip)
+    crons = sf.durable_crons([*worktrees, *([cwd] if cwd else [])], session_id)
+    if sys.platform == "win32":
+        return ["- background tasks and processes: not listed on Windows", f"- {_CRON_NOTE}"]
+    return sf.task_lines(tasks, procs, crons, cron_note=_CRON_NOTE)
+
+
+def _facts_sections(session_id: str, board: str, worktree: str | None, others: list[tuple[str, str, float]],
+                    cwd: str | None) -> list[str]:
+    """The checkpoint's two checked sections (nexus-ct74m). Never raises: a failure is one line in the file."""
+    stamp = _now().isoformat(timespec="seconds")
+    out = [f"## Board checked against the facts\n\n(checked {stamp})\n"]
+    try:
+        lines, unchecked = _board_facts(board, cwd) if board.strip() else ([], [])
+        git = _cli_lookup.resolve("git")
+        work = [_session_facts.worktree_work(p, b, git) for p, b in
+                ([(worktree, "")] if worktree else []) + [(p, b) for p, b, _a in others]] if git else []
+        lines += _session_facts.unboarded(work, board)
+        out.append("\n".join(lines) if lines else "- nothing found stale: every ref, waiting_on, due and worktree "
+                   "line it could check still holds, and every worktree holding work is named")
+        out.extend(f"- {u}" for u in unchecked)
+    except Exception as exc:  # noqa: BLE001 -- the checkpoint is written whatever this finds
+        _log("WARNING", f"pre: board check failed: {type(exc).__name__}: {exc}")
+        out.append(f"- [board check failed: {type(exc).__name__}]")
+    out.append(f"\n## Running for this session\n\n(listed {_now().isoformat(timespec='seconds')})\n")
+    try:
+        trees = [t for t in [worktree, *(p for p, _b, _a in others)] if t]
+        out.append("\n".join(_running_lines(session_id, trees, cwd)))
+    except Exception as exc:  # noqa: BLE001
+        _log("WARNING", f"pre: task listing failed: {type(exc).__name__}: {exc}")
+        out.append(f"- [task listing failed: {type(exc).__name__}]")
+    return ["\n".join(out) + "\n"]
+
+
 def run_pre(payload: dict) -> str:
     """Write the checkpoint. Returns the outcome the probe line reports."""
     session_id = _session_id(payload)
@@ -789,7 +878,14 @@ def run_pre(payload: dict) -> str:
         cwd = worktree
 
     left = _TOTAL_BUDGET_S - (time.monotonic() - started)
-    state, error = _run_nx(["command-context", "continuation"], cwd, max(1.0, min(_NX_TIMEOUT_S, left)))
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 -- only pre needs it
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        # The fact checks run beside continuation, so they add no wall clock unless they are the slower.
+        checked = pool.submit(_facts_sections, session_id, board, worktree, other_worktrees, cwd)
+        state, error = _run_nx(["command-context", "continuation"], cwd, max(1.0, min(_NX_TIMEOUT_S, left)))
+        state_stamp = _now().isoformat(timespec="seconds")
+        checks = checked.result()
     if error:
         _log("WARNING", f"pre: {error}")
 
@@ -813,7 +909,9 @@ def run_pre(payload: dict) -> str:
             parts.append(_cap(board).rstrip() + "\n")
         else:
             parts.append(f"[no board entry: {board_error or 'empty'}]\n")
-    parts.append("## Working state\n")
+    parts.extend(checks)
+    parts.append(f"## Working state\n\n(nx command-context continuation, run {state_stamp}; old tool output is "
+                 "as of when it ran)\n")
     shaped = _filter_in_progress(_shape_state(state), board)
     if shaped:
         parts.append(_cap(shaped).rstrip() + "\n")

@@ -2185,9 +2185,58 @@ def ready_note(s: dict, path: str) -> str:
     return f"mailing ready ask to {label(s)} -> {path}"
 
 
+_FACTS_MODULE: object = None
+
+
+def _facts():
+    """The plugin's ``_session_facts`` (nexus-ct74m), shared with the compaction checkpoint; None when absent."""
+    global _FACTS_MODULE
+    if _FACTS_MODULE is None:
+        import importlib.util
+
+        path = Path(__file__).resolve().parents[1] / "conexus" / "hooks" / "scripts" / "_session_facts.py"
+        try:
+            spec = importlib.util.spec_from_file_location("_session_facts", path)
+            module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+            sys.modules.setdefault("_session_facts", module)  # dataclasses resolve their module here
+            spec.loader.exec_module(module)  # type: ignore[union-attr]
+        except (OSError, ImportError, AttributeError, SyntaxError) as e:
+            log(f"background tasks not checked: cannot load {path}: {e}")
+            _FACTS_MODULE = False
+        else:
+            _FACTS_MODULE = module
+    return _FACTS_MODULE or None
+
+
+def session_tasks(s: dict) -> list[str] | None:
+    """The session's live background tasks (its Bash-tool shells still running), one line each, or None
+    when they cannot be read. The readiness answer reads from this list (nexus-ct74m): before it, a
+    session with a wait loop running said ready twice and the restart cut the loop off."""
+    sf = _facts()
+    if sf is None or not s.get("pid"):
+        return None
+    table = sf.process_table()
+    if not table:
+        return None
+    mine = sf.ancestors(table, os.getpid())  # this script runs in the caller's Bash tool: not a background task
+    return [f"pid {p.pid} since {p.start}: {sf.task_command(p.command)[:120]}"
+            for p in sf.descendants(table, int(s["pid"])) if sf.SNAPSHOT_MARK in p.command and p.pid not in mine]
+
+
+def tasks_note(tasks: list[str] | None) -> str:
+    if tasks is None:
+        return "This script could not list your background tasks; check your own before answering. "
+    if not tasks:
+        return "This script sees no background task running under your session. "
+    shown = "; ".join(tasks[:5]) + (f"; and {len(tasks) - 5} more" if len(tasks) > 5 else "")
+    return (f"This script sees {len(tasks)} background task(s) running under your session, which a restart "
+            f"would cut off: {shown}. Stop each one you do not need, or answer not ready. ")
+
+
 def ready_prompt(s: dict, path: str, mailed: bool = False) -> str:
     origin = origin_note(s, path) if mailed else ""
     return (origin + f"Restart readiness check for {label(s)}: the operator is about to restart every Claude session. "
+            + tasks_note(session_tasks(s)) +
             f"Answer by writing the file {path} (create it; do not edit any other file) holding one JSON object: "
             f'{{"ready": true or false, "reason": "one short sentence", "eta_min": minutes until you could be ready, '
             f"or null}}. ready is true only when a restart now loses nothing: no turn or background job in flight "
@@ -2387,8 +2436,13 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
                                       f"ask again")
                 else:
                     row["state"] = "ready"
+                    tasks = session_tasks(s) if s.get("pane") != caller_pane else []
                     if live != "idle" and s.get("pane") != caller_pane:
                         row["blocker"] = f"ready at {time.strftime('%H:%M', time.localtime(r['mtime']))}, {live} now"
+                    elif tasks:
+                        # The answer is checked against the task list, not taken on its word (nexus-ct74m).
+                        row["blocker"] = (f"said ready, but {len(tasks)} background task(s) still run: {tasks[0]}"
+                                          + (f" (and {len(tasks) - 1} more)" if len(tasks) > 1 else ""))
         rows.append(row)
     return rows
 

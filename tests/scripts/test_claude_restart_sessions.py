@@ -978,6 +978,8 @@ def rd(crs, monkeypatch, tmp_path):
     monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "")
     monkeypatch.setattr(crs, "script_sha256", lambda *_a: SHA)
     monkeypatch.setattr(crs, "claude_version", lambda *_a: "2.1.316")
+    # Live sessions here carry the test process's pid; its children are not background tasks of theirs.
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
     monkeypatch.delenv("TMUX_PANE", raising=False)
     return tmp_path
 
@@ -1034,6 +1036,51 @@ def test_go_refuses_a_ready_reply_older_than_the_max_age(crs, rd) -> None:
     log = _log(rd)
     assert "beta: reply stale: ready reply is 15m old" in log and "alpha:" not in log.replace("alpha, ", "")
     assert _gate(crs, rd, max_age=1000) == 0  # the same reply, a longer window
+
+
+def test_go_refuses_a_ready_reply_while_background_tasks_still_run(crs, rd, monkeypatch) -> None:
+    # nexus-ct74m: labrun said ready twice while a wait loop ran; the answer is checked against the task list.
+    _live(rd, "alpha")
+    _live(rd, "beta")
+    _round(crs, rd, ["alpha", "beta"], alpha=60, beta=60)
+    tasks = {"sid-alpha": ["pid 5000 since Fri Nov 13 01:05:00 2026: nx ci wait abc", "pid 5001 since x: sleep 9"]}
+    monkeypatch.setattr(crs, "session_tasks", lambda s: tasks.get(s["sessionId"], []))
+    assert _gate(crs, rd) == 3
+    log = _log(rd)
+    assert "alpha: said ready, but 2 background task(s) still run: pid 5000 since Fri Nov 13 01:05:00 2026: " \
+           "nx ci wait abc (and 1 more)" in log and "beta:" not in log.replace("beta, ", "")
+
+
+def test_the_caller_is_not_held_by_its_own_shells(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha", pane="%7")
+    _round(crs, rd, ["alpha"], alpha=60)
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: ["pid 1 since x: claude-restart-sessions --resume"])
+    assert _gate(crs, rd, caller_pane="%7") == 0
+
+
+def test_the_ready_ask_carries_the_task_list(crs, rd, monkeypatch) -> None:
+    s = {"name": "alpha", "sessionId": "sid-alpha", "pid": 1}
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: ["pid 5000 since t: nx ci wait abc"])
+    text = crs.ready_prompt(s, "/tmp/r.json")
+    assert "sees 1 background task(s) running under your session, which a restart would cut off: " \
+           "pid 5000 since t: nx ci wait abc. Stop each one you do not need, or answer not ready." in text
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
+    assert "sees no background task running under your session" in crs.ready_prompt(s, "/tmp/r.json")
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: None)
+    assert "could not list your background tasks" in crs.ready_prompt(s, "/tmp/r.json")
+
+
+def test_session_tasks_reads_the_snapshot_shells_below_the_session(crs, monkeypatch) -> None:
+    sf = crs._facts()
+    assert sf is not None
+    snap = "/bin/zsh -c source /h/.claude/shell-snapshots/snapshot-zsh-1.sh && eval 'sleep 600' < /dev/null"
+    table = [sf.Proc(900, 1, "Fri Nov 13 01:00:00 2026", "claude"),
+             sf.Proc(901, 900, "Fri Nov 13 01:05:00 2026", snap),
+             sf.Proc(902, 900, "Fri Nov 13 01:00:01 2026", "node mcp.js")]
+    monkeypatch.setattr(sf, "process_table", lambda *_a: table)
+    assert crs.session_tasks({"pid": 900}) == ["pid 901 since Fri Nov 13 01:05:00 2026: sleep 600"]
+    monkeypatch.setattr(sf, "process_table", lambda *_a: [])
+    assert crs.session_tasks({"pid": 900}) is None
 
 
 def test_go_names_a_session_that_went_busy_after_saying_ready(crs, rd) -> None:
