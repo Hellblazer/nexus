@@ -447,13 +447,29 @@ HNSW maintenance, on the database every tenant shares. What bounds that is Sam's
 pages, commits and polls the status until it ends. A cloud file restores into a local engine under the
 same column-compatibility rule; which cloud-to-local cases are supported is the ask `rdr248-cloud-to-local`. The local `pg_restore` runbook stays
 for whole-cluster restores. An empty tenant comes from tenant create: the operator on the cloud
-(conexus), `nx init` on a fresh local install. The runbook's order is: the operator runs the current
+(conexus). On a local install `nx` holds only the supervisor's root token, which the import routes refuse, so a
+local restore goes into a tenant the user created, with that tenant's token in `NX_SERVICE_TOKEN`
+(`nx service token issue --tenant <t>`); whether the local default tenant should be reachable is the ask
+`rdr248-local-root`. The runbook's order is: the operator runs the current
 engine, creates the empty tenant and issues its token; the user restores, and does not use the tenant until
 the verb reports the outcome (a write during the upload refuses the load at its re-check). Nobody pins an engine
 version. The verb first verifies the whole file, then opens, uploads, commits, and polls; after a lost
 connection it polls the status, and after "no such session" it reads `/v1/tenant/import-marker`. It prints row
 counts by class, the derived tables and retired columns skipped, the soft-reference values negated, and the
 centroid rows dropped.
+
+The verb's rules about a load it cannot see (client review, nexus-csayy.6): a stale import session found at open
+is deleted only when its status reads `staging`, `committed` or `failed`, or the engine says it has no such session;
+a session that is loading or verifying, or whose state cannot be read, is left alone and the verb says to wait.
+After its first commit attempt the verb deletes nothing (an interrupt, a lost connection or an unknown outcome all
+leave the load alone), except after a `restore_busy` answer, when the session is still staging. Any failed answer
+after a commit attempt is settled by the marker: committed only when it names this file's header SHA-256
+(the SHA-256 of the header frame's JSON, which keeps the export's `created_at`, so two exports of one tenant
+differ). Its own waits are failsafes behind the engine's bounds: the `restore_busy` wait ends at the load bound
+plus 180 s, and status polling at the load bound plus 300 s with an unknown outcome and exit 1, never committed.
+`row_bytes` is the bytes the engine will stage (page bodies re-cut into parts with their COPY headers and
+trailers). A table the engine lists in both `tables` and `skipped_tables` is uploaded and closed, because the
+engine requires every listed table closed before commit and skips it itself; an empty page sends no part.
 
 ### Existing Infrastructure Audit
 
@@ -560,7 +576,8 @@ exporter; every new table needs a new exporter.
 - The engine restarts mid-session: the dedicated transaction ends, the snapshot is gone; the next page
   request gets a clear "session closed" and the client starts over.
 - An upload part fails in transit: its SHA-256 check refuses it before it touches the transaction, and the client
-  sends it again; a part whose COPY fails fails the session, and the client starts over; after a
+  sends it again; a part whose COPY fails fails the session, and the verb says to run it again (no automatic
+  restart, which could re-upload gigabytes against a cause such as a full disk); after a
   bounded number of tries the client aborts the session (`DELETE`), which rolls the staging back.
 - Import fails mid-load, including the in-load emptiness re-check or the total bound: one transaction, so the
   tenant is as it was; the status reports the table and reason.
@@ -886,3 +903,4 @@ tenants. Nothing to trim.
 - 2026-11-13: Phase 2 design check round 2 (T2 `nexus_rdr/248-phase2-design-check-r2`): negative soft-reference values pass through, so negation survives a second backup and restore; a deleted plan's id is negated, keeping the run a plan hit; a restore-wait bound on a commit refused `restore_busy`; the session hold restated as up to three hours; stale savepoint, 3.8 s and two-reference lines swept; Step 5 names the asks and the trigger-path placement.
 - 2026-11-13: Phase 2 design check round 3 (T2 `nexus_rdr/248-phase2-design-check-r3`, 0 BLOCKS-PLANNING): the route list (table close, idempotent commit, `import-marker`, busy names the open session), the tenant-create check as a `create_tenant_partitions` parameter on its slow path only, the cloud-to-local line pointed at its ask, the census left at the types a BIGSERIAL fits, and the remaining Test Plan and Failure Modes lines.
 - 2026-11-13: Step 5 review round 1 (T2 `nexus/review-712a73dfb-nexus-csayy.6-2026-11-13`, `nexus/critique-712a73dfb-nexus-csayy.6-2026-11-13`): the RDR-225 walk cannot pass `p_check_restore` and does not need to (amended); ended sessions keep their outcome for 24 hours; verify fails a foreign-key value with no parent in the file and refuses a child table without its parent; staging statement timeout 120 s; Routes points at the wire-contract entry for bodies and reason codes, and a 409 names the session's kind. Amended under standing grant 3 to match reviewed code.
+- 2026-11-13: Step 5 client review (T2 `nexus/review-a8efcfcef-nexus-csayy.6-client-2026-11-13`, `nexus/critique-a8efcfcef-nexus-csayy.6-2026-11-13`): the Restore verb states its rules for a load it cannot see (fail-closed stale delete, nothing deleted after a commit attempt, marker settles any failed answer), its failsafe waits, `header_sha256` and `row_bytes`, the both-lists upload, no automatic restart after a part failure, and that a local restore goes into a created tenant (ask `rdr248-local-root`). Amended under standing grant 3 to match reviewed code.
