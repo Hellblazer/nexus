@@ -174,6 +174,60 @@ def test_a_restart_that_has_started_anew_is_never_exited_as_well(crs, monkeypatc
     assert crs.RESULTS == {"sid-1": "resumed"}
 
 
+def test_a_new_process_that_exits_before_it_settles_is_relaunched_by_the_exit_path(crs, monkeypatch, tmp_path) -> None:
+    """Review round 2, 2026-11-13: a new start whose process died during the settle wait was logged OK and queued for
+    a wake while the pane sat at a shell. Now the exit path relaunches it."""
+    s = _session(crs, tmp_path)
+    monkeypatch.setattr(crs, "SLASH_SETTLE", 5)
+    state = {"looks": 0, "relaunched": False}
+    typed: list[tuple] = []
+
+    def fake_tmux(*a) -> None:
+        typed.append(a)
+        if a[-1] == "Enter" and "/restart" in str(typed[-2]):
+            (tmp_path / "sessions" / "12.json").write_text(json.dumps(
+                {"sessionId": "sid-1", "pid": 12, "tmux": "rs:@1.%3", "status": "busy", "startedAt": 2000}),
+                encoding="utf-8")
+        elif "-l" in a and "--resume" in a[-1]:
+            state["relaunched"] = True
+            (tmp_path / "sessions" / "13.json").write_text(json.dumps(
+                {"sessionId": "sid-1", "pid": 13, "tmux": "rs:@1.%3", "status": "idle"}), encoding="utf-8")
+
+    def alive(pid: int) -> bool:
+        if pid == 12:  # seen once, then gone
+            state["looks"] += 1
+            return state["looks"] <= 1
+        return pid == 13 and state["relaunched"]
+
+    monkeypatch.setattr(crs, "tmux", fake_tmux)
+    monkeypatch.setattr(crs, "alive", alive)
+    assert crs.restart(s) is True
+    log = _log(crs)
+    assert "restarted in place by /restart" not in log
+    assert "/restart not taken (its new process exited before it settled); exiting and resuming instead" in log
+    assert "OK w: resumed as pid 13" in log and crs.RESULTS == {"sid-1": "resumed"}
+    assert [w["pid"] for w in crs.TO_WAKE] == [13]
+
+
+def test_a_session_busy_when_the_wait_ends_is_skipped_not_exited(crs, monkeypatch, tmp_path) -> None:
+    """Review round 2: a session that went busy after /restart was typed may hold it queued; the exit path's Ctrl-C and
+    relaunch line could then meet the restart. It is left running."""
+    s = _session(crs, tmp_path)
+    monkeypatch.setattr(crs, "SLASH_WAIT", 3)
+    typed: list[tuple] = []
+
+    def fake_tmux(*a) -> None:
+        typed.append(a)
+        if a[-1] == "Enter":
+            s["file"].write_text(json.dumps({**json.loads(s["file"].read_text()), "status": "busy"}), encoding="utf-8")
+
+    monkeypatch.setattr(crs, "tmux", fake_tmux)
+    monkeypatch.setattr(crs, "alive", lambda pid: pid == 10)
+    assert crs.restart(s) is False
+    assert not any("C-c" in a for a in typed) and not any("--resume" in " ".join(a) for a in typed)
+    assert f"SKIP w: {crs.SLASH_PENDING}; left running, not restarted" in _log(crs) and crs.RESULTS == {}
+
+
 def test_an_unknown_line_already_in_the_transcript_is_not_this_answer(crs, monkeypatch, tmp_path) -> None:
     """Only what the transcript gains after /restart is typed counts."""
     s = _session(crs, tmp_path)

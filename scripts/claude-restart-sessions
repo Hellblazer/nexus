@@ -975,6 +975,8 @@ SLASH_WAIT = 30
 #: It counts as restarted either way: once a new start is seen the exit path never runs on it.
 SLASH_SETTLE = 120
 SLASH_UNKNOWN = "Unknown command: /restart"
+#: slash_restart's reason when /restart may still be queued in a busy session: restart() skips it, never exits it.
+SLASH_PENDING = "it went busy after /restart and did not start anew; /restart may still be queued"
 #: Seconds the exit path keeps watching a claude still running after its SIGTERM window. bob on the 8.2.2 round
 #: (2026-11-13) exited a little after the window and was left at a shell prompt, not relaunched.
 LATE_EXIT_WAIT = 180
@@ -1068,13 +1070,22 @@ def slash_restart(s: dict) -> tuple[bool, str]:
     if not seen:
         if _transcript_has(sid, SLASH_UNKNOWN, since):
             return False, f'Claude Code answered "{SLASH_UNKNOWN}"'
+        # A session that went busy after /restart was typed (mail started a turn) may still hold it queued; the
+        # exit path's Ctrl-C and relaunch line could then meet the restart. Leave such a session as it is.
+        now = read(s["file"]) or {}
+        if alive(pid) and now.get("status") not in ("idle", "shell"):
+            return False, SLASH_PENDING
         return False, f"it did not start anew within {SLASH_WAIT}s of /restart"
     d, path = seen
     for _ in range(SLASH_SETTLE):
         if d.get("status") in ("idle", "shell"):
             break
         time.sleep(1)
-        d, path = new_start() or (d, path)
+        again = new_start()
+        if again is None and not alive(int(d.get("pid", 0) or 0)):
+            # It started anew and then exited: nothing runs in the pane, so the exit path relaunches it.
+            return False, "its new process exited before it settled"
+        d, path = again or (d, path)
     new_pid = int(d.get("pid", 0) or 0)
     log(f"OK {label(s)}: restarted in place by /restart, pid {new_pid}"
         + (" (same)" if new_pid == pid else f" (was {pid})")
@@ -1116,6 +1127,9 @@ def restart(s: dict, handoff: str = "") -> bool:
         done, why = slash_restart(s)
         if done:
             return True
+        if why == SLASH_PENDING:
+            log(f"SKIP {name}: {why}; left running, not restarted")
+            return False
         log(f"{name}: /restart not taken ({why}); exiting and resuming instead")
     first = ""
     if handoff:
