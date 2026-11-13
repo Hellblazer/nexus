@@ -342,3 +342,30 @@ def test_a_long_line_is_cut() -> None:
     search, _ = _search([{"title": "m", "content": content}])
     lines = due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="")
     assert len(lines[1]) == 300 and lines[1].endswith("…")
+
+
+
+def test_the_mint_deadline_is_set_inside_the_lookup_thread() -> None:
+    from nexus.db.data_token import deadline_left  # noqa: PLC0415
+
+    seen: list[float | None] = []
+
+    def search(_q: str):
+        seen.append(deadline_left())
+        return []
+
+    due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="", budget_s=2.0)
+    assert seen and seen[0] is not None and 0 < seen[0] <= 2.0
+
+
+def test_the_last_due_line_of_a_thread_counts() -> None:
+    (t,) = parse_session("m", "## T\ndue: 2026-01-01\ndue: 2027-01-01\n").threads
+    assert t.due == "2027-01-01"
+
+
+def test_many_due_threads_are_capped_with_a_count() -> None:
+    content = f"session: {SID}\n" + "".join(f"## T{i}\ndue: 2026-01-01\n" for i in range(25))
+    search, _ = _search([{"title": "m", "content": content}])
+    lines = due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="")
+    assert len(lines) == 1 + 20 + 1 + 1
+    assert lines[21] == "- … and 5 more; read the entry"

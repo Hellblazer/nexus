@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """SessionStart: one line per threads-board thread of this session whose ``due:`` has come (nexus-ct74m item 6).
 
-The session's board entry is found as the PreCompact checkpoint finds it (``compact_checkpoint._board_entry``):
+The session's board entry is found in the same two steps as the PreCompact checkpoint's (``compact_checkpoint._board_entry``),
+except that step 1 reads every matching entry where the checkpoint takes the first:
 
 1. every ``threads`` entry whose own ``session:`` line names the payload's session id, by one full-text search of
    project ``threads`` for the id (another entry that merely mentions the id does not count);
@@ -43,6 +44,8 @@ _DEFAULT_TIMEOUT_S = 2.0
 _DEFAULT_BUDGET_S = 3.0
 #: A printed line is cut here: titles, refs and worktree are free text a session wrote.
 _MAX_LINE = 300
+#: At most this many thread lines per entry; the rest are counted in one line.
+_MAX_LINES = 20
 #: The heading tells a session how a reminder stops: nothing is stored, the line itself is the state.
 HEADING = "## Due on your threads board ({entry}): move or delete each due: line once you have acted on it"
 
@@ -123,6 +126,8 @@ def _section(title: str, session: Session, now: datetime) -> list[str]:
     for t in session.threads:
         if has_value(t.due) and due_at(t.due, now.tzinfo) is None:  # type: ignore[arg-type] — now is aware
             lines.append(_clip(f"- {t.title}: `due: {t.due}` is not an ISO date or datetime, so it never comes due"))
+    if len(lines) > _MAX_LINES:
+        lines = [*lines[:_MAX_LINES], f"- … and {len(lines) - _MAX_LINES} more; read the entry"]
     return [_clip(HEADING.format(entry=title)), *lines, ""] if lines else []
 
 
