@@ -706,7 +706,10 @@ public final class TenantImportSessions implements AutoCloseable {
             }
             // finish() itself turns any end of a committed session into committed, so an abort, an eviction or an expiry that
             // raced the COMMIT cannot overwrite it
-            finish(s, committed ? State.COMMITTED : State.FAILED, committed ? "committed" : "failed: " + failure, report);
+            // a failed outcome never carries a report: the wire entry defines report as the commit's, so one on a failure
+            // (run() returned, then the COMMIT was not confirmed) would read as success to a client (confirm round, 2026-11-13)
+            finish(s, committed ? State.COMMITTED : State.FAILED, committed ? "committed" : "failed: " + failure,
+                committed ? report : null);
         } finally {
             s.gate.release();
         }

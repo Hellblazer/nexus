@@ -283,19 +283,24 @@ class TenantImportRoutesTest {
 
     @Test
     void aMarkerRowThatIsNotJsonIsAnUnreadableMarkerNotAServerError() throws Exception {
-        String tenant = "t-imp-badmarker";
-        String token = env.newTenant(tenant);
-        env.su(ctx -> ctx.insertInto(DSL.table(DSL.name("nexus", "catalog_meta")),
-                DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("key")), DSL.field(DSL.name("value")))
-            .values(tenant, "rdr248_restore", "this is {not json").execute());
+        // not JSON at all, and valid JSON that is not an object (confirm round, 2026-11-13): neither names a file
+        String[] values = {"this is {not json", "\"abc\"", "123"};
+        for (int i = 0; i < values.length; i++) {
+            String tenant = "t-imp-badmarker-" + i;
+            String token = env.newTenant(tenant);
+            String value = values[i];
+            env.su(ctx -> ctx.insertInto(DSL.table(DSL.name("nexus", "catalog_meta")),
+                    DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("key")), DSL.field(DSL.name("value")))
+                .values(tenant, "rdr248_restore", value).execute());
 
-        HttpResponse<String> r = env.call("GET", "/v1/tenant/import-marker", token);
+            HttpResponse<String> r = env.call("GET", "/v1/tenant/import-marker", token);
 
-        assertThat(r.statusCode()).isEqualTo(200);
-        assertThat(json(r).get("present").asBoolean()).isTrue();
-        assertThat(json(r).get("committed").asBoolean()).isFalse();
-        assertThat(json(r).get("reason").asText()).contains("readable marker");
-        assertThat(json(r).has("marker")).isFalse();
+            assertThat(r.statusCode()).as(value).isEqualTo(200);
+            assertThat(json(r).get("present").asBoolean()).as(value).isTrue();
+            assertThat(json(r).get("committed").asBoolean()).as(value).isFalse();
+            assertThat(json(r).get("reason").asText()).as(value).contains("readable marker");
+            assertThat(json(r).has("marker")).as(value).isFalse();
+        }
     }
 
     @Test

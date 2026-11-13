@@ -324,7 +324,12 @@ public final class TenantImportHandler implements HttpHandler {
         out.put("present", json != null);
         if (json != null) {
             try {
-                out.set("marker", MAPPER.readTree(json));
+                com.fasterxml.jackson.databind.JsonNode node = MAPPER.readTree(json);
+                if (node == null || !node.isObject()) {
+                    // valid JSON that is not an object ("abc", 123) names no file either
+                    throw new com.fasterxml.jackson.core.JsonParseException(null, "not a JSON object");
+                }
+                out.set("marker", node);
             } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
                 // the key's value is data a restore carries, so it can be anything: an unreadable marker names no file, which a
                 // client reads as "not committed by this file"
