@@ -259,9 +259,10 @@ _NX_T3 = (
     "    store_list, store_get, store_put, collection_list\n"
     "Plans (T2): plan_search, plan_save\n"
     'Hint: where="section_type!=references" filters noise.\n\n'
-    "WRITE-BACK before returning (findings not stored are lost): interim findings to "
+    "WRITE-BACK when your work produced findings: interim findings to "
     "T1 (scratch put, your brief's tags); the record your brief or agent definition requires to T2; only "
-    "validated, reusable knowledge to T3.\n"
+    "validated, reusable knowledge to T3. Your brief comes first: when it says not to use tools, or the "
+    "task produced nothing to keep, write nothing.\n"
 )
 
 _NX_ANSWER = (
