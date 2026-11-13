@@ -179,13 +179,19 @@ class TestRunHookResultContract:
         assert "## Ready Beads" not in result.stdout
         assert "## Hygiene" not in result.stdout
 
-    def test_payload_is_accepted_and_ignored(self, monkeypatch, tmp_path: Path) -> None:
-        """The script never reads stdin -- run() must produce identical
-        output for None and for an arbitrary payload dict."""
+    def test_the_payload_feeds_only_the_board_due_lookup(self, monkeypatch, tmp_path: Path) -> None:
+        """run() reads one payload field, ``session_id``, and only to look up the session's due board threads
+        (nexus-ct74m, nexus.hooks.board_due): with that lookup finding nothing due, a payload and None give the
+        same output. The lookup is stubbed, so this test reaches no storage (it has no tenant)."""
+        from nexus.hooks import board_due
+
+        seen: list[str] = []
+        monkeypatch.setattr(board_due, "due_lines", lambda sid: seen.append(sid) or [])
         self._isolate(monkeypatch, tmp_path)
         result_none = session_context.run(None)
         result_payload = session_context.run({"session_id": "irrelevant", "source": "startup"})
         assert result_none.stdout == result_payload.stdout
+        assert seen == ["irrelevant"]
 
     def test_hook_result_is_the_dataclass_from_hook_runtime_io(self, monkeypatch, tmp_path: Path) -> None:
         self._isolate(monkeypatch, tmp_path)
