@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [8.2.2] - 2026-11-13
+
+Pairs with engine-service-v0.1.190 (REQUIRED_ENGINE_VERSION unchanged from 8.2.1). Emergency plugin-only patch for GitHub #1656.
+
+### Changed
+
+- **The conexus sequential-thinking MCP server is off** (GitHub #1656). On 2026-11-13 subagents were stopped by the API's safety classifier (`[reasoning_extraction]`) at a sharply higher rate, and on a second machine removing this server was enough for the same run to pass. The server's script stays in `conexus/mcp/`, so turning it back on is restoring its `.mcp.json` entry. Skills and agent text that mention the tool are unchanged; with the server off, the tool is simply not offered.
+
 ## [8.2.1] - 2026-11-13
 
 Pairs with engine-service-v0.1.190 (REQUIRED_ENGINE_VERSION moves from 0.1.189 to 0.1.190). The engine validates the chash width CHECKs as a job a user starts, never at boot, and the job can be cancelled; `nx t3 validate-chash-checks` and `nx doctor --fix` start, follow and cancel it, and say which rows a CHECK cannot accept and whose they are. The client refuses to start the engine on a store whose first boot would delete legacy-width chash rows until you take a backup with `nx backup`. The bundled PostgreSQL carries pg_background on all four platforms, for data moves that run as background jobs.

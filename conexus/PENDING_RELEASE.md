@@ -43,10 +43,9 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v8.2.1)
+## Awaiting the next release (pinned: v8.2.2)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/.mcp.json`: the sequential-thinking MCP server is off (GitHub #1656: subagents blocked by the API safety classifier while it loaded; its script is kept).
 
 ## Deferred to the next client release
