@@ -93,30 +93,8 @@ def _restarted(was: dict, now: dict | None) -> bool:
 
 def scenario_slash(sb, crs, a, failures: list[str], notes: list[str], *, boot) -> None:
     spec = sb.spec
-    # /restart is offered only to a native install (docs); the scratch HOME's .claude.json does not say so,
-    # and the command is then unknown ("Unknown command: /restart", first run 2026-11-13).
-    cfg = sb.home / ".claude.json"
-    cfg.write_text(json.dumps(dict(json.loads(cfg.read_text(encoding="utf-8")), installMethod="native")),
-                   encoding="utf-8")
-    # The setting alone left the command unknown (second run): give the scratch HOME a native install's
-    # layout too, the operator's binary copied (a clone on APFS) to ~/.local/share/claude/versions/<v> and
-    # ~/.local/bin/claude linked to it, and launch the sessions from that link. The operator's install is
-    # only read.
-    real = Path(os.path.realpath(sb.claude))
-    versions = sb.home / ".local" / "share" / "claude" / "versions"
-    versions.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["cp", "-c", str(real), str(versions / real.name)], check=True)
-    link = sb.home / ".local" / "bin" / "claude"
-    link.parent.mkdir(parents=True, exist_ok=True)
-    link.symlink_to(versions / real.name)
-    notes.append(f"native layout: {link} -> {versions / real.name} (copied from {real})")
-    sb.claude = str(link)
-    # Claude Code offers /restart only when its resolved executable path starts with
-    # $XDG_DATA_HOME/claude/versions/ (default $HOME/.local/share). The scratch HOME is under /var, which
-    # resolves to /private/var, so the check failed on the third run; name the same directory resolved.
-    data = str(Path(os.path.realpath(sb.home)) / ".local" / "share")
-    sb.env["XDG_DATA_HOME"] = data
-    sb.tmux("set-environment", "-g", "XDG_DATA_HOME", data, check=True)
+    # Sandbox.setup gives every scenario a native install's layout (native_layout), which /restart needs.
+    notes.append(f"native layout: {sb.claude} -> {os.path.realpath(sb.claude)}")
     before = boot(sb, failures)
     sb.before = before
     if failures:
