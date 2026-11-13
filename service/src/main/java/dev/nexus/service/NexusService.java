@@ -908,9 +908,8 @@ public final class NexusService {
         server.createContext(dev.nexus.service.http.CatalogTtlCheckHandler.PATH,
                 new dev.nexus.service.http.CatalogTtlCheckHandler(
                         () -> catalogTtlCheckAdmin, tokenStore::listKnownTenants, tenantScope)).getFilters().addAll(authFilter);
-        server.createContext(dev.nexus.service.http.ManifestChunkIndexCheckHandler.PATH,
-                new dev.nexus.service.http.ManifestChunkIndexCheckHandler(
-                        () -> manifestChunkIndexCheckAdmin, tokenStore::listKnownTenants, tenantScope)).getFilters().addAll(authFilter);
+        server.createContext(dev.nexus.service.http.ManifestChunkIndexCheckHandler.PATH, new dev.nexus.service.http.ManifestChunkIndexCheckHandler(
+                () -> manifestChunkIndexCheckAdmin, tokenStore::listKnownTenants, tenantScope)).getFilters().addAll(authFilter);
 
         // /v1/admin/validate-constraints — the user-started VALIDATE CONSTRAINT job of the chash width CHECKs (nexus-f3yqd),
         // root token only; never started by the engine. The admin connection it runs on is bound late, from Main.
@@ -1323,9 +1322,7 @@ public final class NexusService {
     }
 
     /** Bind the admin-connection DDL behind the manifest chunk-index CHECK routes (nexus-6pfgb.42); {@code Main} calls it once, until then they answer 503. */
-    public void manifestChunkIndexCheckAdmin(dev.nexus.service.db.ManifestChunkIndexCheckAdmin admin) {
-        this.manifestChunkIndexCheckAdmin = admin;
-    }
+    public void manifestChunkIndexCheckAdmin(dev.nexus.service.db.ManifestChunkIndexCheckAdmin admin) { this.manifestChunkIndexCheckAdmin = admin; }
 
     /**
      * Bind the admin-connection VALIDATE behind {@code POST /v1/admin/validate-constraints} (nexus-f3yqd). {@code Main} calls

@@ -26,6 +26,7 @@ NAMING_ALLOWED = {
     "service/src/test/java/dev/nexus/service/ManifestChunkIndexCheckRoutesIntegrationTest.java",
     "service/src/test/java/dev/nexus/service/db/ManifestChunkIndexCheckAdminIntegrationTest.java",
     "service/src/test/java/dev/nexus/service/db/TenantKeyedStateGateTest.java",
+    "service/src/test/java/dev/nexus/service/db/ManifestWriteRetryGateTest.java",
     "tests/test_manifest_chunk_index_check_no_trigger.py",
     # the catalog TTL step's scan lists these classes among the ones that name its own
     "tests/test_catalog_ttl_check_no_trigger.py",

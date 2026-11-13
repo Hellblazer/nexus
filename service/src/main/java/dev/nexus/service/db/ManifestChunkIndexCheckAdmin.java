@@ -27,8 +27,8 @@ import java.util.Objects;
  *
  * <p><b>Why the equality holds.</b> {@code chunk_index} is NOT NULL since hygiene-001, and a BEFORE INSERT trigger
  * ({@code trg_catalog_document_chunks_chunk_index_default}) fills it from {@code position} when a writer omits it. No
- * current writer sets the two apart, so the census is expected to read zero; the CHECK turns that fact into a
- * constraint a later writer cannot break. It does not change either column.
+ * writer in this repository sets the two apart (audit on nexus-6pfgb.42), so the census is expected to read zero; the
+ * engine stores a caller's {@code chunk_index} as sent, so the CHECK is what stops a later writer. It changes neither column.
  *
  * <p><b>The predicate</b> ({@link #chunkIndexEqualsPosition}) is one {@link Condition}, built once. The CHECK is its
  * rendering ({@link #checkExpression}); the census counts the rows for which it is FALSE ({@link #violation}). One
@@ -51,7 +51,7 @@ import java.util.Objects;
  *
  * <p><b>The census-to-ADD window.</b> The routes count, then add, with no lock between. A NOT VALID CHECK is evaluated
  * on every new row version, so a row that breaks it could no longer be updated until fixed; the add route counts again
- * after the ADD and reports {@code violating_after_add}. No writer sets the columns apart, so the window is theory.
+ * after the ADD and reports {@code violating_after_add}. No in-repository writer sets the columns apart, so the window is theory.
  */
 public class ManifestChunkIndexCheckAdmin {
 
