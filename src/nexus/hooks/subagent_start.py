@@ -320,18 +320,9 @@ _BRIEF_CHECK = (
     "the test reset hooks.\n"
 )
 
-_SEQTHINK = (
-    "\n## Sequential Thinking\n\n"
-    "Tool: mcp__plugin_conexus_sequential-thinking__sequentialthinking\n"
-    "Call it BEFORE every decision (what to read, which fix, how to read a result, "
-    "what to\n"
-    'report) — not only "complex" ones; the qualifier is how it goes unused. The '
-    "thought is\n"
-    "the visible record of your reasoning.\n"
-    "Params: needsMoreThoughts=true (continue), isRevision=true+revisesThought=N "
-    "(correct),\n"
-    'branchFromThought=N+branchId="alt" (explore).\n'
-)
+#: GitHub #1656 (2026-11-13): the "Sequential Thinking" section is no longer injected. With it in the hook's
+#: output, subagents were stopped by the API's safety classifier ([reasoning_extraction]); on the reporter's machine
+#: the same prompt went 0 of 11 blocked with it removed (tool absent), against 4 of 8 with it present.
 
 _OPERATORS = (
     "\n## Analytical operators (RDR-080)\n\n"
@@ -645,8 +636,6 @@ def run(payload: dict | None) -> HookResult:
 
     if _IMPLEMENTER_TYPE_RE.search(agent_type):
         parts.append(_BRIEF_CHECK)
-
-    parts.append(_SEQTHINK)
 
     if not skip_operators:
         parts.append(_OPERATORS)

@@ -229,3 +229,11 @@ def test_an_index_line_is_clamped_by_bytes_not_characters(monkeypatch, char: str
     assert raw.decode("utf-8") == line
     assert line.endswith("\u2026")
     assert set(line[len("[abcd0001] ") : -1]) == {char}
+
+
+def test_no_sequential_thinking_section(monkeypatch) -> None:
+    """GitHub #1656: the section correlated with the safety-classifier block and is no longer injected."""
+    for agent in ("conexus:developer", "general-purpose", "conexus:substantive-critic"):
+        ctx = _ctx(agent, monkeypatch)
+        assert "Sequential Thinking" not in ctx
+        assert "sequentialthinking" not in ctx
