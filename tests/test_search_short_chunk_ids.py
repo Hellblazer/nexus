@@ -193,28 +193,27 @@ def test_an_explicit_scope_that_misses_names_where_the_id_was_shown(get_many) ->
     assert 'id dddddddd was shown from docs__1-1__m__v1; pass collections="docs__1-1__m__v1"' in out
 
 
-def test_only_text_search_asks_for_the_superseded_mark(search) -> None:
-    # nexus-2k66t.6 (2A): text output prints the mark, so only it demotes; structured output keeps its ranking.
+def test_search_asks_for_the_superseded_mark_in_both_modes(search) -> None:
+    # nexus-2k66t.6 (2A): both modes show the mark (a text line; superseded_by in the dict), so both demote, and a
+    # text page and a structured one still share the page cache (test_mcp_server pins that).
     search([_sr("c1", _A, 0.1)])
     search([_sr("c1", _A, 0.1)], structured=True)
-    assert [c.get("mark_superseded") for c in search.calls] == [True, False]
+    assert [c.get("mark_superseded") for c in search.calls] == [True, True]
+
+
+def test_the_structured_result_names_a_superseded_hit(search) -> None:
+    from nexus.supersession import SUPERSEDED_KEY  # noqa: PLC0415
+
+    old, cur = _sr("c1", _A, 0.1), _sr("c3", _C, 0.2)
+    old.metadata[SUPERSEDED_KEY] = ("RDR-030 Current Design", "2026-10-01")
+    out = search([old, cur], structured=True)
+    assert out["superseded_by"] == ["superseded by RDR-030 Current Design (linked 2026-10-01)", ""]
+    assert "superseded_by" not in search([cur], structured=True), "absent when nothing on the page is superseded"
+    text = search([old, cur])
+    assert "superseded by RDR-030 Current Design (linked 2026-10-01)" in text
 
 
 def test_a_routed_id_that_is_still_missing_gets_no_looping_advice(get_many) -> None:
     _shown_chunks.record([("d" * 64, "docs__1-1__m__v1")])
     out = core.store_get_many(ids="dddddddd")  # routed to docs__1-1, and the fake does not know the chunk
     assert colls[-1] == ["docs__1-1__m__v1"] and "Missing:" in out and "pass collections" not in out
-
-
-def test_text_and_structured_searches_never_share_a_cached_page(search, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(core._sensitivity, "read_sensitivity", lambda *a, **k: "include")  # "exclude" skips the cache
-    search([_sr("c1", _A, 0.1)])  # sets the rows and the stubs; invalidates the cache around itself
-    search.calls.clear()
-    core._page_cache_invalidate()
-    try:
-        core.search(query="q", corpus="knowledge", threshold=float("inf"))
-        # The cache holds one page; a structured call keyed like the text one would be served the marked page.
-        core.search(query="q", corpus="knowledge", threshold=float("inf"), structured=True)
-    finally:
-        core._page_cache_invalidate()
-    assert [c.get("mark_superseded") for c in search.calls] == [True, False]

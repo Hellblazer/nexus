@@ -18,8 +18,9 @@ all, rather than used partly. Successor titles come from one ``resolve_many`` ca
 superseded hit. Any failure leaves the results as they were.
 
 Reach: ``search_engine.search_cross_corpus`` runs :func:`mark_superseded` only when its caller passes
-``mark_superseded=True``, and only the MCP ``search`` tool does, because it is the one surface that prints the
-annotation: a demotion nobody can see the reason for (``query``, ``nx search``, plan retrieval) is not made. When a
+``mark_superseded=True``, and only the MCP ``search`` tool does, because it is the one surface that shows the mark
+(the text annotation, and ``superseded_by`` in its structured dict, which plan steps read): a demotion nobody can see
+the reason for (``query``, ``nx search``) is not made. When a
 server rerank orders the page (``lexical=True``), the order is the reranker's and the hit is annotated but not
 demoted.
 

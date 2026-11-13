@@ -138,6 +138,7 @@ from nexus.tuple_directory import (
 # names, so the tools below read as `_subscriptions.<fn>` next to their
 # `_t2_ctx`/`_get_t1` sibling helpers.
 from nexus.mcp import _shown_chunks  # nexus-2k66t.6: short chunk ids on search hits
+from nexus.supersession import superseded_note as _superseded_note  # nexus-2k66t.6
 from nexus.mcp import setup_tools as _setup_tools
 from nexus.mcp import subscriptions as _subscriptions
 # RDR-211 Phase 1 Step 3 (bead nexus-rplay.10), rewritten under RDR-213:
@@ -3501,7 +3502,6 @@ def _search_render(
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
             topic or "", threshold, lexical, boost_window, allow_key, sensitivity,
-            bool(structured),  # nexus-2k66t.6: only text output marks superseded hits, so the two never share a page
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
@@ -3554,8 +3554,9 @@ def _search_render(
                     query, target, n_results=fetch_n, t3=t3, where=where_dict,
                     cluster_by=cluster_by or None,
                     catalog=_get_catalog(),
-                    # nexus-2k66t.6: text output prints the superseded mark, so it is the one that demotes
-                    link_boost=False, mark_superseded=not structured,
+                    # nexus-2k66t.6: this tool shows the superseded mark in both modes (the text line, the
+                    # dict's superseded_by), so it is the one caller that demotes
+                    link_boost=False, mark_superseded=True,
                     taxonomy=_search_taxonomy(),
                     topic=topic or None,
                     threshold_override=threshold,
@@ -3795,6 +3796,10 @@ def _search_render(
                 # rows may follow this page, so a page the collapse left short is never read as the end.
                 **({"next_offset": offset + len(page)}
                    if (offset + len(page) < total or not exhausted) else {}),
+                # nexus-2k66t.6: aligned with ``ids``; present only when a row's documents are all superseded (it is
+                # ranked lower for it), "superseded by <title> (linked <date>)" there and "" elsewhere.
+                **({"superseded_by": [_superseded_note(r.metadata) for r in shown]}
+                   if any(_superseded_note(r.metadata) for r in shown) else {}),
                 **posture.structured_keys(),
             }
 
@@ -3997,8 +4002,9 @@ def search(
       the same scope the store read tools give `collection="knowledge"`.
     - `cluster_by` defaults to "" (no clustering).
     - The text and `structured=True` can disagree on ranking order within a
-      page: text applies a per-file diversity cap, the dict does not, and
-      text ranks a hit whose documents are all superseded lower and says so.
+      page: text applies a per-file diversity cap, the dict does not.
+    - A hit whose documents are all superseded ranks lower and says so: a
+      line in the text, `superseded_by` (aligned with `ids`) in the dict.
     - Identical chunk text in several collections is returned once, with the
       other collections named: `also in:` in the text; `also_in` and
       `also_in_ids` (collections, their documents; aligned with `ids`) in the
