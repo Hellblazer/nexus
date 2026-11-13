@@ -1,5 +1,9 @@
 # Changelog
 
+## [8.2.2] - 2026-11-13
+
+Plugin version aligned with conexus 8.2.2. No plugin-surface changes were pending at this pin; the #1656 fix is in the nx SubagentStart hook.
+
 ## [8.2.1] - 2026-11-13
 
 Plugin version aligned with conexus 8.2.1. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).

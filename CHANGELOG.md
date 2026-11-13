@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [8.2.2] - 2026-11-13
+
+Pairs with engine-service-v0.1.190 (REQUIRED_ENGINE_VERSION unchanged from 8.2.1). Fix for GitHub #1656: subagents were being stopped by the API safety classifier; the SubagentStart hook no longer injects the section that triggered it.
+
+### Changed
+
+- **The SubagentStart hook no longer injects its "Sequential Thinking" section** (GitHub #1656). With the section in the hook output, subagents were stopped by the API's safety classifier (`[reasoning_extraction]`) at a sharply higher rate on 2026-11-13; on the reporter's machine the same prompt was blocked 0 times in 11 with it removed, against 4 in 8 with it present. The sequential-thinking tool itself is unchanged.
+- **The SubagentStart write-back line defers to the brief** (GitHub #1656). It used to tell every subagent that findings not stored are lost, so a subagent told "Do not use any tools" still wrote to T1. The line now applies only to work that produced findings, and says the brief comes first: a brief that says not to use tools, or a task with nothing to keep, writes nothing.
+
 ## [8.2.1] - 2026-11-13
 
 Pairs with engine-service-v0.1.190 (REQUIRED_ENGINE_VERSION moves from 0.1.189 to 0.1.190). The engine validates the chash width CHECKs as a job a user starts, never at boot, and the job can be cancelled; `nx t3 validate-chash-checks` and `nx doctor --fix` start, follow and cancel it, and say which rows a CHECK cannot accept and whose they are. The client refuses to start the engine on a store whose first boot would delete legacy-width chash rows until you take a backup with `nx backup`. The bundled PostgreSQL carries pg_background on all four platforms, for data moves that run as background jobs.
