@@ -1,1 +1,3 @@
+### Added
+
 - The compaction checkpoint now checks the threads board against the facts. Each ref and waiting_on line is resolved: a bead closed, an epic with no open child, a tag that now exists, a CI run or PR that finished, a due date past, a worktree that is gone. It names worktrees that hold unlanded work no thread mentions, and lists the session's background tasks, the processes running in its worktrees and its durable crons. It picks the session's worktree by its newest commit (or a board `worktree:` line), not by the launch directory, and stamps each kept section with the time it was read. `claude-restart-sessions` reads each session's background tasks too: the ready ask lists them, and a ready answer while one still runs is refused.
