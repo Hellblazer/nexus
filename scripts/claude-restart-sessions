@@ -2219,18 +2219,21 @@ def session_tasks(s: dict) -> list[str] | None:
     if not table:
         return None
     mine = sf.ancestors(table, os.getpid())  # this script runs in the caller's Bash tool: not a background task
+    # A standing `nx tuple wait` is the session's mail wake: meant to run, re-armed after a restart.
     return [f"pid {p.pid} since {p.start}: {sf.task_command(p.command)[:120]}"
-            for p in sf.descendants(table, int(s["pid"])) if sf.SNAPSHOT_MARK in p.command and p.pid not in mine]
+            for p in sf.descendants(table, int(s["pid"]))
+            if sf.SNAPSHOT_MARK in p.command and p.pid not in mine and not sf.standing(p.command)]
 
 
 def tasks_note(tasks: list[str] | None) -> str:
+    crons = "A session-only cron or reminder you set is lost in a restart; count it as work in flight. "
     if tasks is None:
-        return "This script could not list your background tasks; check your own before answering. "
+        return "This script could not list your background tasks; check your own before answering. " + crons
     if not tasks:
-        return "This script sees no background task running under your session. "
+        return "This script sees no background task running under your session. " + crons
     shown = "; ".join(tasks[:5]) + (f"; and {len(tasks) - 5} more" if len(tasks) > 5 else "")
     return (f"This script sees {len(tasks)} background task(s) running under your session, which a restart "
-            f"would cut off: {shown}. Stop each one you do not need, or answer not ready. ")
+            f"would cut off: {shown}. Stop each one you do not need, or answer not ready. " + crons)
 
 
 def ready_prompt(s: dict, path: str, mailed: bool = False) -> str:
@@ -2443,6 +2446,9 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
                         # The answer is checked against the task list, not taken on its word (nexus-ct74m).
                         row["blocker"] = (f"said ready, but {len(tasks)} background task(s) still run: {tasks[0]}"
                                           + (f" (and {len(tasks) - 1} more)" if len(tasks) > 1 else ""))
+                    elif tasks is None:
+                        # Not knowing is not "none": the labrun case was exactly a task nobody saw.
+                        row["blocker"] = "said ready, but its background tasks could not be listed; check it, or --force"
         rows.append(row)
     return rows
 

@@ -188,7 +188,7 @@ _INJECTED_SUFFIX = ".injected"
 _NAME_LINE = "- session name: "
 #: Subsections of the working-state block that go first when the injection is over its
 #: cap, in this order.
-_DROP_FIRST = ("### Recent commits", "### Open PRs", "### Uncommitted")
+_DROP_FIRST = ("### Recent commits", "### Open PRs", "### Uncommitted", "## Running for this session")
 _SUMMARY_HEADING = "## Compact summary"
 #: The heading post writes, matched whole with its UTC stamp: the embedded threads board can
 #: carry a block whose title starts "Compact summary", which a prefix match would take for
@@ -630,9 +630,10 @@ def _session_worktrees(
     not a topic of ``linda``. Candidates rank by, in order:
 
     1. a board ``worktree:`` line names its path (nexus-ct74m);
-    2. a commit was made in it most recently, by its own reflog
-       (:func:`_session_facts.last_commit_time`): the session's newest commit, not its cwd, says
-       where it works (nexus-ct74m: tamsin's checkpoint named the cwd's worktree, a day stale);
+    2. the session worked in it most recently, by its own reflog
+       (:func:`_session_facts.last_work_time`: its newest commit, or its creation when newer): the
+       session's newest commit, not its cwd, says where it works (nexus-ct74m: tamsin's checkpoint
+       named the cwd's worktree, a day stale);
     3. the launch ``cwd`` is inside it (a session started in its own worktree);
     4. the board entry names its path (``nexus-wt/marlowe-rdr189-p13``);
     5. its branch carries a bead a board ``ref:`` line names, or a child of one (the
@@ -648,9 +649,17 @@ def _session_worktrees(
     if not name:
         return None, []
     try:
+        declared_paths = _session_facts.board_worktree(board)
+
+        def declared_here(path: str) -> bool:
+            real = os.path.normcase(os.path.realpath(path))
+            return any(os.path.normcase(os.path.realpath(d)) == real for d in declared_paths)
+
+        # A board worktree: line names the session's worktree whatever its directory is called.
         candidates = [
             (path, branch) for path, branch in _git_worktrees(cwd, _GIT_TIMEOUT_S)
-            if (Path(path).name == name or Path(path).name.startswith(name + "-")) and os.path.isdir(path)
+            if (Path(path).name == name or Path(path).name.startswith(name + "-") or declared_here(path))
+            and os.path.isdir(path)
         ]
         if not candidates:
             return None, []
@@ -674,10 +683,10 @@ def _session_worktrees(
         def ref_named(branch: str) -> bool:
             return any(re.search(rf"(?:^|/){re.escape(bead)}(?:$|[-/.])", branch) for bead in ref_ids)
 
-        declared = {canon(p) for p in _session_facts.board_worktree(board)}
+        declared = {canon(p) for p in declared_paths}
         ranked = sorted(
             ((path, branch, _last_active(path)) for path, branch in candidates),
-            key=lambda row: (canon(row[0]) in declared, _session_facts.last_commit_time(row[0]), inside(row[0]),
+            key=lambda row: (canon(row[0]) in declared, _session_facts.last_work_time(row[0]), inside(row[0]),
                              path_named(row[0]), ref_named(row[1]), Path(row[0]).name == name, row[2]),
             reverse=True,
         )
@@ -777,72 +786,146 @@ def _summarized(text: str) -> bool:
 
 #: Wall clock for one fact lookup (bd, git ls-remote, gh); they run beside continuation.
 _FACT_TIMEOUT_S = 6.0
-#: The most CI runs and PRs one checkpoint looks up.
+#: The fact checks' own budget, from their start: whatever is not done by then is cut off and said so, so
+#: the checkpoint is written inside the hook's 45 s (hooks.json) whatever the box's load.
+_FACTS_BUDGET_S = 14.0
+#: The most CI runs and PRs one checkpoint looks up; the rest are counted as not checked.
 _MAX_REMOTE_LOOKUPS = 6
 _CRON_NOTE = ("session-only crons and reminders live inside Claude Code and no file shows them: "
               "run CronList after this compaction")
 
 
-def _board_facts(board: str, cwd: str | None) -> tuple[list[str], list[str]]:
+def _pool(n: int):
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 -- only pre needs it
+
+    return ThreadPoolExecutor(max_workers=max(1, n))
+
+
+def _gather(jobs: dict, deadline: float) -> tuple[dict, int]:
+    """``({key: result}, cut)``: each job's result by *deadline* (monotonic); a job not done, or raising, is cut."""
+    from concurrent.futures import TimeoutError as FuturesTimeout  # noqa: PLC0415
+
+    got, cut = {}, 0
+    for key, job in jobs.items():
+        try:
+            got[key] = job.result(timeout=max(0.0, deadline - time.monotonic()))
+        except FuturesTimeout:
+            cut += 1
+        except Exception as exc:  # noqa: BLE001 -- one lookup's failure is that lookup not checked
+            _log("WARNING", f"pre: fact lookup {key!r} failed: {type(exc).__name__}: {exc}")
+            cut += 1
+    return got, cut
+
+
+def _board_facts(board: str, cwd: str | None, deadline: float) -> tuple[list[str], list[str]]:
     """``(lines, unchecked)``: the board's ref, waiting_on, due and worktree lines checked against the facts."""
     sf = _session_facts
     wanted = sf.board_wants(board)
     git, bd, gh = (_cli_lookup.resolve(t) for t in ("git", "bd", "gh"))
+    runs = sorted(wanted.runs)
+    prs = sorted(wanted.prs)
+    unchecked: list[str] = []
+    if len(runs) > _MAX_REMOTE_LOOKUPS or len(prs) > _MAX_REMOTE_LOOKUPS:
+        unchecked.append(f"only the first {_MAX_REMOTE_LOOKUPS} CI runs and PRs were looked up")
+    runs, prs = runs[:_MAX_REMOTE_LOOKUPS], prs[:_MAX_REMOTE_LOOKUPS]
+    pool = _pool(2 + len(runs) + len(prs))
+    try:
+        jobs = {"beads": pool.submit(sf.resolve_beads, wanted.beads, bd, cwd, _FACT_TIMEOUT_S),
+                "tags": pool.submit(sf.resolve_tags, wanted.engine_tags | wanted.client_tags, git, cwd, _FACT_TIMEOUT_S)}
+        jobs.update({("run", r): pool.submit(sf.resolve_run, repo, r, gh, cwd, _FACT_TIMEOUT_S) for repo, r in runs})
+        jobs.update({("pr", pr): pool.submit(sf.resolve_pr, *pr, gh, cwd, _FACT_TIMEOUT_S) for pr in prs})
+        got, cut = _gather(jobs, deadline)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     facts = sf.Facts()
-    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 -- only pre needs it
-
-    runs = sorted(wanted.runs)[:_MAX_REMOTE_LOOKUPS]
-    prs = sorted(wanted.prs)[:_MAX_REMOTE_LOOKUPS]
-    with ThreadPoolExecutor(max_workers=4 + len(runs) + len(prs)) as pool:
-        beads = pool.submit(sf.resolve_beads, wanted.beads, bd, cwd, _FACT_TIMEOUT_S)
-        tags = pool.submit(sf.resolve_tags, wanted.engine_tags | wanted.client_tags, git, cwd, _FACT_TIMEOUT_S)
-        run_jobs = {r: pool.submit(sf.resolve_run, r, gh, cwd, _FACT_TIMEOUT_S) for r in runs}
-        pr_jobs = {n: pool.submit(sf.resolve_pr, n, gh, cwd, _FACT_TIMEOUT_S) for n in prs}
-        facts.beads, why_beads = beads.result()
-        facts.tags, why_tags = tags.result()
-        for r, job in run_jobs.items():
-            if (got := job.result()) is not None:
-                facts.runs[r] = got
-        for n, job in pr_jobs.items():
-            if (state := job.result()) is not None:
-                facts.prs[n] = state
-    unchecked = [w for w in (why_beads, why_tags) if w]
+    for key, why_key in (("beads", "beads"), ("tags", "tags")):
+        if key in got:
+            value, why = got[key]
+            setattr(facts, key, value)
+            if why:
+                unchecked.append(why)
+        else:
+            unchecked.append(f"{why_key} not checked: the lookup ran out of time")
+    facts.runs = {k[1]: v for k, v in got.items() if isinstance(k, tuple) and k[0] == "run" and v is not None}
+    facts.prs = {k[1]: v for k, v in got.items() if isinstance(k, tuple) and k[0] == "pr" and v is not None}
     if len(facts.runs) < len(runs) or len(facts.prs) < len(prs):
-        unchecked.append("some CI runs or PRs not checked: gh missing, failed or timed out")
-    return sf.verify(board, facts, _now()), unchecked
+        unchecked.append("some CI runs or PRs not checked: gh missing, failed, timed out or the repository is not ours")
+    verdict = sf.verify(board, facts, _now())
+    lines = list(verdict.lines)
+    lines.append(f"- checked {verdict.checked} ref/waiting_on line(s) naming a bead, tag, CI run or PR"
+                 + (f"; {verdict.opaque} line(s) name nothing this check can resolve (a person, a branch, a "
+                    "deploy): read those yourself" if verdict.opaque else ""))
+    if cut:
+        unchecked.append(f"{cut} lookup(s) cut off by the checks' time budget")
+    return lines, unchecked
+
+
+def _worktree_lines(board: str, worktree: str | None, others: list[tuple[str, str, float]],
+                    deadline: float) -> tuple[list[str], list[str]]:
+    """Worktrees holding work no thread names, newest ``MAX_WORKTREES`` first, read in parallel."""
+    sf = _session_facts
+    git = _cli_lookup.resolve("git")
+    if not git:
+        return [], ["worktrees not checked: git not found"]
+    trees = ([(worktree, "")] if worktree else []) + [(p, b) for p, b, _a in others]
+    trees.sort(key=lambda t: sf.last_work_time(t[0]), reverse=True)
+    unchecked = []
+    if len(trees) > sf.MAX_WORKTREES:
+        unchecked.append(f"only the newest {sf.MAX_WORKTREES} of {len(trees)} worktrees were checked for work")
+        trees = trees[: sf.MAX_WORKTREES]
+    pool = _pool(min(len(trees), 6))
+    try:
+        jobs = {p: pool.submit(sf.worktree_work, p, b, git) for p, b in trees}
+        got, cut = _gather(jobs, deadline)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    lines, more = sf.unboarded([got[p] for p, _b in trees if p in got], board)
+    if cut:
+        more.append(f"{cut} worktree(s) not checked: the time budget ran out")
+    return lines, unchecked + more
 
 
 def _running_lines(session_id: str, worktrees: list[str], cwd: str | None) -> list[str]:
     """What runs for this session: background tasks, processes in its worktrees, durable crons."""
     sf = _session_facts
+    crons = sf.durable_crons([*worktrees, *([cwd] if cwd else [])], session_id)
+    if sys.platform == "win32":
+        return ["- background tasks and processes: not listed on Windows",
+                *(f"- durable cron: {c}" for c in crons), f"- {_CRON_NOTE}"]
     table = sf.process_table()
     # The hook's own line (its parents, and the continuation it runs beside this listing) is not the session's work.
     mine = sf.ancestors(table, os.getpid()) | {p.pid for p in sf.descendants(table, os.getpid())}
     tasks = sf.background_tasks(session_id, _claude_dir() / "sessions", table, exclude=mine)
-    task_pids = {q.pid for t in tasks for q in [t, *sf.descendants(table, t.pid)]}
+    why = ("no process table" if not table else
+           f"no {_claude_dir() / 'sessions'}/*.json names this session" if tasks is None else "")
+    task_pids = {q.pid for t in tasks or [] for q in [t, *sf.descendants(table, t.pid)]}
     claude = sf.claude_pid(session_id, _claude_dir() / "sessions")
     skip = mine | task_pids | ({claude} if claude else set())
-    procs = sf.worktree_processes(table, sf.process_cwds() if worktrees else {}, worktrees, skip)
-    crons = sf.durable_crons([*worktrees, *([cwd] if cwd else [])], session_id)
-    if sys.platform == "win32":
-        return ["- background tasks and processes: not listed on Windows", f"- {_CRON_NOTE}"]
-    return sf.task_lines(tasks, procs, crons, cron_note=_CRON_NOTE)
+    cwds = sf.process_cwds() if worktrees and table else None
+    procs = sf.worktree_processes(table, cwds, worktrees, skip) if cwds is not None else (None if worktrees else [])
+    return sf.task_lines(tasks, procs, crons, cron_note=_CRON_NOTE, why_not=why)
 
 
-def _facts_sections(session_id: str, board: str, worktree: str | None, others: list[tuple[str, str, float]],
-                    cwd: str | None) -> list[str]:
+def _facts_sections(session_id: str, board: str, board_error: str | None, worktree: str | None,
+                    others: list[tuple[str, str, float]], cwd: str | None) -> list[str]:
     """The checkpoint's two checked sections (nexus-ct74m). Never raises: a failure is one line in the file."""
-    stamp = _now().isoformat(timespec="seconds")
-    out = [f"## Board checked against the facts\n\n(checked {stamp})\n"]
+    deadline = time.monotonic() + _FACTS_BUDGET_S
+    out = [f"## Board checked against the facts\n\n(checked {_now().isoformat(timespec='seconds')})\n"]
     try:
-        lines, unchecked = _board_facts(board, cwd) if board.strip() else ([], [])
-        git = _cli_lookup.resolve("git")
-        work = [_session_facts.worktree_work(p, b, git) for p, b in
-                ([(worktree, "")] if worktree else []) + [(p, b) for p, b, _a in others]] if git else []
-        lines += _session_facts.unboarded(work, board)
-        out.append("\n".join(lines) if lines else "- nothing found stale: every ref, waiting_on, due and worktree "
-                   "line it could check still holds, and every worktree holding work is named")
-        out.extend(f"- {u}" for u in unchecked)
+        if not board.strip():
+            # Without the board nothing can be stale and no worktree can be called unnamed.
+            out.append(f"- not checked: the board entry was not read ({_one_line(board_error or 'empty')})")
+        else:
+            pool = _pool(2)
+            try:
+                jobs = {"board": pool.submit(_board_facts, board, cwd, deadline),
+                        "trees": pool.submit(_worktree_lines, board, worktree, others, deadline)}
+                got, _cut = _gather(jobs, deadline + 1.0)
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+            lines, unchecked = got.get("board", ([], ["board lines not checked: the time budget ran out"]))
+            tree_lines, tree_unchecked = got.get("trees", ([], ["worktrees not checked: the time budget ran out"]))
+            out.append("\n".join([*lines, *tree_lines, *(f"- {u}" for u in [*unchecked, *tree_unchecked])]))
     except Exception as exc:  # noqa: BLE001 -- the checkpoint is written whatever this finds
         _log("WARNING", f"pre: board check failed: {type(exc).__name__}: {exc}")
         out.append(f"- [board check failed: {type(exc).__name__}]")
@@ -878,14 +961,17 @@ def run_pre(payload: dict) -> str:
         cwd = worktree
 
     left = _TOTAL_BUDGET_S - (time.monotonic() - started)
-    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 -- only pre needs it
-
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        # The fact checks run beside continuation, so they add no wall clock unless they are the slower.
-        checked = pool.submit(_facts_sections, session_id, board, worktree, other_worktrees, cwd)
+    pool = _pool(1)
+    try:
+        # The fact checks run beside continuation, so they add no wall clock unless they are the slower;
+        # they hold their own budget, and one second past it they are dropped, never waited on.
+        checked = pool.submit(_facts_sections, session_id, board, board_error, worktree, other_worktrees, cwd)
         state, error = _run_nx(["command-context", "continuation"], cwd, max(1.0, min(_NX_TIMEOUT_S, left)))
         state_stamp = _now().isoformat(timespec="seconds")
-        checks = checked.result()
+        got, _cut = _gather({"checks": checked}, time.monotonic() + _FACTS_BUDGET_S + 2.0)
+        checks = got.get("checks") or ["## Board checked against the facts\n\n- [checks cut off: the time budget ran out]\n"]
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     if error:
         _log("WARNING", f"pre: {error}")
 
@@ -906,6 +992,8 @@ def run_pre(payload: dict) -> str:
     if name or board.strip():
         parts.append(f"## Threads board entry ({_BOARD_PROJECT}/{board_title or name})\n")
         if board.strip():
+            parts.append(f"(read {_now().isoformat(timespec='seconds')}; each thread says what its session last wrote, "
+                         "and the next section checks it)\n")
             parts.append(_cap(board).rstrip() + "\n")
         else:
             parts.append(f"[no board entry: {board_error or 'empty'}]\n")

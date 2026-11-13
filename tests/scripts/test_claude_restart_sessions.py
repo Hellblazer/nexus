@@ -1051,6 +1051,15 @@ def test_go_refuses_a_ready_reply_while_background_tasks_still_run(crs, rd, monk
            "nx ci wait abc (and 1 more)" in log and "beta:" not in log.replace("beta, ", "")
 
 
+def test_go_refuses_a_ready_reply_whose_tasks_could_not_be_listed(crs, rd, monkeypatch) -> None:
+    # Not knowing is not "none": the labrun case was a task nobody saw.
+    _live(rd, "alpha")
+    _round(crs, rd, ["alpha"], alpha=60)
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: None)
+    assert _gate(crs, rd) == 3
+    assert "alpha: said ready, but its background tasks could not be listed" in _log(rd)
+
+
 def test_the_caller_is_not_held_by_its_own_shells(crs, rd, monkeypatch) -> None:
     _live(rd, "alpha", pane="%7")
     _round(crs, rd, ["alpha"], alpha=60)
@@ -1066,6 +1075,7 @@ def test_the_ready_ask_carries_the_task_list(crs, rd, monkeypatch) -> None:
            "pid 5000 since t: nx ci wait abc. Stop each one you do not need, or answer not ready." in text
     monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
     assert "sees no background task running under your session" in crs.ready_prompt(s, "/tmp/r.json")
+    assert "A session-only cron or reminder you set is lost in a restart" in crs.ready_prompt(s, "/tmp/r.json")
     monkeypatch.setattr(crs, "session_tasks", lambda _s: None)
     assert "could not list your background tasks" in crs.ready_prompt(s, "/tmp/r.json")
 
@@ -1078,6 +1088,11 @@ def test_session_tasks_reads_the_snapshot_shells_below_the_session(crs, monkeypa
              sf.Proc(901, 900, "Fri Nov 13 01:05:00 2026", snap),
              sf.Proc(902, 900, "Fri Nov 13 01:00:01 2026", "node mcp.js")]
     monkeypatch.setattr(sf, "process_table", lambda *_a: table)
+    assert crs.session_tasks({"pid": 900}) == ["pid 901 since Fri Nov 13 01:05:00 2026: sleep 600"]
+    # A standing mail wake is meant to run; this script's own shell (the caller's Bash tool) is not a task.
+    mine = sf.Proc(os.getpid(), 900, "Fri Nov 13 01:06:00 2026", snap.replace("sleep 600", "claude-restart-sessions"))
+    wake = sf.Proc(903, 900, "Fri Nov 13 01:07:00 2026", snap.replace("sleep 600", "nx tuple wait mailbox/x"))
+    monkeypatch.setattr(sf, "process_table", lambda *_a: [*table, mine, wake])
     assert crs.session_tasks({"pid": 900}) == ["pid 901 since Fri Nov 13 01:05:00 2026: sleep 600"]
     monkeypatch.setattr(sf, "process_table", lambda *_a: [])
     assert crs.session_tasks({"pid": 900}) is None
