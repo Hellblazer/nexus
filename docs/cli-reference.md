@@ -5377,6 +5377,7 @@ remains a separate, independently consented act.
 ```
 nx backup [--to PATH]
 nx backup --check FILE
+nx backup restore FILE
 ```
 
 An explicit, user-run backup (nexus-f3yqd.4, nexus-csayy.3): in local mode one `pg_dump -Fc` file of the local engine's database, in managed (cloud) mode one `.nxtenant` file of your own tenant, as [Cloud mode](#nx-backup-cloud-mode) below says. **Nothing runs it for you.** `nx upgrade`, `nx doctor`, `nx init`, `nx self`, the hooks and the daemons never call it; a test fails on a Python import, a subprocess command line, or a hook or script line under the repository's code directories that would (it cannot see a command assembled at run time).
@@ -5389,7 +5390,7 @@ It dumps with the bundled Postgres binaries the engine runs (`NEXUS_PG_BIN`, the
 - Output: first the database's size on disk (tables, indexes and bloat; indexes are not dumped, so the file can be smaller or larger), then the bytes written and the rate through the shared step reporter (redrawn on a terminal, plain lines every 30 s otherwise). It warns, and carries on, if the destination disk has less free space than the database occupies. `pg_dump` waits at most 60 s for a table lock; when it gives up, the verb fails saying something holds locks, most likely a schema migration, and to run it again afterwards. At the end it prints the path, the size, the exact restore commands for this machine, and the runbook's path in the repository.
 - Refusals (exit 1, nothing written): no `pg_credentials` (run `nx init`); Postgres not accepting connections (start it with `nx daemon service start`); a bundle without `pg_dump` or `pg_restore`; an existing destination.
 
-There is no `nx restore`: a restore over a live database is destructive. [docs/operations/backup-restore.md](operations/backup-restore.md) is the runbook: back the live database up first, stop the engine, `pg_restore` into a fresh database with the bundled binaries (macOS, Linux and Windows commands), check for connections, swap names in one transaction, start the engine, and how to undo. It says what each step overwrites (only the last, the optional drop of the replaced database, deletes anything), and that the restore rebuilds every index without progress and that the first boot after restoring an older backup runs migrations; neither should be interrupted.
+There is no `nx restore` of a whole local database: a restore over a live database is destructive. (`nx backup restore FILE` is the cloud-tenant verb; see below.) [docs/operations/backup-restore.md](operations/backup-restore.md) is the runbook: back the live database up first, stop the engine, `pg_restore` into a fresh database with the bundled binaries (macOS, Linux and Windows commands), check for connections, swap names in one transaction, start the engine, and how to undo. It says what each step overwrites (only the last, the optional drop of the replaced database, deletes anything), and that the restore rebuilds every index without progress and that the first boot after restoring an older backup runs migrations; neither should be interrupted.
 
 ### nx backup: cloud mode
 
@@ -5397,7 +5398,23 @@ In managed mode `nx backup` opens an export session on the engine (RDR-248) and 
 
 - `--check FILE`: verify a `.nxtenant` file offline (no engine, no token, either mode): frame structure, every page's SHA-256 and row count, each table's count and SHA-256 against the trailer, and the whole file's SHA-256; then print the header (tenant, engine version, export format, schema changeset count, snapshot time) and every table. A damaged file is refused naming the table (exit 1). `--check` and `--to` together are a usage error.
 
-There is no restore command for a cloud file yet (RDR-248 Phase 2); [docs/operations/backup-restore.md](operations/backup-restore.md#cloud-tenant-backups-managed-mode) says what a restore is until then.
+### nx backup restore
+
+```
+nx backup restore FILE
+```
+
+Loads a `.nxtenant` file (nexus-csayy.6, RDR-248) into the token's own tenant, which must be empty: a fresh tenant from the operator on the cloud, `nx init` locally. It uses the engine's import routes in cloud and local mode alike, so the token is a tenant or data token (the operator's root token is refused, naming what to use), and the engine must report `tenant_import_supported` on `/version`; an older engine is refused before anything is sent, naming the release that has the routes (0.1.192 or later).
+
+What it does, in order:
+
+- **Verifies the whole file first**, as `--check` does (every page's SHA-256 and row count, every table against the trailer, the whole file). A file that fails is refused with the table named, and the engine is never sent a byte.
+- **Opens a session** with the file's header, the SHA-256 of the header frame (which the engine's restore marker names) and the page bytes' total. The engine refuses, before any upload and naming what failed, a tenant that is not empty (when the marker shows this very file is already in the tenant, the message says so), a file the engine cannot load, a missing `embedding_models` row, a file past its size cap, and a tenant that already has a session. A session left by a killed earlier run is deleted once through the route of its kind (import or export) and the open repeated, unless it is an import that is already loading: deleting that would cancel the load, so the verb leaves it and says so.
+- **Uploads** every table the engine will load, in the order it names. Each exported page is cut at row boundaries into parts of at most the engine's part size (8 MiB), each a whole binary COPY stream with its own SHA-256 header, numbered from 0 within the table. A part that fails on the wire, with a 5xx or with a hash refusal is sent again (five tries, 1, 2, 4 and 8 s apart); `part_in_flight` waits the engine's `Retry-After` on its own budget (two minutes per request); `part_already_staged` means the part is in and counts as sent. Each table is closed with the trailer's row count, which the engine checks against what it staged. A failure at this stage deletes the staged session and says to run again.
+- **Commits, then waits.** A `restore_busy` answer (another restore is loading on the engine) keeps the upload staged and the commit is sent again every 60 s until the engine closes the session at its bound. The status is then read every 2 s until `committed` or `failed`, reading the body of every answer (a 200 can carry `failed: <reason>`). After a lost connection the verb reads the status again; after "no such session" (an engine restart) it reads `GET /v1/tenant/import-marker` and reports the restore committed **only when the marker names this file**; a marker that is absent or names another file means the load rolled back. If it cannot learn the outcome the verb says so and exits 1, leaving the load alone: Ctrl-C and the like never cancel a load that may be running.
+- **Prints** the rows loaded by class, the rows the engine had already written for the tenant (kept, not loaded again), the derived tables and retired columns it skipped, the soft-reference columns with their remapped, passed-through and negated counts, the rows dropped (centroids whose topic was gone), and the engine's notes, including the changeset-count difference when the file came from another engine release.
+
+Ids are assigned afresh in the tenant, so a restored row refers to its restored neighbours and not to the old tenant's ids. The load is one transaction: it all lands or none of it does. Do not use the tenant until the verb reports the outcome, because a write during the upload makes the engine refuse the load. The runbook for the operator's side is [docs/operations/backup-restore.md](operations/backup-restore.md#cloud-tenant-backups-managed-mode).
 
 ## nx uninstall
 

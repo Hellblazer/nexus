@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``nx backup``: an explicit, user-run backup (nexus-f3yqd.4, nexus-csayy.3).
+"""``nx backup``: an explicit, user-run backup (nexus-f3yqd.4, nexus-csayy.3) and ``nx backup restore`` (nexus-csayy.6).
 
 A verb the user runs, nothing else: no other command, hook or daemon calls it. Local mode dumps the local engine's
 database (:mod:`nexus.backup.pg_backup`); managed (cloud) mode pulls the caller's own tenant through the engine's
 export session into one ``.nxtenant`` file (:mod:`nexus.backup.cloud_export`, RDR-248); ``--check FILE`` verifies such
-a file offline (:mod:`nexus.backup.tenant_file`). ``tests/test_nx_backup_pin.py`` fails on a Python import or a
-command line that runs any of it from anywhere but here (see that module's docstring for what the scan can and
-cannot see).
+a file offline (:mod:`nexus.backup.tenant_file`); ``restore FILE`` loads such a file into the caller's own, empty
+tenant through the engine's import session (:mod:`nexus.backup.cloud_import`), in cloud and local mode alike.
+``tests/test_nx_backup_pin.py`` fails on a Python import or a command line that runs any of it from anywhere but
+here (see that module's docstring for what the scan can and cannot see).
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from nexus.backup.pg_backup import (
     restore_sections,
     run_dump,
 )
+from nexus.backup import cloud_import
 from nexus.backup.cloud_export import OMITTED_NOTICE, connect, default_file_name, run_export
 from nexus.backup.tenant_file import TenantFileError, verify_file
 from nexus.progress.step_report import StepReporter, format_bytes, format_duration
@@ -69,7 +71,7 @@ def _signals_as_interrupt() -> Iterator[None]:
             signal.signal(sig, previous)
 
 
-@click.command("backup")
+@click.group("backup", invoke_without_command=True)
 @click.option(
     "--to", "to", type=click.Path(dir_okay=False, path_type=Path), default=None,
     help="Where to write the backup (default: ~/nexus-backups/nexus-<UTC timestamp>.dump locally, "
@@ -81,7 +83,8 @@ def _signals_as_interrupt() -> Iterator[None]:
     help="Verify a cloud backup file (.nxtenant) offline, without contacting any engine, and print its header "
          "and tables. A damaged file is refused naming the table.",
 )
-def backup(to: Path | None, check: Path | None) -> None:
+@click.pass_context
+def backup(ctx: click.Context, to: Path | None, check: Path | None) -> None:
     """Back up the local engine's database, or your cloud tenant, to one file, now.
 
     Local mode runs `pg_dump -Fc` with the bundled Postgres against the running local cluster: an online,
@@ -101,10 +104,14 @@ def backup(to: Path | None, check: Path | None) -> None:
     There is no automatic backup; this file is the only copy besides the live database. Copy it to
     another disk or machine.
 
-    Locally there is no restore command; the printed commands and the backup-and-restore runbook (the URL it
-    prints) restore into a fresh database and overwrite nothing until you swap names. A cloud restore is not
-    a command yet; the runbook says what it is until then.
+    `nx backup restore FILE` loads a `.nxtenant` file into your own, empty tenant (see its help). A whole local
+    database is restored with the printed commands and the backup-and-restore runbook (the URL it prints): they
+    restore into a fresh database and overwrite nothing until you swap names.
     """
+    if ctx.invoked_subcommand is not None:
+        if to is not None or check is not None:
+            raise click.UsageError("--to and --check belong to `nx backup` itself, not to a subcommand.")
+        return
     if check is not None:
         if to is not None:
             raise click.UsageError("--check verifies a file that already exists and --to names a file to write; use one of them.")
@@ -245,8 +252,7 @@ def _cloud_backup(to: Path | None) -> None:
     click.echo("")
     click.echo(f"Verify it any time, offline: nx backup --check {result.path}")
     click.echo(
-        "There is no restore command for a cloud backup yet; until it ships, restoring is something the operator "
-        f"does from this file. The runbook: {RUNBOOK_URL}"
+        f"Restore it into an empty tenant with: nx backup restore {result.path}   (the runbook: {RUNBOOK_URL})"
     )
 
 
@@ -273,3 +279,104 @@ def _check(path: Path) -> None:
     width = max(len(t.name) for t in report.tables)
     for t in report.tables:
         click.echo(f"  {t.name:<{width}}  {t.table_class:<8}  {_plural(t.rows, 'row'):<14}  {_plural(t.pages, 'page')}")
+
+
+@backup.command("restore")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+def restore(file: Path) -> None:
+    """Load a `.nxtenant` backup into YOUR tenant, which must be empty.
+
+    The file is verified end to end first (every page and table, as `--check` does); a damaged file is refused
+    before anything is sent. The engine then stages the file in one transaction, in parts of at most 8 MiB, and
+    loads it in one more: it either all lands or none of it does. Ids are assigned afresh, so the restored rows
+    refer to each other and not to the old tenant's ids. Do not use the tenant until the verb reports the outcome:
+    a write during the upload makes the engine refuse the load.
+
+    Works against the managed service and a local engine alike (the tenant or data token in `service_token` decides
+    which tenant it is). An engine older than the import routes is refused, naming the release that has them. If the
+    connection drops while the load runs, the verb reads the engine's status, and after an engine restart its
+    restore marker, and says whether the load committed.
+    """
+    try:
+        client = cloud_import.connect()
+    except BackupRefused as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(f"Restoring {file} into your tenant on the service.")
+    reporter = StepReporter(1, name="nx backup restore")
+    try:
+        with (
+            _signals_as_interrupt(),
+            reporter.step("Restore the backup", "tenant import session", lazy=True) as step,
+        ):
+
+            def progress(done: int, total: int, table: str, index: int, count: int) -> None:
+                rate = done / max(step.elapsed(), 1e-3)
+                step.progress(done, total or None, "bytes", note=f"table {index}/{count} {table}, {format_bytes(rate)}/s")
+
+            try:
+                result = cloud_import.run_restore(
+                    client, file, on_progress=progress, on_note=lambda m: click.echo(m, err=True),
+                )
+            except BackupRefused as exc:
+                raise click.ClickException(str(exc)) from None
+    except BackupFailed as exc:
+        rest = exc.detail.splitlines()[1:]
+        if rest:
+            click.echo("\n".join(f"  {line}" for line in rest), err=True)
+        raise click.exceptions.Exit(1) from None
+    finally:
+        client.close_http()
+    _print_restore(file, result)
+
+
+def _print_restore(file: Path, result: cloud_import.RestoreResult) -> None:
+    """What the committed load did, from the engine's report (or, after a lost session, its marker)."""
+    out = result.outcome
+    h = result.header
+    click.echo(f"Restore committed: {file}")
+    click.echo(
+        f"From tenant {h['tenant_id']}, engine {h.get('engine_version', '?')}, schema {h['schema_changeset_count']} "
+        f"changesets; took {format_duration(result.seconds)}."
+    )
+    report = out.report
+    tables = report.get("tables") if isinstance(report.get("tables"), list) else []
+    if tables:
+        loaded: dict[str, int] = {}
+        counted: dict[str, int] = {}
+        for t in tables:
+            cls = result.classes.get(str(t.get("table")), "data")
+            loaded[cls] = loaded.get(cls, 0) + int(t.get("inserted") or 0)
+            counted[cls] = counted.get(cls, 0) + 1
+        for cls in ("data", "derived"):
+            if cls in loaded:
+                click.echo(f"  {cls}: {_plural(loaded[cls], 'row')} loaded in {_plural(counted[cls], 'table')}")
+        seeded = sum(int(t.get("seeded_skipped") or 0) for t in tables)
+        if seeded:
+            click.echo(f"  Kept, not loaded again: {_plural(seeded, 'row')} the engine had already written for the tenant")
+        for t in tables:
+            if int(t.get("dropped") or 0):
+                click.echo(f"  {t.get('table')}: {_plural(int(t['dropped']), 'row')} dropped (the row they point at was gone before the backup)")
+    elif out.marker is not None:
+        click.echo(
+            "The engine's own report is gone (it restarted or lost the session); its restore marker records that this "
+            f"file's load committed (session {out.marker.get('session_id', '?')}, {out.marker.get('committed_at', '?')})."
+        )
+        counts = out.marker.get("row_counts")
+        if isinstance(counts, dict) and counts:
+            total = sum(int(v) for v in counts.values() if isinstance(v, int))
+            click.echo(f"  {_plural(total, 'row')} in {_plural(len(counts), 'table')} per the marker")
+    skipped_report = report.get("skipped_tables")
+    skipped = {**result.skipped_at_open, **(skipped_report if isinstance(skipped_report, dict) else {})}
+    for name, why in sorted(skipped.items()):
+        click.echo(f"  Skipped table {name}: {why}")
+    columns = report.get("skipped_columns")
+    for col in columns if isinstance(columns, list) else []:
+        click.echo(f"  Skipped column {col} (retired by a later schema)")
+    softs = report.get("soft_references")
+    for s in softs if isinstance(softs, list) else []:
+        remapped, passed, negated = (int(s.get(k) or 0) for k in ("remapped", "passed_through", "negated"))
+        if remapped or passed or negated:
+            why = " (the rows they named were gone before the backup)" if negated else ""
+            click.echo(f"  {s.get('column')}: {remapped} remapped, {passed} passed through, {negated} negated{why}")
+    for note in dict.fromkeys([*result.open_notes, *out.notes]):
+        click.echo(f"  Note: {note}")

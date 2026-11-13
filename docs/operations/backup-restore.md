@@ -263,4 +263,12 @@ The `.nxtenant` layout is described in `src/nexus/backup/tenant_file.py` (a magi
 
 ### Restoring
 
-There is no restore command for a cloud backup yet. RDR-248 Phase 2 adds `nx backup restore FILE`, which loads a file into an EMPTY tenant (it can never overwrite data) through an engine import session. Until it ships there is no tool that loads the file, for you or for an operator: keep it, and it will load once `nx backup restore` exists. The local `pg_restore` runbook above is for the local engine's whole database and does not apply to a `.nxtenant` file.
+`nx backup restore FILE` (RDR-248, nexus-csayy.6) loads a `.nxtenant` file into your own, EMPTY tenant through an engine import session; it can never overwrite data. The local `pg_restore` runbook above is for the local engine's whole database and does not apply to a `.nxtenant` file.
+
+The order, so nothing is lost:
+
+1. The operator runs the current engine (0.1.192 or later, the first with the import routes), creates the empty tenant and issues its token. Nobody pins an engine version: a file from an older engine loads when its columns match, and the verb prints the schema changeset difference.
+2. You set that token (`nx config set service_token <token>`) and run `nx backup restore FILE`. Do not use the tenant until the verb reports the outcome: a write during the upload makes the engine refuse the load at its last check, and nothing is written.
+3. The verb verifies the whole file first, uploads it in parts of at most 8 MiB, commits, and follows the load. The load is one transaction, so it lands whole or not at all. When it ends the verb prints the rows loaded by class, the tables and columns it skipped, and how many soft-reference values were negated or dropped (rows that named a memory, plan or topic that was already gone when the backup was taken keep a negative id, so a second backup and restore keeps them negative).
+
+If your connection drops during the load the engine carries on; the verb reads the status again, and after an engine restart it reads the tenant's restore marker and says the load committed only when the marker names your file. If it prints that the outcome is unknown, do not restore again at once: run `nx backup restore FILE` once more later; a tenant that holds the file's marker answers "this file was already restored". A tenant that is not empty is refused, naming the table, before anything is uploaded. Another restore loading on the same database makes the commit wait: the verb tries again every 60 seconds, and gives up when the engine closes the session at its bound.

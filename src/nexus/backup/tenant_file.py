@@ -22,7 +22,7 @@ the trailer frame, so a flipped byte in a header or a page's meta, which no page
 :func:`verify_file` is ``nx backup --check``: a streaming pass, no engine. Every refusal is a
 :class:`TenantFileError` whose message names the table (or says it is the header or the trailer).
 
-Imported by ``nexus.backup.cloud_export`` and ``nexus.commands.backup_cmd`` only (``tests/test_nx_backup_pin.py``).
+Imported by ``nexus.backup.cloud_export``, ``nexus.backup.cloud_import`` and ``nexus.commands.backup_cmd`` only (``tests/test_nx_backup_pin.py``).
 """
 
 from __future__ import annotations
@@ -489,3 +489,175 @@ def _verify_page(state: _TableState, columns: int, payload: bytes) -> None:
     state.rows += rows
     state.pages += 1
     state.done = done
+
+
+# -- reading a file back for a restore (nexus-csayy.6) -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PageRef:
+    """Where one page's COPY body sits in the file, and what the page's own metadata says of it."""
+
+    offset: int
+    length: int
+    rows: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class TableIndex:
+    name: str
+    table_class: str
+    rows: int
+    pages: list[PageRef]
+
+
+@dataclass(frozen=True)
+class FileIndex:
+    """What a restore needs from a file without holding it in memory: the header, the SHA-256 of the header
+    frame's payload (the marker the engine writes names it), the sum of the page bodies' bytes, and every
+    table's page positions."""
+
+    header: dict[str, Any]
+    header_sha256: str
+    row_bytes: int
+    tables: dict[str, TableIndex]
+
+
+def index_file(path: Path) -> FileIndex:
+    """Walk *path*'s frames and record each page's position. It does not verify (call :func:`verify_file`
+    first): it reads only frame heads and page metadata, so it costs a few seeks per page, not the file.
+
+    Raises :class:`TenantFileError` on a structure it cannot walk."""
+    try:
+        fh = path.open("rb")
+    except OSError as exc:
+        raise TenantFileError(f"cannot read {path}: {exc.strerror or exc}") from None
+    with fh:
+        head = fh.read(_FILE_HEAD_LEN)
+        if len(head) < _FILE_HEAD_LEN or head[: len(FILE_MAGIC)] != FILE_MAGIC:
+            raise TenantFileError(f"{path} is not a nexus tenant backup")
+        header: dict[str, Any] | None = None
+        header_sha = ""
+        declared: dict[str, str] = {}
+        tables: dict[str, TableIndex] = {}
+        current: str | None = None
+        pages: list[PageRef] = []
+        table_rows = 0
+        row_bytes = 0
+
+        def close_current() -> None:
+            nonlocal current, pages, table_rows
+            if current is not None:
+                tables[current] = TableIndex(current, declared[current], table_rows, pages)
+            current, pages, table_rows = None, [], 0
+
+        while True:
+            raw = fh.read(_FRAME_HEAD.size)
+            if len(raw) < _FRAME_HEAD.size:
+                raise TenantFileError("the file ends before its trailer")
+            kind, length = _FRAME_HEAD.unpack(raw)
+            body_start = fh.tell()
+            if kind == KIND_TRAILER:
+                break
+            if kind == KIND_PAGE:
+                if current is None:
+                    raise TenantFileError("a page frame outside a table frame")
+                meta_head = fh.read(4)
+                if len(meta_head) < 4:
+                    raise TenantFileError(f"table {current}: a page is truncated", current)
+                (mlen,) = struct.unpack(">I", meta_head)
+                try:
+                    meta = json.loads(fh.read(mlen))
+                    rows, sha = int(meta["rows"]), str(meta["sha256"])
+                except (ValueError, KeyError, TypeError) as exc:
+                    raise TenantFileError(f"table {current}: a page's metadata does not parse: {exc}", current) from None
+                size = length - 4 - mlen
+                if size < 0:
+                    raise TenantFileError(f"table {current}: a page's metadata runs past its frame", current)
+                pages.append(PageRef(body_start + 4 + mlen, size, rows, sha))
+                table_rows += rows
+                row_bytes += size
+                fh.seek(body_start + length)
+                continue
+            payload = fh.read(length)
+            if len(payload) < length:
+                raise TenantFileError("the file is truncated inside a frame")
+            try:
+                if kind == KIND_HEADER:
+                    header = json.loads(payload)
+                    header_sha = hashlib.sha256(payload).hexdigest()
+                    declared = {t["name"]: str(t["class"]) for t in header["tables"]}
+                elif kind == KIND_TABLE:
+                    close_current()
+                    current = str(json.loads(payload)["table"])
+                    if current not in declared:
+                        raise TenantFileError(f"table {current} is not in the header", current)
+                else:
+                    raise TenantFileError(f"an unknown frame kind {kind!r}")
+            except (ValueError, KeyError, TypeError) as exc:
+                raise TenantFileError(f"a frame does not parse: {exc}") from None
+        close_current()
+        if header is None:
+            raise TenantFileError("the file has no header frame")
+        return FileIndex(header, header_sha, row_bytes, tables)
+
+
+def read_page_body(fh: IO[bytes], ref: PageRef) -> bytes:
+    """The COPY body of one page, read from *fh* (a file opened for reading)."""
+    fh.seek(ref.offset)
+    body = fh.read(ref.length)
+    if len(body) != ref.length:
+        raise TenantFileError("the file is shorter than it was when it was indexed")
+    return body
+
+
+def split_copy_body(body: bytes, max_part_bytes: int) -> list[tuple[bytes, int]]:
+    """Cut one page's binary COPY stream at row boundaries into complete COPY streams (the page's own header,
+    whole rows, the trailer) of at most *max_part_bytes* each. Returns ``(part, rows)`` pairs; a page with no
+    rows yields none. Raises ValueError for a stream that is malformed or a row too big for any part."""
+    view = memoryview(body)
+    n = len(view)
+    start = _copy_body_start(view)
+    head = bytes(view[:start])
+    trailer = struct.pack(">h", -1)
+    budget = max_part_bytes - len(head) - len(trailer)
+    if budget <= 0:
+        raise ValueError(f"a part of {max_part_bytes} bytes cannot hold a COPY header")
+    unpack_h = struct.Struct(">h").unpack_from
+    unpack_i = struct.Struct(">i").unpack_from
+    parts: list[tuple[bytes, int]] = []
+    pos = chunk_start = start
+    chunk_rows = 0
+    while True:
+        if pos + 2 > n:
+            raise ValueError("binary COPY stream ends before its trailer")
+        (nfields,) = unpack_h(view, pos)
+        if nfields == -1:
+            if pos + 2 != n:
+                raise ValueError(f"{n - pos - 2} bytes follow the binary COPY trailer")
+            break
+        if nfields < 0:
+            raise ValueError(f"binary COPY tuple with {nfields} fields")
+        row_start = pos
+        pos += 2
+        for _ in range(nfields):
+            if pos + 4 > n:
+                raise ValueError("binary COPY stream ends inside a tuple")
+            (flen,) = unpack_i(view, pos)
+            pos += 4
+            if flen > 0:
+                pos += flen
+            elif flen not in (-1, 0):
+                raise ValueError("binary COPY field has a negative length")
+        if pos > n:
+            raise ValueError("binary COPY field runs past the end of the stream")
+        if pos - row_start > budget:
+            raise ValueError(f"a row of {pos - row_start} bytes does not fit a part of {max_part_bytes} bytes")
+        if chunk_rows and pos - chunk_start > budget:
+            parts.append((head + bytes(view[chunk_start:row_start]) + trailer, chunk_rows))
+            chunk_start, chunk_rows = row_start, 0
+        chunk_rows += 1
+    if chunk_rows:
+        parts.append((head + bytes(view[chunk_start:pos]) + trailer, chunk_rows))
+    return parts
